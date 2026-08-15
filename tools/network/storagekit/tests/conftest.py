@@ -47,11 +47,33 @@ from tools.network.storagekit.errors import StorageError
 HLC0 = (1_800_000_000_000, 0)
 
 
-class KeyControlStore:
-    """Accepted key-control records + the ``state_ancestry`` interface the
+class KeyControlDouble:
+    """Accepted key-control records + the ``ancestry`` interface the
     storage-topic domination check consumes (register pin 4): the
     inclusive closure over accepted descriptors' ``parent_state_ids``
-    edges. Object headers contribute nothing here."""
+    edges. Object headers contribute nothing here.
+
+    NOT the production store. ``storagekit.keycontrol.KeyControlStore``
+    persists ``StorageStateDescriptor`` records and exposes this same
+    ``ancestry`` traversal; it does not yet cover the other three things
+    this double holds -- ``bridges``, ``grants``, and ``history_complete``
+    (which acceptance computes and the production store deliberately
+    returns without storing, because its inputs are ``ParentBridge``
+    records from a later sub-bead). So this cannot be swapped for the
+    production store yet, and is named apart from it so nothing imports
+    the wrong one.
+
+    Two divergences to close when it can be swapped, both of which would
+    fail silently rather than loudly if missed:
+
+    * ``states`` here is the live dict and is mutated directly (line
+      ~141). The production property returns a snapshot COPY, so the same
+      assignment against it writes to a temporary and is lost.
+    * ``ancestry`` here is permissive about identifiers it has never
+      seen. Production FAILS CLOSED and raises ``UnknownStateError``,
+      matching ``dominates`` (``witness.py:112-117``), so a not-yet-synced
+      replica cannot evaluate a retraction of heads it cannot see.
+    """
 
     def __init__(self):
         self.states: dict = {}  # state_id -> descriptor
@@ -59,7 +81,7 @@ class KeyControlStore:
         self.bridges: list = []
         self.grants: list = []
 
-    def state_ancestry(self, ids) -> frozenset:
+    def ancestry(self, ids) -> frozenset:
         seen: set = set()
         stack = list(ids)
         while stack:
@@ -115,7 +137,7 @@ class ContentStores:
         self.fold_at = fold_at
         self.ancestry = ancestry
         self.credentials_by_kem_id = credentials_by_kem_id
-        self.kc = KeyControlStore()
+        self.kc = KeyControlDouble()
         self.receipt_store = ReceiptStore()
         self.object_store: dict = {}  # ciphertext_hash -> (header, body)
         self.counters: dict = {}
