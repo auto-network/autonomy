@@ -28,6 +28,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
 
+from tools.dashboard import api_auth
 from tools.dashboard.dao import approval_requests as ar
 from tools.dashboard.event_bus import event_bus
 
@@ -74,6 +75,10 @@ async def get_sign_key(request: Request) -> PlainTextResponse:
     read owning-DB-only (never cross-org) until it is moved to personal, after
     which the fallback is removed. See bead auto-bsbaf.
     """
+    auth_error = api_auth.require_global_api_authority(request)
+    if auth_error is not None:
+        return auth_error
+
     from tools.graph import settings_ops
     try:
         armored = _first_armored_key(
