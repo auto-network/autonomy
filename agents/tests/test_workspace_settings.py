@@ -305,12 +305,31 @@ def test_workspace_from_setting_rejects_invalid_harness():
 
 @pytest.fixture
 def graph_db_env(tmp_path, monkeypatch):
-    """Pin GRAPH_DB to a fresh empty scratch DB for capability resolution tests."""
-    db = tmp_path / "graph.db"
-    monkeypatch.setenv("GRAPH_DB", str(db))
+    """Hermetic per-org tree for capability resolution tests.
+
+    Capability resolution reads enables/installs/impls at explicit org
+    'autonomy', which a GRAPH_DB pin contradicts under the fail-loud
+    resolver. Use the orgs tree instead: no pin, create the org DBs, and
+    set GRAPH_ORG so the seed helpers' CALLER_ORG writes land in the same
+    'autonomy' store the resolver reads.
+    """
+    from tools.graph.db import GraphDB
+    orgs = tmp_path / "orgs"
+    orgs.mkdir()
+    monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.delenv("GRAPH_API", raising=False)
-    monkeypatch.delenv("AUTONOMY_ORGS_DIR", raising=False)
-    yield db
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs))
+    # No GRAPH_ORG override: the seed helpers write at CALLER_ORG and
+    # resolve_capabilities reads at org=None — both resolve to the personal
+    # store, so they align without a pin. (The old GRAPH_DB pin collapsed
+    # every org to one file, which is why the mismatch was invisible.)
+    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    GraphDB.close_all_pooled()
+    for slug, kind in (("autonomy", "shared"), ("personal", "personal")):
+        GraphDB.create_org_db(slug, type_=kind, path=orgs / f"{slug}.db").close()
+    GraphDB.close_all_pooled()
+    yield orgs / "autonomy.db"
+    GraphDB.close_all_pooled()
 
 
 _GITHUB_IMPL = {
