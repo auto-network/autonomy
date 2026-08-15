@@ -434,27 +434,36 @@ def mock_tmux():
 
 
 @pytest.fixture
-def shipped_settings_orgs(tmp_path_factory, monkeypatch):
-    """Populate shipped-workspace Settings into a tmp orgs/ dir.
+def shipped_settings_orgs(test_app, monkeypatch):
+    """Populate shipped-workspace Settings into the app's orgs/ dir.
 
     Dashboard API handlers that render the workspace registry read from
     ``autonomy.workspace#1`` + ``autonomy.org#1`` Settings; tests need
     those populated so ``load_workspaces`` returns the same registry the
-    live dashboard shows. Tests opt in by taking this fixture; ``test_app``
-    alone doesn't trigger population so tests with their own ``orgs_root``
-    stay isolated.
+    live dashboard shows.
+
+    Depends on ``test_app`` deliberately: ``test_app`` sets
+    ``AUTONOMY_ORGS_DIR`` to its own per-test empty orgs dir (to keep the
+    sign-in gate fail-open), and if this fixture populated a DIFFERENT
+    dir, ``test_app``'s later assignment would clobber it and the
+    endpoint would read the empty dir — the whole registry coming back
+    empty. Populating into the dir ``test_app`` already established means
+    the app reads what we seed.
     """
+    import os
+    from pathlib import Path
     from tools.graph.db import GraphDB
     from agents.tests.conftest import (
         SHIPPED_PROJECTS_YAML,
         populate_workspaces_from_yaml,
     )
 
-    orgs_dir = tmp_path_factory.mktemp("orgs")
+    orgs_dir = Path(os.environ["AUTONOMY_ORGS_DIR"])
+    orgs_dir.mkdir(parents=True, exist_ok=True)
     GraphDB.close_all_pooled()
-    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
     monkeypatch.delenv("GRAPH_DB", raising=False)
     populate_workspaces_from_yaml(SHIPPED_PROJECTS_YAML, orgs_dir)
+    GraphDB.close_all_pooled()
     try:
         yield orgs_dir
     finally:
