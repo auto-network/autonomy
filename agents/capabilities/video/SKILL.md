@@ -1,3 +1,8 @@
+---
+name: video
+description: Video tooling capability. Probe, contact-sheet, scene-detect and convert video files, and compile an image sequence into an animation, using a sha256-pinned static ffmpeg/ffprobe mounted read-only.
+---
+
 # Video Tooling
 
 Probe, contact-sheet, scene-detect, and convert video files — including
