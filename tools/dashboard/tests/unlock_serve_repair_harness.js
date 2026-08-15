@@ -13,6 +13,7 @@ globalThis.window = {
   AutonomyNetworkSession: {
     _internals: {
       decryptArmor: async () => ({ seed: new Uint8Array(32) }),
+      decryptArmorAny: async () => ({ seed: new Uint8Array(32) }),
       canonicalJson: (value) => JSON.stringify(value),
       bytesToHex: () => "11".repeat(64),
     },

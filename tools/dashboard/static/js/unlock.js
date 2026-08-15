@@ -160,7 +160,7 @@
     var stored = await _fetchJson('/api/identity/personal');
     var opened;
     try {
-      opened = await S.decryptArmor(stored.armored_private_key, password);
+      opened = await S.decryptArmorAny(stored.armored_private_key, password);
     } catch (e) {
       throw new Error('that password does not open your identity — check it and try again');
     }

@@ -4,6 +4,8 @@ import {
   bytesToHex,
   domainBytes,
   decryptArmor,
+  decryptArmorAny,
+  encryptArmorV2,
   importEd25519RootSigningKey,
   openSealedArmor,
 } from './ceremony/primitives.js';
@@ -216,7 +218,7 @@ var signRegistryRequestCore;
           'personal identity, but no personal identity is stored on this ' +
           'node — set one up from the getting-started flow first');
       }
-      var openedPersonal = await decryptArmor(
+      var openedPersonal = await decryptArmorAny(
         personal.armored_private_key, passphrase);
       try {
         var seed = await openSealedArmor(orgKey, openedPersonal.seed);
@@ -272,7 +274,7 @@ var signRegistryRequestCore;
     }
     var openedPersonal = null;
     try {
-      openedPersonal = await decryptArmor(
+      openedPersonal = await decryptArmorAny(
         personal.armored_private_key, passphrase);
     } catch (e) {
       // The entered passphrase opens the org armor but not the personal
@@ -802,6 +804,8 @@ var signRegistryRequestCore;
     _internals: {
       canonicalJson: canonicalJson,
       decryptArmor: decryptArmor,
+      decryptArmorAny: decryptArmorAny,
+      encryptArmorV2: encryptArmorV2,
       openOrgRoot: _openOrgRoot,
       provisionServeCert: provisionServeCert,
       repairServeCredential: repairServeCredential,

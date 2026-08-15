@@ -111,7 +111,7 @@
     var pair = await I.generateEd25519();
     var armor;
     try {
-      armor = await I.armorSeed(pair.seed, pair.pubHex, password);
+      armor = await I.armorSeedV2(pair.seed, pair.pubHex, password);
     } finally {
       pair.seed.fill(0);
       pair.seed = null;
