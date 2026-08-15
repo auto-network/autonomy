@@ -847,7 +847,45 @@ def _db_path(org: str | None) -> str | None:
     return str(_org_db_path(org))
 
 
-def _open(org: str | None) -> GraphDB:
+def _assert_home(set_id: str | None, org: str | None) -> None:
+    """Refuse a Setting routed to a database its schema does not live in.
+
+    ``personal`` is the operator's own store; ``organization`` is a store an
+    org owns and its members read. An organization's database is what
+    federates, so a value in the wrong one is either invisible to everyone
+    who needs it or visible to everyone who should not have it. Neither
+    failure announces itself, which is why this is checked rather than
+    documented.
+
+    Checked on the way to the database, so a read looking in the wrong place
+    and a write landing in it fail the same way for the same reason.
+
+    A ``GRAPH_DB`` pin with no org replaces the whole store outright -- it is
+    how the test suite, ``graph --db`` and the multi-node harness address a
+    database directly. There is no organization in that resolution to be
+    right or wrong about, so nothing is asserted.
+    """
+    if set_id is None:
+        return
+    want = schemas.declared_home(set_id)
+    if want is None:
+        return
+    if os.environ.get("GRAPH_DB") and org is None:
+        return
+    is_personal = org in _CREATED_ON_DEMAND
+    if want == "personal" and not is_personal:
+        raise schemas.SchemaValidationError(
+            f"{set_id} lives in the operator's own database; refusing to use "
+            f"organization {org!r}"
+        )
+    if want == "organization" and is_personal:
+        raise schemas.SchemaValidationError(
+            f"{set_id} lives in an organization's database; refusing to use "
+            f"the operator's own store"
+        )
+
+
+def _open(org: str | None, set_id: str | None = None) -> GraphDB:
     """Open the database :func:`_db_path` resolved, creating nothing.
 
     A NAMED organization's database must already be there, because
@@ -864,10 +902,11 @@ def _open(org: str | None) -> GraphDB:
     it is treated the same way -- an operator's own store is not
     something anyone provisions first.
     """
+    _assert_home(set_id, org)
     return GraphDB(_db_path(org), create=org in _CREATED_ON_DEMAND)
 
 
-def _open_read(org: str | None) -> GraphDB:
+def _open_read(org: str | None, set_id: str | None = None) -> GraphDB:
     """Open for reading, read-only where that is possible.
 
     A read has no business taking a write lock or running schema
@@ -880,10 +919,11 @@ def _open_read(org: str | None) -> GraphDB:
     -- a pinned path, the operator's own store -- readable before anything
     has been written to them.
     """
+    _assert_home(set_id, org)
     path = _db_path(org)
     if path and Path(path).exists():
         return GraphDB(path, mode="ro")
-    return _open(org)
+    return _open(org, set_id)
 
 
 # ── JSON merge-patch (RFC 7396) ──────────────────────────────
@@ -1059,7 +1099,7 @@ def add_setting(
     sid = str(uuid4())
     now = _now_iso()
     expires_at = schemas.cache_expires_at(set_id, int(schema_revision), now)
-    db = _open(org)
+    db = _open(org, set_id)
     try:
         db.conn.execute(
             "INSERT INTO settings(id, set_id, schema_revision, key, payload, "
@@ -1135,7 +1175,7 @@ def upsert_by_key(
     now = _now_iso()
     expires_at = schemas.cache_expires_at(set_id, int(schema_revision), now)
     payload_json = json.dumps(payload)
-    db = _open(org)
+    db = _open(org, set_id)
     try:
         db.conn.execute("BEGIN IMMEDIATE")
         existing = db.conn.execute(
@@ -1466,7 +1506,7 @@ def remove_settings_by_key_prefix(
     """
     org = _resolve_org_arg(org)
     _guard_protected_set(set_id)
-    db = _open(org)
+    db = _open(org, set_id)
     deleted_keys: list[tuple[str, int, str, str, bool]] = []
     try:
         like = _prefix_like_pattern(prefix)
@@ -1751,7 +1791,7 @@ def chain_setting(
     org = _resolve_org_arg(org)
     resolved_org = org
     raw_rows: list[tuple[str | None, Any]] = []
-    db = _open(org)
+    db = _open(org, set_id)
     try:
         rows = db.conn.execute(
             "SELECT rowid AS _rowid, * FROM settings WHERE set_id = ? AND key = ? "
@@ -2045,7 +2085,7 @@ def read_set(
     if prefix is not None:
         prefix_clause = " AND key LIKE ? ESCAPE '\\'"
         prefix_params = (_prefix_like_pattern(prefix),)
-    db = _open_read(org)
+    db = _open_read(org, set_id)
     try:
         rows = db.conn.execute(
             f"SELECT rowid AS _rowid, * FROM settings WHERE set_id = ? "
@@ -2282,7 +2322,7 @@ def migrate_setting_revisions(
     # one we need to know. Compute once and reuse for every cache-row
     # rewrite in this loop.
     expires_at = schemas.cache_expires_at(set_id, int(to_revision), now)
-    db = _open(org)
+    db = _open(org, set_id)
     affected_snapshots: list[dict] = []
     try:
         rows = db.conn.execute(

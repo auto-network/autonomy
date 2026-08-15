@@ -334,6 +334,67 @@ def keyed_per_entity(
     return _wrap(cls)
 
 
+VALID_HOMES = ("personal", "organization")
+
+
+def home(where: str) -> Any:
+    """Schema decorator: declare which database this Setting lives in.
+
+    ``personal`` is the operator's own store: their identity, their
+    credentials, their machine. ``organization`` is a store an org owns and
+    that its members read. The distinction is not cosmetic -- an
+    organization's database is what federates, so a value put in the wrong
+    one is either invisible to everyone who needs it or visible to everyone
+    who should not have it.
+
+    Stacked ABOVE the access-pattern decorator, and separate from it because
+    the two answer different questions: how many rows there are, and whose
+    database they are in. Neither implies the other.
+
+    Undeclared means undeclared -- nothing is asserted, and a schema that
+    has not been through this decision behaves exactly as it did.
+    """
+    if where not in VALID_HOMES:
+        raise SchemaValidationError(
+            f"home must be one of {list(VALID_HOMES)}, got {where!r}"
+        )
+
+    def _wrap(target: type) -> type:
+        existing = target.__dict__.get("_home")
+        if existing is not None and existing != where:
+            raise SchemaValidationError(
+                f"{target.__name__}: declares two homes "
+                f"({existing!r} and {where!r}); it lives in one database"
+            )
+        target._home = where
+        return target
+
+    return _wrap
+
+
+def declared_home(set_id: str) -> str | None:
+    """The home every registered revision of ``set_id`` agrees on.
+
+    A Setting does not move between databases when its schema gains a
+    revision, so disagreement is a contradiction rather than something to
+    resolve by picking the newest.
+    """
+    prefix = f"{set_id}#"
+    seen = {
+        cls._home
+        for key, cls in SCHEMAS.items()
+        if key.startswith(prefix) and getattr(cls, "_home", None) is not None
+    }
+    if not seen:
+        return None
+    if len(seen) > 1:
+        raise SchemaValidationError(
+            f"{set_id}: revisions declare different homes {sorted(seen)}; "
+            f"a Setting does not change database between revisions"
+        )
+    return seen.pop()
+
+
 def cache(
     cls: type | None = None,
     *,
