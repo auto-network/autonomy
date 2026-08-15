@@ -129,6 +129,7 @@ class _FakeDashboardEvents:
 def stack(tmp_path_factory):
     """Registry + connector as real subprocesses, wired to real stores."""
     from tools.network.idkit import Subject, issue_cert
+    from tools.network.idkit.persona import derive_persona
 
     tmp = tmp_path_factory.mktemp("mission-relay")
     # Orgs-tree, no GRAPH_DB pin: the stack's grant/mission writes go at
@@ -207,6 +208,13 @@ def stack(tmp_path_factory):
 
     GraphDB.close_all_pooled()
     GraphDB.create_org_db(GRAPH_ORG).close()
+    # Mission compose reads presence/state from the platform 'autonomy'
+    # org (and the personal store), which always exist in production; the
+    # connector serving the mission refuses ('unavailable') without them
+    # under the refuse-real-data flag.
+    for _plat in ("autonomy", "personal"):
+        if not (orgs_dir / f"{_plat}.db").exists():
+            GraphDB.create_org_db(_plat).close()
     from tools.graph.schemas.network_identity import (
         NETWORK_LINK_GRANT_REVISION, NETWORK_LINK_GRANT_SET_ID,
     )
@@ -265,10 +273,19 @@ def stack(tmp_path_factory):
     # (E1) must mirror it with the identity-neutral subject
     # {operator, child_pub} — both are dedicated serve-side certs,
     # distinct from the broad session cert above.
+    # The relay's serve-cert hello requires a canonical organization
+    # persona subject (subject_kind == "persona" with a 64-hex persona
+    # pub), not a plain operator label — a serve cert speaks AS the org's
+    # persona. Derive it from the org root seed anchored on the org's
+    # genesis (derive_persona is pure HKDF; any well-formed 64-hex genesis
+    # id yields a stable persona, and the relay checks the subject shape
+    # and the chain to root, not the genesis).
+    org_genesis_id = ORG_UUID.replace("-", "") * 2  # 64 lowercase hex
+    persona = derive_persona(bytes.fromhex(root.private_hex), org_genesis_id)
     serve_cert = issue_cert(
         root, session_key.public_hex,
         scope=("tunnel:serve",),
-        org=ORG_UUID, subject=Subject("operator", "op-1"),
+        org=ORG_UUID, subject=Subject("persona", persona.public_hex),
         not_before=now - 300, not_after=now + 7 * 86_400,
     )
     cert_file = tmp / "session.cert"
