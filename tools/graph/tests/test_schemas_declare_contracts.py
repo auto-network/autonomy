@@ -185,3 +185,61 @@ def test_no_schema_leaves_its_entity_unnamed(registered_schemas):
         "these declare a per-entity key without naming the entity:\n  "
         + "\n  ".join(unnamed)
     )
+
+
+# Schemas whose payload repeats a segment of their own key, grandfathered.
+#
+# The rule is that the key is returned with the row -- ``resolve_set_key``
+# gives the base row including ``key``, every ``read_set`` member carries
+# ``.key`` -- so repeating it in the payload is redundant and can drift: when
+# the two disagree, nothing says which wins.
+#
+# These predate the rule and cannot be fixed by editing a schema. The
+# duplicated fields are read at roughly a hundred production sites between
+# them (``design_id`` 54, ``participant_id`` 38, ``credential_id`` 13), so
+# removing one is a consumer migration, not a declaration change. Each is
+# recorded here rather than silently skipped, so the debt is countable and a
+# NEW collision still fails.
+#
+# ``autonomy.network.persona`` is NOT debt. Its ``genesis_id`` is the
+# derivation input the persona was produced under, duplicated deliberately so
+# a payload read on its own still states what it is -- the exception the
+# guide names.
+_KEY_DUPLICATION_GRANDFATHERED = {
+    ("autonomy.identity.passkey", 1, "credential_id"),
+    ("autonomy.network.ledger-projection", 1, "projection"),
+    ("autonomy.network.ledger-state", 1, "genesis_id"),
+    ("autonomy.network.persona", 1, "genesis_id"),          # derivation input
+    ("dashboard.harness.usage", 1, "harness"),
+    ("dashboard.harness.usage", 1, "identity_id"),
+    ("dashboard.plugin-owned-setting", 1, "plugin_id"),
+    ("dashboard.plugin-owned-setting", 1, "set_id"),
+    ("dashboard.presentation.deck", 1, "design_id"),
+    ("dashboard.surface.presence", 1, "surface_id"),
+    ("dashboard.surface.presence", 1, "participant_id"),
+}
+
+
+def test_no_new_schema_repeats_its_own_key_in_the_payload(registered_schemas):
+    """The key comes back with the row; repeating it invites drift.
+
+    Only strategies that name an entity are checked. ``fixed:``, ``uuid_v4``
+    and ``natural`` name no segment to collide with.
+    """
+    import re
+
+    unexpected = []
+    for set_id, revision, cls in registered_schemas:
+        strategy = getattr(cls, "_key_strategy", None) or ""
+        if (not strategy or strategy in ("natural", "uuid_v4", "snowflake_id")
+                or strategy.startswith("fixed:")):
+            continue
+        segments = [seg.strip("[]") for seg in re.split(r"[:/]", strategy)]
+        fields = set(getattr(cls, "_field_metadata", None) or {})
+        for segment in segments:
+            if segment in fields and (set_id, revision, segment) not in _KEY_DUPLICATION_GRANDFATHERED:
+                unexpected.append(f"{set_id}#{revision} field {segment!r} repeats its key")
+    assert not unexpected, (
+        "payload repeats a key segment; the key is already returned with the "
+        "row:\n  " + "\n  ".join(unexpected)
+    )
