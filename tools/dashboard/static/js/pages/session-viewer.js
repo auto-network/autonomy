@@ -2344,11 +2344,23 @@
             if (!self.showTerminal) return;
             var container = self.$refs.termContainer;
             if (!container || typeof window.mountTerminal !== 'function') return;
-            self._termInstance = window.mountTerminal(container, self._tmuxSession);
-            // Fit after mount — the grid row is now sized and the terminal can measure
-            setTimeout(function () {
-              if (self._termInstance) self._termInstance.fit();
-            }, 50);
+            // The emulator is fetched on first use rather than by every page
+            // in the shell, so mounting waits for it. Re-check the toggle
+            // afterwards: the wait is a real gap, and the reader may have
+            // closed the terminal or left the session inside it.
+            var ready = typeof window.ensureTerminalLibs === 'function'
+              ? window.ensureTerminalLibs()
+              : Promise.resolve();
+            ready.then(function () {
+              if (!self.showTerminal || !self.$refs.termContainer) return;
+              self._termInstance = window.mountTerminal(container, self._tmuxSession);
+              // Fit after mount — the grid row is now sized and the terminal can measure
+              setTimeout(function () {
+                if (self._termInstance) self._termInstance.fit();
+              }, 50);
+            }).catch(function (err) {
+              console.warn('terminal libraries failed to load', err);
+            });
           });
         } else {
           if (this._termInstance) {

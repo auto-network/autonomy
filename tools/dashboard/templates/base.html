@@ -26,13 +26,20 @@
   <link rel="stylesheet" href="/static/css/style-picker.css?v=__STATIC_VERSION__">
   <link rel="stylesheet" href="/static/css/turn-correction.css?v=__STATIC_VERSION__">
   <link rel="stylesheet" href="/static/css/identity-indicator.css?v=__STATIC_VERSION__">
-  <script src="/static/vendor/marked.min.js?v=__STATIC_VERSION__"></script>
-  <script src="/static/vendor/highlightjs/highlight.min.js?v=__STATIC_VERSION__"></script>
+  <!-- The terminal emulator, its addons and its stylesheet are NOT here.
+       Every page blocked its first paint on them, including pages with no
+       terminal on them at all. terminal-mount.js fetches them the first time
+       a terminal is opened. -->
+  <!-- Deferred, not blocking. Nothing renders markdown or highlights code
+       while the document is parsing: the only consumers are markdown.js and
+       page scripts, all of which are themselves deferred or loaded by the
+       router. Undeferred they held up first paint on every page, for a
+       markdown renderer and a syntax highlighter that a page with neither on
+       it still waited for. Deferred scripts run in document order, so these
+       are still in place before markdown.js below. -->
+  <script src="/static/vendor/marked.min.js?v=__STATIC_VERSION__" defer></script>
+  <script src="/static/vendor/highlightjs/highlight.min.js?v=__STATIC_VERSION__" defer></script>
   <link rel="stylesheet" href="/static/vendor/highlightjs/github-dark.min.css?v=__STATIC_VERSION__">
-  <script src="/static/vendor/xterm.min.js?v=__STATIC_VERSION__"></script>
-  <script src="/static/vendor/addon-fit.min.js?v=__STATIC_VERSION__"></script>
-  <script src="/static/vendor/addon-clipboard.min.js?v=__STATIC_VERSION__"></script>
-  <link rel="stylesheet" href="/static/vendor/xterm.min.css?v=__STATIC_VERSION__">
   <script src="/static/vendor/purify.min.js?v=__STATIC_VERSION__" defer></script>
   <script src="/static/js/markdown.js?v=__STATIC_VERSION__" defer></script>
   <script type="importmap">{"imports": {"/static/js/ceremony/primitives.js": "/static/js/ceremony/primitives.js?v=__STATIC_VERSION__"}}</script>

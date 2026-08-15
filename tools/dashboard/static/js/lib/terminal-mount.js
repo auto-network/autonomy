@@ -19,6 +19,67 @@
  *   onOpen() — fires after the WebSocket opens and initial dimensions are
  *     sent (the /terminal page uses it to refresh the pill bar).
  */
+/**
+ * ensureTerminalLibs — fetch the terminal emulator the first time one opens.
+ *
+ * The emulator, its two addons and its stylesheet used to sit in the shell's
+ * head, so every page in the dashboard blocked its first paint on them. A
+ * mission screen, which has no terminal anywhere on it, waited for a terminal
+ * emulator before it could draw, and the emulator is the largest asset the
+ * dashboard serves.
+ *
+ * The shell is one document for every route with a client-side router, so
+ * there is no per-page template to move them into. Fetching them on the first
+ * mount covers both a cold load and a move between pages that never reloads
+ * the shell.
+ */
+(function () {
+  var VENDOR = [
+    "/static/vendor/xterm.min.js",
+    "/static/vendor/addon-fit.min.js",
+    "/static/vendor/addon-clipboard.min.js",
+  ];
+  var STYLE = "/static/vendor/xterm.min.css";
+  var pending = null;
+
+  function version() {
+    // Carry whatever cache-busting the shell stamped on its own assets, so a
+    // deploy invalidates these too instead of serving a stale emulator.
+    var stamped = document.querySelector('link[href*="/static/tailwind.css"]');
+    var href = stamped && stamped.getAttribute("href");
+    var q = href ? href.indexOf("?") : -1;
+    return q > -1 ? href.slice(q) : "";
+  }
+
+  function loadScript(src) {
+    return new Promise(function (resolve, reject) {
+      var el = document.createElement("script");
+      el.src = src;
+      el.onload = resolve;
+      el.onerror = function () { reject(new Error("failed to load " + src)); };
+      document.head.appendChild(el);
+    });
+  }
+
+  window.ensureTerminalLibs = function () {
+    if (window.Terminal && window.FitAddon) return Promise.resolve();
+    if (pending) return pending;          // one fetch however many callers
+    var v = version();
+    var link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = STYLE + v;
+    document.head.appendChild(link);
+    // Sequential: each addon registers against the emulator's global.
+    pending = VENDOR.reduce(function (chain, src) {
+      return chain.then(function () { return loadScript(src + v); });
+    }, Promise.resolve()).catch(function (err) {
+      pending = null;                     // a failed load may be retried
+      throw err;
+    });
+    return pending;
+  };
+})();
+
 (function () {
   function installTouchScrollBridge(container, term) {
     var lastTouchY = null;
