@@ -462,11 +462,40 @@ async def post_ledger_found(request: Request) -> JSONResponse:
             status_code=500,
         )
 
+    # Record WHICH member this node is. The ledger says the founder's persona
+    # is a member; it cannot say that persona is US, because that depends on
+    # who holds which seed -- and the seed never leaves the browser. The
+    # persona's PUBLIC half is in the claim event the client just signed, so
+    # this is read from the folded batch rather than derived from anything
+    # secret. Without it a browser-founded organization has no record of who
+    # its owner is on this node (auto-jdba4 follow-up).
+    try:
+        org_ops._record_persona_setting(
+            requested_org,
+            event_ids[0],
+            events[3].payload["persona_pub"],
+            source="found",
+        )
+    except Exception as exc:
+        # The ledger is already durable and correct; failing the whole
+        # founding here would leave a founded org the client believes failed.
+        # Report it instead, so the gap is visible rather than silent.
+        return JSONResponse(
+            {
+                "ok": True,
+                "genesis_id": event_ids[0],
+                "event_ids": event_ids,
+                "persona_recorded": False,
+                "warning": f"founded, but the owner persona was not recorded: {exc}",
+            }
+        )
+
     return JSONResponse(
         {
             "ok": True,
             "genesis_id": event_ids[0],
             "event_ids": event_ids,
+            "persona_recorded": True,
         }
     )
 

@@ -160,3 +160,42 @@ def test_a_browser_founds_an_organization_without_ever_sending_a_passphrase(
         "/api/network/org-key/sealed",
         "/api/network/ledger/found",
     ]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_browser_founding_records_which_member_this_node_is(live, tmp_path):
+    """The ledger says that persona is a member; only this says it is US.
+
+    Without it a browser-founded organization has no record of its owner on
+    this node -- the seed that would derive it never leaves the browser, so it
+    cannot be recovered later without the passphrase this whole change exists
+    to stop asking for.
+    """
+    from tools.graph.schemas.network_identity import NETWORK_PERSONA_SET_ID
+
+    fixture = tmp_path / "e2e.json"
+    fixture.write_text(json.dumps({
+        "server_url": live,
+        "org": ORG,
+        "personal_root_seed_hex": PERSONAL_ROOT_SEED.hex(),
+        "now": NOW,
+    }))
+    proc = subprocess.run(
+        ["node", str(DRIVER), str(fixture)],
+        cwd=REPO_ROOT, check=True, capture_output=True, text=True,
+    )
+    result = json.loads(proc.stdout)
+
+    # personal.db, not the org's database -- two members must never share a row.
+    rows = list(settings_ops.read_owned_set(NETWORK_PERSONA_SET_ID, org=None))
+    assert len(rows) == 1, "exactly one persona record for this founding"
+    payload = rows[0].payload
+    assert payload["persona_pub"] == result["founder_persona_pub"], (
+        "the recorded persona is not the one the browser actually claimed"
+    )
+    assert payload["genesis_id"] == result["genesis_id"]
+    assert payload["org_slug"] == ORG
+    assert payload["source"] == "found"
+    # And it did not ride in on the wire from the client.
+    sent = "\n".join(entry["sent"] for entry in result["wire"])
+    assert "persona_record" not in sent and "derived_at" not in sent
