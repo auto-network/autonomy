@@ -1,0 +1,14 @@
+[Unit]
+Description=Bind the auto.network TURN floating IPv4
+Before=autonomy-coturn.service
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/autonomy-coturn/runtime.env
+ExecStart=/opt/autonomy-coturn/bind-floating-ip.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
