@@ -52,8 +52,15 @@ def registered_schemas():
     for set_id in R.list_registered_set_ids():
         for revision in range(1, 12):
             cls = R.get_schema(set_id, revision)
-            if cls is not None:
-                out.append((set_id, revision, cls))
+            if cls is None:
+                continue
+            # The registry is process-global and other tests register throwaway
+            # schemas into it. Only schemas defined in production modules are
+            # shipped contracts; a class defined inside a test module is not.
+            module = cls.__module__ or ""
+            if ".tests." in module or module.rsplit(".", 1)[-1].startswith("test_"):
+                continue
+            out.append((set_id, revision, cls))
     assert out, "no schemas registered — the import sweep found nothing"
     return out
 

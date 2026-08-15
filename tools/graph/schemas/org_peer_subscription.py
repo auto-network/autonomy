@@ -16,6 +16,7 @@ Spec: graph://0d3f750f-f9c (Setting Primitive), graph://bcce359d-a1d
 from __future__ import annotations
 
 from .registry import (
+    keyed_per_entity,
     SchemaValidationError,
     SettingSchema,
 )
@@ -38,6 +39,7 @@ SYNOPSIS = {
 }
 
 
+@keyed_per_entity(key_strategy="org_slug")
 class OrgPeerSubscriptionV1(SettingSchema):
     set_id = SET_ID
     schema_revision = SCHEMA_REVISION

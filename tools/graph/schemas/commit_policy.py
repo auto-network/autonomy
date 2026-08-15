@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .registry import SchemaValidationError, SettingSchema, field
+from .registry import SchemaValidationError, SettingSchema, field, keyed_per_entity
 
 
 COMMIT_POLICY_SET_ID = "autonomy.commit.policy"
@@ -162,6 +162,7 @@ def _validate_object(payload: dict, key: str, cls_name: str) -> None:
         raise SchemaValidationError(f"{cls_name}: {key!r} must be an object")
 
 
+@keyed_per_entity(key_strategy="policy_scope_key")
 class CommitPolicyV1(SettingSchema):
     set_id = COMMIT_POLICY_SET_ID
     schema_revision = COMMIT_POLICY_REVISION
@@ -278,6 +279,7 @@ class CommitPolicyV1(SettingSchema):
                 )
 
 
+@keyed_per_entity(key_strategy="contract_operation")
 class OperationPolicyV1(SettingSchema):
     set_id = OPERATION_POLICY_SET_ID
     schema_revision = OPERATION_POLICY_REVISION

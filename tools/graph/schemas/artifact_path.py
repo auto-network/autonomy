@@ -17,6 +17,7 @@ Spec: graph://0d3f750f-f9c (Setting Primitive), graph://bc0dda40-f56
 from __future__ import annotations
 
 from .registry import (
+    keyed_per_entity,
     SchemaValidationError,
     SettingSchema,
 )
@@ -40,6 +41,7 @@ SYNOPSIS = {
 }
 
 
+@keyed_per_entity(key_strategy="artifact_name")
 class ArtifactPathV1(SettingSchema):
     set_id = SET_ID
     schema_revision = SCHEMA_REVISION

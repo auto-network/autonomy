@@ -82,9 +82,10 @@ class WorkspaceMountV1(BaseModel):
 # class with a classmethod ``validate``). Pydantic BaseModel validation
 # goes through ``model_validate``; wrap it so ``add_setting`` /
 # dashboard validation call sites keep working unchanged.
-from .registry import SettingSchema, SchemaValidationError
+from .registry import SettingSchema, SchemaValidationError, keyed_per_entity
 
 
+@keyed_per_entity(key_strategy="workspace_id:mount_name")
 class _WorkspaceMountSchemaAdapter(SettingSchema):
     """Adapts :class:`WorkspaceMountV1` (Pydantic) to the registry contract.
 

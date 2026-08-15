@@ -24,6 +24,7 @@ graph://8cf067e3-ca3. First-run init design: graph://dc310166-911.
 from __future__ import annotations
 
 from .registry import (
+    keyed_per_entity,
     SchemaValidationError,
     SettingSchema,
 )
@@ -51,6 +52,7 @@ SYNOPSIS = {
 _LIST_FIELDS = ("canonical", "published")
 
 
+@keyed_per_entity(key_strategy="org_slug")
 class OrgBootstrapAllowlistV1(SettingSchema):
     set_id = SET_ID
     schema_revision = SCHEMA_REVISION
