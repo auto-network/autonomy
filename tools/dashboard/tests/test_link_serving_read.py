@@ -75,7 +75,12 @@ def test_read_refuses_target_type_without_a_registered_handler(monkeypatch, gran
     assert call(TOKEN, {"v": 1, "op": "read", "body": {}}) == link_serving.REFUSED
 
 
-def test_read_refuses_missing_bound_identity(stub_handler, monkeypatch):
+def test_read_without_bound_identity_reaches_handler_as_empty(stub_handler, monkeypatch):
+    # Reads are authorised by holding the link, NOT by a bound participant
+    # (see _serve_read: requiring meta.participant_id here made every
+    # anonymous link fail at everything after its first screen). An unbound
+    # channel reaches the handler as the empty identity, which the handler
+    # is free to refuse if it genuinely needs to know who is asking.
     monkeypatch.setattr(
         link_serving, "check_grant",
         lambda token, org=None, now=None: {
@@ -83,8 +88,9 @@ def test_read_refuses_missing_bound_identity(stub_handler, monkeypatch):
             "target_uuid": TARGET_UUID, "meta": {},
         },
     )
-    assert call(TOKEN, {"v": 1, "op": "read", "body": {}}) == link_serving.REFUSED
-    assert stub_handler == []
+    body = envelope(call(TOKEN, {"v": 1, "op": "read", "body": {"kind": "pillars"}}))
+    assert body == {"v": 1, "status": "ok", "echo": {"kind": "pillars"}}
+    assert stub_handler == [("", TARGET_UUID, {"kind": "pillars"})]
 
 
 def test_read_refuses_non_dict_or_missing_body(stub_handler, grants):
