@@ -8,8 +8,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import yaml
 import pytest
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
 from starlette.testclient import TestClient
 
+from tools.dashboard import api_auth
 from tools.dashboard.dao import mission_control_db as db
 from tools.dashboard.plugin_api.manifest import PluginManifest
 from tools.dashboard.plugins.mission_control.entrypoints import api as mc_api
@@ -40,8 +42,25 @@ def _no_real_presence_writes():
         yield
 
 
+class _OperatorPrincipalMiddleware:
+    """Give non-auth-focused plugin tests the production operator context."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        scope.setdefault("state", {})["api_principal"] = api_auth.ApiPrincipal(
+            api_auth.ApiPrincipalKind.OPERATOR_COOKIE,
+            subject="test-operator",
+        )
+        await self.app(scope, receive, send)
+
+
 def _client() -> TestClient:
-    app = Starlette(routes=mc_api.routes)
+    app = Starlette(
+        routes=mc_api.routes,
+        middleware=[Middleware(_OperatorPrincipalMiddleware)],
+    )
     return TestClient(app)
 
 
@@ -50,7 +69,10 @@ def _https_client() -> TestClient:
     cookie is set with secure=True (matches the unlock system's own
     session cookie convention), and httpx's cookie jar won't carry a
     Secure cookie back over a plain http:// scheme."""
-    app = Starlette(routes=mc_api.routes)
+    app = Starlette(
+        routes=mc_api.routes,
+        middleware=[Middleware(_OperatorPrincipalMiddleware)],
+    )
     return TestClient(app, base_url="https://testserver")
 
 
