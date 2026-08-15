@@ -24,6 +24,7 @@ import logging
 from typing import Callable
 
 from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,39 @@ def principal_from_request(request: Request) -> ApiPrincipal:
     """
 
     return getattr(request.state, "api_principal", COMPATIBILITY_PRINCIPAL)
+
+
+def require_global_api_authority(request: Request) -> JSONResponse | None:
+    """Refuse an API caller that lacks global operator authority.
+
+    This is the final route-level guard for operations that belong to the
+    local operator rather than to any organization.  It consumes only the
+    identity established by :class:`ApiIdentityMiddleware`: handlers must not
+    re-parse cookies, bearers, or caller-controlled organization selectors.
+
+    ``None`` means authorized.  Compatibility traffic receives 401;
+    authenticated organization sessions receive 403.  The distinction lets a
+    legitimate agent see that its credential is valid but deliberately too
+    narrow, while missing or unrecognized credentials gain no authority.
+    """
+
+    principal = principal_from_request(request)
+    if principal.global_authority:
+        return None
+    if principal.org_bound:
+        logger.warning(
+            "api_authz_refused policy=global_operator method=%s path=%s "
+            "caller=%s caller_org=%s",
+            request.method,
+            request.url.path,
+            principal.subject,
+            principal.org,
+        )
+        return JSONResponse(
+            {"error": "global operator authority required"},
+            status_code=403,
+        )
+    return JSONResponse({"error": "authentication required"}, status_code=401)
 
 
 BearerAuthenticator = Callable[[Request], tuple[tuple[str, str | None] | None, object | None]]
