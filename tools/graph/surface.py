@@ -261,8 +261,14 @@ class SurfacePingV1(SettingSchema):
     set_id = SURFACE_PING_SET_ID
     schema_revision = SCHEMA_REVISION
 
-    surface_id: str = field(required=True)
-    from_participant_id: str = field(required=True)
+    surface_id: str = field(
+        required=True,
+        description="The page/surface this ping was sent on, e.g. 'settings-nexus'",
+    )
+    from_participant_id: str = field(
+        required=True,
+        description="participant_id of whoever sent the summons",
+    )
     to_participant_id: str = field(
         required=True,
         description="Exact participant_id from a SurfacePresence row",
@@ -270,10 +276,26 @@ class SurfacePingV1(SettingSchema):
     position_kind: str = field(
         required=True,
         enum=list(VALID_POSITION_KINDS_PING),
+        description=(
+            "How to interpret position_value — the place on the surface the "
+            "recipient is being summoned to"
+        ),
     )
-    position_value: str = field(required=True)
-    message: str = field(default="")
-    sent_at: str = field(required=True)
+    position_value: str = field(
+        required=True,
+        description=(
+            "tile id | zone id | 'x,y' | free text — interpretation depends "
+            "on position_kind"
+        ),
+    )
+    message: str = field(
+        default="",
+        description="Optional free text shown with the summons",
+    )
+    sent_at: str = field(
+        required=True,
+        description="ISO-8601 UTC timestamp the ping was written",
+    )
 
     @classmethod
     def validate(cls, payload: Any) -> None:

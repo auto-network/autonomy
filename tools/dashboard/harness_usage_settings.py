@@ -154,12 +154,30 @@ class DashboardHarnessUsageV1(SettingSchema):
         required=True,
         description="ISO-8601 timestamp the publisher stamped at write time.",
     )
-    plan_type: str | None = field(default=None)
-    tier: str | None = field(default=None)
-    limit_id: str | None = field(default=None)
-    limit_name: str | None = field(default=None)
-    rate_limit_reached_type: str | None = field(default=None)
-    note: str | None = field(default=None)
+    plan_type: str | None = field(
+        default=None,
+        description="Subscription plan the account is on, as the harness reports it.",
+    )
+    tier: str | None = field(
+        default=None,
+        description="Usage tier within the plan, when the harness distinguishes one.",
+    )
+    limit_id: str | None = field(
+        default=None,
+        description="Identifier of the rate limit currently in force.",
+    )
+    limit_name: str | None = field(
+        default=None,
+        description="Human-readable name of that rate limit, for display.",
+    )
+    rate_limit_reached_type: str | None = field(
+        default=None,
+        description="Which limit was hit, when the harness reports having hit one.",
+    )
+    note: str | None = field(
+        default=None,
+        description="Free-text note from the publisher; shown as-is when present.",
+    )
     windows: dict = field(
         default_factory=dict,
         description=(

@@ -174,6 +174,11 @@ def field(
         element: per-element shape for list-typed fields. Bare Python
             types become JSON-schema type names; a dict of field→type
             describes a list-of-dict element shape.
+
+    ``description`` is required of every field a SHIPPED schema declares,
+    asserted over the live registry rather than here — a throwaway schema
+    in a test publishes no contract and needs none. See
+    ``test_schemas_declare_contracts``.
     """
     return _FieldSpec(
         required=required,
