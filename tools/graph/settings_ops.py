@@ -949,6 +949,7 @@ def add_setting(
     if state not in VALID_STATES:
         raise ValueError(f"invalid state {state!r}; valid: {VALID_STATES}")
     schemas.validate_payload(set_id, schema_revision, payload)
+    schemas.validate_key(set_id, schema_revision, key)
     sid = str(uuid4())
     now = _now_iso()
     expires_at = schemas.cache_expires_at(set_id, int(schema_revision), now)
@@ -1024,6 +1025,7 @@ def upsert_by_key(
     if state not in VALID_STATES:
         raise ValueError(f"invalid state {state!r}; valid: {VALID_STATES}")
     schemas.validate_payload(set_id, schema_revision, payload)
+    schemas.validate_key(set_id, schema_revision, key)
     now = _now_iso()
     expires_at = schemas.cache_expires_at(set_id, int(schema_revision), now)
     payload_json = json.dumps(payload)
