@@ -137,6 +137,9 @@ def test_node_founding_posts_atomic_batch_and_folds_owner(
             "ok": True,
             "genesis_id": founded["genesisId"],
             "event_ids": founded["eventIds"],
+            # The owner persona is recorded here too: the ledger says that
+            # persona is a member, but only this says it is US.
+            "persona_recorded": True,
         }
         assert founded["kemCredential"] is None
         assert founded["kemPrivateKey"] is None
