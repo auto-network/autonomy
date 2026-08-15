@@ -2319,6 +2319,11 @@
               createDescription = createFields.description;
               delete createFields.description;
             }
+            const storyPointsValue = req.value === null || req.value === undefined ||
+              String(req.value).trim() === '' ? '?' : String(req.value).trim();
+            const storyPointsUnit = Number(storyPointsValue) === 1
+              ? 'story point' : 'story points';
+            const storyPointsLabel = storyPointsValue + ' ' + storyPointsUnit;
             const ops = {
               comment: { title: 'Jira comment', action: 'Post comment' },
               set_field: {
@@ -2334,6 +2339,10 @@
               change_type: {
                 title: 'Jira issue-type change',
                 action: 'Change type to ' + (req.issue_type || '?'),
+              },
+              set_story_points: {
+                title: 'Set ' + storyPointsLabel,
+                action: 'Set ' + storyPointsLabel,
               },
             };
             const op = ops[req.op] || { title: 'Jira write', action: 'Approve' };
@@ -2351,6 +2360,12 @@
             const changeTypeNote = req.op === 'change_type'
               ? 'Change ' + (req.key || '?') + ' to issue type ' + (req.issue_type || '?')
               : '';
+            const storyPointsNote = req.op === 'set_story_points'
+              ? 'Story Points\n\nCurrent: ' +
+                (req.previous_value === null || req.previous_value === undefined
+                  ? 'Unestimated' : req.previous_value) +
+                '\nNew: ' + storyPointsLabel
+              : '';
             self.approvalRequest = {
               id: r.id, kind: r.kind, session: r.session,
               title: op.title, actionLabel: op.action, op: req.op,
@@ -2358,7 +2373,7 @@
                 ((req.fields || {}).project ? (req.fields.project.key || '') : ''),
               bodyMarkdown:
                 req.body_markdown || createDescription || attachNote ||
-                transitionNote || changeTypeNote,
+                transitionNote || changeTypeNote || storyPointsNote,
               fields: createFields,
             };
             if (req.op === 'transition' && req.key) {

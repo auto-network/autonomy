@@ -5526,6 +5526,33 @@ JIRA_CREATE_APPROVAL_CHECKS = """(async () => {
 
     data.approvalRequest = null;
     await Alpine.nextTick();
+
+    data._approvalKinds.jira_write.open(data, {
+        id: 'apr-jira-points-1',
+        kind: 'jira_write',
+        session: 'auto-agent-1',
+        result: null,
+        request: {
+            op: 'set_story_points',
+            org: 'anchore',
+            key: 'ENTERPRISE-8917',
+            value: '5',
+            previous_value: null,
+            board_id: 78,
+            field_id: 'customfield_10028',
+        },
+    });
+    await Alpine.nextTick();
+    var pointsBody = q('approval-body');
+    var approveButton = q('approval-approve-button');
+    r.points_title = data.approvalRequest.title;
+    r.points_action = data.approvalRequest.actionLabel;
+    r.points_body = pointsBody ? pointsBody.textContent : '';
+    r.points_button = approveButton ? approveButton.textContent.replace(/\\s+/g, ' ').trim() : '';
+    r.points_target = data.approvalRequest.target;
+
+    data.approvalRequest = null;
+    await Alpine.nextTick();
     return JSON.stringify(r);
 })()"""
 
@@ -6233,6 +6260,18 @@ class TestJiraCreateApprovalPreview:
 
     def test_preview_derivation_does_not_mutate_staged_request(self):
         assert self._checks["input_was_not_mutated"] is True
+
+    def test_story_points_value_is_prominent_in_prompt_and_action(self):
+        c = self._checks
+        assert c["points_title"] == "Set 5 story points"
+        assert c["points_action"] == "Set 5 story points"
+        assert "Set 5 story points" in c["points_button"]
+        assert c["points_target"] == "ENTERPRISE-8917"
+
+    def test_story_points_body_shows_current_and_proposed_values(self):
+        assert self._checks["points_body"] == (
+            "Story Points\n\nCurrent: Unestimated\nNew: 5 story points"
+        )
 
 
 class TestWorktreesRebaseStatusBehavior:
