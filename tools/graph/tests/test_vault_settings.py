@@ -60,6 +60,18 @@ def seal(world, store, setting_id="row-1", payload=None):
     )
 
 
+def seal_other_setting(world, store, setting_id):
+    """A different setting entirely -- so its object id differs."""
+    return seal_setting(
+        author=world.member, frontier=world.f1, setting_id=setting_id,
+        set_id="dashboard.other.credentials", key=KEY, payload={"x": 1},
+        held_secrets={world.s1.state_id: world.sec1},
+        available_states={world.s1.state_id: world.s1},
+        ancestry=world.ancestry, store=store,
+        bridges=world.bridges, descriptors=world.descriptors,
+    )
+
+
 # ── The row holds a locator, never the secret ─────────────────────────────
 
 
@@ -96,22 +108,36 @@ def test_a_partial_override_cannot_splice_two_locators(world, store):
     second = seal(world, store, setting_id="row-2", payload={"access_token": "second"})
     assert parse_locator(first)["revision_id"] != parse_locator(second)["revision_id"]
 
-    def merge_patch(base, patch):
-        # RFC 7386, the operation settings resolution actually applies.
-        if not isinstance(patch, dict) or not isinstance(base, dict):
-            return patch
-        out = dict(base)
-        for k, v in patch.items():
-            if v is None:
-                out.pop(k, None)
-            else:
-                out[k] = merge_patch(out.get(k), v)
-        return out
+    # The RESOLVER'S OWN merge, imported rather than reimplemented: the
+    # property must hold for the function settings resolution actually calls,
+    # so this cannot drift away from it.
+    from tools.graph.settings_ops import json_merge_patch
 
-    merged = merge_patch({"value": first}, {"value": second})
+    merged = json_merge_patch({"value": first}, {"value": second})
     # The winner is one locator, entire -- never a blend of the two.
     assert merged["value"] == second
     assert merged["value"] in (first, second)
+
+    # And the defect was REAL, shown with the same function. Two DIFFERENT
+    # settings, so the locators differ in more than one field; had they stayed
+    # objects, a partial override merges per field and yields one carrying the
+    # object id of one and the revision id of the other -- addressing an object
+    # that was never written.
+    a = parse_locator(seal(world, store, setting_id="row-a"))
+    b = parse_locator(
+        seal_other_setting(world, store, setting_id="row-b")
+    )
+    assert a["object_id"] != b["object_id"], "two settings, two objects"
+
+    spliced = json_merge_patch(
+        {"value": dict(a)}, {"value": {"revision_id": b["revision_id"]}}
+    )["value"]
+    assert spliced["object_id"] == a["object_id"]
+    assert spliced["revision_id"] == b["revision_id"]
+    assert spliced != a and spliced != b, (
+        "the object form yields a locator belonging to NEITHER write -- which "
+        "is precisely the failure the scalar form prevents"
+    )
 
 
 def test_the_secret_is_recoverable_through_the_reference(world, store):
