@@ -25,8 +25,9 @@ ssh "$TARGET" 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get inst
 ssh "$TARGET" 'getent group autonomy-coturn >/dev/null || groupadd --system autonomy-coturn; install -d -m 0755 /opt/autonomy-coturn; install -d -m 0700 /etc/autonomy-coturn'
 rsync -az --delete --exclude runtime.env.example "$HERE/" "$TARGET:/opt/autonomy-coturn/"
 scp -q "$HERE/runtime.env.example" "$TARGET:/etc/autonomy-coturn/runtime.env.example"
-scp -q "$HERE/autonomy-coturn.service" "$TARGET:/etc/systemd/system/autonomy-coturn.service"
-ssh "$TARGET" "gid=\$(getent group autonomy-coturn | cut -d: -f3); sed -i \"s/^TURN_RUNTIME_GID=.*/TURN_RUNTIME_GID=\$gid/\" /etc/autonomy-coturn/runtime.env.example; chmod 0755 /opt/autonomy-coturn/*.sh /opt/autonomy-coturn/*.py; chmod 0644 /etc/systemd/system/autonomy-coturn.service /etc/autonomy-coturn/runtime.env.example; docker pull '$IMAGE'; systemd-analyze verify /etc/systemd/system/autonomy-coturn.service; systemctl daemon-reload"
+scp -q "$HERE/autonomy-coturn.service" "$HERE/autonomy-turn-ip.service" "$TARGET:/etc/systemd/system/"
+scp -q "$HERE/bind-floating-ip.sh" "$TARGET:/opt/autonomy-coturn/bind-floating-ip.sh"
+ssh "$TARGET" "gid=\$(getent group autonomy-coturn | cut -d: -f3); sed -i \"s/^TURN_RUNTIME_GID=.*/TURN_RUNTIME_GID=\$gid/\" /etc/autonomy-coturn/runtime.env.example; chmod 0755 /opt/autonomy-coturn/*.sh /opt/autonomy-coturn/*.py /opt/autonomy-coturn/bind-floating-ip.sh; chmod 0644 /etc/systemd/system/autonomy-coturn.service /etc/systemd/system/autonomy-turn-ip.service /etc/autonomy-coturn/runtime.env.example; docker pull '$IMAGE'; systemd-analyze verify /etc/systemd/system/autonomy-coturn.service /etc/systemd/system/autonomy-turn-ip.service; systemctl daemon-reload"
 
 if [ "$ACTIVATE" != --activate ]; then
     echo "==> staged only; service remains disabled and stopped"
@@ -46,6 +47,7 @@ done
 . /etc/autonomy-coturn/runtime.env
 test "$TURN_RUNTIME_GID" = "$(getent group autonomy-coturn | cut -d: -f3)"
 test "$(getent ahostsv4 turn.auto.network | awk 'NR == 1 {print $1}')" = "$TURN_PUBLIC_IP"
+systemctl enable --now autonomy-turn-ip.service
 systemctl enable --now autonomy-coturn.service
 sleep 2
 curl -fsS http://127.0.0.1:9641/metrics >/dev/null
