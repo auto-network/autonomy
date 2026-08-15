@@ -142,8 +142,8 @@ def test_two_orgs_get_two_rows_with_different_personas(orgs_env):
     by_key = {m.key: m.payload for m in rows}
     assert set(by_key) == {a.genesis_id, b.genesis_id}
     assert by_key[a.genesis_id]["persona_pub"] != by_key[b.genesis_id]["persona_pub"]
-    assert by_key[a.genesis_id]["org_slug"] == "acme"
-    assert by_key[b.genesis_id]["org_slug"] == "brawn"
+    # Which org each row belongs to is carried by the key, which the assertion
+    # above already checks; the payload does not repeat it.
 
 
 # ── the join path (auto-6n3we) ───────────────────────────────

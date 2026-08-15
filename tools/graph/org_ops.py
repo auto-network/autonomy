@@ -662,8 +662,6 @@ def _record_persona_setting(
 
     payload = {
         "persona_pub": persona_pub,
-        "genesis_id": genesis_id,
-        "org_slug": slug,
         "derived_at": _now_iso(),
         "source": source,
     }
