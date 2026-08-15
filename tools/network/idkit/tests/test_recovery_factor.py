@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from tools.network.idkit import KeyPair, recovery
+from tools.network.idkit.errors import IdkitError, MalformedError
 from tools.network.idkit.armor import (
     RECOVERY_ARMOR_PURPOSE,
     ArmorError,
@@ -160,3 +161,113 @@ def test_a_wrong_code_cannot_reset_the_password():
             armor, recovery.generate_recovery_code(), "attacker-password",
             iterations=ITERS,
         )
+
+
+# ── The factor set cannot be edited behind your back (F5) ─────────────────
+
+
+def _edit_body(armor, mutate):
+    import base64 as b64
+    import json as js
+
+    lines = [ln for ln in armor.split("\n") if ln]
+    body = js.loads(b64.b64decode("".join(lines[1:-1])))
+    mutate(body)
+    blob = b64.b64encode(js.dumps(body).encode()).decode()
+    return "\n".join([lines[0], *[blob[i:i + 64] for i in range(0, len(blob), 64)], lines[-1]])
+
+
+def test_stripping_the_recovery_factor_is_detected():
+    """The attack this closes: a silent downgrade of your last resort.
+
+    Anyone who can write the file -- a backup, a sync folder, a shared disk --
+    could delete the recovery factor. The armor still parsed and still opened
+    with the password, so nothing looked wrong; the owner would discover it on
+    the day they reached for the code, having already lost everything else.
+    """
+    _key, armor, _code = enrolled()
+    stripped = _edit_body(
+        armor, lambda b: b.update(factors=[f for f in b["factors"] if f["type"] != "recovery"])
+    )
+    # It still parses -- the shape is legal. It must not OPEN.
+    assert [f["type"] for f in parse_armor_v2(stripped)["factors"]] == ["password"]
+    with pytest.raises(MalformedError, match="factor list"):
+        decrypt_root_key_v2(stripped, PASSWORD)
+
+
+def test_stripping_the_password_factor_is_detected():
+    _key, armor, code = enrolled()
+    stripped = _edit_body(
+        armor, lambda b: b.update(factors=[f for f in b["factors"] if f["type"] != "password"])
+    )
+    with pytest.raises(MalformedError, match="factor list"):
+        decrypt_root_key_with_recovery(stripped, code)
+
+
+def test_swapping_in_another_recovery_key_is_detected():
+    """Substituting an attacker's recovery key, not just removing yours."""
+    _key, armor, _code = enrolled()
+    theirs = recovery.generate_recovery_code()
+    seed = recovery.derive_recovery_factors(theirs)["kek_recovery_seed"]
+    _, their_kem = derive_encapsulation_keypair(seed, RECOVERY_ARMOR_PURPOSE)
+
+    def swap(b):
+        for f in b["factors"]:
+            if f["type"] == "recovery":
+                f["kem_pub"] = their_kem
+
+    with pytest.raises(MalformedError, match="factor list"):
+        decrypt_root_key_v2(_edit_body(armor, swap), PASSWORD)
+
+
+def test_weakening_the_password_work_factor_is_refused():
+    """The work factor is committed, so it cannot be quietly lowered.
+
+    Two guards catch this and either is sufficient: the count feeds the key
+    derivation, so changing it derives a different key; and it is part of the
+    set commitment. Asserted on the common base so the test does not pin
+    WHICH guard fires first, only that the tampering never succeeds.
+    """
+    key, armor, _code = enrolled()
+    assert ITERS != 50_000, "the tampered value must differ from the real one"
+
+    def weaken(b):
+        for f in b["factors"]:
+            if f["type"] == "password":
+                f["kdf"]["iterations"] = 50_000
+
+    tampered = _edit_body(armor, weaken)
+    assert parse_armor_v2(tampered)["factors"][0]["kdf"]["iterations"] == 50_000
+    with pytest.raises(IdkitError):
+        decrypt_root_key_v2(tampered, PASSWORD)
+    # And the untampered armor still opens, so the test is not vacuous.
+    assert decrypt_root_key_v2(armor, PASSWORD).public_hex == key.public_hex
+
+
+def test_reordering_the_factors_is_harmless():
+    """The commitment is over a SET, so order is not load-bearing."""
+    key, armor, code = enrolled()
+    reordered = _edit_body(armor, lambda b: b.update(factors=list(reversed(b["factors"]))))
+    assert decrypt_root_key_v2(reordered, PASSWORD).public_hex == key.public_hex
+    assert decrypt_root_key_with_recovery(reordered, code).public_hex == key.public_hex
+
+
+def test_the_owner_can_still_change_their_own_locks():
+    """Tamper-evidence must not make legitimate change impossible."""
+    key = KeyPair.generate()
+    armor = encrypt_root_key_v2(key, PASSWORD, iterations=ITERS)
+    code = recovery.generate_recovery_code()
+    seed = recovery.derive_recovery_factors(code)["kek_recovery_seed"]
+    _, kem_pub = derive_encapsulation_keypair(seed, RECOVERY_ARMOR_PURPOSE)
+    # Adding a factor requires the passphrase -- i.e. the authority to open it.
+    added = add_recovery_factor(armor, PASSWORD, kem_pub)
+    assert decrypt_root_key_v2(added, PASSWORD).public_hex == key.public_hex
+    assert decrypt_root_key_with_recovery(added, code).public_hex == key.public_hex
+
+
+def test_a_factor_type_with_no_commitment_is_refused():
+    """Total dispatch again: a type that pins nothing could be stripped."""
+    from tools.network.idkit.armor import _factor_commitment
+
+    with pytest.raises(ArmorError, match="no set commitment"):
+        _factor_commitment([{"type": "future-thing"}])

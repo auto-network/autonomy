@@ -366,8 +366,16 @@ def test_v2_aad_prefixes_are_distinct_across_slot_and_version():
     from tools.network.idkit.armor import _aad, _v2_factor_aad, _v2_seal_aad
 
     rp = "ab" * 32
-    assert _v2_seal_aad(rp) != _v2_factor_aad(rp, "password")
-    assert _v2_seal_aad(rp) != _aad(rp)
+    factors = [{
+        "type": "password",
+        "kdf": {"name": "PBKDF2", "hash": "SHA-256", "iterations": 10_000,
+                "salt": base64.b64encode(b"s" * 16).decode()},
+        "cipher": "AES-256-GCM",
+        "iv": base64.b64encode(b"i" * 12).decode(),
+        "wrap": base64.b64encode(b"w" * 48).decode(),
+    }]
+    assert _v2_seal_aad(rp, factors) != _v2_factor_aad(rp, "password")
+    assert _v2_seal_aad(rp, factors) != _aad(rp)
     assert _v2_factor_aad(rp, "password") != _aad(rp)
 
 

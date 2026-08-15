@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
 import os
 import re
@@ -315,8 +316,59 @@ _V2_SEAL_AAD = b"autonomy.idkit.armor.v2.kek-seal\n"
 _V2_FACTOR_AAD = b"autonomy.idkit.armor.v2.factor\n"
 
 
-def _v2_seal_aad(root_pub: str) -> bytes:
-    return _V2_SEAL_AAD + root_pub.encode("ascii")
+#: What each factor type contributes to the set commitment: its type plus the
+#: PUBLIC material that identifies it. A registry, like the parser table, so a
+#: new factor type cannot be added without deciding what pins it -- a type that
+#: contributed nothing would be one an attacker could add or strip unnoticed,
+#: which is the whole hole this closes.
+_FACTOR_COMMITMENTS = {
+    "password": lambda f: {
+        "type": "password",
+        "salt": f["kdf"]["salt"],
+        "iterations": f["kdf"]["iterations"],
+    },
+    "recovery": lambda f: {"type": "recovery", "kem_pub": f["kem_pub"]},
+}
+
+
+def _factor_commitment(factors: list) -> str:
+    """A digest over the factor SET, bound into the seal.
+
+    Every factor's wrap is already bound to its own slot, so nobody can move
+    material between slots. Nothing bound the LIST, though -- so anyone who
+    could write the file could delete a factor, and the armor would still
+    parse and still open with whatever remained. Stripping a recovery factor
+    that way is silent: the owner finds out when they reach for the code, on
+    the day they have already lost everything else.
+
+    Sorted by type, so the commitment is over a SET rather than an ordering.
+    """
+    items = []
+    for f in factors:
+        contribute = _FACTOR_COMMITMENTS.get(f["type"])
+        if contribute is None:
+            raise ArmorError(
+                f"v2 factor type {f['type']!r} has no set commitment; a factor "
+                "that pins nothing could be added or stripped unnoticed"
+            )
+        items.append(contribute(f))
+    items.sort(key=lambda d: d["type"])
+    return hashlib.sha256(canonical_json(items)).hexdigest()
+
+
+def _v2_seal_aad(root_pub: str, factors: list) -> bytes:
+    """Bind the identity AND the exact set of factors into the seed's seal.
+
+    Editing the factor list therefore invalidates the seal, so the armor fails
+    to open rather than opening with a lock quietly missing. Fail-closed is
+    the point: an altered file is detected, not silently honoured.
+    """
+    return (
+        _V2_SEAL_AAD
+        + root_pub.encode("ascii")
+        + b"\n"
+        + _factor_commitment(factors).encode("ascii")
+    )
 
 
 def _v2_factor_aad(root_pub: str, factor_type: str) -> bytes:
@@ -347,13 +399,30 @@ def encrypt_root_key_v2(
     # tests, fixtures, and the one-shot migration.
     seed = bytes.fromhex(key.private_hex)
     master_kek = os.urandom(_MASTER_KEK_LEN)
-    seal_iv = os.urandom(_IV_LEN)
-    seal_ct = AESGCM(master_kek).encrypt(seal_iv, seed, _v2_seal_aad(root_pub))
     salt = os.urandom(_SALT_LEN)
     pw_key = _derive_key(passphrase, salt, iterations)
     wrap_iv = os.urandom(_IV_LEN)
     wrap = AESGCM(pw_key).encrypt(
         wrap_iv, master_kek, _v2_factor_aad(root_pub, "password")
+    )
+    factors = [
+        {
+            "type": "password",
+            "kdf": {
+                "name": "PBKDF2",
+                "hash": "SHA-256",
+                "iterations": iterations,
+                "salt": base64.b64encode(salt).decode("ascii"),
+            },
+            "cipher": "AES-256-GCM",
+            "iv": base64.b64encode(wrap_iv).decode("ascii"),
+            "wrap": base64.b64encode(wrap).decode("ascii"),
+        }
+    ]
+    # Sealed LAST: the seal commits to the factor set, so the set must exist.
+    seal_iv = os.urandom(_IV_LEN)
+    seal_ct = AESGCM(master_kek).encrypt(
+        seal_iv, seed, _v2_seal_aad(root_pub, factors)
     )
     body = canonical_json(
         {
@@ -364,20 +433,7 @@ def encrypt_root_key_v2(
                 "iv": base64.b64encode(seal_iv).decode("ascii"),
                 "ct": base64.b64encode(seal_ct).decode("ascii"),
             },
-            "factors": [
-                {
-                    "type": "password",
-                    "kdf": {
-                        "name": "PBKDF2",
-                        "hash": "SHA-256",
-                        "iterations": iterations,
-                        "salt": base64.b64encode(salt).decode("ascii"),
-                    },
-                    "cipher": "AES-256-GCM",
-                    "iv": base64.b64encode(wrap_iv).decode("ascii"),
-                    "wrap": base64.b64encode(wrap).decode("ascii"),
-                }
-            ],
+            "factors": factors,
         }
     )
     b64 = base64.b64encode(body).decode("ascii")
@@ -501,7 +557,41 @@ def decrypt_root_key_v2(armor: str, passphrase: str) -> KeyPair:
         seal_ct = base64.b64decode(data["kek_seal"]["ct"], validate=True)
     except (binascii.Error, ValueError) as exc:
         raise ArmorError(f"v2 armor fields do not base64-decode: {exc}") from exc
-    return _open_seed_under_master_kek(master_kek, seal_iv, seal_ct, root_pub)
+    return _open_seed_under_master_kek(
+        master_kek, seal_iv, seal_ct, root_pub, data["factors"]
+    )
+
+
+def _reseal_to_factor_set(
+    data: dict, master_kek: bytes, previous_factors: list
+) -> None:
+    """Re-seal the seed so it commits to ``data['factors']`` as it now stands.
+
+    Called by every operation that legitimately changes the set. It needs the
+    master KEK, which is exactly the authorisation that separates an owner
+    editing their own locks from someone editing the file behind their back.
+    """
+    root_pub = data["root_pub"]
+    try:
+        old_iv = base64.b64decode(data["kek_seal"]["iv"], validate=True)
+        old_ct = base64.b64decode(data["kek_seal"]["ct"], validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ArmorError(f"v2 armor fields do not base64-decode: {exc}") from exc
+    # Recover the seed under the CURRENT commitment, then commit to the new one.
+    seed = _open_seed_under_master_kek(
+        master_kek, old_iv, old_ct, root_pub, previous_factors
+    )
+    seal_iv = os.urandom(_IV_LEN)
+    seal_ct = AESGCM(master_kek).encrypt(
+        seal_iv,
+        bytes.fromhex(seed.private_hex),
+        _v2_seal_aad(root_pub, data["factors"]),
+    )
+    data["kek_seal"] = {
+        "cipher": "AES-256-GCM",
+        "iv": base64.b64encode(seal_iv).decode("ascii"),
+        "ct": base64.b64encode(seal_ct).decode("ascii"),
+    }
 
 
 def _emit_v2(data: dict) -> str:
@@ -519,8 +609,11 @@ def add_recovery_factor(armor: str, passphrase: str, recovery_kem_pub: str) -> s
     bearer principle. A recovery code that needed a surviving factor to work
     would not be a recovery code.
 
-    *passphrase* is needed only to reach the master KEK being re-wrapped; the
-    seed is never re-sealed, so every existing factor keeps working unchanged.
+    *passphrase* is needed to reach the master KEK, and to re-seal the seed:
+    the seal commits to the factor SET, so changing the set means re-sealing
+    it. That is what makes the set tamper-evident -- only somebody who can
+    already open this armor can change which locks it has. Every existing
+    factor keeps working, and the identity inside is untouched.
     """
     if not isinstance(recovery_kem_pub, str) or not _ROOT_PUB_RE.match(recovery_kem_pub):
         raise ArmorError("recovery_kem_pub must be 64 lowercase hex chars")
@@ -533,6 +626,7 @@ def add_recovery_factor(armor: str, passphrase: str, recovery_kem_pub: str) -> s
             "rotation, not an addition"
         )
     master_kek = _v2_master_kek(data, passphrase)
+    previous_factors = list(data["factors"])
     sealed = seal(master_kek, recovery_kem_pub, RECOVERY_ARMOR_PURPOSE)
     if len(sealed) != _RECOVERY_SEAL_LEN:
         raise ArmorError("sealed recovery wrap is not the expected length")
@@ -544,6 +638,7 @@ def add_recovery_factor(armor: str, passphrase: str, recovery_kem_pub: str) -> s
             "sealed": base64.b64encode(sealed).decode("ascii"),
         },
     ]
+    _reseal_to_factor_set(data, master_kek, previous_factors)
     return _emit_v2(parse_armor_v2(_emit_v2(data)))
 
 
@@ -586,7 +681,9 @@ def decrypt_root_key_with_recovery(armor: str, recovery_code: bytes) -> KeyPair:
         raise ArmorPassphraseError(
             "the recovery factor does not open with that code"
         ) from exc
-    return _open_seed_under_master_kek(master_kek, seal_iv, seal_ct, root_pub)
+    return _open_seed_under_master_kek(
+        master_kek, seal_iv, seal_ct, root_pub, data["factors"]
+    )
 
 
 def recover_and_reset_password(
@@ -663,22 +760,35 @@ def recover_and_reset_password(
         "iv": base64.b64encode(wrap_iv).decode("ascii"),
         "wrap": base64.b64encode(wrap).decode("ascii"),
     }
+    previous_factors = list(data["factors"])
     data["factors"] = [
         password_factor if f["type"] == "password" else f for f in data["factors"]
     ]
     if not any(f["type"] == "password" for f in data["factors"]):
         data["factors"] = [password_factor, *data["factors"]]
+    # The password factor's salt is part of the set commitment, so replacing
+    # it changes the set and the seed must be re-sealed to the new one.
+    _reseal_to_factor_set(data, master_kek, previous_factors)
     return _emit_v2(parse_armor_v2(_emit_v2(data)))
 
 
 def _open_seed_under_master_kek(
-    master_kek: bytes, seal_iv: bytes, seal_ct: bytes, root_pub: str
+    master_kek: bytes, seal_iv: bytes, seal_ct: bytes, root_pub: str, factors: list
 ) -> KeyPair:
-    """The last step every factor shares: master KEK -> seed -> identity."""
+    """The last step every factor shares: master KEK -> seed -> identity.
+
+    The seal commits to the factor set, so an armor whose list has been edited
+    fails HERE -- loudly -- rather than opening with a lock quietly removed.
+    """
     try:
-        seed = AESGCM(master_kek).decrypt(seal_iv, seal_ct, _v2_seal_aad(root_pub))
+        seed = AESGCM(master_kek).decrypt(
+            seal_iv, seal_ct, _v2_seal_aad(root_pub, factors)
+        )
     except InvalidTag as exc:
-        raise MalformedError("v2 master KEK does not open the seed seal") from exc
+        raise MalformedError(
+            "v2 master KEK does not open the seed seal -- the factor list "
+            "may have been altered"
+        ) from exc
     if len(seed) != _SEED_LEN:
         raise MalformedError("v2 armor plaintext is not a 32-byte Ed25519 seed")
     key = KeyPair.from_private_hex(seed.hex())
