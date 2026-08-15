@@ -64,6 +64,20 @@ _RW_OPEN_BACKOFF_S = (0.05, 0.1, 0.2)
 VALID_ORG_TYPES = ("shared", "personal")
 
 
+class GraphDBMissing(RuntimeError):
+    """A database was opened with ``create=False`` and is not there.
+
+    Opening read-write creates the file, which is silent and wrong outside
+    provisioning: a path that is not mounted where the caller believes it
+    is yields a fresh empty database, the write reports success, and
+    nothing ever reads it. Creation is a deliberate act -- ``create=True``,
+    or :meth:`GraphDB.create_org_db`.
+
+    The message carries the path, because which file was looked for is the
+    whole diagnosis when a mount is missing.
+    """
+
+
 class GraphDBNotReady(RuntimeError):
     """The database exists but cannot serve schema-backed reads yet."""
 
@@ -290,10 +304,12 @@ class GraphDB:
         *,
         mode: Literal["rw", "ro"] = "rw",
         org: str | None = None,
+        create: bool = True,
     ):
         if db_path is None:
             db_path = resolve_caller_db_path(org)
         self.db_path = Path(db_path)
+        self._may_create = bool(create)
         self.read_only = False
         self._immutable = False
         self._pooled = False  # set to True by for_org when cached
@@ -319,6 +335,10 @@ class GraphDB:
         raise last_error
 
     def _open_rw_once(self) -> None:
+        if not self._may_create and not self.db_path.exists():
+            raise GraphDBMissing(
+                f"database does not exist: {self.db_path}"
+            )
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(
             str(self.db_path),

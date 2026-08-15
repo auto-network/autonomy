@@ -318,6 +318,13 @@ def test_read_set_with_org_returns_workspace_artifacts(
     # The autonomy org DB has no artifact Settings of its own. ``peers=[]``
     # pins the read to autonomy only — cross-org reads (default) would
     # pull the canonical anchore rows through, per auto-txg5.4.
+    #
+    # Provisioned deliberately, and left empty: an org that HAS a database
+    # with no rows in it is what "no settings of its own" means. An org with
+    # no database at all is a different thing and reads as an error, so
+    # letting one stand in for the other here would assert nothing.
+    GraphDB.create_org_db("autonomy", path=orgs_dir / "autonomy.db").close()
+
     autonomy_got = ops.read_set(SET_ID, org="autonomy", peers=[])
     assert autonomy_got.members == []
 
