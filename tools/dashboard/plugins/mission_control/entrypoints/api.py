@@ -109,6 +109,10 @@ def _mission_payload(mission: dict) -> dict:
         "created_at": mission["created_at"],
         "current_revision_id": mission["current_revision_id"],
         "status": mission["status"],
+        # The organization the mission belongs to. A reader that cannot see
+        # which organization a mission is in cannot tell a mission it is
+        # bounded by from one it merely happens to be looking at.
+        "org": mission["org"] if "org" in mission.keys() else "",
     }
 
 
@@ -459,6 +463,46 @@ async def set_pillar_status(request: Request) -> JSONResponse:
     if not ok:
         return JSONResponse({"error": "pillar not found"}, status_code=404)
     return JSONResponse({"pillar": _pillar_payload(db.get_pillar(pillar_id))})
+
+
+def _coordinator_from(body: dict) -> tuple[str, JSONResponse | None]:
+    session = (body.get("coordinator_session") or "").strip()
+    if not session:
+        return "", JSONResponse(
+            {"error": "coordinator_session is required"}, status_code=400)
+    return session, None
+
+
+async def set_pillar_coordinator(request: Request) -> JSONResponse:
+    """Point a pillar at the session coordinating it now.
+
+    A pillar outlives the session running it. When one is retired and another
+    takes the seat, nothing moved this field, so questions asked on the screen
+    were relayed to the session that had gone and presence named it as
+    present. Recreating the pillar was the only way to correct it, and that
+    discards its screen history and every question -- the record the mission
+    exists to keep.
+    """
+    pillar_id = request.path_params["pillar_id"]
+    session, err = _coordinator_from(await request.json())
+    if err is not None:
+        return err
+    if not db.set_pillar_coordinator(pillar_id, session):
+        return JSONResponse({"error": "pillar not found"}, status_code=404)
+    return JSONResponse({"pillar": _pillar_payload(db.get_pillar(pillar_id))})
+
+
+async def set_mission_coordinator(request: Request) -> JSONResponse:
+    """Point a mission at the session coordinating it now. Same reason as the
+    pillar-level route above: the seat changes hands and the record should
+    not have to be rebuilt for it."""
+    mission_id = request.path_params["mission_id"]
+    session, err = _coordinator_from(await request.json())
+    if err is not None:
+        return err
+    if not db.set_mission_coordinator(mission_id, session):
+        return JSONResponse({"error": "mission not found"}, status_code=404)
+    return JSONResponse({"mission": _mission_payload(db.get_mission(mission_id))})
 
 
 async def move_question(request: Request) -> JSONResponse:
@@ -2090,6 +2134,8 @@ routes: list[Route] = [
     Route("/api/pillars/{pillar_id}", delete_pillar, methods=["DELETE"]),
     Route("/api/pillars/{pillar_id}/seen", mark_pillar_seen, methods=["POST"]),
     Route("/api/pillars/{pillar_id}/status", set_pillar_status, methods=["POST"]),
+    Route("/api/missions/{mission_id}/coordinator", set_mission_coordinator, methods=["POST"]),
+    Route("/api/pillars/{pillar_id}/coordinator", set_pillar_coordinator, methods=["POST"]),
     Route("/api/pillars/{pillar_id}/last-done", set_pillar_last_done, methods=["POST"]),
     Route("/api/questions/{entry_id}/anchor", move_question, methods=["POST"]),
     Route("/api/questions/{entry_id}/retire", retire_question, methods=["POST"]),

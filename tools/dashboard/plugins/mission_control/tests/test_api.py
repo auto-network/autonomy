@@ -2883,3 +2883,115 @@ def test_a_question_carries_the_text_it_replies_to():
     envelope = sent["auto-crypto"]
     assert "In reply to:" in envelope, "the coordinator cannot tell what is being answered"
     assert said in envelope
+
+
+# ── Pointing a pillar at the session that runs it now ──────────────
+
+
+def test_a_pillar_can_be_pointed_at_the_session_running_it_now(tmp_path):
+    """A pillar outlives the session running it. Until this route existed the
+    only way to correct the name was to delete the pillar and make a new one,
+    which discards its screen history and every question asked on it."""
+    db_path = tmp_path / "mc.db"
+    mission = db.create_mission("Multi-User", "auto-controller", db_path=db_path)
+    pillar = db.create_pillar(
+        mission["mission_id"], "Platform", "auto-retired", "#fff", db_path=db_path)
+
+    assert db.set_pillar_coordinator(
+        pillar["pillar_id"], "auto-incoming", db_path=db_path) is True
+    assert db.get_pillar(
+        pillar["pillar_id"], db_path=db_path)["coordinator_session"] == "auto-incoming"
+
+
+def test_the_pillar_keeps_its_screens_and_questions_when_it_changes_hands(tmp_path):
+    """The reason the route exists rather than delete-and-recreate."""
+    db_path = tmp_path / "mc.db"
+    mission = db.create_mission("Multi-User", "auto-controller", db_path=db_path)
+    pillar = db.create_pillar(
+        mission["mission_id"], "Platform", "auto-retired", "#fff", db_path=db_path)
+    db.push_pillar_site_revision(
+        pillar["pillar_id"], "<p>the screen</p>", "rev1", db_path=db_path)
+    entry = db.ask_question(
+        mission["mission_id"], "why three paths?", "guest:jeremy", "Jeremy",
+        pillar_id=pillar["pillar_id"], db_path=db_path)
+
+    db.set_pillar_coordinator(pillar["pillar_id"], "auto-incoming", db_path=db_path)
+
+    site = db.get_current_pillar_site(pillar["pillar_id"], db_path=db_path)
+    assert site["html"] == "<p>the screen</p>"
+    kept = db.list_pillar_conversation(pillar["pillar_id"], db_path=db_path)
+    assert [q["entry_id"] for q in kept] == [entry["entry_id"]]
+
+
+def test_a_mission_can_be_pointed_at_the_session_running_it_now(tmp_path):
+    db_path = tmp_path / "mc.db"
+    mission = db.create_mission("Multi-User", "auto-retired", db_path=db_path)
+
+    assert db.set_mission_coordinator(
+        mission["mission_id"], "auto-incoming", db_path=db_path) is True
+    assert db.get_mission(
+        mission["mission_id"], db_path=db_path)["coordinator_session"] == "auto-incoming"
+
+
+def test_pointing_a_pillar_that_does_not_exist_reports_that(tmp_path):
+    db_path = tmp_path / "mc.db"
+    assert db.set_pillar_coordinator("no-such-pillar", "auto-x", db_path=db_path) is False
+    assert db.set_mission_coordinator("no-such-mission", "auto-x", db_path=db_path) is False
+
+
+# ── The organization a mission belongs to ──────────────────────────
+
+
+def test_a_mission_records_the_organization_it_belongs_to(tmp_path):
+    """A mission's organization is the only boundary it has. Sessions in it
+    reach the mission; sessions in another organization do not. There is
+    nothing finer -- a mission has no members and no per-session rights."""
+    db_path = tmp_path / "mc.db"
+    mission = db.create_mission(
+        "Multi-User", "auto-controller", org="autonomy", db_path=db_path)
+
+    assert mission["org"] == "autonomy"
+    assert db.get_mission(mission["mission_id"], db_path=db_path)["org"] == "autonomy"
+
+
+def test_a_mission_is_never_stored_without_an_organization(tmp_path):
+    """An empty organization would read as a mission nothing is bounded by,
+    which is the one value that must never reach a row. A caller that does
+    not say gets its own."""
+    db_path = tmp_path / "mc.db"
+    for supplied in (None, "", "   "):
+        mission = db.create_mission(
+            "M", "auto-x", org=supplied, db_path=db_path)
+        assert mission["org"]
+        assert db.get_mission(mission["mission_id"], db_path=db_path)["org"]
+
+
+def test_missions_created_before_the_column_existed_are_given_one(tmp_path):
+    """The live database predates this column. Its missions were all made by
+    the one organization running the dashboard, so the migration names it
+    rather than leaving rows unbounded."""
+    import sqlite3
+
+    db_path = tmp_path / "old.db"
+    db.init_db(db_path)
+    raw = sqlite3.connect(str(db_path))
+    raw.execute("ALTER TABLE missions DROP COLUMN org")
+    raw.execute(
+        "INSERT INTO missions (mission_id, name, coordinator_session,"
+        " created_at, current_revision_id, status)"
+        " VALUES ('m-old', 'OSS Insights', 'auto-0709', 1.0, NULL, 'active')")
+    raw.commit()
+    raw.close()
+
+    migrated = db.get_mission("m-old", db_path=db_path)
+    assert migrated["org"], "a pre-existing mission was left with no organization"
+    assert migrated["name"] == "OSS Insights"
+
+
+def test_the_api_reports_which_organization_a_mission_is_in(tmp_path):
+    """A reader that cannot see the organization cannot tell a mission it is
+    bounded by from one it is merely looking at."""
+    db_path = tmp_path / "mc.db"
+    mission = db.create_mission("M", "auto-x", org="autonomy", db_path=db_path)
+    assert mc_api._mission_payload(
+        db.get_mission(mission["mission_id"], db_path=db_path))["org"] == "autonomy"
