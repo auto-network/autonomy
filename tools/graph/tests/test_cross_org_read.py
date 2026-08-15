@@ -22,6 +22,7 @@ from tools.graph import cross_org, ops, settings_ops
 from tools.graph import db as graph_db_mod
 from tools.graph.db import GraphDB
 from tools.graph.models import Source, Thought
+from tools.graph.schemas.registry import SCHEMAS, UPCONVERTERS
 
 
 @pytest.fixture
@@ -43,6 +44,24 @@ def _evict_pool():
         yield
     finally:
         GraphDB.close_all_pooled()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_registry():
+    # Several tests here register stub schemas at ``autonomy.test.*`` keys.
+    # Without restoring the registry those leak permanently and, on a serial
+    # run, later surface in ``test_synopses_appear_for_every_autonomy_schema``
+    # as autonomy schemas with no synopsis. Parallel runs hide it (each file
+    # gets its own worker). Snapshot/restore per test.
+    schemas_snap = dict(SCHEMAS)
+    upcon_snap = dict(UPCONVERTERS)
+    try:
+        yield
+    finally:
+        SCHEMAS.clear()
+        SCHEMAS.update(schemas_snap)
+        UPCONVERTERS.clear()
+        UPCONVERTERS.update(upcon_snap)
 
 
 def _seed_org(slug: str) -> GraphDB:
