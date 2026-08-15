@@ -310,8 +310,49 @@ function bytesToB64(bytes) {
   return btoa(binary);
 }
 
-function v2SealAad(rootPub) {
-  return textEncoder.encode(V2_SEAL_AAD + rootPub);
+// What each factor type contributes to the set commitment: its type plus the
+// PUBLIC material identifying it. A registry, like the parser table, so a new
+// type cannot be added without deciding what pins it — a type contributing
+// nothing would be one an attacker could add or strip unnoticed.
+const V2_FACTOR_COMMITMENTS = {
+  password: (f) => ({
+    type: 'password',
+    salt: f.kdf.salt,
+    iterations: f.kdf.iterations,
+  }),
+  recovery: (f) => ({ type: 'recovery', kem_pub: f.kem_pub }),
+};
+
+// A digest over the factor SET. Each factor's wrap is already bound to its own
+// slot, but nothing bound the LIST — so anyone able to write the file could
+// delete a factor and it would still open with whatever remained. Stripping a
+// recovery factor that way is silent: the owner finds out when they reach for
+// the code, on the day they have already lost everything else.
+async function v2FactorCommitment(factors) {
+  const items = factors.map((f) => {
+    const contribute = V2_FACTOR_COMMITMENTS[f.type];
+    if (!contribute) {
+      throw new Error(
+        `v2 factor type ${f.type} has no set commitment; a factor that pins `
+        + 'nothing could be added or stripped unnoticed',
+      );
+    }
+    return contribute(f);
+  });
+  items.sort((a, b) => (a.type < b.type ? -1 : a.type > b.type ? 1 : 0));
+  const digest = new Uint8Array(await webCrypto.subtle.digest(
+    'SHA-256', textEncoder.encode(canonicalJson(items)),
+  ));
+  return bytesToHex(digest);
+}
+
+// Binds the identity AND the exact set of factors, so editing the list
+// invalidates the seal: an altered armor fails to open rather than opening
+// with a lock quietly missing.
+async function v2SealAad(rootPub, factors) {
+  return textEncoder.encode(
+    `${V2_SEAL_AAD}${rootPub}\n${await v2FactorCommitment(factors)}`,
+  );
 }
 
 function v2FactorAad(rootPub, factorType) {
@@ -423,13 +464,16 @@ async function decryptArmorV2(armorText, passphrase) {
     seed = new Uint8Array(await webCrypto.subtle.decrypt(
       {
         name: 'AES-GCM', iv: b64ToBytes(data.kek_seal.iv),
-        additionalData: v2SealAad(data.root_pub),
+        additionalData: await v2SealAad(data.root_pub, data.factors),
       },
       kekKey, b64ToBytes(data.kek_seal.ct),
     ));
   } catch {
     masterKek.fill(0);
-    throw new Error('v2 master key does not open the seed seal');
+    throw new Error(
+      'v2 master key does not open the seed seal — the factor list may '
+      + 'have been altered',
+    );
   }
   masterKek.fill(0);
   if (seed.length !== 32) {
@@ -456,11 +500,6 @@ async function encryptArmorV2(
     const kekKey = await webCrypto.subtle.importKey(
       'raw', masterKek, { name: 'AES-GCM', length: 256 }, false, ['encrypt'],
     );
-    const sealIv = webCrypto.getRandomValues(new Uint8Array(12));
-    const sealCt = new Uint8Array(await webCrypto.subtle.encrypt(
-      { name: 'AES-GCM', iv: sealIv, additionalData: v2SealAad(rootPub) },
-      kekKey, seed,
-    ));
     const material = await webCrypto.subtle.importKey(
       'raw', textEncoder.encode(passphrase), 'PBKDF2', false, ['deriveKey'],
     );
@@ -477,19 +516,26 @@ async function encryptArmorV2(
       },
       pwKey, masterKek,
     ));
+    const factors = [{
+      type: 'password',
+      kdf: {
+        name: 'PBKDF2', hash: 'SHA-256', iterations, salt: bytesToB64(salt),
+      },
+      cipher: 'AES-256-GCM', iv: bytesToB64(wrapIv), wrap: bytesToB64(wrap),
+    }];
+    // Sealed LAST: the seal commits to the factor set, so the set must exist.
+    const sealIv = webCrypto.getRandomValues(new Uint8Array(12));
+    const sealCt = new Uint8Array(await webCrypto.subtle.encrypt(
+      { name: 'AES-GCM', iv: sealIv, additionalData: await v2SealAad(rootPub, factors) },
+      kekKey, seed,
+    ));
     const body = canonicalJson({
       v: ARMOR_VERSION_2,
       root_pub: rootPub,
       kek_seal: {
         cipher: 'AES-256-GCM', iv: bytesToB64(sealIv), ct: bytesToB64(sealCt),
       },
-      factors: [{
-        type: 'password',
-        kdf: {
-          name: 'PBKDF2', hash: 'SHA-256', iterations, salt: bytesToB64(salt),
-        },
-        cipher: 'AES-256-GCM', iv: bytesToB64(wrapIv), wrap: bytesToB64(wrap),
-      }],
+      factors,
     });
     const b64 = bytesToB64(textEncoder.encode(body));
     return `${ARMOR_BEGIN}\n${b64.match(/.{1,64}/g).join('\n')}\n${ARMOR_END}`;
