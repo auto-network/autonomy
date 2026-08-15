@@ -5879,7 +5879,29 @@ def main():
     p_dstatus.add_argument("--json", action="store_true", help="Output as JSON")
     p_dstatus.set_defaults(func=cmd_dispatch_status)
 
-    p_approve = dispatch_sub.add_parser("approve", help="Approve bead(s) for dispatch")
+    p_approve = dispatch_sub.add_parser(
+        "approve",
+        help="Approve bead(s) for dispatch",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Set readiness=approved on one or more beads, releasing "
+                    "them for the dispatcher to pick up.",
+        epilog=(
+            "Harness and model are selected per bead via labels — no flag here:\n"
+            "\n"
+            "  Harness  A bead label matching a workspace's dispatch_labels\n"
+            "           routes the bead to that workspace; the workspace's\n"
+            "           harness (claude | codex) is used. Unmatched beads run\n"
+            "           the rig default (claude).\n"
+            "\n"
+            "  Model    Precedence is label > workspace > built-in default.\n"
+            "           Add a 'model:<name>' label (opus | sonnet | haiku) to\n"
+            "           override the model for one bead. With no such label the\n"
+            "           bead inherits its workspace's model, or the built-in\n"
+            "           default when the workspace declares none. An unknown\n"
+            "           model: value FAILS the dispatch (naming the label)\n"
+            "           rather than silently running the default.\n"
+        ),
+    )
     p_approve.add_argument("bead_ids", nargs="+", help="One or more bead IDs")
     p_approve.set_defaults(func=cmd_dispatch_approve)
 

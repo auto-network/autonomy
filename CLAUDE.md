@@ -173,6 +173,33 @@ graph note update <src_id> -c - < /tmp/notes/<src_id>.md   # push changes back
 
 Note: `graph note` and `graph note update` auto-save to `/tmp/graph-notes/{source_id}.md`.
 
+### Choosing a bead's harness and model at dispatch
+
+Two independent levers decide *how* a bead runs. Both are set via **bead
+labels** — there is no per-bead flag on `graph dispatch approve` (see
+`graph dispatch approve --help`).
+
+- **Harness** (`claude` vs `codex`) — selected indirectly. A bead label that
+  matches a workspace's `dispatch_labels` routes the bead to that workspace,
+  and the workspace's declared `harness` is used. A bead matching no workspace
+  runs the rig default (`claude`).
+
+- **Model** — selected with an optional `model:<name>` label so a simple bead
+  can run cheap and a complex one expensive. Precedence, highest first:
+  1. **bead label** — `model:opus`, `model:sonnet`, or `model:haiku` (a known
+     full model id is also accepted). Wins over everything.
+  2. **workspace model** — the model declared on the bead's workspace.
+  3. **built-in default** — `DEFAULT_OPUS_MODEL` for claude, resolved in
+     `agents/session_launcher.py`.
+
+  With no `model:` label a bead inherits its workspace's model, or the default
+  when the workspace declares none. An **unknown `model:` value fails the
+  dispatch** (naming the label) rather than silently running the expensive
+  default — add the alias to `MODEL_ALIASES` in `agents/dispatcher.py` if you
+  need a new one. The label is forwarded as `--model` through
+  `start_agent` → `launch.sh` → `launch_session_cli`; see the Dispatch
+  Lifecycle note `c706c9f3-5a8`.
+
 ### Key References
 
 Read these graph notes to orient — use `graph read <id>` to load any of them.

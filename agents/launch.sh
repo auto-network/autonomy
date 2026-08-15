@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Launch an agent container to work on a bead.
 #
-# Usage: ./agents/launch.sh <bead-id> [--dry-run] [--image=autonomy-agent:TAG] [--detach] [--harness=claude|codex] [--org=SLUG] [--workspace-id=ID]
+# Usage: ./agents/launch.sh <bead-id> [--dry-run] [--image=autonomy-agent:TAG] [--detach] [--harness=claude|codex] [--org=SLUG] [--workspace-id=ID] [--model=NAME]
 #
 # Lifecycle (foreground mode — default):
 # 1. Creates a git worktree on a bead-specific branch
@@ -31,6 +31,7 @@ ORG=""
 GRAPH_PROJECT=""
 GRAPH_TAGS=""
 WORKSPACE_ID=""
+MODEL=""
 for arg in "$@"; do
     case $arg in
         --dry-run) DRY_RUN=true ;;
@@ -41,6 +42,7 @@ for arg in "$@"; do
         --graph-project=*) GRAPH_PROJECT="${arg#*=}" ;;  # deprecated alias, use --org
         --graph-tags=*) GRAPH_TAGS="${arg#*=}" ;;
         --workspace-id=*) WORKSPACE_ID="${arg#*=}" ;;
+        --model=*) MODEL="${arg#*=}" ;;
     esac
 done
 
@@ -176,6 +178,13 @@ if [[ -n "$WORKSPACE_ID" ]]; then
     SCOPE_ARGS+=("--workspace-id" "$WORKSPACE_ID")
 fi
 
+# Forward the model override only when set. When empty, launch_session_cli's
+# own workspace-then-default chain resolves the model exactly as before.
+MODEL_ARGS=()
+if [[ -n "$MODEL" ]]; then
+    MODEL_ARGS+=("--model" "$MODEL")
+fi
+
 if $DETACH; then
     # ── Detached mode: delegate to Python launch_session_cli ──
     LAUNCH_OUTPUT=$("$REPO_ROOT/.venv/bin/python" -m agents.launch_session_cli \
@@ -189,6 +198,7 @@ if $DETACH; then
         --image "$IMAGE" \
         --harness "$HARNESS" \
         ${SCOPE_ARGS[@]+"${SCOPE_ARGS[@]}"} \
+        ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} \
         --detach)
 
     if [[ $? -ne 0 ]]; then
@@ -225,7 +235,8 @@ fi
     --output-dir "$OUTPUT_DIR" \
     --image "$IMAGE" \
     --harness "$HARNESS" \
-    ${SCOPE_ARGS[@]+"${SCOPE_ARGS[@]}"}
+    ${SCOPE_ARGS[@]+"${SCOPE_ARGS[@]}"} \
+    ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"}
 
 EXIT_CODE=$?
 
