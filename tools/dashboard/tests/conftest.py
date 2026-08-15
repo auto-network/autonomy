@@ -162,7 +162,14 @@ def _configure_hermetic_stores():
     # want that (suites that test the HTTP contract boot their own app).
     _os.environ.pop("GRAPH_API", None)
     _os.environ.pop("GRAPH_ORG", None)
-    _os.environ["AUTONOMY_REFUSE_REAL_DATA_FALLBACK"] = "1"
+    # NOTE: AUTONOMY_REFUSE_REAL_DATA_FALLBACK is deliberately NOT set here.
+    # A module-level (import-time) os.environ set is process-global and leaks
+    # to graph tests that share this xdist worker — flipping graph's resolver
+    # to fail-loud and breaking the ones that legitimately exercise the legacy
+    # real-data fallback (RealDataFallbackRefused). It is set per dashboard
+    # test instead by the ``_refuse_real_data_fallback`` autouse fixture below,
+    # so the fail-loud contract applies to dashboard tests only and restores
+    # after each. See tools/dashboard/tests/conftest.py::_refuse_real_data_fallback.
 
 
 _configure_hermetic_stores()
@@ -183,6 +190,19 @@ def _set_default_event_bus_state_path():
 
 
 _set_default_event_bus_state_path()
+
+
+@pytest.fixture(autouse=True)
+def _refuse_real_data_fallback(monkeypatch):
+    """Dashboard tests must never fall through to the operator's real graph
+    data — resolution should raise rather than read data/graph.db. Set that
+    fail-loud flag PER TEST via monkeypatch (auto-restored) instead of a
+    process-global os.environ set: the latter leaks to graph tests that share
+    this xdist worker (or a serial run) and breaks the ones that legitimately
+    exercise the legacy real-data fallback. Applies only under this conftest
+    (dashboard tests), so graph tests on the same worker are unaffected.
+    """
+    monkeypatch.setenv("AUTONOMY_REFUSE_REAL_DATA_FALLBACK", "1")
 
 
 # ── Per-worker agent-browser session fallback ──────────────────────────
