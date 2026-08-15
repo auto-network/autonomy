@@ -513,10 +513,18 @@ def locate_source_org(
     """
     from .cross_org import list_org_slugs
     for slug in sorted(list_org_slugs()):
-        slug_db = open_peer_db(slug)
-        if slug_db is None:
+        # This lookup is used as an authorization fact by by-ID actions.
+        # Do not use the process-lifetime peer pool: a stale/immutable peer
+        # snapshot may disagree with a fresh explicit-org read, producing the
+        # exact false 404 that locate-then-authorize is meant to prevent.
+        try:
+            slug_db = GraphDB.open_org_db(slug, mode="ro")
+        except FileNotFoundError:
             continue
-        src = slug_db.get_source(source_id)
+        try:
+            src = slug_db.get_source(source_id)
+        finally:
+            slug_db.close()
         if src is None:
             continue
         return {
