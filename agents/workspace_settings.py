@@ -479,7 +479,12 @@ def _workspace_from_setting(
         startup=(setting_payload.get("startup") or None),
         needs_nested_docker=needs_nested_docker,
         session_runtime=session_runtime,
-        network_host=bool(setting_payload.get("network_host", True)),
+        # Default mirrors the schema (False). Every stored row now states
+        # network_host explicitly, so this fallback governs only rows created
+        # in future -- where host networking, being a privilege, is off unless
+        # asked for. It previously defaulted True, which granted host
+        # networking to any workspace that simply omitted the field.
+        network_host=bool(setting_payload.get("network_host", False)),
         default_tags=tuple(str(t) for t in (setting_payload.get("tags") or ())),
         dispatch_labels=tuple(
             str(l) for l in (setting_payload.get("dispatch_labels") or ())
@@ -517,7 +522,12 @@ def _artifact_from_setting(
     return ArtifactSpec(
         name=name,
         scope=str(scope),
-        required=bool(payload.get("required", False)),
+        # Default mirrors the schema (True). Every stored artifact row states
+        # required explicitly, so this governs only future rows -- where an
+        # artifact declared without saying otherwise is one the workspace
+        # needs, and a missing file should stop the launch rather than start
+        # a container that is quietly missing a credential.
+        required=bool(payload.get("required", True)),
         description=str(payload.get("description") or ""),
         help=str(payload.get("help") or ""),
     )
