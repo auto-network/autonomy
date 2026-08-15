@@ -106,8 +106,16 @@ def _claude_credentials_alias_map() -> dict[str, str]:
     except Exception:
         return {}
     try:
+        from tools.dashboard.claude_credentials_refresh import (
+            _credentials_org,
+        )
+        # Pinned to the set's home rather than the ambient caller org: the
+        # dashboard runs with GRAPH_ORG set, so CALLER_ORG resolved to that
+        # org's database, where credentials do not live. The read returned
+        # nothing and every session fell back to displaying a bare UUID.
+        # peers=[] because a credential set must never be read federated.
         members = graph_ops.read_set(
-            CLAUDE_CREDENTIALS_SET_ID, org=graph_ops.CALLER_ORG,
+            CLAUDE_CREDENTIALS_SET_ID, org=_credentials_org(), peers=[],
         )
     except Exception:
         return {}

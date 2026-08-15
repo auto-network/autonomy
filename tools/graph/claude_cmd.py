@@ -142,14 +142,14 @@ def _credentials_org() -> str:
 def _read_credentials_rows() -> list[Any]:
     """Return the list of ``ResolvedSetting`` rows for installed credentials."""
     members = ops.read_set(
-        CLAUDE_CREDENTIALS_SET_ID, org=_credentials_org(),
+        CLAUDE_CREDENTIALS_SET_ID, org=_credentials_org(), peers=[],
     )
     return list(members.members)
 
 
 def _read_setup_token_rows() -> list[Any]:
     members = ops.read_set(
-        CLAUDE_SETUP_TOKENS_SET_ID, org=_credentials_org(),
+        CLAUDE_SETUP_TOKENS_SET_ID, org=_credentials_org(), peers=[],
     )
     return list(members.members)
 
