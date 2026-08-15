@@ -150,14 +150,14 @@ class TestResumeAuthorization:
             lambda _token_hash: ("agent-foreign", "foreign-org"),
         )
         content_reads = []
-        original_resolve = server.graph_ops.resolve_source_strict
+        original_resolve = server.graph_ops.get_source
 
         def capture_resolve(*args, **kwargs):
             content_reads.append((args, kwargs))
             return original_resolve(*args, **kwargs)
 
         monkeypatch.setattr(
-            server.graph_ops, "resolve_source_strict", capture_resolve,
+            server.graph_ops, "get_source", capture_resolve,
         )
 
         with caplog.at_level("WARNING"):
@@ -181,14 +181,14 @@ class TestResumeAuthorization:
         from tools.dashboard import server
 
         calls = []
-        original_resolve = server.graph_ops.resolve_source_strict
+        original_resolve = server.graph_ops.get_source
 
         def capture_resolve(*args, **kwargs):
             calls.append((args, kwargs))
             return original_resolve(*args, **kwargs)
 
         monkeypatch.setattr(
-            server.graph_ops, "resolve_source_strict", capture_resolve,
+            server.graph_ops, "get_source", capture_resolve,
         )
         response = test_client.post(
             "/api/session/resume",
