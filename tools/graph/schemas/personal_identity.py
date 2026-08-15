@@ -184,8 +184,8 @@ class PersonalIdentityV1(SettingSchema):
         try:
             from tools.network.idkit.armor import (
                 ArmorError,
-                canonicalize_armor,
-                parse_armor,
+                armor_root_pub,
+                canonicalize_armor_any,
             )
         except Exception as exc:  # pragma: no cover — env without idkit deps
             raise SchemaValidationError(
@@ -194,12 +194,15 @@ class PersonalIdentityV1(SettingSchema):
                 "write (I1 fail-closed)"
             ) from exc
         try:
-            armor_data = parse_armor(armor)
-            if canonicalize_armor(armor) != armor:
+            # Version-agnostic: a personal identity may be armored in either
+            # format, and the ceremonies are moving to the newer one. Both are
+            # strictly parsed and both must already be in canonical byte form.
+            armor_data = {"root_pub": armor_root_pub(armor)}
+            if canonicalize_armor_any(armor) != armor:
                 raise SchemaValidationError(
                     f"{cls.__name__}: 'armored_private_key' must be the "
                     "canonical armor byte form — re-emit it with "
-                    "tools.network.idkit.armor.canonicalize_armor (I1)"
+                    "tools.network.idkit.armor.canonicalize_armor_any (I1)"
                 )
         except ArmorError as e:
             raise SchemaValidationError(

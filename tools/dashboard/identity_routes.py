@@ -308,10 +308,15 @@ async def post_personal(request: Request) -> JSONResponse:
         )}, status_code=400)
     display_name = display_name.strip()
 
-    from tools.network.idkit.armor import ArmorError, canonicalize_armor, parse_armor
+    from tools.network.idkit.armor import (
+        ArmorError,
+        armor_root_pub,
+        canonicalize_armor_any,
+    )
     try:
-        canonical_armor = canonicalize_armor(body["armored_private_key"])
-        armor_data = parse_armor(canonical_armor)
+        # Either armor version: existing identities are v1, new ones are v2.
+        canonical_armor = canonicalize_armor_any(body["armored_private_key"])
+        armor_data = {"root_pub": armor_root_pub(canonical_armor)}
     except ArmorError as e:
         return JSONResponse({"ok": False, "error": (
             f"refusing to store: not a canonical password-encrypted key "

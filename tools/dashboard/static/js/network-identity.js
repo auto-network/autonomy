@@ -128,6 +128,26 @@
     return lines.join('\n');
   }
 
+  // The PERSONAL identity's armor, in the multi-lock format (v2). It
+  // delegates to the single implementation in ceremony/primitives.js rather
+  // than hand-rolling a second one here: the v1 minter below exists because
+  // this file predates that module, and duplicating the newer format would
+  // be how the two quietly drift apart.
+  //
+  // The ORG key armor stays on armorSeed (v1) — the server validates that
+  // one as v1, so moving it is a separate, server-side change.
+  async function armorSeedV2(seed, rootPubHex, passphrase, iterations) {
+    if (typeof passphrase !== 'string' || !passphrase) {
+      throw new Error('passphrase must be a non-empty string');
+    }
+    if (!/^[0-9a-f]{64}$/.test(rootPubHex)) {
+      throw new Error('root_pub must be 64 lowercase hex chars');
+    }
+    return _I().encryptArmorV2(
+      seed, rootPubHex, passphrase, iterations || _iterations,
+    );
+  }
+
   async function importSigningKey(seed) {
     var pkcs8 = new Uint8Array(PKCS8_ED25519_PREFIX.length + seed.length);
     pkcs8.set(PKCS8_ED25519_PREFIX, 0);
@@ -626,6 +646,7 @@
     _internals: {
       generateEd25519: generateEd25519,
       armorSeed: armorSeed,
+      armorSeedV2: armorSeedV2,
       importSigningKey: importSigningKey,
       signRegistration: signRegistration,
       buildRecoveryBlock: buildRecoveryBlock,

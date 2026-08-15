@@ -256,6 +256,33 @@ def canonicalize_armor(armor: str) -> str:
     return "\n".join([ARMOR_BEGIN, *textwrap.wrap(b64, 64), ARMOR_END])
 
 
+def canonicalize_armor_v2(armor: str) -> str:
+    """Strict-parse a v2 armor and re-emit it in the one canonical byte form.
+
+    Unlike v1 this does not rebuild the body field by field, because it does
+    not need to: :func:`parse_armor_v2` is closed to an EXACT key set at every
+    level, including a per-type strict parser for each factor, so anything the
+    parse accepted already contains nothing else. Re-emitting the parsed dict
+    as canonical JSON is therefore complete by construction --- and stays
+    complete when a factor type is added, which a hand-copied field list here
+    would not.
+    """
+    return _emit_v2(parse_armor_v2(armor))
+
+
+def canonicalize_armor_any(armor: str) -> str:
+    """Canonicalize an armor of EITHER version, dispatching on its own tag.
+
+    Storage layers that persist an armor they did not mint need this: pinning
+    them to one version would reject the format the ceremonies are moving to.
+    """
+    version = armor_version(armor)
+    canonicalizer = _ARMOR_CANONICALIZERS.get(version)
+    if canonicalizer is None:
+        raise ArmorError(f"unsupported armor version: {version!r}")
+    return canonicalizer(armor)
+
+
 def decrypt_root_key(armor: str, passphrase: str) -> KeyPair:
     """Open the armor with *passphrase*; returns the root :class:`KeyPair`.
 
@@ -869,6 +896,13 @@ _ARMOR_DECRYPTORS = {
 
 
 _ARMOR_PARSERS = {ARMOR_VERSION: parse_armor, ARMOR_VERSION_2: parse_armor_v2}
+
+#: Version dispatch for canonicalization, alongside the parser and decryptor
+#: tables — a storage layer canonicalizes whatever version it is handed.
+_ARMOR_CANONICALIZERS = {
+    ARMOR_VERSION: canonicalize_armor,
+    ARMOR_VERSION_2: canonicalize_armor_v2,
+}
 
 
 def armor_version(armor: str) -> int:
