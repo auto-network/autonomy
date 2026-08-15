@@ -16551,6 +16551,10 @@ async def api_orgs_create(request):
 
 async def api_orgs_delete(request):
     """DELETE /api/orgs/<slug>?force=1 — refuses on cross-DB references."""
+    auth_error = api_auth.require_global_api_authority(request)
+    if auth_error is not None:
+        return auth_error
+
     from tools.graph import org_ops
     slug = request.path_params["slug"]
     force = request.query_params.get("force", "").lower() in ("1", "true", "yes")
