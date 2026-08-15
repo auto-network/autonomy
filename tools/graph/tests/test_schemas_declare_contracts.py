@@ -119,3 +119,45 @@ def test_every_declared_field_has_a_description(registered_schemas):
         "these declared fields state no meaning, so nothing that renders the "
         "schema can explain them:\n  " + "\n  ".join(undescribed)
     )
+
+
+def test_every_schema_declares_its_cardinality(registered_schemas):
+    """How many rows exist at once is the first thing a schema must answer.
+
+    The access-pattern decorator is that answer, and it is what tells a reader
+    -- and codegen -- whether to expect one row, one per entity, or an
+    append-only stream. Undeclared, the question was simply never asked, and
+    the key strategy that follows from it cannot have been chosen either.
+
+    A typed payload contract that is not a Setting row declares
+    ``internal = True`` and stays out of the registry, so it is not asked a
+    question it cannot answer.
+    """
+    undeclared = [
+        f"{set_id}#{revision} ({cls.__module__}.{cls.__name__})"
+        for set_id, revision, cls in registered_schemas
+        if getattr(cls, "_access_pattern", None) is None
+    ]
+    assert not undeclared, (
+        "these schemas declare no cardinality, so nothing states how many "
+        "rows they have or what their key means:\n  " + "\n  ".join(undeclared)
+    )
+
+
+def test_internal_schemas_stay_out_of_the_registry(registered_schemas):
+    """``internal = True`` means a payload contract, not a stored Setting.
+
+    Anything walking the registry treats what it finds as a Setting -- the
+    schema-meta flush writes every registered schema into every org database
+    as a row. A payload shape that only borrows the field metadata must not
+    be swept up in that.
+    """
+    leaked = [
+        f"{set_id}#{revision} ({cls.__module__}.{cls.__name__})"
+        for set_id, revision, cls in registered_schemas
+        if getattr(cls, "internal", False)
+    ]
+    assert not leaked, (
+        "these are marked internal but registered as Settings:\n  "
+        + "\n  ".join(leaked)
+    )
