@@ -68,7 +68,7 @@ import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import Any, Callable, get_origin
 from uuid import uuid4
 
 
@@ -582,14 +582,34 @@ _PY_TO_JSON_TYPE = {
 
 
 def _python_type_to_json_type(t: Any) -> str:
-    """Map a Python type (or tuple of types) to a JSON-schema type name."""
+    """Map a Python type (or tuple of types) to a JSON-schema type name.
+
+    A parameterized generic — ``list[str]`` rather than ``list`` — is not
+    the bare type this mapping is keyed on, so resolve its origin before
+    giving up. Without that, an annotation that resolved perfectly well
+    falls through to ``"string"`` and types a list as a scalar, which
+    every consumer of the metadata then believes.
+
+    The final fallback stays deliberately: when ``get_type_hints`` cannot
+    resolve a class's annotations it logs and leaves them as raw strings,
+    and those degrade uniformly to ``"string"`` rather than being parsed
+    back into half-trusted types.
+    """
     if isinstance(t, tuple):
         for cand in t:
             mapped = _PY_TO_JSON_TYPE.get(cand)
             if mapped is not None:
                 return mapped
         return "string"
-    return _PY_TO_JSON_TYPE.get(t, "string")
+    mapped = _PY_TO_JSON_TYPE.get(t)
+    if mapped is not None:
+        return mapped
+    origin = get_origin(t)
+    if origin is not None:
+        mapped = _PY_TO_JSON_TYPE.get(origin)
+        if mapped is not None:
+            return mapped
+    return "string"
 
 
 class SettingSchema:
