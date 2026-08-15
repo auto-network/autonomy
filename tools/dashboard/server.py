@@ -16022,9 +16022,17 @@ async def api_agent_action_dispatch(request):
     # prompt template then interpolates it via ``{custom_input}``.
     custom_input = str(body.get("custom_input") or "")
     # Browser-initiated dispatches have no specific operator session id.
-    # Use a stable sentinel so dispatch_runs.dispatched_by_session is
-    # never NULL and the agent's prompt has something to render.
+    # Use a stable sentinel so the agentic source row's
+    # ``dispatched_by_session`` is never NULL and the agent's prompt has
+    # something to render. A caller holding a session bearer token IS a
+    # specific session, so record it -- that is who gets told when the run
+    # finishes (see _notify_agentic_dispatch_nag in agents/dispatcher.py).
     dispatched_by_session = "dashboard"
+    if principal.subject and principal.kind in (
+        api_auth.ApiPrincipalKind.LOCAL_SESSION,
+        api_auth.ApiPrincipalKind.ORG_SESSION,
+    ):
+        dispatched_by_session = principal.subject
 
     if not member_key or not isinstance(member_key, str):
         return JSONResponse(

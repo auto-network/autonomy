@@ -1479,6 +1479,52 @@ def _send_dispatch_nag_crosstalk(targets: list[str], message: str) -> None:
             pass  # best-effort — don't crash dispatcher
 
 
+def _notify_agentic_dispatch_nag(
+    run_id: str,
+    status: str,
+    reason: str,
+    agentic_source_id: str | None,
+) -> None:
+    """Announce an agentic dispatch's completion. Best-effort.
+
+    ``_notify_dispatch_nag`` covers the bead-agent path only -- all five of
+    its call sites take a ``RunningAgent`` and it resolves its title via
+    ``bd show``, neither of which an agentic run has. So agentic dispatches
+    finished silently.
+
+    Two audiences. ``dispatch_nag`` subscribers hear about every completion,
+    which is what that flag has always meant. The session that launched this
+    run hears about its own without subscribing: ``api_agent_action_dispatch``
+    records it on the agentic source row as ``dispatched_by_session``, and
+    ``"dashboard"`` is the sentinel for a browser click with no session
+    behind it.
+    """
+    try:
+        sys.path.insert(0, str(REPO_ROOT))
+        from tools.dashboard.dao import dashboard_db
+        from tools.dashboard.server import _resolve_agentic_identity
+        dashboard_db.init_db()
+        targets = dashboard_db.get_dispatch_nag_sessions()
+
+        identity = _resolve_agentic_identity(agentic_source_id)
+        origin = identity.get("dispatched_by_session") or ""
+        if origin and origin != "dashboard" and origin not in targets:
+            targets.append(origin)
+        if not targets:
+            return
+
+        label = identity.get("action_label") or run_id
+        title = identity.get("title") or ""
+        msg = f"{label} {status}"
+        if title and title != label:
+            msg += f" — {title}"
+        if reason:
+            msg += f"\n{reason}"
+        _send_dispatch_nag_crosstalk(targets, msg)
+    except Exception as e:
+        print(f"  WARN: agentic dispatch nag failed: {e}", file=sys.stderr)
+
+
 # ── Live stats collection ────────────────────────────────────────
 
 
@@ -2599,6 +2645,10 @@ def poll_and_collect_agentic() -> None:
                 file=sys.stderr,
             )
             continue
+
+        _notify_agentic_dispatch_nag(
+            run_id, status, reason, row["agentic_source_id"],
+        )
 
         # Best-effort live-stats refresh so the SSE payload stops
         # showing the row as RUNNING before the next dashboard poll.
