@@ -330,6 +330,23 @@ def test_locate_source_org_finds_peer_raw(orgs_root):
     }
 
 
+def test_locate_source_org_uses_fresh_db_not_shared_peer_pool(
+    orgs_root, monkeypatch,
+):
+    """Authorization location must not depend on a cached peer snapshot."""
+    ids = _seed_anchore_and_autonomy(orgs_root)
+
+    def reject_pooled_lookup(_slug):
+        raise AssertionError("authorization locator used the peer read pool")
+
+    monkeypatch.setattr(ops, "open_peer_db", reject_pooled_lookup)
+    hit = ops.locate_source_org(ids["autonomy_raw"])
+
+    assert hit == {
+        "org": "autonomy", "id": ids["autonomy_raw"], "type": "note",
+    }
+
+
 def test_locate_source_org_unknown_id_returns_none(orgs_root):
     _seed_anchore_and_autonomy(orgs_root)
     assert ops.locate_source_org(str(uuid.uuid4())) is None
