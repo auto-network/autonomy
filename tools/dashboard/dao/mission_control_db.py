@@ -553,51 +553,6 @@ def set_pillar_status(
     return cur.rowcount > 0
 
 
-def set_pillar_coordinator(
-    pillar_id: str, coordinator_session: str, *, db_path: Path | str | None = None,
-) -> bool:
-    """Point a pillar at the session that coordinates it now.
-
-    A pillar changes hands: a session is retired and another takes the seat.
-    The field was always meant to move -- it is a pointer to whoever holds the
-    work, not a fact about who started it -- and until now nothing could move
-    it, so a handover left questions relaying to a session that was going away
-    and presence naming the wrong holder.
-
-    THIS CONFERS IDENTITY. get_pillar_by_coordinator resolves a caller's
-    participant identity FROM this field, so whoever can write it can decide
-    who acts as this pillar. The route above it is gated accordingly; this
-    layer stores what it is given.
-    """
-    conn = _get_conn(db_path)
-    try:
-        cur = conn.execute(
-            "UPDATE pillars SET coordinator_session = ? WHERE pillar_id = ?",
-            (coordinator_session, pillar_id),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-    return cur.rowcount > 0
-
-
-def set_mission_coordinator(
-    mission_id: str, coordinator_session: str, *, db_path: Path | str | None = None,
-) -> bool:
-    """Point a mission at the session that coordinates it now. Same contract
-    and the same identity consequence as set_pillar_coordinator."""
-    conn = _get_conn(db_path)
-    try:
-        cur = conn.execute(
-            "UPDATE missions SET coordinator_session = ? WHERE mission_id = ?",
-            (coordinator_session, mission_id),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-    return cur.rowcount > 0
-
-
 def set_pillar_last_done(
     pillar_id: str, text: str, *, db_path: Path | str | None = None,
 ) -> bool:

@@ -143,10 +143,7 @@ async def create_mission(request: Request) -> JSONResponse:
     name = (body.get("name") or "").strip()
     if not name:
         return JSONResponse({"error": "name is required"}, status_code=400)
-    coordinator_session, err = _coordinator_assignment(
-        request, (body.get("coordinator_session") or "").strip())
-    if err is not None:
-        return err
+    coordinator_session = (body.get("coordinator_session") or "").strip()
     mission = db.create_mission(name, coordinator_session)
     return JSONResponse({"mission": _mission_payload(mission)}, status_code=201)
 
@@ -382,18 +379,13 @@ def _pillar_payload(pillar: dict) -> dict:
 
 async def create_pillar(request: Request) -> JSONResponse:
     mission_id = request.path_params["mission_id"]
-    mission = db.get_mission(mission_id)
-    if not mission:
+    if not db.get_mission(mission_id):
         return JSONResponse({"error": "mission not found"}, status_code=404)
     body = await request.json()
     name = (body.get("name") or "").strip()
     if not name:
         return JSONResponse({"error": "name is required"}, status_code=400)
-    coordinator_session, err = _coordinator_assignment(
-        request, (body.get("coordinator_session") or "").strip(),
-        staffed_by=(mission.get("coordinator_session") or "").strip())
-    if err is not None:
-        return err
+    coordinator_session = (body.get("coordinator_session") or "").strip()
     color = (body.get("color") or "").strip()
     pillar = db.create_pillar(mission_id, name, coordinator_session, color)
     return JSONResponse({"pillar": _pillar_payload(pillar)}, status_code=201)
@@ -467,92 +459,6 @@ async def set_pillar_status(request: Request) -> JSONResponse:
     if not ok:
         return JSONResponse({"error": "pillar not found"}, status_code=404)
     return JSONResponse({"pillar": _pillar_payload(db.get_pillar(pillar_id))})
-
-
-def _coordinator_from(body: dict) -> tuple[str | None, JSONResponse | None]:
-    session = body.get("coordinator_session")
-    if not isinstance(session, str) or not session.strip():
-        return None, JSONResponse(
-            {"error": "coordinator_session is required"}, status_code=400)
-    return session.strip(), None
-
-
-async def set_pillar_coordinator(request: Request) -> JSONResponse:
-    """Hand a pillar to the session that runs it now.
-
-    GATED ON GLOBAL AUTHORITY, unlike the reporting routes beside it. This
-    field is where a caller's identity comes from -- get_pillar_by_coordinator
-    resolves a session to the pillar it acts as -- so an open setter would let
-    any caller name itself coordinator of any pillar and inherit that pillar's
-    standing. Reporting on work you already hold is open; deciding who holds
-    it is not.
-    """
-    auth_error = api_auth.require_global_api_authority(request)
-    if auth_error is not None:
-        return auth_error
-    pillar_id = request.path_params["pillar_id"]
-    session, err = _coordinator_from(await request.json())
-    if err is not None:
-        return err
-    if not db.set_pillar_coordinator(pillar_id, session):
-        return JSONResponse({"error": "pillar not found"}, status_code=404)
-    return JSONResponse({"pillar": _pillar_payload(db.get_pillar(pillar_id))})
-
-
-async def set_mission_coordinator(request: Request) -> JSONResponse:
-    """Hand a mission to the session that runs it now. Same gate and the same
-    reason as set_pillar_coordinator."""
-    auth_error = api_auth.require_global_api_authority(request)
-    if auth_error is not None:
-        return auth_error
-    mission_id = request.path_params["mission_id"]
-    session, err = _coordinator_from(await request.json())
-    if err is not None:
-        return err
-    if not db.set_mission_coordinator(mission_id, session):
-        return JSONResponse({"error": "mission not found"}, status_code=404)
-    return JSONResponse({"mission": _mission_payload(db.get_mission(mission_id))})
-
-
-def _coordinator_assignment(
-    request: Request, requested: str, *, staffed_by: str = "",
-) -> tuple[str, JSONResponse | None]:
-    """Who may be named coordinator at creation.
-
-    Naming a coordinator hands out identity, it does not label a row:
-    get_pillar_by_coordinator resolves an incoming session to the pillar it
-    acts as. Write a session name you do not own and that session's traffic
-    can resolve to your pillar instead of its own, silently.
-
-    Creation was the way round the gate on the setter. Rather than change a
-    pillar you may not touch, make a new one carrying whatever name you like.
-
-    Global authority may name anyone. So may ``staffed_by``: whoever already
-    runs the mission a pillar is being added to is the one meant to staff it,
-    and that is the ordinary way pillars come into existence. Any other
-    authenticated caller may name only the session it is proven to be.
-
-    A caller that proves nothing may create a pillar, but not name a
-    coordinator on it -- asking to is refused rather than quietly dropped,
-    because a pillar that came back looking created and then never received
-    anything is worse than a refusal that says why.
-
-    Prove who you are with your session's own bearer::
-
-        curl -sk -H "Authorization: Bearer $CROSSTALK_TOKEN" ...
-    """
-    if not requested:
-        return "", None
-    if api_auth.require_global_api_authority(request) is None:
-        return requested, None
-    mine = api_auth.principal_from_request(request).subject
-    if mine and (requested == mine or (staffed_by and mine == staffed_by)):
-        return requested, None
-    return "", JSONResponse(
-        {"error": "name yourself, or authenticate as the mission's "
-                  "coordinator to name somebody else"},
-        status_code=403,
-    )
 
 
 async def move_question(request: Request) -> JSONResponse:
@@ -2145,8 +2051,6 @@ routes: list[Route] = [
     ),
     Route("/api/missions/{mission_id}/asked", answer_asked_by_mission, methods=["POST"]),
     Route("/api/pillars/{pillar_id}/asked", answer_asked_by_pillar, methods=["POST"]),
-    Route("/api/missions/{mission_id}/coordinator", set_mission_coordinator, methods=["POST"]),
-    Route("/api/pillars/{pillar_id}/coordinator", set_pillar_coordinator, methods=["POST"]),
     Route("/api/missions/{mission_id}/here", mission_here, methods=["POST"]),
     Route("/api/pillars/{pillar_id}/here", pillar_here, methods=["POST"]),
     Route("/api/missions/{mission_id}/questions", ask_question, methods=["POST"]),
