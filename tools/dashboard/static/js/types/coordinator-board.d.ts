@@ -105,6 +105,8 @@ export interface CoordinatorDecisionV1Base {
   sentAt?: string;
   /** Session that should receive the decision via session_send */
   target_session: string;
+  /** The option the operator picked. Optional in general and required by validate() when kind is 'choice' or 'custom', a conditional the declarative form cannot express */
+  choice?: string;
 }
 
 export interface CoordinatorDecisionV1ThumbYes extends CoordinatorDecisionV1Base {
@@ -117,6 +119,8 @@ export interface CoordinatorDecisionV1ThumbYes extends CoordinatorDecisionV1Base
   sentAt?: string;
   /** Session that should receive the decision via session_send */
   target_session: string;
+  /** The option the operator picked. Optional in general and required by validate() when kind is 'choice' or 'custom', a conditional the declarative form cannot express */
+  choice?: string;
 }
 
 export interface CoordinatorDecisionV1ThumbNo extends CoordinatorDecisionV1Base {
@@ -129,6 +133,8 @@ export interface CoordinatorDecisionV1ThumbNo extends CoordinatorDecisionV1Base 
   sentAt?: string;
   /** Session that should receive the decision via session_send */
   target_session: string;
+  /** The option the operator picked. Optional in general and required by validate() when kind is 'choice' or 'custom', a conditional the declarative form cannot express */
+  choice?: string;
 }
 
 export interface CoordinatorDecisionV1SitrepRequest extends CoordinatorDecisionV1Base {
@@ -141,6 +147,8 @@ export interface CoordinatorDecisionV1SitrepRequest extends CoordinatorDecisionV
   sentAt?: string;
   /** Session that should receive the decision via session_send */
   target_session: string;
+  /** The option the operator picked. Optional in general and required by validate() when kind is 'choice' or 'custom', a conditional the declarative form cannot express */
+  choice?: string;
 }
 
 export interface CoordinatorDecisionV1RefreshRequest extends CoordinatorDecisionV1Base {
@@ -153,6 +161,8 @@ export interface CoordinatorDecisionV1RefreshRequest extends CoordinatorDecision
   sentAt?: string;
   /** Session that should receive the decision via session_send */
   target_session: string;
+  /** The option the operator picked. Optional in general and required by validate() when kind is 'choice' or 'custom', a conditional the declarative form cannot express */
+  choice?: string;
 }
 
 export interface CoordinatorDecisionV1Choice extends CoordinatorDecisionV1Base {

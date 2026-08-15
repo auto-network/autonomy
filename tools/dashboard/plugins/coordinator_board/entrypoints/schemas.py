@@ -816,6 +816,14 @@ class CoordinatorDecisionV1(SettingSchema):
         required=True,
         description="Session that should receive the decision via session_send",
     )
+    choice: str = field(
+        required=False,
+        description=(
+            "The option the operator picked. Optional in general and "
+            "required by validate() when kind is 'choice' or 'custom', a "
+            "conditional the declarative form cannot express"
+        ),
+    )
 
     @classmethod
     def validate(cls, payload: Any) -> None:
