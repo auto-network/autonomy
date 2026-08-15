@@ -1734,6 +1734,13 @@ def resolve_set_key(
     rules. Returns the underlying base row dict (the one that becomes
     ``ResolvedSetting.id`` post-merge), or None if no member matches.
 
+    ``payload`` comes back parsed, with the schema's declared defaults
+    applied, exactly as a :func:`read_set` member's does. Handing back the
+    stored JSON string here instead would mean every caller that wants a
+    field parses it itself, and each of them would separately have to know
+    to apply the defaults — which is the disagreement those defaults exist
+    to end.
+
     ``org`` is **required** — see :func:`add_setting` for the contract.
     """
     org = _resolve_org_arg(org)
@@ -1741,7 +1748,19 @@ def resolve_set_key(
     for m in members.members:
         if m.key == key:
             # m.id is the chosen base id; fetch the row in its origin DB.
-            return _fetch_setting_any_org(m.id, org)
+            row = _fetch_setting_any_org(m.id, org)
+            if row is None:
+                return None
+            payload = row.get("payload")
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except (json.JSONDecodeError, TypeError):
+                    payload = {}
+            row["payload"] = _apply_declared_defaults(
+                row["set_id"], row["schema_revision"], payload,
+            )
+            return row
     return None
 
 

@@ -45,58 +45,35 @@ from tools.graph.schemas import commit_signing_key as _sign_key_schema  # noqa: 
 SIGN_KEY_SET_ID = _sign_key_schema.SIGN_KEY_SET_ID
 
 
-def _first_armored_key(members) -> str | None:
-    for m in (members or []):
-        payload = m.payload if isinstance(m.payload, dict) else {}
-        armored = payload.get("armored_private_key") or payload.get("armored")
-        if isinstance(armored, str) and "PRIVATE KEY" in armored:
-            return armored
-    return None
-
-
 async def get_sign_key(request: Request) -> PlainTextResponse:
-    """GET /api/sign-key -> the operator's OWN passphrase-encrypted armored
-    private commit-signing key, or 404 if none is configured. Read-only; serves
-    an already-encrypted value.
+    """GET /api/sign-key -> the operator's passphrase-encrypted armored private
+    commit-signing key for their organization, or 404 if none is configured.
+    Read-only; serves an already-encrypted value.
 
-    auto-bsbaf (authority re-home): the commit-signing key is the OPERATOR's own
-    secret — decrypted only in the operator's browser with the operator's
-    passphrase, used to sign the operator's commits, and never shared outside the
-    operator's own fleet. It therefore belongs in ``personal.db``, read pinned to
-    ``personal`` (mirroring ``_credentials_org()``), never an org DB. As a
-    personal secret it is structurally never on any org's cross-org read-through
-    surface, so there is no org to name: the ``?org=`` parameter and the
-    cross-org guard are gone, and ``read_owned_set(org="personal")`` returns a
-    row that is the operator's by construction.
-
-    This supersedes the earlier read-side owning-DB patch (auto-h4kzx), which
-    stopped the cross-org leak but left the key in the wrong home. The fallback
-    below is transitional: a key still provisioned in the caller's own org DB is
-    read owning-DB-only (never cross-org) until it is moved to personal, after
-    which the fallback is removed. See bead auto-bsbaf.
+    The key is the operator's own secret -- decrypted only in their browser,
+    with their passphrase, to sign their commits -- so it lives in their own
+    database and never on any organization's cross-org read-through surface.
+    They hold one per organization they sign for, keyed by its slug, which is
+    why the organization is named here rather than guessed. ``peers=[]``
+    because a signing key is never read from anyone else's database.
     """
     auth_error = api_auth.require_global_api_authority(request)
     if auth_error is not None:
         return auth_error
 
     from tools.graph import settings_ops
-    try:
-        armored = _first_armored_key(
-            settings_ops.read_owned_set(SIGN_KEY_SET_ID, org="personal").members
-        )
-        if armored is None:
-            # Transitional: legacy key still in the caller's own org DB. Owning-DB
-            # only, so never cross-org. Remove once all keys live in personal.
-            caller = settings_ops._resolve_settings_caller(None)
-            if caller and caller != "personal":
-                armored = _first_armored_key(
-                    settings_ops.read_owned_set(SIGN_KEY_SET_ID, org=caller).members
-                )
-        if armored is not None:
-            return PlainTextResponse(armored)
-    except Exception:
-        pass
-    return PlainTextResponse("no signing key configured", status_code=404)
+
+    org = settings_ops._resolve_settings_caller(None)
+    if not org or org == "personal":
+        return PlainTextResponse("no signing key configured", status_code=404)
+
+    row = settings_ops.resolve_set_key(
+        SIGN_KEY_SET_ID, org, org="personal", peers=[],
+    )
+    armored = (row or {}).get("payload", {}).get("armored_private_key")
+    if not armored:
+        return PlainTextResponse("no signing key configured", status_code=404)
+    return PlainTextResponse(armored)
 
 
 def _tree_and_parent(payload: bytes) -> tuple[str | None, str | None]:

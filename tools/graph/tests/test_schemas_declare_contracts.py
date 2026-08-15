@@ -268,7 +268,6 @@ _HOME_UNDECLARED_GRANDFATHERED = {
     "autonomy.capability.impl",
     "autonomy.capability.operation_policy",
     "autonomy.commit.policy",
-    "autonomy.commit.signing-key",
     "autonomy.harness.bootstrap",
     "autonomy.identity.passkey",
     "autonomy.identity.personal",

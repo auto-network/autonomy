@@ -5,23 +5,23 @@ commits with. The server only ever stores and serves the ENCRYPTED blob; the
 passphrase is entered in the operator's browser, where the key is decrypted and
 used to sign. Nothing here is usable without the passphrase.
 
-Authority: PERSONAL (auto-bsbaf). This is the operator's own key — decrypted only
-with the operator's passphrase, used to sign the operator's commits, and never
-shared outside the operator's own fleet. Per the settings scope/publication-state
-rubric (graph://4d88c2ad-625, authority axis: "whose fact is this?"), a personal
-secret lives in ``personal.db`` and is read/written pinned to ``personal`` (like
-``dashboard.claude.credentials``), NOT in an org DB — where it would sit on that
-org's cross-org read-through surface. The ``autonomy.commit.*`` set_id is a legacy
-name; the home is personal. Being a personal secret it must never reach a
-read-through publication_state — pin to ``raw`` once the schema publication-band
-enforcement lands (tracked). Re-vaulting under standard vault secrecy, dropping
-the bespoke PGP armor, is the successor: bead auto-wu2al.
+Lives in the operator's own database, keyed by organization slug: it is the
+operator's key, decrypted only with their passphrase and never shared outside
+their own fleet, and they hold one per organization they sign for. Naming the
+organization is how a reader gets the right one.
+
+Being a personal secret it must never reach a read-through publication state --
+pin to ``raw`` once the publication-band enforcement lands. Re-vaulting under
+standard vault secrecy, dropping the bespoke PGP armor, is the successor:
+bead auto-wu2al.
+
+The ``autonomy.commit.*`` set_id is a legacy name; the home is personal.
 """
 
 from .registry import (
-    singleton,
     SettingSchema,
     field,
+    home,
     keyed_per_entity,
 )
 
@@ -46,12 +46,18 @@ SYNOPSIS = {
 }
 
 
-@singleton(key="default")
+@home("personal")
+@keyed_per_entity(key_strategy="org_slug")
 class CommitSigningKeyV1(SettingSchema):
-    """The org's commit-signing key.
+    """The operator's commit-signing key for one organization.
 
-    Key: an operator-chosen label (e.g. ``default``) — one org may hold more
-    than one key. Payload: the armored, passphrase-encrypted private key.
+    Keyed by the organization's slug, so the key for an organization is
+    found by naming it. The alternative — one row under a fixed label —
+    cannot hold a second organization's key at all, and leaves a reader
+    with nothing to ask for, so it has to identify the row it wants by
+    looking INSIDE the stored values until one appears to be a private
+    key. That is a scan over secrets standing in for a lookup, and it
+    returns whichever row happens to come first.
     """
 
     set_id = SIGN_KEY_SET_ID
