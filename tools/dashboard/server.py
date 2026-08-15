@@ -321,6 +321,40 @@ def _plugin_effective_org(plugin: plugin_loader.LoadedPlugin) -> str:
     return plugin.manifest.org
 
 
+class _VersionedStatic(StaticFiles):
+    """Static files that a browser may keep, when the URL says which version.
+
+    Nothing under /static carried a cache-control header, so a browser had no
+    instruction to reuse anything and revalidated on every navigation. The
+    shell asks for nineteen files before it can paint, so that was nineteen
+    conditional requests per page change, each a round trip, six at a time
+    over HTTP/1.1 and sharing that budget with the live event streams the
+    pages hold open. They all answer 304 with an empty body: nothing is
+    downloaded and the reader waits anyway.
+
+    A request carrying a ``?v=`` is asking for one specific build -- the shell
+    stamps every asset it references with the newest modification time under
+    static/, so the URL changes whenever the file does. That request can be
+    answered once and kept, because a changed file is a different URL.
+
+    A request without one cannot. Five references have no stamp, among them
+    the encryption library and the network-join page, and pinning those for a
+    year would strand a browser on whichever build it happened to see first.
+    Those keep revalidating, which is what they do today.
+    """
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        scope = args[2] if len(args) > 2 else kwargs.get("scope") or {}
+        query = scope.get("query_string") or b""
+        stamped = b"v=" in query
+        response.headers["cache-control"] = (
+            "public, max-age=31536000, immutable" if stamped
+            else "no-cache"
+        )
+        return response
+
+
 def _static_version() -> str:
     import time as _time
     t0 = _time.monotonic()
@@ -17741,7 +17775,7 @@ routes = [
     *jira_routes.ROUTES,
 
     # Static (catch-all — plugin static mounts above take precedence)
-    Mount("/static", app=StaticFiles(directory=str(STATIC_DIR)), name="static"),
+    Mount("/static", app=_VersionedStatic(directory=str(STATIC_DIR)), name="static"),
 ]
 
 # Background task handles — captured during startup, cancelled during shutdown
