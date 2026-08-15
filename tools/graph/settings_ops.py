@@ -2200,12 +2200,43 @@ def read_set(
         if not candidate_bases:
             continue
 
-        # Pick highest precedence; tie-break by most recent created_at.
-        # Two-pass stable sort: recency first, then precedence wins.
+        # Pick highest precedence; tie-break by stored revision, then by most
+        # recent created_at. Stable sorts applied least-significant first.
+        #
+        # Revision belongs in this order because a key can hold a row at more
+        # than one revision -- stored-row uniqueness is per
+        # (set_id, schema_revision, key, publication_state), so nothing stops
+        # it, and a schema whose generations deliberately coexist will have it.
+        # Without revision here the two tie on precedence, and on created_at
+        # whenever they were written in the same second, leaving the winner to
+        # be whichever the database happened to return first. That is how a
+        # newer generation of a value becomes invisible while the row is
+        # sitting right there.
         candidate_bases.sort(key=lambda om: om[1]["created_at"] or "", reverse=True)
+        candidate_bases.sort(
+            key=lambda om: int(om[1]["schema_revision"]), reverse=True,
+        )
         candidate_bases.sort(
             key=lambda om: PRECEDENCE.get(om[1]["publication_state"], 99),
         )
+
+        # Asking for a revision should consider the rows that can be served as
+        # it, rather than picking a winner first and discovering afterwards
+        # that it cannot be. Otherwise a row stored at exactly the requested
+        # revision loses to one that cannot reach it, and the read comes back
+        # empty with the answer in the set the whole time.
+        #
+        # If NOTHING can reach the target, the winner is chosen as usual and
+        # dropped below with its reason, so drop accounting says the same thing
+        # it always did.
+        if target_revision is not None:
+            reachable = [
+                om for om in candidate_bases
+                if _can_reach_revision(set_id, om[1], target_revision)
+            ]
+            if reachable:
+                candidate_bases = reachable
+
         chosen_org, chosen_row = candidate_bases[0]
 
         # Apply overrides whose supersedes targets this base, oldest first so
@@ -2280,6 +2311,20 @@ def read_owned_set(
 
 
 # ── Schema versioning helpers ────────────────────────────────
+
+
+def _can_reach_revision(set_id: str, row: Any, target_revision: int) -> bool:
+    """Whether this stored row can be served AS ``target_revision``.
+
+    Exactly at it, or below it with an upconvert chain. Above it is not
+    reachable: there is no downconvert, by design.
+    """
+    stored = int(row["schema_revision"])
+    if stored == target_revision:
+        return True
+    if stored > target_revision:
+        return False
+    return schemas.upconvert_chain(set_id, stored, target_revision) is not None
 
 
 def _shape_to_target(
