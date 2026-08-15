@@ -51,6 +51,7 @@ LEDGER_EVENT_TYPES = (
     "delegate",
     "genesis",
     "invite",
+    "key.epoch",
     "key.rotate",
     "member.claim",
     "member.rekey",
