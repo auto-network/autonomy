@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from tools.data_paths import STORE_MANIFEST
-from tools.graph.db import GraphDB
+from tools.graph.db import GraphDB, _SCHEMA_USER_VERSION
 from tools.graph.models import Source
 from tools.network.idkit import (
     KeyPair,
@@ -539,7 +539,10 @@ def test_migrate_on_mount_upgrades_legacy_volume_and_stamps_it(tmp_path):
     assert (volume / "orgs" / "personal.db").is_file()
     assert (volume / "graph.db").is_file()
     with sqlite3.connect(other_org) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        # A graph org DB heals to the CURRENT graph schema version on
+        # open (crypto's fleet-wide self-heal), not the version this
+        # test was written against.
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == _SCHEMA_USER_VERSION
 
 
 def test_newer_volume_is_refused_before_any_mutation(tmp_path):
