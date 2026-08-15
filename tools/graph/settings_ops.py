@@ -34,6 +34,7 @@ import time
 from collections import Counter
 from dataclasses import dataclass, field, asdict, replace
 from functools import wraps
+from pathlib import Path
 from typing import Any, Callable, Generic, Iterator, TypeVar
 from uuid import uuid4
 
@@ -130,7 +131,7 @@ def _guard_protected_setting_id(setting_id: str, org: str | None) -> None:
     A missing row is left to the function's own not-found handling."""
     if _identity_write_allowed.get():
         return
-    db = _open(org)
+    db = _open_read(org)
     try:
         row = db.conn.execute(
             "SELECT set_id FROM settings WHERE id = ?", (setting_id,)
@@ -788,6 +789,11 @@ class MigrationReport:
 # ── DB selection (mirrors ops._open) ─────────────────────────
 
 
+# The destinations a caller does not provision first: saying nothing, and
+# naming the operator's own store, which are the same database.
+_CREATED_ON_DEMAND: frozenset[str | None] = frozenset({None, "personal"})
+
+
 def _db_path(org: str | None) -> str | None:
     """Resolve Settings DB path for a literal ``org`` value.
 
@@ -826,11 +832,58 @@ def _db_path(org: str | None) -> str | None:
                     # Another process won the guarded first-open race.
                     pass
         return str(personal_path)
-    return str(resolve_caller_db_path(org))
+    # A named org resolves to that org's database, or to nothing.
+    # ``resolve_caller_db_path`` keeps a pre-migration fallback to the legacy
+    # single store when the per-org file is absent, which is right for reading
+    # an installation that has not been migrated and wrong for a Setting: the
+    # write reports success against a database the caller did not name and
+    # nobody looks in for that org's settings. Going straight to the org's own
+    # path makes the absence an error that names the file.
+    #
+    # The pinned case still goes through the resolver, which refuses a
+    # ``GRAPH_DB`` that contradicts an explicit org rather than discarding it.
+    if os.environ.get("GRAPH_DB"):
+        return str(resolve_caller_db_path(org))
+    return str(_org_db_path(org))
 
 
 def _open(org: str | None) -> GraphDB:
-    return GraphDB(_db_path(org))
+    """Open the database :func:`_db_path` resolved, creating nothing.
+
+    A NAMED organization's database must already be there, because
+    creating the organization is what creates it. Letting an open
+    manufacture one is silent and wrong: a path that is not mounted where
+    the caller believes it is -- the ordinary case inside a container --
+    yields a fresh empty database, the write reports success, and nothing
+    ever reads it. Refusing turns that into an error naming the path.
+
+    The two destinations that come into being on demand are left alone.
+    :func:`_db_path` provisions the personal database itself, under a
+    lock, and a ``GRAPH_DB`` pin is a path its caller chose outright.
+    Naming ``personal`` reaches the same database as saying nothing, so
+    it is treated the same way -- an operator's own store is not
+    something anyone provisions first.
+    """
+    return GraphDB(_db_path(org), create=org in _CREATED_ON_DEMAND)
+
+
+def _open_read(org: str | None) -> GraphDB:
+    """Open for reading, read-only where that is possible.
+
+    A read has no business taking a write lock or running schema
+    initialisation, which is what an rw open does on every call. Where the
+    database is already there, open it read-only and neither can happen.
+
+    A database that is not there yet falls back to :func:`_open`, which
+    decides whether it may be created. Read-only cannot open a missing
+    file at all, so the fallback is what keeps the on-demand destinations
+    -- a pinned path, the operator's own store -- readable before anything
+    has been written to them.
+    """
+    path = _db_path(org)
+    if path and Path(path).exists():
+        return GraphDB(path, mode="ro")
+    return _open(org)
 
 
 # ── JSON merge-patch (RFC 7396) ──────────────────────────────
@@ -1514,7 +1567,7 @@ def list_set_ids(
 
     org = _resolve_org_arg(org)
     seen: set[str] = set()
-    db = _open(org)
+    db = _open_read(org)
     try:
         rows = db.conn.execute(
             "SELECT DISTINCT set_id FROM settings"
@@ -1582,7 +1635,7 @@ def resolve_setting_strict(
     )
 
     org = _resolve_org_arg(org)
-    db = _open(org)
+    db = _open_read(org)
     try:
         # 1. Exact id, own org
         row = db.conn.execute(
@@ -1814,7 +1867,7 @@ def _base_and_tail_for(row: dict, org: str | None) -> tuple[str, str]:
             break
         cur = nxt
     base_id = str(cur["id"])
-    db = _open(org)
+    db = _open_read(org)
     tail = db.conn.execute(
         "SELECT id FROM settings WHERE supersedes = ? AND deprecated = 0 "
         "ORDER BY created_at DESC, rowid DESC LIMIT 1",
@@ -1840,7 +1893,7 @@ def _fetch_setting_any_org(
         resolve_peers,
     )
 
-    db = _open(org)
+    db = _open_read(org)
     try:
         row = db.conn.execute(
             "SELECT * FROM settings WHERE id = ?", (setting_id,)
@@ -1892,7 +1945,7 @@ def get_setting(
 
     org = _resolve_org_arg(org)
     resolved_org = org
-    db = _open(org)
+    db = _open_read(org)
     try:
         row = db.conn.execute(
             "SELECT * FROM settings WHERE id = ?", (setting_id,)
@@ -1992,7 +2045,7 @@ def read_set(
     if prefix is not None:
         prefix_clause = " AND key LIKE ? ESCAPE '\\'"
         prefix_params = (_prefix_like_pattern(prefix),)
-    db = _open(org)
+    db = _open_read(org)
     try:
         rows = db.conn.execute(
             f"SELECT rowid AS _rowid, * FROM settings WHERE set_id = ? "
