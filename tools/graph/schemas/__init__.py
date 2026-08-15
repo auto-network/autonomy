@@ -33,6 +33,12 @@ from .registry import (
     singleton,
     keyed_per_entity,
     cache,
+    # Which database a Setting lives in. Orthogonal to cardinality above:
+    # how many rows there are, and whose database they are in, are
+    # different questions and neither implies the other.
+    home,
+    declared_home,
+    VALID_HOMES,
     # Mediator-action marker decorators: declare a default action or a
     # per-``kind`` action method directly on the schema class. Discovery
     # in ``SettingSchema.__init_subclass__`` registers each via the
@@ -76,6 +82,9 @@ from . import harness_bootstrap  # noqa: F401 — autonomy.harness.bootstrap#1
 
 __all__ = [
     "SchemaValidationError",
+    "home",
+    "declared_home",
+    "VALID_HOMES",
     "SettingSchema",
     "register_schema",
     "register_upconverter",
