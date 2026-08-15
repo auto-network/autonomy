@@ -92,6 +92,15 @@ _INSTALL_CSP = (
 # same-origin wss upgrade under 'self', and scheme-wide wss:/ws: sources
 # would permit connections to ANY host (relay review) — with fail-silent
 # enrichment, a browser that disagrees simply shows the minimal display.
+# The public landing page (register row 105): fully static, self-contained
+# — real product screenshots ride as data URIs, the only script is the
+# copy button, and nothing on the page can reach the network at all.
+_LANDING_CSP = (
+    "default-src 'none'; style-src 'unsafe-inline'; "
+    "script-src 'unsafe-inline'; img-src data:; base-uri 'none'; "
+    "form-action 'none'; frame-ancestors 'none'"
+)
+
 _JOIN_CSP = (
     "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; "
     "connect-src 'self'; "
@@ -1082,6 +1091,24 @@ def create_app(
             media_type="text/html",
             headers={
                 "Content-Security-Policy": _BOOTLOADER_CSP,
+                "Referrer-Policy": "no-referrer",
+                "X-Content-Type-Options": "nosniff",
+                "Cache-Control": "no-store",
+            },
+        )
+
+    landing_bytes = (_BOOTLOADER_DIR / "landing.html").read_bytes()
+
+    @app.get("/")
+    async def landing_page():
+        # The public front door (register row 105): what Autonomy is, the
+        # agent-install CTA, and the REAL product shown through real
+        # captures — one static byte sequence, no state, no lookups.
+        return Response(
+            content=landing_bytes,
+            media_type="text/html",
+            headers={
+                "Content-Security-Policy": _LANDING_CSP,
                 "Referrer-Policy": "no-referrer",
                 "X-Content-Type-Options": "nosniff",
                 "Cache-Control": "no-store",
