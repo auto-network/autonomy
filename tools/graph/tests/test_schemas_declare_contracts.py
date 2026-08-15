@@ -201,15 +201,18 @@ def test_no_schema_leaves_its_entity_unnamed(registered_schemas):
 # recorded here rather than silently skipped, so the debt is countable and a
 # NEW collision still fails.
 #
-# ``autonomy.network.persona`` is NOT debt. Its ``genesis_id`` is the
-# derivation input the persona was produced under, duplicated deliberately so
-# a payload read on its own still states what it is -- the exception the
-# guide names.
+# ``autonomy.network.persona`` was on this list and is not: its duplication
+# was removed rather than excused. Its schema claimed ``genesis_id`` was a
+# derivation input that a payload read alone must still state -- but no
+# consumer read it from the payload, the reader looks the row up BY that
+# value, and the writer passed the same variable as key and field in one
+# call. Zero rows existed, so removing it cost nothing. A duplicated
+# derivation input is worse than a duplicated label, not better: if the two
+# ever disagree you derive against the wrong org.
 _KEY_DUPLICATION_GRANDFATHERED = {
     ("autonomy.identity.passkey", 1, "credential_id"),
     ("autonomy.network.ledger-projection", 1, "projection"),
     ("autonomy.network.ledger-state", 1, "genesis_id"),
-    ("autonomy.network.persona", 1, "genesis_id"),          # derivation input
     ("dashboard.harness.usage", 1, "harness"),
     ("dashboard.harness.usage", 1, "identity_id"),
     ("dashboard.plugin-owned-setting", 1, "plugin_id"),

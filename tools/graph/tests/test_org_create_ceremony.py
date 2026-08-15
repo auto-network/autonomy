@@ -211,9 +211,9 @@ def test_founding_records_the_persona_keyed_by_genesis(env):
     row = rows[0]
     assert row.key == result.genesis_id, "keyed by the genesis VALUE, not a label"
     assert row.payload["persona_pub"] == result.founder_persona_pub
-    assert row.payload["genesis_id"] == result.genesis_id
-    assert row.payload["org_slug"] == "acme"
     assert row.payload["source"] == "found"
+    # The genesis id and the org are NOT repeated in the payload: the key is
+    # the genesis id, asserted above, and it is returned with every read.
 
 
 def test_the_recorded_persona_is_a_member_of_the_folded_ledger(env):

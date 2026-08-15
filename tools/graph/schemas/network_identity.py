@@ -968,25 +968,6 @@ class NetworkPersonaV1(SettingSchema):
             "the first rekey."
         ),
     )
-    genesis_id: str = field(
-        required=True,
-        description=(
-            "The org's genesis event id (64 lowercase hex) — the derivation "
-            "input this persona was produced under. Duplicated from the row "
-            "key on purpose: a payload read on its own must still state what "
-            "it is. Org identity anchors on the immutable genesis hash, never "
-            "the rotatable root key."
-        ),
-    )
-    org_slug: str = field(
-        required=True,
-        description=(
-            "The local slug of the org this persona belongs to, for display "
-            "and for finding the row from a slug the caller already holds. A "
-            "convenience label, never an authority: the genesis_id is the "
-            "identifier."
-        ),
-    )
     derived_at: str = field(
         required=True,
         description="ISO-8601 UTC timestamp of the ceremony that derived it.",
@@ -1012,8 +993,6 @@ class NetworkPersonaV1(SettingSchema):
         if not isinstance(payload, dict):
             return
         _require_hex(payload, "persona_pub", cls.__name__, length=NETWORK_PUB_HEX_LEN)
-        _require_hex(payload, "genesis_id", cls.__name__, length=GENESIS_ID_HEX_LEN)
-        _require_str(payload, "org_slug", cls.__name__, max_len=128)
         _require_iso_ts(payload, "derived_at", cls.__name__)
         source = _require_str(payload, "source", cls.__name__, max_len=16)
         if source not in PERSONA_SOURCES:
