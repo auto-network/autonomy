@@ -83,8 +83,9 @@ def _seed_node(volume: Path) -> dict:
     with sqlite3.connect(personal) as conn:
         conn.execute(
             "INSERT INTO settings("
-            "id,set_id,schema_revision,key,payload,created_at,updated_at"
-            ") VALUES(?,?,?,?,?,?,?)",
+            "id,set_id,schema_revision,key,payload,created_at,updated_at,"
+            "publication_state"
+            ") VALUES(?,?,?,?,?,?,?,?)",
             (
                 "portable-identity",
                 "autonomy.identity.portability",
@@ -93,6 +94,7 @@ def _seed_node(volume: Path) -> dict:
                 identity_payload,
                 "2026-07-26T00:00:00Z",
                 "2026-07-26T00:00:00Z",
+            "canonical",
             ),
         )
 
@@ -120,8 +122,9 @@ def _seed_node(volume: Path) -> dict:
     with sqlite3.connect(org_db) as conn:
         conn.execute(
             "INSERT INTO settings("
-            "id,set_id,schema_revision,key,payload,created_at,updated_at"
-            ") VALUES(?,?,?,?,?,?,?)",
+            "id,set_id,schema_revision,key,payload,created_at,updated_at,"
+            "publication_state"
+            ") VALUES(?,?,?,?,?,?,?,?)",
             (
                 "portable-org-key",
                 "autonomy.network.org-key",
@@ -130,6 +133,7 @@ def _seed_node(volume: Path) -> dict:
                 org_key_payload,
                 "2026-07-26T00:00:00Z",
                 "2026-07-26T00:00:00Z",
+            "canonical",
             ),
         )
 
@@ -142,7 +146,20 @@ def _seed_node(volume: Path) -> dict:
         delegate.public_hex,
         scope=("tunnel:serve",),
         org=PORTABLE_ORG_UUID,
-        subject=Subject("operator", "portable-node"),
+        # serve-cert v2 requires a canonical org persona subject (not an
+        # operator label) — use the founded org's persona.
+        subject=Subject("persona", founded.founder_persona_pub),
+        not_before=now - 60,
+        not_after=now + 86_400,
+    )
+    # v2 also requires an identity-neutral viewer cert: same delegate key,
+    # org and validity window as the serve cert, subject {operator, child_pub}.
+    viewer_cert = issue_cert(
+        org_root,
+        delegate.public_hex,
+        scope=("tunnel:serve",),
+        org=PORTABLE_ORG_UUID,
+        subject=Subject("operator", delegate.public_hex),
         not_before=now - 60,
         not_after=now + 86_400,
     )
@@ -153,6 +170,7 @@ def _seed_node(volume: Path) -> dict:
     key_path.chmod(0o600)
     serve_payload = json.dumps({
         "cert": cert.to_json().decode("ascii"),
+        "viewer_cert": viewer_cert.to_json().decode("ascii"),
         "key_path": key_file,
         "root_pub": org_root.public_hex,
         "not_after": cert.not_after,
@@ -160,16 +178,19 @@ def _seed_node(volume: Path) -> dict:
     with sqlite3.connect(org_db) as conn:
         conn.execute(
             "INSERT INTO settings("
-            "id,set_id,schema_revision,key,payload,created_at,updated_at"
-            ") VALUES(?,?,?,?,?,?,?)",
+            "id,set_id,schema_revision,key,payload,created_at,updated_at,"
+            "publication_state"
+            ") VALUES(?,?,?,?,?,?,?,?)",
             (
                 "portable-serving-key",
                 "autonomy.network.serve-cert",
-                1,
+                2,  # NETWORK_SERVE_CERT_REVISION — read_set filters by the
+                    # current revision, so a stale rev-1 row reads as missing
                 "default",
                 serve_payload,
                 "2026-07-26T00:00:00Z",
                 "2026-07-26T00:00:00Z",
+            "canonical",
             ),
         )
 
@@ -317,7 +338,7 @@ def test_snapshot_restore_to_fresh_node_preserves_identity_membership_and_data(
     )
     assert not state["key_path"].startswith(str(node_a))
     assert supervisor._verify_key_matches(
-        state["cert"], state["key_path"]
+        state["cert"], state["viewer_cert"], state["key_path"]
     ) == (True, "ok")
     materialized_cert = Path(supervisor._materialize_cert(
         state["key_path"], state["cert"]
