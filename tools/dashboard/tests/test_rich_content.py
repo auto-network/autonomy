@@ -29,6 +29,14 @@ def _clean_env():
     env.pop("GRAPH_API", None)
     # Disable auto-provenance
     env.pop("CLAUDE_SESSION_ID", None)
+    # These subprocesses pin the DB explicitly with --db, so the dashboard
+    # conftest's AUTONOMY_REFUSE_REAL_DATA_FALLBACK guard is irrelevant here —
+    # and harmful: the CLI computes _get_db_path() as the eager argparse
+    # default for --db (cli.py:_get_db_path -> resolve_caller_db_path), which
+    # raises RealDataFallbackRefused at startup (before --db is parsed) when
+    # the hermetic orgs dir has no autonomy.db. Drop it so the pinned --db run
+    # starts cleanly.
+    env.pop("AUTONOMY_REFUSE_REAL_DATA_FALLBACK", None)
     return env
 
 
