@@ -796,6 +796,28 @@ def _resolve_source_id_by_path(jsonl_path: str) -> str | None:
     return None
 
 
+def _resolve_source_and_org_by_path(jsonl_path: str) -> tuple[str, str] | None:
+    """Like :func:`_resolve_source_id_by_path` but also returns the org slug
+    the source was found in, so a write-through targets the right store."""
+    if not jsonl_path:
+        return None
+    try:
+        from tools.graph.cross_org import list_org_slugs, open_peer_db
+    except Exception:
+        return None
+    for slug in list_org_slugs():
+        peer = open_peer_db(slug)
+        if peer is None:
+            continue
+        try:
+            row = peer.get_source_by_path(jsonl_path)
+        except Exception:
+            row = None
+        if row and row.get("id"):
+            return row["id"], slug
+    return None
+
+
 def set_graph_source_validated(tmux_name: str, graph_source_id: str) -> None:
     """Set ``graph_source_id`` and log a warning if it doesn't resolve.
 
@@ -862,10 +884,11 @@ def reconcile_graph_source_ids(*, live_only: bool = True) -> int:
         if gid and _resolve_source_in_orgs_by_id(gid):
             # Already correct — no cross-org by_path lookup needed.
             continue
-        real_id = _resolve_source_id_by_path(jpath)
-        if not real_id:
+        resolved = _resolve_source_and_org_by_path(jpath)
+        if not resolved:
             # JSONL not yet ingested. Try again next tick.
             continue
+        real_id, source_org = resolved
         if real_id == gid:
             # Defensive: file_path resolved to the same id we already store.
             # _resolve_source_in_orgs_by_id said no, so this likely means
@@ -884,7 +907,11 @@ def reconcile_graph_source_ids(*, live_only: bool = True) -> int:
         if label:
             try:
                 from tools.graph import ops as graph_ops
-                graph_ops.update_source_title(real_id, label)
+                # Write the title into the org the source actually lives in
+                # — the caller org (personal) is not where a non-personal
+                # org's source is stored, so an unscoped write would land
+                # in the wrong DB and the label would never reach the title.
+                graph_ops.update_source_title(real_id, label, org=source_org)
             except Exception:
                 logger.warning(
                     "dashboard_db: reconcile label write-through failed for %s (%s)",
