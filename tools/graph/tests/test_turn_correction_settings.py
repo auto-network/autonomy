@@ -203,9 +203,10 @@ def test_add_and_read_round_trip(graph_db_env):
     member = members.members[0]
     assert member.id == sid
     assert member.key == "enterprise-ng"
-    assert member.payload == {
-        "aggressiveness": "aggressive", "enabled": True,
-    }
+    # Resolution completes the payload from the schema's declared defaults,
+    # so what was written is present and what was omitted is filled.
+    assert member.payload == {**DEFAULT_PAYLOAD,
+                              "aggressiveness": "aggressive", "enabled": True}
 
 
 def test_upsert_by_key_replaces_existing_row(graph_db_env):
@@ -221,7 +222,7 @@ def test_upsert_by_key_replaces_existing_row(graph_db_env):
     assert sid_a == sid_b
     members = ops.read_set(SET_ID, org=ops.CALLER_ORG)
     assert len(members.members) == 1
-    assert members.members[0].payload == {"aggressiveness": "off"}
+    assert members.members[0].payload["aggressiveness"] == "off"
 
 
 def test_multiple_workspaces_are_independent(graph_db_env):
@@ -229,11 +230,8 @@ def test_multiple_workspaces_are_independent(graph_db_env):
     ops.upsert_by_key(SET_ID, SCHEMA_REVISION, "ws-a", {"enabled": True}, org=ops.CALLER_ORG)
     ops.upsert_by_key(SET_ID, SCHEMA_REVISION, "ws-b", {"enabled": False}, org=ops.CALLER_ORG)
     members = ops.read_set(SET_ID, org=ops.CALLER_ORG)
-    by_key = {m.key: m.payload for m in members.members}
-    assert by_key == {
-        "ws-a": {"enabled": True},
-        "ws-b": {"enabled": False},
-    }
+    by_key = {m.key: m.payload["enabled"] for m in members.members}
+    assert by_key == {"ws-a": True, "ws-b": False}
 
 
 def test_add_setting_rejects_invalid_payload(graph_db_env):
@@ -242,3 +240,21 @@ def test_add_setting_rejects_invalid_payload(graph_db_env):
         ops.add_setting(
             SET_ID, SCHEMA_REVISION, "ws", {"aggressiveness": "yolo"},
          org=ops.CALLER_ORG)
+
+
+def test_resolution_fills_what_a_partial_setting_omitted(graph_db_env):
+    """A default belongs to the schema, so every reader gets the same one.
+
+    An operator writes only the knob they care about. Resolution completes
+    the rest from the declared defaults, which is what lets a consumer read
+    ``payload["aggressiveness"]`` instead of restating a fallback that could
+    disagree with the schema's.
+    """
+    ops.upsert_by_key(SET_ID, SCHEMA_REVISION, "partial",
+                      {"aggressiveness": "off"}, org=ops.CALLER_ORG)
+    payload = ops.read_set(SET_ID, org=ops.CALLER_ORG).members[0].payload
+
+    assert payload["aggressiveness"] == "off", "what was written wins"
+    for name, default in DEFAULT_PAYLOAD.items():
+        if name != "aggressiveness":
+            assert payload[name] == default

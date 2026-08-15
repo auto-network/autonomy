@@ -862,6 +862,59 @@ def json_merge_patch(target: Any, patch: Any) -> Any:
 # ── Row → ResolvedSetting ────────────────────────────────────
 
 
+def _apply_declared_defaults(set_id: str, revision: int, payload: dict) -> dict:
+    """Fill fields the schema declares a default for and the payload omits.
+
+    A default belongs to the schema, so every reader should see the same one.
+    While resolution left them out, each consumer supplied its own, and two
+    consumers of the same field could disagree without either being obviously
+    wrong -- which is exactly how a workspace ended up with host networking
+    granted by a fallback nobody chose.
+
+    Only an ABSENT key is filled. An explicitly stored ``None`` is a stated
+    value and is left alone; the schema does not get to overrule what a writer
+    said on purpose.
+
+    Applied AFTER override merging, so a value supplied by any layer wins over
+    the default -- a default is what you get when nobody said anything, not a
+    floor.
+
+    Two kinds of field are skipped, because for them absence is not silence:
+
+    ``default`` of ``None`` -- present-and-null says exactly what absence
+    already said, so filling it adds no information and costs every reader
+    that asks whether the field is there at all.
+
+    A field in a ``deprecated_alias_of`` pair -- two names for one value.
+    Filling either makes both present, and a schema that pairs them refuses a
+    payload where they are both present and disagree, so the fill would
+    produce a payload the schema itself rejects. Which of the two a reader
+    consults first then decides the answer, which is how a workspace that
+    asked for a nested Docker daemon under the older name stops getting one.
+    """
+    schema = schemas.get_schema(set_id, int(revision))
+    if schema is None or not isinstance(payload, dict):
+        return payload
+    meta = getattr(schema, "_field_metadata", None) or {}
+    aliased = {
+        name
+        for name, spec in meta.items()
+        for name in (name, spec.get("deprecated_alias_of"))
+        if spec.get("deprecated_alias_of")
+    }
+    missing = {
+        name: spec["default"]
+        for name, spec in meta.items()
+        if "default" in spec
+        and name not in payload
+        and spec["default"] is not None
+        and name not in aliased
+    }
+    if not missing:
+        return payload
+    return {**missing, **payload}
+
+
 def _row_to_resolved(row, *, org: str | None = None,
                      target_revision: int | None = None) -> ResolvedSetting[dict]:
     payload = row["payload"]
@@ -2057,7 +2110,9 @@ def read_set(
                 merged_payload = json_merge_patch(merged_payload, ov_payload)
 
         resolved = _row_to_resolved(chosen_row, org=chosen_org)
-        resolved.payload = merged_payload
+        resolved.payload = _apply_declared_defaults(
+            chosen_row["set_id"], chosen_row["schema_revision"], merged_payload,
+        )
 
         # Optional revision transform.
         if target_revision is not None:
