@@ -68,6 +68,13 @@ def env(tmp_path, monkeypatch):
     from tools.graph.db import GraphDB
     GraphDB.close_all_pooled()
     GraphDB.create_org_db(ORG).close()
+    # Mission compose reads presence/state from the platform 'autonomy'
+    # org (and the personal store), which always exist in production; the
+    # refuse-real-data flag turns their absence into a hard error that
+    # refuses the whole mission serve. Create them so compose resolves.
+    for _slug in ("autonomy", "personal"):
+        if not (orgs_dir / f"{_slug}.db").exists():
+            GraphDB.create_org_db(_slug).close()
     monkeypatch.delenv("GRAPH_ORG", raising=False)
     monkeypatch.setattr(design_db, "DB_PATH", tmp_path / "designs.db")
     monkeypatch.setattr(design_db, "_initialized", False)
