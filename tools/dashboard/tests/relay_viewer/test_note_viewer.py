@@ -2,10 +2,22 @@
 
 from pathlib import Path
 
+import pytest
+
 from tools.dashboard.scripts import build_relay_note_viewer
 
 
-VIEWER = Path(__file__).resolve().parents[2] / "relay_viewer" / "note-viewer.html"
+VIEWER = (Path(__file__).resolve().parents[2] / "relay_viewer" / ".build"
+          / "note-viewer.html")
+
+
+@pytest.fixture(autouse=True)
+def _build_viewer_artifact():
+    """The viewer lives under a gitignored .build/ dir, so a fresh checkout
+    (CI) has no file to read. Build it from the template before each test,
+    the same way the deploy step does."""
+    VIEWER.parent.mkdir(parents=True, exist_ok=True)
+    VIEWER.write_text(build_relay_note_viewer.build())
 
 
 def test_generated_viewer_is_current():
@@ -22,7 +34,10 @@ def test_viewer_is_self_contained_and_content_free():
     assert "marked.parse" in text
     assert "DOMPurify.sanitize" in text
     assert "hljs.highlightElement" in text
-    assert "event.source === parent" in text
+    # The viewer guards its message handler by REJECTING anything not from
+    # the parent frame: `if (event.source !== parent) return;`. (The old
+    # `=== parent` spelling never matched the real guard.)
+    assert "event.source !== parent" in text
     assert "navigateTo" not in text
     assert "/api/resolve" not in text
 
