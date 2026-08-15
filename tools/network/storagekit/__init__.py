@@ -22,6 +22,7 @@ from .acceptance import (
     scope_storage_grant,
 )
 from .credentials import domain_member_keys, select_current_credential
+from .keycontrol import KeyControlStore
 from .errors import (
     CommitmentError,
     MalformedRecordError,
@@ -56,6 +57,8 @@ __all__ = [
     # credentials
     "domain_member_keys",
     "select_current_credential",
+    # key-control store
+    "KeyControlStore",
     # errors
     "StorageError",
     "MalformedRecordError",
