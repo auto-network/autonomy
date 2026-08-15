@@ -1,16 +1,20 @@
-"""GET /api/sign-key serves the OPERATOR'S OWN signing key from personal.db.
+"""GET /api/sign-key serves the operator's own signing key, keyed by organization.
 
-auto-h4kzx (read-side leak fix, retained below at the primitive level): a
-signing-key row that is ``canonical`` sits on an org's cross-org read-through
-surface, so the old federated ``read_set`` served it to any subscribing org;
-``read_owned_set`` excludes another org's row by construction.
+The key is the operator's own secret: decrypted only in their browser, with
+their passphrase, to sign their commits. It lives in their own database, and
+they hold one per organization they sign for.
 
-auto-bsbaf (authority re-home): the commit-signing key is the operator's OWN
-secret, so it lives in ``personal.db`` and get_sign_key now reads it pinned to
-``personal`` (a legacy key still in the caller's own org DB is read owning-DB
-only, transitionally, until moved). A personal secret is never in an org DB, so
-it is structurally never on any org's cross-org read-through surface — the real
-fix for the exposure, of which the owning-DB read was the symptom-level stop.
+That home is the structural fix for the cross-org exposure. A row in an org's
+database can be published onto that org's read-through surface, where any
+subscribing org composes it in; a row in the operator's own database cannot be
+reached that way at all, by anyone. The schema declares the home, so putting
+one in an org's database is refused rather than merely discouraged.
+
+Keying by organization slug is what lets a reader ASK for the right row. A
+single row under a fixed label cannot hold a second organization's key, and
+leaves a reader with nothing to name -- so it has to find the row it wants by
+looking inside the stored values until one appears to be a private key, and
+takes whichever comes first.
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ from tools.dashboard import api_auth
 from tools.dashboard.approvals_routes import get_sign_key
 from tools.graph import settings_ops
 from tools.graph.db import GraphDB
+from tools.graph.schemas.registry import SchemaValidationError
 from tools.graph.schemas.commit_signing_key import SIGN_KEY_SET_ID
 
 ARMORED = (
@@ -70,13 +75,12 @@ def _global_request():
 def sign_key_client(monkeypatch):
     reads = []
 
-    def read_owned_set(set_id, *, org):
-        reads.append((set_id, org))
-        return SimpleNamespace(
-            members=[SimpleNamespace(payload={"armored_private_key": ARMORED})],
-        )
+    def resolve_set_key(set_id, key, *, org, peers=None):
+        reads.append((set_id, key, org, peers))
+        return {"payload": {"armored_private_key": ARMORED}}
 
-    monkeypatch.setattr(settings_ops, "read_owned_set", read_owned_set)
+    monkeypatch.setattr(settings_ops, "_resolve_settings_caller", lambda _: "anchore")
+    monkeypatch.setattr(settings_ops, "resolve_set_key", resolve_set_key)
     app = Starlette(
         routes=[Route("/api/sign-key", get_sign_key, methods=["GET"])],
         middleware=[
@@ -133,7 +137,9 @@ def test_sign_key_preserves_global_operator_read(
 
     assert response.status_code == 200
     assert response.text == ARMORED
-    assert reads == [(SIGN_KEY_SET_ID, "personal")]
+    # The caller's organization names the row; the operator's own database
+    # holds it; no peer database is consulted for a signing key.
+    assert reads == [(SIGN_KEY_SET_ID, "anchore", "personal", [])]
 
 
 @pytest.fixture
@@ -146,27 +152,38 @@ def orgs(tmp_path, monkeypatch):
     GraphDB.close_all_pooled()
 
 
-def test_owned_set_excludes_another_orgs_canonical_sign_key(orgs):
-    # anchore has a CANONICAL signing key — the federation-visible state the
-    # live exposure was found in.
-    settings_ops.upsert_by_key(
-        SIGN_KEY_SET_ID, 1, "default",
-        {"armored_private_key": ARMORED}, org="anchore", state="canonical",
-    )
-    # beta reading its OWN owned set sees nothing: anchore's canonical row lives
-    # in anchore's DB and is never composed in. This is exactly what
-    # get_sign_key now uses; the old federated read_set returned it cross-org.
-    assert settings_ops.read_owned_set(SIGN_KEY_SET_ID, org="beta").members == []
+def test_a_signing_key_cannot_be_put_in_an_organizations_database(orgs):
+    """The exposure, closed at its source.
+
+    A row in an org's database can be promoted onto that org's read-through
+    surface, and every subscribing org then composes it in. Refusing the write
+    means there is no such row to promote -- which is a different and stronger
+    thing than reading it carefully.
+    """
+    with pytest.raises(SchemaValidationError, match="operator's own database"):
+        settings_ops.upsert_by_key(
+            SIGN_KEY_SET_ID, 1, "anchore",
+            {"armored_private_key": ARMORED}, org="anchore", state="canonical",
+        )
 
 
-def test_owned_set_still_serves_own_org_sign_key(orgs):
+def test_one_key_per_organization_in_the_operators_own_database(orgs):
+    """Two organizations, two keys, each found by naming its organization."""
     settings_ops.upsert_by_key(
-        SIGN_KEY_SET_ID, 1, "default",
-        {"armored_private_key": ARMORED}, org="anchore", state="canonical",
+        SIGN_KEY_SET_ID, 1, "anchore",
+        {"armored_private_key": ARMORED + "-anchore"}, org="personal", state="raw",
     )
-    own = settings_ops.read_owned_set(SIGN_KEY_SET_ID, org="anchore").members
-    assert len(own) == 1
-    assert own[0].payload["armored_private_key"] == ARMORED
+    settings_ops.upsert_by_key(
+        SIGN_KEY_SET_ID, 1, "beta",
+        {"armored_private_key": ARMORED + "-beta"}, org="personal", state="raw",
+    )
+
+    for slug in ("anchore", "beta"):
+        row = settings_ops.resolve_set_key(
+            SIGN_KEY_SET_ID, slug, org="personal", peers=[],
+        )
+        assert row is not None, f"no signing key found for {slug}"
+        assert row["payload"]["armored_private_key"].endswith(slug)
 
 
 def test_get_sign_key_serves_the_operators_personal_key(tmp_path, monkeypatch):
@@ -178,9 +195,10 @@ def test_get_sign_key_serves_the_operators_personal_key(tmp_path, monkeypatch):
     monkeypatch.delenv("GRAPH_DB", raising=False)
     GraphDB.create_org_db("personal", type_="personal").close()
     settings_ops.upsert_by_key(
-        SIGN_KEY_SET_ID, 1, "default",
+        SIGN_KEY_SET_ID, 1, "anchore",
         {"armored_private_key": ARMORED}, org="personal", state="raw",
     )
+    monkeypatch.setattr(settings_ops, "_resolve_settings_caller", lambda _: "anchore")
     from tools.dashboard.approvals_routes import get_sign_key
 
     resp = asyncio.run(get_sign_key(_global_request()))
@@ -196,6 +214,7 @@ def test_get_sign_key_404_when_no_personal_key(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
     monkeypatch.delenv("GRAPH_DB", raising=False)
     GraphDB.create_org_db("personal", type_="personal").close()
+    monkeypatch.setattr(settings_ops, "_resolve_settings_caller", lambda _: "anchore")
     from tools.dashboard.approvals_routes import get_sign_key
 
     resp = asyncio.run(get_sign_key(_global_request()))
