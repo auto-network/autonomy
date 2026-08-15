@@ -17,6 +17,7 @@ transaction as the insert.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import time
 import uuid
@@ -26,6 +27,18 @@ from tools.data_paths import resolve_store
 
 DB_PATH = resolve_store("mission_control")
 
+# ``missions.org`` is the organization a mission belongs to, and is the only
+# boundary a mission has: sessions in that organization reach it, sessions in
+# another do not. Nothing finer exists -- a mission has no members and no
+# per-session permissions, so that column is what "who may touch this" means,
+# in full. Everything under a mission inherits it; a pillar carries no
+# organization of its own, because a pillar in a different organization from
+# its mission is not a thing that can exist.
+#
+# Keep comments out of the CREATE TABLE text itself. SQLite stores the
+# statement verbatim and re-parses it when a column is dropped, and a comment
+# inside the definition makes that fail with "incomplete input" -- so an
+# annotated table is one nothing can ever alter again.
 CREATE_TABLES = """\
 CREATE TABLE IF NOT EXISTS missions (
     mission_id            TEXT PRIMARY KEY,
@@ -33,7 +46,8 @@ CREATE TABLE IF NOT EXISTS missions (
     coordinator_session    TEXT NOT NULL DEFAULT '',
     created_at             REAL NOT NULL,
     current_revision_id   TEXT,
-    status                 TEXT NOT NULL DEFAULT 'active'
+    status                 TEXT NOT NULL DEFAULT 'active',
+    org                    TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS mission_site_revisions (
@@ -190,6 +204,18 @@ CREATE TABLE IF NOT EXISTS coordinator_nag_state (
 VALID_MISSION_STATUSES = ("active", "paused", "complete")
 
 
+def _default_org() -> str:
+    """The organization a mission belongs to when the caller did not say.
+
+    Sessions run under GRAPH_ORG; a host process without it is the
+    dashboard's own organization. Falling back to the literal is
+    deliberate: a mission with no organization has no boundary at all, and
+    an unbounded mission is worse than one attributed to the wrong place,
+    which is visible and correctable.
+    """
+    return os.environ.get("GRAPH_ORG") or "autonomy"
+
+
 def _db_path(db_path: Path | str | None = None) -> Path:
     return Path(db_path) if db_path is not None else DB_PATH
 
@@ -328,6 +354,19 @@ def _get_conn(db_path: Path | str | None = None) -> sqlite3.Connection:
             "ALTER TABLE mission_conversation_updates"
             " ADD COLUMN kind TEXT NOT NULL DEFAULT 'status'")
         conn.commit()
+    # Migrate: the organization a mission belongs to.
+    #
+    # Every mission that existed before this column was created by the
+    # single organization running this dashboard, so they are backfilled to
+    # it rather than left empty. An empty organization would read as "no
+    # boundary" and is the one value that must never appear on a real row.
+    try:
+        conn.execute("SELECT org FROM missions LIMIT 0")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE missions ADD COLUMN org TEXT NOT NULL DEFAULT ''")
+        conn.execute(
+            "UPDATE missions SET org = ? WHERE org = ''", (_default_org(),))
+        conn.commit()
     try:
         conn.execute("SELECT closed_at, closed_by FROM mission_conversation LIMIT 0")
     except sqlite3.OperationalError:
@@ -353,21 +392,29 @@ def create_mission(
     name: str,
     coordinator_session: str = "",
     *,
+    org: str | None = None,
     db_path: Path | str | None = None,
 ) -> dict:
     """Create a mission. Entity is deliberately minimal: id, name,
     coordinator_session, created_at, status. No register or conversation
     model — those arrive with their own phases, not guessed at here.
     Status starts 'active' (the column default) — explicit, coordinator-set
-    from here on, never inferred."""
+    from here on, never inferred.
+
+    *org* is the organization the mission belongs to, and is the only
+    boundary it has: sessions in that organization reach it and sessions in
+    another do not. Omitting it takes the caller's own organization, which
+    is right for every caller that has one; it is never stored empty,
+    because an empty organization is a mission nothing is bounded by."""
     mission_id = str(uuid.uuid4())
     created_at = time.time()
+    org = (org or "").strip() or _default_org()
     conn = _get_conn(db_path)
     try:
         conn.execute(
-            "INSERT INTO missions (mission_id, name, coordinator_session, created_at, current_revision_id)"
-            " VALUES (?, ?, ?, ?, NULL)",
-            (mission_id, name, coordinator_session, created_at),
+            "INSERT INTO missions (mission_id, name, coordinator_session, created_at, current_revision_id, org)"
+            " VALUES (?, ?, ?, ?, NULL, ?)",
+            (mission_id, name, coordinator_session, created_at, org),
         )
         conn.commit()
     finally:
@@ -379,6 +426,7 @@ def create_mission(
         "created_at": created_at,
         "current_revision_id": None,
         "status": "active",
+        "org": org,
     }
 
 
@@ -546,6 +594,50 @@ def set_pillar_status(
         cur = conn.execute(
             "UPDATE pillars SET status = ? WHERE pillar_id = ?",
             (status, pillar_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return cur.rowcount > 0
+
+
+def set_pillar_coordinator(
+    pillar_id: str, coordinator_session: str, *, db_path: Path | str | None = None,
+) -> bool:
+    """Point a pillar at the session that coordinates it now.
+
+    A pillar changes hands: a session is retired and another takes the seat.
+    The field was always meant to move -- it is a pointer to whoever holds the
+    work, not a fact about who started it -- and until now nothing could move
+    it, so a handover left questions relaying to a session that was going away
+    and presence naming the wrong holder.
+
+    Writing this field decides who acts as this pillar:
+    get_pillar_by_coordinator resolves a caller to a pillar through it. This
+    layer stores what it is given and does not decide who may ask.
+    """
+    conn = _get_conn(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE pillars SET coordinator_session = ? WHERE pillar_id = ?",
+            (coordinator_session, pillar_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return cur.rowcount > 0
+
+
+def set_mission_coordinator(
+    mission_id: str, coordinator_session: str, *, db_path: Path | str | None = None,
+) -> bool:
+    """Point a mission at the session that coordinates it now. Same contract
+    and the same identity consequence as set_pillar_coordinator."""
+    conn = _get_conn(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE missions SET coordinator_session = ? WHERE mission_id = ?",
+            (coordinator_session, mission_id),
         )
         conn.commit()
     finally:
