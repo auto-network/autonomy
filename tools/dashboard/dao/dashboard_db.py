@@ -8,6 +8,7 @@ Database: data/dashboard.db
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sqlite3
@@ -38,6 +39,38 @@ CREATE TABLE IF NOT EXISTS tmux_sessions (
     session_uuid        TEXT,
     graph_source_id     TEXT,
     harness             TEXT NOT NULL DEFAULT 'claude',
+    -- harness_state: VOLATILE. Describes the CURRENT harness process only.
+    -- Nothing that must outlive a relaunch may be stored here.
+    --
+    -- Written by three paths with three different semantics:
+    --   _persist_tail_window  -> json_patch(...)      MERGE, per log window
+    --   _screen_poll_loop     -> harness_state=?      FULL REPLACE, every 2s
+    --                            from launch until composer_ready, carrying
+    --                            only the four keys read_screen_state
+    --                            returns; every other key is erased
+    --   revive_session        -> harness_state='{}'   WIPED, on every
+    --                            resume/relaunch, by design: the contents
+    --                            describe the PREVIOUS process's screen, and
+    --                            a stale composer_ready=true would let the
+    --                            input gate fire before the new harness
+    --                            accepts typing
+    --
+    -- Contents today: composer_ready / confirming_trust_prompt /
+    -- in_planning_mode / blocking_modal (from the pane), plus the rate-limit
+    -- block (from token_count records in the log). Both are re-derived after
+    -- a wipe -- the pane keys within one poll interval, the rate-limit block
+    -- only when the next token_count record arrives, so the 5H/7D figures on
+    -- a session card have no source between a resume and the next model call.
+    --
+    -- Durable per-session facts belong in their own column, as harness_token
+    -- and harness_version do. Storing one here looks like it works: the two
+    -- json_patch writers preserve it, so it survives until the next resume.
+    -- harness_version: the harness build this session's container runs,
+    -- read from the image's label at launch. Durable: unlike
+    -- harness_state it is never wiped, because it describes the image,
+    -- not the process's screen. Decides which record shape the log
+    -- parser expects (Codex >=0.147 writes chat as response_item.message).
+    harness_version     TEXT,
     harness_state       TEXT NOT NULL DEFAULT '{}',
     type                TEXT NOT NULL,
     project             TEXT NOT NULL,
@@ -243,6 +276,10 @@ def init_db(db_path: Path | None = None) -> None:
         _conn.execute("SELECT harness_state FROM tmux_sessions LIMIT 0")
     except sqlite3.OperationalError:
         _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN harness_state TEXT NOT NULL DEFAULT '{}'")
+    try:
+        _conn.execute("SELECT harness_version FROM tmux_sessions LIMIT 0")
+    except sqlite3.OperationalError:
+        _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN harness_version TEXT")
         _conn.commit()
     # Migrate: add resolution_dir, session_uuids, curr_jsonl_file columns (Phase 0)
     try:
@@ -949,6 +986,32 @@ def get_source_max_turn_number(graph_source_id: str) -> int | None:
         m = max_row["m"] if hasattr(max_row, "keys") else max_row[0]
         return int(m) if m is not None else None
     return None
+
+
+def patch_harness_state(tmux_name: str, patch: dict) -> None:
+    """Merge *patch* into the row's ``harness_state`` without a read.
+
+    Same ``json_patch`` merge the drain path uses, so a concurrent writer's
+    keys are never clobbered by a read-modify-write.
+    """
+    conn = get_conn()
+    conn.execute(
+        "UPDATE tmux_sessions SET harness_state="
+        "json_patch(COALESCE(NULLIF(harness_state,''),'{}'), ?) "
+        "WHERE tmux_name=?",
+        (json.dumps(patch), tmux_name),
+    )
+    conn.commit()
+
+
+def set_harness_version(tmux_name: str, version: str) -> None:
+    """Record the harness build this session runs. Idempotent."""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE tmux_sessions SET harness_version=? WHERE tmux_name=?",
+        (version, tmux_name),
+    )
+    conn.commit()
 
 
 def update_tail_state(

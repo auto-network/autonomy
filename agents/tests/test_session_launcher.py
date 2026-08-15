@@ -59,7 +59,7 @@ def captured_run(monkeypatch):
             self.stderr = ""
 
     def fake_run(cmd, **kwargs):
-        if cmd and cmd[0] == "docker":
+        if cmd[:2] == ["docker", "run"]:
             calls.append(cmd)
         return FakeCompleted()
 

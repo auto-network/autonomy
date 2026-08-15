@@ -72,7 +72,9 @@ cp "$SCRIPT_DIR/Dockerfile" context/
 cp "$SCRIPT_DIR/dind-entrypoint.sh" context/
 cp "$SCRIPT_DIR/commit_sign_shim.sh" context/
 
-docker build $NO_CACHE $PULL -t autonomy-agent context/
+CLAUDE_VERSION=$(bin/claude --version 2>/dev/null | awk '{print $1}')
+docker build $NO_CACHE $PULL --build-arg CLAUDE_VERSION="${CLAUDE_VERSION:-unknown}" \
+    -t autonomy-agent context/
 echo "==> Done. Image: autonomy-agent:latest"
 docker images autonomy-agent:latest --format "  Size: {{.Size}}"
 

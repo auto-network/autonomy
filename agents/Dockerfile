@@ -108,9 +108,19 @@ RUN userdel -r ubuntu 2>/dev/null; useradd -m -s /bin/bash -u 1000 agent \
 # ── Codex CLI + agent-browser (needs node + agent user to exist) ──
 # Codex is an npm package plus platform-specific optional dependency, not a
 # standalone host ELF like Claude, so install it inside the image directly.
-ARG CODEX_VERSION=0.146.0
+ARG CODEX_VERSION=0.147.0
 RUN npm install -g "@openai/codex@${CODEX_VERSION}" agent-browser \
     && su agent -c "agent-browser install"
+
+# The harness versions this image was built with, recorded on the image
+# itself. CODEX_VERSION is the same variable that installed the binary two
+# lines above, so the label cannot disagree with what is installed.
+# CLAUDE_VERSION is passed by build.sh from the binary it copies into the
+# build context. The launcher reads these with `docker image inspect` and
+# stamps them into each session's .session_meta.json, so a reader that
+# starts mid-log never has to guess which record format the session writes.
+ARG CLAUDE_VERSION=unknown
+LABEL codex.version=$CODEX_VERSION claude.version=$CLAUDE_VERSION
 
 # ── Pre-configure agent-browser for container use ──
 RUN mkdir -p /home/agent/.agent-browser \

@@ -4919,6 +4919,8 @@ def _parse_and_enrich_segments(
         snap = session_monitor.snapshot_read_context(tmux_name) if tmux_name else None
 
     parse_ctx: dict = (recon or {}).get("parse_ctx") or {}
+    if db_row is not None:
+        session_monitor_mod._seed_codex_version(parse_ctx, dict(db_row))
     entries: list[dict] = []
     per_file_end: dict[str, int] = {}
     for seg in segments:
@@ -8372,6 +8374,10 @@ async def api_session_retry(request):
     # would let that reconcile silently drop the watch before the worker's
     # first transition re-asserts liveness.
     dashboard_db.revive_session(tmux_name, file_offset=0)
+    # Re-read the harness version: a resume may land on a rebuilt image, and
+    # the row would otherwise keep the version the session first launched
+    # with while running a different binary.
+    session_monitor.refresh_harness_version(tmux_name)
     await session_monitor.register_pending(
         tmux_name,
         session_type=config.get("session_type") or "container",
