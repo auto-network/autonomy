@@ -36,11 +36,27 @@ from tools.graph.settings_ops import ResolvedSetting
 
 @pytest.fixture
 def graph_db_env(tmp_path, monkeypatch):
-    """Pin GRAPH_DB to an empty scratch DB for test-local writes."""
-    db = tmp_path / "graph.db"
-    monkeypatch.setenv("GRAPH_DB", str(db))
+    """Hermetic per-org tree for mount-composition tests.
+
+    A GRAPH_DB pin collapses every org to one file (hiding org mismatches)
+    and, under the fail-loud resolver, conflicts with explicit-org reads.
+    Use the orgs tree: no pin, both org DBs created, no GRAPH_ORG override
+    so the seed helpers' CALLER_ORG writes and load_mounts's org=None reads
+    both land in the personal store.
+    """
+    from tools.graph.db import GraphDB
+    orgs = tmp_path / "orgs"
+    orgs.mkdir()
+    monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.delenv("GRAPH_API", raising=False)
-    yield db
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs))
+    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    GraphDB.close_all_pooled()
+    for slug, kind in (("autonomy", "shared"), ("personal", "personal")):
+        GraphDB.create_org_db(slug, type_=kind, path=orgs / f"{slug}.db").close()
+    GraphDB.close_all_pooled()
+    yield orgs / "personal.db"
+    GraphDB.close_all_pooled()
 
 
 def _mount_rs(
