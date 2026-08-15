@@ -55,8 +55,18 @@ def env(tmp_path, monkeypatch):
     from tools.graph.db import GraphDB
 
     GraphDB.close_all_pooled()
-    monkeypatch.setenv("GRAPH_DB", str(tmp_path / "graph.db"))
-    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    # Agreement pin: seeds and reads use explicit org=ORG, which a plain
+    # GRAPH_DB pin contradicts under the fail-loud resolver. Point GRAPH_DB
+    # AT the orgs tree's own ORG.db so the pin and the explicit-org
+    # resolution converge on one file — and tests that read
+    # os.environ["GRAPH_DB"] directly still see the store the data is in.
+    orgs = tmp_path / "orgs"
+    orgs.mkdir()
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs))
+    monkeypatch.setenv("GRAPH_DB", str(orgs / f"{ORG}.db"))
+    monkeypatch.setenv("GRAPH_ORG", ORG)
+    GraphDB.create_org_db(ORG, type_="shared", path=orgs / f"{ORG}.db").close()
+    GraphDB.close_all_pooled()
     monkeypatch.setattr(design_db, "DB_PATH", tmp_path / "designs.db")
     monkeypatch.setattr(design_db, "_initialized", False)
     yield tmp_path
