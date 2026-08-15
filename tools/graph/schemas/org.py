@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .registry import SettingSchema, SchemaValidationError
+from .registry import SettingSchema, SchemaValidationError, keyed_per_entity
 
 
 ORG_SET_ID = "autonomy.org"
@@ -45,6 +45,7 @@ SYNOPSIS = {
 }
 
 
+@keyed_per_entity(key_strategy="org_slug")
 class OrgV1(SettingSchema):
     """Shape of an ``autonomy.org#1`` Setting payload.
 

@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .registry import SchemaValidationError, SettingSchema, field
+from .registry import SchemaValidationError, SettingSchema, field, keyed_per_entity
 
 
 SET_ID = "autonomy.org.capability.install"
@@ -86,6 +86,7 @@ def _validate_str_str_map(payload: dict, key: str, cls_name: str) -> None:
             )
 
 
+@keyed_per_entity(key_strategy="contract_name")
 class OrgCapabilityInstallV1(SettingSchema):
     """Shape of an ``autonomy.org.capability.install#1`` Setting payload.
 

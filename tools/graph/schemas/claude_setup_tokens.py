@@ -20,6 +20,7 @@ from datetime import timedelta
 from typing import Any
 
 from .registry import (
+    keyed_per_entity,
     SchemaValidationError,
     SettingSchema,
     cache,
@@ -53,6 +54,7 @@ SYNOPSIS = {
 
 
 @cache(ttl=CLAUDE_SETUP_TOKEN_TTL)
+@keyed_per_entity
 class ClaudeSetupTokenV1(SettingSchema):
     """Per-account long-lived setup token.
 

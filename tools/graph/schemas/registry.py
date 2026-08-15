@@ -239,6 +239,27 @@ def _build_metadata_from_spec(ann: Any, spec: _FieldSpec) -> dict:
 # expansion to surface this metadata is bead 1D; 1B only stores it.
 
 
+def _claim_access_pattern(target: type, pattern: str, key_strategy: str) -> type:
+    """Stamp the cardinality declaration, refusing a second one.
+
+    The three access-pattern decorators are alternatives: a schema has one
+    cardinality. Stacking two silently resolved to whichever sat outermost and
+    left the class claiming a cardinality nobody chose, so it is refused here
+    instead. Checks the class's OWN ``__dict__`` — a variant subclass
+    legitimately inherits its parent's pattern and may declare its own.
+    """
+    existing = target.__dict__.get("_access_pattern")
+    if existing is not None and existing != pattern:
+        raise SchemaValidationError(
+            f"{target.__name__}: declares two access patterns "
+            f"({existing!r} and {pattern!r}). A schema has one cardinality; "
+            f"pick the decorator that matches what its writers actually write."
+        )
+    target._access_pattern = pattern
+    target._key_strategy = key_strategy
+    return target
+
+
 def append_only_log(
     cls: type | None = None,
     *,
@@ -266,9 +287,7 @@ def append_only_log(
         key_name = str(key)
 
     def _wrap(target: type) -> type:
-        target._access_pattern = "append_only_log"
-        target._key_strategy = key_name
-        return target
+        return _claim_access_pattern(target, "append_only_log", key_name)
 
     if cls is None:
         return _wrap
@@ -285,9 +304,7 @@ def singleton(cls: type | None = None, *, key: str = "default") -> Any:
     Usable as ``@singleton`` (bare) or ``@singleton(key="...")``.
     """
     def _wrap(target: type) -> type:
-        target._access_pattern = "singleton"
-        target._key_strategy = f"fixed:{key}"
-        return target
+        return _claim_access_pattern(target, "singleton", f"fixed:{key}")
 
     if cls is None:
         return _wrap
@@ -310,9 +327,7 @@ def keyed_per_entity(
     ``@keyed_per_entity(key_strategy="...")``.
     """
     def _wrap(target: type) -> type:
-        target._access_pattern = "keyed_per_entity"
-        target._key_strategy = key_strategy
-        return target
+        return _claim_access_pattern(target, "keyed_per_entity", key_strategy)
 
     if cls is None:
         return _wrap
@@ -323,7 +338,6 @@ def cache(
     cls: type | None = None,
     *,
     ttl: timedelta,
-    key_strategy: str = "natural",
 ) -> Any:
     """Schema decorator: declare cache semantics with TTL-driven GC.
 
@@ -334,9 +348,8 @@ def cache(
 
     ``ttl`` is required — there is no default-eternal cache.
     ``timedelta`` is enforced (not int seconds) so the unit is
-    explicit at the call site. ``key_strategy`` mirrors
-    :func:`keyed_per_entity` since cache rows are caller-keyed
-    upserts.
+    explicit at the call site. Cardinality is declared separately by
+    stacking an access-pattern decorator; this one says nothing about it.
 
     Usable only with parens: ``@cache(ttl=timedelta(...))``.
     """
@@ -347,8 +360,12 @@ def cache(
         raise ValueError("@cache requires a positive ttl")
 
     def _wrap(target: type) -> type:
-        target._access_pattern = "cache"
-        target._key_strategy = key_strategy
+        # Writes ONLY its own attribute. Caching policy and cardinality are
+        # orthogonal -- a cached value can be a singleton, keyed per entity or
+        # an append-only log -- so @cache stacks above whichever access-pattern
+        # decorator applies rather than occupying that slot. It previously set
+        # _access_pattern, which made the two mutually exclusive and silently
+        # destroyed a real key strategy when stacked.
         target._cache_ttl_seconds = seconds
         return target
 

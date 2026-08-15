@@ -39,7 +39,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .registry import SchemaValidationError, SettingSchema, field
+from .registry import SchemaValidationError, SettingSchema, field, keyed_per_entity
 
 
 SET_ID = "autonomy.capability.contract"
@@ -118,6 +118,7 @@ def _validate_op(op: Any, idx: int, cls_name: str) -> str:
     return name
 
 
+@keyed_per_entity(key_strategy="contract_name")
 class CapabilityContractV1(SettingSchema):
     """Shape of an ``autonomy.capability.contract#1`` Setting payload.
 

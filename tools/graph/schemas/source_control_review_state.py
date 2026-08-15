@@ -20,6 +20,7 @@ from datetime import timedelta
 from typing import Any
 
 from .registry import (
+    keyed_per_entity,
     SchemaValidationError,
     SettingSchema,
     cache,
@@ -85,6 +86,7 @@ def _validate_check(entry: Any, idx: int, cls_name: str) -> None:
 
 
 @cache(ttl=timedelta(days=30))
+@keyed_per_entity
 class SourceControlReviewStateV1(SettingSchema):
     """Capability-cached vendor-shape review snapshot.
 

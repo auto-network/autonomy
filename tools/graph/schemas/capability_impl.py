@@ -38,7 +38,7 @@ from __future__ import annotations
 import posixpath
 from typing import Any
 
-from .registry import SchemaValidationError, SettingSchema, field
+from .registry import SchemaValidationError, SettingSchema, field, keyed_per_entity
 
 
 SET_ID = "autonomy.capability.impl"
@@ -318,6 +318,7 @@ def _validate_str_list(payload: dict, key: str, cls_name: str) -> None:
         )
 
 
+@keyed_per_entity(key_strategy="implementation_name")
 class CapabilityImplV1(SettingSchema):
     """Shape of an ``autonomy.capability.impl#1`` Setting payload.
 

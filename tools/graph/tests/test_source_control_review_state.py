@@ -159,7 +159,7 @@ def test_is_terminal_payload_pending():
 
 
 def test_keyed_per_entity_decorator_applied():
-    assert SourceControlReviewStateV1._access_pattern == "cache"
+    assert SourceControlReviewStateV1._access_pattern == "keyed_per_entity"
     assert SourceControlReviewStateV1._key_strategy == "natural"
     assert SourceControlReviewStateV1._cache_ttl_seconds == 30 * 24 * 3600
 
@@ -184,7 +184,7 @@ def test_parse_state_key_string_review_id():
 
 def test_export_json_schema_surfaces_cache_ttl():
     js = SourceControlReviewStateV1.export_json_schema()
-    assert js["access_pattern"] == "cache"
+    assert js["access_pattern"] == "keyed_per_entity"  # @cache stacks above it
     assert js["cache_ttl_seconds"] == 30 * 24 * 3600
 
 

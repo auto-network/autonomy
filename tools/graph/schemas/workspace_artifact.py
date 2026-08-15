@@ -14,6 +14,7 @@ and therefore dropped from the payload.
 from __future__ import annotations
 
 from .registry import (
+    keyed_per_entity,
     SchemaValidationError,
     SettingSchema,
 )
@@ -47,6 +48,7 @@ SYNOPSIS = {
 }
 
 
+@keyed_per_entity(key_strategy="workspace_id:artifact_name")
 class WorkspaceArtifactV1(SettingSchema):
     set_id = SET_ID
     schema_revision = SCHEMA_REVISION

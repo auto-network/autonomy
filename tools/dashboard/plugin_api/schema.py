@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from tools.graph.schemas.registry import (
+    keyed_per_entity,
     SchemaValidationError,
     SettingSchema,
     field,
@@ -22,6 +23,7 @@ PLUGIN_OWNED_SETTING_SET_ID = "dashboard.plugin-owned-setting"
 PLUGIN_OWNED_SETTING_SCHEMA_REVISION = 1
 
 
+@keyed_per_entity(key_strategy="plugin_id")
 class DashboardPluginV1(SettingSchema):
     """Payload shape for ``dashboard.plugin#1`` Settings.
 
@@ -72,6 +74,7 @@ class DashboardPluginV1(SettingSchema):
             )
 
 
+@keyed_per_entity(key_strategy="plugin_id:set_id:setting_key")
 class DashboardPluginOwnedSettingV1(SettingSchema):
     """Tracks graph Settings installed from plugin declarations.
 

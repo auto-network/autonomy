@@ -25,7 +25,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .registry import SettingSchema, SchemaValidationError
+from .registry import SettingSchema, SchemaValidationError, keyed_per_entity
 
 
 WORKSPACE_SET_ID = "autonomy.workspace"
@@ -97,6 +97,7 @@ def _validate_repo(repo: Any, idx: int) -> None:
 # ── WorkspaceV1 ─────────────────────────────────────────────
 
 
+@keyed_per_entity(key_strategy="workspace_id")
 class WorkspaceV1(SettingSchema):
     """Shape of an ``autonomy.workspace#1`` Setting payload.
 

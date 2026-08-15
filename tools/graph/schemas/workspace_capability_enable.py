@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .registry import SchemaValidationError, SettingSchema
+from .registry import SchemaValidationError, SettingSchema, keyed_per_entity
 
 
 SET_ID = "autonomy.workspace.capability.enable"
@@ -66,6 +66,7 @@ _BOOL_FIELDS = (
 )
 
 
+@keyed_per_entity(key_strategy="workspace_id:contract_name")
 class WorkspaceCapabilityEnableV1(SettingSchema):
     """Shape of an ``autonomy.workspace.capability.enable#1`` payload.
 

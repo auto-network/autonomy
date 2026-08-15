@@ -20,7 +20,7 @@ from __future__ import annotations
 import string
 from typing import Any
 
-from .registry import SchemaValidationError, SettingSchema
+from .registry import SchemaValidationError, SettingSchema, keyed_per_entity
 
 
 AGENT_ACTIONS_SET_ID = "dashboard.agent-actions"
@@ -99,6 +99,7 @@ def validate_prompt_template(template: str) -> None:
         )
 
 
+@keyed_per_entity(key_strategy="action_name")
 class AgentActionV2(SettingSchema):
     """Shape of a ``dashboard.agent-actions#2`` member payload.
 
@@ -298,6 +299,7 @@ class AgentActionV2(SettingSchema):
         return dict(payload)
 
 
+@keyed_per_entity(key_strategy="action_name")
 class AgentActionV1(SettingSchema):
     """Legacy ``dashboard.agent-actions#1`` shape — identical to ``#2``
     minus the optional ``input_prompt`` field.

@@ -2,8 +2,12 @@
 
 Covers:
 
-* The decorator stamps ``_access_pattern == "cache"``,
-  ``_cache_ttl_seconds`` (int seconds), and ``_key_strategy``.
+* The decorator stamps ``_cache_ttl_seconds`` (int seconds) and NOTHING
+  else. Caching policy and cardinality are orthogonal, so ``@cache``
+  stacks above an access-pattern decorator rather than occupying that
+  slot; it used to write ``_access_pattern`` and ``_key_strategy``, which
+  made the two mutually exclusive and silently destroyed a real key
+  strategy when stacked.
 * Bad arguments (missing ttl, non-timedelta, zero/negative) raise.
 * :func:`cache_expires_at` returns ISO-8601 = updated_at + ttl for
   cache schemas, ``None`` for non-cache schemas.
@@ -20,10 +24,13 @@ import pytest
 from tools.graph.schemas.registry import (
     SCHEMAS,
     UPCONVERTERS,
+    SchemaValidationError,
     SettingSchema,
+    append_only_log,
     cache,
     cache_expires_at,
     field,
+    keyed_per_entity,
     register_schema,
     singleton,
 )
@@ -45,26 +52,46 @@ def _isolate_registry():
 # ── @cache decorator ──────────────────────────────────────────
 
 
-def test_cache_sets_access_pattern_and_ttl():
+def test_cache_sets_only_its_own_ttl():
     @cache(ttl=timedelta(days=30))
     class V1(SettingSchema):
         set_id = "x.cache"
         schema_revision = 1
 
-    assert V1._access_pattern == "cache"
     assert V1._cache_ttl_seconds == 30 * 24 * 3600  # 2_592_000
-    # Default key strategy mirrors keyed_per_entity (caller-supplied).
-    assert V1._key_strategy == "natural"
+    # It claims no cardinality: that is the access-pattern decorators' slot.
+    assert V1.__dict__.get("_access_pattern") is None
+    assert V1.__dict__.get("_key_strategy") is None
 
 
-def test_cache_with_explicit_key_strategy():
-    @cache(ttl=timedelta(hours=1), key_strategy="composite")
-    class V1(SettingSchema):
-        set_id = "x.cache"
+def test_cache_stacks_with_an_access_pattern_in_either_order():
+    """Orthogonal decorators compose, and order does not change the result."""
+    @cache(ttl=timedelta(hours=1))
+    @keyed_per_entity(key_strategy="org_slug")
+    class Outer(SettingSchema):
+        set_id = "x.cache.outer"
         schema_revision = 1
 
-    assert V1._key_strategy == "composite"
-    assert V1._cache_ttl_seconds == 3600
+    @keyed_per_entity(key_strategy="org_slug")
+    @cache(ttl=timedelta(hours=1))
+    class Inner(SettingSchema):
+        set_id = "x.cache.inner"
+        schema_revision = 1
+
+    for cls in (Outer, Inner):
+        assert cls._cache_ttl_seconds == 3600
+        assert cls._access_pattern == "keyed_per_entity"
+        assert cls._key_strategy == "org_slug"
+
+
+def test_two_access_patterns_on_one_class_are_refused():
+    """A schema has one cardinality; stacking two used to silently pick one."""
+    with pytest.raises(SchemaValidationError, match="two access patterns"):
+        @singleton
+        @append_only_log
+        class _V1(SettingSchema):
+            set_id = "x.cache.two"
+            schema_revision = 1
 
 
 def test_cache_rejects_int_seconds():
@@ -126,8 +153,9 @@ def test_export_json_schema_includes_cache_ttl_for_cache_schema():
         name: str = field(required=True, description="N")
 
     js = V1.export_json_schema()
-    assert js["access_pattern"] == "cache"
     assert js["cache_ttl_seconds"] == 30 * 24 * 3600
+    # @cache claims no cardinality, so none is exported unless one is stacked.
+    assert js["access_pattern"] is None
     assert js["set_id"] == "x.cache"
     assert js["schema_revision"] == 1
 
