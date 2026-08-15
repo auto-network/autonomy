@@ -89,6 +89,9 @@ projects:
     default_tags: []
     dispatch_labels: [dashboard]
     dind: false
+    # Stated rather than inherited from a default, matching the live rows:
+    # this workspace reaches host localhost services and always has.
+    network_host: true
 
   enterprise-v5:
     name: "Enterprise v5"

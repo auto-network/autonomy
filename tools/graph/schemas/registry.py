@@ -571,6 +571,16 @@ def _merged_inherited_field_metadata(cls: type) -> dict[str, dict]:
 # ── JSON-schema field shape helpers ──────────────────────────
 
 
+_JSON_TYPE_TO_PY: dict[str, Any] = {
+    "string": str,
+    "boolean": bool,
+    "integer": int,
+    "number": (int, float),
+    "array": list,
+    "object": dict,
+}
+
+
 _PY_TO_JSON_TYPE = {
     str: "string",
     bool: "boolean",
@@ -601,6 +611,11 @@ def _python_type_to_json_type(t: Any) -> str:
             if mapped is not None:
                 return mapped
         return "string"
+    if t is Any:
+        # A field genuinely of any type carries no type constraint. Recording
+        # it as "string" is simply false, and enforcement then rejects the
+        # very values it exists to allow.
+        return "any"
     mapped = _PY_TO_JSON_TYPE.get(t)
     if mapped is not None:
         return mapped
@@ -957,8 +972,79 @@ def upconvert_payload(
 # ── Validation ───────────────────────────────────────────────
 
 
+def enforce_declared_fields(schema: type, payload: Any) -> None:
+    """Enforce a schema's DECLARED field metadata against *payload*.
+
+    Runs for every schema, including those overriding :meth:`validate`, so an
+    override adds contract-specific rules rather than replacing the declared
+    ones. Declaring a field is what makes it enforced; without this, a schema
+    could declare a field as required and never check it.
+
+    Four rules, all read from ``_field_metadata``:
+
+    * a payload key the schema does not declare is rejected — the schema is
+      the complete statement of the payload's shape, which is what makes an
+      aliased or misspelled field a failure instead of a silently ignored key;
+    * a required field that is absent, or present as ``None``, is missing;
+    * a declared type is checked, but only for a non-``None`` value;
+    * a declared enum is checked, likewise only for a non-``None`` value.
+
+    ``None`` is permitted for an optional field rather than treated as a type
+    error. That is the convention the hand-written validators already follow
+    independently — the credential schemas type-check with
+    ``v is not None and not isinstance(...)``, and the harness-usage schema
+    reads ``None`` on a required field as absent.
+
+    A schema declaring no fields enforces nothing here, so an undeclared
+    contract stays as permissive as it is today rather than rejecting
+    everything.
+    """
+    meta = getattr(schema, "_field_metadata", None) or {}
+    if not meta:
+        return
+    if not isinstance(payload, dict):
+        raise SchemaValidationError(
+            f"{schema.__name__}: payload must be a dict, "
+            f"got {type(payload).__name__}"
+        )
+    undeclared = sorted(set(payload) - set(meta))
+    if undeclared:
+        raise SchemaValidationError(
+            f"{schema.__name__}: undeclared field(s): {undeclared}"
+        )
+    for name, spec in meta.items():
+        present = name in payload
+        value = payload.get(name)
+        if spec.get("required") and (not present or value is None):
+            raise SchemaValidationError(
+                f"{schema.__name__}: missing required field {name!r}"
+            )
+        if not present or value is None:
+            continue
+        want = _JSON_TYPE_TO_PY.get(spec.get("type"))
+        if want is not None and not isinstance(value, want):
+            raise SchemaValidationError(
+                f"{schema.__name__}: {name!r} must be {spec['type']}, "
+                f"got {type(value).__name__}"
+            )
+        enum = spec.get("enum")
+        if enum and value not in enum:
+            raise SchemaValidationError(
+                f"{schema.__name__}: {name!r} must be one of {enum}, "
+                f"got {value!r}"
+            )
+
+
 def validate_payload(set_id: str, revision: int, payload: Any) -> None:
     """Validate *payload* against ``(set_id, revision)``.
+
+    Both the schema's own :meth:`validate` and its declared field metadata
+    must accept the payload. The schema's method runs FIRST so that where
+    both would reject, the caller sees the contract-specific message —
+    "kind=choice requires a non-empty 'choice'" rather than a generic
+    missing-field notice. Declared enforcement then catches what the
+    method did not check, which for a schema that never overrode
+    :meth:`validate` is everything.
 
     Raises ``SchemaValidationError`` if the schema is registered and rejects
     the payload, or if the schema is unknown.
@@ -969,6 +1055,7 @@ def validate_payload(set_id: str, revision: int, payload: Any) -> None:
             f"unknown schema: {schema_key(set_id, revision)}"
         )
     schema.validate(payload)
+    enforce_declared_fields(schema, payload)
 
 
 # ── Schema-as-Setting flush (auto-82xyq) ─────────────────────
