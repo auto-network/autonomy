@@ -384,6 +384,25 @@ def encrypt_root_key_v2(
     return "\n".join([ARMOR_BEGIN, *textwrap.wrap(b64, 64), ARMOR_END])
 
 
+#: The one purpose a recovery wrap is ever sealed for. The seal's own info
+#: binds it, so material sealed for anything else cannot open an armor.
+RECOVERY_ARMOR_PURPOSE = "autonomy/recovery-armor/v1"
+#: suite id (1) + X25519 encapsulated key (32) + ChaCha20-Poly1305 of a 32-byte
+#: master KEK (32 + 16 tag).
+_RECOVERY_SEAL_LEN = 1 + 32 + _MASTER_KEK_LEN + 16
+
+
+def _parse_recovery_factor(f: dict, index: int) -> None:
+    if set(f) != {"type", "kem_pub", "sealed"}:
+        raise ArmorError(
+            f"v2 recovery factor[{index}] must carry exactly "
+            "{type, kem_pub, sealed}"
+        )
+    if not isinstance(f["kem_pub"], str) or not _ROOT_PUB_RE.match(f["kem_pub"]):
+        raise ArmorError("v2 recovery factor kem_pub must be 64 lowercase hex chars")
+    _b64_field(f, "sealed", length=_RECOVERY_SEAL_LEN, what="recovery.sealed")
+
+
 def _parse_password_factor(f: dict, index: int) -> None:
     if set(f) != {"type", "kdf", "cipher", "iv", "wrap"}:
         raise ArmorError(
@@ -415,7 +434,10 @@ def _parse_password_factor(f: dict, index: int) -> None:
 # type (recovery, passkey) means adding its parser here — there is no path where
 # a registered type clears the membership check yet hits no field-closure, which
 # would reopen I1 at the exact growth point this envelope exists for.
-_FACTOR_PARSERS = {"password": _parse_password_factor}
+_FACTOR_PARSERS = {
+    "password": _parse_password_factor,
+    "recovery": _parse_recovery_factor,
+}
 #: Closed registry of factor types (unit 1); derived so it cannot drift from the
 #: parsers. recovery/passkey add a (type -> strict parser) entry above.
 _KNOWN_FACTOR_TYPES = frozenset(_FACTOR_PARSERS)
@@ -473,24 +495,186 @@ def decrypt_root_key_v2(armor: str, passphrase: str) -> KeyPair:
     password factor, then unseal the seed under the master KEK."""
     data = parse_armor_v2(armor)
     root_pub = data["root_pub"]
-    pw = next((f for f in data["factors"] if f["type"] == "password"), None)
-    if pw is None:
-        raise ArmorError("v2 armor has no password factor to open with a passphrase")
+    master_kek = _v2_master_kek(data, passphrase)
     try:
-        salt = base64.b64decode(pw["kdf"]["salt"], validate=True)
-        wrap_iv = base64.b64decode(pw["iv"], validate=True)
-        wrap = base64.b64decode(pw["wrap"], validate=True)
         seal_iv = base64.b64decode(data["kek_seal"]["iv"], validate=True)
         seal_ct = base64.b64decode(data["kek_seal"]["ct"], validate=True)
     except (binascii.Error, ValueError) as exc:
         raise ArmorError(f"v2 armor fields do not base64-decode: {exc}") from exc
-    pw_key = _derive_key(passphrase, salt, pw["kdf"]["iterations"])
-    try:
-        master_kek = AESGCM(pw_key).decrypt(
-            wrap_iv, wrap, _v2_factor_aad(root_pub, "password")
+    return _open_seed_under_master_kek(master_kek, seal_iv, seal_ct, root_pub)
+
+
+def _emit_v2(data: dict) -> str:
+    """Re-serialize a parsed v2 body as armor text (canonical, wrapped)."""
+    b64 = base64.b64encode(canonical_json(data)).decode("ascii")
+    return "\n".join([ARMOR_BEGIN, *textwrap.wrap(b64, 64), ARMOR_END])
+
+
+def add_recovery_factor(armor: str, passphrase: str, recovery_kem_pub: str) -> str:
+    """Enroll a recovery factor, knowing only the code's PUBLIC half.
+
+    The recovery code itself stays COLD: it never enters this process. Its
+    public encapsulation key is enough to seal the master KEK to it, which is
+    what makes the printed code able to open this armor ALONE later --- the
+    bearer principle. A recovery code that needed a surviving factor to work
+    would not be a recovery code.
+
+    *passphrase* is needed only to reach the master KEK being re-wrapped; the
+    seed is never re-sealed, so every existing factor keeps working unchanged.
+    """
+    if not isinstance(recovery_kem_pub, str) or not _ROOT_PUB_RE.match(recovery_kem_pub):
+        raise ArmorError("recovery_kem_pub must be 64 lowercase hex chars")
+    from .sealing import seal
+
+    data = parse_armor_v2(armor)
+    if any(f["type"] == "recovery" for f in data["factors"]):
+        raise ArmorError(
+            "this armor already carries a recovery factor; replacing one is a "
+            "rotation, not an addition"
         )
-    except InvalidTag as exc:
-        raise ArmorPassphraseError("v2 armor does not open with that passphrase") from exc
+    master_kek = _v2_master_kek(data, passphrase)
+    sealed = seal(master_kek, recovery_kem_pub, RECOVERY_ARMOR_PURPOSE)
+    if len(sealed) != _RECOVERY_SEAL_LEN:
+        raise ArmorError("sealed recovery wrap is not the expected length")
+    data["factors"] = [
+        *data["factors"],
+        {
+            "type": "recovery",
+            "kem_pub": recovery_kem_pub,
+            "sealed": base64.b64encode(sealed).decode("ascii"),
+        },
+    ]
+    return _emit_v2(parse_armor_v2(_emit_v2(data)))
+
+
+def decrypt_root_key_with_recovery(armor: str, recovery_code: bytes) -> KeyPair:
+    """Open a v2 armor with the printed recovery code ALONE.
+
+    This is the whole point of the code: you reach for it precisely when the
+    factor you normally use is gone, so nothing else may be required. The
+    code's KEK half reconstructs the private encapsulation key, which unseals
+    the master KEK, which unseals the identity.
+    """
+    from .recovery import derive_recovery_factors
+    from .sealing import derive_encapsulation_keypair
+    from .sealing import open as seal_open
+
+    data = parse_armor_v2(armor)
+    root_pub = data["root_pub"]
+    factor = next((f for f in data["factors"] if f["type"] == "recovery"), None)
+    if factor is None:
+        raise ArmorError(
+            "this armor carries no recovery factor; a recovery code cannot open it"
+        )
+    kek_seed = derive_recovery_factors(recovery_code)["kek_recovery_seed"]
+    private_hex, public_hex = derive_encapsulation_keypair(
+        kek_seed, RECOVERY_ARMOR_PURPOSE
+    )
+    if public_hex != factor["kem_pub"]:
+        raise ArmorPassphraseError(
+            "that recovery code does not match this armor's recovery factor"
+        )
+    try:
+        sealed = base64.b64decode(factor["sealed"], validate=True)
+        seal_iv = base64.b64decode(data["kek_seal"]["iv"], validate=True)
+        seal_ct = base64.b64decode(data["kek_seal"]["ct"], validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ArmorError(f"v2 armor fields do not base64-decode: {exc}") from exc
+    try:
+        master_kek = seal_open(sealed, private_hex, RECOVERY_ARMOR_PURPOSE)
+    except Exception as exc:
+        raise ArmorPassphraseError(
+            "the recovery factor does not open with that code"
+        ) from exc
+    return _open_seed_under_master_kek(master_kek, seal_iv, seal_ct, root_pub)
+
+
+def recover_and_reset_password(
+    armor: str,
+    recovery_code: bytes,
+    new_passphrase: str,
+    *,
+    iterations: int = DEFAULT_ITERATIONS,
+) -> str:
+    """Open with the recovery code and immediately re-establish the password.
+
+    You reach for a recovery code because a factor is GONE, so authenticating
+    is only half the job: an armor you can open only with the printed code has
+    simply moved the single point of failure. This re-wraps the master KEK
+    under a fresh password in the same act.
+
+    The seed is never re-sealed and the master KEK is unchanged, so the
+    recovery factor keeps working and the identity is untouched.
+
+    NOTE what this deliberately does NOT do: the previous armor file, with the
+    OLD password, still opens this identity for anyone holding a copy. Making
+    an old copy worthless is a ROOT ROTATION, not a factor reset --- they are
+    different operations and only one of them is forward secrecy.
+    """
+    if not (_MIN_ITERATIONS <= iterations <= _MAX_ITERATIONS):
+        raise ArmorError(
+            f"iterations must be in [{_MIN_ITERATIONS}, {_MAX_ITERATIONS}]"
+        )
+    from .recovery import derive_recovery_factors
+    from .sealing import derive_encapsulation_keypair
+    from .sealing import open as seal_open
+
+    data = parse_armor_v2(armor)
+    root_pub = data["root_pub"]
+    factor = next((f for f in data["factors"] if f["type"] == "recovery"), None)
+    if factor is None:
+        raise ArmorError(
+            "this armor carries no recovery factor; a recovery code cannot open it"
+        )
+    kek_seed = derive_recovery_factors(recovery_code)["kek_recovery_seed"]
+    private_hex, public_hex = derive_encapsulation_keypair(
+        kek_seed, RECOVERY_ARMOR_PURPOSE
+    )
+    if public_hex != factor["kem_pub"]:
+        raise ArmorPassphraseError(
+            "that recovery code does not match this armor's recovery factor"
+        )
+    try:
+        master_kek = seal_open(
+            base64.b64decode(factor["sealed"], validate=True),
+            private_hex,
+            RECOVERY_ARMOR_PURPOSE,
+        )
+    except Exception as exc:
+        raise ArmorPassphraseError(
+            "the recovery factor does not open with that code"
+        ) from exc
+
+    salt = os.urandom(_SALT_LEN)
+    wrap_iv = os.urandom(_IV_LEN)
+    pw_key = _derive_key(new_passphrase, salt, iterations)
+    wrap = AESGCM(pw_key).encrypt(
+        wrap_iv, master_kek, _v2_factor_aad(root_pub, "password")
+    )
+    password_factor = {
+        "type": "password",
+        "kdf": {
+            "name": "PBKDF2",
+            "hash": "SHA-256",
+            "iterations": iterations,
+            "salt": base64.b64encode(salt).decode("ascii"),
+        },
+        "cipher": "AES-256-GCM",
+        "iv": base64.b64encode(wrap_iv).decode("ascii"),
+        "wrap": base64.b64encode(wrap).decode("ascii"),
+    }
+    data["factors"] = [
+        password_factor if f["type"] == "password" else f for f in data["factors"]
+    ]
+    if not any(f["type"] == "password" for f in data["factors"]):
+        data["factors"] = [password_factor, *data["factors"]]
+    return _emit_v2(parse_armor_v2(_emit_v2(data)))
+
+
+def _open_seed_under_master_kek(
+    master_kek: bytes, seal_iv: bytes, seal_ct: bytes, root_pub: str
+) -> KeyPair:
+    """The last step every factor shares: master KEK -> seed -> identity."""
     try:
         seed = AESGCM(master_kek).decrypt(seal_iv, seal_ct, _v2_seal_aad(root_pub))
     except InvalidTag as exc:
@@ -501,6 +685,27 @@ def decrypt_root_key_v2(armor: str, passphrase: str) -> KeyPair:
     if key.public_hex != root_pub:
         raise MalformedError("v2 armor root_pub does not match the enclosed private key")
     return key
+
+
+def _v2_master_kek(data: dict, passphrase: str) -> bytes:
+    """The master KEK, unwrapped from the password factor of a parsed body."""
+    root_pub = data["root_pub"]
+    pw = next((f for f in data["factors"] if f["type"] == "password"), None)
+    if pw is None:
+        raise ArmorError("v2 armor has no password factor to open with a passphrase")
+    try:
+        salt = base64.b64decode(pw["kdf"]["salt"], validate=True)
+        wrap_iv = base64.b64decode(pw["iv"], validate=True)
+        wrap = base64.b64decode(pw["wrap"], validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ArmorError(f"v2 armor fields do not base64-decode: {exc}") from exc
+    pw_key = _derive_key(passphrase, salt, pw["kdf"]["iterations"])
+    try:
+        return AESGCM(pw_key).decrypt(
+            wrap_iv, wrap, _v2_factor_aad(root_pub, "password")
+        )
+    except InvalidTag as exc:
+        raise ArmorPassphraseError("v2 armor does not open with that passphrase") from exc
 
 
 # Version dispatch tables — a future v3 slots in here (parser, decryptor, and a
