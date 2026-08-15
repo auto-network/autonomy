@@ -56,9 +56,15 @@ def test_async_context(_mock_subprocess):
 
     async def _run():
         tmux_send_sync("test-session", "hello from async")
-        # The task is scheduled on the running loop — wait for the worker's
-        # asyncio.sleep(0.3) + asyncio.sleep(0.5) to complete
-        await asyncio.sleep(1.0)
+        # The paste/send runs on a background task (create_task) after the
+        # worker's asyncio.sleep(0.3)+asyncio.sleep(0.5). Poll until all five
+        # subprocess.run calls land rather than racing a fixed sleep: a fixed
+        # 1.0s margin over ~0.8s of work flakes under load (CPU contention in
+        # the full parallel run delays the task past the margin).
+        for _ in range(80):  # up to ~8s, well past the ~0.8s of real work
+            if len(_mock_subprocess.call_args_list) >= 5:
+                break
+            await asyncio.sleep(0.1)
 
     asyncio.run(_run())
 
