@@ -12,6 +12,7 @@ from typing import Any
 from tools.graph.schemas.registry import (
     SchemaValidationError,
     SettingSchema,
+    field,
 )
 
 
@@ -32,6 +33,18 @@ class DashboardPluginV1(SettingSchema):
 
     set_id = PLUGIN_SET_ID
     schema_revision = PLUGIN_SCHEMA_REVISION
+
+    enabled: bool = field(
+        required=True,
+        description="Whether the operator has this plugin switched on",
+    )
+    org: str = field(
+        required=False,
+        description=(
+            "Operator override of the manifest's declared install scope — "
+            "switches the plugin to a different org DB without a reinstall"
+        ),
+    )
 
     @classmethod
     def validate(cls, payload: Any) -> None:
@@ -68,6 +81,40 @@ class DashboardPluginOwnedSettingV1(SettingSchema):
 
     set_id = PLUGIN_OWNED_SETTING_SET_ID
     schema_revision = PLUGIN_OWNED_SETTING_SCHEMA_REVISION
+
+    # Declared as the legacy metadata dict rather than typed annotations:
+    # two of these payload fields are named `set_id` and `schema_revision`,
+    # which are the schema class's own reserved attributes. A typed
+    # annotation would shadow them and break registration, so the whole
+    # schema uses one mechanism rather than mixing two.
+    _field_metadata = {
+        "plugin_id": {"type": "string", "required": True,
+                      "description": "Owning plugin's id"},
+        "org": {"type": "string", "required": True,
+                "description": "Org DB the owned Setting was installed into"},
+        "set_id": {"type": "string", "required": True,
+                   "description": "set_id of the owned Setting"},
+        "schema_revision": {"type": "integer", "required": True,
+                            "description": "schema_revision of the owned Setting"},
+        "key": {"type": "string", "required": True,
+                "description": "Key of the owned Setting"},
+        "setting_id": {"type": "string", "required": True,
+                       "description": "Row id of the owned Setting"},
+        "status": {"type": "string", "required": True,
+                   "enum": ["managed", "drifted", "orphaned", "uninstalled"],
+                   "description": "Reconciliation state of the owned Setting"},
+        "plugin_payload_hash": {"type": "string", "required": True,
+                                "description": "Hash of the payload the manifest declares"},
+        "installed_payload_hash": {"type": "string", "required": True,
+                                   "description": "Hash of the payload as installed"},
+        "current_payload_hash": {"type": "string", "required": True,
+                                 "description": "Hash of the payload as it stands now"},
+        "resource": {"type": "string", "required": True,
+                     "description": "Manifest resource the declaration came from"},
+        "uninstall": {"type": "string", "required": True,
+                      "enum": ["deprecate_if_unchanged", "leave"],
+                      "description": "What to do with the owned Setting when the plugin is removed"},
+    }
 
     @classmethod
     def validate(cls, payload: Any) -> None:
