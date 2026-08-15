@@ -1464,19 +1464,11 @@ def answer_question(
     answered_at = time.time()
     conn = _get_conn(db_path)
     try:
-        # Answering closes the entry in the same act (see the closed_at
-        # note above and the backfill that assumes every answered row is
-        # closed): without setting closed_at here a freshly-answered
-        # question stays closed_at IS NULL and reopen_question — which
-        # gates on closed_at — refuses it, so a visitor could never push
-        # back on an answer they just received.
         cur = conn.execute(
             "UPDATE mission_conversation"
-            " SET answer = ?, answered_by_session = ?, answered_at = ?,"
-            "     closed_at = ?, closed_by = ?"
+            " SET answer = ?, answered_by_session = ?, answered_at = ?"
             " WHERE mission_id = ? AND entry_id = ?",
-            (answer, answered_by_session, answered_at,
-             answered_at, answered_by_session, mission_id, entry_id),
+            (answer, answered_by_session, answered_at, mission_id, entry_id),
         )
         conn.commit()
         if cur.rowcount == 0:
@@ -1684,7 +1676,12 @@ def reopen_question(
             "SELECT * FROM mission_conversation WHERE mission_id = ? AND entry_id = ?",
             (mission_id, entry_id),
         ).fetchone()
-        if not row or row["closed_at"] is None:
+        # Reopenable when there is something to reopen FROM: an answered
+        # entry (answering deliberately does NOT set closed_at — the
+        # conversation stays open, per the API contract) OR one explicitly
+        # closed. An entry that is neither answered nor closed has nothing
+        # to reopen and is refused.
+        if not row or (row["closed_at"] is None and row["answer"] is None):
             return None
         # Only when there was one. An entry closed because it stopped
         # mattering has no prior answer, and saying "Previous answer: None"
