@@ -759,6 +759,128 @@ def _seal_org_root_setting(slug: str, org_root, personal_seed: bytes) -> None:
     )
 
 
+#: What the org root signs to authorise re-sealing itself to a new recipient.
+#: A distinct domain, so this signature can never be mistaken for a ledger one.
+ORG_KEY_RESEAL_DOMAIN = b"autonomy.org-key.reseal.v1\n"
+
+
+def _validate_sealed_org_key_payload(sealed_payload: dict) -> None:
+    """Exact shape of a revision-2 sealed org key. Shared by store and reseal."""
+    from .schemas.network_identity import ORG_ROOT_ARMOR_PURPOSE
+
+    if not isinstance(sealed_payload, dict):
+        raise OrgError("sealed org-key payload must be an object")
+    required = ("root_pub", "sealed_root_key", "owner_kem_pub", "seal_purpose")
+    missing = [
+        k for k in required
+        if not isinstance(sealed_payload.get(k), str) or not sealed_payload.get(k)
+    ]
+    if missing:
+        raise OrgError(f"sealed org-key payload missing/empty fields: {missing}")
+    for k in ("root_pub", "sealed_root_key", "owner_kem_pub"):
+        try:
+            bytes.fromhex(sealed_payload[k])
+        except ValueError as e:
+            raise OrgError(f"sealed org-key field {k!r} must be hex") from e
+    if sealed_payload["seal_purpose"] != ORG_ROOT_ARMOR_PURPOSE:
+        raise OrgError(
+            f"seal_purpose must be {ORG_ROOT_ARMOR_PURPOSE!r}, "
+            f"got {sealed_payload['seal_purpose']!r}"
+        )
+
+
+def reseal_input(slug: str, sealed_payload: dict) -> bytes:
+    """The binding the org root signs to authorise a re-seal.
+
+    Bound to the org, the unchanged root, and the exact new recipient and
+    ciphertext, so an authorisation for one re-seal authorises no other.
+    """
+    from tools.network.idkit.canonical import canonical_json
+
+    return ORG_KEY_RESEAL_DOMAIN + canonical_json(
+        {
+            "slug": slug,
+            "root_pub": sealed_payload["root_pub"],
+            "owner_kem_pub": sealed_payload["owner_kem_pub"],
+            "sealed_root_key": sealed_payload["sealed_root_key"],
+        }
+    )
+
+
+def reseal_org_key(slug: str, sealed_payload: dict, signature_hex: str) -> None:
+    """Re-seal a FOUNDED org's root key to a new recipient (auto-t1nek).
+
+    When an owner rotates their personal root, every seal made to the old one
+    stops opening for them --- including their own organization's root key.
+    They are locked out of something they still own, and the thief who holds
+    the old personal root is not.
+
+    This is a RE-WRAP, not a replacement: the org root itself is unchanged, so
+    the ledger's commitment to it is untouched. That distinction is enforced
+    rather than trusted --- a payload naming a different ``root_pub`` is
+    refused, which is what keeps the founding-time lock meaningful.
+
+    The server cannot open the seal, so it cannot tell a genuine re-wrap from
+    a blob sealed to an attacker's key. Anyone could otherwise overwrite the
+    stored seal and lock the owner out for good. So the ORG ROOT signs the
+    exact new payload: only a caller who can already open the org root can
+    change who it opens for, which grants no power they did not have.
+    """
+    from tools.network.idkit.keys import verify_signature
+
+    _validate_sealed_org_key_payload(sealed_payload)
+    if get_org(slug) is None:
+        raise OrgNotFoundError(f"org does not exist: {slug}")
+
+    current = _current_sealed_org_key(slug)
+    if current is None:
+        raise OrgError(
+            f"org {slug} has no sealed root key to re-seal; store one first"
+        )
+    if sealed_payload["root_pub"] != current["root_pub"]:
+        raise OrgError(
+            "a re-seal may not change the org root key: this organization's "
+            f"ledger has committed to {current['root_pub'][:16]}...; replacing "
+            "the key itself is a ledger rotation, not a re-seal"
+        )
+    verify_signature(
+        current["root_pub"], signature_hex, reseal_input(slug, sealed_payload)
+    )
+
+    from . import settings_ops
+    from .schemas.network_identity import (
+        NETWORK_ORG_KEY_REVISION_2,
+        NETWORK_ORG_KEY_SET_ID,
+        ORG_ROOT_ARMOR_PURPOSE,
+    )
+
+    settings_ops.upsert_by_key(
+        NETWORK_ORG_KEY_SET_ID,
+        NETWORK_ORG_KEY_REVISION_2,
+        "default",
+        {
+            "root_pub": sealed_payload["root_pub"],
+            "sealed_root_key": sealed_payload["sealed_root_key"],
+            "owner_kem_pub": sealed_payload["owner_kem_pub"],
+            "seal_purpose": ORG_ROOT_ARMOR_PURPOSE,
+        },
+        org=slug,
+    )
+
+
+def _current_sealed_org_key(slug: str) -> dict | None:
+    """The org's stored revision-2 sealed root key payload, or None."""
+    from . import settings_ops
+    from .schemas.network_identity import NETWORK_ORG_KEY_SET_ID
+
+    members = list(settings_ops.read_owned_set(NETWORK_ORG_KEY_SET_ID, org=slug))
+    for member in members:
+        payload = member.payload
+        if isinstance(payload, dict) and "sealed_root_key" in payload:
+            return payload
+    return None
+
+
 def store_sealed_org_key(slug: str, sealed_payload: dict) -> None:
     """Persist an org root key SEALED IN THE BROWSER (I1) — the client-driven
     counterpart to :func:`_seal_org_root_setting`. The browser generates the org
@@ -783,25 +905,7 @@ def store_sealed_org_key(slug: str, sealed_payload: dict) -> None:
         ORG_ROOT_ARMOR_PURPOSE,
     )
 
-    if not isinstance(sealed_payload, dict):
-        raise OrgError("sealed org-key payload must be an object")
-    required = ("root_pub", "sealed_root_key", "owner_kem_pub", "seal_purpose")
-    missing = [
-        k for k in required
-        if not isinstance(sealed_payload.get(k), str) or not sealed_payload.get(k)
-    ]
-    if missing:
-        raise OrgError(f"sealed org-key payload missing/empty fields: {missing}")
-    for k in ("root_pub", "sealed_root_key", "owner_kem_pub"):
-        try:
-            bytes.fromhex(sealed_payload[k])
-        except ValueError as e:
-            raise OrgError(f"sealed org-key field {k!r} must be hex") from e
-    if sealed_payload["seal_purpose"] != ORG_ROOT_ARMOR_PURPOSE:
-        raise OrgError(
-            f"seal_purpose must be {ORG_ROOT_ARMOR_PURPOSE!r}, "
-            f"got {sealed_payload['seal_purpose']!r}"
-        )
+    _validate_sealed_org_key_payload(sealed_payload)
     if get_org(slug) is None:
         raise OrgNotFoundError(f"org shell does not exist: {slug}")
 
