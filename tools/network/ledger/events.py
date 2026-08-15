@@ -456,6 +456,18 @@ def _v_checkpoint(p: dict) -> None:
         raise SchemaError("checkpoint.signers must be sorted and free of duplicates")
 
 
+def _v_key_epoch(p: dict) -> None:
+    """A member marking a new key epoch (F-001).
+
+    Carries nothing but the persona it advances for. It has no authority
+    meaning at all -- its ONLY effect is that it exists, so that a credential
+    minted after it cites a frontier which strictly descends the incumbent's
+    instead of tying with it.
+    """
+    _require_fields(p, "key.epoch", frozenset({"persona"}))
+    _require_key(p["persona"], "key.epoch.persona")
+
+
 #: The closed authority vocabulary (L8). Nothing else enters the ledger.
 EVENT_TYPES = {
     "genesis": _v_genesis,
@@ -468,6 +480,7 @@ EVENT_TYPES = {
     "member.claim": _v_member_claim,
     "member.rekey": _v_member_rekey,
     "key.rotate": _v_key_rotate,
+    "key.epoch": _v_key_epoch,
     "checkpoint": _v_checkpoint,
 }
 
