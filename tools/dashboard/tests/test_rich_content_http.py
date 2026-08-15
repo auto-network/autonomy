@@ -22,11 +22,21 @@ def test_graph_db(tmp_path):
     import hashlib
     import shutil
 
-    db_path = tmp_path / "graph.db"
+    # The attachment/resolve handlers resolve through ops.get_attachment /
+    # resolve_source, which scan the org DBs under AUTONOMY_ORGS_DIR — a
+    # global GraphDB.__init__ patch never reaches that scan. Put the
+    # fixtures in a real org DB the scan finds: an "autonomy" org store in
+    # a tmp orgs tree that the test points AUTONOMY_ORGS_DIR at.
+    import os
     from tools.graph.db import GraphDB
     from tools.graph.models import Source, Thought, Attachment, new_id
 
-    db = GraphDB(db_path)
+    orgs_dir = tmp_path / "orgs"
+    orgs_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["AUTONOMY_ORGS_DIR"] = str(orgs_dir)
+    db_path = orgs_dir / "autonomy.db"
+    GraphDB.close_all_pooled()
+    db = GraphDB.create_org_db("autonomy", type_="shared", path=db_path)
 
     # ── Rich-content note ──
     rc_source = Source(
@@ -92,21 +102,10 @@ def test_graph_db(tmp_path):
 @pytest.fixture
 def test_client(test_graph_db, monkeypatch):
     """Create a test client with the test graph DB."""
-    db_path = test_graph_db["db_path"]
-
-    # Patch GraphDB to use our test DB
-    original_init = None
-    from tools.graph import db as graph_db_mod
-
-    original_init = graph_db_mod.GraphDB.__init__
-
-    def patched_init(self, db_path_arg=None, **kwargs):
-        original_init(self, db_path or db_path_arg, **kwargs)
-
-    monkeypatch.setattr(graph_db_mod.GraphDB, "__init__",
-                        lambda self, db_path_arg=None, **kw: original_init(self, db_path, **kw))
-
-    # Reload server to pick up patches
+    # Data lives in a real org DB under AUTONOMY_ORGS_DIR (set by the
+    # test_graph_db fixture), so the server's normal org-scan resolution
+    # finds it — no GraphDB monkeypatch needed. The autonomy org is the
+    # default the scan reaches.
     from tools.dashboard import server
     importlib.reload(server)
 
