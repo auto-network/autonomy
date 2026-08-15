@@ -1623,7 +1623,12 @@ def test_scan_all_worktrees_keeps_dirty_worktree_ff_eligible_when_commit_is_line
     assert row.rebase_required is False
 
 
-def test_scan_all_worktrees_lists_nested_untracked_files_individually(tmp_path, monkeypatch):
+def test_scan_all_worktrees_collapses_untracked_directories(tmp_path, monkeypatch):
+    # The scan uses git's `--untracked-files=normal`, which collapses an
+    # untracked directory to a single entry rather than exploding it into
+    # every file beneath (one node_modules/ row, not tens of thousands —
+    # see _worktree_dirty_files). In this minimal worktree nothing under
+    # tools/ is tracked, so git collapses the whole new tree to "tools/".
     session = "sess-untracked"
     worktrees_dir, _clone, worktree = _make_writable_session_worktree(
         tmp_path, session, monkeypatch,
@@ -1642,11 +1647,10 @@ def test_scan_all_worktrees_lists_nested_untracked_files_individually(tmp_path, 
 
     row = next(item for item in rows if item.session_name == session)
     assert row.is_dirty is False
-    assert sorted(file.path for file in row.dirty_files) == [
-        "tools/dashboard/static/vendor/highlightjs/LICENSE",
-        "tools/dashboard/static/vendor/highlightjs/github-dark.min.css",
-        "tools/dashboard/static/vendor/highlightjs/highlight.min.js",
-    ]
+    collapsed = [f for f in row.dirty_files if f.path == "tools/"]
+    assert len(collapsed) == 1 and collapsed[0].is_dir is True, (
+        f"expected one collapsed untracked 'tools/' entry, got "
+        f"{[f.path for f in row.dirty_files]}")
 
 
 def test_merge_session_worktree_fast_forwards_matching_checkout(tmp_path, monkeypatch):
