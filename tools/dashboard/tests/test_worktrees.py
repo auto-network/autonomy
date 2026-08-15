@@ -4293,6 +4293,15 @@ class TestWorktreeReviewBindings:
         monkeypatch.setattr(server, "get_session_worktree_integrated_diff", fake_detail)
         # The /api/worktrees stub bypass — we don't need monitor.refresh.
         monkeypatch.setattr(server.worktree_monitor, "get_all", lambda: [])
+        # The monitor's background _loop() (started by the TestClient lifespan)
+        # periodically calls refresh(), which REASSIGNS _source_control_cache to
+        # a freshly built dict and drops our primed ("auto-x", "autonomy") key.
+        # Alone the request beats the first refresh; under load the refresh fires
+        # first and this flakes. Neutralise the rebuild so the primed cache is
+        # stable regardless of timing.
+        async def _no_refresh():
+            return None
+        monkeypatch.setattr(server.worktree_monitor, "refresh", _no_refresh)
 
         resp = test_client.get("/api/worktrees/auto-x/autonomy/pr-diff")
         assert resp.status_code == 200
@@ -4329,6 +4338,12 @@ class TestWorktreeReviewBindings:
         }
         server.worktree_monitor._source_control_cache[("auto-y", "autonomy")] = snapshot
         monkeypatch.setattr(server.worktree_monitor, "get_all", lambda: [])
+        # Same race as test_pr_diff_endpoint_uses_binding_base_sha_when_present:
+        # the background refresh() rebuilds and reassigns _source_control_cache,
+        # dropping the primed ("auto-y", "autonomy") key under load. No-op it.
+        async def _no_refresh():
+            return None
+        monkeypatch.setattr(server.worktree_monitor, "refresh", _no_refresh)
 
         # Patch the integrated_diff entry-point's directory resolution to
         # land in our scratch worktree.
