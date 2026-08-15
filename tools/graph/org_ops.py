@@ -755,7 +755,13 @@ def _seal_org_root_setting(slug: str, org_root, personal_seed: bytes) -> None:
             "seal_purpose": ORG_ROOT_ARMOR_PURPOSE,
         },
         org=slug,
-        state="canonical",
+        # raw keeps the sealed root key off the cross-org read-through
+        # surface: published/canonical rows are what peer orgs compose
+        # against, so a canonical org key is readable by every subscribing
+        # org. Every reader of this set uses read_owned_set (peers=[]),
+        # which returns all states from the owning DB, so raw costs them
+        # nothing. Matches the sibling writers, which already default raw.
+        state="raw",
     )
 
 
