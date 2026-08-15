@@ -349,7 +349,9 @@ def _process_inline_content(content: list[dict[str, Any]]) -> str:
     return "".join(parts)
 
 
-def process_ticket(raw_data: dict[str, Any]) -> dict[str, Any]:
+def process_ticket(raw_data: dict[str, Any],
+                   story_points_field_id: str = "customfield_10016",
+                   ) -> dict[str, Any]:
     """Reduce a raw issue GET to the fields an agent needs, ADF -> markdown."""
     fields = raw_data.get("fields", {})
 
@@ -387,7 +389,7 @@ def process_ticket(raw_data: dict[str, Any]) -> dict[str, Any]:
     else:
         ticket["sprint"] = []
 
-    ticket["story_points"] = fields.get("customfield_10016")
+    ticket["story_points"] = fields.get(story_points_field_id)
 
     acceptance_criteria_adf = fields.get("customfield_10017")
     ticket["acceptance_criteria"] = (

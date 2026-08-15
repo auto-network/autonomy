@@ -24,6 +24,7 @@
             "jira-query",
             "jira-transition",
             "jira-change-type",
+            "jira-points",
             "jira-comment",
             "jira-confirm-plan",
             "jira-update",

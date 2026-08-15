@@ -18,6 +18,10 @@ outcome or the decline).
 - `jira-update KEY --field Description -f body.md` — set rich-text or
   structured fields by display name; invalid names list all valid fields
   *(operator approval)*
+- `jira-points KEY VALUE [--board ID]` — set the board's Story Points estimate,
+  including when the field is absent from the issue edit screen
+  *(operator approval)*
+  `jira-update KEY --field 'Story Points' --value VALUE` delegates here too.
 - ENTERPRISE's “Developer” requirement is the `Assignee` field.
 - `jira-create payload.json` — create a ticket *(operator approval)*
 - `jira-attach KEY FILE` — upload an attachment *(operator approval)*

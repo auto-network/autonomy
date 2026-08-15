@@ -114,6 +114,56 @@ def test_jira_update_invalid_field_fails_before_approval(tmp_path):
     assert "/api/approvals" not in calls
 
 
+def test_jira_update_story_points_delegates_to_estimation_command(tmp_path):
+    """The generic command accepts the operator's original --value form."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "curl.log"
+    curl = bin_dir / "curl"
+    curl.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$*\" >> \"$FAKE_CURL_LOG\"\n"
+        "case \"$*\" in\n"
+        "  *'/api/jira/estimation/'*)\n"
+        "    printf '%s\\n' '{\"board_id\":42,\"field_id\":\"customfield_10106\",\"value\":null}' ;;\n"
+        "  *'wait=55'*)\n"
+        "    printf '%s\\n' '{\"result\":{\"approved\":true,\"execution\":{\"ok\":true,\"value\":\"2.0\"}}}' ;;\n"
+        "  *'wait=0'*)\n"
+        "    printf '%s\\n' '{\"result\":{\"approved\":true,\"execution\":{\"ok\":true,\"value\":\"2.0\"}}}' ;;\n"
+        "  *'/api/approvals'*)\n"
+        "    printf '%s\\n' '{\"id\":\"apr-1\"}' ;;\n"
+        "esac\n"
+    )
+    curl.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "FAKE_CURL_LOG": str(log),
+        "GRAPH_ORG": "anchore",
+        "AUTONOMY_SESSION": "auto-test",
+    }
+    result = subprocess.run(
+        [
+            str(CAPABILITY_DIR / "tools" / "jira-update"),
+            "ENTERPRISE-8917",
+            "--field",
+            "Story Points",
+            "--value",
+            "2",
+        ],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert '"value": "2.0"' in result.stdout
+    calls = log.read_text()
+    assert "/api/jira/estimation/ENTERPRISE-8917" in calls
+    assert "/api/approvals" in calls
+    assert "/api/jira/fields/" not in calls
+
+
 # ── ADF conversion ──
 
 
@@ -213,6 +263,24 @@ def jira_env(tmp_path, monkeypatch):
 
 def _mock(monkeypatch, handler):
     monkeypatch.setattr(api, "_transport", httpx.MockTransport(handler))
+
+
+_STORY_POINTS_FIELDS = {"values": [
+    {
+        "id": "customfield_10016",
+        "name": "Story point estimate",
+        "untranslatedName": "Story point estimate",
+        "clauseNames": ["Story point estimate", "cf[10016]"],
+        "schema": {"type": "number"},
+    },
+    {
+        "id": "customfield_10106",
+        "name": "Story Points",
+        "untranslatedName": "Story Points",
+        "clauseNames": ["Story Points", "Story Points[Number]", "cf[10106]"],
+        "schema": {"type": "number"},
+    },
+]}
 
 
 def _stub_install_setting(monkeypatch, payload):
@@ -338,6 +406,67 @@ def test_set_editable_field_resolves_user_account_id(jira_env, monkeypatch):
         "fields": {"customfield_9": {"accountId": "jeremy-account"}},
     }
     assert out == {"field_id": "customfield_9"}
+
+
+def test_read_ticket_discovers_classic_story_points_field(jira_env, monkeypatch):
+    """The team-managed estimate field must not mask classic Story Points."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/rest/api/3/field/search":
+            assert request.url.params["query"] == "Story Points"
+            return httpx.Response(200, json=_STORY_POINTS_FIELDS)
+        return httpx.Response(200, json={
+            "key": "ENT-1",
+            "fields": {
+                "summary": "s",
+                "customfield_10016": None,
+                "customfield_10106": 8,
+            },
+        })
+
+    _mock(monkeypatch, handler)
+    out = api.read_ticket(api.JiraConfig.resolve(), "ENT-1")
+    assert out["story_points"] == 8
+
+
+def test_set_story_points_uses_off_screen_board_estimation_api(jira_env, monkeypatch):
+    """Story Points need not be present in editmeta or on the edit screen."""
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, dict(request.url.params)))
+        if request.url.path == "/rest/api/3/field/search":
+            return httpx.Response(200, json=_STORY_POINTS_FIELDS)
+        if request.url.path == "/rest/api/3/issue/ENT-1":
+            return httpx.Response(200, json={
+                "fields": {"project": {"key": "ENT"}},
+            })
+        if request.url.path == "/rest/agile/1.0/board":
+            assert request.url.params["projectKeyOrId"] == "ENT"
+            return httpx.Response(200, json={
+                "isLast": True,
+                "values": [{"id": 42, "name": "Enterprise Scrum"}],
+            })
+        if request.url.path == "/rest/agile/1.0/issue/ENT-1/estimation":
+            assert request.url.params["boardId"] == "42"
+            if request.method == "GET":
+                return httpx.Response(200, json={
+                    "fieldId": "customfield_10106", "value": "3.0",
+                })
+            assert json.loads(request.content) == {"value": "8"}
+            return httpx.Response(200, json={
+                "fieldId": "customfield_10106", "value": "8.0",
+            })
+        raise AssertionError(f"unexpected Jira call: {request.method} {request.url}")
+
+    _mock(monkeypatch, handler)
+    out = api.set_story_points(api.JiraConfig.resolve(), "ENT-1", "8")
+    assert out == {
+        "board_id": 42,
+        "field_id": "customfield_10106",
+        "value": "8.0",
+    }
+    assert ("PUT", "/rest/agile/1.0/issue/ENT-1/estimation",
+            {"boardId": "42"}) in seen
 
 
 def test_comment_sends_adf_and_shapes_response(jira_env, monkeypatch):
@@ -565,6 +694,8 @@ def test_search_issues_posts_jql_and_shapes_rows(jira_env, monkeypatch):
     seen = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/rest/api/3/field/search":
+            return httpx.Response(200, json=_STORY_POINTS_FIELDS)
         seen["method"] = request.method
         seen["path"] = request.url.path
         seen["body"] = json.loads(request.content)
@@ -574,7 +705,7 @@ def test_search_issues_posts_jql_and_shapes_rows(jira_env, monkeypatch):
                 "priority": {"name": "P2"}, "assignee": None,
                 "fixVersions": [{"name": "Enterprise 6.1.0"}],
                 "customfield_10020": [{"name": "Sprint 42"}],
-                "customfield_10016": 3, "updated": "2026-07-01"}}],
+                "customfield_10106": 3, "updated": "2026-07-01"}}],
             "nextPageToken": "tok123"})
 
     _mock(monkeypatch, handler)
@@ -594,6 +725,8 @@ def test_search_issues_posts_jql_and_shapes_rows(jira_env, monkeypatch):
 
 def test_search_issues_paginates_by_token(jira_env, monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/rest/api/3/field/search":
+            return httpx.Response(200, json=_STORY_POINTS_FIELDS)
         assert json.loads(request.content)["nextPageToken"] == "tok123"
         return httpx.Response(200, json={"issues": []})
 
@@ -862,6 +995,8 @@ def _app():
 
 def test_read_route(jira_env, monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/rest/api/3/field/search":
+            return httpx.Response(200, json=_STORY_POINTS_FIELDS)
         return httpx.Response(200, json={
             "key": "ENT-1",
             "fields": {"summary": "s", "status": {"name": "Open"},
@@ -905,6 +1040,8 @@ def test_search_route_runs_jql_read_only(jira_env, monkeypatch):
     """POST /api/jira/search is a read route like /api/jira/issue — no
     approval rendezvous, the search runs host-side immediately."""
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/rest/api/3/field/search":
+            return httpx.Response(200, json=_STORY_POINTS_FIELDS)
         assert json.loads(request.content)["jql"] == 'status = "Pending RC"'
         return httpx.Response(200, json={"issues": [
             {"key": "ENT-1", "fields": {"summary": "s"}}]})
@@ -971,6 +1108,8 @@ def test_named_query_run_route_resolves_and_searches(jira_env, monkeypatch,
     ran = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/rest/api/3/field/search":
+            return httpx.Response(200, json=_STORY_POINTS_FIELDS)
         ran["jql"] = json.loads(request.content)["jql"]
         return httpx.Response(200, json={"issues": [
             {"key": "ENT-2", "fields": {"summary": "s"}}]})
@@ -1031,6 +1170,8 @@ def test_named_query_session_query_param_is_ignored(jira_env, monkeypatch,
     ran = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/rest/api/3/field/search":
+            return httpx.Response(200, json=_STORY_POINTS_FIELDS)
         ran["jql"] = json.loads(request.content)["jql"]
         return httpx.Response(200, json={"issues": []})
 
@@ -1279,6 +1420,57 @@ def test_jira_write_set_field_coerces_structured_value(jira_env, monkeypatch):
     asyncio.run(scenario())
     assert posted["body"] == {
         "fields": {"fixVersions": [{"name": "Enterprise 6.2.0"}]},
+    }
+
+
+def test_jira_write_story_points_uses_approval_executor(jira_env, monkeypatch):
+    """The dedicated estimation write remains behind the shared approval gate."""
+    called = {}
+
+    def fake_set_story_points(cfg, key, value, board_id=None):
+        called.update(key=key, value=value, board_id=board_id)
+        return {
+            "board_id": int(board_id),
+            "field_id": "customfield_10106",
+            "value": "5.0",
+        }
+
+    monkeypatch.setattr(api, "set_story_points", fake_set_story_points)
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=_app())
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://t") as c:
+            response = await c.post("/api/approvals", json={
+                "kind": "jira_write",
+                "session": "auto-1",
+                "request": {
+                    "op": "set_story_points",
+                    "key": "ENTERPRISE-8917",
+                    "value": "5",
+                    "board_id": 42,
+                },
+            })
+            request_id = response.json()["id"]
+            await c.post(
+                f"/api/approvals/{request_id}/decision",
+                json={"approved": True},
+            )
+            result = (
+                await c.get(f"/api/approvals/{request_id}?wait=10")
+            ).json()["result"]
+            assert result["execution"] == {
+                "ok": True,
+                "board_id": 42,
+                "field_id": "customfield_10106",
+                "value": "5.0",
+            }
+
+    asyncio.run(scenario())
+    assert called == {
+        "key": "ENTERPRISE-8917",
+        "value": "5",
+        "board_id": 42,
     }
 
 

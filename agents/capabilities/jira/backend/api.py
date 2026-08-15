@@ -9,8 +9,9 @@ Every rich-text value written (comments, descriptions, textarea custom fields)
 is converted markdown -> ADF first: Jira Cloud requires an ADF document even
 for custom fields whose editmeta schema claims ``string``/textarea — a plain
 string is rejected with 400 "Operation value must be an Atlassian Document".
-Custom-field ids are discovered per issue via editmeta, never hardcoded (ids
-vary per instance/project).
+Custom-field ids are discovered from Jira metadata, never hardcoded (ids vary
+per instance/project). Existing-ticket fields use editmeta; board estimation
+uses field metadata plus the Jira Software board configuration.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable
 
@@ -108,20 +110,75 @@ def _check(resp: httpx.Response, what: str) -> None:
         raise JiraError(f"{what} failed (HTTP {resp.status_code}): {detail}")
 
 
+def story_points_field(cfg: JiraConfig) -> dict[str, Any]:
+    """Return this Jira site's classic ``Story Points`` numeric field.
+
+    Jira Cloud can expose both the company-managed ``Story Points`` field and
+    the team-managed ``Story point estimate`` field.  Their ids are allocated
+    per site, so neither may be hardcoded.  Prefer the exact classic field
+    name (and its untranslated equivalent) and reject ambiguity instead of
+    silently reporting the other estimation field.
+    """
+    with _client(cfg) as c:
+        resp = c.get(
+            "/rest/api/3/field/search",
+            params={"type": "custom", "query": "Story Points", "maxResults": 100},
+        )
+        _check(resp, "discover Story Points field")
+        fields = resp.json().get("values") or []
+
+    def is_classic(field: dict[str, Any]) -> bool:
+        schema = field.get("schema") or {}
+        names = (field.get("name"), field.get("untranslatedName"))
+        clauses = field.get("clauseNames") or []
+        return schema.get("type") == "number" and (
+            any(
+                str(name or "").strip().casefold() == "story points"
+                for name in names
+            )
+            or any(
+                str(clause or "").strip().casefold() in {
+                    "story points", "story points[number]"
+                }
+                for clause in clauses
+            )
+        )
+
+    matches = [
+        field for field in fields
+        if isinstance(field, dict) and is_classic(field)
+    ]
+    if len(matches) == 1 and matches[0].get("id"):
+        return matches[0]
+    if not matches:
+        available = ", ".join(
+            f"{field.get('name')} ({field.get('id')})"
+            for field in fields if isinstance(field, dict)
+        ) or "none"
+        raise JiraError(
+            "Jira has no unambiguous numeric field named 'Story Points'. "
+            f"Matching fields returned by Jira: {available}"
+        )
+    choices = ", ".join(
+        f"{field.get('name')} ({field.get('id')})" for field in matches
+    )
+    raise JiraError(f"Jira has multiple fields named 'Story Points': {choices}")
+
+
 def read_ticket(cfg: JiraConfig, key: str) -> dict[str, Any]:
     """The cleaned ticket (ADF already converted to markdown)."""
+    points_field_id = story_points_field(cfg)["id"]
     with _client(cfg) as c:
         resp = c.get(f"/rest/api/3/issue/{key}")
         _check(resp, f"read {key}")
-        return adf.process_ticket(resp.json())
+        return adf.process_ticket(resp.json(), story_points_field_id=points_field_id)
 
 
-# Terse row fields for search results. The two customfield ids mirror
-# process_ticket's sprint/story-points mapping for this instance.
+# Terse row fields for search results. Sprint remains an instance-local field
+# for the current installation; Story Points is discovered per Jira site.
 _SEARCH_FIELDS = [
     "summary", "status", "assignee", "priority", "fixVersions", "updated",
     "customfield_10020",   # sprint
-    "customfield_10016",   # story points
 ]
 
 
@@ -135,10 +192,11 @@ def search_issues(cfg: JiraConfig, jql: str, max_results: int = 50,
     ``next_page_token`` in the result is ``None`` on the last page,
     otherwise pass it back in as *page_token* for the next page.
     """
+    points_field_id = story_points_field(cfg)["id"]
     payload: dict[str, Any] = {
         "jql": jql,
         "maxResults": max(1, min(int(max_results), 100)),
-        "fields": _SEARCH_FIELDS,
+        "fields": [*_SEARCH_FIELDS, points_field_id],
     }
     if page_token:
         payload["nextPageToken"] = page_token
@@ -159,10 +217,125 @@ def search_issues(cfg: JiraConfig, jql: str, max_results: int = 50,
             "fix_versions": [v.get("name") for v in (f.get("fixVersions") or [])],
             "sprint": [s.get("name") for s in sprint_data
                        if isinstance(s, dict)] if isinstance(sprint_data, list) else [],
-            "story_points": f.get("customfield_10016"),
+            "story_points": f.get(points_field_id),
             "updated": f.get("updated"),
         })
     return {"items": items, "next_page_token": body.get("nextPageToken")}
+
+
+def _issue_project_key(cfg: JiraConfig, key: str) -> str:
+    with _client(cfg) as c:
+        resp = c.get(f"/rest/api/3/issue/{key}", params={"fields": "project"})
+        _check(resp, f"read {key} project")
+    project = ((resp.json().get("fields") or {}).get("project") or {}).get("key")
+    if not project:
+        raise JiraError(f"Jira did not return a project for {key}")
+    return str(project)
+
+
+def _project_boards(cfg: JiraConfig, project: str) -> list[dict[str, Any]]:
+    """All visible boards associated with *project*, following pagination."""
+    boards: list[dict[str, Any]] = []
+    start_at = 0
+    with _client(cfg) as c:
+        while True:
+            resp = c.get(
+                "/rest/agile/1.0/board",
+                params={
+                    "projectKeyOrId": project,
+                    "startAt": start_at,
+                    "maxResults": 50,
+                },
+            )
+            _check(resp, f"list boards for {project}")
+            body = resp.json()
+            page = [
+                row for row in (body.get("values") or [])
+                if isinstance(row, dict)
+            ]
+            boards.extend(page)
+            if body.get("isLast", True) or not page:
+                break
+            start_at += len(page)
+    return boards
+
+
+def estimation_context(cfg: JiraConfig, key: str,
+                       board_id: int | str | None = None) -> dict[str, Any]:
+    """Resolve the board and off-screen field used to estimate *key*.
+
+    The Jira Software estimation API requires a board id.  With no explicit
+    board, use the issue's project boards and select one configured with the
+    site's classic Story Points field. Multiple boards are safe when they all
+    target that same field.
+    """
+    points_field = story_points_field(cfg)
+    project = _issue_project_key(cfg, key)
+    boards = ([{"id": int(board_id), "name": str(board_id)}]
+              if board_id is not None else _project_boards(cfg, project))
+    if not boards:
+        raise JiraError(f"no visible Jira Software board is associated with {project}")
+
+    candidates: list[dict[str, Any]] = []
+    with _client(cfg) as c:
+        for board in boards:
+            candidate_id = board.get("id")
+            if candidate_id is None:
+                continue
+            resp = c.get(
+                f"/rest/agile/1.0/issue/{key}/estimation",
+                params={"boardId": candidate_id},
+            )
+            if resp.status_code >= 300:
+                if board_id is not None:
+                    _check(resp, f"read {key} estimation for board {candidate_id}")
+                continue
+            estimation = resp.json()
+            if estimation.get("fieldId") == points_field["id"]:
+                candidates.append({
+                    "board_id": int(candidate_id),
+                    "board_name": board.get("name"),
+                    "field_id": estimation.get("fieldId"),
+                    "field_name": points_field.get("name"),
+                    "project": project,
+                    "value": estimation.get("value"),
+                })
+
+    if not candidates:
+        suffix = f" on board {board_id}" if board_id is not None else ""
+        raise JiraError(
+            f"no Story Points estimation configuration was found for {key}{suffix}"
+        )
+    return candidates[0]
+
+
+def set_story_points(cfg: JiraConfig, key: str, value: str,
+                     board_id: int | str | None = None) -> dict[str, Any]:
+    """Set *key*'s board estimate even when the field is off the edit screen."""
+    raw_value = str(value).strip()
+    try:
+        numeric = Decimal(raw_value)
+    except InvalidOperation:
+        raise JiraError(f"story points must be a number, got {raw_value!r}")
+    if not numeric.is_finite() or numeric < 0:
+        raise JiraError(
+            "story points must be a finite non-negative number, "
+            f"got {raw_value!r}"
+        )
+    context = estimation_context(cfg, key, board_id=board_id)
+    with _client(cfg) as c:
+        resp = c.put(
+            f"/rest/agile/1.0/issue/{key}/estimation",
+            params={"boardId": context["board_id"]},
+            json={"value": raw_value},
+        )
+        _check(resp, f"set Story Points on {key}")
+        body = resp.json()
+    return {
+        "board_id": context["board_id"],
+        "field_id": body.get("fieldId") or context["field_id"],
+        "value": body.get("value", raw_value),
+    }
 
 
 def createmeta(cfg: JiraConfig, project: str, issuetype: str,

@@ -61,6 +61,7 @@ jira-confirm-plan ENTERPRISE-8385 -f plan.md    # sets the Confirm Plan field
 jira-update ENTERPRISE-8385 --field Description -f body.md   # rich text or structured value
 jira-update ENTERPRISE-8385 --field 'Fix versions' -f version.txt
 jira-update ENTERPRISE-8385 --field Assignee -f assignee.txt
+jira-points ENTERPRISE-8917 3                  # works even when points are off-screen
 jira-create payload.json                        # create a ticket
 jira-attach ENTERPRISE-8385 repro.log           # upload an attachment (10MB cap)
 jira-transition ENTERPRISE-8385 'Code Review'   # move through a workflow transition
@@ -89,6 +90,22 @@ first. It reads the issue's live edit metadata and shows exact display names,
 field ids, schema types, and allowed values without requiring approval.
 
 `jira-confirm-plan` remains the idiomatic shortcut for Confirm Plan.
+
+### Story points
+
+`jira-read` and `jira-search` discover the Jira site's numeric **Story Points**
+field by metadata rather than assuming a custom-field id. This intentionally
+distinguishes the classic `Story Points` field from the separate team-managed
+`Story point estimate` field.
+
+Set points with `jira-points KEY VALUE`. It resolves the issue's project board
+and the board's configured estimation field during a read-only preflight, then
+uses Jira Software's estimation endpoint after operator approval. That endpoint
+works when Story Points is absent from `jira-fields` because the field is not
+on the issue edit screen. `jira-update KEY --field 'Story Points' --value VALUE`
+delegates to the same path for callers already using the generic update command.
+Pass `--board ID` to `jira-points` when a project has multiple boards and the
+default board is not the intended one.
 
 ### Changing the issue type
 
