@@ -568,7 +568,7 @@ def _update_readonly_clone(clone: Path, *, git_timeout: int = 600) -> None:
     the clone stays on a detached HEAD and never conflicts with worktrees.
     """
     _run_git(
-        ["checkout", "--detach", _repo_integration_base_ref(clone)],
+        ["checkout", "--force", "--detach", _repo_integration_base_ref(clone)],
         cwd=clone,
         timeout=git_timeout,
     )
