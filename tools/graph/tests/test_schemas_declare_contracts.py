@@ -88,3 +88,27 @@ def test_declared_types_are_recognised(registered_schemas):
         if spec.get("type") not in known
     ]
     assert not bad, "unrecognised declared type(s):\n  " + "\n  ".join(bad)
+
+
+def test_every_declared_field_has_a_description(registered_schemas):
+    """A declared field is a published contract; this is where it says what it means.
+
+    It appears in ``graph set schema``, in the exported JSON schema and in the
+    generated TypeScript, and the description is the only thing there telling a
+    reader what the field is for. A field name is rarely self-explanatory to
+    someone who did not write it.
+
+    Asserted here rather than raised from ``field()`` for the same reason as the
+    check above: a throwaway schema in a test publishes no contract, and
+    enforcing at construction breaks those without protecting anything shipped.
+    """
+    undescribed = [
+        f"{set_id}#{revision} {name}"
+        for set_id, revision, cls in registered_schemas
+        for name, spec in (getattr(cls, "_field_metadata", None) or {}).items()
+        if not str(spec.get("description") or "").strip()
+    ]
+    assert not undescribed, (
+        "these declared fields state no meaning, so nothing that renders the "
+        "schema can explain them:\n  " + "\n  ".join(undescribed)
+    )

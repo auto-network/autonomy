@@ -168,26 +168,83 @@ class CommitPolicyV1(SettingSchema):
 
     workspace_id: str = field(required=False, description="Workspace id this row targets")
     repo_slug: str = field(required=False, description="Canonical repo slug this row targets")
-    repo_aliases: list = field(required=False, default_factory=list)
-    applies_to: str = field(required=False, enum=["org", "workspace", "repo"])
+    repo_aliases: list = field(
+        required=False, default_factory=list,
+        description="Other slugs that resolve to this same repository",
+    )
+    applies_to: str = field(
+        required=False, enum=["org", "workspace", "repo"],
+        description="Scope this row governs — an org, one workspace, or one repository",
+    )
     profile: str = field(required=False, description="Named built-in profile")
-    override_mode: str = field(required=False, default="none", enum=list(OVERRIDE_MODES))
-    commit_destination: str = field(required=False, enum=list(COMMIT_DESTINATIONS))
-    branch_mode: str = field(required=False, enum=list(BRANCH_MODES))
-    visibility: str = field(required=False, enum=list(VISIBILITIES))
-    push_requirement: str = field(required=False, enum=list(PUSH_REQUIREMENTS))
-    review_integration: str = field(required=False, enum=list(REVIEW_INTEGRATIONS))
-    signature_requirement: str = field(required=False, enum=list(SIGNATURE_REQUIREMENTS))
-    signing_boundary: str = field(required=False, enum=list(SIGNING_BOUNDARIES))
-    provider_credential_boundary: str = field(required=False, enum=list(CREDENTIAL_BOUNDARIES))
-    ref_update_permissions: str = field(required=False, enum=list(REF_UPDATE_PERMISSIONS))
-    reviewer_audience: list = field(required=False, default_factory=list)
-    author_policy: dict = field(required=False, default_factory=dict)
-    watch_policy: dict = field(required=False, default_factory=dict)
-    issue_linkage: dict = field(required=False, default_factory=dict)
-    operation_overrides: dict = field(required=False, default_factory=dict)
-    coherence_version: str = field(required=False)
-    notes: str = field(required=False)
+    override_mode: str = field(
+        required=False, default="none", enum=list(OVERRIDE_MODES),
+        description="Whether and how a narrower row may override this one",
+    )
+    commit_destination: str = field(
+        required=False, enum=list(COMMIT_DESTINATIONS),
+        description="How far a commit travels: local only, an integration branch, shared across the workspace, or the origin remote",
+    )
+    branch_mode: str = field(
+        required=False, enum=list(BRANCH_MODES),
+        description="Which branch work lands on — the current one, a new topic branch, or the managed session branch",
+    )
+    visibility: str = field(
+        required=False, enum=list(VISIBILITIES),
+        description="Who can see the resulting commits: local only, workspace-shared, or published to origin",
+    )
+    push_requirement: str = field(
+        required=False, enum=list(PUSH_REQUIREMENTS),
+        description="Whether pushing is forbidden, optional and manual, or required",
+    )
+    review_integration: str = field(
+        required=False, enum=list(REVIEW_INTEGRATIONS),
+        description="Whether a pull request is skipped, optional, or required and watched",
+    )
+    signature_requirement: str = field(
+        required=False, enum=list(SIGNATURE_REQUIREMENTS),
+        description="What must sign a commit — nothing, a sign-off trailer, or a GPG signature",
+    )
+    signing_boundary: str = field(
+        required=False, enum=list(SIGNING_BOUNDARIES),
+        description="Where signing happens: nowhere, mediated by the broker, or requiring the human to hold the key locally",
+    )
+    provider_credential_boundary: str = field(
+        required=False, enum=list(CREDENTIAL_BOUNDARIES),
+        description="How provider credentials may be reached — not at all, via a proxy, or only through the broker",
+    )
+    ref_update_permissions: str = field(
+        required=False, enum=list(REF_UPDATE_PERMISSIONS),
+        description="What ref updates are allowed: direct to the target, fast-forward only, or protected branches refused",
+    )
+    reviewer_audience: list = field(
+        required=False, default_factory=list,
+        description="Who reviews work produced under this policy",
+    )
+    author_policy: dict = field(
+        required=False, default_factory=dict,
+        description="Rules for how the commit author is set",
+    )
+    watch_policy: dict = field(
+        required=False, default_factory=dict,
+        description="Rules for watching a pull request through to completion",
+    )
+    issue_linkage: dict = field(
+        required=False, default_factory=dict,
+        description="Rules tying commits to issue-tracker records",
+    )
+    operation_overrides: dict = field(
+        required=False, default_factory=dict,
+        description="Per-operation exceptions to the dimensions above",
+    )
+    coherence_version: str = field(
+        required=False,
+        description="Version stamp of the dimension vocabulary this row was written against",
+    )
+    notes: str = field(
+        required=False,
+        description="Free text explaining why this policy is as it is",
+    )
 
     @classmethod
     def validate(cls, payload: Any) -> None:
@@ -225,14 +282,38 @@ class OperationPolicyV1(SettingSchema):
     set_id = OPERATION_POLICY_SET_ID
     schema_revision = OPERATION_POLICY_REVISION
 
-    contract: str = field(required=True)
-    operation: str = field(required=True)
-    allowed_execution_classes: list = field(required=False, default_factory=list)
-    approval_required: bool = field(required=False, default=False)
-    credential_boundary: str = field(required=False, enum=list(CREDENTIAL_BOUNDARIES))
-    audit_level: str = field(required=False, default="standard", enum=list(AUDIT_LEVELS))
-    input_redaction_rules: list = field(required=False, default_factory=list)
-    output_redaction_rules: list = field(required=False, default_factory=list)
+    contract: str = field(
+        required=True,
+        description='Capability contract the operation belongs to, e.g. "link"',
+    )
+    operation: str = field(
+        required=True,
+        description='Operation within that contract; contract and operation join into the class string policy and prompts name, e.g. "link.publish"',
+    )
+    allowed_execution_classes: list = field(
+        required=False, default_factory=list,
+        description="Execution classes permitted to perform this operation",
+    )
+    approval_required: bool = field(
+        required=False, default=False,
+        description="Whether a human must approve each invocation",
+    )
+    credential_boundary: str = field(
+        required=False, enum=list(CREDENTIAL_BOUNDARIES),
+        description="How provider credentials may be reached for this operation — not at all, via a proxy, or only through the broker",
+    )
+    audit_level: str = field(
+        required=False, default="standard", enum=list(AUDIT_LEVELS),
+        description="How much of each invocation is recorded: minimal, standard, or full",
+    )
+    input_redaction_rules: list = field(
+        required=False, default_factory=list,
+        description="What to strip from the recorded input before it is stored",
+    )
+    output_redaction_rules: list = field(
+        required=False, default_factory=list,
+        description="What to strip from the recorded output before it is stored",
+    )
     mode: str = field(
         required=False,
         enum=list(LINK_OPERATION_MODES),
@@ -245,7 +326,10 @@ class OperationPolicyV1(SettingSchema):
             "a missing delegation hop, spec §8)."
         ),
     )
-    notes: str = field(required=False)
+    notes: str = field(
+        required=False,
+        description="Free text explaining why this operation policy is as it is",
+    )
 
     @classmethod
     def validate(cls, payload: Any) -> None:
