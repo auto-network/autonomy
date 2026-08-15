@@ -869,15 +869,49 @@ def reseal_org_key(slug: str, sealed_payload: dict, signature_hex: str) -> None:
 
 
 def _current_sealed_org_key(slug: str) -> dict | None:
-    """The org's stored revision-2 sealed root key payload, or None."""
-    from . import settings_ops
-    from .schemas.network_identity import NETWORK_ORG_KEY_SET_ID
+    """The org's stored revision-2 sealed root key payload, or None.
 
-    members = list(settings_ops.read_owned_set(NETWORK_ORG_KEY_SET_ID, org=slug))
+    Asks for revision 2 rather than inspecting payloads to work out which
+    revision a row is. Both revisions live under the same key -- the stored-row
+    uniqueness constraint is ``(set_id, schema_revision, key,
+    publication_state)``, so no key can separate them -- and a revision-1 row
+    has no upconvert path to 2 by design (``NetworkOrgKeyV2``), so targeting the
+    revision drops it as ``no_upconvert_path`` rather than reshaping it. That
+    absence of an upconvert chain is exactly what makes revision-targeting the
+    right selector here.
+
+    Do NOT generalise this to every reader of the set: only a caller with a
+    revision-specific intent should target one. ``get_org_key`` deliberately
+    serves either generation to the browser (auto-05tom), and the create-time
+    existence check and the ``root_pub`` match are both revision-agnostic.
+
+    KNOWN SUBSTRATE DEFECT, not fixed here. When a revision-1 row and a
+    revision-2 row both exist under this key, resolution collapses to one row
+    and revision 1 wins, so the sealed key is unreachable: untargeted reads
+    return revision 1, and ``target_revision=2`` drops revision 1 as
+    ``no_upconvert_path`` and returns nothing. Payload inspection does not help
+    either -- the revision-2 payload is never in the result set to inspect --
+    so this function returned ``None`` in that case before this change too.
+    The consequence is that ``store_sealed_org_key`` refuses a re-seal for
+    exactly the organizations that have one, which is the revision-1-to-2
+    retrofit path. Reproduction:
+    ``/workspace/output/repro-org-key-revision-collapse.py``. Owned by the
+    settings substrate, not by this module.
+    """
+    from . import settings_ops
+    from .schemas.network_identity import (
+        NETWORK_ORG_KEY_REVISION_2,
+        NETWORK_ORG_KEY_SET_ID,
+    )
+
+    members = list(settings_ops.read_owned_set(
+        NETWORK_ORG_KEY_SET_ID,
+        org=slug,
+        target_revision=NETWORK_ORG_KEY_REVISION_2,
+    ))
     for member in members:
-        payload = member.payload
-        if isinstance(payload, dict) and "sealed_root_key" in payload:
-            return payload
+        if isinstance(member.payload, dict):
+            return member.payload
     return None
 
 
