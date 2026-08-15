@@ -22,6 +22,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from starlette.routing import Route
 
+from tools.dashboard import api_auth
 from tools.dashboard.dao import mission_control_db as db
 from tools.dashboard.plugins.mission_control import compose
 from tools.dashboard.event_bus import event_bus
@@ -209,6 +210,10 @@ async def set_mission_status(request: Request) -> JSONResponse:
 
 
 async def delete_mission(request: Request) -> JSONResponse:
+    auth_error = api_auth.require_global_api_authority(request)
+    if auth_error is not None:
+        return auth_error
+
     mission_id = request.path_params["mission_id"]
     deleted = db.delete_mission(mission_id)
     if not deleted:
@@ -526,6 +531,10 @@ async def set_pillar_last_done(request: Request) -> JSONResponse:
 
 
 async def delete_pillar(request: Request) -> JSONResponse:
+    auth_error = api_auth.require_global_api_authority(request)
+    if auth_error is not None:
+        return auth_error
+
     pillar_id = request.path_params["pillar_id"]
     deleted = db.delete_pillar(pillar_id)
     if not deleted:
@@ -719,6 +728,10 @@ async def create_visitor_token(request: Request) -> JSONResponse:
     share link. No dashboard UI: the operator is a human handing links
     to other humans, but minting is still an API action, same call made
     on missions and site revisions."""
+    auth_error = api_auth.require_global_api_authority(request)
+    if auth_error is not None:
+        return auth_error
+
     body = await request.json()
     display_name = (body.get("display_name") or "").strip()
     if not display_name:
