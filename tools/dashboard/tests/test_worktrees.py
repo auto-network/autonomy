@@ -3807,8 +3807,11 @@ def isolated_settings_db(monkeypatch, tmp_path):
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs))
     monkeypatch.delenv("GRAPH_DB", raising=False)
     GraphDB.close_all_pooled()
-    GraphDB.create_org_db("autonomy").close()
     db_path = orgs / "autonomy.db"
+    # The module's autouse org-DB seeder may have already created this in
+    # the same tree; create only when absent so the two don't collide.
+    if not db_path.exists():
+        GraphDB.create_org_db("autonomy").close()
     yield db_path
 
 
