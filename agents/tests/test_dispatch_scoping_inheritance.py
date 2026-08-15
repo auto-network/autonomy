@@ -341,7 +341,12 @@ class TestLaunchSessionMetaAndEnv:
         completed = _completed_process(stdout="fake-container-id\n")
 
         def fake_run(cmd, **kwargs):
-            if cmd and cmd[0] == "docker":
+            # `docker image inspect` is a read-only metadata call the launcher
+            # makes to bake harness versions into meta — not a launch command,
+            # and capturing it would shift captured_run[0] off the docker run.
+            if (cmd and cmd[0] == "docker"
+                    and not (len(cmd) > 2 and cmd[1] == "image"
+                             and cmd[2] == "inspect")):
                 calls.append(cmd)
             return completed
 
