@@ -642,6 +642,47 @@ def add_recovery_factor(armor: str, passphrase: str, recovery_kem_pub: str) -> s
     return _emit_v2(parse_armor_v2(_emit_v2(data)))
 
 
+def remove_factor(armor: str, passphrase: str, factor_type: str) -> str:
+    """Drop a lock from this armor.
+
+    Authorised by the passphrase, which is what makes this different from
+    someone editing the file: changing the set re-seals the seed, and that
+    needs the master KEK. The last lock can never be removed --- an armor
+    with no way in is not a safer armor, it is a destroyed identity.
+
+    WHAT THIS DOES NOT ACHIEVE, and it matters: dropping a weak lock does
+    not reach the copies of this file that already exist. Anyone holding an
+    older copy still has the weak lock and the identity behind it. Removing
+    a factor is only a real strengthening if the identity is ROTATED too ---
+    see :mod:`tools.network.idkit.root_rotation`. On its own it is
+    housekeeping, not security.
+    """
+    data = parse_armor_v2(armor)
+    if factor_type not in _FACTOR_PARSERS:
+        raise ArmorError(
+            f"unknown factor type {factor_type!r}; this armor knows "
+            f"{sorted(_FACTOR_PARSERS)}"
+        )
+    if not any(f["type"] == factor_type for f in data["factors"]):
+        raise ArmorError(f"this armor carries no {factor_type!r} factor to remove")
+    remaining = [f for f in data["factors"] if f["type"] != factor_type]
+    if not remaining:
+        raise ArmorError(
+            "refusing to remove the last factor: an armor nothing can open is "
+            "a destroyed identity, not a hardened one"
+        )
+    master_kek = _v2_master_kek(data, passphrase)
+    previous_factors = list(data["factors"])
+    data["factors"] = remaining
+    _reseal_to_factor_set(data, master_kek, previous_factors)
+    return _emit_v2(parse_armor_v2(_emit_v2(data)))
+
+
+def armor_factor_types(armor: str) -> list:
+    """Which locks this armor carries, in declaration order."""
+    return [f["type"] for f in parse_armor_v2(armor)["factors"]]
+
+
 def decrypt_root_key_with_recovery(armor: str, recovery_code: bytes) -> KeyPair:
     """Open a v2 armor with the printed recovery code ALONE.
 

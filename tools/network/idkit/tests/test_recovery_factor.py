@@ -271,3 +271,82 @@ def test_a_factor_type_with_no_commitment_is_refused():
 
     with pytest.raises(ArmorError, match="no set commitment"):
         _factor_commitment([{"type": "future-thing"}])
+
+
+# ── US-6: changing which locks you use ────────────────────────────────────
+
+
+def test_a_lock_can_be_removed_by_someone_who_can_open_the_armor():
+    key, armor, code = enrolled()
+    from tools.network.idkit.armor import armor_factor_types, remove_factor
+
+    assert armor_factor_types(armor) == ["password", "recovery"]
+    dropped = remove_factor(armor, PASSWORD, "recovery")
+    assert armor_factor_types(dropped) == ["password"]
+    # Still the same identity, still openable the remaining way.
+    assert decrypt_root_key_v2(dropped, PASSWORD).public_hex == key.public_hex
+    # And the dropped lock really is gone.
+    with pytest.raises(ArmorError, match="no recovery factor"):
+        decrypt_root_key_with_recovery(dropped, code)
+
+
+def test_the_last_lock_cannot_be_removed():
+    """An armor nothing opens is a destroyed identity, not a hardened one."""
+    from tools.network.idkit.armor import remove_factor
+
+    key = KeyPair.generate()
+    armor = encrypt_root_key_v2(key, PASSWORD, iterations=ITERS)
+    with pytest.raises(ArmorError, match="last factor"):
+        remove_factor(armor, PASSWORD, "password")
+
+
+def test_removing_a_lock_needs_the_authority_to_open_it():
+    from tools.network.idkit.armor import remove_factor
+
+    _key, armor, _code = enrolled()
+    with pytest.raises(ArmorPassphraseError):
+        remove_factor(armor, "not-the-passphrase", "recovery")
+
+
+def test_removing_a_lock_that_is_not_there_is_refused():
+    from tools.network.idkit.armor import remove_factor
+
+    key = KeyPair.generate()
+    armor = encrypt_root_key_v2(key, PASSWORD, iterations=ITERS)
+    with pytest.raises(ArmorError, match="no 'recovery' factor"):
+        remove_factor(armor, PASSWORD, "recovery")
+
+
+def test_removing_an_unknown_factor_type_is_refused():
+    from tools.network.idkit.armor import remove_factor
+
+    _key, armor, _code = enrolled()
+    with pytest.raises(ArmorError, match="unknown factor type"):
+        remove_factor(armor, PASSWORD, "backdoor")
+
+
+def test_the_armor_left_behind_still_opens_with_the_lock_you_dropped():
+    """The honest limit of dropping a weak lock, pinned so nobody assumes more.
+
+    Removing a factor does not reach copies that already exist. Only rotating
+    the identity makes those worthless.
+    """
+    key, armor, code = enrolled()
+    from tools.network.idkit.armor import remove_factor
+
+    remove_factor(armor, PASSWORD, "recovery")
+    # The ORIGINAL file is untouched and its recovery lock still works.
+    assert decrypt_root_key_with_recovery(armor, code).public_hex == key.public_hex
+
+
+def test_a_removed_lock_can_be_added_again():
+    """Changing your locks is reversible; it is housekeeping, not a ratchet."""
+    from tools.network.idkit.armor import armor_factor_types, remove_factor
+
+    key, armor, code = enrolled()
+    dropped = remove_factor(armor, PASSWORD, "recovery")
+    seed = recovery.derive_recovery_factors(code)["kek_recovery_seed"]
+    _, kem_pub = derive_encapsulation_keypair(seed, RECOVERY_ARMOR_PURPOSE)
+    restored = add_recovery_factor(dropped, PASSWORD, kem_pub)
+    assert armor_factor_types(restored) == ["password", "recovery"]
+    assert decrypt_root_key_with_recovery(restored, code).public_hex == key.public_hex
