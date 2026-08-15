@@ -92,6 +92,7 @@ R_RECOVERY_CONTINUITY_MISSING = "recovery-continuity-missing"
 R_BAD_RECOVERY_CONTINUITY = "bad-recovery-continuity"
 R_RECOVERY_NOT_DECLARED = "recovery-continuity-not-declared"
 R_CHECKPOINT_UNAUTHORIZED = "checkpoint-unauthorized"
+R_KEY_EPOCH_UNAUTHORIZED = "key-epoch-unauthorized"
 
 INVITE_LIVE = "live"
 INVITE_CLAIMED = "claimed"
@@ -853,6 +854,38 @@ class _Folder:
         self.rotations[event.event_id] = _Rotation(
             id=event.event_id, old_pub=p["old_pub"], new_pub=p["new_pub"]
         )
+        return None
+
+    def _h_key_epoch(self, event, ctx) -> Optional[str]:
+        """Mark a new key epoch, and change nothing else (F-001).
+
+        A re-key that cites the same authority frontier as the credential it
+        replaces does not supersede it: neither strictly descends the other,
+        so both stay current and the winner is the greater ``kem_key_id`` --
+        a hash, with no notion of recency. Against a fixed incumbent that
+        happens to hash high, a re-key can therefore lose EVERY time, and
+        every new grant keeps going to the credential a removed machine still
+        holds. Contraction writes a ledger event and escapes this by itself;
+        disenrollment and opportunistic refresh write nothing, so they need
+        something to advance the frontier. This is that something.
+
+        It is deliberately INERT: it grants nothing, revokes nothing, and
+        touches no authority state, so it can never appear in the state
+        fingerprint. Its whole contribution is causal -- it exists, so what
+        follows it descends it.
+
+        Self-only, like a rekey: a member may mark an epoch for their own
+        persona, and the root may do it for a member. Otherwise the ledger
+        would accept epoch markers from strangers, which buys them nothing
+        but costs everyone the append volume.
+        """
+        p = event.payload
+        members, _ = self.members_at(ctx)
+        if p["persona"] not in members:
+            return R_UNKNOWN_PERSONA
+        current = members[p["persona"]][2]
+        if event.author_key != current and event.author_key != self.root_at(ctx):
+            return R_KEY_EPOCH_UNAUTHORIZED
         return None
 
     def _h_checkpoint(self, event, ctx) -> Optional[str]:
