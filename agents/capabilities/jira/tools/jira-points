@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Usage: jira-points ISSUE_KEY VALUE [--board BOARD_ID]
+# Sets the Jira Software board estimate through the off-screen-safe Agile API.
+# The write is staged for operator approval and blocks until decided.
+set -uo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/_jira_lib.sh"
+
+KEY="${1:-}"
+VALUE="${2:-}"
+[ -n "$KEY" ] && [ -n "$VALUE" ] \
+  || jira_fail "usage: jira-points ISSUE_KEY VALUE [--board BOARD_ID]"
+shift 2
+
+BOARD_ID=""
+if [ "${1:-}" = "--board" ]; then
+  [ -n "${2:-}" ] || jira_fail "jira-points: --board needs a numeric board id"
+  BOARD_ID="$2"
+  shift 2
+fi
+[ "$#" -eq 0 ] || jira_fail "usage: jira-points ISSUE_KEY VALUE [--board BOARD_ID]"
+case "$BOARD_ID" in
+  ""|*[!0-9]*) [ -z "$BOARD_ID" ] || jira_fail "jira-points: --board must be numeric" ;;
+esac
+
+# Resolve the project board and verify that it uses the site's classic Story
+# Points field before creating an approval request.
+context_file="$(mktemp)"; req_file="$(mktemp)"
+trap 'rm -f "$context_file" "$req_file"' EXIT
+query="org=$ORG"
+[ -z "$BOARD_ID" ] || query="$query&board_id=$BOARD_ID"
+curl -sk "$DASH/api/jira/estimation/$KEY?$query" > "$context_file"
+python3 - "$context_file" <<'PY' || exit 1
+import json, sys
+try:
+    body = json.load(open(sys.argv[1]))
+except Exception as exc:
+    sys.exit(f"jira: invalid estimation preflight response: {exc}")
+if body.get("error"):
+    sys.exit("jira: " + str(body["error"]))
+for required in ("board_id", "field_id"):
+    if body.get(required) is None:
+        sys.exit("jira: estimation preflight did not return " + required)
+PY
+
+python3 - "$SESSION" "$KEY" "$VALUE" "$ORG" "$context_file" > "$req_file" <<'PY'
+import json, sys
+session, key, value, org, context_path = sys.argv[1:6]
+context = json.load(open(context_path))
+print(json.dumps({"kind": "jira_write", "session": session, "request": {
+    "op": "set_story_points", "key": key, "org": org,
+    "value": value, "board_id": context["board_id"],
+    "field_id": context["field_id"], "previous_value": context.get("value"),
+}}))
+PY
+jira_approval_wait "$req_file"

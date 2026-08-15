@@ -18,6 +18,8 @@ result. Ops carried in the request JSON:
   display name or id, values as CLI strings — coerced per schema host-side)
 - ``{"op": "change_type", "key", "issue_type"}`` (Jira's "Move": target name
   resolved to the project-scoped id host-side; sub-task conversions rejected)
+- ``{"op": "set_story_points", "key", "value", "board_id"?}`` (uses Jira
+  Software's estimation endpoint so the field need not be on the edit screen)
 """
 
 from __future__ import annotations
@@ -134,6 +136,18 @@ async def get_issue_types(request: Request) -> JSONResponse:
         out = await asyncio.to_thread(
             api.list_issue_types, _cfg(_org(request)), key)
     except api.JiraError as e:
+        return JSONResponse({"error": str(e)}, status_code=502)
+    return JSONResponse(out)
+
+
+async def get_estimation(request: Request) -> JSONResponse:
+    """GET /api/jira/estimation/{key} -> board, field, and current value."""
+    key = request.path_params["key"]
+    board_id = request.query_params.get("board_id") or None
+    try:
+        out = await asyncio.to_thread(
+            api.estimation_context, _cfg(_org(request)), key, board_id)
+    except (api.JiraError, ValueError) as e:
         return JSONResponse({"error": str(e)}, status_code=502)
     return JSONResponse(out)
 
@@ -319,6 +333,9 @@ async def _execute_jira_write(row: dict, _decision: dict) -> dict:
         elif op == "change_type":
             out = api.change_issue_type(cfg, req["key"],
                                         req.get("issue_type", ""))
+        elif op == "set_story_points":
+            out = api.set_story_points(
+                cfg, req["key"], req.get("value", ""), req.get("board_id"))
         elif op == "attach":
             out = api.add_attachment(
                 cfg, req["key"], req.get("filename", "attachment"),
@@ -341,6 +358,7 @@ ROUTES = [
     Route("/api/jira/attachment/{id}", get_attachment, methods=["GET"]),
     Route("/api/jira/transitions/{key}", get_transitions, methods=["GET"]),
     Route("/api/jira/issue-types/{key}", get_issue_types, methods=["GET"]),
+    Route("/api/jira/estimation/{key}", get_estimation, methods=["GET"]),
     Route("/api/jira/search", post_search, methods=["POST"]),
     Route("/api/jira/query", list_named_queries, methods=["GET"]),
     Route("/api/jira/query/{name}", run_named_query, methods=["GET"]),

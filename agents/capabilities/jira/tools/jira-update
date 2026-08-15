@@ -20,6 +20,23 @@ if [ "${1:-}" = "--field" ]; then
 fi
 [ -n "$FIELD" ] || jira_fail "jira-update: --field NAME is required (e.g. --field Description)"
 
+# Story Points commonly lives off the issue edit screen, so Jira omits it from
+# editmeta. Preserve the familiar jira-update surface (including --value) by
+# delegating to the board-estimation command before the editmeta preflight.
+case "${FIELD,,}" in
+  "story points"|"story point")
+    if [ "${1:-}" = "--value" ]; then
+      [ -n "${2:-}" ] || jira_fail "jira-update: --value needs a story-points value"
+      POINTS_VALUE="$2"; shift 2
+    else
+      POINTS_VALUE="$(jira_read_body "$@")"
+      shift "$#"
+    fi
+    [ -n "$POINTS_VALUE" ] || jira_fail "jira-update: empty Story Points value"
+    exec "$(dirname "${BASH_SOURCE[0]}")/jira-points" "$KEY" "$POINTS_VALUE"
+    ;;
+esac
+
 # Read-only preflight before staging approval. A typo used to reach editmeta
 # only after approval, leaving a junk failed-write audit row. Validate against
 # the same authoritative field list that powers jira-fields instead.
