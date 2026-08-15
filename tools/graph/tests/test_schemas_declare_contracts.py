@@ -246,3 +246,134 @@ def test_no_new_schema_repeats_its_own_key_in_the_payload(registered_schemas):
         "payload repeats a key segment; the key is already returned with the "
         "row:\n  " + "\n  ".join(unexpected)
     )
+
+# Schemas registered before ``home`` existed, and not yet put through the
+# decision.
+#
+# Which database a Setting lives in is not something to leave to whichever
+# org a caller happened to pass: the operator's own store holds their
+# identity and their credentials, an organization's store is what federates,
+# and a value in the wrong one is either invisible to everyone who needs it
+# or visible to everyone who should not have it.
+#
+# Every entry here is a set_id whose home nobody has stated yet. Deciding one
+# is a re-home, not an edit: the declaration has to match where the rows
+# actually are, or the assertion in the resolver starts refusing live reads.
+# So they are listed rather than skipped -- the debt is countable, it shrinks
+# by one line per set_id decided, and a NEW schema still cannot be registered
+# without saying.
+_HOME_UNDECLARED_GRANDFATHERED = {
+    "autonomy.artifact-path",
+    "autonomy.capability.contract",
+    "autonomy.capability.impl",
+    "autonomy.capability.operation_policy",
+    "autonomy.commit.policy",
+    "autonomy.commit.signing-key",
+    "autonomy.harness.bootstrap",
+    "autonomy.identity.passkey",
+    "autonomy.identity.personal",
+    "autonomy.network.binding",
+    "autonomy.network.ledger-projection",
+    "autonomy.network.ledger-state",
+    "autonomy.network.link-grant",
+    "autonomy.network.org-key",
+    "autonomy.network.persona",
+    "autonomy.network.serve-cert",
+    "autonomy.org",
+    "autonomy.org.bootstrap-allowlist",
+    "autonomy.org.capability.install",
+    "autonomy.org.capability.primer",
+    "autonomy.org.peer-subscription",
+    "autonomy.org.primer",
+    "autonomy.secure.setting",
+    "autonomy.source_control.review_state",
+    "autonomy.workspace",
+    "autonomy.workspace.artifact",
+    "autonomy.workspace.capability.enable",
+    "autonomy.workspace.mount",
+    "autonomy.workspace.primer",
+    "autonomy.workspace.turn_correction",
+    "autonomy.worktree.review_binding",
+    "dashboard.activity.ask",
+    "dashboard.activity.ask_refresh",
+    "dashboard.activity.ask_vote",
+    "dashboard.activity.operator_dismissed",
+    "dashboard.agent-actions",
+    "dashboard.capability.host_install_state",
+    "dashboard.claude.credentials",
+    "dashboard.claude.setup_tokens",
+    "dashboard.codex.credentials",
+    "dashboard.coordinator",
+    "dashboard.coordinator-bead",
+    "dashboard.coordinator-canvas",
+    "dashboard.coordinator-convergent-decision",
+    "dashboard.coordinator-decision",
+    "dashboard.coordinator-docs",
+    "dashboard.coordinator-open-followup",
+    "dashboard.coordinator-sprint",
+    "dashboard.coordinator-thread",
+    "dashboard.coordinator-tile",
+    "dashboard.feature_flags",
+    "dashboard.harness.usage",
+    "dashboard.nexus.scene",
+    "dashboard.nexus.tile",
+    "dashboard.operator-message-to-coordinator",
+    "dashboard.operator.activity",
+    "dashboard.plugin",
+    "dashboard.plugin-owned-setting",
+    "dashboard.presentation.deck",
+    "dashboard.session.crosstalk.worktree.rebase",
+    "dashboard.session.orientation",
+    "dashboard.session.upload",
+    "dashboard.session.worktree.rebase_status",
+    "dashboard.surface.ping",
+    "dashboard.surface.presence",
+    "dashboard.voice.transcription",
+    "dashboard.worktree.terminal_fire",
+    "dashboard.worktree.watch",
+}
+
+
+def test_a_new_schema_states_which_database_it_lives_in(registered_schemas):
+    """The one thing a Setting cannot be silent about is where it is.
+
+    Not defaulted, because there is no answer that is right often enough to
+    be worth guessing: getting it wrong in one direction hides a value from
+    everyone who needs it, and in the other direction shows it to everyone
+    who should not have it.
+    """
+    from tools.graph.schemas.registry import declared_home
+
+    undeclared = sorted(
+        {
+            set_id
+            for set_id, _revision, _cls in registered_schemas
+            if declared_home(set_id) is None
+            and set_id not in _HOME_UNDECLARED_GRANDFATHERED
+        }
+    )
+    assert not undeclared, (
+        "these schemas do not say which database they live in; add "
+        "``@home(...)`` above the access-pattern decorator:\n  "
+        + "\n  ".join(undeclared)
+    )
+
+
+def test_the_grandfathered_list_does_not_outlive_its_entries(registered_schemas):
+    """A set_id that HAS been decided must be struck from the list.
+
+    Otherwise the list stops measuring anything: it would keep counting
+    settled schemas as debt, and the number would never come down even as
+    the work got done.
+    """
+    from tools.graph.schemas.registry import declared_home
+
+    settled = sorted(
+        set_id
+        for set_id in _HOME_UNDECLARED_GRANDFATHERED
+        if declared_home(set_id) is not None
+    )
+    assert not settled, (
+        "these now declare a home and must be removed from "
+        "_HOME_UNDECLARED_GRANDFATHERED:\n  " + "\n  ".join(settled)
+    )
