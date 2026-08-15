@@ -26,18 +26,35 @@ COORD_SPRINT_SET_ID = "dashboard.coordinator-sprint"
 
 @pytest.fixture
 def isolated_db():
+    # Hermetic per-org tree, not a GRAPH_DB pin: a pin collapses every org
+    # to one file and conflicts with the fail-loud resolver's explicit-org
+    # reads. Seeds write at CALLER_ORG and the migration reads at org=None;
+    # with no GRAPH_ORG both resolve to the personal store and align.
+    from tools.graph.db import GraphDB
     with tempfile.TemporaryDirectory() as tmp:
-        db_path = os.path.join(tmp, "drop-age-min.db")
-        old_db = os.environ.get("GRAPH_DB")
-        os.environ["GRAPH_DB"] = db_path
+        orgs = os.path.join(tmp, "orgs")
+        os.makedirs(orgs, exist_ok=True)
+        saved = {k: os.environ.get(k) for k in ("GRAPH_DB", "AUTONOMY_ORGS_DIR", "GRAPH_ORG")}
+        os.environ.pop("GRAPH_DB", None)
+        os.environ.pop("GRAPH_ORG", None)
+        os.environ["AUTONOMY_ORGS_DIR"] = orgs
+        GraphDB.close_all_pooled()
+        for slug, kind in (("autonomy", "shared"), ("personal", "personal")):
+            GraphDB.create_org_db(slug, type_=kind,
+                                  path=os.path.join(orgs, f"{slug}.db")).close()
+        GraphDB.close_all_pooled()
         importlib.import_module(
             "tools.dashboard.plugins.coordinator_board.entrypoints.schemas"
         )
-        yield db_path
-        if old_db is None:
-            os.environ.pop("GRAPH_DB", None)
-        else:
-            os.environ["GRAPH_DB"] = old_db
+        try:
+            yield os.path.join(orgs, "personal.db")
+        finally:
+            GraphDB.close_all_pooled()
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
 
 class TestDropLegacyAgeMin:

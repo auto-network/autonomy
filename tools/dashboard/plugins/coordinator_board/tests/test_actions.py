@@ -73,12 +73,27 @@ def _isolate_schema_registry():
 
 @pytest.fixture
 def graph_db_env(tmp_path, monkeypatch):
-    """Pin GRAPH_DB to a fresh tmp file for the test's duration."""
-    db_path = tmp_path / "graph.db"
-    monkeypatch.setenv("GRAPH_DB", str(db_path))
+    """Hermetic per-org tree for coordinator-board action tests.
+
+    A GRAPH_DB pin collapses every org to one file and, under the
+    fail-loud resolver, conflicts with the explicit-org reads these
+    actions make. Use the orgs tree: no pin, both org DBs created, no
+    GRAPH_ORG override so the seeds' CALLER_ORG writes and org=None reads
+    both resolve to the personal store.
+    """
+    from tools.graph.db import GraphDB
+    orgs = tmp_path / "orgs"
+    orgs.mkdir()
+    monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.delenv("GRAPH_API", raising=False)
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs))
     monkeypatch.delenv("GRAPH_ORG", raising=False)
-    yield db_path
+    GraphDB.close_all_pooled()
+    for slug, kind in (("autonomy", "shared"), ("personal", "personal")):
+        GraphDB.create_org_db(slug, type_=kind, path=orgs / f"{slug}.db").close()
+    GraphDB.close_all_pooled()
+    yield orgs / "personal.db"
+    GraphDB.close_all_pooled()
 
 
 @pytest.fixture
@@ -228,7 +243,7 @@ async def test_operator_message_routes_to_coordinator(
     ops.add_setting(
         COORDINATOR_SET_ID, 1, "default",
         {"session_id": "auto-coord-9"},
-        org=ops.CALLER_ORG,
+        org="autonomy",  # actions read the binding at COORDINATOR_ORG
     )
 
     await actions.operator_message(row, services_capture)
@@ -435,7 +450,7 @@ async def test_dispatch_operator_message_routes_to_bound_coordinator(
     ops.add_setting(
         COORDINATOR_SET_ID, 1, "default",
         {"session_id": "auto-bound-coord"},
-        org=ops.CALLER_ORG,
+        org="autonomy",  # actions read the binding at COORDINATOR_ORG
     )
     ops.add_setting(
         OPERATOR_MESSAGE_SET_ID, 1,
