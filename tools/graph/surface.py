@@ -104,7 +104,7 @@ SYNOPSIS = {
 # ── SurfacePresence ──────────────────────────────────────────
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="surface_id:participant_id")
 class SurfacePresenceV1(SettingSchema):
     """Persistent row per ``(surface_id, participant_id)``.
 

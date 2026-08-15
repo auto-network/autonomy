@@ -27,7 +27,7 @@ SYNOPSIS = {
 }
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="design_id")
 class PresentationDeckV1(SettingSchema):
     """One deck shown through the Present app. Key: stable ``design_id``."""
 

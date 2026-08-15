@@ -71,7 +71,7 @@ SYNOPSIS = {
 }
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="harness_name")
 class HarnessBootstrapV1(SettingSchema):
     """Per-harness clean-room bootstrap discovery row.
 

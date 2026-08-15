@@ -169,7 +169,7 @@ class NexusSceneV1(SettingSchema):
 # ── Tile (keyed-per-entity) ──────────────────────────────────────────
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="tile_name")
 class NexusTileV1(SettingSchema):
     """A single timeline entry. Key: caller-supplied tile id (uuid or
     natural slug).

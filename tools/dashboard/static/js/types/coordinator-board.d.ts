@@ -23,7 +23,7 @@ export interface CoordinatorV1 {
 
 /**
  * dashboard.coordinator-canvas#1
- * Access pattern: keyed_per_entity (key strategy: natural)
+ * Access pattern: keyed_per_entity (key strategy: session_name)
  */
 export interface CoordinatorCanvasV1 {
   /** The one well-framed question the coordinator wants the operator to answer right now */
@@ -49,7 +49,7 @@ export interface OperatorMessageToCoordinatorV1 {
 
 /**
  * dashboard.coordinator-tile#1
- * Access pattern: keyed_per_entity (key strategy: natural)
+ * Access pattern: keyed_per_entity (key strategy: session_name[:tile_id])
  */
 export interface CoordinatorTileV1 {
   /** Tile label (peer's working title) */
@@ -70,7 +70,7 @@ export interface CoordinatorTileV1 {
 
 /**
  * dashboard.coordinator-thread#1
- * Access pattern: keyed_per_entity (key strategy: natural)
+ * Access pattern: keyed_per_entity (key strategy: session_name)
  */
 export interface CoordinatorThreadV1 {
   /** Thread label (working title) */

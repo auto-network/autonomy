@@ -147,7 +147,7 @@ class WorktreeStatusSchema(SettingSchema):
     set_id = WORKTREE_NAMESPACE
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="session_name/repo_name")
 class WorktreeRebaseStatusV1(WorktreeStatusSchema):
     """Agent-written rebase progress, watched by the worktree review UI.
 

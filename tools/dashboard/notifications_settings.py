@@ -127,7 +127,7 @@ SYNOPSIS = {
 # ── SessionAskV1 (legacy — back-compat reads only) ───────────
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="session_name")
 class SessionAskV1(SettingSchema):
     """Legacy session-ask schema. Writers should target v2.
 
@@ -224,7 +224,7 @@ class SessionAskV1(SettingSchema):
 # ── SessionAskV2 (current — compact / normal / expanded zoom) ────
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="session_name")
 class SessionAskV2(SettingSchema):
     """One row per source session with an outstanding operator-ask.
 
@@ -373,7 +373,7 @@ class SessionAskV2(SettingSchema):
 # ── AskVoteV1 ────────────────────────────────────────────────
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="session_name:participant_id")
 class AskVoteV1(SettingSchema):
     """One row per ``(ask_id, voter_id)`` pair. Shared, schema-clean.
 
@@ -442,7 +442,7 @@ class AskVoteV1(SettingSchema):
 # ── AskRefreshRequestV1 ──────────────────────────────────────
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="session_name")
 class AskRefreshRequestV1(SettingSchema):
     """One row per ask. Pins a ``target_revision`` for the refresh.
 

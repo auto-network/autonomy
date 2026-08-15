@@ -42,7 +42,7 @@ SYNOPSIS = {
 }
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="session_name:repo:review_id:hash")
 class WorktreeTerminalFireV1(SettingSchema):
     """Persisted dedup ledger entry for one terminal notification."""
 

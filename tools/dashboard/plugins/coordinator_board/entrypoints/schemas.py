@@ -173,7 +173,7 @@ class CoordinatorV1(SettingSchema):
 # ── Canvas ───────────────────────────────────────────────────────────
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="session_name")
 class CoordinatorCanvasV1(SettingSchema):
     """``{ageMin, question, context, quickReplies[]}`` — coordinator's banger."""
 
@@ -328,7 +328,7 @@ def _validate_tile_common(cls, payload: Any) -> None:
         )
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="session_name[:tile_id]")
 class CoordinatorTileV1(SettingSchema):
     """Per-(coordinator, peer) tile. Key: ``<coord>:<peer-session>``.
 
@@ -370,7 +370,7 @@ class CoordinatorTileV1(SettingSchema):
 # ── Tile (v2 — peer-session keyshape, structured detail) ─────────────
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="session_name[:tile_id]")
 class CoordinatorTileV2(SettingSchema):
     """Per-peer-session tile. Key: ``<peer-session>``.
 
@@ -459,7 +459,7 @@ class CoordinatorTileV2(SettingSchema):
 # ── Tile (v3 — drops ``ageMin``; relative time derived from member.updated_at) ──
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="session_name[:tile_id]")
 class CoordinatorTileV3(SettingSchema):
     """Per-peer-session tile, ``ageMin``-free. Key: ``<peer-session>``.
 
@@ -591,7 +591,7 @@ def _validate_thread_common(cls, payload: Any) -> None:
         )
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="session_name")
 class CoordinatorThreadV1(SettingSchema):
     """Per-(coordinator, peer) thread. Key: ``<coord>:<peer-session>``.
 
@@ -637,7 +637,7 @@ class CoordinatorThreadV1(SettingSchema):
             )
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="session_name")
 class CoordinatorThreadV2(SettingSchema):
     """Per-peer-session thread. Key: ``<peer-session>``.
 
@@ -696,7 +696,7 @@ class CoordinatorThreadV2(SettingSchema):
 # ── Thread (v3 — drops ``ageMin``) ───────────────────────────────────
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="session_name")
 class CoordinatorThreadV3(SettingSchema):
     """Per-peer-session thread, ``ageMin``-free. Key: ``<peer-session>``.
 
@@ -910,7 +910,7 @@ class Custom(CoordinatorDecisionV1):
 # ── Sprint (coordinator-owned editorial arc) ─────────────────────────
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="sprint_id")
 class CoordinatorSprintV1(SettingSchema):
     """Per-sprint-id editorial card. Key: ``<sprint-id>``.
 
@@ -1011,7 +1011,7 @@ class CoordinatorSprintV1(SettingSchema):
 # ── Sprint (v2 — drops ``ageMin``) ───────────────────────────────────
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="sprint_id")
 class CoordinatorSprintV2(SettingSchema):
     """Per-sprint-id editorial card, ``ageMin``-free. Key: ``<sprint-id>``.
 
@@ -1114,7 +1114,7 @@ class CoordinatorSprintV2(SettingSchema):
 # ── Bead (coordinator-curated landing/closing summary) ───────────────
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="bead_id")
 class CoordinatorBeadV1(SettingSchema):
     """Coordinator-curated bead summary. Key: ``<bead-id>``."""
 
@@ -1168,7 +1168,7 @@ class CoordinatorBeadV1(SettingSchema):
 # ── Convergent decision (coordinator-curated cross-session call) ─────
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="decision_id")
 class CoordinatorConvergentDecisionV1(SettingSchema):
     """Coordinator-curated convergent design decision. Key: ``<title-slug>``."""
 
@@ -1211,7 +1211,7 @@ class CoordinatorConvergentDecisionV1(SettingSchema):
 # ── Open follow-up (coordinator-curated, not yet beaded) ─────────────
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="followup_id")
 class CoordinatorOpenFollowupV1(SettingSchema):
     """Coordinator-curated open follow-up. Key: uuid."""
 

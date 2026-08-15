@@ -45,6 +45,7 @@ from datetime import datetime
 from typing import Any
 
 from .registry import (
+    singleton,
     SchemaValidationError,
     SettingSchema,
     field,
@@ -185,7 +186,7 @@ def _require_iso_ts(payload: dict, key: str, cls_name: str) -> str:
 # ── autonomy.network.org-key ──────────────────────────────────
 
 
-@keyed_per_entity
+@singleton(key="default")
 class NetworkOrgKeyV1(SettingSchema):
     """The org's auto.network root key — encrypted armor only (I1).
 
@@ -283,7 +284,7 @@ class NetworkOrgKeyV1(SettingSchema):
                 )
 
 
-@keyed_per_entity
+@singleton(key="default")
 class NetworkOrgKeyV2(SettingSchema):
     """Revision 2 — the org root seed SEALED to the owner's key (B4/Option B).
 
@@ -354,7 +355,7 @@ class NetworkOrgKeyV2(SettingSchema):
 # ── autonomy.network.binding ──────────────────────────────────
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="registry_host")
 class NetworkBindingV1(SettingSchema):
     """Local record of the org's auto.network registry binding (§4.1–4.3).
 
@@ -479,7 +480,7 @@ class NetworkBindingV1(SettingSchema):
 # ── autonomy.network.link-grant ───────────────────────────────
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="grant_token")
 class NetworkLinkGrantV1(SettingSchema):
     """Dashboard-side share-link grant cache (§4.4, §6.1; feeds I9).
 
@@ -731,7 +732,7 @@ class NetworkLinkGrantV3(NetworkLinkGrantV2):
 # ── autonomy.network.serve-cert ───────────────────────────────
 
 
-@keyed_per_entity
+@singleton(key="default")
 class NetworkServeCertV2(SettingSchema):
     """One serving key with two context-specific root-signed certificates.
 
@@ -918,7 +919,7 @@ class NetworkServeCertV2(SettingSchema):
             ) from e
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="genesis_id")
 class NetworkPersonaV1(SettingSchema):
     """Which persona THIS NODE holds the seed for, in one organization.
 

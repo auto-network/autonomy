@@ -9,7 +9,7 @@
 
 /**
  * dashboard.presentation.deck#1
- * Access pattern: keyed_per_entity (key strategy: natural)
+ * Access pattern: keyed_per_entity (key strategy: design_id)
  */
 export interface PresentationDeckV1 {
   /** Stable Design Studio design id */

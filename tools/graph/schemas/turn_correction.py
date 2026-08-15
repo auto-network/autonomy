@@ -64,7 +64,7 @@ SYNOPSIS = {
 }
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="workspace_id")
 class TurnCorrectionSettingsV1(SettingSchema):
     """Shape of an ``autonomy.workspace.turn_correction#1`` payload.
 

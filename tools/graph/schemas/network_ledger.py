@@ -140,7 +140,7 @@ def _require_heads(value: Any, cls_name: str, what: str = "heads") -> list:
 # ── autonomy.network.ledger-state ─────────────────────────────
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="genesis_id")
 class NetworkLedgerStateV1(SettingSchema):
     """One replica's view of one org ledger — hashes and cursors only.
 
@@ -232,7 +232,7 @@ class NetworkLedgerStateV1(SettingSchema):
 # ── autonomy.network.ledger-projection ────────────────────────
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="genesis_id:projection")
 class NetworkLedgerProjectionV1(SettingSchema):
     """A fold-derived read model — a rebuildable cache, never the truth.
 

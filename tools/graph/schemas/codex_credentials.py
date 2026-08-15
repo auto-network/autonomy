@@ -60,7 +60,7 @@ SYNOPSIS = {
 }
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="account_uuid")
 class CodexCredentialsV1(SettingSchema):
     """Per-account Codex OAuth credentials.
 

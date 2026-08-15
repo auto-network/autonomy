@@ -38,7 +38,7 @@ SYNOPSIS = {
 }
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="secret_name")
 class SecureSettingV1(SettingSchema):
     """One sealed secret payload.
 
@@ -111,7 +111,7 @@ class SecureSettingV1(SettingSchema):
     )
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="secret_name")
 class SecureSettingV2(SettingSchema):
     """One sealed secret payload, bound to a workspace allowlist.
 
