@@ -16515,43 +16515,38 @@ async def api_orgs_show(request):
 
 
 async def api_orgs_create(request):
-    """POST /api/orgs — body: {slug, type?, identity?, personal_password}.
+    """POST /api/orgs — body: {slug, type?, identity?}.
 
-    Creation is the full founding ceremony (auto-nixfv): the personal
-    password authorizes founding and seals the org key. Wrong password →
-    403, nothing created; missing password → 400 naming the field.
+    Creates the organization SHELL only, and never takes a passphrase
+    (I1, auto-jdba4): the org root is generated and the four founding
+    events are signed in the operator's browser, then folded via
+    ``POST /api/network/ledger/found`` with the sealed org key submitted
+    separately. The server therefore never receives the personal password
+    and never decrypts the personal root.
+
+    Founding is two calls by construction, not by preference: genesis binds
+    the stable ``orgs.id`` (D21), which is minted here, so the browser
+    cannot sign the batch until this call returns. ``create_org_shell``
+    closes the window between them by being idempotent on an UN-FOUNDED
+    shell, so a failed ceremony can be retried against the same org rather
+    than stranding a half-created one.
     """
     from tools.graph import org_ops
     body = await request.json()
     slug = body.get("slug")
     if not slug:
         return JSONResponse({"error": "slug required"}, status_code=400)
-    personal_password = body.get("personal_password")
-    if not isinstance(personal_password, str) or not personal_password:
-        return JSONResponse(
-            {"error": "personal_password required — creating an organization "
-                      "founds its ledger and seals its key under your "
-                      "personal identity"},
-            status_code=400,
-        )
     type_ = body.get("type", "shared")
     identity_payload = body.get("identity")
-    from tools.network.idkit.armor import ArmorPassphraseError
     try:
-        result = org_ops.create_org_with_identity(
-            slug, personal_password,
-            type_=type_, identity_payload=identity_payload,
-        )
-    except ArmorPassphraseError:
-        return JSONResponse(
-            {"error": "the personal password is incorrect; nothing was created"},
-            status_code=403,
+        ref = org_ops.create_org_shell(
+            slug, type_=type_, identity_payload=identity_payload,
         )
     except org_ops.OrgExistsError as e:
         return JSONResponse({"error": str(e)}, status_code=409)
     except org_ops.OrgError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
-    return JSONResponse(result.to_dict(), status_code=201)
+    return JSONResponse({"org": ref.to_dict(), "founded": False}, status_code=201)
 
 
 async def api_orgs_delete(request):

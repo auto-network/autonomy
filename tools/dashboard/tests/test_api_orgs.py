@@ -45,15 +45,15 @@ def stub_org_schema():
     return OrgV1
 
 
-#: Creating an org IS the founding ceremony (auto-nixfv): the route
-#: requires the owner's personal-identity password, which authorizes
-#: founding and seals the org key. These tests enroll a throwaway
-#: identity and pass its password, exercising the real ceremony.
+#: Creating an org creates the SHELL only (auto-jdba4, I1): no passphrase
+#: crosses the wire, and the ledger is founded afterwards by the browser
+#: via POST /api/network/ledger/found. The throwaway identity these tests
+#: enroll is no longer consulted by this route.
 PERSONAL_PASSWORD = "api-orgs-test-password"
 
 
 def create_org_body(slug: str, **extra) -> dict:
-    return {"slug": slug, "personal_password": PERSONAL_PASSWORD, **extra}
+    return {"slug": slug, **extra}
 
 
 @pytest.fixture
@@ -163,8 +163,8 @@ def test_orgs_create(orgs_root, client):
     body = r.json()
     assert body["org"]["slug"] == "anchore"
     assert body["org"]["type"] == "shared"
-    # The ceremony founded the ledger in the same act.
-    assert len(body["identity"]["event_ids"]) == 4
+    # The shell is inert: founding is the browser's next call, not this one.
+    assert body["founded"] is False
     assert (orgs_root / "anchore.db").exists()
 
 
@@ -174,10 +174,17 @@ def test_orgs_create_missing_slug(orgs_root, client):
     assert "slug" in r.json()["error"].lower()
 
 
-def test_orgs_create_existing_returns_409(orgs_root, client):
-    client.post("/api/orgs", json=create_org_body("anchore"))
-    r = client.post("/api/orgs", json=create_org_body("anchore"))
-    assert r.status_code == 409
+def test_recreating_an_unfounded_shell_is_a_retry_not_a_conflict(orgs_root, client):
+    """A shell whose ledger was never folded is the browser's retry target.
+
+    Conflict is reserved for an org that is actually founded (auto-jdba4);
+    refusing here would strand an org nobody could finish founding.
+    """
+    first = client.post("/api/orgs", json=create_org_body("anchore"))
+    assert first.status_code == 201
+    again = client.post("/api/orgs", json=create_org_body("anchore"))
+    assert again.status_code == 201
+    assert again.json()["org"]["id"] == first.json()["org"]["id"]
 
 
 def test_orgs_create_invalid_slug_400(orgs_root, client):
