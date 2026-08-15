@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pytest
 
-from tools.graph.vault import open_setting, seal_setting
+from tools.graph.vault import open_setting, parse_locator, seal_setting
 from tools.network.idkit import KeyPair
 from tools.network.storagekit import capability
 from tools.network.storagekit.credentials import build as build_credential
@@ -71,7 +71,8 @@ def test_another_principal_on_another_store_reads_what_was_written(world, stores
     )
 
     # ── The object replicates to node B ───────────────────────────────────
-    replicate(node_a, node_b, reference["object_id"], reference["revision_id"])
+    located = parse_locator(reference)
+    replicate(node_a, node_b, located["object_id"], located["revision_id"])
 
     # ── Bob has a credential of his own; Alice grants him the state key ───
     bob = KeyPair.generate()
@@ -115,8 +116,9 @@ def test_the_replicated_bytes_alone_do_not_reveal_the_secret(world, stores):
         ancestry=world.ancestry, store=node_a,
         bridges=world.bridges, descriptors=world.descriptors,
     )
+    located = parse_locator(reference)
     _header, body = replicate(
-        node_a, node_b, reference["object_id"], reference["revision_id"]
+        node_a, node_b, located["object_id"], located["revision_id"]
     )
     token = SECRET["access_token"].encode()
     assert token not in body
@@ -140,7 +142,8 @@ def test_a_grant_for_someone_else_does_not_open_it(world, stores):
         ancestry=world.ancestry, store=node_a,
         bridges=world.bridges, descriptors=world.descriptors,
     )
-    replicate(node_a, node_b, reference["object_id"], reference["revision_id"])
+    located = parse_locator(reference)
+    replicate(node_a, node_b, located["object_id"], located["revision_id"])
 
     bob = KeyPair.generate()
     bob_credential, _bob_private = build_credential(
