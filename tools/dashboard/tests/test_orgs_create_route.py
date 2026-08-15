@@ -1,4 +1,11 @@
-"""POST /api/orgs — the founding-ceremony route contract (auto-nixfv #8)."""
+"""POST /api/orgs — the org-SHELL route contract (auto-jdba4, I1).
+
+The route creates the organization shell and nothing else. It takes no
+passphrase: the org root is generated and the founding batch signed in the
+operator's browser, then folded by ``POST /api/network/ledger/found``. The
+enumeration guard in ``test_i1_no_passphrase_ingress.py`` holds the wire rule
+for every route; these tests hold this route's behaviour.
+"""
 
 from __future__ import annotations
 
@@ -7,12 +14,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from tools.graph import org_ops, settings_ops
-from tools.graph.schemas.personal_identity import PERSONAL_IDENTITY_SET_ID
-from tools.network.idkit import KeyPair
-from tools.network.idkit.armor import encrypt_root_key
-
-PASSWORD = "week-glacier-thirty-nine"
+from tools.graph import org_ops
 
 
 @pytest.fixture
@@ -21,9 +23,9 @@ def client(tmp_path, monkeypatch):
     from tools.dashboard import server
 
     GraphDB.close_all_pooled()
-    # Orgs-tree hermeticity, no GRAPH_DB pin: the ceremony writes to the
-    # created org's OWN db, which a pin would contradict and the
-    # fail-loud resolver refuses. delenv guards ambient leaks.
+    # Orgs-tree hermeticity, no GRAPH_DB pin: shell creation writes to the
+    # created org's OWN db, which a pin would contradict and the fail-loud
+    # resolver refuses. delenv guards ambient leaks.
     orgs = tmp_path / "orgs"
     orgs.mkdir()
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs))
@@ -32,52 +34,64 @@ def client(tmp_path, monkeypatch):
     GraphDB.create_org_db(
         "personal", type_="personal", path=orgs / "personal.db"
     ).close()
-    root = KeyPair.generate()
-    with settings_ops.identity_write_context():
-        settings_ops.upsert_by_key(
-            PERSONAL_IDENTITY_SET_ID, 1, "default",
-            {
-                "armored_private_key": encrypt_root_key(root, PASSWORD, iterations=10_000),
-                "root_pub": root.public_hex,
-                "display_name": "Test Owner",
-                "created_at": "2026-07-26T00:00:00Z",
-            },
-            org=None,
-        )
     app = Starlette(routes=[Route("/api/orgs", server.api_orgs_create, methods=["POST"])])
     with TestClient(app) as c:
         yield c
     GraphDB.close_all_pooled()
 
 
-def test_missing_password_is_400_naming_the_field(client):
-    r = client.post("/api/orgs", json={"slug": "acme"})
+def test_missing_slug_is_400(client):
+    r = client.post("/api/orgs", json={})
     assert r.status_code == 400
-    assert "personal_password" in r.json()["error"]
-    assert all(o.slug != "acme" for o in org_ops.list_orgs())
+    assert "slug" in r.json()["error"]
 
 
-def test_wrong_password_is_403_and_creates_nothing(client):
-    r = client.post(
-        "/api/orgs", json={"slug": "acme", "personal_password": "wrong"}
-    )
-    assert r.status_code == 403
-    assert all(o.slug != "acme" for o in org_ops.list_orgs())
-
-
-def test_success_returns_the_ceremony_result(client):
-    r = client.post(
-        "/api/orgs", json={"slug": "acme", "personal_password": PASSWORD}
-    )
+def test_creating_a_shell_needs_no_passphrase(client):
+    """The whole point of auto-jdba4: founding no longer costs a password."""
+    r = client.post("/api/orgs", json={"slug": "acme"})
     assert r.status_code == 201, r.text
     body = r.json()
     assert body["org"]["slug"] == "acme"
-    assert set(body["identity"]) == {
-        "root_pub", "genesis_id", "founder_persona_pub", "event_ids"
-    }
-    assert len(body["identity"]["event_ids"]) == 4
-    # Slug conflict on a second create: 409, unchanged.
-    again = client.post(
-        "/api/orgs", json={"slug": "acme", "personal_password": PASSWORD}
+    # The stable orgs.id the browser must bind into genesis (D21).
+    assert body["org"]["id"]
+    # The shell is explicitly NOT founded -- the browser does that next.
+    assert body["founded"] is False
+    assert any(o.slug == "acme" for o in org_ops.list_orgs())
+
+
+def test_no_identity_needs_to_be_enrolled_server_side(client):
+    """No personal identity exists in this fixture, and the shell still creates.
+
+    The personal root is the browser's business now; the server has no reason
+    to consult it, which is exactly why it no longer holds the passphrase.
+    """
+    assert client.post("/api/orgs", json={"slug": "shellonly"}).status_code == 201
+
+
+def test_a_passphrase_in_the_body_is_never_used(client):
+    """A stale client sending the old field must not get the old behaviour.
+
+    It is not an error -- the field is simply not part of the contract -- but
+    nothing may decrypt with it, and the result is the same inert shell.
+    """
+    r = client.post(
+        "/api/orgs", json={"slug": "acme", "personal_password": "anything-at-all"}
     )
-    assert again.status_code == 409
+    assert r.status_code == 201, r.text
+    assert r.json()["founded"] is False
+
+
+def test_an_unfounded_shell_is_a_retryable_target(client):
+    """The two-call window (auto-jdba4): a failed founding strands nothing."""
+    first = client.post("/api/orgs", json={"slug": "acme"})
+    assert first.status_code == 201
+    # The browser's founding call failed / the tab closed. Try again.
+    again = client.post("/api/orgs", json={"slug": "acme"})
+    assert again.status_code == 201, again.text
+    # Same organization, same stable id -- so a genesis signed against the
+    # first response is still valid against this one.
+    assert again.json()["org"]["id"] == first.json()["org"]["id"]
+
+
+def test_invalid_slug_is_400(client):
+    assert client.post("/api/orgs", json={"slug": "Not A Slug"}).status_code == 400
