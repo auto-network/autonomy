@@ -52,15 +52,58 @@ from agents.git_status import working_tree_clean_and_summary
 from agents.librarian_db import enqueue as enqueue_job, dequeue, complete_job, fail_job
 from agents.workspace_manager import WORKTREES_DIR, cleanup_session_worktrees
 from agents.workspace_settings import WorkspaceV1, load_workspaces
-from agents.session_launcher import launch_session
+from agents.session_launcher import launch_session, DEFAULT_OPUS_MODEL
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LAUNCH_SCRIPT = Path(__file__).parent / "launch.sh"
 DISPATCH_STATE_PATH = REPO_ROOT / "data" / "dispatch.state"
 
 DEFAULT_IMAGE = "autonomy-agent"
-DEFAULT_OPUS_MODEL = "claude-opus-4-8[1m]"
+# DEFAULT_OPUS_MODEL is imported from session_launcher — the single source of
+# truth that launch_session_cli also resolves against. Do NOT redefine it here;
+# a second copy silently drifts from the one the launcher actually applies.
 DEFAULT_SONNET_MODEL = "claude-sonnet-4-6"
+
+# Friendly ``model:<name>`` bead-label values → the model id passed through to
+# ``launch_session_cli --model``. A bead label is the highest-precedence lever:
+# launch_session_cli resolves ``args.model or workspace_model or default``, so a
+# value here wins over the workspace model, which wins over the built-in default.
+# An unknown alias must FAIL the dispatch (see _resolve_bead_model) — a typo that
+# quietly runs the expensive default is exactly the failure this map prevents.
+MODEL_ALIASES: dict[str, str] = {
+    "opus": DEFAULT_OPUS_MODEL,
+    "sonnet": DEFAULT_SONNET_MODEL,
+    "haiku": "claude-haiku-4-5-20251001",
+}
+
+
+def _resolve_bead_model(labels: list[str]) -> str | None:
+    """Resolve a per-bead model override from a ``model:<name>`` label.
+
+    Returns the resolved model id when a ``model:`` label is present, or None
+    when absent — in which case the caller passes no ``--model`` and
+    launch_session_cli's existing workspace-then-default chain resolves exactly
+    as it does today. Accepts either a known alias (``opus``/``sonnet``/``haiku``)
+    or a full model id already present in :data:`MODEL_ALIASES`'s values.
+
+    Raises :class:`ValueError` naming the offending label when the value is
+    neither — a typo must fail the dispatch loudly rather than silently fall
+    back to the expensive default.
+    """
+    for label in labels:
+        if not label.startswith("model:"):
+            continue
+        value = label[len("model:"):].strip()
+        if value in MODEL_ALIASES:
+            return MODEL_ALIASES[value]
+        if value in MODEL_ALIASES.values():
+            return value
+        raise ValueError(
+            f"Unknown model label {label!r}: '{value}' is not a known model. "
+            f"Valid model: labels are {sorted(MODEL_ALIASES)} "
+            f"(or a full model id). Refusing to dispatch with a silent fallback."
+        )
+    return None
 
 # Deferred restart flag — set by _maybe_restart_dispatcher(), executed at end of cycle
 _restart_scheduled = False
@@ -589,6 +632,7 @@ def start_agent(
     graph_project: str | None = None,
     graph_tags: tuple[str, ...] = (),
     workspace_id: str | None = None,
+    model: str | None = None,
 ) -> RunningAgent | None:
     """Launch an agent container in detached mode. Returns immediately.
 
@@ -600,6 +644,12 @@ def start_agent(
     ``graph_project`` and ``graph_tags`` flow through to the container as
     ``GRAPH_SCOPE`` / ``GRAPH_TAGS`` env vars and are written into
     ``.session_meta.json`` so ingest can scope the resulting session source.
+
+    ``model`` is forwarded as ``--model`` ONLY when set. When None, no flag is
+    passed and launch_session_cli's ``args.model or workspace_model or default``
+    chain resolves exactly as it does today — a bead with no model override
+    inherits its workspace's model, or the built-in default when the workspace
+    declares none.
 
     Returns RunningAgent on success, None on failure.
     """
@@ -618,6 +668,8 @@ def start_agent(
         cmd.append(f"--workspace-id={workspace_id}")
     if graph_tags:
         cmd.append(f"--graph-tags={','.join(graph_tags)}")
+    if model:
+        cmd.append(f"--model={model}")
 
     try:
         result = subprocess.run(
@@ -2870,6 +2922,17 @@ def dispatch_cycle(
                 else "claude"
             )
         )
+        # Per-bead model override, resolved beside the harness. A ``model:<name>``
+        # label wins over the workspace model (launch_session_cli precedence:
+        # label > workspace > default). An unknown value fails the dispatch here
+        # rather than silently running the default.
+        try:
+            bead_model = _resolve_bead_model(bead_labels)
+        except ValueError as e:
+            print(f"  Skipping {bead_id}: {e}", file=sys.stderr)
+            run_bd(["set-state", bead_id, "readiness=blocked",
+                    "--reason", str(e)])
+            continue
         agent = start_agent(
             bead_id,
             image=image,
@@ -2880,6 +2943,7 @@ def dispatch_cycle(
                 project.id if project is not None
                 else (fallback_workspace.id if fallback_workspace is not None else None)
             ),
+            model=bead_model,
         )
         if agent:
             agent.labels = bead.get("labels") or []
