@@ -46,6 +46,26 @@ class TestBuildMissionControlNagMessage:
         assert "..." in msg
         assert len(msg.splitlines()[1]) < 150
 
+    def test_full_entry_renders_the_answer_route(self):
+        # Positive pair to the graceful-degradation path: an entry WITH
+        # its ids must still emit the POST answer route, so degradation
+        # can never silently swallow it for every entry.
+        msg = _build_mission_control_nag_message([{
+            "question": "why 3 triggers?",
+            "mission_id": "m-123",
+            "entry_id": "e-456",
+        }])
+        assert "POST /api/missions/m-123/questions/e-456/answer" in msg
+
+    def test_pillar_entry_renders_pillar_scoped_route(self):
+        msg = _build_mission_control_nag_message([{
+            "question": "why?",
+            "pillar_id": "p-9",
+            "mission_id": "m-1",
+            "entry_id": "e-7",
+        }])
+        assert "POST /api/pillars/p-9/questions/e-7/answer" in msg
+
     def test_caps_listed_entries_and_summarizes_the_rest(self):
         entries = [{"question": f"q{i}"} for i in range(8)]
         msg = _build_mission_control_nag_message(entries)

@@ -440,12 +440,21 @@ def _build_mission_control_nag_message(entries: list[dict]) -> str:
         # SELF-SUFFICIENT. This used to say "see the reply route in the
         # original relay message", which fails exactly when a reminder
         # matters most: a long-running session whose scrollback is gone.
-        scope = (f"pillars/{entry['pillar_id']}" if entry.get("pillar_id")
-                 else f"missions/{entry['mission_id']}")
-        lines.append(
-            f"  POST /api/{scope}/questions/{entry['entry_id']}/answer"
-            ' {"answer": "..."}'
-        )
+        # Emit the answer route only when the entry carries the ids it
+        # needs. A single malformed entry must not KeyError the whole
+        # message — that would blank a coordinator's entire reminder over
+        # one bad row. Production entries always carry these; a degraded
+        # entry simply loses its route line, not everyone else's.
+        scope = None
+        if entry.get("pillar_id"):
+            scope = f"pillars/{entry['pillar_id']}"
+        elif entry.get("mission_id"):
+            scope = f"missions/{entry['mission_id']}"
+        if scope and entry.get("entry_id"):
+            lines.append(
+                f"  POST /api/{scope}/questions/{entry['entry_id']}/answer"
+                ' {"answer": "..."}'
+            )
     if n > 5:
         lines.append(f"...and {n - 5} more.")
     # SAY WHAT THIS IS AND WHAT STOPS IT. A reminder whose recipient cannot
