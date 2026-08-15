@@ -6,7 +6,35 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
+import os
+
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _seed_hermetic_org_dbs():
+    """The hermetic conftest points AUTONOMY_ORGS_DIR at an empty per-worker
+    tree and forbids the real-data fallback, but worktree_monitor resolves
+    source-control state through the org's graph DB — with no autonomy.db
+    it raises RealDataFallbackRefused and every monitor test fails. Create
+    the org DBs the monitor reads, in the hermetic tree, so the tests
+    exercise routing instead of the missing-store guard.
+    """
+    from tools.graph.db import GraphDB
+    orgs = os.environ.get("AUTONOMY_ORGS_DIR")
+    if not orgs:
+        yield
+        return
+    from pathlib import Path as _P
+    root = _P(orgs)
+    root.mkdir(parents=True, exist_ok=True)
+    for slug, kind in (("personal", "personal"), ("autonomy", "shared")):
+        db = root / f"{slug}.db"
+        if not db.exists():
+            GraphDB.create_org_db(slug, type_=kind, path=db).close()
+    GraphDB.close_all_pooled()
+    yield
+    GraphDB.close_all_pooled()
 
 from agents.workspace_manager import (
     CleanupResult,
@@ -37,6 +65,13 @@ class _FakeMonitor:
         self.last_session_filter = session_filter
         if session_filter is not None:
             return [row for row in self.rows if session_filter(row.session_name)]
+        return list(self.rows)
+
+    async def refresh_one(self, session_name, repo_name):
+        # The merge endpoint re-reads via refresh_one before refusing a
+        # not-ff row; the fake's cache doesn't change, so a re-read returns
+        # the same rows (the not-ff state is confirmed, not cleared).
+        self.refresh_count += 1
         return list(self.rows)
 
     async def discover_prs(self, rows):
@@ -121,6 +156,10 @@ def _install_fake_monitor(monkeypatch, rows):
     fake = _FakeMonitor(rows)
     monkeypatch.setattr(server.worktree_monitor, "get_all", fake.get_all)
     monkeypatch.setattr(server.worktree_monitor, "refresh", fake.refresh)
+    # The merge endpoint re-reads via refresh_one before refusing a not-ff
+    # row; without patching it the real monitor's live git sweep runs and
+    # returns nothing in tests, 404-ing what should be a 409.
+    monkeypatch.setattr(server.worktree_monitor, "refresh_one", fake.refresh_one)
     monkeypatch.setattr(server.worktree_monitor, "discover_prs", fake.discover_prs)
     monkeypatch.setattr(server.worktree_monitor, "refresh_bound_rows", fake.refresh_bound_rows)
     # Force the /api/worktrees fallback render so the faked ``get_all`` rows
@@ -536,9 +575,12 @@ class TestWorktreeAPI:
         assert resp.json() == {"ok": True, "commit": "abc1234", "message": "merged"}
 
     def test_merge_endpoint_returns_409_when_cached_row_not_ff_eligible(self, test_client, monkeypatch):
+        # Not ff-eligible AND has commits to merge — a genuinely diverged
+        # branch. (ahead=0 + clean would be "nothing to merge", which the
+        # endpoint deliberately answers 200, not 409.)
         server, _fake = _install_fake_monitor(
             monkeypatch,
-            [_row(ahead=0, dirty=False, ff=False)],
+            [_row(ahead=1, dirty=False, ff=False)],
         )
         called = {"merge": False}
 
