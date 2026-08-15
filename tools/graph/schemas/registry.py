@@ -1070,6 +1070,48 @@ def enforce_declared_fields(schema: type, payload: Any) -> None:
             )
 
 
+_UUID4_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+
+
+def validate_key(set_id: str, revision: int, key: str) -> None:
+    """Check *key* against the schema's declared key strategy.
+
+    Only the strategies that state a FORM are checkable: ``fixed:X`` means
+    the key is literally ``X``, and ``uuid_v4`` means it is a uuid. The rest
+    name the ENTITY the key identifies — ``org_slug``, ``workspace_id``,
+    ``session_name:participant_id`` — which says what the key means rather
+    than what it looks like, and is for a reader, not a matcher.
+
+    The point of the checkable half is the false-plurality class: a schema
+    declaring one fixed row while a writer quietly uses a second key is how
+    a singleton becomes a set nobody designed, and how readers end up
+    scanning for the row they want.
+
+    Unknown schema is left alone here; :func:`validate_payload` reports it.
+    """
+    schema = get_schema(set_id, revision)
+    if schema is None:
+        return
+    strategy = getattr(schema, "_key_strategy", None)
+    if not strategy:
+        return
+    if strategy.startswith("fixed:"):
+        expected = strategy.split(":", 1)[1]
+        if key != expected:
+            raise SchemaValidationError(
+                f"{schema.__name__}: declares a single row keyed "
+                f"{expected!r}, so it cannot also be written at {key!r}. "
+                f"Either this is a second entity — in which case the schema "
+                f"is not a singleton — or the key is wrong."
+            )
+    elif strategy == "uuid_v4" and not _UUID4_RE.match(key or ""):
+        raise SchemaValidationError(
+            f"{schema.__name__}: keys are generated uuids, got {key!r}"
+        )
+
+
 def validate_payload(set_id: str, revision: int, payload: Any) -> None:
     """Validate *payload* against ``(set_id, revision)``.
 
