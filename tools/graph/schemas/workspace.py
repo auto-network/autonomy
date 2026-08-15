@@ -170,6 +170,7 @@ class WorkspaceV1(SettingSchema):
                 "daemon; it never mounts the host Docker socket."
             ),
             "default": False,
+            "deprecated_alias_of": "needs_nested_docker",
         },
         "needs_nested_docker": {
             "type": "boolean",
