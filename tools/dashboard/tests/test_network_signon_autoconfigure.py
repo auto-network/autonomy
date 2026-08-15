@@ -50,6 +50,9 @@ def test_browser_module_load_configures_real_signon_path():
     assert output["fetchCalls"] == [
         "/api/network/org-key?org=module-load-org",
         "/api/network/binding?org=module-load-org",
+        # A bound org checks whether its serving credential needs repair
+        # before opening the root — best-effort, never blocks sign-on.
+        "/api/network/serve-cert?org=module-load-org",
         # Persona-subject resolution probes the ledger; the 404 here means
         # "not founded", so the personal armor is never fetched and the
         # cert falls back to the label subject.
