@@ -559,6 +559,8 @@ def _auto_register_schema(cls: type) -> None:
     classmethods are skipped) so a subclass doesn't accidentally inherit
     its parent's upconverter.
     """
+    if getattr(cls, "internal", False):
+        return
     set_id = cls.__dict__.get("set_id")
     schema_revision = cls.__dict__.get("schema_revision")
     if not set_id or not schema_revision:
@@ -702,6 +704,17 @@ class SettingSchema:
     # ``None`` for non-cache schemas (they never expire and have no
     # ``expires_at`` column value).
     _cache_ttl_seconds: int | None = None
+
+    #: A schema that is NOT a Setting row. Typed payload contracts borrow this
+    #: class for its field metadata -- to drive TypeScript generation and to
+    #: validate a JSON boundary -- without ever being stored as Settings.
+    #: Marking one keeps it out of the registry, so nothing that walks the
+    #: registry treats it as a Setting: not the schema-meta flush that writes
+    #: every registered schema into every org database, not enforcement, not
+    #: the contract checks. Inherited, so a variant of a payload contract is
+    #: one too. Reach such a schema by explicit ``module:Class`` reference,
+    #: which is how ``graph set typegen --schemas`` already does it.
+    internal: bool = False
 
     # Variant discriminated-union machinery. ``_variants`` maps
     # discriminator slug → variant subclass for every direct subclass of

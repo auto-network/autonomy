@@ -40,6 +40,7 @@ class CheckEntryV1(SettingSchema):
 
     set_id = "agents.capabilities.github.check_entry"
     schema_revision = 1
+    internal = True  # payload shape, not a Setting row
 
     id: str = field(
         required=True,
@@ -77,6 +78,7 @@ class ReviewPayloadV1(SettingSchema):
 
     set_id = "agents.capabilities.github.review_payload"
     schema_revision = 1
+    internal = True  # payload shape, not a Setting row
 
     number: int = field(
         required=False,
@@ -153,6 +155,7 @@ class WorktreeGithubExecResultV1(SettingSchema):
 
     set_id = "agents.capabilities.github.exec_result"
     schema_revision = 1
+    internal = True  # payload shape, not a Setting row
 
     operation: str = field(
         required=True,
@@ -223,6 +226,7 @@ class ProbeResultV1(SettingSchema):
 
     set_id = "agents.capabilities.github.probe_result"
     schema_revision = 1
+    internal = True  # payload shape, not a Setting row
 
     contract: str = field(
         required=True,
