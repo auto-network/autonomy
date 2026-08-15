@@ -384,7 +384,7 @@ def test_storage_ancestry_domination():
     world.grant(m1, m0, sb)
     su, _ = world.union(m0, [sa, sb])
 
-    ancestry = world.stores.kc.state_ancestry
+    ancestry = world.stores.kc.ancestry
     before = ancestry([su.state_id])
     assert {sa.state_id, sb.state_id, s0.state_id} <= before  # union dominates both
     assert sb.state_id not in ancestry([sa.state_id])  # neither branch dominates
@@ -415,7 +415,7 @@ def test_receipt_frontier_compaction_invariance():
     world.grant(m0, m1, su)
 
     full = list(world.stores.receipt_store.receipts)
-    compacted = world.stores.receipt_store.compacted(world.stores.kc.state_ancestry)
+    compacted = world.stores.receipt_store.compacted(world.stores.kc.ancestry)
     assert len(compacted) < len(full)  # something was actually behind a frontier
 
     fold_state = world.fold()
