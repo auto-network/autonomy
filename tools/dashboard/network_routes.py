@@ -977,6 +977,74 @@ async def put_org_key(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "label": label, "root_pub": root_pub})
 
 
+async def post_sealed_org_key(request: Request) -> JSONResponse:
+    """Persist an org root key the BROWSER sealed (I1, auto-jdba4).
+
+    Body: ``{org?, root_pub, sealed_root_key, owner_kem_pub, seal_purpose}``.
+    The org root is generated in the operator's browser and sealed there to
+    the owner's derived encapsulation key, so only sealed material arrives
+    here: no passphrase and no root plaintext reaches the server. This is
+    the client-driven counterpart of the server-side seal the founding
+    ceremony used to perform under a password.
+
+    Idempotent while the ledger is UN-FOUNDED -- the seal-then-fold window
+    and its retries. Once founded, the ledger has committed to this root and
+    the key can never be replaced (409).
+    """
+    if _mock_mode():
+        return JSONResponse(
+            {"ok": False, "error": "mock dashboard stores no org keys"},
+            status_code=502,
+        )
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "body must be JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse(
+            {"ok": False, "error": "body must be a JSON object"}, status_code=400,
+        )
+
+    # Refuse a cross-org write BEFORE processing the (foreign) payload.
+    org, refused = _scoped_org(body.get("org"), request=request)
+    if refused is not None:
+        return refused
+
+    from tools.graph import org_ops
+
+    # The sealed key lives in one organization's own database and is looked up
+    # by slug, so the caller-org sentinel must collapse to a literal here; a
+    # scopeless write has no org whose ledger could lock the key.
+    slug = settings_ops._resolve_org_arg(org)
+    if not isinstance(slug, str) or not slug:
+        return JSONResponse(
+            {"ok": False, "error": (
+                "no organization scope resolved — name the org whose root key "
+                "this is"
+            )},
+            status_code=400,
+        )
+
+    sealed = {
+        k: body.get(k)
+        for k in ("root_pub", "sealed_root_key", "owner_kem_pub", "seal_purpose")
+    }
+    try:
+        org_ops.store_sealed_org_key(slug, sealed)
+    except org_ops.OrgNotFoundError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=404)
+    except org_ops.OrgExistsError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=409)
+    except org_ops.OrgError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+    except Exception as e:
+        return JSONResponse(
+            {"ok": False, "error": f"could not store the sealed org key: {e}"},
+            status_code=500,
+        )
+    return JSONResponse({"ok": True, "root_pub": sealed["root_pub"]})
+
+
 async def post_register(request: Request) -> JSONResponse:
     """Forward the C1 registration envelope to the registry (§4.1).
 
@@ -1561,6 +1629,7 @@ async def post_invite_resolve(request: Request) -> JSONResponse:
 ROUTES = [
     Route("/api/network/org-key", get_org_key, methods=["GET"]),
     Route("/api/network/org-key", put_org_key, methods=["POST"]),
+    Route("/api/network/org-key/sealed", post_sealed_org_key, methods=["POST"]),
     Route("/api/network/binding", get_binding, methods=["GET"]),
     Route("/api/network/registry", get_registry, methods=["GET"]),
     Route("/api/network/ledger/found", post_ledger_found, methods=["POST"]),
