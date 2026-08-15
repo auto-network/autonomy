@@ -1213,7 +1213,13 @@ def launch_session(
         # from the image's own labels — no container is started. A log reader
         # that begins at a stored byte offset never sees the version the log
         # declares in its first record, so it reads it from here instead.
-        meta_doc.update(_image_harness_versions(image, harness))
+        # Skipped when the launch has no canonical org: it is refused below
+        # regardless (the token cannot be org-stamped), and a doomed launch
+        # must not touch docker at all — not even a read-only image inspect
+        # (test_write_routing's no-docker-after-refusal contract). The meta
+        # is still written so graph_org derivation stays observable.
+        if (metadata or {}).get("org"):
+            meta_doc.update(_image_harness_versions(image, harness))
         if creds is not None and creds.get("harness_token"):
             # Operator-facing credential pointer for triage. The dashboard
             # reads this back when the session is registered so the drawer
