@@ -18,6 +18,18 @@ import {
   eventId,
   signEvent,
 } from './ledger-event.js';
+import {
+  deriveEncapsulationKeypair,
+  sealToEncapsulationKey,
+} from './sealing.js';
+
+// The one purpose an organization root seal is ever minted for; the server
+// refuses any other value, and the seal's own info binds it, so material
+// sealed for something else can never open as an org root.
+const ORG_ROOT_ARMOR_PURPOSE = 'autonomy/org-root-armor/v1';
+// pkcs8 wrapper an exported Ed25519 private key arrives in; the raw 32-byte
+// seed -- the thing that is sealed -- is the tail.
+const ED25519_PKCS8_SEED_OFFSET = 16;
 
 const CREDENTIAL_DOMAIN = 'autonomy.storage.persona-kem-credential.v1\n';
 const KEM_DERIVE_INFO_PREFIX = 'autonomy.idkit.encap-key.v1\n';
@@ -301,6 +313,58 @@ async function buildFoundingBatch({
   };
 }
 
+/**
+ * Generate an organization root here and seal it to the owner, locally.
+ *
+ * The root is minted in the browser and never leaves it in the clear: what
+ * comes back is the public half, a signing key for the founding batch, and
+ * the sealed payload the server stores verbatim. The personal root seed is
+ * used only to derive the recipient key -- it is neither sent nor retained.
+ *
+ * The generated key is extractable because the seed IS the thing being
+ * sealed; it exists as bytes for exactly as long as that takes, then is
+ * zeroed on every path.
+ */
+async function generateSealedOrgRoot({ personalRootSeed }) {
+  if (!(personalRootSeed instanceof Uint8Array) || personalRootSeed.length !== 32) {
+    throw new Error('personalRootSeed must be the 32-byte personal root seed');
+  }
+  const pair = await webCrypto.subtle.generateKey(
+    { name: 'Ed25519' }, true, ['sign', 'verify'],
+  );
+  const rootPub = bytesToHex(
+    new Uint8Array(await webCrypto.subtle.exportKey('raw', pair.publicKey)),
+  );
+  const pkcs8 = new Uint8Array(
+    await webCrypto.subtle.exportKey('pkcs8', pair.privateKey),
+  );
+  const seed = pkcs8.slice(ED25519_PKCS8_SEED_OFFSET);
+  try {
+    if (seed.length !== 32) {
+      throw new Error('exported Ed25519 private key was not a 32-byte seed');
+    }
+    const recipient = await deriveEncapsulationKeypair(
+      personalRootSeed, ORG_ROOT_ARMOR_PURPOSE,
+    );
+    const sealed = await sealToEncapsulationKey(
+      seed, recipient.publicKeyHex, ORG_ROOT_ARMOR_PURPOSE,
+    );
+    return {
+      rootPub,
+      rootSigningKey: pair.privateKey,
+      sealedOrgKey: {
+        root_pub: rootPub,
+        sealed_root_key: bytesToHex(sealed),
+        owner_kem_pub: recipient.publicKeyHex,
+        seal_purpose: ORG_ROOT_ARMOR_PURPOSE,
+      },
+    };
+  } finally {
+    seed.fill(0);
+    pkcs8.fill(0);
+  }
+}
+
 async function responseBody(response) {
   const text = await response.text();
   if (!text) return null;
@@ -359,4 +423,6 @@ export {
   buildFoundingBatch,
   buildPersonaKemCredential,
   foundOrganization,
+  generateSealedOrgRoot,
+  ORG_ROOT_ARMOR_PURPOSE,
 };
