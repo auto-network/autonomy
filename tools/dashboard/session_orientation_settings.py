@@ -48,7 +48,7 @@ DEFAULT_TEMPLATE = (
 )
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="session_name")
 class SessionOrientationV1(SettingSchema):
     """One row per workspace (plus the global ``__default__``).
 

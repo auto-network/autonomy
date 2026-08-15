@@ -32,6 +32,7 @@ from datetime import datetime
 from typing import Any
 
 from .registry import (
+    singleton,
     SchemaValidationError,
     SettingSchema,
     field,
@@ -120,7 +121,7 @@ def _require_iso_ts(payload: dict, key: str, cls_name: str) -> str:
 # ── autonomy.identity.personal ────────────────────────────────
 
 
-@keyed_per_entity
+@singleton(key="default")
 class PersonalIdentityV1(SettingSchema):
     """The person's root key — encrypted armor only (I1).
 
@@ -232,7 +233,7 @@ class PersonalIdentityV1(SettingSchema):
 # ── autonomy.identity.passkey ─────────────────────────────────
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="credential_id")
 class PasskeyCredentialV1(SettingSchema):
     """One enrolled WebAuthn credential — Gate-1 access, never signing.
 

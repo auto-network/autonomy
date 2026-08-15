@@ -493,7 +493,10 @@ def test_set_schema_meta_flush_exposes_all_three(graph_db_env):
         assert payload["set_id"] == set_id
         assert payload["properties"], f"{key} exports no properties"
         assert payload["required"], f"{key} declares no required fields"
-        assert payload["access_pattern"] == "keyed_per_entity"
+        # org-key and serve-cert write one row keyed "default" per org
+        # database, so they declare @singleton; binding is per registry host
+        # and stays keyed per entity.
+        assert payload["access_pattern"] in ("keyed_per_entity", "singleton")
 
 
 def test_set_example_stub_covers_required_fields(graph_db_env):

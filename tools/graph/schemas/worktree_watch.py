@@ -45,7 +45,7 @@ SYNOPSIS = {
 }
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="session_name:repo")
 class WorktreeWatchV1(SettingSchema):
     """Persisted watch configuration for one Worktrees row."""
 

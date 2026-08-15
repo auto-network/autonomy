@@ -60,7 +60,7 @@ SYNOPSIS = {
 _HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="session_name:repo:branch:review_id")
 class WorktreeReviewBindingV1(SettingSchema):
     """Operator/agent declaration about a worktree row.
 

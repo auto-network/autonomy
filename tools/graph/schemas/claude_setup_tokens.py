@@ -54,7 +54,7 @@ SYNOPSIS = {
 
 
 @cache(ttl=CLAUDE_SETUP_TOKEN_TTL)
-@keyed_per_entity
+@keyed_per_entity(key_strategy="account_uuid")
 class ClaudeSetupTokenV1(SettingSchema):
     """Per-account long-lived setup token.
 

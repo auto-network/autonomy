@@ -31,7 +31,7 @@ export interface NexusSceneV1 {
 
 /**
  * dashboard.nexus.tile#1
- * Access pattern: keyed_per_entity (key strategy: natural)
+ * Access pattern: keyed_per_entity (key strategy: tile_name)
  */
 export interface NexusTileV1 {
   /** Sort key; higher orders render first (descending). */

@@ -160,7 +160,7 @@ def test_is_terminal_payload_pending():
 
 def test_keyed_per_entity_decorator_applied():
     assert SourceControlReviewStateV1._access_pattern == "keyed_per_entity"
-    assert SourceControlReviewStateV1._key_strategy == "natural"
+    assert SourceControlReviewStateV1._key_strategy == "repo_slug:review_id"
     assert SourceControlReviewStateV1._cache_ttl_seconds == 30 * 24 * 3600
 
 

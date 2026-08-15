@@ -86,7 +86,7 @@ def _validate_check(entry: Any, idx: int, cls_name: str) -> None:
 
 
 @cache(ttl=timedelta(days=30))
-@keyed_per_entity
+@keyed_per_entity(key_strategy="repo_slug:review_id")
 class SourceControlReviewStateV1(SettingSchema):
     """Capability-cached vendor-shape review snapshot.
 

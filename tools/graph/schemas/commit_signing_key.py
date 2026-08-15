@@ -19,6 +19,7 @@ the bespoke PGP armor, is the successor: bead auto-wu2al.
 """
 
 from .registry import (
+    singleton,
     SettingSchema,
     field,
     keyed_per_entity,
@@ -45,7 +46,7 @@ SYNOPSIS = {
 }
 
 
-@keyed_per_entity
+@singleton(key="default")
 class CommitSigningKeyV1(SettingSchema):
     """The org's commit-signing key.
 

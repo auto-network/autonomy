@@ -52,7 +52,7 @@ SYNOPSIS = {
 }
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="implementation_name")
 class HostInstallStateV1(SettingSchema):
     """Resolved host-install state for one capability implementation.
 

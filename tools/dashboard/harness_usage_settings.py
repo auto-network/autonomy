@@ -98,7 +98,7 @@ _VALID_SOURCES = ("oauth_usage", "transcript")
 
 
 @cache(ttl=HARNESS_USAGE_CACHE_TTL)
-@keyed_per_entity
+@keyed_per_entity(key_strategy="harness:identity_id")
 class DashboardHarnessUsageV1(SettingSchema):
     """Per-auth-identity harness usage row.
 

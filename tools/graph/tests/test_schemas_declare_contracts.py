@@ -161,3 +161,27 @@ def test_internal_schemas_stay_out_of_the_registry(registered_schemas):
         "these are marked internal but registered as Settings:\n  "
         + "\n  ".join(leaked)
     )
+
+
+def test_no_schema_leaves_its_entity_unnamed(registered_schemas):
+    """``natural`` means "the caller picks", which asserts nothing.
+
+    A per-entity schema whose entity is unnamed has not decided its
+    cardinality: the key strategy follows from the entity, and if nobody can
+    say what the entity is, nobody chose the key either. Naming it is what
+    makes the declaration carry information — and what lets a reader tell
+    ``workspace_id`` from ``session_name`` without reading the writers.
+
+    A genuinely caller-chosen key is legitimate, but it has to be stated:
+    pass ``key_strategy="natural"`` explicitly and say why in the docstring,
+    rather than taking it by default.
+    """
+    unnamed = [
+        f"{set_id}#{revision} ({cls.__module__}.{cls.__name__})"
+        for set_id, revision, cls in registered_schemas
+        if getattr(cls, "_key_strategy", None) == "natural"
+    ]
+    assert not unnamed, (
+        "these declare a per-entity key without naming the entity:\n  "
+        + "\n  ".join(unnamed)
+    )

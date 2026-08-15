@@ -51,7 +51,7 @@ SYNOPSIS = {
 }
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="flag_name")
 class FeatureFlagV1(SettingSchema):
     """Per-flag boolean toggle.
 

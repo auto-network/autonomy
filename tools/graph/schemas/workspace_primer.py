@@ -57,7 +57,7 @@ SYNOPSIS = {
 }
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="workspace_id[:block_name]")
 class WorkspacePrimerV1(SettingSchema):
     """Shape of an ``autonomy.workspace.primer#1`` payload."""
 

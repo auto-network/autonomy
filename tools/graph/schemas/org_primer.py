@@ -60,7 +60,7 @@ SYNOPSIS = {
 }
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="org_slug[:block_name]")
 class OrgPrimerV1(SettingSchema):
     """Shape of an ``autonomy.org.primer#1`` payload."""
 

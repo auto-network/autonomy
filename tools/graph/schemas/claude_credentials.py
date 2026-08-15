@@ -46,7 +46,7 @@ SYNOPSIS = {
 }
 
 
-@keyed_per_entity
+@keyed_per_entity(key_strategy="account_uuid")
 class ClaudeCredentialsV1(SettingSchema):
     """Per-account Claude OAuth credentials.
 
