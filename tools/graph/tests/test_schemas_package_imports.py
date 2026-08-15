@@ -9,6 +9,31 @@ importable from the package and listed in ``__all__``.
 
 from __future__ import annotations
 
+import pytest
+
+from tools.graph.schemas.registry import SCHEMAS, UPCONVERTERS
+
+
+@pytest.fixture(autouse=True)
+def _isolate_registry():
+    # ``test_decorators_from_package_work_end_to_end`` defines a schema at
+    # the toy key ``x.y#1``, which auto-registers permanently. Five sibling
+    # files reuse the same toy key under their own ``_isolate_registry``
+    # snapshot; without this fixture our registration leaks and, because a
+    # sibling's snapshot captures the already-polluted state, every one of
+    # its ``x.y`` definitions then collides. Parallel runs (--dist loadfile)
+    # hide it — each file gets its own worker process — so a serial run is
+    # the only place the leak surfaces. Restore the registry per test.
+    schemas_snap = dict(SCHEMAS)
+    upcon_snap = dict(UPCONVERTERS)
+    try:
+        yield
+    finally:
+        SCHEMAS.clear()
+        SCHEMAS.update(schemas_snap)
+        UPCONVERTERS.clear()
+        UPCONVERTERS.update(upcon_snap)
+
 
 def test_authoring_api_importable_from_package():
     """The four authoring symbols must be importable from the package."""
