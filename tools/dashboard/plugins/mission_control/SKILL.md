@@ -275,9 +275,40 @@ need.
 ```bash
 curl -sk https://host.docker.internal:8080/api/missions/<mission_id>/pillars \
   -X POST -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $CROSSTALK_TOKEN" \
   -d '{"name": "Dataset & Schema", "coordinator_session": "auto-schema-abc", "color": "#34d399"}'
 # → 201 {"pillar": {"pillar_id": "<uuid>", "mission_id": "...", "name": "...", "coordinator_session": "...", "color": "...", "created_at": ..., "current_revision_id": null, "status": "active"}}
 ```
+
+**The bearer is required whenever you name a coordinator**, here and when
+creating a mission. `coordinator_session` is not a label: an incoming session
+is resolved to whichever pillar carries its name, so writing a name hands that
+pillar to it. Write a name you do not own and that session's traffic can land
+on your pillar instead of its own, with nothing to see it happen.
+
+So the name has to be one you are entitled to write. `$CROSSTALK_TOKEN` proves
+which session you are. You may always name yourself; you may name anybody for
+a pillar under a mission you already coordinate, which is the case above. A
+mission you do not run, or a request that proves nothing, gets 403 — create
+the pillar without a coordinator and have the operator fill it in.
+
+### Handing a pillar to a different session
+
+When the session running a pillar is replaced, the pillar has to be pointed at
+the new one or its questions keep being relayed to a session that is gone.
+
+```bash
+curl -sk https://host.docker.internal:8080/api/pillars/<pillar_id>/coordinator \
+  -X POST -H 'Content-Type: application/json' \
+  -d '{"coordinator_session": "auto-0815-090112"}'
+# and the same shape at /api/missions/<mission_id>/coordinator
+```
+
+**Only the operator can make this call.** Reassignment is the one operation
+that takes a pillar away from a session that currently holds it, so it is not
+something a pillar may do to itself or to a neighbour — from a container it
+returns 403 however you authenticate. If your pillar needs to change hands,
+ask the operator; you cannot do it and neither can the mission controller.
 
 `color` is a free-text hex/CSS color hint for the mission dashboard's
 pillar-grid dot and your own site's chrome, if you want visual consistency
