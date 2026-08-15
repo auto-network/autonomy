@@ -337,6 +337,11 @@ def client(
     reset_idempotency_cache,
 ):
     with TestClient(test_app) as c:
+        from tools.dashboard import unlock_routes
+        c.cookies.set(
+            unlock_routes.SESSION_COOKIE,
+            unlock_routes.mint_session_token(method="test"),
+        )
         yield c
 
 
@@ -354,6 +359,67 @@ def test_dispatch_unknown_member_404(client, per_org_universe):
     body = r.json()
     assert body["error"] == "agent-action member not found"
     assert body["target_org"] == "autonomy"
+
+
+def test_dispatch_refuses_compatibility_before_asset_lookup(
+    client, monkeypatch,
+):
+    from tools.dashboard import api_auth, server
+
+    client.cookies.clear()
+    lookups = []
+
+    def get_source(asset_id):
+        lookups.append(asset_id)
+        return None
+
+    monkeypatch.setattr(graph_ops, "get_source", get_source)
+    monkeypatch.setattr(
+        server.dao_beads,
+        "get_bead",
+        lambda asset_id: lookups.append(asset_id) or None,
+    )
+
+    response = client.post("/api/agent-actions/dispatch", json={
+        "member_key": "note.update-summary",
+        "asset_id": "missing-asset",
+    })
+
+    assert response.status_code == 401
+    assert api_auth.COMPATIBILITY_PRINCIPAL.authenticated is False
+    assert lookups == []
+
+
+def test_dispatch_refuses_wrong_org_after_location_before_action_lookup(
+    client, per_org_universe, monkeypatch,
+):
+    from tools.dashboard import api_auth, server
+
+    asset_id = "19191919-1919-1919-1919-191919191919"
+    _insert_note_source(org="anchore", source_id=asset_id, title="Anchore note")
+    action_lookups = []
+    monkeypatch.setattr(
+        server.api_auth,
+        "principal_from_request",
+        lambda request: api_auth.ApiPrincipal(
+            api_auth.ApiPrincipalKind.ORG_SESSION,
+            subject="autonomy-agent",
+            org="autonomy",
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        "_resolve_agent_action_member",
+        lambda **kwargs: action_lookups.append(kwargs) or None,
+    )
+
+    response = client.post("/api/agent-actions/dispatch", json={
+        "member_key": "note.update-summary",
+        "asset_id": asset_id,
+    })
+
+    assert response.status_code == 404
+    assert action_lookups == []
 
 
 def test_dispatch_creates_agentic_source(client, per_org_universe):

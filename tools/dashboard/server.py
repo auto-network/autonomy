@@ -15985,6 +15985,23 @@ async def api_agent_action_dispatch(request):
     operator's. The agent (when one is spawned) runs in the workspace
     registered to that same org.
     """
+    principal = api_auth.principal_from_request(request)
+    if not principal.authenticated:
+        return JSONResponse({"error": "authentication required"}, status_code=401)
+
+    def target_org_auth_error(target_org):
+        if not principal.org_bound or principal.org == target_org:
+            return None
+        logger.warning(
+            "api_authz_refused action=agent.dispatch caller=%s "
+            "caller_org=%s owner_org=%s",
+            principal.subject,
+            principal.org,
+            target_org,
+        )
+        # A remote caller must not learn that an asset exists in another org.
+        return JSONResponse({"error": f"asset not found: {asset_id}"}, status_code=404)
+
     try:
         body = await request.json()
     except Exception:
@@ -16051,6 +16068,9 @@ async def api_agent_action_dispatch(request):
                 asset_id = str((bead or {}).get("id") or asset_id)
                 asset_type = "bead"
                 asset_title = str((bead or {}).get("title") or asset_id)
+        auth_error = target_org_auth_error(target_org)
+        if auth_error is not None:
+            return auth_error
         members = dao_mock.get_settings_members(set_id, org=target_org)
         payload = next(
             (m.get("payload") or {} for m in members if m.get("key") == member_key),
@@ -16141,6 +16161,10 @@ async def api_agent_action_dispatch(request):
         else:
             target_kind = "bead"
         target_source_id = asset_id
+
+    auth_error = target_org_auth_error(target_org)
+    if auth_error is not None:
+        return auth_error
 
     # ── Step 2: look up the action member in target_org's DB ─────
     payload = _resolve_agent_action_member(
