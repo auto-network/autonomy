@@ -8517,7 +8517,11 @@ async def api_session_resume(request):
             # Location is a server-side fact.  Resolve content only after the
             # caller is authorized, in the located owner org, never through
             # the ambient X-Graph-Org selection.
-            src = graph_ops.resolve_source_strict(
+            # ``located.id`` is already the unambiguous full ID.  Use the
+            # ordinary exact source reader for the authorized content fetch;
+            # repeating prefix/session-UUID resolution here adds a second
+            # lookup contract after location has already been decided.
+            src = graph_ops.get_source(
                 located.get("id") or source_id,
                 org=owner_org,
                 peers=[],
@@ -8527,11 +8531,6 @@ async def api_session_resume(request):
 
         if src is None:
             return JSONResponse({"error": f"Source '{source_id}' not found"}, status_code=404)
-        if isinstance(src, list):
-            return JSONResponse(
-                {"error": f"Ambiguous source_id '{source_id}', {len(src)} candidates"},
-                status_code=400,
-            )
         if src.get("type") != "session":
             return JSONResponse(
                 {"error": f"Source '{source_id}' is type '{src.get('type')}', not a session"},

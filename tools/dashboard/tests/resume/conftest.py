@@ -335,7 +335,7 @@ def test_client(mock_fixture, resume_env, monkeypatch):
 
     monkeypatch.setattr(server.graph_ops, "locate_source_org", fake_locate_source_org)
 
-    def fake_resolve_source_strict(source_id, *, org=None, peers=None):
+    def fake_get_source(source_id, *, org=None, peers=None):
         source = resume_env["sources_by_id"].get(source_id)
         if source is None:
             return None
@@ -345,7 +345,7 @@ def test_client(mock_fixture, resume_env, monkeypatch):
         return row
 
     monkeypatch.setattr(
-        server.graph_ops, "resolve_source_strict", fake_resolve_source_strict,
+        server.graph_ops, "get_source", fake_get_source,
     )
 
     # Launches run on the lifecycle worker now: capture enqueued jobs and
