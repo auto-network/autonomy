@@ -15,11 +15,11 @@ import pytest
 
 from tools.graph.vault import (
     VaultError,
-    build_reference,
-    is_vault_reference,
+    build_locator,
+    is_vault_locator,
     object_id_for,
     open_setting,
-    parse_reference,
+    parse_locator,
     revision_id_for,
     seal_setting,
 )
@@ -64,16 +64,54 @@ def seal(world, store, setting_id="row-1", payload=None):
 
 
 def test_the_settings_row_holds_no_ciphertext_and_no_secret(world, store):
-    ref = seal(world, store)
-    row = json.dumps(ref)
-    assert SECRET["access_token"] not in row
-    assert SECRET["refresh"] not in row
-    # And nothing key-shaped or ciphertext-shaped rode along.
-    assert set(ref) == {
-        "vault", "genesis_id", "domain_id", "object_id", "revision_id",
-        "storage_state_id", "policy_class",
+    locator = seal(world, store)
+    assert SECRET["access_token"] not in locator
+    assert SECRET["refresh"] not in locator
+    assert is_vault_locator(locator)
+    assert set(parse_locator(locator)) == {
+        "genesis_id", "domain_id", "object_id", "revision_id",
+        "storage_state_id", "tier",
     }
-    assert is_vault_reference(ref)
+
+
+def test_the_locator_is_an_opaque_scalar(world, store):
+    """Design of record §17: the locator MUST be a scalar, not an object.
+
+    Settings resolution merge-patches candidate rows (RFC 7386) BEFORE
+    anything is decrypted, and merge-patch recurses into objects. An
+    object-shaped locator would be merged field by field.
+    """
+    locator = seal(world, store)
+    assert isinstance(locator, str)
+
+
+def test_a_partial_override_cannot_splice_two_locators(world, store):
+    """The failure §17 names: a wrap key for an object never written.
+
+    Two writes produce two locators. Merge-patching one payload over the other
+    must replace the locator WHOLE. If it were an object, RFC 7386 would merge
+    per-field and could pair one write's object id with another's revision id.
+    """
+    first = seal(world, store, setting_id="row-1")
+    second = seal(world, store, setting_id="row-2", payload={"access_token": "second"})
+    assert parse_locator(first)["revision_id"] != parse_locator(second)["revision_id"]
+
+    def merge_patch(base, patch):
+        # RFC 7386, the operation settings resolution actually applies.
+        if not isinstance(patch, dict) or not isinstance(base, dict):
+            return patch
+        out = dict(base)
+        for k, v in patch.items():
+            if v is None:
+                out.pop(k, None)
+            else:
+                out[k] = merge_patch(out.get(k), v)
+        return out
+
+    merged = merge_patch({"value": first}, {"value": second})
+    # The winner is one locator, entire -- never a blend of the two.
+    assert merged["value"] == second
+    assert merged["value"] in (first, second)
 
 
 def test_the_secret_is_recoverable_through_the_reference(world, store):
@@ -88,10 +126,10 @@ def test_the_secret_is_recoverable_through_the_reference(world, store):
     assert got == SECRET
 
 
-def test_the_stored_body_is_ciphertext(world, store, tmp_path):
+def test_the_stored_body_is_ciphertext(world, store):
     """What lands on disk must not contain the secret in any form."""
-    ref = seal(world, store)
-    header, body = store.get_object(ref["object_id"], ref["revision_id"])
+    ref = parse_locator(seal(world, store))
+    _header, body = store.get_object(ref["object_id"], ref["revision_id"])
     token = SECRET["access_token"].encode()
     assert token not in body
     assert not any(token[i:i + 12] in body for i in range(0, len(token) - 12))
@@ -103,15 +141,19 @@ def test_the_stored_body_is_ciphertext(world, store, tmp_path):
 def test_writing_the_same_setting_twice_gives_two_revisions_of_one_object(
     world, store
 ):
-    first = seal(world, store, setting_id="row-1")
-    second = seal(world, store, setting_id="row-2", payload={"access_token": "second"})
+    first = parse_locator(seal(world, store, setting_id="row-1"))
+    second = parse_locator(
+        seal(world, store, setting_id="row-2", payload={"access_token": "second"})
+    )
     assert first["object_id"] == second["object_id"], "revisions must share an object"
     assert first["revision_id"] != second["revision_id"]
     # Both remain independently readable -- an append-only history.
     opened = [
-        open_setting(r, held_secrets={world.s1.state_id: world.sec1},
+        open_setting(loc, held_secrets={world.s1.state_id: world.sec1},
                      bridges=world.bridges, descriptors=world.descriptors, store=store)
-        for r in (first, second)
+        for loc in (
+            build_locator(**{k: v for k, v in ref.items()}) for ref in (first, second)
+        )
     ]
     assert opened[0] == SECRET
     assert opened[1] == {"access_token": "second"}
@@ -150,33 +192,47 @@ def test_a_reader_holding_only_an_older_key_is_refused(world, store):
 # ── The reference itself is strict ────────────────────────────────────────
 
 
-def test_a_reference_with_an_extra_field_is_refused():
-    ref = build_reference(
-        genesis_id="a" * 64, domain_id="d", object_id="o", revision_id="r",
-        storage_state_id="s", policy_class="password",
-    )
+def test_a_locator_with_an_extra_field_is_refused():
+    import base64 as b64
+
+    from tools.graph.vault import LOCATOR_PREFIX
+
+    body = json.dumps({
+        "genesis_id": "a" * 64, "domain_id": "d", "object_id": "o",
+        "revision_id": "r", "storage_state_id": "s", "tier": "audited",
+        "smuggled": "x",
+    }).encode()
+    tampered = LOCATOR_PREFIX + b64.urlsafe_b64encode(body).decode().rstrip("=")
     with pytest.raises(VaultError, match="exactly"):
-        parse_reference({**ref, "smuggled": "x"})
+        parse_locator(tampered)
 
 
-def test_a_policy_class_this_build_cannot_open_is_refused():
-    """Storing under a class nothing can open would strand the secret."""
-    with pytest.raises(VaultError, match="unknown policy class"):
-        build_reference(
+def test_a_tier_this_build_cannot_honour_is_refused():
+    """`secured` needs the policy-class wrap (auto-39d26), which is not built.
+
+    Accepting it would promise a human factor nothing enforces -- the label
+    would assert protection the code does not provide.
+    """
+    with pytest.raises(VaultError, match="unimplemented tier"):
+        build_locator(
             genesis_id="a" * 64, domain_id="d", object_id="o", revision_id="r",
-            storage_state_id="s", policy_class="prf",
+            storage_state_id="s", tier="secured",
         )
-    ref = build_reference(
+
+
+def test_the_tier_travels_inside_the_locator():
+    """So a sibling field cannot be merged in to downgrade it separately."""
+    locator = build_locator(
         genesis_id="a" * 64, domain_id="d", object_id="o", revision_id="r",
-        storage_state_id="s", policy_class="password",
+        storage_state_id="s",
     )
-    with pytest.raises(VaultError, match="unknown policy class"):
-        parse_reference({**ref, "policy_class": "both"})
+    assert parse_locator(locator)["tier"] == "audited"
+    assert "audited" not in locator, "the tier is encoded, not a readable sibling"
 
 
-def test_an_ordinary_settings_payload_is_not_mistaken_for_a_reference():
-    assert not is_vault_reference({"interval": "quarterly"})
-    assert not is_vault_reference({"vault": "something-else"})
-    assert not is_vault_reference(None)
-    with pytest.raises(VaultError, match="not a vault reference"):
-        parse_reference({"interval": "quarterly"})
+def test_an_ordinary_settings_payload_is_not_mistaken_for_a_locator():
+    assert not is_vault_locator({"interval": "quarterly"})
+    assert not is_vault_locator("just a string")
+    assert not is_vault_locator(None)
+    with pytest.raises(VaultError, match="not a vault locator"):
+        parse_locator({"interval": "quarterly"})
