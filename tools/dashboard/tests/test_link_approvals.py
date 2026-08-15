@@ -66,6 +66,10 @@ def founded_org(tmp_path, monkeypatch, root):
     from tools.graph.db import GraphDB
 
     orgs_dir = tmp_path / "orgs"
+    # Unpin GRAPH_DB BEFORE creating org DBs: while the hermetic pin is
+    # set, create_org_db(root=...) writes into the pinned store, not
+    # orgs_dir/<slug>.db, so the resolver later can't find the org.
+    monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
     GraphDB.create_org_db(ORG, root=orgs_dir).close()
     with LedgerStore(org_ledger_db_path(ORG)) as store:
@@ -265,11 +269,14 @@ def test_load_binding_ignores_other_orgs_published_binding(tmp_path, monkeypatch
 
     GraphDB.close_all_pooled()
     orgs_dir = tmp_path / "orgs"
-    GraphDB.create_org_db(ORG, root=orgs_dir).close()
-    GraphDB.create_org_db("unregorg", root=orgs_dir).close()
+    # Unpin GRAPH_DB before creating the org DBs — otherwise create_org_db
+    # writes into the hermetic pin, not orgs_dir/<slug>.db, and the org
+    # read below can't find it.
     monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
     monkeypatch.delenv("GRAPH_ORG", raising=False)
+    GraphDB.create_org_db(ORG, root=orgs_dir).close()
+    GraphDB.create_org_db("unregorg", root=orgs_dir).close()
     settings_ops.add_setting(
         NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION, "registry.test",
         {
@@ -482,12 +489,15 @@ def _isolated_orgs_with_peer_binding(tmp_path, monkeypatch, root, *test_orgs):
 
     GraphDB.close_all_pooled()
     orgs_dir = tmp_path / "orgs"
-    GraphDB.create_org_db(ORG, root=orgs_dir).close()
-    for o in test_orgs:
-        GraphDB.create_org_db(o, root=orgs_dir).close()
+    # Unpin GRAPH_DB before creating the org DBs (see the other sites): a
+    # live pin sends create_org_db into the pinned store instead of
+    # orgs_dir/<slug>.db.
     monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
     monkeypatch.delenv("GRAPH_ORG", raising=False)
+    GraphDB.create_org_db(ORG, root=orgs_dir).close()
+    for o in test_orgs:
+        GraphDB.create_org_db(o, root=orgs_dir).close()
     settings_ops.add_setting(
         NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION, "registry.test",
         {
