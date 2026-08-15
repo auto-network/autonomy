@@ -201,11 +201,24 @@ def test_store_reopens_from_disk():
 
 
 def test_slug_targets_the_org_own_db(world, orgs_dir):
+    """Storing by slug writes into the org's own database and creates no
+    database of its own.
+
+    The negative is asserted as "no file appeared that the org database did
+    not already account for", not as "no file named ``keycontrol.db``" --
+    naming one hypothetical filename passes for every other name somebody
+    might reach for instead.
+    """
     descriptor = _minted(world)
+    before = {p.name for p in orgs_dir.iterdir()}
     with KeyControlStore(slug="acme") as store:
         assert store.path == str(orgs_dir / "acme.db")
         store.accept_state(descriptor, world.fold, world.ancestry)
-    assert not (orgs_dir / "keycontrol.db").exists()  # NOT a separate file
+    new = {p.name for p in orgs_dir.iterdir()} - before
+    # WAL/SHM sidecars belong to acme.db itself, not to a second store.
+    assert new <= {"acme.db", "acme.db-wal", "acme.db-shm"}, (
+        f"storing by slug created its own database: {sorted(new)}"
+    )
 
 
 def test_coexists_with_ledger_in_one_org_db(world):
