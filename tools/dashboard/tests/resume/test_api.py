@@ -84,6 +84,16 @@ class TestResumeWithSourceId:
 class TestResumeAuthorization:
     """Owner location and operator-vs-org-session authorization."""
 
+    def test_dashboard_cookie_finds_session_in_another_org(
+        self, cross_org_resume_client, resume_env,
+    ):
+        response = cross_org_resume_client.post(
+            "/api/session/resume",
+            json={"source_id": resume_env["container_source_id"]},
+            headers={"Cookie": "autonomy_dashboard_session=valid-cookie"},
+        )
+        assert response.status_code == 409, response.text
+
     def test_dashboard_cookie_resumes_owner_org_despite_wrong_ambient_org(
         self, test_client, resume_env, monkeypatch,
     ):

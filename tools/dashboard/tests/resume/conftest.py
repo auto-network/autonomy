@@ -159,6 +159,66 @@ def resume_env(tmp_path):
 
 
 @pytest.fixture
+def cross_org_resume_client(mock_fixture, resume_env, tmp_path, monkeypatch):
+    """Real Resume lookup over isolated per-org graph databases."""
+    monkeypatch.setenv("DASHBOARD_MOCK", mock_fixture)
+    monkeypatch.setenv("DASHBOARD_DB", str(tmp_path / "dashboard.db"))
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
+    monkeypatch.setenv("GRAPH_ORG", "autonomy")
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.delenv("GRAPH_API", raising=False)
+
+    from tools.graph.db import GraphDB
+    from tools.graph.models import Source
+
+    GraphDB.close_all_pooled()
+    GraphDB.create_org_db("autonomy").close()
+    anchore = GraphDB.create_org_db("anchore")
+    source = resume_env["sources_by_id"][resume_env["container_source_id"]]
+    anchore.insert_source(Source(
+        id=source["id"],
+        type=source["type"],
+        title=source["title"],
+        file_path=source["file_path"],
+        metadata=source["metadata"],
+        publication_state="raw",
+    ))
+    anchore.conn.commit()
+    anchore.close()
+
+    from tools.dashboard.dao import dashboard_db as ddb
+    ddb._conn = None
+    ddb._DB_PATH = tmp_path / "dashboard.db"
+    ddb.init_db(ddb._DB_PATH)
+
+    from tools.dashboard.dao import mock as mock_mod
+    importlib.reload(mock_mod)
+    from tools.dashboard import server
+    importlib.reload(server)
+
+    monkeypatch.setattr(
+        server.unlock_routes,
+        "_verified_session_payload",
+        lambda token: {"sid": "operator"} if token == "valid-cookie" else None,
+    )
+    monkeypatch.setattr(
+        server.unlock_routes.identity_sessions,
+        "check_active",
+        lambda **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        server.dashboard_db,
+        "find_live_session",
+        lambda **_kwargs: {"tmux_name": "auto-test-resume"},
+    )
+
+    from starlette.testclient import TestClient
+    with TestClient(server.app) as client:
+        yield client
+    GraphDB.close_all_pooled()
+
+
+@pytest.fixture
 def mock_fixture(tmp_path, resume_env):
     """Write mock fixture and configure DASHBOARD_MOCK."""
     # Include resume-specific recent sessions with the new fields
