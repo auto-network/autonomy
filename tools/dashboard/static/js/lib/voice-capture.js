@@ -19,6 +19,9 @@
   // names a build may be kept by the browser; one that does not is rechecked on
   // every load. Anything fetched after render has to add it itself.
   function staticVersion() {
+    // Called at import time, and this module is imported by tests that run
+    // outside a browser, where there is no document to read.
+    if (typeof document === 'undefined') return '';
     var meta = document.querySelector('meta[name="autonomy-static-version"]');
     var v = meta && meta.getAttribute('content');
     return v ? '?v=' + encodeURIComponent(v) : '';

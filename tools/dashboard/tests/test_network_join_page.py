@@ -9,6 +9,7 @@ acceptance mechanics.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from starlette.testclient import TestClient
@@ -38,7 +39,15 @@ class TestRoute:
         )
         assert bare.status_code == full.status_code == 200
         assert bare.text == full.text  # neutrality: query never interpolated
-        assert bare.text.strip() == TEMPLATE.strip()
+        # The template is served whole, with one substitution: the build
+        # marker becomes the build the page was served from, so a browser can
+        # keep the two scripts it loads instead of rechecking them on every
+        # visit. Compare against the template with that marker filled in, so
+        # this still fails if anything else about the page changes.
+        served_version = re.search(r"network-join\.js\?v=([^\"]+)", bare.text)
+        assert served_version, "the page no longer names which build it is"
+        expected = TEMPLATE.replace("__STATIC_VERSION__", served_version.group(1))
+        assert bare.text.strip() == expected.strip()
         # The dashboard's global cache middleware rewrites Cache-Control;
         # the property that matters is that the shell is never cached.
         assert "no-store" in bare.headers["cache-control"] \
