@@ -70,10 +70,36 @@ DEFAULT_SONNET_MODEL = "claude-sonnet-4-6"
 # value here wins over the workspace model, which wins over the built-in default.
 # An unknown alias must FAIL the dispatch (see _resolve_bead_model) — a typo that
 # quietly runs the expensive default is exactly the failure this map prevents.
+#
+# Two kinds of entry, and the difference matters:
+#
+#   FAMILY aliases (opus/sonnet/haiku) are PINNED to a specific version and are
+#   deliberately NOT repointed when a new model ships. ``opus`` maps to
+#   DEFAULT_OPUS_MODEL, which is also the no-label fallback, so repointing it
+#   would silently change the model for every bead that names nothing. Adding a
+#   version-suffixed key below changes nothing that already exists.
+#
+#   VERSION-SUFFIXED aliases name one model exactly. Adding one here is the
+#   whole cost of making a new model dispatchable — and because
+#   _resolve_bead_model also accepts any value present in this map, adding
+#   ``"opus-5": "claude-opus-5"`` makes BOTH ``model:opus-5`` and
+#   ``model:claude-opus-5`` resolve, with no second entry.
+#
+# Note the harness CLI does its own aliasing: ``claude --model opus`` resolves
+# to the LATEST opus. We pin instead, so a bead's model is reproducible and a
+# new release cannot change what an already-approved bead runs.
 MODEL_ALIASES: dict[str, str] = {
     "opus": DEFAULT_OPUS_MODEL,
     "sonnet": DEFAULT_SONNET_MODEL,
     "haiku": "claude-haiku-4-5-20251001",
+    # Current generation, addressable by exact version.
+    "opus-5": "claude-opus-5",
+    "sonnet-5": "claude-sonnet-5",
+    "fable-5": "claude-fable-5",
+    "haiku-4-5": "claude-haiku-4-5-20251001",
+    # Prior generation, still nameable now that the bare aliases are pinned.
+    "opus-4-8": DEFAULT_OPUS_MODEL,
+    "sonnet-4-6": DEFAULT_SONNET_MODEL,
 }
 
 
