@@ -370,3 +370,66 @@ def test_the_frame_names_the_peers_it_consulted(two_orgs, shared):
     findings = settings_ops.orphans_of("probe.shared.uses", org="acme")
 
     assert "peers" in findings[0].looked_in
+
+
+# ── one answer to "where does this row live" ─────────────────
+
+
+@pytest.fixture(scope="module")
+def org_scoped():
+    """A target with no declared home, referred to by an org-scoped field.
+
+    The key carries the organization, which means the store holds several of
+    them — the operator's own. An organization's own database would have no
+    reason to repeat which organization it is.
+    """
+    @keyed_per_entity(key_strategy="secret_name")
+    class Sealed(SettingSchema):
+        set_id = "probe.scoped.sealed"
+        schema_revision = 1
+        v: str = field(required=True, description="v")
+
+    @keyed_per_entity(key_strategy="probe_id")
+    class Wants(SettingSchema):
+        set_id = "probe.scoped.wants"
+        schema_revision = 1
+        unlocks: str = field(required=True, description="a sealed value",
+                             references="probe.scoped.sealed",
+                             reference_scope="org")
+
+    return Sealed, Wants
+
+
+def test_both_paths_look_in_the_same_place(acme, org_scoped):
+    """The defect this exists to prevent.
+
+    ``unresolved_references`` and ``check_setting`` each decided where an
+    org-scoped target lived, and decided differently — one read the
+    operator's store, the other the organization's. Both reported their
+    answer as though it settled the question, so the same row was
+    simultaneously provisioned and missing depending on which verb asked.
+    """
+    settings_ops.add_setting("probe.scoped.sealed", 1, "acme:thing",
+                             {"v": "x"}, org="personal")
+    payload = {"unlocks": "thing"}
+    settings_ops.add_setting("probe.scoped.wants", 1, "w", payload, org="acme")
+
+    assert settings_ops.unresolved_references(
+        "probe.scoped.wants", 1, payload, org="acme") == []
+    assert settings_ops.check_setting(
+        "probe.scoped.wants", "w", org="acme") == []
+
+
+def test_both_paths_agree_when_it_is_absent(acme, org_scoped):
+    """Agreeing only when satisfied would leave the disagreement in place."""
+    payload = {"unlocks": "never-sealed"}
+    settings_ops.add_setting("probe.scoped.wants", 1, "u", payload, org="acme")
+
+    by_field = settings_ops.unresolved_references(
+        "probe.scoped.wants", 1, payload, org="acme")
+    by_walk = settings_ops.check_setting("probe.scoped.wants", "u", org="acme")
+
+    assert [key for _t, key in by_field] == ["acme:never-sealed"]
+    assert [f.kind for f in by_walk] == ["missing_reference"]
+    assert "operator" in by_walk[0].looked_in, (
+        "the frame has to name the store that actually answered")
