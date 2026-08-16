@@ -915,10 +915,11 @@ def unresolved_references(
                 # several orgs, which is the operator's own -- an org-homed
                 # set has no reason to repeat the org it already is. Where
                 # the target says where it lives, that wins.
-                home = schemas.declared_home(target) or ("personal" if scoped else None)
-                if read_set_key(
-                    target, key, org=home if home else org, peers=[],
-                ) is None:
+                if schemas.declared_home(target) is None and scoped:
+                    read_org, peers = "personal", []
+                else:
+                    read_org, peers, _frame = _existence_frame(target, org)
+                if read_set_key(target, key, org=read_org, peers=peers) is None:
                     out.append((target, key))
 
     schema = schemas.get_schema(set_id, int(revision))
@@ -934,6 +935,26 @@ class CheckFinding:
     kind: str             # "missing_reference" | "missing_path" | "unreadable"
     detail: str
     looked_in: str        # the frame the answer came from
+
+
+def _existence_frame(target: str, org: str) -> tuple[str, list[str] | None, str]:
+    """Where to look for ``target``, and the words for it.
+
+    Existence is asked with the visibility the consumer of that row has, which
+    for an organization's set includes its subscribed peers: a workspace one
+    organization owns is genuinely present for another that can read it, and
+    answering from the owning database alone reports rows as dangling while
+    the software that uses them resolves them without difficulty.
+
+    A store that follows the operator or belongs to this machine is single --
+    there is no peer to consult -- so the read is confined to it, and the
+    returned frame says which one, because "not found" means something
+    different in each.
+    """
+    home = schemas.declared_home(target)
+    if home in ("machine", "personal"):
+        return home, [], home
+    return org, None, f"{org} and its peers"
 
 
 def rows_keyed_by(
@@ -1031,22 +1052,17 @@ def check_setting(
             "this process's schema registry",
         )]
 
-    home = None
-    try:
-        home = schemas.declared_home(set_id)
-    except Exception:
-        pass
-    read_org = home if home in ("machine", "personal") else org
+    read_org, peers, frame = _existence_frame(set_id, org)
     address = f"{set_id} key={key!r} in {read_org!r}"
 
     try:
-        row = read_set_key(set_id, key, org=read_org, peers=[])
+        row = read_set_key(set_id, key, org=read_org, peers=peers)
     except Exception as exc:
         return [CheckFinding(address, "unreadable",
-                             f"{type(exc).__name__}: {exc}"[:160], read_org)]
+                             f"{type(exc).__name__}: {exc}"[:160], frame)]
     if row is None:
         return [CheckFinding(address, "missing_reference",
-                             "no row under this key", read_org)]
+                             "no row under this key", frame)]
 
     schema = schemas.get_schema(set_id, int(row["schema_revision"]))
     payload = row.get("payload") or {}
@@ -1127,18 +1143,13 @@ def orphans_of(set_id: str, *, org: str) -> list[CheckFinding]:
             index = segments.index(segment)
             if index >= len(parts):
                 continue
-            target_home = None
-            try:
-                target_home = schemas.declared_home(target)
-            except Exception:
-                pass
-            read_org = target_home if target_home in ("machine", "personal") else org
-            if read_set_key(target, parts[index], org=read_org, peers=[]) is None:
+            read_org, peers, frame = _existence_frame(target, org)
+            if read_set_key(target, parts[index], org=read_org, peers=peers) is None:
                 findings.append(CheckFinding(
                     f"{set_id} key={member.key!r} in {org!r}", "orphaned_key",
                     f"its {segment} names {parts[index]!r} in {target}, which "
                     f"has no row",
-                    read_org,
+                    frame,
                 ))
     return findings
 

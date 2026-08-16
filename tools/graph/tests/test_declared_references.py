@@ -23,9 +23,6 @@ from tools.graph.schemas.registry import (
     keyed_per_entity,
     validate_payload,
 )
-import tools.graph.schemas.secure_setting  # noqa: F401 — registers the target set
-
-
 SECRETS = "autonomy.secure.setting"
 
 

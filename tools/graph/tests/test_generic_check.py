@@ -293,3 +293,80 @@ def test_a_segment_the_key_strategy_does_not_have_is_refused():
             set_id = "probe.keyed.typo"
             schema_revision = 1
             v: str = field(required=True, description="v")
+
+
+# ── what counts as existing ──────────────────────────────────
+
+
+@pytest.fixture
+def two_orgs(tmp_path, monkeypatch, invented):
+    """``acme`` refers to something ``partner`` owns and publishes."""
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.delenv("GRAPH_API", raising=False)
+    for slug in ("acme", "partner"):
+        GraphDB.create_org_db(slug).close()
+    yield
+    GraphDB.close_all_pooled()
+
+
+@pytest.fixture(scope="module")
+def shared():
+    @keyed_per_entity(key_strategy="thing_id")
+    class Thing(SettingSchema):
+        set_id = "probe.shared.thing"
+        schema_revision = 1
+        v: str = field(required=True, description="v")
+
+    @keyed_per_entity(key_strategy="thing_id",
+                      key_references={"thing_id": "probe.shared.thing"})
+    class Uses(SettingSchema):
+        set_id = "probe.shared.uses"
+        schema_revision = 1
+        v: str = field(required=True, description="v")
+
+    return Thing, Uses
+
+
+def test_a_row_another_org_publishes_is_present(two_orgs, shared):
+    """Existence is asked with the visibility its consumer has.
+
+    An organization reads its subscribed peers, so a row one of them
+    publishes is as available to the software as one of its own. Answering
+    from the owning database alone reports a working configuration as
+    dangling, and the report is the more convincing for being specific.
+    """
+    settings_ops.upsert_by_key("probe.shared.thing", 1, "shared-thing",
+                               {"v": "x"}, org="partner", state="published")
+    settings_ops.add_setting("probe.shared.uses", 1, "shared-thing",
+                             {"v": "x"}, org="acme")
+
+    assert settings_ops.orphans_of("probe.shared.uses", org="acme") == []
+
+
+def test_a_row_another_org_keeps_private_is_absent(two_orgs, shared):
+    """The other half of the same rule.
+
+    A row a peer does not publish is not readable, so nothing in this
+    organization can resolve it — which is what makes the row keyed by it
+    genuinely orphaned rather than merely owned elsewhere.
+    """
+    settings_ops.upsert_by_key("probe.shared.thing", 1, "private-thing",
+                               {"v": "x"}, org="partner", state="raw")
+    settings_ops.add_setting("probe.shared.uses", 1, "private-thing",
+                             {"v": "x"}, org="acme")
+
+    findings = settings_ops.orphans_of("probe.shared.uses", org="acme")
+
+    assert [f.kind for f in findings] == ["orphaned_key"]
+
+
+def test_the_frame_names_the_peers_it_consulted(two_orgs, shared):
+    """"Not found in acme" and "not found in acme or anything it reads" are
+    different claims, and only the second justifies deleting the row."""
+    settings_ops.add_setting("probe.shared.uses", 1, "nowhere", {"v": "x"},
+                             org="acme")
+
+    findings = settings_ops.orphans_of("probe.shared.uses", org="acme")
+
+    assert "peers" in findings[0].looked_in
