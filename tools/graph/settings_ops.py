@@ -1338,6 +1338,11 @@ def upsert_by_key(
     _guard_protected_set(set_id)
     if state not in VALID_STATES:
         raise ValueError(f"invalid state {state!r}; valid: {VALID_STATES}")
+    if _access_pattern_for(set_id, schema_revision) == "append_only_log":
+        raise ValueError(
+            f"{set_id} declares 'append_only_log': its rows are never "
+            f"rewritten. Append a new one with add_setting()."
+        )
     schemas.validate_payload(set_id, schema_revision, payload)
     schemas.validate_key(set_id, schema_revision, key)
     now = _now_iso()
@@ -1384,6 +1389,46 @@ def upsert_by_key(
     return sid
 
 
+_REPLACED_PATTERNS = ("singleton", "keyed_per_entity")
+
+
+def _access_pattern_for(set_id: str, revision: int) -> str | None:
+    schema = schemas.get_schema(set_id, int(revision))
+    return getattr(schema, "_access_pattern", None) if schema else None
+
+
+def _refuse_amend_when_replaced(target: dict, org: str | None) -> None:
+    """Refuse an override that should have been a rewrite."""
+    pattern = _access_pattern_for(target["set_id"], target["schema_revision"])
+    if pattern not in _REPLACED_PATTERNS:
+        return
+    # Absent from the caller's own database means the row belongs to a peer,
+    # which is the case overrides exist for: you cannot rewrite what you do
+    # not own.
+    if not _is_own_row(target["id"], org):
+        return
+    raise ValueError(
+        f"{target['set_id']} declares {pattern!r}: its rows are replaced, "
+        f"not amended. Rewrite it with upsert_by_key(key={target['key']!r}) "
+        f"-- one row, no chain to merge on every read. Overriding is for "
+        f"adapting a row another organization owns."
+    )
+
+
+def _is_own_row(setting_id: str, org: str | None) -> bool:
+    """Whether ``setting_id`` lives in the caller's own database."""
+    try:
+        db = _open_read(org)
+    except Exception:
+        return False
+    try:
+        return db.conn.execute(
+            "SELECT 1 FROM settings WHERE id = ?", (setting_id,)
+        ).fetchone() is not None
+    finally:
+        db.close()
+
+
 def override_setting(
     target_id: str,
     payload_overrides: dict,
@@ -1409,6 +1454,16 @@ def override_setting(
     target = _fetch_setting_any_org(target_id, org)
     if target is None:
         raise LookupError(f"override target not found: {target_id!r}")
+
+    # A set whose schema says its rows are REPLACED must not be amended in
+    # place of rewriting. Overriding appends a row and every later read
+    # merges the whole chain, so a value changed this way grows a layer per
+    # edit -- which is how a workspace ends up resolving through ten rows.
+    #
+    # Overriding ANOTHER organization's row stays allowed and is the reason
+    # overrides exist: you cannot rewrite a row you do not own, and adapting
+    # a shared primitive locally is the intended use.
+    _refuse_amend_when_replaced(target, org)
 
     # Resolution applies ONLY overrides whose ``supersedes`` points at the
     # chosen base row (see read_set / explain_setting). An override of an
