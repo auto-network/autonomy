@@ -200,7 +200,8 @@ class RunningAgent:
     jsonl_offset: int = 0          # byte offset into the session JSONL file
     prev_cpu_usec: int = 0         # previous cpu.stat usage_usec reading
     prev_cpu_poll_time: float = 0.0  # wall time of previous CPU reading
-    # Latched once the JSONL tail shows a tool_use; extends stale threshold to 1800s.
+    # Latched once the JSONL tail shows a tool_use; extends the stale
+    # threshold to STALE_THRESHOLD_TOOL_SECS.
     _extended: bool = False
 
 
@@ -399,7 +400,7 @@ def classify_failure(output_dir: str, duration_secs: float) -> str:
     if jsonl_file:
         try:
             stale_secs = time.time() - jsonl_file.stat().st_mtime
-            if stale_secs > 300:
+            if stale_secs > STALE_THRESHOLD_SECS:
                 return "timeout"
         except OSError:
             pass
@@ -1636,6 +1637,25 @@ def _find_jsonl_file(output_dir: str) -> Path | None:
 # line beyond this is pathological; stop rather than read an unbounded tail.
 _TAIL_SCAN_CAP = 8 * 1024 * 1024
 
+# How long a session's JSONL may go unwritten before the run is reaped.
+#
+# This is a THINKING budget, not a liveness check. Between two turns the agent
+# writes nothing: the model is composing the next one, and a hard problem can
+# occupy it for minutes with no observable output anywhere -- not in the JSONL,
+# not in docker logs, and not on any screen, because the agentic harness runs
+# `claude -p` with no TTY. A budget shorter than the model's real thinking time
+# therefore kills healthy runs and reports them exactly like a hang.
+#
+# Measured 2026-08-16: auto-42rsi was reaped five consecutive times at 300s
+# while every other bead passed. Under observation the same bead showed
+# between-turn pauses of 112s and 152s and then resumed normally, reaching
+# implementation. The pauses scale with how hard the bead is to think about, so
+# a fixed 300s silently penalises exactly the work that most needs the time.
+STALE_THRESHOLD_SECS = 600
+# Extended budget once a tool call is known to be in flight. A tool runs for as
+# long as it runs -- a test suite, a build -- and that is not thinking time.
+STALE_THRESHOLD_TOOL_SECS = 1800
+
 
 def _has_running_tool(jsonl_file: Path) -> bool:
     """Return True if the last JSONL entry is an assistant turn with a tool_use block.
@@ -2321,10 +2341,13 @@ def poll_and_collect(running: list[RunningAgent]) -> None:
                     stale_secs = time.time() - jsonl_file.stat().st_mtime
                     # Tail the JSONL for a running tool call. Latched once True
                     # so subsequent ticks skip the file read.
-                    if stale_secs > 300:
+                    if stale_secs > STALE_THRESHOLD_SECS:
                         if not agent._extended and _has_running_tool(jsonl_file):
                             agent._extended = True
-                        threshold = 1800 if agent._extended else 300
+                        threshold = (
+                            STALE_THRESHOLD_TOOL_SECS if agent._extended
+                            else STALE_THRESHOLD_SECS
+                        )
                         stale = stale_secs > threshold
                     else:
                         stale = False
@@ -2456,10 +2479,13 @@ def poll_and_collect_librarians(running_librarians: list[RunningLibrarian]) -> N
             if jsonl_file:
                 try:
                     stale_secs = time.time() - jsonl_file.stat().st_mtime
-                    if stale_secs > 300:
+                    if stale_secs > STALE_THRESHOLD_SECS:
                         if not lib._extended and _has_running_tool(jsonl_file):
                             lib._extended = True
-                        threshold = 1800 if lib._extended else 300
+                        threshold = (
+                            STALE_THRESHOLD_TOOL_SECS if lib._extended
+                            else STALE_THRESHOLD_SECS
+                        )
                         stale = stale_secs > threshold
                     else:
                         stale = False
