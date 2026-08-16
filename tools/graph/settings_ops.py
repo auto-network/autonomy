@@ -936,6 +936,52 @@ class CheckFinding:
     looked_in: str        # the frame the answer came from
 
 
+def rows_keyed_by(
+    entity_set_id: str,
+    entity_key: str,
+    *,
+    org: str,
+) -> list[tuple[str, str, str]]:
+    """Every row whose KEY identifies ``entity_key`` in ``entity_set_id``.
+
+    Reads the key segments schemas declare with ``key_references`` and
+    returns each row whose segment holds this entity's key, as
+    ``(set_id, key, segment_name)``.
+
+    Metadata-driven: it names no set and no entity, so a schema that
+    declares a key reference becomes traversable without touching this.
+    """
+    import re as _re
+
+    out: list[tuple[str, str, str]] = []
+    for set_id in schemas.list_registered_set_ids():
+        schema = next((schemas.get_schema(set_id, r)
+                       for r in range(1, 12) if schemas.get_schema(set_id, r)), None)
+        refs = getattr(schema, "_key_references", None) or {}
+        wanted = [seg for seg, target in refs.items() if target == entity_set_id]
+        if not wanted:
+            continue
+        strategy = getattr(schema, "_key_strategy", "") or ""
+        segments = [seg.strip("[]") for seg in _re.split(r"[:/]", strategy)]
+        home = None
+        try:
+            home = schemas.declared_home(set_id)
+        except Exception:
+            pass
+        read_org = home if home in ("machine", "personal") else org
+        try:
+            members = read_set(set_id, org=read_org, peers=[])
+        except Exception:
+            continue
+        for member in members.members:
+            parts = str(member.key).split(":")
+            for segment in wanted:
+                index = segments.index(segment)
+                if index < len(parts) and parts[index] == entity_key:
+                    out.append((set_id, member.key, segment))
+    return out
+
+
 def check_setting(
     set_id: str,
     key: str,
@@ -1042,6 +1088,58 @@ def check_setting(
 
     if schema is not None:
         walk(schema, payload, "")
+
+    # Rows keyed by this one are part of whether it is fully installed: a
+    # workspace's capability enables are found through the key segment that
+    # names the workspace.
+    for dep_set, dep_key, _segment in rows_keyed_by(set_id, key, org=org):
+        findings.extend(check_setting(dep_set, dep_key, org=org, _seen=seen))
+    return findings
+
+
+def orphans_of(set_id: str, *, org: str) -> list[CheckFinding]:
+    """Rows whose key names an entity that no longer exists.
+
+    Reads each declared key segment and looks for the row it identifies, in
+    the home that target declares. A row keyed by something absent is
+    reported here; it is valid in every other respect, so this is where it
+    surfaces.
+    """
+    import re as _re
+
+    findings: list[CheckFinding] = []
+    schema = next((schemas.get_schema(set_id, r)
+                   for r in range(1, 12) if schemas.get_schema(set_id, r)), None)
+    refs = getattr(schema, "_key_references", None) or {}
+    if not refs:
+        return findings
+    segments = [seg.strip("[]") for seg in
+                _re.split(r"[:/]", getattr(schema, "_key_strategy", "") or "")]
+    try:
+        members = read_set(set_id, org=org, peers=[])
+    except Exception:
+        return findings
+    for member in members.members:
+        parts = str(member.key).split(":")
+        for segment, target in refs.items():
+            if segment not in segments:
+                continue
+            index = segments.index(segment)
+            if index >= len(parts):
+                continue
+            target_home = None
+            try:
+                target_home = schemas.declared_home(target)
+            except Exception:
+                pass
+            read_org = target_home if target_home in ("machine", "personal") else org
+            if read_set_key(target, parts[index], org=read_org, peers=[]) is None:
+                findings.append(CheckFinding(
+                    f"{set_id} key={member.key!r} in {org!r}", "orphaned_key",
+                    f"its {segment} names {parts[index]!r} in {target}, which "
+                    f"has no row",
+                    read_org,
+                ))
     return findings
 
 

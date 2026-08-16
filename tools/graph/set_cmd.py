@@ -467,6 +467,23 @@ def _report_unresolved_references(set_id: str, rev: int, payload, org) -> None:
         print(f"    in this process.")
 
 
+def cmd_set_orphans(args) -> None:
+    """Rows in a set whose key names an entity that has no row."""
+    from tools.graph import settings_ops
+
+    set_id = args.set_at_rev.split("#", 1)[0]
+    org = _org(args) or "personal"
+    findings = settings_ops.orphans_of(set_id, org=org)
+    if not findings:
+        print(f"  ✓ {set_id} — every key names something that exists")
+        return
+    print(f"  {len(findings)} orphaned key(s) in {set_id}:\n")
+    for finding in findings:
+        print(f"      {finding.address}")
+        print(f"        {finding.detail}")
+    sys.exit(1)
+
+
 def cmd_set_check(args) -> None:
     """Is this row satisfied, and everything it declares it depends on?
 
@@ -1019,6 +1036,14 @@ def attach_set_subparser(sub) -> None:
     p_check.add_argument("--key", required=True, help="Which row to check")
     p_check.add_argument("--org", default=None, help="Organization to read as")
     p_check.set_defaults(func=cmd_set_check)
+
+    p_orphans = set_sub.add_parser(
+        "orphans",
+        help="Rows whose key names an entity that no longer exists",
+    )
+    p_orphans.add_argument("set_at_rev", metavar="set_id[#rev]")
+    p_orphans.add_argument("--org", default=None, help="Organization to read as")
+    p_orphans.set_defaults(func=cmd_set_orphans)
     p_add.add_argument("--from", dest="from_file",
                        help="Path to JSON or YAML payload file (use '-' for stdin)")
     p_add.add_argument("--inline", dest="inline",

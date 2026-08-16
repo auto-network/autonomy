@@ -66,7 +66,17 @@ _BOOL_FIELDS = (
 )
 
 
-@keyed_per_entity(key_strategy="workspace_id:contract_name")
+@keyed_per_entity(
+    key_strategy="workspace_id:contract_name",
+    # Each key segment identifies a row in another set: the first is a
+    # workspace, the second a capability contract. Declared, a walker can
+    # find every enable row belonging to a given workspace, and report one
+    # whose workspace or contract no longer exists.
+    key_references={
+        "workspace_id": "autonomy.workspace",
+        "contract_name": "autonomy.capability.contract",
+    },
+)
 class WorkspaceCapabilityEnableV1(SettingSchema):
     """Shape of an ``autonomy.workspace.capability.enable#1`` payload.
 
