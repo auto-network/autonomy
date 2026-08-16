@@ -141,6 +141,11 @@ async def probe_host_v1(
     configured for that git host (graph note f7c4c109-91a §Phase 1a) — no
     agent container involved. UNAVAILABLE = no token configured; DEGRADED
     mirrors the container probe's classification.
+
+    Takes no org: this asks whether host mode works for a git host at all.
+    Where exactly one organization has configured the host that is
+    unambiguous, and where several have, the answer depends on which one
+    is asking and the caller has to say.
     """
     import os
 
@@ -149,7 +154,7 @@ async def probe_host_v1(
         return ProbeResult(
             state=STATE_UNAVAILABLE,
             reason=REASON_ENV_MISSING,
-            missing_env=("token_file." + host,),
+            missing_env=("autonomy.credential-file <org>:" + host,),
         )
     stdout, stderr, exit_code, timed_out = await service.run_cli(
         list(PROBE_COMMAND),
@@ -169,7 +174,7 @@ async def probe_host_v1(
         return ProbeResult(
             state=STATE_DEGRADED,
             reason=REASON_ENV_MISSING,
-            missing_env=("token_file." + host,),
+            missing_env=("autonomy.credential-file <org>:" + host,),
         )
     return ProbeResult(
         state=STATE_DEGRADED,
