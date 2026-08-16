@@ -6204,6 +6204,10 @@ def main():
     from .claude_cmd import attach_claude_subparser
     attach_claude_subparser(sub)
 
+    # settings — inventory, validation and throughput for the substrate
+    from .settings_diag_cmd import register as attach_settings_diag_subparser
+    attach_settings_diag_subparser(sub)
+
     # harness — every account the platform can authenticate as, with usage,
     # reset times and what is running against each. Harness-agnostic: a new
     # provider appears here as soon as it writes harness-usage rows.
