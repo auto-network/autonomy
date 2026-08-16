@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import re as _re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -200,6 +201,43 @@ class WorkspaceMountInvalidError(WorkspaceMountError):
 # ── Typed composition models ────────────────────────────────
 
 
+_SSH_SCHEME_RE = _re.compile(
+    r"^ssh://(?:(?P<user>[^@/]+)@)?(?P<host>[^/:]+)(?::\d+)?(?P<path>/.*)$")
+_SCP_RE = _re.compile(r"^(?:(?P<user>[^@/]+)@)?(?P<host>[^/:]+):(?P<path>.+)$")
+
+
+def split_remote_url(url: str) -> tuple[str | None, str, str]:
+    """Split a git remote into ``(user, host, path)``, losing nothing.
+
+    The path keeps its leading slash when it has one — an absolute path on
+    the server is a different location from a path relative to the login
+    user's home, and dropping the distinction silently repoints the remote.
+    A trailing ``.git`` is dropped and re-added on composition.
+
+    Raises ``WorkspaceSettingsError`` for a form that would not survive the
+    round trip, rather than storing something that composes back to a
+    different remote.
+    """
+    # A scheme other than ssh:// must be refused explicitly: the scp-style
+    # pattern happily reads "https://host/path" as host "https" with the rest
+    # as its path, which composes back into nonsense.
+    if "://" in url and not url.startswith("ssh://"):
+        raise WorkspaceSettingsError(
+            f"unrecognized git remote {url!r}: only ssh remotes decompose "
+            f"into a user, host and path"
+        )
+    m = _SSH_SCHEME_RE.match(url) or _SCP_RE.match(url)
+    if not m:
+        raise WorkspaceSettingsError(
+            f"unrecognized git remote {url!r}: expected user@host:path, "
+            f"ssh://user@host/path, or an absolute local path"
+        )
+    path = m.group("path")
+    if path.endswith(".git"):
+        path = path[:-4]
+    return m.group("user"), m.group("host"), path
+
+
 @dataclass(frozen=True)
 class RepoMount:
     """Git repo mount spec from the workspace Setting payload.
@@ -217,16 +255,28 @@ class RepoMount:
     host: str | None
     repo: str | None
     mount: str
+    user: str | None = None
     local_path: str | None = None
     writable: bool = False
     base_source: str | None = None
 
     @property
     def url(self) -> str:
-        """The clone URL, composed from whichever form names the repository."""
+        """The clone URL, composed from whichever form names the repository.
+
+        The login user is part of a remote's address, so it is stored; it is
+        ``git`` on every hosted forge and something else on a private server.
+        An absolute path is a path on that server and takes the ``ssh://``
+        form; a relative one is relative to the login user's home and takes
+        the scp-style form. Choosing between them by looking at the path is
+        what keeps both round-trips exact.
+        """
         if self.local_path:
             return self.local_path
-        return f"git@{self.host}:{self.repo}.git"
+        user = self.user or "git"
+        if str(self.repo).startswith("/"):
+            return f"ssh://{user}@{self.host}{self.repo}.git"
+        return f"{user}@{self.host}:{self.repo}.git"
 
     @classmethod
     def from_url(cls, url: str, **kwargs: Any) -> "RepoMount":
@@ -238,9 +288,8 @@ class RepoMount:
         """
         if url.startswith("/"):
             return cls(host=None, repo=None, local_path=url, **kwargs)
-        from agents.workspace_manager import parse_repo_url
-        host, path = parse_repo_url(url)
-        return cls(host=host, repo=path, **kwargs)
+        user, host, path = split_remote_url(url)
+        return cls(host=host, repo=path, user=user, **kwargs)
 
 
 @dataclass(frozen=True)
@@ -433,6 +482,7 @@ def _parse_repo(raw: Any, workspace_id: str, idx: int) -> RepoMount:
     return RepoMount(
         host=str(raw["host"]) if raw.get("host") else None,
         repo=str(raw["repo"]) if raw.get("repo") else None,
+        user=str(raw["user"]) if raw.get("user") else None,
         local_path=str(raw["local_path"]) if raw.get("local_path") else None,
         mount=str(raw["mount"]),
         writable=bool(raw.get("writable", False)),

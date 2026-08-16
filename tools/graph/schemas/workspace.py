@@ -95,6 +95,13 @@ class WorkspaceRepoV1(SettingSchema):
         required=False,
         description="Owner and name on that host, e.g. anchore/anchorectl",
     )
+    user: str = field(
+        required=False,
+        description=(
+            "Login user on that host. Defaults to git, which is right for "
+            "every hosted forge; a private server may use another"
+        ),
+    )
     local_path: str = field(
         required=False,
         description=(
