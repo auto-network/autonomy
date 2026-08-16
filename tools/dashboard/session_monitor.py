@@ -1304,6 +1304,7 @@ class SessionMonitor:
         session_type: str = "container",
         project: str = "",
         harness: str = "claude",
+        harness_token: str | None = None,
     ) -> None:
         """Register a session row IMMEDIATELY at session-create POST entry,
         before ``prepare_session_mounts`` and ``launch_session`` run.
@@ -1320,6 +1321,7 @@ class SessionMonitor:
                 session_type=session_type,
                 project=project,
                 harness=harness,
+                harness_token=harness_token,
                 state="LAUNCHING",
             )
         except Exception:

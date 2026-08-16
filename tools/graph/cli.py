@@ -6204,6 +6204,12 @@ def main():
     from .claude_cmd import attach_claude_subparser
     attach_claude_subparser(sub)
 
+    # harness — every account the platform can authenticate as, with usage,
+    # reset times and what is running against each. Harness-agnostic: a new
+    # provider appears here as soon as it writes harness-usage rows.
+    from .harness_cmd import register as attach_harness_subparser
+    attach_harness_subparser(sub)
+
     # credentials — Layer-0 outer-agent import of local Claude/Codex auth
     # into the substrate credential Settings (bead auto-5bq85)
     from .credential_import import attach_credentials_subparser
