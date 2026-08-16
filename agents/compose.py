@@ -70,7 +70,9 @@ def compose_prompt(bead_id: str) -> str:
     #    Label-matched subdirs (e.g. shared/dashboard/) are included when
     #    the bead has a matching label.
     bead = get_bead(bead_id)
-    labels = bead.get("labels", []) if bead else []
+    # A bead with no labels stores null, and a dict default only covers an
+    # absent key -- so this is None for such a bead unless asked for directly.
+    labels = (bead.get("labels") if bead else None) or []
     shared = load_shared_blocks(labels)
     if shared:
         sections.append("\n---\n")
