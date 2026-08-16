@@ -16,11 +16,15 @@ sequence; there is no bare ``role.grant`` — membership and ``owner``
 both flow from the claim, and every predicate keys off the one
 membership projection (pin 6).
 
-``kem_seed`` is optional (RESOLUTION 2): the default founding omits the
-KEM credential — the founder is the domain's initial provisioner and
-publishes a credential with first storage use (contract §5). When
-supplied, the claim carries the persona-signed credential so the
-founding admission is immediately provisionable.
+``kem_seed`` is optional at this primitive layer, but auto-uh2dp closes
+the contract §5 founder allowance at the production callers: the headless
+founding (``org_ops.create_org_with_identity`` and the retrofit) ALWAYS
+supply a seed, so the founder claim carries a persona-signed
+PersonaKemCredential and the founder has a grant address the moment a
+later member advances the state after an access contraction. When the
+seed is omitted the claim is credential-free (still exercised by the
+``kem_seed=None`` unit path and the not-yet-converted JS founding client,
+auto-kz3vu / auto-5dh9a).
 
 ``org_id`` is the organization's stable local ``orgs.id`` UUID (D21) —
 a label, never the slug and never a registry handle. The org root
@@ -165,6 +169,7 @@ def resume_org_founding(
     org_id: str,
     org_root: KeyPair,
     personal_root_seed: bytes,
+    kem_seed: Optional[bytes] = None,
 ) -> FoundedLedger:
     """Complete an interrupted founding onto its existing genesis.
 
@@ -284,29 +289,41 @@ def resume_org_founding(
         )
     else:
         founding_invite_id = invite.event_id
+    credential = kem_private = None
+    if kem_seed is not None:
+        # A faithful resume mints exactly what the fresh founding would have:
+        # since the fresh path now carries a PersonaKemCredential (auto-uh2dp),
+        # a resumed claim carries one too. Lazy import — see found_org_ledger.
+        from tools.network.storagekit import credentials as _credentials
+
+        record, kem_private = _credentials.build(
+            founder, genesis_id, kem_seed, [genesis_id], (genesis.hlc.ts, 0)
+        )
+        credential = record.to_dict()
     if claim is None:
+        claim_payload = {
+            "type": "member.claim",
+            "invite_ref": founding_invite_id,
+            "persona_pub": founder.public_hex,
+            "profile": {},
+            "approvals": [],
+        }
+        if credential is not None:
+            claim_payload["kem_credential"] = credential
         founder_claim_id = store.append(
-            make_event(
-                founder,
-                {
-                    "type": "member.claim",
-                    "invite_ref": founding_invite_id,
-                    "persona_pub": founder.public_hex,
-                    "profile": {},
-                    "approvals": [],
-                },
-                [founding_invite_id],
-                next_hlc(),
-            )
+            make_event(founder, claim_payload, [founding_invite_id], next_hlc())
         )
     else:
         founder_claim_id = claim.event_id
+        # An already-committed claim is authoritative; do not resurface a
+        # freshly built credential that was never appended.
+        credential = kem_private = None
     return FoundedLedger(
         genesis_id=genesis_id,
         founder_persona_pub=founder.public_hex,
         role_define_id=role_define_id,
         founding_invite_id=founding_invite_id,
         founder_claim_id=founder_claim_id,
-        kem_credential=None,
-        kem_private_key=None,
+        kem_credential=credential,
+        kem_private_key=kem_private,
     )

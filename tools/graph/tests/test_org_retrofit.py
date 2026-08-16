@@ -16,6 +16,7 @@ from tools.graph.schemas.network_identity import (
 )
 from tools.graph.schemas.personal_identity import PERSONAL_IDENTITY_SET_ID
 from tools.network.idkit import KeyPair, derive_persona
+from tools.network.storagekit import credentials
 from tools.network.idkit.armor import ArmorPassphraseError, encrypt_root_key
 from tools.network.idkit.errors import SealingError
 from tools.network.idkit.sealing import derive_encapsulation_keypair
@@ -97,10 +98,13 @@ class TestRetrofitFoundLedgers:
             state = store.fold()
             founder = derive_persona(env.personal_seed, genesis.event_id)
             assert state.members[founder.public_hex].roles == ("owner",)
-            # RESOLUTION 2: credential-free founding.
+            # auto-uh2dp: the retrofit founding, like the fresh one, carries a
+            # PersonaKemCredential on the founder claim.
             for event in store.events():
                 if event.type == "member.claim":
-                    assert "kem_credential" not in event.payload
+                    assert "kem_credential" in event.payload
+                    cred = credentials.validate(event.payload["kem_credential"])
+                    assert cred.persona == founder.public_hex
 
     def test_second_run_is_idempotent(self, env):
         org_ops.retrofit_found_ledgers(PASSWORD)
