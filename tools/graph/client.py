@@ -128,6 +128,11 @@ class HttpClient:
 
     def __init__(self, base_url: str):
         self.base_url = base_url.rstrip("/")
+        #: Full body of the most recent Settings write. The server reports
+        #: a stored row that resolution will never return; that report is
+        #: only useful if it survives the transport, and returning the id
+        #: alone discarded it. Held here so the caller can say so.
+        self.last_write_report: dict | None = None
         self._ssl_ctx = ssl.create_default_context()
         self._ssl_ctx.check_hostname = False
         self._ssl_ctx.verify_mode = ssl.CERT_NONE
@@ -778,6 +783,7 @@ class HttpClient:
             "POST", "/api/graph/setting", body=body,
             headers=_settings_headers(org),
         )
+        self.last_write_report = result
         return result.get("id")
 
     def override_setting(self, target_id, payload, *, org, state="raw"):
@@ -787,6 +793,7 @@ class HttpClient:
             "POST", f"/api/graph/setting/{target_id}/override",
             body=body, headers=_settings_headers(org),
         )
+        self.last_write_report = result
         return result.get("id")
 
     def exclude_setting(self, target_id, *, org, state="raw"):

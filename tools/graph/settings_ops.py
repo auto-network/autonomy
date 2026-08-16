@@ -1714,6 +1714,65 @@ def _access_pattern_for(set_id: str, revision: int) -> str | None:
     return getattr(schema, "_access_pattern", None) if schema else None
 
 
+def illegal_amendments(*, org: str | None) -> list[dict]:
+    """Override rows stored on sets whose schema forbids amendment.
+
+    A ``singleton`` or ``keyed_per_entity`` set declares that its rows are
+    replaced, not amended. That rule is enforced when an override is
+    written; it is not consulted when one is read, so a row predating the
+    rule -- or written before its schema declared a pattern -- is still
+    merged into every resolved value. The store then serves a state its own
+    schema says cannot exist, and no reader can tell.
+
+    Same-organization only. An override whose base lives in another
+    database is the legitimate case the rule exists to permit: adapting a
+    row you do not own, which you cannot rewrite.
+
+    Returns one entry per offending row so a caller can report it, gate on
+    it, or remove it by id -- which is the only way to address a row whose
+    base has since been deleted.
+    """
+    out: list[dict] = []
+    try:
+        db = _open_read(org, "")
+    except Exception:
+        return out
+    try:
+        rows = db.conn.execute(
+            "SELECT id, set_id, schema_revision, key, supersedes, "
+            "       publication_state, created_at "
+            "FROM settings "
+            "WHERE supersedes IS NOT NULL AND deprecated = 0"
+        ).fetchall()
+        own_ids = {
+            r["id"] for r in db.conn.execute("SELECT id FROM settings").fetchall()
+        }
+    except Exception:
+        return out
+    finally:
+        db.close()
+
+    for row in rows:
+        pattern = _access_pattern_for(row["set_id"], row["schema_revision"])
+        if pattern not in _REPLACED_PATTERNS:
+            continue
+        # A base in another database is a peer's row, which is exactly what
+        # overriding is for.
+        if row["supersedes"] not in own_ids:
+            continue
+        out.append({
+            "id": row["id"],
+            "set_id": row["set_id"],
+            "key": row["key"],
+            "supersedes": row["supersedes"],
+            "access_pattern": pattern,
+            "state": row["publication_state"],
+            "base_present": row["supersedes"] in own_ids,
+            "created_at": row["created_at"],
+        })
+    return out
+
+
 def _refuse_amend_when_replaced(target: dict, org: str | None) -> None:
     """Refuse an override that should have been a rewrite."""
     pattern = _access_pattern_for(target["set_id"], target["schema_revision"])
