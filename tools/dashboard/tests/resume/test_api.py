@@ -544,7 +544,7 @@ class TestWorkspaceHarnessPassthrough:
             image="autonomy-agent:dashboard",
             graph_project="autonomy",
             harness="codex",
-            repos=(RepoMount(url="git@example.com:autonomy.git", mount="/workspace/repo", writable=True),),
+            repos=(RepoMount.from_url(url="git@example.com:autonomy.git", mount="/workspace/repo", writable=True),),
             working_dir="/workspace/repo",
         )
 
@@ -608,7 +608,7 @@ class TestWorkspaceHarnessPassthrough:
             image="autonomy-agent:dashboard",
             graph_project="autonomy",
             harness="codex",
-            repos=(RepoMount(url="git@example.com:autonomy.git", mount="/workspace/repo", writable=True),),
+            repos=(RepoMount.from_url(url="git@example.com:autonomy.git", mount="/workspace/repo", writable=True),),
             working_dir="/workspace/repo",
         )
 
@@ -642,7 +642,7 @@ class TestWorkspaceHarnessPassthrough:
             image="autonomy-agent:dashboard",
             graph_project="autonomy",
             harness="codex",
-            repos=(RepoMount(url="git@example.com:autonomy.git", mount="/workspace/repo", writable=True),),
+            repos=(RepoMount.from_url(url="git@example.com:autonomy.git", mount="/workspace/repo", writable=True),),
             working_dir="/workspace/repo",
         )
 
@@ -675,7 +675,7 @@ class TestWorkspaceHarnessPassthrough:
             image="autonomy-agent:dashboard",
             graph_project="autonomy",
             harness="codex",
-            repos=(RepoMount(url="git@example.com:autonomy.git", mount="/workspace/repo", writable=True),),
+            repos=(RepoMount.from_url(url="git@example.com:autonomy.git", mount="/workspace/repo", writable=True),),
             working_dir="/workspace/repo",
         )
 
@@ -748,7 +748,7 @@ class TestWorkspaceCapabilityPassthrough:
             image="autonomy-agent:dashboard",
             graph_project="autonomy",
             harness="claude",
-            repos=(RepoMount(url="git@example.com:autonomy.git", mount="/workspace/repo", writable=True),),
+            repos=(RepoMount.from_url(url="git@example.com:autonomy.git", mount="/workspace/repo", writable=True),),
             working_dir="/workspace/repo",
             capabilities=(self._jira_capability(),),
         )

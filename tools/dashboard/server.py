@@ -2682,6 +2682,20 @@ async def api_source_read(request):
     return JSONResponse(result)
 
 
+def _note_version_count(source_id: str, org: str | None) -> int:
+    """How many stored versions a note has. 1 when it has never been revised."""
+    try:
+        from tools.graph.db import GraphDB
+        db = GraphDB(org=org, mode="ro")
+        try:
+            versions = db.list_note_versions(source_id)
+        finally:
+            db.close()
+    except Exception:
+        return 1
+    return max(1, len(versions or []))
+
+
 def _attach_source_org(result: dict | None) -> None:
     """Attach resolved ``org`` (and tmux session, when applicable) to the
     nested ``source`` of a graph-read response.
@@ -2695,8 +2709,16 @@ def _attach_source_org(result: dict | None) -> None:
     src = result.get("source") if isinstance(result.get("source"), dict) else result
     if not isinstance(src, dict):
         return
-    if "org" not in src:
-        src["org"] = resolve_org_identity(session_org_slug(src))
+    # The stored row already carries ``org`` as a SLUG string, so a
+    # presence check never resolves it and the viewer receives a bare
+    # string where it renders an identity object -- no colour, no
+    # initial, no name. Resolve unless it is already resolved.
+    org_value = src.get("org")
+    if not isinstance(org_value, dict):
+        src["org"] = resolve_org_identity(
+            org_value if isinstance(org_value, str) and org_value
+            else session_org_slug(src)
+        )
     _attach_source_session_chip(src)
 
 
@@ -16680,6 +16702,12 @@ async def api_graph_resolve(request):
             result = {"source": source, "entries": [], "truncated": False,
                       "total_chars": 0}
         _attach_source_org(result)
+        if source.get("type") == "note":
+            # The header renders an ``@vN`` chip from this; without it the
+            # revision a reader is looking at is invisible.
+            result["version_count"] = await asyncio.to_thread(
+                _note_version_count, source["id"], org,
+            )
         return JSONResponse(result)
     att = await asyncio.to_thread(graph_ops.get_attachment, id, org=org)
     if att:

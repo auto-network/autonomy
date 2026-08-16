@@ -133,7 +133,13 @@
               <div class="flex items-center gap-1.5" style="font-size:10px; font-family:ui-monospace,monospace; color:#64748b">
                 <span style="font-size:11px; font-weight:500; color:#64748b" x-text="srcType"></span>
                 <span style="color:#4b5e73; flex-shrink:0" x-text="date"></span>
-                <span class="ml-auto" style="white-space:nowrap"><span style="color:#3d4f63; cursor:pointer" @click="copyGraphLink()" x-text="(src.id || '').slice(0, 12)"></span><template x-if="noteVersion"><span style="color:#94a3b8; background:rgba(255,255,255,0.04); padding:1px 0; border-radius:3px" x-text="'@v' + noteVersion"></span></template></span>
+                <template x-if="orgLabel">
+                  <span style="color:#4b5e73">&middot;</span>
+                </template>
+                <template x-if="orgLabel">
+                  <span data-testid="sv-org-label" style="color:#64748b; flex-shrink:0" x-text="orgLabel"></span>
+                </template>
+                <span class="ml-auto" style="white-space:nowrap"><span style="color:#3d4f63; cursor:pointer" @click="copyGraphLink()" x-text="(src.id || '').slice(0, 12)"></span><template x-if="noteVersion"><span style="color:#94a3b8; background:rgba(255,255,255,0.04); padding:1px 0; border-radius:3px" x-text="'@' + noteVersion"></span></template></span>
               </div>
 
               <!-- Row 2: org glyph + title -->
@@ -214,7 +220,7 @@
                     <span style="color:#334155; font-size:10px">&middot;</span>
                   </template>
                   <template x-if="commentCount">
-                    <span style="font-size:11px; color:#475569" x-text="commentCount + ' comment' + (commentCount === 1 ? '' : 's')"></span>
+                    <span style="font-size:11px; color:#475569" x-text="commentSummary"></span>
                   </template>
                   <template x-if="provenanceLink">
                     <span style="color:#334155; font-size:10px">&middot;</span>
@@ -292,14 +298,23 @@
       <template x-if="isNote && noteComments.length > 0">
         <section aria-label="Comments" class="mt-8">
           <h3 class="text-sm font-semibold text-gray-400 mb-3"
-              x-text="'Comments (' + noteComments.length + ')'"></h3>
+              x-text="commentHeading"></h3>
           <div class="space-y-3">
             <template x-for="c in noteComments" :key="c._key">
               <div :id="'comment-' + c.id.slice(0,12)"
-                   :class="highlightId && c.id.startsWith(highlightId) ? 'pl-4 border-l-2 border-indigo-700/50 ring-2 ring-indigo-500 bg-indigo-900/20 rounded' : 'pl-4 border-l-2 border-indigo-700/50'"
+                   :class="highlightId && c.id.startsWith(highlightId)
+                             ? 'pl-4 border-l-2 border-indigo-700/50 ring-2 ring-indigo-500 bg-indigo-900/20 rounded'
+                             : (c.integrated ? 'pl-4 border-l-2 border-gray-700/60' : 'pl-4 border-l-2 border-indigo-700/50')"
                    :data-comment-highlight="highlightId && c.id.startsWith(highlightId) ? '' : undefined">
-                <div class="text-xs text-gray-500 mb-1" x-text="c.actor + ' · ' + c.created_at.slice(0, 16)"></div>
-                <div class="text-sm text-gray-300" x-markdown.attachments="c.content"></div>
+                <div class="text-xs text-gray-500 mb-1">
+                  <span x-text="c.actor + ' · ' + c.created_at.slice(0, 16)"></span>
+                  <template x-if="c.integrated">
+                    <span class="ml-2 px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide bg-gray-800 text-gray-500"
+                          title="Rolled into the note body; kept for provenance">integrated</span>
+                  </template>
+                </div>
+                <div :class="c.integrated ? 'text-sm text-gray-500' : 'text-sm text-gray-300'"
+                     x-markdown.attachments="c.content"></div>
               </div>
             </template>
           </div>
