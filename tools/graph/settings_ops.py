@@ -87,6 +87,16 @@ class ProtectedSettingError(PermissionError):
     without the internal identity-route capability. Surfaces as 403."""
 
 
+class VaultSealerMissing(RuntimeError):
+    """A write to a vaulted set could not be encrypted.
+
+    Raised when no vault sealer is registered in this process, or when the
+    registered one did not return a locator. Either way the row is not
+    written: the value this set holds is a secret, and storing it in the
+    clear is not a degraded mode of storing it encrypted.
+    """
+
+
 _identity_write_allowed: "_contextvars.ContextVar[bool]" = _contextvars.ContextVar(
     "settings_identity_write_allowed", default=False,
 )
@@ -222,6 +232,89 @@ def set_emit_hook(hook: Callable[..., None] | None) -> None:
     """
     global _emit_hook
     _emit_hook = hook
+
+
+# ── The vault seam ──────────────────────────────────────────
+#
+# A set whose schema declares ``@vaulted(...)`` does not store its payload.
+# The payload is encrypted once as a content object under the organization's
+# current key generation and the row keeps a locator instead
+# (``tools.vault.storage_object``, design ``graph://0c206bd8-1c6`` §9).
+#
+# Sealing needs the domain's key control — the writer's persona, the authority
+# fold at its cited frontier, the state secrets it holds and the content
+# store — none of which a settings write has or should acquire for itself. So
+# it is injected, exactly as the emit hook is: the host process that holds
+# that material registers a sealer at startup, and contexts that hold none
+# never write a vaulted set.
+#
+# Sealer signature::
+#
+#     def sealer(*, set_id: str, schema_revision: int, key: str,
+#                setting_id: str, payload, tier: str, org: str | None) -> str
+#
+# It returns the locator scalar to store in place of the payload. UNLIKE the
+# emit hook it is NOT best-effort: it runs BEFORE the insert, and anything it
+# raises aborts the write. A vaulted set with no sealer registered is refused
+# for the same reason — the alternative to encrypting a credential is not
+# writing it in the clear.
+_vault_sealer: Callable[..., str] | None = None
+
+
+def set_vault_sealer(sealer: Callable[..., str] | None) -> None:
+    """Register (or clear with ``None``) the vault sealer.
+
+    See the commentary above ``_vault_sealer`` for the contract. Returns
+    nothing; the previously registered sealer is discarded.
+    """
+    global _vault_sealer
+    _vault_sealer = sealer
+
+
+def _seal_vault_payload(
+    *,
+    set_id: str,
+    schema_revision: int,
+    key: str,
+    setting_id: str,
+    payload: dict,
+    tier: str,
+    org: str | None,
+) -> str:
+    """The locator this row stores in place of *payload*.
+
+    Fails closed on every path: no sealer, a sealer that raises, or a sealer
+    returning anything but a locator all abort the write with the plaintext
+    unwritten. There is deliberately no branch here that stores *payload*.
+    """
+    # Imported here rather than at module scope: settings_ops is imported by
+    # every CLI entry point, and the vault pulls in the whole storage stack.
+    from tools.vault import storage_object as vault_storage_object
+
+    sealer = _vault_sealer
+    if sealer is None:
+        raise VaultSealerMissing(
+            f"{set_id} is a vault set at the {tier!r} tier: its payload is "
+            f"stored as an encrypted object, and no vault sealer is "
+            f"registered in this process to produce one. Register one with "
+            f"settings_ops.set_vault_sealer() — writing the value in the "
+            f"clear is not the fallback."
+        )
+    locator = sealer(
+        set_id=set_id,
+        schema_revision=int(schema_revision),
+        key=key,
+        setting_id=setting_id,
+        payload=payload,
+        tier=tier,
+        org=org,
+    )
+    if not vault_storage_object.is_vault_locator(locator):
+        raise VaultSealerMissing(
+            f"the vault sealer returned {type(locator).__name__}, not a "
+            f"locator; refusing to store it as {set_id}/{key}"
+        )
+    return locator
 
 
 def _make_snapshot(
@@ -1642,6 +1735,12 @@ def add_setting(
     Validates payload against ``(set_id, schema_revision)``. Returns the new
     Setting id. Raises ``schemas.SchemaValidationError`` on validation
     failure, ``ValueError`` on bad ``state``.
+
+    A set declared ``@vaulted`` takes one extra step: the validated payload is
+    sealed into a content object and the row stores the resulting locator. The
+    payload is validated first either way, so a vaulted set is held to its
+    schema exactly as an ordinary one is — encryption is what happens to a
+    value, not an excuse to stop checking it.
     """
     org = _resolve_org_arg(org)
     _guard_protected_set(set_id)
@@ -1650,6 +1749,21 @@ def add_setting(
     schemas.validate_payload(set_id, schema_revision, payload)
     schemas.validate_key(set_id, schema_revision, key)
     sid = str(uuid4())
+    stored_payload = payload
+    vault_tier = schemas.declared_vault_tier(set_id)
+    if vault_tier is not None:
+        # Before the insert, and with the row id already chosen: the revision
+        # identifier is derived from it, so the object and the row that names
+        # it are one write or neither.
+        stored_payload = _seal_vault_payload(
+            set_id=set_id,
+            schema_revision=schema_revision,
+            key=key,
+            setting_id=sid,
+            payload=payload,
+            tier=vault_tier,
+            org=org,
+        )
     now = _now_iso()
     expires_at = schemas.cache_expires_at(set_id, int(schema_revision), now)
     db = _open(org, set_id)
@@ -1658,7 +1772,7 @@ def add_setting(
             "INSERT INTO settings(id, set_id, schema_revision, key, payload, "
             "publication_state, created_at, updated_at, expires_at) "
             "VALUES(?,?,?,?,?,?,?,?,?)",
-            (sid, set_id, int(schema_revision), key, json.dumps(payload),
+            (sid, set_id, int(schema_revision), key, json.dumps(stored_payload),
              state, now, now, expires_at),
         )
         db.conn.commit()
@@ -1731,6 +1845,19 @@ def upsert_by_key(
         raise ValueError(
             f"{set_id} declares 'append_only_log': its rows are never "
             f"rewritten. Append a new one with add_setting()."
+        )
+    if schemas.declared_vault_tier(set_id) is not None:
+        # A vaulted row's revision identifier is derived from the row id, so
+        # rewriting the row in place would address the revision already
+        # committed — and a committed revision admits only a byte-identical
+        # replay (``storagekit.store``, contract Invariant 7). The value is
+        # not lost by appending instead: settings are already append-only and
+        # resolution takes the most recent base.
+        raise ValueError(
+            f"{set_id} is a vault set: its rows are encrypted object "
+            f"revisions and are never rewritten. Write the first value with "
+            f"add_setting() and change it with override_setting(), which "
+            f"appends a new revision and leaves the old one as it was."
         )
     schemas.validate_payload(set_id, schema_revision, payload)
     schemas.validate_key(set_id, schema_revision, key)
@@ -1980,6 +2107,14 @@ def _collapse_amendment(
         return None
     if not _is_own_row(target["id"], org):
         return None
+    if schemas.declared_vault_tier(target["set_id"]) is not None:
+        # A vaulted row is an encrypted object revision, and its identity is
+        # derived from the row id — so rewriting the row in place would
+        # address the revision already committed, which admits only a
+        # byte-identical replay. The amendment appends instead. This is the
+        # same reason a patch row remains for another organization's row: what
+        # forces one is physics, not intent.
+        return None
     merged = json_merge_patch(json.loads(target["payload"]), payload_overrides)
     upsert_by_key(
         target["set_id"], int(target["schema_revision"]), target["key"],
@@ -2017,6 +2152,13 @@ def override_setting(
     be either own-org or peer-origin — overriding peer content is the
     expected way to adapt shared primitives to a local org. Raises
     ``LookupError`` only when the target exists nowhere (own or peers).
+
+    On a ``@vaulted`` set this is how a secret CHANGES: the target's stored
+    payload is an opaque locator, so the merge replaces it whole and what this
+    row carries is the complete new value — validated as such, sealed into a
+    fresh revision of the same object, and stored as its own locator. A
+    partial patch is not available there and would not be meaningful anyway:
+    the writer cannot merge onto a plaintext it may hold no factor to open.
 
     ``org`` is **required** — see :func:`add_setting` for the contract.
     """
@@ -2075,6 +2217,25 @@ def override_setting(
             target["set_id"], int(target["schema_revision"]), merged,
         )
         sid = str(uuid4())
+        stored_payload = payload_overrides
+        vault_tier = schemas.declared_vault_tier(target["set_id"])
+        if vault_tier is not None:
+            # A vaulted target's stored payload is an opaque locator, so the
+            # merge above replaced it whole: what this row supersedes it with
+            # is the WHOLE new value, which is why validation just held the
+            # override to the complete schema rather than to a patch. It is
+            # sealed into its own revision of the same object; the row stores
+            # the new locator, and the previous revision stays exactly as it
+            # was written.
+            stored_payload = _seal_vault_payload(
+                set_id=target["set_id"],
+                schema_revision=int(target["schema_revision"]),
+                key=target["key"],
+                setting_id=sid,
+                payload=merged,
+                tier=vault_tier,
+                org=org,
+            )
         now = _now_iso()
         expires_at = schemas.cache_expires_at(
             target["set_id"], int(target["schema_revision"]), now,
@@ -2085,7 +2246,7 @@ def override_setting(
             "expires_at) "
             "VALUES(?,?,?,?,?,?,?,?,?,?)",
             (sid, target["set_id"], int(target["schema_revision"]),
-             target["key"], json.dumps(payload_overrides),
+             target["key"], json.dumps(stored_payload),
              state, target_id, now, now, expires_at),
         )
         db.conn.commit()
