@@ -32,7 +32,7 @@ def _ws(
     """Build a :class:`WorkspaceV1` with the minimum fields the API uses."""
     repos: tuple[RepoMount, ...] = ()
     if writable:
-        repos = (RepoMount(url="git@host:repo.git", mount="/w/r", writable=True),)
+        repos = (RepoMount.from_url(url="git@host:repo.git", mount="/w/r", writable=True),)
     return WorkspaceV1(
         id=wid,
         name=name or wid,

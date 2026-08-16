@@ -124,6 +124,43 @@
       // Comment count
       get commentCount() { return this.noteComments?.length || 0; },
 
+      // Open comments are the ones still asking for something. An integrated
+      // comment has been rolled into the body and is kept for provenance, so
+      // rendering the two alike makes a fully-synthesised note look like it
+      // has a pile of unread feedback.
+      get openCommentCount() {
+        return (this.noteComments || []).filter(c => !c.integrated).length;
+      },
+      // The organization in words. The glyph beside the title carries the
+      // colour; a reader still has to be told which org this is.
+      get orgLabel() {
+        const o = this.src?.org;
+        if (!o) return '';
+        if (typeof o === 'string') return o;
+        return o.resolved === false ? '' : (o.slug || o.name || '');
+      },
+
+      // A count alone reads as a pile of unread feedback when every one of
+      // them has already been rolled into the body.
+      get commentSummary() {
+        const total = this.commentCount;
+        if (!total) return '';
+        const noun = total === 1 ? 'comment' : 'comments';
+        const open = this.openCommentCount;
+        if (open === total) return `${total} ${noun}`;
+        if (open === 0) return `${total} ${noun} · all integrated`;
+        return `${total} ${noun} · ${open} open`;
+      },
+
+      get commentHeading() {
+        const total = this.commentCount;
+        const open = this.openCommentCount;
+        if (!total) return 'Comments';
+        if (open === total) return `Comments (${total})`;
+        if (open === 0) return `Comments (${total} — all integrated)`;
+        return `Comments (${total} — ${open} open, ${total - open} integrated)`;
+      },
+
       // Provenance link URL
       get provenanceLink() {
         if (!this.noteProvenanceId) return '';
