@@ -16,12 +16,28 @@ file of exactly this kind was built, judged wrong, and migrated away from
 (``relocate_ledger_to_org_db``). The store opens its own WAL-mode
 connection so it coexists with the ledger and graph connections.
 
-**This module — StorageStateDescriptor only.** The first of five
-record-type sub-beads. It persists ``StorageStateDescriptor`` records
-keyed by ``state_id`` and exposes the ``ancestry(heads)`` traversal over
-their ``parent_state_ids`` edges (register pin 4). The other four record
-types (bridges, grants, receipts, credentials) are added by later
+**This module.** ``StorageStateDescriptor`` records, keyed by
+``state_id``, with the ``ancestry(heads)`` traversal over their
+``parent_state_ids`` edges (register pin 4); and ``PersonaKemCredential``
+records, keyed by ``kem_key_id`` with a secondary ``persona`` index. The
+remaining record types (bridges, grants, receipts) are added by other
 sub-beads.
+
+**Credentials — persistence, not selection.** :meth:`accept_credential`
+runs the real :func:`credentials.validate` — Ed25519 signature over
+``signing_input()``, exact ``_FIELDS`` closure, version, suite, hex
+widths, and ``compute_kem_key_id(binding_dict()) == kem_key_id`` — and
+refuses a failing credential TERMINALLY, storing no row. It does NOT call
+``verify_against_fold``: currency is TIME-VARYING and is the reader's
+question (``credentials.py:245``), so a credential valid at write must not
+be retroactively invalidated by later membership. Retrieval by
+``kem_key_id`` returns the one credential; retrieval by ``persona``
+returns every credential that persona has published — currency is not
+uniqueness in storage, because ``select_current_credential`` needs the
+whole candidate set. Selection stays the caller's, run with the caller's
+LEDGER ancestry (``Ledger.ancestry``, closing over ``authority_heads``) —
+never this store's :meth:`ancestry`, which closes over storage
+``state_id``s and is a different DAG over a different identifier space.
 
 **Content addressing.** ``keycontrol_state.state_id`` must equal the
 SHA-256 of the stored signed wire (``record_id``); it is verified on
@@ -46,6 +62,8 @@ from pathlib import Path
 from tools.network.ledger.store import org_ledger_db_path
 
 from . import acceptance
+from . import credentials
+from .credentials import PersonaKemCredential
 from .errors import StorageError
 from .records import record_id
 from .state import StorageStateDescriptor
@@ -61,6 +79,13 @@ CREATE TABLE IF NOT EXISTS keycontrol_state (
     state_id TEXT PRIMARY KEY,
     wire     BLOB NOT NULL
 );
+CREATE TABLE IF NOT EXISTS keycontrol_credential (
+    kem_key_id TEXT PRIMARY KEY,
+    persona    TEXT NOT NULL,
+    wire       BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS keycontrol_credential_persona
+    ON keycontrol_credential (persona);
 """
 
 
@@ -103,6 +128,8 @@ class KeyControlStore:
                 (str(KEYCONTROL_SCHEMA_VERSION),),
             )
         self._states: dict = {}  # state_id -> StorageStateDescriptor
+        self._credentials: dict = {}  # kem_key_id -> PersonaKemCredential
+        self._credentials_by_persona: dict = {}  # persona -> {kem_key_id: cred}
         self._hydrate()
 
     # -- lifecycle -------------------------------------------------------------------
@@ -129,6 +156,31 @@ class KeyControlStore:
             # descriptor's own state_id equals record_id(wire) by construction.
             descriptor = StorageStateDescriptor.from_json(wire)
             self._states[state_id] = descriptor
+        self._hydrate_credentials()
+
+    def _hydrate_credentials(self) -> None:
+        rows = self.db.execute(
+            "SELECT kem_key_id, persona, wire FROM keycontrol_credential"
+        ).fetchall()
+        for kem_key_id, _persona, wire in rows:
+            wire = bytes(wire)
+            # Full re-verification on every hydrate, not just at write:
+            # ``validate`` re-checks the Ed25519 signature and recomputes
+            # ``compute_kem_key_id(binding_dict())`` — this family's content
+            # address — so a tampered wire is caught at open.
+            credential = credentials.validate(wire)
+            if credential.kem_key_id != kem_key_id:
+                raise TamperError(
+                    f"stored credential {kem_key_id[:12]} does not match its "
+                    "content address"
+                )
+            self._index_credential(credential)
+
+    def _index_credential(self, credential: PersonaKemCredential) -> None:
+        self._credentials[credential.kem_key_id] = credential
+        self._credentials_by_persona.setdefault(credential.persona, {})[
+            credential.kem_key_id
+        ] = credential
 
     # -- write side ------------------------------------------------------------------
 
@@ -181,11 +233,70 @@ class KeyControlStore:
             )
         self._states[state_id] = descriptor
 
+    def accept_credential(self, credential) -> PersonaKemCredential:
+        """Fully authenticate a :class:`PersonaKemCredential`, then persist it.
+
+        Verification precedes retention: :func:`credentials.validate`
+        checks the Ed25519 signature over ``signing_input()``, exact
+        ``_FIELDS`` closure, version, suite, hex widths, and that
+        ``compute_kem_key_id(binding_dict())`` equals the stored
+        ``kem_key_id``. Any failure raises its distinct
+        :class:`~.errors.StorageError` subclass, which propagates unchanged
+        — the credential is refused TERMINALLY and no row is written.
+
+        Admission deliberately does NOT call ``verify_against_fold``: that
+        requires a fold this store does not hold and answers a TIME-VARYING
+        question (a rekey-retired key is fold-invalid though not one byte
+        changed). Currency is the reader's question, resolved by
+        :func:`select_current_credential`. So a credential whose persona is
+        absent from any fold still stores and retrieves.
+
+        Accepts the wire bytes, the payload dict, or a record (whatever
+        :func:`credentials.validate` accepts) and returns the validated
+        record.
+        """
+        validated = credentials.validate(credential)
+        self._put_credential(validated)
+        return validated
+
+    def _put_credential(self, credential: PersonaKemCredential) -> None:
+        kem_key_id = credential.kem_key_id
+        if kem_key_id in self._credentials:
+            # Content-addressed dedupe (§1e): ``kem_key_id`` is the SHA-256
+            # of the binding and the persona signs deterministically, so an
+            # identical credential is identical bytes. Re-storing is a no-op.
+            return
+        with self.db:
+            self.db.execute(
+                "INSERT OR IGNORE INTO keycontrol_credential"
+                "(kem_key_id, persona, wire) VALUES (?, ?, ?)",
+                (kem_key_id, credential.persona, credential.to_json()),
+            )
+        self._index_credential(credential)
+
     # -- read side -------------------------------------------------------------------
 
     def get(self, state_id: str):
         """The stored :class:`StorageStateDescriptor`, or ``None``."""
         return self._states.get(state_id)
+
+    def get_credential(self, kem_key_id: str):
+        """The one stored :class:`PersonaKemCredential` at *kem_key_id*, or
+        ``None``. Grants address ``recipient_kem_key_id``; this is that lookup."""
+        return self._credentials.get(kem_key_id)
+
+    def credentials_for_persona(self, persona: str) -> list:
+        """Every credential *persona* has published, ascending by
+        ``kem_key_id``.
+
+        The full candidate set — not the current one. Currency is not
+        uniqueness in storage: :func:`select_current_credential` needs every
+        candidate, and discarding the older would destroy its input. The
+        caller runs that selection with its own LEDGER ancestry, never this
+        store's :meth:`ancestry`.
+        """
+        by_id = self._credentials_by_persona.get(persona, {})
+        return [by_id[k] for k in sorted(by_id)]
 
     def __contains__(self, state_id: str) -> bool:
         return state_id in self._states
