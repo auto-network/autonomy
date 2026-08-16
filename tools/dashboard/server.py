@@ -12452,7 +12452,8 @@ async def api_diag_settings_set_detail(request):
             {"error": f"unknown set_id: {set_id!r}"},
             status_code=404,
         )
-    member_count, member_keys = _settings_member_snapshot(set_id, org=org)
+    member_count, member_keys, read_error = _settings_member_snapshot(
+        set_id, org=org)
     key_rows = _settings_key_storage_rows(set_id, org=org)
     for row in key_rows:
         row["member_present"] = row["key"] in member_keys
@@ -12463,6 +12464,7 @@ async def api_diag_settings_set_detail(request):
             **summary,
             "member_count": member_count,
             "count": member_count,
+            "read_error": read_error,
         },
         "keys": key_rows,
     })
@@ -15374,8 +15376,11 @@ def _settings_member_snapshot(
     set_id: str,
     *,
     org: str | None,
-) -> tuple[int, set[str]]:
+) -> tuple[int | None, set[str], str | None]:
     """Resolved members of one set, read at the set's OWN home.
+
+    Returns ``(count, keys, error)``. ``count`` is None when the set could
+    not be read, which is not the same as a count of zero.
 
     A diagnostic walks every visible set_id, and a set that declares it lives
     in the operator's own database is refused when read against an
@@ -15395,16 +15400,19 @@ def _settings_member_snapshot(
 
     try:
         members = settings_ops.read_set.__wrapped__(set_id, org=read_org)
-    except Exception:
-        # A single unreadable set is worth reporting as empty, never worth
-        # failing the whole inventory for.
+    except Exception as exc:
+        # One unreadable set must not fail the whole inventory -- a tool you
+        # reach for when things are broken is the worst place for all-or-
+        # nothing. But it must not read as EMPTY either: a set with no rows
+        # and a set that could not be read are different facts, and
+        # collapsing them hides the second behind the first.
         logger.warning(
             "settings diagnostic: could not read %s at org=%r",
             set_id, read_org, exc_info=True,
         )
-        return 0, set()
+        return None, set(), f"{type(exc).__name__}: {exc}"[:200]
     keys = {member.key for member in members.members}
-    return len(members.members), keys
+    return len(members.members), keys, None
 
 
 def _settings_set_summary_row(
@@ -15414,12 +15422,14 @@ def _settings_set_summary_row(
     storage_by_set: dict[str, dict[str, Any]],
     activity_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    member_count, _member_keys = _settings_member_snapshot(set_id, org=org)
+    member_count, _member_keys, read_error = _settings_member_snapshot(
+        set_id, org=org)
     storage = storage_by_set.get(set_id, {})
     row = {
         "set_id": set_id,
         "count": member_count,
         "member_count": member_count,
+        "read_error": read_error,
         "stored_row_count": int(storage.get("stored_row_count") or 0),
         "stored_key_count": int(storage.get("stored_key_count") or 0),
         "payload_bytes": int(storage.get("payload_bytes") or 0),
