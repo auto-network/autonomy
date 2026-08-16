@@ -1887,6 +1887,7 @@ def illegal_amendments(*, org: str | None) -> list[dict]:
     base has since been deleted.
     """
     out: list[dict] = []
+    unjudged: list[dict] = []
     try:
         db = _open_read(org, "")
     except Exception:
@@ -1907,6 +1908,19 @@ def illegal_amendments(*, org: str | None) -> list[dict]:
         db.close()
 
     for row in rows:
+        if not any(schemas.get_schema(row["set_id"], r) for r in range(1, 12)):
+            # Not registered HERE. Plugin schemas register in the dashboard
+            # and not in a bare CLI, so this row's access pattern is unknown
+            # in this process -- which is not the same as permitted. Skipping
+            # it silently makes the sweep's answer depend on who is asking
+            # and say nothing about it, so it is returned separately and the
+            # caller decides whether a partial view is good enough.
+            unjudged.append({
+                "id": row["id"], "set_id": row["set_id"], "key": row["key"],
+                "supersedes": row["supersedes"],
+                "reason": "no schema registered in this process",
+            })
+            continue
         pattern = _access_pattern_for(row["set_id"], row["schema_revision"])
         if pattern not in _REPLACED_PATTERNS:
             continue
@@ -1933,7 +1947,19 @@ def illegal_amendments(*, org: str | None) -> list[dict]:
             "base_present": row["supersedes"] in own_ids,
             "created_at": row["created_at"],
         })
+    _LAST_UNJUDGED[org or ""] = unjudged
     return out
+
+
+#: Amendment rows the last :func:`illegal_amendments` call could not judge,
+#: per org. Kept beside the result rather than raising, because a partial
+#: answer is still useful -- it just must not be mistaken for a whole one.
+_LAST_UNJUDGED: dict[str, list[dict]] = {}
+
+
+def unjudged_amendments(*, org: str | None) -> list[dict]:
+    """Rows the last sweep of ``org`` could not evaluate in this process."""
+    return list(_LAST_UNJUDGED.get(org or "", []))
 
 
 def _collapse_amendment(
