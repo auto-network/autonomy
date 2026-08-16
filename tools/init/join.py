@@ -288,15 +288,19 @@ def _initial_claim(
     genesis_id = context["genesis_id"]
     role = context["granted_role"]
     persona = derive_persona(seed, genesis_id)
-    credential = None
-    if kem_seed is not None:
-        from tools.network.storagekit import credentials as credentials_mod
+    from tools.network.storagekit import credentials as credentials_mod
 
-        record, _private = credentials_mod.build(
-            persona, genesis_id, kem_seed, list(context["heads"]),
-            tuple(context["max_hlc"]),
-        )
-        credential = record.to_dict()
+    # Eager provisioning (contract §5, §15, auto-uh2dp): a newly admitted
+    # member's claim always carries a PersonaKemCredential, so the admission
+    # is immediately provisionable. The seed derives from the personal root
+    # (§1c), never a device; an explicit kem_seed is honoured for tests.
+    if kem_seed is None:
+        kem_seed = credentials_mod.derive_kem_seed(seed)
+    record, _private = credentials_mod.build(
+        persona, genesis_id, kem_seed, list(context["heads"]),
+        tuple(context["max_hlc"]),
+    )
+    credential = record.to_dict()
     ts, _count = context["max_hlc"]
     event, _ = mint_member_claim(
         seed, genesis_id,
@@ -464,6 +468,7 @@ def _resume_pending(
     reply: dict,
 ) -> JoinOutcome:
     """Return pending or finalize from the service's authoritative subset."""
+    from tools.network.idkit import derive_persona
     from tools.network.ledger import HLC
     from tools.network.ledger.claims import mint_member_claim
 
@@ -507,7 +512,21 @@ def _resume_pending(
         raise JoinError("ready claim status has an invalid admitting subset") from None
     if len(selected) != need or len(set(admitting)) != len(admitting):
         raise JoinError("ready claim status has a non-authoritative admitting subset")
+    from tools.network.storagekit import credentials as credentials_mod
+
     try:
+        # The finalized claim carries the same eager PersonaKemCredential the
+        # direct-admission path publishes (auto-uh2dp): approvals countersign
+        # only {invite_ref, persona_pub} (events.approval_core), so citing the
+        # stored frontier here does not disturb the approval subset.
+        persona = derive_persona(seed, genesis_id)
+        record, _ = credentials_mod.build(
+            persona,
+            genesis_id,
+            credentials_mod.derive_kem_seed(seed),
+            list(position["parents"]),
+            tuple(position["hlc"]),
+        )
         final, _ = mint_member_claim(
             seed,
             genesis_id,
@@ -515,6 +534,7 @@ def _resume_pending(
             heads=position["parents"],
             hlc=HLC(*position["hlc"]),
             token=invitation.claim_token,
+            kem_credential=record.to_dict(),
             approvals=selected,
         )
     except (KeyError, TypeError, ValueError):

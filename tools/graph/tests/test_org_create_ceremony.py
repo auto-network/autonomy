@@ -21,6 +21,7 @@ from tools.network.idkit.errors import SealingError
 from tools.network.idkit.sealing import derive_encapsulation_keypair
 from tools.network.idkit.sealing import open as seal_open
 from tools.network.ledger import LedgerStore, org_ledger_db_path
+from tools.network.storagekit import credentials
 
 PASSWORD = "week-glacier-thirty-nine"
 
@@ -85,9 +86,22 @@ def test_ceremony_founds_a_four_event_ledger(env):
             == result.founder_persona_pub
         )
 
-        # RESOLUTION 2: the founding claim carries no kem_credential.
+        # auto-uh2dp closes the contract §5 founder allowance: the founding
+        # claim ALWAYS carries a PersonaKemCredential, so the founder has a
+        # grant address the moment a later member advances the state after an
+        # access contraction. (Inverts the withdrawn RESOLUTION 2 assertion.)
         claim = store.get(result.event_ids[3])
-        assert "kem_credential" not in claim.payload
+        assert "kem_credential" in claim.payload
+        credential = credentials.validate(claim.payload["kem_credential"])
+        assert credential.persona == result.founder_persona_pub
+        assert credential.genesis_id == result.genesis_id
+        # The credential's key is derived from the personal root, not a device:
+        # re-derive the seed and the org-bound keypair and match byte-for-byte.
+        kem_seed = credentials.derive_kem_seed(env.personal_seed)
+        _priv, kem_pub = derive_encapsulation_keypair(
+            kem_seed, credentials.kem_purpose(result.genesis_id)
+        )
+        assert credential.kem_public_key == kem_pub
 
 
 def test_org_key_revision_2_seals_to_the_owner(env):
