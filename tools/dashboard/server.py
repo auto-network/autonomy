@@ -14993,7 +14993,23 @@ async def api_graph_setting_create(request):
         return JSONResponse({"error": str(e)}, status_code=400)
     # setting.changed fires from settings_ops.add_setting via the
     # function-level emit hook — see _settings_emit_hook.
-    return JSONResponse({"id": sid}, status_code=201)
+    #
+    # A stored row that resolution will never return is reported here, not
+    # left for the caller to discover by reading the value back and finding
+    # it unchanged. A write API that says "created" about a row nothing can
+    # read has told the caller the opposite of what happened.
+    out: dict = {"id": sid}
+    shadow = graph_ops.take_shadowed_write(body["set_id"], body["key"])
+    if shadow is not None:
+        out["shadowed_by"] = {
+            "winner_id": shadow.winner_id,
+            "winner_org": shadow.winner_org,
+            "winner_state": shadow.winner_state,
+            "written_state": shadow.written_state,
+            "written_org": shadow.written_org,
+            "message": str(shadow),
+        }
+    return JSONResponse(out, status_code=201)
 
 
 async def api_graph_setting_override(request):

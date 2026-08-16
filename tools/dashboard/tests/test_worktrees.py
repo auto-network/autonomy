@@ -3681,7 +3681,7 @@ class TestWorktreeMonitorNagMode:
 
         fresh = wm_module.WorktreeMonitor()
         assert fresh.get_nag_mode("auto-x", "autonomy") == "silent"
-        row = settings_ops.resolve_set_key(
+        row = settings_ops.read_set_key(
             "dashboard.worktree.watch",
             "auto-x:autonomy",
             org="autonomy",
@@ -4706,7 +4706,7 @@ class TestArmingNagWhenDone:
         monitor.set_nag_mode("auto-x", "autonomy", "silent")
         assert ("auto-x", "autonomy") not in monitor._armed_at
         assert ("auto-x", "autonomy") not in monitor._terminal_fired
-        assert settings_ops.resolve_set_key(
+        assert settings_ops.read_set_key(
             "dashboard.worktree.terminal_fire",
             "auto-x:autonomy:42:sha",
             org="autonomy",
@@ -4734,7 +4734,7 @@ class TestArmingNagWhenDone:
 
         monitor = wm.WorktreeMonitor()
         monitor.set_nag_mode("auto-x", "autonomy", "nag_done")
-        assert settings_ops.resolve_set_key(
+        assert settings_ops.read_set_key(
             "dashboard.worktree.terminal_fire",
             "auto-x:autonomy:42:sha",
             org="autonomy",
@@ -5232,7 +5232,7 @@ class TestFireTerminalTransitions:
         # a working notifier) re-attempts at the same head_sha.
         fired = monitor._terminal_fired.get(("auto-x", "autonomy"), {})
         assert fired.get("42") != "abc"
-        assert settings_ops.resolve_set_key(
+        assert settings_ops.read_set_key(
             "dashboard.worktree.terminal_fire",
             "auto-x:autonomy:42:abc",
             org="autonomy",

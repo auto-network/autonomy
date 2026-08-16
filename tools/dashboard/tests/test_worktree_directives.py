@@ -252,7 +252,7 @@ async def test_rebase_directive_failure_writes_failed_status(graph_db_env, monke
         org="autonomy",
     )
     await actions[0].fn(row, Services(session_send=session_send))
-    failed = settings_ops.resolve_set_key(
+    failed = settings_ops.read_set_key(
         WORKTREE_REBASE_STATUS_SET_ID,
         "auto-x/autonomy",
         org="autonomy",

@@ -75,12 +75,12 @@ def _global_request():
 def sign_key_client(monkeypatch):
     reads = []
 
-    def resolve_set_key(set_id, key, *, org, peers=None):
+    def read_set_key(set_id, key, *, org, peers=None):
         reads.append((set_id, key, org, peers))
         return {"payload": {"armored_private_key": ARMORED}}
 
     monkeypatch.setattr(settings_ops, "_resolve_settings_caller", lambda _: "anchore")
-    monkeypatch.setattr(settings_ops, "resolve_set_key", resolve_set_key)
+    monkeypatch.setattr(settings_ops, "read_set_key", read_set_key)
     app = Starlette(
         routes=[Route("/api/sign-key", get_sign_key, methods=["GET"])],
         middleware=[
@@ -179,7 +179,7 @@ def test_one_key_per_organization_in_the_operators_own_database(orgs):
     )
 
     for slug in ("anchore", "beta"):
-        row = settings_ops.resolve_set_key(
+        row = settings_ops.read_set_key(
             SIGN_KEY_SET_ID, slug, org="personal", peers=[],
         )
         assert row is not None, f"no signing key found for {slug}"

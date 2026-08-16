@@ -122,7 +122,7 @@ def test_publication_state_still_outranks_revision(acme):
     """
     _write(1, {"legacy": "old"})
     settings_ops.promote_setting(
-        settings_ops.resolve_set_key(SET_ID, "acme", org="acme", peers=[])["id"],
+        settings_ops.read_set_key(SET_ID, "acme", org="acme", peers=[])["id"],
         "canonical", org="acme",
     )
     _write(2, {"sealed": "new"})

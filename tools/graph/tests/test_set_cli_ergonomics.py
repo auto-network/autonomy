@@ -413,23 +413,23 @@ def test_resolve_setting_strict_none(graph_db_env, example_schema):
     assert ops.resolve_setting_strict("no-such-id", org=ops.CALLER_ORG) is None
 
 
-# ── 8. resolve_set_key ops-layer behavior ──────────────────
+# ── 8. read_set_key ops-layer behavior ──────────────────
 
 
-def test_resolve_set_key_returns_base_after_overrides(graph_db_env, workspace_schema):
+def test_read_set_key_returns_base_after_overrides(graph_db_env, workspace_schema):
     base = ops.add_setting(
         "autonomy.test.workspace", 1, "ws",
         {"name": "Base"}, state="canonical",
      org=ops.CALLER_ORG)
     ops.override_setting(base, {"name": "Override"}, org=ops.CALLER_ORG)
-    hit = ops.resolve_set_key("autonomy.test.workspace", "ws", org=ops.CALLER_ORG)
+    hit = ops.read_set_key("autonomy.test.workspace", "ws", org=ops.CALLER_ORG)
     assert isinstance(hit, dict)
     # Should return the BASE row id (matches read_set's chosen member).
     assert hit["id"] == base
 
 
-def test_resolve_set_key_none(graph_db_env, workspace_schema):
-    assert ops.resolve_set_key("autonomy.test.workspace", "ghost", org=ops.CALLER_ORG) is None
+def test_read_set_key_none(graph_db_env, workspace_schema):
+    assert ops.read_set_key("autonomy.test.workspace", "ghost", org=ops.CALLER_ORG) is None
 
 
 # ── 9. chain_setting ops-layer behavior ───────────────────
