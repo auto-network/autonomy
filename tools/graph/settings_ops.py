@@ -893,7 +893,7 @@ def unresolved_references(
                 # set has no reason to repeat the org it already is. Where
                 # the target says where it lives, that wins.
                 home = schemas.declared_home(target) or ("personal" if scoped else None)
-                if resolve_set_key(
+                if read_set_key(
                     target, key, org=home if home else org, peers=[],
                 ) is None:
                     out.append((target, key))
@@ -1127,6 +1127,113 @@ def _apply_model(
 # ── Write paths ──────────────────────────────────────────────
 
 
+@dataclass
+class ShadowedWrite:
+    """A row was stored and will never be read.
+
+    Resolution returns ONE row per key. A row written where a
+    higher-precedence one already exists is stored successfully, resolves to
+    nothing, and reports success at every layer -- so the caller believes
+    they changed a value they did not change. Anything that writes a Setting
+    must surface this; it cannot be left to the writer to remember that
+    publication state and owning organization decide who wins.
+    """
+    key: str
+    written_id: str
+    written_org: str | None
+    written_state: str
+    winner_id: str
+    winner_org: str | None
+    winner_state: str
+
+    def __str__(self) -> str:
+        where = (f"organization {self.winner_org!r}"
+                 if self.winner_org != self.written_org
+                 else "the same organization")
+        return (
+            f"SHADOWED: {self.key!r} was written at {self.written_state!r} "
+            f"but resolves to a different row -- {self.winner_id[:11]} at "
+            f"{self.winner_state!r} in {where}. Nothing will read what you "
+            f"just wrote. Write it at {self.winner_state!r}"
+            + (f" against organization {self.winner_org!r}"
+               if self.winner_org != self.written_org else "")
+            + f", or promote {self.written_id[:11]} above it."
+        )
+
+
+_LAST_SHADOWED: dict[tuple[str, str], 'ShadowedWrite'] = {}
+
+
+def shadowed_write(
+    set_id: str,
+    key: str,
+    written_id: str,
+    *,
+    org: str | None,
+    state: str,
+) -> ShadowedWrite | None:
+    """Return the row that will be read instead of ``written_id``, or None."""
+    # Ask only what this means: is there another BASE under this exact key
+    # that outranks mine? Resolving the whole set would answer it, and would
+    # cost time proportional to every key in the set -- on a write path that
+    # runs per presence heartbeat. The question is per-key, so the query is
+    # per-key, which keeps the check cheap enough to always run rather than
+    # behind a flag somebody turns off during the bulk write that needs it.
+    from .cross_org import PEER_VISIBLE_STATES, open_peer_db, resolve_peers
+
+    sql = (
+        "SELECT id, publication_state FROM settings "
+        "WHERE set_id = ? AND key = ? AND deprecated = 0 "
+        "  AND supersedes IS NULL AND excludes IS NULL"
+    )
+    candidates: list[tuple[str, str, str | None]] = []
+    try:
+        db = _open_read(org, set_id)
+        try:
+            for row in db.conn.execute(sql, (set_id, key)).fetchall():
+                candidates.append((row["id"], row["publication_state"], org))
+        finally:
+            db.close()
+
+        placeholders = ",".join("?" for _ in PEER_VISIBLE_STATES)
+        for peer in sorted(resolve_peers(_resolve_settings_caller(org), None)):
+            peer_db = open_peer_db(peer)
+            if peer_db is None:
+                continue
+            try:
+                rows = peer_db.conn.execute(
+                    f"{sql} AND publication_state IN ({placeholders})",
+                    (set_id, key, *PEER_VISIBLE_STATES),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                continue
+            for row in rows:
+                candidates.append((row["id"], row["publication_state"], peer))
+    except Exception:
+        return None
+
+    if len(candidates) < 2:
+        return None
+    candidates.sort(key=lambda c: PRECEDENCE.get(c[1], 99))
+    winner_id, winner_state, winner_org = candidates[0]
+    if winner_id == written_id:
+        return None
+    return ShadowedWrite(
+        key=key,
+        written_id=written_id,
+        written_org=org,
+        written_state=state,
+        winner_id=winner_id,
+        winner_org=winner_org,
+        winner_state=winner_state,
+    )
+
+
+def take_shadowed_write(set_id: str, key: str) -> "ShadowedWrite | None":
+    """Pop the shadow report for the last write to ``(set_id, key)``."""
+    return _LAST_SHADOWED.pop((set_id, key), None)
+
+
 def add_setting(
     set_id: str,
     schema_revision: int,
@@ -1173,6 +1280,10 @@ def add_setting(
         snapshot=_make_snapshot(set_id, schema_revision, key, state, False),
         org=org,
     )
+    shadow = shadowed_write(set_id, key, sid, org=org, state=state)
+    if shadow is not None:
+        logger.warning("%s", shadow)
+        _LAST_SHADOWED[(set_id, key)] = shadow
     return sid
 
 
@@ -1266,6 +1377,10 @@ def upsert_by_key(
         snapshot=_make_snapshot(set_id, schema_revision, key, state, False),
         org=org,
     )
+    shadow = shadowed_write(set_id, key, sid, org=org, state=state)
+    if shadow is not None:
+        logger.warning("%s", shadow)
+        _LAST_SHADOWED[(set_id, key)] = shadow
     return sid
 
 
@@ -1777,14 +1892,20 @@ def resolve_setting_strict(
     return None
 
 
-def resolve_set_key(
+def read_set_key(
     set_id: str,
     key: str,
     *,
     org: "str | None | _CallerOrgSentinel",
     peers: list[str] | None = None,
 ) -> dict | None:
-    """Resolve ``(set_id, key)`` to the winning base Setting row.
+    """The one member of ``set_id`` under ``key``, as ``read_set`` sees it.
+
+    Named for ``read_set``, whose semantics it shares exactly: this is that
+    call narrowed to a single key. The previous name said "resolve", which
+    reads as "the resolved value" and hid that the answer is a ROW -- so a
+    caller reasonably took its payload for the resolved one when it was the
+    base's own, and every override was silently absent.
 
     Uses :func:`read_set` so the answer matches what consumers see at
     runtime — same precedence, same cross-org visibility, same exclude
@@ -1808,15 +1929,14 @@ def resolve_set_key(
             row = _fetch_setting_any_org(m.id, org)
             if row is None:
                 return None
-            payload = row.get("payload")
-            if isinstance(payload, str):
-                try:
-                    payload = json.loads(payload)
-                except (json.JSONDecodeError, TypeError):
-                    payload = {}
-            row["payload"] = _apply_declared_defaults(
-                row["set_id"], row["schema_revision"], payload,
-            )
+            # The row identifies the BASE -- which is what a caller
+            # targeting an override, a promote or an exclude needs. Its
+            # payload is the RESOLVED one: base plus every override that
+            # applies, with declared defaults filled, exactly what a
+            # read_set member carries. Handing back the base's own payload
+            # here reads as an answer and silently drops every override,
+            # and the shape gives nothing away.
+            row["payload"] = m.payload
             return row
     return None
 

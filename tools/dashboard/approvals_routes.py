@@ -67,7 +67,7 @@ async def get_sign_key(request: Request) -> PlainTextResponse:
     if not org or org == "personal":
         return PlainTextResponse("no signing key configured", status_code=404)
 
-    row = settings_ops.resolve_set_key(
+    row = settings_ops.read_set_key(
         SIGN_KEY_SET_ID, org, org="personal", peers=[],
     )
     armored = (row or {}).get("payload", {}).get("armored_private_key")

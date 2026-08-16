@@ -605,7 +605,7 @@ def _seed_bindings_from_legacy_reviews(row: WorktreeState, reviews) -> None:
             continue
 
         binding_key = f"{row.session_name}:{row.repo_name}:{row.branch}:{review_id}"
-        if settings_ops.resolve_set_key(REVIEW_BINDING_SET_ID, binding_key, org="autonomy") is None:
+        if settings_ops.read_set_key(REVIEW_BINDING_SET_ID, binding_key, org="autonomy") is None:
             settings_ops.add_setting(
                 REVIEW_BINDING_SET_ID,
                 REVIEW_BINDING_REVISION,
@@ -1044,7 +1044,7 @@ class WorktreeMonitor:
 
     def _clear_persisted_nag_mode(self, key: tuple[str, str]) -> None:
         """Delete the persisted watch row for ``key`` if one exists."""
-        setting = settings_ops.resolve_set_key(
+        setting = settings_ops.read_set_key(
             WATCH_SET_ID,
             _watch_key(*key),
             org="autonomy",
@@ -1067,7 +1067,7 @@ class WorktreeMonitor:
         head_sha: str,
     ) -> bool:
         """True when this exact terminal PR head already fired once."""
-        return settings_ops.resolve_set_key(
+        return settings_ops.read_set_key(
             TERMINAL_FIRE_SET_ID,
             _terminal_fire_key(key[0], key[1], review_id, head_sha),
             org="autonomy",

@@ -78,7 +78,7 @@ SETTINGS_API_FUNCS = frozenset(
         "read_set",
         "migrate_setting_revisions",
         "resolve_setting_strict",
-        "resolve_set_key",
+        "read_set_key",
         "chain_setting",
     }
 )

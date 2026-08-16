@@ -189,7 +189,7 @@ def test_no_schema_leaves_its_entity_unnamed(registered_schemas):
 
 # Schemas whose payload repeats a segment of their own key, grandfathered.
 #
-# The rule is that the key is returned with the row -- ``resolve_set_key``
+# The rule is that the key is returned with the row -- ``read_set_key``
 # gives the base row including ``key``, every ``read_set`` member carries
 # ``.key`` -- so repeating it in the payload is redundant and can drift: when
 # the two disagree, nothing says which wins.

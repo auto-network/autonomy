@@ -408,6 +408,28 @@ def cmd_set_read(args) -> None:
 # ── add / override / exclude ────────────────────────────────
 
 
+def _report_shadowed_write(set_id: str, key: str) -> None:
+    """Say loudly when the row just written is not the row that will be read.
+
+    Resolution returns one row per key, chosen by publication state and then
+    by owning organization. A row written below the winner is stored, reports
+    success, and is read by nothing — so silence here means the caller
+    believes they changed a value they did not change.
+    """
+    try:
+        from tools.graph import settings_ops
+        shadow = settings_ops.take_shadowed_write(set_id, key)
+    except Exception:
+        return
+    if shadow is None:
+        return
+    print("")
+    print("  ****************************************************************")
+    print(f"  {shadow}")
+    print("  ****************************************************************")
+    print("")
+
+
 def _report_unresolved_references(set_id: str, rev: int, payload, org) -> None:
     """Say which referenced keys are not provisioned yet, right after the write.
 
@@ -450,6 +472,7 @@ def cmd_set_add(args) -> None:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     print(f"  ✓ Setting: {sid[:11]}  {set_id}#{rev}  key={args.key}  [{args.state}]")
+    _report_shadowed_write(set_id, args.key)
     _report_unresolved_references(set_id, rev, payload, _org(args))
 
 

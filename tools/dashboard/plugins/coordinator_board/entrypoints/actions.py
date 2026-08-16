@@ -35,7 +35,7 @@ COORDINATOR_ORG = "autonomy"
 
 
 def _bound_coordinator_session() -> str | None:
-    binding = settings_ops.resolve_set_key(
+    binding = settings_ops.read_set_key(
         COORDINATOR_SET_ID,
         "default",
         org=COORDINATOR_ORG,
