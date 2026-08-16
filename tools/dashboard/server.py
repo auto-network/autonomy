@@ -12766,6 +12766,13 @@ async def _collect_dispatch_data() -> dict:
         dao_beads.get_bead_title_priority, running_bead_ids
     )
 
+    # CPU and resident memory are sampled by ResourceMonitor for the Sessions
+    # cards and keyed by the dispatch run/container name.  The dispatch DB's
+    # stats columns can remain NULL for agentic runs, so use the existing live
+    # sample as the current value instead of making each frontend rediscover it.
+    # This single dispatch payload feeds both /dispatch and Activity.
+    resource_rows = resource_monitor.snapshot().get("sessions", {})
+
     # Build active list from SQLite RUNNING runs + Dolt metadata
     active = []
     for run in running_runs:
@@ -12774,6 +12781,11 @@ async def _collect_dispatch_data() -> dict:
         kind = run.get("kind") or "bead"
         agentic_source_id = run.get("agentic_source_id") or None
         meta = bead_meta.get(bead_id, {})
+        resource = (
+            resource_rows.get(run.get("id", ""))
+            or resource_rows.get(run.get("container_name", ""))
+            or {}
+        )
         container = None
         if run.get("container_name"):
             container = {
@@ -12814,9 +12826,17 @@ async def _collect_dispatch_data() -> dict:
             "token_count": run.get("token_count"),
             "tool_count": run.get("tool_count"),
             "turn_count": run.get("turn_count"),
-            "cpu_pct": run.get("cpu_pct"),
+            "cpu_pct": (
+                resource.get("cpu_pct")
+                if resource.get("cpu_pct") is not None
+                else run.get("cpu_pct")
+            ),
             "cpu_usec": run.get("cpu_usec"),
-            "mem_mb": run.get("mem_mb"),
+            "mem_mb": (
+                resource["mem_bytes"] / 1_000_000
+                if resource.get("mem_bytes") is not None
+                else run.get("mem_mb")
+            ),
             "duration_secs": run.get("duration_secs") or (
                 int(time.time() - datetime.fromisoformat(run["started_at"]).replace(tzinfo=timezone.utc).timestamp())
                 if run.get("started_at") else None

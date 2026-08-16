@@ -29,35 +29,12 @@
     return String(n);
   }
 
-  function _formatDuration(secs) {
-    if (!secs && secs !== 0) return '';
-    const m = Math.floor(secs / 60);
-    const s = Math.floor(secs % 60);
-    return m + 'm' + String(s).padStart(2, '0') + 's';
-  }
-
-  function _formatLastActivity(ts) {
-    if (!ts) return '';
-    const secs = Math.floor(Date.now() / 1000 - ts);
-    if (secs < 60) return secs + 's';
-    if (secs < 3600) return Math.floor(secs / 60) + 'm';
-    return Math.floor(secs / 3600) + 'h';
-  }
-
   function _formatPct(value) {
     return value == null ? '--' : Math.round(value * 100) + '%';
   }
 
   const _LIB_NAMES = {
     'review_report': 'Experience Review',
-  };
-
-  const _STATE_COLORS = {
-    queued: 'blue',
-    launching: 'yellow',
-    running: 'green',
-    collecting: 'purple',
-    merging: 'indigo',
   };
 
   function _reviewCollapsedLabel(review) {
@@ -154,85 +131,6 @@
     }
     if (failDetail) tipParts.push(failDetail);
     return { cls: 'tl-smoke-fail', icon: '✗', tip: tipParts.join(', ') };
-  }
-
-  function _getDispatchState(bead) {
-    for (const l of (bead.labels || [])) {
-      if (l.startsWith('dispatch:')) return l.split(':')[1];
-    }
-    return null;
-  }
-
-  function _computeDot(bead) {
-    if (bead.container) return { color: 'green', pulse: true };
-    const now = Date.now() / 1000;
-    if (bead.last_activity && (now - bead.last_activity) < 30) return { color: 'green', pulse: true };
-    if (bead.last_activity) return { color: 'yellow', pulse: false };
-    return { color: 'gray', pulse: false };
-  }
-
-  function _mapActive(bead) {
-    const ds = _getDispatchState(bead);
-    const dot = _computeDot(bead);
-    const cpuPct = bead.cpu_pct != null ? bead.cpu_pct.toFixed(1) + '%' : '';
-    return {
-      ...bead,
-      id: bead.bead_id || bead.id,
-      _section: 'active',
-      _ds: ds,
-      _stateColor: _STATE_COLORS[ds] || 'gray',
-      _runDir: bead.run_dir || bead.dir || '',
-      _snippet: bead.last_snippet || bead.snippet || '',
-      _dotColor: dot.color,
-      _dotPulse: dot.pulse,
-      _duration: _formatDuration(bead.duration_secs),
-      _cpu_pct: cpuPct,
-      _mem_mb: bead.mem_mb != null ? Math.round(bead.mem_mb) + 'MB' : '',
-      _tok: _fmtTokens(bead.token_count) || '',
-      _tools: bead.tool_count != null ? String(bead.tool_count) : '',
-      _turns: bead.turn_count != null ? String(bead.turn_count) : '',
-      _last: _formatLastActivity(bead.last_activity),
-    };
-  }
-
-  function _mapWaiting(bead) {
-    return {
-      ...bead,
-      _section: 'waiting',
-      _ds: null,
-      _stateColor: 'gray',
-      _runDir: '',
-      _snippet: '',
-      _dotColor: 'gray',
-      _dotPulse: false,
-      _duration: '',
-      _cpu_pct: '',
-      _mem_mb: '',
-      _tok: '',
-      _tools: '',
-      _turns: '',
-      _last: '',
-    };
-  }
-
-  function _mapBlocked(bead) {
-    return {
-      ...bead,
-      _section: 'blocked',
-      _ds: null,
-      _stateColor: 'gray',
-      _runDir: '',
-      _snippet: '',
-      _dotColor: 'gray',
-      _dotPulse: false,
-      _duration: '',
-      _cpu_pct: '',
-      _mem_mb: '',
-      _tok: '',
-      _tools: '',
-      _turns: '',
-      _last: '',
-    };
   }
 
   function _mapEntry(e, idx) {
@@ -436,13 +334,11 @@
 
   document.addEventListener('alpine:init', () => {
     Alpine.data('activityPage', () => ({
+      ...window.DispatchCards.alpine(),
       range: '24h',
       stats: {},
       entries: [],
       loading: true,
-      active: [],
-      waiting: [],
-      blocked: [],
       paused: {},
       reasons: {},
       dispatcherState: { paused: false, reason: null, merge_health: { status: 'ok' } },
@@ -475,7 +371,6 @@
       _RefreshSchema: null,
       _DismissedSchema: null,
       _notifUnsubs: [],
-      routeForRun: window.routeForRun || null,
       _intervalId: null,
       _dispatchHandler: null,
       _pauseHandler: null,
@@ -574,18 +469,6 @@
           { label: 'done', value: this.stats.completed_count || 0, cls: 'text-gray-200' },
           { label: 'success', value: _formatPct(this.stats.success_rate), cls: 'text-gray-200' },
         ];
-      },
-
-      applyDispatch(data) {
-        this.waiting = (data.waiting || []).map(_mapWaiting);
-        this.blocked = (data.blocked || []).map(_mapBlocked);
-        this.active = (data.active || []).map(_mapActive);
-        if (data.paused != null) {
-          this.paused = { ...data.paused };
-        }
-        if (data.pause_reasons != null) {
-          this.reasons = { ...data.pause_reasons };
-        }
       },
 
       applyPause(pauseState) {
