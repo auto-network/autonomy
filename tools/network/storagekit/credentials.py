@@ -30,6 +30,9 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, fields, replace
 
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
 from tools.network.idkit import canonical_json, load_public_key
 from tools.network.idkit import KeyPair
 from tools.network.idkit import verify_signature as idkit_verify_signature
@@ -48,6 +51,13 @@ SUITE_ID = suites.SEAL_SUITE
 #: Purpose prefix for the encapsulation derivation — the genesis id is
 #: appended so the keypair is bound to one organization.
 KEM_PURPOSE_PREFIX = "autonomy/persona-kem/v1/"
+
+#: HKDF info prefix for the persona KEM *seed* — the counter is appended so
+#: PersonaKemCredential rotation (auto-biqme) can advance the seed without
+#: touching the fixed :func:`kem_purpose` label. Distinct label space from
+#: ``KEM_PURPOSE_PREFIX``: this derives the seed handed to :func:`build`, and
+#: ``build`` binds that seed to one organization via ``kem_purpose(genesis_id)``.
+KEM_SEED_INFO_PREFIX = "autonomy/persona-storage-kem-seed/v1/"
 
 _ID_HEX_LEN = 64
 _KEY_HEX_LEN = 64
@@ -128,6 +138,36 @@ def _from_fields(data: dict) -> PersonaKemCredential:
 
 def compute_kem_key_id(binding: dict) -> str:
     return hashlib.sha256(canonical_json(binding)).hexdigest()
+
+
+def derive_kem_seed(root_seed: bytes, counter: int = 0) -> bytes:
+    """Derive a persona's KEM seed from the personal root seed.
+
+    The seed feeds :func:`build`, which binds the resulting X25519
+    encapsulation keypair to one organization via
+    :func:`kem_purpose` — so the seed itself is org-independent and
+    ``counter`` is the only rotation input. The initial publication (this
+    program's founding and admission paths) uses counter zero;
+    PersonaKemCredential rotation (auto-biqme, contract §1d) advances it.
+
+    Deterministic and secretless-at-rest: the same root and counter yield a
+    BYTE-IDENTICAL seed on every machine, and thus a byte-identical keypair,
+    with no device-local randomness (contract §14 — "same root + same
+    kem_seed ⇒ byte-identical keypair on every machine"). Never persisted; a
+    second machine re-derives it from the armored personal root at unlock
+    (§1c), so no enrolment ceremony and no key-control record is needed to
+    add a device.
+    """
+    if not isinstance(root_seed, (bytes, bytearray)):
+        raise MalformedRecordError("root_seed must be bytes")
+    if type(counter) is not int or counter < 0:
+        raise MalformedRecordError("counter must be a non-negative integer")
+    return HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=None,
+        info=(KEM_SEED_INFO_PREFIX + str(counter)).encode("ascii"),
+    ).derive(bytes(root_seed))
 
 
 def build(

@@ -572,6 +572,7 @@ def create_org_with_identity(
     from tools.network.idkit.armor import decrypt_root_key
     from tools.network.ledger import LedgerStore, org_ledger_db_path
     from tools.network.ledger.found import found_org_ledger
+    from tools.network.storagekit import credentials as _credentials
 
     member = _personal_identity_member()
     if member is None or not member.payload.get("armored_private_key"):
@@ -600,6 +601,13 @@ def create_org_with_identity(
                 org_root=org_root,
                 personal_root_seed=personal_seed,
                 now=now_ms,
+                # Contract §5 closed allowance (auto-uh2dp): the founding
+                # claim always carries a PersonaKemCredential, so the founder
+                # has a grant address the moment a later member advances the
+                # state after an access contraction. The seed derives from the
+                # personal root, not a device (§1c); a second machine re-derives
+                # it and opens the same grants with no new key-control record.
+                kem_seed=_credentials.derive_kem_seed(personal_seed),
                 # The recovery-code ceremony's PUBLIC half only (derived from the
                 # cold code in the operator's own context) -- declaring it at
                 # genesis relocates no secret; recovery_pub == root_pub is
@@ -1052,6 +1060,7 @@ def retrofit_found_ledgers(
     from tools.network.idkit.armor import decrypt_root_key
     from tools.network.ledger import LedgerStore, org_ledger_db_path
     from tools.network.ledger.found import found_org_ledger, resume_org_founding
+    from tools.network.storagekit import credentials as _credentials
 
     member = _personal_identity_member()
     if member is None or not member.payload.get("armored_private_key"):
@@ -1093,6 +1102,10 @@ def retrofit_found_ledgers(
                         org_root=org_root,
                         personal_root_seed=personal_seed,
                         now=now_ms,
+                        # Same closed §5 allowance as the fresh founding
+                        # (auto-uh2dp): every founder claim carries a
+                        # PersonaKemCredential, retrofit included.
+                        kem_seed=_credentials.derive_kem_seed(personal_seed),
                     )
                 else:  # interrupted prior run: guarded, identity-preserving
                     founded = resume_org_founding(
@@ -1100,6 +1113,7 @@ def retrofit_found_ledgers(
                         org_id=org.id,
                         org_root=org_root,
                         personal_root_seed=personal_seed,
+                        kem_seed=_credentials.derive_kem_seed(personal_seed),
                     )
                 store.refresh_projections()
                 entry["outcome"] = "keyed_and_founded" if minted else "founded"
