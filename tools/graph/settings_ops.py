@@ -902,6 +902,13 @@ def unresolved_references(
             for one in (item if isinstance(item, list) else [item]):
                 if not isinstance(one, str) or not one:
                     continue
+                if not any(schemas.get_schema(target, r) for r in range(1, 12)):
+                    # The edge itself is wrong, or its module is not imported
+                    # here. Either way this is not a key anyone can provision,
+                    # and reporting it as one sends a writer somewhere with no
+                    # exit -- a write to an unregistered schema is refused.
+                    out.append((target, "<no schema registered for this set>"))
+                    continue
                 scoped = spec.get("reference_scope") == "org"
                 key = f"{org}:{one}" if scoped else one
                 # A key that carries the org is a key in a store that holds
@@ -960,6 +967,24 @@ def check_setting(
     seen.add((set_id, key, org))
 
     findings: list[CheckFinding] = []
+
+    # A set with no registered schema is not the same as a row nobody has
+    # written. Reporting the first as the second sends a reader to provision
+    # something that cannot be provisioned -- a write to an unregistered
+    # schema is refused -- so it must be named for what it is. It stays a
+    # report rather than a certainty because registration is per PROCESS:
+    # some schemas register only when a consumer imports their module, so a
+    # set genuinely present elsewhere can be absent here.
+    if not any(schemas.get_schema(set_id, r) for r in range(1, 12)):
+        return [CheckFinding(
+            f"{set_id} key={key!r}", "unknown_target",
+            f"no schema for {set_id!r} is registered in this process, so "
+            f"nothing can satisfy this reference here. Either the reference "
+            f"names a set that does not exist, or its module is not imported "
+            f"in this process.",
+            "this process's schema registry",
+        )]
+
     home = None
     try:
         home = schemas.declared_home(set_id)

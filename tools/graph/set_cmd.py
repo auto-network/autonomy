@@ -449,12 +449,22 @@ def _report_unresolved_references(set_id: str, rev: int, payload, org) -> None:
         )
     except Exception:
         return
-    for target, key in missing:
+    unknown = [(t, k) for t, k in missing if k.startswith("<no schema")]
+    provisionable = [(t, k) for t, k in missing if not k.startswith("<no schema")]
+    for target, key in provisionable:
         print(f"  ! not provisioned: {target}  key={key}")
-    if missing:
-        target, key = missing[0]
+    if provisionable:
+        target, key = provisionable[0]
         print(f"    provision with: graph set add {target}#1 "
               f"--key {key} --from <file>")
+    for target, _ in unknown:
+        print(f"  ! this row references {target}, and no schema for it is "
+              f"registered here.")
+        print(f"    Nothing can satisfy that: a write to an unregistered "
+              f"schema is refused. Either the")
+        print(f"    reference names a set that does not exist, or that set's "
+              f"module is not imported")
+        print(f"    in this process.")
 
 
 def cmd_set_check(args) -> None:
