@@ -77,20 +77,22 @@ def orgs(tmp_path, monkeypatch, schemas):
 
 @pytest.mark.parametrize(
     "set_id", ["probe.pattern.singleton", "probe.pattern.per-entity"])
-def test_amending_your_own_replaced_row_is_refused(orgs, set_id):
+def test_amending_your_own_replaced_row_rewrites_it(orgs, set_id):
+    """The declaration is one row per key, so the amendment lands in it.
+
+    Refusing was the earlier answer and it was the wrong one: the caller
+    asked for a value to win, which is what the verb means, and a patch row
+    was only ever how that happened to be stored.
+    """
     key = "default" if set_id.endswith("singleton") else "acme"
     base = settings_ops.add_setting(set_id, 1, key, {"v": "a"}, org="acme")
 
-    with pytest.raises(ValueError, match="replaced, not amended"):
-        settings_ops.override_setting(base, {"v": "b"}, org="acme")
+    returned = settings_ops.override_setting(base, {"v": "b"}, org="acme")
 
-
-def test_the_refusal_names_the_verb_to_use_instead(orgs):
-    base = settings_ops.add_setting(
-        "probe.pattern.singleton", 1, "default", {"v": "a"}, org="acme")
-
-    with pytest.raises(ValueError, match=r"upsert_by_key\(key='default'\)"):
-        settings_ops.override_setting(base, {"v": "b"}, org="acme")
+    layers = settings_ops.layers_for(set_id, key, org="acme")
+    assert returned == base
+    assert layers["overrides"] == []
+    assert layers["base"]["payload"] == {"v": "b"}
 
 
 def test_rewriting_it_is_what_works(orgs):

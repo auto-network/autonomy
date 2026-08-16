@@ -168,7 +168,7 @@ def test_an_override_that_overwrites_the_write_is_reported(orgs, monkeypatch):
     """
     base = settings_ops.add_setting("probe.shadow.value", 1, "m", {"v": "old"},
                                     org="acme")
-    monkeypatch.setattr(settings_ops, "_refuse_amend_when_replaced",
+    monkeypatch.setattr(settings_ops, "_collapse_amendment",
                         lambda *a, **k: None)
     settings_ops.override_setting(base, {"v": "override wins"}, org="acme")
 
@@ -188,7 +188,7 @@ def test_a_write_an_override_does_not_touch_is_not_reported(orgs, monkeypatch):
     train the reader to ignore the warning."""
     base = settings_ops.add_setting(
         "probe.shadow.wide", 1, "w", {"a": "1", "b": "2"}, org="acme")
-    monkeypatch.setattr(settings_ops, "_refuse_amend_when_replaced",
+    monkeypatch.setattr(settings_ops, "_collapse_amendment",
                         lambda *a, **k: None)
     settings_ops.override_setting(base, {"b": "override"}, org="acme")
 

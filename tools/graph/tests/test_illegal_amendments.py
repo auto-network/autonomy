@@ -62,7 +62,7 @@ def test_an_override_on_a_replaced_set_is_reported(orgs, monkeypatch):
     """Written past the guard, as a row predating the rule would be."""
     base = settings_ops.add_setting("probe.amend.replaced", 1, "k", {"v": "x"},
                                     org="acme")
-    monkeypatch.setattr(settings_ops, "_refuse_amend_when_replaced",
+    monkeypatch.setattr(settings_ops, "_collapse_amendment",
                         lambda *a, **k: None)
     settings_ops.override_setting(base, {"v": "amended"}, org="acme")
 
@@ -88,7 +88,7 @@ def test_the_row_is_addressable_by_id(orgs, monkeypatch):
     address goes through resolution, which returns nothing for it."""
     base = settings_ops.add_setting("probe.amend.replaced", 1, "gone", {"v": "x"},
                                     org="acme")
-    monkeypatch.setattr(settings_ops, "_refuse_amend_when_replaced",
+    monkeypatch.setattr(settings_ops, "_collapse_amendment",
                         lambda *a, **k: None)
     settings_ops.override_setting(base, {"v": "amended"}, org="acme")
 
