@@ -262,6 +262,20 @@ def cmd_settings_diag(args) -> None:
         for set_id in unused:
             print(f"      {set_id}")
 
+    # ── sets that could not be read at all ──
+    try:
+        diag = _get_json("/api/diag/settings/sets", timeout=25)
+        unreadable = [(r["set_id"], r["read_error"])
+                      for r in (diag.get("sets") or [])
+                      if r.get("read_error")]
+    except Exception:
+        unreadable = []
+    if unreadable:
+        print(f"\n  ! {len(unreadable)} set(s) could not be read — this is not "
+              f"the same as being empty:")
+        for set_id, error in unreadable:
+            print(f"      {set_id}: {error}")
+
     # ── validation ──
     if not getattr(args, "no_validate", False):
         failures: list[tuple[str, str, str]] = []
