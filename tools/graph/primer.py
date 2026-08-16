@@ -185,8 +185,11 @@ def collect_primer_data(
     # Collect provenance source IDs for dedup
     provenance_source_ids = {p["source_id"] for p in result["provenance"]}
 
-    # Extract bead labels once for tag boosting
-    bead_labels = set(bead.get("labels", [])) if bead else set()
+    # Extract bead labels once for tag boosting. A bead with no labels stores
+    # null rather than omitting the field, and a dict default only applies to
+    # an absent key -- so this reads None for such a bead unless it is asked
+    # for explicitly.
+    bead_labels = set((bead.get("labels") if bead else None) or [])
 
     def _tag_score(note):
         meta = json.loads(note["metadata"]) if note["metadata"] else {}
