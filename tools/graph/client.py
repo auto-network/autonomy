@@ -1180,7 +1180,11 @@ def _normalize_update_result(result: dict, content: str | None) -> dict:
 
 def _dict_to_resolved_setting(d: dict):
     """Reconstruct a ``ResolvedSetting`` from the dashboard API response."""
-    from .settings_ops import ResolvedSetting
+    from .settings_ops import ResolvedSetting, SettingReadError
+    d = dict(d)
+    error = d.pop("error", None)
+    if error is not None:
+        d["payload"] = SettingReadError(**error)
     return ResolvedSetting(
         id=d["id"],
         set_id=d["set_id"],

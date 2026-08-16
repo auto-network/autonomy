@@ -97,6 +97,16 @@ class VaultSealerMissing(RuntimeError):
     """
 
 
+class VaultKeyHolderMissing(RuntimeError):
+    """A vaulted read has no registered source of held generation keys.
+
+    This is the read-side counterpart to :class:`VaultSealerMissing`.  It is
+    converted to a per-member :class:`SettingReadError` by ``read_set`` so a
+    missing dashboard key cache never turns ciphertext into a value, hides the
+    member, or prevents unrelated members from resolving.
+    """
+
+
 _identity_write_allowed: "_contextvars.ContextVar[bool]" = _contextvars.ContextVar(
     "settings_identity_write_allowed", default=False,
 )
@@ -261,6 +271,31 @@ def set_emit_hook(hook: Callable[..., None] | None) -> None:
 _vault_sealer: Callable[..., str] | None = None
 
 
+@dataclass(frozen=True)
+class VaultReadContext:
+    """The injected material needed to open one organization content object.
+
+    ``holdings`` is a :class:`tools.vault.storage_object.Holdings` instance and
+    ``content_store`` implements ``get_object(object_id, revision_id)``.  The
+    holder/cache implementation owns their lifecycle; settings resolution only
+    consumes them for the duration of one member read.
+    """
+
+    holdings: Any
+    content_store: Any
+
+
+# Holder accessor signature::
+#
+#     def holder(*, set_id: str, key: str, org: str | None) -> VaultReadContext
+#
+# The accessor is deliberately narrower than an injected decryptor: read_set
+# remains the one implementation of step six and calls storagekit's shipped
+# object reader itself.  The later ramfs-backed cache only has to supply the
+# held secrets and the two persisted stores.
+_vault_key_holder: Callable[..., VaultReadContext] | None = None
+
+
 def set_vault_sealer(sealer: Callable[..., str] | None) -> None:
     """Register (or clear with ``None``) the vault sealer.
 
@@ -269,6 +304,14 @@ def set_vault_sealer(sealer: Callable[..., str] | None) -> None:
     """
     global _vault_sealer
     _vault_sealer = sealer
+
+
+def set_vault_key_holder(
+    holder: Callable[..., VaultReadContext] | None,
+) -> None:
+    """Register (or clear with ``None``) the vaulted-read key accessor."""
+    global _vault_key_holder
+    _vault_key_holder = holder
 
 
 def _seal_vault_payload(
@@ -315,6 +358,142 @@ def _seal_vault_payload(
             f"locator; refusing to store it as {set_id}/{key}"
         )
     return locator
+
+
+@dataclass(frozen=True)
+class SettingReadError:
+    """A member that exists but could not be resolved to a payload.
+
+    Keeping the error in the member's payload slot makes the in-process and
+    HTTP clients present the same interface without adding a nullable field to
+    every successful setting.  On the wire it is rendered as a sibling
+    ``error`` object with ``payload: null`` so it cannot be mistaken for a
+    setting value.
+    """
+
+    code: str
+    error: str
+    message: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "code": self.code,
+            "error": self.error,
+            "message": self.message,
+        }
+
+
+def _vault_read_error(code: str, exc: BaseException) -> SettingReadError:
+    return SettingReadError(
+        code=code,
+        error=type(exc).__name__,
+        message=str(exc),
+    )
+
+
+def _descriptor_reaches(
+    held_state_ids: Any,
+    target_state_id: str,
+    descriptors: dict,
+) -> bool:
+    """Whether public descriptor edges put *target* behind a held state.
+
+    This only classifies ``StateUnreachableError`` as a missing bridge versus
+    no usable key.  It does not derive a key or open an edge; that remains
+    exclusively ``storagekit.objects.read_object``'s job.
+    """
+    seen: set[str] = set()
+    stack = list(held_state_ids)
+    while stack:
+        state_id = stack.pop()
+        if state_id == target_state_id:
+            return True
+        if state_id in seen:
+            continue
+        seen.add(state_id)
+        descriptor = descriptors.get(state_id)
+        if descriptor is not None:
+            stack.extend(descriptor.parent_state_ids)
+    return False
+
+
+def _open_vault_payload(
+    locator: str,
+    *,
+    set_id: str,
+    key: str,
+    org: str | None,
+    declared_tier: str,
+) -> dict | SettingReadError:
+    """Step six of ``read_set``: open one merged scalar locator.
+
+    Every refusal becomes a value on this member, never an exception for the
+    whole set.  The cryptographic sequence itself is the already-shipped
+    :func:`tools.network.storagekit.objects.read_object`; this function only
+    obtains persisted inputs, parses the tier envelope, and names failures.
+    """
+    from tools.network.storagekit import objects as storage_objects
+    from tools.network.storagekit.errors import StorageError, SuiteError
+    from tools.network.storagekit.objects import StateUnreachableError
+    from tools.vault import storage_object as vault_storage_object
+    from tools.vault.errors import VaultError
+
+    holder = _vault_key_holder
+    if holder is None:
+        return _vault_read_error(
+            "vault_key_holder_missing",
+            VaultKeyHolderMissing(
+                f"{set_id}/{key} is vaulted, but no generation-key holder is "
+                "registered; register one with "
+                "settings_ops.set_vault_key_holder()"
+            ),
+        )
+
+    reference = None
+    holdings = None
+    try:
+        reference = vault_storage_object.parse_locator(locator)
+        if reference["tier"] != declared_tier:
+            raise VaultError(
+                f"vault locator tier {reference['tier']!r} does not match "
+                f"the schema's {declared_tier!r} tier"
+            )
+        context = holder(set_id=set_id, key=key, org=org)
+        if not isinstance(context, VaultReadContext):
+            raise VaultKeyHolderMissing(
+                "the registered generation-key holder did not return a "
+                "VaultReadContext"
+            )
+        holdings = context.holdings
+        header, body = context.content_store.get_object(
+            reference["object_id"], reference["revision_id"]
+        )
+        opened = storage_objects.read_object(
+            header,
+            body,
+            holdings.secrets,
+            list(holdings.bridges),
+            dict(holdings.descriptors),
+        )
+        payload = json.loads(opened)
+        if not isinstance(payload, dict):
+            raise VaultError("a vaulted settings object must open to a JSON object")
+        # For ``secured`` this is intentionally the storage-opened envelope:
+        # its content-encryption key remains sealed under the policy class.
+        return payload
+    except SuiteError as exc:
+        return _vault_read_error("vault_unknown_suite", exc)
+    except StateUnreachableError as exc:
+        secrets = getattr(holdings, "secrets", {})
+        descriptors = getattr(holdings, "descriptors", {})
+        target = reference.get("storage_state_id") if reference else None
+        if target and secrets and _descriptor_reaches(secrets, target, descriptors):
+            return _vault_read_error("vault_bridge_missing", exc)
+        return _vault_read_error("vault_key_unavailable", exc)
+    except VaultKeyHolderMissing as exc:
+        return _vault_read_error("vault_key_holder_missing", exc)
+    except (StorageError, VaultError, OSError, ValueError, TypeError) as exc:
+        return _vault_read_error("vault_decryption_failed", exc)
 
 
 def _make_snapshot(
@@ -774,6 +953,11 @@ class ResolvedSetting(Generic[T]):
 
     def to_dict(self) -> dict:
         """Serialize the Setting as a dict (payload included as-is)."""
+        if isinstance(self.payload, SettingReadError):
+            d = dict(self.__dict__)
+            d["payload"] = None
+            d["error"] = self.payload.to_dict()
+            return d
         d = asdict(self)
         return d
 
@@ -858,7 +1042,10 @@ def _serialize_member(m: ResolvedSetting) -> dict:
     """
     d = dict(m.__dict__)
     payload = d.get("payload")
-    if hasattr(payload, "model_dump"):
+    if isinstance(payload, SettingReadError):
+        d["payload"] = None
+        d["error"] = payload.to_dict()
+    elif hasattr(payload, "model_dump"):
         d["payload"] = payload.model_dump()
     return d
 
@@ -3041,12 +3228,14 @@ def read_set(
 ) -> SetMembers[Any]:
     """Resolve members of *set_id* visible to org's session.
 
-    Five-step pipeline (see graph://0d3f750f-f9c § Resolution algorithm):
+    Six-step pipeline (see graph://0d3f750f-f9c § Resolution algorithm and
+    graph://0c206bd8-1c6 §2):
     1. per-DB fetch (single DB today, peers loop ready),
     2. group by key into bases / overrides / exclusions,
     3. drop excluded bases,
     4. pick highest-precedence base per key (tie-break: most recent),
     5. apply overrides via JSON-merge-patch.
+    6. open a vaulted member's merged scalar locator.
 
     Optional ``min_revision`` filters before transform; ``target_revision``
     upconverts (or drops if no chain). ``prefix=X`` restricts the query
@@ -3223,8 +3412,28 @@ def read_set(
                 merged_payload = json_merge_patch(merged_payload, ov_payload)
 
         resolved = _row_to_resolved(chosen_row, org=chosen_org)
+        vault_tier = schemas.declared_vault_tier(chosen_row["set_id"])
+        if vault_tier is not None:
+            resolved.payload = _open_vault_payload(
+                merged_payload,
+                set_id=chosen_row["set_id"],
+                key=key,
+                org=chosen_org,
+                declared_tier=vault_tier,
+            )
+            if isinstance(resolved.payload, SettingReadError):
+                members.append(resolved)
+                continue
+            # A secured member stops at the still-sealed content-key envelope;
+            # schema transforms apply only after the policy class opens it.
+            if vault_tier == "secured":
+                members.append(resolved)
+                continue
+        else:
+            resolved.payload = merged_payload
+
         resolved.payload = _apply_declared_defaults(
-            chosen_row["set_id"], chosen_row["schema_revision"], merged_payload,
+            chosen_row["set_id"], chosen_row["schema_revision"], resolved.payload,
         )
 
         # Optional revision transform.
