@@ -9,6 +9,7 @@ It's a headless Chrome CLI purpose-built for AI agents (~200-500 tokens per snap
 - Dark color scheme, PNG screenshots to `/tmp/screenshots/`
 - Dashboard runs at `https://localhost:8080` (self-signed TLS)
 - Pass `--ignore-https-errors` on the `open` command only (not on subsequent commands, or you'll get warnings)
+- If the live dashboard redirects to `/unlock`, request a `dashboard_access` grant through `/api/approvals` (follow the complete ephemeral-key request/redeem flow in `tools/dashboard/tests/test_dashboard_access_approvals.py`), have the operator approve it, then install the returned session cookie with `agent-browser cookies set`.
 - Element refs (e.g. `[1]`, `[2]`) invalidate on navigation — re-snapshot after navigating
 
 ## Quick Validation Pattern
