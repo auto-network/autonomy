@@ -1910,10 +1910,19 @@ def illegal_amendments(*, org: str | None) -> list[dict]:
         pattern = _access_pattern_for(row["set_id"], row["schema_revision"])
         if pattern not in _REPLACED_PATTERNS:
             continue
-        # A base in another database is a peer's row, which is exactly what
-        # overriding is for.
         if row["supersedes"] not in own_ids:
-            continue
+            # Not in this database means either a peer's row -- which is
+            # exactly what overriding is for -- or a row that was deleted,
+            # leaving this one stranded. Those look identical from here and
+            # need opposite treatment, so ask whether the target exists at
+            # all. A stranded row resolves to nothing, is unreachable by
+            # key, and is invisible to every read: precisely the row a sweep
+            # exists to find, and the one an "assume peer" shortcut skips.
+            try:
+                if _fetch_setting_any_org(row["supersedes"], org) is not None:
+                    continue
+            except Exception:
+                continue
         out.append({
             "id": row["id"],
             "set_id": row["set_id"],
