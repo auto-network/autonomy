@@ -55,11 +55,10 @@ class KeyControlDouble:
 
     NOT the production store. ``storagekit.keycontrol.KeyControlStore``
     persists ``StorageStateDescriptor`` records and exposes this same
-    ``ancestry`` traversal; it does not yet cover the other three things
-    this double holds -- ``bridges``, ``grants``, and ``history_complete``
-    (which acceptance computes and the production store deliberately
-    returns without storing, because its inputs are ``ParentBridge``
-    records from a later sub-bead). So this cannot be swapped for the
+    ``ancestry`` traversal; it now also persists ``bridges`` and serves
+    ``history_complete`` -- but RECOMPUTED from the bridge bodies locally
+    available, never the admission-time value this double caches, and
+    ``grants`` remain a later sub-bead. So this cannot be swapped for the
     production store yet, and is named apart from it so nothing imports
     the wrong one.
 
