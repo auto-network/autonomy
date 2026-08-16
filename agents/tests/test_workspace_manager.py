@@ -90,7 +90,7 @@ def test_api_managed_local_repo_round_trips_through_session_merge(tmp_path, monk
         description="",
         image="img",
         graph_project="personal",
-        repos=(RepoMount(url=str(repo), mount="/workspace/repo", writable=True),),
+        repos=(RepoMount.from_url(url=str(repo), mount="/workspace/repo", writable=True),),
     )
 
     wm.prepare_session_mounts(
@@ -206,7 +206,7 @@ def test_prepare_session_mounts_local_repo_no_remote(tmp_path):
 
     proj = ProjectConfig(
         id="db", name="db", description="", image="img", graph_project="gp",
-        repos=(RepoMount(url=url, base_source=url, mount="/workspace/db", writable=True),),
+        repos=(RepoMount.from_url(url=url, base_source=url, mount="/workspace/db", writable=True),),
     )
     mounts = wm.prepare_session_mounts(
         proj, "sess-db", repos_dir=repos_dir, worktrees_dir=worktrees_dir,
@@ -286,7 +286,7 @@ def test_prepare_session_mounts_writable_and_readonly(tmp_path, monkeypatch):
 
     proj_w = ProjectConfig(
         id="w", name="w", description="", image="img", graph_project="gp",
-        repos=(RepoMount(url=url, mount="/workspace/upstream", writable=True),),
+        repos=(RepoMount.from_url(url=url, mount="/workspace/upstream", writable=True),),
     )
     mounts_w = wm.prepare_session_mounts(
         proj_w, "sess-w", repos_dir=repos_dir, worktrees_dir=worktrees_dir,
@@ -311,7 +311,7 @@ def test_prepare_session_mounts_writable_and_readonly(tmp_path, monkeypatch):
 
     proj_ro = ProjectConfig(
         id="ro", name="ro", description="", image="img", graph_project="gp",
-        repos=(RepoMount(url=url, mount="/workspace/ro", writable=False),),
+        repos=(RepoMount.from_url(url=url, mount="/workspace/ro", writable=False),),
     )
     mounts_ro = wm.prepare_session_mounts(
         proj_ro, "sess-ro", repos_dir=repos_dir, worktrees_dir=worktrees_dir,
@@ -345,7 +345,7 @@ def test_git_add_and_commit_succeed_in_session_worktree(tmp_path, monkeypatch):
 
     proj = ProjectConfig(
         id="w", name="w", description="", image="img", graph_project="gp",
-        repos=(RepoMount(url=url, mount="/workspace/upstream", writable=True),),
+        repos=(RepoMount.from_url(url=url, mount="/workspace/upstream", writable=True),),
     )
     wm.prepare_session_mounts(
         proj, session, repos_dir=repos_dir, worktrees_dir=worktrees_dir,
@@ -525,7 +525,7 @@ def test_prepare_session_mounts_refreshes_existing_clean_worktree_on_fresh_launc
 
     proj = ProjectConfig(
         id="w", name="w", description="", image="img", graph_project="gp",
-        repos=(RepoMount(url=url, mount="/workspace/upstream", writable=True),),
+        repos=(RepoMount.from_url(url=url, mount="/workspace/upstream", writable=True),),
     )
     wm.prepare_session_mounts(
         proj,
@@ -560,7 +560,7 @@ def test_prepare_session_mounts_refreshes_existing_clean_worktree_to_local_base_
 
     proj = ProjectConfig(
         id="w", name="w", description="", image="img", graph_project="gp",
-        repos=(RepoMount(url=url, mount="/workspace/upstream", writable=True),),
+        repos=(RepoMount.from_url(url=url, mount="/workspace/upstream", writable=True),),
     )
     wm.prepare_session_mounts(
         proj,
@@ -610,7 +610,7 @@ def test_prepare_session_mounts_refreshes_existing_clean_worktree_to_origin_when
 
     proj = ProjectConfig(
         id="w", name="w", description="", image="img", graph_project="gp",
-        repos=(RepoMount(url=url, mount="/workspace/upstream", writable=True),),
+        repos=(RepoMount.from_url(url=url, mount="/workspace/upstream", writable=True),),
     )
     wm.prepare_session_mounts(
         proj,
@@ -669,7 +669,7 @@ def test_prepare_session_mounts_preserves_existing_worktree_with_local_commits(t
 
     proj = ProjectConfig(
         id="w", name="w", description="", image="img", graph_project="gp",
-        repos=(RepoMount(url=url, mount="/workspace/upstream", writable=True),),
+        repos=(RepoMount.from_url(url=url, mount="/workspace/upstream", writable=True),),
     )
     wm.prepare_session_mounts(
         proj,
@@ -716,7 +716,7 @@ def test_prepare_session_mounts_readonly_prefers_explicitly_synced_local_default
 
     proj = ProjectConfig(
         id="ro", name="ro", description="", image="img", graph_project="gp",
-        repos=(RepoMount(url=url, mount="/workspace/ro", writable=False),),
+        repos=(RepoMount.from_url(url=url, mount="/workspace/ro", writable=False),),
     )
     mounts = wm.prepare_session_mounts(
         proj, "sess-ro-local", repos_dir=repos_dir, worktrees_dir=tmp_path / "worktrees",
@@ -773,7 +773,7 @@ def test_prepare_session_mounts_syncs_clone_main_from_base_source(tmp_path, monk
 
     proj = ProjectConfig(
         id="w", name="w", description="", image="img", graph_project="gp",
-        repos=(RepoMount(
+        repos=(RepoMount.from_url(
             url=url,
             mount="/workspace/upstream",
             writable=True,
@@ -829,7 +829,7 @@ def test_prepare_session_mounts_readonly_advances_clone_main_from_base_source(
 
     proj = ProjectConfig(
         id="ro", name="ro", description="", image="img", graph_project="gp",
-        repos=(RepoMount(
+        repos=(RepoMount.from_url(
             url=url,
             mount="/workspace/ro",
             writable=False,
@@ -863,7 +863,7 @@ def test_prepare_session_mounts_rejects_missing_base_source_path(tmp_path, monke
 
     proj = ProjectConfig(
         id="w", name="w", description="", image="img", graph_project="gp",
-        repos=(RepoMount(
+        repos=(RepoMount.from_url(
             url=url,
             mount="/workspace/upstream",
             writable=True,
@@ -892,7 +892,7 @@ def test_prepare_session_mounts_rejects_non_git_base_source(tmp_path, monkeypatc
 
     proj = ProjectConfig(
         id="w", name="w", description="", image="img", graph_project="gp",
-        repos=(RepoMount(
+        repos=(RepoMount.from_url(
             url=url,
             mount="/workspace/upstream",
             writable=True,
@@ -938,7 +938,7 @@ def test_prepare_session_mounts_rejects_base_source_identity_mismatch(tmp_path, 
 
     proj = ProjectConfig(
         id="w", name="w", description="", image="img", graph_project="gp",
-        repos=(RepoMount(
+        repos=(RepoMount.from_url(
             url=url,
             mount="/workspace/upstream",
             writable=True,
@@ -964,7 +964,7 @@ def test_prepare_session_mounts_rejects_relative_base_source(tmp_path, monkeypat
 
     proj = ProjectConfig(
         id="w", name="w", description="", image="img", graph_project="gp",
-        repos=(RepoMount(
+        repos=(RepoMount.from_url(
             url=url,
             mount="/workspace/upstream",
             writable=True,
@@ -1020,7 +1020,7 @@ def test_prepare_session_mounts_resume_preserves_session_worktree_with_base_sour
 
     proj = ProjectConfig(
         id="w", name="w", description="", image="img", graph_project="gp",
-        repos=(RepoMount(
+        repos=(RepoMount.from_url(
             url=url,
             mount="/workspace/upstream",
             writable=True,
@@ -1069,7 +1069,7 @@ def _make_writable_session_worktree(
 
     proj = ProjectConfig(
         id="w", name="w", description="", image="img", graph_project="gp",
-        repos=(RepoMount(url=url, mount="/workspace/upstream", writable=True),),
+        repos=(RepoMount.from_url(url=url, mount="/workspace/upstream", writable=True),),
     )
     wm.prepare_session_mounts(
         proj, session, repos_dir=repos_dir, worktrees_dir=worktrees_dir,
@@ -1295,7 +1295,7 @@ def test_prune_orphan_worktrees_skips_live_sessions(tmp_path, monkeypatch):
     url = str(next((tmp_path).glob("upstream.git")))
     proj = ProjectConfig(
         id="w", name="w", description="", image="img", graph_project="gp",
-        repos=(RepoMount(url=url, mount="/workspace/upstream", writable=True),),
+        repos=(RepoMount.from_url(url=url, mount="/workspace/upstream", writable=True),),
     )
     wm.prepare_session_mounts(
         proj, session_dead,
@@ -1333,7 +1333,7 @@ def test_scan_all_worktrees_reports_state_per_session(tmp_path, monkeypatch):
     url = str(next(tmp_path.glob("upstream.git")))
     proj = ProjectConfig(
         id="w", name="w", description="", image="img", graph_project="gp",
-        repos=(RepoMount(url=url, mount="/workspace/upstream", writable=True),),
+        repos=(RepoMount.from_url(url=url, mount="/workspace/upstream", writable=True),),
     )
     wm.prepare_session_mounts(
         proj, session_dirty,
@@ -1412,7 +1412,7 @@ def test_scan_all_worktrees_suppresses_cross_worktree_duplicates(tmp_path, monke
     url = str(next(tmp_path.glob("upstream.git")))
     proj = ProjectConfig(
         id="w", name="w", description="", image="img", graph_project="gp",
-        repos=(RepoMount(url=url, mount="/workspace/upstream", writable=True),),
+        repos=(RepoMount.from_url(url=url, mount="/workspace/upstream", writable=True),),
     )
     wm.prepare_session_mounts(
         proj, session_review,
@@ -1470,7 +1470,7 @@ def test_scan_all_worktrees_session_filter_skips_sessions(tmp_path, monkeypatch)
     url = str(next(tmp_path.glob("upstream.git")))
     proj = ProjectConfig(
         id="w", name="w", description="", image="img", graph_project="gp",
-        repos=(RepoMount(url=url, mount="/workspace/upstream", writable=True),),
+        repos=(RepoMount.from_url(url=url, mount="/workspace/upstream", writable=True),),
     )
     wm.prepare_session_mounts(
         proj, session_b,
@@ -1501,7 +1501,7 @@ def test_scan_all_worktrees_suppresses_rebased_copy_duplicates(tmp_path, monkeyp
     url = str(next(tmp_path.glob("upstream.git")))
     proj = ProjectConfig(
         id="w", name="w", description="", image="img", graph_project="gp",
-        repos=(RepoMount(url=url, mount="/workspace/upstream", writable=True),),
+        repos=(RepoMount.from_url(url=url, mount="/workspace/upstream", writable=True),),
     )
     wm.prepare_session_mounts(
         proj, session_copy,
@@ -2357,7 +2357,7 @@ def _prepare_sessions(tmp_path, monkeypatch, sessions, *, repo_name="upstream"):
     monkeypatch.setattr(wm, "_worktree_basename", lambda u: repo_name)
     proj = ProjectConfig(
         id="w", name="w", description="", image="img", graph_project="gp",
-        repos=(RepoMount(url=url, mount="/workspace/upstream", writable=True),),
+        repos=(RepoMount.from_url(url=url, mount="/workspace/upstream", writable=True),),
     )
     for session in sessions:
         wm.prepare_session_mounts(
@@ -2399,7 +2399,7 @@ def test_metadata_rw_mount_resolves_to_own_registration(tmp_path, monkeypatch):
     monkeypatch.setattr(wm, "_worktree_basename", lambda u: "upstream")
     proj = ProjectConfig(
         id="w", name="w", description="", image="img", graph_project="gp",
-        repos=(RepoMount(url=url, mount="/workspace/upstream", writable=True),),
+        repos=(RepoMount.from_url(url=url, mount="/workspace/upstream", writable=True),),
     )
     mounts_a = wm.prepare_session_mounts(
         proj, "sess-a", repos_dir=repos_dir, worktrees_dir=worktrees_dir,
@@ -2449,7 +2449,7 @@ def test_legacy_bare_basename_worktree_still_resolves(tmp_path, monkeypatch):
     # A resume launch reuses the legacy worktree in place.
     proj = ProjectConfig(
         id="w", name="w", description="", image="img", graph_project="gp",
-        repos=(RepoMount(url=url, mount="/workspace/upstream", writable=True),),
+        repos=(RepoMount.from_url(url=url, mount="/workspace/upstream", writable=True),),
     )
     mounts = wm.prepare_session_mounts(
         proj, session, repos_dir=repos_dir, worktrees_dir=worktrees_dir,
@@ -2675,7 +2675,7 @@ def test_host_root_opt_in_conflicts_with_repo_at_platform_path(tmp_path, monkeyp
     project = ProjectConfig(
         id="ops", name="ops", description="", image="img",
         graph_project="autonomy",
-        repos=(RepoMount(url=str(checkout), base_source=str(checkout),
+        repos=(RepoMount.from_url(url=str(checkout), base_source=str(checkout),
                          mount="/workspace/repo", writable=False),),
         host_root_mount_reason="contradiction",
     )

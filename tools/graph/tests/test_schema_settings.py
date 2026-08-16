@@ -110,7 +110,8 @@ def test_settings_round_trip(fresh_db):
 def _ws_payload(**repo_overrides):
     """Build an autonomy.workspace#1 payload with a single repo entry."""
     repo = {
-        "url": "git@github.com:autonomy/autonomy.git",
+        "host": "github.com",
+        "repo": "autonomy/autonomy",
         "mount": "/workspace/repo",
     }
     repo.update(repo_overrides)

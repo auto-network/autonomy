@@ -109,7 +109,7 @@ def test_bead_polishing_protocol_reference():
 
 def test_writable_repos_listed_as_writable():
     out = render_workspace_primer(_cfg(
-        repos=(RepoMount(url="u", mount="/workspace/ng", writable=True),),
+        repos=(RepoMount(host="example.com", repo="o/r", mount="/workspace/ng", writable=True),),
     ))
     assert "`/workspace/ng` — **writable**" in out
     assert "## Editing and Committing" in out
@@ -118,7 +118,7 @@ def test_writable_repos_listed_as_writable():
 
 def test_readonly_repos_listed_as_readonly():
     out = render_workspace_primer(_cfg(
-        repos=(RepoMount(url="u", mount="/workspace/a", writable=False),),
+        repos=(RepoMount(host="example.com", repo="o/r", mount="/workspace/a", writable=False),),
     ))
     assert "`/workspace/a` — read-only" in out
     assert "## Limits" in out
@@ -129,8 +129,8 @@ def test_readonly_repos_listed_as_readonly():
 def test_mixed_repos_both_sections():
     out = render_workspace_primer(_cfg(
         repos=(
-            RepoMount(url="u1", mount="/workspace/enterprise", writable=False),
-            RepoMount(url="u2", mount="/workspace/enterprise_ng", writable=True),
+            RepoMount(host="example.com", repo="o/r1", mount="/workspace/enterprise", writable=False),
+            RepoMount(host="example.com", repo="o/r2", mount="/workspace/enterprise_ng", writable=True),
         ),
     ))
     assert "`/workspace/enterprise_ng` — **writable**" in out
@@ -292,8 +292,8 @@ def test_no_unrendered_template_syntax():
         startup="x", needs_nested_docker=True,
         default_tags=("a", "b"),
         repos=(
-            RepoMount(url="u", mount="/workspace/a", writable=True),
-            RepoMount(url="u", mount="/workspace/b", writable=False),
+            RepoMount(host="example.com", repo="o/r", mount="/workspace/a", writable=True),
+            RepoMount(host="example.com", repo="o/r", mount="/workspace/b", writable=False),
         ),
     ))
     assert "{{" not in out
@@ -562,7 +562,7 @@ def test_writable_session_branch_uses_session_prefix():
     that look for the branch via tab-complete or `git branch --list`.
     """
     out = render_workspace_primer(_cfg(
-        repos=(RepoMount(url="u", mount="/workspace/foo", writable=True),),
+        repos=(RepoMount(host="example.com", repo="o/r", mount="/workspace/foo", writable=True),),
     ))
     assert "session/<session>" in out, (
         "writable-branch guidance must reference the current "
@@ -579,7 +579,7 @@ def test_sync_snippet_assignment_and_curl_on_separate_lines():
     `trim_blocks=True` ate the trailing newline of the inline ``{% if %}``.
     """
     out = render_workspace_primer(_cfg(
-        repos=(RepoMount(url="u", mount="/workspace/foo", writable=True),),
+        repos=(RepoMount(host="example.com", repo="o/r", mount="/workspace/foo", writable=True),),
         network_host=True,
     ))
     # Valid shell — DASHBOARD value followed by a real newline before the
@@ -595,7 +595,7 @@ def test_sync_snippet_renders_for_bridge_network():
     """Bridge-network workspaces resolve to host.docker.internal but the
     rendered shell must still place `curl` on its own line."""
     out = render_workspace_primer(_cfg(
-        repos=(RepoMount(url="u", mount="/workspace/foo", writable=True),),
+        repos=(RepoMount(host="example.com", repo="o/r", mount="/workspace/foo", writable=True),),
         network_host=False,
     ))
     assert "DASHBOARD=https://host.docker.internal:8080\nREPO_NAME=$(curl " in out

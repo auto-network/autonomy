@@ -408,6 +408,33 @@ def cmd_set_read(args) -> None:
 # ── add / override / exclude ────────────────────────────────
 
 
+def _report_unresolved_references(set_id: str, rev: int, payload, org) -> None:
+    """Say which referenced keys are not provisioned yet, right after the write.
+
+    A field that declares a reference names a key in another set. Whether that
+    key exists is knowable at the moment the row is written, and the moment it
+    is written is when someone is in a position to do something about it --
+    rather than at launch, as a capability that quietly does not work.
+
+    Reported, never fatal: writing the row before provisioning what it names is
+    a legitimate order to work in. The point is that nobody has to remember to
+    check.
+    """
+    try:
+        from tools.graph import settings_ops
+        missing = settings_ops.unresolved_references(
+            set_id, rev, payload, org=settings_ops._resolve_settings_caller(org),
+        )
+    except Exception:
+        return
+    for target, key in missing:
+        print(f"  ! not provisioned: {target}  key={key}")
+    if missing:
+        target, key = missing[0]
+        print(f"    provision with: graph set add {target}#1 "
+              f"--key {key} --from <file>")
+
+
 def cmd_set_add(args) -> None:
     set_id, rev = _parse_set_at_rev(args.set_at_rev)
     payload = _resolve_payload_input(args)
@@ -423,6 +450,7 @@ def cmd_set_add(args) -> None:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     print(f"  ✓ Setting: {sid[:11]}  {set_id}#{rev}  key={args.key}  [{args.state}]")
+    _report_unresolved_references(set_id, rev, payload, _org(args))
 
 
 def cmd_set_override(args) -> None:

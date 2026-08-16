@@ -131,10 +131,15 @@ def _normalize_repo(repo: Any) -> dict:
         raise WorkspaceMigrationError(
             f"repo entry must be a mapping, got {type(repo).__name__}"
         )
-    out: dict[str, Any] = {
-        "url": str(repo["url"]),
-        "mount": str(repo["mount"]),
-    }
+    url = str(repo["url"])
+    out: dict[str, Any] = {"mount": str(repo["mount"])}
+    if url.startswith("/"):
+        # A local-first repository: an absolute host path, no remote.
+        out["local_path"] = url
+    else:
+        from agents.workspace_manager import parse_repo_url
+        host, path = parse_repo_url(url)
+        out["host"], out["repo"] = host, path
     if "writable" in repo:
         out["writable"] = bool(repo["writable"])
     return out

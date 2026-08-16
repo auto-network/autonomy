@@ -204,15 +204,43 @@ class WorkspaceMountInvalidError(WorkspaceMountError):
 class RepoMount:
     """Git repo mount spec from the workspace Setting payload.
 
+    ``host`` and ``repo`` are stored; the clone URL is composed from them.
+    A credential is keyed by host, so storing the host is what lets the
+    reference be a plain value instead of something parsed back out of a
+    URL at the moment it is needed.
+
     ``base_source`` is an optional absolute host checkout path. When set,
     fresh session worktrees derive from that checkout's integration branch
     instead of the managed clone's ``origin``. ``None`` means default
     ``origin`` behaviour.
     """
-    url: str
+    host: str | None
+    repo: str | None
     mount: str
+    local_path: str | None = None
     writable: bool = False
     base_source: str | None = None
+
+    @property
+    def url(self) -> str:
+        """The clone URL, composed from whichever form names the repository."""
+        if self.local_path:
+            return self.local_path
+        return f"git@{self.host}:{self.repo}.git"
+
+    @classmethod
+    def from_url(cls, url: str, **kwargs: Any) -> "RepoMount":
+        """Build one from a clone URL, splitting it into the stored form.
+
+        For callers that genuinely hold a URL and nothing else. The stored
+        shape is host and repo -- or a local path -- so the split happens
+        once, here, rather than at every read.
+        """
+        if url.startswith("/"):
+            return cls(host=None, repo=None, local_path=url, **kwargs)
+        from agents.workspace_manager import parse_repo_url
+        host, path = parse_repo_url(url)
+        return cls(host=host, repo=path, **kwargs)
 
 
 @dataclass(frozen=True)
@@ -381,7 +409,7 @@ def _parse_repo(raw: Any, workspace_id: str, idx: int) -> RepoMount:
         raise WorkspaceSettingsError(
             f"workspace {workspace_id!r}: repos[{idx}] must be a mapping"
         )
-    for key in ("url", "mount"):
+    for key in ("mount",):
         if key not in raw:
             raise WorkspaceSettingsError(
                 f"workspace {workspace_id!r}: repos[{idx}] missing {key!r}"
@@ -403,7 +431,9 @@ def _parse_repo(raw: Any, workspace_id: str, idx: int) -> RepoMount:
             )
         base_source = base_source_raw
     return RepoMount(
-        url=str(raw["url"]),
+        host=str(raw["host"]) if raw.get("host") else None,
+        repo=str(raw["repo"]) if raw.get("repo") else None,
+        local_path=str(raw["local_path"]) if raw.get("local_path") else None,
         mount=str(raw["mount"]),
         writable=bool(raw.get("writable", False)),
         base_source=base_source,

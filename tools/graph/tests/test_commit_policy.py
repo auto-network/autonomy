@@ -589,7 +589,7 @@ def test_workspace_primer_renders_resolved_commit_policy(multi_org_env):
         description="Autonomy platform",
         image="autonomy-agent:dashboard",
         graph_project="autonomy",
-        repos=(RepoMount(url="u", mount="/workspace/repo", writable=True),),
+        repos=(RepoMount(host="example.com", repo="o/r", mount="/workspace/repo", writable=True),),
     )
     out = render_workspace_primer(workspace)
     assert "## Commit Policy" in out
@@ -613,7 +613,7 @@ def test_commit_policy_block_issue_linkage_uses_real_capability_context(graph_db
         description="",
         image="autonomy-agent:dashboard",
         graph_project=ops.CALLER_ORG,
-        repos=(RepoMount(url="u", mount="/workspace/repo", writable=True),),
+        repos=(RepoMount(host="example.com", repo="o/r", mount="/workspace/repo", writable=True),),
     )
     block = _commit_policy_block(no_linkage_workspace)
     assert "issue_linkage is required" not in " ".join(block["errors"])
@@ -631,7 +631,7 @@ def test_commit_policy_block_issue_linkage_uses_real_capability_context(graph_db
         description="",
         image="autonomy-agent:dashboard",
         graph_project=ops.CALLER_ORG,
-        repos=(RepoMount(url="u", mount="/workspace/repo", writable=True),),
+        repos=(RepoMount(host="example.com", repo="o/r", mount="/workspace/repo", writable=True),),
     )
     block = _commit_policy_block(no_tracker_workspace)
     assert "issue_linkage is required" in " ".join(block["errors"])
@@ -644,7 +644,7 @@ def test_commit_policy_block_issue_linkage_uses_real_capability_context(graph_db
         description="",
         image="autonomy-agent:dashboard",
         graph_project=ops.CALLER_ORG,
-        repos=(RepoMount(url="u", mount="/workspace/repo", writable=True),),
+        repos=(RepoMount(host="example.com", repo="o/r", mount="/workspace/repo", writable=True),),
         capabilities=(
             MaterializedCapability(
                 contract="issue_tracker",

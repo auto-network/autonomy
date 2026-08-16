@@ -25,7 +25,12 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .registry import SettingSchema, SchemaValidationError, keyed_per_entity
+from .registry import (
+    SettingSchema,
+    SchemaValidationError,
+    field,
+    keyed_per_entity,
+)
 
 
 WORKSPACE_SET_ID = "autonomy.workspace"
@@ -49,48 +54,105 @@ SYNOPSIS = {
 }
 
 
-# ── Valid repo mount shape ──────────────────────────────────
+# ── Repo mount entry ────────────────────────────────────────
 
-_REPO_REQUIRED = ("url", "mount")
-_REPO_OPTIONAL = {"writable": bool, "base_source": str}
 _VALID_HARNESSES = {"claude", "codex"}
 
 
+class WorkspaceRepoV1(SettingSchema):
+    """One repository mounted into a workspace.
+
+    A repository is identified one of two ways, and exactly one: by ``host``
+    and ``repo`` on a git host, or by ``local_path`` for a local-first
+    repository that has no remote at all. The clone URL is composed from
+    whichever form is present.
+
+    The host is stored rather than parsed back out of a clone URL, because
+    it is what a credential is keyed by: stating it makes the reference a
+    plain value and the check a plain lookup. A local-first repository
+    needs no credential, and says so by having no host rather than by
+    omitting a field.
+
+    Declared rather than checked imperatively, so the entry's shape is
+    metadata: enforcement reads it, and so does the reference check that
+    reports an unprovisioned credential. A shape that lives only in a
+    validate() body is invisible to both.
+    """
+
+    internal = True
+
+    host: str = field(
+        required=False,
+        description=(
+            "Git host this repository is on, e.g. github.com or an ssh "
+            "config alias. Credentials are per host, so this is what "
+            "selects one"
+        ),
+        references="autonomy.secure.setting",
+        reference_scope="org",
+    )
+    repo: str = field(
+        required=False,
+        description="Owner and name on that host, e.g. anchore/anchorectl",
+    )
+    local_path: str = field(
+        required=False,
+        description=(
+            "Absolute host path of a local-first repository that has no "
+            "remote. Mutually exclusive with host and repo"
+        ),
+    )
+    mount: str = field(
+        required=True,
+        description="Absolute path the repository is mounted at in the workspace",
+    )
+    writable: bool = field(
+        required=False,
+        description="Whether the agent may commit to it",
+    )
+    base_source: str = field(
+        required=False,
+        description="Absolute host path to clone from instead of the remote",
+    )
+
+
 def _validate_repo(repo: Any, idx: int) -> None:
+    """The rules no declaration expresses: absolute paths, and one form.
+
+    Field names, types and unknown-field rejection are declared on
+    :class:`WorkspaceRepoV1` and enforced from its metadata. What is left
+    is a cross-field rule -- a repository is on a git host or it is local,
+    never both and never neither -- and the requirement that host paths be
+    absolute.
+    """
     if not isinstance(repo, dict):
+        return
+    remote = bool(repo.get("host")) or bool(repo.get("repo"))
+    local = bool(repo.get("local_path"))
+    if remote and local:
         raise SchemaValidationError(
-            f"repos[{idx}] must be a mapping, got {type(repo).__name__}"
+            f"repos[{idx}] sets both a git host and a local path; "
+            f"a repository is one or the other"
         )
-    for key in _REPO_REQUIRED:
-        if key not in repo:
-            raise SchemaValidationError(
-                f"repos[{idx}] missing required field {key!r}"
-            )
-        if not isinstance(repo[key], str) or not repo[key]:
-            raise SchemaValidationError(
-                f"repos[{idx}].{key} must be a non-empty string"
-            )
-    for key, want in _REPO_OPTIONAL.items():
-        if key in repo and not isinstance(repo[key], want):
-            raise SchemaValidationError(
-                f"repos[{idx}].{key} must be {want.__name__}"
-            )
-    if "base_source" in repo:
-        bs = repo["base_source"]
-        if not bs:
-            raise SchemaValidationError(
-                f"repos[{idx}].base_source must be a non-empty string"
-            )
-        if not bs.startswith("/"):
-            raise SchemaValidationError(
-                f"repos[{idx}].base_source must be an absolute path, "
-                f"got {bs!r}"
-            )
-    allowed = set(_REPO_REQUIRED) | set(_REPO_OPTIONAL)
-    extra = set(repo) - allowed
-    if extra:
+    if remote and not (repo.get("host") and repo.get("repo")):
         raise SchemaValidationError(
-            f"repos[{idx}] has unknown field(s): {sorted(extra)}"
+            f"repos[{idx}] needs both 'host' and 'repo' to name a "
+            f"repository on a git host"
+        )
+    if not remote and not local:
+        raise SchemaValidationError(
+            f"repos[{idx}] names no repository: give 'host' and 'repo', "
+            f"or 'local_path'"
+        )
+    if local and not str(repo["local_path"]).startswith("/"):
+        raise SchemaValidationError(
+            f"repos[{idx}].local_path must be an absolute path, "
+            f"got {repo['local_path']!r}"
+        )
+    bs = repo.get("base_source")
+    if bs is not None and not str(bs).startswith("/"):
+        raise SchemaValidationError(
+            f"repos[{idx}].base_source must be an absolute path, got {bs!r}"
         )
 
 
@@ -196,22 +258,7 @@ class WorkspaceV1(SettingSchema):
         "repos": {
             "type": "array",
             "description": "Repos to mount as worktrees inside the container",
-            "element": {
-                "url": {"type": "string", "required": True,
-                        "description": "Git repository URL or path"},
-                "mount": {"type": "string", "required": True,
-                          "description": "Container path to mount the worktree at"},
-                "writable": {"type": "boolean", "default": False,
-                             "description": "Whether the worktree mount is writable"},
-                "base_source": {
-                    "type": "string",
-                    "description": (
-                        "Absolute host checkout path used as the base for "
-                        "fresh session worktrees instead of `origin`. "
-                        "Omit to derive fresh worktrees from `origin`."
-                    ),
-                },
-            },
+            "element": WorkspaceRepoV1,
         },
         "host_root_mount": {
             "type": "object",

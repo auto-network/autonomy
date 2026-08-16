@@ -141,7 +141,8 @@ def test_workspace_schema_payload_shape(graph_db_env):
     # Element shape for repos.
     repos = properties["repos"]
     assert repos["type"] == "array"
-    assert "url" in repos["element"]
+    assert "host" in repos["element"]
+    assert "repo" in repos["element"]
     assert "mount" in repos["element"]
 
 
@@ -176,7 +177,8 @@ def test_set_schema_prints_required_optional_descriptions(graph_db_env):
     assert "[default: \"claude\"]" in out
     # Element shape for repos
     assert "Element shape:" in out
-    assert "url (string)  [required]" in out
+    assert "host (string)" in out
+    assert "repo (string)" in out
     assert "mount (string)  [required]" in out
     # Descriptions come from _field_metadata, not the validator code
     assert "Workspace identifier" in out
