@@ -911,14 +911,8 @@ def unresolved_references(
                     continue
                 scoped = spec.get("reference_scope") == "org"
                 key = f"{org}:{one}" if scoped else one
-                # A key that carries the org is a key in a store that holds
-                # several orgs, which is the operator's own -- an org-homed
-                # set has no reason to repeat the org it already is. Where
-                # the target says where it lives, that wins.
-                if schemas.declared_home(target) is None and scoped:
-                    read_org, peers = "personal", []
-                else:
-                    read_org, peers, _frame = _existence_frame(target, org)
+                read_org, peers, _frame = _existence_frame(
+                    target, org, org_scoped=scoped)
                 if read_set_key(target, key, org=read_org, peers=peers) is None:
                     out.append((target, key))
 
@@ -937,7 +931,9 @@ class CheckFinding:
     looked_in: str        # the frame the answer came from
 
 
-def _existence_frame(target: str, org: str) -> tuple[str, list[str] | None, str]:
+def _existence_frame(
+    target: str, org: str, *, org_scoped: bool = False,
+) -> tuple[str, list[str] | None, str]:
     """Where to look for ``target``, and the words for it.
 
     Existence is asked with the visibility the consumer of that row has, which
@@ -950,10 +946,22 @@ def _existence_frame(target: str, org: str) -> tuple[str, list[str] | None, str]
     there is no peer to consult -- so the read is confined to it, and the
     returned frame says which one, because "not found" means something
     different in each.
+
+    ``org_scoped`` is the referring field's declaration that it names a key
+    carrying the organization. A key that repeats the organization is a key in
+    a store holding several of them, which is the operator's own -- an
+    organization's own database has no reason to say which one it is. Where
+    the target declares a home, that is the answer and this does not arise.
+
+    Every caller decides here. Two callers deciding separately is how the same
+    row came to be looked for in two different databases, with each answer
+    reported as though it settled the question.
     """
     home = schemas.declared_home(target)
     if home in ("machine", "personal"):
         return home, [], home
+    if home is None and org_scoped:
+        return "personal", [], "the operator's own store"
     return org, None, f"{org} and its peers"
 
 
@@ -1009,6 +1017,7 @@ def check_setting(
     *,
     org: str,
     _seen: set | None = None,
+    _org_scoped: bool = False,
 ) -> list[CheckFinding]:
     """Is this row satisfied, and everything it declares it depends on?
 
@@ -1052,7 +1061,8 @@ def check_setting(
             "this process's schema registry",
         )]
 
-    read_org, peers, frame = _existence_frame(set_id, org)
+    read_org, peers, frame = _existence_frame(
+        set_id, org, org_scoped=_org_scoped)
     address = f"{set_id} key={key!r} in {read_org!r}"
 
     try:
@@ -1085,10 +1095,11 @@ def check_setting(
                     continue
                 target = spec.get("references")
                 if target:
-                    ref_key = (f"{org}:{one}"
-                               if spec.get("reference_scope") == "org" else one)
-                    findings.extend(
-                        check_setting(target, ref_key, org=org, _seen=seen))
+                    scoped = spec.get("reference_scope") == "org"
+                    ref_key = f"{org}:{one}" if scoped else one
+                    findings.extend(check_setting(
+                        target, ref_key, org=org, _seen=seen,
+                        _org_scoped=scoped))
                 kind = spec.get("exists")
                 if kind:
                     ok = (_os.path.isfile(one) if kind == "file"
