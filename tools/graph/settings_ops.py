@@ -1927,22 +1927,30 @@ def illegal_amendments(*, org: str | None) -> list[dict]:
     return out
 
 
-def _refuse_amend_when_replaced(target: dict, org: str | None) -> None:
-    """Refuse an override that should have been a rewrite."""
+def _collapse_amendment(
+    target: dict, payload_overrides: dict, org: str | None,
+) -> str | None:
+    """Rewrite the row instead of appending a patch, where that is possible.
+
+    Returns the rewritten row's id, or None when a patch row is genuinely
+    required -- the set permits amendment, or the row belongs to another
+    organization and cannot be rewritten from here.
+
+    The row keeps its own publication state. The caller's ``state`` argument
+    described the patch row that is no longer created, and applying it here
+    would let an unstated default silently demote a published row.
+    """
     pattern = _access_pattern_for(target["set_id"], target["schema_revision"])
     if pattern not in _REPLACED_PATTERNS:
-        return
-    # Absent from the caller's own database means the row belongs to a peer,
-    # which is the case overrides exist for: you cannot rewrite what you do
-    # not own.
+        return None
     if not _is_own_row(target["id"], org):
-        return
-    raise ValueError(
-        f"{target['set_id']} declares {pattern!r}: its rows are replaced, "
-        f"not amended. Rewrite it with upsert_by_key(key={target['key']!r}) "
-        f"-- one row, no chain to merge on every read. Overriding is for "
-        f"adapting a row another organization owns."
+        return None
+    merged = json_merge_patch(json.loads(target["payload"]), payload_overrides)
+    upsert_by_key(
+        target["set_id"], int(target["schema_revision"]), target["key"],
+        merged, org=org, state=target["publication_state"],
     )
+    return target["id"]
 
 
 def _is_own_row(setting_id: str, org: str | None) -> bool:
@@ -1985,16 +1993,6 @@ def override_setting(
     if target is None:
         raise LookupError(f"override target not found: {target_id!r}")
 
-    # A set whose schema says its rows are REPLACED must not be amended in
-    # place of rewriting. Overriding appends a row and every later read
-    # merges the whole chain, so a value changed this way grows a layer per
-    # edit -- which is how a workspace ends up resolving through ten rows.
-    #
-    # Overriding ANOTHER organization's row stays allowed and is the reason
-    # overrides exist: you cannot rewrite a row you do not own, and adapting
-    # a shared primitive locally is the intended use.
-    _refuse_amend_when_replaced(target, org)
-
     # Resolution applies ONLY overrides whose ``supersedes`` points at the
     # chosen base row (see read_set / explain_setting). An override of an
     # override is silently inert: the write succeeds, the row is canonical and
@@ -2019,6 +2017,20 @@ def override_setting(
         target = _fetch_setting_any_org(base_id, org)
         if target is None:
             raise LookupError(f"override base not found: {base_id!r}")
+
+    # A set whose schema declares one row per key is REPLACED, not amended.
+    # Appending a patch row there contradicts the declaration and makes every
+    # later read merge a chain that grows by one layer per edit. The caller
+    # asked for a value to win, which is what "override" means; a patch row
+    # was never part of that promise, only of how it happened to be stored.
+    #
+    # So the same request is satisfied by rewriting the row. What forces a
+    # patch row is not intent but physics: a row in ANOTHER organization's
+    # database cannot be rewritten from here, which is the case overrides
+    # exist for and the one place the chain remains.
+    collapsed = _collapse_amendment(target, payload_overrides, org)
+    if collapsed is not None:
+        return collapsed
 
     db = _open(org)
     try:
