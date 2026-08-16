@@ -512,14 +512,27 @@
 
       async openDiffOverlay(entry) {
         if (!entry || !entry.run_id) return;
+        const target = entry.diff_target;
+        if (entry._isAgentic && target && target.kind === 'worktree') {
+          if (typeof window.openWorktreeReviewOverlay === 'function') {
+            const opened = await window.openWorktreeReviewOverlay(
+              target.session_name || entry.container_name || entry.run_id,
+            );
+            if (opened) return;
+          }
+          window.location.assign(target.href || ('/worktrees?session=' + encodeURIComponent(entry.run_id)));
+          return;
+        }
         const ok = await window.openCommitOverlay({
-          runId: entry.run_id,
+          runId: (target && target.run_id) || entry.run_id,
           sessionName: entry.container_name || '',
-          branch: entry.branch || '',
-          subject: entry._wtHeadline || entry.commit_message || '',
+          branch: (target && target.branch) || entry.branch || '',
+          subject: entry._wtHeadline || entry.commit_message || entry.title || '',
         });
         if (!ok) {
-          window.location.assign('/worktrees');
+          window.location.assign(entry._isAgentic
+            ? ('/dispatch/trace/' + encodeURIComponent(entry.run_id))
+            : '/worktrees');
         }
       },
 

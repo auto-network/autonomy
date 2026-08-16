@@ -306,6 +306,12 @@
             <template x-if="e.priority != null">
               <span class="tl-ft" :class="e._prioCls" x-text="'P' + e.priority"></span>
             </template>
+            <template x-if="e._isAgentic && e.diff_target">
+              <button type="button"
+                      class="tl-wt-diff-btn"
+                      :data-testid="'tl-agentic-diff-btn-' + e.run_id"
+                      @click.stop="openDiffOverlay(e)">Diff →</button>
+            </template>
             <span class="tl-ft" :class="e._stCls" x-text="e.status || '?'"></span>
           </div>
         </div>
