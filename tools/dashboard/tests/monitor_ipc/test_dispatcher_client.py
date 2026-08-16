@@ -107,6 +107,10 @@ class TestDispatcherHTTPClient:
         output_dir = str(tmp_path / "agent-runs" / run_id)
         sessions_dir = tmp_path / "agent-runs" / run_id / "sessions" / "-workspace-repo"
         sessions_dir.mkdir(parents=True)
+        (sessions_dir.parent / ".session_meta.json").write_text(_json.dumps({
+            "harness": "codex",
+            "model": "gpt-5.6-sol",
+        }))
         jsonl = sessions_dir / "agent-uuid.jsonl"
         jsonl.write_text("")
 
@@ -139,6 +143,8 @@ class TestDispatcherHTTPClient:
         assert payload["jsonl_path"] == str(jsonl)
         assert payload["project"] == "-workspace-repo"
         assert payload["run_dir"] == output_dir
+        assert payload["harness"] == "codex"
+        assert payload["model"] == "gpt-5.6-sol"
 
     def test_dispatcher_deregister_uses_http_not_db(self, tmp_path, monkeypatch):
         """_deregister_session_with_monitor must POST, not call mark_dead."""
