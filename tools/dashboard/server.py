@@ -18172,10 +18172,9 @@ async def _on_startup():
     # up with a hook bound to *this* module's ``event_bus`` name.
     from tools.graph import settings_ops as _settings_ops
     _settings_ops.set_emit_hook(_settings_emit_hook)
-    # Restore EventBus state from the prior process so a uvicorn --reload
-    # cycle preserves seq/epoch and avoids the client "Server restarted"
-    # banner. Failure modes (missing/corrupt/version-mismatched snapshot)
-    # are swallowed inside restore() — we proceed with a fresh epoch.
+    # Restore EventBus sequence/buffer state from the prior process. restore()
+    # advances the persisted epoch so clients show the existing reload banner
+    # while still retaining gap-replay continuity.
     # Some tests substitute a MockEventBus without snapshot/restore;
     # treat absence of the attribute as a no-op.
     # Mock-mode servers skip restore entirely: under pytest all fixture
@@ -18465,7 +18464,8 @@ async def _on_shutdown():
     except Exception:
         logger.exception("error during session lifecycle worker shutdown")
     # Snapshot bus state after monitors stop so the next process boots into
-    # the same epoch + seq + buffer state. Best-effort: snapshot() itself
+    # the same seq + buffer state and an epoch restore() can advance.
+    # Best-effort: snapshot() itself
     # logs and swallows any exception. Some tests substitute a MockEventBus
     # without snapshot/restore; treat absence of the attribute as a no-op.
     snapshot_fn = getattr(event_bus, "snapshot", None)

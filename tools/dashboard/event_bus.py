@@ -443,7 +443,11 @@ class EventBus:
         self._last = new_last
         self._buffer = new_buffer
         self._buffer_bytes = new_buffer_bytes
-        _SERVER_EPOCH = new_epoch
+        # A clean reload keeps the replay buffer and sequence, but must still
+        # be observable by connected clients.  Increment the persisted epoch
+        # (or keep the newer process timestamp) so the next SSE frame triggers
+        # the existing "Server restarted" reload banner.
+        _SERVER_EPOCH = max(_SERVER_EPOCH, new_epoch + 1)
         _record(True)
         return True
 
@@ -453,8 +457,8 @@ event_bus = EventBus()
 
 # Server epoch — set once at import time, changes on process restart.
 # Clients compare this to detect restarts and reset stale seq counters.
-# EventBus.restore() may overwrite this on startup so a clean uvicorn reload
-# preserves the prior epoch and avoids the client "Server restarted" banner.
+# EventBus.restore() advances this beyond the persisted value so a clean
+# uvicorn reload is visible to connected clients without losing replay state.
 _SERVER_EPOCH = int(time.time())
 
 
