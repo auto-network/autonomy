@@ -509,10 +509,17 @@ def cmd_set_check(args) -> None:
         return
     print(f"  {len(findings)} unsatisfied dependenc"
           f"{'y' if len(findings) == 1 else 'ies'} for {set_id} key={args.key}:\n")
+    import textwrap
+
     for finding in findings:
         print(f"  ! {finding.kind}")
         print(f"      at      {finding.address}")
-        print(f"      what    {finding.detail}")
+        # A finding that says what to do about it is longer than one line, and
+        # the instruction is the part worth reading.
+        wrapped = textwrap.wrap(finding.detail, width=72) or [""]
+        print(f"      what    {wrapped[0]}")
+        for line in wrapped[1:]:
+            print(f"              {line}")
         print(f"      looked  {finding.looked_in}")
     print("\n  The walk follows DECLARED edges only. A relationship carried "
           "by convention\n  rather than by a reference declaration is not "
