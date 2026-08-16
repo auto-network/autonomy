@@ -96,3 +96,33 @@ def test_the_row_is_addressable_by_id(orgs, monkeypatch):
 
     assert found and found[0]["id"]
     assert found[0]["supersedes"] == base
+
+
+def test_a_stranded_override_is_not_mistaken_for_a_peers(orgs, monkeypatch):
+    """Deleted-base and peer-owned look identical from the owning database.
+
+    Both have a ``supersedes`` that is not a local id. Treating that as
+    "peer, therefore legitimate" skips the one row a sweep exists to find:
+    stranded, resolving to nothing, unreachable by key, invisible to every
+    read. Asking whether the target exists anywhere separates them.
+    """
+    from tools.graph.db import GraphDB, resolve_caller_db_path
+
+    base = settings_ops.add_setting("probe.amend.replaced", 1, "strand",
+                                    {"v": "x"}, org="acme")
+    monkeypatch.setattr(settings_ops, "_collapse_amendment",
+                        lambda *a, **k: None)
+    settings_ops.override_setting(base, {"v": "amended"}, org="acme")
+
+    db = GraphDB(resolve_caller_db_path("acme"))
+    try:
+        db.conn.execute("DELETE FROM settings WHERE id = ?", (base,))
+        db.conn.commit()
+    finally:
+        db.close()
+
+    found = settings_ops.illegal_amendments(org="acme")
+
+    stranded = [f for f in found if f["key"] == "strand"]
+    assert stranded, "a stranded override was counted as a legitimate peer override"
+    assert stranded[0]["base_present"] is False
