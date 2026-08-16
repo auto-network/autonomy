@@ -2489,6 +2489,28 @@ class SessionMonitor:
             )
             # W2: eager-create the graph source row at link time.
             self._eager_create_source(tmux_name, path)
+            # Pending→resolved harness-version stamp. The version is read
+            # from the launcher's .session_meta.json once, at registration —
+            # but a container session registers PENDING, before its sidecar
+            # and JSONL exist, so that read returns nothing and the row's
+            # harness_version stays NULL for the session's whole life. This
+            # first-resolution link is the transition where the file, and the
+            # sidecar beside it, are finally present; backfill the column here
+            # so every discovery path (IN_CREATE, scan, reconciliation) is
+            # covered — they all funnel through this link. Readers take the
+            # Codex build from the row to pick the chat record shape (>=0.147
+            # writes chat as response_item.message); a missing stamp makes a
+            # windowed read silently drop EVERY user/assistant message and
+            # render an empty "Load older" transcript. Best-effort, only when
+            # the column is still absent; never blocks the link.
+            if not row.get("harness_version"):
+                try:
+                    self.refresh_harness_version(tmux_name)
+                except Exception:
+                    logger.exception(
+                        "session_monitor: harness_version backfill at link "
+                        "failed for %s", tmux_name,
+                    )
         track.state = TRACK_STREAMING
         track.provenance = provenance
         track.generation = (st.st_dev, st.st_ino)
