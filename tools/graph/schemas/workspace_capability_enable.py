@@ -87,6 +87,10 @@ class WorkspaceCapabilityEnableV1(SettingSchema):
             "type": "string",
             "required": True,
             "description": "Contract identifier this workspace enables/disables",
+            # The value IS another set's key. Declaring it makes the edge
+            # walkable: a check can follow it without knowing what a
+            # capability is.
+            "references": "autonomy.capability.contract",
         },
         "contract_version": {
             "type": "integer",
