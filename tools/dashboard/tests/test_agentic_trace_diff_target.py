@@ -199,8 +199,13 @@ async def test_agentic_commit_detail_reads_target_workspace_managed_clone(
         "target_org": "autonomy",
     })
     monkeypatch.setattr(server, "_resolve_workspace_for_org", lambda _org: SimpleNamespace(
-        repos=(SimpleNamespace(url="git@example:autonomy.git"),),
+        repos=(),
     ))
+    monkeypatch.setattr(server.workspace_settings, "load_workspaces", lambda: {
+        "autonomy-developer": SimpleNamespace(
+            repos=(SimpleNamespace(url="git@example:autonomy.git"),),
+        ),
+    })
     monkeypatch.setattr(server, "managed_clone_path", lambda _url: clone)
     seen = []
 

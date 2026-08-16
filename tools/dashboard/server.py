@@ -2154,15 +2154,25 @@ async def api_dispatch_run_commit_detail(request):
             {"error": "run has no commit_hash"}, status_code=404,
         )
 
-    repo_paths = [_REPO_ROOT]
+    repo_paths: list[Path] = []
     if kind == "agentic":
         identity = _resolve_agentic_identity(row["agentic_source_id"] or "")
         workspace = _resolve_workspace_for_org(identity["target_org"] or "")
-        if workspace is not None:
-            repo_paths = [
-                managed_clone_path(repo.url)
-                for repo in workspace.repos
-            ] + repo_paths
+        # Historical action rows do not carry the explicit workspace override
+        # selected at dispatch time. Try that org's default first, then the
+        # finite configured-workspace set. Paths are deterministic from the
+        # Settings repo declarations; this is click-time commit lookup, not a
+        # filesystem scan or a timeline-load git sweep.
+        candidates = ([workspace] if workspace is not None else []) + list(
+            workspace_settings.load_workspaces().values()
+        )
+        for candidate in candidates:
+            for repo in candidate.repos:
+                path = managed_clone_path(repo.url)
+                if path not in repo_paths:
+                    repo_paths.append(path)
+    if _REPO_ROOT not in repo_paths:
+        repo_paths.append(_REPO_ROOT)
 
     commit = None
     errors: list[str] = []
