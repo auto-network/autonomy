@@ -262,6 +262,31 @@ def cmd_settings_diag(args) -> None:
         for set_id in unused:
             print(f"      {set_id}")
 
+    # ── rows the schema says cannot exist ──
+    #
+    # A set declaring singleton or keyed_per_entity is replaced, not amended.
+    # The write path enforces that; resolution does not consult it, so an
+    # override stored before the rule is still merged into every read. The
+    # value served is one the schema declares impossible, and no reader can
+    # tell -- which is exactly the state that cannot be found by reading.
+    from tools.graph import settings_ops as _ops
+
+    offenders: list[tuple[str, dict]] = []
+    for slug, _path in databases:
+        try:
+            for row in _ops.illegal_amendments(org=slug):
+                offenders.append((slug, row))
+        except Exception:
+            continue
+    if offenders:
+        print(f"\n  ! amendments on sets that declare replacement "
+              f"({len(offenders)}) — merged into every read, and only "
+              f"removable by id:")
+        for slug, row in offenders:
+            base = "" if row["base_present"] else "  [base already deleted]"
+            print(f"      [{slug}] {row['id'][:12]}  {row['set_id']} "
+                  f"key={row['key']!r}{base}")
+
     # ── sets that could not be read at all ──
     try:
         diag = _get_json("/api/diag/settings/sets", timeout=25)

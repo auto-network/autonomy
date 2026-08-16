@@ -408,24 +408,41 @@ def cmd_set_read(args) -> None:
 # ── add / override / exclude ────────────────────────────────
 
 
-def _report_shadowed_write(set_id: str, key: str) -> None:
+def _report_shadowed_write(set_id: str, key: str, client=None) -> None:
     """Say loudly when the row just written is not the row that will be read.
 
-    Resolution returns one row per key, chosen by publication state and then
-    by owning organization. A row written below the winner is stored, reports
-    success, and is read by nothing — so silence here means the caller
+    A row stored below the row resolution returns is written, reports
+    success, and is read by nothing -- so silence here means the caller
     believes they changed a value they did not change.
+
+    The report comes from the WRITE RESPONSE, because the write does not
+    happen here. With ``GRAPH_API`` set it happens in the dashboard, and an
+    earlier version read a module-global that only an in-process write
+    populates -- so this printed nothing, for every container session, for
+    every setting, since the day it was written. The server had detected the
+    condition and put it in the response; the response was thrown away.
+
+    The in-process fallback is for ``--force-host``, where the write really
+    did happen here and there is no response to read.
     """
-    try:
-        from tools.graph import settings_ops
-        shadow = settings_ops.take_shadowed_write(set_id, key)
-    except Exception:
-        return
-    if shadow is None:
-        return
+    message = None
+    report = getattr(client, "last_write_report", None)
+    if isinstance(report, dict):
+        shadowed = report.get("shadowed_by")
+        if isinstance(shadowed, dict):
+            message = shadowed.get("message") or str(shadowed)
+    if message is None:
+        try:
+            from tools.graph import settings_ops
+            shadow = settings_ops.take_shadowed_write(set_id, key)
+        except Exception:
+            return
+        if shadow is None:
+            return
+        message = str(shadow)
     print("")
     print("  ****************************************************************")
-    print(f"  {shadow}")
+    print(f"  {message}")
     print("  ****************************************************************")
     print("")
 
@@ -530,8 +547,9 @@ def cmd_set_check(args) -> None:
 def cmd_set_add(args) -> None:
     set_id, rev = _parse_set_at_rev(args.set_at_rev)
     payload = _resolve_payload_input(args)
+    client = get_client()
     try:
-        sid = get_client().add_setting(
+        sid = client.add_setting(
             set_id, rev, args.key, payload, state=args.state,
             org=_org(args),
         )
@@ -542,15 +560,16 @@ def cmd_set_add(args) -> None:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     print(f"  ✓ Setting: {sid[:11]}  {set_id}#{rev}  key={args.key}  [{args.state}]")
-    _report_shadowed_write(set_id, args.key)
+    _report_shadowed_write(set_id, args.key, client)
     _report_unresolved_references(set_id, rev, payload, _org(args))
 
 
 def cmd_set_override(args) -> None:
     payload = _resolve_payload_input(args)
     target_id = _resolve_target_address(args)
+    client = get_client()
     try:
-        sid = get_client().override_setting(
+        sid = client.override_setting(
             target_id, payload, state=args.state,
             org=_org(args),
         )

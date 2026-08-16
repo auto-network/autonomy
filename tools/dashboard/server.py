@@ -12434,10 +12434,17 @@ async def api_diag_settings_sets(request):
     """Storage + activity summary for Settings sets in the selected org."""
     org = _caller_org(request)
     resolved_org, windows, rows = _settings_diag_rows(org=org)
+    from tools.graph import settings_ops as _settings_ops
+    try:
+        # Rows the schema says cannot exist, which every read still merges.
+        illegal = _settings_ops.illegal_amendments(org=org)
+    except Exception:
+        illegal = []
     return JSONResponse({
         "org": resolved_org,
         "windows": windows,
         "sets": rows,
+        "illegal_amendments": illegal,
     })
 
 
