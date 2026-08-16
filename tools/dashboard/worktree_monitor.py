@@ -145,6 +145,23 @@ def _encode_json(payload) -> bytes:
     ).encode("utf-8")
 
 
+def org_for_session(session_name: str) -> str | None:
+    """The org a session acts for, or None when it cannot be determined.
+
+    Host-side GitHub execution authenticates as one organization, so this
+    is what decides whose credential is used. Resolved through the same
+    identity cascade the row payloads use; None leaves host mode off
+    rather than letting a call run as whoever happens to be configured.
+    """
+    from tools.dashboard.org_identity import session_org_slug
+
+    try:
+        row = dashboard_db.get_session(session_name) or {}
+    except Exception:
+        return None
+    return session_org_slug(row) or None
+
+
 def _watch_key(session_name: str, repo_name: str) -> str:
     """Composite Settings key for one Worktrees row's watch state."""
     return f"{session_name}:{repo_name}"
@@ -698,6 +715,7 @@ async def _fetch_source_control(
     op_result: WorktreeGithubExecResult = await source_control_review_read_v1(
         row.session_name,
         row.repo_name,
+        org=org_for_session(row.session_name),
         rows=all_rows,
         timeout=int(_GITHUB_REVIEW_TIMEOUT),
     )
@@ -795,6 +813,7 @@ async def _refresh_bindings_via_rest(
         rest = await source_control_review_read_by_id_v1(
             row.session_name,
             row.repo_name,
+            org=org_for_session(row.session_name),
             review_id=review_id,
             rows=all_rows,
             repo_slug=repo_slug or None,
@@ -815,6 +834,7 @@ async def _refresh_bindings_via_rest(
                 checks_rest = await source_control_check_runs_read_for_sha_v1(
                     row.session_name,
                     row.repo_name,
+                    org=org_for_session(row.session_name),
                     head_sha=head_sha,
                     rows=all_rows,
                     repo_slug=repo_slug or None,
@@ -863,6 +883,7 @@ async def _refresh_bindings_via_rest(
             checks_rest = await source_control_check_runs_read_for_sha_v1(
                 row.session_name,
                 row.repo_name,
+                org=org_for_session(row.session_name),
                 head_sha=head_sha,
                 rows=all_rows,
                 repo_slug=repo_slug or None,
@@ -1371,7 +1392,8 @@ class WorktreeMonitor:
                     github_host_token,
                 )
                 host_and_slug = derive_repo_host_and_slug(target.managed_clone)
-                host_ok = bool(host_and_slug) and bool(github_host_token(host_and_slug[0]))
+                host_ok = bool(host_and_slug) and bool(github_host_token(
+                    host_and_slug[0], org=org_for_session(target.session_name)))
                 if not (host_ok and _read_bindings(target)):
                     target = None
             if target is not None:
@@ -1437,7 +1459,9 @@ class WorktreeMonitor:
                 continue
             host, slug = host_and_slug
             stdout, failure = await source_control_repo_reviews_v1(
-                host, slug, timeout=int(_GITHUB_REVIEW_TIMEOUT),
+                host, slug,
+                org=org_for_session(group[0].session_name),
+                timeout=int(_GITHUB_REVIEW_TIMEOUT),
             )
             logger.info(
                 "worktree_monitor: discovery %s (%s) → failure=%s stdout_bytes=%d",

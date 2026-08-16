@@ -1648,6 +1648,14 @@ def _install_github_stubs(
     return wg, recorder, rows_list
 
 
+class _CredRow:
+    """Stand-in for a resolved ``autonomy.credential-file`` member."""
+
+    def __init__(self, key, payload):
+        self.key = key
+        self.payload = payload
+
+
 class TestGithubHostExecution:
     """Host-mode gh execution (auto-rn1dp, design f7c4c109-91a §Phase 1a):
     with a token file configured for the repo's git host, the capability
@@ -1659,41 +1667,70 @@ class TestGithubHostExecution:
 
         token_path = tmp_path / "gh.token"
         token_path.write_text("sekrit-token\n")
-        monkeypatch.setattr(
-            wg, "_github_broker_config",
-            lambda: {"token_file.github.com": str(token_path)},
-        )
-        assert wg.github_host_token("github.com") == "sekrit-token"
+
+        def rows(*paths):
+            return [_CredRow("autonomy:github.com", {"path": str(q)}) for q in paths]
+
+        monkeypatch.setattr(wg, "_credential_file_rows", lambda: rows(token_path))
+        assert wg.github_host_token("github.com", org="autonomy") == "sekrit-token"
+        # An org with no row of its own gets nothing, even though another
+        # org has configured this host -- the whole point of the key.
+        assert wg.github_host_token("github.com", org="anchore") is None
+        # No org named → nothing. Not a best guess.
+        assert wg.github_host_token("github.com") is None
         # Unconfigured host → None.
-        assert wg.github_host_token("github-autonomy") is None
+        assert wg.github_host_token("github-autonomy", org="autonomy") is None
         # No host at all → None.
-        assert wg.github_host_token(None) is None
+        assert wg.github_host_token(None, org="autonomy") is None
         # Unreadable path → None (fall back to container mode).
         monkeypatch.setattr(
-            wg, "_github_broker_config",
-            lambda: {"token_file.github.com": str(tmp_path / "missing")},
-        )
-        assert wg.github_host_token("github.com") is None
+            wg, "_credential_file_rows", lambda: rows(tmp_path / "missing"))
+        assert wg.github_host_token("github.com", org="autonomy") is None
         # Empty file → None.
         token_path.write_text("   \n")
-        monkeypatch.setattr(
-            wg, "_github_broker_config",
-            lambda: {"token_file.github.com": str(token_path)},
-        )
-        assert wg.github_host_token("github.com") is None
+        monkeypatch.setattr(wg, "_credential_file_rows", lambda: rows(token_path))
+        assert wg.github_host_token("github.com", org="autonomy") is None
 
-    def test_broker_config_loader_calls_read_set_correctly(self, monkeypatch):
-        """Regression: read_set requires keyword-only ``org``; a bare call
-        TypeErrors, and a silently-swallowed TypeError reads as "no config"
-        — host mode dead with no symptom. Pin the loader against the REAL
-        signature by stubbing at the settings_ops layer (the stub enforces
-        org as keyword-only exactly like production)."""
+    def test_one_orgs_credential_never_serves_another(self, monkeypatch, tmp_path):
+        """The defect this key shape exists to make unrepresentable.
+
+        A single host-token entry sat on one organization's install row
+        while two organizations used that host, so the second was served
+        the first's credential by construction -- authorised, working,
+        and attributed on the far side to an identity nobody chose.
+
+        Both rows here are legitimate. What decides is which organization
+        is acting, so an unnamed org resolves to nothing rather than to
+        whichever row happens to match the host.
+        """
+        from agents.capabilities.github import service as wg
+
+        a, b = tmp_path / "a.token", tmp_path / "b.token"
+        a.write_text("token-a\n")
+        b.write_text("token-b\n")
+        monkeypatch.setattr(wg, "_credential_file_rows", lambda: [
+            _CredRow("autonomy:github.com", {"path": str(a)}),
+            _CredRow("anchore:github.com", {"path": str(b)}),
+        ])
+
+        assert wg.github_host_token("github.com") is None
+        # Named, each org gets its own and only its own.
+        assert wg.github_host_token("github.com", org="autonomy") == "token-a"
+        assert wg.github_host_token("github.com", org="anchore") == "token-b"
+        # An org with no row is not served by either.
+        assert wg.github_host_token("github.com", org="blindhash") is None
+
+    def test_credential_file_rows_read_the_machine_store(self, monkeypatch):
+        """Regression, twice over.
+
+        ``read_set`` takes ``org`` keyword-only, so a bare call TypeErrors
+        and a swallowed TypeError reads as "no config" -- host mode dead
+        with no symptom. And the read must name the MACHINE store: these
+        paths are true on one computer, and reading them from a database
+        that travels would serve another machine's filesystem layout.
+        """
         from agents.capabilities.github import service as wg
         from tools.graph import settings_ops
-
-        class _Member:
-            def __init__(self, payload):
-                self.payload = payload
 
         class _Members:
             def __init__(self, members):
@@ -1704,23 +1741,22 @@ class TestGithubHostExecution:
         def fake_read_set(set_id, *, org, **kw):
             seen["set_id"] = set_id
             seen["org"] = org
-            return _Members([
-                _Member({"implementation": "autonomy/jira", "broker_config": {"x": "y"}}),
-                _Member({"implementation": "autonomy/github",
-                         "broker_config": {"token_file.github.com": "/tmp/t"}}),
-            ])
+            seen["peers"] = kw.get("peers")
+            return _Members([_CredRow("autonomy:github.com", {"path": "/tmp/t"})])
 
         monkeypatch.setattr(settings_ops, "read_set", fake_read_set)
-        cfg = wg._github_broker_config()
-        assert cfg == {"token_file.github.com": "/tmp/t"}
-        assert seen == {"set_id": "autonomy.org.capability.install", "org": "autonomy"}
+        got = wg._credential_file_rows()
 
-        # A loader exception degrades to {} (container fallback), never raises.
+        assert [r.key for r in got] == ["autonomy:github.com"]
+        assert seen == {"set_id": "autonomy.credential-file",
+                        "org": "machine", "peers": []}
+
+        # A loader exception degrades to [] (container fallback), never raises.
         def boom(set_id, *, org, **kw):
             raise RuntimeError("db unavailable")
 
         monkeypatch.setattr(settings_ops, "read_set", boom)
-        assert wg._github_broker_config() == {}
+        assert wg._credential_file_rows() == []
 
     def test_dead_row_refreshes_via_host_mode(self, monkeypatch):
         """The headline capability: a DEAD session's bound row fetches PR
@@ -1738,12 +1774,12 @@ class TestGithubHostExecution:
         )
         monkeypatch.setattr(
             wg, "github_host_token",
-            lambda host: "sekrit" if host == "github.com" else None,
+            lambda host, **_kw: "sekrit" if host == "github.com" else None,
         )
 
         import asyncio
         result = asyncio.run(wg.source_control_review_read_by_id_v1(
-            "auto-dead", "enterprise_ng", review_id="577", rows=[dead],
+            "auto-dead", "enterprise_ng", org="autonomy", review_id="577", rows=[dead],
         ))
 
         assert result.ok, (result.failure, result.error_message)
@@ -1770,11 +1806,11 @@ class TestGithubHostExecution:
             wg, "derive_repo_host_and_slug",
             lambda _p: ("github.com", "anchore/enterprise_ng"),
         )
-        monkeypatch.setattr(wg, "github_host_token", lambda _h: None)
+        monkeypatch.setattr(wg, "github_host_token", lambda _h, **_kw: None)
 
         import asyncio
         result = asyncio.run(wg.source_control_review_read_by_id_v1(
-            "auto-live", "enterprise_ng", review_id="9", rows=[live],
+            "auto-live", "enterprise_ng", org="autonomy", review_id="9", rows=[live],
         ))
 
         assert result.ok
@@ -1790,11 +1826,11 @@ class TestGithubHostExecution:
             wg, "derive_repo_host_and_slug",
             lambda _p: ("github.com", "anchore/enterprise_ng"),
         )
-        monkeypatch.setattr(wg, "github_host_token", lambda _h: None)
+        monkeypatch.setattr(wg, "github_host_token", lambda _h, **_kw: None)
 
         import asyncio
         result = asyncio.run(wg.source_control_review_read_by_id_v1(
-            "auto-dead", "enterprise_ng", review_id="9", rows=[dead],
+            "auto-dead", "enterprise_ng", org="autonomy", review_id="9", rows=[dead],
         ))
         assert result.failure == wg.FAILURE_NO_LIVE_ROW
 
@@ -1803,14 +1839,15 @@ class TestGithubHostExecution:
         from agents.capabilities.github import service as wg
         import asyncio
 
-        # No token configured → UNAVAILABLE naming the missing entry.
-        monkeypatch.setattr(wg, "github_host_token", lambda _h: None)
+        # No token configured → UNAVAILABLE naming what has to be
+        # provisioned: the set, and the host half of the key.
+        monkeypatch.setattr(wg, "github_host_token", lambda _h, **_kw: None)
         res = asyncio.run(gp.probe_host_v1("github.com"))
         assert res.state == gp.STATE_UNAVAILABLE
-        assert "token_file.github.com" in res.missing_env
+        assert res.missing_env == ("autonomy.credential-file <org>:github.com",)
 
         # Token + clean auth status → READY.
-        monkeypatch.setattr(wg, "github_host_token", lambda _h: "tok")
+        monkeypatch.setattr(wg, "github_host_token", lambda _h, **_kw: "tok")
 
         async def ok_run(cmd, *, timeout=30, env=None):
             assert cmd == ["gh", "auth", "status"]
@@ -1828,7 +1865,7 @@ class TestGithubHostExecution:
         monkeypatch.setattr(wg, "run_cli", bad_run)
         res = asyncio.run(gp.probe_host_v1("github.com"))
         assert res.state == gp.STATE_DEGRADED
-        assert "token_file.github.com" in res.missing_env
+        assert res.missing_env == ("autonomy.credential-file <org>:github.com",)
 
 
 class TestWorktreeGithubResolution:
@@ -1890,7 +1927,7 @@ class TestWorktreePRSnapshot:
         )
 
         result = asyncio.run(
-            wg.source_control_review_read_v1("auto-test", "autonomy", rows=rows)
+            wg.source_control_review_read_v1("auto-test", "autonomy", org="autonomy", rows=rows)
         )
 
         assert result.ok is True
@@ -1929,7 +1966,7 @@ class TestWorktreePRSnapshot:
         )
 
         result = asyncio.run(
-            wg.source_control_review_read_v1("auto-dead", "autonomy", rows=rows)
+            wg.source_control_review_read_v1("auto-dead", "autonomy", org="autonomy", rows=rows)
         )
 
         assert result.ok is False
@@ -1949,7 +1986,7 @@ class TestWorktreePRSnapshot:
         )
 
         result = asyncio.run(
-            wg.source_control_review_read_v1("auto-test", "autonomy", rows=rows)
+            wg.source_control_review_read_v1("auto-test", "autonomy", org="autonomy", rows=rows)
         )
 
         assert result.ok is False
@@ -1967,7 +2004,7 @@ class TestWorktreePRSnapshot:
         )
 
         result = asyncio.run(
-            wg.source_control_review_read_v1("auto-test", "autonomy", rows=rows)
+            wg.source_control_review_read_v1("auto-test", "autonomy", org="autonomy", rows=rows)
         )
 
         assert result.ok is False
@@ -1983,7 +2020,7 @@ class TestWorktreePRSnapshot:
         )
 
         result = asyncio.run(
-            wg.source_control_review_read_v1("auto-test", "autonomy", rows=rows)
+            wg.source_control_review_read_v1("auto-test", "autonomy", org="autonomy", rows=rows)
         )
 
         assert result.ok is False
@@ -1998,7 +2035,7 @@ class TestWorktreePRSnapshot:
         )
 
         result = asyncio.run(
-            wg.source_control_review_read_v1("auto-test", "autonomy", rows=rows)
+            wg.source_control_review_read_v1("auto-test", "autonomy", org="autonomy", rows=rows)
         )
 
         assert result.ok is False
@@ -2016,7 +2053,7 @@ class TestWorktreePRSnapshot:
         monkeypatch.setattr(wg, "run_cli", _explode)
 
         result = asyncio.run(
-            wg.source_control_review_read_v1("auto-test", "autonomy", rows=rows)
+            wg.source_control_review_read_v1("auto-test", "autonomy", org="autonomy", rows=rows)
         )
 
         assert result.ok is False
@@ -2033,7 +2070,7 @@ class TestWorktreePRRefresh:
         )
 
         result = asyncio.run(
-            wg.source_control_review_refresh_v1("auto-test", "autonomy", rows=rows)
+            wg.source_control_review_refresh_v1("auto-test", "autonomy", org="autonomy", rows=rows)
         )
 
         assert result.ok is True
@@ -2068,6 +2105,7 @@ class TestWorktreePRWatchSet:
                 "auto-test",
                 "autonomy",
                 mode,
+                org="autonomy",
                 rows=rows,
                 review_node_ids=["PR_kwDOA1", "PR_kwDOA2"],
             )
@@ -2096,6 +2134,7 @@ class TestWorktreePRWatchSet:
                 "auto-test",
                 "autonomy",
                 "subscribed",
+                org="autonomy",
                 rows=rows,
                 review_node_ids=["", ""],
             )
@@ -2124,7 +2163,7 @@ class TestWorktreePRWatchSet:
         )
 
         result = asyncio.run(
-            wg.source_control_gates_watch_set_v1("auto-test", "autonomy", mode, rows=rows)
+            wg.source_control_gates_watch_set_v1("auto-test", "autonomy", mode, org="autonomy", rows=rows)
         )
 
         assert result.ok is True
@@ -2145,7 +2184,7 @@ class TestWorktreePRWatchSet:
         )
 
         result = asyncio.run(
-            wg.source_control_gates_watch_set_v1("auto-test", "autonomy", "default", rows=rows)
+            wg.source_control_gates_watch_set_v1("auto-test", "autonomy", "default", org="autonomy", rows=rows)
         )
 
         assert result.ok is True
@@ -2161,7 +2200,7 @@ class TestWorktreePRWatchSet:
         )
 
         result = asyncio.run(
-            wg.source_control_gates_watch_set_v1("auto-test", "autonomy", "muted", rows=rows)
+            wg.source_control_gates_watch_set_v1("auto-test", "autonomy", "muted", org="autonomy", rows=rows)
         )
 
         assert result.ok is False
@@ -2869,7 +2908,7 @@ class TestWorktreeMonitorDiscovery:
         )
         listed = {"calls": 0}
 
-        async def fake_list(host, slug, *, timeout=30, limit=100):
+        async def fake_list(host, slug, *, timeout=30, limit=100, **_kw):
             listed["calls"] += 1
             assert (host, slug) == ("github.com", "anchore/enterprise_ng")
             return self._prs_json(), None
@@ -2900,7 +2939,7 @@ class TestWorktreeMonitorDiscovery:
             lambda _p: ("github.com", "anchore/enterprise_ng"),
         )
 
-        async def fake_list(host, slug, *, timeout=30, limit=100):
+        async def fake_list(host, slug, *, timeout=30, limit=100, **_kw):
             return self._prs_json(), None
 
         monkeypatch.setattr(wm_module, "source_control_repo_reviews_v1", fake_list)
@@ -2927,7 +2966,7 @@ class TestWorktreeMonitorDiscovery:
             lambda _p: ("github-autonomy", "auto-network/autonomy"),
         )
 
-        async def fake_list(host, slug, *, timeout=30, limit=100):
+        async def fake_list(host, slug, *, timeout=30, limit=100, **_kw):
             return None, FAILURE_NO_HOST_TOKEN
 
         monkeypatch.setattr(wm_module, "source_control_repo_reviews_v1", fake_list)
@@ -2957,7 +2996,7 @@ class TestWorktreeMonitorDiscovery:
             return "[]", "", 0, False
 
         monkeypatch.setattr(wg, "run_cli", fake_run)
-        monkeypatch.setattr(wg, "github_host_token", lambda _h: "tok")
+        monkeypatch.setattr(wg, "github_host_token", lambda _h, **_kw: "tok")
         stdout, failure = asyncio.run(
             wg.source_control_repo_reviews_v1("github.com", "anchore/enterprise_ng"))
         assert failure is None and stdout == "[]"
@@ -3058,7 +3097,7 @@ class TestWorktreeMonitorDiscovery:
             lambda _p: ("github.com", "anchore/enterprise_ng"),
         )
 
-        async def fake_list(host, slug, *, timeout=30, limit=100):
+        async def fake_list(host, slug, *, timeout=30, limit=100, **_kw):
             return None, FAILURE_EXEC_FAILED
 
         monkeypatch.setattr(wm_module, "source_control_repo_reviews_v1", fake_list)
@@ -3152,7 +3191,7 @@ class TestWorktreeMonitorRefreshOne:
         )
         monkeypatch.setattr(
             "agents.capabilities.github.service.github_host_token",
-            lambda _h: "tok",
+            lambda _h, **_kw: "tok",
         )
         monkeypatch.setattr(wm_module, "_read_bindings", lambda _row: [object()])
 
@@ -3163,7 +3202,7 @@ class TestWorktreeMonitorRefreshOne:
         captured["calls"].clear()
         monkeypatch.setattr(
             "agents.capabilities.github.service.github_host_token",
-            lambda _h: None,
+            lambda _h, **_kw: None,
         )
         asyncio.run(monitor.refresh_one("auto-dead", "autonomy"))
         assert captured["calls"] == []
@@ -3172,7 +3211,7 @@ class TestWorktreeMonitorRefreshOne:
         # probe the dead container and fail noisily).
         monkeypatch.setattr(
             "agents.capabilities.github.service.github_host_token",
-            lambda _h: "tok",
+            lambda _h, **_kw: "tok",
         )
         monkeypatch.setattr(wm_module, "_read_bindings", lambda _row: [])
         asyncio.run(monitor.refresh_one("auto-dead", "autonomy"))

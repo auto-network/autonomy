@@ -72,7 +72,7 @@ FAILURE_EXEC_FAILED = "exec_failed"
 # the resolver should keep it and only touch ``updated_at``.
 FAILURE_NOT_MODIFIED = "not_modified"
 # Host-mode discovery asked for a git host with no configured token file
-# (``broker_config`` ``token_file.<host>`` entry absent/unreadable).
+# (no ``autonomy.credential-file`` row for it, or its path unreadable).
 FAILURE_NO_HOST_TOKEN = "no_host_token"
 
 # Fields requested from ``gh pr list --head <branch>`` for review
@@ -676,51 +676,79 @@ def derive_repo_slug(managed_clone: Path | None) -> str | None:
 #
 # The dashboard can run ``gh`` directly — no docker exec into an agent
 # container — when the operator has configured a host token file for the
-# repo's git host. Config lives on the ``autonomy/github`` org
-# capability-install Setting's ``broker_config`` map (the jira pattern,
-# 938055c): keys ``token_file.<git-host>`` point at host files holding
-# the token; the Setting itself NEVER carries a literal secret. Design:
-# graph note f7c4c109-91a (§Phase 1a).
+# repo's git host. The path lives on ``autonomy.credential-file``, keyed
+# ``<org>:<host>``, in the machine store: it names a file on one computer
+# and is true nowhere else. The Setting carries the path, never the
+# token. Design: graph note f7c4c109-91a (§Phase 1a).
 
 
-def _github_broker_config() -> dict:
-    """``broker_config`` map from the autonomy/github org install Setting.
+def _credential_file_rows() -> list:
+    """Every ``autonomy.credential-file`` row on this machine.
 
-    Read fresh per call; tests monkeypatch this function rather than
-    threading env overrides per host. ``read_set`` requires the
-    keyword-only ``org`` argument — the jira loader's bare call
-    TypeErrors and silently falls back to its env overrides, which is
-    exactly the failure mode this version logs instead of swallowing.
+    The machine store, explicitly: this names a path on one computer and
+    must never be read from a database that travels.
     """
     try:
         from tools.graph import settings_ops
         members = settings_ops.read_set(
-            "autonomy.org.capability.install", org="autonomy",
+            "autonomy.credential-file", org="machine", peers=[],
         )
-        for m in (getattr(members, "members", []) or []):
-            payload = m.payload if isinstance(m.payload, dict) else {}
-            if payload.get("implementation") == "autonomy/github":
-                return payload.get("broker_config") or {}
+        return list(getattr(members, "members", []) or [])
     except Exception:
         logger.warning(
-            "github capability: could not read org install broker_config; "
+            "github capability: could not read credential-file rows; "
             "host-mode execution disabled this pass",
             exc_info=True,
         )
-    return {}
+        return []
 
 
-def github_host_token(host: str | None) -> str | None:
-    """Return the host-side token for ``host``, or None when unconfigured.
+def _credential_file_path(host: str, org: str) -> str | None:
+    """The path configured by ``org`` for ``host``, or None.
+
+    The key is ``<org>:<host>`` and nothing resolves without both halves.
+    An unnamed org has no answer here — not a best guess, not the only
+    row that happens to match the host. One organization's credential
+    used for another organization's repository is not a degraded result,
+    it is acting as the wrong account, and it succeeds quietly: the
+    request is authorised, the operation works, and the audit trail on
+    the far side names an identity nobody chose.
+
+    That is not hypothetical. A single host-token entry sat on one
+    organization's install row while two organizations used that host,
+    so the second was served the first's credential by construction.
+    Requiring both halves of the key is what makes that unrepresentable
+    rather than merely unlikely.
+
+    The cost of refusing is bounded: no token means host-side execution
+    is unavailable and the caller falls back to running inside the
+    organization's own container, which holds its own credentials.
+    """
+    for member in _credential_file_rows():
+        if member.key == f"{org}:{host}":
+            payload = member.payload if isinstance(member.payload, dict) else {}
+            return payload.get("path") or None
+    return None
+
+
+def github_host_token(host: str | None, *, org: str | None = None) -> str | None:
+    """Return ``org``'s host-side token for ``host``, or None.
 
     The token exists only in process memory — read from the file the
-    ``token_file.<host>`` broker_config entry points at. Any read failure
-    (missing entry, missing/unreadable file, empty file) returns None so
-    callers fall back to container execution.
+    ``autonomy.credential-file`` row for this machine points at. Any read
+    failure (no org named, no row, missing or unreadable file, empty
+    file) returns None so callers fall back to container execution.
+
+    ``org`` is keyword-optional in signature and required in fact: a
+    caller that omits it gets None. It reads that way so the omission is
+    a quiet fallback to the container rather than an exception thrown
+    into a refresh loop, and so adding the argument at a call site is the
+    thing that turns host mode on rather than the thing that stops a
+    crash.
     """
-    if not host:
+    if not host or not org:
         return None
-    path = (_github_broker_config() or {}).get(f"token_file.{host}")
+    path = _credential_file_path(host, org)
     if not path:
         return None
     try:
@@ -890,6 +918,7 @@ def _pr_watch_set_args(review_node_ids: list[str], mode: str) -> list[str]:
 async def _execute_op(
     *,
     operation: str,
+    org: str | None,
     session_name: str,
     repo_name: str,
     rows: list[WorktreeState],
@@ -913,7 +942,10 @@ async def _execute_op(
         None,
     )
     host_and_slug = derive_repo_host_and_slug(row.managed_clone) if row else None
-    token = github_host_token(host_and_slug[0]) if host_and_slug else None
+    token = (
+        github_host_token(host_and_slug[0], org=org)
+        if host_and_slug else None
+    )
 
     if token is None:
         # Legacy container path: the row must be LIVE.
@@ -1033,6 +1065,7 @@ async def source_control_review_read_v1(
     session_name: str,
     repo_name: str,
     *,
+    org: str | None,
     rows: list[WorktreeState],
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> WorktreeGithubExecResult:
@@ -1051,6 +1084,7 @@ async def source_control_review_read_v1(
         return _pr_view_args(row.branch, repo_slug)
 
     return await _execute_op(
+        org=org,
         operation=OP_REVIEW_READ,
         session_name=session_name,
         repo_name=repo_name,
@@ -1064,6 +1098,7 @@ async def source_control_review_refresh_v1(
     session_name: str,
     repo_name: str,
     *,
+    org: str | None,
     rows: list[WorktreeState],
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> WorktreeGithubExecResult:
@@ -1079,6 +1114,7 @@ async def source_control_review_refresh_v1(
         return _pr_view_args(row.branch, repo_slug)
 
     return await _execute_op(
+        org=org,
         operation=OP_REVIEW_REFRESH,
         session_name=session_name,
         repo_name=repo_name,
@@ -1093,6 +1129,7 @@ async def source_control_gates_watch_set_v1(
     repo_name: str,
     mode: str,
     *,
+    org: str | None,
     rows: list[WorktreeState],
     review_node_ids: list[str] | None = None,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
@@ -1142,6 +1179,7 @@ async def source_control_gates_watch_set_v1(
         )
 
     return await _execute_op(
+        org=org,
         operation=OP_GATES_WATCH_SET,
         session_name=session_name,
         repo_name=repo_name,
@@ -1175,6 +1213,7 @@ async def source_control_repo_reviews_v1(
     host: str,
     repo_slug: str,
     *,
+    org: str | None = None,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
     limit: int = 100,
 ) -> tuple[str | None, str | None]:
@@ -1186,12 +1225,14 @@ async def source_control_repo_reviews_v1(
     against worktree branches locally — including dead sessions'
     worktrees, which the docker-exec path could never serve.
 
-    Host mode only by design: without a token file for ``host`` this
-    returns ``(None, FAILURE_NO_HOST_TOKEN)`` and the caller skips the
-    repo. Returns ``(stdout, None)`` on success, ``(None, failure)``
-    otherwise.
+    Host mode only by design: without ``org``'s token file for ``host``
+    this returns ``(None, FAILURE_NO_HOST_TOKEN)`` and the caller skips
+    the repo. ``org`` is what decides whose credential is used, so a
+    caller that omits it gets no token rather than another
+    organization's. Returns ``(stdout, None)`` on success,
+    ``(None, failure)`` otherwise.
     """
-    token = github_host_token(host)
+    token = github_host_token(host, org=org)
     if token is None:
         return None, FAILURE_NO_HOST_TOKEN
     cmd = [
@@ -1404,6 +1445,7 @@ async def source_control_review_read_by_id_v1(
     session_name: str,
     repo_name: str,
     *,
+    org: str | None,
     review_id: str,
     rows: list[WorktreeState],
     repo_slug: str | None = None,
@@ -1434,6 +1476,7 @@ async def source_control_review_read_by_id_v1(
         return _api_args_review_read_by_id(slug, str(review_id), etag)
 
     result = await _execute_op(
+        org=org,
         operation=OP_REVIEW_READ_BY_ID,
         session_name=session_name,
         repo_name=repo_name,
@@ -1467,6 +1510,7 @@ async def source_control_check_runs_read_for_sha_v1(
     session_name: str,
     repo_name: str,
     *,
+    org: str | None,
     head_sha: str,
     rows: list[WorktreeState],
     repo_slug: str | None = None,
@@ -1486,6 +1530,7 @@ async def source_control_check_runs_read_for_sha_v1(
         return _api_args_check_runs_for_sha(slug, str(head_sha))
 
     return await _execute_op(
+        org=org,
         operation=OP_CHECK_RUNS_READ_FOR_SHA,
         session_name=session_name,
         repo_name=repo_name,

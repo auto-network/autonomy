@@ -53,17 +53,24 @@ class JiraConfig:
         token itself is read from the host file and exists only in process
         memory."""
         installed: dict = {}
-        try:
-            from tools.graph import ops as graph_ops
-            members = graph_ops.read_set("autonomy.org.capability.install",
-                                         org=org, peers=[])
-            for m in (getattr(members, "members", []) or []):
-                payload = m.payload if isinstance(m.payload, dict) else {}
-                if payload.get("contract") == "issue_tracker":
-                    installed = payload.get("broker_config") or {}
-                    break
-        except Exception:
-            pass
+        # No org named means there is no organization's configuration to
+        # read. Asking anyway resolved to the operator's own store, where
+        # capability-install rows do not live, so the read found nothing
+        # and the failure looked identical to "not configured" -- sending
+        # a reader to fix a Setting that was correct all along. The env
+        # overrides below are the deliberate path when no org is named.
+        if org:
+            try:
+                from tools.graph import ops as graph_ops
+                members = graph_ops.read_set("autonomy.org.capability.install",
+                                             org=org, peers=[])
+                for m in (getattr(members, "members", []) or []):
+                    payload = m.payload if isinstance(m.payload, dict) else {}
+                    if payload.get("contract") == "issue_tracker":
+                        installed = payload.get("broker_config") or {}
+                        break
+            except Exception:
+                pass
         base_url = (os.environ.get("JIRA_BASE_URL")
                     or installed.get("base_url", "")).rstrip("/")
         email = os.environ.get("JIRA_EMAIL") or installed.get("email", "")
@@ -79,10 +86,14 @@ class JiraConfig:
                    [("base_url", base_url), ("email", email),
                     (f"token file {token_file}", token)] if not val]
         if missing:
+            where = (f"set broker_config on the issue_tracker org install "
+                     f"Setting in {org!r}" if org else
+                     "no org was named, so no organization's install Setting "
+                     "was consulted -- name one, or set the environment "
+                     "overrides")
             raise JiraError(
-                "jira broker is not configured: missing "
-                f"{', '.join(missing)} (set broker_config on the "
-                f"issue_tracker org install Setting; org={org!r})")
+                f"jira broker is not configured: missing "
+                f"{', '.join(missing)} ({where})")
         return cls(base_url=base_url, email=email, token=token)
 
 
