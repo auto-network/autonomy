@@ -22,7 +22,27 @@ from .acceptance import (
     scope_storage_grant,
 )
 from .credentials import domain_member_keys, select_current_credential
+from .delegate import (
+    DEFAULT_DELEGATE_TTL_MS,
+    DelegateError,
+    StorageDelegate,
+    authorize_member_storage,
+    provision,
+    renew,
+    revoke,
+    sign_capability_grant,
+    sign_generation_advance,
+    storage_delegate_scopes,
+)
 from .keycontrol import KeyControlStore
+from .memory_cache import (
+    RAMFS_MAGIC,
+    TMPFS_MAGIC,
+    MemoryClassError,
+    RamDelegateCache,
+    assert_memory_backed,
+    filesystem_magic,
+)
 from .errors import (
     CommitmentError,
     MalformedRecordError,
@@ -59,6 +79,24 @@ __all__ = [
     "select_current_credential",
     # key-control store
     "KeyControlStore",
+    # agent delegate
+    "StorageDelegate",
+    "DelegateError",
+    "DEFAULT_DELEGATE_TTL_MS",
+    "storage_delegate_scopes",
+    "authorize_member_storage",
+    "provision",
+    "renew",
+    "revoke",
+    "sign_generation_advance",
+    "sign_capability_grant",
+    # MEMORY-class cache
+    "RamDelegateCache",
+    "MemoryClassError",
+    "assert_memory_backed",
+    "filesystem_magic",
+    "RAMFS_MAGIC",
+    "TMPFS_MAGIC",
     # errors
     "StorageError",
     "MalformedRecordError",
