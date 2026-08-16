@@ -374,3 +374,31 @@ def test_the_grandfathered_list_does_not_outlive_its_entries(registered_schemas)
         "these now declare a home and must be removed from "
         "_HOME_UNDECLARED_GRANDFATHERED:\n  " + "\n  ".join(settled)
     )
+
+
+def test_every_declared_reference_points_at_a_real_set(registered_schemas):
+    """A reference to a set that does not exist can never be satisfied.
+
+    It is indistinguishable at runtime from a row nobody has provisioned yet,
+    so it reads as "go and create it" — and creating it is impossible, since
+    a write to an unregistered schema is refused. That is a loop with no exit,
+    and a typo is all it takes. Caught here, where the answer is knowable.
+    """
+    from tools.graph.schemas import registry as R
+
+    known = set(R.list_registered_set_ids())
+    bad = []
+    for set_id, revision, cls in registered_schemas:
+        for name, spec in (getattr(cls, "_field_metadata", None) or {}).items():
+            for shape in (spec, *(
+                    (spec.get("element") or {}).values()
+                    if isinstance(spec.get("element"), dict) else ())):
+                if not isinstance(shape, dict):
+                    continue
+                target = shape.get("references")
+                if target and target not in known:
+                    bad.append(f"{set_id}#{revision} {name} → {target!r}")
+    assert not bad, (
+        "these fields reference a set_id that is not registered — nothing can "
+        "ever satisfy them:\n  " + "\n  ".join(bad)
+    )

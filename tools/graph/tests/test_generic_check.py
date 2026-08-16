@@ -155,3 +155,54 @@ def test_a_cycle_terminates(acme):
     settings_ops.add_setting("probe.check.loop", 1, "x", {"uses": "x"}, org="acme")
 
     assert settings_ops.check_setting("probe.check.loop", "x", org="acme") == []
+
+
+# ── an edge that is itself wrong ─────────────────────────────
+
+
+def test_an_edge_naming_a_set_that_does_not_exist_says_so(acme):
+    """Not the same as a row nobody has written.
+
+    Reported as "no row under this key", a reader goes to provision it — and
+    cannot, because a write to an unregistered schema is refused. A loop with
+    no exit, from one typo. It has to be named for what it is.
+    """
+    @keyed_per_entity(key_strategy="probe_id")
+    class Typo(SettingSchema):
+        set_id = "probe.check.typo"
+        schema_revision = 1
+        uses: str = field(required=True, description="u",
+                          references="probe.check.no-such-set")
+
+    settings_ops.add_setting("probe.check.typo", 1, "a", {"uses": "x"}, org="acme")
+
+    findings = settings_ops.check_setting("probe.check.typo", "a", org="acme")
+
+    assert [f.kind for f in findings] == ["unknown_target"]
+    assert "probe.check.no-such-set" in findings[0].detail
+    assert "registry" in findings[0].looked_in, (
+        "the answer came from this process's registry, and a set can be "
+        "registered elsewhere and not here — the frame has to be stated")
+
+
+def test_a_bad_edge_reads_differently_from_an_unwritten_row(acme):
+    """The two must not be confusable; they call for opposite actions."""
+    @keyed_per_entity(key_strategy="probe_id")
+    class Bad(SettingSchema):
+        set_id = "probe.check.bad-edge"
+        schema_revision = 1
+        uses: str = field(required=True, description="u",
+                          references="probe.check.absent-set")
+
+    settings_ops.add_setting("probe.check.bad-edge", 1, "a", {"uses": "x"},
+                             org="acme")
+    settings_ops.add_setting("probe.check.needs", 1, "unwritten",
+                             {"uses": "nothing-here"}, org="acme")
+
+    bad = settings_ops.check_setting("probe.check.bad-edge", "a", org="acme")
+    unwritten = settings_ops.check_setting("probe.check.needs", "unwritten",
+                                           org="acme")
+
+    assert bad[0].kind != unwritten[0].kind
+    assert {bad[0].kind, unwritten[0].kind} == {"unknown_target",
+                                               "missing_reference"}
