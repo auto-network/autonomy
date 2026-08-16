@@ -31,6 +31,7 @@ from __future__ import annotations
 from typing import Any
 
 from .registry import (
+    home,
     SchemaValidationError,
     SettingSchema,
     field,
@@ -42,7 +43,7 @@ SET_ID = "autonomy.harness.bootstrap"
 SCHEMA_REVISION = 1
 
 # Host-local operator fact — see rubric graph://4d88c2ad-625 § "one-line rule".
-HARNESS_BOOTSTRAP_ORG = "personal"
+HARNESS_BOOTSTRAP_ORG = "machine"
 
 VALID_HARNESSES = ("claude", "codex")
 VALID_AUTH = ("ok", "missing")
@@ -71,6 +72,7 @@ SYNOPSIS = {
 }
 
 
+@home("machine")
 @keyed_per_entity(key_strategy="harness_name")
 class HarnessBootstrapV1(SettingSchema):
     """Per-harness clean-room bootstrap discovery row.

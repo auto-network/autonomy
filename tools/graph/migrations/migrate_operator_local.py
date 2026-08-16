@@ -87,7 +87,14 @@ class OperatorLocalMigrationError(Exception):
 
 @dataclass
 class OperatorLocalEntry:
-    """One Setting to insert in ``personal.db``."""
+    """One Setting to insert, in whichever store its schema declares.
+
+    Operator-local config is not all one kind of fact. A peer subscription
+    is the operator's and follows them to every machine they own; an
+    artifact's filesystem location is true on one computer and false on the
+    next. They are separate homes, so each entry is written where its own
+    schema says it lives rather than all of them into one database.
+    """
     set_id: str
     schema_revision: int
     key: str
@@ -316,19 +323,48 @@ def apply_migration(
         return plan
 
     orgs_dir = plan.personal_db.parent
-    if not dry_run:
-        _ensure_personal_db(plan.personal_db, orgs_dir)
 
-    if dry_run and not plan.personal_db.exists():
-        # Can't introspect existing rows without opening the DB. Treat
-        # everything as "would insert" and report.
-        for entry in plan.entries:
-            entry.action = "insert"
-        return plan
+    # Group by destination: each entry goes where its schema declares, so a
+    # machine fact never lands in a store that would carry it to another
+    # machine.
+    from collections import defaultdict
+    by_db: dict[Path, list[OperatorLocalEntry]] = defaultdict(list)
+    for entry in plan.entries:
+        by_db[_destination_db(entry.set_id, orgs_dir)].append(entry)
 
-    db = GraphDB(plan.personal_db)
+    for target_db, entries in by_db.items():
+        if not dry_run:
+            _ensure_personal_db(target_db, orgs_dir)
+        if dry_run and not target_db.exists():
+            for entry in entries:
+                entry.action = "insert"
+            continue
+        _apply_to_db(target_db, entries, dry_run=dry_run, state=state, log=log)
+    return plan
+
+
+def _destination_db(set_id: str, orgs_dir: Path) -> Path:
+    """The database this set declares it lives in."""
+    from tools.graph import schemas as _schemas
+
     try:
-        for entry in plan.entries:
+        home = _schemas.declared_home(set_id)
+    except Exception:
+        home = None
+    return orgs_dir / f"{home or PERSONAL_ORG_SLUG}.db"
+
+
+def _apply_to_db(
+    target_db: Path,
+    entries: list[OperatorLocalEntry],
+    *,
+    dry_run: bool,
+    state: str,
+    log,
+) -> None:
+    db = GraphDB(target_db)
+    try:
+        for entry in entries:
             if _setting_exists(db, set_id=entry.set_id, key=entry.key):
                 entry.action = "skip_exists"
                 entry.reason = (
@@ -359,7 +395,6 @@ def apply_migration(
             db.conn.commit()
     finally:
         db.close()
-    return plan
 
 
 # ── CLI ────────────────────────────────────────────────────

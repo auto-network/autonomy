@@ -257,8 +257,21 @@ def test_apply_migration_inserts_canonical_settings(synthetic_yaml, orgs_dir):
     plan = build_plan(synthetic_yaml, orgs_root=orgs_dir)
     apply_migration(plan)
 
+    # Each entry lands in the store its schema declares: an artifact's
+    # filesystem location is true on this machine only, while a peer
+    # subscription is the operator's on every machine they own.
     assert (orgs_dir / "personal.db").exists()
-    rows = _settings_rows(orgs_dir / "personal.db")
+    assert (orgs_dir / "machine.db").exists()
+    rows = (_settings_rows(orgs_dir / "personal.db")
+            + _settings_rows(orgs_dir / "machine.db"))
+
+    machine_sets = {r["set_id"] for r in _settings_rows(orgs_dir / "machine.db")}
+    personal_sets = {r["set_id"] for r in _settings_rows(orgs_dir / "personal.db")}
+    assert ARTIFACT_PATH_SET_ID in machine_sets
+    assert ARTIFACT_PATH_SET_ID not in personal_sets, (
+        "an artifact's filesystem location must not reach a store that travels")
+    assert PEER_SUB_SET_ID in personal_sets
+    assert PEER_SUB_SET_ID not in machine_sets
     # Rows from ensure_bootstrap_orgs (identity Setting) plus our entries.
     artifact_rows = [r for r in rows if r["set_id"] == ARTIFACT_PATH_SET_ID]
     peer_rows = [r for r in rows if r["set_id"] == PEER_SUB_SET_ID]
@@ -393,15 +406,16 @@ def test_peer_subscription_schema_rejects_non_string_peer():
 # ── ops.read_set routed by org=personal ─────────────
 
 
-def test_read_set_with_org_personal_returns_artifact_paths(
+def test_read_set_with_org_machine_returns_artifact_paths(
     synthetic_yaml, orgs_dir, monkeypatch,
 ):
+    """Read them where they live: an artifact's location is a machine fact."""
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
     monkeypatch.delenv("GRAPH_DB", raising=False)
     plan = build_plan(synthetic_yaml, orgs_root=orgs_dir)
     apply_migration(plan)
 
-    got = ops.read_set(ARTIFACT_PATH_SET_ID, org=PERSONAL_ORG_SLUG)
+    got = ops.read_set(ARTIFACT_PATH_SET_ID, org="machine")
     keys = sorted(m.key for m in got.members)
     assert keys == [
         "anchore:id_ed25519",
@@ -445,7 +459,7 @@ def _run_cli(argv: list[str]) -> tuple[int, str, str]:
     return rc, out.getvalue(), err.getvalue()
 
 
-def test_cli_set_members_artifact_path_personal(
+def test_cli_set_members_artifact_path_machine(
     synthetic_yaml, orgs_dir, monkeypatch,
 ):
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
@@ -455,7 +469,7 @@ def test_cli_set_members_artifact_path_personal(
 
     rc, out, err = _run_cli([
         "set", "members", ARTIFACT_PATH_SET_ID,
-        "--org", PERSONAL_ORG_SLUG,
+        "--org", "machine",
     ])
     assert rc == 0, err
     assert "anchore:license.yaml" in out
@@ -489,7 +503,7 @@ def test_cli_set_members_empty_when_no_migration(orgs_dir, monkeypatch):
 
     rc, out, err = _run_cli([
         "set", "members", ARTIFACT_PATH_SET_ID,
-        "--org", PERSONAL_ORG_SLUG,
+        "--org", "machine",
     ])
     assert rc == 0, err
     assert "no Settings in" in out

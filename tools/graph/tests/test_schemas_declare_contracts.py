@@ -263,12 +263,10 @@ def test_no_new_schema_repeats_its_own_key_in_the_payload(registered_schemas):
 # by one line per set_id decided, and a NEW schema still cannot be registered
 # without saying.
 _HOME_UNDECLARED_GRANDFATHERED = {
-    "autonomy.artifact-path",
     "autonomy.capability.contract",
     "autonomy.capability.impl",
     "autonomy.capability.operation_policy",
     "autonomy.commit.policy",
-    "autonomy.harness.bootstrap",
     "autonomy.identity.passkey",
     "autonomy.identity.personal",
     "autonomy.network.binding",

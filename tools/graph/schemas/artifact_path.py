@@ -1,9 +1,14 @@
 """Schema: ``autonomy.artifact-path#1``.
 
-Personal Setting that overrides where an artifact lives on the operator's
-host filesystem, replacing the Artifact Layering default
-(``data/artifacts/{shared|personal}/{org}[/{workspace}]/{name}``). Lives in
-``personal.db`` — this Setting is per-operator, never published.
+Overrides where an artifact lives on THIS machine's filesystem, replacing
+the Artifact Layering default
+(``data/artifacts/{shared|personal}/{org}[/{workspace}]/{name}``).
+
+Lives in the machine store, because a filesystem location is true on one
+computer and false on the next: carried to a second machine of the same
+operator it would point at a file that is not there, and be believed rather
+than probed. The org row declares the artifact; this row says where it
+actually sits here. Never published, and never replicated anywhere.
 
 Composite key: ``<org>:<name>`` — the owning org slug plus the artifact
 name. The Setting applies to all workspaces in that org that declare an
@@ -17,6 +22,7 @@ Spec: graph://0d3f750f-f9c (Setting Primitive), graph://bc0dda40-f56
 from __future__ import annotations
 
 from .registry import (
+    home,
     keyed_per_entity,
     SchemaValidationError,
     SettingSchema,
@@ -41,6 +47,7 @@ SYNOPSIS = {
 }
 
 
+@home("machine")
 @keyed_per_entity(key_strategy="artifact_name")
 class ArtifactPathV1(SettingSchema):
     set_id = SET_ID
