@@ -272,7 +272,7 @@ class TestSnapshotRoundtrip:
     """Persisting EventBus state across restart (uvicorn --reload)."""
 
     def test_round_trip_preserves_state_and_replays(self, bus, tmp_path):
-        """snapshot() + restore() preserves seq, last_seq, last, buffer, epoch.
+        """snapshot() + restore() preserves replay state and advances epoch.
 
         Replay still works after restore — events from the prior process
         come back via the ring buffer, so the SSE gap-fill flow succeeds.
@@ -292,7 +292,7 @@ class TestSnapshotRoundtrip:
             bus.snapshot(snapshot_path)
             assert snapshot_path.exists()
 
-            event_bus_module._SERVER_EPOCH = original_epoch + 999
+            event_bus_module._SERVER_EPOCH = original_epoch
             new_bus = EventBus()
             assert new_bus.restore(snapshot_path) is True
 
@@ -300,7 +300,7 @@ class TestSnapshotRoundtrip:
             assert new_bus._last_seq == bus._last_seq
             assert new_bus._last == bus._last
             assert len(new_bus._buffer) == len(bus._buffer)
-            assert event_bus_module._SERVER_EPOCH == original_epoch
+            assert event_bus_module._SERVER_EPOCH == original_epoch + 1
 
             events, complete = new_bus.replay(1, 3)
             assert complete is True
