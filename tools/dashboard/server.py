@@ -75,6 +75,7 @@ from agents.workspace_manager import (
     cherry_pick_session_worktree,
     ensure_local_workspace_repository,
     local_workspace_repo_path,
+    managed_clone_path,
     merge_session_worktree,
     merge_session_worktree_commit,
     prepare_session_mounts,
@@ -1692,6 +1693,38 @@ def _load_decision_for_run(output_dir: str | None) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def _agentic_decision_artifacts(
+    row: dict | sqlite3.Row | None,
+    decision: dict | None = None,
+) -> dict:
+    """Return the durable branch artifact identity for an agentic run.
+
+    Agentic comparison actions write their deliverable to ``decision.json``.
+    Older dispatcher processes completed those runs with empty commit/branch
+    columns even though the decision file and pushed branch were intact.  Read
+    both sources so historical runs remain reviewable after their disposable
+    worktree directory is cleaned up.
+    """
+    row = dict(row) if row is not None else {}
+    if decision is None:
+        decision = _load_decision_for_run(row.get("output_dir")) or {}
+    return {
+        "commit_hash": (
+            row.get("commit_hash")
+            or decision.get("commit_hash")
+            or decision.get("commit")
+            or ""
+        ),
+        "branch": row.get("branch") or decision.get("branch") or "",
+        "branch_base": (
+            row.get("branch_base")
+            or decision.get("branch_base")
+            or decision.get("base_commit")
+            or ""
+        ),
+    }
+
+
 def _enrich_timeline_agentic(entries: list[dict]) -> None:
     """Populate the agentic-only timeline fields in-place via the
     shared identity resolver. See :func:`_resolve_agentic_identity`."""
@@ -1737,14 +1770,22 @@ def _enrich_timeline_agentic(entries: list[dict]) -> None:
     for entry in entries:
         if entry.get("kind") != "agentic":
             continue
+        saved_decision = _load_decision_for_run(entry.get("_output_dir")) or {}
+        artifacts = _agentic_decision_artifacts(entry, saved_decision)
+        if artifacts["commit_hash"]:
+            entry.update(artifacts)
+        entry["diff_target"] = _agentic_trace_diff_target(
+            entry.get("run_id") or entry.get("container_name") or "",
+            row=entry,
+            decision=saved_decision,
+        )
         slots = summaries.get(
             (entry.get("member_key") or "", entry.get("target_org") or ""),
         )
         if not slots:
             entry["card_summary"] = []
             continue
-        decision = _load_decision_for_run(entry.get("_output_dir"))
-        entry["card_summary"] = _resolve_card_summary_slots(slots, decision)
+        entry["card_summary"] = _resolve_card_summary_slots(slots, saved_decision)
 
 
 def _parse_review_summary(text: str) -> dict | None:
@@ -2069,16 +2110,11 @@ async def api_timeline(request):
 async def api_dispatch_run_commit_detail(request):
     """Return commit detail (subject, body, files, patch) for a dispatch run.
 
-    Powers the auto-24a60 worktree-merge card's Diff overlay on the
-    Activity feed. The card stores the merged commit SHA in
-    ``dispatch_runs.commit_hash``; this endpoint reads the commit from
-    the main repo (where the merge result lives on master) and returns
-    the same JSON shape as ``/api/worktrees/{session}/{repo}/commits/{sha}``
-    so the overlay can render its file list + patch the same way.
-
-    Scoped to ``kind='worktree-merge'`` rows. Bead/agentic rows have
-    their own trace surface (``/dispatch/trace/<run_id>``); routing them
-    here would only confuse the diff renderer.
+    Worktree-merge rows resolve from the integrated repository. Agentic rows
+    resolve the commit recorded in their durable decision artifact from the
+    target workspace's managed clone, so a pushed comparison branch remains
+    reviewable after its disposable worktree is cleaned up. Both return the
+    shared Worktrees overlay shape.
     """
     run_id = request.path_params["run_id"]
 
@@ -2093,7 +2129,8 @@ async def api_dispatch_run_commit_detail(request):
     conn = _timeline_conn()
     try:
         row = conn.execute(
-            "SELECT id, kind, commit_hash FROM dispatch_runs WHERE id = ?",
+            "SELECT id, kind, commit_hash, branch, branch_base, output_dir, "
+            "agentic_source_id FROM dispatch_runs WHERE id = ?",
             (run_id,),
         ).fetchone()
     finally:
@@ -2101,23 +2138,47 @@ async def api_dispatch_run_commit_detail(request):
     if row is None:
         return JSONResponse({"error": "run not found"}, status_code=404)
     kind = row["kind"] or "bead"
-    if kind != "worktree-merge":
+    if kind not in {"worktree-merge", "agentic"}:
         return JSONResponse(
-            {"error": "commit-detail is only available for worktree-merge runs"},
+            {"error": "commit-detail is only available for merge or agentic runs"},
             status_code=400,
         )
-    sha = row["commit_hash"] or ""
+    artifacts = _agentic_decision_artifacts(row) if kind == "agentic" else {
+        "commit_hash": row["commit_hash"] or "",
+        "branch": row["branch"] or "",
+        "branch_base": row["branch_base"] or "",
+    }
+    sha = artifacts["commit_hash"]
     if not sha:
         return JSONResponse(
             {"error": "run has no commit_hash"}, status_code=404,
         )
 
-    try:
-        commit = await asyncio.to_thread(
-            get_repo_commit_detail, _REPO_ROOT, sha,
+    repo_paths = [_REPO_ROOT]
+    if kind == "agentic":
+        identity = _resolve_agentic_identity(row["agentic_source_id"] or "")
+        workspace = _resolve_workspace_for_org(identity["target_org"] or "")
+        if workspace is not None:
+            repo_paths = [
+                managed_clone_path(repo.url)
+                for repo in workspace.repos
+            ] + repo_paths
+
+    commit = None
+    errors: list[str] = []
+    for repo_path in repo_paths:
+        try:
+            commit = await asyncio.to_thread(
+                get_repo_commit_detail, repo_path, sha,
+            )
+            break
+        except WorkspaceError as exc:
+            errors.append(str(exc))
+    if commit is None:
+        return JSONResponse(
+            {"error": errors[-1] if errors else f"commit could not be read: {sha}"},
+            status_code=404,
         )
-    except WorkspaceError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=404)
 
     return JSONResponse(_worktree_commit_json(commit, include_patch=True))
 
@@ -2189,16 +2250,23 @@ async def api_timeline_stats(request):
     return JSONResponse(stats)
 
 
-def _agentic_trace_diff_target(run_name: str) -> dict | None:
+def _agentic_trace_diff_target(
+    run_name: str,
+    *,
+    row: dict | sqlite3.Row | None = None,
+    decision: dict | None = None,
+) -> dict | None:
     """Resolve the best currently-viewable diff for an agentic run.
 
     Resolution is intentionally cheap and ordered by fidelity:
 
     1. The worktree monitor's in-memory rows, when the retained worktree has
        commits or dirty files. This is the same state the Worktrees page uses.
-    2. A recorded host-side merge row for this session, which opens the
+    2. The run's persisted decision artifact, which names the pushed branch
+       commit even after the disposable worktree is cleaned up.
+    3. A recorded host-side merge row for this session, which opens the
        existing immutable commit overlay after the worktree is gone.
-    3. The deterministic session directory as a cold-cache fallback. The
+    4. The deterministic session directory as a cold-cache fallback. The
        Worktrees deep link refreshes/resolves the concrete repository row.
 
     No git command runs on the Trace request path.
@@ -2218,6 +2286,19 @@ def _agentic_trace_diff_target(run_name: str) -> dict | None:
             "session_name": run_name,
             "href": worktree_href,
             "repo_count": len(changed_rows),
+        }
+
+    if row is None and decision is None:
+        try:
+            row = get_run(run_name)
+        except Exception:  # noqa: BLE001 — an absent legacy row is normal
+            row = None
+    artifacts = _agentic_decision_artifacts(row, decision)
+    if artifacts["commit_hash"]:
+        return {
+            "kind": "commit",
+            "run_id": run_name,
+            **artifacts,
         }
 
     try:
@@ -2381,6 +2462,10 @@ async def api_dispatch_trace(request):
     # ``dispatch_runs.output_dir``. Resolve those and short-circuit.
     if kind == "agentic":
         agentic_run_dir = Path(row["output_dir"]) if row and row.get("output_dir") else run_dir
+        saved_decision = _load_decision_for_run(str(agentic_run_dir)) or {}
+        if saved_decision:
+            decision = {**saved_decision, **(decision or {})}
+        artifacts = _agentic_decision_artifacts(row, saved_decision)
         has_session = bool(_find_session_files(run_name, run_dir=agentic_run_dir))
         identity = _resolve_agentic_identity(agentic_source_id)
         # Resolve the dispatching session's project so the front-end
@@ -2407,8 +2492,9 @@ async def api_dispatch_trace(request):
             "decision": decision,
             "card_summary": card_summary,
             "experience_report": "",
-            "commit_hash": "",
-            "branch": "",
+            "commit_hash": artifacts["commit_hash"],
+            "branch": artifacts["branch"],
+            "branch_base": artifacts["branch_base"],
             "diff": "",
             "has_session": has_session,
             "is_live": is_live,
@@ -2428,7 +2514,11 @@ async def api_dispatch_trace(request):
             "dispatched_by_session": sender,
             "dispatched_by_project": sender_project,
             "diff_target": (
-                None if is_live else _agentic_trace_diff_target(run_name)
+                None if is_live else _agentic_trace_diff_target(
+                    run_name,
+                    row=row,
+                    decision=saved_decision,
+                )
             ),
         })
 

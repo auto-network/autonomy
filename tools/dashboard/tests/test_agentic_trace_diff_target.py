@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from types import SimpleNamespace
 
@@ -124,6 +125,111 @@ def test_trace_uses_merge_commit_after_worktree_is_clean(monkeypatch, tmp_path):
     }
 
 
+def test_trace_uses_persisted_agentic_decision_after_worktree_cleanup(
+    monkeypatch, tmp_path,
+):
+    from tools.dashboard import server
+
+    run = "agentic-implement-to-branch-codex-a209"
+    output_dir = tmp_path / "run-output"
+    output_dir.mkdir()
+    (output_dir / "decision.json").write_text(json.dumps({
+        "status": "DONE",
+        "branch": "compare/auto-4436u/codex",
+        "base_commit": "4c8ebf43",
+        "commit": "81b5af539b3290fcfe21e0a521dea4666b113e4e",
+    }))
+    monkeypatch.setattr(server.worktree_monitor, "get_all", lambda: [])
+    monkeypatch.setattr(server, "WORKTREES_DIR", tmp_path / "worktrees")
+    monkeypatch.setattr(server, "get_run", lambda _run: {
+        "id": run,
+        "output_dir": str(output_dir),
+        "commit_hash": "",
+        "branch": "",
+        "branch_base": "",
+    })
+
+    target = server._agentic_trace_diff_target(run)
+
+    assert target == {
+        "kind": "commit",
+        "run_id": run,
+        "commit_hash": "81b5af539b3290fcfe21e0a521dea4666b113e4e",
+        "branch": "compare/auto-4436u/codex",
+        "branch_base": "4c8ebf43",
+    }
+
+
+@pytest.mark.asyncio
+async def test_agentic_commit_detail_reads_target_workspace_managed_clone(
+    monkeypatch, tmp_path,
+):
+    from tools.dashboard import server
+
+    output_dir = tmp_path / "run-output"
+    output_dir.mkdir()
+    (output_dir / "decision.json").write_text(json.dumps({
+        "status": "DONE",
+        "branch": "compare/auto-4436u/opus",
+        "base_commit": "4c8ebf43",
+        "commit": "a4179f2ad9dfb502e427405b15b9aaf7a8b61fef",
+    }))
+    db_path = tmp_path / "dispatch.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE dispatch_runs (id TEXT, kind TEXT, commit_hash TEXT, "
+        "branch TEXT, branch_base TEXT, output_dir TEXT, agentic_source_id TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO dispatch_runs VALUES (?, 'agentic', '', '', '', ?, ?)",
+        ("agentic-implement-to-branch-35e2", str(output_dir), "source-1"),
+    )
+    conn.commit()
+    conn.close()
+
+    def timeline_conn():
+        c = sqlite3.connect(db_path)
+        c.row_factory = sqlite3.Row
+        return c
+
+    clone = tmp_path / "managed.git"
+    clone.mkdir()
+    monkeypatch.setattr(server, "_timeline_conn", timeline_conn)
+    monkeypatch.setattr(server, "_resolve_agentic_identity", lambda _sid: {
+        "target_org": "autonomy",
+    })
+    monkeypatch.setattr(server, "_resolve_workspace_for_org", lambda _org: SimpleNamespace(
+        repos=(SimpleNamespace(url="git@example:autonomy.git"),),
+    ))
+    monkeypatch.setattr(server, "managed_clone_path", lambda _url: clone)
+    seen = []
+
+    def read_commit(repo_path, sha):
+        seen.append((repo_path, sha))
+        return SimpleNamespace(
+            sha=sha,
+            short_sha=sha[:8],
+            author="Agent",
+            date="2026-08-16 19:16",
+            subject="Vault settings",
+            body="",
+            files=[],
+            patch="diff --git a/a b/a",
+        )
+
+    monkeypatch.setattr(server, "get_repo_commit_detail", read_commit)
+    monkeypatch.delenv("DASHBOARD_MOCK", raising=False)
+
+    response = await server.api_dispatch_run_commit_detail(SimpleNamespace(
+        path_params={"run_id": "agentic-implement-to-branch-35e2"},
+    ))
+    payload = json.loads(response.body)
+
+    assert response.status_code == 200
+    assert payload["sha"] == "a4179f2ad9dfb502e427405b15b9aaf7a8b61fef"
+    assert seen == [(clone, "a4179f2ad9dfb502e427405b15b9aaf7a8b61fef")]
+
+
 def test_trace_uses_deterministic_deeplink_during_monitor_cold_start(
     monkeypatch, tmp_path,
 ):
@@ -158,6 +264,12 @@ def test_trace_and_dispatch_templates_reuse_existing_overlays_and_badge():
     trace_js = (
         root / "tools/dashboard/static/js/pages/trace.js"
     ).read_text()
+    activity_template = (
+        root / "tools/dashboard/templates/pages/timeline.html"
+    ).read_text()
+    activity_js = (
+        root / "tools/dashboard/static/js/pages/activity.js"
+    ).read_text()
     dispatch_card = (
         root / "tools/dashboard/templates/partials/bead-card.html"
     ).read_text()
@@ -165,5 +277,7 @@ def test_trace_and_dispatch_templates_reuse_existing_overlays_and_badge():
     assert 'data-testid="trace-view-diffs"' in trace_template
     assert "openWorktreeReviewOverlay" in trace_js
     assert "openCommitOverlay" in trace_js
+    assert "tl-agentic-diff-btn-" in activity_template
+    assert "entry.diff_target" in activity_js
     assert "session-harness-badge.html" in dispatch_card
     assert "flex flex-wrap items-center" in dispatch_card
