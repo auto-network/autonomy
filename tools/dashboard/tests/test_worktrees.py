@@ -1021,8 +1021,8 @@ class TestWorktreePage:
         shell = test_client.get("/worktrees")
         assert shell.status_code == 200
         assert "/static/js/pages/worktrees.js" in shell.text
-        assert "/static/vendor/highlightjs/highlight.min.js" in shell.text
-        assert "/static/vendor/highlightjs/github-dark.min.css" in shell.text
+        assert "/static/vendor/highlightjs/highlight-11.11.1.min.js" in shell.text
+        assert "/static/vendor/highlightjs/github-dark-11.11.1.min.css" in shell.text
         assert 'href="/worktrees"' in shell.text
 
         fragment = test_client.get("/pages/worktrees")

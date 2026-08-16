@@ -8,6 +8,24 @@
        Schema.of(...) calls resolve against the right org slice
        (auto-t0auy). Plugin pages override this at render time. -->
   <meta name="autonomy-shell-org" content="{{ shell_org }}">
+  <!-- The build this page was served from. Anything that loads a file from
+       /static/ after the page has rendered reads it here and appends it, so
+       the browser may keep that file: a request naming a build is granted a
+       long lifetime, one without a build is rechecked every time. Published
+       once rather than scraped off whichever link tag happens to carry it. -->
+  <meta name="autonomy-static-version" content="__STATIC_VERSION__">
+  <script>
+    /* The same value as a query string, for markup that cannot carry the
+       token. Page fragments are rendered by a path that does not substitute
+       it, so a fragment writing ?v=__STATIC_VERSION__ literally would ship
+       that text to the browser. Anything built or evaluated in the page uses
+       this instead. Defined during parse, before anything reads it. */
+    window.STATIC_V = (function () {
+      var m = document.querySelector('meta[name="autonomy-static-version"]');
+      var v = m && m.getAttribute('content');
+      return v && v !== '__STATIC_VERSION__' ? '?v=' + encodeURIComponent(v) : '';
+    })();
+  </script>
   <!-- PWA -->
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -37,10 +55,10 @@
        markdown renderer and a syntax highlighter that a page with neither on
        it still waited for. Deferred scripts run in document order, so these
        are still in place before markdown.js below. -->
-  <script src="/static/vendor/marked.min.js?v=__STATIC_VERSION__" defer></script>
-  <script src="/static/vendor/highlightjs/highlight.min.js?v=__STATIC_VERSION__" defer></script>
-  <link rel="stylesheet" href="/static/vendor/highlightjs/github-dark.min.css?v=__STATIC_VERSION__">
-  <script src="/static/vendor/purify.min.js?v=__STATIC_VERSION__" defer></script>
+  <script src="/static/vendor/marked-15.0.12.min.js?v=__STATIC_VERSION__" defer></script>
+  <script src="/static/vendor/highlightjs/highlight-11.11.1.min.js?v=__STATIC_VERSION__" defer></script>
+  <link rel="stylesheet" href="/static/vendor/highlightjs/github-dark-11.11.1.min.css?v=__STATIC_VERSION__">
+  <script src="/static/vendor/purify-3.4.12.min.js?v=__STATIC_VERSION__" defer></script>
   <script src="/static/js/markdown.js?v=__STATIC_VERSION__" defer></script>
   <script type="importmap">{"imports": {"/static/js/ceremony/primitives.js": "/static/js/ceremony/primitives.js?v=__STATIC_VERSION__"}}</script>
   <script type="module" src="/static/js/network-signon.mjs?v=__STATIC_VERSION__"></script>
@@ -53,7 +71,7 @@
        body into a fragment slot. Not deferred: must wrap window.fetch
        before any app code captures a reference to it. -->
   <script src="/static/js/unlock-guard.js?v=__STATIC_VERSION__"></script>
-  <script defer src="/static/vendor/alpine.min.js?v=__STATIC_VERSION__"></script>
+  <script defer src="/static/vendor/alpine-3.15.12.min.js?v=__STATIC_VERSION__"></script>
   <script>
     // iOS standalone detection — 100vh is unreliable in PWA mode (fluctuates 787/812/874).
     // Use screen.height as a stable reference via --app-height.

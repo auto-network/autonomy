@@ -61,9 +61,9 @@ def test_no_cdn_hosts_in_dashboard_surfaces():
 def test_vendored_libs_present_and_nonempty():
     vendor = DASHBOARD / "static" / "vendor"
     for name in (
-        "marked.min.js", "xterm.min.js", "xterm.min.css",
-        "addon-fit.min.js", "addon-clipboard.min.js", "purify.min.js",
-        "alpine.min.js", "html2canvas.min.js", "tailwind-browser.min.js",
+        "marked-15.0.12.min.js", "xterm-5.5.0.min.js", "xterm-5.5.0.min.css",
+        "addon-fit-0.11.0.min.js", "addon-clipboard-0.2.0.min.js", "purify-3.4.12.min.js",
+        "alpine-3.15.12.min.js", "html2canvas-1.4.1.min.js", "tailwind-browser-4.3.3.min.js",
     ):
         f = vendor / name
         assert f.is_file() and f.stat().st_size > 1000, name

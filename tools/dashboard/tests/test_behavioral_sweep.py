@@ -1616,7 +1616,7 @@ SWEEP_WORKTREE_ROWS = [
             },
             {
                 "status": "??",
-                "path": "tools/dashboard/static/vendor/highlightjs/highlight.min.js",
+                "path": "tools/dashboard/static/vendor/highlightjs/highlight-11.11.1.min.js",
                 "additions": 0,
                 "deletions": 0,
             },

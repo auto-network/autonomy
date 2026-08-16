@@ -2230,7 +2230,7 @@
         if (window.openpgp) return window.openpgp;
         await new Promise((resolve, reject) => {
           const el = document.createElement('script');
-          el.src = '/static/vendor/openpgp.min.js';
+          el.src = '/static/vendor/openpgp-6.3.1.min.js';
           el.onload = resolve;
           el.onerror = () => reject(new Error('failed to load the signing library'));
           document.head.appendChild(el);

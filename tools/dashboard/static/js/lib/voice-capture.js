@@ -15,7 +15,16 @@
  * Reuses the existing worklet (voice-smoke-worklet.js, processor "voice-smoke-pcm").
  */
 (function () {
-  var WORKLET_URL = '/static/js/lib/voice-smoke-worklet.js';
+  // The build this page was served from, published by the shell. A request that
+  // names a build may be kept by the browser; one that does not is rechecked on
+  // every load. Anything fetched after render has to add it itself.
+  function staticVersion() {
+    var meta = document.querySelector('meta[name="autonomy-static-version"]');
+    var v = meta && meta.getAttribute('content');
+    return v ? '?v=' + encodeURIComponent(v) : '';
+  }
+
+  var WORKLET_URL = '/static/js/lib/voice-smoke-worklet.js' + staticVersion();
 
   var s = {
     ws: null, wsOpen: false, started: false, talkActive: false, requiresReconnect: false,

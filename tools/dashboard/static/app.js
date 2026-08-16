@@ -1685,7 +1685,7 @@ async function _ensureHtml2Canvas(doc, win) {
   if (win.html2canvas) return win.html2canvas;
   await new Promise((resolve, reject) => {
     const s = doc.createElement('script');
-    s.src = '/static/vendor/html2canvas.min.js';
+    s.src = '/static/vendor/html2canvas-1.4.1.min.js';
     s.onload = resolve;
     s.onerror = reject;
     (doc.head || doc.documentElement).appendChild(s);
