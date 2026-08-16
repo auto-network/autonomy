@@ -147,6 +147,7 @@ class _FieldSpec:
     element: Any = None
     references: str | None = None
     reference_scope: str | None = None
+    exists: str | None = None
 
 
 def field(
@@ -159,6 +160,7 @@ def field(
     element: Any = None,
     references: str | None = None,
     reference_scope: str | None = None,
+    exists: str | None = None,
 ) -> Any:
     """Declare metadata for a SettingSchema field.
 
@@ -186,6 +188,13 @@ def field(
             about what either set means.
         reference_scope: ``"org"`` when the stored key is
             ``<org>:<value>`` rather than the value alone.
+        exists: this value names something on a filesystem, and what kind:
+            ``"file"``, ``"dir"`` or ``"executable"``. A READINESS check, and
+            deliberately never run at write. Whether a file is present is a
+            fact about the world rather than about the value: it differs
+            between machines, changes after the write, and would make an
+            organization's row refusable on one host and acceptable on
+            another. Declaring it lets a check verb ask on demand.
 
     ``description`` is required of every field a SHIPPED schema declares,
     asserted over the live registry rather than here — a throwaway schema
@@ -201,6 +210,7 @@ def field(
         element=element,
         references=references,
         reference_scope=reference_scope,
+        exists=exists,
     )
 
 
@@ -238,6 +248,12 @@ def _build_metadata_from_spec(ann: Any, spec: _FieldSpec) -> dict:
         meta["references"] = spec.references
     if spec.reference_scope is not None:
         meta["reference_scope"] = spec.reference_scope
+    if spec.exists is not None:
+        if spec.exists not in VALID_EXISTS:
+            raise SchemaValidationError(
+                f"exists must be one of {list(VALID_EXISTS)}, got {spec.exists!r}"
+            )
+        meta["exists"] = spec.exists
     return meta
 
 
@@ -357,6 +373,10 @@ def keyed_per_entity(
 
 
 VALID_HOMES = ("machine", "personal", "organization")
+
+#: What a declared ``exists`` check asserts about a filesystem entry. Checked
+#: on demand by a readiness verb, never at write -- see ``field(exists=...)``.
+VALID_EXISTS = ("file", "dir", "executable")
 
 
 def home(where: str) -> Any:

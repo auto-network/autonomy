@@ -111,6 +111,7 @@ class OrgCapabilityInstallV1(SettingSchema):
     contract: str = field(
         required=True,
         description="Contract identifier (unpinned name; version is the integer field)",
+        references="autonomy.capability.contract",
     )
     contract_version: int = field(
         required=True,
@@ -119,6 +120,7 @@ class OrgCapabilityInstallV1(SettingSchema):
     implementation: str = field(
         required=True,
         description="Implementation identifier (e.g. autonomy/github)",
+        references="autonomy.capability.impl",
     )
     implementation_version: int = field(
         required=True,

@@ -457,6 +457,42 @@ def _report_unresolved_references(set_id: str, rev: int, payload, org) -> None:
               f"--key {key} --from <file>")
 
 
+def cmd_set_check(args) -> None:
+    """Is this row satisfied, and everything it declares it depends on?
+
+    Metadata-driven end to end: it follows fields declaring ``references``
+    and asks fields declaring ``exists``. Nothing here knows what any
+    particular setting means, which is why a new set needs no code.
+    """
+    from tools.graph import settings_ops
+
+    # A revision is not needed to check a row: the stored row carries its
+    # own, and the check reads what is there rather than asserting a shape.
+    set_id = args.set_at_rev.split("#", 1)[0]
+    org = _org(args) or "personal"
+    try:
+        findings = settings_ops.check_setting(set_id, args.key, org=org)
+    except Exception as exc:
+        print(f"Error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if not findings:
+        print(f"  ✓ {set_id} key={args.key} — satisfied, with everything it "
+              f"declares it depends on")
+        return
+    print(f"  {len(findings)} unsatisfied dependenc"
+          f"{'y' if len(findings) == 1 else 'ies'} for {set_id} key={args.key}:\n")
+    for finding in findings:
+        print(f"  ! {finding.kind}")
+        print(f"      at      {finding.address}")
+        print(f"      what    {finding.detail}")
+        print(f"      looked  {finding.looked_in}")
+    print("\n  The walk follows DECLARED edges only. A relationship carried "
+          "by convention\n  rather than by a reference declaration is not "
+          "checked, and not reported.")
+    sys.exit(1)
+
+
 def cmd_set_add(args) -> None:
     set_id, rev = _parse_set_at_rev(args.set_at_rev)
     payload = _resolve_payload_input(args)
@@ -964,6 +1000,15 @@ def attach_set_subparser(sub) -> None:
     p_add.add_argument("set_at_rev",
                        help="set_id#schema_revision, e.g. autonomy.workspace#1")
     p_add.add_argument("--key", required=True, help="Identity within (set_id, this DB)")
+
+    p_check = set_sub.add_parser(
+        "check",
+        help="Verify a row and everything it declares it depends on",
+    )
+    p_check.add_argument("set_at_rev", metavar="set_id[#rev]")
+    p_check.add_argument("--key", required=True, help="Which row to check")
+    p_check.add_argument("--org", default=None, help="Organization to read as")
+    p_check.set_defaults(func=cmd_set_check)
     p_add.add_argument("--from", dest="from_file",
                        help="Path to JSON or YAML payload file (use '-' for stdin)")
     p_add.add_argument("--inline", dest="inline",

@@ -920,6 +920,106 @@ def unresolved_references(
     return out
 
 
+@dataclass
+class CheckFinding:
+    """One thing that is not satisfied, and where the checker looked."""
+    address: str          # set_id key=<key> in <org>
+    kind: str             # "missing_reference" | "missing_path" | "unreadable"
+    detail: str
+    looked_in: str        # the frame the answer came from
+
+
+def check_setting(
+    set_id: str,
+    key: str,
+    *,
+    org: str,
+    _seen: set | None = None,
+) -> list[CheckFinding]:
+    """Is this row satisfied, and everything it declares it depends on?
+
+    Entirely metadata-driven. It follows fields that declare ``references``
+    to the rows they name, and asks fields that declare ``exists`` whether
+    what they name is present. It knows nothing about workspaces,
+    capabilities or credentials -- give it any address and it walks whatever
+    that row declares, which is why adding a set requires no code here.
+
+    The traversal reaches exactly as far as the DECLARATIONS go. A
+    relationship carried only by a key convention is invisible to it, which
+    is the honest limit: it will not silently invent an edge nobody stated.
+
+    Every finding records the frame it was answered in, because "not found"
+    from a process that cannot see a filesystem is a different fact from
+    "not found" on the machine that owns it.
+    """
+    import os as _os
+
+    seen = _seen if _seen is not None else set()
+    if (set_id, key, org) in seen:
+        return []
+    seen.add((set_id, key, org))
+
+    findings: list[CheckFinding] = []
+    home = None
+    try:
+        home = schemas.declared_home(set_id)
+    except Exception:
+        pass
+    read_org = home if home in ("machine", "personal") else org
+    address = f"{set_id} key={key!r} in {read_org!r}"
+
+    try:
+        row = read_set_key(set_id, key, org=read_org, peers=[])
+    except Exception as exc:
+        return [CheckFinding(address, "unreadable",
+                             f"{type(exc).__name__}: {exc}"[:160], read_org)]
+    if row is None:
+        return [CheckFinding(address, "missing_reference",
+                             "no row under this key", read_org)]
+
+    schema = schemas.get_schema(set_id, int(row["schema_revision"]))
+    payload = row.get("payload") or {}
+
+    def walk(schema_cls, value, path_prefix: str) -> None:
+        meta = getattr(schema_cls, "_field_metadata", None) or {}
+        if not isinstance(value, dict):
+            return
+        for name, spec in meta.items():
+            item = value.get(name)
+            if item is None:
+                continue
+            element = (getattr(schema_cls, "_element_schemas", None) or {}).get(name)
+            if element is not None and isinstance(item, list):
+                for index, entry in enumerate(item):
+                    walk(element, entry, f"{path_prefix}{name}[{index}].")
+                continue
+            for one in (item if isinstance(item, list) else [item]):
+                if not isinstance(one, str) or not one:
+                    continue
+                target = spec.get("references")
+                if target:
+                    ref_key = (f"{org}:{one}"
+                               if spec.get("reference_scope") == "org" else one)
+                    findings.extend(
+                        check_setting(target, ref_key, org=org, _seen=seen))
+                kind = spec.get("exists")
+                if kind:
+                    ok = (_os.path.isfile(one) if kind == "file"
+                          else _os.path.isdir(one) if kind == "dir"
+                          else _os.path.isfile(one) and _os.access(one, _os.X_OK))
+                    if not ok:
+                        findings.append(CheckFinding(
+                            address, "missing_path",
+                            f"{path_prefix}{name} declares {kind} at {one!r}, "
+                            f"which is not there",
+                            f"the filesystem of the process running this check",
+                        ))
+
+    if schema is not None:
+        walk(schema, payload, "")
+    return findings
+
+
 def _assert_home(set_id: str | None, org: str | None) -> None:
     """Refuse a Setting routed to a database its schema does not live in.
 
