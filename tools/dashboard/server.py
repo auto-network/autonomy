@@ -26,6 +26,7 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Callable
 from urllib import error as urllib_error, request as urllib_request
+from urllib.parse import quote as url_quote
 
 logger = logging.getLogger(__name__)
 from datetime import datetime, timedelta, timezone
@@ -974,8 +975,8 @@ def _resolve_agentic_identity(agentic_source_id: str | None) -> dict:
     single ``target_source_id`` plus ``target_kind`` to interpret it.
     Returns a dict with: ``action_label``, ``member_key``,
     ``target_kind``, ``target_source_id``, ``target_org``,
-    ``dispatched_by_session``, ``title`` (target asset's title, or
-    action_label as fallback).
+    ``dispatched_by_session``, ``harness``, ``model``, and ``title``
+    (target asset's title, or action_label as fallback).
 
     Single source of truth used by ``_enrich_dispatch_runs``,
     ``_enrich_timeline_agentic``, and the live-active list builder so
@@ -989,6 +990,8 @@ def _resolve_agentic_identity(agentic_source_id: str | None) -> dict:
         "target_source_id": None,
         "target_org": None,
         "dispatched_by_session": None,
+        "harness": None,
+        "model": None,
         "title": None,
     }
     if not agentic_source_id:
@@ -1011,6 +1014,8 @@ def _resolve_agentic_identity(agentic_source_id: str | None) -> dict:
     out["target_source_id"] = meta.get("target_source_id") or None
     out["target_org"] = meta.get("target_org") or None
     out["dispatched_by_session"] = meta.get("dispatched_by_session") or None
+    out["harness"] = meta.get("harness") or None
+    out["model"] = meta.get("model") or None
     if out["target_kind"] == "bead" and out["target_source_id"]:
         try:
             bead = dao_beads.get_bead(out["target_source_id"])
@@ -2184,6 +2189,74 @@ async def api_timeline_stats(request):
     return JSONResponse(stats)
 
 
+def _agentic_trace_diff_target(run_name: str) -> dict | None:
+    """Resolve the best currently-viewable diff for an agentic run.
+
+    Resolution is intentionally cheap and ordered by fidelity:
+
+    1. The worktree monitor's in-memory rows, when the retained worktree has
+       commits or dirty files. This is the same state the Worktrees page uses.
+    2. A recorded host-side merge row for this session, which opens the
+       existing immutable commit overlay after the worktree is gone.
+    3. The deterministic session directory as a cold-cache fallback. The
+       Worktrees deep link refreshes/resolves the concrete repository row.
+
+    No git command runs on the Trace request path.
+    """
+    worktree_href = f"/worktrees?session={url_quote(run_name, safe='')}"
+    matching_rows = [
+        row for row in worktree_monitor.get_all()
+        if row.session_name == run_name
+    ]
+    changed_rows = [
+        row for row in matching_rows
+        if row.is_dirty or row.commits_ahead > 0
+    ]
+    if changed_rows:
+        return {
+            "kind": "worktree",
+            "session_name": run_name,
+            "href": worktree_href,
+            "repo_count": len(changed_rows),
+        }
+
+    try:
+        conn = _timeline_conn()
+        try:
+            merged = conn.execute(
+                "SELECT id, commit_hash, branch, branch_base "
+                "FROM dispatch_runs "
+                "WHERE COALESCE(kind, 'bead') = 'worktree-merge' "
+                "AND container_name = ? AND COALESCE(commit_hash, '') != '' "
+                "ORDER BY completed_at DESC LIMIT 1",
+                (run_name,),
+            ).fetchone()
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError):
+        merged = None
+    if merged is not None:
+        return {
+            "kind": "commit",
+            "run_id": merged["id"],
+            "commit_hash": merged["commit_hash"],
+            "branch": merged["branch"] or "",
+            "branch_base": merged["branch_base"] or "",
+        }
+
+    # The background monitor may not have completed its first sweep after a
+    # dashboard restart. Folder existence is enough to offer the stable deep
+    # link; that page performs its own fresh row resolution.
+    if (WORKTREES_DIR / run_name).is_dir():
+        return {
+            "kind": "worktree",
+            "session_name": run_name,
+            "href": worktree_href,
+            "repo_count": len(matching_rows),
+        }
+    return None
+
+
 async def api_dispatch_trace(request):
     """Full trace for a completed dispatch run.
 
@@ -2223,6 +2296,7 @@ async def api_dispatch_trace(request):
             "target_title": trace.get("target_title"),
             "dispatched_by_session": trace.get("dispatched_by_session"),
             "dispatched_by_project": trace.get("dispatched_by_project") or "",
+            "diff_target": trace.get("diff_target"),
         })
 
     # Get structured metadata from SQLite
@@ -2353,6 +2427,9 @@ async def api_dispatch_trace(request):
             "target_title": identity["title"],
             "dispatched_by_session": sender,
             "dispatched_by_project": sender_project,
+            "diff_target": (
+                None if is_live else _agentic_trace_diff_target(run_name)
+            ),
         })
 
     # Large artifacts still from disk (beads / librarian only)
@@ -3305,7 +3382,7 @@ async def api_resources_refresh(request):
 async def api_monitor_register(request):
     """POST /api/monitor/register — register a session with the in-process monitor.
 
-    Body: {tmux_name, type, jsonl_path, bead_id, project, run_dir?}
+    Body: {tmux_name, type, jsonl_path, bead_id, project, run_dir?, harness?, model?}
 
     Calls session_monitor.register_session() in-process so that the DB row
     AND the inotify watch AND the SSE registry broadcast all happen. This is
@@ -3333,12 +3410,27 @@ async def api_monitor_register(request):
     bead_id = body.get("bead_id")
     project = body.get("project")
     run_dir = body.get("run_dir")
+    requested_harness = body.get("harness")
+    if requested_harness is not None and not isinstance(requested_harness, str):
+        return JSONResponse({"error": "harness must be a string"}, status_code=400)
+    model = body.get("model")
+    if model is not None and not isinstance(model, str):
+        return JSONResponse({"error": "model must be a string"}, status_code=400)
 
     existing = dashboard_db.get_session(tmux_name)
     if existing is not None:
-        # Idempotent re-register: refresh the in-process watch without a
-        # duplicate INSERT. register_session() would swallow the
-        # IntegrityError silently and leave the watch un-refreshed.
+        identity_changed = bool(
+            (requested_harness and requested_harness != existing.get("harness"))
+            or (model and model != existing.get("model"))
+        )
+        if requested_harness or model:
+            dashboard_db.update_session_provider_identity(
+                tmux_name,
+                harness=requested_harness or None,
+                model=model or None,
+            )
+        # Idempotent re-register: refresh the in-process watch without
+        # rebuilding the tail state/parser context on every dispatcher poll.
         if jsonl_path and session_monitor._use_inotify:
             try:
                 session_monitor._add_file_watch(tmux_name, jsonl_path)
@@ -3347,7 +3439,11 @@ async def api_monitor_register(request):
                     "api_monitor_register: watch refresh failed for %s",
                     tmux_name,
                 )
+        if identity_changed:
+            await session_monitor._broadcast_registry()
         return JSONResponse({"ok": True, "tmux_name": tmux_name})
+
+    harness = requested_harness or "claude"
 
     try:
         await session_monitor.register_session(
@@ -3357,6 +3453,8 @@ async def api_monitor_register(request):
             run_dir=run_dir,
             bead_id=bead_id,
             project=project,
+            harness=harness,
+            model=model or None,
         )
     except Exception as exc:
         logger.exception("api_monitor_register failed for %s", tmux_name)
@@ -12629,12 +12727,24 @@ async def _collect_dispatch_data() -> dict:
             ),
         }
         if agentic_ident is not None:
+            monitored = dashboard_db.get_session(run.get("id", "")) or {}
             active_row["action_label"] = agentic_ident["action_label"]
             active_row["member_key"] = agentic_ident["member_key"]
             active_row["target_kind"] = agentic_ident["target_kind"]
             active_row["target_source_id"] = agentic_ident["target_source_id"]
             active_row["target_org"] = agentic_ident["target_org"]
             active_row["dispatched_by_session"] = agentic_ident["dispatched_by_session"]
+            # Provider identity belongs to the monitored session.  The eager
+            # agentic source metadata is the launch-time fallback for the
+            # short interval before the JSONL registration arrives.
+            active_row["harness"] = (
+                monitored.get("harness") or agentic_ident["harness"]
+                or run.get("harness") or None
+            )
+            active_row["model"] = (
+                monitored.get("model") or agentic_ident["model"]
+                or run.get("model") or None
+            )
         active.append(active_row)
 
     # Exclude running beads from waiting/blocked to avoid double-counting
@@ -16507,6 +16617,7 @@ async def api_agent_action_dispatch(request):
             target_org=target_org,
             dispatched_by_session=dispatched_by_session or "",
             title=title,
+            harness=workspace.harness,
         )
     except Exception as exc:
         logger.exception("agent-actions: insert_agentic_session failed")

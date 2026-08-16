@@ -34,10 +34,9 @@
     </div>
   </template>
 
-  <!-- Completed agentic dispatch — different shape than beads: no
-       commit, no diff, no experience report. Show the action that
-       ran, the asset it operated on, and provenance back to sender +
-       agentic source. Session log is the primary trace artifact. -->
+  <!-- Completed agentic dispatch. The run's retained worktree (or its
+       recorded merge commit) is resolved as a typed diff target, alongside
+       the action/asset provenance and captured session log. -->
   <template x-if="!loading && !error && trace && !trace.is_live && trace.kind === 'agentic'">
     <div>
 
@@ -168,15 +167,34 @@
         </div>
       </section>
 
-      <!-- Session log — the primary trace artifact for agentic runs.
-           This is the JSONL of what the agent actually did. -->
-      <template x-if="trace.has_session">
-        <div class="mb-6">
+      <!-- Run artifacts: the worktree/commit review reuses the same overlay
+           as Worktrees and Activity; the session log remains the JSONL of
+           what the agent actually did. -->
+      <div class="mb-6 flex flex-wrap gap-2 items-center">
+        <template x-if="trace.diff_target && trace.diff_target.kind === 'worktree'">
+          <a :href="trace.diff_target.href"
+             @click.prevent="openDiff()"
+             data-testid="trace-view-diffs"
+             class="px-4 py-2 bg-amber-900/60 hover:bg-amber-800/70 border border-amber-700/70 rounded-lg text-sm text-amber-200">
+            View Diffs
+          </a>
+        </template>
+        <template x-if="trace.diff_target && trace.diff_target.kind === 'commit'">
+          <button @click="openDiff()"
+                  data-testid="trace-view-diffs"
+                  class="px-4 py-2 bg-amber-900/60 hover:bg-amber-800/70 border border-amber-700/70 rounded-lg text-sm text-amber-200">
+            View Diffs
+          </button>
+        </template>
+        <template x-if="trace.has_session">
           <button
             @click="openSessionLog()"
             class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm text-gray-300"
           >View Session Log</button>
-        </div>
+        </template>
+      </div>
+      <template x-if="diffError">
+        <div class="mb-4 text-xs text-red-400" x-text="diffError"></div>
       </template>
       <template x-if="!trace.has_session">
         <div class="mb-6 text-xs text-gray-500">No session log captured for this run.</div>

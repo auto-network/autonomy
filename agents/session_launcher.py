@@ -1240,6 +1240,11 @@ def launch_session(
             "container_name": name,
             "launched_at": datetime.now(timezone.utc).isoformat(),
             "harness": harness,
+            # Seed the dashboard's monitored-session row before the first
+            # provider response declares its model in the JSONL.  Dispatch
+            # cards can therefore paint the provider/model badge immediately,
+            # and the monitor selects the correct parser from byte zero.
+            "model": resolved_model,
             "needs_nested_docker": needs_nested_docker,
             "session_runtime": resolved_runtime,
         }

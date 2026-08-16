@@ -2142,6 +2142,7 @@ def insert_agentic_session(
     target_org: str,
     dispatched_by_session: str,
     title: str,
+    harness: str | None = None,
 ) -> dict:
     """Eager-create an ``agentic`` source row at agent-action dispatch time.
 
@@ -2165,6 +2166,7 @@ def insert_agentic_session(
         "set_revision": set_revision,
         "member_key": member_key,
         "model": model,
+        "harness": harness or None,
         "target_source_id": target_source_id,
         "target_kind": target_kind or "source",
         "target_org": target_org,

@@ -519,6 +519,7 @@ def insert_session(
     project: str,
     *,
     harness: str = "claude",
+    model: str | None = None,
     harness_state: str = "{}",
     bead_id: str | None = None,
     jsonl_path: str | None = None,
@@ -543,17 +544,50 @@ def insert_session(
     curr_jsonl_file = jsonl_path  # initially same as jsonl_path
     conn.execute(
         "INSERT INTO tmux_sessions"
-        " (tmux_name, type, project, harness, harness_state,"
+        " (tmux_name, type, project, harness, model, harness_state,"
         "  bead_id, jsonl_path, session_uuid,"
         "  resolution_dir, session_uuids, curr_jsonl_file, created_at,"
         "  harness_token, state, attention)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (tmux_name, session_type, project, harness, harness_state,
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (tmux_name, session_type, project, harness, model, harness_state,
          bead_id, jsonl_path, session_uuid,
          resolution_dir, session_uuids, curr_jsonl_file, time.time(),
          harness_token, state, "idle" if state == "ACTIVE" else None),
     )
     conn.commit()
+
+
+def update_session_provider_identity(
+    tmux_name: str,
+    *,
+    harness: str | None = None,
+    model: str | None = None,
+) -> bool:
+    """Refresh provider identity on an existing monitored session row.
+
+    The dispatcher re-registers live JSONLs idempotently. Updating these two
+    columns must not re-run full registration (which would reset in-memory
+    tail/parser state on every stats poll), so the monitor IPC endpoint uses
+    this narrow writer before refreshing the existing watch.
+    """
+    parts: list[str] = []
+    vals: list[object] = []
+    if harness is not None:
+        parts.append("harness=?")
+        vals.append(harness)
+    if model is not None:
+        parts.append("model=?")
+        vals.append(model)
+    if not parts:
+        return False
+    vals.append(tmux_name)
+    conn = get_conn()
+    cur = conn.execute(
+        f"UPDATE tmux_sessions SET {', '.join(parts)} WHERE tmux_name=?",
+        vals,
+    )
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def update_jsonl_link(

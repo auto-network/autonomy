@@ -1855,12 +1855,31 @@ def _register_agentic_session(
     """
     tmux_name = run_id
     project = jsonl_file.parent.name if jsonl_file.is_file() else "autonomy"
+    # The launcher stamps the exact provider identity alongside the JSONL.
+    # Carry it across the dispatcher→dashboard IPC boundary so the monitor
+    # chooses the right parser from byte zero (and the Dispatch card can show
+    # its model before the first assistant response arrives).
+    harness = "claude"
+    model: str | None = None
+    if output_dir:
+        meta_path = Path(output_dir) / "sessions" / ".session_meta.json"
+        try:
+            meta = json.loads(meta_path.read_text())
+        except (OSError, json.JSONDecodeError, TypeError):
+            meta = {}
+        if isinstance(meta, dict):
+            harness = str(meta.get("harness") or "claude")
+            raw_model = meta.get("model")
+            if isinstance(raw_model, str) and raw_model:
+                model = raw_model
     body = {
         "tmux_name": tmux_name,
         "type": "agentic",
         "jsonl_path": str(jsonl_file),
         "project": project,
         "run_dir": output_dir or None,
+        "harness": harness,
+        "model": model,
     }
     _monitor_post("/api/monitor/register", body, tmux_name=tmux_name)
 
@@ -2759,6 +2778,22 @@ def poll_and_collect_agentic() -> None:
             status = "FAILED"
             reason = f"container exited with code {exit_code}"
 
+        # Agentic decisions already carry the exact worktree result. Persist
+        # it instead of replacing it with empty strings so Trace retains the
+        # branch/base/commit identity after the container exits. A later
+        # Worktrees merge row remains the authoritative immutable diff target.
+        decision_commit = ""
+        decision_branch = ""
+        decision_base = ""
+        if decision is not None:
+            decision_commit = str(
+                decision.get("commit") or decision.get("commit_hash") or ""
+            )
+            decision_branch = str(decision.get("branch") or "")
+            decision_base = str(
+                decision.get("base_commit") or decision.get("branch_base") or ""
+            )
+
         try:
             insert_run(
                 run_id=run_id,
@@ -2768,9 +2803,9 @@ def poll_and_collect_agentic() -> None:
                 status=status,
                 reason=reason,
                 decision=decision,
-                commit_hash="",
-                branch="",
-                branch_base="",
+                commit_hash=decision_commit,
+                branch=decision_branch,
+                branch_base=decision_base,
                 image=image,
                 container_name=container_name,
                 exit_code=exit_code,

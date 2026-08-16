@@ -1143,6 +1143,7 @@ class SessionMonitor:
         session_uuid: str | None = None,
         resolution_dir: Path | None = None,
         harness: str = "claude",
+        model: str | None = None,
         harness_state: str = "{}",
         harness_token: str | None = None,
     ) -> None:
@@ -1180,6 +1181,7 @@ class SessionMonitor:
                 session_type=session_type,
                 project=project,
                 harness=harness,
+                model=model,
                 harness_state=harness_state,
                 bead_id=bead_id,
                 jsonl_path=path_str,
@@ -1235,6 +1237,9 @@ class SessionMonitor:
             vals.append(project)
             parts.append("harness=?")
             vals.append(harness)
+            if model is not None:
+                parts.append("model=?")
+                vals.append(model)
             if parts:
                 vals.append(tmux_name)
                 conn.execute(
@@ -1381,6 +1386,8 @@ class SessionMonitor:
         run_dir: Path | str | None = None,
         bead_id: str | None = None,
         project: str | None = None,
+        harness: str = "claude",
+        model: str | None = None,
     ) -> None:
         """Register a session of any type (container/host/dispatch/librarian).
 
@@ -1428,6 +1435,8 @@ class SessionMonitor:
             bead_id=bead_id,
             session_uuid=session_uuid,
             resolution_dir=res_dir,
+            harness=harness,
+            model=model,
             harness_token=harness_token,
         )
         # Persist on the row, not in memory. Every in-memory per-session

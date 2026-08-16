@@ -61,6 +61,8 @@ class TestRegisterEndpoint:
                     "bead_id": "auto-test",
                     "project": "autonomy",
                     "run_dir": str(sess_dir.parent),
+                    "harness": "codex",
+                    "model": "gpt-5.6-sol",
                 },
             )
 
@@ -80,6 +82,8 @@ class TestRegisterEndpoint:
             assert row["jsonl_path"] == str(jsonl), (
                 f"jsonl_path not persisted: {row['jsonl_path']!r}"
             )
+            assert row["harness"] == "codex"
+            assert row["model"] == "gpt-5.6-sol"
 
             # In-process side effects — the auto-ylj6r gap test.
             # 1. _tail_states dict contains an entry for the tmux_name
@@ -136,7 +140,8 @@ class TestRegisterEndpoint:
             r1 = client.post("/api/monitor/register", json=body)
             assert r1.status_code == 200, f"first POST: {r1.status_code} {r1.text[:200]}"
 
-            r2 = client.post("/api/monitor/register", json=body)
+            refreshed_body = dict(body, harness="codex", model="gpt-5.6-sol")
+            r2 = client.post("/api/monitor/register", json=refreshed_body)
             assert r2.status_code == 200, (
                 f"second POST (idempotent re-register) returned {r2.status_code} "
                 f"body={r2.text[:200]!r}. Handler must accept re-registration "
@@ -155,6 +160,9 @@ class TestRegisterEndpoint:
                 f"Idempotent re-register produced {count} rows for "
                 "tmux_name='auto-test-002'; must collapse to 1 via upsert."
             )
+            row = fetch_row(db_path, "auto-test-002")
+            assert row["harness"] == "codex"
+            assert row["model"] == "gpt-5.6-sol"
 
 
 @pytest.mark.asyncio
