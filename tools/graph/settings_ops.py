@@ -847,6 +847,63 @@ def _db_path(org: str | None) -> str | None:
     return str(_org_db_path(org))
 
 
+def unresolved_references(
+    set_id: str,
+    revision: int,
+    payload: dict,
+    *,
+    org: str,
+) -> list[tuple[str, str]]:
+    """Declared references in *payload* whose target does not exist yet.
+
+    A field that declares ``references`` says its value is a KEY in another
+    set. That declaration is the whole input: this walks field metadata and
+    knows nothing about what either set means, so a capability does not
+    implement its own completeness check and cannot forget to.
+
+    Returns ``(set_id, key)`` pairs for targets that are absent. Reporting
+    rather than refusing is deliberate -- a row may legitimately be written
+    before the credential it names is provisioned, and the useful thing is to
+    say which key is still needed, by name.
+    """
+    out: list[tuple[str, str]] = []
+
+    def walk(schema: Any, value: Any) -> None:
+        meta = getattr(schema, "_field_metadata", None) or {}
+        if not isinstance(value, dict):
+            return
+        for name, spec in meta.items():
+            item = value.get(name)
+            if item is None:
+                continue
+            element = (getattr(schema, "_element_schemas", None) or {}).get(name)
+            if element is not None and isinstance(item, list):
+                for entry in item:
+                    walk(element, entry)
+            target = spec.get("references")
+            if not target:
+                continue
+            for one in (item if isinstance(item, list) else [item]):
+                if not isinstance(one, str) or not one:
+                    continue
+                scoped = spec.get("reference_scope") == "org"
+                key = f"{org}:{one}" if scoped else one
+                # A key that carries the org is a key in a store that holds
+                # several orgs, which is the operator's own -- an org-homed
+                # set has no reason to repeat the org it already is. Where
+                # the target says where it lives, that wins.
+                home = schemas.declared_home(target) or ("personal" if scoped else None)
+                if resolve_set_key(
+                    target, key, org=home if home else org, peers=[],
+                ) is None:
+                    out.append((target, key))
+
+    schema = schemas.get_schema(set_id, int(revision))
+    if schema is not None:
+        walk(schema, payload)
+    return out
+
+
 def _assert_home(set_id: str | None, org: str | None) -> None:
     """Refuse a Setting routed to a database its schema does not live in.
 

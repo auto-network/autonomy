@@ -145,6 +145,8 @@ class _FieldSpec:
     description: str | None = None
     enum: list | None = None
     element: Any = None
+    references: str | None = None
+    reference_scope: str | None = None
 
 
 def field(
@@ -155,6 +157,8 @@ def field(
     description: str | None = None,
     enum: list | None = None,
     element: Any = None,
+    references: str | None = None,
+    reference_scope: str | None = None,
 ) -> Any:
     """Declare metadata for a SettingSchema field.
 
@@ -173,7 +177,15 @@ def field(
         enum: list of valid values for enum-shaped fields.
         element: per-element shape for list-typed fields. Bare Python
             types become JSON-schema type names; a dict of field→type
-            describes a list-of-dict element shape.
+            describes a list-of-dict element shape; a ``SettingSchema``
+            marked ``internal`` declares the element properly, and is the
+            form that enforcement and reference checking can descend into.
+        references: this field's value is a KEY in the named set. Declaring
+            it is what lets a generic checker report that the thing being
+            referred to has not been provisioned, without knowing anything
+            about what either set means.
+        reference_scope: ``"org"`` when the stored key is
+            ``<org>:<value>`` rather than the value alone.
 
     ``description`` is required of every field a SHIPPED schema declares,
     asserted over the live registry rather than here — a throwaway schema
@@ -187,10 +199,16 @@ def field(
         description=description,
         enum=enum,
         element=element,
+        references=references,
+        reference_scope=reference_scope,
     )
 
 
 def _normalize_element(element: Any) -> Any:
+    # A declared element shape is kept as the class here; the metadata pass
+    # moves it to ``_element_schemas`` and leaves plain data behind.
+    if isinstance(element, type) and issubclass(element, SettingSchema):
+        return element
     if isinstance(element, type):
         return _python_type_to_json_type(element)
     if isinstance(element, dict):
@@ -216,6 +234,10 @@ def _build_metadata_from_spec(ann: Any, spec: _FieldSpec) -> dict:
         meta["enum"] = list(spec.enum)
     if spec.element is not None:
         meta["element"] = _normalize_element(spec.element)
+    if spec.references is not None:
+        meta["references"] = spec.references
+    if spec.reference_scope is not None:
+        meta["reference_scope"] = spec.reference_scope
     return meta
 
 
@@ -466,6 +488,34 @@ def _register_variant(cls: type) -> None:
     slug = snake_case(cls.__name__)
     parent._variants[slug] = cls
     cls._variant_slug = slug
+
+
+def _extract_element_schemas(cls: type) -> None:
+    """Move declared element shapes out of the JSON metadata.
+
+    ``_field_metadata`` is serialized -- it is written into every org
+    database by the schema-meta flush and exported as JSON schema -- so a
+    class cannot live in it. The class goes to ``_element_schemas``, where
+    enforcement and reference checking read it, and the metadata keeps the
+    element's field shape as plain data, exactly as a hand-written dict
+    would have.
+    """
+    meta = cls.__dict__.get("_field_metadata")
+    if not meta:
+        return
+    element_schemas = dict(getattr(cls, "_element_schemas", None) or {})
+    for name, spec in meta.items():
+        element = spec.get("element")
+        if isinstance(element, type) and issubclass(element, SettingSchema):
+            element_schemas[name] = element
+            spec["element"] = {
+                sub: {k: v for k, v in sub_spec.items() if k != "element"}
+                for sub, sub_spec in (
+                    getattr(element, "_field_metadata", None) or {}
+                ).items()
+            }
+    if element_schemas:
+        cls._element_schemas = element_schemas
 
 
 def _compose_set_id_from_suffix(cls: type) -> None:
@@ -852,6 +902,7 @@ class SettingSchema:
             merged.update(explicit)
             merged.update(derived)
             cls._field_metadata = merged
+        _extract_element_schemas(cls)
         _compose_set_id_from_suffix(cls)
         _register_variant(cls)
         _auto_register_schema(cls)
@@ -1117,6 +1168,21 @@ def enforce_declared_fields(schema: type, payload: Any) -> None:
             )
         if not present or value is None:
             continue
+        element = (getattr(schema, "_element_schemas", None) or {}).get(name)
+        if element is not None and isinstance(value, list):
+            for index, item in enumerate(value):
+                if not isinstance(item, dict):
+                    raise SchemaValidationError(
+                        f"{schema.__name__}: {name}[{index}] must be an object, "
+                        f"got {type(item).__name__}"
+                    )
+                try:
+                    enforce_declared_fields(element, item)
+                except SchemaValidationError as exc:
+                    raise SchemaValidationError(
+                        f"{schema.__name__}: {name}[{index}] {exc}"
+                    ) from None
+
         want = _JSON_TYPE_TO_PY.get(spec.get("type"))
         if want is not None and not isinstance(value, want):
             raise SchemaValidationError(

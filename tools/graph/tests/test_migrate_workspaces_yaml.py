@@ -196,16 +196,20 @@ def test_migration_payload_shape(yaml_path, orgs_dir):
         ),
     }
     assert payload["env_from_host"] == ["GITHUB_RELEASE_PULL_TOKEN"]
-    # Repos normalized.
+    # Repos normalized: the clone URL is split into the stored form, so the
+    # host a credential is keyed by is data rather than something parsed
+    # back out of a URL at the moment it is needed.
     assert payload["repos"] == [
         {
-            "url": "git@github.com:anchore/widgets.git",
             "mount": "/workspace/widgets",
+            "host": "github.com",
+            "repo": "anchore/widgets",
             "writable": True,
         },
         {
-            "url": "git@github.com:anchore/widgets_ng.git",
             "mount": "/workspace/widgets_ng",
+            "host": "github.com",
+            "repo": "anchore/widgets_ng",
             "writable": True,
         },
     ]
