@@ -1462,8 +1462,20 @@ class ShadowedWrite:
     winner_id: str
     winner_org: str | None
     winner_state: str
+    #: Fields whose written value is overwritten by an override on this same
+    #: row. Empty when the write lost to a different BASE instead.
+    masked_fields: tuple[str, ...] = ()
 
     def __str__(self) -> str:
+        if self.masked_fields:
+            return (
+                f"MASKED: {self.key!r} was written, and an override on this "
+                f"same row ({self.winner_id[:11]}) overwrites "
+                f"{', '.join(sorted(self.masked_fields))}. Readers keep the "
+                f"override's values for those fields, so the write did not "
+                f"change what anything reads. Amend or remove the override; "
+                f"`graph set layers` shows both rows."
+            )
         where = (f"organization {self.winner_org!r}"
                  if self.winner_org != self.written_org
                  else "the same organization")
@@ -1529,12 +1541,72 @@ def shadowed_write(
     except Exception:
         return None
 
-    if len(candidates) < 2:
+    if len(candidates) >= 2:
+        candidates.sort(key=lambda c: PRECEDENCE.get(c[1], 99))
+        if candidates[0][0] != written_id:
+            return _shadowed_by_base(
+                key, written_id, org, state, *candidates[0])
+    # Winning the base contest is not the same as being read. An override on
+    # this row is merged over it, so a write can win and still change nothing
+    # -- which is the commonest way a write is silently neutralised, and was
+    # invisible here because the query above excludes overrides by design.
+    return _masked_by_override(set_id, key, written_id, org, state)
+
+
+def _masked_by_override(
+    set_id: str, key: str, written_id: str, org: str | None, state: str,
+) -> "ShadowedWrite | None":
+    """Report the fields an override on this row overwrites, if any."""
+    try:
+        db = _open_read(org, set_id)
+    except Exception:
         return None
-    candidates.sort(key=lambda c: PRECEDENCE.get(c[1], 99))
-    winner_id, winner_state, winner_org = candidates[0]
-    if winner_id == written_id:
+    try:
+        written = db.conn.execute(
+            "SELECT payload FROM settings WHERE id = ?", (written_id,)
+        ).fetchone()
+        overrides = db.conn.execute(
+            "SELECT id, payload, publication_state FROM settings "
+            "WHERE supersedes = ? AND deprecated = 0 "
+            "ORDER BY created_at ASC, rowid ASC",
+            (written_id,),
+        ).fetchall()
+    except Exception:
         return None
+    finally:
+        db.close()
+    if written is None or not overrides:
+        return None
+    try:
+        base_payload = json.loads(written["payload"]) or {}
+        merged = dict(base_payload)
+        last = overrides[-1]
+        for row in overrides:
+            merged = json_merge_patch(merged, json.loads(row["payload"]) or {})
+    except Exception:
+        return None
+    masked = tuple(
+        name for name, value in base_payload.items()
+        if name in merged and merged[name] != value
+    )
+    if not masked:
+        return None
+    return ShadowedWrite(
+        key=key,
+        written_id=written_id,
+        written_org=org,
+        written_state=state,
+        winner_id=last["id"],
+        winner_org=org,
+        winner_state=last["publication_state"],
+        masked_fields=masked,
+    )
+
+
+def _shadowed_by_base(
+    key: str, written_id: str, org: str | None, state: str,
+    winner_id: str, winner_state: str, winner_org: str | None,
+) -> "ShadowedWrite":
     return ShadowedWrite(
         key=key,
         written_id=written_id,
@@ -1712,6 +1784,88 @@ _REPLACED_PATTERNS = ("singleton", "keyed_per_entity")
 def _access_pattern_for(set_id: str, revision: int) -> str | None:
     schema = schemas.get_schema(set_id, int(revision))
     return getattr(schema, "_access_pattern", None) if schema else None
+
+
+def layers_for(set_id: str, key: str, *, org: str | None) -> dict:
+    """Every stored row behind one resolved value, and what each contributes.
+
+    Resolution returns one merged payload, and every surface in the system
+    returns that -- ``read``, ``members``, both endpoints. So the store
+    presents as a dictionary of key to value while it is really rows and
+    layers, and a reader whose write appears to do nothing has no way to
+    see why. That is not a gap in someone's knowledge; it is a gap in what
+    anything will tell them.
+
+    Reports the base, every override in application order with the fields
+    each one changes, and the merged result. Rows are addressed by id
+    because an override whose base has been deleted cannot be reached any
+    other way.
+    """
+    out: dict = {"set_id": set_id, "key": key, "org": org,
+                 "base": None, "overrides": [], "resolved": None,
+                 "orphans": []}
+    try:
+        db = _open_read(org, set_id)
+    except Exception:
+        return out
+    try:
+        rows = db.conn.execute(
+            "SELECT id, payload, publication_state, supersedes, excludes, "
+            "       deprecated, created_at "
+            "FROM settings WHERE set_id = ? AND key = ? "
+            "ORDER BY created_at ASC, rowid ASC",
+            (set_id, key),
+        ).fetchall()
+    except Exception:
+        return out
+    finally:
+        db.close()
+
+    bases = [r for r in rows if r["supersedes"] is None and not r["excludes"]]
+    overrides = [r for r in rows if r["supersedes"] is not None]
+    if not bases:
+        # Overrides with no base resolve to nothing and are invisible to
+        # every read; they are reported here so they can be removed.
+        out["orphans"] = [
+            {"id": r["id"], "supersedes": r["supersedes"],
+             "state": r["publication_state"]}
+            for r in overrides
+        ]
+        return out
+
+    bases.sort(key=lambda r: PRECEDENCE.get(r["publication_state"], 99))
+    base = bases[0]
+    try:
+        merged = json.loads(base["payload"]) or {}
+    except Exception:
+        return out
+    out["base"] = {"id": base["id"], "state": base["publication_state"],
+                   "payload": dict(merged)}
+
+    for row in overrides:
+        if row["supersedes"] != base["id"]:
+            out["orphans"].append({
+                "id": row["id"], "supersedes": row["supersedes"],
+                "state": row["publication_state"]})
+            continue
+        try:
+            patch = json.loads(row["payload"]) or {}
+        except Exception:
+            continue
+        before = dict(merged)
+        merged = json_merge_patch(merged, patch)
+        out["overrides"].append({
+            "id": row["id"],
+            "state": row["publication_state"],
+            "deprecated": bool(row["deprecated"]),
+            "changes": sorted(
+                name for name in set(before) | set(merged)
+                if before.get(name) != merged.get(name)
+            ),
+            "patch": patch,
+        })
+    out["resolved"] = merged
+    return out
 
 
 def illegal_amendments(*, org: str | None) -> list[dict]:
