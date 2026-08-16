@@ -333,3 +333,62 @@ def test_dispatcher_reuses_session_launcher_opus_constant():
     """The dead duplicate was retired: dispatcher.DEFAULT_OPUS_MODEL is the very
     object launch_session_cli resolves against, not a look-alike copy."""
     assert dispatcher.DEFAULT_OPUS_MODEL is session_launcher.DEFAULT_OPUS_MODEL
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Version-suffixed aliases: naming a model exactly, without moving the
+# default out from under every unlabelled bead.
+# ══════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.parametrize(
+    "label,expected",
+    [
+        ("model:opus-5", "claude-opus-5"),
+        ("model:sonnet-5", "claude-sonnet-5"),
+        ("model:fable-5", "claude-fable-5"),
+    ],
+)
+def test_version_suffixed_alias_resolves(label, expected):
+    assert dispatcher._resolve_bead_model([label]) == expected
+
+
+@pytest.mark.parametrize(
+    "label,expected",
+    [
+        ("model:claude-opus-5", "claude-opus-5"),
+        ("model:claude-sonnet-5", "claude-sonnet-5"),
+    ],
+)
+def test_full_model_id_resolves_without_its_own_key(label, expected):
+    """Adding a model as a VALUE also makes its full id nameable.
+
+    ``_resolve_bead_model`` accepts anything present in ``MODEL_ALIASES``'s
+    values, so one entry serves both ``model:opus-5`` and the explicit
+    ``model:claude-opus-5`` — no second key, no chance of the two drifting.
+    """
+    assert dispatcher._resolve_bead_model([label]) == expected
+
+
+def test_bare_family_aliases_are_pinned_not_latest():
+    """The invariant that makes adding a model safe.
+
+    ``opus`` is DEFAULT_OPUS_MODEL, which is ALSO what an unlabelled bead
+    runs. Repointing it at each new release would silently change the model
+    for every bead that names nothing, so the bare aliases stay pinned and
+    new versions get their own key. If this test fails, adding a model moved
+    the default — which is the failure the version-suffixed keys exist to
+    prevent.
+    """
+    assert dispatcher._resolve_bead_model(["model:opus"]) == session_launcher.DEFAULT_OPUS_MODEL
+    assert dispatcher._resolve_bead_model(["model:sonnet"]) == dispatcher.DEFAULT_SONNET_MODEL
+    # And the no-label path is untouched: no --model flag at all.
+    assert dispatcher._resolve_bead_model(["readiness:approved"]) is None
+
+
+def test_unregistered_version_still_fails_loudly():
+    """A plausible-looking typo must stop the dispatch, not run the default."""
+    with pytest.raises(ValueError) as exc:
+        dispatcher._resolve_bead_model(["model:opus-9"])
+    assert "opus-9" in str(exc.value)
+    assert "opus-5" in str(exc.value)  # the message lists what IS valid
