@@ -1636,8 +1636,8 @@ def test_scan_all_worktrees_collapses_untracked_directories(tmp_path, monkeypatc
 
     vendor_dir = worktree / "tools" / "dashboard" / "static" / "vendor" / "highlightjs"
     vendor_dir.mkdir(parents=True)
-    (vendor_dir / "highlight.min.js").write_text("hljs\n")
-    (vendor_dir / "github-dark.min.css").write_text("css\n")
+    (vendor_dir / "highlight-11.11.1.min.js").write_text("hljs\n")
+    (vendor_dir / "github-dark-11.11.1.min.css").write_text("css\n")
     (vendor_dir / "LICENSE").write_text("license\n")
 
     rows = wm.scan_all_worktrees(

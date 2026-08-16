@@ -91,9 +91,9 @@ Single HTML template with:
 <head>
   <title>Autonomy Dashboard</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release/build/highlight.min.js"></script>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release/build/styles/github-dark.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked-15.0.12.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release/build/highlight-11.11.1.min.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release/build/styles/github-dark-11.11.1.min.css">
 </head>
 <body class="bg-gray-900 text-gray-100">
   <div class="flex h-screen">

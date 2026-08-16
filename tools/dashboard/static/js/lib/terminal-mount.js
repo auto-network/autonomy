@@ -35,20 +35,20 @@
  */
 (function () {
   var VENDOR = [
-    "/static/vendor/xterm.min.js",
-    "/static/vendor/addon-fit.min.js",
-    "/static/vendor/addon-clipboard.min.js",
+    "/static/vendor/xterm-5.5.0.min.js",
+    "/static/vendor/addon-fit-0.11.0.min.js",
+    "/static/vendor/addon-clipboard-0.2.0.min.js",
   ];
-  var STYLE = "/static/vendor/xterm.min.css";
+  var STYLE = "/static/vendor/xterm-5.5.0.min.css";
   var pending = null;
 
   function version() {
-    // Carry whatever cache-busting the shell stamped on its own assets, so a
-    // deploy invalidates these too instead of serving a stale emulator.
-    var stamped = document.querySelector('link[href*="/static/tailwind.css"]');
-    var href = stamped && stamped.getAttribute("href");
-    var q = href ? href.indexOf("?") : -1;
-    return q > -1 ? href.slice(q) : "";
+    // The build the page was served from, so a deploy invalidates these too
+    // rather than serving a stale emulator. Read from the value the shell
+    // publishes; anything fetched after render needs the same one.
+    var meta = document.querySelector('meta[name="autonomy-static-version"]');
+    var v = meta && meta.getAttribute("content");
+    return v ? "?v=" + encodeURIComponent(v) : "";
   }
 
   function loadScript(src) {

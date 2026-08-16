@@ -221,8 +221,8 @@
       'html,body{background:#020617;color:#e5e7eb;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;}' +
       '</style>' +
       parts.head +
-      '<script src="/static/vendor/tailwind-browser.min.js"><\/script>' +
-      '<script defer src="/static/vendor/alpine.min.js"><\/script>' +
+      '<script src="/static/vendor/tailwind-browser-4.3.3.min.js"><\/script>' +
+      '<script defer src="/static/vendor/alpine-3.15.12.min.js"><\/script>' +
       // Structural pager rules stay AFTER deck styles — the scroll root and
       // snap mechanics must hold regardless of what the deck ships.
       '<style>' +

@@ -11,7 +11,16 @@
  * transport pointer; org and root_pub come from the dashboard-resolved invite
  * context, and the handshake pins the channel to that root.
  */
-const CORE_URL = '/static/js/lib/relaykit-core.js';
+// The build this page was served from, published by the shell. A request that
+// names a build may be kept by the browser; one that does not is rechecked on
+// every load. Anything fetched after render has to add it itself.
+function staticVersion() {
+  var meta = document.querySelector('meta[name="autonomy-static-version"]');
+  var v = meta && meta.getAttribute('content');
+  return v ? '?v=' + encodeURIComponent(v) : '';
+}
+
+const CORE_URL = '/static/js/lib/relaykit-core.js' + staticVersion();
 const RELAY_WS_ORIGIN = 'wss://relay.auto.network';
 
 export function channelUrl(channelToken, { origin = RELAY_WS_ORIGIN } = {}) {

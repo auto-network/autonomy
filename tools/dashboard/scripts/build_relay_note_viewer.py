@@ -15,10 +15,10 @@ OUTPUT = VIEWER_DIR / ".build" / "note-viewer.html"
 #: over the channel, where it has no origin and can fetch nothing, so the
 #: parser, sanitizer and highlighter must physically be in the one file.
 VENDORS = {
-    "/*__MARKED_JS__*/": VENDOR / "marked.min.js",
-    "/*__PURIFY_JS__*/": VENDOR / "purify.min.js",
-    "/*__HIGHLIGHT_JS__*/": VENDOR / "highlightjs" / "highlight.min.js",
-    "/*__HIGHLIGHT_CSS__*/": VENDOR / "highlightjs" / "github-dark.min.css",
+    "/*__MARKED_JS__*/": VENDOR / "marked-15.0.12.min.js",
+    "/*__PURIFY_JS__*/": VENDOR / "purify-3.4.12.min.js",
+    "/*__HIGHLIGHT_JS__*/": VENDOR / "highlightjs" / "highlight-11.11.1.min.js",
+    "/*__HIGHLIGHT_CSS__*/": VENDOR / "highlightjs" / "github-dark-11.11.1.min.css",
 }
 
 
