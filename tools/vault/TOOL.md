@@ -44,6 +44,7 @@ secrets — a test (`test_service.py`) enforces this over the package.
 | File | What |
 |------|------|
 | `policy_class.py` | The construction: records + create/open/extend/revoke/seal_cek/open_cek |
+| `storage_object.py` | A setting revision as an org-domain content object: the derived object/revision ids, the opaque locator a row stores, and the write that mints its own key generation when it must |
 | `factors.py` | Password factor (armored) and passkey factor (PRF stand-in) |
 | `store.py` | SQLite persistence: classes, factor material, vault secrets (with class reference) |
 | `service.py` | Store-backed orchestration shared by the CLI and tests |
@@ -56,6 +57,22 @@ Graph Setting schemas (the persisted-shape contract, `@home("personal")`, `raw`
 `tools/graph/schemas/vault_policy_class.py` (`autonomy.vault.policy-class#1`) and
 `tools/graph/schemas/vault_secret.py` (`autonomy.vault.secret#1`, whose
 `policy_class_id` is the vault secret's reference to its class).
+
+## Settings whose payload is a secret
+
+A settings set marks itself with `@vaulted("audited"|"secured")`
+(`tools/graph/schemas/registry.py`). Its rows then hold a locator instead of a
+payload: `settings_ops.add_setting` writes the first revision and
+`override_setting` appends each later one, both sealing through the sealer a
+host process registers with `settings_ops.set_vault_sealer`. With no sealer
+registered the write is REFUSED — writing the value in the clear is not the
+fallback. Ordinary sets are untouched and need no sealer.
+
+One setting is one object and one row is one revision; both identifiers are
+derived, never stored, so two nodes agree without coordinating. The locator is
+an opaque scalar because settings resolution merge-patches candidate rows
+before anything is decrypted, and an object-shaped locator would be spliced
+field by field across two writes.
 
 ## Headless run
 

@@ -400,6 +400,13 @@ VALID_HOMES = ("machine", "personal", "organization")
 #: on demand by a readiness verb, never at write -- see ``field(exists=...)``.
 VALID_EXISTS = ("file", "dir", "executable")
 
+#: Vault tiers a schema may declare -- WHO MUST PARTICIPATE to read the value
+#: back (``0c206bd8-1c6`` §4.1). ``audited`` releases to any authorized
+#: session; ``secured`` additionally requires the human factor its policy
+#: class carries. Both store the payload as an encrypted storage object rather
+#: than as plain JSON in the row.
+VALID_VAULT_TIERS = ("audited", "secured")
+
 
 def home(where: str) -> Any:
     """Schema decorator: declare which database this Setting lives in.
@@ -460,6 +467,66 @@ def declared_home(set_id: str) -> str | None:
         raise SchemaValidationError(
             f"{set_id}: revisions declare different homes {sorted(seen)}; "
             f"a Setting does not change database between revisions"
+        )
+    return seen.pop()
+
+
+def vaulted(tier: str) -> Any:
+    """Schema decorator: this set's payloads are secrets, stored encrypted.
+
+    A row of a vaulted set does not hold its payload. The payload is
+    encrypted once as a content object under the organization's current key
+    generation and the row keeps a locator (``tools.vault.storage_object``),
+    so whatever can read the database file learns which object a setting is
+    and nothing about what it says.
+
+    ``tier`` names WHO MUST PARTICIPATE to read it back — ``audited`` releases
+    to any authorized session, ``secured`` additionally requires the human
+    factor. It is a property of the KIND of value, which is why it is declared
+    here once rather than passed at every write, where one forgetful call site
+    would silently write a credential in the clear.
+
+    Declaring it is not sufficient to write one: the writer needs the domain's
+    key control, which ``settings_ops.set_vault_sealer`` injects. A vaulted
+    write with no sealer registered is REFUSED, never downgraded to plaintext.
+    """
+    if tier not in VALID_VAULT_TIERS:
+        raise SchemaValidationError(
+            f"vault tier must be one of {list(VALID_VAULT_TIERS)}, got {tier!r}"
+        )
+
+    def _wrap(target: type) -> type:
+        existing = target.__dict__.get("_vault_tier")
+        if existing is not None and existing != tier:
+            raise SchemaValidationError(
+                f"{target.__name__}: declares two vault tiers "
+                f"({existing!r} and {tier!r}); a value has one release rule"
+            )
+        target._vault_tier = tier
+        return target
+
+    return _wrap
+
+
+def declared_vault_tier(set_id: str) -> str | None:
+    """The vault tier every registered revision of ``set_id`` agrees on.
+
+    Disagreement is refused rather than resolved by picking the newest: a
+    revision bump that quietly weakened the release rule of already-written
+    secrets would be invisible at the call site that relies on it.
+    """
+    prefix = f"{set_id}#"
+    seen = {
+        cls._vault_tier
+        for key, cls in SCHEMAS.items()
+        if key.startswith(prefix) and getattr(cls, "_vault_tier", None) is not None
+    }
+    if not seen:
+        return None
+    if len(seen) > 1:
+        raise SchemaValidationError(
+            f"{set_id}: revisions declare different vault tiers {sorted(seen)}; "
+            f"a secret does not change its release rule between revisions"
         )
     return seen.pop()
 
@@ -862,6 +929,11 @@ class SettingSchema:
     # ``None`` for non-cache schemas (they never expire and have no
     # ``expires_at`` column value).
     _cache_ttl_seconds: int | None = None
+
+    # ``@vaulted(tier=...)``-only: the release rule for this set's payloads.
+    # ``None`` means an ordinary setting, whose payload is stored as it always
+    # was — see :func:`vaulted`.
+    _vault_tier: str | None = None
 
     #: A schema that is NOT a Setting row. Typed payload contracts borrow this
     #: class for its field metadata -- to drive TypeScript generation and to

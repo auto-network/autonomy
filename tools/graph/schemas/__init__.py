@@ -39,6 +39,11 @@ from .registry import (
     home,
     declared_home,
     VALID_HOMES,
+    # Whether this set's payloads are secrets stored as encrypted storage
+    # objects, and who must participate to read one back.
+    vaulted,
+    declared_vault_tier,
+    VALID_VAULT_TIERS,
     # Mediator-action marker decorators: declare a default action or a
     # per-``kind`` action method directly on the schema class. Discovery
     # in ``SettingSchema.__init_subclass__`` registers each via the
@@ -90,6 +95,9 @@ __all__ = [
     "home",
     "declared_home",
     "VALID_HOMES",
+    "vaulted",
+    "declared_vault_tier",
+    "VALID_VAULT_TIERS",
     "SettingSchema",
     "register_schema",
     "register_upconverter",
