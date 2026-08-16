@@ -85,7 +85,12 @@ class WorkspaceMountV1(BaseModel):
 from .registry import SettingSchema, SchemaValidationError, keyed_per_entity
 
 
-@keyed_per_entity(key_strategy="workspace_id:mount_name")
+@keyed_per_entity(
+    key_strategy="workspace_id:mount_name",
+    # The first segment identifies the workspace this mount belongs to.
+    # Declared, every mount of a given workspace is reachable from it.
+    key_references={"workspace_id": "autonomy.workspace"},
+)
 class _WorkspaceMountSchemaAdapter(SettingSchema):
     """Adapts :class:`WorkspaceMountV1` (Pydantic) to the registry contract.
 
