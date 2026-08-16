@@ -59,6 +59,11 @@ def test_importing_the_package_is_enough_to_resolve_a_declared_target():
     """
     unresolvable: list[str] = []
     for set_id in schemas.list_registered_set_ids():
+        # Schemas invented by other tests register in the same process and
+        # deliberately name targets that do not exist. The gate is about what
+        # ships, so it walks only that.
+        if set_id.startswith("probe."):
+            continue
         for revision in range(1, 12):
             schema = schemas.get_schema(set_id, revision)
             if schema is None:

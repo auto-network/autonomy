@@ -126,3 +126,40 @@ def test_a_stranded_override_is_not_mistaken_for_a_peers(orgs, monkeypatch):
     stranded = [f for f in found if f["key"] == "strand"]
     assert stranded, "a stranded override was counted as a legitimate peer override"
     assert stranded[0]["base_present"] is False
+
+
+def test_a_row_whose_schema_is_not_registered_here_is_not_called_clean(orgs):
+    """"I cannot judge this" and "this is fine" are different answers.
+
+    Plugin schemas register in the dashboard and not in a bare CLI, so the
+    same sweep over the same data answered 73 rows in one process and 64 in
+    another, and neither number mentioned that a different process would
+    disagree. Silently skipping an unjudgeable row makes the result depend
+    on who is asking while looking like a fact about the data.
+    """
+    from tools.graph.db import GraphDB, resolve_caller_db_path
+
+    base = settings_ops.add_setting("probe.amend.replaced", 1, "u",
+                                    {"v": "x"}, org="acme")
+    db = GraphDB(resolve_caller_db_path("acme"))
+    try:
+        # A row whose set has no schema in this process, as a plugin's would be.
+        db.conn.execute(
+            "INSERT INTO settings (id, set_id, schema_revision, key, payload, "
+            " publication_state, supersedes, deprecated, created_at, updated_at) "
+            "VALUES ('probe-unjudged', 'probe.amend.unregistered', 1, 'k', "
+            "        '{}', 'raw', ?, 0, '2026-01-01T00:00:00Z', "
+            "        '2026-01-01T00:00:00Z')",
+            (base,))
+        db.conn.commit()
+    finally:
+        db.close()
+
+    found = settings_ops.illegal_amendments(org="acme")
+    unjudged = settings_ops.unjudged_amendments(org="acme")
+
+    assert not any(f["id"] == "probe-unjudged" for f in found), (
+        "an unjudgeable row must not be reported as a confirmed offender")
+    assert [u["set_id"] for u in unjudged] == ["probe.amend.unregistered"], (
+        "it must not vanish either -- that is what made the count depend on "
+        "which process ran the sweep")
