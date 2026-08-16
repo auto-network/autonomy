@@ -8106,6 +8106,11 @@ async def api_session_create(request):
             session_type="host",
             project=host_project_folder,
             harness="claude",
+            # Which account this terminal is burning. A container session
+            # records this; a host one did not, so host sessions could never
+            # be attributed to an account — and the account that ran out was
+            # the one nothing could account for.
+            harness_token=host_creds.get("harness_token"),
         )
         host_cmd = (
             f"CLAUDE_CODE_OAUTH_TOKEN={shlex.quote(host_creds['token'])} "
