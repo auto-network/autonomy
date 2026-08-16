@@ -518,8 +518,7 @@ class TestWorktreeAPI:
         self, test_client, monkeypatch,
     ):
         """Bead auto-ecmss: a successful ff-merge writes a kind='worktree-merge'
-        row via record_worktree_merge_run with reason='ff' before the
-        post-response task (and any source-code-triggered reload) runs."""
+        row via record_worktree_merge_run with reason='ff'."""
         server, _fake = _install_fake_monitor(monkeypatch, [_row()])
 
         def fake_merge(_session_name, _repo_name):
@@ -538,16 +537,6 @@ class TestWorktreeAPI:
             return f"wt-{kwargs['commit_hash'][:12]}"
 
         monkeypatch.setattr(server, "record_worktree_merge_run", fake_record)
-
-        async def skip_background(**_kwargs):
-            return None
-
-        # Prove the row is no longer dependent on the background task. A
-        # dashboard source-code merge may restart uvicorn immediately after
-        # the response and cancel that task.
-        monkeypatch.setattr(
-            server, "_finish_worktree_merge_after_response", skip_background,
-        )
 
         resp = test_client.post("/api/worktrees/auto-test/autonomy/merge")
 
