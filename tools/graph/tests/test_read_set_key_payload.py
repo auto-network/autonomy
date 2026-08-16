@@ -21,6 +21,37 @@ from tools.graph.db import GraphDB
 SET_ID = "autonomy.workspace"
 
 
+def _legacy_override(base_id: str, patch: dict, *, org: str = "acme") -> str:
+    """An override row of the kind that already exists in stored data.
+
+    ``override_setting`` now refuses to amend a row the caller owns when the
+    schema says its rows are replaced — the chains in live data predate that
+    rule, and merging has to keep working for them. Writing the row directly
+    is how the test reproduces one without going through the verb that
+    correctly refuses to create another.
+    """
+    import json as _json
+    from uuid import uuid4
+
+    sid = str(uuid4())
+    db = GraphDB(org=org)
+    try:
+        base = db.conn.execute(
+            "SELECT set_id, schema_revision, key, publication_state "
+            "FROM settings WHERE id = ?", (base_id,)).fetchone()
+        db.conn.execute(
+            "INSERT INTO settings(id, set_id, schema_revision, key, payload, "
+            "publication_state, supersedes, created_at, updated_at) "
+            "VALUES(?,?,?,?,?,?,?,datetime('now'),datetime('now'))",
+            (sid, base["set_id"], base["schema_revision"], base["key"],
+             _json.dumps(patch), base["publication_state"], base_id),
+        )
+        db.conn.commit()
+    finally:
+        db.close()
+    return sid
+
+
 @pytest.fixture
 def acme(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
@@ -42,15 +73,15 @@ def _resolved():
 
 def test_an_override_is_applied(acme):
     base = _base()
-    settings_ops.override_setting(base, {"image": "img2"}, org="acme")
+    _legacy_override(base, {"image": "img2"})
 
     assert _resolved()["payload"]["image"] == "img2"
 
 
 def test_overrides_apply_in_order(acme):
     base = _base()
-    settings_ops.override_setting(base, {"image": "second"}, org="acme")
-    settings_ops.override_setting(base, {"image": "third"}, org="acme")
+    _legacy_override(base, {"image": "second"}, org="acme")
+    _legacy_override(base, {"image": "third"})
 
     assert _resolved()["payload"]["image"] == "third"
 
@@ -58,7 +89,7 @@ def test_overrides_apply_in_order(acme):
 def test_it_agrees_with_read_set(acme):
     """The two read paths must not answer differently about one key."""
     base = _base(working_dir="/a")
-    settings_ops.override_setting(base, {"working_dir": "/b"}, org="acme")
+    _legacy_override(base, {"working_dir": "/b"})
 
     member = next(m for m in settings_ops.read_set(
         SET_ID, org="acme", peers=[]).members if m.key == "w")
@@ -69,7 +100,7 @@ def test_it_agrees_with_read_set(acme):
 def test_the_row_still_identifies_the_base(acme):
     """Most callers want the id, to target an override or a promote."""
     base = _base()
-    settings_ops.override_setting(base, {"image": "img2"}, org="acme")
+    _legacy_override(base, {"image": "img2"})
 
     assert _resolved()["id"] == base
 

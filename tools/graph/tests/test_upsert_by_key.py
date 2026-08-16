@@ -403,9 +403,25 @@ def test_upsert_ignores_override_and_exclude_rows(
     set_id, _ = upsert_schema
 
     base_id = settings_ops.add_setting(set_id, 1, "k", {"name": "base"}, org=settings_ops.CALLER_ORG)
-    # Override + exclude. exclude_setting raises if the target schema
-    # isn't keyed-per-entity-friendly; override is simpler.
-    settings_ops.override_setting(base_id, {"note": "patched"}, org=settings_ops.CALLER_ORG)
+    # A chain of the kind stored data already contains. ``override_setting``
+    # now refuses to amend a row the caller owns when the schema says its
+    # rows are replaced, so the row is written directly — an upsert still has
+    # to select past chains that predate the rule.
+    import json as _json
+    from uuid import uuid4
+
+    db = settings_ops._open(None)
+    try:
+        db.conn.execute(
+            "INSERT INTO settings(id, set_id, schema_revision, key, payload, "
+            "publication_state, supersedes, created_at, updated_at) "
+            "VALUES(?,?,?,?,?,'raw',?,datetime('now'),datetime('now'))",
+            (str(uuid4()), set_id, 1, "k", _json.dumps({"note": "patched"}),
+             base_id),
+        )
+        db.conn.commit()
+    finally:
+        db.close()
 
     sid = settings_ops.upsert_by_key(set_id, 1, "k", {"name": "rewritten"}, org=settings_ops.CALLER_ORG)
     assert sid == base_id
