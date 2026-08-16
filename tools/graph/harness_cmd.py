@@ -99,15 +99,20 @@ def _fmt_window(window: Any, now: int) -> str:
 
 
 def _verdict(payload: dict, now: int) -> str:
-    """What this account can do right now, in one word."""
-    from tools.dashboard.harness_usage_settings import is_exhausted, reading_still_valid
+    """What this account can do right now, in one word.
+
+    Deliberately no "stale" verdict. A window that has just rolled reports
+    zero used and carries no reset time, because there is nothing pending to
+    reset -- the freshest state an account can be in, not the least
+    trustworthy. How current the reading is shows in the SEEN column, where a
+    reader can weigh it themselves.
+    """
+    from tools.dashboard.harness_usage_settings import is_exhausted
 
     if is_exhausted(payload, now_epoch=now):
         return "EXHAUSTED"
     if payload.get("status") not in (None, "ok"):
         return "unknown"
-    if not reading_still_valid(payload, now_epoch=now):
-        return "stale"
     return "ok"
 
 
