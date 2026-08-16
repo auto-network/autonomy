@@ -105,6 +105,23 @@ class TestLastActivityConversion:
         last_act = active[0]["last_activity"]
         assert isinstance(last_act, (int, float))
 
+    def test_live_resource_sample_fills_cpu_and_memory(self):
+        """NULL dispatch stats use the shared resource monitor sample."""
+        self._write_fixture(None)
+        sample = {
+            "sessions": {
+                "run-last-act": {
+                    "cpu_pct": 12.34,
+                    "mem_bytes": 487_000_000,
+                },
+            },
+        }
+        with patch.object(self.server.resource_monitor, "snapshot", return_value=sample):
+            active = self._collect()["active"]
+
+        assert active[0]["cpu_pct"] == 12.34
+        assert active[0]["mem_mb"] == 487
+
 
 # ── Browser test: no NaN on dispatch page ────────────────────────────
 

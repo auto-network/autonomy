@@ -296,6 +296,34 @@ def test_dispatch_kind_agentic_renders():
     assert ">Lib<" in text
 
 
+def test_dispatch_and_activity_share_one_card_presenter():
+    """Both live-card surfaces use one template and one Alpine state mixin."""
+    repo_root = Path(__file__).resolve().parents[3]
+    dispatch_template = (
+        repo_root / "tools" / "dashboard" / "templates" / "pages" / "dispatch.html"
+    ).read_text()
+    activity_template = (
+        repo_root / "tools" / "dashboard" / "templates" / "pages" / "timeline.html"
+    ).read_text()
+    dispatch_js = (
+        repo_root / "tools" / "dashboard" / "static" / "js" / "pages" / "dispatch.js"
+    ).read_text()
+    activity_js = (
+        repo_root / "tools" / "dashboard" / "static" / "js" / "pages" / "activity.js"
+    ).read_text()
+    presenter = (
+        repo_root / "tools" / "dashboard" / "static" / "js" / "components" / "dispatch-cards.js"
+    ).read_text()
+
+    assert "partials/bead-card.html" in dispatch_template
+    assert "partials/bead-card.html" in activity_template
+    assert "window.DispatchCards.alpine()" in dispatch_js
+    assert "window.DispatchCards.alpine()" in activity_js
+    assert "applyDispatch(data)" in presenter
+    assert "_mapActive" not in dispatch_js
+    assert "_mapActive" not in activity_js
+
+
 # ── Identity ownership: graph row holds metadata, dispatch_runs is lean ─
 
 
