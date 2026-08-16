@@ -38,6 +38,12 @@ here (the XOR split is pure symmetric crypto) so the cross-model attack can
 exercise a downgrade headlessly, but their *real* factor seed is a WebAuthn PRF
 output whose library is out of this epic — see :mod:`tools.vault.factors`.
 
+.. warning:: ``prf`` and ``both`` are PRE-REVIEW. The bead defers them because
+   they "carry their own cryptographic review" (``auto-7ej7d``), and that review
+   has not happened. They are built here so the attack suite can exercise a
+   downgrade, NOT so a caller can use them. Do not wire either policy into a
+   production read or write path until that review lands.
+
 THE NARROWING (crib §18): ``class_key`` is symmetric, so sealing a CEK requires
 HOLDING it, which requires opening a per-factor wrap — a human at that instant.
 No function here caches a class_key; callers must not either.

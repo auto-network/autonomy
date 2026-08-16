@@ -5,6 +5,12 @@ human-entered password — the primary functional acceptance surface for bead
 auto-39d26. Every command prints its result as one JSON object (the "view
 state": data displayed after the transition), so the CLI IS the API shape.
 
+THIS IS NOT THE PRODUCT SURFACE. The epic is explicit: "There is no separate
+vault service, no ``vault get`` command." Secrets reach a caller through
+``graph set read``, which returns a payload, an access error, or a notice. This
+module exists to drive acceptance headlessly and must not be registered as a
+console entry point or documented as a way to read a secret.
+
 Run ``python3 -m tools.vault.cli demo`` for the whole path end-to-end; the
 granular subcommands drive one transition each against a ``--store`` file.
 
