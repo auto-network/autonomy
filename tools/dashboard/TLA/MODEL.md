@@ -126,6 +126,17 @@ Recorded so nobody mistakes model silence for a checked guarantee:
   delivery" step).  The graph/viewer split (separate appender, eager
   sources) shares the offset regime and adds no distinct interleaving
   at this granularity.
+- **The harness-version stamp is a non-modeled side effect of the
+  first-resolution link** (`_link_and_stream`, alongside the eager
+  source create).  A container session registers PENDING, before its
+  launcher `.session_meta.json` exists, so the registration-time read
+  returns nothing; the link is where the sidecar is finally present, so
+  the column is backfilled there.  It writes only a display/parse
+  attribute (`harness_version`), never a modeled track/link/offset
+  variable, and is idempotent (fires only while the column is NULL), so
+  it adds no state or interleaving to check — but it is load-bearing:
+  readers pick the Codex chat record shape from it, and a NULL stamp
+  makes windowed reads drop all chat.
 - **The atomic claim and the atomic final sequence** (`ClaimDrain`,
   `WkFinal`) model the bead's await-free critical sections.  The
   implementation must actually be await-free there — including the
