@@ -2970,6 +2970,23 @@ async def api_stats(request):
     return JSONResponse({"results": "\n".join(lines), "stats": data, "error": None})
 
 
+def _existing_usage_payload(row_key: str) -> dict | None:
+    """The usage row currently stored under ``row_key``, or None.
+
+    Read so a failed poll can tell whether it would be overwriting a reading
+    that is still true. Best-effort: if the read fails, the caller falls back
+    to the behaviour it had before, which is to record the failure.
+    """
+    try:
+        row = graph_ops.read_set_key(
+            _harness_usage_settings.HARNESS_USAGE_SET_ID,
+            row_key, org="personal", peers=[],
+        )
+    except Exception:
+        return None
+    return (row or {}).get("payload") if isinstance(row, dict) else None
+
+
 async def api_harness_usage(request):
     _ = request
     data = await asyncio.to_thread(_collect_harness_usage)
@@ -8067,6 +8084,22 @@ async def api_session_create(request):
         }, status_code=202)
     elif session_type == "host":
         model = _resolve_host_session_model()
+
+        # Pick an account the same way a container session does. Without
+        # this the command inherits whatever the dashboard process happens
+        # to have, which in practice is the one credential sitting in
+        # ~/.claude -- so the host terminal uses a single account forever
+        # and dies with it when that account reaches its weekly ceiling,
+        # while other installed accounts sit unused.
+        from agents.session_launcher import _resolve_credentials
+        host_creds = _resolve_credentials(prefer_alias=body.get("alias"))
+        if host_creds is None or host_creds.get("type") != "token":
+            return JSONResponse(
+                {"error": "no Claude account is installed to start a host "
+                          "terminal with — run `graph claude install`"},
+                status_code=503,
+            )
+
         host_project_folder = str(_REPO_ROOT).replace("/", "-")
         await session_monitor.register_pending(
             tmux_name,
@@ -8075,6 +8108,7 @@ async def api_session_create(request):
             harness="claude",
         )
         host_cmd = (
+            f"CLAUDE_CODE_OAUTH_TOKEN={shlex.quote(host_creds['token'])} "
             f"BD_ACTOR=terminal:{tmux_name} AUTONOMY_SESSION={tmux_name} "
             f"claude --dangerously-skip-permissions --model {model}"
         )
@@ -13119,6 +13153,18 @@ def _collect_claude_usage_payloads(
                 "claude harness usage: /usage call failed for org=%s alias=%r",
                 org_uuid, alias,
             )
+            # A failed poll must not erase a reading that is still true. Usage
+            # is monotonic within a window, so a stored reading holds as a
+            # lower bound until its own reset time -- and a maxed account
+            # answers /usage with 429, which means the reading this would
+            # overwrite is the one proving the account is exhausted.
+            existing = _existing_usage_payload(row_key)
+            if _harness_usage_settings.reading_still_valid(existing):
+                logger.info(
+                    "claude harness usage: keeping the live reading for "
+                    "org=%s alias=%r; its window has not reset", org_uuid, alias,
+                )
+                continue
             payloads[row_key] = _harness_usage_settings.make_unavailable_usage_payload(
                 harness="claude",
                 identity_id=identity_id,

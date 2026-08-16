@@ -516,6 +516,18 @@ def _is_usage_stale(payload: dict, *, now: datetime) -> bool:
     return (now - ts) > HARNESS_USAGE_CACHE_TTL
 
 
+def _reading_window_open(payload: dict, *, now: Any) -> bool:
+    """Whether a stored reading's own window has not reset yet."""
+    from tools.dashboard.harness_usage_settings import reading_still_valid
+    return reading_still_valid(payload, now_epoch=int(now.timestamp()))
+
+
+def _usage_exhausted(payload: Any, *, now: Any) -> bool:
+    """Whether a still-valid reading says this account has no headroom."""
+    from tools.dashboard.harness_usage_settings import is_exhausted
+    return is_exhausted(payload, now_epoch=int(now.timestamp()))
+
+
 def _is_usage_usable(payload: dict) -> bool:
     """``True`` only when the row carries real, usable headroom telemetry.
 
@@ -628,6 +640,13 @@ def _resolve_credentials_via_substrate(
             account_id = payload.get("account_id")
             if not isinstance(account_id, str) or not account_id:
                 continue
+            # A reading whose window has not reset is still true, however
+            # old it is: usage only rises until the window rolls. Judging it
+            # by a fixed time-to-live discards a fact that has not stopped
+            # being a fact.
+            if _reading_window_open(payload, now=now):
+                usage_by_org[account_id] = payload
+                continue
             if _is_usage_stale(payload, now=now):
                 continue
             if not _is_usage_usable(payload):
@@ -640,6 +659,21 @@ def _resolve_credentials_via_substrate(
             usage_by_org[account_id] = payload
 
         token_keys = [getattr(t, "key", None) for t in tokens]
+
+        # An account a live reading says is exhausted is not a candidate.
+        # Falling back to a random choice here would hand out the one token
+        # we KNOW cannot serve a session -- and it would do it precisely when
+        # the account is maxed, because that is when /usage answers 429 and
+        # the old code called the result unknown.
+        exhausted = {
+            k for k in token_keys
+            if k and _usage_exhausted(usage_by_org.get(k), now=now)
+        }
+        if exhausted and len(exhausted) < len([k for k in token_keys if k]):
+            tokens = [t for t in tokens
+                      if getattr(t, "key", None) not in exhausted]
+            token_keys = [getattr(t, "key", None) for t in tokens]
+
         if all(k in usage_by_org for k in token_keys if k):
             # Every token has fresh telemetry → max-min deterministic.
             def _score(token_row: Any) -> tuple[float, str]:

@@ -383,6 +383,53 @@ def normalize_claude_usage_payload(
     )
 
 
+def reading_still_valid(payload: object, *, now_epoch: int | None = None) -> bool:
+    """Whether a stored usage reading is still true.
+
+    A window's usage is MONOTONIC: it only rises until the window resets. So a
+    reading stays valid as a lower bound until its own ``resets_at``, however
+    old it is and however badly a later poll went. Judging it by a fixed
+    time-to-live throws away a fact that has not stopped being true, and a
+    later failed poll overwriting it destroys the very reading that proves an
+    account is exhausted -- exactly when knowing that matters most.
+    """
+    import time as _time
+
+    if not isinstance(payload, dict) or payload.get("status") not in (None, "ok"):
+        return False
+    windows = payload.get("windows")
+    if not isinstance(windows, dict) or not windows:
+        return False
+    now = now_epoch if now_epoch is not None else int(_time.time())
+    for window in windows.values():
+        if not isinstance(window, dict):
+            continue
+        resets_at = window.get("resets_at")
+        if isinstance(resets_at, int) and resets_at > now:
+            return True
+    return False
+
+
+def is_exhausted(payload: object, *, now_epoch: int | None = None) -> bool:
+    """Whether a still-valid reading says the account has no headroom left.
+
+    Being told this by a live reading is not the same as failing to reach the
+    API. No amount of re-asking changes a window that is full; it changes when
+    the window resets.
+    """
+    if not reading_still_valid(payload, now_epoch=now_epoch):
+        return False
+    if payload.get("rate_limit_reached_type"):
+        return True
+    for window in (payload.get("windows") or {}).values():
+        if not isinstance(window, dict):
+            continue
+        used = window.get("used_percent")
+        if isinstance(used, (int, float)) and used >= 100:
+            return True
+    return False
+
+
 def make_unavailable_usage_payload(
     *,
     harness: str,
