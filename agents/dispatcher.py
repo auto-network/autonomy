@@ -1527,8 +1527,16 @@ def _send_dispatch_nag_crosstalk(targets: list[str], message: str) -> None:
                 capture_output=True, timeout=5,
             )
             Path(path).unlink(missing_ok=True)
-        except Exception:
-            pass  # best-effort — don't crash dispatcher
+            print(f"  dispatch nag -> {tmux_name}", file=sys.stderr)
+        except Exception as exc:
+            # Best-effort delivery, but NOT silent: this swallowed every
+            # failure, so a nag that never arrived looked identical to one
+            # that was never attempted. That ambiguity cost a debugging
+            # session — the notify functions logged, the send did not.
+            print(
+                f"  WARN: dispatch nag send failed for {tmux_name}: {exc}",
+                file=sys.stderr,
+            )
 
 
 def _notify_agentic_dispatch_nag(
@@ -1563,6 +1571,11 @@ def _notify_agentic_dispatch_nag(
         if origin and origin != "dashboard" and origin not in targets:
             targets.append(origin)
         if not targets:
+            print(
+                f"  agentic nag: no targets for {run_id} "
+                f"(origin={origin!r}, subscribers=0)",
+                file=sys.stderr,
+            )
             return
 
         label = identity.get("action_label") or run_id
