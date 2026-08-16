@@ -39,7 +39,14 @@ def probe_schema():
         schema_revision = 1
         v: str = field(required=True, description="value")
 
-    return Probe
+    @keyed_per_entity(key_strategy="probe_id")
+    class Wide(SettingSchema):
+        set_id = "probe.shadow.wide"
+        schema_revision = 1
+        a: str = field(required=True, description="a")
+        b: str = field(required=True, description="b")
+
+    return Probe, Wide
 
 
 @pytest.fixture
@@ -146,3 +153,46 @@ def test_a_client_that_never_wrote_does_not_crash_the_report(capsys):
     set_cmd._report_shadowed_write("probe.shadow.value", "absent", object())
 
     assert capsys.readouterr().out == ""
+
+
+# ── masking, the case it could not see ───────────────────────
+
+
+def test_an_override_that_overwrites_the_write_is_reported(orgs, monkeypatch):
+    """Winning the base contest is not the same as being read.
+
+    This is how a write is most often neutralised, and the original check
+    was blind to it by construction: its query excluded override rows, so
+    the row that actually decides the value was the one row it never
+    looked at.
+    """
+    base = settings_ops.add_setting("probe.shadow.value", 1, "m", {"v": "old"},
+                                    org="acme")
+    monkeypatch.setattr(settings_ops, "_refuse_amend_when_replaced",
+                        lambda *a, **k: None)
+    settings_ops.override_setting(base, {"v": "override wins"}, org="acme")
+
+    settings_ops.upsert_by_key("probe.shadow.value", 1, "m", {"v": "new"},
+                               org="acme")
+    shadow = settings_ops.take_shadowed_write("probe.shadow.value", "m")
+
+    assert shadow is not None, (
+        "the write stored a value no reader will see and said nothing")
+    assert shadow.masked_fields == ("v",)
+    assert "MASKED" in str(shadow)
+
+
+def test_a_write_an_override_does_not_touch_is_not_reported(orgs, monkeypatch):
+    """Only the fields actually overwritten count. An override on another
+    field leaves this write fully effective, and warning about it would
+    train the reader to ignore the warning."""
+    base = settings_ops.add_setting(
+        "probe.shadow.wide", 1, "w", {"a": "1", "b": "2"}, org="acme")
+    monkeypatch.setattr(settings_ops, "_refuse_amend_when_replaced",
+                        lambda *a, **k: None)
+    settings_ops.override_setting(base, {"b": "override"}, org="acme")
+
+    settings_ops.upsert_by_key("probe.shadow.wide", 1, "w",
+                               {"a": "changed", "b": "override"}, org="acme")
+
+    assert settings_ops.take_shadowed_write("probe.shadow.wide", "w") is None
