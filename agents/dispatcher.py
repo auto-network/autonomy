@@ -1606,19 +1606,41 @@ def _find_jsonl_file(output_dir: str) -> Path | None:
     return files[0] if files else None
 
 
+# Upper bound on the backward scan for the last complete JSONL line. A single
+# line beyond this is pathological; stop rather than read an unbounded tail.
+_TAIL_SCAN_CAP = 8 * 1024 * 1024
+
+
 def _has_running_tool(jsonl_file: Path) -> bool:
     """Return True if the last JSONL entry is an assistant turn with a tool_use block.
 
-    Reads the trailing 8KB of the file so a long-running tool call (pytest,
+    Reads back to the last newline so a long-running tool call (pytest,
     builds) isn't mistaken for a stalled agent. Any I/O or parse error returns
     False so the caller falls back to the default 300s stale threshold.
+
+    The window EXPANDS until it contains a line boundary rather than using a
+    fixed 8KB tail. While a tool runs, the last line IS the assistant
+    ``tool_use`` — the ``tool_result`` line is not written until the tool
+    finishes — and the size of that line is model-controlled: a large ``Write``
+    input or a fat MCP argument easily exceeds 8KB. With a fixed tail the
+    window would start mid-JSON, ``json.loads`` would raise, and a legitimately
+    running tool would silently drop to the 300s threshold and be killed
+    mid-flight. Verified against auto-42rsi's runs 2026-08-16: a 30KB in-flight
+    ``tool_use`` line returned False before this change.
     """
     try:
         with open(jsonl_file, "rb") as f:
-            end = f.seek(0, 2)
-            f.seek(max(0, end - 8192))
-            data = f.read().decode("utf-8", errors="replace")
-        for line in reversed(data.splitlines()):
+            size = f.seek(0, 2)
+            window, chunk = 8192, b""
+            while True:
+                f.seek(max(0, size - window))
+                chunk = f.read().rstrip(b"\n")
+                # Everything after the last newline is the final COMPLETE line.
+                if b"\n" in chunk or size <= window or window >= _TAIL_SCAN_CAP:
+                    break
+                window *= 4
+        data = chunk.rpartition(b"\n")[2].decode("utf-8", errors="replace")
+        for line in [data]:
             line = line.strip()
             if not line:
                 continue
