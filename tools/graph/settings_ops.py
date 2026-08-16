@@ -922,6 +922,39 @@ def unresolved_references(
     return out
 
 
+def _owned_but_unreadable(
+    set_id: str, key: str, reader: str,
+) -> tuple[str, str] | None:
+    """Is this row written somewhere the reader cannot see it?
+
+    "Nobody has written this" and "somebody has, and you may not read it" are
+    both reported by a plain read as nothing, and they call for opposite
+    repairs: write the row, or publish the one that exists. Told the first
+    when the second is true, a reader writes a second row, and the two then
+    disagree with no way to tell which one anything used.
+
+    Returns the owning organization and the state its row is in, or ``None``
+    when the row genuinely is not there. Asked only once a read has already
+    failed, so the cost falls on the reporting path and never on resolution.
+    """
+    from tools.graph.cross_org import list_org_slugs
+
+    try:
+        slugs = list_org_slugs()
+    except Exception:
+        return None
+    for slug in slugs:
+        if slug == reader or slug in ("personal", "machine"):
+            continue
+        try:
+            found = read_set_key(set_id, key, org=slug, peers=[])
+        except Exception:
+            continue
+        if found is not None:
+            return slug, str(found.get("state") or "raw")
+    return None
+
+
 @dataclass
 class CheckFinding:
     """One thing that is not satisfied, and where the checker looked."""
@@ -1071,6 +1104,17 @@ def check_setting(
         return [CheckFinding(address, "unreadable",
                              f"{type(exc).__name__}: {exc}"[:160], frame)]
     if row is None:
+        elsewhere = _owned_but_unreadable(set_id, key, read_org)
+        if elsewhere is not None:
+            owner, state = elsewhere
+            return [CheckFinding(
+                address, "unreadable_reference",
+                f"a row exists in {owner!r} at {state!r}, which peers cannot "
+                f"read. Raise it to 'published' or 'canonical', or give this "
+                f"organization its own row -- writing a second one here while "
+                f"the first stays unreadable leaves two answers and no way to "
+                f"tell which one anything used",
+                frame)]
         return [CheckFinding(address, "missing_reference",
                              "no row under this key", frame)]
 

@@ -433,3 +433,43 @@ def test_both_paths_agree_when_it_is_absent(acme, org_scoped):
     assert [f.kind for f in by_walk] == ["missing_reference"]
     assert "operator" in by_walk[0].looked_in, (
         "the frame has to name the store that actually answered")
+
+
+# ── written, but not readable ────────────────────────────────
+
+
+def test_a_row_a_peer_keeps_private_says_so_rather_than_missing(two_orgs, shared):
+    """"Nobody wrote it" and "you may not read it" need opposite repairs.
+
+    A plain read reports both as nothing. A reader told the row is absent
+    writes one, and now two rows exist under the same key in different
+    organizations, disagreeing, with nothing recording which one anything
+    resolved. So the report has to name the owner and the state.
+    """
+    settings_ops.upsert_by_key("probe.shared.thing", 1, "held-back",
+                               {"v": "x"}, org="partner", state="raw")
+    settings_ops.add_setting("probe.shared.uses", 1, "u",
+                             {"v": "x"}, org="acme")
+
+    findings = settings_ops.check_setting("probe.shared.uses", "u", org="acme")
+    keyed = settings_ops.check_setting("probe.shared.thing", "held-back",
+                                       org="acme")
+
+    assert [f.kind for f in keyed] == ["unreadable_reference"]
+    assert "partner" in keyed[0].detail and "raw" in keyed[0].detail
+
+
+def test_a_row_nobody_wrote_is_still_reported_missing(two_orgs, shared):
+    """The distinction is only worth anything if it discriminates."""
+    findings = settings_ops.check_setting("probe.shared.thing", "nowhere-at-all",
+                                          org="acme")
+
+    assert [f.kind for f in findings] == ["missing_reference"]
+
+
+def test_a_published_row_is_neither(two_orgs, shared):
+    settings_ops.upsert_by_key("probe.shared.thing", 1, "open",
+                               {"v": "x"}, org="partner", state="published")
+
+    assert settings_ops.check_setting("probe.shared.thing", "open",
+                                      org="acme") == []
