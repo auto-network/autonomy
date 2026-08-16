@@ -15,6 +15,8 @@ import pytest
 
 from agents.dispatcher import (
     RunningAgent,
+    STALE_THRESHOLD_SECS,
+    STALE_THRESHOLD_TOOL_SECS,
     _has_running_tool,
     poll_and_collect,
 )
@@ -146,8 +148,10 @@ class TestExtendedFlagLatching:
             {"type": "assistant", "message": {"content": [
                 {"type": "tool_use", "name": "Bash", "input": {}}]}},
         ])
-        # Set mtime 600s in the past — past 300, well under 1800.
-        old = time.time() - 600
+        # Comfortably past the plain thinking budget, far under the tool
+        # budget. Derived, not restated: a hardcoded number here silently
+        # stops testing the boundary the moment the budget moves.
+        old = time.time() - (STALE_THRESHOLD_SECS + 100)
         import os
         os.utime(jsonl, (old, old))
 
@@ -181,14 +185,20 @@ class TestExtendedFlagLatching:
     @patch("agents.dispatcher.collect_results")
     @patch("agents.dispatcher.kill_container")
     @patch("agents.dispatcher.poll_container")
-    def test_no_tool_killed_at_300(self, mock_poll, mock_kill, mock_collect,
-                                    mock_record, mock_notify, mock_release,
-                                    mock_cleanup, tmp_path):
-        """Stale > 300s with no running tool → killed."""
+    def test_no_tool_killed_past_thinking_budget(
+            self, mock_poll, mock_kill, mock_collect,
+            mock_record, mock_notify, mock_release,
+            mock_cleanup, tmp_path):
+        """Past the thinking budget with NO tool running → killed.
+
+        The budget exists to reap a genuinely dead run. What it must not do is
+        reap a live one that is merely thinking hard, which is why the number
+        is a tunable and why this test reads it rather than repeating it.
+        """
         output_dir, jsonl = _setup_session(tmp_path, [
             {"type": "user", "message": {"content": "stuck"}},
         ])
-        old = time.time() - 400
+        old = time.time() - (STALE_THRESHOLD_SECS + 100)
         import os
         os.utime(jsonl, (old, old))
 
@@ -215,15 +225,15 @@ class TestExtendedFlagLatching:
     @patch("agents.dispatcher.collect_results")
     @patch("agents.dispatcher.kill_container")
     @patch("agents.dispatcher.poll_container")
-    def test_extended_killed_after_1800(self, mock_poll, mock_kill, mock_collect,
+    def test_extended_killed_past_tool_budget(self, mock_poll, mock_kill, mock_collect,
                                          mock_record, mock_notify, mock_release,
                                          mock_cleanup, tmp_path):
-        """Even with running tool, agent is killed once stale > 1800s."""
+        """A tool that never returns is still reaped, at the tool budget."""
         output_dir, jsonl = _setup_session(tmp_path, [
             {"type": "assistant", "message": {"content": [
                 {"type": "tool_use", "name": "Bash", "input": {}}]}},
         ])
-        old = time.time() - 2000
+        old = time.time() - (STALE_THRESHOLD_TOOL_SECS + 200)
         import os
         os.utime(jsonl, (old, old))
 
@@ -250,7 +260,7 @@ class TestExtendedFlagLatching:
         output_dir, jsonl = _setup_session(tmp_path, [
             {"type": "user", "message": {"content": "starting"}},
         ])
-        # Default mtime = now — well under 300s.
+        # Default mtime = now — well inside the thinking budget.
         agent = _make_running_agent(
             output_dir=str(output_dir),
             started_at=time.time() - 9999,
