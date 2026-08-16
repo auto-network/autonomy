@@ -15375,11 +15375,34 @@ def _settings_member_snapshot(
     *,
     org: str | None,
 ) -> tuple[int, set[str]]:
-    from tools.graph import settings_ops
+    """Resolved members of one set, read at the set's OWN home.
 
-    members = settings_ops.read_set.__wrapped__(
-        set_id, org=org or graph_ops.CALLER_ORG,
-    )
+    A diagnostic walks every visible set_id, and a set that declares it lives
+    in the operator's own database is refused when read against an
+    organization -- correctly, since that is the whole point of declaring a
+    home. Reading each set where it actually lives is the fix; asking for all
+    of them at the caller's organization means one personal-homed set takes
+    the entire summary down with it.
+    """
+    from tools.graph import settings_ops
+    from tools.graph import schemas as _schemas
+
+    try:
+        home = _schemas.declared_home(set_id)
+    except Exception:
+        home = None
+    read_org = "personal" if home == "personal" else (org or graph_ops.CALLER_ORG)
+
+    try:
+        members = settings_ops.read_set.__wrapped__(set_id, org=read_org)
+    except Exception:
+        # A single unreadable set is worth reporting as empty, never worth
+        # failing the whole inventory for.
+        logger.warning(
+            "settings diagnostic: could not read %s at org=%r",
+            set_id, read_org, exc_info=True,
+        )
+        return 0, set()
     keys = {member.key for member in members.members}
     return len(members.members), keys
 
