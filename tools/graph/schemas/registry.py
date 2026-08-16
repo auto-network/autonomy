@@ -356,18 +356,23 @@ def keyed_per_entity(
     return _wrap(cls)
 
 
-VALID_HOMES = ("personal", "organization")
+VALID_HOMES = ("machine", "personal", "organization")
 
 
 def home(where: str) -> Any:
     """Schema decorator: declare which database this Setting lives in.
 
-    ``personal`` is the operator's own store: their identity, their
-    credentials, their machine. ``organization`` is a store an org owns and
-    that its members read. The distinction is not cosmetic -- an
-    organization's database is what federates, so a value put in the wrong
-    one is either invisible to everyone who needs it or visible to everyone
-    who should not have it.
+    ``machine`` is this computer and nothing else: a path a binary landed at
+    here, what is installed here, what was verified here. ``personal`` is the
+    operator's own store, which follows them across every machine they own.
+    ``organization`` is a store an org owns and that its members read.
+
+    The distinction is not cosmetic. An organization's database is what
+    federates, so a value put in the wrong one is either invisible to
+    everyone who needs it or visible to everyone who should not have it. And
+    a machine fact placed in the personal store becomes wrong on every
+    machine but the one that wrote it -- a recorded path to a binary that
+    another host does not have, believed rather than probed.
 
     Stacked ABOVE the access-pattern decorator, and separate from it because
     the two answer different questions: how many rows there are, and whose
