@@ -11232,6 +11232,29 @@ async def _finish_worktree_merge_after_response(
     )
 
 
+async def _record_worktree_merge_before_response(
+    *,
+    session_name: str,
+    branch: str | None,
+    result: dict,
+    reason: str,
+) -> None:
+    """Persist merge identity before a source-code merge reloads the server.
+
+    The dashboard watches its own Python/templates. A successful merge that
+    changes those files can restart the process immediately after the HTTP
+    response, cancelling Starlette's background task before it writes the
+    timeline row. The row id is commit-derived and INSERT OR IGNORE, so this
+    pre-response write and the existing background safety-net are race-safe.
+    """
+    await _record_worktree_merge_timeline(
+        session_name=session_name,
+        branch=branch,
+        result=result,
+        reason=reason,
+    )
+
+
 async def api_worktree_commit_merge(request):
     session_name = request.path_params["session"]
     repo_name = request.path_params["repo"]
@@ -11258,6 +11281,13 @@ async def api_worktree_commit_merge(request):
         )
     except WorkspaceError as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
+
+    await _record_worktree_merge_before_response(
+        session_name=session_name,
+        branch=None,
+        result=result,
+        reason="commit-merge",
+    )
 
     return JSONResponse({
         "ok": True,
@@ -11326,6 +11356,13 @@ async def api_worktree_merge(request):
     except WorkspaceError as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
 
+    await _record_worktree_merge_before_response(
+        session_name=session_name,
+        branch=getattr(row, "branch", None),
+        result=result,
+        reason="ff",
+    )
+
     return JSONResponse({
         "ok": True,
         "commit": result.get("commit", ""),
@@ -11369,6 +11406,13 @@ async def api_worktree_cherry_pick(request):
         )
     except WorkspaceError as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
+
+    await _record_worktree_merge_before_response(
+        session_name=session_name,
+        branch=getattr(row, "branch", None),
+        result=result,
+        reason="cherry-pick",
+    )
 
     return JSONResponse({
         "ok": True,
