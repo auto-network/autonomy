@@ -789,9 +789,11 @@ class MigrationReport:
 # ── DB selection (mirrors ops._open) ─────────────────────────
 
 
-# The destinations a caller does not provision first: saying nothing, and
-# naming the operator's own store, which are the same database.
-_CREATED_ON_DEMAND: frozenset[str | None] = frozenset({None, "personal"})
+# The destinations a caller does not provision first: saying nothing, naming
+# the operator's own store, and naming this machine's own store. Nobody
+# provisions any of them -- they come into being where they are used.
+_CREATED_ON_DEMAND: frozenset[str | None] = frozenset(
+    {None, "personal", "machine"})
 
 
 def _db_path(org: str | None) -> str | None:
@@ -818,6 +820,20 @@ def _db_path(org: str | None) -> str | None:
         # own DB or raises ``OrgResolutionConflict`` under a contradicting
         # pin, rather than honouring the pin blind.
         return env_db
+    if org == "machine":
+        # This machine's own store. Never replicated, so it is the one
+        # destination a fleet sync can ignore wholesale rather than by
+        # inspecting rows.
+        machine_path = _org_db_path("machine")
+        with _personal_db_init_lock:
+            if not machine_path.exists():
+                try:
+                    GraphDB.create_org_db(
+                        "machine", type_="personal", path=machine_path,
+                    ).close()
+                except FileExistsError:
+                    pass
+        return str(machine_path)
     if org is None:
         personal_path = _org_db_path("personal")
         with _personal_db_init_lock:
@@ -929,7 +945,19 @@ def _assert_home(set_id: str | None, org: str | None) -> None:
         return
     if os.environ.get("GRAPH_DB") and org is None:
         return
-    is_personal = org in _CREATED_ON_DEMAND
+    if want == "machine":
+        if org != "machine":
+            raise schemas.SchemaValidationError(
+                f"{set_id} lives in this machine's own database, which never "
+                f"leaves it; refusing to use {org!r}"
+            )
+        return
+    if org == "machine":
+        raise schemas.SchemaValidationError(
+            f"{set_id} does not live in this machine's database — it declares "
+            f"{want!r}, and a machine store never leaves the machine"
+        )
+    is_personal = org in (None, "personal")
     if want == "personal" and not is_personal:
         raise schemas.SchemaValidationError(
             f"{set_id} lives in the operator's own database; refusing to use "
