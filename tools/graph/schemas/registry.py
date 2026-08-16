@@ -353,6 +353,7 @@ def keyed_per_entity(
     cls: type | None = None,
     *,
     key_strategy: str = "natural",
+    key_references: dict[str, str] | None = None,
 ) -> Any:
     """Schema decorator: declare per-entity rows with caller-supplied keys.
 
@@ -361,11 +362,32 @@ def keyed_per_entity(
     caller-side convention (``natural`` = caller picks; future
     strategies can name structured-key derivations).
 
+    ``key_references`` says which SET each named key segment identifies —
+    ``{"workspace_id": "autonomy.workspace"}`` declares that the first
+    segment of every key is a row in ``autonomy.workspace``. The strategy
+    names the segments; this states what those names identify.
+
+    Declared, the edge is traversable from the entity: given a workspace,
+    every row keyed by it can be found. That is what answers "is this
+    workspace fully installed" from one address, and what makes a row whose
+    key names a deleted entity reportable.
+
     Usable as ``@keyed_per_entity`` (bare) or
-    ``@keyed_per_entity(key_strategy="...")``.
+    ``@keyed_per_entity(key_strategy="...", key_references={...})``.
     """
     def _wrap(target: type) -> type:
-        return _claim_access_pattern(target, "keyed_per_entity", key_strategy)
+        out = _claim_access_pattern(target, "keyed_per_entity", key_strategy)
+        if key_references:
+            segments = [seg.strip("[]") for seg in re.split(r"[:/]", key_strategy)]
+            unknown = sorted(set(key_references) - set(segments))
+            if unknown:
+                raise SchemaValidationError(
+                    f"{target.__name__}: key_references names segment(s) "
+                    f"{unknown} that the key strategy {key_strategy!r} does "
+                    f"not have — it declares {segments}"
+                )
+            out._key_references = dict(key_references)
+        return out
 
     if cls is None:
         return _wrap

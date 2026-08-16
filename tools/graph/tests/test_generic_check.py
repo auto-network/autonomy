@@ -206,3 +206,90 @@ def test_a_bad_edge_reads_differently_from_an_unwritten_row(acme):
     assert bad[0].kind != unwritten[0].kind
     assert {bad[0].kind, unwritten[0].kind} == {"unknown_target",
                                                "missing_reference"}
+
+
+# ── edges that live in the key ───────────────────────────────
+
+
+@pytest.fixture(scope="module")
+def keyed_edges():
+    """An entity, and rows keyed BY it — the edge a field cannot express."""
+    @keyed_per_entity(key_strategy="probe_id")
+    class Thing(SettingSchema):
+        set_id = "probe.keyed.thing"
+        schema_revision = 1
+        v: str = field(required=True, description="v")
+
+    @keyed_per_entity(
+        key_strategy="thing_id:aspect",
+        key_references={"thing_id": "probe.keyed.thing"},
+    )
+    class Aspect(SettingSchema):
+        set_id = "probe.keyed.aspect"
+        schema_revision = 1
+        v: str = field(required=True, description="v")
+
+    return Thing, Aspect
+
+
+def test_rows_keyed_by_an_entity_are_found(acme, keyed_edges):
+    settings_ops.add_setting("probe.keyed.thing", 1, "t1", {"v": "x"}, org="acme")
+    for aspect in ("one", "two"):
+        settings_ops.add_setting("probe.keyed.aspect", 1, f"t1:{aspect}",
+                                 {"v": "x"}, org="acme")
+    settings_ops.add_setting("probe.keyed.aspect", 1, "t2:one", {"v": "x"},
+                             org="acme")
+
+    found = settings_ops.rows_keyed_by("probe.keyed.thing", "t1", org="acme")
+
+    assert sorted(k for _s, k, _seg in found) == ["t1:one", "t1:two"]
+    assert {seg for _s, _k, seg in found} == {"thing_id"}
+
+
+def test_an_entity_nothing_is_keyed_by_finds_nothing(acme, keyed_edges):
+    assert settings_ops.rows_keyed_by(
+        "probe.keyed.thing", "unreferenced", org="acme") == []
+
+
+def test_a_check_reaches_rows_keyed_by_the_thing_checked(acme, keyed_edges):
+    """The direction a field reference cannot go.
+
+    A capability enable is not reachable from any field of a workspace — only
+    from the key segment that names it.
+    """
+    settings_ops.add_setting("probe.keyed.thing", 1, "t3", {"v": "x"}, org="acme")
+    settings_ops.add_setting("probe.keyed.aspect", 1, "t3:only", {"v": "x"},
+                             org="acme")
+
+    # Satisfied today; the point is that the walk visits the keyed row at all.
+    seen: set = set()
+    settings_ops.check_setting("probe.keyed.thing", "t3", org="acme", _seen=seen)
+
+    assert ("probe.keyed.aspect", "t3:only", "acme") in seen
+
+
+def test_a_row_keyed_by_something_deleted_is_an_orphan(acme, keyed_edges):
+    """Nothing validates this at write, because provisioning order is
+    legitimate — so the row outlives its entity and stays valid in every
+    other respect."""
+    settings_ops.add_setting("probe.keyed.aspect", 1, "never-existed:x",
+                             {"v": "x"}, org="acme")
+
+    findings = settings_ops.orphans_of("probe.keyed.aspect", org="acme")
+
+    orphaned = [f for f in findings if "never-existed" in f.detail]
+    assert orphaned and orphaned[0].kind == "orphaned_key"
+
+
+def test_a_segment_the_key_strategy_does_not_have_is_refused():
+    """A declaration naming a segment that is not in the key is a typo that
+    would otherwise silently never match anything."""
+    from tools.graph.schemas.registry import SchemaValidationError
+
+    with pytest.raises(SchemaValidationError, match="does not have"):
+        @keyed_per_entity(key_strategy="thing_id:aspect",
+                          key_references={"thingId": "probe.keyed.thing"})
+        class Typo(SettingSchema):
+            set_id = "probe.keyed.typo"
+            schema_revision = 1
+            v: str = field(required=True, description="v")
