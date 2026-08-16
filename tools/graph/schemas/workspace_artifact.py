@@ -48,7 +48,12 @@ SYNOPSIS = {
 }
 
 
-@keyed_per_entity(key_strategy="workspace_id:artifact_name")
+@keyed_per_entity(
+    key_strategy="workspace_id:artifact_name",
+    # The first segment identifies the workspace that declares this
+    # artifact, so every artifact of a workspace is reachable from it.
+    key_references={"workspace_id": "autonomy.workspace"},
+)
 class WorkspaceArtifactV1(SettingSchema):
     set_id = SET_ID
     schema_revision = SCHEMA_REVISION
