@@ -28,10 +28,6 @@ exec /usr/bin/docker run --rm --name autonomy-coturn \
     --log-driver journald \
     --label service=auto-network-coturn \
     --mount type=bind,src=/run/autonomy-coturn,dst=/etc/coturn,readonly \
-    --publish "${TURN_PUBLIC_IP}:3478:3478/tcp" \
-    --publish "${TURN_PUBLIC_IP}:3478:3478/udp" \
-    --publish "${TURN_PUBLIC_IP}:443:5349/tcp" \
-    --publish "${TURN_PUBLIC_IP}:${TURN_RELAY_MIN_PORT}-${TURN_RELAY_MAX_PORT}:${TURN_RELAY_MIN_PORT}-${TURN_RELAY_MAX_PORT}/udp" \
-    --publish 127.0.0.1:9641:9641/tcp \
+    --network host \
     "$IMAGE" \
     -c /etc/coturn/turnserver.conf

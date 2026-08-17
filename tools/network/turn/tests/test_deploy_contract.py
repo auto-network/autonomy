@@ -52,7 +52,11 @@ def test_renderer_keeps_secret_in_runtime_config_and_resolves_every_marker(tmp_p
     config = (runtime / "turnserver.conf").read_text()
     assert "static-auth-secret=" + "a" * 64 in config
     assert "@@" not in config
-    assert "external-ip=1.1.1.1" in config
+    assert "listening-ip=1.1.1.1" in config
+    assert "relay-ip=1.1.1.1" in config
+    assert "tls-listening-port=443" in config
+    assert "prometheus-address=127.0.0.1" in config
+    assert "external-ip=" not in config
     assert not any(
         line.startswith("prometheus-username-labels")
         for line in config.splitlines()
@@ -83,10 +87,11 @@ def test_renderer_refuses_quota_larger_than_relay_port_range(tmp_path):
         render(tmp_path, total="101")
 
 
-def test_container_is_digest_pinned_and_metrics_publish_only_on_loopback():
+def test_container_is_digest_pinned_and_uses_the_host_turn_address_directly():
     script = (DEPLOY / "run-coturn.sh").read_text()
     assert "coturn/coturn@sha256:75e9ebd1e19005bec0c7f591d29afe22f959916ac8d9c852452f27db8c789828" in script
-    assert "127.0.0.1:9641:9641/tcp" in script
+    assert "--network host" in script
+    assert "--publish" not in script
     assert "--cap-drop=ALL" in script
     # coturn's image turnserver carries cap_net_bind_service=ep; cap-drop=ALL
     # strips it from the bounding set, so exec returns EPERM ("Operation not
@@ -98,8 +103,6 @@ def test_container_is_digest_pinned_and_metrics_publish_only_on_loopback():
     assert '--user "65534:${TURN_RUNTIME_GID}"' in script
     assert "--read-only" in script
     assert "static-auth-secret" not in script
-    assert '--publish "${TURN_PUBLIC_IP}:443:5349/tcp"' in script
-    assert '--publish 443:5349/tcp' not in script
     assert "[::]" not in script
 
 
@@ -156,10 +159,12 @@ def test_ipv4_only_contract_is_explicit_and_ipv6_requires_a_new_review():
     config = (DEPLOY / "turnserver.conf.in").read_text()
     run = (DEPLOY / "run-coturn.sh").read_text()
     readme = (DEPLOY / "README.md").read_text()
-    assert "listening-ip=0.0.0.0" in config
+    assert "listening-ip=@@TURN_PUBLIC_IP@@" in config
+    assert "relay-ip=@@TURN_PUBLIC_IP@@" in config
+    assert "prometheus-address=127.0.0.1" in config
     assert "allocation-default-address-family=ipv4" in config
-    assert '--publish "${TURN_PUBLIC_IP}:' in run
-    assert "--publish [::]" not in run
+    assert "--network host" in run
+    assert "--publish" not in run
     assert "64:ff9b::/96" in readme
 
 
