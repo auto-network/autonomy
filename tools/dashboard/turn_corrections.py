@@ -165,8 +165,9 @@ def read_recent_canonical_user_turns(
     harness adapter for the path so Claude, Codex, queued, and synthetic
     message identities all resolve to the same ``message_id`` every other
     consumer (viewer overlay, graph ingest) uses. Oldest-first; the last
-    ``user_limit`` entries when bounded. Best-effort: any read/parse failure
-    yields an empty list rather than raising.
+    ``user_limit`` entries when bounded. File I/O and individual malformed
+    records are best-effort; missing mandatory transcript metadata is raised
+    so the caller cannot mistake an unparseable transcript for no messages.
     """
     if not jsonl_path:
         return []
@@ -181,33 +182,18 @@ def read_recent_canonical_user_turns(
     # the dependency direction explicit and avoid an import cycle at module
     # load (session_monitor imports this module).
     from tools.dashboard.session_harness import (
-        CLAUDE_HARNESS,
+        TranscriptParseContextError,
         resolve_harness_for_path,
     )
 
-    try:
-        harness = resolve_harness_for_path(path)
-    except Exception:
-        harness = CLAUDE_HARNESS
-
-    # Codex 0.147+ writes operator-visible chat as ``response_item.message``.
-    # Its adapter deliberately gates that shape on the CLI version stored by
-    # the rollout's leading ``session_meta`` record.  A bounded tail commonly
-    # excludes that first record, so seed the same parse context the live
-    # monitor has before parsing the tail.  Parsing the first line is harmless
-    # for Claude and older Codex transcripts (it either initializes context or
-    # returns an entry that we intentionally discard here).
-    parse_ctx: dict[str, Any] = {}
-    if all_lines:
-        try:
-            harness.parse_line(all_lines[0], ctx=parse_ctx)
-        except Exception:
-            pass
+    reader = resolve_harness_for_path(path)
 
     users: list[dict[str, Any]] = []
     for raw in lines:
         try:
-            parsed = harness.parse_line(raw, ctx=parse_ctx)
+            parsed = reader.parse_line(raw)
+        except TranscriptParseContextError:
+            raise
         except Exception:
             parsed = None
         parsed_entries = parsed if isinstance(parsed, list) else [parsed] if parsed else []

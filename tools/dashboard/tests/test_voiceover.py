@@ -6,14 +6,20 @@ from pathlib import Path
 
 
 class _FakeHarness:
-    def parse_line(self, line: str):
+    name = "fake"
+
+    def parse_line(self, line: str, ctx=None):
         return json.loads(line)
 
 
 def test_build_session_context_keeps_conversation_and_compacts_tool_payloads(tmp_path, monkeypatch):
     from tools.dashboard import voiceover
 
-    monkeypatch.setattr(voiceover, "resolve_harness_for_session_row", lambda _row: _FakeHarness())
+    monkeypatch.setattr(
+        voiceover,
+        "resolve_harness_for_path",
+        lambda _path: _FakeHarness(),
+    )
     transcript = tmp_path / "session.jsonl"
     transcript.write_text("\n".join([
         json.dumps({"type": "message", "role": "user", "content": "Please fix the voice path."}),
@@ -36,6 +42,31 @@ def test_build_session_context_keeps_conversation_and_compacts_tool_payloads(tmp
     assert "TOOL: exec_command completed" in context
     assert "SECRET" not in context
     assert "SESSION: The implementation is ready for tests." in context
+
+
+def test_build_session_context_seeds_current_codex_version_outside_bounded_tail(tmp_path):
+    from tools.dashboard import voiceover
+
+    transcript = tmp_path / "rollout-current.jsonl"
+    lines = [
+        {"type": "session_meta", "payload": {
+            "originator": "codex-tui", "cli_version": "0.148.0"}},
+        {"type": "event_msg", "payload": {
+            "type": "reasoning", "text": "x" * (voiceover.MAX_TRANSCRIPT_BYTES + 100)}},
+        {"type": "response_item", "timestamp": "2026-08-17T00:00:00Z", "payload": {
+            "type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": "What changed?"}]}},
+        {"type": "response_item", "timestamp": "2026-08-17T00:00:01Z", "payload": {
+            "type": "message", "role": "assistant",
+            "content": [{"type": "output_text", "text": "The parser now fails closed."}]}},
+    ]
+    transcript.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+
+    context = voiceover.build_session_context(
+        {"tmux_name": "auto-current", "harness": "codex"}, transcript)
+
+    assert "OPERATOR: What changed?" in context
+    assert "SESSION: The parser now fails closed." in context
 
 
 def test_ask_session_builds_spoken_first_prompt_and_bounded_history(tmp_path, monkeypatch):

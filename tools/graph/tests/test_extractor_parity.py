@@ -23,7 +23,11 @@ import json
 
 import pytest
 
-from tools.graph.ingest import ClaudeTurnExtractor, CodexTurnExtractor
+from tools.graph.ingest import (
+    ClaudeTurnExtractor,
+    CodexTurnExtractor,
+    MissingCodexVersionError,
+)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -220,7 +224,12 @@ class TestClaudeExtractorSplitInvariance:
 def _x_session_meta(ts: str = "2026-05-01T09:00:00Z") -> dict:
     return {
         "type": "session_meta", "timestamp": ts,
-        "payload": {"originator": "codex-tui", "model_provider": "openai", "model": "gpt-test"},
+        "payload": {
+            "originator": "codex-tui",
+            "model_provider": "openai",
+            "model": "gpt-test",
+            "cli_version": "0.146.0",
+        },
     }
 
 
@@ -265,6 +274,11 @@ CODEX_CORPUS = [
 
 
 class TestCodexExtractorGoldenCorpus:
+    def test_missing_version_fails_closed_before_any_chat_is_dropped(self):
+        with pytest.raises(MissingCodexVersionError, match="version is unavailable"):
+            CodexTurnExtractor().feed(
+                _x_user("This must not disappear", "2026-05-01T09:00:01Z"))
+
     def test_batch_parse_matches_expected_turn_stream(self):
         turns = _feed_all(CodexTurnExtractor(), CODEX_CORPUS)
         stream = [(t["role"], t["content"]) for t in turns]

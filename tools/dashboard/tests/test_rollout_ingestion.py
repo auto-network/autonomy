@@ -1001,7 +1001,10 @@ async def test_r1_larger_replacement_resets_cursor_no_loss(env):
     sdir = env.tmp_path / name / "sessions"
     env.make_session(name, sdir)
     path = sdir / "rollout-2026-08-10T11-00-00-aaaaaaaa-1111-1111-1111-111111111111.jsonl"
-    path.write_text(_msg_line("old-line-1") + "\n")
+    path.write_text(
+        _meta_line("aaaaaaaa-1111-1111-1111-111111111111") + "\n"
+        + _msg_line("old-line-1") + "\n"
+    )
     old_offset = path.stat().st_size
     env.db.update_jsonl_link(
         name, session_uuid=path.stem, jsonl_path=str(path),
@@ -1011,7 +1014,8 @@ async def test_r1_larger_replacement_resets_cursor_no_loss(env):
     # Larger replacement whose FIRST line spans the stale cursor.
     tmp = path.with_suffix(".tmp")
     tmp.write_text(
-        _msg_line("replacement-first-line " + "x" * 120) + "\n"
+        _meta_line("aaaaaaaa-1111-1111-1111-111111111111") + "\n"
+        + _msg_line("replacement-first-line " + "x" * 120) + "\n"
         + _msg_line("replacement-second-line") + "\n"
     )
     tmp.rename(path)
@@ -1030,7 +1034,7 @@ async def test_r1_larger_replacement_resets_cursor_no_loss(env):
     )
     assert texts.count("replacement-second-line") == 1
     assert row["file_offset"] == st.st_size
-    assert row["entry_count"] == 2
+    assert row["entry_count"] == 3  # session_meta + two visible messages
     # Secondary (observed in the repro): a mid-line read also inflates
     # parse_errors — a full re-read must not.
     ts = mon._tail_states.get(name)

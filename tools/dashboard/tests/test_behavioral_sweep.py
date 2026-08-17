@@ -13237,7 +13237,7 @@ class TestSessionHarnessBadge:
             }) + "\n")
             claude_path = Path(f.name)
         try:
-            assert resolve_harness_for_path(claude_path) is CLAUDE_HARNESS
+            assert resolve_harness_for_path(claude_path).harness is CLAUDE_HARNESS
         finally:
             claude_path.unlink(missing_ok=True)
 
@@ -13253,11 +13253,15 @@ class TestSessionHarnessBadge:
         with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False, mode="w") as f:
             f.write(json.dumps({
                 "type": "session_meta",
-                "payload": {"originator": "codex-tui", "model": "gpt-5-codex"},
+                "payload": {
+                    "originator": "codex-tui",
+                    "model": "gpt-5-codex",
+                    "cli_version": "0.148.0",
+                },
             }) + "\n")
             codex_path = Path(f.name)
         try:
-            assert resolve_harness_for_path(codex_path) is CODEX_HARNESS
+            assert resolve_harness_for_path(codex_path).harness is CODEX_HARNESS
         finally:
             codex_path.unlink(missing_ok=True)
 

@@ -63,14 +63,8 @@ CREATE TABLE IF NOT EXISTS tmux_sessions (
     -- a session card have no source between a resume and the next model call.
     --
     -- Durable per-session facts belong in their own column, as harness_token
-    -- and harness_version do. Storing one here looks like it works: the two
+    -- does. Storing one here looks like it works: the two
     -- json_patch writers preserve it, so it survives until the next resume.
-    -- harness_version: the harness build this session's container runs,
-    -- read from the image's label at launch. Durable: unlike
-    -- harness_state it is never wiped, because it describes the image,
-    -- not the process's screen. Decides which record shape the log
-    -- parser expects (Codex >=0.147 writes chat as response_item.message).
-    harness_version     TEXT,
     harness_state       TEXT NOT NULL DEFAULT '{}',
     type                TEXT NOT NULL,
     project             TEXT NOT NULL,
@@ -276,11 +270,6 @@ def init_db(db_path: Path | None = None) -> None:
         _conn.execute("SELECT harness_state FROM tmux_sessions LIMIT 0")
     except sqlite3.OperationalError:
         _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN harness_state TEXT NOT NULL DEFAULT '{}'")
-    try:
-        _conn.execute("SELECT harness_version FROM tmux_sessions LIMIT 0")
-    except sqlite3.OperationalError:
-        _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN harness_version TEXT")
-        _conn.commit()
     # Migrate: add resolution_dir, session_uuids, curr_jsonl_file columns (Phase 0)
     try:
         _conn.execute("SELECT resolution_dir FROM tmux_sessions LIMIT 0")
@@ -1061,16 +1050,6 @@ def patch_harness_state(tmux_name: str, patch: dict) -> None:
         "json_patch(COALESCE(NULLIF(harness_state,''),'{}'), ?) "
         "WHERE tmux_name=?",
         (json.dumps(patch), tmux_name),
-    )
-    conn.commit()
-
-
-def set_harness_version(tmux_name: str, version: str) -> None:
-    """Record the harness build this session runs. Idempotent."""
-    conn = get_conn()
-    conn.execute(
-        "UPDATE tmux_sessions SET harness_version=? WHERE tmux_name=?",
-        (version, tmux_name),
     )
     conn.commit()
 

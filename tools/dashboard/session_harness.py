@@ -17,8 +17,19 @@ import shlex
 import sqlite3
 from typing import Protocol, Any
 
+from tools.codex_transcript import (
+    CodexTranscriptVersionError,
+    TranscriptVersionError,
+    codex_cli_version,
+    codex_uses_response_item_chat,
+)
+
 
 logger = logging.getLogger(__name__)
+
+
+TranscriptParseContextError = TranscriptVersionError
+MissingCodexVersionError = CodexTranscriptVersionError
 
 
 _CODEX_PATCH_FILE_RE = re.compile(r"^\*\*\* (Update|Add|Delete) File: (.+)$", re.MULTILINE)
@@ -84,6 +95,8 @@ def parse_lines_with_refs(
     for line, line_off in iter_jsonl_lines_with_offsets(data, base_offset):
         try:
             parsed = harness.parse_line(line, ctx=ctx)
+        except TranscriptParseContextError:
+            raise
         except Exception:
             logger.exception("parse_lines_with_refs: parse_line failed")
             continue
@@ -2446,30 +2459,18 @@ def _parse_codex_exec_end(payload: dict, timestamp: str) -> dict | list[dict] | 
 # ``response_item.message``. Measured across all 176 rollouts on this host:
 # every version through 0.146.0 (172 files) emits the event_msg shape; only
 # 0.147.0 does not.
-_CODEX_RESPONSE_ITEM_CHAT_FROM = (0, 147, 0)
-
-
-def _codex_cli_version(ctx: dict | None) -> tuple[int, ...] | None:
-    raw = (ctx or {}).get("codex_cli_version")
-    if not raw:
-        return None
-    try:
-        return tuple(int(p) for p in str(raw).split("."))
-    except (TypeError, ValueError):
-        return None
-
-
 def _codex_reads_response_item_chat(ctx: dict | None) -> bool:
     """True when this rollout's Codex no longer emits event_msg chat.
 
     Older rollouts carry the SAME message in both shapes, plus tool-runtime
     warnings filed under the user role — which is exactly why the
     ``response_item.message`` skip below exists and must stay for them.
-    Unknown version → False, the safe default that preserves today's
-    behaviour.
+    An unknown version is not an older version.  Returning ``False`` for it
+    silently drops every chat message from current Codex transcripts, so the
+    parser fails closed until the caller supplies file/session context.
     """
-    ver = _codex_cli_version(ctx)
-    return ver is not None and ver >= _CODEX_RESPONSE_ITEM_CHAT_FROM
+    return codex_uses_response_item_chat(
+        str((ctx or {}).get("codex_cli_version") or "") or None)
 
 
 # Machine-authored text that Codex files under the *user* role. The
@@ -3090,8 +3091,8 @@ def _read_session_meta(path: Path) -> dict[str, Any]:
     return {}
 
 
-def resolve_harness_for_path(path: str | Path | None) -> SessionHarness:
-    """Resolve the harness for a transcript path."""
+def _detect_harness_for_path(path: str | Path | None) -> SessionHarness:
+    """Detect the stateless adapter type for a transcript path."""
 
     if not path:
         return CLAUDE_HARNESS
@@ -3116,6 +3117,88 @@ def resolve_harness_for_path(path: str | Path | None) -> SessionHarness:
     return CLAUDE_HARNESS
 
 
+def _seed_parse_context_for_file(
+    ctx: dict[str, Any],
+    harness: SessionHarness,
+    path: str | Path | None,
+) -> dict[str, Any]:
+    """Seed the context required to parse a bounded transcript window.
+
+    Codex changed its operator-chat record shape at 0.147.  Every real rollout
+    records the authoritative CLI version in its leading ``session_meta``;
+    A partial reader must recover that metadata before it can decide whether
+    ``response_item.message`` is visible chat or duplicate/noise.  Missing or
+    malformed metadata is an explicit error rather than a successful,
+    message-free parse.
+    """
+    if getattr(harness, "name", "") != "codex":
+        return ctx
+
+    if path is None:
+        raise MissingCodexVersionError("Codex transcript path is unavailable")
+    ctx["codex_cli_version"] = codex_cli_version(path)
+    return ctx
+
+
+class TranscriptReader:
+    """One parse stream bound to one transcript file.
+
+    This is the consumer boundary.  Harness selection and provider-specific
+    parse prerequisites are established here once; callers only request parsed
+    lines or byte windows and never handle Codex versions themselves.
+    """
+
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        ctx: dict[str, Any] | None = None,
+    ) -> None:
+        self.path = Path(path)
+        self.harness = _detect_harness_for_path(self.path)
+        self.ctx = ctx if ctx is not None else {}
+        _seed_parse_context_for_file(self.ctx, self.harness, self.path)
+
+    def parse_line(self, line: str) -> dict | list[dict] | None:
+        return self.harness.parse_line(line, ctx=self.ctx)
+
+    @property
+    def name(self) -> str:
+        return self.harness.name
+
+    def extract_message_text(self, raw_entry: dict) -> str:
+        return self.harness.extract_message_text(raw_entry)
+
+    def parse_bytes_with_refs(
+        self,
+        data: bytes,
+        *,
+        stem: str | None = None,
+        base_offset: int = 0,
+    ) -> list[dict]:
+        return parse_lines_with_refs(
+            self.harness,
+            data,
+            stem=stem or self.path.stem,
+            base_offset=base_offset,
+            ctx=self.ctx,
+        )
+
+
+def resolve_harness_for_path(
+    path: str | Path,
+    *,
+    ctx: dict[str, Any] | None = None,
+) -> TranscriptReader:
+    """Return a fully initialized, file-bound harness instance.
+
+    This is the sole raw-transcript parsing API.  Resolving a path includes
+    every mandatory provider-specific field; callers can never receive a
+    half-initialized Codex parser whose version is unknown.
+    """
+    return TranscriptReader(path, ctx=ctx)
+
+
 def resolve_harness_for_session_row(row: dict | None) -> SessionHarness:
     """Resolve the harness for a dashboard session row."""
 
@@ -3127,7 +3210,7 @@ def resolve_harness_for_session_row(row: dict | None) -> SessionHarness:
         if session_uuid.startswith("rollout-"):
             return CODEX_HARNESS
     if row and row.get("jsonl_path"):
-        return resolve_harness_for_path(row["jsonl_path"])
+        return _detect_harness_for_path(row["jsonl_path"])
     return CLAUDE_HARNESS
 
 

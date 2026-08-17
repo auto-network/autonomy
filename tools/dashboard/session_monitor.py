@@ -64,7 +64,6 @@ from tools.dashboard.dao.dashboard_db import (
     mark_dead,
     delete_session,
     update_activity_state,
-    set_harness_version,
     update_tail_state,
     update_nag_last_sent,
     update_todos,
@@ -192,20 +191,6 @@ def _classify_codex_rollout(jsonl_path: Path) -> _CodexRolloutClassification:
             "subagent", "source.subagent", size_bytes,
         )
     return _CodexRolloutClassification("main", "session_meta_main", size_bytes)
-
-
-def _seed_codex_version(ctx: dict, row: dict) -> None:
-    """Put the session's harness version into *ctx* from the row.
-
-    No file is opened: the row is already in hand, and registration wrote
-    ``harness_version`` there from the launcher's stamp. Absent means the
-    session predates the stamp, and the parser keeps the older record format.
-    """
-    if ctx.get("codex_cli_version"):
-        return
-    v = row.get("harness_version")
-    if v:
-        ctx["codex_cli_version"] = str(v)
 
 
 def _is_primary_jsonl(jsonl_path: Path) -> bool:
@@ -981,16 +966,8 @@ def _read_harness_token_from_meta(
     *,
     run_dir: Path | str | None,
     resolution_dir: Path | None,
-) -> tuple[str | None, str | None]:
-    """Pull ``harness_token`` and ``codex_version`` from the launcher's
-    ``.session_meta.json``. Returns ``(token, harness_version)``.
-
-    The version is the Codex build the session's container runs, stamped by
-    the launcher at session start. It decides which record shape carries
-    chat: >=0.147 writes it as ``response_item.message`` where older builds
-    wrote ``event_msg``. A log declares it in its own first record, but
-    readers resume from a stored byte offset and never reach that record, so
-    the value is taken from here instead and persisted on the row.
+) -> str | None:
+    """Pull ``harness_token`` from the launcher's ``.session_meta.json``.
 
     The launcher writes ``<run_dir>/sessions/.session_meta.json`` (auto-10lsv,
     renamed in auto-ghhdg). Either ``run_dir`` or the already-resolved
@@ -1018,12 +995,9 @@ def _read_harness_token_from_meta(
         if not isinstance(doc, dict):
             continue
         token = doc.get("harness_token")
-        version = doc.get("harness_version")
         if isinstance(token, str) and token.strip():
-            return token.strip(), (str(version) if version else None)
-        if version:
-            return None, str(version)
-    return None, None
+            return token.strip()
+    return None
 
 
 class SessionMonitor:
@@ -1423,7 +1397,7 @@ class SessionMonitor:
         if proj is None:
             proj = "autonomy"
 
-        harness_token, codex_version = _read_harness_token_from_meta(
+        harness_token = _read_harness_token_from_meta(
             run_dir=run_dir, resolution_dir=res_dir,
         )
 
@@ -1439,35 +1413,6 @@ class SessionMonitor:
             model=model,
             harness_token=harness_token,
         )
-        # Persist on the row, not in memory. Every in-memory per-session
-        # structure is reset when the dashboard restarts -- which it does on
-        # every .py save -- and the row is not (RolloutIngestion.tla,
-        # Restart: rowVars UNCHANGED). Readers take it from the row and put
-        # it in their parse context, so no reader re-opens the meta file.
-        if codex_version:
-            set_harness_version(tmux_name, codex_version)
-
-    def refresh_harness_version(self, tmux_name: str) -> None:
-        """Re-read the launcher's stamp for an existing session.
-
-        Registration reads it once at first launch. A resume does not go
-        through registration, so without this the row keeps the version the
-        session originally launched with — wrong the moment a resume lands
-        on a rebuilt image, which is exactly how the 2026-08-14 outage
-        started.
-        """
-        row = get_session(tmux_name)
-        if not row:
-            return
-        jp = row.get("jsonl_path")
-        res_dir = Path(jp).parent if jp else None
-        run_dir = row.get("resolution_dir")
-        _token, version = _read_harness_token_from_meta(
-            run_dir=run_dir, resolution_dir=res_dir,
-        )
-        if version:
-            set_harness_version(tmux_name, version)
-
     async def deregister_session(self, tmux_name: str) -> None:
         """Mark a session dead but preserve the DB row (keeps history)."""
         await self.deregister(tmux_name)
@@ -2489,28 +2434,6 @@ class SessionMonitor:
             )
             # W2: eager-create the graph source row at link time.
             self._eager_create_source(tmux_name, path)
-            # Pending→resolved harness-version stamp. The version is read
-            # from the launcher's .session_meta.json once, at registration —
-            # but a container session registers PENDING, before its sidecar
-            # and JSONL exist, so that read returns nothing and the row's
-            # harness_version stays NULL for the session's whole life. This
-            # first-resolution link is the transition where the file, and the
-            # sidecar beside it, are finally present; backfill the column here
-            # so every discovery path (IN_CREATE, scan, reconciliation) is
-            # covered — they all funnel through this link. Readers take the
-            # Codex build from the row to pick the chat record shape (>=0.147
-            # writes chat as response_item.message); a missing stamp makes a
-            # windowed read silently drop EVERY user/assistant message and
-            # render an empty "Load older" transcript. Best-effort, only when
-            # the column is still absent; never blocks the link.
-            if not row.get("harness_version"):
-                try:
-                    self.refresh_harness_version(tmux_name)
-                except Exception:
-                    logger.exception(
-                        "session_monitor: harness_version backfill at link "
-                        "failed for %s", tmux_name,
-                    )
         track.state = TRACK_STREAMING
         track.provenance = provenance
         track.generation = (st.st_dev, st.st_ino)
@@ -3188,11 +3111,10 @@ class SessionMonitor:
         # Purity: parse against a COPY of the live parse ctx; the loop task
         # commits window["parse_ctx_after"] only when the window publishes.
         ctx_after = copy.deepcopy(parse_ctx) if parse_ctx else {}
-        _seed_codex_version(ctx_after, row)
         window = self._parse_window(
             row, data[:last_nl + 1],
             stem=jsonl_path.stem, base_offset=file_offset,
-            parse_ctx=ctx_after,
+            parse_ctx=ctx_after, source_path=jsonl_path,
         )
         window.update({
             "path": jsonl_path_str,
@@ -3237,11 +3159,10 @@ class SessionMonitor:
         if last_nl == -1:
             return None
         ctx_after = copy.deepcopy(parse_ctx) if parse_ctx else {}
-        _seed_codex_version(ctx_after, row)
         window = self._parse_window(
             row, data[:last_nl + 1],
             stem=p.stem, base_offset=start_offset,
-            parse_ctx=ctx_after,
+            parse_ctx=ctx_after, source_path=p,
         )
         window.update({
             "path": path,
@@ -3261,6 +3182,7 @@ class SessionMonitor:
         stem: str | None = None,
         base_offset: int = 0,
         parse_ctx: dict | None = None,
+        source_path: Path | None = None,
     ) -> dict:
         """Parse a complete-line byte window into publication material.
 
@@ -3269,7 +3191,11 @@ class SessionMonitor:
         ``entry_ref = (stem, line start offset, sub_index)``. ``parse_ctx``
         scopes cross-line parse state to this stream — the caller owns it.
         """
-        harness = resolve_harness_for_session_row(row)
+        transcript_path = source_path or Path(str(row.get("jsonl_path") or ""))
+        reader = session_harness_mod.resolve_harness_for_path(
+            transcript_path, ctx=parse_ctx,
+        )
+        harness = reader.harness
         raw_count = 0
         parsed_entries: list = []
         last_message: str | None = None
@@ -3305,7 +3231,9 @@ class SessionMonitor:
             model = harness.extract_model(entry, model)
             harness_state = harness.extract_harness_state(entry, harness_state) or {}
             try:
-                parsed = harness.parse_line(line, ctx=parse_ctx)
+                parsed = reader.parse_line(line)
+            except session_harness_mod.TranscriptParseContextError:
+                raise
             except Exception as exc:
                 parse_errors.append(
                     f"harness.parse_line: {str(exc)[:160]} | line: {line[:160]}"
@@ -4514,14 +4442,13 @@ class SessionMonitor:
                 data = fh.read(file_offset)
         except OSError:
             return
-        harness = resolve_harness_for_session_row(row)
+        reader = session_harness_mod.resolve_harness_for_path(jsonl_path)
         prior: list = []
-        warm_ctx: dict = {}   # per-replay parse ctx — never the live stream's
         for raw_line in data.splitlines():
             line = raw_line.decode("utf-8", errors="replace").strip()
             if not line:
                 continue
-            parsed = harness.parse_line(line, ctx=warm_ctx)
+            parsed = reader.parse_line(line)
             if parsed is None:
                 continue
             if isinstance(parsed, list):
