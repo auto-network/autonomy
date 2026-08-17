@@ -36,7 +36,7 @@ function loadAutonetTestSource() {
   let composition = fs.readFileSync(AUTONET, "utf8");
   composition = composition.replace(
     /import \{[\s\S]*?\} from "\.\/relaykit-core\.js";\n\n/,
-    "const { SecureChannel, canonicalJson, openSocket, performHandshake } = __relaykitCore;\n\n",
+    "const { SecureChannel, canonicalJson, openSocket, performHandshake, sendOp } = __relaykitCore;\n\n",
   );
   return `${coreClosure}\n${composition}`;
 }

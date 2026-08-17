@@ -31,12 +31,17 @@ const A = new Function('TextEncoder', 'TextDecoder', 'crypto', 'MessageChannel',
 function fakeChannel(replies) {
   let i = 0;
   const sent = [];
+  const wires = [];
   return {
-    sent,
-    async sendMessage(bytes) { sent.push(JSON.parse(new TextDecoder().decode(bytes))); },
+    sent, wires,
+    async sendMessage(bytes) {
+      const wire = new TextDecoder().decode(bytes);
+      wires.push(wire);
+      sent.push(JSON.parse(wire));
+    },
     async recvMessage() {
       const reply = replies[Math.min(i++, replies.length - 1)];
-      return new TextEncoder().encode(JSON.stringify(reply) + '\\n');
+      return new TextEncoder().encode(A.canonicalJson(reply) + '\\n');
     },
   };
 }
@@ -101,6 +106,7 @@ def test_requests_are_correlated_and_forwarded_opaquely():
   process.stdout.write(JSON.stringify({
     replies: seen.map((m) => ({id: m.id, ok: m.ok, n: m.body && m.body.n})),
     forwarded: channel.sent.map((m) => [m.op, m.body && m.body.kind]),
+    wires: channel.wires,
   }));
   process.exit(0);
 })();
@@ -108,6 +114,10 @@ def test_requests_are_correlated_and_forwarded_opaquely():
     assert sorted(r["id"] for r in out["replies"]) == ["a", "b"]
     assert all(r["ok"] for r in out["replies"])
     assert out["forwarded"] == [["read", "pillars"], ["read", "presence"]]
+    assert out["wires"] == [
+        '{"body":{"kind":"pillars"},"op":"read","v":1}\n',
+        '{"body":{"kind":"presence"},"op":"read","v":1}\n',
+    ]
 
 
 def test_the_stream_key_never_reaches_the_viewer():
@@ -283,22 +293,26 @@ def test_a_refused_subscribe_leaves_the_viewer_static_not_broken():
     assert after and after[0]["n"] == 7
 
 
-def test_a_failing_op_does_not_silence_the_channel():
-    """One rejected exchange must not poison the queue.
+def test_a_transport_failure_poison_closes_later_exchanges():
+    """A failed record exchange poisons the ordered channel.
 
-    The chain is kept alive explicitly; without that, every later op
-    inherits the rejection and the viewer goes quiet with no error.
+    Continuing after a missing response would desynchronize record sequence
+    numbers. The viewer gets explicit failures and must establish a fresh
+    channel rather than trying another operation on the damaged one.
     """
     out = _node("""
 (async () => {
   let call = 0;
-  const channel = {
-    async sendMessage() {},
-    async recvMessage() {
-      call++;
-      if (call === 1) throw new Error('channel hiccup');
-      return new TextEncoder().encode(JSON.stringify({v:1,status:'ok',n:call}) + '\\n');
-    },
+      const channel = {
+        closed: false,
+        async sendMessage() {},
+        async recvMessage() {
+          call++;
+          if (call === 1) throw new Error('channel hiccup');
+          if (this.closed) throw new Error('channel closed');
+          return new TextEncoder().encode(A.canonicalJson({v:1,status:'ok',n:call}) + '\\n');
+        },
+        close() { this.closed = true; },
   };
   const broker = new A.ChannelBroker(channel, null);
   const pair = new MessageChannel();
@@ -317,7 +331,7 @@ def test_a_failing_op_does_not_silence_the_channel():
 """)
     by_id = {m["id"]: m["ok"] for m in out["seen"]}
     assert by_id["boom"] is False       # the caller is told
-    assert by_id["after"] is True       # and the next op still works
+    assert by_id["after"] is False      # the damaged sequence is not reused
 
 
 # ── the shell's own chrome, claimed by the viewer ───────────────────────

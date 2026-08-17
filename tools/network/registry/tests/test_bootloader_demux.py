@@ -34,7 +34,7 @@ src = src.replace(/^const autonet = \(\(\) => \{/, '');
 let made = null;
 class FakeWS {
   constructor() { made = this; this.binaryType = 'blob'; setTimeout(() => this.onopen && this.onopen(), 0); }
-  send() {} close() {}
+  send() {} close() { this.closed = true; }
 }
 const A = new Function('TextEncoder','TextDecoder','crypto','WebSocket',
   src)(TextEncoder, TextDecoder, require('crypto').webcrypto, FakeWS);
@@ -50,7 +50,7 @@ const A = new Function('TextEncoder','TextDecoder','crypto','WebSocket',
     made.onmessage({ data: new Uint8Array(f).buffer });
   }
   await new Promise(r => setTimeout(r, 20));
-  process.stdout.write(JSON.stringify({records, feeds}));
+  process.stdout.write(JSON.stringify({records, feeds, closed: made.closed === true}));
   process.exit(0);
 })();
     """ % json.dumps(str(AUTONET_TEST_SOURCE))
@@ -80,7 +80,8 @@ def test_records_and_feeds_interleave_without_crossing():
     assert out["feeds"] == [[20], [40]]
 
 
-def test_an_unknown_kind_is_ignored_rather_than_misrouted():
+def test_an_unknown_kind_poison_closes_the_socket():
     out = _demux([[0x7f, 9], [0x00, 5]])
-    assert out["records"] == [[5]]
+    assert out["records"] == []
     assert out["feeds"] == []
+    assert out["closed"] is True
