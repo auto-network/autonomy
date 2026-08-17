@@ -59,12 +59,10 @@ def _isolate_schema_registry():
 @pytest.fixture(autouse=True)
 def _clear_sealer():
     settings_ops.set_vault_sealer(None)
-    settings_ops.set_vault_key_holder(None)
     try:
         yield
     finally:
         settings_ops.set_vault_sealer(None)
-        settings_ops.set_vault_key_holder(None)
 
 
 @pytest.fixture
@@ -402,21 +400,20 @@ def test_a_one_row_per_key_set_appends_rather_than_rewriting(
     ) == {"access_token": "one"}
 
 
-def test_a_reader_with_no_key_holder_gets_a_named_error_and_never_the_locator(
+def test_a_reader_with_no_vault_gets_the_locator_and_never_the_value(
     graph_db_env, vault_schema, vault
 ):
-    """A cold dashboard exposes neither ciphertext nor false absence."""
+    """Resolution up to the merge step is unchanged and metadata-only: it
+    hands back what the row holds. Unwrapping is step six and belongs to the
+    read path (auto-6364n); what matters here is that nothing on the way
+    there produces the plaintext or hides the row."""
     ops.add_setting(
         "autonomy.test.vaulted", 1, "default", {"access_token": SECRET},
         org=ops.CALLER_ORG,
     )
     resolved = settings_ops.read_set("autonomy.test.vaulted", org=None).to_dict()
-    failure = resolved["default"].payload
-    assert isinstance(failure, settings_ops.SettingReadError)
-    assert failure.code == "vault_key_holder_missing"
-    assert failure.error == "VaultKeyHolderMissing"
+    assert is_vault_locator(resolved["default"].payload)
     assert SECRET not in json.dumps(resolved["default"].to_dict())
-    assert not is_vault_locator(failure)
 
 
 # ── ordinary settings are untouched ───────────────────────────────────────
