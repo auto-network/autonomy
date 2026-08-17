@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 from pathlib import Path
 
@@ -44,6 +45,19 @@ def _load_build_info(path: str | None) -> dict:
     return value
 
 
+def _load_turn_issuer():
+    """Use the optional TURN-deploy credential without gating the Registry."""
+    credential_dir = os.environ.get("CREDENTIALS_DIRECTORY")
+    if not credential_dir:
+        return None
+    path = Path(credential_dir) / "turn-rest-secrets"
+    if not path.is_file():
+        return None
+    from .turn_credentials import TurnCredentialIssuer
+
+    return TurnCredentialIssuer.from_file(path)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="auto.network registry v1")
     parser.add_argument("--db", default="registry.db", help="SQLite database path")
@@ -63,6 +77,7 @@ def main() -> None:
         args.db,
         base_url=args.base_url,
         build_info=_load_build_info(args.version_file),
+        turn_issuer=_load_turn_issuer(),
     )
     # Link tokens are bearer credentials and are part of the public route.
     # Uvicorn's HTTP access logger records the full path, while its WebSocket

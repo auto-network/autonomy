@@ -24,6 +24,16 @@ can traverse and read only this runtime directory. The group id is measured by
 the deploy and pinned in `runtime.env`, never assumed to be the host's
 `nogroup` id.
 
+The co-located Registry is the sole credential issuer. Its systemd unit reads
+the same root-only file through a separate `LoadCredential` mount; Dashboards
+and browsers never receive the long-lived secret. With two lines present,
+coturn accepts both while the issuer signs new 15-minute coupons with the last
+line. Rotation is therefore ordered: append the new line, restart coturn and
+the Registry, prove credentials signed by both secrets, wait at least the
+credential TTL, remove the old first line, then restart and prove again. A
+Registry restart reconnects serving tunnels and must be included in the
+monitored rotation window.
+
 The TLS certificate and key come from Certbot's
 `/etc/letsencrypt/live/turn.auto.network/` paths. Systemd handles them as
 credentials and the renderer copies them into the same runtime directory.

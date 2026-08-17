@@ -13,6 +13,7 @@ import contextlib
 import json
 
 import pytest
+from fastapi.testclient import TestClient
 
 from tools.network.idkit import KeyPair, Subject, issue_cert
 from tools.network.relaykit.frames import (
@@ -30,6 +31,8 @@ from tools.network.registry.relay import (
     CLOSE_PROTOCOL_MISMATCH,
     CLOSE_UNAUTHENTICATED,
 )
+from tools.network.registry.app import create_app
+from tools.network.registry.turn_credentials import TurnCredentialIssuer
 from starlette.websockets import WebSocketDisconnect
 
 from .conftest import DAY, NOW, ORG, ORG_NONE, TARGET, register
@@ -170,6 +173,35 @@ def test_revoke_link_over_tunnel(client, clock, root, app):
     assert revoked["token"] == token
     assert revoked["revoked_at"] == clock.now
     assert client.get(f"/v1/links/{token}/envelope").status_code == 404
+
+
+def test_authenticated_org_tunnel_issues_one_opaque_turn_coupon(clock, root):
+    issuer = TurnCredentialIssuer(
+        ("a" * 64,), clock=clock, token_hex=lambda _size: "b" * 32
+    )
+    app = create_app(
+        ":memory:", now_fn=clock, secure_cookies=False, turn_issuer=issuer
+    )
+    with TestClient(app) as client:
+        with _open_tunnel(client, clock, root) as ws:
+            reply = _ctrl(ws, "9" * 32, "issue-turn", {})
+
+    assert reply["ok"] is True
+    assert reply["id"] == "9" * 32
+    assert set(reply) == {"id", "ok", "ice_servers", "expires_at"}
+    assert reply["expires_at"] == clock.now + 15 * 60
+    assert reply["ice_servers"][1]["username"].endswith(":" + "b" * 32)
+    assert ORG not in json.dumps(reply)
+
+
+def test_turn_coupon_is_unavailable_without_the_host_credential(client, clock, root):
+    with _open_tunnel(client, clock, root) as ws:
+        reply = _ctrl(ws, "8" * 32, "issue-turn", {})
+    assert reply == {
+        "id": "8" * 32,
+        "ok": False,
+        "error": "TURN credential issuance is unavailable",
+    }
 
 
 def test_second_org_cannot_revoke_or_enumerate(client, clock, root, app):

@@ -547,6 +547,7 @@ def create_app(
     secure_cookies: bool = True,
     build_info: Optional[dict] = None,
     abuse_limiter: Optional[RelayAbuseLimiter] = None,
+    turn_issuer=None,
 ) -> FastAPI:
     """Build the registry app.
 
@@ -580,6 +581,7 @@ def create_app(
     app.state.witness_key = witness_key
     app.state.challenge_hub = challenge_hub
     app.state.abuse_limiter = abuse_limiter
+    app.state.turn_issuer = turn_issuer
 
     def now() -> int:
         return int(now_fn())
@@ -1915,7 +1917,7 @@ def create_app(
     @app.websocket("/t/{org_uuid}")
     async def relay_tunnel(websocket: WebSocket, org_uuid: str):
         await tunnel_endpoint(websocket, org_uuid, hub, store, now_fn,
-                              base_url=base_url)
+                              base_url=base_url, turn_issuer=turn_issuer)
 
     @app.websocket("/v1/links/{token}/channel")
     async def relay_viewer(websocket: WebSocket, token: str):

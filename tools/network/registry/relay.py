@@ -660,9 +660,22 @@ def _ctrl_revoke_link(tunnel: "Tunnel", args: dict, store: RegistryStore,
     return {"token": token, "revoked_at": now}
 
 
+def _ctrl_issue_turn(tunnel: "Tunnel", args: dict, turn_issuer) -> dict:
+    """Issue one opaque coupon to an already-authenticated org tunnel."""
+    if args != {}:
+        raise _CtrlError("issue-turn takes no arguments")
+    if turn_issuer is None:
+        raise _CtrlError("TURN credential issuance is unavailable")
+    configuration = turn_issuer.issue(tunnel.org)
+    return {
+        "ice_servers": list(configuration.ice_servers),
+        "expires_at": configuration.expires_at,
+    }
+
+
 async def _handle_ctrl_frame(tunnel: "Tunnel", payload: bytes,
                              store: RegistryStore, base_url: str,
-                             now: int) -> None:
+                             now: int, turn_issuer=None) -> None:
     """Parse one control request and reply on the control channel. A
     malformed payload raises FrameError (drops the tunnel); a clean op
     failure replies {ok: false} and leaves the tunnel up."""
@@ -682,6 +695,8 @@ async def _handle_ctrl_frame(tunnel: "Tunnel", payload: bytes,
             result = _ctrl_create_link(tunnel, args, store, base_url, now)
         elif op == "revoke-link":
             result = _ctrl_revoke_link(tunnel, args, store, now)
+        elif op == "issue-turn":
+            result = _ctrl_issue_turn(tunnel, args, turn_issuer)
         else:
             raise _CtrlError(f"unknown control op: {op!r}")
         reply = {"id": correlation, "ok": True, **result}
@@ -698,7 +713,7 @@ async def _handle_ctrl_frame(tunnel: "Tunnel", payload: bytes,
 
 async def tunnel_endpoint(websocket: WebSocket, org: str, hub: TunnelHub,
                           store: RegistryStore, now_fn,
-                          base_url: str = "") -> None:
+                          base_url: str = "", turn_issuer=None) -> None:
     """Handle one dashboard tunnel connection for its whole lifetime."""
     await websocket.accept()
     try:
@@ -756,7 +771,9 @@ async def tunnel_endpoint(websocket: WebSocket, org: str, hub: TunnelHub,
                 # malformed payload is a protocol violation → drop.
                 try:
                     await _handle_ctrl_frame(
-                        tunnel, frame.payload, store, base_url, int(now_fn()))
+                        tunnel, frame.payload, store, base_url, int(now_fn()),
+                        turn_issuer=turn_issuer,
+                    )
                 except FrameError:
                     break
                 continue
