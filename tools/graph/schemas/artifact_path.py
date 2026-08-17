@@ -57,6 +57,7 @@ class ArtifactPathV1(SettingSchema):
         "path": {
             "type": "string",
             "required": True,
+            "exists": "file",
             "description": (
                 "Absolute host path where the artifact lives, replacing the "
                 "Artifact-Layering default. Setting key is '<org>:<name>'."
