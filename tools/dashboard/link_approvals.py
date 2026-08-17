@@ -959,7 +959,7 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
 #: the registry. The relay is untrusted (I5) and authorizes nothing with
 #: these — serving reads the LOCAL grant cache only — so shipping them
 #: would leak who a link is for while buying nothing.
-_LOCAL_ONLY_META = frozenset({"participant_id"})
+_LOCAL_ONLY_META = frozenset({"participant_id", "ice_policy"})
 
 
 def _tunnel_link_meta(req: dict, decision: dict) -> tuple[dict, str | None]:
