@@ -716,17 +716,10 @@ class TunnelConnector:
             )
         except Exception as exc:  # HandshakeError, RecordError, transport failures
             # Do not log the token, wire bytes, or exception text.  The class
-            # plus the code-defined origin site separates adjacent fail-closed
-            # checks without exposing exception arguments or viewer input.
-            origin = exc.__traceback__
-            while origin is not None and origin.tb_next is not None:
-                origin = origin.tb_next
-            function = origin.tb_frame.f_code.co_name if origin is not None else "unknown"
-            line = origin.tb_lineno if origin is not None else 0
-            logger.warning(
-                "viewer channel failed: %s at %s:%d",
-                type(exc).__name__, function, line,
-            )
+            # is enough to separate responder/protocol/transport failures;
+            # without it every authenticated-channel fault is reduced to the
+            # same unexplained WebSocket close.
+            logger.warning("viewer channel failed: %s", type(exc).__name__)
             with contextlib.suppress(Exception):
                 await send_frame(FRAME_CLOSE, channel_id)
         else:
