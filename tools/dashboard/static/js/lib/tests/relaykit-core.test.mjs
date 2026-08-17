@@ -225,7 +225,19 @@ const encoder = new TextEncoder();
     const second = await relaykit.openSocket('wss://relay.invalid/channel');
     socket.onmessage({ data: new Uint8Array([9, 1]).buffer });
     assert.equal(socket.closed, true);
+    socket.onmessage({ data: new Uint8Array([0, 7]).buffer });
     await assert.rejects(second.recvBinary(), /unknown kind/);
+
+    const third = await relaykit.openSocket('wss://relay.invalid/channel');
+    const largeFeed = new Uint8Array((2 * 1024 * 1024) + 1);
+    largeFeed[0] = 1;
+    socket.onmessage({ data: largeFeed.buffer });
+    assert.equal((await third.recvFeed()).length, 2 * 1024 * 1024);
+
+    const fourth = await relaykit.openSocket('wss://relay.invalid/channel');
+    fourth.close();
+    socket.onmessage({ data: new Uint8Array([0, 8]).buffer });
+    await assert.rejects(fourth.recvBinary(), /websocket closed/);
   } finally {
     globalThis.WebSocket = OriginalWebSocket;
   }

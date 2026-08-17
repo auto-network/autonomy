@@ -23,7 +23,10 @@ const VIEWER_KIND_RECORD = 0x00;
 const VIEWER_KIND_FEED = 0x01;
 const MAX_SOCKET_QUEUE_FRAMES = 128;
 const MAX_SOCKET_QUEUE_BYTES = 8 * 1024 * 1024;
-const MAX_SOCKET_FRAME_BYTES = MAX_RECORD_CHUNK_SIZE + 64;
+const MAX_SOCKET_RECORD_FRAME_BYTES = MAX_RECORD_CHUNK_SIZE + 64;
+// Mirrors the Relay's per-viewer writer ceiling. Feed frames are sealed once
+// and are not pairwise records, so the record-chunk limit does not apply.
+const MAX_SOCKET_FEED_FRAME_BYTES = 2 * 1024 * 1024;
 
 const te = new TextEncoder();
 const td = new TextDecoder('utf-8', { fatal: true });
@@ -514,13 +517,13 @@ export function openSocket(url) {
       while (feedWaiters.length) feedWaiters.shift().reject(error);
     };
     const take = (queue, waiters, kind) => {
+      if (closed) return Promise.reject(closed);
       if (queue.length) {
         const value = queue.shift();
         if (kind === VIEWER_KIND_RECORD) recordBytes -= value.length;
         else feedBytes -= value.length;
         return Promise.resolve(value);
       }
-      if (closed) return Promise.reject(closed);
       return new Promise((resolveValue, rejectValue) => {
         waiters.push({ resolve: resolveValue, reject: rejectValue });
       });
@@ -529,22 +532,31 @@ export function openSocket(url) {
       send: (bytes) => socket.send(bytes),
       recvBinary: () => take(records, recordWaiters, VIEWER_KIND_RECORD),
       recvFeed: () => take(feeds, feedWaiters, VIEWER_KIND_FEED),
-      close: () => socket.close(),
+      close: () => {
+        fail(typedTransportError('websocket closed'));
+        socket.close();
+      },
     });
     socket.onmessage = (event) => {
+      if (closed) return;
       if (!(event.data instanceof ArrayBuffer)) {
         fail(typedTransportError('websocket sent a non-binary frame'));
         socket.close();
         return;
       }
       const tagged = new Uint8Array(event.data);
-      if (!tagged.length || tagged.length - 1 > MAX_SOCKET_FRAME_BYTES) {
+      if (!tagged.length) {
         fail(typedTransportError('websocket frame violates size bounds'));
         socket.close();
         return;
       }
       const payload = tagged.subarray(1);
       if (tagged[0] === VIEWER_KIND_FEED) {
+        if (payload.length > MAX_SOCKET_FEED_FRAME_BYTES) {
+          fail(typedTransportError('websocket feed frame violates size bounds'));
+          socket.close();
+          return;
+        }
         if (feedWaiters.length) feedWaiters.shift().resolve(payload);
         else {
           if (
@@ -559,6 +571,11 @@ export function openSocket(url) {
           feedBytes += payload.length;
         }
       } else if (tagged[0] === VIEWER_KIND_RECORD) {
+        if (payload.length > MAX_SOCKET_RECORD_FRAME_BYTES) {
+          fail(typedTransportError('websocket record frame violates size bounds'));
+          socket.close();
+          return;
+        }
         if (recordWaiters.length) recordWaiters.shift().resolve(payload);
         else {
           if (
