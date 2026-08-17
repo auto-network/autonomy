@@ -120,6 +120,7 @@ class _WorkspaceMountSchemaAdapter(SettingSchema):
             "type": "string",
             "required": True,
             "exists": "dir",
+            "exists_frame": "platform-host",
             "description": "Absolute host path to the directory to mount",
         },
         "container_path": {

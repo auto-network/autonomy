@@ -1260,6 +1260,32 @@ def rows_keyed_by(
     return out
 
 
+def _running_in_a_container() -> bool:
+    """Whether this process is inside a container rather than on the host.
+
+    Only ever used to decide whether a question about the HOST's filesystem
+    can be answered from here, and it fails toward answering: if this cannot
+    tell, the check behaves exactly as it did before. A false positive costs
+    a finding that says "ask on the host"; a false negative costs nothing
+    that was not already the case.
+
+    Overridable so a test can exercise both frames without a container, and
+    so an operator running the platform in an unusual arrangement can say so
+    rather than argue with a heuristic.
+    """
+    forced = os.environ.get("AUTONOMY_CONTAINER")
+    if forced is not None:
+        return forced.strip().lower() in ("1", "true", "yes")
+    if os.path.exists("/.dockerenv"):
+        return True
+    try:
+        with open("/proc/1/cgroup", encoding="utf-8", errors="replace") as fh:
+            marker = fh.read()
+    except OSError:
+        return False
+    return any(s in marker for s in ("docker", "containerd", "kubepods", "lxc"))
+
+
 def check_setting(
     set_id: str,
     key: str,
@@ -1362,6 +1388,24 @@ def check_setting(
                         _org_scoped=scoped))
                 kind = spec.get("exists")
                 if kind:
+                    if (spec.get("exists_frame") == "platform-host"
+                            and _running_in_a_container()):
+                        # Refuse rather than answer. From in here the question
+                        # has two wrong answers and no right one: the path is
+                        # reported missing when it is present on the host, and
+                        # PRESENT when a same-named directory happens to exist
+                        # in this container. The second is why this cannot just
+                        # be a caveat on the output — it turns green, and green
+                        # is read as ready.
+                        findings.append(CheckFinding(
+                            address, "unanswerable_here",
+                            f"{path_prefix}{name} declares {kind} at {one!r} on "
+                            f"the platform host, which this container cannot "
+                            f"see — run this check on the host to answer it",
+                            "a container filesystem, which is not the platform "
+                            "host's",
+                        ))
+                        continue
                     ok = (_os.path.isfile(one) if kind == "file"
                           else _os.path.isdir(one) if kind == "dir"
                           else _os.path.isfile(one) and _os.access(one, _os.X_OK))
@@ -1372,6 +1416,21 @@ def check_setting(
                             f"which is not there",
                             f"the filesystem of the process running this check",
                         ))
+                if spec.get("names_host_env") and one not in _os.environ:
+                    # A launcher forwards the variables that are set and
+                    # skips the rest without saying so, which is why this
+                    # is worth reporting at all: the container starts, and
+                    # whatever needed the value fails later saying nothing
+                    # about a forward that never happened.
+                    findings.append(CheckFinding(
+                        address, "missing_env",
+                        f"{path_prefix}{name} names host environment variable "
+                        f"{one!r}, which is not set — a launcher forwards only "
+                        f"what is set and skips the rest in silence",
+                        "the environment of the process running this check, "
+                        "which is the launcher's only if they are the same "
+                        "process",
+                    ))
 
     if schema is not None:
         walk(schema, payload, "")
