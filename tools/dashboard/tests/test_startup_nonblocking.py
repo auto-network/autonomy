@@ -11,6 +11,7 @@ bootstrap and asserts startup returns well before it could have completed.
 
 from __future__ import annotations
 
+import threading
 import time
 
 from starlette.testclient import TestClient
@@ -22,27 +23,40 @@ def test_lifespan_startup_does_not_block_on_bootstrap(
     test_app, monkeypatch
 ):
     started = {"called": False, "finished": False}
+    # Gate the fake bootstrap on an event rather than a wall-clock sleep: the
+    # proof that startup is fire-and-forget is that the lifespan returns while
+    # bootstrap is still blocked, which holds regardless of scheduling latency.
+    # A wall-clock threshold (entered < 2s vs a 3s sleep) flakes under -n 8
+    # CPU contention even though the code is correct.
+    release = threading.Event()
 
     def slow_bootstrap(orgs=None):
         started["called"] = True
-        time.sleep(3.0)  # stand in for real connector bring-up
+        release.wait(timeout=30)  # blocks until the test releases it
         started["finished"] = True
         return None
 
     monkeypatch.setattr(link_serving_supervisor, "bootstrap", slow_bootstrap)
     monkeypatch.delenv("DASHBOARD_MOCK", raising=False)
 
-    t0 = time.monotonic()
-    with TestClient(test_app) as client:
-        entered = time.monotonic() - t0
-        # The lifespan completed (startup returned) far faster than the
-        # 3s bootstrap could have — proving it is fire-and-forget, not
-        # awaited. Generous ceiling so unrelated startup work never flakes.
-        assert entered < 2.0, (
-            f"startup blocked for {entered:.1f}s — bootstrap is being awaited")
-        # And the app actually answers during the window bootstrap is still
-        # running in the background.
-        resp = client.get("/api/version")
-        assert resp.status_code == 200
-        assert started["called"] is True
-        assert started["finished"] is False  # still running in the background
+    try:
+        with TestClient(test_app) as client:
+            # Startup returned even though bootstrap is still blocked on the
+            # event — that is the fire-and-forget proof, with no timing margin.
+            resp = client.get("/api/version")
+            assert resp.status_code == 200
+            # The background task was kicked off (poll briefly; it runs on
+            # another thread and may not have been scheduled yet).
+            for _ in range(200):
+                if started["called"]:
+                    break
+                time.sleep(0.02)
+            assert started["called"] is True
+            # Still running: blocked on the event, not finished — no race with
+            # a wall-clock sleep.
+            assert started["finished"] is False
+            # Release before leaving the context so lifespan shutdown does not
+            # wait on the background task (keeps the test fast).
+            release.set()
+    finally:
+        release.set()  # safety if an assertion above raised first
