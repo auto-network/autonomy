@@ -16995,6 +16995,65 @@ async def api_orgs_list(request):
     return JSONResponse({"orgs": entries})
 
 
+def _finding_json(finding) -> dict:
+    """One finding, as data rather than as a printed line.
+
+    ``looked_in`` travels with every one because the same question has
+    different true answers in different places, and a reader who cannot see
+    where it was asked cannot tell a clean result from an unasked one.
+    """
+    return {
+        "kind": finding.kind,
+        "at": finding.address,
+        "what": finding.detail,
+        "looked_in": finding.looked_in,
+        "severity": getattr(finding, "severity", "blocking"),
+    }
+
+
+async def api_org_workspace_health(request):
+    """GET /api/orgs/<slug>/workspaces/health — what this machine still owes.
+
+    An organization's workspaces arrive with it and say nothing about the
+    machine that just joined: the directories, credentials and host variables
+    they name are answered locally or not at all. This reports which are
+    still unanswered, per workspace.
+
+    Read-only. It provisions nothing and launches nothing.
+    """
+    from agents import workspace_readiness as readiness
+
+    slug = request.path_params["slug"]
+    try:
+        rows = await asyncio.to_thread(readiness.org_readiness, slug)
+    except Exception as exc:
+        logger.exception("workspace health failed for org %s", slug)
+        return JSONResponse(
+            {"error": f"{type(exc).__name__}: {exc}"}, status_code=502,
+        )
+    return JSONResponse({
+        "org": slug,
+        # The frame is a property of the answer, not of any one finding, so
+        # it is stated once for the whole report as well: a caller rendering
+        # a clean result needs to know whether the question was asked
+        # somewhere that could answer it.
+        "asked_in": ("a container, which cannot see the platform host's "
+                     "filesystem" if settings_ops._running_in_a_container()
+                     else "the platform host"),
+        "workspaces": [
+            {
+                "id": w.workspace_id,
+                "name": w.name,
+                "ready": w.ready,
+                "blocking": [_finding_json(f) for f in w.blocking],
+                "advisory": [_finding_json(f) for f in w.advisory],
+                "unanswerable": [_finding_json(f) for f in w.unanswerable],
+            }
+            for w in rows
+        ],
+    })
+
+
 async def api_orgs_show(request):
     """GET /api/orgs/<slug> — bootstrap row + autonomy.org#1 Setting."""
     from tools.graph import org_ops
@@ -17912,6 +17971,8 @@ routes = [
     Route("/api/orgs", api_orgs_list, methods=["GET"]),
     Route("/api/orgs", api_orgs_create, methods=["POST"]),
     Route("/api/orgs/{slug}", api_orgs_show, methods=["GET"]),
+    Route("/api/orgs/{slug}/workspaces/health", api_org_workspace_health,
+          methods=["GET"]),
     Route("/api/orgs/{slug}", api_orgs_delete, methods=["DELETE"]),
     Route("/api/stats", api_stats),
     Route("/api/harness_usage", api_harness_usage),

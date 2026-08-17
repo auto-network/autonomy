@@ -15,6 +15,11 @@
 
   var status = null;
   var loadError = null;
+  //: Organizations this deployment knows about, for the panel's list. Held
+  //: separately from `status` because it loads on its own schedule and a
+  //: slow or failed org read must not blank the identity above it.
+  var orgs = null;
+  var orgsError = null;
   var panelOpen = false;
   var lockBusy = false;
   var initialized = false;
@@ -216,6 +221,72 @@
     }
   }
 
+  function orgRow(org) {
+    var slug = org && (org.slug || org.name);
+    var row = el('button', 'identity-panel-action identity-panel-org');
+    row.type = 'button';
+    row.setAttribute('data-testid', 'identity-org-' + slug);
+    var iconHost = el('span', 'identity-panel-action-icon identity-org-mark');
+    // The org's own initial rather than a generic glyph — several of these
+    // sit in a list and the first thing a reader does is tell them apart.
+    iconHost.appendChild(el('span', '', String(
+      (org && org.initial) || (slug || '?').charAt(0)).toUpperCase()));
+    if (org && org.color) iconHost.style.background = org.color;
+    row.appendChild(iconHost);
+    var copy = el('span', 'identity-panel-action-copy');
+    copy.appendChild(el('span', 'identity-panel-action-label',
+      (org && (org.name || org.display_name)) || slug));
+    if (org && org.byline) {
+      copy.appendChild(el('span', 'identity-panel-action-detail', org.byline));
+    }
+    row.appendChild(copy);
+    row.addEventListener('click', function () {
+      closePanel();
+      if (root.AutonomyOrgSettings) root.AutonomyOrgSettings.open(slug);
+    });
+    return row;
+  }
+
+  function orgSection() {
+    var section = el('div', 'identity-panel-orgs');
+    section.setAttribute('data-testid', 'identity-orgs');
+    section.appendChild(el('div', 'identity-panel-section-label', 'Organizations'));
+    if (orgsError) {
+      section.appendChild(el('div', 'identity-panel-error', orgsError));
+      return section;
+    }
+    if (orgs === null) {
+      section.appendChild(el('div', 'identity-panel-action-detail', 'Loading…'));
+      return section;
+    }
+    if (!orgs.length) {
+      // Not an error, and worth saying: an operator with no organizations
+      // has one obvious next move and the panel already offers it below.
+      section.appendChild(el('div', 'identity-panel-action-detail',
+        'None yet. Accept an invitation to join one.'));
+      return section;
+    }
+    orgs.forEach(function (org) { section.appendChild(orgRow(org)); });
+    return section;
+  }
+
+  function loadOrgs() {
+    fetch('/api/orgs', { headers: { 'Accept': 'application/json' } })
+      .then(function (res) {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json();
+      })
+      .then(function (body) {
+        orgs = (body && body.orgs) || [];
+        orgsError = null;
+        if (panelOpen) render();
+      })
+      .catch(function (err) {
+        orgsError = 'Organizations unavailable: ' + ((err && err.message) || err);
+        if (panelOpen) render();
+      });
+  }
+
   function panelForState(state) {
     var panel = el('section', 'identity-panel');
     panel.setAttribute('role', 'dialog');
@@ -239,6 +310,13 @@
     } else if (state === 'open') {
       panel.appendChild(el('div', 'identity-panel-notice',
         'Access is open. This browser is not authenticated.'));
+    }
+
+    // Only where there is an identity to have organizations. In bootstrap
+    // or locked states the panel's job is to get past that first.
+    if (state !== 'bootstrap' && state !== 'locked' && state !== 'error') {
+      panel.appendChild(orgSection());
+      if (orgs === null && !orgsError) loadOrgs();
     }
 
     var actions = el('div', 'identity-panel-actions');
