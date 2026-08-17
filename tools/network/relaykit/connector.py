@@ -714,12 +714,7 @@ class TunnelConnector:
                 send=lambda data: send_frame(FRAME_DATA, channel_id, data),
                 handler=self._handler,
             )
-        except Exception as exc:  # HandshakeError, RecordError, transport failures
-            # Do not log the token, wire bytes, or exception text.  The class
-            # is enough to separate responder/protocol/transport failures;
-            # without it every authenticated-channel fault is reduced to the
-            # same unexplained WebSocket close.
-            logger.warning("viewer channel failed: %s", type(exc).__name__)
+        except Exception:  # HandshakeError, RecordError, transport failures
             with contextlib.suppress(Exception):
                 await send_frame(FRAME_CLOSE, channel_id)
         else:
