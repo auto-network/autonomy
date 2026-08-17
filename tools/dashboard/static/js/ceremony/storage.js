@@ -7,15 +7,27 @@
  */
 
 /**
+ * One PERSONAL session record carrying a map from genesis_id to that
+ * organization's persona entry — one unlock, a persona per organization.
+ * There is no top-level `org`/`orgSlug`: those live inside an entry, because
+ * the top level of a sign-on is a person, not an organization.
+ *
+ * @typedef {Object} SessionOrgEntry
+ * @property {string} genesisId
+ * @property {string} org Registry org uuid when bound, else the genesis id.
+ * @property {string|null} orgSlug
+ * @property {string} personaPub HKDF(personal_root_seed, genesisId) public key.
+ * @property {string} certWire
+ * @property {string|null} registryUrl
+ * @property {string|null} rootPub
+ * @property {number|null} rekeyedAt
+ *
  * @typedef {Object} SessionRecord
  * @property {CryptoKey|null} key Non-extractable Ed25519 private signing key.
  *   This is null only when metadata was reloaded from a Node file.
- * @property {string} certWire
- * @property {string} org
- * @property {string} registryUrl
- * @property {string} rootPub
- * @property {string|null} orgSlug
+ * @property {string|null} personalRootPub
  * @property {number} createdAt
+ * @property {Object<string, SessionOrgEntry>} orgs
  */
 
 /**
@@ -33,12 +45,9 @@ const DB_KEY = 'current';
 const SUBJECT_ID_KEY = 'autonomy.network.browser-id';
 
 const SERIALIZABLE_SESSION_FIELDS = [
-  'certWire',
-  'org',
-  'registryUrl',
-  'rootPub',
-  'orgSlug',
+  'personalRootPub',
   'createdAt',
+  'orgs',
 ];
 
 let nodeFs = null;
@@ -123,11 +132,13 @@ function serializableSession(record) {
   if (record === null) return null;
   const serialized = {};
   for (const field of SERIALIZABLE_SESSION_FIELDS) {
-    serialized[field] = (
-      field === 'orgSlug' && record[field] === undefined
-        ? null
-        : record[field]
-    );
+    if (field === 'orgs') {
+      serialized[field] = record[field] === undefined ? {} : record[field];
+    } else {
+      serialized[field] = (
+        record[field] === undefined ? null : record[field]
+      );
+    }
   }
   return serialized;
 }
