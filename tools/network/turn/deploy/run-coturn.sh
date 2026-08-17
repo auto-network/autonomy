@@ -19,6 +19,7 @@ exec /usr/bin/docker run --rm --name autonomy-coturn \
     --tmpfs /tmp:rw,nosuid,nodev,noexec,size=16m \
     --tmpfs /var/lib/coturn:rw,nosuid,nodev,noexec,size=16m \
     --cap-drop=ALL \
+    --cap-add=NET_BIND_SERVICE \
     --user "65534:${TURN_RUNTIME_GID}" \
     --security-opt no-new-privileges \
     --pids-limit 256 \
