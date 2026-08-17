@@ -34,6 +34,7 @@ Spec: graph://0d3f750f-f9c (Setting Primitive).
 from __future__ import annotations
 
 from .registry import (
+    publication_band,
     SettingSchema,
     field,
     home,
@@ -62,6 +63,10 @@ SYNOPSIS = {
 
 
 @home("machine")
+#: Never leaves the database that owns it: the location of a credential on this machine. Publication state
+#: is the only control over a cross-organization read, so the band is
+#: what makes 'promote this' unable to become a disclosure.
+@publication_band(max="raw")
 @keyed_per_entity(
     key_strategy="org_slug:host",
     key_references={"org_slug": "autonomy.org"},

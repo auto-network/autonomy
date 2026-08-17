@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import Any
 
 from .registry import (
+    publication_band,
     SchemaValidationError,
     SettingSchema,
     field,
@@ -46,6 +47,10 @@ SYNOPSIS = {
 }
 
 
+#: Never leaves the database that owns it: harness credentials. Publication state
+#: is the only control over a cross-organization read, so the band is
+#: what makes 'promote this' unable to become a disclosure.
+@publication_band(max="raw")
 @keyed_per_entity(key_strategy="account_uuid")
 class ClaudeCredentialsV1(SettingSchema):
     """Per-account Claude OAuth credentials.

@@ -161,3 +161,43 @@ def test_promotion_within_the_band_still_works(orgs):
 
     layers = settings_ops.layers_for("probe.band.shared", "q", org="acme")
     assert layers["base"]["state"] == "canonical"
+
+
+# ── the sets this exists for ─────────────────────────────────
+
+
+SECRET_BEARING = (
+    "autonomy.secure.setting",
+    "autonomy.commit.signing-key",
+    "autonomy.credential-file",
+    "autonomy.vault.secret",
+    "dashboard.claude.credentials",
+    "dashboard.claude.setup_tokens",
+)
+
+
+@pytest.mark.parametrize("set_id", SECRET_BEARING)
+def test_secret_bearing_sets_cannot_leave_their_database(set_id):
+    """The band is what makes "promote this" unable to become a disclosure.
+
+    Each of these holds key material, a credential, or the location of one.
+    A peer reads a row when its state says so and for no other reason, so a
+    single promotion -- typed by anyone with write access, at any point in
+    the future -- is the whole distance between private and published.
+    """
+    from tools.graph import schemas
+
+    assert schemas.states_allowed(set_id, 1) == ("raw",), (
+        f"{set_id} may hold a state that peers can read")
+
+
+@pytest.mark.parametrize("set_id", SECRET_BEARING)
+def test_the_pin_matches_what_is_stored_today(set_id):
+    """A band contradicting live rows breaks the next write to them.
+
+    Every one of these was verified raw in live data before pinning, which
+    is the check a migration exists to avoid needing.
+    """
+    from tools.graph import schemas
+
+    assert "raw" in schemas.states_allowed(set_id, 1)

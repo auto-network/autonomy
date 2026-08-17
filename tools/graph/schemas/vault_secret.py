@@ -24,6 +24,7 @@ factor enrollment be O(classes), not O(secrets).
 from __future__ import annotations
 
 from .registry import (
+    publication_band,
     SettingSchema,
     field,
     home,
@@ -52,6 +53,10 @@ SYNOPSIS = {
 
 
 @home("personal")
+#: Never leaves the database that owns it: vaulted secret material. Publication state
+#: is the only control over a cross-organization read, so the band is
+#: what makes 'promote this' unable to become a disclosure.
+@publication_band(max="raw")
 @keyed_per_entity(key_strategy="setting_name")
 class VaultSecretV1(SettingSchema):
     """One vault secret: its sealed data key and its class reference.
