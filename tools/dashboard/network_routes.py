@@ -1655,10 +1655,72 @@ async def post_invite_resolve(request: Request) -> JSONResponse:
     return JSONResponse(out)
 
 
+
+async def post_migrate_org_key(request: Request) -> JSONResponse:
+    """Retrofit a founded org from its passphrase-armored root key to one
+    sealed to the owner's personal root.
+
+    The caller has just opened the org root with that organization's own
+    passphrase and re-opened its own seal to prove it round-trips; the server
+    can do neither, so it checks what it can -- the org root's signature over
+    this exact payload, and that the root itself is unchanged.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "body must be JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse(
+            {"ok": False, "error": "body must be a JSON object"}, status_code=400,
+        )
+
+    org, refused = _scoped_org(body.get("org"), request=request)
+    if refused is not None:
+        return refused
+
+    from tools.graph import org_ops
+
+    slug = settings_ops._resolve_org_arg(org)
+    if not isinstance(slug, str) or not slug:
+        return JSONResponse(
+            {"ok": False, "error": (
+                "no organization scope resolved — name the org whose root key "
+                "this is"
+            )},
+            status_code=400,
+        )
+
+    sealed = {
+        k: body.get(k)
+        for k in ("root_pub", "sealed_root_key", "owner_kem_pub", "seal_purpose")
+    }
+    signature = body.get("sig")
+    if not isinstance(signature, str) or not signature:
+        return JSONResponse(
+            {"ok": False, "error": "a migration must be signed by the org root"},
+            status_code=400,
+        )
+    try:
+        org_ops.migrate_org_key_to_sealed(slug, sealed, signature)
+    except org_ops.OrgNotFoundError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=404)
+    except org_ops.OrgError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+    except Exception as e:
+        # Includes SignatureError: an unauthorised migration is a refusal, not
+        # a server fault, and must never report anything about the key.
+        return JSONResponse(
+            {"ok": False, "error": f"the migration was refused: {e}"},
+            status_code=403,
+        )
+    return JSONResponse({"ok": True, "root_pub": sealed["root_pub"]})
+
+
 ROUTES = [
     Route("/api/network/org-key", get_org_key, methods=["GET"]),
     Route("/api/network/org-key", put_org_key, methods=["POST"]),
     Route("/api/network/org-key/sealed", post_sealed_org_key, methods=["POST"]),
+    Route("/api/network/org-key/migrate", post_migrate_org_key, methods=["POST"]),
     Route("/api/network/binding", get_binding, methods=["GET"]),
     Route("/api/network/registry", get_registry, methods=["GET"]),
     Route("/api/network/ledger/found", post_ledger_found, methods=["POST"]),
