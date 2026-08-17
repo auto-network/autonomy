@@ -17,7 +17,7 @@
  *   - a channel failure (offline, revoked, malformed reply) rejects, so the
  *     caller's catch sees LINK truth and never mistakes it for the ledger's.
  */
-import { sendOp } from './channel-op.js';
+import { sendOp } from '../lib/relaykit-core.js';
 
 export function makeChannelTransport(channel) {
   async function fetch(url, options = {}) {

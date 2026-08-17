@@ -7,7 +7,7 @@
  */
 import assert from 'node:assert/strict';
 
-import { sendOp } from '../channel-op.js';
+import { canonicalJson, sendOp } from '../../lib/relaykit-core.js';
 import { makeChannelTransport } from '../channel-transport.js';
 import {
   getClaimContext,
@@ -44,7 +44,7 @@ class StubChannel {
   async recvMessage() {
     const reply = this.replyFor(this.last); // may throw (offline)
     if (typeof reply === 'string') return te.encode(reply);
-    return te.encode(`${JSON.stringify(reply)}\n`);
+    return te.encode(`${canonicalJson(reply)}\n`);
   }
 
   get last() {

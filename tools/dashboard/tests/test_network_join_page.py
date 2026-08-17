@@ -21,6 +21,7 @@ TEMPLATE = (DASHBOARD / "templates" / "network-join.html").read_text(
 PAGE_JS = (DASHBOARD / "static" / "js" / "network-join.js").read_text(
     encoding="utf-8"
 )
+RELAYKIT_CORE = DASHBOARD / "static" / "js" / "lib" / "relaykit-core.js"
 
 
 def _client():
@@ -54,6 +55,11 @@ class TestRoute:
             or "no-cache" in bare.headers["cache-control"]
         assert bare.headers["referrer-policy"] == "no-referrer"
         assert bare.headers["x-content-type-options"] == "nosniff"
+
+    def test_serves_the_shared_relaykit_core_own_origin(self):
+        response = _client().get("/static/js/lib/relaykit-core.js")
+        assert response.status_code == 200
+        assert response.content == RELAYKIT_CORE.read_bytes()
 
 
 class TestI1Constraints:

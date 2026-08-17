@@ -7,6 +7,8 @@ these tests pin the server-side static-shell and HTTP-liveness contract.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from .conftest import HOUR, ORG, TARGET, publish_link, register, signed
 
 
@@ -93,6 +95,17 @@ class TestBootloaderBytes:
         assert "javascript" in response.headers["content-type"]
         assert response.headers["cache-control"] == "no-store"
         assert b"performHandshake" in response.content
+
+    def test_shared_relaykit_core_is_served_byte_for_byte(self, client):
+        source = (
+            Path(__file__).resolve().parents[3]
+            / "dashboard" / "static" / "js" / "lib" / "relaykit-core.js"
+        )
+        response = client.get("/l-assets/relaykit-core.js")
+        assert response.status_code == 200
+        assert response.content == source.read_bytes()
+        assert response.headers["cache-control"] == "no-store"
+        assert response.headers["x-content-type-options"] == "nosniff"
 
     def test_asset_uses_sandboxed_srcdoc_not_blob_frame_navigation(self, client):
         script = client.get("/l-assets/autonet.js").text

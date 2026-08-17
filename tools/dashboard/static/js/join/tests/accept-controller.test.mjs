@@ -6,6 +6,7 @@
 import assert from 'node:assert/strict';
 
 import { JoinSession } from '../accept-controller.js';
+import { canonicalJson } from '../../lib/relaykit-core.js';
 
 const te = new TextEncoder();
 const td = new TextDecoder();
@@ -20,7 +21,7 @@ const PERSONA = 'f'.repeat(64);
 const CLAIMKEY = 'c'.repeat(64);
 
 const INPUTS = {
-  org: ORG, rootPub: ROOT, inviteRef: INVITE, channelToken: 'd'.repeat(64), bearer: 'tok',
+  org: ORG, rootPub: ROOT, inviteRef: INVITE, channelToken: 'd'.repeat(32), bearer: 'tok',
 };
 
 // A SecureChannel-shaped stub whose replies are scripted per op and per Nth
@@ -43,7 +44,7 @@ class ScriptedChannel {
     this.calls[req.op] += 1;
     const reply = this.handler(req, this.calls[req.op]); // may throw
     if (typeof reply === 'string') return te.encode(reply);
-    return te.encode(`${JSON.stringify(reply)}\n`);
+    return te.encode(`${canonicalJson(reply)}\n`);
   }
 }
 

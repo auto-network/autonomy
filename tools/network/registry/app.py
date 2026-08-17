@@ -71,6 +71,10 @@ MAX_BINDING_TTL = DEFAULT_BINDING_TTL
 RECOVERY_POLICIES = frozenset({"none", "recovery-key"})
 
 _BOOTLOADER_DIR = Path(__file__).resolve().parent / "bootloader"
+_RELAYKIT_CORE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "dashboard" / "static" / "js" / "lib" / "relaykit-core.js"
+)
 
 # Agent-first install primer content (auto-2dt9b): canonical, repo-tracked
 # markdown under deploy/install/, served at /install with content
@@ -1064,6 +1068,7 @@ def create_app(
 
     shell_bytes = (_BOOTLOADER_DIR / "bootloader.html").read_bytes()
     js_bytes = (_BOOTLOADER_DIR / "autonet.js").read_bytes()
+    relaykit_core_bytes = _RELAYKIT_CORE_PATH.read_bytes()
     join_shell_bytes = (_BOOTLOADER_DIR / "join.html").read_bytes()
     join_js_bytes = (_BOOTLOADER_DIR / "join.js").read_bytes()
 
@@ -1153,6 +1158,20 @@ def create_app(
                 # The shell and script are one protocol unit. Caching this
                 # path across a deploy can pair new HTML with old JavaScript
                 # and leave every view hidden after an error.
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    @app.get("/l-assets/relaykit-core.js")
+    async def relaykit_core_js():
+        # The Dashboard static path and this Relay path serve one source file,
+        # not generated/copy-maintained siblings. A browser gets byte-identical
+        # channel crypto and operation framing from either origin.
+        return Response(
+            content=relaykit_core_bytes,
+            media_type="text/javascript",
+            headers={
                 "Cache-Control": "no-store",
                 "X-Content-Type-Options": "nosniff",
             },
