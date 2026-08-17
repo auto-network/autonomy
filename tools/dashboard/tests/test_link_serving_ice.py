@@ -35,14 +35,14 @@ def configuration():
     )
 
 
-def viewer_credentials():
+def viewer_credentials(org="test-org"):
     root = KeyPair.generate()
     key = KeyPair.generate()
     cert = issue_cert(
         root,
         key.public_hex,
         scope=("tunnel:serve",),
-        org="test-org",
+        org=org,
         subject=Subject("operator", key.public_hex),
         not_before=900,
         not_after=4000,
@@ -172,14 +172,16 @@ async def test_production_connector_routes_ice_begin_to_live_turn_issuance(monke
                 "expires_at": expected.expires_at,
             }
 
-    key, cert = viewer_credentials()
+    registry_org = "2d4b90cb-0000-4000-8000-000000000000"
+    graph_org = "autonomy"
+    key, cert = viewer_credentials(registry_org)
     connector = link_serving._make_ice_serving_connector(
         "wss://relay.test",
-        "test-org",
+        registry_org,
         key,
         cert,
         cert,
-        "test-org",
+        graph_org,
         Publisher(),
         min_backoff=0.2,
         max_backoff=5.0,

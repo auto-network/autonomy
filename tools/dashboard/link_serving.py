@@ -1077,8 +1077,9 @@ def make_grant_handler(org: str | None = None, *, now=None):
 
 
 def make_ice_grant_handler(
-    org: str | None,
+    graph_org: str | None,
     *,
+    channel_org: str | None = None,
     configuration_provider,
     key,
     channel_cert,
@@ -1108,14 +1109,19 @@ def make_ice_grant_handler(
         raise ValueError("ICE grant handler requires a Publisher")
 
     clock = now or time.time
-    application_handler = make_grant_handler(org, now=clock)
+    application_handler = make_grant_handler(graph_org, now=clock)
+    responder_org = channel_org if channel_org is not None else graph_org
 
     async def valid_grant(token: str) -> bool:
-        grant = await asyncio.to_thread(check_grant, token, org=org, now=clock())
+        grant = await asyncio.to_thread(
+            check_grant, token, org=graph_org, now=clock()
+        )
         return grant is not None
 
     async def policy_provider(token: str):
-        grant = await asyncio.to_thread(check_grant, token, org=org, now=clock())
+        grant = await asyncio.to_thread(
+            check_grant, token, org=graph_org, now=clock()
+        )
         if grant is None:
             return None
         meta = grant.get("meta") or {}
@@ -1127,7 +1133,7 @@ def make_ice_grant_handler(
             owner=peer_runtime,
             key=key,
             cert=channel_cert,
-            org=org,
+            org=responder_org,
             application_handler=application_handler,
             authorization_check=valid_grant,
             publisher=publisher,
@@ -1195,6 +1201,7 @@ def _make_ice_serving_connector(
 
     handler = make_ice_grant_handler(
         graph_org,
+        channel_org=org,
         configuration_provider=configuration_provider,
         key=key,
         channel_cert=channel_cert,
