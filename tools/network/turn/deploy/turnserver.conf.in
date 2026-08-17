@@ -66,23 +66,10 @@ denied-peer-ip=203.0.113.0-203.0.113.255
 denied-peer-ip=224.0.0.0-239.255.255.255
 denied-peer-ip=240.0.0.0-255.255.255.255
 
-# Pin the IPv6 policy now even though IPv6 allocation is disabled. The
-# mapped forms are deliberately specific; denying all ::ffff:0:0/96 could
-# also deny legitimate public IPv4 peers in an implementation that normalizes
-# IPv4 internally to mapped addresses.
-denied-peer-ip=::-::ffff
-denied-peer-ip=::1-::1
-denied-peer-ip=::ffff:0.0.0.0-::ffff:0.255.255.255
-denied-peer-ip=::ffff:10.0.0.0-::ffff:10.255.255.255
-denied-peer-ip=::ffff:100.64.0.0-::ffff:100.127.255.255
-denied-peer-ip=::ffff:127.0.0.0-::ffff:127.255.255.255
-denied-peer-ip=::ffff:169.254.0.0-::ffff:169.254.255.255
-denied-peer-ip=::ffff:172.16.0.0-::ffff:172.31.255.255
-denied-peer-ip=::ffff:192.168.0.0-::ffff:192.168.255.255
-denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
-denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
-denied-peer-ip=2001:db8::-2001:db8:ffff:ffff:ffff:ffff:ffff:ffff
-denied-peer-ip=ff00::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+# Do not add IPv6 deny ranges while this service is IPv4-only. coturn compares
+# ordinary IPv4 peers in IPv4-mapped form, and a broad IPv6 range can therefore
+# shadow legitimate public IPv4 destinations. Enabling IPv6 requires the
+# destination-policy and real-data acceptance gate documented in the runbook.
 
 prometheus
 prometheus-address=0.0.0.0
