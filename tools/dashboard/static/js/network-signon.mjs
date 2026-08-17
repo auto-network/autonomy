@@ -702,7 +702,7 @@ var signRegistryRequestCore;
         reports.push({
           orgSlug: slug, genesisId: genesisId, org: orgId,
           personaPub: persona.publicHex, notAfter: certPayload.not_after,
-          registryUrl: entry.registryUrl, rekey: rekey,
+          certWire: certWire, registryUrl: entry.registryUrl, rekey: rekey,
         });
       }
     } finally {
@@ -840,6 +840,12 @@ var signRegistryRequestCore;
   // The organization to revoke in is named explicitly (opts.org), because
   // one personal sign-on now carries authority in several organizations and
   // a revocation belongs to exactly one of them.
+  //
+  // Step-up, and PERSONAL: a persona provisions and expires its own
+  // delegates (§7), so revoking this session key re-opens the personal
+  // armor and re-derives that organization's persona rather than opening
+  // the organization root. The persona is the key that issued the
+  // certificate being revoked, so it is the key entitled to revoke it.
   async function revokeCurrentKey(passphrase, reason, opts) {
     opts = opts || {};
     var session = _state.session;
@@ -852,33 +858,27 @@ var signRegistryRequestCore;
     }
     var entry = _resolveOrgEntry(session, opts.org);
     if (!entry) throw new Error('no live session authority for that organization');
-    var orgQ = entry.orgSlug ? ('?org=' + encodeURIComponent(entry.orgSlug)) : '';
-    var orgKey = await _fetchJson('/api/network/org-key' + orgQ, entry.orgSlug);
-    if (!orgKey.armored_private_key && !orgKey.sealed_root_key) {
-      throw new Error('no auto.network org key is stored for this org');
-    }
-    var opened = await _openOrgRoot(orgKey, passphrase);
+    var opened = await _openPersonalRoot(passphrase);
     var recordWire;
     try {
-      if (entry.rootPub && opened.rootPub !== entry.rootPub) {
-        throw new Error('the stored org key does not match this session\'s root');
+      var persona = await derivePersona(opened.seed, entry.genesisId);
+      if (persona.publicHex !== entry.personaPub) {
+        throw new Error('that passphrase derives a different persona for ' +
+          'this organization — refusing to revoke');
       }
-      var rootKey = await _importRootKey(opened.seed);
-      opened.seed.fill(0);
-      opened.seed = null;
       var payload = {
         v: 1,
         revoked_key_id: entry.cert.child_pub,
         org: entry.org,
         revoked_at: _nowS(),
         expires_at: entry.cert.not_after,   // I7: bounded by natural expiry
-        issuer_pub: entry.rootPub || opened.rootPub,
+        issuer_pub: persona.publicHex,
       };
       if (reason) payload.reason = String(reason).slice(0, 512);
       var sigBytes = await crypto.subtle.sign(
-        'Ed25519', rootKey,
+        'Ed25519', persona.signingKey,
         _domainBytes(REVOCATION_DOMAIN, canonicalJson(payload)));
-      rootKey = null;
+      persona.signingKey = null;
       recordWire = canonicalJson(Object.assign({}, payload, { sig: bytesToHex(sigBytes) }));
     } finally {
       if (opened.seed) { opened.seed.fill(0); opened.seed = null; }
