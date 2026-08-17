@@ -97,6 +97,52 @@ class VaultSealerMissing(RuntimeError):
     """
 
 
+# ── why a vault member did not open ──────────────────────────
+#
+# Resolution serves every caller of a set at once, so one unopenable secret
+# must not take the rest of the set with it. Each of these is a member-level
+# outcome carried on :class:`VaultReadFailure`, not an exception — and every
+# one of them is a REFUSAL. None of them is a value, none is a locator, and
+# none removes the member, which a caller would read as "no such setting".
+#
+#: The seam itself is unfilled: nothing in this process holds the
+#: organization's key control. Distinct from holding a key that does not
+#: reach — the fault is in the deployment, not in the reader's grants.
+VAULT_NO_KEY_HOLDER = "no_key_holder"
+#: No held generation reaches the one this revision was written under.
+VAULT_NO_KEY_HELD = "no_key_held"
+#: A held generation DESCENDS from this revision's, so the parent bridge that
+#: should have recovered it backward is absent or does not open.
+VAULT_MISSING_BRIDGE = "missing_bridge"
+#: An authenticated decryption failed, at any layer of the object.
+VAULT_DECRYPTION_FAILED = "decryption_failed"
+#: A suite identifier this build does not recognize — fails closed rather
+#: than negotiating down.
+VAULT_UNKNOWN_SUITE = "unknown_suite"
+#: The row of a vault set does not hold a locator. Whatever it holds is not
+#: what this set stores, and handing it back would present it as the value.
+VAULT_NOT_A_LOCATOR = "not_a_locator"
+#: The locator's tier is not the one the set declares — a stored downgrade.
+VAULT_TIER_MISMATCH = "tier_mismatch"
+
+
+@dataclass(frozen=True)
+class VaultReadFailure:
+    """Why one member of a vault set resolved to no value.
+
+    ``reason`` is one of the ``VAULT_*`` codes above and is the part callers
+    branch on; ``message`` is the operator-facing detail. Both cross the HTTP
+    boundary, so an out-of-process caller distinguishes the same four faults
+    an in-process one does.
+    """
+
+    reason: str
+    message: str
+
+    def to_dict(self) -> dict:
+        return {"reason": self.reason, "message": self.message}
+
+
 _identity_write_allowed: "_contextvars.ContextVar[bool]" = _contextvars.ContextVar(
     "settings_identity_write_allowed", default=False,
 )
@@ -315,6 +361,58 @@ def _seal_vault_payload(
             f"locator; refusing to store it as {set_id}/{key}"
         )
     return locator
+
+
+# ── The other half of the seam: what OPENS a vault setting ───
+#
+# Reading is the mirror of writing and injected the same way. A vault row
+# holds a locator, and turning it back into a value needs the organization's
+# held generation keys and the store holding the objects — material a
+# settings read has no business acquiring for itself. So the host process
+# that holds it registers a key holder at startup, exactly as it registers
+# the sealer, and every other context reads a vault set to a refusal.
+#
+# Key-holder signature::
+#
+#     def holder(*, set_id: str, org: str | None) -> VaultKeyControl | None
+#
+# It is consulted at most ONCE per originating org per :func:`read_set`, and
+# only when a vault row is actually in the result — a set nobody vaulted never
+# touches it. Returning ``None`` says this process holds no key control for
+# that organization, which resolves its secrets to ``VAULT_NO_KEY_HOLDER``.
+#
+# UNLIKE the sealer this one does not abort the call. A write with nowhere to
+# encrypt to must not happen at all; a read of five settings where one cannot
+# be opened must still answer for the other four.
+_vault_key_holder: Callable[..., Any] | None = None
+
+
+@dataclass(frozen=True)
+class VaultKeyControl:
+    """What opening a vault setting takes, as one value.
+
+    ``holdings`` is a ``tools.vault.storage_object.Holdings`` — the state
+    secrets this process holds plus the public descriptors and bridges it has
+    seen. ``content_store`` is the object store the locators address.
+
+    Declared here rather than imported from the vault so that this module
+    depends on the INTERFACE it needs and not on whatever fills it: the cache
+    that eventually holds the real keys implements this shape, and until it
+    exists a stub does.
+    """
+
+    holdings: Any
+    content_store: Any
+
+
+def set_vault_key_holder(holder: Callable[..., Any] | None) -> None:
+    """Register (or clear with ``None``) the vault key holder.
+
+    See the commentary above ``_vault_key_holder`` for the contract. Returns
+    nothing; the previously registered holder is discarded.
+    """
+    global _vault_key_holder
+    _vault_key_holder = holder
 
 
 def _make_snapshot(
@@ -755,6 +853,13 @@ class ResolvedSetting(Generic[T]):
     ``payload`` is typed on the ``T`` parameter: a bare ``dict`` when no
     ``model=`` was supplied to :func:`read_set` / :func:`get_setting`; a
     validated Pydantic (or compatible) instance when a model was supplied.
+
+    ``vault_error`` and ``sealed_content_key`` are the two outcomes of a vault
+    set's member that is not a plaintext payload. Both are ``None`` on every
+    ordinary setting AND on a vault secret that opened, and both are OMITTED
+    from the serialized shape when they are — a member that resolved carries
+    no trace of whether it was encrypted, which is what makes the vault
+    transparent to a caller rather than a mode it has to know about.
     """
     id: str
     set_id: str
@@ -771,11 +876,13 @@ class ResolvedSetting(Generic[T]):
     target_revision: int | None = None
     org: str | None = None
     upconverted: bool = False
+    vault_error: VaultReadFailure | None = None
+    sealed_content_key: dict | None = None
 
     def to_dict(self) -> dict:
         """Serialize the Setting as a dict (payload included as-is)."""
         d = asdict(self)
-        return d
+        return _strip_absent_vault_fields(d)
 
 
 @dataclass
@@ -850,6 +957,20 @@ class SetMembers(Generic[T]):
         }
 
 
+def _strip_absent_vault_fields(d: dict) -> dict:
+    """Drop the vault fields when they say nothing.
+
+    A non-vault set must serialize byte-identically to how it did before the
+    vault existed, and a vault secret that opened must be indistinguishable
+    from an ordinary one. Both hold exactly when the two fields are absent
+    rather than present-and-null.
+    """
+    for name in ("vault_error", "sealed_content_key"):
+        if d.get(name) is None:
+            d.pop(name, None)
+    return d
+
+
 def _serialize_member(m: ResolvedSetting) -> dict:
     """Render a :class:`ResolvedSetting` as a JSON-friendly dict.
 
@@ -860,7 +981,9 @@ def _serialize_member(m: ResolvedSetting) -> dict:
     payload = d.get("payload")
     if hasattr(payload, "model_dump"):
         d["payload"] = payload.model_dump()
-    return d
+    if isinstance(d.get("vault_error"), VaultReadFailure):
+        d["vault_error"] = d["vault_error"].to_dict()
+    return _strip_absent_vault_fields(d)
 
 
 @dataclass
@@ -2763,6 +2886,14 @@ def read_set_key(
             # here reads as an answer and silently drops every override,
             # and the shape gives nothing away.
             row["payload"] = m.payload
+            # A vault secret that did not open has no payload, and a row whose
+            # payload is None and says nothing else is exactly the absence a
+            # refusal must not become. Carried the same way the member carries
+            # it, and absent on every other setting.
+            if m.vault_error is not None:
+                row["vault_error"] = m.vault_error.to_dict()
+            if m.sealed_content_key is not None:
+                row["sealed_content_key"] = m.sealed_content_key
             return row
     return None
 
@@ -3062,6 +3193,108 @@ def _prefix_like_pattern(prefix: str) -> str:
     return f"{escaped}:%"
 
 
+def _vault_key_control(org: str | None, set_id: str, cache: dict):
+    """The key control for *org*, consulted at most once per read.
+
+    Returns ``(control, failure_message)`` — a control, or the reason there
+    isn't one. Cached because one ``read_set`` can resolve many secrets of one
+    organization and the holder may be doing real work (opening a store,
+    reading a ramfs page) to answer.
+    """
+    if org in cache:
+        return cache[org]
+    holder = _vault_key_holder
+    if holder is None:
+        answer = (None, "no vault key holder is registered in this process")
+    else:
+        try:
+            control = holder(set_id=set_id, org=org)
+        except Exception as exc:  # noqa: BLE001 — one refusal, whatever failed
+            answer = (None, f"the vault key holder failed: {exc}")
+        else:
+            answer = (
+                (control, None) if control is not None
+                else (None, "the vault key holder holds no key control for this "
+                            "organization")
+            )
+    cache[org] = answer
+    return answer
+
+
+def _unwrap_vault_locator(
+    locator, *, set_id: str, key: str, declared_tier: str, org: str | None,
+    cache: dict,
+):
+    """Step six for one member: the locator, resolved back to its value.
+
+    Returns ``(payload, sealed_content_key, failure)`` with exactly one of the
+    three not ``None``. Nothing here derives a key, opens a bridge or touches
+    a suite: ``storage_object.open_revision_for_member`` runs the whole
+    sequence through ``storagekit.objects.read_object``, and this function's
+    entire job is choosing which refusal a failure is.
+    """
+    # Imported here rather than at module scope for the reason the sealer is:
+    # settings_ops is imported by every CLI entry point and the vault pulls in
+    # the whole storage stack.
+    from tools.network.storagekit.errors import StorageError, SuiteError
+    from tools.network.storagekit.objects import StateUnreachableError
+    from tools.vault import storage_object as vault_storage_object
+    from tools.vault.errors import VaultError
+
+    def refuse(reason: str, message: str):
+        return None, None, VaultReadFailure(
+            reason=reason, message=f"{set_id}/{key}: {message}"
+        )
+
+    if not vault_storage_object.is_vault_locator(locator):
+        return refuse(
+            VAULT_NOT_A_LOCATOR,
+            "this set stores its payloads as encrypted objects and this row "
+            "does not hold a locator",
+        )
+    try:
+        reference = vault_storage_object.parse_locator(locator)
+    except VaultError as exc:
+        return refuse(VAULT_NOT_A_LOCATOR, str(exc))
+    if reference["tier"] != declared_tier:
+        # The set says how its secrets are released; a row saying otherwise is
+        # a downgrade sitting in the database, not a per-row preference.
+        return refuse(
+            VAULT_TIER_MISMATCH,
+            f"the set declares the {declared_tier!r} tier and this row's "
+            f"locator names {reference['tier']!r}",
+        )
+
+    control, missing = _vault_key_control(org, set_id, cache)
+    if control is None:
+        return refuse(VAULT_NO_KEY_HOLDER, missing)
+
+    try:
+        opened = vault_storage_object.open_revision_for_member(
+            locator, holdings=control.holdings, content_store=control.content_store,
+        )
+    except SuiteError as exc:
+        return refuse(VAULT_UNKNOWN_SUITE, str(exc))
+    except StateUnreachableError as exc:
+        # The storage layer refuses both the same way. Holding a generation
+        # descended from this one means the backward recovery SHOULD have
+        # worked, so the edge is what is missing.
+        descended = vault_storage_object.holds_a_descendant_of(
+            reference["storage_state_id"], control.holdings,
+        )
+        return refuse(
+            VAULT_MISSING_BRIDGE if descended else VAULT_NO_KEY_HELD, str(exc),
+        )
+    except (StorageError, VaultError) as exc:
+        return refuse(VAULT_DECRYPTION_FAILED, f"{type(exc).__name__}: {exc}")
+
+    if isinstance(opened, vault_storage_object.SealedContentKey):
+        # A secured secret, opened as far as membership goes. The human factor
+        # is applied above this layer, by whoever holds it.
+        return None, asdict(opened), None
+    return opened, None, None
+
+
 def read_set(
     set_id: str,
     *,
@@ -3074,12 +3307,27 @@ def read_set(
 ) -> SetMembers[Any]:
     """Resolve members of *set_id* visible to org's session.
 
-    Five-step pipeline (see graph://0d3f750f-f9c § Resolution algorithm):
+    Six-step pipeline (see graph://0d3f750f-f9c § Resolution algorithm):
     1. per-DB fetch (single DB today, peers loop ready),
     2. group by key into bases / overrides / exclusions,
     3. drop excluded bases,
     4. pick highest-precedence base per key (tie-break: most recent),
-    5. apply overrides via JSON-merge-patch.
+    5. apply overrides via JSON-merge-patch,
+    6. on a ``@vaulted`` set only, open the merged locator.
+
+    Step six is last because steps one to five branch on row METADATA alone
+    and never parse a payload. Precedence discards every base candidate but
+    one, and the store is append-only, so decrypting earlier would open the
+    whole edit history and throw it away. It is also the only ordering that
+    is correct: merge patch cannot combine two ciphertexts, which is why the
+    locator is a scalar and why what step six opens is one object.
+
+    A vault member that does not open resolves to a
+    :class:`VaultReadFailure` on ``vault_error`` — never to a locator, never
+    to ciphertext, and never to absence — and the rest of the set resolves
+    normally around it. A ``secured`` one resolves to its still-sealed
+    content key on ``sealed_content_key``; applying the human factor belongs
+    to whoever holds it, not to resolution.
 
     Optional ``min_revision`` filters before transform; ``target_revision``
     upconverts (or drops if no chain). ``prefix=X`` restricts the query
@@ -3194,6 +3442,10 @@ def read_set(
 
     members: list[ResolvedSetting[Any]] = []
     keys_seen = sorted(bases.keys())
+    # Step six applies to a vaulted set and to nothing else, so an ordinary
+    # set answers this once and never consults the vault again.
+    declared_tier = schemas.declared_vault_tier(set_id)
+    key_control_cache: dict = {}
     for key in keys_seen:
         excluded_ids = {row["excludes"] for (_, row) in excludes.get(key, [])}
         candidate_bases = [
@@ -3256,6 +3508,30 @@ def read_set(
                 merged_payload = json_merge_patch(merged_payload, ov_payload)
 
         resolved = _row_to_resolved(chosen_row, org=chosen_org)
+
+        # Step six — the merged locator, opened.
+        if declared_tier is not None:
+            opened, sealed, failure = _unwrap_vault_locator(
+                merged_payload,
+                set_id=set_id,
+                key=key,
+                declared_tier=declared_tier,
+                org=chosen_org,
+                cache=key_control_cache,
+            )
+            if failure is not None or sealed is not None:
+                # Neither is a value, so nothing downstream that shapes a
+                # value applies: defaults, upconversion and model validation
+                # would all be operating on something that is not the payload,
+                # and model validation in particular would DROP the member —
+                # turning a refusal into an absence.
+                resolved.payload = None
+                resolved.vault_error = failure
+                resolved.sealed_content_key = sealed
+                members.append(resolved)
+                continue
+            merged_payload = opened
+
         resolved.payload = _apply_declared_defaults(
             chosen_row["set_id"], chosen_row["schema_revision"], merged_payload,
         )

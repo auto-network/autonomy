@@ -425,6 +425,22 @@ def cmd_set_read(args) -> None:
     members = get_client().read_set(set_id, org=org)
     for m in members.members:
         if m.key == key:
+            # A vault secret that did not open has no payload, and printing
+            # its `null` would read as "this setting's value is null" — the
+            # one thing a refusal must never look like.
+            failure = getattr(m, "vault_error", None)
+            if failure is not None:
+                print(
+                    f"Error: {failure.reason}: {failure.message}", file=sys.stderr,
+                )
+                sys.exit(1)
+            sealed = getattr(m, "sealed_content_key", None)
+            if sealed is not None:
+                # A secured secret resolves to its content key, still sealed
+                # under the policy class. Opening that takes the human factor,
+                # which resolution neither holds nor applies.
+                print(json.dumps(sealed, indent=2, default=str))
+                return
             print(json.dumps(m.payload, indent=2, default=str))
             _print_composition(set_id, key, org)
             return

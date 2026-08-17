@@ -1180,7 +1180,13 @@ def _normalize_update_result(result: dict, content: str | None) -> dict:
 
 def _dict_to_resolved_setting(d: dict):
     """Reconstruct a ``ResolvedSetting`` from the dashboard API response."""
-    from .settings_ops import ResolvedSetting
+    from .settings_ops import ResolvedSetting, VaultReadFailure
+    # Both are absent on every ordinary member — and on a vault secret that
+    # opened, which is the point: an out-of-process caller cannot tell the two
+    # apart either. When one IS present the remote resolver refused, and the
+    # refusal is rebuilt here so the HTTP caller branches on exactly what the
+    # in-process caller branches on.
+    failure = d.get("vault_error")
     return ResolvedSetting(
         id=d["id"],
         set_id=d["set_id"],
@@ -1197,6 +1203,14 @@ def _dict_to_resolved_setting(d: dict):
         target_revision=d.get("target_revision"),
         org=d.get("org"),
         upconverted=bool(d.get("upconverted", False)),
+        vault_error=(
+            VaultReadFailure(
+                reason=failure.get("reason", ""),
+                message=failure.get("message", ""),
+            )
+            if isinstance(failure, dict) else None
+        ),
+        sealed_content_key=d.get("sealed_content_key"),
     )
 
 

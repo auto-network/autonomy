@@ -400,20 +400,23 @@ def test_a_one_row_per_key_set_appends_rather_than_rewriting(
     ) == {"access_token": "one"}
 
 
-def test_a_reader_with_no_vault_gets_the_locator_and_never_the_value(
+def test_a_reader_with_no_vault_gets_a_refusal_and_never_the_value(
     graph_db_env, vault_schema, vault
 ):
     """Resolution up to the merge step is unchanged and metadata-only: it
-    hands back what the row holds. Unwrapping is step six and belongs to the
-    read path (auto-6364n); what matters here is that nothing on the way
-    there produces the plaintext or hides the row."""
+    carries what the row holds as far as step six. There the read path
+    (auto-6364n) refuses, because this process registered a sealer and no key
+    holder — and a refusal is neither the plaintext nor the locator."""
     ops.add_setting(
         "autonomy.test.vaulted", 1, "default", {"access_token": SECRET},
         org=ops.CALLER_ORG,
     )
     resolved = settings_ops.read_set("autonomy.test.vaulted", org=None).to_dict()
-    assert is_vault_locator(resolved["default"].payload)
-    assert SECRET not in json.dumps(resolved["default"].to_dict())
+    member = resolved["default"]
+    assert member.payload is None
+    assert member.vault_error.reason == settings_ops.VAULT_NO_KEY_HOLDER
+    assert not is_vault_locator(member.payload)
+    assert SECRET not in json.dumps(member.to_dict())
 
 
 # ── ordinary settings are untouched ───────────────────────────────────────

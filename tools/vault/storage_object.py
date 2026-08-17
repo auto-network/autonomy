@@ -621,6 +621,101 @@ def _create_with_inline_advance(
 # ── the read path (contract §9) ────────────────────────────────────────────
 
 
+@dataclass(frozen=True)
+class SealedContentKey:
+    """A ``secured`` revision, opened as far as membership alone reaches.
+
+    Holding the storage state proves membership and yields exactly this: the
+    content key still sealed under the policy class, and nothing else (§9.2).
+    Opening THAT needs the class, which needs the human factor — so what a
+    member without one holds is a key it cannot use, which is the nesting
+    working rather than a check something could omit.
+
+    Carries no ciphertext. A reader that gets this has learned the secret's
+    release rule and no part of the secret.
+    """
+
+    policy_class_id: str
+    required_policy: str
+    sealed_cek: dict
+
+
+def _open_object(locator, holdings: Holdings, content_store):
+    """The locator's object, opened under the storage state.
+
+    Every read of a vault revision goes through here, so the storage layer is
+    entered at exactly one place and ``objects.read_object`` performs the whole
+    sequence — content address, secret recovery through bridges, descriptor
+    commitment, unwrap, open.
+    """
+    reference = parse_locator(locator)
+    header, body = content_store.get_object(
+        reference["object_id"], reference["revision_id"]
+    )
+    opened = objects.read_object(
+        header, body, holdings.secrets, list(holdings.bridges), dict(holdings.descriptors)
+    )
+    return reference, header, opened
+
+
+def open_revision_for_member(locator, *, holdings: Holdings, content_store):
+    """What the storage state ALONE yields — a payload, or a sealed key.
+
+    ``audited`` returns the payload; ``secured`` returns a
+    :class:`SealedContentKey` rather than refusing, because a member with no
+    human factor has still legitimately opened the object. What it found there
+    is a sealed key, and reporting that is not a downgrade — handing back a
+    value would be.
+
+    :func:`open_revision` is the call for a reader that HAS the factor and
+    wants the value; this one is for a resolver that must serve every reader
+    and holds no factor for any of them.
+    """
+    reference, _header, opened = _open_object(locator, holdings, content_store)
+    if reference["tier"] == AUDITED:
+        return json.loads(opened)
+    envelope = json.loads(opened)
+    if envelope.get("v") != _SECURED_ENVELOPE_VERSION:
+        raise VaultError(f"unsupported secured envelope version {envelope.get('v')!r}")
+    return SealedContentKey(
+        policy_class_id=reference["policy_class_id"],
+        required_policy=reference["required_policy"],
+        sealed_cek=envelope["sealed_cek"],
+    )
+
+
+def holds_a_descendant_of(state_id: str, holdings: Holdings) -> bool:
+    """Whether this reader holds a generation DESCENDED from *state_id*.
+
+    The storage layer refuses both cases the same way — no held secret reached
+    the state — and they are different faults. A reader holding a descendant
+    should have recovered the ancestor backward through parent bridges, so its
+    failure says an edge is absent or unopenable. A reader holding nothing that
+    descends from the state was simply never given a key that reaches it.
+
+    Walks ``parent_state_ids`` in the public descriptors only: this is routing
+    metadata, and answering it must not need a key.
+    """
+    descriptors = holdings.descriptors
+    for held_id in sorted(holdings.secrets):
+        held = descriptors.get(held_id)
+        if held is None:
+            continue
+        seen = {held_id}
+        frontier = list(held.parent_state_ids)
+        while frontier:
+            current = frontier.pop()
+            if current == state_id:
+                return True
+            if current in seen:
+                continue
+            seen.add(current)
+            descriptor = descriptors.get(current)
+            if descriptor is not None:
+                frontier.extend(descriptor.parent_state_ids)
+    return False
+
+
 def open_revision(
     locator,
     *,
@@ -636,13 +731,7 @@ def open_revision(
     reach the key must see that, not an empty value indistinguishable from a
     setting that was never written.
     """
-    reference = parse_locator(locator)
-    header, body = content_store.get_object(
-        reference["object_id"], reference["revision_id"]
-    )
-    opened = objects.read_object(
-        header, body, holdings.secrets, list(holdings.bridges), dict(holdings.descriptors)
-    )
+    reference, header, opened = _open_object(locator, holdings, content_store)
     if reference["tier"] == AUDITED:
         return json.loads(opened)
 
