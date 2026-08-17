@@ -3017,3 +3017,64 @@ def test_a_mission_is_never_left_belonging_to_nobody(tmp_path):
         assert db.set_mission_org(mission["mission_id"], empty, db_path=db_path) is False
     assert db.get_mission(mission["mission_id"], db_path=db_path)["org"] == "autonomy"
     assert db.set_mission_org("no-such-mission", "anchore", db_path=db_path) is False
+
+
+# ── who is here, over a share link ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_named_guest_appears_by_name_not_by_id(tmp_path, monkeypatch):
+    """A link minted for a person carries their participant id, and presence
+    put that id in the NAME field -- so the one surface whose job is saying who
+    is here showed a guest and a uuid, while the link, the attribution and the
+    screen all had the identity right."""
+    db_path = tmp_path / "mc.db"
+    mission = db.create_mission("OSS Insights", "auto-x", db_path=db_path)
+    visitor = db.create_visitor_token("Shari Vietry", db_path=db_path)
+    pid = visitor["participant_id"]
+
+    # mc_api.db IS this module, so the originals have to be captured before
+    # patching or each replacement calls itself.
+    real_mission = db.get_mission
+    real_visitor = db.get_visitor_by_participant_id
+    monkeypatch.setattr(mc_api.db, "get_mission",
+                        lambda m, **kw: real_mission(m, db_path=db_path))
+    monkeypatch.setattr(mc_api.db, "get_visitor_by_participant_id",
+                        lambda p, **kw: real_visitor(p, db_path=db_path))
+
+    seen = {}
+    monkeypatch.setattr(
+        mc_api, "_heartbeat_presence",
+        lambda sid, who, label, kind="guest": seen.update(
+            surface=sid, who=who, label=label, kind=kind))
+    monkeypatch.setattr(mc_api, "_surface_presence", lambda sid: [])
+
+    await mc_api.handle_relay_read(pid, mission["mission_id"], {"kind": "here"})
+
+    assert seen["label"] == "Shari Vietry", "presence shows the name, not the id"
+    assert seen["who"] == pid, "and is still keyed by the id"
+
+
+@pytest.mark.asyncio
+async def test_a_guest_whose_record_is_gone_is_still_shown(tmp_path, monkeypatch):
+    """A grant can outlive the person it was minted for. Falling back to the
+    id keeps a reader who is genuinely there on the list."""
+    monkeypatch.setattr(mc_api.db, "get_visitor_by_participant_id",
+                        lambda p, **kw: None)
+    monkeypatch.setattr(mc_api.db, "get_mission", lambda m, **kw: {"mission_id": m})
+    seen = {}
+    monkeypatch.setattr(
+        mc_api, "_heartbeat_presence",
+        lambda sid, who, label, kind="guest": seen.update(label=label))
+    monkeypatch.setattr(mc_api, "_surface_presence", lambda sid: [])
+
+    await mc_api.handle_relay_read("guest:gone", "m-1", {"kind": "here"})
+    assert seen["label"] == "guest:gone"
+
+
+def test_an_unbound_link_still_says_someone_rather_than_inventing_people():
+    """Everyone holding an unbound link is the same participant as far as
+    anything here can tell, so it says so instead of inflating the count."""
+    import inspect
+    src = inspect.getsource(mc_api)
+    assert '"Someone with the link"' in src

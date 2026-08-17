@@ -95,7 +95,14 @@
                       class="nx-avatar mc-presence-avatar" :title="p.participant_label"
                       :style="'background:' + participantColor(p.participant_id) + '; left:' + avatarLeft(i) + 'px; z-index:' + (openId === p.participant_id ? 10 : (participants.length - i))"
                       :data-testid="'mc-presence-avatar-' + p.participant_id">
-                <span x-text="participantInitial(p)"></span>
+                <!-- _avatarTick is read so Alpine re-evaluates when a photo
+                     arrives; the fetch is one per person, not per render. -->
+                <img x-show="_avatarTick > -1 && participantAvatar(p)" x-cloak
+                     :src="participantAvatar(p)" :alt="p.participant_label"
+                     class="h-full w-full rounded-full object-cover"
+                     :data-testid="'mc-presence-photo-' + p.participant_id">
+                <span x-show="!participantAvatar(p)"
+                      x-text="participantInitial(p)"></span>
               </button>
             </template>
             <div class="mc-presence-name"
@@ -112,7 +119,7 @@
           <div x-show="presenceStyle === 'pan-strip'" class="flex gap-2 overflow-x-auto pb-1" style="scrollbar-width:thin">
             <template x-for="p in participants" :key="'strip' + p.participant_id">
               <div class="flex items-center gap-1.5 shrink-0 bg-gray-800/60 rounded-full pl-1 pr-3 py-1 nx-avatar-stack">
-                <span class="nx-avatar" :style="'width:22px;height:22px;font-size:9px;background:' + participantColor(p.participant_id)"><span x-text="participantInitial(p)"></span></span>
+                <span class="nx-avatar" :style="'width:22px;height:22px;font-size:9px;background:' + participantColor(p.participant_id)"><img x-show="_avatarTick > -1 && participantAvatar(p)" x-cloak :src="participantAvatar(p)" :alt="p.participant_label" class="h-full w-full rounded-full object-cover"><span x-show="!participantAvatar(p)" x-text="participantInitial(p)"></span></span>
                 <span class="text-xs text-gray-200 font-medium" x-text="p.participant_label"></span>
                 <span class="text-[10px] text-gray-500" x-text="lastActive(p)"></span>
               </div>
@@ -124,7 +131,7 @@
             <button @click="groupedOpen = !groupedOpen" class="flex items-center gap-2 text-xs text-gray-300 hover:text-white">
               <span class="flex -space-x-1.5 nx-avatar-stack">
                 <template x-for="p in participants.slice(0,3)" :key="'g' + p.participant_id">
-                  <span class="nx-avatar" :style="'width:22px;height:22px;font-size:9px;background:' + participantColor(p.participant_id)"><span x-text="participantInitial(p)"></span></span>
+                  <span class="nx-avatar" :style="'width:22px;height:22px;font-size:9px;background:' + participantColor(p.participant_id)"><img x-show="_avatarTick > -1 && participantAvatar(p)" x-cloak :src="participantAvatar(p)" :alt="p.participant_label" class="h-full w-full rounded-full object-cover"><span x-show="!participantAvatar(p)" x-text="participantInitial(p)"></span></span>
                 </template>
               </span>
               <span x-text="presenceHumans.length + ' human' + (presenceHumans.length===1?'':'s') + ' · ' + presenceAgents.length + ' agent' + (presenceAgents.length===1?'':'s') + ' here recently'"></span>
@@ -135,7 +142,7 @@
                 <div class="text-[10px] uppercase tracking-wide text-gray-500 mb-1.5">Human</div>
                 <template x-for="p in presenceHumans" :key="p.participant_id">
                   <div class="flex items-center gap-1.5 py-1 nx-avatar-stack">
-                    <span class="nx-avatar" :style="'width:22px;height:22px;font-size:9px;background:' + participantColor(p.participant_id)"><span x-text="participantInitial(p)"></span></span>
+                    <span class="nx-avatar" :style="'width:22px;height:22px;font-size:9px;background:' + participantColor(p.participant_id)"><img x-show="_avatarTick > -1 && participantAvatar(p)" x-cloak :src="participantAvatar(p)" :alt="p.participant_label" class="h-full w-full rounded-full object-cover"><span x-show="!participantAvatar(p)" x-text="participantInitial(p)"></span></span>
                     <div class="text-xs text-gray-300" x-text="p.participant_label"></div>
                     <div class="text-[10px] text-gray-500 ml-auto" x-text="lastActive(p)"></div>
                   </div>
@@ -146,7 +153,7 @@
                 <div class="text-[10px] uppercase tracking-wide text-gray-500 mb-1.5">Agent</div>
                 <template x-for="p in presenceAgents" :key="p.participant_id">
                   <div class="flex items-center gap-1.5 py-1 nx-avatar-stack">
-                    <span class="nx-avatar" :style="'width:22px;height:22px;font-size:9px;background:' + participantColor(p.participant_id)"><span x-text="participantInitial(p)"></span></span>
+                    <span class="nx-avatar" :style="'width:22px;height:22px;font-size:9px;background:' + participantColor(p.participant_id)"><img x-show="_avatarTick > -1 && participantAvatar(p)" x-cloak :src="participantAvatar(p)" :alt="p.participant_label" class="h-full w-full rounded-full object-cover"><span x-show="!participantAvatar(p)" x-text="participantInitial(p)"></span></span>
                     <div class="text-xs text-gray-300" x-text="p.participant_label"></div>
                     <div class="text-[10px] text-gray-500 ml-auto" x-text="lastActive(p)"></div>
                   </div>
@@ -169,7 +176,7 @@
             <div x-show="compactOpen && participants.length" x-cloak class="flex flex-wrap gap-2 mt-3">
               <template x-for="p in participants" :key="'c' + p.participant_id">
                 <div class="flex items-center gap-1.5 bg-gray-800/60 rounded-full pl-1 pr-2.5 py-0.5 nx-avatar-stack">
-                  <span class="nx-avatar" :style="'width:22px;height:22px;font-size:9px;background:' + participantColor(p.participant_id)"><span x-text="participantInitial(p)"></span></span>
+                  <span class="nx-avatar" :style="'width:22px;height:22px;font-size:9px;background:' + participantColor(p.participant_id)"><img x-show="_avatarTick > -1 && participantAvatar(p)" x-cloak :src="participantAvatar(p)" :alt="p.participant_label" class="h-full w-full rounded-full object-cover"><span x-show="!participantAvatar(p)" x-text="participantInitial(p)"></span></span>
                   <span class="text-[11px] text-gray-300" x-text="p.participant_label + ' · ' + lastActive(p)"></span>
                 </div>
               </template>
@@ -183,7 +190,7 @@
                 <span class="text-xs text-gray-500" x-text="participants.length + ' here'"></span>
                 <span class="flex -space-x-1.5 nx-avatar-stack">
                   <template x-for="p in participants.slice(0,3)" :key="'df' + p.participant_id">
-                    <span class="nx-avatar" :style="'width:22px;height:22px;font-size:9px;background:' + participantColor(p.participant_id)"><span x-text="participantInitial(p)"></span></span>
+                    <span class="nx-avatar" :style="'width:22px;height:22px;font-size:9px;background:' + participantColor(p.participant_id)"><img x-show="_avatarTick > -1 && participantAvatar(p)" x-cloak :src="participantAvatar(p)" :alt="p.participant_label" class="h-full w-full rounded-full object-cover"><span x-show="!participantAvatar(p)" x-text="participantInitial(p)"></span></span>
                   </template>
                 </span>
               </div>
