@@ -145,7 +145,7 @@ async def test_inherited_deliver_calls_session_send():
     row = Row(
         id="r-1",
         set_id="dashboard.session.crosstalk.deliver-fixture",
-        key="evt-1",
+        key="11111111-1111-4111-8111-111111111111",
         payload={
             "target_session": "auto-x123",
             "body": "rebase against master",
@@ -201,7 +201,7 @@ async def test_inherited_deliver_dispatched_via_settings_mediator(
         ops.add_setting(
             "dashboard.session.crosstalk.dispatch-fixture",
             1,
-            "evt-1",
+            "11111111-1111-4111-8111-111111111111",
             {
                 "target_session": "auto-y456",
                 "body": "ping the agent",
@@ -249,7 +249,7 @@ async def test_subclass_override_shadows_inherited_deliver():
     row = Row(
         id="r-2",
         set_id="dashboard.session.crosstalk.custom-fixture",
-        key="evt-2",
+        key="22222222-2222-4222-8222-222222222222",
         payload={
             "target_session": "auto-z789",
             "body": "shout",
