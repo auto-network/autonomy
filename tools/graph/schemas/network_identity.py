@@ -45,6 +45,14 @@ from datetime import datetime
 from typing import Any
 
 from .registry import (
+    home,
+    home,
+    home,
+    home,
+    home,
+    home,
+    home,
+    home,
     singleton,
     SchemaValidationError,
     SettingSchema,
@@ -186,6 +194,16 @@ def _require_iso_ts(payload: dict, key: str, cls_name: str) -> str:
 # ── autonomy.network.org-key ──────────────────────────────────
 
 
+#: Not forced into any one store. This records that the question was
+#: ASKED -- must this live in the operator's own database, or on
+#: this machine alone? -- and answered no, which is different
+#: from nobody having considered it.
+#:
+#: It is not a prohibition. The operator owns workspaces, so
+#: their database is the organizational home of their own
+#: things; reading this as "anywhere but personal" refuses
+#: writes that are correct.
+@home("organization")
 @singleton(key="default")
 class NetworkOrgKeyV1(SettingSchema):
     """The org's auto.network root key — encrypted armor only (I1).
@@ -355,6 +373,16 @@ class NetworkOrgKeyV2(SettingSchema):
 # ── autonomy.network.binding ──────────────────────────────────
 
 
+#: Not forced into any one store. This records that the question was
+#: ASKED -- must this live in the operator's own database, or on
+#: this machine alone? -- and answered no, which is different
+#: from nobody having considered it.
+#:
+#: It is not a prohibition. The operator owns workspaces, so
+#: their database is the organizational home of their own
+#: things; reading this as "anywhere but personal" refuses
+#: writes that are correct.
+@home("organization")
 @keyed_per_entity(key_strategy="registry_host")
 class NetworkBindingV1(SettingSchema):
     """Local record of the org's auto.network registry binding (§4.1–4.3).
@@ -480,6 +508,16 @@ class NetworkBindingV1(SettingSchema):
 # ── autonomy.network.link-grant ───────────────────────────────
 
 
+#: Not forced into any one store. This records that the question was
+#: ASKED -- must this live in the operator's own database, or on
+#: this machine alone? -- and answered no, which is different
+#: from nobody having considered it.
+#:
+#: It is not a prohibition. The operator owns workspaces, so
+#: their database is the organizational home of their own
+#: things; reading this as "anywhere but personal" refuses
+#: writes that are correct.
+@home("organization")
 @keyed_per_entity(key_strategy="grant_token")
 class NetworkLinkGrantV1(SettingSchema):
     """Dashboard-side share-link grant cache (§4.4, §6.1; feeds I9).
@@ -732,6 +770,16 @@ class NetworkLinkGrantV3(NetworkLinkGrantV2):
 # ── autonomy.network.serve-cert ───────────────────────────────
 
 
+#: Not forced into any one store. This records that the question was
+#: ASKED -- must this live in the operator's own database, or on
+#: this machine alone? -- and answered no, which is different
+#: from nobody having considered it.
+#:
+#: It is not a prohibition. The operator owns workspaces, so
+#: their database is the organizational home of their own
+#: things; reading this as "anywhere but personal" refuses
+#: writes that are correct.
+@home("organization")
 @singleton(key="default")
 class NetworkServeCertV2(SettingSchema):
     """One serving key with two context-specific root-signed certificates.

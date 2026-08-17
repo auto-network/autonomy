@@ -40,6 +40,8 @@ from typing import Any, Optional
 from uuid import uuid4
 
 from tools.graph.schemas.registry import (
+    home,
+    home,
     SchemaValidationError,
     SettingSchema,
     append_only_log,
@@ -104,6 +106,11 @@ SYNOPSIS = {
 # ── SurfacePresence ──────────────────────────────────────────
 
 
+#: An organization's own store. Observed: rows live only in
+#: organization databases and never in the operator's. Declaring
+#: it refuses a write into the personal or machine store, which
+#: would be invisible to every member who needs the value.
+@home("organization")
 @keyed_per_entity(key_strategy="surface_id:participant_id")
 class SurfacePresenceV1(SettingSchema):
     """Persistent row per ``(surface_id, participant_id)``.
@@ -335,6 +342,12 @@ class SurfacePingV1(SettingSchema):
 # ── OperatorActivity ─────────────────────────────────────────
 
 
+#: The operator's own store. Observed: every stored row lives there
+#: and none in any organization's database. Declared so it is
+#: enforced rather than agreed -- an undeclared home refuses
+#: nothing, and a plain read looks in the caller's own store and
+#: reports nothing for rows sitting one database over.
+@home("personal")
 @singleton(key="operator")
 class OperatorActivityV1(SettingSchema):
     """Has the operator typed anywhere recently? Singleton, one writer.

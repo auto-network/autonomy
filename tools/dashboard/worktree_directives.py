@@ -31,6 +31,8 @@ from agents.workspace_manager import WorkspaceError, get_session_worktree_rebase
 from tools.dashboard.crosstalk_directive import CrosstalkDirective
 from tools.graph import settings_ops
 from tools.graph.schemas.registry import (
+    home,
+    home,
     SchemaValidationError,
     SettingSchema,
     action,
@@ -98,6 +100,16 @@ class WorktreeDirective(CrosstalkDirective):
     )
 
 
+#: Not forced into any one store. This records that the question was
+#: ASKED -- must this live in the operator's own database, or on
+#: this machine alone? -- and answered no, which is different
+#: from nobody having considered it.
+#:
+#: It is not a prohibition. The operator owns workspaces, so
+#: their database is the organizational home of their own
+#: things; reading this as "anywhere but personal" refuses
+#: writes that are correct.
+@home("organization")
 class RebaseDirectiveV1(WorktreeDirective):
     """Operator-issued request asking a session to rebase one worktree."""
 

@@ -54,6 +54,14 @@ from __future__ import annotations
 from typing import Any
 
 from tools.graph.schemas.registry import (
+    home,
+    home,
+    home,
+    home,
+    home,
+    home,
+    home,
+    home,
     SchemaValidationError,
     SettingSchema,
     field,
@@ -127,6 +135,16 @@ SYNOPSIS = {
 # ── SessionAskV1 (legacy — back-compat reads only) ───────────
 
 
+#: Not forced into any one store. This records that the question was
+#: ASKED -- must this live in the operator's own database, or on
+#: this machine alone? -- and answered no, which is different
+#: from nobody having considered it.
+#:
+#: It is not a prohibition. The operator owns workspaces, so
+#: their database is the organizational home of their own
+#: things; reading this as "anywhere but personal" refuses
+#: writes that are correct.
+@home("organization")
 @keyed_per_entity(key_strategy="session_name")
 class SessionAskV1(SettingSchema):
     """Legacy session-ask schema. Writers should target v2.
@@ -373,6 +391,16 @@ class SessionAskV2(SettingSchema):
 # ── AskVoteV1 ────────────────────────────────────────────────
 
 
+#: Not forced into any one store. This records that the question was
+#: ASKED -- must this live in the operator's own database, or on
+#: this machine alone? -- and answered no, which is different
+#: from nobody having considered it.
+#:
+#: It is not a prohibition. The operator owns workspaces, so
+#: their database is the organizational home of their own
+#: things; reading this as "anywhere but personal" refuses
+#: writes that are correct.
+@home("organization")
 @keyed_per_entity(key_strategy="session_name:participant_id")
 class AskVoteV1(SettingSchema):
     """One row per ``(ask_id, voter_id)`` pair. Shared, schema-clean.
@@ -442,6 +470,16 @@ class AskVoteV1(SettingSchema):
 # ── AskRefreshRequestV1 ──────────────────────────────────────
 
 
+#: Not forced into any one store. This records that the question was
+#: ASKED -- must this live in the operator's own database, or on
+#: this machine alone? -- and answered no, which is different
+#: from nobody having considered it.
+#:
+#: It is not a prohibition. The operator owns workspaces, so
+#: their database is the organizational home of their own
+#: things; reading this as "anywhere but personal" refuses
+#: writes that are correct.
+@home("organization")
 @keyed_per_entity(key_strategy="session_name")
 class AskRefreshRequestV1(SettingSchema):
     """One row per ask. Pins a ``target_revision`` for the refresh.
@@ -522,6 +560,16 @@ class AskRefreshRequestV1(SettingSchema):
 # ── OperatorDismissedAsksV1 ──────────────────────────────────
 
 
+#: Not forced into any one store. This records that the question was
+#: ASKED -- must this live in the operator's own database, or on
+#: this machine alone? -- and answered no, which is different
+#: from nobody having considered it.
+#:
+#: It is not a prohibition. The operator owns workspaces, so
+#: their database is the organizational home of their own
+#: things; reading this as "anywhere but personal" refuses
+#: writes that are correct.
+@home("organization")
 @singleton(key="dismissed")
 class OperatorDismissedAsksV1(SettingSchema):
     """Operator-local: ask ids THIS operator has muted from their inbox.

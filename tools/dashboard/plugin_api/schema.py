@@ -10,6 +10,10 @@ from __future__ import annotations
 from typing import Any
 
 from tools.graph.schemas.registry import (
+    home,
+    home,
+    home,
+    home,
     keyed_per_entity,
     SchemaValidationError,
     SettingSchema,
@@ -23,6 +27,16 @@ PLUGIN_OWNED_SETTING_SET_ID = "dashboard.plugin-owned-setting"
 PLUGIN_OWNED_SETTING_SCHEMA_REVISION = 1
 
 
+#: Not forced into any one store. This records that the question was
+#: ASKED -- must this live in the operator's own database, or on
+#: this machine alone? -- and answered no, which is different
+#: from nobody having considered it.
+#:
+#: It is not a prohibition. The operator owns workspaces, so
+#: their database is the organizational home of their own
+#: things; reading this as "anywhere but personal" refuses
+#: writes that are correct.
+@home("organization")
 @keyed_per_entity(key_strategy="plugin_id")
 class DashboardPluginV1(SettingSchema):
     """Payload shape for ``dashboard.plugin#1`` Settings.
@@ -74,6 +88,16 @@ class DashboardPluginV1(SettingSchema):
             )
 
 
+#: Not forced into any one store. This records that the question was
+#: ASKED -- must this live in the operator's own database, or on
+#: this machine alone? -- and answered no, which is different
+#: from nobody having considered it.
+#:
+#: It is not a prohibition. The operator owns workspaces, so
+#: their database is the organizational home of their own
+#: things; reading this as "anywhere but personal" refuses
+#: writes that are correct.
+@home("organization")
 @keyed_per_entity(key_strategy="plugin_id:set_id:setting_key")
 class DashboardPluginOwnedSettingV1(SettingSchema):
     """Tracks graph Settings installed from plugin declarations.

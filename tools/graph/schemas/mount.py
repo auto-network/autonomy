@@ -83,6 +83,7 @@ class WorkspaceMountV1(BaseModel):
 # goes through ``model_validate``; wrap it so ``add_setting`` /
 # dashboard validation call sites keep working unchanged.
 from .registry import SettingSchema, SchemaValidationError, keyed_per_entity
+from .registry import home
 
 
 @keyed_per_entity(
@@ -91,6 +92,16 @@ from .registry import SettingSchema, SchemaValidationError, keyed_per_entity
     # Declared, every mount of a given workspace is reachable from it.
     key_references={"workspace_id": "autonomy.workspace"},
 )
+#: Not forced into any one store. This records that the question was
+#: ASKED -- must this live in the operator's own database, or on
+#: this machine alone? -- and answered no, which is different
+#: from nobody having considered it.
+#:
+#: It is not a prohibition. The operator owns workspaces, so
+#: their database is the organizational home of their own
+#: things; reading this as "anywhere but personal" refuses
+#: writes that are correct.
+@home("organization")
 class _WorkspaceMountSchemaAdapter(SettingSchema):
     """Adapts :class:`WorkspaceMountV1` (Pydantic) to the registry contract.
 
