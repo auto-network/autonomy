@@ -276,6 +276,66 @@ def _ab_eval_batch(js: str) -> Any:
     return None
 
 
+def instrument_network() -> None:
+    """Wrap window.fetch (idempotently) to track in-flight requests, so
+    :func:`wait_dom_idle` can wait for network-idle. Must run BEFORE the
+    navigation whose fetches we want to observe."""
+    js = (
+        "(() => { if (window.__l2bNet) return 'already';"
+        " window.__l2bNet = true; window.__l2bInflight = 0;"
+        " try { var of = window.fetch; window.fetch = function(){"
+        "   window.__l2bInflight++;"
+        "   return of.apply(this, arguments).finally(function(){"
+        "     window.__l2bInflight = Math.max(0, window.__l2bInflight - 1); }); };"
+        " } catch(e) {} return 'ok'; })()"
+    )
+    try:
+        subprocess.run(
+            ["agent-browser", "eval", js], capture_output=True, timeout=10,
+        )
+    except Exception:
+        pass
+
+
+def wait_dom_idle(idle_ms: int = 250, ceiling_ms: int = 1500) -> None:
+    """Block until the page is quiescent — no in-flight fetches AND the DOM has
+    been idle (no mutations) for *idle_ms* — or *ceiling_ms* elapses.
+
+    The generic 'page finished loading and rendering' signal (Playwright's
+    networkidle idea): a MutationObserver resets an idle timer on every DOM
+    change, and the idle check only fires once ``window.__l2bInflight`` (set by
+    :func:`instrument_network`) is zero. So this returns the instant the data
+    fetch has resolved AND Alpine has stopped rendering it — it does NOT fire in
+    the gap between init and the fetch's render, which a plain DOM-idle (or a
+    fixed sleep) would race. A page that mutates or fetches forever hits the
+    ceiling, never worse than the old blind sleep. (crypto pillar fixed-sleeps
+    report, auto-0812-211339.)
+    """
+    js = (
+        "(async () => { await new Promise(function(res){"
+        " var t = null;"
+        " function schedule(){ clearTimeout(t); t = setTimeout(check, %d); }"
+        " function check(){ if ((window.__l2bInflight||0) <= 0)"
+        "   { try{o.disconnect();}catch(e){} res(); } else { schedule(); } }"
+        " var o;"
+        " try {"
+        "  o = new MutationObserver(schedule);"
+        "  o.observe(document.documentElement,"
+        "   {childList:true, subtree:true, attributes:true, characterData:true});"
+        " } catch(e) {}"
+        " schedule();"
+        " setTimeout(function(){ try{o.disconnect();}catch(e){} res(); }, %d);"
+        " }); return JSON.stringify({idle:true}); })()"
+    ) % (idle_ms, ceiling_ms)
+    try:
+        subprocess.run(
+            ["agent-browser", "--json", "eval", js],
+            capture_output=True, text=True, timeout=ceiling_ms / 1000.0 + 5,
+        )
+    except Exception:
+        pass
+
+
 def _navigate_and_check(
     path: str,
     js_checks: str,
@@ -288,12 +348,22 @@ def _navigate_and_check(
     ``var r = {}; <checks>; return r;`` and submits via
     ``_ab_eval_batch``.
     """
+    # Instrument fetch BEFORE navigating so wait_dom_idle can see the route's
+    # own data fetch in-flight — a DOM-idle-only wait fires in the gap between
+    # Alpine init and the fetch's render, which is what made several checks flap.
+    instrument_network()
     nav_js = f"navigateTo('{path}')"
     subprocess.run(
         ["agent-browser", "eval", nav_js],
         capture_output=True, timeout=10,
     )
-    time.sleep(wait_ms / 1000)
+    # Wait for the DOM to stop mutating (the page has finished rendering,
+    # including late async Alpine renders) instead of sleeping a fixed wait_ms
+    # and hoping. Returns the instant the page settles — faster on every run,
+    # and it waits for the RIGHT condition so it cannot lose a race a fixed
+    # sleep would also lose. wait_ms is a generous ceiling. (crypto pillar
+    # fixed-sleeps report, auto-0812-211339.)
+    wait_dom_idle(ceiling_ms=max(wait_ms, 5000))
 
     full_js = f"var r = {{}}; {js_checks} return r;"
     return _ab_eval_batch(full_js) or {}
