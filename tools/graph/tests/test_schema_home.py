@@ -266,3 +266,36 @@ def test_they_also_cannot_be_published(set_id):
     from tools.graph import schemas
 
     assert schemas.states_allowed(set_id, 1) == ("raw",)
+
+
+def test_a_sweep_across_every_store_never_raises(homed_schemas, orgs_root):
+    """The outage this cost twelve minutes to learn.
+
+    Readers exist that walk every database -- the session monitor does, on a
+    timer. Reaching the machine store, an organization-homed set raised
+    instead of returning no rows. The exception was thrown inside a timer
+    task and never retrieved, so the dashboard did not crash: it kept the
+    port and stopped answering, and every graph call across the fleet hung
+    rather than failing fast.
+
+    A guard meant to stop a value being WRITTEN where nobody could find it
+    took down the platform on a READ. Reads resolve or come back empty; they
+    do not refuse.
+    """
+    settings_ops.add_setting("probe.home.ours", 1, "ws-a", {"v": "x"},
+                             org="acme")
+
+    for store in ("acme", "personal", "machine", None):
+        members = settings_ops.read_set("probe.home.ours", org=store, peers=[])
+        assert isinstance(getattr(members, "members", None), list)
+
+
+def test_the_machine_store_simply_holds_none_of_it(homed_schemas, orgs_root):
+    """Empty is the honest answer, and it is a different answer from an
+    error. The value is not there; nothing has gone wrong."""
+    settings_ops.add_setting("probe.home.ours", 1, "ws-b", {"v": "x"},
+                             org="acme")
+
+    seen = settings_ops.read_set("probe.home.ours", org="machine", peers=[])
+
+    assert [m.key for m in seen.members] == []
