@@ -205,6 +205,43 @@ def _refuse_real_data_fallback(monkeypatch):
     monkeypatch.setenv("AUTONOMY_REFUSE_REAL_DATA_FALLBACK", "1")
 
 
+@pytest.fixture(autouse=True)
+def _contain_shared_db_reload_leak():
+    """Undo cross-test contamination from fixtures that ``importlib.reload``
+    the shared ``dashboard_db`` / ``dispatch_db`` singletons to inject a test
+    DB path.
+
+    Both modules resolve their DB path at IMPORT time
+    (``dashboard_db._DB_PATH = resolve_store("dashboard")``;
+    ``dispatch_db.DB_PATH = Path(os.environ["DISPATCH_DB"] ...)``), so tests
+    reload them after setting the env to repoint at a tmp DB. Many such
+    fixtures pop the env on teardown but never reload the module back, leaving
+    the process-global singleton resolved to a now-deleted tmp path. Under
+    ``-n 8 --dist loadfile`` that poisons every later test on the same worker
+    (they read the stale path and fail) — a shifting, hard-to-reproduce set of
+    failures. After each test, if a module's cached path no longer matches what
+    the current environment resolves to, reload it back to a clean baseline.
+    """
+    yield
+    import importlib
+    try:
+        from tools.data_paths import resolve_store
+        from tools.dashboard.dao import dashboard_db as _ddb
+        if getattr(_ddb, "_DB_PATH", None) != resolve_store("dashboard"):
+            importlib.reload(_ddb)
+    except Exception:
+        pass
+    try:
+        from agents import dispatch_db as _disp
+        expected = _Path(
+            _os.environ.get("DISPATCH_DB", str(_disp.REPO_ROOT / "data" / "dispatch.db"))
+        )
+        if getattr(_disp, "DB_PATH", None) != expected:
+            importlib.reload(_disp)
+    except Exception:
+        pass
+
+
 # ── Per-worker agent-browser session fallback ──────────────────────────
 # The ROOT conftest.py gives each dashboard test module its own browser
 # session (pytest-<worker>-<module>-<hash>) via a module-scoped autouse
