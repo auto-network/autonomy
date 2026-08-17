@@ -290,6 +290,16 @@ class CommitPolicyV1(SettingSchema):
                 )
 
 
+#: Not forced into any one store. This records that the question was
+#: ASKED -- must this live in the operator's own database, or on
+#: this machine alone? -- and answered no, which is different
+#: from nobody having considered it.
+#:
+#: It is not a prohibition. The operator owns workspaces, so
+#: their database is the organizational home of their own
+#: things; reading this as "anywhere but personal" refuses
+#: writes that are correct.
+@home("organization")
 @keyed_per_entity(key_strategy="contract_operation")
 class OperationPolicyV1(SettingSchema):
     set_id = OPERATION_POLICY_SET_ID
