@@ -208,3 +208,36 @@ def test_an_organization_homed_set_still_reads_at_the_callers_org(homed_schemas,
     seen = settings_ops.read_set("probe.home.ours", org="acme", peers=[])
 
     assert [m.key for m in seen.members] == ["ws-a"]
+
+
+# ── credentials belong to the operator, and it is declared ──
+
+
+@pytest.mark.parametrize("set_id", [
+    "dashboard.claude.setup_tokens",
+    "dashboard.claude.credentials",
+    "dashboard.codex.credentials",
+])
+def test_harness_credentials_declare_the_operators_store(set_id):
+    """Every writer already named `personal` by a module constant, and the
+    launcher read it back the same way -- so the home was agreed and not
+    enforced. An undeclared home cannot refuse a write into an
+    organization's database, and it left a bare `graph set members` looking
+    in the caller's own store and answering "(no Settings)" for rows that
+    plainly existed one database over.
+    """
+    from tools.graph import schemas
+
+    assert schemas.declared_home(set_id) == "personal"
+
+
+@pytest.mark.parametrize("set_id", [
+    "dashboard.claude.setup_tokens",
+    "dashboard.claude.credentials",
+])
+def test_they_also_cannot_be_published(set_id):
+    """Home says which database; the band says who may read across one. A
+    credential needs both answers, and they are different questions."""
+    from tools.graph import schemas
+
+    assert schemas.states_allowed(set_id, 1) == ("raw",)

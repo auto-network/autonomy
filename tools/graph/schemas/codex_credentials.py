@@ -31,6 +31,7 @@ from __future__ import annotations
 from typing import Any
 
 from .registry import (
+    home,
     SchemaValidationError,
     SettingSchema,
     field,
@@ -60,6 +61,14 @@ SYNOPSIS = {
 }
 
 
+#: The operator's own store, and only there. These hold credentials for
+#: accounts the operator owns, not an organization -- every writer already
+#: names `personal` by a module constant, and the launcher reads it back
+#: the same way. Declared so it is ENFORCED rather than agreed: an
+#: undeclared home cannot refuse a write into an organization's database,
+#: and leaves a bare `graph set members` looking in the caller's own
+#: store and reporting "(no Settings)" for rows that plainly exist.
+@home("personal")
 @keyed_per_entity(key_strategy="account_uuid")
 class CodexCredentialsV1(SettingSchema):
     """Per-account Codex OAuth credentials.
