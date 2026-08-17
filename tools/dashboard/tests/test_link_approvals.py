@@ -649,6 +649,15 @@ def test_tunnel_meta_carries_the_signed_ice_policy():
     assert error is None
     assert meta == {"ice_policy": "relay_only", "label": "Private route"}
 
+    # Policy is enforced by the serving dashboard from this signed local
+    # grant. The Registry neither authorizes nor routes with it, so the
+    # control frame must not disclose it or require a Registry wire change.
+    wire = {
+        k: v for k, v in meta.items()
+        if k not in link_approvals._LOCAL_ONLY_META
+    }
+    assert wire == {"label": "Private route"}
+
 
 def test_tunnel_meta_still_drops_unknown_keys():
     """The allowlist is the point: an unknown key must never reach a grant."""
