@@ -38,6 +38,10 @@ from .registry import (
     # different questions and neither implies the other.
     home,
     declared_home,
+    publication_band,
+    declared_band,
+    states_allowed,
+    PUBLICATION_ORDER,
     VALID_HOMES,
     # Whether this set's payloads are secrets stored as encrypted storage
     # objects, and who must participate to read one back.
@@ -94,6 +98,10 @@ __all__ = [
     "SchemaValidationError",
     "home",
     "declared_home",
+    "publication_band",
+    "declared_band",
+    "states_allowed",
+    "PUBLICATION_ORDER",
     "VALID_HOMES",
     "vaulted",
     "declared_vault_tier",
