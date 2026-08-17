@@ -78,6 +78,7 @@ class CredentialFileV1(SettingSchema):
     path: str = field(
         required=True,
         exists="file",
+        exists_frame="platform-host",
         description=(
             "Absolute path on this machine to the file holding the "
             "credential. Read at the moment it is used and never retained; "

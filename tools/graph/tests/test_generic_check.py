@@ -601,3 +601,235 @@ def test_the_command_a_message_tells_you_to_run_exists(acme, monkeypatch, capsys
     assert parsed.key == "cmd"
     assert parsed.set_at_rev == "probe.check.plain"
     assert parsed.func is set_cmd.cmd_set_layers
+
+
+# ── a value that names a host environment variable ───────────
+#
+# The launcher forwards the variables that are set and skips the rest
+# without a word (three call sites, all ``if value is not None``). So a
+# workspace declaring one that is unset starts without it, and whatever
+# needed the value fails much later saying nothing about a forward that
+# never happened. Declaring what the field HOLDS is what turns that into
+# something a check can say in advance.
+
+
+@pytest.fixture(scope="module")
+def env_naming():
+    @keyed_per_entity(key_strategy="probe_id")
+    class Forwards(SettingSchema):
+        set_id = "probe.check.env"
+        schema_revision = 1
+        wants: list = field(
+            required=True,
+            description="host env var names",
+            element=str,
+            names_host_env=True,
+        )
+
+    return Forwards
+
+
+@pytest.fixture
+def env_org(tmp_path, monkeypatch, env_naming):
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.delenv("GRAPH_API", raising=False)
+    GraphDB.create_org_db("acme").close()
+    yield
+    GraphDB.close_all_pooled()
+
+
+def test_a_named_variable_that_is_not_set_is_reported(env_org, monkeypatch):
+    monkeypatch.delenv("PROBE_ABSENT", raising=False)
+    settings_ops.add_setting("probe.check.env", 1, "k", {"wants": ["PROBE_ABSENT"]},
+                             org="acme", state="raw")
+
+    findings = settings_ops.check_setting("probe.check.env", "k", org="acme")
+
+    assert [f.kind for f in findings] == ["missing_env"]
+    assert "PROBE_ABSENT" in findings[0].detail
+
+
+def test_a_named_variable_that_is_set_is_not(env_org, monkeypatch):
+    monkeypatch.setenv("PROBE_PRESENT", "x")
+    settings_ops.add_setting("probe.check.env", 1, "s", {"wants": ["PROBE_PRESENT"]},
+                             org="acme", state="raw")
+
+    assert settings_ops.check_setting("probe.check.env", "s", org="acme") == []
+
+
+def test_an_empty_value_counts_as_set(env_org, monkeypatch):
+    """Forwarding is by presence, not by truthiness.
+
+    The launcher tests ``is not None``, so an exported-but-empty variable
+    IS forwarded. A check calling that missing would report a problem the
+    launcher does not have, and send someone to fix a variable that is
+    already doing what it will do.
+    """
+    monkeypatch.setenv("PROBE_EMPTY", "")
+    settings_ops.add_setting("probe.check.env", 1, "e", {"wants": ["PROBE_EMPTY"]},
+                             org="acme", state="raw")
+
+    assert settings_ops.check_setting("probe.check.env", "e", org="acme") == []
+
+
+def test_each_unset_variable_is_named_separately(env_org, monkeypatch):
+    """One finding per variable. A single "some of these are missing" is a
+    finding somebody has to go and expand by hand."""
+    for name in ("PROBE_A", "PROBE_B"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("PROBE_C", "here")
+    settings_ops.add_setting("probe.check.env", 1, "m",
+                             {"wants": ["PROBE_A", "PROBE_C", "PROBE_B"]},
+                             org="acme", state="raw")
+
+    findings = settings_ops.check_setting("probe.check.env", "m", org="acme")
+
+    assert len(findings) == 2
+    assert {"PROBE_A", "PROBE_B"} == {
+        n for n in ("PROBE_A", "PROBE_B")
+        for f in findings if n in f.detail
+    }
+
+
+def test_the_finding_says_whose_environment_it_read(env_org, monkeypatch):
+    """The frame is load-bearing here in a way it is not for a file.
+
+    A variable exported in the operator's shell is not set in the dashboard
+    process, and neither is the container's. So this check is only decisive
+    when run in the process that will do the forwarding, and the finding has
+    to say so rather than let a clean result be read as a guarantee.
+    """
+    monkeypatch.delenv("PROBE_FRAME", raising=False)
+    settings_ops.add_setting("probe.check.env", 1, "f", {"wants": ["PROBE_FRAME"]},
+                             org="acme", state="raw")
+
+    finding = settings_ops.check_setting("probe.check.env", "f", org="acme")[0]
+
+    assert "environment of the process running this check" in finding.looked_in
+    assert "launcher" in finding.looked_in
+
+
+def test_a_readiness_check_on_env_never_runs_at_write(env_org, monkeypatch):
+    """Same rule as a path: whether a variable is exported is a fact about
+    the world, and an organization's row must not be refusable on one host
+    and acceptable on the next."""
+    monkeypatch.delenv("PROBE_AT_WRITE", raising=False)
+
+    assert settings_ops.add_setting(
+        "probe.check.env", 1, "w", {"wants": ["PROBE_AT_WRITE"]},
+        org="acme", state="raw")
+
+
+# ── a path whose filesystem is not this process's ────────────
+#
+# A bind-mount source belongs to the machine running the platform. Asked
+# from inside a container the question has two wrong answers and no right
+# one, and the dangerous one is not the false alarm.
+
+
+@pytest.fixture(scope="module")
+def host_framed():
+    @keyed_per_entity(key_strategy="probe_id")
+    class Mounts(SettingSchema):
+        set_id = "probe.check.hostframe"
+        schema_revision = 1
+        host_path: str = field(
+            required=True,
+            description="a directory on the platform host",
+            exists="dir",
+            exists_frame="platform-host",
+        )
+
+    return Mounts
+
+
+@pytest.fixture
+def frame_org(tmp_path, monkeypatch, host_framed):
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.delenv("GRAPH_API", raising=False)
+    GraphDB.create_org_db("acme").close()
+    yield tmp_path
+    GraphDB.close_all_pooled()
+
+
+def test_a_container_refuses_to_answer_for_the_host(frame_org, monkeypatch):
+    monkeypatch.setenv("AUTONOMY_CONTAINER", "1")
+    settings_ops.add_setting("probe.check.hostframe", 1, "k",
+                             {"host_path": "/data/thing"}, org="acme", state="raw")
+
+    findings = settings_ops.check_setting("probe.check.hostframe", "k", org="acme")
+
+    assert [f.kind for f in findings] == ["unanswerable_here"]
+    assert "run this check on the host" in findings[0].detail
+
+
+def test_a_directory_present_only_in_the_container_does_not_read_as_ready(
+    frame_org, monkeypatch,
+):
+    """The reason this refuses instead of answering with a caveat.
+
+    A same-named directory inside the container satisfies the filesystem
+    question and the check turns GREEN for a bind-mount source the host does
+    not have. Nobody re-reads a clean result, so the caveat would never be
+    seen — the workspace would simply fail at launch, having been declared
+    ready.
+    """
+    monkeypatch.setenv("AUTONOMY_CONTAINER", "1")
+    local = frame_org / "looks-right"
+    local.mkdir()
+    settings_ops.add_setting("probe.check.hostframe", 1, "d",
+                             {"host_path": str(local)}, org="acme", state="raw")
+
+    findings = settings_ops.check_setting("probe.check.hostframe", "d", org="acme")
+
+    assert [f.kind for f in findings] == ["unanswerable_here"], (
+        "a directory that exists only in this container reported the host's "
+        "bind-mount source as satisfied")
+
+
+def test_on_the_host_the_question_is_answered_normally(frame_org, monkeypatch):
+    monkeypatch.setenv("AUTONOMY_CONTAINER", "0")
+    settings_ops.add_setting("probe.check.hostframe", 1, "h",
+                             {"host_path": "/definitely/not/here"},
+                             org="acme", state="raw")
+
+    findings = settings_ops.check_setting("probe.check.hostframe", "h", org="acme")
+
+    assert [f.kind for f in findings] == ["missing_path"]
+
+
+def test_on_the_host_a_present_directory_is_satisfied(frame_org, monkeypatch):
+    monkeypatch.setenv("AUTONOMY_CONTAINER", "0")
+    present = frame_org / "real"
+    present.mkdir()
+    settings_ops.add_setting("probe.check.hostframe", 1, "p",
+                             {"host_path": str(present)}, org="acme", state="raw")
+
+    assert settings_ops.check_setting("probe.check.hostframe", "p", org="acme") == []
+
+
+def test_an_undeclared_frame_is_answered_wherever_it_is_asked(acme):
+    """Only a declared frame changes behaviour, so every existing check and
+    every schema that has not considered the question is untouched."""
+    settings_ops.add_setting("probe.check.local", 1, "u",
+                             {"path": "/nowhere/at/all"}, org="machine")
+
+    findings = settings_ops.check_setting("probe.check.local", "u", org="machine")
+
+    assert [f.kind for f in findings] == ["missing_path"]
+
+
+def test_a_frame_without_an_exists_check_is_refused_at_declaration():
+    """It says whose filesystem an exists check reads. With no such check it
+    reads as a constraint and is nothing at all."""
+    from tools.graph.schemas.registry import SchemaValidationError as SVE
+
+    with pytest.raises(SVE, match="declares no exists check"):
+        @keyed_per_entity(key_strategy="probe_id")
+        class Bad(SettingSchema):
+            set_id = "probe.check.badframe"
+            schema_revision = 1
+            v: str = field(required=True, description="v",
+                           exists_frame="platform-host")

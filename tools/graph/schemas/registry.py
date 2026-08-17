@@ -148,6 +148,8 @@ class _FieldSpec:
     references: str | None = None
     reference_scope: str | None = None
     exists: str | None = None
+    exists_frame: str | None = None
+    names_host_env: bool = False
 
 
 def field(
@@ -161,6 +163,8 @@ def field(
     references: str | None = None,
     reference_scope: str | None = None,
     exists: str | None = None,
+    exists_frame: str | None = None,
+    names_host_env: bool = False,
 ) -> Any:
     """Declare metadata for a SettingSchema field.
 
@@ -195,6 +199,25 @@ def field(
             between machines, changes after the write, and would make an
             organization's row refusable on one host and acceptable on
             another. Declaring it lets a check verb ask on demand.
+        exists_frame: WHOSE filesystem the ``exists`` check is about, when
+            it is not the process asking. ``"platform-host"`` says the path
+            belongs to the machine running the platform -- a bind-mount
+            source the docker daemon resolves, say -- so a container asking
+            the question is looking at the wrong filesystem entirely. That
+            matters more than it sounds: the wrong frame answers MISSING for
+            a path that is present, and PRESENT for a path that is not,
+            because a same-named directory inside the container satisfies
+            it. The second is the dangerous one, since a check made green
+            that way is silence, and silence reads as agreement.
+        names_host_env: this value is the NAME of a host environment
+            variable the workspace expects to be forwarded. Also a
+            READINESS check. A launcher forwards only the variables that
+            are actually set, and skips the rest in silence, so a
+            workspace declaring one that is unset starts without it and
+            fails much later at whatever needed it. Declaring this lets
+            the check say which name is unset, in the environment it
+            looked in -- which is the process running the check, and is
+            not the launcher's unless they are the same process.
 
     ``description`` is required of every field a SHIPPED schema declares,
     asserted over the live registry rather than here — a throwaway schema
@@ -211,6 +234,8 @@ def field(
         references=references,
         reference_scope=reference_scope,
         exists=exists,
+        exists_frame=exists_frame,
+        names_host_env=names_host_env,
     )
 
 
@@ -254,6 +279,20 @@ def _build_metadata_from_spec(ann: Any, spec: _FieldSpec) -> dict:
                 f"exists must be one of {list(VALID_EXISTS)}, got {spec.exists!r}"
             )
         meta["exists"] = spec.exists
+    if spec.exists_frame is not None:
+        if spec.exists_frame not in VALID_EXISTS_FRAMES:
+            raise SchemaValidationError(
+                f"exists_frame must be one of {list(VALID_EXISTS_FRAMES)}, "
+                f"got {spec.exists_frame!r}"
+            )
+        if spec.exists is None:
+            raise SchemaValidationError(
+                "exists_frame says whose filesystem an exists check reads, "
+                "and this field declares no exists check"
+            )
+        meta["exists_frame"] = spec.exists_frame
+    if spec.names_host_env:
+        meta["names_host_env"] = True
     return meta
 
 
@@ -399,6 +438,11 @@ VALID_HOMES = ("machine", "personal", "organization")
 #: What a declared ``exists`` check asserts about a filesystem entry. Checked
 #: on demand by a readiness verb, never at write -- see ``field(exists=...)``.
 VALID_EXISTS = ("file", "dir", "executable")
+
+#: Whose filesystem an ``exists`` check is about. Absent means the process
+#: asking. ``platform-host`` means the machine running the platform, which a
+#: container is not -- and cannot answer for.
+VALID_EXISTS_FRAMES = ("platform-host",)
 
 #: Vault tiers a schema may declare -- WHO MUST PARTICIPATE to read the value
 #: back (``0c206bd8-1c6`` §4.1). ``audited`` releases to any authorized

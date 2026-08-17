@@ -105,6 +105,7 @@ class WorkspaceRepoV1(SettingSchema):
     local_path: str = field(
         required=False,
         exists="dir",
+        exists_frame="platform-host",
         description=(
             "Absolute host path of a local-first repository that has no "
             "remote. Mutually exclusive with host and repo"
@@ -121,6 +122,7 @@ class WorkspaceRepoV1(SettingSchema):
     base_source: str = field(
         required=False,
         exists="dir",
+        exists_frame="platform-host",
         description="Absolute host path to clone from instead of the remote",
     )
 
@@ -289,6 +291,7 @@ class WorkspaceV1(SettingSchema):
         },
         "env_from_host": {
             "type": "array",
+            "names_host_env": True,
             "description": "Names of host env vars to forward into the container",
             "element": {"type": "string"},
         },
