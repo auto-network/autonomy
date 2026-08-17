@@ -74,6 +74,10 @@ from tools.graph.schemas.registry import (
     home,
     home,
     home,
+    home,
+    home,
+    home,
+    home,
     SchemaValidationError,
     SettingSchema,
     append_only_log,
@@ -195,6 +199,16 @@ class CoordinatorV1(SettingSchema):
 # ── Canvas ───────────────────────────────────────────────────────────
 
 
+#: Not forced into any one store. This records that the question was
+#: ASKED -- must this live in the operator's own database, or on
+#: this machine alone? -- and answered no, which is different
+#: from nobody having considered it.
+#:
+#: It is not a prohibition. The operator owns workspaces, so
+#: their database is the organizational home of their own
+#: things; reading this as "anywhere but personal" refuses
+#: writes that are correct.
+@home("organization")
 @keyed_per_entity(key_strategy="session_name")
 class CoordinatorCanvasV1(SettingSchema):
     """``{ageMin, question, context, quickReplies[]}`` — coordinator's banger."""
@@ -350,6 +364,16 @@ def _validate_tile_common(cls, payload: Any) -> None:
         )
 
 
+#: Not forced into any one store. This records that the question was
+#: ASKED -- must this live in the operator's own database, or on
+#: this machine alone? -- and answered no, which is different
+#: from nobody having considered it.
+#:
+#: It is not a prohibition. The operator owns workspaces, so
+#: their database is the organizational home of their own
+#: things; reading this as "anywhere but personal" refuses
+#: writes that are correct.
+@home("organization")
 @keyed_per_entity(key_strategy="session_name[:tile_id]")
 class CoordinatorTileV1(SettingSchema):
     """Per-(coordinator, peer) tile. Key: ``<coord>:<peer-session>``.
@@ -1166,6 +1190,16 @@ class CoordinatorSprintV2(SettingSchema):
 # ── Bead (coordinator-curated landing/closing summary) ───────────────
 
 
+#: Not forced into any one store. This records that the question was
+#: ASKED -- must this live in the operator's own database, or on
+#: this machine alone? -- and answered no, which is different
+#: from nobody having considered it.
+#:
+#: It is not a prohibition. The operator owns workspaces, so
+#: their database is the organizational home of their own
+#: things; reading this as "anywhere but personal" refuses
+#: writes that are correct.
+@home("organization")
 @keyed_per_entity(key_strategy="bead_id")
 class CoordinatorBeadV1(SettingSchema):
     """Coordinator-curated bead summary. Key: ``<bead-id>``."""
@@ -1220,6 +1254,16 @@ class CoordinatorBeadV1(SettingSchema):
 # ── Convergent decision (coordinator-curated cross-session call) ─────
 
 
+#: Not forced into any one store. This records that the question was
+#: ASKED -- must this live in the operator's own database, or on
+#: this machine alone? -- and answered no, which is different
+#: from nobody having considered it.
+#:
+#: It is not a prohibition. The operator owns workspaces, so
+#: their database is the organizational home of their own
+#: things; reading this as "anywhere but personal" refuses
+#: writes that are correct.
+@home("organization")
 @keyed_per_entity(key_strategy="decision_id")
 class CoordinatorConvergentDecisionV1(SettingSchema):
     """Coordinator-curated convergent design decision. Key: ``<title-slug>``."""

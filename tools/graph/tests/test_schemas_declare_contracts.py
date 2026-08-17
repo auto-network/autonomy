@@ -263,25 +263,14 @@ def test_no_new_schema_repeats_its_own_key_in_the_payload(registered_schemas):
 # by one line per set_id decided, and a NEW schema still cannot be registered
 # without saying.
 _HOME_UNDECLARED_GRANDFATHERED = {
-    "autonomy.capability.operation_policy",
     "autonomy.network.ledger-projection",
     "autonomy.network.ledger-state",
     "autonomy.network.persona",
-    "autonomy.org",
-    "autonomy.org.bootstrap-allowlist",
     "autonomy.org.peer-subscription",
     "autonomy.secure.setting",
     "autonomy.workspace",
-    "autonomy.workspace.capability.enable",
-    "dashboard.coordinator-bead",
-    "dashboard.coordinator-canvas",
-    "dashboard.coordinator-convergent-decision",
-    "dashboard.coordinator-tile",
     "dashboard.feature_flags",
     "dashboard.operator-message-to-coordinator",
-    "dashboard.session.orientation",
-    "dashboard.session.upload",
-    "dashboard.session.worktree.rebase_status",
     "dashboard.surface.ping",
     "dashboard.worktree.watch",
 }

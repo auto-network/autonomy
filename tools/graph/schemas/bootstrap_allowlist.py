@@ -24,6 +24,7 @@ graph://8cf067e3-ca3. First-run init design: graph://dc310166-911.
 from __future__ import annotations
 
 from .registry import (
+    home,
     keyed_per_entity,
     SchemaValidationError,
     SettingSchema,
@@ -52,6 +53,16 @@ SYNOPSIS = {
 _LIST_FIELDS = ("canonical", "published")
 
 
+#: Not forced into any one store. This records that the question was
+#: ASKED -- must this live in the operator's own database, or on
+#: this machine alone? -- and answered no, which is different
+#: from nobody having considered it.
+#:
+#: It is not a prohibition. The operator owns workspaces, so
+#: their database is the organizational home of their own
+#: things; reading this as "anywhere but personal" refuses
+#: writes that are correct.
+@home("organization")
 @keyed_per_entity(key_strategy="org_slug")
 class OrgBootstrapAllowlistV1(SettingSchema):
     set_id = SET_ID

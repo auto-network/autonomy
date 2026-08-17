@@ -19,6 +19,7 @@ event with a UUID key — no collision concerns even if the same
 filename gets uploaded twice in the same session.
 """
 from tools.graph.schemas.registry import (
+    home,
     SettingSchema,
     append_only_log,
     field,
@@ -29,6 +30,16 @@ SESSION_UPLOAD_SET_ID = "dashboard.session.upload"
 SCHEMA_REVISION = 1
 
 
+#: Not forced into any one store. This records that the question was
+#: ASKED -- must this live in the operator's own database, or on
+#: this machine alone? -- and answered no, which is different
+#: from nobody having considered it.
+#:
+#: It is not a prohibition. The operator owns workspaces, so
+#: their database is the organizational home of their own
+#: things; reading this as "anywhere but personal" refuses
+#: writes that are correct.
+@home("organization")
 @append_only_log
 class SessionUploadV1(SettingSchema):
     """One row per dashboard-uploaded file."""

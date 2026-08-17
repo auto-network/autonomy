@@ -31,6 +31,7 @@ session boots without an orientation turn.
 from __future__ import annotations
 
 from tools.graph.schemas.registry import (
+    home,
     SettingSchema,
     field,
     keyed_per_entity,
@@ -48,6 +49,16 @@ DEFAULT_TEMPLATE = (
 )
 
 
+#: Not forced into any one store. This records that the question was
+#: ASKED -- must this live in the operator's own database, or on
+#: this machine alone? -- and answered no, which is different
+#: from nobody having considered it.
+#:
+#: It is not a prohibition. The operator owns workspaces, so
+#: their database is the organizational home of their own
+#: things; reading this as "anywhere but personal" refuses
+#: writes that are correct.
+@home("organization")
 @keyed_per_entity(key_strategy="session_name")
 class SessionOrientationV1(SettingSchema):
     """One row per workspace (plus the global ``__default__``).
