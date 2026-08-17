@@ -30,6 +30,7 @@ from tools.graph.schemas.network_identity import (
     NETWORK_BINDING_REVISION,
 )
 from tools.network.idkit import KeyPair, Subject, issue_cert
+from tools.network.idkit.persona import derive_persona
 from tools.network.ledger import LedgerStore, org_ledger_db_path
 from tools.network.ledger.found import found_org_ledger
 from tools.network.registry.app import create_app as create_registry_app
@@ -135,8 +136,14 @@ def operator_env(tmp_path, monkeypatch):
 
     session_key = KeyPair.generate()
     now = int(time.time())
+    # The session certificate is signed by the ACTING PERSONA, not the org root.
+    # Sign-on is a personal act, so the persona is what the publish gate anchors
+    # at (PIN 6b: a chain terminating outside the roster is void). Signing this
+    # with `root` reproduces the pre-rework shape and is refused at hop 1.
+    founder_persona = derive_persona(
+        bytes.fromhex(personal_root.private_hex), founded.genesis_id)
     session_cert = issue_cert(
-        root, session_key.public_hex,
+        founder_persona, session_key.public_hex,
         scope=("link:publish", "link:revoke", "viewer:identify"),
         org=ORG_UUID,
         subject=Subject("operator", founded.founder_persona_pub),
