@@ -112,6 +112,19 @@ def test_service_uses_systemd_credentials_and_never_environment_for_secrets():
     assert "ConditionPathExists" not in unit
 
 
+def test_runtime_directory_group_lets_the_nonroot_container_read_its_config():
+    # The container runs as uid 65534 : gid autonomy-coturn and must traverse the
+    # 0750 RuntimeDirectory to read its rendered config. systemd owns a
+    # RuntimeDirectory as the unit's User:Group and re-applies that ownership
+    # after ExecStartPre, so a chown to autonomy-coturn does NOT survive — the dir
+    # stays root:root and the non-root container gets EACCES, so coturn silently
+    # falls back to defaults (no auth secret, no TLS). Only Group= sticks.
+    unit = (DEPLOY / "autonomy-coturn.service").read_text()
+    assert "RuntimeDirectory=autonomy-coturn" in unit
+    assert "Group=autonomy-coturn" in unit
+    assert "chown root:autonomy-coturn /run/autonomy-coturn" not in unit
+
+
 def test_template_uses_options_accepted_by_pinned_coturn_release():
     config = (DEPLOY / "turnserver.conf.in").read_text()
     for removed_or_invalid in (

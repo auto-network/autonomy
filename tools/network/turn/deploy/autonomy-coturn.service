@@ -14,10 +14,16 @@ Type=simple
 EnvironmentFile=/etc/autonomy-coturn/runtime.env
 RuntimeDirectory=autonomy-coturn
 RuntimeDirectoryMode=0750
+# The coturn container runs as uid 65534 / gid autonomy-coturn and must traverse
+# this RuntimeDirectory (0750) to read its rendered config. systemd owns a
+# RuntimeDirectory as the unit's User:Group, and re-applies that ownership after
+# ExecStartPre — so an ExecStartPre `chown` to autonomy-coturn does NOT survive
+# (the dir stays root:root and the non-root container gets EACCES on traverse).
+# Setting Group= is the only ownership that sticks.
+Group=autonomy-coturn
 LoadCredential=turn-rest-secrets:/etc/autonomy-coturn/turn-rest-secrets
 LoadCredential=tls-cert.pem:/etc/letsencrypt/live/turn.auto.network/fullchain.pem
 LoadCredential=tls-key.pem:/etc/letsencrypt/live/turn.auto.network/privkey.pem
-ExecStartPre=/usr/bin/chown root:autonomy-coturn /run/autonomy-coturn
 ExecStartPre=/opt/autonomy-coturn/render_config.py \
     --template /opt/autonomy-coturn/turnserver.conf.in \
     --secrets %d/turn-rest-secrets \
