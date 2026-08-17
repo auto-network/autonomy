@@ -499,8 +499,11 @@ class IceSignalingSession:
         The terminal answer transfers the exact responder object—not the
         caller-chosen attempt id—to the direct-channel runtime.  Transfer is a
         synchronous, event-loop-local ownership change so cancellation cannot
-        land between runtime adoption and the session recording it.  ``True``
-        tells ``serve_channel`` to close the short-lived signaling channel.
+        land between runtime adoption and the session recording it.  The
+        signaling channel remains open until the browser closes it (or the
+        existing attempt deadline expires): on the Relay transport, sending a
+        DATA frame immediately followed by CLOSE can cancel the asynchronous
+        viewer writer before it delivers that final DATA frame.
         """
         if self._state == "config_ready":
             self._state = "configured"
@@ -518,7 +521,7 @@ class IceSignalingSession:
         if self._acquired:
             self._capacity.release(self._token)
             self._acquired = False
-        return True
+        return False
 
     async def aclose(self) -> None:
         if self._closed:
