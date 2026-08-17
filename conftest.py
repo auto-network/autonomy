@@ -106,6 +106,11 @@ _QUARANTINE = _load_quarantine()
 
 def pytest_collection_modifyitems(config, items):
     """Apply one identical skip marker to every quarantined baseline failure."""
+    # Burn-down affordance: QUARANTINE_OFF=1 runs quarantined tests for real so
+    # a fixer can confirm a test now passes before deleting its line from the
+    # list. Never set in CI — the point of the quarantine is the default-green run.
+    if os.environ.get("QUARANTINE_OFF") == "1":
+        return
     if not _QUARANTINE:
         return
     skip = pytest.mark.skip(reason=_QUARANTINE_REASON)
