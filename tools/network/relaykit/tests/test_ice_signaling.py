@@ -179,8 +179,10 @@ def test_outgoing_sdp_is_stripped_then_asserted_candidate_free():
     assert "a=candidate:" not in clean
     assert "c=IN IP4 0.0.0.0\r\n" in clean
     assert "192.168.1.2" not in clean
-    assert "a=end-of-candidates" in clean
+    assert "a=end-of-candidates" not in clean
     assert assert_candidate_free_sdp(clean) == clean
+    with pytest.raises(IceSignalingError, match="smuggled"):
+        assert_candidate_free_sdp("v=0\r\na=end-of-candidates\r\n")
 
 
 def test_incoming_sdp_refuses_address_smuggling_outside_candidates():
