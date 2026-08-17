@@ -1,0 +1,203 @@
+/* Organization settings — a dialog holding many screens.
+ *
+ * Two layouts for one structure, chosen the way iPadOS does it. Wide enough
+ * for both panes and it is a split view: screens on the left, the selected
+ * one on the right, always both visible. Too narrow and it becomes a stack:
+ * the list IS the first screen, choosing one pushes it in, and a back
+ * control returns. Not a split view squeezed until it fits — at phone width
+ * a two-pane layout leaves neither pane usable.
+ */
+
+.orgset-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.orgset-dialog {
+  display: flex;
+  flex-direction: column;
+  background: #1f2937;
+  border: 1px solid #4b5563;
+  color: #d1d5db;
+  overflow: hidden;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
+}
+
+.orgset-header {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid #374151;
+  flex-shrink: 0;
+}
+
+.orgset-title {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: #e5e7eb;
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.orgset-close,
+.orgset-back {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2rem;
+  height: 2rem;
+  padding: 0 0.5rem;
+  background: transparent;
+  border: none;
+  border-radius: 0.375rem;
+  color: #9ca3af;
+  font-size: 0.8125rem;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.orgset-close { font-size: 1.25rem; }
+.orgset-close:hover,
+.orgset-back:hover { background: #374151; color: #e5e7eb; }
+
+.orgset-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+/* The rail — one entry per screen. */
+.orgset-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  padding: 0.5rem;
+  overflow-y: auto;
+  flex-shrink: 0;
+}
+
+.orgset-rail-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.5rem 0.625rem;
+  background: transparent;
+  border: none;
+  border-radius: 0.375rem;
+  color: #9ca3af;
+  font-size: 0.8125rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.orgset-rail-item:hover { background: #374151; color: #e5e7eb; }
+.orgset-rail-item[aria-current="true"] { background: #4f46e5; color: #fff; }
+
+.orgset-pane {
+  flex: 1;
+  min-width: 0;
+  padding: 1rem;
+  overflow-y: auto;
+}
+
+/* A count beside a screen name. Empty renders as nothing rather than as a
+ * zero, because a zero is a fact somebody has to read and dismiss. */
+.orgset-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.25rem;
+  padding: 0.125rem 0.375rem;
+  border-radius: 9999px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  line-height: 1;
+  background: #4b5563;
+  color: #e5e7eb;
+}
+
+.orgset-count:empty { display: none; }
+.orgset-count-blocking { background: #b91c1c; color: #fff; }
+.orgset-count-ready { background: #15803d; color: #fff; }
+
+.orgset-empty,
+.orgset-loading {
+  padding: 1.5rem 0.5rem;
+  color: #9ca3af;
+  font-size: 0.8125rem;
+  text-align: center;
+}
+
+.orgset-error {
+  margin: 0 0 0.75rem;
+  padding: 0.5rem 0.625rem;
+  border: 1px solid #b91c1c;
+  border-radius: 0.375rem;
+  background: rgba(185, 28, 28, 0.12);
+  color: #fca5a5;
+  font-size: 0.75rem;
+}
+
+/* Where the answer came from. Carried on the report, not on each row: a
+ * clean result read in the wrong place is not a clean result, and the
+ * reader cannot tell without being told. */
+.orgset-frame {
+  margin: 0 0 0.75rem;
+  color: #9ca3af;
+  font-size: 0.6875rem;
+}
+
+/* ── desktop: both panes, always ─────────────────────────── */
+
+@media (min-width: 768px) {
+  .orgset-dialog {
+    width: min(56rem, calc(100vw - 3rem));
+    height: min(38rem, calc(100vh - 4rem));
+    border-radius: 0.75rem;
+  }
+  .orgset-rail {
+    width: 13rem;
+    border-right: 1px solid #374151;
+  }
+  .orgset-back { display: none; }
+}
+
+/* ── narrow: a stack, pushed one screen at a time ────────── */
+
+@media (max-width: 767px) {
+  .orgset-overlay { align-items: stretch; justify-content: stretch; }
+  .orgset-dialog {
+    width: 100%;
+    height: 100%;
+    border: none;
+    border-radius: 0;
+  }
+  .orgset-rail {
+    width: 100%;
+    border-right: none;
+  }
+  .orgset-rail-item { padding: 0.75rem 0.625rem; font-size: 0.875rem; }
+  /* One at a time. Which one is on the dialog, so the two panes cannot
+   * disagree about who is showing. */
+  .orgset-dialog[data-view="list"] .orgset-pane { display: none; }
+  .orgset-dialog[data-view="detail"] .orgset-rail { display: none; }
+  .orgset-dialog[data-view="list"] .orgset-back { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .orgset-overlay,
+  .orgset-dialog { transition: none; }
+}
