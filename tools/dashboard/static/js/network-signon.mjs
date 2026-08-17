@@ -96,6 +96,12 @@ var signRegistryRequestCore;
   var NOT_BEFORE_SKEW_S = 60;             // tolerate modest clock skew
   var SESSION_SCOPES = [                  // spec §6.3 defaults; sorted (idkit)
     'delegate:agent', 'link:publish', 'link:revoke', 'tunnel:serve',
+    // turn:allocate — EXECUTION. An authenticated session allocating relay
+    // capacity for itself, the same shape as tunnel:serve: it grants authority
+    // to nobody. It must be carried by the directly persona-signed session
+    // certificate, because a certificate cannot later widen its own scope —
+    // idkit requires a child's scope to be a strict subset of its parent's.
+    'turn:allocate',
     'viewer:identify',
   ];
 
