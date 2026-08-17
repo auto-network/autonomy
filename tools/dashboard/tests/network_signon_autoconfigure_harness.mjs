@@ -102,13 +102,23 @@ async function browserMode() {
   globalThis.window = {
     async fetch(url) {
       fetchCalls.push(String(url));
-      if (String(url).startsWith('/api/network/org-key')) {
+      if (String(url).startsWith('/api/identity/personal')) {
         return {
           ok: true,
           status: 200,
           json: async () => ({
-            armored_private_key: process.env.AUTONOMY_ARMOR,
-            root_pub: process.env.AUTONOMY_ROOT_PUB,
+            armored_private_key: process.env.AUTONOMY_PERSONAL_ARMOR,
+            root_pub: process.env.AUTONOMY_PERSONAL_ROOT_PUB,
+          }),
+        };
+      }
+      if (String(url).startsWith('/api/network/ledger/heads')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            genesis_id: process.env.AUTONOMY_GENESIS_ID,
+            heads: [process.env.AUTONOMY_GENESIS_ID],
           }),
         };
       }
@@ -143,6 +153,7 @@ async function browserMode() {
       target_uuid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
       target_type: 'present',
     },
+    { org: 'module-load-org' },
   );
   const output = {
     signOnResult,

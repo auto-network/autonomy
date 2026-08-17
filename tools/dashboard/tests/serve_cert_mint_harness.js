@@ -24,9 +24,11 @@ const MODE = process.env.AUTONOMY_MODE || "explicit";
 
 let captured = null;
 let serveStatusReads = 0;
+let orgKeyReads = 0;
 globalThis.fetch = async (url, opts) => {
   opts = opts || {};
   if (url.indexOf("/api/network/org-key") !== -1) {
+    orgKeyReads += 1;
     return { ok: true, json: async () => ({
       armored_private_key: ARMOR, root_pub: ROOT_PUB,
     }) };
@@ -84,7 +86,15 @@ globalThis.window.fetch = globalThis.fetch;
       },
       transport: { fetch: globalThis.fetch },
     });
-    await session.signOn(PW, { org: null });
+    await session.signOn(PW, { org: "harness-org" });
+    // Sign-on is personal and root-free: it must neither read the org key
+    // nor mint a serving delegate (that is a root ceremony, design §8).
+    process.stdout.write(JSON.stringify({
+      captured: captured,
+      org_key_reads: orgKeyReads,
+      serve_status_reads: serveStatusReads,
+    }), () => process.exit(0));
+    return;
   } else if (MODE === "repair" || MODE === "repair-ready") {
     await session.repairServeCredential(PW, { org: null });
   } else {
