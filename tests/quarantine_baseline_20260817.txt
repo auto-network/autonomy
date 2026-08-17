@@ -97,12 +97,3 @@ tools/dashboard/tests/test_worktree_directives.py::test_rebase_directive_failure
 tools/dashboard/tests/unified_viewer/test_browser.py::TestUnresolvedState::test_link_button_visible
 tools/dashboard/tests/unified_viewer/test_browser.py::TestUnresolvedState::test_no_entries_when_unresolved
 tools/graph/tests/test_declared_references.py::test_two_repositories_on_one_host_need_one_credential
-tools/init/tests/test_first_run.py::test_bootstrap_allowlist_setting_seeded_and_valid
-tools/init/tests/test_first_run.py::test_default_first_org_is_autonomy
-tools/init/tests/test_first_run.py::test_first_org_from_env
-tools/init/tests/test_first_run.py::test_initialize_creates_empty_deployment
-tools/init/tests/test_first_run.py::test_second_run_is_noop
-tools/init/tests/test_first_run.py::test_startup_bootstrap_respects_operator_named_org
-tools/init/tests/test_first_run.py::test_tls_half_pair_left_alone
-tools/init/tests/test_first_run.py::test_tls_selfsigned_generation
-tools/init/tests/test_first_run.py::test_zero_content_search_is_empty_not_error
