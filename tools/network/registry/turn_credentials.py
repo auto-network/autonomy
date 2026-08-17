@@ -1,9 +1,13 @@
 """Bounded TURN-REST credential issuance for authenticated org tunnels.
 
 The long-lived shared secret stays on the auto.network host.  A Dashboard
-receives only an opaque, short-lived username/password pair after its local
-application authorization has already succeeded.  TURN credentials convey no
-application authority and carry no link, persona, or organization identifier.
+receives only an opaque, short-lived username/password pair. The authenticated
+org tunnel is the Registry-side issuer authority: it can already create public
+links, and every live public link is TURN-eligible. Honest Dashboard code still
+applies its local link-grant or ``turn:allocate`` admission rule first, but the
+Registry neither proves nor attributes that local decision. TURN credentials
+convey no application authority and carry no link, persona, or organization
+identifier.
 """
 
 from __future__ import annotations
@@ -130,4 +134,3 @@ class TurnCredentialIssuer:
             ),
             expires_at=expires_at,
         )
-
