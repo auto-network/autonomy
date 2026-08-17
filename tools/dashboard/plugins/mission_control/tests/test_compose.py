@@ -536,3 +536,37 @@ def test_a_shared_link_is_not_told_the_coordinators_session_name():
     framed_pillar = compose.compose_screen(
         mission_id, pillar["pillar_id"], framed=True).decode()
     assert "auto-pillar-secret" not in framed_pillar
+
+
+# ── a face has to survive the trip ─────────────────────────────────
+
+
+def test_a_face_travels_inside_the_document(monkeypatch):
+    """Carried as bytes, on both surfaces, because they are one document.
+
+    Over a share link the screen runs in a frame with no origin, where a path
+    like /api/attachment/<id> has nothing to resolve against and no credential
+    to carry -- so a picture served that way silently never loads there.
+    Serving one form on the dashboard and another over a link would make a
+    guest and a coordinator look at different documents.
+    """
+    from tools.dashboard.plugins.mission_control import compose
+    from tools.dashboard.dao import mission_control_db as db
+
+    monkeypatch.setattr(compose, "_face_bytes", lambda a: "data:image/jpeg;base64,AAA")
+    monkeypatch.setattr(db, "get_visitor_by_participant_id",
+                        lambda pid, **kw: {"avatar_attachment_id": "att-1"})
+
+    got = compose._guest_avatar("guest:someone")
+    assert got.startswith("data:image/"), (
+        "a path only works where there is an origin to resolve it against"
+    )
+
+
+def test_only_guests_get_a_face():
+    """An agent has no face and the operator is drawn from an initial, same as
+    every other surface."""
+    from tools.dashboard.plugins.mission_control import compose
+
+    assert compose._guest_avatar("auto-0709-092918") is None
+    assert compose._guest_avatar(None) is None
