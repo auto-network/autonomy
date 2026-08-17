@@ -8,6 +8,8 @@ import {
   encryptArmorV2,
   importEd25519RootSigningKey,
   openSealedArmor,
+  deriveEncapsulationKeypair,
+  sealToEncapsulationKey,
 } from './ceremony/primitives.js';
 import { derivePersona } from './ceremony/ledger-event.js';
 import { createBrowserStorage } from './ceremony/storage.js';
@@ -492,6 +494,87 @@ var signRegistryRequestCore;
     return await _fetchJson('/api/network/serve-cert' + orgQ, orgSlug);
   }
 
+  var ORG_ROOT_ARMOR_PURPOSE = 'autonomy/org-root-armor/v1';
+  var ORG_KEY_RESEAL_DOMAIN = 'autonomy.org-key.reseal.v1\n';
+
+  // SINGLE-USE MIGRATION. Delete this, its call site and its route once every
+  // organization reads a sealed root key.
+  //
+  // A revision-1 org root is armored under that ORGANIZATION's passphrase, so
+  // a personal unlock cannot open it and every capability reached from one --
+  // serving-certificate renewal above all -- is unavailable to that org. This
+  // moves it to the sealed form, using the only passphrase we have: the one
+  // just typed. Organizations whose armor answers to a different passphrase
+  // are reported, not prompted for and not silently skipped.
+  //
+  // The seal is VERIFIED BEFORE IT IS SUBMITTED. A sealed row becomes what
+  // every reader serves the instant it is written, and the surviving armored
+  // row is not a fallback, so an unopenable seal would take the organization
+  // out. Here -- and only here -- both the org root and the personal seed are
+  // in hand, so the round trip can actually be checked.
+  async function _migrateLegacyOrgKey(slug, orgKey, passphrase, personalSeed) {
+    var opened;
+    try {
+      opened = await decryptArmor(orgKey.armored_private_key, passphrase);
+    } catch (e) {
+      return { migrated: false, status: 'needs-its-own-passphrase' };
+    }
+    var rootSeed = opened.seed;
+    try {
+      var recipient = await deriveEncapsulationKeypair(
+        personalSeed, ORG_ROOT_ARMOR_PURPOSE);
+      var sealed = await sealToEncapsulationKey(
+        rootSeed, recipient.publicKeyHex, ORG_ROOT_ARMOR_PURPOSE);
+      var payload = {
+        root_pub: opened.rootPub || orgKey.root_pub,
+        sealed_root_key: bytesToHex(sealed),
+        owner_kem_pub: recipient.publicKeyHex,
+        seal_purpose: ORG_ROOT_ARMOR_PURPOSE,
+      };
+
+      // The check that makes this safe: re-open what we just sealed, with the
+      // personal seed, and confirm it yields the same root seed byte for byte.
+      // Nothing is submitted until this holds.
+      var reopened = await openSealedArmor(payload, personalSeed);
+      var identical = reopened.length === rootSeed.length;
+      for (var b = 0; b < rootSeed.length && identical; b++) {
+        if (reopened[b] !== rootSeed[b]) identical = false;
+      }
+      reopened.fill(0);
+      if (!identical) {
+        return { migrated: false, status: 'seal-does-not-round-trip' };
+      }
+
+      // Signed by the ORG ROOT: only a caller who can already open it may
+      // change what wraps it. Bound to this exact recipient and ciphertext.
+      var rootKey = await _importRootKey(rootSeed);
+      var sig = bytesToHex(new Uint8Array(await crypto.subtle.sign(
+        'Ed25519', rootKey,
+        _domainBytes(ORG_KEY_RESEAL_DOMAIN, canonicalJson({
+          slug: slug,
+          root_pub: payload.root_pub,
+          owner_kem_pub: payload.owner_kem_pub,
+          sealed_root_key: payload.sealed_root_key,
+        })))));
+      rootKey = null;
+
+      var resp = await _transport.fetch('/api/network/org-key/migrate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Graph-Org': slug },
+        body: JSON.stringify(Object.assign({ org: slug, sig: sig }, payload)),
+      });
+      var result = await resp.json().catch(function () { return {}; });
+      if (!resp.ok || result.ok === false) {
+        return { migrated: false, status: 'refused',
+                 error: result.error || ('HTTP ' + resp.status) };
+      }
+      return { migrated: true, status: 'migrated' };
+    } finally {
+      rootSeed.fill(0);              // I1: the org root plaintext dies here
+      opened.seed = null;
+    }
+  }
+
   // Renewing a serving credential needs that organization's ROOT key, because
   // the delegate is root-signed (see provisionServeCert). A personal sign-on
   // can do it without a second passphrase: the org root is not derived from the
@@ -765,6 +848,27 @@ var signRegistryRequestCore;
         // their session. The outcome is REPORTED per organization instead of
         // warned to a console nobody reads, which is how these expired
         // unnoticed.
+        // SINGLE-USE, opt-in: move any organization still on the armored root
+        // key onto the sealed form, so that everything below can reach its
+        // root from this one unlock. Off by default, so an ordinary sign-on
+        // fetches no organization key at all.
+        var migration = null;
+        if (bound && opts.migrateLegacyOrgKeys) {
+          try {
+            var legacyKey = await _fetchJson(
+              '/api/network/org-key' + slugQ, slug);
+            if (legacyKey && !legacyKey.sealed_root_key &&
+                legacyKey.armored_private_key) {
+              migration = await _migrateLegacyOrgKey(
+                slug, legacyKey, passphrase, opened.seed);
+              if (migration.migrated) orgRootsOpened += 1;
+            }
+          } catch (e) {
+            migration = { migrated: false, status: 'failed',
+                          error: (e && e.message) || String(e) };
+          }
+        }
+
         var serve = { checked: false, renewed: false, status: 'skipped' };
         if (bound) {
           try {
@@ -781,7 +885,7 @@ var signRegistryRequestCore;
           orgSlug: slug, genesisId: genesisId, org: orgId,
           personaPub: persona.publicHex, notAfter: certPayload.not_after,
           certWire: certWire, registryUrl: entry.registryUrl, rekey: rekey,
-          serveCert: serve,
+          serveCert: serve, migration: migration,
         });
       }
     } finally {
@@ -818,6 +922,15 @@ var signRegistryRequestCore;
         serveCertsRenewed: reports
           .filter(function (r) { return r.serveCert && r.serveCert.renewed; })
           .map(function (r) { return r.orgSlug; }),
+        orgKeysMigrated: reports
+          .filter(function (r) { return r.migration && r.migration.migrated; })
+          .map(function (r) { return r.orgSlug; }),
+        orgKeysNotMigrated: reports
+          .filter(function (r) { return r.migration && !r.migration.migrated; })
+          .map(function (r) {
+            return { org: r.orgSlug, status: r.migration.status,
+                     error: r.migration.error || null };
+          }),
         serveCertsFailed: reports
           .filter(function (r) {
             return r.serveCert && r.serveCert.checked && !r.serveCert.renewed &&

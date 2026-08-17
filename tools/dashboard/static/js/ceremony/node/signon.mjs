@@ -47,6 +47,7 @@ function parseArguments(argv) {
     ttlSeconds: null,
     passphraseFd: null,
     rekeyEndpoint: null,
+    migrateLegacyOrgKeys: false,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -68,6 +69,8 @@ function parseArguments(argv) {
     } else if (option === '--target') {
       options.target = requiredValue(argv, index, option);
       index += 1;
+    } else if (option === '--migrate-legacy-org-keys') {
+      options.migrateLegacyOrgKeys = true;
     } else if (option === '--ttl') {
       const value = requiredValue(argv, index, option);
       if (!/^[0-9]+$/.test(value)) {
@@ -219,6 +222,9 @@ async function main(argv) {
   if (options.orgs.length) signOnOptions.orgs = options.orgs;
   if (options.ttlSeconds !== null) {
     signOnOptions.ttlSeconds = options.ttlSeconds;
+  }
+  if (options.migrateLegacyOrgKeys) {
+    signOnOptions.migrateLegacyOrgKeys = true;
   }
   const result = await signOn(passphrase, signOnOptions);
 

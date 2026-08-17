@@ -79,7 +79,9 @@ class OrgFixture:
 
     def __init__(self, slug: str, *, genesis_id: str | None,
                  rekey: dict | None = None, bound: bool = True,
-                 serve_required: bool = False, serve_status: int = 200):
+                 serve_required: bool = False, serve_status: int = 200,
+                 legacy_key: bool = False,
+                 org_passphrase: str | None = None):
         self.slug = slug
         self.genesis_id = genesis_id
         self.rekey = rekey
@@ -91,6 +93,10 @@ class OrgFixture:
         # down must not cost the operator their sign-on.
         self.serve_required = serve_required
         self.serve_status = serve_status
+        # A revision-1 organization: its root is armored under its OWN
+        # passphrase, which a personal unlock has only if they happen to match.
+        self.legacy_key = legacy_key
+        self.org_passphrase = org_passphrase
 
     def sealed_org_key(self, personal_root: KeyPair) -> dict:
         """This org's root, sealed to the personal root exactly as founding
@@ -119,6 +125,7 @@ class OrgFixture:
 def _identity_source(*, personal_armor: str, personal_root_pub: str,
                      orgs: list[OrgFixture], requests: list[str],
                      rekeyed: list[dict], served: list[dict] | None = None,
+                     migrations: list[dict] | None = None,
                      personal_root: KeyPair | None = None,
                      registry_url: str = "http://127.0.0.1:9") -> Starlette:
     """The dashboard-shaped identity source the Node command reads.
@@ -153,6 +160,13 @@ def _identity_source(*, personal_armor: str, personal_root_pub: str,
         org = _org(request)
         if org is None:
             return JSONResponse({"error": "unknown org"}, status_code=404)
+        if org.legacy_key:
+            return JSONResponse({
+                "label": "default",
+                "armored_private_key": encrypt_root_key(
+                    org.root, org.org_passphrase, iterations=10_000),
+                "root_pub": org.root.public_hex,
+            })
         if personal_root is not None:
             # The real shape: sealed to the personal root, no org passphrase.
             return JSONResponse(
@@ -222,8 +236,16 @@ def _identity_source(*, personal_armor: str, personal_root_pub: str,
             served.append(body)
         return JSONResponse({"ok": True})
 
+    async def org_key_migrate(request: Request):
+        requests.append("POST " + str(request.url.path))
+        body = await request.json()
+        if migrations is not None:
+            migrations.append(body)
+        return JSONResponse({"ok": True, "root_pub": body.get("root_pub")})
+
     return Starlette(routes=[
         Route("/api/orgs", org_list),
+        Route("/api/network/org-key/migrate", org_key_migrate, methods=["POST"]),
         Route("/api/network/serve-cert", serve_cert_state),
         Route("/api/network/serve-cert", serve_cert_post, methods=["POST"]),
         Route("/api/identity/personal", personal),
@@ -272,6 +294,7 @@ def _run(identity_url: str, passphrase: str, *extra: str) -> subprocess.Complete
 def _sign_on(orgs: list[OrgFixture], *, passphrase: str,
              personal_root: KeyPair, extra: tuple[str, ...] = (),
              served: list[dict] | None = None, sealed_org_keys: bool = False,
+             migrations: list[dict] | None = None,
              ) -> tuple[dict, list[str], list[dict]]:
     """Run one headless sign-on; return (output, request trace, re-keys)."""
     requests: list[str] = []
@@ -285,6 +308,7 @@ def _sign_on(orgs: list[OrgFixture], *, passphrase: str,
         requests=requests,
         rekeyed=rekeyed,
         served=served,
+        migrations=migrations,
         personal_root=personal_root if sealed_org_keys else None,
     )
     with _live_server(identity, _free_port()) as identity_url:
@@ -594,3 +618,106 @@ def test_a_failed_renewal_is_reported_and_does_not_break_sign_on():
     assert [entry["org"] for entry in failed] == ["gamma-org"]
     assert failed[0]["status"] == "failed"
     assert failed[0]["error"], "a failure has to say what went wrong"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_a_legacy_org_key_migrates_to_the_sealed_form_on_unlock():
+    """A revision-1 organization is armored under its OWN passphrase, so a
+    personal unlock cannot open its root and everything reached from one --
+    serving-certificate renewal above all -- is unavailable to it.
+
+    When that passphrase is the one being typed, the unlock migrates it: seals
+    the SAME root to the personal root and submits it signed by the org root.
+    """
+    passphrase = "one personal password"
+    personal_root = KeyPair.generate()
+    orgs = _three_founded_orgs()
+    orgs[0].legacy_key = True
+    orgs[0].org_passphrase = passphrase          # same passphrase as personal
+    migrations: list[dict] = []
+    output, requests, _ = _sign_on(
+        orgs, passphrase=passphrase, personal_root=personal_root,
+        sealed_org_keys=True, migrations=migrations,
+        extra=("--migrate-legacy-org-keys",),
+    )
+
+    diagnostics = output["signOn"]["diagnostics"]
+    assert diagnostics["orgKeysMigrated"] == ["alpha-org"]
+    assert len(migrations) == 1
+    submitted = migrations[0]
+
+    # The SAME org root, re-wrapped — not a new key. The ledger's commitment
+    # to this root is what makes that the only acceptable outcome.
+    assert submitted["root_pub"] == orgs[0].root.public_hex
+
+    # It opens with the PERSONAL root, which is the entire point.
+    from tools.network.idkit.sealing import derive_encapsulation_keypair
+    from tools.network.idkit.sealing import open as seal_open
+
+    owner_priv, owner_pub = derive_encapsulation_keypair(
+        bytes.fromhex(personal_root.private_hex), ORG_ROOT_ARMOR_PURPOSE)
+    assert submitted["owner_kem_pub"] == owner_pub
+    recovered = seal_open(
+        bytes.fromhex(submitted["sealed_root_key"]), owner_priv,
+        ORG_ROOT_ARMOR_PURPOSE,
+    )
+    assert KeyPair.from_private_hex(recovered.hex()).public_hex == \
+        orgs[0].root.public_hex
+
+    # Signed by the ORG ROOT over this exact recipient and ciphertext, so the
+    # server can refuse a blob sealed to anyone else.
+    from tools.graph import org_ops
+    from tools.network.idkit.keys import verify_signature
+
+    verify_signature(
+        submitted["root_pub"], submitted["sig"],
+        org_ops.reseal_input("alpha-org", submitted),
+    )
+
+    # Sign-on is otherwise undisturbed.
+    assert diagnostics["personaCount"] == 3
+    assert requests.count("/api/identity/personal") == 1
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_an_org_with_its_own_passphrase_is_reported_not_prompted():
+    """If the organization's armor answers to a different passphrase, the
+    unlock cannot open it and must not ask. It is reported, so the org is
+    visibly still on the old form rather than quietly left there."""
+    personal_root = KeyPair.generate()
+    orgs = _three_founded_orgs()
+    orgs[2].legacy_key = True
+    orgs[2].org_passphrase = "a completely different organization passphrase"
+    migrations: list[dict] = []
+    output, _requests, _ = _sign_on(
+        orgs, passphrase="one personal password", personal_root=personal_root,
+        sealed_org_keys=True, migrations=migrations,
+        extra=("--migrate-legacy-org-keys",),
+    )
+
+    diagnostics = output["signOn"]["diagnostics"]
+    assert migrations == [], "nothing may be submitted for a key we cannot open"
+    assert diagnostics["orgKeysMigrated"] == []
+    assert [e["org"] for e in diagnostics["orgKeysNotMigrated"]] == ["gamma-org"]
+    assert diagnostics["orgKeysNotMigrated"][0]["status"] == \
+        "needs-its-own-passphrase"
+    assert diagnostics["personaCount"] == 3
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_an_ordinary_unlock_does_not_migrate_or_read_any_org_key():
+    """The migration is opt-in and single-use. Without the flag an ordinary
+    sign-on still fetches no organization key at all."""
+    personal_root = KeyPair.generate()
+    orgs = _three_founded_orgs()
+    orgs[0].legacy_key = True
+    orgs[0].org_passphrase = "one personal password"
+    migrations: list[dict] = []
+    output, requests, _ = _sign_on(
+        orgs, passphrase="one personal password", personal_root=personal_root,
+        sealed_org_keys=True, migrations=migrations,
+    )
+
+    assert migrations == []
+    assert "/api/network/org-key" not in requests
+    assert output["signOn"]["diagnostics"]["orgRootsOpened"] == 0
