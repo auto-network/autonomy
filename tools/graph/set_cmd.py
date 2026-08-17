@@ -334,6 +334,36 @@ def cmd_set_show(args) -> None:
     print(json.dumps(out, indent=2))
 
 
+def _print_composition(set_id: str, key: str, org) -> None:
+    """Say, on stderr, how many rows produced the value just printed.
+
+    Every read surface returns a merged payload, so the store presents as a
+    dictionary of key to value while it is really rows and layers. Hundreds
+    of readings teach the dictionary, and then a write appears to do nothing
+    and there is nowhere to look -- not a gap in anyone's knowledge, a gap in
+    what anything will tell them.
+
+    One line, and only when there is more than one row, so the common case
+    stays quiet. On stderr so piping the payload into a file or `jq` is
+    unaffected: the value is the output, this is commentary about it.
+    """
+    try:
+        from tools.graph import settings_ops
+        layers = settings_ops.layers_for(set_id, key, org=org)
+    except Exception:
+        return
+    parts = []
+    if layers.get("overrides"):
+        parts.append(f"{len(layers['overrides'])} override(s)")
+    if layers.get("deprecated"):
+        parts.append(f"{len(layers['deprecated'])} retired row(s), not applied")
+    if not parts:
+        return
+    print(f"  composed from a base plus {', '.join(parts)} — "
+          f"`graph set layers {set_id} {key}` shows each",
+          file=sys.stderr)
+
+
 def cmd_set_read(args) -> None:
     """``graph set read <id-or-prefix> | <set_id> <key>`` — resolved payload.
 
@@ -403,6 +433,7 @@ def cmd_set_read(args) -> None:
                 )
                 sys.exit(1)
             print(json.dumps(m.payload, indent=2, default=str))
+            _print_composition(set_id, key, org)
             return
     scope = f" in org {org!r}" if org else ""
     print(
@@ -551,6 +582,40 @@ def cmd_set_check(args) -> None:
     sys.exit(1)
 
 
+def _report_effective_value(set_id: str, key: str, org, written: dict) -> None:
+    """Say what readers will see, every time, not only when it surprises.
+
+    "Setting written" and "this is the value now" are different facts, and
+    only the second is what the caller came for. Reporting the row alone let
+    a write land, print success, and change nothing anyone reads -- and the
+    only way to find out was to go looking, which is a thing people do after
+    they have already stopped trusting the output.
+
+    Printed unconditionally. A report that appears only when something is
+    wrong teaches the reader that silence means agreement, and silence is
+    exactly what the failing case produced.
+    """
+    try:
+        from tools.graph import settings_ops
+        row = settings_ops.read_set_key(set_id, key, org=org)
+    except Exception:
+        return
+    if row is None:
+        print("      effective: nothing — this key does not resolve")
+        return
+    effective = row.get("payload")
+    if effective == written:
+        print("      effective: exactly what you wrote")
+        return
+    differing = sorted(
+        name for name in set(written) | set(effective or {})
+        if (written.get(name) != (effective or {}).get(name))
+    )
+    print(f"      effective: differs from what you wrote in "
+          f"{', '.join(differing)}")
+    print(f"                 {json.dumps(effective, sort_keys=True)[:300]}")
+
+
 def cmd_set_add(args) -> None:
     set_id, rev = _parse_set_at_rev(args.set_at_rev)
     payload = _resolve_payload_input(args)
@@ -567,6 +632,7 @@ def cmd_set_add(args) -> None:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     print(f"  ✓ Setting: {sid[:11]}  {set_id}#{rev}  key={args.key}  [{args.state}]")
+    _report_effective_value(set_id, args.key, _org(args), payload)
     _report_shadowed_write(set_id, args.key, client)
     _report_unresolved_references(set_id, rev, payload, _org(args))
 
@@ -650,8 +716,50 @@ def cmd_set_deprecate(args) -> None:
     print(f"  ✓ Deprecated: {sid[:11]}{suc}")
 
 
+def _report_rows_left_for(set_id: str, key: str, org) -> None:
+    """After removing one row, say what is still under that key.
+
+    A key can hold several rows, and removing one reported unqualified
+    success while the rest stayed. Worse, addressing runs through
+    resolution: once a base is gone the survivors resolve to nothing, so
+    the same command that had just left them behind then answered "no
+    Setting with that key" while holding one. The store denying its own
+    contents is worse than saying nothing.
+
+    So the count is reported, and anything left is named by id -- which is
+    the only address that still works once a row stops resolving.
+    """
+    try:
+        from tools.graph import settings_ops
+        layers = settings_ops.layers_for(set_id, key, org=org)
+    except Exception:
+        return
+    leftover = list(layers.get("overrides") or []) + list(
+        layers.get("orphans") or [])
+    if layers.get("base") is None and not leftover:
+        return
+    if layers.get("base") is None and leftover:
+        print(f"      ! the base is gone and {len(leftover)} row(s) remain "
+              f"under this key. They resolve to nothing and cannot be "
+              f"addressed by key — remove them by id:")
+        for entry in leftover:
+            print(f"          {entry['id']}")
+        return
+    if leftover:
+        print(f"      {len(leftover)} row(s) still under this key")
+
+
 def cmd_set_remove(args) -> None:
     sid = _resolve_address(args)
+    # Captured BEFORE the removal: afterwards the row is gone and, if it was
+    # the base, its key stops resolving -- so there would be nothing left to
+    # ask what else is under it.
+    try:
+        _row = get_client().resolve_setting_strict(sid, org=_org(args))
+        if isinstance(_row, list):
+            _row = None
+    except Exception:
+        _row = None
     try:
         get_client().remove_setting(sid, org=_org(args))
     except LookupError as e:
@@ -661,6 +769,8 @@ def cmd_set_remove(args) -> None:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     print(f"  ✓ Removed: {sid[:11]}")
+    if _row is not None:
+        _report_rows_left_for(_row["set_id"], _row["key"], _org(args))
 
 
 # ── schema / example / find ─────────────────────────────────
