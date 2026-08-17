@@ -147,7 +147,6 @@ def test_api_session_send_records_client_id(tmp_path, monkeypatch):
     from tools.dashboard.dao import dashboard_db
     importlib.reload(dashboard_db)
     from tools.dashboard import server as _server
-    importlib.reload(_server)
     # Re-import pending_outbound — server holds a reference to the
     # module, not the buffer dict, so the autouse clear fixture above
     # still resets state correctly.
@@ -184,7 +183,6 @@ def test_api_session_send_idempotent_for_in_flight_client_id(tmp_path, monkeypat
     from tools.dashboard.dao import dashboard_db
     importlib.reload(dashboard_db)
     from tools.dashboard import server as _server
-    importlib.reload(_server)
     from tools.dashboard import pending_outbound as po
     po._buffers.clear()
 
@@ -226,7 +224,6 @@ def test_api_session_send_without_client_id_skips_ring(tmp_path, monkeypatch):
     from tools.dashboard.dao import dashboard_db
     importlib.reload(dashboard_db)
     from tools.dashboard import server as _server
-    importlib.reload(_server)
     from tools.dashboard import pending_outbound as po
     po._buffers.clear()
 

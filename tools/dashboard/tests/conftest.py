@@ -206,6 +206,33 @@ def _refuse_real_data_fallback(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_schema_registry_global():
+    """Snapshot + restore the process-global schema registry around every
+    dashboard test.
+
+    ``tools.graph.schemas.registry.SCHEMAS`` / ``UPCONVERTERS`` are mutable
+    module-level dicts. Tests that register permissive/stub schemas (directly
+    or by importing a plugin's actions module) mutate them in place; without
+    cleanup the extra registrations leak to later tests on the same xdist
+    worker, which then resolve the wrong validator and fail in a shifting,
+    hard-to-reproduce way (e.g. coordinator_board dispatch after a mediator
+    test). Restoring here means no dashboard test can leave the registry
+    dirty for the next one — including tests in other packages that only
+    isolate the registry for themselves.
+    """
+    from tools.graph.schemas import registry as _reg
+    schemas_snap = dict(_reg.SCHEMAS)
+    upcon_snap = dict(_reg.UPCONVERTERS)
+    try:
+        yield
+    finally:
+        _reg.SCHEMAS.clear()
+        _reg.SCHEMAS.update(schemas_snap)
+        _reg.UPCONVERTERS.clear()
+        _reg.UPCONVERTERS.update(upcon_snap)
+
+
+@pytest.fixture(autouse=True)
 def _contain_shared_db_reload_leak():
     """Undo cross-test contamination from fixtures that ``importlib.reload``
     the shared ``dashboard_db`` / ``dispatch_db`` singletons to inject a test
