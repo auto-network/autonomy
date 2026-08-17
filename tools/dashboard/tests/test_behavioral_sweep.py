@@ -14815,12 +14815,12 @@ class TestNetworkSignOn:
 
         The organization key is read once, and for one reason only: this
         fixture's serving certificate is due, so sign-on offers to renew it.
-        That key is legacy passphrase-armor, which a personal unlock cannot
-        open, so it is reported and no root is decrypted."""
+        The fixture stores no sealed root key, so there is nothing to open
+        and the organization is reported rather than silently skipped."""
         c = self._checks
         assert c["org_key_reads_at_signon"] == 1
         assert c["signon"]["diagnostics"]["orgRootsOpened"] == 0
-        assert c["signon"]["orgs"][0]["serveCert"]["status"] == "legacy-org-armor"
+        assert c["signon"]["orgs"][0]["serveCert"]["status"] == "no-sealed-org-key"
         assert c["signon"]["diagnostics"]["personaCount"] == 1
         assert c["signon"]["personalRootPub"] == NETWORK_PERSONAL_ROOT.public_hex
         entry = c["signon"]["orgs"][0]

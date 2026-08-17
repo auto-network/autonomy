@@ -71,38 +71,7 @@ def _run(mode: str = "success") -> dict:
     return _proof(result.stdout)
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
-def test_the_password_unlock_migrates_legacy_org_keys_before_repairing():
-    """An organization whose root key is still passphrase-armored cannot be
-    opened from a personal unlock, so its serving credential can NEVER be
-    repaired. The migration therefore has to run first, and it has to run
-    here -- this is the function a person reaches by signing in, and the only
-    one holding the password.
-    """
-    proof = _run()
-    assert proof["migrate_calls"] == 1
-    assert proof["migrate_before_repair"] is True, \
-        "repairing before migrating leaves the legacy org unreachable"
-    assert proof["repair_calls"] == 1
-    assert proof["migration"] == {"migrated": ["alpha-org"], "notMigrated": []}
 
-
-@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
-def test_a_failed_migration_does_not_cost_the_operator_their_session():
-    """Access has already been granted by the time this runs. A migration that
-    fails must not undo it, and must not stop the repair that follows."""
-    proof = _run(mode="migrate-failure")
-    assert "POST /api/identity/unlock/password" in proof["events"]
-    assert proof["repair_calls"] == 1, "the repair still runs"
-
-
-@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
-def test_the_passkey_path_does_not_migrate():
-    """A passkey unlock releases no signing material, so it can open no org
-    root -- it must not even attempt this."""
-    proof = _run(mode="passkey")
-    assert proof["migrate_calls"] == 0
-    assert proof["repair_calls"] == 0
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")

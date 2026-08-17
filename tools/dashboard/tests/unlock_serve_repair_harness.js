@@ -62,16 +62,6 @@ globalThis.fetch = async (requestUrl, options) => {
 };
 window.fetch = globalThis.fetch;
 
-let migrateCalls = 0;
-let migrateBeforeRepair = false;
-window.AutonomyNetworkSession.migrateLegacyOrgKeys = async (password) => {
-  migrateCalls += 1;
-  migrateBeforeRepair = repairCalls === 0;
-  if (password !== "test password") throw new Error("wrong password forwarded");
-  if (mode === "migrate-failure") throw new Error("simulated migration failure");
-  return { migrated: ["alpha-org"], notMigrated: [] };
-};
-
 let repairCalledAfterAccess = false;
 window.AutonomyNetworkSession.repairServeCredential = async (password) => {
   repairCalls += 1;
@@ -121,9 +111,6 @@ require("../static/js/unlock.js");
     events,
     repair_called_after_access: repairCalledAfterAccess,
     repair_calls: repairCalls,
-    migrate_calls: migrateCalls,
-    migrate_before_repair: migrateBeforeRepair,
-    migration: window.__autonomyOrgKeyMigration || null,
     all_repair_calls: allRepairCalls,
     all_repair_orgs: allRepairOrgs,
     serve_repair: window.__autonomyServeRepair || null,
