@@ -233,6 +233,33 @@ def _isolate_schema_registry_global():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_action_registry_global():
+    """Snapshot + restore the process-global settings-mediator action registry
+    around every dashboard test.
+
+    ``settings_mediator.loop._HANDLERS`` is a module-level dict populated once,
+    at import time, by ``@register_action_decorator`` on the action modules
+    (surface_actions, notifications_actions, crosstalk/worktree directives, …).
+    Several suites call ``settings_mediator.clear_registry()`` in an autouse
+    fixture to get a clean registry for their own test, and clear it AGAIN at
+    teardown without restoring — which empties ``_HANDLERS`` for good, because
+    the decorators do not re-run on an already-imported module. A later test
+    that needs a registered handler (e.g. ``test_worktree_directives`` asserting
+    the rebase handler is registered) then sees an empty registry and fails in
+    a shifting, order-dependent way. Snapshotting here (before those per-file
+    fixtures clear) and restoring after means no dashboard test can leave the
+    registry empty for the next one, mirroring _isolate_schema_registry_global.
+    """
+    from tools.dashboard.settings_mediator.loop import _HANDLERS
+    snap = {k: list(v) for k, v in _HANDLERS.items()}
+    try:
+        yield
+    finally:
+        _HANDLERS.clear()
+        _HANDLERS.update({k: list(v) for k, v in snap.items()})
+
+
+@pytest.fixture(autouse=True)
 def _contain_shared_db_reload_leak():
     """Undo cross-test contamination from fixtures that ``importlib.reload``
     the shared ``dashboard_db`` / ``dispatch_db`` singletons to inject a test
