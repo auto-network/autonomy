@@ -4314,7 +4314,8 @@ async def _read_session_jsonl(
             "project": project,
         })
 
-    harness = resolve_harness_for_path(session_file)
+    reader = session_harness.resolve_harness_for_path(session_file)
+    harness = reader.harness
     with open(session_file, "rb") as f:
         f.seek(after)
         data = f.read()
@@ -4327,9 +4328,7 @@ async def _read_session_jsonl(
     else:
         data = data[:last_nl + 1]
         new_offset = after + last_nl + 1
-    entries = session_harness.parse_lines_with_refs(
-        harness, data, stem=session_file.stem, base_offset=after, ctx={},
-    )
+    entries = reader.parse_bytes_with_refs(data, base_offset=after)
     entries = harness.postprocess_entries(
         entries, session_dir=session_file.parent / session_file.stem,
     )
@@ -4491,7 +4490,8 @@ async def api_dispatch_tail(request):
     # — complete-line clamped, ref-stamped, finalized. Every server path
     # emits canonical identities; a refless entry would make the client
     # mint a fresh synthetic ref per delivery and duplicate tiles.
-    harness = resolve_harness_for_path(session_file)
+    reader = session_harness.resolve_harness_for_path(session_file)
+    harness = reader.harness
     with open(session_file, "rb") as f:
         f.seek(after)
         data = f.read()
@@ -4502,9 +4502,7 @@ async def api_dispatch_tail(request):
     else:
         data = data[:last_nl + 1]
         new_offset = after + last_nl + 1
-    entries = session_harness.parse_lines_with_refs(
-        harness, data, stem=session_file.stem, base_offset=after, ctx={},
-    )
+    entries = reader.parse_bytes_with_refs(data, base_offset=after)
     entries = harness.postprocess_entries(
         entries,
         session_dir=session_file.parent / session_file.stem,
@@ -4680,7 +4678,7 @@ async def api_dispatch_latest(request):
 
     session_file = session_files[-1]
     is_live = (import_time() - session_file.stat().st_mtime) < 120
-    harness = resolve_harness_for_path(session_file)
+    reader = session_harness.resolve_harness_for_path(session_file)
 
     # Read last ~4KB to find latest assistant text
     file_size = session_file.stat().st_size
@@ -4694,7 +4692,7 @@ async def api_dispatch_latest(request):
         line = line.strip()
         if not line:
             continue
-        parsed = harness.parse_line(line)
+        parsed = reader.parse_line(line)
         if parsed is None:
             continue
         if isinstance(parsed, list):
@@ -4851,13 +4849,13 @@ def _session_chain_files(
     return chain or [(cur_stem, session_file)]
 
 
-def _renderable_count(harness, data: bytes) -> int:
+def _renderable_count(data: bytes, *, path: Path) -> int:
     """How many non-internal entries a raw window parses to."""
     count = 0
-    ctx: dict = {}
+    reader = session_harness.resolve_harness_for_path(path)
     for line, _off in session_harness.iter_jsonl_lines_with_offsets(data):
         try:
-            parsed = harness.parse_line(line, ctx=ctx)
+            parsed = reader.parse_line(line)
         except Exception:
             continue
         if parsed is None:
@@ -4881,7 +4879,7 @@ def _read_file_window_backward(
         data, start, end = _read_jsonl_tail_window(path, n=lines_guess, before=before)
         if not data:
             return None
-        count = _renderable_count(harness, data)
+        count = _renderable_count(data, path=path)
         if count >= need or start <= 0 or start == prev_start:
             return {"start": start, "end": end, "data": data, "count": count}
         prev_start = start
@@ -5126,8 +5124,11 @@ def _reconstruct_read_state(
                     data = fh.read(limit)
             except OSError:
                 data = b""
-            prefix = session_harness.parse_lines_with_refs(
-                harness, data, stem=stem, base_offset=0, ctx=parse_ctx,
+            reader = session_harness.resolve_harness_for_path(
+                path, ctx=parse_ctx,
+            )
+            prefix = reader.parse_bytes_with_refs(
+                data, stem=stem, base_offset=0,
             )
             prefix, last_enqueue, _ = session_monitor_mod.dedup_queued_entries(
                 prefix, last_enqueue,
@@ -5190,14 +5191,14 @@ def _parse_and_enrich_segments(
         snap = session_monitor.snapshot_read_context(tmux_name) if tmux_name else None
 
     parse_ctx: dict = (recon or {}).get("parse_ctx") or {}
-    if db_row is not None:
-        session_monitor_mod._seed_codex_version(parse_ctx, dict(db_row))
     entries: list[dict] = []
     per_file_end: dict[str, int] = {}
     for seg in segments:
-        entries.extend(session_harness.parse_lines_with_refs(
-            harness, seg["data"], stem=seg["stem"],
-            base_offset=seg["start"], ctx=parse_ctx,
+        reader = session_harness.resolve_harness_for_path(
+            seg["path"], ctx=parse_ctx,
+        )
+        entries.extend(reader.parse_bytes_with_refs(
+            seg["data"], stem=seg["stem"], base_offset=seg["start"],
         ))
         per_file_end[seg["stem"]] = seg["end"]
 
@@ -5606,9 +5607,11 @@ async def api_session_tail(request):
             before=before,
         )
         new_offset = file_size
-        entries = session_harness.parse_lines_with_refs(
-            harness, data, stem=session_file.stem,
-            base_offset=window_start, ctx={},
+        reader = session_harness.resolve_harness_for_path(
+            session_file,
+        )
+        entries = reader.parse_bytes_with_refs(
+            data, base_offset=window_start,
         )
     else:
         with open(session_file, "rb") as f:
@@ -5623,9 +5626,10 @@ async def api_session_tail(request):
         else:
             data = data[:last_nl + 1]
             new_offset = after + last_nl + 1
-        entries = session_harness.parse_lines_with_refs(
-            harness, data, stem=session_file.stem, base_offset=after, ctx={},
+        reader = session_harness.resolve_harness_for_path(
+            session_file,
         )
+        entries = reader.parse_bytes_with_refs(data, base_offset=after)
 
     entries = harness.postprocess_entries(
         entries,
@@ -5639,14 +5643,16 @@ async def api_session_tail(request):
     # operator scrolls back.
     if not reverse_window and after > 0:
         history: list = []
-        history_ctx: dict = {}
+        history_reader = session_harness.resolve_harness_for_path(
+            session_file,
+        )
         with open(session_file, "rb") as f:
             history_data = f.read(after)
         for line in history_data.decode("utf-8", errors="replace").split("\n"):
             line = line.strip()
             if not line:
                 continue
-            parsed = harness.parse_line(line, ctx=history_ctx)
+            parsed = history_reader.parse_line(line)
             if parsed is None:
                 continue
             if isinstance(parsed, list):
@@ -6668,7 +6674,13 @@ async def api_session_turn_correction_suggest(request):
             status_code=409,
         )
 
-    users = turn_corrections_mod.read_recent_canonical_user_turns(jsonl_path)
+    try:
+        users = turn_corrections_mod.read_recent_canonical_user_turns(jsonl_path)
+    except session_harness.TranscriptParseContextError as exc:
+        return JSONResponse(
+            {"error": "transcript parse context unavailable", "detail": str(exc)},
+            status_code=409,
+        )
 
     def _target_unavailable(message_id: str) -> bool:
         # A target already carrying a terminal (accepted/dismissed) correction
@@ -8667,10 +8679,6 @@ async def api_session_retry(request):
     # would let that reconcile silently drop the watch before the worker's
     # first transition re-asserts liveness.
     dashboard_db.revive_session(tmux_name, file_offset=0)
-    # Re-read the harness version: a resume may land on a rebuilt image, and
-    # the row would otherwise keep the version the session first launched
-    # with while running a different binary.
-    session_monitor.refresh_harness_version(tmux_name)
     await session_monitor.register_pending(
         tmux_name,
         session_type=config.get("session_type") or "container",

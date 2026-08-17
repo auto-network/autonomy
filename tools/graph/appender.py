@@ -52,6 +52,8 @@ import json
 import threading
 from pathlib import Path
 
+from tools.codex_transcript import codex_cli_version
+
 from .db import GraphDB, resolve_caller_db_path
 from .ingest import (
     ClaudeTurnExtractor,
@@ -109,7 +111,10 @@ class GraphAppender:
         self.harness = harness
         self.default_model = default_model
         self.graph_ingest_offset = graph_ingest_offset
-        self.extractor = extractor_class_for_harness(harness)(state=extractor_state)
+        restored_state = dict(extractor_state or {})
+        if harness == "codex" and not restored_state.get("cli_version"):
+            restored_state["cli_version"] = codex_cli_version(self.file_path)
+        self.extractor = extractor_class_for_harness(harness)(state=restored_state)
 
     @classmethod
     def from_source(
@@ -142,7 +147,12 @@ class GraphAppender:
         appender's state was built against. The next ``feed_lines`` call
         should be given the file's content from byte 0."""
         self.graph_ingest_offset = 0
-        self.extractor = extractor_class_for_harness(self.harness)()
+        state = (
+            {"cli_version": codex_cli_version(self.file_path)}
+            if self.harness == "codex"
+            else None
+        )
+        self.extractor = extractor_class_for_harness(self.harness)(state=state)
 
     def feed_lines(self, lines: list[bytes], *, new_byte_offset: int) -> dict:
         """Decode + extract + write one batch, in a single transaction.

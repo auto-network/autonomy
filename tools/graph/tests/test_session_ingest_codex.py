@@ -30,6 +30,7 @@ def _session_meta(ts: str = "2026-04-24T05:00:00Z") -> dict:
         "payload": {
             "originator": "codex-tui",
             "model_provider": "openai",
+            "cli_version": "0.146.0",
         },
     }
 

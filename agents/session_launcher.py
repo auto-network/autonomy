@@ -771,28 +771,6 @@ def _schedule_creds_cleanup(container_id: str, creds_copy: str) -> None:
     t.start()
 
 
-def _image_harness_versions(image: str, harness: str) -> dict[str, str]:
-    """Return ``{"harness_version": ...}`` from *image*'s label for *harness*.
-
-    Set by the Dockerfile from the same variables that install the binaries,
-    so they cannot disagree with what the image contains. Reads host-side
-    image metadata; starts nothing. Missing labels mean an image built before
-    the labels existed — the keys are simply absent, and a reader that finds
-    no version falls back to the pre-0.147 record format.
-    """
-    try:
-        out = subprocess.run(
-            ["docker", "image", "inspect", image,
-             "--format", "{{json .Config.Labels}}"],
-            capture_output=True, text=True, timeout=10,
-        )
-        labels = json.loads(out.stdout or "{}") or {}
-    except (OSError, subprocess.SubprocessError, ValueError):
-        return {}
-    v = labels.get(f"{harness}.version")
-    return {"harness_version": v} if isinstance(v, str) and v and v != "unknown" else {}
-
-
 def _codex_git_root(worktree_host: Path) -> str | None:
     """Return the repository root Codex resolves trust to for a worktree.
 
@@ -1248,17 +1226,6 @@ def launch_session(
             "needs_nested_docker": needs_nested_docker,
             "session_runtime": resolved_runtime,
         }
-        # The harness versions baked into the image this session runs. Read
-        # from the image's own labels — no container is started. A log reader
-        # that begins at a stored byte offset never sees the version the log
-        # declares in its first record, so it reads it from here instead.
-        # Skipped when the launch has no canonical org: it is refused below
-        # regardless (the token cannot be org-stamped), and a doomed launch
-        # must not touch docker at all — not even a read-only image inspect
-        # (test_write_routing's no-docker-after-refusal contract). The meta
-        # is still written so graph_org derivation stays observable.
-        if (metadata or {}).get("org"):
-            meta_doc.update(_image_harness_versions(image, harness))
         if creds is not None and creds.get("harness_token"):
             # Operator-facing credential pointer for triage. The dashboard
             # reads this back when the session is registered so the drawer

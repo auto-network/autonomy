@@ -19,6 +19,7 @@ import pytest
 
 from tools.dashboard.session_harness import (
     CODEX_HARNESS,
+    MissingCodexVersionError,
     extract_codex_context_tokens,
     postprocess_codex_entries,
     parse_codex_log_line,
@@ -66,12 +67,43 @@ def codex_graph_db(tmp_path, monkeypatch):
     return db_path
 
 
-def test_resolve_codex_harness_from_rollout_path():
-    harness = resolve_harness_for_path(
-        "/home/agent/.codex/sessions/2026/04/23/"
-        "rollout-2026-04-23T00-44-19-thread.jsonl"
-    )
+def test_resolve_codex_harness_from_rollout_path(tmp_path):
+    rollout = tmp_path / "rollout-2026-04-23T00-44-19-thread.jsonl"
+    rollout.write_text(json.dumps({
+        "type": "session_meta",
+        "payload": {"originator": "codex-tui", "cli_version": "0.148.0"},
+    }) + "\n")
+    harness = resolve_harness_for_path(rollout)
     assert harness.name == "codex"
+
+
+def test_resolved_harness_caches_version_by_file_identity(tmp_path):
+    from tools import codex_transcript
+
+    codex_transcript._read_version.cache_clear()
+    rollout = tmp_path / "rollout-cache.jsonl"
+    rollout.write_text(json.dumps({
+        "type": "session_meta",
+        "payload": {"originator": "codex-tui", "cli_version": "0.147.0"},
+    }) + "\n")
+
+    first = resolve_harness_for_path(rollout)
+    second = resolve_harness_for_path(rollout)
+
+    assert first.ctx["codex_cli_version"] == "0.147.0"
+    assert second.ctx["codex_cli_version"] == "0.147.0"
+    assert codex_transcript._read_version.cache_info().hits == 1
+
+
+def test_resolved_harness_rejects_codex_file_without_mandatory_version(tmp_path):
+    rollout = tmp_path / "rollout-missing-version.jsonl"
+    rollout.write_text(json.dumps({
+        "type": "session_meta",
+        "payload": {"originator": "codex-tui"},
+    }) + "\n")
+
+    with pytest.raises(MissingCodexVersionError, match="version is unavailable"):
+        resolve_harness_for_path(rollout)
 
 
 def test_resolve_codex_harness_from_rollout_session_uuid():
@@ -1148,10 +1180,28 @@ def test_resolve_harness_for_path_reads_session_meta(tmp_path):
     nested = sessions_dir / "2026" / "04" / "22"
     nested.mkdir(parents=True)
     rollout = nested / "rollout-2026-04-22T22-40-19-uuid.jsonl"
-    rollout.write_text("")
+    rollout.write_text(json.dumps({
+        "type": "session_meta",
+        "payload": {"originator": "codex-tui", "cli_version": "0.148.0"},
+    }) + "\n")
 
     harness = resolve_harness_for_path(rollout)
     assert harness.name == "codex"
+
+
+def test_response_item_chat_without_codex_version_fails_closed():
+    line = json.dumps({
+        "type": "response_item",
+        "timestamp": TS,
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Do not drop me"}],
+        },
+    })
+
+    with pytest.raises(MissingCodexVersionError, match="version is unavailable"):
+        parse_codex_log_line(line, ctx={})
 
 
 

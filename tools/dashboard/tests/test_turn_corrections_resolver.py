@@ -119,6 +119,8 @@ def test_reads_codex_user_turns_with_synthetic_message_id(tmp_path):
     assert expected_id and expected_id.startswith("codex-user:")
     # Filename ``rollout-*`` makes resolve_harness_for_path pick the Codex adapter.
     jsonl = _write_jsonl(tmp_path / "sessions" / "u" / "rollout-2026.jsonl", [
+        {"type": "session_meta", "payload": {"cli_version": "0.146.0"},
+         "timestamp": "2026-08-10T11:59:59Z"},
         {"type": "event_msg", "payload": {"type": "user_message", "message": text},
          "timestamp": "2026-08-10T12:00:00Z"},
     ])

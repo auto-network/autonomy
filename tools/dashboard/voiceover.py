@@ -16,7 +16,9 @@ from pathlib import Path
 from typing import Any
 from urllib import error as urllib_error, request as urllib_request
 
-from tools.dashboard.session_harness import resolve_harness_for_session_row
+from tools.dashboard.session_harness import (
+    resolve_harness_for_path,
+)
 
 
 DEFAULT_MODEL = "llama3.1:8b"
@@ -106,10 +108,10 @@ def _compact_entry(entry: dict[str, Any]) -> str:
 
 def build_session_context(row: dict[str, Any], path: Path) -> str:
     """Build recent, high-signal context from any registered harness."""
-    harness = resolve_harness_for_session_row(row)
+    reader = resolve_harness_for_path(path)
     entries: list[dict[str, Any]] = []
     for line in _tail_text(path).splitlines():
-        parsed = harness.parse_line(line)
+        parsed = reader.parse_line(line)
         if isinstance(parsed, dict):
             entries.append(parsed)
         elif isinstance(parsed, list):

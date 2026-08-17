@@ -11,6 +11,12 @@ import re
 import subprocess
 from pathlib import Path
 
+from tools.codex_transcript import (
+    CodexTranscriptVersionError as MissingCodexVersionError,
+    codex_cli_version,
+    codex_uses_response_item_chat,
+)
+
 from .models import Source, Thought, Derivation, Entity, Edge, now_iso
 from .db import GraphDB, resolve_caller_db_path
 
@@ -714,17 +720,6 @@ class CodexTurnExtractor:
     # First Codex release that stopped emitting event_msg chat. Measured
     # across all 176 rollouts on this host: every version through 0.146.0
     # (172 files) emits it; only 0.147.0 does not.
-    _RESPONSE_ITEM_CHAT_FROM = (0, 147, 0)
-
-    @staticmethod
-    def _version_tuple(raw: str | None) -> tuple[int, ...] | None:
-        if not raw:
-            return None
-        try:
-            return tuple(int(p) for p in str(raw).split("."))
-        except (TypeError, ValueError):
-            return None
-
     def _reads_response_items(self) -> bool:
         """True when this rollout's Codex is new enough to need the fallback.
 
@@ -734,10 +729,11 @@ class CodexTurnExtractor:
         surfaced. Reading response_items there would double-count, reclassify
         and inject noise into sessions that render correctly today — so the
         branch stays off unless the file's own cli_version says event_msg
-        chat is gone. Unknown/unparseable version → off, the safe default.
+        chat is gone. Unknown/unparseable versions fail closed: treating one
+        as an old rollout silently drops every turn if an incremental appender
+        resumes inside a current-format file without its extractor state.
         """
-        ver = self._version_tuple(self._s.get("cli_version"))
-        return ver is not None and ver >= self._RESPONSE_ITEM_CHAT_FROM
+        return codex_uses_response_item_chat(self._s.get("cli_version"))
 
     def _seen(self, message_id: str | None) -> bool:
         """True when ``message_id`` was already emitted in the recent window.
@@ -891,7 +887,9 @@ def parse_codex_session(file_path: Path) -> tuple[dict, list[dict]]:
         "session_id": file_path.stem,
         "platform": "codex-cli",
     }
-    extractor = CodexTurnExtractor()
+    extractor = CodexTurnExtractor(
+        state={"cli_version": codex_cli_version(file_path)},
+    )
     turns: list[dict] = []
 
     with open(file_path, "r", encoding="utf-8") as f:

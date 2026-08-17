@@ -489,6 +489,14 @@ def _codex_line(payload: dict, ts: str = "2026-08-10T01:00:00Z") -> str:
     return json.dumps({"timestamp": ts, "type": "response_item", "payload": payload})
 
 
+def _codex_meta_line() -> str:
+    return json.dumps({
+        "timestamp": "2026-08-10T00:59:59Z",
+        "type": "session_meta",
+        "payload": {"originator": "codex-tui", "cli_version": "0.148.0"},
+    })
+
+
 class TestRound1Blockers:
 
     def test_b1_partial_line_cold_open_never_commits_into_it(self, tail_client):
@@ -593,6 +601,7 @@ class TestRound1Blockers:
         d.mkdir()
         jsonl = d / "rollout-2026-08-10T01-00-00-b3b3.jsonl"
         lines = [
+            _codex_meta_line(),
             _codex_line({"type": "function_call", "name": "exec_command",
                          "call_id": "T1",
                          "arguments": json.dumps({"cmd": "sleep 5"})}),
@@ -609,10 +618,10 @@ class TestRound1Blockers:
         # Cursor sits after the call line; running + final were missed.
         resp = client.get(
             "/api/session/autonomy/auto-b3/tail"
-            f"?after_file={jsonl.stem}&after={offsets[1]}").json()
+            f"?after_file={jsonl.stem}&after={offsets[2]}").json()
         results = [e for e in resp["entries"] if e.get("type") == "tool_result"]
         statuses = [(r["entry_ref"]["off"], r.get("status")) for r in results]
-        assert (offsets[1], "running") in statuses, (
+        assert (offsets[2], "running") in statuses, (
             f"running progress entry must survive the replay, got {statuses}"
         )
 
@@ -625,6 +634,7 @@ class TestRound1Blockers:
         d.mkdir()
         jsonl = d / "rollout-2026-08-10T02-00-00-b4b4.jsonl"
         lines = [
+            _codex_meta_line(),
             _codex_line({"type": "custom_tool_call", "name": "exec",
                          "call_id": "W1",
                          "input": 'const r = await tools.exec_command({"cmd":"ls"});\ntext(r);'}),
@@ -637,7 +647,7 @@ class TestRound1Blockers:
 
         resp = client.get(
             "/api/session/autonomy/auto-b4/tail"
-            f"?after_file={jsonl.stem}&after={offsets[1]}").json()
+            f"?after_file={jsonl.stem}&after={offsets[2]}").json()
         kinds = {e.get("result_kind") for e in resp["entries"]
                  if e.get("type") == "tool_result"}
         assert "exec_command" in kinds, (
