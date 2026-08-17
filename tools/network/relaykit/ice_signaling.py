@@ -282,7 +282,8 @@ def assert_candidate_free_sdp(sdp: Any) -> str:
         raise IceSignalingError("SDP is malformed or exceeds its byte limit")
     for line in sdp.splitlines():
         stripped = line.strip()
-        if stripped.lower().startswith("a=candidate:"):
+        lowered = stripped.lower()
+        if lowered.startswith("a=candidate:") or lowered == "a=end-of-candidates":
             raise IceSignalingError("SDP contains a smuggled ICE candidate")
         match = _SDP_CONNECTION_RE.match(stripped)
         if match and match.group(3) not in ("0.0.0.0", "::"):
@@ -296,7 +297,8 @@ def strip_candidate_lines(sdp: str) -> str:
         raise IceSignalingError("SDP must be a string")
     clean_lines = []
     for line in sdp.splitlines(keepends=True):
-        if line.strip().lower().startswith("a=candidate:"):
+        lowered = line.strip().lower()
+        if lowered.startswith("a=candidate:") or lowered == "a=end-of-candidates":
             continue
         match = _SDP_CONNECTION_RE.match(line)
         if match:
