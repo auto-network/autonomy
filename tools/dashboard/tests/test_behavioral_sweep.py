@@ -56,6 +56,7 @@ from tools.network.idkit import (
 from tools.network.idkit.armor import decrypt_root_key, encrypt_root_key
 from tools.network.idkit.canonical import canonical_json
 from tools.network.idkit.keys import verify_signature
+from tools.network.idkit.persona import derive_persona
 from tools.network.idkit.revocation import RevocationRecord, verify_revocation
 from tools.network.registry.signing import request_signing_input
 
@@ -14356,20 +14357,33 @@ class TestCoordinatorBoardRelativeTimeAndPendingCommits:
 
 # ═══ auto.network sign-on ceremony (C2, spec §6.3) ════════════════════
 #
-# The ceremony itself runs in the browser: passphrase → armor decrypt →
-# root import → non-extractable session key + root-signed delegation
-# cert → root plaintext dropped. The sweep drives the REAL module
-# (static/js/network-signon.js) end to end with the network mocked at
-# window.fetch, then hands every artifact the browser minted back to
-# Python, where idkit — the same code the registry runs — verifies it.
-# Cross-language byte-compatibility (canonical JSON) is pinned with a
-# hostile vector.
+# The ceremony itself runs in the browser: ONE passphrase → personal
+# armor decrypt → a persona per organization (HKDF over each genesis id)
+# → non-extractable session key + a persona-signed delegation cert per
+# organization → personal root plaintext dropped. The sweep drives the
+# REAL module (static/js/network-signon.mjs) end to end with the network
+# mocked at window.fetch, then hands every artifact the browser minted
+# back to Python, where idkit — the same code the registry runs —
+# verifies it. Cross-language byte-compatibility (canonical JSON) is
+# pinned with a hostile vector.
 
 NETWORK_ROOT = KeyPair.generate()
 NETWORK_PASSPHRASE = "sweep horse battery staple"
 # Floor-of-range PBKDF2 iterations keep the sweep fast; real ceremonies
 # use armor.DEFAULT_ITERATIONS.
 NETWORK_ARMOR = encrypt_root_key(NETWORK_ROOT, NETWORK_PASSPHRASE, iterations=10_000)
+# The PERSONAL identity sign-on actually unlocks. Its armor opens with the
+# same one passphrase; the org armor above now only serves the root step-up
+# that revocation still is.
+NETWORK_PERSONAL_ROOT = KeyPair.generate()
+NETWORK_PERSONAL_ARMOR = encrypt_root_key(
+    NETWORK_PERSONAL_ROOT, NETWORK_PASSPHRASE, iterations=10_000,
+)
+NETWORK_ORG_SLUG = "sweep-org"
+NETWORK_GENESIS_ID = "5e" * 32
+NETWORK_PERSONA = derive_persona(
+    bytes.fromhex(NETWORK_PERSONAL_ROOT.private_hex), NETWORK_GENESIS_ID,
+)
 NETWORK_ORG_UUID = "22222222-2222-4222-8222-222222222222"
 NETWORK_SCOPES = ("delegate:agent", "link:publish", "link:revoke",
                   "tunnel:serve", "viewer:identify")
@@ -14397,16 +14411,21 @@ NETWORK_CANON_VECTOR = {
 # read as signed-out on load and purge the store (I7 client-side) — both
 # ends: expired, and NOT YET VALID (Codex validation finding: a future
 # not_before must not read as locally signed-in; the registry 403s it).
+# Both are genuine persona-issued certs for this organization, so the only
+# thing wrong with them is the window — the rejection cannot pass for the
+# wrong reason (a foreign subject would be dropped before the window check).
 _expired_child = KeyPair.generate()
 NETWORK_EXPIRED_CERT = issue_cert(
-    NETWORK_ROOT, _expired_child.public_hex, scope=NETWORK_SCOPES,
-    org=NETWORK_ORG_UUID, subject=Subject("operator", "browser-expired"),
+    NETWORK_PERSONA, _expired_child.public_hex, scope=NETWORK_SCOPES,
+    org=NETWORK_ORG_UUID,
+    subject=Subject("operator", NETWORK_PERSONA.public_hex),
     not_before=NOW - 7200, not_after=NOW - 3600,
 ).to_json().decode()
 _future_child = KeyPair.generate()
 NETWORK_FUTURE_CERT = issue_cert(
-    NETWORK_ROOT, _future_child.public_hex, scope=NETWORK_SCOPES,
-    org=NETWORK_ORG_UUID, subject=Subject("operator", "browser-future"),
+    NETWORK_PERSONA, _future_child.public_hex, scope=NETWORK_SCOPES,
+    org=NETWORK_ORG_UUID,
+    subject=Subject("operator", NETWORK_PERSONA.public_hex),
     not_before=NOW + 3600, not_after=NOW + 7200,
 ).to_json().decode()
 
@@ -14438,9 +14457,27 @@ _NETWORK_SIGNON_JS = r"""
     const BINDING = __BINDING__;
     const ORGKEY = {label: 'default', armored_private_key: __ARMOR__,
                     root_pub: BINDING.root_pub};
+    const PERSONAL = {armored_private_key: __PERSONAL_ARMOR__,
+                      root_pub: __PERSONAL_ROOT_PUB__};
+    const ORG_SLUG = __ORG_SLUG__;
+    const GENESIS = __GENESIS_ID__;
     const PASS = __PASSPHRASE__;
     const posted = [];
+    const orgKeyReads = [];
     const origFetch = window.fetch;
+    // The one personal session record shape, reused by every planted-record
+    // probe below: no top-level org, one entry per organization.
+    function personalRecord(key, certWire) {
+        const orgs = {};
+        orgs[GENESIS] = {
+            genesisId: GENESIS, org: BINDING.org_uuid, orgSlug: ORG_SLUG,
+            personaPub: JSON.parse(certWire).subject.id, certWire: certWire,
+            registryUrl: BINDING.registry_url, rootPub: BINDING.root_pub,
+            rekeyedAt: null,
+        };
+        return {key: key, personalRootPub: PERSONAL.root_pub,
+                createdAt: 0, orgs: orgs};
+    }
 
     // Configuration fails closed: every adapter method is required and
     // validation must happen before getSession can perform a load.
@@ -14511,7 +14548,16 @@ _NETWORK_SIGNON_JS = r"""
         if (u.indexOf('/api/network/binding') === 0) {
             return {ok: true, json: async () => BINDING};
         }
+        if (u.indexOf('/api/identity/personal') === 0) {
+            return {ok: true, json: async () => PERSONAL};
+        }
+        if (u.indexOf('/api/network/ledger/heads') === 0) {
+            return {ok: true, status: 200,
+                    json: async () => ({genesis_id: GENESIS, heads: [GENESIS]})};
+        }
         if (u.indexOf('/api/network/org-key') === 0) {
+            // Sign-on must never come here; revoke's root step-up does.
+            orgKeyReads.push(u);
             return {ok: true, json: async () => ORGKEY};
         }
         if (u.indexOf('/api/network/revocations') === 0) {
@@ -14525,33 +14571,34 @@ _NETWORK_SIGNON_JS = r"""
     try {
         // wrong passphrase: clean error, still signed out
         r.wrong_pass = null;
-        try { await S.signOn('not the passphrase', {ttlSeconds: 3600}); }
+        try { await S.signOn('not the passphrase', {org: ORG_SLUG, ttlSeconds: 3600}); }
         catch (e) { r.wrong_pass = String(e.message || e); }
         r.wrong_pass_signed_in = S.state().signedIn;
 
-        // the real ceremony
-        r.signon = await S.signOn(PASS, {ttlSeconds: 3600});
+        // the real ceremony: ONE personal unlock
+        r.signon = await S.signOn(PASS, {org: ORG_SLUG, ttlSeconds: 3600});
+        r.org_key_reads_at_signon = orgKeyReads.length;
         r.signer_state = S.state();
         r.available = window.AutonomyNetworkSigner.available();
         r.idb_signed_in = await idbCount();
         r.keys = S.listKeys();
 
-        // the C3 seam: a signed registry envelope
+        // the C3 seam: a signed registry envelope, acting as this
+        // organization's persona
         r.envelope = await window.AutonomyNetworkSigner.signRegistryRequest(
             'POST', '/v1/links',
             {org: BINDING.org_uuid,
              target_uuid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
-             target_type: 'note', meta: {ttl: 3600, label: 'sweep'}});
+             target_type: 'note', meta: {ttl: 3600, label: 'sweep'}},
+            {org: ORG_SLUG});
 
         // tested rejection: an EXTRACTABLE key must never install
         r.extractable_reject = null;
         try {
             const bad = await crypto.subtle.generateKey(
                 {name: 'Ed25519'}, true, ['sign', 'verify']);
-            await I.installSession({
-                key: bad.privateKey, certWire: r.signon.certWire,
-                org: BINDING.org_uuid, registryUrl: BINDING.registry_url,
-                rootPub: BINDING.root_pub, createdAt: 0});
+            await I.installSession(
+                personalRecord(bad.privateKey, r.signon.orgs[0].certWire));
         } catch (e) { r.extractable_reject = String(e.message || e); }
         r.still_available = window.AutonomyNetworkSigner.available();
 
@@ -14564,8 +14611,8 @@ _NETWORK_SIGNON_JS = r"""
                            available: window.AutonomyNetworkSigner.available()};
 
         // revoke: fresh sign-on, then root step-up revocation
-        await S.signOn(PASS, {ttlSeconds: 3600});
-        r.revoke = await S.revokeCurrentKey(PASS, 'sweep revoke');
+        await S.signOn(PASS, {org: ORG_SLUG, ttlSeconds: 3600});
+        r.revoke = await S.revokeCurrentKey(PASS, 'sweep revoke', {org: ORG_SLUG});
         r.revoke_posted = posted[0] || null;
         r.after_revoke = {signedIn: S.state().signedIn, idb: await idbCount(),
                           available: window.AutonomyNetworkSigner.available()};
@@ -14575,6 +14622,7 @@ _NETWORK_SIGNON_JS = r"""
         async function plantCert(certWire) {
             const ghost = await crypto.subtle.generateKey(
                 {name: 'Ed25519'}, false, ['sign', 'verify']);
+            const record = personalRecord(ghost.privateKey, certWire);
             await new Promise((res, rej) => {
                 const rq = indexedDB.open('autonomy-network', 1);
                 rq.onupgradeneeded = () => rq.result.createObjectStore('session');
@@ -14582,9 +14630,7 @@ _NETWORK_SIGNON_JS = r"""
                     const db = rq.result;
                     const p = db.transaction('session', 'readwrite')
                         .objectStore('session')
-                        .put({key: ghost.privateKey, certWire: certWire,
-                              org: BINDING.org_uuid, registryUrl: BINDING.registry_url,
-                              rootPub: BINDING.root_pub, createdAt: 0}, 'current');
+                        .put(record, 'current');
                     p.onsuccess = () => { db.close(); res(); };
                     p.onerror = () => { db.close(); rej(p.error); };
                 };
@@ -14602,10 +14648,8 @@ _NETWORK_SIGNON_JS = r"""
         try {
             const g2 = await crypto.subtle.generateKey(
                 {name: 'Ed25519'}, false, ['sign', 'verify']);
-            await I.installSession({
-                key: g2.privateKey, certWire: __FUTURE_CERT__,
-                org: BINDING.org_uuid, registryUrl: BINDING.registry_url,
-                rootPub: BINDING.root_pub, createdAt: 0});
+            await I.installSession(
+                personalRecord(g2.privateKey, __FUTURE_CERT__));
         } catch (e) { r.future_install_reject = String(e.message || e); }
         r.future_install_available = window.AutonomyNetworkSigner.available();
         await plantCert(__FUTURE_CERT__);
@@ -14626,6 +14670,11 @@ def _network_signon_js() -> str:
         _NETWORK_SIGNON_JS
         .replace("__BINDING__", json.dumps(NETWORK_BINDING))
         .replace("__ARMOR__", json.dumps(NETWORK_ARMOR))
+        .replace("__PERSONAL_ARMOR__", json.dumps(NETWORK_PERSONAL_ARMOR))
+        .replace("__PERSONAL_ROOT_PUB__",
+                 json.dumps(NETWORK_PERSONAL_ROOT.public_hex))
+        .replace("__ORG_SLUG__", json.dumps(NETWORK_ORG_SLUG))
+        .replace("__GENESIS_ID__", json.dumps(NETWORK_GENESIS_ID))
         .replace("__PASSPHRASE__", json.dumps(NETWORK_PASSPHRASE))
         .replace("__VECTOR__", json.dumps(NETWORK_CANON_VECTOR))
         .replace("__EXPIRED_CERT__", json.dumps(NETWORK_EXPIRED_CERT))
@@ -14683,7 +14732,7 @@ class TestNetworkSignOn:
             ("async function _installSession(record)", "// ── ceremonies"),
             ("async function signOn(passphrase, opts)",
              "async function provisionServeCert(passphrase, opts)"),
-            ("async function signRegistryRequest(method, path, payload)",
+            ("async function signRegistryRequest(method, path, payload, opts)",
              "// Expiry watchdog:"),
         ),
     )
@@ -14727,23 +14776,46 @@ class TestNetworkSignOn:
     def test_sign_on_activates_signer_without_shell_chrome(self):
         c = self._checks
         assert c["signer_state"]["signedIn"] is True
-        assert c["signer_state"]["notAfter"] > NOW
+        assert len(c["signer_state"]["orgs"]) == 1
+        assert c["signer_state"]["orgs"][0]["notAfter"] > NOW
+        assert c["signer_state"]["orgs"][0]["orgSlug"] == NETWORK_ORG_SLUG
         assert c["available"] is True
         assert c["idb_signed_in"] == 1
         assert c["keys"] and c["keys"][0]["this_browser"] is True
 
-    # ── acceptance: minted cert chain-verifies to root via idkit ──
+    # ── acceptance: one personal unlock, a persona per organization ──
 
-    def test_minted_cert_chain_verifies_to_root(self):
+    def test_sign_on_derives_the_persona_and_opens_no_org_root(self):
+        """The unlock decrypts the PERSONAL root once. No organization key
+        is even read, and the persona is exactly HKDF over the genesis id —
+        idkit's own derivation, byte for byte."""
         c = self._checks
-        cert = DelegationCert.from_json(c["signon"]["certWire"])
+        assert c["org_key_reads_at_signon"] == 0
+        assert c["signon"]["diagnostics"]["orgRootsOpened"] == 0
+        assert c["signon"]["diagnostics"]["personaCount"] == 1
+        assert c["signon"]["personalRootPub"] == NETWORK_PERSONAL_ROOT.public_hex
+        entry = c["signon"]["orgs"][0]
+        assert entry["personaPub"] == NETWORK_PERSONA.public_hex
+        assert entry["genesisId"] == NETWORK_GENESIS_ID
+        assert c["signer_state"]["orgs"][0]["personaPub"] == (
+            NETWORK_PERSONA.public_hex)
+
+    # ── acceptance: the actor is the persona, and it signed the cert ──
+
+    def test_minted_cert_chain_verifies_to_the_persona(self):
+        c = self._checks
+        cert = DelegationCert.from_json(c["signon"]["orgs"][0]["certWire"])
         result = verify_chain(
-            cert, NETWORK_ROOT.public_hex, org=NETWORK_ORG_UUID,
+            cert, NETWORK_PERSONA.public_hex, org=NETWORK_ORG_UUID,
             required_scope="link:publish",
         )
         assert result.leaf_pub == c["signon"]["sessionPub"]
         assert result.subject_kind == "operator"
-        assert result.subject_id.startswith("browser-")
+        # The ACTOR: this organization's persona, not a browser label and
+        # not the personal key.
+        assert result.subject_id == NETWORK_PERSONA.public_hex
+        assert not result.subject_id.startswith("browser-")
+        assert result.subject_id != NETWORK_PERSONAL_ROOT.public_hex
         assert result.scope == NETWORK_SCOPES
         assert 0 < result.not_after - NOW <= 3600 + 600
 
@@ -14754,7 +14826,7 @@ class TestNetworkSignOn:
         env = c["envelope"]
         assert set(env) == {"v", "signer", "ts", "payload", "cert", "sig"}
         assert env["v"] == 1
-        assert env["cert"] == c["signon"]["certWire"]
+        assert env["cert"] == c["signon"]["orgs"][0]["certWire"]
         cert = DelegationCert.from_json(env["cert"])
         assert cert.child_pub == env["signer"]
         verify_signature(
@@ -14772,7 +14844,7 @@ class TestNetworkSignOn:
     def test_session_key_non_extractable_and_root_dropped(self):
         c = self._checks
         assert c["signon"]["diagnostics"]["extractable"] is False
-        assert c["signon"]["diagnostics"]["rootDropped"] is True
+        assert c["signon"]["diagnostics"]["personalRootDropped"] is True
 
     def test_extractable_key_install_refused(self):
         c = self._checks
@@ -14788,9 +14860,11 @@ class TestNetworkSignOn:
         assert after["idb"] == 0  # IndexedDB cleared on sign-out
         assert after["available"] is False
 
-    # ── revoke: root step-up mints a registry-valid record ──
+    # ── revoke: personal step-up, signed by the issuing persona ──
 
     def test_revocation_record_verifies_and_signs_out(self):
+        """A persona expires its own delegates (§7): the record is issued by
+        the persona that signed the certificate, and verifies under it."""
         c = self._checks
         assert c["revoke"]["revoked"] is True
         posted = c["revoke_posted"]
@@ -14798,10 +14872,10 @@ class TestNetworkSignOn:
         record = RevocationRecord.from_json(posted["record"])
         revoked_cert = DelegationCert.from_json(posted["revoked_cert"])
         verify_revocation(
-            record, NETWORK_ROOT.public_hex, org=NETWORK_ORG_UUID,
+            record, NETWORK_PERSONA.public_hex, org=NETWORK_ORG_UUID,
             revoked_cert=revoked_cert,
         )
-        assert record.issuer_pub == NETWORK_ROOT.public_hex
+        assert record.issuer_pub == NETWORK_PERSONA.public_hex
         assert record.revoked_key_id == revoked_cert.child_pub
         assert record.expires_at == revoked_cert.not_after  # I7 bound
         after = c["after_revoke"]
