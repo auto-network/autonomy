@@ -98,7 +98,6 @@ tools/dashboard/tests/test_worktree_directives.py::test_rebase_directive_failure
 tools/dashboard/tests/unified_viewer/test_browser.py::TestUnresolvedState::test_link_button_visible
 tools/dashboard/tests/unified_viewer/test_browser.py::TestUnresolvedState::test_no_entries_when_unresolved
 tools/graph/tests/test_declared_references.py::test_two_repositories_on_one_host_need_one_credential
-tools/graph/tests/test_turn_correction_supersedes.py::test_codex_no_uuid_event_msg_resolves_via_shared_id_rule
 tools/init/tests/test_first_run.py::test_bootstrap_allowlist_setting_seeded_and_valid
 tools/init/tests/test_first_run.py::test_default_first_org_is_autonomy
 tools/init/tests/test_first_run.py::test_first_org_from_env
