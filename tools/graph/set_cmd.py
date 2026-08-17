@@ -360,7 +360,7 @@ def _print_composition(set_id: str, key: str, org) -> None:
     if not parts:
         return
     print(f"  composed from a base plus {', '.join(parts)} — "
-          f"`graph set layers {set_id} {key}` shows each",
+          f"`graph set layers {set_id} --key {key}` shows each",
           file=sys.stderr)
 
 
@@ -512,6 +512,13 @@ def _report_unresolved_references(set_id: str, rev: int, payload, org) -> None:
         target, key = provisionable[0]
         print(f"    provision with: graph set add {target}#1 "
               f"--key {key} --from <file>")
+        # Which store answered. This read goes to the databases THIS process
+        # can open, and a container's are not the host's -- so "not
+        # provisioned" here can mean "provisioned somewhere I cannot see".
+        # Naming the frame is the difference between a fact and a guess
+        # wearing a fact's clothes.
+        print(f"    (looked in the databases this process can open; from a "
+              f"container that is not the host's store)")
     for target, _ in unknown:
         print(f"  ! this row references {target}, and no schema for it is "
               f"registered here.")
@@ -520,6 +527,53 @@ def _report_unresolved_references(set_id: str, rev: int, payload, org) -> None:
         print(f"    reference names a set that does not exist, or that set's "
               f"module is not imported")
         print(f"    in this process.")
+
+
+def cmd_set_layers(args) -> None:
+    """Every stored row behind one resolved value, and what each contributes.
+
+    The command the other messages point at. Every read surface returns a
+    merged payload, so when a write appears to do nothing there is nowhere
+    to look -- not a gap in anyone's knowledge, a gap in what anything will
+    tell them. This is the view where a base, its overrides, the fields each
+    one changes, and any row that resolves to nothing are all visible at
+    once.
+    """
+    from tools.graph import settings_ops
+
+    set_id = args.set_at_rev.split("#", 1)[0]
+    org = _org(args) or "personal"
+    layers = settings_ops.layers_for(set_id, args.key, org=org)
+
+    if layers["base"] is None and not layers["orphans"]:
+        print(f"  no rows under {set_id} key={args.key!r} in {org!r}")
+        return
+
+    if layers["base"] is not None:
+        base = layers["base"]
+        print(f"  base       {base['id']}  [{base['state']}]  "
+              f"rev {base['schema_revision']}")
+        for name in sorted(base["payload"]):
+            print(f"               {name} = "
+                  f"{json.dumps(base['payload'][name], default=str)[:70]}")
+
+    for entry in layers["overrides"]:
+        print(f"  override   {entry['id']}  [{entry['state']}]"
+              f"{'  DEPRECATED' if entry['deprecated'] else ''}")
+        print(f"               changes {', '.join(entry['changes']) or '(nothing)'}")
+
+    for entry in layers["deprecated"]:
+        kind = "override" if entry["is_override"] else "base"
+        print(f"  retired    {entry['id']}  [{entry['state']}]  {kind} — "
+              f"not applied by resolution")
+
+    for entry in layers["orphans"]:
+        print(f"  ORPHAN     {entry['id']}  [{entry['state']}]  supersedes "
+              f"{entry['supersedes'][:11]}, which is not here — resolves to "
+              f"nothing and is only reachable by this id")
+
+    if layers["resolved"] is not None:
+        print(f"\n  resolved   {json.dumps(layers['resolved'], sort_keys=True, default=str)[:600]}")
 
 
 def cmd_set_orphans(args) -> None:
@@ -1187,6 +1241,15 @@ def attach_set_subparser(sub) -> None:
     p_orphans.add_argument("set_at_rev", metavar="set_id[#rev]")
     p_orphans.add_argument("--org", default=None, help="Organization to read as")
     p_orphans.set_defaults(func=cmd_set_orphans)
+
+    p_layers = set_sub.add_parser(
+        "layers",
+        help="Every stored row behind one resolved value, and what each adds",
+    )
+    p_layers.add_argument("set_at_rev", metavar="set_id[#rev]")
+    p_layers.add_argument("--key", required=True, help="Which key to open up")
+    p_layers.add_argument("--org", default=None, help="Organization to read as")
+    p_layers.set_defaults(func=cmd_set_layers)
     p_add.add_argument("--from", dest="from_file",
                        help="Path to JSON or YAML payload file (use '-' for stdin)")
     p_add.add_argument("--inline", dest="inline",
