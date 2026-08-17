@@ -31,16 +31,39 @@ def test_the_operator_is_shown_who_is_being_admitted_and_why():
     assert stored["display_name"] == "Shari Vietry"
 
 
-def test_the_photo_is_not_put_on_the_decision_surface():
-    """A decision surface carries what is being decided -- who, and why. The
-    photo is several hundred kilobytes and is not that."""
+def test_the_operator_is_shown_the_face_not_a_note_about_one(monkeypatch):
+    """Deciding who to let in means seeing them. The photo is put in the
+    attachment store when the request is made, so what reaches the screen is
+    the same kind of URL every other avatar in the dashboard is drawn from --
+    never bytes the requester supplied inline."""
+    from tools.dashboard.plugins.mission_control.entrypoints import api as mc
+
+    monkeypatch.setattr(mc, "_store_avatar", lambda v, n: ("att-123", None))
     avatar = "data:image/jpeg;base64," + "A" * 4000
     stored, staged = va.prepare_create("auto-x", {
         "display_name": "Shari Vietry", "avatar": avatar,
     })
-    assert staged["has_photo"] is True
-    assert "avatar" not in staged
-    assert stored["avatar"] == avatar          # kept, for the minting step
+    assert staged["avatar_url"] == "/api/attachment/att-123"
+    assert "avatar" not in staged, "the raw bytes never reach the screen"
+    assert stored["avatar_attachment_id"] == "att-123"
+
+
+def test_a_person_with_no_photo_is_still_decidable():
+    stored, staged = va.prepare_create("auto-x", {"display_name": "Shari Vietry"})
+    assert staged["avatar_url"] is None
+    assert "avatar_attachment_id" not in stored
+
+
+def test_an_unstorable_photo_is_refused_before_the_operator_sees_it(monkeypatch):
+    from tools.dashboard.plugins.mission_control.entrypoints import api as mc
+
+    monkeypatch.setattr(mc, "_store_avatar", lambda v, n: (None, "image is corrupt"))
+    with pytest.raises(ValueError) as exc:
+        va.prepare_create("auto-x", {
+            "display_name": "Shari Vietry",
+            "avatar": "data:image/jpeg;base64,AAAA",
+        })
+    assert "corrupt" in str(exc.value)
 
 
 # ── refusing early ────────────────────────────────────────────────
@@ -108,8 +131,12 @@ async def test_approval_mints_the_way_in_and_returns_it_once(tmp_path, monkeypat
     monkeypatch.setattr(db, "_db_path", lambda p=None: db_path)
 
     out = await va.execute(
-        {"request": {"display_name": "Shari Vietry", "reason": "reviewing"}},
+        {"request": {"display_name": "Shari Vietry", "reason": "reviewing",
+                     "avatar_attachment_id": "att-123"}},
         {"approved": True},
+    )
+    assert out["avatar_attachment_id"] == "att-123", (
+        "the photo the operator approved is the one the person gets"
     )
     assert out["ok"] is True
     assert out["display_name"] == "Shari Vietry"

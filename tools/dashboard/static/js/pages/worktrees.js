@@ -2286,6 +2286,25 @@
                      ttl_seconds: req.ttl === '' ? null : Number(req.ttl) };
           },
         },
+        visitor_token: {
+          open(self, r) {
+            // The operator is deciding a person, so the panel shows one: the
+            // photo they sent, their name under it, and why. Everything here
+            // is what the server froze at request time -- the page never
+            // renders bytes the requester supplied inline.
+            const staged = r.staged || {};
+            self.approvalBusy = false;
+            self.approvalRequest = {
+              id: r.id, kind: r.kind, session: staged.asked_by || r.session,
+              title: 'Let this person in?',
+              actionLabel: 'Approve',
+              target: null,
+              staged: staged,
+              awaitExecution: true,
+              error: '',
+            };
+          },
+        },
         mcp_crosstalk: {
           open(self, r) {
             const req = r.request || {};

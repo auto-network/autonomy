@@ -61,17 +61,33 @@ def prepare_create(session: str, request: dict) -> tuple[dict, dict]:
         )
 
     reason = (request.get("reason") or "").strip()
-    stored = {"display_name": name, "reason": reason}
+
+    # The photo is put in the attachment store HERE, not on approval, so that
+    # what the operator is shown is a face and not a note saying a face was
+    # attached. Seeing who is being admitted is the decision.
+    #
+    # Storing it before the answer is known means a declined request leaves an
+    # image behind. That store is content-addressed and de-duplicates, so the
+    # cost is one copy of a photo that was already sent, and the alternative
+    # is deciding blind.
+    attachment_id = None
     if avatar:
-        stored["avatar"] = avatar
-    # Staged is what the operator is shown. The photo is not in it: it is
-    # large, and a decision surface should carry what is being decided, which
-    # is who this person is and why -- not several hundred kilobytes of it.
+        from tools.dashboard.plugins.mission_control.entrypoints import api as mc
+
+        attachment_id, error = mc._store_avatar(avatar, name)
+        if error:
+            raise ValueError(error)
+
+    stored = {"display_name": name, "reason": reason}
+    if attachment_id:
+        stored["avatar_attachment_id"] = attachment_id
     staged = {
         "display_name": name,
         "reason": reason,
-        "has_photo": bool(avatar),
         "asked_by": session,
+        "avatar_attachment_id": attachment_id,
+        # Same route every other avatar in the dashboard is drawn from.
+        "avatar_url": f"/api/attachment/{attachment_id}" if attachment_id else None,
     }
     return stored, staged
 
@@ -107,16 +123,15 @@ async def execute(row: dict, decision: dict) -> dict:
     # Imported here: this module is loaded by the approvals routes at import
     # time, and the plugin brings the whole Mission Control surface with it.
     from tools.dashboard.dao import mission_control_db as db
-    from tools.dashboard.plugins.mission_control.entrypoints import api as mc
 
     request = row.get("request") or {}
     name = (request.get("display_name") or "").strip()
     if not name:
         return {"ok": False, "error": "the request no longer carries a name"}
 
-    attachment_id, error = mc._store_avatar(request.get("avatar"), name)
-    if error:
-        return {"ok": False, "error": error}
+    # The photo was stored when the request was made, so the operator could
+    # see it. Nothing to do here but name it.
+    attachment_id = request.get("avatar_attachment_id")
 
     visitor = db.create_visitor_token(name, avatar_attachment_id=attachment_id)
     return {

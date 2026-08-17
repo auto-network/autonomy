@@ -867,6 +867,29 @@
             </div>
           </div>
         </template>
+        <template x-if="approvalRequest.kind === 'visitor_token'">
+          <div class="mt-4 flex flex-col items-center text-center" data-testid="approval-visitor">
+            <img x-show="approvalRequest.staged && approvalRequest.staged.avatar_url" x-cloak
+                 :src="approvalRequest.staged && approvalRequest.staged.avatar_url"
+                 :alt="approvalRequest.staged && approvalRequest.staged.display_name"
+                 data-testid="approval-visitor-photo"
+                 class="h-24 w-24 rounded-full object-cover ring-2 ring-slate-600">
+            <div x-show="!(approvalRequest.staged && approvalRequest.staged.avatar_url)" x-cloak
+                 data-testid="approval-visitor-nophoto"
+                 class="flex h-24 w-24 items-center justify-center rounded-full bg-slate-700 text-2xl font-semibold text-slate-300"
+                 x-text="(approvalRequest.staged && approvalRequest.staged.display_name || '?').trim().charAt(0).toUpperCase()"></div>
+            <div class="mt-3 text-base font-semibold text-slate-100"
+                 data-testid="approval-visitor-name"
+                 x-text="approvalRequest.staged && approvalRequest.staged.display_name"></div>
+            <p x-show="approvalRequest.staged && approvalRequest.staged.reason" x-cloak
+               class="mt-1 text-sm leading-5 text-slate-400"
+               data-testid="approval-visitor-reason"
+               x-text="approvalRequest.staged && approvalRequest.staged.reason"></p>
+            <p class="mt-3 text-xs leading-5 text-slate-500">
+              Approving gives this person a link that opens your missions.
+            </p>
+          </div>
+        </template>
         <template x-if="approvalRequest.kind === 'secure_setting'">
           <div class="mt-4 space-y-4" data-testid="approval-secure-setting">
             <template x-for="f in approvalRequest.secure.fields" :key="f.key">
