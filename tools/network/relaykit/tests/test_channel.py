@@ -21,11 +21,14 @@ from tools.network.relaykit.channel import (
     verify_server_hello,
 )
 from tools.network.relaykit.frames import (
+    VIEWER_KIND_FEED,
     VIEWER_KIND_LEN,
     VIEWER_KIND_RECORD,
     split_viewer_message,
+    tag_viewer_message,
 )
 from tools.network.relaykit.connector import serve_channel
+from tools.network.relaykit.viewer import ViewerChannel
 from tools.network.relaykit.ice_signaling import (
     IceAnswer,
     IceCapacity,
@@ -152,6 +155,131 @@ class TestHandshake:
                 server_hello, root_pub=root.public_hex, org=ORG,
                 token="f" * 32, client_eph=client_eph, now=now,
             )
+
+    @pytest.mark.asyncio
+    async def test_viewer_authenticates_an_already_open_transport(
+        self, root, session_key, session_cert, now
+    ):
+        class Transport:
+            def __init__(self):
+                self.sent = []
+                self.replies = asyncio.Queue()
+                self.closed = False
+                self.server_crypto = None
+
+            async def send(self, payload):
+                self.sent.append(payload)
+                if self.server_crypto is None:
+                    client_eph = parse_client_hello(payload)
+                    server_priv, server_hello, transcript = build_server_hello(
+                        session_key,
+                        session_cert,
+                        org=ORG,
+                        token=TOKEN,
+                        client_eph=client_eph,
+                    )
+                    self.server_crypto = ChannelCrypto.server(
+                        server_priv, client_eph, transcript
+                    )
+                    await self.replies.put(
+                        tag_viewer_message(VIEWER_KIND_RECORD, server_hello)
+                    )
+                    return
+                assert self.server_crypto.open_record(payload) == b"request"
+                for record in self.server_crypto.seal_message(b"response"):
+                    await self.replies.put(
+                        tag_viewer_message(VIEWER_KIND_RECORD, record)
+                    )
+
+            async def recv(self):
+                return await self.replies.get()
+
+            async def close(self):
+                self.closed = True
+
+        transport = Transport()
+        channel = await ViewerChannel.authenticate(
+            transport,
+            TOKEN,
+            root_pub=root.public_hex,
+            org=ORG,
+            now=now,
+        )
+        await channel.send_message(b"request")
+        assert await channel.recv_message() == b"response"
+        await channel.close()
+        assert transport.closed is True
+
+    @pytest.mark.asyncio
+    async def test_viewer_bounds_demultiplexed_feed_while_waiting_for_a_record(
+        self, root, session_key, session_cert, now
+    ):
+        class Transport:
+            closed = False
+
+            def __init__(self):
+                self.replies = asyncio.Queue()
+
+            async def send(self, payload):
+                client_eph = parse_client_hello(payload)
+                _, server_hello, _ = build_server_hello(
+                    session_key,
+                    session_cert,
+                    org=ORG,
+                    token=TOKEN,
+                    client_eph=client_eph,
+                )
+                await self.replies.put(
+                    tag_viewer_message(VIEWER_KIND_RECORD, server_hello)
+                )
+                feed = tag_viewer_message(VIEWER_KIND_FEED, b"x" * (2 * 1024 * 1024))
+                for _ in range(5):
+                    await self.replies.put(feed)
+
+            async def recv(self):
+                return await self.replies.get()
+
+            async def close(self):
+                self.closed = True
+
+        transport = Transport()
+        channel = await ViewerChannel.authenticate(
+            transport,
+            TOKEN,
+            root_pub=root.public_hex,
+            org=ORG,
+            now=now,
+        )
+        with pytest.raises(ConnectionError, match="demultiplexer queue is full"):
+            await channel.recv_message()
+        assert transport.closed is True
+
+    @pytest.mark.asyncio
+    async def test_viewer_closes_an_open_transport_when_authentication_fails(
+        self, root, now
+    ):
+        class Transport:
+            closed = False
+
+            async def send(self, payload):
+                pass
+
+            async def recv(self):
+                return tag_viewer_message(VIEWER_KIND_RECORD, b"not-json")
+
+            async def close(self):
+                self.closed = True
+
+        transport = Transport()
+        with pytest.raises(HandshakeError):
+            await ViewerChannel.authenticate(
+                transport,
+                TOKEN,
+                root_pub=root.public_hex,
+                org=ORG,
+                now=now,
+            )
+        assert transport.closed is True
 
 
 class TestRecordLayer:

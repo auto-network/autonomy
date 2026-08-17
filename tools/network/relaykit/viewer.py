@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 from typing import Optional
 
 import websockets
@@ -28,6 +29,10 @@ from .frames import (
     FrameError,
     split_viewer_message,
 )
+
+
+VIEWER_DEMUX_MAX_FRAMES = 128
+VIEWER_DEMUX_MAX_BYTES = 8 * 1024 * 1024
 
 
 def read_viewer_record(raw: bytes) -> bytes:
@@ -63,8 +68,14 @@ class ViewerChannel:
         #: reads next routes what it finds into BOTH queues, so a feed
         #: frame arriving mid-request and a record arriving while waiting
         #: on a feed are each buffered rather than dropped or misdecoded.
-        self._records: asyncio.Queue[bytes] = asyncio.Queue()
-        self._feed: asyncio.Queue[bytes] = asyncio.Queue()
+        self._records: asyncio.Queue[bytes] = asyncio.Queue(
+            maxsize=VIEWER_DEMUX_MAX_FRAMES
+        )
+        self._feed: asyncio.Queue[bytes] = asyncio.Queue(
+            maxsize=VIEWER_DEMUX_MAX_FRAMES
+        )
+        self._record_bytes = 0
+        self._feed_bytes = 0
 
     async def _next(self, queue: "asyncio.Queue[bytes]") -> bytes:
         """Next payload from *queue*, pumping the socket until it has one.
@@ -81,8 +92,26 @@ class ViewerChannel:
                 continue
             kind, payload = split_viewer_message(raw)
             target = self._feed if kind == VIEWER_KIND_FEED else self._records
+            queued_bytes = (
+                self._feed_bytes if kind == VIEWER_KIND_FEED else self._record_bytes
+            )
+            if (
+                target.full()
+                or queued_bytes + len(payload) > VIEWER_DEMUX_MAX_BYTES
+            ):
+                await self.close()
+                raise ConnectionError("viewer demultiplexer queue is full")
             target.put_nowait(payload)
-        return queue.get_nowait()
+            if kind == VIEWER_KIND_FEED:
+                self._feed_bytes += len(payload)
+            else:
+                self._record_bytes += len(payload)
+        payload = queue.get_nowait()
+        if queue is self._feed:
+            self._feed_bytes -= len(payload)
+        else:
+            self._record_bytes -= len(payload)
+        return payload
 
     async def recv_feed(self) -> bytes:
         """Next sealed feed frame.
@@ -92,6 +121,47 @@ class ViewerChannel:
         with this channel's pairwise key.
         """
         return await self._next(self._feed)
+
+    @classmethod
+    async def authenticate(
+        cls,
+        transport,
+        token: str,
+        *,
+        root_pub: str,
+        org: str,
+        now: Optional[int] = None,
+    ) -> "ViewerChannel":
+        """Run the application handshake over an already-open transport.
+
+        The transport needs only the WebSocket-shaped ``send``, ``recv``, and
+        ``close`` methods.  This keeps one handshake and record implementation
+        for the Relay WebSocket, a native WebRTC DataChannel, and tests.
+        """
+        try:
+            eph_priv, client_hello = build_client_hello()
+            client_eph = eph_priv.public_key().public_bytes_raw().hex()
+            await transport.send(client_hello)
+            server_hello = await transport.recv()
+            if isinstance(server_hello, str):
+                raise HandshakeError("expected binary SERVER_HELLO")
+            server_hello = read_viewer_record(server_hello)
+            server_eph, transcript_hash = verify_server_hello(
+                server_hello,
+                root_pub=root_pub,
+                org=org,
+                token=token,
+                client_eph=client_eph,
+                now=now,
+            )
+            crypto = ChannelCrypto.client(eph_priv, server_eph, transcript_hash)
+        except BaseException:
+            with contextlib.suppress(Exception):
+                result = transport.close()
+                if inspect.isawaitable(result):
+                    await result
+            raise
+        return cls(transport, crypto)
 
     @classmethod
     async def connect(
@@ -110,28 +180,9 @@ class ViewerChannel:
             open_timeout=open_timeout,
             compression=None,
         )
-        try:
-            eph_priv, client_hello = build_client_hello()
-            client_eph = eph_priv.public_key().public_bytes_raw().hex()
-            await ws.send(client_hello)
-            server_hello = await ws.recv()
-            if isinstance(server_hello, str):
-                raise HandshakeError("expected binary SERVER_HELLO")
-            server_hello = read_viewer_record(server_hello)
-            server_eph, transcript_hash = verify_server_hello(
-                server_hello,
-                root_pub=root_pub,
-                org=org,
-                token=token,
-                client_eph=client_eph,
-                now=now,
-            )
-            crypto = ChannelCrypto.client(eph_priv, server_eph, transcript_hash)
-        except BaseException:
-            with contextlib.suppress(Exception):
-                await ws.close()
-            raise
-        return cls(ws, crypto)
+        return await cls.authenticate(
+            ws, token, root_pub=root_pub, org=org, now=now
+        )
 
     async def send_message(self, data: bytes) -> None:
         for record in self._crypto.seal_message(data):
