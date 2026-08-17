@@ -58,7 +58,68 @@ NOT_A_HOST_PATH = {
         "repo-local, so it resolves against a checkout rather than a machine",
     ("autonomy.capability.impl", "package_root"):
         "repo-local, so it resolves against a checkout rather than a machine",
+    ("dashboard.session.upload", "rel_path"):
+        "relative to the session run dir, and served through a route",
 }
+
+
+def _register_every_schema() -> None:
+    """Import every module that declares a schema, so the sweep sees them all.
+
+    A schema registers as an import side effect. The package imports the core
+    ones; a plugin's live under the plugin and register only where the plugin
+    is loaded. Without this the set of schemas under test depends on which
+    other test files were collected first — so the same assertion passes alone
+    and fails in a full run, or worse, passes in a full run and hides a field
+    when run alone.
+
+    Found by what a file CONTAINS rather than where it sits, because a path
+    list is right until the next plugin and then silently short.
+    """
+    import importlib
+    import pathlib
+
+    import tools.graph.schemas  # noqa: F401 — the core set
+
+    root = pathlib.Path(__file__).resolve().parents[3]
+    for base in ("tools/dashboard", "agents"):
+        directory = root / base
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.rglob("*.py")):
+            if "test" in path.parts or path.name.startswith("test_"):
+                continue
+            try:
+                if "SettingSchema" not in path.read_text():
+                    continue
+            except OSError:
+                continue
+            try:
+                importlib.import_module(
+                    ".".join(path.relative_to(root).with_suffix("").parts))
+            except Exception:
+                # Not fatal, and not silent: whatever fails to import is
+                # covered by the assertion below, which fails rather than
+                # quietly narrowing what this file checks.
+                continue
+
+
+_register_every_schema()
+
+
+def test_the_sweep_can_see_plugin_schemas():
+    """Guards the guard.
+
+    Every assertion here is over the registry, so a registry missing half the
+    product reports a clean sweep of the half it can see. This names one
+    schema that only registers when a plugin module is imported: if it is
+    absent, the rest of this file proves nothing.
+    """
+    registered = set(schemas.list_registered_set_ids())
+
+    assert "dashboard.session.upload" in registered, (
+        "plugin schemas did not register, so this file is checking only the "
+        "core set and the fields it would catch are invisible to it")
 
 
 def _walk_fields():

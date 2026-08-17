@@ -33,8 +33,6 @@ tools/dashboard/tests/test_api_orgs.py::test_orgs_delete
 tools/dashboard/tests/test_api_orgs.py::test_orgs_delete_force
 tools/dashboard/tests/test_api_orgs.py::test_orgs_delete_missing
 tools/dashboard/tests/test_api_orgs.py::test_orgs_delete_refuses_with_references
-tools/dashboard/tests/test_api_projects.py::test_local_workspace_api_attaches_repo_to_existing_personal_workspace
-tools/dashboard/tests/test_api_projects.py::test_local_workspace_api_creates_new_workspace_in_one_call
 tools/dashboard/tests/test_api_settings.py::test_diag_settings_latency_percentiles
 tools/dashboard/tests/test_behavioral_sweep.py::TestAgentActionsDropdown::test_send_to_dispatches_and_closes
 tools/dashboard/tests/test_behavioral_sweep.py::TestAgentActionsDropdown::test_send_to_primer_has_new_shape
