@@ -11,7 +11,12 @@ from pathlib import Path
 
 import pytest
 
-from tools.network.idkit import DelegationCert, KeyPair, verify_chain
+from tools.network.idkit import (
+    DelegationCert,
+    KeyPair,
+    derive_persona,
+    verify_chain,
+)
 from tools.network.idkit.armor import encrypt_root_key
 from tools.network.idkit.keys import verify_signature
 from tools.network.registry.signing import request_signing_input
@@ -24,16 +29,19 @@ HARNESS = (
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
 def test_browser_module_load_configures_real_signon_path():
-    root = KeyPair.generate()
+    personal = KeyPair.generate()
     org_uuid = str(uuid.uuid4())
+    genesis_id = "b7" * 32
     passphrase = "module load browser sign-on passphrase"
-    armor = encrypt_root_key(root, passphrase, iterations=10_000)
     result = subprocess.run(
         ["node", str(HARNESS), "browser"],
         env={
             **os.environ,
-            "AUTONOMY_ARMOR": armor,
-            "AUTONOMY_ROOT_PUB": root.public_hex,
+            "AUTONOMY_PERSONAL_ARMOR": encrypt_root_key(
+                personal, passphrase, iterations=10_000),
+            "AUTONOMY_PERSONAL_ROOT_PUB": personal.public_hex,
+            "AUTONOMY_GENESIS_ID": genesis_id,
+            "AUTONOMY_ROOT_PUB": personal.public_hex,
             "AUTONOMY_ORG_UUID": org_uuid,
             "AUTONOMY_PASSPHRASE": passphrase,
         },
@@ -46,28 +54,31 @@ def test_browser_module_load_configures_real_signon_path():
 
     assert output["state"]["signedIn"] is True
     assert output["storedSessions"] == 1
-    assert output["subjectId"].startswith("browser-")
+    # No browser label is minted any more: the actor is the persona, so the
+    # localStorage stand-in identity is never written.
+    assert output["subjectId"] is None
+    # The ONE unlock reads the personal armor, then one ledger head and one
+    # binding per organization. The organization key is never fetched.
     assert output["fetchCalls"] == [
-        "/api/network/org-key?org=module-load-org",
-        "/api/network/binding?org=module-load-org",
-        # A bound org checks whether its serving credential needs repair
-        # before opening the root — best-effort, never blocks sign-on.
-        "/api/network/serve-cert?org=module-load-org",
-        # Persona-subject resolution probes the ledger; the 404 here means
-        # "not founded", so the personal armor is never fetched and the
-        # cert falls back to the label subject.
+        "/api/identity/personal",
         "/api/network/ledger/heads?org=module-load-org",
+        "/api/network/binding?org=module-load-org",
+        "/api/network/rekey-policy?org=module-load-org",
     ]
 
-    certificate = DelegationCert.from_json(
-        output["signOnResult"]["certWire"]
+    persona = derive_persona(
+        bytes.fromhex(personal.private_hex), genesis_id,
     )
+    entry = output["signOnResult"]["orgs"][0]
+    assert entry["personaPub"] == persona.public_hex
+    certificate = DelegationCert.from_json(entry["certWire"])
     verify_chain(
         certificate,
-        root.public_hex,
+        persona.public_hex,
         org=org_uuid,
         required_scope="link:publish",
     )
+    assert certificate.subject.id == persona.public_hex
     envelope = output["envelope"]
     verify_signature(
         envelope["signer"],
