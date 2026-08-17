@@ -1012,6 +1012,49 @@ var signRegistryRequestCore;
   // unlock.  The common path performs only two local reads (binding + status)
   // and returns.  Root decryption and signing happen only when the stored
   // serving credential is missing, expired, or has the obsolete schema.
+  // SINGLE-USE MIGRATION, reached from the ordinary password unlock — the
+  // place a person actually signs in. Delete this with _migrateLegacyOrgKey.
+  //
+  // Every organization still on the passphrase-armored root key is opened
+  // with the password just typed and moved to the sealed form, after which a
+  // personal unlock can reach its root and renew its serving certificate.
+  // Organizations whose armor answers to a different password are reported.
+  // Nothing here may disturb a successful unlock: dashboard access has
+  // already been granted by the time this runs.
+  async function migrateLegacyOrgKeys(passphrase, opts) {
+    opts = opts || {};
+    var opened = await _openPersonalRoot(passphrase);
+    var migrated = [];
+    var notMigrated = [];
+    try {
+      var slugs = await _signOnOrgSlugs(opts);
+      for (var i = 0; i < slugs.length; i++) {
+        var slug = slugs[i];
+        var slugQ = '?org=' + encodeURIComponent(slug);
+        try {
+          var orgKey = await _fetchJsonOrNull(
+            '/api/network/org-key' + slugQ, slug);
+          if (!orgKey || orgKey.sealed_root_key ||
+              !orgKey.armored_private_key) {
+            continue;                       // already sealed, or no key here
+          }
+          var result = await _migrateLegacyOrgKey(
+            slug, orgKey, passphrase, opened.seed);
+          if (result.migrated) migrated.push(slug);
+          else notMigrated.push({ org: slug, status: result.status,
+                                  error: result.error || null });
+        } catch (e) {
+          notMigrated.push({ org: slug, status: 'failed',
+                             error: (e && e.message) || String(e) });
+        }
+      }
+    } finally {
+      // I1: the personal root plaintext dies here, whatever happened above.
+      if (opened.seed) { opened.seed.fill(0); opened.seed = null; }
+    }
+    return { migrated: migrated, notMigrated: notMigrated };
+  }
+
   async function repairServeCredential(passphrase, opts) {
     opts = opts || {};
     var orgSlug = opts.org || null;
@@ -1246,6 +1289,7 @@ var signRegistryRequestCore;
     signOut: signOut,
     provisionServeCert: provisionServeCert,
     repairServeCredential: repairServeCredential,
+    migrateLegacyOrgKeys: migrateLegacyOrgKeys,
     revokeCurrentKey: revokeCurrentKey,
     listKeys: listKeys,
     // Internals exposed for the L2.B sweep + cross-language vectors; the

@@ -193,6 +193,27 @@
         if (typeof networkSession.ready === 'function') {
           await networkSession.ready();
         }
+        // SINGLE-USE MIGRATION, before the repair that depends on it. An
+        // organization whose root key is still passphrase-armored cannot be
+        // opened from a personal unlock at all, so its serving credential
+        // can never be repaired; moving it to the sealed form is what makes
+        // the line below able to do anything for it. Remove this call, and
+        // the code behind it, once every organization reads a sealed key.
+        if (typeof networkSession.migrateLegacyOrgKeys === 'function') {
+          try {
+            var moved = await networkSession.migrateLegacyOrgKeys(password, {});
+            window.__autonomyOrgKeyMigration = moved;
+            if (window.console && console.info &&
+                (moved.migrated.length || moved.notMigrated.length)) {
+              console.info('org key migration:', JSON.stringify(moved));
+            }
+          } catch (e) {
+            if (window.console && console.warn) {
+              console.warn('org key migration failed after unlock:',
+                           (e && e.message) || e);
+            }
+          }
+        }
         await networkSession.repairServeCredential(password, {});
       } catch (e) {
         if (window.console && console.warn) {
