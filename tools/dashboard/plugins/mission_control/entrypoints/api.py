@@ -492,6 +492,53 @@ async def set_pillar_coordinator(request: Request) -> JSONResponse:
     return JSONResponse({"pillar": _pillar_payload(db.get_pillar(pillar_id))})
 
 
+async def delete_visitor(request: Request) -> JSONResponse:
+    """Forget a guest.
+
+    Their link stops working at once. What they already said stays, under the
+    name they said it: a conversation entry keeps the label it was written
+    with, so removing somebody never blanks out a question or makes it look
+    unasked.
+
+    Presence is separate and is not touched here -- a row saying they were on
+    a screen is a record of something that happened, and the route below is
+    for removing one deliberately.
+    """
+    participant_id = request.path_params["participant_id"]
+    if not db.delete_visitor(participant_id):
+        return JSONResponse({"error": "no such participant"}, status_code=404)
+    return JSONResponse({"deleted": participant_id})
+
+
+async def forget_presence(request: Request) -> JSONResponse:
+    """Take one participant off one surface.
+
+    For a row that should not be there rather than one that is merely old:
+    an identity somebody has stopped using, or a duplicate of a person who is
+    already on the list under another name. Ageing a stale row off is a
+    different problem and is not what this does.
+    """
+    surface_id = request.path_params["surface_id"]
+    participant_id = request.path_params["participant_id"]
+    from tools.graph import settings_ops
+    from tools.graph.surface import SURFACE_PRESENCE_SET_ID
+
+    key = f"{surface_id}:{participant_id}"
+    try:
+        rows = settings_ops.read_set(SURFACE_PRESENCE_SET_ID, org=compose.PRESENCE_ORG)
+    except (LookupError, OSError, ValueError) as exc:
+        return JSONResponse({"error": f"presence store unavailable: {exc}"},
+                            status_code=503)
+    for member in rows.members:
+        if member.key == key:
+            try:
+                settings_ops.remove_setting(member.id, org=compose.PRESENCE_ORG)
+            except Exception as exc:
+                return JSONResponse({"error": str(exc)}, status_code=409)
+            return JSONResponse({"forgotten": key})
+    return JSONResponse({"error": "not on that surface"}, status_code=404)
+
+
 async def set_mission_org(request: Request) -> JSONResponse:
     """Put a mission in the organization it belongs to.
 
@@ -984,6 +1031,12 @@ OPERATOR_PARTICIPANT_ID = "operator"
 #: this value, set in static/js/identity-indicator.js as Autonomy.operatorId.
 #: The two are pinned together by a test, because there is no shared source
 #: for them and drift shows up as one person appearing twice.
+#: A reader nothing can name: a link bound to no participant, or somebody
+#: signed out. Everyone in that position is one entry, because nothing here
+#: can tell two of them apart and claiming otherwise would fill the list with
+#: strangers who may be the same person.
+ANONYMOUS_VIEWER = "Anonymous Viewer"
+
 OPERATOR_PRESENCE_ID = "operator:personal"
 
 
@@ -1505,7 +1558,7 @@ async def handle_relay_read(participant_id: str, mission_id: str, body: dict) ->
         # all had the identity right. The id is display-safe and the lookup
         # takes exactly it.
         who = participant_id or "guest:with-the-link"
-        label = "Someone with the link"
+        label = ANONYMOUS_VIEWER
         if participant_id:
             visitor = db.get_visitor_by_participant_id(participant_id)
             # A grant can outlive the person it was minted for. Falling back
@@ -1855,7 +1908,7 @@ async def _here_impl(request: Request, *, surface_id: str) -> JSONResponse:
     """
     identity = _resolve_visitor_identity(request)
     who = (identity or {}).get("participant_id") or "guest:signed-out"
-    label = (identity or {}).get("participant_label") or "Someone here"
+    label = (identity or {}).get("participant_label") or ANONYMOUS_VIEWER
     # TWO NAMESPACES, ONE HUMAN. OPERATOR_PARTICIPANT_ID is who a question is
     # attributed to; presence is keyed separately, and every other surface on
     # the dashboard writes the operator under OPERATOR_PRESENCE_ID. Recording
@@ -2113,6 +2166,8 @@ routes: list[Route] = [
         activate_site_revision, methods=["POST"],
     ),
     Route("/api/visitor-tokens", create_visitor_token, methods=["POST"]),
+    Route("/api/visitor-tokens/{participant_id}", delete_visitor, methods=["DELETE"]),
+    Route("/api/presence/{surface_id}/{participant_id}", forget_presence, methods=["DELETE"]),
     Route(
         "/api/visitor-tokens/{participant_id}",
         get_visitor_by_participant_id, methods=["GET"],

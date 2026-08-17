@@ -1995,7 +1995,7 @@ def test_an_unbound_reader_is_named_honestly():
          patch.object(mc_api, "_surface_presence", lambda s: []):
         _run(mc_api.handle_relay_read("", mission_id, {"kind": "here"}))
     assert seen["who"] == "guest:with-the-link"
-    assert seen["label"] == "Someone with the link"
+    assert seen["label"] == mc_api.ANONYMOUS_VIEWER
     assert seen["kind"] == "guest"
     assert seen["surface"] == f"mission:{mission_id}"
 
@@ -3072,9 +3072,36 @@ async def test_a_guest_whose_record_is_gone_is_still_shown(tmp_path, monkeypatch
     assert seen["label"] == "guest:gone"
 
 
-def test_an_unbound_link_still_says_someone_rather_than_inventing_people():
-    """Everyone holding an unbound link is the same participant as far as
-    anything here can tell, so it says so instead of inflating the count."""
-    import inspect
-    src = inspect.getsource(mc_api)
-    assert '"Someone with the link"' in src
+# ── forgetting a person ────────────────────────────────────────────
+
+
+def test_forgetting_a_guest_stops_their_link_working(tmp_path):
+    """The token IS the row, so removing the person removes the way in."""
+    db_path = tmp_path / "mc.db"
+    visitor = db.create_visitor_token("Jeremy Spilman", db_path=db_path)
+    assert db.resolve_visitor(visitor["token"], db_path=db_path) is not None
+
+    assert db.delete_visitor(visitor["participant_id"], db_path=db_path) is True
+    assert db.resolve_visitor(visitor["token"], db_path=db_path) is None
+
+
+def test_forgetting_a_guest_leaves_what_they_said(tmp_path):
+    """A conversation entry keeps the name it was written under. Removing the
+    person must never blank a question or make it look unasked."""
+    db_path = tmp_path / "mc.db"
+    mission = db.create_mission("OSS Insights", "auto-x", db_path=db_path)
+    visitor = db.create_visitor_token("Jeremy Spilman", db_path=db_path)
+    entry = db.ask_question(
+        mission["mission_id"], "why three paths?",
+        visitor["participant_id"], visitor["display_name"], db_path=db_path)
+
+    db.delete_visitor(visitor["participant_id"], db_path=db_path)
+
+    kept = db.get_question(mission["mission_id"], entry["entry_id"], db_path=db_path)
+    assert kept["question"] == "why three paths?"
+    assert kept["asked_by_label"] == "Jeremy Spilman"
+
+
+def test_forgetting_somebody_who_was_never_there_says_so(tmp_path):
+    """So a caller can tell "gone now" from "never existed"."""
+    assert db.delete_visitor("guest:nobody", db_path=tmp_path / "mc.db") is False

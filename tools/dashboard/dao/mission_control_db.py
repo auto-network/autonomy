@@ -1146,6 +1146,29 @@ def resolve_visitor(
     }
 
 
+def delete_visitor(
+    participant_id: str, *, db_path: Path | str | None = None,
+) -> bool:
+    """Forget a guest, by the identifier that is safe to pass around.
+
+    Their way in stops working immediately -- the token IS the row. What they
+    already said stays: every conversation entry keeps the name it was written
+    under, snapshotted at the time, so removing the person does not blank out
+    a question they asked or make it look like nobody asked it.
+
+    Returns False when there was no such person, so a caller can tell "gone
+    now" from "never existed" instead of reporting success either way.
+    """
+    conn = _get_conn(db_path)
+    try:
+        cur = conn.execute(
+            "DELETE FROM visitor_tokens WHERE participant_id = ?", (participant_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    return cur.rowcount > 0
+
+
 def get_visitor_by_participant_id(
     participant_id: str, *, db_path: Path | str | None = None,
 ) -> dict | None:

@@ -94,29 +94,119 @@ curl -sk https://host.docker.internal:8080/api/missions/<mission_id>/site/revisi
 # → {"revision": {"revision_id": "<revision_id>", "revision_seq": N, ...}}
 ```
 
-## 5. Other routes
+## 5. Every dial you have
+
+The whole surface, grouped by what you are doing. Anything not listed here
+does not exist, and nothing here needs a Settings edit or a database write to
+reach — if you find yourself reaching for one of those, you are working around
+a route rather than using it.
+
+**The mission itself**
 
 ```bash
-GET    /api/missions                                              # list all missions
-GET    /api/missions/<mission_id>                                 # mission + current revision metadata
-DELETE /api/missions/<mission_id>                                 # hard-delete a mission and its full history
-GET    /api/missions/<mission_id>/site                            # current revision, metadata AND content together
-GET    /api/missions/<mission_id>/site/revisions                  # history (no content — id, seq, note, byte size, created_at)
-GET    /api/missions/<mission_id>/site/revisions/<revision_id>    # one historical revision, full content
-POST   /api/missions/<mission_id>/status                          # set lifecycle status -- {"status": "active"|"paused"|"complete"}
+GET    /api/missions                                    # every mission
+POST   /api/missions                                    # {name, coordinator_session, org}
+GET    /api/missions/<id>                               # mission, current revision, since_last_visit
+DELETE /api/missions/<id>                               # the mission and its whole history, gone
+POST   /api/missions/<id>/status                        # {"status": "active"|"paused"|"complete"}
+POST   /api/missions/<id>/seen                          # consume the "since last visit" delta
+POST   /api/missions/<id>/coordinator                   # {"coordinator_session": "..."}
+POST   /api/missions/<id>/org                           # {"org": "..."}
 ```
 
-No membership-set indirection, no `graph set remove` needed for deletion —
-`DELETE /api/missions/<id>` is a real route.
+Status is yours to set and is never inferred: a mission that is genuinely
+finished looks exactly like one that stalled, so guessing from staleness would
+mislead. It starts `active`.
 
-Status is explicit and coordinator-set, never inferred — a mission that's
-genuinely done looks identical to one that's stalled, so guessing from
-staleness would be actively misleading. Defaults to `active` on creation.
+`coordinator_session` is where a question is delivered, not a permission. A
+pillar or mission outlives the session running it, and when one is retired the
+name has to move or its questions go to a session that is gone. The record —
+screens, questions, answers — is untouched by the change.
+
+`org` is the organisation a mission belongs to, and is the only boundary it
+has. Everything under it inherits it.
+
+**Screens**
 
 ```bash
-curl -sk https://host.docker.internal:8080/api/missions/<mission_id>/status \
-  -X POST -H 'Content-Type: application/json' -d '{"status": "paused"}'
+POST   /api/missions/<id>/site                          # {html, note} -- publishes; there is no second step
+GET    /api/missions/<id>/site                          # current revision, metadata and content
+GET    /api/missions/<id>/site/revisions                # history: id, seq, note, size, created_at
+GET    /api/missions/<id>/site/revisions/<rev>          # one past revision, in full
+POST   /api/missions/<id>/site/revisions/<rev>/activate # roll back by pointing at it
+GET    /missions/<id>                                   # the screen itself
 ```
+
+Roll back by activating an old revision. Re-pushing old content instead
+fabricates a new revision and loses what actually happened.
+
+**Pillars** — every one mirrors its mission-level counterpart, one level down.
+
+```bash
+POST   /api/missions/<id>/pillars                       # {name, coordinator_session, color}
+GET    /api/missions/<id>/pillars
+GET    /api/pillars/<id>                                # pillar, current revision, since_last_visit
+DELETE /api/pillars/<id>
+POST   /api/pillars/<id>/status
+POST   /api/pillars/<id>/seen
+POST   /api/pillars/<id>/coordinator
+POST   /api/pillars/<id>/last-done                      # {"last_done": "..."} -- see §9
+POST   /api/pillars/<id>/site                           # {html, note}
+GET    /api/pillars/<id>/site
+GET    /missions/<mission_id>/pillars/<pillar_id>       # one screen, direct
+```
+
+**Conversation**
+
+```bash
+GET    /api/missions/<id>/questions                     # everything asked at mission level
+POST   /api/missions/<id>/questions                     # {question, anchor}
+GET    /api/pillars/<id>/questions
+POST   /api/pillars/<id>/questions                      # {question, anchor}
+POST   /api/missions/<id>/questions/<entry>/answer      # exactly one, final
+POST   /api/pillars/<id>/questions/<entry>/answer
+POST   /api/pillars/<id>/questions/<entry>/update        # {text} -- progress; vanishes when you answer
+POST   /api/missions/<id>/questions/<entry>/reopen      # {followup} -- the asker was not satisfied
+POST   /api/missions/<id>/asked                         # answer a question YOUR screen asked (§10)
+POST   /api/pillars/<id>/asked
+POST   /api/questions/<entry>/anchor                    # {anchor} -- move it, or null to detach
+POST   /api/questions/<entry>/retire                    # {note} -- it stopped mattering; empty note undoes it
+```
+
+**What the mission looks like from outside**
+
+```bash
+GET    /api/missions/<id>/decision-log                  # every revision and answer, newest first, computed
+GET    /api/missions/<id>/status-feed                   # every pillar's status line
+POST   /api/missions/<id>/here                          # "I am looking at this" -- records presence
+POST   /api/pillars/<id>/here
+```
+
+The decision log is a rollup, not an editorial judgement. If you want
+something in it read as a decision, write it that way in the `note` or the
+`answer` — the log surfaces your words, it does not interpret them.
+
+**People**
+
+```bash
+POST   /api/visitor-tokens                              # {display_name, avatar} -- OPERATOR ONLY
+DELETE /api/visitor-tokens/<participant_id>             # forget somebody
+GET    /api/visitor-tokens/<participant_id>             # name and photo, never the token
+DELETE /api/presence/<surface_id>/<participant_id>      # take one participant off one surface
+```
+
+Minting a way in is the operator's act and refuses every session, including
+yours. Ask for it as an approval instead — see §6 — which is one tap for them
+and returns the result to you.
+
+Forgetting somebody stops their link working immediately. What they already
+said stays, under the name they said it: a conversation entry keeps the label
+it was written with, so removing a person never blanks a question or makes it
+look unasked.
+
+`DELETE /api/presence/...` is for a row that should not be there — an identity
+somebody stopped using, or a duplicate of a person already on the list under
+another name. `surface_id` is `mission:<id>` or `pillar:<id>`.
 
 ## 6. Q&A — visitors ask, you answer
 
