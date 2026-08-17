@@ -1167,6 +1167,14 @@ async def _serve_control_listener(connector, ctl_path: str) -> None:
             else:
                 if request.get("auth") != auth:
                     reply = {"ok": False, "error": "control auth rejected"}
+                elif request.get("op") == "connector-status":
+                    # Supervisor-local readiness probe.  This never becomes
+                    # a registry control frame: it reports whether the
+                    # connector has completed the tunnel hello right now.
+                    reply = {
+                        "ok": True,
+                        "serving": connector.connected.is_set(),
+                    }
                 else:
                     try:
                         reply = await connector.control(

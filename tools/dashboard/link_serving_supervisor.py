@@ -32,11 +32,19 @@ handshake.
 The subprocess ``spawn`` is a seam so the reconciliation logic is testable
 without real processes; the default spawns ``python -m
 tools.dashboard.link_serving``.
+
+Several workers of one dashboard installation may share one org store.  A
+non-blocking file lock beside the control descriptor elects exactly one
+connector owner per org; the other local workers use that owner's loopback
+listener and never touch its descriptor or create a competing relay tunnel.
+Mock dashboards do not start this supervisor at all; isolated containers do
+not share this lock and must carry their own mock or node identity boundary.
 """
 
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import json
 import logging
 import os
@@ -63,6 +71,7 @@ from tools.graph.schemas.network_identity import (
 
 
 _PERSONA_PUB_RE = re.compile(r"^[0-9a-f]{64}$")
+CONNECTOR_STARTUP_TIMEOUT_S = 60.0
 
 
 # ── provisioning state (also the enrich precondition) ─────────
@@ -291,6 +300,11 @@ def _control_path_for(key_path: str) -> str:
     return os.path.splitext(key_path)[0] + ".ctl"
 
 
+def _lock_path_for(key_path: str) -> str:
+    """Cross-process ownership lock for one org's serving connector."""
+    return _control_path_for(key_path) + ".lock"
+
+
 class TunnelUnavailable(RuntimeError):
     """No live serving tunnel to carry a control op — names the remedy.
 
@@ -387,9 +401,13 @@ def _connector_command(binding: dict, org: str | None, key_path: str,
 
 
 class _Proc:
-    """A spawned connector process. ``alive``/``stop`` are all the supervisor
-    needs; the connector self-reconnects to the relay on its own, so the
-    supervisor only supervises the OS process, not the tunnel."""
+    """A spawned connector process plus its authenticated serving readiness.
+
+    The connector self-reconnects after it has served successfully.  A PID
+    which never completes its first tunnel hello is different: without the
+    local readiness probe it can remain alive forever while publishing is
+    impossible.
+    """
 
     def __init__(self, popen, ctl_path: str | None = None):
         self._p = popen
@@ -397,6 +415,34 @@ class _Proc:
 
     def alive(self) -> bool:
         return self._p.poll() is None
+
+    def serving(self) -> bool:
+        """True only when the child reports a completed tunnel handshake."""
+        if not self.alive() or not self._ctl_path:
+            return False
+        try:
+            with open(self._ctl_path) as fh:
+                descriptor = json.load(fh)
+            request = json.dumps({
+                "auth": descriptor["auth"],
+                "op": "connector-status",
+                "args": {},
+            }) + "\n"
+            with socket.create_connection(
+                ("127.0.0.1", int(descriptor["port"])), timeout=0.5
+            ) as sock:
+                sock.sendall(request.encode("utf-8"))
+                sock.settimeout(0.5)
+                buf = b""
+                while b"\n" not in buf:
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        break
+                    buf += chunk
+            reply = json.loads(buf.split(b"\n", 1)[0].decode("utf-8"))
+            return reply.get("ok") is True and reply.get("serving") is True
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
 
     def stop(self) -> None:
         try:
@@ -418,8 +464,18 @@ class _Proc:
 def _default_spawn(argv: list, env: dict, *, log_path: str | None = None,
                    ctl_path: str | None = None):
     out = open(log_path, "ab") if log_path else subprocess.DEVNULL
-    return _Proc(subprocess.Popen(argv, env=env, stdout=out, stderr=out),
-                 ctl_path=ctl_path)
+    child_env = dict(env)
+    # A supervised connector's diagnostics must reach its file immediately;
+    # otherwise a crash/reconnect loop looks like a frozen healthy process.
+    child_env["PYTHONUNBUFFERED"] = "1"
+    try:
+        popen = subprocess.Popen(
+            argv, env=child_env, stdout=out, stderr=out
+        )
+    finally:
+        if out is not subprocess.DEVNULL:
+            out.close()  # the child retains its duplicated descriptor
+    return _Proc(popen, ctl_path=ctl_path)
 
 
 class ServingSupervisor:
@@ -428,7 +484,7 @@ class ServingSupervisor:
     Thread-safe: ``ensure``/``ensure_all`` take a lock, so the watchdog thread
     and the post-publish call cannot race a double-spawn. *spawn* is the
     subprocess seam (``spawn(argv, env, log_path=...)`` → handle with
-    ``alive()``/``stop()``); *now* is the injectable clock.
+    ``alive()``/``serving()``/``stop()``); *now* is the injectable clock.
     """
 
     def __init__(self, *, spawn=None, now=None):
@@ -438,7 +494,9 @@ class ServingSupervisor:
         self._credentials: dict = {} # org -> exact (both cert wires, key path) launched
         self._managed: set = set()   # orgs seen via ensure(), re-checked by the watchdog
         self._started_at: dict = {}  # org -> launch time; fresh-tunnel grace
-        self._grace_s: float = 20.0  # one watchdog interval; a fresh tunnel is skipped once
+        self._grace_s: float = CONNECTOR_STARTUP_TIMEOUT_S
+        self._ever_served: set = set() # orgs observed through a completed hello
+        self._locks: dict = {}       # org -> open file holding flock ownership
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._watchdog: threading.Thread | None = None
@@ -474,10 +532,13 @@ class ServingSupervisor:
                     and self._credentials.get(org)
                     == (state["cert"], state["viewer_cert"], state["key_path"])
                 ):
-                    return {"running": True, "reason": "already-running"}
+                    current = self._live_process_state(org, proc)
+                    if current is not None:
+                        return current
                 proc.stop()
                 self._procs.pop(org, None)
                 self._credentials.pop(org, None)
+                self._ever_served.discard(org)
             self._procs.pop(org, None)
             state = serve_cert_state(org, now=self._now())
             if state["status"] != "ok":
@@ -504,6 +565,8 @@ class ServingSupervisor:
                 self._procs.pop(org, None)
                 self._credentials.pop(org, None)
             self._started_at.pop(org, None)
+            self._ever_served.discard(org)
+            self._release_lock(org)
             reason = state["status"] if state["status"] != "ok" else "no-live-grants"
             return {"running": False, "reason": reason}
 
@@ -511,7 +574,18 @@ class ServingSupervisor:
             if self._credentials.get(org) == (
                 state["cert"], state["viewer_cert"], state["key_path"]
             ):
-                return {"running": True, "reason": "already-running"}
+                current = self._live_process_state(org, proc)
+                if current is not None:
+                    return current
+                # The child stayed alive but never completed its first hello
+                # before the startup deadline.  Replace this genuinely wedged
+                # process; a connector observed serving once owns its normal
+                # reconnect lifecycle and is not churned here.
+                proc.stop()
+                self._procs.pop(org, None)
+                self._credentials.pop(org, None)
+                self._ever_served.discard(org)
+                return self._launch(org, state)
             # Provisioning replaced this org's credential. Keeping the old
             # process alive would leave it presenting the superseded cert
             # forever, because ensure() otherwise treats any live PID as
@@ -519,10 +593,28 @@ class ServingSupervisor:
             proc.stop()
             self._procs.pop(org, None)
             self._credentials.pop(org, None)
+            self._ever_served.discard(org)
         # A dead handle: drop it and relaunch below.
         self._procs.pop(org, None)
         self._credentials.pop(org, None)
         return self._launch(org, state)
+
+    def _live_process_state(self, org, proc) -> dict | None:
+        """Classify an alive, correctly credentialed child.
+
+        ``None`` means it has never served and exceeded the startup deadline,
+        so the caller must replace it.  A child observed serving once remains
+        responsible for ordinary relay reconnects instead of being restarted
+        by a second competing retry loop.
+        """
+        if proc.serving():
+            self._ever_served.add(org)
+            return {"running": True, "reason": "already-running"}
+        if org in self._ever_served:
+            return {"running": True, "reason": "reconnecting"}
+        if self._now() - self._started_at.get(org, 0.0) < self._grace_s:
+            return {"running": True, "reason": "starting"}
+        return None
 
     def _launch(self, org: str | None, state: dict) -> dict:
         """Spawn the connector for *org* (``state`` must be an ``ok``
@@ -535,30 +627,72 @@ class ServingSupervisor:
         binding, binding_error = _load_binding(org)
         if binding_error:
             return {"running": False, "reason": binding_error}
-        cert_path = _materialize_cert(state["key_path"], state["cert"])
-        viewer_cert_path = _viewer_cert_path_for(state["key_path"])
-        viewer_tmp = viewer_cert_path + ".tmp"
-        with open(viewer_tmp, "w") as fh:
-            fh.write(state["viewer_cert"])
-        os.replace(viewer_tmp, viewer_cert_path)
-        ctl_path = _control_path_for(state["key_path"])
-        # A stale descriptor from a previous killed connector would mislead
-        # control() until the new connector rewrites it; clear it up front.
-        with contextlib.suppress(OSError):
-            os.remove(ctl_path)
-        argv, env = _connector_command(
-            binding, org, state["key_path"], cert_path, viewer_cert_path)
-        self._procs[org] = self._spawn(
-            argv, env, log_path=_log_path_for(state["key_path"]), ctl_path=ctl_path)
+        # Several workers of one dashboard installation can legitimately
+        # share the same org store.  Exactly one may own its connector.
+        # Acquire BEFORE touching the shared cert or control descriptor; a
+        # non-owner simply uses the owner's loopback control listener when
+        # publish calls control().  This is local process coordination, not
+        # cross-container isolation; mock dashboards never bootstrap serving.
+        if not self._acquire_lock(org, state["key_path"]):
+            return {"running": True, "reason": "owned-by-other-dashboard"}
+        try:
+            cert_path = _materialize_cert(state["key_path"], state["cert"])
+            viewer_cert_path = _viewer_cert_path_for(state["key_path"])
+            viewer_tmp = viewer_cert_path + ".tmp"
+            with open(viewer_tmp, "w") as fh:
+                fh.write(state["viewer_cert"])
+            os.replace(viewer_tmp, viewer_cert_path)
+            ctl_path = _control_path_for(state["key_path"])
+            # A stale descriptor from a previous killed connector would
+            # mislead control() until the new connector rewrites it; clear it
+            # up front.  All shared-file preparation stays inside this guard:
+            # failure must release ownership so another dashboard can serve.
+            with contextlib.suppress(OSError):
+                os.remove(ctl_path)
+            argv, env = _connector_command(
+                binding, org, state["key_path"], cert_path, viewer_cert_path)
+            self._procs[org] = self._spawn(
+                argv, env, log_path=_log_path_for(state["key_path"]),
+                ctl_path=ctl_path,
+            )
+        except Exception:
+            self._release_lock(org)
+            raise
         self._credentials[org] = (
             state["cert"], state["viewer_cert"], state["key_path"])
         self._started_at[org] = self._now()
+        self._ever_served.discard(org)
         return {"running": True, "reason": "launched"}
+
+    def _acquire_lock(self, org: str | None, key_path: str) -> bool:
+        if org in self._locks:
+            return True
+        lock_path = _lock_path_for(key_path)
+        lock = open(lock_path, "a+")
+        os.chmod(lock_path, 0o600)
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lock.close()
+            return False
+        self._locks[org] = lock
+        return True
+
+    def _release_lock(self, org: str | None) -> None:
+        lock = self._locks.pop(org, None)
+        if lock is None:
+            return
+        with contextlib.suppress(OSError):
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        lock.close()
 
     def start_watchdog(self, interval: float = 20.0) -> None:
         """Periodically re-reconcile every managed org — restart the dead,
         tear down the expired/revoked. No-op if already running."""
-        self._grace_s = interval  # a fresh tunnel is skipped for exactly one interval
+        # Startup is an observed process property, not a watchdog scheduling
+        # property.  Keep a real deadline even when tests/operators choose a
+        # shorter reconciliation interval.
+        self._grace_s = max(CONNECTOR_STARTUP_TIMEOUT_S, interval)
         if self._watchdog is not None:
             return
         self._stop.clear()
@@ -585,6 +719,9 @@ class ServingSupervisor:
             self._credentials.clear()
             self._managed.clear()
             self._started_at.clear()
+            self._ever_served.clear()
+            for org in list(self._locks):
+                self._release_lock(org)
         if watchdog is not None and watchdog is not threading.current_thread():
             watchdog.join(timeout=2)
         self._watchdog = None
