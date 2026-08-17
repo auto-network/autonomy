@@ -23,6 +23,7 @@ class _StubConnector:
         self._reply = reply or {"ok": True, "token": "t" * 32}
         self._raise = raise_conn
         self.calls = []
+        self.connected = asyncio.Event()
 
     async def control(self, op, args, timeout=10.0):
         self.calls.append((op, args))
@@ -80,6 +81,31 @@ def test_listener_forwards_authorized_control(tmp_path):
     asyncio.run(_with_listener(connector, ctl, body))
     # Descriptor removed on listener shutdown.
     assert not os.path.exists(ctl)
+
+
+def test_listener_reports_local_serving_state_without_forwarding(tmp_path):
+    ctl = str(tmp_path / "serve.ctl")
+    connector = _StubConnector()
+
+    async def body():
+        descriptor = json.loads(open(ctl).read())
+        request = {
+            "auth": descriptor["auth"],
+            "op": "connector-status",
+            "args": {},
+        }
+        down = await asyncio.to_thread(
+            _roundtrip, descriptor["port"], request
+        )
+        assert down == {"ok": True, "serving": False}
+        connector.connected.set()
+        up = await asyncio.to_thread(
+            _roundtrip, descriptor["port"], request
+        )
+        assert up == {"ok": True, "serving": True}
+        assert connector.calls == []
+
+    asyncio.run(_with_listener(connector, ctl, body))
 
 
 def test_listener_rejects_bad_auth(tmp_path):

@@ -849,7 +849,7 @@ async def _execute_link_publish(row: dict, decision: dict) -> dict:
 _TUNNEL_STARTUP_RETRY_KINDS = frozenset({"no-listener", "unreachable", "no-tunnel"})
 
 
-def _create_link_over_tunnel(org, args, *, timeout: float = 25.0, poll: float = 0.5):
+def _create_link_over_tunnel(org, args, *, timeout: float = 60.0, poll: float = 0.5):
     """Send the create-link control op, tolerating a connector/tunnel that is
     still coming up on a first publish. Retries ONLY the pre-write failures
     (see _TUNNEL_STARTUP_RETRY_KINDS), so a retry cannot double-create; any

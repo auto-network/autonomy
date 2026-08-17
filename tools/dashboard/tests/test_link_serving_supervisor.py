@@ -44,12 +44,22 @@ ISO = "%Y-%m-%dT%H:%M:%SZ"
 class FakeProc:
     def __init__(self):
         self._alive = True
+        self._serving = True
 
     def alive(self):
         return self._alive
 
     def stop(self):
         self._alive = False
+
+    def serving(self):
+        return self._alive and self._serving
+
+    def disconnect(self):
+        self._serving = False
+
+    def connect(self):
+        self._serving = True
 
     def die(self):  # simulate a crash for the watchdog test
         self._alive = False
@@ -86,6 +96,26 @@ def test_default_spawn_captures_connector_warnings_in_shared_log(tmp_path):
         time.sleep(0.01)
     assert proc.alive() is False
     assert marker in log_path.read_text()
+
+
+def test_default_spawn_forces_unbuffered_connector_output(tmp_path):
+    log_path = tmp_path / "serve.log"
+    proc = sup._default_spawn(
+        [
+            sys.executable,
+            "-c",
+            "import sys,time; sys.stdout.write('ready'); time.sleep(0.5)",
+        ],
+        dict(os.environ),
+        log_path=str(log_path),
+    )
+    deadline = time.time() + 0.4
+    while time.time() < deadline and log_path.read_bytes() != b"ready":
+        time.sleep(0.01)
+    try:
+        assert log_path.read_bytes() == b"ready"
+    finally:
+        proc.stop()
 
 
 @pytest.fixture
@@ -343,6 +373,93 @@ def test_watchdog_reconcile_relaunches_dead_proc(env):
     s.ensure_all()                 # what the watchdog thread runs
     assert len(spawn.calls) == 2   # relaunched
     assert s.running_orgs() == [ORG]
+
+
+def test_watchdog_replaces_alive_child_that_never_serves(env):
+    _provision_serve_cert(env)
+    _put_grant()
+    clock = [1000.0]
+    spawn = FakeSpawn()
+    s = sup.ServingSupervisor(spawn=spawn, now=lambda: clock[0])
+    assert s.ensure(ORG)["reason"] == "launched"
+    first = spawn.procs[0]
+    first.disconnect()
+
+    clock[0] += sup.CONNECTOR_STARTUP_TIMEOUT_S - 1
+    assert s.ensure(ORG) == {"running": True, "reason": "starting"}
+    assert len(spawn.calls) == 1
+
+    clock[0] += 2
+    assert s.ensure(ORG)["reason"] == "launched"
+    assert first.alive() is False
+    assert len(spawn.calls) == 2
+
+
+def test_watchdog_leaves_reconnect_to_child_after_it_has_served(env):
+    _provision_serve_cert(env)
+    _put_grant()
+    clock = [1000.0]
+    spawn = FakeSpawn()
+    s = sup.ServingSupervisor(spawn=spawn, now=lambda: clock[0])
+    assert s.ensure(ORG)["reason"] == "launched"
+    proc = spawn.procs[0]
+
+    assert s.ensure(ORG)["reason"] == "already-running"
+    proc.disconnect()
+    clock[0] += sup.CONNECTOR_STARTUP_TIMEOUT_S * 2
+    assert s.ensure(ORG) == {"running": True, "reason": "reconnecting"}
+    assert proc.alive() is True
+    assert len(spawn.calls) == 1
+
+
+def test_only_one_dashboard_process_owns_an_org_connector(env):
+    """Independent dashboard supervisors share one process-wide file lock.
+
+    A non-owner must neither spawn a competing connector nor remove the
+    owner's shared control descriptor.  Once the owner stops, another
+    dashboard may acquire ownership normally.
+    """
+    _provision_serve_cert(env)
+    _put_grant()
+    first_spawn = FakeSpawn()
+    second_spawn = FakeSpawn()
+    first = sup.ServingSupervisor(spawn=first_spawn)
+    second = sup.ServingSupervisor(spawn=second_spawn)
+
+    assert first.ensure(ORG)["reason"] == "launched"
+    assert second.ensure(ORG) == {
+        "running": True,
+        "reason": "owned-by-other-dashboard",
+    }
+    assert len(first_spawn.calls) == 1
+    assert second_spawn.calls == []
+
+    first.stop_all()
+    assert second.ensure(ORG)["reason"] == "launched"
+    assert len(second_spawn.calls) == 1
+    second.stop_all()
+
+
+def test_pre_spawn_failure_releases_org_ownership(env, monkeypatch):
+    """A failed owner must not prevent another dashboard from taking over."""
+    _provision_serve_cert(env)
+    _put_grant()
+    first = sup.ServingSupervisor(spawn=FakeSpawn())
+    second_spawn = FakeSpawn()
+    second = sup.ServingSupervisor(spawn=second_spawn)
+    original = sup._materialize_cert
+
+    def fail_materialization(*_args, **_kwargs):
+        raise OSError("simulated certificate write failure")
+
+    monkeypatch.setattr(sup, "_materialize_cert", fail_materialization)
+    with pytest.raises(OSError, match="simulated certificate write failure"):
+        first.ensure(ORG)
+
+    monkeypatch.setattr(sup, "_materialize_cert", original)
+    assert second.ensure(ORG)["reason"] == "launched"
+    assert len(second_spawn.calls) == 1
+    second.stop_all()
 
 
 def test_reprovisioned_credential_restarts_existing_connector(env):
