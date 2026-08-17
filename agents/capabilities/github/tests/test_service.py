@@ -192,6 +192,7 @@ async def test_review_read_by_id_builds_correct_argv(monkeypatch):
     rows = [_live_row()]
     result = await source_control_review_read_by_id_v1(
         "auto-x", "autonomy",
+        org="autonomy",
         review_id="123",
         rows=rows,
     )
@@ -221,6 +222,7 @@ async def test_review_read_by_id_passes_etag_header(monkeypatch):
 
     await source_control_review_read_by_id_v1(
         "auto-x", "autonomy",
+        org="autonomy",
         review_id="9",
         rows=[_live_row()],
         etag='W/"abc"',
@@ -247,6 +249,7 @@ async def test_review_read_by_id_classifies_304(monkeypatch):
 
     result = await source_control_review_read_by_id_v1(
         "auto-x", "autonomy",
+        org="autonomy",
         review_id="42",
         rows=[_live_row()],
         etag='W/"prev"',
@@ -271,6 +274,7 @@ async def test_review_read_by_id_classifies_rate_limit(monkeypatch):
 
     result = await source_control_review_read_by_id_v1(
         "auto-x", "autonomy",
+        org="autonomy",
         review_id="42",
         rows=[_live_row()],
     )
@@ -297,6 +301,7 @@ async def test_check_runs_read_for_sha_builds_correct_argv(monkeypatch):
 
     result = await source_control_check_runs_read_for_sha_v1(
         "auto-x", "autonomy",
+        org="autonomy",
         head_sha="deadbeef",
         rows=[_live_row()],
     )
