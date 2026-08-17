@@ -3417,7 +3417,17 @@ def read_set(
         db.close()
 
     # Peer-org contributions: public surface only.
+    #
+    # A set whose band forbids every peer-visible state has no public
+    # surface by construction, so no peer database is opened for it at all.
+    # The band already refuses the write and the promotion that would make
+    # such a row readable; this refuses to SERVE one, so a row that reached
+    # a peer-visible state by some path nobody anticipated -- a direct
+    # write, a restore, a migration -- still does not cross the boundary.
+    # The two guards fail independently, which is the point of having both.
     resolved_peers = resolve_peers(resolved_org, peers)
+    if not set(schemas.states_allowed(set_id, 1)) & set(PEER_VISIBLE_STATES):
+        resolved_peers = []
     for peer in sorted(resolved_peers):
         peer_db = open_peer_db(peer)
         if peer_db is None:
