@@ -290,6 +290,16 @@ class TestFileWriteToSSE:
         bus = MockEventBus()
         mon, patcher = await _start_monitor(bus)
         try:
+            # A real Codex transcript opens with a session_meta declaring the
+            # CLI version; the tailer needs it to classify the format. Without
+            # it a model-only turn_context cannot be parsed and produces no
+            # event, so seed it first (its own event is cleared below).
+            _write_jsonl_entry(jsonl, {
+                "type": "session_meta",
+                "payload": {"originator": "codex-tui", "cli_version": "0.147.0"},
+                "timestamp": "2026-08-11T00:00:00Z",
+            })
+            await asyncio.sleep(0.2)
             bus.events.clear()
             await asyncio.sleep(0.05)
             _write_jsonl_entry(jsonl, {
