@@ -19,9 +19,22 @@ from tools.init.first_run import CREATED, EXISTS, SKIPPED, initialize
 
 @pytest.fixture(autouse=True)
 def _clean_first_org_env(monkeypatch):
-    """Tests control first-org naming explicitly; shield from session env."""
+    """Tests control first-org naming explicitly; shield from session env.
+
+    These tests are hermetic on a per-test ``tmp_path`` deployment root, but
+    ``resolve_store`` precedence is store-env → ambient ``AUTONOMY_DATA_ROOT``
+    → the ``root`` argument, so any leaked store/ambient env silently outranks
+    the root and sends org/TLS/store writes elsewhere. A dashboard test sharing
+    this xdist worker sets ``AUTONOMY_ORGS_DIR`` (and the other store envs)
+    process-globally at conftest import time; clear the ambient root and every
+    store env here so this deployment's ``tmp_path`` root is authoritative.
+    """
     monkeypatch.delenv("AUTONOMY_FIRST_ORG", raising=False)
     monkeypatch.delenv("AUTONOMY_FIRST_ORG_NAME", raising=False)
+    from tools.data_paths import DATA_ROOT_ENV, STORE_MANIFEST
+    monkeypatch.delenv(DATA_ROOT_ENV, raising=False)
+    for store in STORE_MANIFEST:
+        monkeypatch.delenv(store.env, raising=False)
 
 
 def _tables(db_path):
