@@ -163,3 +163,44 @@ def test_a_row_whose_schema_is_not_registered_here_is_not_called_clean(orgs):
     assert [u["set_id"] for u in unjudged] == ["probe.amend.unregistered"], (
         "it must not vanish either -- that is what made the count depend on "
         "which process ran the sweep")
+
+
+def test_the_access_pattern_is_read_from_the_database(orgs, monkeypatch):
+    """The declaration is data, so the answer does not depend on the caller.
+
+    Every schema flushes its access pattern into the store. Reading it from
+    the calling process's registry instead made the same data count 73 rows
+    in the dashboard and 64 in a bare command line, with neither number
+    saying which process it came from -- on the input to a delete.
+
+    Here the process is made blind on purpose: the registry lookup returns
+    nothing, and the sweep still judges the row, because the database knows.
+    """
+    from tools.graph.db import GraphDB, resolve_caller_db_path
+
+    base = settings_ops.add_setting("probe.amend.replaced", 1, "fromdb",
+                                    {"v": "x"}, org="acme")
+    monkeypatch.setattr(settings_ops, "_collapse_amendment",
+                        lambda *a, **k: None)
+    settings_ops.override_setting(base, {"v": "amended"}, org="acme")
+
+    db = GraphDB(resolve_caller_db_path("acme"))
+    try:
+        db.conn.execute(
+            "INSERT INTO settings (id, set_id, schema_revision, key, payload, "
+            " publication_state, deprecated, created_at, updated_at) "
+            "VALUES ('meta-probe', 'autonomy.schema', 1, "
+            "        'probe.amend.replaced#1', "
+            "        '{\"access_pattern\": \"keyed_per_entity\"}', 'raw', 0, "
+            "        '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')")
+        db.conn.commit()
+    finally:
+        db.close()
+
+    monkeypatch.setattr(settings_ops, "_access_pattern_for",
+                        lambda *a, **k: None)
+
+    found = settings_ops.illegal_amendments(org="acme")
+
+    assert [f["key"] for f in found if f["key"] == "fromdb"] == ["fromdb"]
+    assert not settings_ops.unjudged_amendments(org="acme")

@@ -2216,26 +2216,47 @@ def illegal_amendments(*, org: str | None) -> list[dict]:
         own_ids = {
             r["id"] for r in db.conn.execute("SELECT id FROM settings").fetchall()
         }
+        # The access pattern is DATA, not only code. Every schema flushes its
+        # declaration into the store, so the question "what are this set's
+        # rows" is answerable from the same database the rows are in -- and
+        # gives the same answer to every caller. Reading it from the calling
+        # process's registry instead made the sweep's result depend on which
+        # modules that process happened to import, which is how the same data
+        # counted 73 rows in one place and 64 in another with neither saying
+        # so. Code remains the fallback for a set that has never flushed.
+        stored_patterns: dict[str, str] = {}
+        for r in db.conn.execute(
+            "SELECT key, payload FROM settings WHERE set_id = ? "
+            "AND supersedes IS NULL AND deprecated = 0",
+            (schemas.SCHEMA_META_SET_ID,),
+        ).fetchall():
+            try:
+                pattern = (json.loads(r["payload"]) or {}).get("access_pattern")
+            except Exception:
+                continue
+            if pattern:
+                stored_patterns[r["key"]] = pattern
     except Exception:
         return out
     finally:
         db.close()
 
     for row in rows:
-        if not any(schemas.get_schema(row["set_id"], r) for r in range(1, 12)):
-            # Not registered HERE. Plugin schemas register in the dashboard
-            # and not in a bare CLI, so this row's access pattern is unknown
-            # in this process -- which is not the same as permitted. Skipping
-            # it silently makes the sweep's answer depend on who is asking
-            # and say nothing about it, so it is returned separately and the
-            # caller decides whether a partial view is good enough.
+        pattern = stored_patterns.get(
+            f"{row['set_id']}#{row['schema_revision']}")
+        if pattern is None:
+            pattern = _access_pattern_for(row["set_id"], row["schema_revision"])
+        if pattern is None:
+            # Neither the database nor this process can say what this set's
+            # rows are. Unknown is not permitted, and the difference decides
+            # whether a row gets deleted, so it is returned separately.
             unjudged.append({
                 "id": row["id"], "set_id": row["set_id"], "key": row["key"],
                 "supersedes": row["supersedes"],
-                "reason": "no schema registered in this process",
+                "reason": "no access pattern recorded in the database or "
+                          "registered in this process",
             })
             continue
-        pattern = _access_pattern_for(row["set_id"], row["schema_revision"])
         if pattern not in _REPLACED_PATTERNS:
             continue
         if row["supersedes"] not in own_ids:
