@@ -48,3 +48,27 @@ def _evict_graph_pool():
     GraphDB.close_all_pooled()
     yield
     GraphDB.close_all_pooled()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_schema_registry_global():
+    """Snapshot + restore the process-global schema registry around every
+    graph test.
+
+    ``tools.graph.schemas.registry.SCHEMAS`` / ``UPCONVERTERS`` are mutable
+    module-level dicts. Tests that register stub/variant schemas mutate them
+    in place; without cleanup the extra registrations leak to later tests on
+    the same xdist worker (graph or dashboard), which then resolve the wrong
+    validator and fail in a shifting, hard-to-reproduce way. Restore here so
+    no graph test can leave the registry dirty for the next one.
+    """
+    from tools.graph.schemas import registry as _reg
+    schemas_snap = dict(_reg.SCHEMAS)
+    upcon_snap = dict(_reg.UPCONVERTERS)
+    try:
+        yield
+    finally:
+        _reg.SCHEMAS.clear()
+        _reg.SCHEMAS.update(schemas_snap)
+        _reg.UPCONVERTERS.clear()
+        _reg.UPCONVERTERS.update(upcon_snap)
