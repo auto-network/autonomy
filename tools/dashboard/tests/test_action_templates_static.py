@@ -21,7 +21,7 @@ import pytest
 
 from tools.dashboard.server import _render_agent_action_prompt
 from tools.graph import ops as graph_ops
-from tools.graph.db import GraphDB
+from tools.graph.db import GraphDB, GraphDBMissing
 from tools.graph.schemas.agent_actions import AGENT_ACTIONS_SET_ID
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -33,8 +33,22 @@ def _live_members():
 
     Returns members that carry a ``prompt_template`` field. Empty when
     the DB has no agent-action members (fresh org / before bootstrap).
+
+    ``read_set`` resolves the ``autonomy`` store through ``AUTONOMY_ORGS_DIR``,
+    which the dashboard test suite redirects to a hermetic per-worker tmp dir
+    (see conftest ``_configure_hermetic_stores``). That dir has no seeded
+    ``autonomy.db`` unless some *earlier* test happened to create one, so the
+    open raises ``GraphDBMissing`` instead of returning empty. Treat a missing
+    resolved store as "nothing seeded" (the test then skips) — this is the same
+    before-bootstrap case the docstring describes, and it removes an implicit
+    ordering dependency that made the test pass or fail based on its
+    predecessors. (The ``_require_autonomy_db`` guard checks the *repo* data
+    path, which is a different file than the one resolved here.)
     """
-    members = graph_ops.read_set(AGENT_ACTIONS_SET_ID, org="autonomy")
+    try:
+        members = graph_ops.read_set(AGENT_ACTIONS_SET_ID, org="autonomy")
+    except GraphDBMissing:
+        return []
     return [m for m in members.members if m.payload.get("prompt_template")]
 
 
