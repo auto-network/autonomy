@@ -38,7 +38,7 @@ pytestmark = [
 
 # ── Constants ────────────────────────────────────────────────────────
 
-from tools.dashboard.tests._xdist import worker_test_port
+from tools.dashboard.tests._xdist import bind_free_port, worker_test_port
 
 TEST_PORT = worker_test_port(8086)
 TEST_SESSION_ID = "auto-gap-browser"
@@ -183,25 +183,24 @@ def _make_fixture():
 
 # ── Server lifecycle ─────────────────────────────────────────────────
 
-def _start_server(fixture_path, events_path, port):
-    """Boot mock dashboard server. Returns Popen handle."""
-    subprocess.run(
-        ["pkill", "-f", f"uvicorn.*{port}"],
-        capture_output=True, timeout=3,
-    )
-    time.sleep(0.3)
-
+def _start_server(fixture_path, events_path):
+    """Boot mock dashboard server on a kernel-assigned free port. Returns
+    ``(proc, port)`` — worker_test_port is worker-index derived with no session
+    dimension, so a fixed port can be answered by another session's server
+    (port-collision report, auto-0812-211339)."""
     env = os.environ.copy()
     env["DASHBOARD_MOCK"] = str(fixture_path)
     env["DASHBOARD_MOCK_EVENTS"] = str(events_path)
     env["PYTHONPATH"] = str(Path(__file__).resolve().parents[3])
+    sock, port = bind_free_port()
     proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "tools.dashboard.server:app",
-         "--host", "127.0.0.1", "--port", str(port)],
+         "--fd", str(sock.fileno())],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        env=env,
+        env=env, pass_fds=(sock.fileno(),),
     )
-    return proc
+    sock.close()
+    return proc, port
 
 
 def _wait_for_server(port, timeout=30.0):
@@ -261,7 +260,8 @@ class Harness:
 
     def start_server(self):
         self.events_path.touch()
-        self.proc = _start_server(self.fixture_path, self.events_path, TEST_PORT)
+        global TEST_PORT
+        self.proc, TEST_PORT = _start_server(self.fixture_path, self.events_path)
         if not _wait_for_server(TEST_PORT):
             self.stop()
             raise RuntimeError(f"Server failed to start on port {TEST_PORT}")
