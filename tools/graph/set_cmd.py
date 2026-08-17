@@ -625,24 +625,48 @@ def cmd_set_check(args) -> None:
         print(f"  ✓ {set_id} key={args.key} — satisfied, with everything it "
               f"declares it depends on")
         return
-    print(f"  {len(findings)} unsatisfied dependenc"
-          f"{'y' if len(findings) == 1 else 'ies'} for {set_id} key={args.key}:\n")
+
     import textwrap
 
-    for finding in findings:
-        print(f"  ! {finding.kind}")
-        print(f"      at      {finding.address}")
-        # A finding that says what to do about it is longer than one line, and
-        # the instruction is the part worth reading.
-        wrapped = textwrap.wrap(finding.detail, width=72) or [""]
-        print(f"      what    {wrapped[0]}")
-        for line in wrapped[1:]:
-            print(f"              {line}")
-        print(f"      looked  {finding.looked_in}")
+    blocking = [f for f in findings if f.severity != "advisory"]
+    advisory = [f for f in findings if f.severity == "advisory"]
+
+    def _emit(group, marker):
+        for finding in group:
+            print(f"  {marker} {finding.kind}")
+            print(f"      at      {finding.address}")
+            # A finding that says what to do about it is longer than one line,
+            # and the instruction is the part worth reading.
+            wrapped = textwrap.wrap(finding.detail, width=72) or [""]
+            print(f"      what    {wrapped[0]}")
+            for line in wrapped[1:]:
+                print(f"              {line}")
+            print(f"      looked  {finding.looked_in}")
+
+    # Separated because they answer different questions. "What is unsatisfied"
+    # and "can this run" are not the same list, and printing them as one made
+    # a missing local clone source read exactly like a missing credential --
+    # so the reader either treats every finding as fatal or learns to treat
+    # none of them as fatal.
+    if blocking:
+        print(f"  {len(blocking)} unsatisfied requirement"
+              f"{'' if len(blocking) == 1 else 's'} for {set_id} "
+              f"key={args.key} — this cannot run until each is resolved:\n")
+        _emit(blocking, "!")
+    if advisory:
+        if blocking:
+            print("")
+        print(f"  {len(advisory)} thing{'' if len(advisory) == 1 else 's'} "
+              f"declared and not present, which do NOT stop it running:\n")
+        _emit(advisory, "-")
+    if not blocking:
+        print(f"\n  ✓ nothing blocks {set_id} key={args.key}")
     print("\n  The walk follows DECLARED edges only. A relationship carried "
           "by convention\n  rather than by a reference declaration is not "
           "checked, and not reported.")
-    sys.exit(1)
+    # Exit status answers the question a script asks, which is whether this
+    # can run -- not whether every declared thing is present.
+    sys.exit(1 if blocking else 0)
 
 
 def _report_effective_value(set_id: str, key: str, org, written: dict) -> None:

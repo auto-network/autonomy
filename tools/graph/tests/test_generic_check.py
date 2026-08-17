@@ -833,3 +833,119 @@ def test_a_frame_without_an_exists_check_is_refused_at_declaration():
             schema_revision = 1
             v: str = field(required=True, description="v",
                            exists_frame="platform-host")
+
+
+# ── what stops it, and what only degrades it ─────────────────
+#
+# "Everything declared is present" and "this can run" are different
+# questions. Printed as one list, a missing local clone source reads
+# exactly like a missing credential — so the reader either treats every
+# finding as fatal or learns to treat none of them as fatal.
+
+
+@pytest.fixture(scope="module")
+def graded():
+    from tools.graph.schemas.registry import readiness_gated_by
+
+    @keyed_per_entity(key_strategy="probe_id")
+    class Mixed(SettingSchema):
+        set_id = "probe.sev.mixed"
+        schema_revision = 1
+        needed: str = field(required=True, description="required file",
+                            exists="file")
+        shortcut: str = field(required=False, description="a faster source",
+                              exists="file", severity="advisory")
+
+    @readiness_gated_by("wanted")
+    @keyed_per_entity(key_strategy="probe_id")
+    class Optional(SettingSchema):
+        set_id = "probe.sev.gated"
+        schema_revision = 1
+        wanted: bool = field(required=True, description="is this row needed")
+        thing: str = field(required=True, description="a file", exists="file")
+
+    return Mixed, Optional
+
+
+@pytest.fixture
+def sev_org(tmp_path, monkeypatch, graded):
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.delenv("GRAPH_API", raising=False)
+    monkeypatch.setenv("AUTONOMY_CONTAINER", "0")
+    GraphDB.create_org_db("acme").close()
+    yield
+    GraphDB.close_all_pooled()
+
+
+def test_an_undeclared_requirement_blocks(sev_org):
+    """Blocking is the default and is never declared. Whoever wrote a
+    requirement was saying it is needed."""
+    settings_ops.add_setting("probe.sev.mixed", 1, "a",
+                             {"needed": "/nope/a"}, org="acme")
+
+    findings = settings_ops.check_setting("probe.sev.mixed", "a", org="acme")
+
+    assert [f.severity for f in findings] == ["blocking"]
+
+
+def test_a_declared_advisory_does_not(sev_org):
+    settings_ops.add_setting("probe.sev.mixed", 1, "b",
+                             {"needed": "/nope/b", "shortcut": "/nope/fast"},
+                             org="acme")
+
+    findings = settings_ops.check_setting("probe.sev.mixed", "b", org="acme")
+
+    by_field = {("shortcut" if "shortcut" in f.detail else "needed"): f.severity
+                for f in findings}
+    assert by_field == {"needed": "blocking", "shortcut": "advisory"}
+
+
+def test_a_row_that_says_it_is_optional_downgrades_everything_it_asks_for(sev_org):
+    """The fact was already in the payload; only the way to read it was
+    missing. An optional mount's absent directory is worth reporting and is
+    not a broken launch."""
+    settings_ops.add_setting("probe.sev.gated", 1, "off",
+                             {"wanted": False, "thing": "/nope/opt"}, org="acme")
+
+    findings = settings_ops.check_setting("probe.sev.gated", "off", org="acme")
+
+    assert [f.severity for f in findings] == ["advisory"]
+
+
+def test_the_same_row_marked_needed_blocks(sev_org):
+    """The control. Without it, a gate that downgraded every row would pass
+    the assertion above."""
+    settings_ops.add_setting("probe.sev.gated", 1, "on",
+                             {"wanted": True, "thing": "/nope/req"}, org="acme")
+
+    findings = settings_ops.check_setting("probe.sev.gated", "on", org="acme")
+
+    assert [f.severity for f in findings] == ["blocking"]
+
+
+def test_a_gate_naming_a_field_the_schema_lacks_is_refused():
+    """Silently, it would gate on a field that is never set — so every row
+    reads as optional and nothing ever blocks."""
+    from tools.graph.schemas.registry import (
+        SchemaValidationError as SVE, readiness_gated_by,
+    )
+
+    with pytest.raises(SVE, match="not a field it declares"):
+        @readiness_gated_by("nonexistent")
+        @keyed_per_entity(key_strategy="probe_id")
+        class Bad(SettingSchema):
+            set_id = "probe.sev.badgate"
+            schema_revision = 1
+            _field_metadata = {"v": {"type": "string", "description": "v"}}
+
+
+def test_an_unknown_severity_is_refused_at_declaration():
+    from tools.graph.schemas.registry import SchemaValidationError as SVE
+
+    with pytest.raises(SVE, match="severity must be one of"):
+        @keyed_per_entity(key_strategy="probe_id")
+        class Bad(SettingSchema):
+            set_id = "probe.sev.badsev"
+            schema_revision = 1
+            v: str = field(required=True, description="v", severity="maybe")

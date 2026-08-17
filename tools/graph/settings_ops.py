@@ -1178,6 +1178,11 @@ class CheckFinding:
     kind: str             # "missing_reference" | "missing_path" | "unreadable"
     detail: str
     looked_in: str        # the frame the answer came from
+    #: Whether this stops the thing from running, or only degrades it.
+    #: Blocking by default: a checker that guesses "advisory" when nobody
+    #: said so reports a launch as ready and is wrong in the direction
+    #: nobody re-examines. Advisory is declared, never inferred.
+    severity: str = "blocking"
 
 
 def _existence_frame(
@@ -1363,6 +1368,20 @@ def check_setting(
     schema = schemas.get_schema(set_id, int(row["schema_revision"]))
     payload = row.get("payload") or {}
 
+    # A row may say, in its own payload, that it is optional. Where a schema
+    # names that field, everything this row asks for degrades with it: an
+    # optional mount's missing directory is worth reporting and does not mean
+    # the launch is broken.
+    gate = schemas.readiness_gate(set_id, int(row["schema_revision"]))
+    row_severity = (
+        "advisory" if gate is not None and not payload.get(gate) else "blocking"
+    )
+
+    def _sev(field_spec: dict) -> str:
+        if row_severity == "advisory":
+            return "advisory"
+        return field_spec.get("severity") or "blocking"
+
     def walk(schema_cls, value, path_prefix: str) -> None:
         meta = getattr(schema_cls, "_field_metadata", None) or {}
         if not isinstance(value, dict):
@@ -1404,6 +1423,7 @@ def check_setting(
                             f"see — run this check on the host to answer it",
                             "a container filesystem, which is not the platform "
                             "host's",
+                            _sev(spec),
                         ))
                         continue
                     ok = (_os.path.isfile(one) if kind == "file"
@@ -1415,6 +1435,7 @@ def check_setting(
                             f"{path_prefix}{name} declares {kind} at {one!r}, "
                             f"which is not there",
                             f"the filesystem of the process running this check",
+                            _sev(spec),
                         ))
                 if spec.get("names_host_env") and one not in _os.environ:
                     # A launcher forwards the variables that are set and
@@ -1430,6 +1451,7 @@ def check_setting(
                         "the environment of the process running this check, "
                         "which is the launcher's only if they are the same "
                         "process",
+                        _sev(spec),
                     ))
 
     if schema is not None:

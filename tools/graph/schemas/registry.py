@@ -150,6 +150,7 @@ class _FieldSpec:
     exists: str | None = None
     exists_frame: str | None = None
     names_host_env: bool = False
+    severity: str | None = None
 
 
 def field(
@@ -165,6 +166,7 @@ def field(
     exists: str | None = None,
     exists_frame: str | None = None,
     names_host_env: bool = False,
+    severity: str | None = None,
 ) -> Any:
     """Declare metadata for a SettingSchema field.
 
@@ -218,6 +220,13 @@ def field(
             the check say which name is unset, in the environment it
             looked in -- which is the process running the check, and is
             not the launcher's unless they are the same process.
+        severity: what an UNSATISFIED value here means. Blocking by
+            default: whoever declares a requirement is saying it is
+            needed. ``"advisory"`` says the thing degrades gracefully
+            instead of stopping -- a local clone source whose absence
+            costs a network fetch, not a launch. Declared and never
+            inferred, because a checker that guesses advisory reports a
+            broken install as ready, and nobody re-reads a clean result.
 
     ``description`` is required of every field a SHIPPED schema declares,
     asserted over the live registry rather than here — a throwaway schema
@@ -236,6 +245,7 @@ def field(
         exists=exists,
         exists_frame=exists_frame,
         names_host_env=names_host_env,
+        severity=severity,
     )
 
 
@@ -293,6 +303,13 @@ def _build_metadata_from_spec(ann: Any, spec: _FieldSpec) -> dict:
         meta["exists_frame"] = spec.exists_frame
     if spec.names_host_env:
         meta["names_host_env"] = True
+    if spec.severity is not None:
+        if spec.severity not in VALID_SEVERITIES:
+            raise SchemaValidationError(
+                f"severity must be one of {list(VALID_SEVERITIES)}, "
+                f"got {spec.severity!r}"
+            )
+        meta["severity"] = spec.severity
     return meta
 
 
@@ -444,6 +461,11 @@ VALID_EXISTS = ("file", "dir", "executable")
 #: container is not -- and cannot answer for.
 VALID_EXISTS_FRAMES = ("platform-host",)
 
+#: What an unsatisfied requirement means. ``blocking`` is the default and is
+#: never declared; ``advisory`` has to be, because guessing it is the error
+#: that reports a broken install as ready.
+VALID_SEVERITIES = ("blocking", "advisory")
+
 #: Vault tiers a schema may declare -- WHO MUST PARTICIPATE to read the value
 #: back (``0c206bd8-1c6`` §4.1). ``audited`` releases to any authorized
 #: session; ``secured`` additionally requires the human factor its policy
@@ -554,6 +576,51 @@ def home(where: str) -> Any:
         return target
 
     return _wrap
+
+
+def readiness_gated_by(field_name: str) -> Any:
+    """Schema decorator: a payload field says whether this row is required.
+
+    Some rows describe something optional at the level of the whole row
+    rather than field by field — a mount the container starts happily
+    without, say. That fact is already in the payload, written by whoever
+    declared the row; what is missing is any way for a generic check to know
+    which field carries it.
+
+    Declaring the field name is that way. When the named field is falsy, every
+    finding from the row is advisory rather than blocking. The checker still
+    reports it — an optional thing being absent is worth saying — it just
+    stops claiming the launch is broken.
+
+    Named rather than inferred. "required" is a plausible convention and a
+    schema is free to call it something else, and a checker that guessed
+    would silently downgrade real findings on any row that happened to have
+    a falsy field by that name.
+    """
+
+    def _wrap(target: type) -> type:
+        existing = target.__dict__.get("_readiness_gate")
+        if existing is not None and existing != field_name:
+            raise SchemaValidationError(
+                f"{target.__name__}: declares two readiness gates "
+                f"({existing!r} and {field_name!r})"
+            )
+        meta = target.__dict__.get("_field_metadata") or {}
+        if meta and field_name not in meta:
+            raise SchemaValidationError(
+                f"{target.__name__}: readiness gate names {field_name!r}, "
+                f"which is not a field it declares"
+            )
+        target._readiness_gate = field_name
+        return target
+
+    return _wrap
+
+
+def readiness_gate(set_id: str, revision: int) -> str | None:
+    """The payload field naming whether a row of this set is required."""
+    schema = get_schema(set_id, revision)
+    return getattr(schema, "_readiness_gate", None) if schema else None
 
 
 def declared_home(set_id: str) -> str | None:

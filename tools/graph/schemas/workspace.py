@@ -123,6 +123,7 @@ class WorkspaceRepoV1(SettingSchema):
         required=False,
         exists="dir",
         exists_frame="platform-host",
+        severity="advisory",
         description="Absolute host path to clone from instead of the remote",
     )
 
