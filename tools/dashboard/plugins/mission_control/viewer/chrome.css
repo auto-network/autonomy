@@ -46,6 +46,9 @@
 .mc-face { width: 1.5rem; height: 1.5rem; border-radius: 50%; display: grid; place-items: center;
            font-size: 10px; font-weight: 600; box-shadow: 0 0 0 2px #111318; margin-left: -.35rem; }
 .mc-face-sm { width: 1.25rem; height: 1.25rem; font-size: 9px; box-shadow: 0 0 0 2px #141418; }
+/* A photo fills its circle instead of stretching to it. Same size as the
+   initial it replaces, so a mixed list stays on one line. */
+.mc-face-photo { object-fit: cover; background: #1e293b; }
 .mc-nobody { color: #475569; font-size: 11px; flex: none; }
 
 .mc-who { position: fixed; top: 3rem; right: .5rem; z-index: 2147483001; width: 16rem;

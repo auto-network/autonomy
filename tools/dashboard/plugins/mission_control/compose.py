@@ -132,14 +132,41 @@ def _presence(surface_id: str, now: float) -> list[dict]:
             continue
         payload = member.payload if isinstance(member.payload, dict) else {}
         label = payload.get("participant_label")
+        participant_id = payload.get("participant_id")
         here.append({
-            "participant_id": payload.get("participant_id"),
+            "participant_id": participant_id,
             "label": label,
             "initial": _initial(label),
             "kind": payload.get("participant_kind"),
             "seen": _ago(payload.get("heartbeat_at"), now),
+            "avatar_url": _guest_avatar(participant_id),
         })
     return here
+
+
+def _guest_avatar(participant_id: str | None) -> str | None:
+    """A guest's photo, resolved when the list is read rather than stored on
+    the row.
+
+    A presence row carries an id and a name and nothing else, and that schema
+    is shared with every other surface on the dashboard -- so the photo is
+    looked up here, from the id the row already has. Reading it late also
+    means a person who changes their photo changes it everywhere, instead of
+    leaving whatever was copied onto a row the day they arrived.
+
+    Only guests have one: an agent and the operator are drawn from their own
+    initial, which is what every other surface does for them.
+    """
+    if not isinstance(participant_id, str) or not participant_id.startswith("guest:"):
+        return None
+    try:
+        from tools.dashboard.dao import mission_control_db as _db
+
+        visitor = _db.get_visitor_by_participant_id(participant_id)
+    except Exception:
+        return None                      # presence is decoration; never fail the screen
+    attachment_id = (visitor or {}).get("avatar_attachment_id")
+    return f"/api/attachment/{attachment_id}" if attachment_id else None
 
 
 def _latest_sign_of_life(current: dict | None, pillar: dict) -> float | None:

@@ -423,7 +423,22 @@
   var CHAT = "M21 11.5a8.4 8.4 0 0 1-9 8.4 8.5 8.5 0 0 1-3.8-.9L3 21l1.9-5.1A8.4 8.4 0 0 1 12 3a8.4 8.4 0 0 1 9 8.5z";
 
   function face(p, small) {
-    var f = el("span", {class: small ? "mc-face mc-face-sm" : "mc-face", text: p.initial || "?"});
+    var cls = small ? "mc-face mc-face-sm" : "mc-face";
+    // A guest who sent a photo is shown as one. Everyone else keeps the
+    // initial: an agent has no face, and inventing one for them would make
+    // the list harder to read rather than friendlier.
+    if (p.avatar_url) {
+      var img = el("img", {class: cls + " mc-face-photo", src: p.avatar_url,
+                           alt: p.label || ""});
+      // A photo that fails to load must not leave a blank circle where a
+      // person was: fall back to the initial in place.
+      img.onerror = function () {
+        var f = face({initial: p.initial, color: p.color}, small);
+        if (img.parentNode) img.parentNode.replaceChild(f, img);
+      };
+      return img;
+    }
+    var f = el("span", {class: cls, text: p.initial || "?"});
     f.style.background = (p.color || "#64748b") + "33";
     f.style.color = p.color || "#94a3b8";
     return f;

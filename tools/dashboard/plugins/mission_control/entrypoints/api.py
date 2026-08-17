@@ -1498,8 +1498,20 @@ async def handle_relay_read(participant_id: str, mission_id: str, body: dict) ->
         if pillar_id is not None and _pillar_of_this_mission(pillar_id, mission_id) is None:
             return None
         surface_id = f"pillar:{pillar_id}" if pillar_id else f"mission:{mission_id}"
+        # A bound link names a real person, so presence shows their name. It
+        # used to put the participant id in the label field, which is what a
+        # reader saw: a guest and a uuid, on the surface whose whole job is
+        # saying who is here -- while the link, the attribution and the screen
+        # all had the identity right. The id is display-safe and the lookup
+        # takes exactly it.
         who = participant_id or "guest:with-the-link"
-        label = participant_id or "Someone with the link"
+        label = "Someone with the link"
+        if participant_id:
+            visitor = db.get_visitor_by_participant_id(participant_id)
+            # A grant can outlive the person it was minted for. Falling back
+            # to the id keeps them on the list, named as best we can, rather
+            # than dropping a reader who is genuinely there.
+            label = (visitor or {}).get("display_name") or participant_id
         # "guest" -- one of the three kinds surface.py accepts. This said
         # "person", which is not, and Presence rejected every call: the
         # exception was caught and logged, so guest presence was silently

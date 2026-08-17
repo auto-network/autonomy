@@ -82,6 +82,8 @@ function missionPresenceRow(id, kind = 'mission') {
     {
       openId: null,
       identityTimer: null,
+      _avatars: null,
+      _avatarTick: 0,
       groupedOpen: false,
       compactOpen: false,
 
@@ -92,6 +94,34 @@ function missionPresenceRow(id, kind = 'mission') {
       participantInitial(p) {
         const label = (p && p.participant_label) || '';
         return label ? label.charAt(0).toUpperCase() : '?';
+      },
+
+      // A guest's photo, fetched once per person and kept for the life of the
+      // page. A presence row carries an id and a name and nothing else -- that
+      // shape is shared with every other surface here -- so the picture is
+      // looked up from the id the row already has.
+      //
+      // Only guests have one. An agent and the operator are drawn from their
+      // initial, the same as everywhere else on the dashboard.
+      participantAvatar(p) {
+        const id = p && p.participant_id;
+        if (!id || id.indexOf('guest:') !== 0) return null;
+        if (!this._avatars) this._avatars = {};
+        if (Object.prototype.hasOwnProperty.call(this._avatars, id)) {
+          return this._avatars[id];
+        }
+        this._avatars[id] = null;          // claim it: one fetch per person
+        fetch('/api/visitor-tokens/' + encodeURIComponent(id))
+          .then(r => (r.ok ? r.json() : null))
+          .then(d => {
+            const att = d && d.visitor && d.visitor.avatar_attachment_id;
+            // Assigning through the key Alpine already tracks is what makes
+            // the picture appear without a reload.
+            this._avatars[id] = att ? '/api/attachment/' + att : null;
+            this._avatarTick = (this._avatarTick || 0) + 1;
+          })
+          .catch(() => {});               // a missing photo is not an error
+        return null;
       },
       lastActive(p) {
         return (p && p.heartbeat_at) ? relativeTime(Date.parse(p.heartbeat_at) / 1000) : '';
