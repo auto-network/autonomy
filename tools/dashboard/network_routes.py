@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import hashlib
 import json
 import os
@@ -1230,7 +1231,12 @@ def _write_serve_key(path: Path, private_key_hex: str) -> None:
 #: credential is left alone for its first 10 days: signing in every day still
 #: mints at most once per 10 days, while any sign-in in the final third
 #: replaces it well before it dies.
+logger = logging.getLogger(__name__)
+
 SERVE_CERT_RENEW_BELOW_DAYS = 20
+
+#: Last browser-side unlock maintenance report, for reading back off-device.
+_LAST_UNLOCK_MAINTENANCE: dict = {}
 
 
 async def get_serve_cert_status(request: Request) -> JSONResponse:
@@ -1754,6 +1760,40 @@ async def post_migrate_org_key(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "root_pub": sealed["root_pub"]})
 
 
+
+async def post_unlock_maintenance_report(request: Request) -> JSONResponse:
+    """Record what the unlock's maintenance pass actually did, per org.
+
+    Serving repair and the org-key migration run in the browser, so their
+    outcome has until now existed only in a console. An operator on a phone
+    has no console, and a failure nobody can read is the reporting defect that
+    let three organizations drift to the edge of expiry unnoticed. The browser
+    posts its report here so the result is on the server, where it can be read
+    without the machine that produced it.
+
+    Diagnostic only: it carries statuses and error strings, never key
+    material, and is logged rather than stored.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "body must be JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse(
+            {"ok": False, "error": "body must be a JSON object"}, status_code=400,
+        )
+    logger.warning("[unlock-maintenance] %s", json.dumps(body, default=str)[:4000])
+    _LAST_UNLOCK_MAINTENANCE.clear()
+    _LAST_UNLOCK_MAINTENANCE.update(body)
+    _LAST_UNLOCK_MAINTENANCE["received_at"] = int(time.time())
+    return JSONResponse({"ok": True})
+
+
+async def get_unlock_maintenance_report(request: Request) -> JSONResponse:
+    """The most recent unlock maintenance report, or an empty object."""
+    return JSONResponse(dict(_LAST_UNLOCK_MAINTENANCE))
+
+
 ROUTES = [
     Route("/api/network/org-key", get_org_key, methods=["GET"]),
     Route("/api/network/org-key", put_org_key, methods=["POST"]),
@@ -1780,6 +1820,8 @@ ROUTES = [
     Route("/api/network/register", post_register, methods=["POST"]),
     Route("/api/network/invite/resolve", post_invite_resolve, methods=["POST"]),
     Route("/api/network/serve-cert", get_serve_cert_status, methods=["GET"]),
+    Route("/api/network/unlock-report", get_unlock_maintenance_report),
+    Route("/api/network/unlock-report", post_unlock_maintenance_report, methods=["POST"]),
     Route("/api/network/serve-cert", post_serve_cert, methods=["POST"]),
     Route("/api/network/revocations", post_revocation, methods=["POST"]),
 ]

@@ -34,7 +34,14 @@ def test_password_unlock_runs_opportunistic_serving_repair_after_access(mode):
     proof = _proof(result.stdout)
     assert proof["repair_called_after_access"] is True
     assert proof["repair_calls"] == 1
-    assert proof["events"][-1] == "POST /api/identity/unlock/password"
+    # Access authentication completes BEFORE any maintenance -- the ordering
+    # is the property, not that the unlock is the final call (maintenance now
+    # reports its outcome to the server afterwards).
+    events = proof["events"]
+    assert "POST /api/identity/unlock/password" in events
+    maintenance = [i for i, e in enumerate(events) if "unlock-report" in e]
+    if maintenance:
+        assert events.index("POST /api/identity/unlock/password") < maintenance[0]
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
