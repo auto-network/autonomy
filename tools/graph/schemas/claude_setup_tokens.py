@@ -20,6 +20,7 @@ from datetime import timedelta
 from typing import Any
 
 from .registry import (
+    publication_band,
     keyed_per_entity,
     SchemaValidationError,
     SettingSchema,
@@ -54,6 +55,10 @@ SYNOPSIS = {
 
 
 @cache(ttl=CLAUDE_SETUP_TOKEN_TTL)
+#: Never leaves the database that owns it: harness setup tokens. Publication state
+#: is the only control over a cross-organization read, so the band is
+#: what makes 'promote this' unable to become a disclosure.
+@publication_band(max="raw")
 @keyed_per_entity(key_strategy="account_uuid")
 class ClaudeSetupTokenV1(SettingSchema):
     """Per-account long-lived setup token.

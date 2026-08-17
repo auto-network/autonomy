@@ -10,6 +10,7 @@ requires the mode-0600 private key file on the host
 """
 
 from .registry import (
+    publication_band,
     SettingSchema,
     field,
     keyed_per_entity,
@@ -38,6 +39,10 @@ SYNOPSIS = {
 }
 
 
+#: Never leaves the database that owns it: sealed secret material. Publication state
+#: is the only control over a cross-organization read, so the band is
+#: what makes 'promote this' unable to become a disclosure.
+@publication_band(max="raw")
 @keyed_per_entity(key_strategy="secret_name")
 class SecureSettingV1(SettingSchema):
     """One sealed secret payload.
@@ -111,6 +116,10 @@ class SecureSettingV1(SettingSchema):
     )
 
 
+#: Never leaves the database that owns it: sealed secret material. Publication state
+#: is the only control over a cross-organization read, so the band is
+#: what makes 'promote this' unable to become a disclosure.
+@publication_band(max="raw")
 @keyed_per_entity(key_strategy="secret_name")
 class SecureSettingV2(SettingSchema):
     """One sealed secret payload, bound to a workspace allowlist.

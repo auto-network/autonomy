@@ -19,6 +19,7 @@ The ``autonomy.commit.*`` set_id is a legacy name; the home is personal.
 """
 
 from .registry import (
+    publication_band,
     SettingSchema,
     field,
     home,
@@ -47,6 +48,10 @@ SYNOPSIS = {
 
 
 @home("personal")
+#: Never leaves the database that owns it: a private signing key. Publication state
+#: is the only control over a cross-organization read, so the band is
+#: what makes 'promote this' unable to become a disclosure.
+@publication_band(max="raw")
 @keyed_per_entity(key_strategy="org_slug")
 class CommitSigningKeyV1(SettingSchema):
     """The operator's commit-signing key for one organization.
