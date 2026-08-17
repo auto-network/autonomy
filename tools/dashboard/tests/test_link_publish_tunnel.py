@@ -3,9 +3,14 @@
 Share links no longer travel to the registry over HTTP. The dashboard
 authenticates the acting persona LOCALLY — the approval envelope's
 signature proves possession of the session key, its certificate chains to
-the org's bound root with the required scope, and the ledger fold grants
-that scope — and then sends the mint/revoke as a control op on the
+THE ACTING PERSONA with the required scope, and the ledger fold grants that
+scope — and then sends the mint/revoke as a control op on the
 already-authenticated serving tunnel. The registry never sees the persona.
+
+The chain anchors at the persona, never at the org root: §7 rules that the
+org root is not a domain principal and that a chain terminating outside the
+roster is void. Authentication and authorization are separate — the chain
+proves WHO signed, the authority ledger decides WHAT they may do.
 
 These tests found a real authority ledger, mock the tunnel control seam
 at ``link_serving_supervisor.control``, and drive the approval flow so the
@@ -71,11 +76,30 @@ def founded_org(tmp_path, monkeypatch, root):
         )
 
 
-def _persona_cert(root, session_key, persona_pub, *, kind="operator",
+PERSONAL_ROOT_SEED = b"\x91" * 32
+
+
+@pytest.fixture
+def founder_persona(founded_org):
+    """The founder's persona KEYPAIR, derived exactly as the browser derives
+    it — one personal unlock, HKDF over this org's genesis id."""
+    from tools.network.idkit.persona import derive_persona
+
+    return derive_persona(PERSONAL_ROOT_SEED, founded_org.genesis_id)
+
+
+def _persona_cert(signer, session_key, persona_pub, *, kind="operator",
                   scope=SESSION_SCOPE, not_before=None, not_after=None):
+    """Mint a session certificate the way sign-on does: signed by the ACTING
+    PERSONA (not the org root), naming that persona as the subject.
+
+    The org root does not appear. A session certificate has never chained to
+    it since sign-on became a personal act, and §7 is explicit that the org
+    root is not a domain principal — authorization is the ledger's job.
+    """
     now = int(time.time())
     return issue_cert(
-        root, session_key.public_hex, scope=scope, org=ORG_UUID,
+        signer, session_key.public_hex, scope=scope, org=ORG_UUID,
         subject=Subject(kind, persona_pub),
         not_before=now - 3600 if not_before is None else not_before,
         not_after=now + 30 * 86400 if not_after is None else not_after,
@@ -83,8 +107,9 @@ def _persona_cert(root, session_key, persona_pub, *, kind="operator",
 
 
 @pytest.fixture
-def session_cert(root, session_key, founded_org):
-    return _persona_cert(root, session_key, founded_org.founder_persona_pub)
+def session_cert(session_key, founder_persona):
+    return _persona_cert(
+        founder_persona, session_key, founder_persona.public_hex)
 
 
 @pytest.fixture
@@ -231,7 +256,7 @@ def test_publish_refused_without_scope_emits_no_frame(
     env, root, session_key, monkeypatch,
 ):
     outsider = KeyPair.generate()  # a persona holding no role in the fold
-    cert = _persona_cert(root, session_key, outsider.public_hex)
+    cert = _persona_cert(outsider, session_key, outsider.public_hex)
     recorder = _ControlRecorder()
     _install_control(monkeypatch, recorder)
 
@@ -363,7 +388,7 @@ def test_revoke_refused_without_scope(
 ):
     token = _seed_share_grant(root, session_key, session_cert, env, monkeypatch)
     outsider = KeyPair.generate()
-    cert = _persona_cert(root, session_key, outsider.public_hex)
+    cert = _persona_cert(outsider, session_key, outsider.public_hex)
     recorder = _ControlRecorder()
     _install_control(monkeypatch, recorder)
 
@@ -385,11 +410,11 @@ def test_revoke_refused_without_scope(
 # ── Codex D19 review findings (2026-07-30) — regression guards ──
 
 
-def test_expired_cert_is_refused(env, root, session_key, founded_org, monkeypatch):
+def test_expired_cert_is_refused(env, root, session_key, founded_org, founder_persona, monkeypatch):
     """Finding #1: a cert whose validity window has passed must not mint.
     (The chain check must verify at request time, not the cert midpoint.)"""
     now = int(time.time())
-    cert = _persona_cert(root, session_key, founded_org.founder_persona_pub,
+    cert = _persona_cert(founder_persona, session_key, founder_persona.public_hex,
                         not_before=now - 7200, not_after=now - 3600)
     recorder = _ControlRecorder()
     _install_control(monkeypatch, recorder)
@@ -402,10 +427,10 @@ def test_expired_cert_is_refused(env, root, session_key, founded_org, monkeypatc
 
 
 def test_not_yet_valid_cert_is_refused(env, root, session_key, founded_org,
-                                       monkeypatch):
+                                       founder_persona, monkeypatch):
     """Finding #1: a cert whose validity window is in the future must not mint."""
     now = int(time.time())
-    cert = _persona_cert(root, session_key, founded_org.founder_persona_pub,
+    cert = _persona_cert(founder_persona, session_key, founder_persona.public_hex,
                         not_before=now + 3600, not_after=now + 7200)
     recorder = _ControlRecorder()
     _install_control(monkeypatch, recorder)
@@ -418,14 +443,14 @@ def test_not_yet_valid_cert_is_refused(env, root, session_key, founded_org,
 
 
 def test_non_operator_subject_kind_is_refused(env, root, session_key,
-                                              founded_org, monkeypatch):
+                                              founded_org, founder_persona, monkeypatch):
     """Finding #4: an agent- or persona-kind cert whose subject.id names an
     authorized persona must not reach mint — the rung-1 transport pins the
     subject kind to 'operator'."""
     recorder = _ControlRecorder()
     _install_control(monkeypatch, recorder)
     for kind in ("agent", "persona"):
-        cert = _persona_cert(root, session_key, founded_org.founder_persona_pub,
+        cert = _persona_cert(founder_persona, session_key, founder_persona.public_hex,
                             kind=kind)
         rid = _create_publish(env)
         envelope = _tunnel_envelope(session_key, cert, "/control/create-link")
@@ -520,5 +545,53 @@ def test_invalid_ttl_override_is_refused(env, root, session_key, session_cert,
             break
     assert d["result"]["execution"]["ok"] is False
     assert "between 1 and 365 days" in d["result"]["execution"]["error"]
+    assert recorder.calls == []
+    assert _cached_grants() == {}
+
+
+# ── the anchor: persona, never the org root ──
+
+
+def test_persona_signed_session_certificate_publishes(
+    env, session_key, founder_persona, founded_org, monkeypatch,
+):
+    """REGRESSION. Sign-on is a personal act, so the session certificate is
+    signed by the org's persona and does not chain to the org root at all.
+
+    Anchoring the check at the org root rejected every one of them at the
+    first hop -- "hop 1: signature does not verify against its parent key" --
+    which reads as a forged certificate and is actually a wrong anchor. It
+    blocked every share-link publish, so no mission could be shared with a
+    real person.
+    """
+    recorder = _ControlRecorder()
+    _install_control(monkeypatch, recorder)
+
+    cert = _persona_cert(
+        founder_persona, session_key, founder_persona.public_hex)
+    rid = _create_publish(env)
+    envelope = _tunnel_envelope(session_key, cert, "/control/create-link")
+    result = _decide_and_wait(env, rid, envelope)
+
+    assert result["execution"]["ok"] is True, result["execution"].get("error")
+    assert len(recorder.calls) == 1
+
+
+def test_root_signed_certificate_is_refused(
+    env, root, session_key, founder_persona, founded_org, monkeypatch,
+):
+    """The org root is NOT a domain principal (§7). A certificate signed by
+    it, naming an authorized persona as subject, must not publish -- otherwise
+    holding the root would silently confer every persona's authority."""
+    recorder = _ControlRecorder()
+    _install_control(monkeypatch, recorder)
+
+    cert = _persona_cert(root, session_key, founder_persona.public_hex)
+    rid = _create_publish(env)
+    envelope = _tunnel_envelope(session_key, cert, "/control/create-link")
+    result = _decide_and_wait(env, rid, envelope)
+
+    assert result["execution"]["ok"] is False
+    assert "does not chain to its acting persona" in result["execution"]["error"]
     assert recorder.calls == []
     assert _cached_grants() == {}
