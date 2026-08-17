@@ -1225,6 +1225,14 @@ def _write_serve_key(path: Path, private_key_hex: str) -> None:
     os.replace(tmp, path)
 
 
+#: Renew a serving credential once fewer than this many days remain. The
+#: delegate is minted for 30 days, so renewing under 20 means a fresh
+#: credential is left alone for its first 10 days: signing in every day still
+#: mints at most once per 10 days, while any sign-in in the final third
+#: replaces it well before it dies.
+SERVE_CERT_RENEW_BELOW_DAYS = 20
+
+
 async def get_serve_cert_status(request: Request) -> JSONResponse:
     """Cheap pre-unlock check: does this org need a fresh serving credential?
 
@@ -1237,8 +1245,38 @@ async def get_serve_cert_status(request: Request) -> JSONResponse:
         return refused
     from tools.dashboard.link_serving_supervisor import serve_cert_state
 
-    status = serve_cert_state(org).get("status", "missing")
-    return JSONResponse({"required": status != "ok", "status": status})
+    state = serve_cert_state(org)
+    status = state.get("status", "missing")
+
+    # RENEW BEFORE IT DIES, not after. `status` is "ok" for any certificate
+    # that has not already passed not_after, so keying the mint decision on it
+    # alone means a credential can only ever be replaced once it is expired --
+    # every renewal necessarily begins with an outage, lasting until whenever
+    # the next password unlock happens to occur. Renewal is opportunistic and
+    # unlocks are irregular, so the window has to be wide enough that an
+    # ordinary sign-in falls inside it: half the 30-day lifetime.
+    #
+    # Only the browser's "should I mint?" answer changes here. `status` is
+    # returned untouched because the connector and the supervisor gate serving
+    # on it being "ok" -- reporting a still-valid certificate as anything else
+    # would stop serving, which is a worse outage than the one this prevents.
+    required = status != "ok"
+    days_remaining = None
+    row = state.get("row") or {}
+    not_after = row.get("not_after")
+    if isinstance(not_after, int):
+        days_remaining = (not_after - int(time.time())) / 86400.0
+        if days_remaining < SERVE_CERT_RENEW_BELOW_DAYS:
+            required = True
+    return JSONResponse({
+        "required": required,
+        "status": status,
+        # Reported whether or not a renewal is due, so the caller can say how
+        # long a credential has left instead of only that it is fine for now.
+        "days_remaining": (
+            None if days_remaining is None else round(days_remaining, 1)
+        ),
+    })
 
 
 async def post_serve_cert(request: Request) -> JSONResponse:
