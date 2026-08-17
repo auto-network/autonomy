@@ -2740,9 +2740,23 @@
         this.signing = true; this.signError = null;
         try {
           const openpgp = await this._ensureOpenpgp();
-          const encArmored = await (await fetch('/api/sign-key')).text();
-          if (!encArmored || encArmored.indexOf('PRIVATE KEY') < 0) {
-            throw new Error('no signing key is configured for this org');
+          // Name the APPROVAL, not the organization: the server reads which
+          // org from the request being signed, so the browser cannot select
+          // somebody else's key and cannot get it wrong.
+          const keyResp = await fetch('/api/sign-key?approval='
+            + encodeURIComponent(sc.approvalId));
+          const encArmored = await keyResp.text();
+          if (!keyResp.ok || !encArmored
+              || encArmored.indexOf('PRIVATE KEY') < 0) {
+            // Say what the server said. This threw one generic sentence for
+            // every distinct failure -- 404, 400, 500, auth -- so four
+            // separate faults looked identical from the dialog and each
+            // round trip produced no new information.
+            throw new Error(
+              (encArmored && encArmored.indexOf('PRIVATE KEY') < 0
+                ? encArmored.trim()
+                : 'the dashboard returned no signing key')
+              + ' (HTTP ' + keyResp.status + ')');
           }
           const encPriv = await openpgp.readPrivateKey({ armoredKey: encArmored });
           // decryptKey throws on a wrong passphrase — so success here proves it.

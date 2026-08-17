@@ -45,6 +45,35 @@ from tools.graph.schemas import commit_signing_key as _sign_key_schema  # noqa: 
 SIGN_KEY_SET_ID = _sign_key_schema.SIGN_KEY_SET_ID
 
 
+def _org_for_approval(rid: str) -> str | None:
+    """The organization a pending approval belongs to.
+
+    Derived from the request row the operator is already looking at, never
+    from anything the browser says. The signing key is per organization, and
+    the caller with authority over all of them -- the operator, holding the
+    cookie -- is the one caller that carries no organization of its own. So
+    the organization has to come from the thing being signed.
+
+    Taking it from a query parameter instead would put a selector for
+    somebody's private key under browser control, which
+    ``require_global_api_authority`` explicitly tells handlers not to do.
+    The approval id is not a selector: it names a row the server owns and
+    the operator has already been shown.
+    """
+    row = ar.get(rid)
+    if not row:
+        return None
+    session = row.get("session")
+    if not session:
+        return None
+    try:
+        from tools.dashboard.dao import dashboard_db
+        from tools.dashboard.org_identity import session_org_slug
+        return session_org_slug(dashboard_db.get_session(session) or {}) or None
+    except Exception:
+        return None
+
+
 async def get_sign_key(request: Request) -> PlainTextResponse:
     """GET /api/sign-key -> the operator's passphrase-encrypted armored private
     commit-signing key for their organization, or 404 if none is configured.
@@ -63,16 +92,33 @@ async def get_sign_key(request: Request) -> PlainTextResponse:
 
     from tools.graph import settings_ops
 
-    org = settings_ops._resolve_settings_caller(None)
+    # Which key, from the thing being signed. The operator's browser sends no
+    # organization -- it has none, it owns them all -- so resolving the caller
+    # returned nothing and this took its 404 branch before looking anything
+    # up. Four signing attempts failed that way, each reported to the operator
+    # as "no signing key is configured", which named the wrong problem.
+    approval_id = request.query_params.get("approval")
+    org = _org_for_approval(approval_id) if approval_id else None
+    if not org:
+        org = settings_ops._resolve_settings_caller(None)
     if not org or org == "personal":
-        return PlainTextResponse("no signing key configured", status_code=404)
+        return PlainTextResponse(
+            "this request does not say which organization to sign for: pass "
+            "?approval=<id> so the organization can be read from the request "
+            "being signed",
+            status_code=400,
+        )
 
     row = settings_ops.read_set_key(
         SIGN_KEY_SET_ID, org, org="personal", peers=[],
     )
     armored = (row or {}).get("payload", {}).get("armored_private_key")
     if not armored:
-        return PlainTextResponse("no signing key configured", status_code=404)
+        return PlainTextResponse(
+            f"no signing key is configured for {org!r} — add one at "
+            f"{SIGN_KEY_SET_ID} key={org!r} in the operator's own store",
+            status_code=404,
+        )
     return PlainTextResponse(armored)
 
 
@@ -106,7 +152,8 @@ def _enrich_commit_sign(row: dict) -> dict:
             files, patch = d["files"], d["patch"]
         except Exception:
             pass  # worktree/tree unavailable -> render without diff
-    return {"files": files, "patch": patch}
+    return {"files": files, "patch": patch,
+            "org": _org_for_approval(row.get("id")) }
 
 
 # Share-link approval kinds (link_publish / link_revoke) live in their own
