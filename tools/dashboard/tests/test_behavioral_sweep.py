@@ -36,6 +36,8 @@ import pytest
 
 from tools.dashboard.test_lib.l2b_harness import (
     _ab_eval_batch,
+    instrument_network,
+    wait_dom_idle,
     _http_get,
     _navigate_and_check,
     _run_async_eval,
@@ -7837,52 +7839,60 @@ def _navigate_and_eval_async(path: str, js_expr: str, wait_ms: int = 800) -> dic
     a pre-declared `r` object and returned via JSON.stringify, mirroring _navigate_and_check
     but allowing `await`.
     """
+    # Instrument fetch before navigating so wait_dom_idle observes the route's
+    # data fetch in-flight (network-idle), not just DOM-idle.
+    instrument_network()
     nav_js = f"navigateTo('{path}')"
     subprocess.run(
         ["agent-browser", "eval", nav_js],
         capture_output=True, timeout=10,
     )
-    time.sleep(wait_ms / 1000)
 
     # Auto-wrap non-IIFE expressions
     stripped = js_expr.strip()
     if not stripped.startswith('('):
         js_expr = f"(async () => {{ var r = {{}}; {js_expr} return JSON.stringify(r); }})()"
 
-    result = subprocess.run(
-        ["agent-browser", "--json", "eval", js_expr],
-        capture_output=True, text=True, timeout=15,
-    )
-    stdout = result.stdout.strip()
-    if not stdout:
+    def _run_once() -> dict:
+        result = subprocess.run(
+            ["agent-browser", "--json", "eval", js_expr],
+            capture_output=True, text=True, timeout=15,
+        )
+        stdout = result.stdout.strip()
+        if not stdout:
+            return {}
+        # Parse last JSON line that has success+data shape
+        for line in reversed(stdout.split("\n")):
+            try:
+                parsed = json.loads(line)
+                if isinstance(parsed, dict) and "data" in parsed:
+                    data = parsed["data"]
+                    if isinstance(data, dict) and "result" in data:
+                        val = data["result"]
+                        if isinstance(val, str):
+                            try:
+                                return json.loads(val)
+                            except (json.JSONDecodeError, TypeError):
+                                pass
+                        if isinstance(val, dict):
+                            return val
+                        return {}
+                    if isinstance(data, dict):
+                        return data
+                if isinstance(parsed, str):
+                    try:
+                        return json.loads(parsed)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+            except json.JSONDecodeError:
+                continue
         return {}
-    # Parse last JSON line that has success+data shape
-    for line in reversed(stdout.split("\n")):
-        try:
-            parsed = json.loads(line)
-            if isinstance(parsed, dict) and "data" in parsed:
-                data = parsed["data"]
-                if isinstance(data, dict) and "result" in data:
-                    val = data["result"]
-                    # If result is a JSON string, parse it
-                    if isinstance(val, str):
-                        try:
-                            return json.loads(val)
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-                    if isinstance(val, dict):
-                        return val
-                    return {}
-                if isinstance(data, dict):
-                    return data
-            if isinstance(parsed, str):
-                try:
-                    return json.loads(parsed)
-                except (json.JSONDecodeError, TypeError):
-                    pass
-        except json.JSONDecodeError:
-            continue
-    return {}
+
+    # Wait for the DOM to settle (page finished rendering, including late async
+    # renders) instead of a fixed sleep, then read once — same rationale as
+    # l2b_harness._navigate_and_check. (crypto pillar fixed-sleeps report.)
+    wait_dom_idle(ceiling_ms=max(wait_ms, 5000))
+    return _run_once()
 
 
 class TestExperimentToolbar:
@@ -10848,10 +10858,15 @@ class TestSearchPillRefetch:
 SEARCH_DROPDOWN_POSITIONING_CHECKS = """(async () => {
   var r = {};
   const sleep = (ms) => new Promise(res => setTimeout(res, ms));
-  await sleep(800);  // initial fetch settles
-
-  var spRoot = document.querySelector('[x-data^="searchPage"]');
-  var spScope = spRoot && Alpine ? Alpine.$data(spRoot) : null;
+  // Poll for the searchPage Alpine root to hydrate (the navigate helper's
+  // DOM-idle wait already settled the page) rather than a fixed 800ms.
+  var spRoot = null, spScope = null;
+  for (var _t0 = Date.now(); Date.now() - _t0 < 3000; ) {
+    spRoot = document.querySelector('[x-data^="searchPage"]');
+    spScope = spRoot && window.Alpine ? Alpine.$data(spRoot) : null;
+    if (spScope) break;
+    await sleep(20);
+  }
   r.has_alpine_root = !!spScope;
   if (!spScope) return JSON.stringify(r);
 
@@ -10859,12 +10874,19 @@ SEARCH_DROPDOWN_POSITIONING_CHECKS = """(async () => {
     var el = spRoot.querySelector('[data-testid="' + testid + '"]');
     return el ? el.getBoundingClientRect() : null;
   }
-  function dropdownRect(testid) {
+  async function dropdownRect(testid) {
     var el = spRoot.querySelector('[data-testid="' + testid + '"]');
     if (!el) return null;
-    // Alpine x-show toggles display; getBoundingClientRect on a
-    // display:none element returns all zeros, so opening the dropdown
-    // first is mandatory before the position check.
+    // x-show toggles display on the next Alpine tick; getBoundingClientRect on
+    // a display:none element returns all zeros. Wait for a REAL box (non-zero
+    // width) instead of a fixed sleep — a fixed 120ms loses that race under
+    // load and reads zeros, which then looks like a layout bug rather than
+    // 'not open yet'. (crypto pillar fixed-sleeps report.)
+    for (var _t = Date.now(); Date.now() - _t < 2000; ) {
+      var rect = el.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) return rect;
+      await sleep(20);
+    }
     return el.getBoundingClientRect();
   }
 
@@ -10872,8 +10894,7 @@ SEARCH_DROPDOWN_POSITIONING_CHECKS = """(async () => {
   //       not at the row's left edge. ─────────────────────────────────
   var stateChip = chipRect('sp-state-chip');
   spScope.toggleStateDropdown();
-  await sleep(120);
-  var stateDD = dropdownRect('sp-state-dropdown');
+  var stateDD = await dropdownRect('sp-state-dropdown');
   r.state_chip_left = stateChip ? stateChip.left : null;
   r.state_dd_left = stateDD ? stateDD.left : null;
   // Whether the dropdown is anchored to the chip (within a few px) or
@@ -10887,8 +10908,7 @@ SEARCH_DROPDOWN_POSITIONING_CHECKS = """(async () => {
   // ── 2. Open the Sort (Order) dropdown — same anchor invariant ─────
   var orderChip = chipRect('sp-order-chip');
   spScope.toggleOrderDropdown();
-  await sleep(120);
-  var orderDD = dropdownRect('sp-order-dropdown');
+  var orderDD = await dropdownRect('sp-order-dropdown');
   r.order_chip_left = orderChip ? orderChip.left : null;
   r.order_dd_left = orderDD ? orderDD.left : null;
   if (orderChip && orderDD) {
@@ -10900,8 +10920,7 @@ SEARCH_DROPDOWN_POSITIONING_CHECKS = """(async () => {
   // ── 3. Open the Org dropdown ──────────────────────────────────────
   var orgChip = chipRect('sp-org-chip');
   spScope.toggleOrgDropdown();
-  await sleep(120);
-  var orgDD = dropdownRect('sp-org-dropdown');
+  var orgDD = await dropdownRect('sp-org-dropdown');
   r.org_chip_left = orgChip ? orgChip.left : null;
   r.org_dd_left = orgDD ? orgDD.left : null;
   if (orgChip && orgDD) {
