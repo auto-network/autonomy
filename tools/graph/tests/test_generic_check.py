@@ -473,3 +473,45 @@ def test_a_published_row_is_neither(two_orgs, shared):
 
     assert settings_ops.check_setting("probe.shared.thing", "open",
                                       org="acme") == []
+
+
+# ── what a layers view must not merge ────────────────────────
+
+
+def test_layers_does_not_merge_a_deprecated_override(acme, monkeypatch):
+    """A view that merges rows resolution skips describes a value nothing
+    returns.
+
+    This was not theoretical. A deprecated override carrying a model pin was
+    merged into a workspace's base by a migration built on this view, which
+    would have silently re-pinned that workspace from a row the platform had
+    already retired.
+    """
+    from tools.graph.db import GraphDB, resolve_caller_db_path
+
+    base = settings_ops.add_setting("probe.check.plain", 1, "dep", {"v": "live"},
+                                    org="acme")
+    # A pre-existing chain, as the live data holds: written before amendment
+    # collapsed into the row it amends.
+    monkeypatch.setattr(settings_ops, "_collapse_amendment",
+                        lambda *a, **k: None)
+    settings_ops.override_setting(base, {"v": "retired"}, org="acme")
+
+    db = GraphDB(resolve_caller_db_path("acme"))
+    try:
+        db.conn.execute(
+            "UPDATE settings SET deprecated = 1 WHERE supersedes = ?", (base,))
+        db.conn.commit()
+    finally:
+        db.close()
+
+    layers = settings_ops.layers_for("probe.check.plain", "dep", org="acme")
+    resolved = settings_ops.read_set_key("probe.check.plain", "dep",
+                                         org="acme", peers=[])
+
+    assert layers["resolved"] == resolved["payload"], (
+        "the view and the resolver disagree about the same key")
+    assert layers["resolved"]["v"] == "live"
+    assert layers["overrides"] == []
+    assert len(layers["deprecated"]) == 1, (
+        "a retired row should still be visible, just not applied")
