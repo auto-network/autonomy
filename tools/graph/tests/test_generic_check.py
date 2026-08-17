@@ -533,3 +533,37 @@ def test_layers_reports_the_rows_own_revision(acme):
 
     assert layers["base"]["schema_revision"] == 1, (
         "a caller cannot rewrite a row correctly without its revision")
+
+
+def test_a_composed_read_says_it_was_composed(acme, monkeypatch, capsys):
+    """The fix for the wrong mental model, at its source.
+
+    Every read surface returns a merged payload, so the store presents as a
+    dictionary of key to value while it is really rows and layers. When a
+    write then appears to do nothing there is nowhere to look. One line on
+    a composed read is what makes the layering visible in the surface people
+    use daily, rather than in a command they would have to already suspect.
+    """
+    from tools.graph import set_cmd
+
+    base = settings_ops.add_setting("probe.check.plain", 1, "comp",
+                                    {"v": "1"}, org="acme")
+    monkeypatch.setattr(settings_ops, "_collapse_amendment",
+                        lambda *a, **k: None)
+    settings_ops.override_setting(base, {"v": "2"}, org="acme")
+
+    set_cmd._print_composition("probe.check.plain", "comp", "acme")
+
+    assert "composed from a base plus 1 override" in capsys.readouterr().err
+
+
+def test_a_single_row_read_stays_quiet(acme, capsys):
+    """The common case must not become noise, or the line stops being read."""
+    from tools.graph import set_cmd
+
+    settings_ops.add_setting("probe.check.plain", 1, "single", {"v": "1"},
+                             org="acme")
+
+    set_cmd._print_composition("probe.check.plain", "single", "acme")
+
+    assert capsys.readouterr().err == ""

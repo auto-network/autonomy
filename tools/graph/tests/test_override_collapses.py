@@ -198,3 +198,44 @@ def test_a_set_that_does_not_declare_replacement_still_layers(orgs):
     returned = settings_ops.override_setting(base, {"a": "2"}, org="acme")
 
     assert returned != base
+
+
+# ── removing one row of several ──────────────────────────────
+
+
+def test_removing_a_base_names_the_rows_it_orphans(orgs, monkeypatch, capsys):
+    """Removing one row of two reported unqualified success.
+
+    Then the same command, asked again by key, answered "no Setting with
+    that key" while the store still held one -- because addressing runs
+    through resolution and an override with no base resolves to nothing.
+    A store denying its own contents is worse than one saying nothing, so
+    the survivors are named by id, the only address that still works.
+    """
+    from tools.graph import set_cmd
+
+    base = settings_ops.add_setting("probe.collapse.keyed", 1, "orph",
+                                    {"a": "1"}, org="acme")
+    monkeypatch.setattr(settings_ops, "_collapse_amendment",
+                        lambda *a, **k: None)
+    settings_ops.override_setting(base, {"a": "2"}, org="acme")
+
+    settings_ops.remove_setting(base, org="acme")
+    set_cmd._report_rows_left_for("probe.collapse.keyed", "orph", "acme")
+
+    out = capsys.readouterr().out
+    assert "the base is gone" in out
+    assert "remove them by id" in out
+
+
+def test_removing_from_a_key_with_one_row_says_nothing_extra(orgs, capsys):
+    """The report has to discriminate or it becomes noise on every delete."""
+    from tools.graph import set_cmd
+
+    base = settings_ops.add_setting("probe.collapse.keyed", 1, "solo",
+                                    {"a": "1"}, org="acme")
+    settings_ops.remove_setting(base, org="acme")
+
+    set_cmd._report_rows_left_for("probe.collapse.keyed", "solo", "acme")
+
+    assert capsys.readouterr().out == ""

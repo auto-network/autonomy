@@ -196,3 +196,52 @@ def test_a_write_an_override_does_not_touch_is_not_reported(orgs, monkeypatch):
                                {"a": "changed", "b": "override"}, org="acme")
 
     assert settings_ops.take_shadowed_write("probe.shadow.wide", "w") is None
+
+
+# ── what readers will see, said every time ───────────────────
+
+
+def test_a_write_says_what_the_value_now_is(orgs, capsys):
+    """"Written" and "this is the value" are different facts."""
+    settings_ops.add_setting("probe.shadow.value", 1, "eff", {"v": "mine"},
+                             org="acme")
+
+    set_cmd._report_effective_value(
+        "probe.shadow.value", "eff", "acme", {"v": "mine"})
+
+    assert "exactly what you wrote" in capsys.readouterr().out
+
+
+def test_it_names_the_fields_that_did_not_take(orgs, capsys):
+    """The case that cost a day: the row lands, and a reader sees something
+    else. Naming the field is the difference between a report and a hint."""
+    settings_ops.upsert_by_key("probe.shadow.value", 1, "eff2", {"v": "theirs"},
+                               org="partner", state="published")
+
+    set_cmd._report_effective_value(
+        "probe.shadow.value", "eff2", "acme", {"v": "mine"})
+
+    out = capsys.readouterr().out
+    assert "differs from what you wrote in v" in out
+    assert "theirs" in out, "the value a reader gets has to be shown, not implied"
+
+
+def test_a_key_that_resolves_to_nothing_says_so(orgs, capsys):
+    """Distinct from agreeing. A write that resolves to nothing is the
+    loudest possible version of the failure and printed nothing before."""
+    set_cmd._report_effective_value(
+        "probe.shadow.value", "absent", "acme", {"v": "mine"})
+
+    assert "does not resolve" in capsys.readouterr().out
+
+
+def test_it_is_printed_even_when_nothing_is_wrong(orgs, capsys):
+    """A report that appears only on trouble teaches that silence means
+    agreement -- and silence is what the failing case produced."""
+    settings_ops.add_setting("probe.shadow.value", 1, "quiet", {"v": "x"},
+                             org="acme")
+
+    set_cmd._report_effective_value(
+        "probe.shadow.value", "quiet", "acme", {"v": "x"})
+
+    assert capsys.readouterr().out.strip(), "a silent success is the old behaviour"
