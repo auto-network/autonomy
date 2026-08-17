@@ -172,7 +172,8 @@ def read_recent_canonical_user_turns(
         return []
     try:
         path = Path(jsonl_path)
-        lines = path.read_text(errors="replace").splitlines()[-line_limit:]
+        all_lines = path.read_text(errors="replace").splitlines()
+        lines = all_lines[-line_limit:]
     except OSError:
         return []
 
@@ -189,10 +190,24 @@ def read_recent_canonical_user_turns(
     except Exception:
         harness = CLAUDE_HARNESS
 
+    # Codex 0.147+ writes operator-visible chat as ``response_item.message``.
+    # Its adapter deliberately gates that shape on the CLI version stored by
+    # the rollout's leading ``session_meta`` record.  A bounded tail commonly
+    # excludes that first record, so seed the same parse context the live
+    # monitor has before parsing the tail.  Parsing the first line is harmless
+    # for Claude and older Codex transcripts (it either initializes context or
+    # returns an entry that we intentionally discard here).
+    parse_ctx: dict[str, Any] = {}
+    if all_lines:
+        try:
+            harness.parse_line(all_lines[0], ctx=parse_ctx)
+        except Exception:
+            pass
+
     users: list[dict[str, Any]] = []
     for raw in lines:
         try:
-            parsed = harness.parse_line(raw)
+            parsed = harness.parse_line(raw, ctx=parse_ctx)
         except Exception:
             parsed = None
         parsed_entries = parsed if isinstance(parsed, list) else [parsed] if parsed else []

@@ -128,6 +128,42 @@ def test_reads_codex_user_turns_with_synthetic_message_id(tmp_path):
     assert users[0]["content"] == text
 
 
+def test_reads_current_codex_response_item_user_turns_from_bounded_tail(tmp_path):
+    """The resolver preserves session_meta context even when it precedes the tail."""
+    from tools.dashboard.session_harness import codex_message_id
+
+    text = "Plese fix the correction overlay"
+    expected_id = codex_message_id({}, "user", text)
+    lines = [{
+        "type": "session_meta",
+        "payload": {"cli_version": "0.148.0", "originator": "codex-tui"},
+        "timestamp": "2026-08-16T12:00:00Z",
+    }]
+    lines.extend(
+        {"type": "event_msg", "payload": {"type": "task_started"}}
+        for _ in range(5)
+    )
+    lines.append({
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": text}],
+        },
+        "timestamp": "2026-08-16T12:01:00Z",
+    })
+    jsonl = _write_jsonl(
+        tmp_path / "sessions" / "u" / "rollout-2026.jsonl", lines)
+
+    users = tc.read_recent_canonical_user_turns(jsonl, line_limit=2)
+
+    assert users == [{
+        "message_id": expected_id,
+        "content": text,
+        "timestamp": "2026-08-16T12:01:00Z",
+    }]
+
+
 def test_missing_or_unreadable_jsonl_yields_empty(tmp_path):
     assert tc.read_recent_canonical_user_turns(None) == []
     assert tc.read_recent_canonical_user_turns(str(tmp_path / "nope.jsonl")) == []
