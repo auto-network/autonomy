@@ -89,6 +89,148 @@ const encoder = new TextEncoder();
   assert.ok(channel instanceof relaykit.SecureChannel);
 }
 
+// Every failed handshake owns teardown. A caller must never lose the only
+// reference to a still-live unauthenticated transport.
+{
+  let closed = false;
+  const transport = {
+    send() {},
+    async recvBinary() { return encoder.encode('{'); },
+    close() { closed = true; },
+  };
+  await assert.rejects(relaykit.performHandshake(transport, {
+    org: 'org', token: 'a1'.repeat(16), rootPub: 'b2'.repeat(32),
+  }), /malformed SERVER_HELLO/);
+  assert.equal(closed, true);
+}
+
+{
+  let closed = false;
+  const transport = {
+    send() {},
+    async recvBinary() {
+      return encoder.encode(relaykit.canonicalJson({
+        v: 1, eph_pub: 'a1'.repeat(32), cert: '{}', sig: 'b2'.repeat(64),
+        unexpected: true,
+      }));
+    },
+    close() { closed = true; },
+  };
+  await assert.rejects(relaykit.performHandshake(transport, {
+    org: 'org', token: 'a1'.repeat(16), rootPub: 'b2'.repeat(32),
+  }), /malformed SERVER_HELLO/);
+  assert.equal(closed, true);
+}
+
+// The identity-neutral viewer credential is an exact wire shape, not merely
+// a few fields found inside a more revealing certificate.
+{
+  const org = '00000000-0000-4000-8000-0000000000bb';
+  const token = 'b1'.repeat(16);
+  const now = Math.floor(Date.now() / 1000);
+  const root = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
+  const parentKey = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
+  const serving = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
+  const rootPub = hex(await crypto.subtle.exportKey('raw', root.publicKey));
+  const parentPub = hex(await crypto.subtle.exportKey('raw', parentKey.publicKey));
+  const servingPub = hex(await crypto.subtle.exportKey('raw', serving.publicKey));
+
+  const signCert = async (payload, signer) => relaykit.canonicalJson({
+    ...payload,
+    sig: hex(await crypto.subtle.sign(
+      'Ed25519', signer,
+      encoder.encode(`autonomy.idkit.cert.v1\n${relaykit.canonicalJson(payload)}`),
+    )),
+  });
+  const base = {
+    v: 1, child_pub: servingPub, scope: ['tunnel:serve'], org,
+    subject: { kind: 'operator', id: servingPub },
+    not_before: now - 60, not_after: now + 3600,
+  };
+  const attempt = async (cert) => {
+    let hello;
+    let closed = false;
+    const transport = {
+      async send(bytes) {
+        const client = JSON.parse(new TextDecoder().decode(bytes));
+        const eph = await crypto.subtle.generateKey('X25519', true, ['deriveBits']);
+        const serverPub = hex(await crypto.subtle.exportKey('raw', eph.publicKey));
+        const signed = encoder.encode(
+          `autonomy.network.channel.handshake.v1\n${relaykit.canonicalJson({
+            v: 1, org, token, client_eph: client.eph_pub, server_eph: serverPub,
+          })}`,
+        );
+        hello = encoder.encode(relaykit.canonicalJson({
+          v: 1, eph_pub: serverPub, cert,
+          sig: hex(await crypto.subtle.sign('Ed25519', serving.privateKey, signed)),
+        }));
+      },
+      async recvBinary() { return hello; },
+      close() { closed = true; },
+    };
+    await assert.rejects(relaykit.performHandshake(transport, { org, token, rootPub }));
+    assert.equal(closed, true);
+  };
+
+  await attempt(await signCert({
+    ...base, subject: { kind: 'persona', id: servingPub },
+  }, root.privateKey));
+  await attempt(await signCert({
+    ...base, subject: { kind: 'operator', id: parentPub },
+  }, root.privateKey));
+  await attempt(await signCert({ ...base, scope: ['artifact:read', 'tunnel:serve'] }, root.privateKey));
+  await attempt(await signCert({ ...base, persona: parentPub }, root.privateKey));
+
+  const parentPayload = {
+    v: 1, child_pub: parentPub, scope: ['artifact:read', 'tunnel:serve'], org,
+    subject: { kind: 'operator', id: parentPub },
+    not_before: now - 120, not_after: now + 7200,
+  };
+  const parentCert = JSON.parse(await signCert(parentPayload, root.privateKey));
+  const childPayload = {
+    ...base, not_before: now - 60, not_after: now + 3600,
+    parent_cert: parentCert,
+  };
+  await attempt(await signCert(childPayload, parentKey.privateKey));
+}
+
+// Reassembly overflow closes the authenticated channel immediately.
+{
+  let closed = false;
+  const transport = { send() {}, recvBinary() {}, close() { closed = true; } };
+  const channel = new relaykit.SecureChannel(transport, {}, {}, new Uint8Array());
+  channel.receiveRecord = async () => ({ flags: 0, chunk: new Uint8Array(128 * 1024) });
+  await assert.rejects(channel.recvMessage(), /message exceeds maximum size/);
+  assert.equal(closed, true);
+}
+
+// Socket demux queues have hard count/byte ceilings and reject unknown kinds.
+{
+  const OriginalWebSocket = globalThis.WebSocket;
+  let socket;
+  class FakeWebSocket {
+    constructor() { socket = this; queueMicrotask(() => this.onopen()); }
+    send() {}
+    close() { this.closed = true; }
+  }
+  globalThis.WebSocket = FakeWebSocket;
+  try {
+    const transport = await relaykit.openSocket('wss://relay.invalid/channel');
+    for (let index = 0; index < 129; index += 1) {
+      socket.onmessage({ data: new Uint8Array([0, index]).buffer });
+    }
+    assert.equal(socket.closed, true);
+    await assert.rejects(transport.recvBinary(), /queue overflow/);
+
+    const second = await relaykit.openSocket('wss://relay.invalid/channel');
+    socket.onmessage({ data: new Uint8Array([9, 1]).buffer });
+    assert.equal(socket.closed, true);
+    await assert.rejects(second.recvBinary(), /unknown kind/);
+  } finally {
+    globalThis.WebSocket = OriginalWebSocket;
+  }
+}
+
 // The shared record layer must carry a real multi-record message, not only
 // single-record examples. Direction is swapped to model the peer reading the
 // browser's c2s records with the same AES key and transcript.
@@ -132,5 +274,39 @@ assert.deepEqual(
   reply,
 );
 assert.equal(requests[0], '{"op":"context","v":1,"z":2}\n');
+
+let badReplyClosed = false;
+const badReplyChannel = {
+  async sendMessage() {},
+  async recvMessage() { return encoder.encode('{"v":1}'); },
+  close() { badReplyClosed = true; },
+};
+await assert.rejects(
+  relaykit.sendOp(badReplyChannel, { v: 1, op: 'context' }),
+  /newline-terminated/,
+);
+assert.equal(badReplyClosed, true);
+
+let badRequestClosed = false;
+const badRequestChannel = {
+  async sendMessage() {},
+  async recvMessage() { throw new Error('must not receive'); },
+  close() { badRequestClosed = true; },
+};
+await assert.rejects(
+  relaykit.sendOp(badRequestChannel, { v: 1, op: '' }),
+  /request must be/,
+);
+assert.equal(badRequestClosed, true);
+
+let oversizeClosed = false;
+const boundedSend = new relaykit.SecureChannel({
+  send() {}, recvBinary() {}, close() { oversizeClosed = true; },
+}, key, key, transcript);
+await assert.rejects(
+  boundedSend.sendMessage(new Uint8Array((64 * 1024 * 1024) + 1)),
+  /message exceeds maximum size/,
+);
+assert.equal(oversizeClosed, true);
 
 console.log('relaykit-core: all assertions passed');

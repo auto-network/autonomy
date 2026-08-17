@@ -33,7 +33,9 @@ def _eval(session: str, javascript: str):
         capture_output=True,
         text=True,
         timeout=120,
-        check=True,
+    )
+    assert result.returncode == 0, (
+        f"agent-browser eval failed:\nstdout={result.stdout}\nstderr={result.stderr}"
     )
     parsed = json.loads(result.stdout.strip())
     return json.loads(parsed) if isinstance(parsed, str) else parsed

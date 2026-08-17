@@ -19,6 +19,7 @@ import {
   canonicalJson,
   openSocket,
   performHandshake,
+  sendOp,
 } from "./relaykit-core.js";
 
 "use strict";
@@ -824,9 +825,9 @@ const autonet = (() => {
         if (this.closed || this.port !== port) return;   // stale document
         let reply;
         try {
-          const body = await this.exchange({
-            v: 1, op: message.op, body: message.body,
-          });
+          const request = { v: 1, op: message.op };
+          if (message.body !== undefined) request.body = message.body;
+          const body = await this.exchange(request);
           if (message.op === "subscribe" && body && typeof body.stream_key === "string") {
             // The key stays here. The viewer gets acknowledgement only.
             this.streamKey = hexToBytes(body.stream_key);
@@ -845,12 +846,7 @@ const autonet = (() => {
     }
 
     async exchange(request) {
-      const encoder = new TextEncoder();
-      await this.channel.sendMessage(encoder.encode(JSON.stringify(request)));
-      const raw = await this.channel.recvMessage();
-      const text = new TextDecoder("utf-8", { fatal: true }).decode(raw);
-      const newline = text.indexOf("\n");
-      return JSON.parse(newline === -1 ? text : text.slice(0, newline));
+      return sendOp(this.channel, request);
     }
 
     /** Pump feed frames. They arrive on their own socket queue because the
@@ -1925,6 +1921,7 @@ const autonet = (() => {
           org: envelope.org, token, rootPub: envelope.root_pub,
         }), CONNECT_TIMEOUT_MS, "handshake", "disconnected");
       } catch (err) {
+        try { transport.close(); } catch (_closeErr) { /* already closed */ }
         state.error = String(err && err.message || err);
         return showError(err && err.autonetKind === "disconnected"
           ? "disconnected" : "security");
@@ -1957,7 +1954,7 @@ const autonet = (() => {
   }
 
   return {
-    state, boot, canonicalJson, attemptEndpoints,
+    state, boot, canonicalJson, sendOp, attemptEndpoints,
     attemptDirectEndpoint, performHandshake, openSocket, fetchArtifact,
     attemptWebRtcUpgrade, dataChannelTransport,
     filterIceCandidate, sanitizeIceSdp, assertAddressFreeIceSdp,

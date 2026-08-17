@@ -21,6 +21,9 @@ const MSG_END = 0x02;
 const KNOWN_RECORD_FLAGS = STREAM_FINAL | MSG_END;
 const VIEWER_KIND_RECORD = 0x00;
 const VIEWER_KIND_FEED = 0x01;
+const MAX_SOCKET_QUEUE_FRAMES = 128;
+const MAX_SOCKET_QUEUE_BYTES = 8 * 1024 * 1024;
+const MAX_SOCKET_FRAME_BYTES = MAX_RECORD_CHUNK_SIZE + 64;
 
 const te = new TextEncoder();
 const td = new TextDecoder('utf-8', { fatal: true });
@@ -114,6 +117,59 @@ function concatBytes(...arrays) {
   return result;
 }
 
+function hasExactFields(value, fields) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const actual = Object.keys(value).sort();
+  const expected = [...fields].sort();
+  return actual.length === expected.length
+    && actual.every((field, index) => field === expected[index]);
+}
+
+function isCanonicalStringList(value) {
+  return Array.isArray(value)
+    && value.length > 0
+    && value.every((item) => typeof item === 'string' && item.length > 0)
+    && new Set(value).size === value.length
+    && value.every((item, index) => index === 0 || value[index - 1] < item);
+}
+
+function validateCertificateShape(cert) {
+  const fields = [
+    'v', 'child_pub', 'scope', 'org', 'subject', 'not_before', 'not_after', 'sig',
+  ];
+  if (cert.target_types !== undefined) fields.push('target_types');
+  if (cert.parent_cert !== undefined) fields.push('parent_cert');
+  if (
+    !hasExactFields(cert, fields)
+    || cert.v !== 1
+    || typeof cert.org !== 'string'
+    || !cert.org
+    || !hasExactFields(cert.subject, ['kind', 'id'])
+    || typeof cert.subject.kind !== 'string'
+    || typeof cert.subject.id !== 'string'
+    || !Number.isSafeInteger(cert.not_before)
+    || !Number.isSafeInteger(cert.not_after)
+    || cert.not_before < 0
+    || cert.not_after <= cert.not_before
+    || !isCanonicalStringList(cert.scope)
+    || (
+      cert.target_types !== undefined
+      && !isCanonicalStringList(cert.target_types)
+    )
+  ) {
+    throw new Error('certificate has invalid fields');
+  }
+  hexToBytes(cert.child_pub, 64, 'certificate child public key');
+  hexToBytes(cert.sig, 128, 'certificate signature');
+  if (
+    cert.parent_cert !== undefined
+    && (!cert.parent_cert || typeof cert.parent_cert !== 'object'
+      || Array.isArray(cert.parent_cert))
+  ) {
+    throw new Error('certificate parent is invalid');
+  }
+}
+
 function sequenceBytes(sequence) {
   const result = new Uint8Array(8);
   new DataView(result.buffer).setBigUint64(0, BigInt(sequence));
@@ -176,7 +232,7 @@ async function verifyChain(certWire, rootPublicHex, org, now) {
   let signerPublic = rootPublicHex;
   let parent = null;
   for (const hop of chain) {
-    if (hop.v !== 1) throw new Error('unsupported cert version');
+    validateCertificateShape(hop);
     const payload = te.encode(CERT_DOMAIN + canonicalJson(certPayload(hop)));
     if (!(await ed25519Verify(signerPublic, hop.sig, payload))) {
       throw new Error('hop signature does not verify against its parent key');
@@ -233,83 +289,89 @@ function requireTransport(transport) {
 
 export async function performHandshake(transport, { org, token, rootPub } = {}) {
   requireTransport(transport);
-  if (typeof org !== 'string' || !org) throw new Error('org is required');
-  hexToBytes(token, 32, 'channel token');
-  hexToBytes(rootPub, 64, 'root public key');
-
-  const ephemeral = await crypto.subtle.generateKey('X25519', false, ['deriveBits']);
-  const clientEphemeral = bytesToHex(
-    await crypto.subtle.exportKey('raw', ephemeral.publicKey),
-  );
-  await Promise.resolve(transport.send(te.encode(canonicalJson({
-    v: HANDSHAKE_VERSION, eph_pub: clientEphemeral,
-  }))));
-
-  const helloBytes = await transport.recvBinary();
-  let hello;
   try {
-    hello = JSON.parse(td.decode(helloBytes));
-  } catch (_) {
-    throw new Error('malformed SERVER_HELLO');
-  }
-  if (
-    !hello
-    || typeof hello !== 'object'
-    || Array.isArray(hello)
-    || hello.v !== HANDSHAKE_VERSION
-    || typeof hello.eph_pub !== 'string'
-    || typeof hello.cert !== 'string'
-    || typeof hello.sig !== 'string'
-  ) {
-    throw new Error('malformed SERVER_HELLO');
-  }
+    if (typeof org !== 'string' || !org) throw new Error('org is required');
+    hexToBytes(token, 32, 'channel token');
+    hexToBytes(rootPub, 64, 'root public key');
 
-  const leaf = await verifyChain(
-    hello.cert, rootPub, org, Math.floor(Date.now() / 1000),
-  );
-  requireNeutralViewerCertificate(leaf);
-  const signedPayload = te.encode(HANDSHAKE_DOMAIN + canonicalJson({
-    v: HANDSHAKE_VERSION,
-    org,
-    token,
-    client_eph: clientEphemeral,
-    server_eph: hello.eph_pub,
-  }));
-  if (!(await ed25519Verify(leaf.child_pub, hello.sig, signedPayload))) {
-    throw new Error('SERVER_HELLO signature does not verify');
-  }
+    const ephemeral = await crypto.subtle.generateKey('X25519', false, ['deriveBits']);
+    const clientEphemeral = bytesToHex(
+      await crypto.subtle.exportKey('raw', ephemeral.publicKey),
+    );
+    await Promise.resolve(transport.send(te.encode(canonicalJson({
+      v: HANDSHAKE_VERSION, eph_pub: clientEphemeral,
+    }))));
 
-  const transcript = new Uint8Array(await crypto.subtle.digest(
-    'SHA-256',
-    te.encode(HANDSHAKE_DOMAIN + canonicalJson({
+    const helloBytes = await transport.recvBinary();
+    let hello;
+    try {
+      hello = JSON.parse(td.decode(helloBytes));
+    } catch (_) {
+      throw new Error('malformed SERVER_HELLO');
+    }
+    if (
+      !hello
+      || typeof hello !== 'object'
+      || Array.isArray(hello)
+      || !hasExactFields(hello, ['v', 'eph_pub', 'cert', 'sig'])
+      || hello.v !== HANDSHAKE_VERSION
+      || typeof hello.eph_pub !== 'string'
+      || typeof hello.cert !== 'string'
+      || typeof hello.sig !== 'string'
+    ) {
+      throw new Error('malformed SERVER_HELLO');
+    }
+
+    const leaf = await verifyChain(
+      hello.cert, rootPub, org, Math.floor(Date.now() / 1000),
+    );
+    requireNeutralViewerCertificate(leaf);
+    const signedPayload = te.encode(HANDSHAKE_DOMAIN + canonicalJson({
       v: HANDSHAKE_VERSION,
       org,
       token,
       client_eph: clientEphemeral,
       server_eph: hello.eph_pub,
-      cert: hello.cert,
-    })),
-  ));
-  const serverKey = await crypto.subtle.importKey(
-    'raw', hexToBytes(hello.eph_pub, 64, 'server eph'), 'X25519', false, [],
-  );
-  const shared = await crypto.subtle.deriveBits(
-    { name: 'X25519', public: serverKey }, ephemeral.privateKey, 256,
-  );
-  const hkdfKey = await crypto.subtle.importKey('raw', shared, 'HKDF', false, ['deriveBits']);
-  const keyMaterial = new Uint8Array(await crypto.subtle.deriveBits({
-    name: 'HKDF',
-    hash: 'SHA-256',
-    salt: transcript,
-    info: te.encode(KEYS_INFO),
-  }, hkdfKey, 512));
-  const sendKey = await crypto.subtle.importKey(
-    'raw', keyMaterial.slice(0, 32), 'AES-GCM', false, ['encrypt'],
-  );
-  const receiveKey = await crypto.subtle.importKey(
-    'raw', keyMaterial.slice(32), 'AES-GCM', false, ['decrypt'],
-  );
-  return new SecureChannel(transport, sendKey, receiveKey, transcript);
+    }));
+    if (!(await ed25519Verify(leaf.child_pub, hello.sig, signedPayload))) {
+      throw new Error('SERVER_HELLO signature does not verify');
+    }
+
+    const transcript = new Uint8Array(await crypto.subtle.digest(
+      'SHA-256',
+      te.encode(HANDSHAKE_DOMAIN + canonicalJson({
+        v: HANDSHAKE_VERSION,
+        org,
+        token,
+        client_eph: clientEphemeral,
+        server_eph: hello.eph_pub,
+        cert: hello.cert,
+      })),
+    ));
+    const serverKey = await crypto.subtle.importKey(
+      'raw', hexToBytes(hello.eph_pub, 64, 'server eph'), 'X25519', false, [],
+    );
+    const shared = await crypto.subtle.deriveBits(
+      { name: 'X25519', public: serverKey }, ephemeral.privateKey, 256,
+    );
+    const hkdfKey = await crypto.subtle.importKey('raw', shared, 'HKDF', false, ['deriveBits']);
+    const keyMaterial = new Uint8Array(await crypto.subtle.deriveBits({
+      name: 'HKDF',
+      hash: 'SHA-256',
+      salt: transcript,
+      info: te.encode(KEYS_INFO),
+    }, hkdfKey, 512));
+    const sendKey = await crypto.subtle.importKey(
+      'raw', keyMaterial.slice(0, 32), 'AES-GCM', false, ['encrypt'],
+    );
+    const receiveKey = await crypto.subtle.importKey(
+      'raw', keyMaterial.slice(32), 'AES-GCM', false, ['decrypt'],
+    );
+    return new SecureChannel(transport, sendKey, receiveKey, transcript);
+  } catch (error) {
+    try { transport.close(); } catch (_) { /* already closed */ }
+    throw error;
+  }
 }
 
 export class SecureChannel {
@@ -327,6 +389,10 @@ export class SecureChannel {
 
   async sendMessage(bytes) {
     if (!(bytes instanceof Uint8Array)) throw new Error('message must be bytes');
+    if (bytes.length > MAX_MESSAGE_SIZE) {
+      this.close();
+      throw new Error('message exceeds maximum size');
+    }
     for (let offset = 0; ; offset += SEND_CHUNK_SIZE) {
       const chunk = bytes.slice(offset, offset + SEND_CHUNK_SIZE);
       const final = offset + SEND_CHUNK_SIZE >= bytes.length;
@@ -390,7 +456,10 @@ export class SecureChannel {
     for (;;) {
       const { flags, chunk } = await this.receiveRecord();
       size += chunk.length;
-      if (size > MAX_MESSAGE_SIZE) throw new Error('message exceeds maximum size');
+      if (size > MAX_MESSAGE_SIZE) {
+        this.close();
+        throw new Error('message exceeds maximum size');
+      }
       chunks.push(chunk);
       if (flags & (MSG_END | STREAM_FINAL)) {
         yield concatBytes(...chunks);
@@ -432,14 +501,25 @@ export function openSocket(url) {
     const feeds = [];
     const feedWaiters = [];
     let closed = null;
+    let recordBytes = 0;
+    let feedBytes = 0;
     const fail = (error) => {
       if (closed) return;
       closed = error;
+      records.length = 0;
+      feeds.length = 0;
+      recordBytes = 0;
+      feedBytes = 0;
       while (recordWaiters.length) recordWaiters.shift().reject(error);
       while (feedWaiters.length) feedWaiters.shift().reject(error);
     };
-    const take = (queue, waiters) => {
-      if (queue.length) return Promise.resolve(queue.shift());
+    const take = (queue, waiters, kind) => {
+      if (queue.length) {
+        const value = queue.shift();
+        if (kind === VIEWER_KIND_RECORD) recordBytes -= value.length;
+        else feedBytes -= value.length;
+        return Promise.resolve(value);
+      }
       if (closed) return Promise.reject(closed);
       return new Promise((resolveValue, rejectValue) => {
         waiters.push({ resolve: resolveValue, reject: rejectValue });
@@ -447,21 +527,54 @@ export function openSocket(url) {
     };
     socket.onopen = () => resolve({
       send: (bytes) => socket.send(bytes),
-      recvBinary: () => take(records, recordWaiters),
-      recvFeed: () => take(feeds, feedWaiters),
+      recvBinary: () => take(records, recordWaiters, VIEWER_KIND_RECORD),
+      recvFeed: () => take(feeds, feedWaiters, VIEWER_KIND_FEED),
       close: () => socket.close(),
     });
     socket.onmessage = (event) => {
-      if (!(event.data instanceof ArrayBuffer)) return;
+      if (!(event.data instanceof ArrayBuffer)) {
+        fail(typedTransportError('websocket sent a non-binary frame'));
+        socket.close();
+        return;
+      }
       const tagged = new Uint8Array(event.data);
-      if (!tagged.length) return;
+      if (!tagged.length || tagged.length - 1 > MAX_SOCKET_FRAME_BYTES) {
+        fail(typedTransportError('websocket frame violates size bounds'));
+        socket.close();
+        return;
+      }
       const payload = tagged.subarray(1);
       if (tagged[0] === VIEWER_KIND_FEED) {
         if (feedWaiters.length) feedWaiters.shift().resolve(payload);
-        else feeds.push(payload);
+        else {
+          if (
+            feeds.length >= MAX_SOCKET_QUEUE_FRAMES
+            || feedBytes + payload.length > MAX_SOCKET_QUEUE_BYTES
+          ) {
+            fail(typedTransportError('websocket feed queue overflow'));
+            socket.close();
+            return;
+          }
+          feeds.push(payload);
+          feedBytes += payload.length;
+        }
       } else if (tagged[0] === VIEWER_KIND_RECORD) {
         if (recordWaiters.length) recordWaiters.shift().resolve(payload);
-        else records.push(payload);
+        else {
+          if (
+            records.length >= MAX_SOCKET_QUEUE_FRAMES
+            || recordBytes + payload.length > MAX_SOCKET_QUEUE_BYTES
+          ) {
+            fail(typedTransportError('websocket record queue overflow'));
+            socket.close();
+            return;
+          }
+          records.push(payload);
+          recordBytes += payload.length;
+        }
+      } else {
+        fail(typedTransportError('websocket frame has unknown kind'));
+        socket.close();
       }
     };
     socket.onerror = () => {
@@ -483,43 +596,48 @@ export async function sendOp(channel, request) {
   ) {
     throw new Error('sendOp requires a SecureChannel');
   }
-  if (
-    !request
-    || typeof request !== 'object'
-    || Array.isArray(request)
-    || request.v !== 1
-    || typeof request.op !== 'string'
-    || !request.op
-  ) {
-    throw new Error('sendOp request must be a {v:1, op:string, ...} object');
-  }
-  await channel.sendMessage(te.encode(`${canonicalJson(request)}\n`));
-  const raw = await channel.recvMessage();
-  if (!(raw instanceof Uint8Array)) throw new Error('channel reply must be bytes');
-  let wire;
   try {
-    wire = td.decode(raw);
-  } catch (_) {
-    throw new Error('channel reply is not valid UTF-8');
+    if (
+      !request
+      || typeof request !== 'object'
+      || Array.isArray(request)
+      || request.v !== 1
+      || typeof request.op !== 'string'
+      || !request.op
+    ) {
+      throw new Error('sendOp request must be a {v:1, op:string, ...} object');
+    }
+    await channel.sendMessage(te.encode(`${canonicalJson(request)}\n`));
+    const raw = await channel.recvMessage();
+    if (!(raw instanceof Uint8Array)) throw new Error('channel reply must be bytes');
+    let wire;
+    try {
+      wire = td.decode(raw);
+    } catch (_) {
+      throw new Error('channel reply is not valid UTF-8');
+    }
+    if (!wire.endsWith('\n') || wire.slice(0, -1).includes('\n')) {
+      throw new Error('channel reply must be one newline-terminated JSON object');
+    }
+    const jsonWire = wire.slice(0, -1);
+    let reply;
+    try {
+      reply = JSON.parse(jsonWire);
+    } catch (_) {
+      throw new Error('channel reply is not valid JSON');
+    }
+    if (
+      !reply
+      || typeof reply !== 'object'
+      || Array.isArray(reply)
+      || reply.v !== 1
+      || canonicalJson(reply) !== jsonWire
+    ) {
+      throw new Error('channel reply must be canonical {v:1, ...} JSON');
+    }
+    return reply;
+  } catch (error) {
+    try { channel.close(); } catch (_) { /* already closed */ }
+    throw error;
   }
-  if (!wire.endsWith('\n') || wire.slice(0, -1).includes('\n')) {
-    throw new Error('channel reply must be one newline-terminated JSON object');
-  }
-  const jsonWire = wire.slice(0, -1);
-  let reply;
-  try {
-    reply = JSON.parse(jsonWire);
-  } catch (_) {
-    throw new Error('channel reply is not valid JSON');
-  }
-  if (
-    !reply
-    || typeof reply !== 'object'
-    || Array.isArray(reply)
-    || reply.v !== 1
-    || canonicalJson(reply) !== jsonWire
-  ) {
-    throw new Error('channel reply must be canonical {v:1, ...} JSON');
-  }
-  return reply;
 }

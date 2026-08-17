@@ -153,7 +153,7 @@
 
   function enrichFromOrg(inputs) {
     var a = window.autonet;
-    if (!a || !a.openSocket || !a.performHandshake) return;
+    if (!a || !a.openSocket || !a.performHandshake || !a.sendOp) return;
     var scheme = location.protocol === "https:" ? "wss" : "ws";
     var url = scheme + "://" + location.host +
       "/v1/links/" + inputs.channelToken + "/channel";
@@ -164,13 +164,8 @@
         rootPub: inputs.rootPub,
       });
     }).then(function (channel) {
-      var request = new TextEncoder().encode(
-        a.canonicalJson({ v: 1, op: "context" }));
-      return channel.sendMessage(request).then(function () {
-        return channel.recvMessage();
-      });
-    }).then(function (bytes) {
-      var reply = JSON.parse(new TextDecoder().decode(bytes));
+      return a.sendOp(channel, { v: 1, op: "context" });
+    }).then(function (reply) {
       if (reply && reply.status === "ok") renderOrgHeader(reply, inputs);
     }).catch(function () {
       // Org unreachable or an older node without the fields: the minimal
