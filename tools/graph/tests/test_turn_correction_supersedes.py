@@ -372,6 +372,7 @@ def test_codex_no_uuid_event_msg_resolves_via_shared_id_rule(
             "timestamp": "2026-05-03T08:57:00Z",
             "payload": {
                 "originator": "codex-tui", "model_provider": "openai",
+                "cli_version": "0.147.0",
             },
         }),
         json.dumps({
