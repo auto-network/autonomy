@@ -2265,7 +2265,7 @@ def unjudged_amendments(*, org: str | None) -> list[dict]:
 
 
 def _assert_publication_band(
-    set_id: str, revision: int, state: str, *, action: str = "write",
+    set_id: str, revision: int, state: str, *, action: str = "written at",
 ) -> None:
     """Refuse a publication state this set's schema does not permit.
 
@@ -2285,7 +2285,7 @@ def _assert_publication_band(
     band = schemas.declared_band(set_id, int(revision))
     raise ValueError(
         f"{set_id}#{revision} declares publication band "
-        f"{band[0]!r}..{band[1]!r}: it cannot be {action}ten at {state!r}. "
+        f"{band[0]!r}..{band[1]!r}: it cannot be {action} {state!r}. "
         f"Allowed: {', '.join(allowed)}. The band says what this set is for "
         f"-- rows that must not leave their own database, or definitions "
         f"other organizations have to be able to read."
@@ -2566,7 +2566,7 @@ def promote_setting(
     if existing is not None:
         _assert_publication_band(
             existing["set_id"], existing["schema_revision"], to_state,
-            action="promo")
+            action="promoted to")
     now = _now_iso()
     db = _open(org)
     snapshot = None

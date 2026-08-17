@@ -160,10 +160,14 @@ def test_a_signing_key_cannot_be_put_in_an_organizations_database(orgs):
     means there is no such row to promote -- which is a different and stronger
     thing than reading it carefully.
     """
+    # 'raw' rather than 'canonical': the set is now pinned to a raw-only
+    # publication band, so a canonical write is refused by the band before the
+    # home rule is reached. Both refusals are correct and this test is about
+    # the home one, so it uses a state the band permits.
     with pytest.raises(SchemaValidationError, match="operator's own database"):
         settings_ops.upsert_by_key(
             SIGN_KEY_SET_ID, 1, "anchore",
-            {"armored_private_key": ARMORED}, org="anchore", state="canonical",
+            {"armored_private_key": ARMORED}, org="anchore", state="raw",
         )
 
 
