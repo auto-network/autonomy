@@ -11,12 +11,13 @@ import os
 import signal
 import subprocess
 import time
+import uuid
 from pathlib import Path
 
 import pytest
 
 from tools.dashboard.tests import fixtures
-from tools.dashboard.tests._xdist import worker_test_port
+from tools.dashboard.tests._xdist import bind_free_port, worker_test_port
 
 
 TEST_PORT = worker_test_port(8082)
@@ -71,22 +72,24 @@ class PickerTestHarness:
         self.fixture_path = tmp_path / "fixtures.json"
         self.proc = None
         self.exp_id = fixtures.TEST_EXPERIMENT_ID
+        self.nonce = uuid.uuid4().hex
 
     def set_sessions(self, fixture_dict):
         """Swap the session data. Mock DAO reads this fresh on every request."""
-        fixtures.write_fixture(fixture_dict, self.fixture_path)
+        fixtures.write_fixture(
+            {**fixture_dict, "__harness_nonce__": self.nonce}, self.fixture_path
+        )
 
     def start_server(self):
-        # Kill any stale server on our port
-        subprocess.run(
-            ["python3", "-c", f"import httpx; httpx.get('http://localhost:{TEST_PORT}/', timeout=1)"],
-            capture_output=True, timeout=3,
-        )
-        subprocess.run(
-            ["pkill", "-f", f"uvicorn.*{TEST_PORT}"],
-            capture_output=True, timeout=3,
-        )
-        time.sleep(1)
+        # Bind a kernel-assigned free port HERE and hand the descriptor to
+        # uvicorn via --fd. worker_test_port derives the port from the xdist
+        # worker index alone (no session dimension), so on host networking two
+        # sessions compute the same port and a readiness probe can silently
+        # answer from the OTHER session's server — running the whole file
+        # against a stranger's code (port-collision report, auto-0812-211339).
+        # An OS-assigned port we already hold cannot collide.
+        global TEST_PORT
+        sock, TEST_PORT = bind_free_port()
 
         env = os.environ.copy()
         env["DASHBOARD_MOCK"] = str(self.fixture_path)
@@ -94,19 +97,33 @@ class PickerTestHarness:
         env["PYTHONPATH"] = repo_root
         self.proc = subprocess.Popen(
             ["python3", "-m", "uvicorn", "tools.dashboard.server:app",
-             "--host", "127.0.0.1", "--port", str(TEST_PORT)],
+             "--fd", str(sock.fileno())],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            env=env, cwd=repo_root,
+            env=env, cwd=repo_root, pass_fds=(sock.fileno(),),
         )
+        sock.close()  # uvicorn inherited its own copy
         import httpx
         # 30s window: uvicorn imports the full server module; under 8-way
         # xdist contention plus per-module Chromium cold boots, 10s is
         # routinely exceeded on a loaded machine.
         for _ in range(60):
             try:
-                if httpx.get(f"http://localhost:{TEST_PORT}/sessions", timeout=1).status_code == 200:
+                r = httpx.get(
+                    f"http://localhost:{TEST_PORT}/api/_mock/harness-nonce",
+                    timeout=1,
+                )
+                if r.status_code == 200:
+                    # Identity check: refuse to trust a server that does not
+                    # echo THIS harness's nonce (belt-and-suspenders on top of
+                    # the OS-assigned port).
+                    if r.json().get("nonce") != self.nonce:
+                        self.stop()
+                        raise RuntimeError(
+                            "Mock server identity check failed: reached a "
+                            "server that is not ours (nonce mismatch)."
+                        )
                     return
-            except Exception:
+            except httpx.HTTPError:
                 pass
             time.sleep(0.5)
         self.stop()

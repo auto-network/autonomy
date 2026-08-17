@@ -18,13 +18,14 @@ import json
 import os
 import signal
 import subprocess
+import uuid
 import time
 from pathlib import Path
 
 import pytest
 
 from tools.dashboard.tests import fixtures
-from tools.dashboard.tests._xdist import worker_test_port
+from tools.dashboard.tests._xdist import bind_free_port, worker_test_port
 
 
 TEST_PORT = worker_test_port(8083)
@@ -71,16 +72,19 @@ class LayoutTestHarness:
         self.tmp = tmp_path
         self.fixture_path = tmp_path / "fixtures.json"
         self.proc = None
+        self.nonce = uuid.uuid4().hex
 
     def set_fixture(self, fixture_dict):
-        fixtures.write_fixture(fixture_dict, self.fixture_path)
+        fixtures.write_fixture(
+            {**fixture_dict, "__harness_nonce__": self.nonce}, self.fixture_path
+        )
 
     def start_server(self):
-        subprocess.run(
-            ["pkill", "-f", f"uvicorn.*{TEST_PORT}"],
-            capture_output=True, timeout=3,
-        )
-        time.sleep(1)
+        # OS-assigned port via --fd: worker_test_port is worker-index-derived
+        # with no session dimension, so a readiness probe can answer from
+        # another session's server (port-collision report, auto-0812-211339).
+        global TEST_PORT
+        sock, TEST_PORT = bind_free_port()
 
         env = os.environ.copy()
         env["DASHBOARD_MOCK"] = str(self.fixture_path)
@@ -88,16 +92,26 @@ class LayoutTestHarness:
         env["PYTHONPATH"] = repo_root
         self.proc = subprocess.Popen(
             ["python3", "-m", "uvicorn", "tools.dashboard.server:app",
-             "--host", "127.0.0.1", "--port", str(TEST_PORT)],
+             "--fd", str(sock.fileno())],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            env=env, cwd=repo_root,
+            env=env, cwd=repo_root, pass_fds=(sock.fileno(),),
         )
+        sock.close()
         import httpx
-        for _ in range(20):
+        for _ in range(40):
             try:
-                if httpx.get(f"http://localhost:{TEST_PORT}/sessions", timeout=1).status_code == 200:
+                r = httpx.get(
+                    f"http://localhost:{TEST_PORT}/api/_mock/harness-nonce",
+                    timeout=1,
+                )
+                if r.status_code == 200:
+                    if r.json().get("nonce") != self.nonce:
+                        self.stop()
+                        raise RuntimeError(
+                            "Mock server identity check failed (nonce mismatch)."
+                        )
                     return
-            except Exception:
+            except httpx.HTTPError:
                 pass
             time.sleep(0.5)
         self.stop()

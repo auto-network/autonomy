@@ -7,6 +7,29 @@ port at module-import time (e.g. declared as a module-level constant)
 can call ``worker_test_port(base)`` directly.
 """
 import os
+import socket
+
+
+def bind_free_port() -> tuple[socket.socket, int]:
+    """Allocate a listening socket on a kernel-assigned free port.
+
+    Returns ``(socket, port)``. Hand ``socket.fileno()`` to uvicorn via
+    ``--fd`` (with ``pass_fds``) and close the socket after ``Popen`` — the
+    child inherits its own copy of the descriptor.
+
+    This REPLACES :func:`worker_test_port` for server binds. A worker-index
+    derived port has no session dimension, so every session on host networking
+    computes the same port for a base and a readiness probe can silently answer
+    from another session's server (see the port-collision report). A
+    kernel-assigned port is owned by this process the instant we bind it and
+    cannot collide with anyone.
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.1", 0))
+    s.listen(128)
+    s.set_inheritable(True)
+    return s, s.getsockname()[1]
 
 
 def worker_index() -> int:
