@@ -326,6 +326,23 @@ def test_client(mock_fixture, resume_env, monkeypatch):
 
     monkeypatch.setattr(session_launcher, "launch_session", mock_launch_session)
 
+    # Resolve Claude credentials to a fixed mock. Without this the launcher
+    # finds no setup-token rows in the test substrate, falls into its
+    # auto-install path (`graph claude install`), and fails — surfacing as a
+    # 503/None from session create. Tests here exercise the create/resume
+    # lifecycle, not real harness credential install, so short-circuit it.
+    def mock_resolve_credentials(*, prefer_alias=None, **_kwargs):
+        return {
+            "type": "token",
+            "token": "test-key",
+            "alias": prefer_alias or "test",
+            "harness_token": "test-org-uuid",
+        }
+
+    monkeypatch.setattr(
+        session_launcher, "_resolve_credentials", mock_resolve_credentials
+    )
+
     # Patch session_monitor.register and register_revived to capture calls
     from tools.dashboard import session_monitor as sm_mod
 
