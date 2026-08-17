@@ -12,6 +12,10 @@ import pytest
 
 
 AUTONET_JS = Path(__file__).resolve().parents[1] / "bootloader" / "autonet.js"
+AUTONET_TEST_SOURCE = (
+    Path(__file__).resolve().parents[2]
+    / "relaykit" / "tests" / "autonet_test_source.cjs"
+)
 ORG = "11111111-1111-4111-8111-111111111111"
 ROOT_PUB = "ab" * 32
 INVITE_REF = "bc" * 32
@@ -25,8 +29,7 @@ def test_join_context_and_fragment_only_delivery() -> None:
         {"org": ORG, "root_pub": ROOT_PUB, "invite_ref": INVITE_REF}
     )
     script = (
-        "const fs=require('fs');"
-        f"let src=fs.readFileSync({json.dumps(str(AUTONET_JS))},'utf8');"
+            f"let src=require({json.dumps(str(AUTONET_TEST_SOURCE))}).loadAutonetTestSource();"
         "src=src.replace(/window\\.autonet = autonet;[\\s\\S]*$/,'return autonet;');"
         "src=src.replace(/^const autonet = \\(\\(\\) => \\{/,'');"
         "const navigations=[];"

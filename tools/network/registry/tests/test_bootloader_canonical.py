@@ -23,6 +23,10 @@ import pytest
 from tools.network.idkit import canonical_json
 
 AUTONET_JS = Path(__file__).resolve().parents[1] / "bootloader" / "autonet.js"
+AUTONET_TEST_SOURCE = (
+    Path(__file__).resolve().parents[2]
+    / "relaykit" / "tests" / "autonet_test_source.cjs"
+)
 
 CASES = [
     {"v": 1, "eph_pub": "ab" * 32},
@@ -43,8 +47,7 @@ CASES = [
 def test_js_canonical_json_matches_idkit():
     cases_json = json.dumps(CASES)
     script = (
-        "const fs=require('fs');"
-        f"let src=fs.readFileSync({json.dumps(str(AUTONET_JS))},'utf8');"
+        f"let src=require({json.dumps(str(AUTONET_TEST_SOURCE))}).loadAutonetTestSource();"
         "src=src.replace(/window\\.autonet = autonet;[\\s\\S]*$/,'return autonet;');"
         "src=src.replace(/^const autonet = \\(\\(\\) => \\{/,'');"
         "const factory=new Function('TextEncoder','crypto',src);"

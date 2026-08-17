@@ -18,14 +18,17 @@ from pathlib import Path
 import pytest
 
 AUTONET_JS = Path(__file__).resolve().parents[1] / "bootloader" / "autonet.js"
+AUTONET_TEST_SOURCE = (
+    Path(__file__).resolve().parents[2]
+    / "relaykit" / "tests" / "autonet_test_source.cjs"
+)
 
 pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
 
 
 def _demux(frames: list[list[int]]) -> dict:
     script = r"""
-const fs = require('fs');
-let src = fs.readFileSync(%s, 'utf8');
+let src = require(%s).loadAutonetTestSource();
 src = src.replace(/window\.autonet = autonet;[\s\S]*$/, 'return autonet;');
 src = src.replace(/^const autonet = \(\(\) => \{/, '');
 let made = null;
@@ -50,7 +53,7 @@ const A = new Function('TextEncoder','TextDecoder','crypto','WebSocket',
   process.stdout.write(JSON.stringify({records, feeds}));
   process.exit(0);
 })();
-""" % json.dumps(str(AUTONET_JS))
+    """ % json.dumps(str(AUTONET_TEST_SOURCE))
     r = subprocess.run(["node", "-e", script, json.dumps(frames)],
                        capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, r.stderr

@@ -11,13 +11,16 @@ import pytest
 
 
 AUTONET_JS = Path(__file__).resolve().parents[1] / "bootloader" / "autonet.js"
+AUTONET_TEST_SOURCE = (
+    Path(__file__).resolve().parents[2]
+    / "relaykit" / "tests" / "autonet_test_source.cjs"
+)
 _EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 
 def _validate(cases: list[dict]) -> list[bool]:
     script = (
-        "const fs=require('fs');"
-        f"let src=fs.readFileSync({json.dumps(str(AUTONET_JS))},'utf8');"
+        f"let src=require({json.dumps(str(AUTONET_TEST_SOURCE))}).loadAutonetTestSource();"
         "src=src.replace(/window\\.autonet = autonet;[\\s\\S]*$/,'return autonet;');"
         "src=src.replace(/^const autonet = \\(\\(\\) => \\{/,'');"
         "const A=new Function('TextEncoder','crypto',src)(TextEncoder,{subtle:{}});"

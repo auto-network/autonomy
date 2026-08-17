@@ -15,6 +15,10 @@ import pytest
 
 
 AUTONET_JS = Path(__file__).resolve().parents[1] / "bootloader" / "autonet.js"
+RELAYKIT_CORE = (
+    Path(__file__).resolve().parents[3]
+    / "dashboard" / "static" / "js" / "lib" / "relaykit-core.js"
+)
 
 pytestmark = pytest.mark.skipif(
     shutil.which("agent-browser") is None,
@@ -43,10 +47,11 @@ def _origin(tmp_path):
         "window.A = autonet;",
         source,
     )
+    (tmp_path / "autonet.js").write_text(source, encoding="utf-8")
+    (tmp_path / "relaykit-core.js").write_bytes(RELAYKIT_CORE.read_bytes())
     (tmp_path / "index.html").write_text(
-        "<!doctype html><meta charset=utf-8><script>"
-        + source
-        + "</script>",
+        '<!doctype html><meta charset=utf-8>'
+        '<script type="module" src="/autonet.js"></script>',
         encoding="utf-8",
     )
 

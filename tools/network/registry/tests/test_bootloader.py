@@ -119,7 +119,7 @@ class TestBootloaderBytes:
 
     def test_shell_busts_legacy_asset_cache_without_fallback(self, client):
         shell = client.get("/l/not-a-token").text
-        assert 'src="/l-assets/autonet.js?v=3"' in shell
+        assert 'type="module" src="/l-assets/autonet.js?v=4"' in shell
         assert 'id="error-view"' not in shell
         assert "This page needs to be refreshed" not in shell
 

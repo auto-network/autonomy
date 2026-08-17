@@ -14,26 +14,24 @@
  *     registry enforces revocations on the tunnel:serve hello instead)
  *   - handshake + record layer: tools/network/relaykit/channel.py
  */
+import {
+  SecureChannel,
+  canonicalJson,
+  openSocket,
+  performHandshake,
+} from "./relaykit-core.js";
+
 "use strict";
 
 const autonet = (() => {
-  const CERT_DOMAIN = "autonomy.idkit.cert.v1\n";
-  const HANDSHAKE_DOMAIN = "autonomy.network.channel.handshake.v1\n";
-  const KEYS_INFO = "autonomy.network.channel.keys.v1";
-  const DIR_C2S = "c2s\x00";
-  const DIR_S2C = "s2c\x00";
   const SEND_CHUNK_SIZE = 60 * 1024;
-  const MAX_RECORD_CHUNK_SIZE = 128 * 1024;
   const ATTACHMENT_CHUNK_SIZE = 1024 * 1024;
   const ATTACHMENT_WINDOW_SIZE = 8 * ATTACHMENT_CHUNK_SIZE;
   const ATTACHMENT_LAST_IN_WINDOW = 0x01;
   const ATTACHMENT_EOF = 0x02;
-  const MAX_MESSAGE_SIZE = 64 * 1024 * 1024;
   const MAX_ARTIFACT_BYTES = 48 * 1024 * 1024;
   const MAX_TITLE_CHARS = 500;
   const MAX_ATTACHMENT_NAME_CHARS = 255;
-  const MAX_CHAIN_DEPTH = 16;
-  const HANDSHAKE_VERSION = 1;
   // Bound establishing a live channel (connect + handshake). The relay may
   // ACCEPT a viewer socket and never send SERVER_HELLO — it holds the
   // connection open when no serving tunnel is dialed in for the org — and
@@ -59,9 +57,6 @@ const autonet = (() => {
     "turn:turn.auto.network:3478?transport=tcp",
     "turns:turn.auto.network:443?transport=tcp",
   ];
-  const STREAM_FINAL = 0x01;
-  const MSG_END = 0x02;
-  const KNOWN_RECORD_FLAGS = STREAM_FINAL | MSG_END;
   const ATTACHMENT_CURSOR_DOMAIN = "autonomy.attachment.cursor.v1";
   const ATTACHMENT_ERROR_CODES = new Set([
     "not_found", "not_authorized", "oversize", "out_of_range",
@@ -69,58 +64,6 @@ const autonet = (() => {
   ]);
 
   const te = new TextEncoder();
-
-  // ---- canonical JSON (byte-compatible with idkit canonical_json) --------
-
-  function canonicalJson(value) {
-    const parts = [];
-    encodeValue(value, parts);
-    return parts.join("");
-  }
-
-  function encodeValue(value, parts) {
-    if (value === null) { parts.push("null"); return; }
-    const kind = typeof value;
-    if (kind === "boolean") { parts.push(value ? "true" : "false"); return; }
-    if (kind === "number") {
-      if (!Number.isInteger(value)) throw new Error("floats are not canonical");
-      parts.push(String(value));
-      return;
-    }
-    if (kind === "string") { parts.push(encodeString(value)); return; }
-    if (Array.isArray(value)) {
-      parts.push("[");
-      value.forEach((item, i) => { if (i) parts.push(","); encodeValue(item, parts); });
-      parts.push("]");
-      return;
-    }
-    if (kind === "object") {
-      parts.push("{");
-      Object.keys(value).sort().forEach((key, i) => {
-        if (i) parts.push(",");
-        parts.push(encodeString(key), ":");
-        encodeValue(value[key], parts);
-      });
-      parts.push("}");
-      return;
-    }
-    throw new Error("type not allowed in canonical JSON: " + kind);
-  }
-
-  const SHORT_ESCAPES = { 8: "\\b", 9: "\\t", 10: "\\n", 12: "\\f", 13: "\\r", 34: '\\"', 92: "\\\\" };
-
-  function encodeString(str) {
-    // Matches Python json.dumps(ensure_ascii=True): shorthand escapes,
-    // \u00XX for other control chars, \uXXXX per UTF-16 unit for >0x7E.
-    let out = '"';
-    for (let i = 0; i < str.length; i++) {
-      const code = str.charCodeAt(i);
-      if (SHORT_ESCAPES[code]) out += SHORT_ESCAPES[code];
-      else if (code < 0x20 || code > 0x7e) out += "\\u" + code.toString(16).padStart(4, "0");
-      else out += str[i];
-    }
-    return out + '"';
-  }
 
   // ---- byte helpers --------------------------------------------------------
 
@@ -136,237 +79,6 @@ const autonet = (() => {
 
   function bytesToHex(bytes) {
     return Array.from(new Uint8Array(bytes), (b) => b.toString(16).padStart(2, "0")).join("");
-  }
-
-  function concatBytes(...arrays) {
-    const total = arrays.reduce((n, a) => n + a.length, 0);
-    const out = new Uint8Array(total);
-    let offset = 0;
-    for (const a of arrays) { out.set(a, offset); offset += a.length; }
-    return out;
-  }
-
-  function seqBytes(seq) {
-    const out = new Uint8Array(8);
-    new DataView(out.buffer).setBigUint64(0, BigInt(seq));
-    return out;
-  }
-
-  // ---- delegation chain verification (I5 pin) ------------------------------
-
-  async function ed25519Verify(pubHex, sigHex, dataBytes) {
-    const key = await crypto.subtle.importKey(
-      "raw", hexToBytes(pubHex, 64, "public key"), "Ed25519", false, ["verify"]);
-    return crypto.subtle.verify("Ed25519", key, hexToBytes(sigHex, 128, "signature"), dataBytes);
-  }
-
-  function certPayloadDict(cert) {
-    const payload = {
-      v: cert.v, child_pub: cert.child_pub, scope: cert.scope, org: cert.org,
-      subject: cert.subject, not_before: cert.not_before, not_after: cert.not_after,
-    };
-    if (cert.target_types !== undefined) payload.target_types = cert.target_types;
-    if (cert.parent_cert !== undefined) payload.parent_cert = certToDict(cert.parent_cert);
-    return payload;
-  }
-
-  function certToDict(cert) {
-    const dict = certPayloadDict(cert);
-    dict.sig = cert.sig;
-    return dict;
-  }
-
-  function chainOf(cert) {
-    const chain = [];
-    for (let cursor = cert; cursor; cursor = cursor.parent_cert) {
-      chain.push(cursor);
-      if (chain.length > MAX_CHAIN_DEPTH) throw new Error("chain exceeds depth cap");
-    }
-    chain.reverse();
-    return chain;
-  }
-
-  function isStrictSubset(child, parent) {
-    const parentSet = new Set(parent);
-    return child.every((s) => parentSet.has(s)) && child.length < parentSet.size;
-  }
-
-  /* Verify a cert chain against rootPubHex, mirroring idkit verify_chain:
-   * per hop — signature over CERT_DOMAIN||payload against the parent key,
-   * org match, time validity, strict scope/window/target_types narrowing.
-   * Returns the leaf cert. Throws on any failure. */
-  async function verifyChain(certWire, rootPubHex, org, requiredScope, now) {
-    const cert = JSON.parse(certWire);
-    // Anti-malleability: exactly one accepted byte form (idkit from_json).
-    if (canonicalJson(cert) !== certWire) throw new Error("cert is not in canonical wire form");
-
-    const chain = chainOf(cert);
-    let signerPub = rootPubHex;
-    let parent = null;
-    for (const hop of chain) {
-      if (hop.v !== 1) throw new Error("unsupported cert version");
-      const payload = te.encode(CERT_DOMAIN + canonicalJson(certPayloadDict(hop)));
-      if (!(await ed25519Verify(signerPub, hop.sig, payload))) {
-        throw new Error("hop signature does not verify against its parent key");
-      }
-      if (hop.org !== org) throw new Error("cert org mismatch");
-      if (now < hop.not_before || now > hop.not_after) throw new Error("cert hop outside validity window");
-      if (parent) {
-        if (!isStrictSubset(hop.scope, parent.scope)) throw new Error("scope escalation");
-        if (hop.not_before < parent.not_before || hop.not_after >= parent.not_after) {
-          throw new Error("validity window not nested");
-        }
-        if (parent.target_types !== undefined) {
-          if (hop.target_types === undefined ||
-              !hop.target_types.every((t) => parent.target_types.includes(t))) {
-            throw new Error("target_types escalation");
-          }
-        }
-      }
-      signerPub = hop.child_pub;
-      parent = hop;
-    }
-    const leaf = chain[chain.length - 1];
-    if (requiredScope && !leaf.scope.includes(requiredScope)) {
-      throw new Error("leaf lacks required scope " + requiredScope);
-    }
-    return leaf;
-  }
-
-  // ---- E2E handshake + record layer (mirrors relaykit/channel.py) ----------
-
-  async function performHandshake(ws, { org, token, rootPub }) {
-    const eph = await crypto.subtle.generateKey("X25519", false, ["deriveBits"]);
-    const clientEph = bytesToHex(await crypto.subtle.exportKey("raw", eph.publicKey));
-    ws.send(te.encode(canonicalJson({ v: HANDSHAKE_VERSION, eph_pub: clientEph })));
-
-    const helloBytes = await ws.recvBinary();
-    const hello = JSON.parse(new TextDecoder().decode(helloBytes));
-    if (!hello || hello.v !== HANDSHAKE_VERSION || typeof hello.eph_pub !== "string" ||
-        typeof hello.cert !== "string" || typeof hello.sig !== "string") {
-      throw new Error("malformed SERVER_HELLO");
-    }
-    const now = Math.floor(Date.now() / 1000);
-    const leaf = await verifyChain(hello.cert, rootPub, org, "tunnel:serve", now);
-    const signedPayload = te.encode(HANDSHAKE_DOMAIN + canonicalJson({
-      v: HANDSHAKE_VERSION, org, token, client_eph: clientEph, server_eph: hello.eph_pub,
-    }));
-    if (!(await ed25519Verify(leaf.child_pub, hello.sig, signedPayload))) {
-      throw new Error("SERVER_HELLO signature does not verify (relay MITM?)");
-    }
-
-    const transcript = new Uint8Array(await crypto.subtle.digest("SHA-256",
-      te.encode(HANDSHAKE_DOMAIN + canonicalJson({
-        v: HANDSHAKE_VERSION, org, token, client_eph: clientEph,
-        server_eph: hello.eph_pub, cert: hello.cert,
-      }))));
-
-    const serverKey = await crypto.subtle.importKey(
-      "raw", hexToBytes(hello.eph_pub, 64, "server eph"), "X25519", false, []);
-    const shared = await crypto.subtle.deriveBits({ name: "X25519", public: serverKey }, eph.privateKey, 256);
-    const hkdfKey = await crypto.subtle.importKey("raw", shared, "HKDF", false, ["deriveBits"]);
-    const okm = new Uint8Array(await crypto.subtle.deriveBits(
-      { name: "HKDF", hash: "SHA-256", salt: transcript, info: te.encode(KEYS_INFO) }, hkdfKey, 512));
-
-    const sendKey = await crypto.subtle.importKey("raw", okm.slice(0, 32), "AES-GCM", false, ["encrypt"]);
-    const recvKey = await crypto.subtle.importKey("raw", okm.slice(32), "AES-GCM", false, ["decrypt"]);
-    return new SecureChannel(ws, sendKey, recvKey, transcript);
-  }
-
-  class SecureChannel {
-    constructor(ws, sendKey, recvKey, transcript) {
-      this.ws = ws;
-      this.sendKey = sendKey;
-      this.recvKey = recvKey;
-      this.transcript = transcript;
-      this.sendSeq = 0;
-      this.recvSeq = 0;
-      this.sendDir = te.encode(DIR_C2S);
-      this.recvDir = te.encode(DIR_S2C);
-    }
-
-    async sendMessage(bytes) {
-      for (let offset = 0; ; offset += SEND_CHUNK_SIZE) {
-        const chunk = bytes.slice(offset, offset + SEND_CHUNK_SIZE);
-        const final = offset + SEND_CHUNK_SIZE >= bytes.length;
-        const seq = seqBytes(this.sendSeq++);
-        const plaintext = concatBytes(new Uint8Array([final ? 1 : 0]), chunk);
-        const ciphertext = new Uint8Array(await crypto.subtle.encrypt(
-          { name: "AES-GCM", iv: concatBytes(this.sendDir, seq),
-            additionalData: concatBytes(this.transcript, this.sendDir, seq) },
-          this.sendKey, plaintext));
-        // WebSocket.send is synchronous and returns undefined.  The
-        // DataChannel adapter returns a Promise while its bounded send buffer
-        // drains.  Awaiting either keeps one record layer for both transports.
-        await Promise.resolve(this.ws.send(concatBytes(seq, ciphertext)));
-        if (final) return;
-      }
-    }
-
-    close() {
-      if (this.ws && typeof this.ws.close === "function") this.ws.close();
-    }
-
-    async recvRecord() {
-      try {
-        const record = await this.ws.recvBinary();
-        if (!(record instanceof Uint8Array) || record.length < 8 + 1 + 16) {
-          throw new Error("record is too short");
-        }
-        const seq = record.slice(0, 8);
-        if (new DataView(seq.buffer, seq.byteOffset, 8).getBigUint64(0) !== BigInt(this.recvSeq)) {
-          throw new Error("record out of sequence");
-        }
-        const plaintext = new Uint8Array(await crypto.subtle.decrypt(
-          { name: "AES-GCM", iv: concatBytes(this.recvDir, seq),
-            additionalData: concatBytes(this.transcript, this.recvDir, seq) },
-          this.recvKey, record.slice(8)));
-        this.recvSeq++;
-        if (plaintext.length < 1) throw new Error("record plaintext is empty");
-        const flags = plaintext[0];
-        const chunk = plaintext.slice(1);
-        if (flags & ~KNOWN_RECORD_FLAGS) throw new Error("record has unknown flags");
-        if (chunk.length > MAX_RECORD_CHUNK_SIZE) throw new Error("record chunk exceeds maximum size");
-        return { flags, chunk };
-      } catch (err) {
-        // Authentication, sequence, and record-framing failures poison the
-        // stream. Never leave unread records available to a later exchange.
-        this.close();
-        throw err;
-      }
-    }
-
-    async *recvMessageStream() {
-      let parts = [];
-      let size = 0;
-      for (;;) {
-        const { flags, chunk } = await this.recvRecord();
-        size += chunk.length;
-        if (size > MAX_MESSAGE_SIZE) throw new Error("message exceeds maximum size");
-        parts.push(chunk);
-        // STREAM_FINAL is the deployed v1 final bit, so it also terminates
-        // the current message for compatibility with one-shot peers.
-        const messageEnd = Boolean(flags & (MSG_END | STREAM_FINAL));
-        if (messageEnd) {
-          yield concatBytes(...parts);
-          parts = [];
-          size = 0;
-        }
-        if (flags & STREAM_FINAL) return;
-      }
-    }
-
-    async recvMessage() {
-      let message = null;
-      for await (const candidate of this.recvMessageStream()) {
-        if (message !== null) {
-          throw new Error("one-shot response carried multiple messages");
-        }
-        message = candidate;
-      }
-      if (message === null) throw new Error("response exchange ended without a message");
-      return message;
-    }
   }
 
   // ---- transport -----------------------------------------------------------
@@ -399,59 +111,6 @@ const autonet = (() => {
    * the relay attaches a listener at channel OPEN, before subscribe. */
   const VIEWER_KIND_RECORD = 0x00;
   const VIEWER_KIND_FEED = 0x01;
-
-  /* WebSocket wrapped with async receive queues -- records and feed frames. */
-  function openSocket(url) {
-    return new Promise((resolve, reject) => {
-      const ws = new WebSocket(url);
-      ws.binaryType = "arraybuffer";
-      const queue = [];
-      const waiters = [];
-      const feedQueue = [];
-      const feedWaiters = [];
-      let closed = null;
-      const fail = (err) => {
-        closed = err;
-        while (waiters.length) waiters.shift().reject(err);
-        while (feedWaiters.length) feedWaiters.shift().reject(err);
-      };
-      const take = (q, w) => {
-        if (q.length) return Promise.resolve(q.shift());
-        if (closed) return Promise.reject(closed);
-        return new Promise((res, rej) => w.push({ resolve: res, reject: rej }));
-      };
-      ws.onopen = () => resolve({
-        send: (bytes) => ws.send(bytes),
-        close: () => ws.close(),
-        recvBinary: () => take(queue, waiters),
-        /* Sealed feed frame; opens with the stream key from `subscribe`,
-         * NOT this channel's key. */
-        recvFeed: () => take(feedQueue, feedWaiters),
-      });
-      ws.onmessage = (event) => {
-        if (!(event.data instanceof ArrayBuffer)) return;
-        const tagged = new Uint8Array(event.data);
-        if (!tagged.length) return;
-        const payload = tagged.subarray(1);
-        if (tagged[0] === VIEWER_KIND_FEED) {
-          if (feedWaiters.length) feedWaiters.shift().resolve(payload);
-          else feedQueue.push(payload);
-          return;
-        }
-        if (tagged[0] !== VIEWER_KIND_RECORD) return;   // unknown kind: ignore
-        if (waiters.length) waiters.shift().resolve(payload);
-        else queue.push(payload);
-      };
-      ws.onerror = () => {
-        const error = typedError("disconnected", "websocket error");
-        fail(error);
-        reject(error);
-      };
-      ws.onclose = (event) => fail(typedError(
-        "disconnected", "websocket closed (" + event.code + ")"
-      ));
-    });
-  }
 
   // ---- bounded browser WebRTC transport ----------------------------------
 
@@ -2298,7 +1957,7 @@ const autonet = (() => {
   }
 
   return {
-    state, boot, canonicalJson, verifyChain, attemptEndpoints,
+    state, boot, canonicalJson, attemptEndpoints,
     attemptDirectEndpoint, performHandshake, openSocket, fetchArtifact,
     attemptWebRtcUpgrade, dataChannelTransport,
     filterIceCandidate, sanitizeIceSdp, assertAddressFreeIceSdp,
