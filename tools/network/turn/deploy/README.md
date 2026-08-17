@@ -34,6 +34,23 @@ credential TTL, remove the old first line, then restart and prove again. A
 Registry restart reconnects serving tunnels and must be included in the
 monitored rotation window.
 
+Once this optional feature is activated, the root-only secret file is an
+installed-service invariant for both Coturn and the Registry. Removing or
+corrupting it is an operator configuration failure, not a runtime failover
+case; restore the file or remove the Registry drop-in before restarting. The
+base Registry unit remains independent before TURN activation.
+
+The authenticated org tunnel deliberately carries renewable TURN-minting power.
+This adds no application authority: the same tunnel can already create public
+links, and public links are TURN-eligible. Honest Dashboard callers still
+enforce a live link grant or the local `turn:allocate` execution scope before
+asking, but the Registry does not prove or attribute that local decision.
+
+Coturn may include the opaque, expiring TURN username in its bounded session
+logs. The username contains no org, persona, link, bearer, or source and cannot
+authenticate without its password. Passwords and the long-lived REST secret
+never enter logs, metrics labels, environment variables, or argv.
+
 The TLS certificate and key come from Certbot's
 `/etc/letsencrypt/live/turn.auto.network/` paths. Systemd handles them as
 credentials and the renderer copies them into the same runtime directory.
