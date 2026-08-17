@@ -160,6 +160,7 @@ def _enrich_commit_sign(row: dict) -> dict:
 # module; it exports plain dicts so this file stays the single registry.
 from tools.dashboard import link_approvals as _link_approvals
 from tools.dashboard import dashboard_access_approvals as _dashboard_access
+from tools.dashboard import visitor_approvals as _visitor
 from tools.dashboard import mcp_peer_approvals as _mcp_peer
 from tools.dashboard import secure_setting_approvals as _secure_setting
 
@@ -169,11 +170,13 @@ from tools.dashboard import secure_setting_approvals as _secure_setting
 PREPARE_CREATE = {
     "link_publish": _link_approvals.prepare_create,
     **_dashboard_access.PREPARE_CREATE,
+    **_visitor.PREPARE_CREATE,
     **_mcp_peer.PREPARE_CREATE,
     **_secure_setting.PREPARE_CREATE,
 }
 AUTHORIZE_DECISION = {
     **_dashboard_access.AUTHORIZE_DECISION,
+    **_visitor.AUTHORIZE_DECISION,
     **_mcp_peer.AUTHORIZE_DECISION,
     **_secure_setting.AUTHORIZE_DECISION,
 }
@@ -184,6 +187,7 @@ ENRICH = {
     "commit_sign": _enrich_commit_sign,
     **_link_approvals.ENRICH,
     **_dashboard_access.ENRICH,
+    **_visitor.ENRICH,
     **_mcp_peer.ENRICH,
     **_secure_setting.ENRICH,
 }
@@ -207,6 +211,7 @@ _decision_waiters: dict[str, asyncio.Event] = {}
 EXECUTORS: dict = {
     **_link_approvals.EXECUTORS,
     **_dashboard_access.EXECUTORS,
+    **_visitor.EXECUTORS,
     **_mcp_peer.EXECUTORS,
     **_secure_setting.EXECUTORS,
 }

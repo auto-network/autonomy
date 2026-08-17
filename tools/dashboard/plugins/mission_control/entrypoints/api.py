@@ -492,6 +492,22 @@ async def set_pillar_coordinator(request: Request) -> JSONResponse:
     return JSONResponse({"pillar": _pillar_payload(db.get_pillar(pillar_id))})
 
 
+async def set_mission_org(request: Request) -> JSONResponse:
+    """Put a mission in the organization it belongs to.
+
+    Every mission that predates the column was given the organization running
+    this dashboard, which is a starting value rather than a statement about
+    any of them.
+    """
+    mission_id = request.path_params["mission_id"]
+    org = ((await request.json()).get("org") or "").strip()
+    if not org:
+        return JSONResponse({"error": "org is required"}, status_code=400)
+    if not db.set_mission_org(mission_id, org):
+        return JSONResponse({"error": "mission not found"}, status_code=404)
+    return JSONResponse({"mission": _mission_payload(db.get_mission(mission_id))})
+
+
 async def set_mission_coordinator(request: Request) -> JSONResponse:
     """Point a mission at the session coordinating it now. Same reason as the
     pillar-level route above: the seat changes hands and the record should
@@ -2135,6 +2151,7 @@ routes: list[Route] = [
     Route("/api/pillars/{pillar_id}/seen", mark_pillar_seen, methods=["POST"]),
     Route("/api/pillars/{pillar_id}/status", set_pillar_status, methods=["POST"]),
     Route("/api/missions/{mission_id}/coordinator", set_mission_coordinator, methods=["POST"]),
+    Route("/api/missions/{mission_id}/org", set_mission_org, methods=["POST"]),
     Route("/api/pillars/{pillar_id}/coordinator", set_pillar_coordinator, methods=["POST"]),
     Route("/api/pillars/{pillar_id}/last-done", set_pillar_last_done, methods=["POST"]),
     Route("/api/questions/{entry_id}/anchor", move_question, methods=["POST"]),
