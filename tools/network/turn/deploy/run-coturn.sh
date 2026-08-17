@@ -21,7 +21,6 @@ exec /usr/bin/docker run --rm --name autonomy-coturn \
     --cap-drop=ALL \
     --cap-add=NET_BIND_SERVICE \
     --user "65534:${TURN_RUNTIME_GID}" \
-    --security-opt no-new-privileges \
     --pids-limit 256 \
     --memory "${TURN_CONTAINER_MEMORY:-512m}" \
     --cpus "${TURN_CONTAINER_CPUS:-1.0}" \
