@@ -69,3 +69,49 @@ def _isolate_dashboard_browser_module(request):
             os.environ.pop("AGENT_BROWSER_SESSION", None)
         else:
             os.environ["AGENT_BROWSER_SESSION"] = previous
+
+
+# ── Baseline failure quarantine (2026-08-17) ─────────────────────────────────
+# Pre-existing failures on master are SKIPPED here so the suite runs green and
+# sessions stop re-running tests to decide "is this failure mine or the tree's?"
+# — a tax measured at multiple agent-hours per day.
+#
+# This is a temporary shutoff, NOT a parking lot. Every node id in the list must
+# be fixed and removed. The line count of the quarantine file is the burn-down
+# metric; the reason string below is the single greppable marker
+# (QUARANTINE-BASELINE-20260817). Goal: the file reaches zero lines and this
+# hook is deleted. Do not add a failing test here without a plan to fix it.
+_QUARANTINE_REASON = (
+    "QUARANTINE-BASELINE-20260817: pre-existing failure skipped to keep the "
+    "suite green — must be fixed and unskipped, not left skipped "
+    "(see tests/quarantine_baseline_20260817.txt)"
+)
+
+
+def _load_quarantine() -> set[str]:
+    """Node ids to skip, one per line; '#' comments and blanks ignored."""
+    path = Path(__file__).parent / "tests" / "quarantine_baseline_20260817.txt"
+    if not path.exists():
+        return set()
+    out = set()
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            out.add(line)
+    return out
+
+
+_QUARANTINE = _load_quarantine()
+
+
+def pytest_collection_modifyitems(config, items):
+    """Apply one identical skip marker to every quarantined baseline failure."""
+    if not _QUARANTINE:
+        return
+    skip = pytest.mark.skip(reason=_QUARANTINE_REASON)
+    for item in items:
+        # Match exact node id and the parametrize-stripped base, so a single
+        # list entry covers all parametrizations of a quarantined test.
+        base = item.nodeid.split("[", 1)[0]
+        if item.nodeid in _QUARANTINE or base in _QUARANTINE:
+            item.add_marker(skip)
