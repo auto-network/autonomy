@@ -1869,6 +1869,7 @@ def add_setting(
     _guard_protected_set(set_id)
     if state not in VALID_STATES:
         raise ValueError(f"invalid state {state!r}; valid: {VALID_STATES}")
+    _assert_publication_band(set_id, schema_revision, state)
     schemas.validate_payload(set_id, schema_revision, payload)
     schemas.validate_key(set_id, schema_revision, key)
     sid = str(uuid4())
@@ -1964,6 +1965,7 @@ def upsert_by_key(
     _guard_protected_set(set_id)
     if state not in VALID_STATES:
         raise ValueError(f"invalid state {state!r}; valid: {VALID_STATES}")
+    _assert_publication_band(set_id, schema_revision, state)
     if _access_pattern_for(set_id, schema_revision) == "append_only_log":
         raise ValueError(
             f"{set_id} declares 'append_only_log': its rows are never "
@@ -2245,6 +2247,34 @@ def unjudged_amendments(*, org: str | None) -> list[dict]:
     return list(_LAST_UNJUDGED.get(org or "", []))
 
 
+def _assert_publication_band(
+    set_id: str, revision: int, state: str, *, action: str = "write",
+) -> None:
+    """Refuse a publication state this set's schema does not permit.
+
+    The state is the only control over who reads a row across an
+    organization boundary, and a set knows what it is for: a sealed
+    credential is never for peers, a shared contract is useless unless they
+    can read it. Checking it at every write AND at promotion matters
+    because the two failures arrive by different doors -- one row created
+    carelessly, one row promoted later by someone tidying up.
+
+    The message names the states that are allowed rather than only the one
+    refused, because the next thing the caller needs is what to type.
+    """
+    allowed = schemas.states_allowed(set_id, int(revision))
+    if state in allowed:
+        return
+    band = schemas.declared_band(set_id, int(revision))
+    raise ValueError(
+        f"{set_id}#{revision} declares publication band "
+        f"{band[0]!r}..{band[1]!r}: it cannot be {action}ten at {state!r}. "
+        f"Allowed: {', '.join(allowed)}. The band says what this set is for "
+        f"-- rows that must not leave their own database, or definitions "
+        f"other organizations have to be able to read."
+    )
+
+
 def _collapse_amendment(
     target: dict, payload_overrides: dict, org: str | None,
 ) -> str | None:
@@ -2361,6 +2391,9 @@ def override_setting(
     # patch row is not intent but physics: a row in ANOTHER organization's
     # database cannot be rewritten from here, which is the case overrides
     # exist for and the one place the chain remains.
+    _assert_publication_band(
+        target["set_id"], target["schema_revision"], state)
+
     collapsed = _collapse_amendment(target, payload_overrides, org)
     if collapsed is not None:
         return collapsed
@@ -2512,6 +2545,11 @@ def promote_setting(
     _guard_protected_setting_id(setting_id, org)
     if to_state not in VALID_STATES:
         raise ValueError(f"invalid state {to_state!r}; valid: {VALID_STATES}")
+    existing = _fetch_setting_any_org(setting_id, org)
+    if existing is not None:
+        _assert_publication_band(
+            existing["set_id"], existing["schema_revision"], to_state,
+            action="promo")
     now = _now_iso()
     db = _open(org)
     snapshot = None

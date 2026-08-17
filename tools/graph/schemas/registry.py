@@ -408,6 +408,70 @@ VALID_EXISTS = ("file", "dir", "executable")
 VALID_VAULT_TIERS = ("audited", "secured")
 
 
+#: Publication states in increasing order of reach. A row's state decides who
+#: may read it across an organization boundary; nothing else does.
+PUBLICATION_ORDER = ("raw", "curated", "published", "canonical")
+
+
+def publication_band(*, min: str = "raw", max: str = "canonical") -> Any:
+    """Schema decorator: the publication states this set's rows may hold.
+
+    Publication state is the only control over cross-organization reads, and
+    until now nothing constrained it per set. The same axis was wrong in both
+    directions at once: every capability contract sat at ``raw``, so another
+    organization's install of it could not resolve, while nothing stopped a
+    sealed credential being promoted to ``published``, where every peer reads
+    it. One of those is an outage and the other is a disclosure, and neither
+    announces itself.
+
+    A band says what the set is FOR. ``max="raw"`` means these rows never
+    leave the database that owns them, whatever anyone later types. A shared
+    definition can require the opposite with ``min="published"``, so a row
+    nobody can build against is refused at the moment it is written rather
+    than discovered by whoever could not read it.
+
+    Enforced on every write and on promotion, because a band checked only at
+    creation is a band a promotion walks through.
+
+    Undeclared means unconstrained -- a schema that has not been through this
+    decision behaves exactly as it did.
+    """
+    lo, hi = min, max
+    for name, value in (("min", lo), ("max", hi)):
+        if value not in PUBLICATION_ORDER:
+            raise SchemaValidationError(
+                f"publication_band {name} must be one of "
+                f"{list(PUBLICATION_ORDER)}, got {value!r}"
+            )
+    if PUBLICATION_ORDER.index(lo) > PUBLICATION_ORDER.index(hi):
+        raise SchemaValidationError(
+            f"publication_band min {lo!r} is above max {hi!r}: no state "
+            f"satisfies it, so every write would be refused"
+        )
+
+    def _wrap(target: type) -> type:
+        target._publication_band = (lo, hi)
+        return target
+
+    return _wrap
+
+
+def declared_band(set_id: str, revision: int) -> tuple[str, str] | None:
+    """The band declared for ``set_id#revision``, or None if unconstrained."""
+    schema = get_schema(set_id, int(revision))
+    return getattr(schema, "_publication_band", None) if schema else None
+
+
+def states_allowed(set_id: str, revision: int) -> tuple[str, ...]:
+    """Every publication state this set may hold, widest-first for messages."""
+    band = declared_band(set_id, revision)
+    if band is None:
+        return PUBLICATION_ORDER
+    lo, hi = band
+    return PUBLICATION_ORDER[
+        PUBLICATION_ORDER.index(lo):PUBLICATION_ORDER.index(hi) + 1]
+
+
 def home(where: str) -> Any:
     """Schema decorator: declare which database this Setting lives in.
 
