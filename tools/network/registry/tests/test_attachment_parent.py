@@ -17,6 +17,10 @@ import pytest
 
 
 AUTONET_JS = Path(__file__).resolve().parents[1] / "bootloader" / "autonet.js"
+AUTONET_TEST_SOURCE = (
+    Path(__file__).resolve().parents[2]
+    / "relaykit" / "tests" / "autonet_test_source.cjs"
+)
 
 pytestmark = pytest.mark.skipif(
     shutil.which("node") is None,
@@ -26,9 +30,8 @@ pytestmark = pytest.mark.skipif(
 
 def _run_node(scenario: str) -> dict:
     loader = f"""
-const fs = require("fs");
 const webcrypto = require("crypto").webcrypto;
-let src = fs.readFileSync({json.dumps(str(AUTONET_JS))}, "utf8");
+let src = require({json.dumps(str(AUTONET_TEST_SOURCE))}).loadAutonetTestSource();
 src = src.replace(/window\\.autonet = autonet;[\\s\\S]*$/, "return autonet;");
 src = src.replace(/^const autonet = \\(\\(\\) => \\{{/, "");
 const A = new Function(
@@ -143,7 +146,7 @@ def test_streamed_secure_channel_accepts_message_boundaries_and_final():
     await record(0, 2, "first"),
     await record(1, 3, "second"),
   ];
-  const ws = {recvBinary: async () => records.shift(), send() {}};
+  const ws = {recvBinary: async () => records.shift(), send() {}, close() {}};
   const channel = new A.SecureChannel(ws, key, key, transcript);
   const messages = [];
   for await (const message of channel.recvMessageStream()) {

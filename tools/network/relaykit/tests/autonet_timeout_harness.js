@@ -9,9 +9,8 @@
  */
 "use strict";
 
-const fs = require("fs");
-const path = require("path");
 const vm = require("vm");
+const { loadAutonetTestSource } = require("./autonet_test_source.cjs");
 
 if (!globalThis.crypto) globalThis.crypto = require("crypto").webcrypto;
 // readyState 'loading' so the file registers a DOMContentLoaded listener
@@ -19,8 +18,7 @@ if (!globalThis.crypto) globalThis.crypto = require("crypto").webcrypto;
 globalThis.window = {};
 globalThis.document = { readyState: "loading", addEventListener: () => {} };
 
-const src = fs.readFileSync(
-  path.join(__dirname, "..", "..", "registry", "bootloader", "autonet.js"), "utf8");
+const src = loadAutonetTestSource();
 vm.runInThisContext(src);
 
 const autonet = globalThis.window.autonet;

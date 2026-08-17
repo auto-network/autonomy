@@ -15,10 +15,13 @@ from pathlib import Path
 import pytest
 
 AUTONET_JS = Path(__file__).resolve().parents[1] / "bootloader" / "autonet.js"
+AUTONET_TEST_SOURCE = (
+    Path(__file__).resolve().parents[2]
+    / "relaykit" / "tests" / "autonet_test_source.cjs"
+)
 
 _PRELUDE = """
-const fs = require('fs');
-let src = fs.readFileSync(%s, 'utf8');
+let src = require(%s).loadAutonetTestSource();
 src = src.replace(/window\\.autonet = autonet;[\\s\\S]*$/, 'return autonet;');
 src = src.replace(/^const autonet = \\(\\(\\) => \\{/, '');
 const A = new Function('TextEncoder', 'TextDecoder', 'crypto', 'MessageChannel', src)(
@@ -66,7 +69,7 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
 
 def _node(body: str) -> dict:
-    script = _PRELUDE % json.dumps(str(AUTONET_JS)) + body
+    script = _PRELUDE % json.dumps(str(AUTONET_TEST_SOURCE)) + body
     result = subprocess.run(
         ["node", "-e", script], capture_output=True, text=True, timeout=30,
     )
