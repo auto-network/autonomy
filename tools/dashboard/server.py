@@ -3072,15 +3072,25 @@ async def api_workspace_local_create(request):
         peers=[],
     ).members
     existing = next((m for m in members if m.key == workspace_id), None)
+    # A local-first repository names itself with ``local_path``. It used to be
+    # ``url``, which the schema no longer has, so writing that shape here made
+    # every call to this route fail validation — the one path that creates a
+    # local workspace, rejecting its own payload.
     repo_spec = {
-        "url": str(expected_repo_path),
+        "local_path": str(expected_repo_path),
         "mount": mount,
         "writable": True,
     }
     if existing is not None:
         existing_repos = existing.payload.get("repos") or []
-        existing_repo_urls = [r.get("url") for r in existing_repos]
-        if existing_repos and existing_repo_urls != [str(expected_repo_path)]:
+        # Tolerant on the way in: a row written before the shape changed still
+        # carries ``url``, and reading only the current field would see None,
+        # decide the existing configuration disagreed, and refuse with a 409
+        # that named no difference.
+        existing_paths = [
+            r.get("local_path") or r.get("url") for r in existing_repos
+        ]
+        if existing_repos and existing_paths != [str(expected_repo_path)]:
             return JSONResponse(
                 {
                     "error": (
