@@ -515,3 +515,21 @@ def test_layers_does_not_merge_a_deprecated_override(acme, monkeypatch):
     assert layers["overrides"] == []
     assert len(layers["deprecated"]) == 1, (
         "a retired row should still be visible, just not applied")
+
+
+def test_layers_reports_the_rows_own_revision(acme):
+    """A consumer that rewrites the row needs to know which schema it is.
+
+    The migration built on this view assumed revision 1 for everything and
+    wrote revision-2 rows against revision 1's schema. That rejected
+    payloads which were valid where they came from, and would silently have
+    downgraded any it happened to accept -- so the view has to carry the
+    revision rather than let a caller guess it.
+    """
+    settings_ops.add_setting("probe.check.plain", 1, "rev", {"v": "x"},
+                             org="acme")
+
+    layers = settings_ops.layers_for("probe.check.plain", "rev", org="acme")
+
+    assert layers["base"]["schema_revision"] == 1, (
+        "a caller cannot rewrite a row correctly without its revision")
