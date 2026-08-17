@@ -678,9 +678,13 @@ def _verify_local_publish_authority(
     compromised browser could forge to any persona. This mirrors the
     registry's own I4 gate (`_authorize`): the envelope signature proves
     possession of the session key over fixed proof-of-possession bytes,
-    and the cert must chain to the org's OWN bound root with the required
-    scope and delegate to that signer. Returns a refusal string, or None
-    when the persona is authenticated AND the fold grants the scope."""
+    and the cert must chain to THE ACTING PERSONA (§7: a chain terminating
+    outside the roster is void; the org root is not a domain principal)
+    with the required scope, and delegate to that signer. Authentication
+    and authorization are separate here: the chain proves who signed, the
+    authority ledger below decides what they may do. Returns a refusal
+    string, or None when the persona is authenticated AND the fold grants
+    the scope."""
     from tools.network.idkit import (
         DelegationCert,
         IdkitError,
@@ -722,13 +726,39 @@ def _verify_local_publish_authority(
         # denylist — the registry is untrusted for authority. The session
         # signing key is non-extractable and short-TTL, so there is no
         # extractable-key-leak threat for the registry denylist to cover.
+        # ANCHORED AT THE ACTING PERSONA, not the org root (PIN 6b, §7): "a
+        # delegated key authorizes by RESOLVING ITS CHAIN TO A MEMBER PERSONA
+        # and checking THAT persona's membership. A CHAIN TERMINATING OUTSIDE
+        # THE ROSTER IS VOID... the org root is NOT a domain principal."
+        #
+        # Sign-on is a personal act: the session certificate is signed by the
+        # organization's persona, which is derived from the personal root and
+        # never chains to the org root at all. Anchoring here at the org root
+        # rejected every session certificate at hop 1 ("signature does not
+        # verify against its parent key") — not a bad cert, the wrong anchor.
+        #
+        # This does NOT make subject.id self-asserting. It proves only that
+        # the holder of that persona's private key signed this certificate;
+        # WHETHER that persona may publish is decided below by the authority
+        # ledger, which is the sole authorization path and is unchanged.
+        anchor = cert.subject.id
         verify_chain(
-            cert, binding["root_pub"], org=binding["org_uuid"], now=now,
+            cert, anchor, org=binding["org_uuid"], now=now,
             required_scope=required_scope,
         )
+        # idkit's narrowing constrains scope, org and validity but NOT subject
+        # continuity (§8). With the anchor now taken from the leaf's own
+        # subject, an intermediate hop could otherwise name a different actor
+        # than the one the fold is about to authorize. Every hop must name the
+        # anchor persona.
+        for depth, hop in enumerate(cert.chain(), start=1):
+            if hop.subject.id != anchor:
+                return (
+                    f"approval cert hop {depth} names actor {hop.subject.id} "
+                    f"but the chain is anchored at {anchor}")
     except (IdkitError, MalformedError) as exc:
         return (
-            f"approval cert does not chain to this org's root with "
+            f"approval cert does not chain to its acting persona with "
             f"{required_scope}: {exc}")
     # Rung-1 transport pins the subject kind to 'operator' carrying the
     # persona public key in subject.id (settled D19 representation). A
