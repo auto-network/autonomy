@@ -94,6 +94,7 @@ class HarnessBootstrapV1(SettingSchema):
     )
     path: str = field(
         required=True,
+        exists="executable",
         description="Resolved absolute path of the CLI on this host's PATH.",
     )
     version: str = field(

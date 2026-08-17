@@ -104,6 +104,7 @@ class WorkspaceRepoV1(SettingSchema):
     )
     local_path: str = field(
         required=False,
+        exists="dir",
         description=(
             "Absolute host path of a local-first repository that has no "
             "remote. Mutually exclusive with host and repo"
@@ -119,6 +120,7 @@ class WorkspaceRepoV1(SettingSchema):
     )
     base_source: str = field(
         required=False,
+        exists="dir",
         description="Absolute host path to clone from instead of the remote",
     )
 
