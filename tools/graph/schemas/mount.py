@@ -83,7 +83,7 @@ class WorkspaceMountV1(BaseModel):
 # goes through ``model_validate``; wrap it so ``add_setting`` /
 # dashboard validation call sites keep working unchanged.
 from .registry import SettingSchema, SchemaValidationError, keyed_per_entity
-from .registry import home
+from .registry import home, readiness_gated_by
 
 
 @keyed_per_entity(
@@ -102,6 +102,10 @@ from .registry import home
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
 @home("organization")
+#: The row already says whether the container needs it. Named here so a
+#: generic check can read it: an optional mount whose directory is absent
+#: is worth reporting and does not mean the launch is broken.
+@readiness_gated_by("required")
 class _WorkspaceMountSchemaAdapter(SettingSchema):
     """Adapts :class:`WorkspaceMountV1` (Pydantic) to the registry contract.
 

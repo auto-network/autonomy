@@ -38,6 +38,8 @@ from .registry import (
     # different questions and neither implies the other.
     home,
     declared_home,
+    readiness_gate,
+    readiness_gated_by,
     publication_band,
     declared_band,
     states_allowed,
@@ -98,6 +100,8 @@ __all__ = [
     "SchemaValidationError",
     "home",
     "declared_home",
+    "readiness_gate",
+    "readiness_gated_by",
     "publication_band",
     "declared_band",
     "states_allowed",
