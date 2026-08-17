@@ -622,3 +622,36 @@ def test_a_failed_renewal_is_reported_and_does_not_break_sign_on():
 
 
 
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_the_session_certificate_carries_every_session_scope():
+    """The scopes a session certificate carries are fixed at sign-on and can
+    never be widened afterwards: idkit requires a child certificate's scope to
+    be a strict subset of its parent's. A capability whose scope is missing
+    here is unreachable for the whole session, and the failure surfaces at the
+    issuer as a scope refusal rather than as anything naming sign-on.
+
+    turn:allocate is EXECUTION -- an authenticated session allocating relay
+    capacity for itself, granting authority to nobody, the same shape as
+    tunnel:serve.
+    """
+    personal_root = KeyPair.generate()
+    output, _requests, _ = _sign_on(
+        _three_founded_orgs(), passphrase="one personal password",
+        personal_root=personal_root,
+    )
+
+    for org in output["signOn"]["orgs"]:
+        cert = json.loads(org["certWire"])
+        assert cert["scope"] == [
+            "delegate:agent",
+            "link:publish",
+            "link:revoke",
+            "tunnel:serve",
+            "turn:allocate",
+            "viewer:identify",
+        ], org["orgSlug"]
+        # idkit parses strictly: an unsorted or duplicated scope list is
+        # malformed, so the ordering above is a contract, not a preference.
+        assert cert["scope"] == sorted(set(cert["scope"]))

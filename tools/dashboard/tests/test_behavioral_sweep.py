@@ -14408,8 +14408,10 @@ NETWORK_PERSONA = derive_persona(
     bytes.fromhex(NETWORK_PERSONAL_ROOT.private_hex), NETWORK_GENESIS_ID,
 )
 NETWORK_ORG_UUID = "22222222-2222-4222-8222-222222222222"
+# Mirrors SESSION_SCOPES in network-signon.mjs. idkit parses strictly, so the
+# order is a contract: a scope list must be sorted and free of duplicates.
 NETWORK_SCOPES = ("delegate:agent", "link:publish", "link:revoke",
-                  "tunnel:serve", "viewer:identify")
+                  "tunnel:serve", "turn:allocate", "viewer:identify")
 NETWORK_BINDING = {
     "org_uuid": NETWORK_ORG_UUID,
     "root_pub": NETWORK_ROOT.public_hex,
