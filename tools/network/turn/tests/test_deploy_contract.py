@@ -116,6 +116,23 @@ def test_service_uses_systemd_credentials_and_never_environment_for_secrets():
     assert "ConditionPathExists" not in unit
 
 
+def test_turn_activation_gives_registry_the_secret_without_gating_base_service():
+    dropin = (DEPLOY / "autonomy-registry-turn-issuer.conf").read_text()
+    deploy = (DEPLOY / "deploy.sh").read_text()
+    assert (
+        "LoadCredential=turn-rest-secrets:"
+        "/etc/autonomy-coturn/turn-rest-secrets" in dropin
+    )
+    assert "Environment=" not in dropin
+    assert "autonomy-registry.service.d/turn-issuer.conf" in deploy
+    assert "systemctl restart autonomy-registry.service" in deploy
+    assert "curl -fsS http://127.0.0.1:8477/healthz" in deploy
+    base_unit = (
+        ROOT.parent / "registry" / "deploy" / "autonomy-registry.service"
+    ).read_text()
+    assert "turn-rest-secrets" not in base_unit
+
+
 def test_runtime_directory_group_lets_the_nonroot_container_read_its_config():
     # The container runs as uid 65534 : gid autonomy-coturn and must traverse the
     # 0750 RuntimeDirectory to read its rendered config. systemd owns a

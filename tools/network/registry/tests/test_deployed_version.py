@@ -7,7 +7,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from tools.network.registry.__main__ import _load_build_info
+from tools.network.registry.__main__ import _load_build_info, _load_turn_issuer
 from tools.network.registry.app import create_app
 
 
@@ -67,3 +67,14 @@ def test_deploy_writes_stamp_and_unit_consumes_it():
     assert "REVISION.json" not in (REPO / "tools/network/relaykit/connector.py").read_text(
         encoding="utf-8"
     )
+
+
+def test_registry_without_turn_credential_keeps_serving(monkeypatch):
+    monkeypatch.delenv("CREDENTIALS_DIRECTORY", raising=False)
+    assert _load_turn_issuer() is None
+
+
+def test_registry_discovers_turn_credential_in_systemd_directory(tmp_path, monkeypatch):
+    (tmp_path / "turn-rest-secrets").write_text("a" * 64 + "\n", encoding="ascii")
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
+    assert _load_turn_issuer() is not None

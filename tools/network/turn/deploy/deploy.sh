@@ -49,7 +49,14 @@ test "$TURN_RUNTIME_GID" = "$(getent group autonomy-coturn | cut -d: -f3)"
 test "$(getent ahostsv4 turn.auto.network | awk 'NR == 1 {print $1}')" = "$TURN_PUBLIC_IP"
 systemctl enable --now autonomy-turn-ip.service
 systemctl enable --now autonomy-coturn.service
+install -d -m 0755 /etc/systemd/system/autonomy-registry.service.d
+install -m 0644 \
+    /opt/autonomy-coturn/autonomy-registry-turn-issuer.conf \
+    /etc/systemd/system/autonomy-registry.service.d/turn-issuer.conf
+systemctl daemon-reload
+systemctl restart autonomy-registry.service
 sleep 2
 curl -fsS http://127.0.0.1:9641/metrics >/dev/null
+curl -fsS http://127.0.0.1:8477/healthz >/dev/null
 systemctl --no-pager --lines=20 status autonomy-coturn.service
 EOF
