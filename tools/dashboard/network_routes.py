@@ -57,7 +57,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from tools.data_paths import resolve_store
-from tools.graph import settings_ops
+from tools.graph import schemas, settings_ops
 # Importing registers the autonomy.network.* Setting schemas (they
 # self-register on import).
 from tools.graph.schemas.network_identity import (  # noqa: F401
@@ -126,6 +126,17 @@ def _serve_child_used_by_another_local_org(
             members = settings_ops.read_owned_set(
                 NETWORK_SERVE_CERT_SET_ID, org=scope
             ).members
+        except schemas.SchemaValidationError:
+            # This store CANNOT hold a serving credential: the setting
+            # declares organization scope, and a machine or personal store
+            # refuses it by declaration. That is not an uninspectable store,
+            # it is a store where no serving child can exist, so it is no
+            # evidence either way and the scan continues.
+            #
+            # Failing closed here refused EVERY mint as soon as such a store
+            # existed locally -- reported as "child keys cannot be reused",
+            # which names the one thing that was not wrong.
+            continue
         except Exception:
             # Fresh-per-org serving children are a privacy boundary. A local
             # store we cannot inspect is not evidence that the child is new.
