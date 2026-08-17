@@ -277,7 +277,10 @@ async def test_session_transfers_only_after_terminal_answer_is_confirmed_sent():
     assert len(answer_reply["candidates"]) == 1
     assert adapter.transferred is False
     assert capacity.active == 1
-    assert session.on_response_sent() is True
+    # Ownership transfers after the terminal answer is sent, but the browser
+    # owns normal signaling teardown so Relay cannot discard queued DATA by
+    # immediately processing a following CLOSE.
+    assert session.on_response_sent() is False
     assert adapter.transferred is True
     assert capacity.active == 0
     with pytest.raises(IceSignalingError, match="complete"):

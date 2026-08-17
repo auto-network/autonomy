@@ -604,6 +604,8 @@ async def test_serve_channel_transfers_ice_only_after_terminal_wire_send(
     else:
         answer = await exchange(offer)
         assert answer["op"] == "ice.answer"
+        # Browser closes signaling after receiving the terminal answer.
+        await to_server.put(None)
         await task
         assert adapter.transferred is True
         assert adapter.closed is False
