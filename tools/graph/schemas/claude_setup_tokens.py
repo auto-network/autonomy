@@ -20,6 +20,7 @@ from datetime import timedelta
 from typing import Any
 
 from .registry import (
+    home,
     publication_band,
     keyed_per_entity,
     SchemaValidationError,
@@ -54,6 +55,14 @@ SYNOPSIS = {
 }
 
 
+#: The operator's own store, and only there. These hold credentials for
+#: accounts the operator owns, not an organization -- every writer already
+#: names `personal` by a module constant, and the launcher reads it back
+#: the same way. Declared so it is ENFORCED rather than agreed: an
+#: undeclared home cannot refuse a write into an organization's database,
+#: and leaves a bare `graph set members` looking in the caller's own
+#: store and reporting "(no Settings)" for rows that plainly exist.
+@home("personal")
 @cache(ttl=CLAUDE_SETUP_TOKEN_TTL)
 #: Never leaves the database that owns it: harness setup tokens. Publication state
 #: is the only control over a cross-organization read, so the band is
