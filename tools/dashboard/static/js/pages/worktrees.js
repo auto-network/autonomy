@@ -97,7 +97,10 @@
     const expectedOrg = req.orgUuid || (
       req.registryRequest && req.registryRequest.payload &&
       req.registryRequest.payload.org);
-    return !!(state && state.signedIn && state.org === expectedOrg);
+    // One personal sign-on carries a persona per organization, so authority
+    // for THIS action is one row of the session, not the whole session.
+    return !!(state && state.signedIn && (state.orgs || []).some(
+      (entry) => entry.live && entry.org === expectedOrg));
   }
 
   // Gate 2 unlocks org authority only for the concrete action being reviewed.
@@ -293,7 +296,8 @@
     try {
       let envelope;
       try {
-        envelope = await signer.signRegistryRequest(signMethod, signPath, payload);
+        envelope = await signer.signRegistryRequest(
+          signMethod, signPath, payload, { org: req.orgSlug });
       } catch (error) {
         throw new Error('This approval could not be signed. Unlock it again and retry.');
       }

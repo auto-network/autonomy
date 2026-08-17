@@ -60,6 +60,8 @@ const childPublicHex = bytesToHex(
   await crypto.subtle.exportKey('raw', keyPair.publicKey),
 );
 const nowSeconds = Math.floor(Date.now() / 1000);
+const genesisId = 'ab'.repeat(32);
+const personaPub = 'cd'.repeat(32);
 const certWire = canonicalJson({
   child_pub: childPublicHex,
   not_after: nowSeconds + 3600,
@@ -68,27 +70,35 @@ const certWire = canonicalJson({
   scope: ['link:publish'],
   sig: '00'.repeat(64),
   subject: {
-    id: 'browser-abcd1234',
+    id: personaPub,
     kind: 'operator',
   },
   v: 1,
 });
+// One PERSONAL record carrying a per-organization persona entry: there is
+// no top-level org/orgSlug to round-trip any more.
+const orgs = {
+  [genesisId]: {
+    genesisId,
+    org: 'org-1234',
+    orgSlug: 'test-org',
+    personaPub,
+    certWire,
+    registryUrl: 'https://registry.example',
+    rootPub: '11'.repeat(32),
+    rekeyedAt: null,
+  },
+};
 const record = {
   key: keyPair.privateKey,
-  certWire,
-  org: 'org-1234',
-  registryUrl: 'https://registry.example',
-  rootPub: '11'.repeat(32),
-  orgSlug: null,
+  personalRootPub: '22'.repeat(32),
   createdAt: Date.now(),
+  orgs,
 };
 const serializableRecord = {
-  certWire,
-  org: record.org,
-  registryUrl: record.registryUrl,
-  rootPub: record.rootPub,
-  orgSlug: record.orgSlug,
+  personalRootPub: record.personalRootPub,
   createdAt: record.createdAt,
+  orgs,
 };
 
 const fileStorage = createNodeStorage({ filePath });
