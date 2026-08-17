@@ -562,14 +562,21 @@ def test_serve_cert_status_is_a_cheap_required_or_ok_signal(
     _store_binding(root)
     missing = env.get(f"/api/network/serve-cert?org={ORG}")
     assert missing.status_code == 200
-    assert missing.json() == {"required": True, "status": "missing"}
+    assert missing.json() == {
+        "required": True, "status": "missing",
+        # No row, so no life to report — the counter is present and null
+        # rather than absent, so a caller never has to guess which it is.
+        "days_remaining": None,
+    }
 
     delegate, cert = _mint_serve(root)
     stored = env.post(
         "/api/network/serve-cert", json=_serve_body(root, delegate, cert))
     assert stored.status_code == 200, stored.text
     ready = env.get(f"/api/network/serve-cert?org={ORG}")
-    assert ready.json() == {"required": False, "status": "ok"}
+    assert ready.json() == {
+        "required": False, "status": "ok", "days_remaining": 30.0,
+    }
 
 
 def test_failed_serve_cert_update_preserves_previous_row_and_key(
@@ -820,3 +827,43 @@ def test_provision_cross_org_refused(env, root, tmp_path, monkeypatch):
         json=_serve_body(root, delegate, cert, org="someone-else"),
     )
     assert r.status_code == 403
+
+
+def test_a_store_that_cannot_hold_a_serving_credential_is_not_evidence_of_reuse(
+    monkeypatch,
+):
+    """A machine or personal store REFUSES an organization-scoped setting by
+    declaration -- no serving child can exist there, so it is evidence of
+    nothing and the scan must continue past it.
+
+    Failing closed on it refused every mint on any node that has such a store,
+    reported as "serving child keys ... cannot be reused across local
+    organizations" -- naming the one thing that was not wrong. That is why two
+    organizations could not renew a serving certificate at all.
+    """
+    from tools.graph import org_ops, schemas
+
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.setattr(
+        org_ops,
+        "list_orgs",
+        lambda: [
+            SimpleNamespace(slug="org-a"),
+            SimpleNamespace(slug="machine"),
+            SimpleNamespace(slug="personal"),
+        ],
+    )
+
+    def scoped(set_id, org=None):
+        if org in ("machine", "personal"):
+            raise schemas.SchemaValidationError(
+                f"{set_id} does not live in this machine's database — it "
+                "declares 'organization', and a machine store never leaves "
+                "the machine"
+            )
+        return SimpleNamespace(members=[])
+
+    monkeypatch.setattr(settings_ops, "read_owned_set", scoped)
+    assert not network_routes._serve_child_used_by_another_local_org(
+        "ab" * 32, "org-a"
+    ), "a fresh child key must be mintable on a node with a machine store"
