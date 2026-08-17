@@ -425,13 +425,6 @@ def cmd_set_read(args) -> None:
     members = get_client().read_set(set_id, org=org)
     for m in members.members:
         if m.key == key:
-            from .settings_ops import SettingReadError
-            if isinstance(m.payload, SettingReadError):
-                print(
-                    json.dumps({"error": m.payload.to_dict()}, indent=2),
-                    file=sys.stderr,
-                )
-                sys.exit(1)
             print(json.dumps(m.payload, indent=2, default=str))
             _print_composition(set_id, key, org)
             return
