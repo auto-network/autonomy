@@ -254,3 +254,48 @@ def test_a_set_with_a_public_surface_still_federates(orgs):
     row = settings_ops.read_set_key("probe.band.shared", "pub", org="acme")
 
     assert row is not None and row["payload"]["v"] == "theirs"
+
+
+# ── the mechanism supports a floor, and nothing declares one yet ──
+
+
+def test_a_floor_is_expressible_even_though_nothing_declares_one(orgs):
+    """``min`` exists because a set CAN require a public surface.
+
+    Nothing ships with one. A capability contract looked like the obvious
+    candidate -- other organizations build against it -- but an organization
+    may define a capability for its own internal use, where ``curated`` is a
+    legitimate resting state and a floor would forbid something valid. The
+    band says what a set is FOR, and "for other organizations" is not true of
+    every contract merely because it is true of some.
+
+    So the floor stays available and unused, and the broken install it was
+    proposed for is a data problem: definitions written into the wrong
+    database, and rows that genuinely are consumed across a boundary left
+    unpublished. Both are decided per row, not per set.
+    """
+    assert states_allowed("probe.band.shared", 1) == ("published", "canonical")
+    with pytest.raises(ValueError, match="publication band"):
+        settings_ops.add_setting("probe.band.shared", 1, "floor", {"v": "x"},
+                                 org="acme", state="curated")
+
+
+def test_no_shipped_set_declares_a_floor():
+    """Pins the decision, so adding one is deliberate rather than inherited.
+
+    A floor is a real constraint on how an organization may use its own
+    store, and the case for it has to be made per set.
+    """
+    from tools.graph import schemas
+
+    with_floor = []
+    for set_id in schemas.list_registered_set_ids():
+        if set_id.startswith("probe."):
+            continue
+        band = schemas.declared_band(set_id, 1)
+        if band is not None and band[0] != "raw":
+            with_floor.append(f"{set_id} min={band[0]}")
+
+    assert with_floor == [], (
+        "a set now requires a public surface; that is a decision to make "
+        "explicitly, not to acquire: " + ", ".join(with_floor))
