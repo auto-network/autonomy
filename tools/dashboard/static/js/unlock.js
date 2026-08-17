@@ -228,6 +228,21 @@
         } else {
           await networkSession.repairServeCredential(password, {});
         }
+        // Report what happened to the SERVER. This ran only in a console
+        // before, which an operator on a phone cannot open -- and a repair
+        // whose failures nobody can read is how three organizations drifted
+        // to the edge of expiry unnoticed. Diagnostic only: statuses and
+        // error strings, never key material.
+        try {
+          await fetch('/api/network/unlock-report', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              migration: window.__autonomyOrgKeyMigration || null,
+              serve: window.__autonomyServeRepair || null,
+            }),
+          });
+        } catch (e) { /* diagnostics must never break an unlock */ }
       } catch (e) {
         if (window.console && console.warn) {
           console.warn('serving credential maintenance failed after unlock:',
