@@ -7,10 +7,10 @@ fingerprint
 use-auth-secret
 @@STATIC_AUTH_SECRETS@@
 
-listening-ip=0.0.0.0
-external-ip=@@TURN_PUBLIC_IP@@
+listening-ip=@@TURN_PUBLIC_IP@@
+relay-ip=@@TURN_PUBLIC_IP@@
 listening-port=3478
-tls-listening-port=5349
+tls-listening-port=443
 min-port=@@TURN_RELAY_MIN_PORT@@
 max-port=@@TURN_RELAY_MAX_PORT@@
 
@@ -43,9 +43,9 @@ total-quota=@@TURN_TOTAL_QUOTA@@
 max-bps=@@TURN_MAX_BPS@@
 bps-capacity=@@TURN_BPS_CAPACITY@@
 
-# IPv4 is the first deployment. Docker publishes only IPv4 sockets and its
-# bridge has no IPv6 route; coturn also defaults allocations to IPv4. IPv6
-# stays off until the public route and mapped-address refusal matrix pass.
+# IPv4 is the first deployment. Coturn binds only the host's floating IPv4
+# and defaults allocations to IPv4. IPv6 stays off until the public route and
+# mapped-address refusal matrix pass.
 allocation-default-address-family=ipv4
 
 # The relay must never become a route into this host, its cloud metadata, or
@@ -72,7 +72,7 @@ denied-peer-ip=240.0.0.0-255.255.255.255
 # destination-policy and real-data acceptance gate documented in the runbook.
 
 prometheus
-prometheus-address=0.0.0.0
+prometheus-address=127.0.0.1
 prometheus-port=9641
 prometheus-path=/metrics
 

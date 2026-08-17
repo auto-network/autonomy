@@ -66,8 +66,10 @@ client authenticated and relayed data first with the old secret and then with
 the new one while both lines were loaded. Removing the old line remains a
 drain-and-restart operation; it is not assumed to hot-reload.
 
-IPv6 is absent from the first deployment: coturn has only an IPv4 listening
-address and relay pool, Docker publishes only IPv4 addresses, and the bridge
-has no IPv6 route. Enabling IPv6 is a separate change gated on completing the
+IPv6 is absent from the first deployment: coturn binds its listener and relay
+pool only to the host's floating IPv4, and defaults allocations to IPv4. The
+container uses host networking so the relayed source address is exactly that
+floating IP; Docker bridge NAT is deliberately absent from the data path.
+Enabling IPv6 is a separate change gated on completing the
 IPv6 destination policy (including NAT64 `64:ff9b::/96`) and rerunning the
 private, link-local, metadata, mapped-address, and multicast refusal matrix.
