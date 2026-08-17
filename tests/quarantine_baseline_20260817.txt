@@ -4,7 +4,6 @@ tools/dashboard/plugins/coordinator_board/tests/test_actions.py::test_dispatch_o
 tools/dashboard/plugins/coordinator_board/tests/test_actions.py::test_dispatch_thumb_yes_end_to_end
 tools/dashboard/plugins/coordinator_board/tests/test_actions.py::test_operator_message_drops_when_no_coordinator
 tools/dashboard/plugins/coordinator_board/tests/test_actions.py::test_operator_message_routes_to_coordinator
-tools/dashboard/tests/resume/test_api.py::TestWorkspaceHarnessPassthrough::test_host_create_seeds_row_before_harness_phase_advance
 tools/dashboard/tests/session_picker/test_browser.py::TestEmptyState::test_restore
 tools/dashboard/tests/session_picker/test_browser.py::TestEmptyState::test_shows_empty_message
 tools/dashboard/tests/session_picker/test_browser.py::TestManySessionsScale::test_100_sessions_all_accessible
