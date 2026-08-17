@@ -119,3 +119,79 @@ def test_ice_grant_handler_requires_publisher():
             signaling_capacity=IceCapacity(4, per_token_limit=2),
             modules=object(),
         )
+
+
+def test_turn_control_reply_becomes_the_existing_ice_configuration():
+    expected = configuration()
+    reply = {
+        "id": "c" * 32,
+        "ok": True,
+        "ice_servers": list(expected.ice_servers),
+        "expires_at": expected.expires_at,
+    }
+
+    assert link_serving._turn_configuration_from_control(reply) == expected
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        {"ok": False, "error": "unavailable"},
+        {"ok": True, "ice_servers": "not-a-list", "expires_at": 123},
+        {"ok": True, "ice_servers": ["not-an-object"], "expires_at": 123},
+    ],
+)
+def test_turn_control_refusal_or_malformed_reply_fails_the_ice_attempt(reply):
+    with pytest.raises(ConnectionError):
+        link_serving._turn_configuration_from_control(reply)
+
+
+@pytest.mark.asyncio
+async def test_production_connector_routes_ice_begin_to_live_turn_issuance(monkeypatch):
+    from tools.network.relaykit import aiortc_responder
+
+    monkeypatch.setattr(
+        link_serving,
+        "check_grant",
+        lambda token, **kwargs: {"token": token, "meta": {"ice_policy": "relay_only"}},
+    )
+    monkeypatch.setattr(aiortc_responder, "load_aiortc_modules", lambda: object())
+    expected = configuration()
+
+    class FakeConnector:
+        def __init__(self, *args, **kwargs):
+            self.handler = args[4]
+            self.control_calls = []
+
+        async def control(self, op, args):
+            self.control_calls.append((op, args))
+            return {
+                "id": "c" * 32,
+                "ok": True,
+                "ice_servers": list(expected.ice_servers),
+                "expires_at": expected.expires_at,
+            }
+
+    key, cert = viewer_credentials()
+    connector = link_serving._make_ice_serving_connector(
+        "wss://relay.test",
+        "test-org",
+        key,
+        cert,
+        cert,
+        "test-org",
+        Publisher(),
+        min_backoff=0.2,
+        max_backoff=5.0,
+        connector_factory=FakeConnector,
+    )
+
+    channel = connector.handler.for_channel(TOKEN)
+    reply = json.loads(await channel(
+        TOKEN,
+        json.dumps({"v": 1, "op": "ice.begin", "attempt_id": ATTEMPT}).encode(),
+    ))
+    assert connector.control_calls == [("issue-turn", {})]
+    assert reply["policy"] == "relay_only"
+    assert reply["ice_servers"] == list(expected.ice_servers)
+    await channel.aclose()

@@ -1143,6 +1143,79 @@ def make_ice_grant_handler(
     )
 
 
+def _turn_configuration_from_control(reply):
+    """Convert the Registry's authenticated ``issue-turn`` reply.
+
+    The signaling state machine performs the authoritative value validation;
+    this boundary only refuses a failed/malformed control reply and converts
+    its JSON containers to the immutable in-process type it expects.
+    """
+    from tools.network.relaykit.ice_signaling import IceConfiguration
+
+    if not isinstance(reply, dict) or reply.get("ok") is not True:
+        raise ConnectionError("TURN credential issuance was refused")
+    ice_servers = reply.get("ice_servers")
+    expires_at = reply.get("expires_at")
+    if not isinstance(ice_servers, list) or not all(
+        isinstance(server, dict) for server in ice_servers
+    ):
+        raise ConnectionError("TURN credential issuer returned a malformed reply")
+    return IceConfiguration(
+        ice_servers=tuple(ice_servers),
+        expires_at=expires_at,
+    )
+
+
+def _make_ice_serving_connector(
+    relay,
+    org,
+    key,
+    cert,
+    channel_cert,
+    graph_org,
+    publisher,
+    *,
+    min_backoff,
+    max_backoff,
+    connector_factory=None,
+):
+    """Construct the production connector with the existing ICE handler."""
+    from tools.network.relaykit.aiortc_responder import PeerRuntime
+    from tools.network.relaykit.connector import TunnelConnector
+    from tools.network.relaykit.ice_signaling import IceCapacity
+
+    factory = connector_factory or TunnelConnector
+    connector = None
+
+    async def configuration_provider(_token, _policy):
+        if connector is None:  # construction invariant, never viewer-driven
+            raise ConnectionError("serving connector is not ready")
+        reply = await connector.control("issue-turn", {})
+        return _turn_configuration_from_control(reply)
+
+    handler = make_ice_grant_handler(
+        graph_org,
+        configuration_provider=configuration_provider,
+        key=key,
+        channel_cert=channel_cert,
+        peer_runtime=PeerRuntime(64, per_token_limit=4),
+        signaling_capacity=IceCapacity(64, per_token_limit=2),
+        publisher=publisher,
+    )
+    connector = factory(
+        relay,
+        org,
+        key,
+        cert,
+        handler,
+        channel_cert=channel_cert,
+        min_backoff=min_backoff,
+        max_backoff=max_backoff,
+        publisher=publisher,
+    )
+    return connector
+
+
 async def _serve_control_listener(connector, ctl_path: str) -> None:
     """A loopback listener the dashboard drives to run D19 control ops on
     this connector's tunnel (register §3). One newline-delimited JSON
@@ -1240,7 +1313,6 @@ async def _run_connector_with_control(connector, ctl_path: str | None,
 
 def main() -> None:
     from tools.network.idkit import DelegationCert, KeyPair
-    from tools.network.relaykit.connector import TunnelConnector
 
     parser = argparse.ArgumentParser(
         description="auto.network tunnel connector serving grant-gated targets (C4)"
@@ -1278,17 +1350,25 @@ def main() -> None:
 
     from tools.network.relaykit.connector import Publisher
 
-    handler = make_grant_handler(args.graph_org)
     # One Publisher shared by both halves of live push: the connector
     # reports channel attach/detach into it, and the Mission Control
     # publish loop emits through it. Without --dashboard-url it is still
     # constructed and still tracks listeners, it just has nothing
     # publishing into it.
     publisher = Publisher()
-    connector = TunnelConnector(
-        args.relay, args.org, key, cert, handler, channel_cert=channel_cert,
-        min_backoff=args.min_backoff, max_backoff=args.max_backoff,
+
+    # The Registry already owns TURN credential issuance on this connector's
+    # authenticated org tunnel. Feed that existing control result into the
+    # existing ICE handler; neither the viewer nor the grant chooses it.
+    connector = _make_ice_serving_connector(
+        args.relay,
+        args.org,
+        key=key,
+        cert=cert,
+        channel_cert=channel_cert,
+        graph_org=args.graph_org,
         publisher=publisher,
+        min_backoff=args.min_backoff, max_backoff=args.max_backoff,
     )
     # Live push is ON by default. It was opt-in behind an explicit
     # --dashboard-url, which made it unreachable in production: the
