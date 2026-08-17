@@ -214,7 +214,20 @@
             }
           }
         }
-        await networkSession.repairServeCredential(password, {});
+        // EVERY organization, not just the default one: the personal seed
+        // opens all of their sealed roots, and repairing only the default is
+        // how the others drift to expiry unnoticed.
+        if (typeof networkSession.repairAllServeCredentials === 'function') {
+          var serve = await networkSession.repairAllServeCredentials(
+            password, {});
+          window.__autonomyServeRepair = serve;
+          if (window.console && console.info &&
+              (serve.repaired.length || serve.failed.length)) {
+            console.info('serving credentials:', JSON.stringify(serve));
+          }
+        } else {
+          await networkSession.repairServeCredential(password, {});
+        }
       } catch (e) {
         if (window.console && console.warn) {
           console.warn('serving credential maintenance failed after unlock:',

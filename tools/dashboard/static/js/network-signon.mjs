@@ -1076,6 +1076,38 @@ var signRegistryRequestCore;
     return { checked: true, repaired: true, status: state.status || 'required' };
   }
 
+  // EVERY organization's serving credential, from one unlock.
+  //
+  // repairServeCredential covers exactly one organization -- the one named in
+  // opts.org, or the caller's default. An unlock that calls it once therefore
+  // maintains one organization and silently leaves every other one to expire,
+  // which is how two of three drifted to within days of expiry while the
+  // third stayed healthy. The unlock holds the personal seed, and the seed
+  // opens every organization's sealed root, so there is no reason to stop at
+  // the first.
+  //
+  // Per organization, and non-fatal: a registry that is down for one must not
+  // cost the others their renewal, and none of it may disturb an unlock that
+  // has already granted access.
+  async function repairAllServeCredentials(passphrase, opts) {
+    opts = opts || {};
+    var slugs = await _signOnOrgSlugs(opts);
+    var repaired = [];
+    var failed = [];
+    var ready = [];
+    for (var i = 0; i < slugs.length; i++) {
+      var slug = slugs[i];
+      try {
+        var result = await repairServeCredential(passphrase, { org: slug });
+        if (result.repaired) repaired.push(slug);
+        else ready.push(slug);
+      } catch (e) {
+        failed.push({ org: slug, error: (e && e.message) || String(e) });
+      }
+    }
+    return { repaired: repaired, ready: ready, failed: failed };
+  }
+
   // Sign-out destroys the key and cert locally (spec §6.3): the store is
   // CLEARED, not just the current row.
   async function signOut() {
@@ -1289,6 +1321,7 @@ var signRegistryRequestCore;
     signOut: signOut,
     provisionServeCert: provisionServeCert,
     repairServeCredential: repairServeCredential,
+    repairAllServeCredentials: repairAllServeCredentials,
     migrateLegacyOrgKeys: migrateLegacyOrgKeys,
     revokeCurrentKey: revokeCurrentKey,
     listKeys: listKeys,
