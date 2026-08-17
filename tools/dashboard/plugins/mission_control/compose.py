@@ -13,8 +13,10 @@ DOMContentLoaded and load fire, and their in-page anchors resolve.
 
 from __future__ import annotations
 
+import base64
 import json
 import time
+from pathlib import Path
 
 from tools.dashboard.dao import mission_control_db as db
 from tools.dashboard.scripts.build_mission_viewer import bootstrap_source
@@ -36,6 +38,9 @@ from tools.dashboard.scripts.build_mission_viewer import bootstrap_source
 #: surface cannot be either. When a mission carries an org, this derives from
 #: the mission and stops being a constant.
 PRESENCE_ORG = "autonomy"
+
+#: The width a face is drawn at, doubled for sharp screens.
+_FACE_PX = 48
 
 #: ``<base href="about:srcdoc">`` is what makes ``#fragment`` links resolve
 #: in-document inside a sandboxed srcdoc frame; without it they resolve
@@ -144,6 +149,48 @@ def _presence(surface_id: str, now: float) -> list[dict]:
     return here
 
 
+def _face_bytes(attachment_id: str) -> str | None:
+    """A guest's photo, small enough to travel inside the document.
+
+    Carried as bytes rather than a path, on BOTH surfaces, because they are
+    one document: over a share link the screen runs in a frame with no origin,
+    where /api/attachment/<id> has nothing to resolve against and no
+    credential to carry, so the picture would silently never load there.
+
+    Serving one form on the dashboard and another over a link is the thing
+    this composer exists not to do -- a guest and a coordinator would be
+    looking at different documents while believing they are the same. One
+    answer, and it is the one that works in both places.
+
+    So it arrives, shrunk to the size it is actually drawn at. The stored
+    photo is whatever somebody sent from a phone; a face rendered 24 pixels
+    wide does not need two hundred kilobytes of it, and several people on one
+    list would otherwise add megabytes to every open.
+    """
+    from tools.graph import ops as _ops
+
+    att = _ops.get_attachment(attachment_id, org=PRESENCE_ORG)
+    if not att:
+        return None
+    path = Path(att.get("file_path") or "")
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parents[4] / path
+    if not path.exists():
+        return None
+    try:
+        from io import BytesIO
+        from PIL import Image
+
+        with Image.open(path) as im:
+            im = im.convert("RGB")
+            im.thumbnail((_FACE_PX, _FACE_PX))
+            buf = BytesIO()
+            im.save(buf, format="JPEG", quality=78)
+        return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+    except Exception:
+        return None                      # presence is decoration; never fail the screen
+
+
 def _guest_avatar(participant_id: str | None) -> str | None:
     """A guest's photo, resolved when the list is read rather than stored on
     the row.
@@ -166,7 +213,7 @@ def _guest_avatar(participant_id: str | None) -> str | None:
     except Exception:
         return None                      # presence is decoration; never fail the screen
     attachment_id = (visitor or {}).get("avatar_attachment_id")
-    return f"/api/attachment/{attachment_id}" if attachment_id else None
+    return _face_bytes(attachment_id) if attachment_id else None
 
 
 def _latest_sign_of_life(current: dict | None, pillar: dict) -> float | None:
