@@ -6126,8 +6126,35 @@ async def api_session_label(request):
     session_row = dashboard_db.get_session(tmux_name)
     t_get = time.monotonic()
     graph_source_id = session_row.get("graph_source_id") if session_row else None
-    if session_row and session_row.get("graph_source_id"):
-        graph_ops.update_source_title(session_row["graph_source_id"], label)
+    if graph_source_id:
+        # A session's display name belongs to the SESSION, not to whichever
+        # organization the caller happens to be scoped to. Writing it under the
+        # caller's org raised CrossOrgWriteError whenever the two differed --
+        # unhandled, so Starlette returned a plain-text 500 with no JSON error
+        # for the CLI to print. An agent renaming its own session got "HTTP
+        # Error 500" and nothing else, five times in one morning.
+        #
+        # Acting in the source's own organization is what the write always
+        # meant. A label is not cross-org content being edited by a stranger;
+        # it is the session naming itself.
+        try:
+            origin = graph_ops._resolve_source_home(graph_source_id, org=None)
+        except Exception:
+            origin = None
+        try:
+            graph_ops.update_source_title(
+                graph_source_id, label, org=origin or None)
+        except Exception as exc:
+            # Never a bare 500: the caller can act on a sentence and cannot
+            # act on an empty body.
+            logger.warning(
+                "session_label: could not retitle source %s: %s",
+                graph_source_id, exc, exc_info=True)
+            return JSONResponse(
+                {"error": f"the label was saved, but the session's graph "
+                          f"source could not be retitled: {exc}"},
+                status_code=502,
+            )
     t_graph = time.monotonic()
     # Broadcast via SSE so all clients update
     await event_bus.broadcast("session:registry", session_monitor.get_registry())
