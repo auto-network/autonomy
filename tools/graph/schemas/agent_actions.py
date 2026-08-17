@@ -130,14 +130,17 @@ class AgentActionV2(SettingSchema):
             "required": True,
             "description": "Human-readable label shown in the dashboard dropdown",
         },
+        # NOT unconditionally required: universal actions run without a
+        # model/prompt_template. The "required unless universal" rule is
+        # conditional, which declared-field metadata cannot express, so it is
+        # enforced in validate() below. Marking these required here would
+        # (via enforce_declared_fields) wrongly reject every universal member.
         "model": {
             "type": "string",
-            "required": True,
             "description": "Anthropic model id for the action (required unless universal)",
         },
         "prompt_template": {
             "type": "string",
-            "required": True,
             "description": "Prompt template fed to the model (required unless universal)",
         },
         "icon": {
