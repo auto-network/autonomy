@@ -2995,3 +2995,25 @@ def test_the_api_reports_which_organization_a_mission_is_in(tmp_path):
     mission = db.create_mission("M", "auto-x", org="autonomy", db_path=db_path)
     assert mc_api._mission_payload(
         db.get_mission(mission["mission_id"], db_path=db_path))["org"] == "autonomy"
+
+
+def test_a_mission_can_be_put_in_the_organization_it_belongs_to(tmp_path):
+    """Missions that predate the organization column were all given the one
+    running this dashboard, because there was nothing else to give them. That
+    is a starting value, not a statement about any particular mission."""
+    db_path = tmp_path / "mc.db"
+    mission = db.create_mission("OSS Insights", "auto-x", org="autonomy",
+                                db_path=db_path)
+
+    assert db.set_mission_org(mission["mission_id"], "anchore", db_path=db_path)
+    assert db.get_mission(mission["mission_id"], db_path=db_path)["org"] == "anchore"
+
+
+def test_a_mission_is_never_left_belonging_to_nobody(tmp_path):
+    """An empty organization reads as a mission nothing bounds."""
+    db_path = tmp_path / "mc.db"
+    mission = db.create_mission("M", "auto-x", org="autonomy", db_path=db_path)
+    for empty in ("", "   "):
+        assert db.set_mission_org(mission["mission_id"], empty, db_path=db_path) is False
+    assert db.get_mission(mission["mission_id"], db_path=db_path)["org"] == "autonomy"
+    assert db.set_mission_org("no-such-mission", "anchore", db_path=db_path) is False

@@ -628,6 +628,32 @@ def set_pillar_coordinator(
     return cur.rowcount > 0
 
 
+def set_mission_org(
+    mission_id: str, org: str, *, db_path: Path | str | None = None,
+) -> bool:
+    """Move a mission to the organization it belongs to.
+
+    Missions that existed before the column was added were all given the
+    organization running this dashboard, because there was nothing else to
+    give them. That is a starting value, not a decision about any particular
+    mission, so a mission has to be able to be put where it belongs.
+
+    Refuses an empty organization: a mission with none has no boundary at
+    all, which is the one value that must never reach a row.
+    """
+    org = (org or "").strip()
+    if not org:
+        return False
+    conn = _get_conn(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE missions SET org = ? WHERE mission_id = ?", (org, mission_id))
+        conn.commit()
+    finally:
+        conn.close()
+    return cur.rowcount > 0
+
+
 def set_mission_coordinator(
     mission_id: str, coordinator_session: str, *, db_path: Path | str | None = None,
 ) -> bool:
