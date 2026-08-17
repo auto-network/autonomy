@@ -22,12 +22,13 @@ import os
 import shutil
 import signal
 import subprocess
+import uuid
 import time
 from pathlib import Path
 
 import pytest
 
-from tools.dashboard.tests._xdist import worker_test_port
+from tools.dashboard.tests._xdist import spawn_mock_uvicorn, worker_test_port
 
 
 TEST_PORT = worker_test_port(8123)
@@ -111,40 +112,23 @@ class GlobalInputHarness:
         self.events_file = tmp_path / "events.jsonl"
         self.events_file.touch()
         self.proc = None
+        self.nonce = uuid.uuid4().hex
 
     def write_fixture(self, data):
-        self.fixture_path.write_text(json.dumps(data, indent=2))
+        self.fixture_path.write_text(
+            json.dumps({**data, "__harness_nonce__": self.nonce}, indent=2)
+        )
 
     def start(self):
-        subprocess.run(
-            ["pkill", "-f", f"uvicorn.*{TEST_PORT}"],
-            capture_output=True, timeout=3,
-        )
-        time.sleep(0.5)
+        # OS-assigned port via --fd + nonce identity check — worker_test_port is
+        # worker-index derived with no session dimension (port-collision report,
+        # auto-0812-211339).
+        global TEST_PORT
         env = os.environ.copy()
         env["DASHBOARD_MOCK"] = str(self.fixture_path)
         env["DASHBOARD_MOCK_EVENTS"] = str(self.events_file)
-        repo_root = str(Path(__file__).resolve().parents[3])
-        env["PYTHONPATH"] = repo_root
-        self.proc = subprocess.Popen(
-            ["python3", "-m", "uvicorn", "tools.dashboard.server:app",
-             "--host", "127.0.0.1", "--port", str(TEST_PORT)],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            env=env, cwd=repo_root,
-        )
-        import httpx
-        for _ in range(40):
-            try:
-                if httpx.get(
-                    f"http://localhost:{TEST_PORT}/search?q=foo",
-                    timeout=1,
-                ).status_code == 200:
-                    return
-            except Exception:
-                pass
-            time.sleep(0.5)
-        self.stop()
-        raise RuntimeError("Global-input smoke server failed to start")
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parents[3])
+        self.proc, TEST_PORT = spawn_mock_uvicorn(env=env, nonce=self.nonce)
 
     def stop(self):
         if self.proc:

@@ -19,6 +19,7 @@ import os
 import signal
 import shutil
 import subprocess
+import uuid
 import sys
 import time
 from pathlib import Path
@@ -42,7 +43,9 @@ pytestmark = [
 
 # ── Constants ────────────────────────────────────────────────────────
 
-from tools.dashboard.tests._xdist import worker_test_port
+from tools.dashboard.tests._xdist import (
+    bind_free_port, spawn_mock_uvicorn, worker_test_port,
+)
 
 TEST_PORT = worker_test_port(8083)  # distinct base; offset per xdist worker
 TEST_SESSION_ID = "auto-gap-test"
@@ -187,34 +190,26 @@ def _make_fixture():
 
 # ── Server lifecycle ─────────────────────────────────────────────────
 
-def _start_server(fixture_path, events_path, port, state_path=None):
-    """Boot mock dashboard server. Returns Popen handle.
+def _start_server(fixture_path, events_path, nonce, state_path=None):
+    """Boot mock dashboard server. Returns ``(proc, port)``.
+
+    Binds a kernel-assigned free port and verifies the server echoes *nonce*
+    before returning — see spawn_mock_uvicorn. worker_test_port is worker-index
+    derived with no session dimension, so a fixed port can be answered by
+    another session's server (port-collision report, auto-0812-211339).
 
     ``state_path`` controls where EventBus snapshot/restore reads & writes.
     Pass a per-call fresh path to ensure each spawn boots with a new epoch
     (preserving the pre-snapshot ``test_epoch_change_resets`` semantics)
     and to avoid polluting the real data/event_bus.state.
     """
-    # Kill any stale server on our port
-    subprocess.run(
-        ["pkill", "-f", f"uvicorn.*{port}"],
-        capture_output=True, timeout=3,
-    )
-    time.sleep(0.5)
-
     env = os.environ.copy()
     env["DASHBOARD_MOCK"] = str(fixture_path)
     env["DASHBOARD_MOCK_EVENTS"] = str(events_path)
     env["PYTHONPATH"] = str(Path(__file__).resolve().parents[3])
     if state_path is not None:
         env["DASHBOARD_EVENT_BUS_STATE"] = str(state_path)
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "tools.dashboard.server:app",
-         "--host", "127.0.0.1", "--port", str(port)],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        env=env,
-    )
-    return proc
+    return spawn_mock_uvicorn(env=env, nonce=nonce)
 
 
 def _wait_for_server(port, timeout=30.0):
@@ -274,9 +269,12 @@ class GapRecoveryHarness:
         self.events_path = tmp_path / "events.jsonl"
         self.proc = None
         self._restart_idx = 0
+        self.nonce = uuid.uuid4().hex
 
     def write_fixture(self, fixture_dict):
-        self.fixture_path.write_text(json.dumps(fixture_dict, indent=2))
+        self.fixture_path.write_text(
+            json.dumps({**fixture_dict, "__harness_nonce__": self.nonce}, indent=2)
+        )
 
     def _state_path_for_run(self):
         """Return a unique snapshot path per server spawn.
@@ -288,15 +286,15 @@ class GapRecoveryHarness:
         return self.tmp / f"event_bus.state.{self._restart_idx}"
 
     def start_server(self):
+        global TEST_PORT
         self.events_path.touch()
         self._restart_idx += 1
-        self.proc = _start_server(
-            self.fixture_path, self.events_path, TEST_PORT,
+        # _start_server binds a fresh OS-assigned port and verifies the nonce;
+        # publish the real port so this harness's browser opens hit our server.
+        self.proc, TEST_PORT = _start_server(
+            self.fixture_path, self.events_path, self.nonce,
             state_path=self._state_path_for_run(),
         )
-        if not _wait_for_server(TEST_PORT):
-            self.stop()
-            raise RuntimeError(f"Server failed to start on port {TEST_PORT}")
 
     def restart_server(self):
         """Stop and restart server (new epoch)."""

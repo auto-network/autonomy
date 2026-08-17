@@ -32,6 +32,49 @@ def bind_free_port() -> tuple[socket.socket, int]:
     return s, s.getsockname()[1]
 
 
+def spawn_mock_uvicorn(*, env, nonce, cwd=None, ready_timeout=45):
+    """Boot a DASHBOARD_MOCK uvicorn on a kernel-assigned free port and verify
+    identity before returning ``(proc, port)``.
+
+    Binds 127.0.0.1:0 here and hands the descriptor to uvicorn via ``--fd`` (so
+    the port cannot collide with another session — see :func:`bind_free_port`),
+    then polls ``/api/_mock/harness-nonce`` and refuses to return until the
+    served nonce equals *nonce*. Callers must have written the fixture with
+    ``{"__harness_nonce__": nonce, ...}`` and set ``env["DASHBOARD_MOCK"]``.
+    Raises RuntimeError on timeout or nonce mismatch (kills the process first).
+    """
+    import json as _json
+    import subprocess
+    import sys
+    import time
+    import urllib.request
+
+    sock, port = bind_free_port()
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "tools.dashboard.server:app",
+         "--fd", str(sock.fileno()), "--log-level", "warning"],
+        env=env, pass_fds=(sock.fileno(),), cwd=cwd,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    sock.close()
+    deadline = time.time() + ready_timeout
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/_mock/harness-nonce", timeout=1,
+            ) as r:
+                if _json.loads(r.read().decode()).get("nonce") == nonce:
+                    return proc, port
+        except Exception:
+            pass
+        time.sleep(0.2)
+    proc.kill()
+    raise RuntimeError(
+        f"mock uvicorn on port {port} failed to start or did not echo this "
+        "harness's nonce (port collision / wrong server / boot failure)"
+    )
+
+
 def worker_index() -> int:
     """Return xdist worker index (0 for main or missing xdist, 0..N otherwise)."""
     worker = os.environ.get("PYTEST_XDIST_WORKER", "gw0")
