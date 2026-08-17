@@ -329,6 +329,17 @@ def _register_permissive_schemas() -> None:
     ``add_setting`` to work without being coupled to those validators —
     a permissive override keeps the test focused on dispatch behavior.
     """
+    # The real validators (entrypoints/schemas.py) auto-register when their
+    # module is imported — which happens transitively whenever a sibling test
+    # module that pulls in the coordinator entrypoints is collected on this
+    # xdist worker. Defining a SettingSchema subclass auto-registers it, and
+    # register_schema refuses to overwrite a different class, so drop any
+    # existing registration for these keys BEFORE defining the stubs (the
+    # auto-register on class definition would otherwise collide). The autouse
+    # _isolate_schema_registry fixture restores the real schemas after the test.
+    for _sid in (COORDINATOR_SET_ID, COORDINATOR_DECISION_SET_ID, OPERATOR_MESSAGE_SET_ID):
+        SCHEMAS.pop(f"{_sid}#1", None)
+
     class _DecisionV1(SettingSchema):
         set_id = COORDINATOR_DECISION_SET_ID
         schema_revision = 1
