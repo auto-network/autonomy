@@ -154,9 +154,9 @@ async def test_rebase_directive_deliver_renders_and_sends(monkeypatch):
     assert actions[0].name == "RebaseDirectiveV1.deliver"
 
     row = Row(
-        id="evt-1",
+        id="11111111-1111-4111-8111-111111111111",
         set_id=RebaseDirectiveV1.set_id,
-        key="evt-1",
+        key="11111111-1111-4111-8111-111111111111",
         payload={"target_session": "auto-x", "repo": "autonomy"},
         created_at="",
         updated_at="",
@@ -212,7 +212,7 @@ async def test_rebase_directive_dispatched_via_settings_mediator(
         ops.add_setting(
             RebaseDirectiveV1.set_id,
             WORKTREE_REBASE_DIRECTIVE_REVISION,
-            "evt-1",
+            "11111111-1111-4111-8111-111111111111",
             {"target_session": "auto-x", "repo": "autonomy"},
             org=ops.CALLER_ORG,
         )
@@ -243,9 +243,9 @@ async def test_rebase_directive_failure_writes_failed_status(graph_db_env, monke
 
     actions = _HANDLERS.get(RebaseDirectiveV1.set_id, [])
     row = Row(
-        id="evt-2",
+        id="22222222-2222-4222-8222-222222222222",
         set_id=RebaseDirectiveV1.set_id,
-        key="evt-2",
+        key="22222222-2222-4222-8222-222222222222",
         payload={"target_session": "auto-x", "repo": "autonomy"},
         created_at="",
         updated_at="",
@@ -258,7 +258,12 @@ async def test_rebase_directive_failure_writes_failed_status(graph_db_env, monke
         org="autonomy",
     )
     assert failed is not None
-    assert json.loads(failed["payload"]) == {
+    # read_set_key returns the payload already deserialized to a dict; tolerate
+    # a raw JSON string too so the assertion does not depend on that detail.
+    payload = failed["payload"]
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    assert payload == {
         "state": "failed",
         "error": "session is not live: auto-x",
     }
