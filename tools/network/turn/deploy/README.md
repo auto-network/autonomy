@@ -70,6 +70,12 @@ IPv6 is absent from the first deployment: coturn binds its listener and relay
 pool only to the host's floating IPv4, and defaults allocations to IPv4. The
 container uses host networking so the relayed source address is exactly that
 floating IP; Docker bridge NAT is deliberately absent from the data path.
+The process remains uid 65534. The read-only pinned image's turnserver binary
+has only `cap_net_bind_service=ep`; Docker drops every capability and restores
+only `NET_BIND_SERVICE` to the bounding set. `no-new-privileges` is
+intentionally incompatible with that file capability and is absent, allowing
+the non-root process to bind TURN/TLS 443 without granting root or any other
+capability. The live listener check proves the effective result after deploy.
 Enabling IPv6 is a separate change gated on completing the
 IPv6 destination policy (including NAT64 `64:ff9b::/96`) and rerunning the
 private, link-local, metadata, mapped-address, and multicast refusal matrix.

@@ -94,12 +94,12 @@ def test_container_is_digest_pinned_and_uses_the_host_turn_address_directly():
     assert "--publish" not in script
     assert "--cap-drop=ALL" in script
     # coturn's image turnserver carries cap_net_bind_service=ep; cap-drop=ALL
-    # strips it from the bounding set, so exec returns EPERM ("Operation not
-    # permitted") under no-new-privileges even though the container's own ports
-    # are >1024. Re-granting exactly that one capability lets the setcap'd
-    # binary start while keeping every other capability dropped.
+    # strips it from the bounding set, so exec returns EPERM. Re-granting exactly
+    # that one capability lets the pinned setcap'd binary bind host TLS 443 while
+    # keeping every other capability dropped. no-new-privileges is deliberately
+    # absent: it would suppress this audited file capability for uid 65534.
     assert "--cap-add=NET_BIND_SERVICE" in script
-    assert "--security-opt no-new-privileges" in script
+    assert "no-new-privileges" not in script
     assert '--user "65534:${TURN_RUNTIME_GID}"' in script
     assert "--read-only" in script
     assert "static-auth-secret" not in script
