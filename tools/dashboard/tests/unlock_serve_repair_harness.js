@@ -82,6 +82,17 @@ window.AutonomyNetworkSession.repairServeCredential = async (password) => {
   return { checked: true, repaired: false, status: "ready" };
 };
 
+let allRepairCalls = 0;
+let allRepairOrgs = null;
+if (process.env.AUTONOMY_ALL_ORG_REPAIR === "1") {
+  window.AutonomyNetworkSession.repairAllServeCredentials = async (password) => {
+    allRepairCalls += 1;
+    if (password !== "test password") throw new Error("wrong password forwarded");
+    allRepairOrgs = ["autonomy", "dynbench", "anchore"];
+    return { repaired: allRepairOrgs, ready: [], failed: [] };
+  };
+}
+
 require("../static/js/unlock.js");
 
 (async () => {
@@ -113,6 +124,9 @@ require("../static/js/unlock.js");
     migrate_calls: migrateCalls,
     migrate_before_repair: migrateBeforeRepair,
     migration: window.__autonomyOrgKeyMigration || null,
+    all_repair_calls: allRepairCalls,
+    all_repair_orgs: allRepairOrgs,
+    serve_repair: window.__autonomyServeRepair || null,
   }));
 })().catch((error) => {
   console.error(error && error.stack || error);
