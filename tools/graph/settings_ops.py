@@ -1509,7 +1509,24 @@ def _open_read(org: str | None, set_id: str | None = None) -> GraphDB:
     -- a pinned path, the operator's own store -- readable before anything
     has been written to them.
     """
-    _assert_home(set_id, org)
+    # A read RESOLVES to the declared home; it does not refuse the caller for
+    # naming an organization. The two are not symmetric. A write landing in the
+    # wrong database is a value nobody can find or everybody can read, so
+    # refusing it is the whole point of the declaration. A read is different:
+    # the caller names the organization it is acting FOR, which for a
+    # personal-homed set is the KEY rather than the database, and refusing it
+    # breaks every consumer that legitimately scopes by org.
+    #
+    # That is not hypothetical. `/api/sign-key?org=anchore` asks for the
+    # signing key anchore's commits are signed with -- the org is which key,
+    # not which store -- and the guard turned it into a 500, surfaced to the
+    # operator as "User declined signing request". A refusal that misreports
+    # itself as a human decision is worse than the misrouting it prevents.
+    home = schemas.declared_home(set_id) if set_id else None
+    if home in ("personal", "machine"):
+        org = home
+    else:
+        _assert_home(set_id, org)
     path = _db_path(org)
     if path and Path(path).exists():
         return GraphDB(path, mode="ro")
@@ -2913,7 +2930,7 @@ def read_set_key(
     for m in members.members:
         if m.key == key:
             # m.id is the chosen base id; fetch the row in its origin DB.
-            row = _fetch_setting_any_org(m.id, org)
+            row = _fetch_setting_any_org(m.id, org, set_id)
             if row is None:
                 return None
             # The row identifies the BASE -- which is what a caller
@@ -3110,6 +3127,7 @@ def _base_and_tail_for(row: dict, org: str | None) -> tuple[str, str]:
 def _fetch_setting_any_org(
     setting_id: str,
     org: str | None,
+    set_id: str | None = None,
 ) -> dict | None:
     """Return the Setting row as a plain dict, searching own-org then peers.
 
@@ -3117,6 +3135,13 @@ def _fetch_setting_any_org(
     (``publication_state IN ('published','canonical')``). Used by
     override/exclude targets, which are allowed to reference peer
     content — the *override row* itself still lands in org's DB.
+
+    ``set_id`` lets the search start at the set's DECLARED home. Without it
+    the search begins at the caller's organization, and the operator's own
+    store is nobody's peer -- so a personal-homed row was found by the
+    member read and then lost by the lookup that fetches it, one line later,
+    for the same key. Two halves of one read disagreeing about which
+    database holds the answer is the shape this whole class of bug takes.
     """
     from .cross_org import (
         PEER_VISIBLE_STATES,
@@ -3124,7 +3149,7 @@ def _fetch_setting_any_org(
         resolve_peers,
     )
 
-    db = _open_read(org)
+    db = _open_read(org, set_id)
     try:
         row = db.conn.execute(
             "SELECT * FROM settings WHERE id = ?", (setting_id,)
