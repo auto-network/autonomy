@@ -331,16 +331,43 @@ Use `localhost:8080`, not the Tailnet IP.
 
 ## Testing
 
-ALWAYS pipe test output through `tee` — never run pytest without it:
+**Scope your test run to the code you changed. This is the rule, not an
+optimisation.**
+
+Run the test files that cover your change. Do not run the platform suite to
+prove a change to one module. A scoped run is the default and needs no
+justification; a broad run is the exception and needs one.
 
 ```bash
-python3 -m pytest tools/dashboard/tests/ -q --tb=short 2>&1 | tee /tmp/test-results.txt
+# The default: the tests that cover what you touched.
+python3 -m pytest tools/graph/tests/test_settings_vault_read.py -q --tb=short 2>&1 | tee /tmp/test-results.txt
 ```
+
+Three reasons, all of which have cost real runs:
+
+- **A broad sweep can cost you the entire run.** One implementation run was
+  terminated mid-sweep with 36 file-writes across 6 files uncommitted, and all
+  of it was lost. It had finished the work and was re-testing the platform.
+- **A failure in code you did not touch is not yours to diagnose.** If one
+  appears, do NOT chase it. Confirm it is unrelated (it fails on the base
+  commit too), record it in your decision with the test name, and carry on.
+  Diagnosing somebody else's failure is how a scoped change turns into an
+  afternoon.
+- **A green platform suite is not evidence about your change.** It is evidence
+  about the platform. The tests that cover your change are the ones that can
+  fail because of it.
+
+**When a broad run IS warranted:** you changed something with many callers (a
+shared helper, a schema, a serialization boundary). Then run the suites for the
+packages that import it — still not everything — and say in your decision why.
+
+ALWAYS pipe test output through `tee` — never run pytest without it.
 
 NEVER add `| tail` after `tee` — it gets backgrounded on timeout and closes tee stdout.
 NEVER sleep to wait for test completion. Set `timeout: 300000` on the Bash tool call, or use `run_in_background` and read the file when notified.
 
-The full test suite takes ~3 minutes. The default 2-minute bash timeout will background it.
+The full test suite takes ~3 minutes, which is a reason to scope your run, not
+a budget to spend. The default 2-minute bash timeout will background it.
 
 This captures all output to a file while still showing live progress. If you need to inspect specific failures afterward:
 
@@ -351,10 +378,10 @@ cat /tmp/test-results.txt
 
 NEVER re-run the full suite just to see a different part of the output. The file has everything.
 
-For faster iteration on specific failures, run individual test files:
+To narrow further — a single test rather than a file:
 
 ```bash
-python3 -m pytest tools/dashboard/tests/test_specific.py -v --tb=short 2>&1 | tee /tmp/test-results.txt
+python3 -m pytest tools/dashboard/tests/test_specific.py::test_one_thing -v --tb=short 2>&1 | tee /tmp/test-results.txt
 ```
 
 Dashboard features have tests under `tools/dashboard/tests/`.
