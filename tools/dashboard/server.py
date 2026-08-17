@@ -12155,17 +12155,24 @@ def _diag_build_server_block(session_id: str, ts) -> dict:
     try:
         if row:
             db_harness = (row.get("harness") or "claude") or None
-        from tools.dashboard.session_harness import resolve_harness_for_path
         jsonl_path = (row or {}).get("jsonl_path") if row else None
         if jsonl_path:
-            derived_harness = resolve_harness_for_path(jsonl_path).name
-            if db_harness and derived_harness and db_harness != derived_harness:
-                harness_mismatch = True
-            # Filename-based heuristic: rollout-* JSONL registered as claude
-            # is the exact rollout-* / harness=claude pattern called out in
-            # the bead acceptance criteria.
+            # Filename-based heuristic first: it needs only the path and cannot
+            # raise. A rollout-* JSONL registered as claude is the exact
+            # rollout-* / harness=claude mismatch pattern from the bead
+            # acceptance criteria, and must be flagged even when
+            # resolve_harness_for_path() below fails to parse the transcript
+            # (e.g. a rollout missing its Codex CLI version) — otherwise the
+            # parse error would swallow the mismatch.
             if db_harness == "claude" and Path(jsonl_path).name.startswith("rollout-"):
                 harness_mismatch = True
+            try:
+                from tools.dashboard.session_harness import resolve_harness_for_path
+                derived_harness = resolve_harness_for_path(jsonl_path).name
+                if db_harness and derived_harness and db_harness != derived_harness:
+                    harness_mismatch = True
+            except Exception:
+                pass
     except Exception:
         pass
 
