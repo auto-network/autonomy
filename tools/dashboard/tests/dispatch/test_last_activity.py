@@ -125,7 +125,7 @@ class TestLastActivityConversion:
 
 # ── Browser test: no NaN on dispatch page ────────────────────────────
 
-from tools.dashboard.tests._xdist import worker_test_port
+from tools.dashboard.tests._xdist import bind_free_port, worker_test_port
 
 TEST_PORT = worker_test_port(8083)
 
@@ -191,23 +191,21 @@ def dispatch_server(tmp_path_factory):
     data = _make_dispatch_fixture("2026-03-27T16:00:00")
     fixtures.write_fixture(data, fixture_path)
 
-    subprocess.run(
-        ["pkill", "-f", f"uvicorn.*{TEST_PORT}"],
-        capture_output=True, timeout=3,
-    )
-    time.sleep(1)
-
     env = os.environ.copy()
     env["DASHBOARD_MOCK"] = str(fixture_path)
     repo_root = str(Path(__file__).resolve().parents[4])
     env["PYTHONPATH"] = repo_root
 
+    # OS-assigned port via --fd (port-collision report, auto-0812-211339).
+    global TEST_PORT
+    sock, TEST_PORT = bind_free_port()
     proc = subprocess.Popen(
         ["python3", "-m", "uvicorn", "tools.dashboard.server:app",
-         "--host", "127.0.0.1", "--port", str(TEST_PORT)],
+         "--fd", str(sock.fileno())],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        env=env, cwd=repo_root,
+        env=env, cwd=repo_root, pass_fds=(sock.fileno(),),
     )
+    sock.close()
 
     for _ in range(20):
         try:
