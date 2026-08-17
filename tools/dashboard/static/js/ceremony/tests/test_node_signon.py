@@ -26,9 +26,11 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from tools.graph.schemas.network_identity import ORG_ROOT_ARMOR_PURPOSE
 from tools.network.idkit import KeyPair
 from tools.network.idkit.armor import encrypt_root_key
 from tools.network.idkit.persona import derive_persona
+from tools.network.idkit.sealing import derive_encapsulation_keypair, seal
 
 REPO = Path(__file__).resolve().parents[6]
 COMMAND = (
@@ -76,13 +78,37 @@ class OrgFixture:
     """
 
     def __init__(self, slug: str, *, genesis_id: str | None,
-                 rekey: dict | None = None, bound: bool = True):
+                 rekey: dict | None = None, bound: bool = True,
+                 serve_required: bool = False, serve_status: int = 200):
         self.slug = slug
         self.genesis_id = genesis_id
         self.rekey = rekey
         self.org_uuid = str(uuid.uuid4())
         self.root = KeyPair.generate()
         self.bound = bound
+        # Whether this organization's serving certificate is due for renewal,
+        # and whether the status route answers at all — a registry that is
+        # down must not cost the operator their sign-on.
+        self.serve_required = serve_required
+        self.serve_status = serve_status
+
+    def sealed_org_key(self, personal_root: KeyPair) -> dict:
+        """This org's root, sealed to the personal root exactly as founding
+        seals it — openable by the seed sign-on already holds, with no
+        organization passphrase anywhere."""
+        _private, public = derive_encapsulation_keypair(
+            bytes.fromhex(personal_root.private_hex), ORG_ROOT_ARMOR_PURPOSE,
+        )
+        return {
+            "root_pub": self.root.public_hex,
+            "sealed_root_key": seal(
+                bytes.fromhex(self.root.private_hex),
+                public,
+                ORG_ROOT_ARMOR_PURPOSE,
+            ).hex(),
+            "owner_kem_pub": public,
+            "seal_purpose": ORG_ROOT_ARMOR_PURPOSE,
+        }
 
     def persona_pub(self, personal_root: KeyPair) -> str:
         return derive_persona(
@@ -92,7 +118,8 @@ class OrgFixture:
 
 def _identity_source(*, personal_armor: str, personal_root_pub: str,
                      orgs: list[OrgFixture], requests: list[str],
-                     rekeyed: list[dict],
+                     rekeyed: list[dict], served: list[dict] | None = None,
+                     personal_root: KeyPair | None = None,
                      registry_url: str = "http://127.0.0.1:9") -> Starlette:
     """The dashboard-shaped identity source the Node command reads.
 
@@ -118,13 +145,19 @@ def _identity_source(*, personal_armor: str, personal_root_pub: str,
         })
 
     async def org_key(request: Request):
-        # Sign-on must never reach this route. It answers so that a
-        # regression shows up as an assertion on the trace rather than as an
-        # unrelated transport error.
+        # Sign-on reaches this route ONLY for an organization whose serving
+        # certificate is actually due for renewal. For every other org it
+        # answers so that a regression shows up as an assertion on the trace
+        # rather than as an unrelated transport error.
         requests.append(str(request.url.path))
         org = _org(request)
         if org is None:
             return JSONResponse({"error": "unknown org"}, status_code=404)
+        if personal_root is not None:
+            # The real shape: sealed to the personal root, no org passphrase.
+            return JSONResponse(
+                {"label": "default", **org.sealed_org_key(personal_root)},
+            )
         return JSONResponse({
             "label": "default",
             "armored_private_key": encrypt_root_key(
@@ -168,8 +201,31 @@ def _identity_source(*, personal_armor: str, personal_root_pub: str,
         rekeyed.append(await request.json())
         return JSONResponse({"ok": True})
 
+    async def serve_cert_state(request: Request):
+        requests.append(str(request.url.path))
+        org = _org(request)
+        if org is None or not org.bound:
+            return JSONResponse({"required": False, "status": "unregistered"})
+        if org.serve_status != 200:
+            return JSONResponse(
+                {"error": "registry unavailable"}, status_code=org.serve_status,
+            )
+        return JSONResponse({
+            "required": org.serve_required,
+            "status": "expiring" if org.serve_required else "ready",
+        })
+
+    async def serve_cert_post(request: Request):
+        requests.append("POST " + str(request.url.path))
+        body = await request.json()
+        if served is not None:
+            served.append(body)
+        return JSONResponse({"ok": True})
+
     return Starlette(routes=[
         Route("/api/orgs", org_list),
+        Route("/api/network/serve-cert", serve_cert_state),
+        Route("/api/network/serve-cert", serve_cert_post, methods=["POST"]),
         Route("/api/identity/personal", personal),
         Route("/api/network/org-key", org_key),
         Route("/api/network/ledger/heads", ledger_heads),
@@ -214,7 +270,8 @@ def _run(identity_url: str, passphrase: str, *extra: str) -> subprocess.Complete
 
 
 def _sign_on(orgs: list[OrgFixture], *, passphrase: str,
-             personal_root: KeyPair, extra: tuple[str, ...] = ()
+             personal_root: KeyPair, extra: tuple[str, ...] = (),
+             served: list[dict] | None = None, sealed_org_keys: bool = False,
              ) -> tuple[dict, list[str], list[dict]]:
     """Run one headless sign-on; return (output, request trace, re-keys)."""
     requests: list[str] = []
@@ -227,6 +284,8 @@ def _sign_on(orgs: list[OrgFixture], *, passphrase: str,
         orgs=orgs,
         requests=requests,
         rekeyed=rekeyed,
+        served=served,
+        personal_root=personal_root if sealed_org_keys else None,
     )
     with _live_server(identity, _free_port()) as identity_url:
         command = _run(identity_url, passphrase, *extra)
@@ -463,3 +522,75 @@ def test_missing_passphrase_touches_nothing():
     assert command.returncode != 0
     assert "missing passphrase source" in command.stderr
     assert requests == []
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_a_due_serving_certificate_is_renewed_by_the_personal_unlock():
+    """Serving certificates expire on their own 30-day clock, and used to do
+    it unattended because renewal hung off an ORGANIZATION sign-on that no
+    longer happens.
+
+    One personal unlock now renews them. The org root a renewal needs is not
+    derived from the persona -- both are siblings off the personal root -- but
+    it is SEALED to the personal root, so the seed this unlock already holds
+    opens it with no second passphrase. Only the organization actually due is
+    touched.
+    """
+    personal_root = KeyPair.generate()
+    orgs = _three_founded_orgs()
+    orgs[1].serve_required = True          # beta-org alone is expiring
+    served: list[dict] = []
+    output, requests, _ = _sign_on(
+        orgs, passphrase="one personal password", personal_root=personal_root,
+        served=served, sealed_org_keys=True,
+    )
+
+    signed_on = output["signOn"]
+    diagnostics = signed_on["diagnostics"]
+    assert diagnostics["serveCertsRenewed"] == ["beta-org"]
+    assert diagnostics["serveCertsFailed"] == []
+
+    # Exactly one credential was minted, and exactly one org root was opened
+    # to mint it -- the other two organizations were settled by the cheap
+    # status check alone.
+    assert len(served) == 1
+    assert diagnostics["orgRootsOpened"] == 1
+    assert requests.count("/api/network/org-key") == 1
+
+    # The credential names THAT organization's persona, and is signed by that
+    # organization's root -- the two properties that make it serve.
+    cert = json.loads(served[0]["cert"])
+    assert cert["subject"] == {
+        "kind": "persona", "id": orgs[1].persona_pub(personal_root),
+    }
+    assert cert["org"] == orgs[1].org_uuid
+    assert cert["scope"] == ["tunnel:serve"]
+    assert cert["not_after"] > cert["not_before"]
+
+    # Sign-on itself is undisturbed: still three personas, still one unlock.
+    assert diagnostics["personaCount"] == 3
+    assert requests.count("/api/identity/personal") == 1
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_a_failed_renewal_is_reported_and_does_not_break_sign_on():
+    """A registry that is down cannot cost the operator their session -- and
+    must not fail the way this failed before, into a console warning nobody
+    read for three weeks. The failure is REPORTED, per organization."""
+    personal_root = KeyPair.generate()
+    orgs = _three_founded_orgs()
+    orgs[2].serve_status = 503             # gamma-org's status route is down
+    output, _requests, _ = _sign_on(
+        orgs, passphrase="one personal password", personal_root=personal_root,
+        sealed_org_keys=True,
+    )
+
+    signed_on = output["signOn"]
+    diagnostics = signed_on["diagnostics"]
+    assert diagnostics["personaCount"] == 3, "sign-on survives a dead registry"
+    assert signed_on["sessionPub"]
+
+    failed = diagnostics["serveCertsFailed"]
+    assert [entry["org"] for entry in failed] == ["gamma-org"]
+    assert failed[0]["status"] == "failed"
+    assert failed[0]["error"], "a failure has to say what went wrong"

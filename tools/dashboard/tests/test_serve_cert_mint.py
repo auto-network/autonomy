@@ -85,11 +85,15 @@ def test_browser_serve_cert_mint_is_idkit_compatible(mode):
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
-def test_sign_on_neither_reads_the_org_key_nor_mints_a_serving_delegate():
-    """Sign-on opens the personal root and nothing else. Serving repair is a
-    root ceremony reached from the password-backed unlock hook, not from the
-    personal unlock, so a sign-on leaves both alone even when the stored
-    serving credential is reported missing."""
+def test_sign_on_checks_serving_but_cannot_mint_from_a_legacy_org_armor():
+    """Sign-on renews serving credentials, because the personal seed it holds
+    opens each organization's SEALED root without a second passphrase.
+
+    A legacy passphrase-armored organization key is the one case it cannot
+    open: that armor answers to the ORGANIZATION's own passphrase, which a
+    personal unlock does not have and must not prompt for. So the status is
+    checked, the key is read, nothing is minted, and the organization is
+    reported as ``legacy-org-armor`` rather than passing silently."""
     root = KeyPair.generate()
     personal = KeyPair.generate()
     pw = "correct horse battery staple"
@@ -112,7 +116,7 @@ def test_sign_on_neither_reads_the_org_key_nor_mints_a_serving_delegate():
     )
     assert result.returncode == 0, result.stdout + "\n" + result.stderr
     assert json.loads(result.stdout) == {
-        "captured": None, "org_key_reads": 0, "serve_status_reads": 0,
+        "captured": None, "org_key_reads": 1, "serve_status_reads": 1,
     }
 
 

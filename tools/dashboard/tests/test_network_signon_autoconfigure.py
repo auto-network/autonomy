@@ -57,13 +57,17 @@ def test_browser_module_load_configures_real_signon_path():
     # No browser label is minted any more: the actor is the persona, so the
     # localStorage stand-in identity is never written.
     assert output["subjectId"] is None
-    # The ONE unlock reads the personal armor, then one ledger head and one
-    # binding per organization. The organization key is never fetched.
+    # The ONE unlock reads the personal armor, then one ledger head, one
+    # binding, one re-key policy and one serving-certificate status per
+    # organization. The serving check is READ-ONLY and needs no key; the
+    # organization key itself is fetched only when a certificate is actually
+    # due for renewal, which it is not here.
     assert output["fetchCalls"] == [
         "/api/identity/personal",
         "/api/network/ledger/heads?org=module-load-org",
         "/api/network/binding?org=module-load-org",
         "/api/network/rekey-policy?org=module-load-org",
+        "/api/network/serve-cert?org=module-load-org",
     ]
 
     persona = derive_persona(
