@@ -41,7 +41,7 @@ pytestmark = [
 ]
 
 
-from tools.dashboard.tests._xdist import worker_test_port
+from tools.dashboard.tests._xdist import bind_free_port, worker_test_port
 
 TEST_PORT = worker_test_port(8090)
 
@@ -101,20 +101,23 @@ def live_dashboard(tmp_path, monkeypatch):
     repo_root = str(Path(__file__).resolve().parents[4])
     env["PYTHONPATH"] = repo_root
 
-    subprocess.run(
-        ["pkill", "-f", f"uvicorn.*{TEST_PORT}"],
-        capture_output=True, timeout=3,
-    )
-    time.sleep(1)
-
+    # Bind a kernel-assigned free port and hand its descriptor to uvicorn via
+    # --fd. worker_test_port is worker-index derived with no session dimension,
+    # so a fixed port can be answered by another session's server (port-collision
+    # report, auto-0812-211339). This server runs UNMOCKED, so the mock nonce
+    # endpoint is unavailable — the OS-assigned port alone makes collisions
+    # impossible, which is what the probe below then relies on.
+    global TEST_PORT
+    sock, TEST_PORT = bind_free_port()
     proc = subprocess.Popen(
         ["python3", "-m", "uvicorn", "tools.dashboard.server:app",
-         "--host", "127.0.0.1", "--port", str(TEST_PORT)],
+         "--fd", str(sock.fileno())],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        env=env, cwd=repo_root,
+        env=env, cwd=repo_root, pass_fds=(sock.fileno(),),
     )
+    sock.close()
     import httpx
-    for _ in range(20):
+    for _ in range(40):
         try:
             r = httpx.get(f"http://localhost:{TEST_PORT}/dispatch", timeout=1)
             if r.status_code in (200, 404):
