@@ -11679,6 +11679,18 @@ async def api_dao_active_sessions(request):
     sessions = [s for s in sessions if s.get("type") in _ACTIVE_SESSION_TYPES]
     return JSONResponse(sessions)
 
+
+async def api_mock_harness_nonce(request):
+    """Echo the ``__harness_nonce__`` baked into the active DASHBOARD_MOCK
+    fixture. Test harnesses assert this matches the nonce they wrote before
+    trusting the server they reached — turning a silent port-collision (a
+    readiness probe answered by another session's server) into an immediate
+    error. Mock-mode only; 404 otherwise so it never exists in production."""
+    if not os.environ.get("DASHBOARD_MOCK"):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    from tools.dashboard.dao import mock as mock_dao
+    return JSONResponse({"nonce": mock_dao._load().get("__harness_nonce__")})
+
 _recent_sessions_limit_deprecated_logged = False
 
 
@@ -17895,6 +17907,7 @@ routes = [
     Route("/api/attention", api_attention),
     Route("/api/active", api_active_sessions),
     Route("/api/dao/active_sessions", api_dao_active_sessions),
+    Route("/api/_mock/harness-nonce", api_mock_harness_nonce),
     Route("/api/dao/recent_sessions", api_dao_recent_sessions),
     Route("/api/dao/session_status", api_dao_session_status),
     Route("/api/worktrees", api_worktrees),

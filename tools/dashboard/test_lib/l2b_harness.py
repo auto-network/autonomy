@@ -30,9 +30,11 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -60,22 +62,34 @@ def start_mock_server(
     pre-seeded tmp tree so ``/api/orgs`` returns the slugs the test
     expects without depending on the host's real ``data/orgs/``.
     """
+    # Per-run nonce baked into the fixture. The readiness probe asserts the
+    # server it reached echoes THIS nonce before we yield — so a probe that
+    # succeeds against some OTHER session's server (the port-collision failure
+    # mode: worker-index-derived ports are identical across sessions on host
+    # networking) is an immediate, legible error instead of a whole run of
+    # confident wrong answers. See port-collision-report (crypto pillar,
+    # auto-0812-211339). `port` is now ignored — see the --fd allocation below.
+    nonce = uuid.uuid4().hex
+    fixture_data = {**fixture_data, "__harness_nonce__": nonce}
+
     fixture_path = tmp_path / "fixtures.json"
     fixture_path.write_text(json.dumps(fixture_data, indent=2))
 
     events_path = tmp_path / "events.jsonl"
     events_path.write_text("")
 
-    # Kill any stale listener squatting this port BEFORE spawning. Without
-    # this, our uvicorn silently fails to bind while the readiness probe
-    # below answers from the squatter — which then serves the OLD code and
-    # old fixture for the whole module (observed by auto-0708-153344 as a
-    # phantom 'pre-existing' failure).
-    subprocess.run(
-        ["pkill", "-f", f"uvicorn.*{port}"],
-        capture_output=True, timeout=3,
-    )
-    time.sleep(0.5)
+    # Bind the listening socket HERE and hand its descriptor to uvicorn via
+    # --fd. The kernel assigns a free port (bind to :0) that no other process —
+    # in this session or any other — can also hold, so collisions are
+    # impossible by construction. Unlike deriving a port and hoping, or --port 0
+    # and reading it back, there is no window between choosing and binding: we
+    # already own the socket.
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(128)
+    sock.set_inheritable(True)
+    real_port = sock.getsockname()[1]
 
     env = {
         **os.environ,
@@ -94,27 +108,30 @@ def start_mock_server(
         [
             sys.executable, "-m", "uvicorn",
             "tools.dashboard.server:app",
-            "--host", "127.0.0.1",
-            "--port", str(port),
+            "--fd", str(sock.fileno()),
             "--log-level", "warning",
         ],
         env=env,
+        pass_fds=(sock.fileno(),),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
+    sock.close()  # uvicorn inherited its own copy of the descriptor
 
-    # 30s window: uvicorn imports the full server module; under 8-way xdist
-    # contention plus per-module Chromium cold boots, 8s is routinely
-    # exceeded on a loaded machine.
+    url = f"http://127.0.0.1:{real_port}"
+
+    # Readiness + identity probe. A 200 alone proves only that SOMETHING is
+    # listening; require the served nonce to match ours before trusting it.
     deadline = time.time() + 45
     ready = False
+    served_nonce = None
     while time.time() < deadline:
         try:
             import urllib.request
-            urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/api/dao/active_sessions",
-                timeout=1,
-            )
+            with urllib.request.urlopen(
+                f"{url}/api/_mock/harness-nonce", timeout=1,
+            ) as resp:
+                served_nonce = json.loads(resp.read().decode()).get("nonce")
             ready = True
             break
         except Exception:
@@ -128,9 +145,20 @@ def start_mock_server(
             f"stdout: {out.decode()}\nstderr: {err.decode()}"
         )
 
+    if served_nonce != nonce:
+        proc.kill()
+        raise RuntimeError(
+            "Mock server identity check FAILED: the server answering on "
+            f"{url} echoed nonce {served_nonce!r}, not this harness's "
+            f"{nonce!r}. The probe reached a DIFFERENT server (port "
+            "collision with another session, or a stale listener) — every "
+            "test in this run would have executed against a stranger's code. "
+            "Refusing to proceed."
+        )
+
     return {
-        "port": port,
-        "url": f"http://127.0.0.1:{port}",
+        "port": real_port,
+        "url": url,
         "fixture_path": str(fixture_path),
         "events_path": str(events_path),
         "proc": proc,
