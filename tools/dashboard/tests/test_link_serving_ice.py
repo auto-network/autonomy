@@ -195,3 +195,45 @@ async def test_production_connector_routes_ice_begin_to_live_turn_issuance(monke
     assert reply["policy"] == "relay_only"
     assert reply["ice_servers"] == list(expected.ice_servers)
     await channel.aclose()
+
+
+@pytest.mark.asyncio
+async def test_production_ice_connector_leaves_ordinary_application_messages_unchanged(
+    monkeypatch,
+):
+    async def application_handler(token, raw):
+        return b"application:" + token.encode() + b":" + raw
+
+    monkeypatch.setattr(
+        link_serving, "make_grant_handler", lambda *args, **kwargs: application_handler
+    )
+
+    class FakeConnector:
+        def __init__(self, *args, **kwargs):
+            self.handler = args[4]
+            self.control_calls = []
+
+        async def control(self, op, args):
+            self.control_calls.append((op, args))
+            raise AssertionError("ordinary application traffic requested TURN")
+
+    key, cert = viewer_credentials()
+    connector = link_serving._make_ice_serving_connector(
+        "wss://relay.test",
+        "test-org",
+        key,
+        cert,
+        cert,
+        "test-org",
+        Publisher(),
+        min_backoff=0.2,
+        max_backoff=5.0,
+        connector_factory=FakeConnector,
+    )
+
+    channel = connector.handler.for_channel(TOKEN)
+    assert await channel(TOKEN, b'{"v":1,"op":"fetch"}') == (
+        b"application:" + TOKEN.encode() + b':{"v":1,"op":"fetch"}'
+    )
+    assert connector.control_calls == []
+    await channel.aclose()
