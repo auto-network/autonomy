@@ -53,7 +53,7 @@ BUILD_INFO=$(printf '{"commit":"%s","dirty":%s,"built_at":"%s"}' \
     "$SOURCE_SHA" "$SOURCE_DIRTY" "$BUILT_AT")
 
 echo "==> syncing code and install primer to $TARGET:$APP_DIR"
-ssh "$TARGET" "mkdir -p $APP_DIR/tools/network $APP_DIR/deploy"
+ssh "$TARGET" "mkdir -p $APP_DIR/tools/network $APP_DIR/tools/dashboard/static/js/lib $APP_DIR/deploy"
 rsync -az --delete --exclude '__pycache__' --exclude 'tests' \
     "$REPO_ROOT/tools/network/idkit" \
     "$REPO_ROOT/tools/network/relaykit" \
@@ -62,6 +62,12 @@ rsync -az --delete --exclude '__pycache__' --exclude 'tests' \
 rsync -az --delete \
     "$REPO_ROOT/deploy/install" \
     "$TARGET:$APP_DIR/deploy/"
+# The browser transport has one canonical source under Dashboard static so it
+# is served own-origin there. Registry serves these exact same bytes from
+# /l-assets; copy the source into the otherwise network-only deployment tree.
+rsync -az \
+    "$REPO_ROOT/tools/dashboard/static/js/lib/relaykit-core.js" \
+    "$TARGET:$APP_DIR/tools/dashboard/static/js/lib/relaykit-core.js"
 
 echo "==> writing deployed provenance ($SOURCE_SHA, dirty=$SOURCE_DIRTY)"
 printf '%s\n' "$BUILD_INFO" | ssh "$TARGET" \

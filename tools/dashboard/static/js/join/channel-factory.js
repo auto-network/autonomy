@@ -27,8 +27,8 @@ const CORE_URL = '/static/js/lib/relaykit-core.js' + staticVersion();
 const RELAY_WS_ORIGIN = 'wss://relay.auto.network';
 
 export function channelUrl(channelToken, { origin = RELAY_WS_ORIGIN } = {}) {
-  if (typeof channelToken !== 'string' || !/^[0-9a-f]{64}$/.test(channelToken)) {
-    throw new Error('channelToken must be 64 hex chars');
+  if (typeof channelToken !== 'string' || !/^[0-9a-f]{32}$/.test(channelToken)) {
+    throw new Error('channelToken must be 32 hex chars');
   }
   return `${origin}/v1/links/${channelToken}/channel`;
 }
@@ -36,7 +36,7 @@ export function channelUrl(channelToken, { origin = RELAY_WS_ORIGIN } = {}) {
 export async function openChannel(inputs, { origin, core } = {}) {
   const lib = core || (await import(CORE_URL));
   const url = channelUrl(inputs.channelToken, { origin });
-  const socket = lib.openSocket(url);
+  const socket = await lib.openSocket(url);
   return lib.performHandshake(socket, {
     org: inputs.org,
     token: inputs.channelToken,

@@ -18,7 +18,7 @@
  *       Supplied only once the operator has approved the acceptance contract;
  *       absent, accept() refuses rather than pretends.
  */
-import { sendOp } from './channel-op.js';
+import { sendOp } from '../lib/relaykit-core.js';
 import { makeChannelTransport } from './channel-transport.js';
 import { submitClaim, getClaimStatus } from '../ceremony/claim.js';
 

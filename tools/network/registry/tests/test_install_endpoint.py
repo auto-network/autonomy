@@ -74,6 +74,12 @@ class TestInstallSubDocuments:
         assert '"$REPO_ROOT/deploy/install"' in script
         assert '"$TARGET:$APP_DIR/deploy/"' in script
 
+    def test_deploy_copies_the_shared_browser_relaykit_core(self):
+        """The registry runtime is an rsync tree, so the shared JS is explicit."""
+        script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        assert 'tools/dashboard/static/js/lib/relaykit-core.js' in script
+        assert '$APP_DIR/tools/dashboard/static/js/lib/relaykit-core.js' in script
+
     def test_every_repo_doc_is_served(self, client):
         docs = sorted(
             p.relative_to(INSTALL_DIR).as_posix()

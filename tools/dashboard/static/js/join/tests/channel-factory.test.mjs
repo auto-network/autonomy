@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 
 import { channelUrl, openChannel } from '../channel-factory.js';
 
-const TOKEN = 'd'.repeat(64);
+const TOKEN = 'd'.repeat(32);
 const ROOT = 'a'.repeat(64);
 
 // 1. wsUrl is derived from the channelToken against the FIXED relay origin.
@@ -17,7 +17,7 @@ assert.equal(
 );
 
 // 2. junk never becomes a URL.
-assert.throws(() => channelUrl('not-a-token'), /64 hex/);
+assert.throws(() => channelUrl('not-a-token'), /32 hex/);
 
 // 3. a test/config origin may override — but it is passed in, never derived
 //    from the page origin.
