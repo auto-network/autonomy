@@ -231,7 +231,15 @@
     if (!retained) {
       if (!req.password) throw new Error('Enter your organization password to continue.');
       try {
-        await session.signOn(req.password, { org: req.orgSlug });
+        // migrateLegacyOrgKeys: SINGLE-USE. Any organization still holding a
+        // passphrase-armored root key is unreachable from a personal unlock,
+        // so its serving certificate cannot be renewed and expires. This
+        // unlock moves it to the sealed form when the passphrase being typed
+        // is the one that opens it. Remove this argument, and the code behind
+        // it, once every organization reads a sealed key.
+        await session.signOn(req.password, {
+          org: req.orgSlug, migrateLegacyOrgKeys: true,
+        });
       } catch (error) {
         const message = String((error && error.message) || error || '');
         if (error && error.status === 404 && /org|identity|key/i.test(message)) {
