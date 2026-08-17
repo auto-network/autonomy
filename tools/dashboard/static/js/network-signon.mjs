@@ -678,6 +678,18 @@ var signRegistryRequestCore;
           not_before: now - NOT_BEFORE_SKEW_S,
           not_after: now + ttl,
         };
+        // The PERSONA signs it. That is what makes the chain resolve to a
+        // member persona (§7) without the org root, and it moves the chain's
+        // anchor from the org root public key to the persona public key.
+        //
+        // KNOWN CONSEQUENCE, deliberately not fixed here: the rung-1 HTTP
+        // gates still anchor chains at the org root — registry/app.py's
+        // _authorize and the dashboard's _verify_local_publish_authority
+        // both call verify_chain(cert, <org root>), so they refuse this
+        // certificate. Moving those anchors to the acting persona (and
+        // checking that persona in the fold, which both already do) is the
+        // D19 / auto-zudu9 work of putting publish on the org tunnel, not
+        // this ceremony's.
         var sigBytes = await crypto.subtle.sign(
           'Ed25519', persona.signingKey,
           _domainBytes(CERT_DOMAIN, canonicalJson(certPayload)));
