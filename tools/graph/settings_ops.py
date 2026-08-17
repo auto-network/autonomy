@@ -1535,8 +1535,19 @@ def _open_read(org: str | None, set_id: str | None = None) -> GraphDB:
     home = schemas.declared_home(set_id) if set_id else None
     if home in ("personal", "machine"):
         org = home
-    else:
-        _assert_home(set_id, org)
+    # A READ never refuses. Where a home names one database the read resolves
+    # to it; everywhere else it opens the store it was asked for and finds
+    # whatever is there, which for the wrong store is nothing.
+    #
+    # Refusing was not a stricter version of the same idea, it was a different
+    # and worse one. A sweep that walks every database -- the session monitor
+    # does, on a timer -- reaches the machine store, and an organization-homed
+    # set raised there instead of returning no rows. The exception was thrown
+    # inside a timer task and never retrieved, so the dashboard did not crash:
+    # it stopped answering while holding the port, and every graph call across
+    # the fleet hung rather than failing fast. Twelve minutes of outage from a
+    # guard that was only ever meant to stop a value being WRITTEN somewhere
+    # nobody could find it.
     path = _db_path(org)
     if path and Path(path).exists():
         return GraphDB(path, mode="ro")
