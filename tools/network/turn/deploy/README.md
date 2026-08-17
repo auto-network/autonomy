@@ -75,9 +75,14 @@ changes as restart-required.
 6. Run `provision-secret.sh` once on the host. Never rerun it to repair a
    failure; rotation adds a second line, proves both, switches the issuer,
    waits the credential TTL, drains, and then removes the old line.
-7. Copy `runtime.env.example` to `runtime.env` and fill the limits. The relay
-   range is bounded to 100 ports for the first capacity run, but allocation and
-   bandwidth values are intentionally blank until measured.
+7. Copy `runtime.env.example` to `runtime.env` and fill the host-specific
+   values. The first operating limits are 16 allocations per credential, 96
+   allocations total, 8 MiB/s per allocation, and 768 MiB/s of allocation
+   capacity. Coturn reserves the per-allocation maximum against total capacity
+   when it accepts an allocation; the total therefore covers all 96 allocation
+   slots instead of rejecting a normal browser-plus-Dashboard ICE gather before
+   any relay traffic flows. The 100-port relay range remains the independent
+   hard allocation bound.
 8. Set `TURN_PUBLIC_IP` and `ACME_EMAIL`, then run `issue-certificate.sh`.
 9. Run `deploy.sh root@registry-ash-1 --activate`.
 10. Prove metrics are private, inspect logs using a synthetic username, and run
