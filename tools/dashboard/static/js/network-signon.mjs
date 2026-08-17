@@ -492,6 +492,48 @@ var signRegistryRequestCore;
     return await _fetchJson('/api/network/serve-cert' + orgQ, orgSlug);
   }
 
+  // Renewing a serving credential needs that organization's ROOT key, because
+  // the delegate is root-signed (see provisionServeCert). A personal sign-on
+  // can do it without a second passphrase: the org root is not derived from the
+  // persona -- both are siblings off the personal root -- but it is SEALED to a
+  // KEM key derived from the personal root seed, so the seed this unlock is
+  // already holding opens it via openSealedArmor.
+  //
+  // The cheap status check runs FIRST and needs no key at all, so the ordinary
+  // sign-on -- every certificate still current -- opens no organization root.
+  // A root is opened only for an organization actually due for renewal, and is
+  // dropped at import.
+  async function _renewServeCredential(slug, binding, personaPub, personalSeed) {
+    var state = await _serveCredentialRepairState(slug, binding);
+    if (!state.required) {
+      return { checked: true, renewed: false, rootOpened: false,
+               status: state.status || 'ready' };
+    }
+    var orgQ = slug ? ('?org=' + encodeURIComponent(slug)) : '';
+    var orgKey = await _fetchJson('/api/network/org-key' + orgQ, slug);
+    if (!orgKey || !orgKey.sealed_root_key) {
+      // Legacy passphrase-armored org key. Opening it needs that organization's
+      // OWN passphrase, which a personal unlock does not have and must not
+      // prompt for. Reported rather than silently skipped: this is the one case
+      // that still expires unattended, and it has to be visible.
+      return { checked: true, renewed: false, rootOpened: false,
+               status: 'legacy-org-armor' };
+    }
+    var rootSeed = await openSealedArmor(orgKey, personalSeed);
+    var rootKey;
+    try {
+      rootKey = await _importRootKey(rootSeed);
+    } finally {
+      rootSeed.fill(0);                   // I1: root seed gone at import
+    }
+    var credential = await _mintServeCredential(
+      rootKey, binding.org_uuid, personaPub);
+    rootKey = null;                       // I1: last root reference dropped
+    var posted = await _postServeCredential(credential, slug);
+    return { checked: true, renewed: true, rootOpened: true, status: 'renewed',
+             notAfter: posted.notAfter };
+  }
+
   // The ONE unlock. Sign-on is personal, so the only armor it opens is the
   // personal root armor — no organization's key is fetched, and none is
   // decrypted. Every persona below comes out of this single seed.
@@ -622,6 +664,7 @@ var signRegistryRequestCore;
     var orgs = {};
     var reports = [];
     var skipped = [];
+    var orgRootsOpened = 0;
     var rekeys = {};
     var seedDropped = false;
     try {
@@ -711,10 +754,34 @@ var signRegistryRequestCore;
         if (rekey.fired) entry.rekeyedAt = _nowS();
         orgs[genesisId] = entry;
         rekeys[genesisId] = rekey;
+
+        // Serving certificates expire on a 30-day clock of their own. This is
+        // the moment every one of them can be renewed at once: the personal
+        // seed is live, so each organization's root is reachable, and the
+        // persona that the credential names has just been derived.
+        //
+        // It must never disturb sign-on -- a registry that is down, or one
+        // organization whose key is legacy-armored, cannot cost the operator
+        // their session. The outcome is REPORTED per organization instead of
+        // warned to a console nobody reads, which is how these expired
+        // unnoticed.
+        var serve = { checked: false, renewed: false, status: 'skipped' };
+        if (bound) {
+          try {
+            serve = await _renewServeCredential(
+              slug, binding, persona.publicHex, opened.seed);
+            if (serve.rootOpened) orgRootsOpened += 1;
+          } catch (e) {
+            serve = { checked: true, renewed: false, status: 'failed',
+                      error: (e && e.message) || String(e) };
+          }
+        }
+
         reports.push({
           orgSlug: slug, genesisId: genesisId, org: orgId,
           personaPub: persona.publicHex, notAfter: certPayload.not_after,
           certWire: certWire, registryUrl: entry.registryUrl, rekey: rekey,
+          serveCert: serve,
         });
       }
     } finally {
@@ -742,10 +809,24 @@ var signRegistryRequestCore;
       diagnostics: {
         personalRootDropped: seedDropped,
         extractable: sessionKeys.privateKey.extractable,
-        orgRootsOpened: 0,
+        // Zero on an ordinary unlock: a root is opened only for an org whose
+        // serving certificate was actually due, and never to sign on.
+        orgRootsOpened: orgRootsOpened,
         personaCount: reports.length,
         rekeyedOrgs: reports.filter(function (r) { return r.rekey.fired; })
           .map(function (r) { return r.orgSlug; }),
+        serveCertsRenewed: reports
+          .filter(function (r) { return r.serveCert && r.serveCert.renewed; })
+          .map(function (r) { return r.orgSlug; }),
+        serveCertsFailed: reports
+          .filter(function (r) {
+            return r.serveCert && r.serveCert.checked && !r.serveCert.renewed &&
+              r.serveCert.status !== 'ready' && r.serveCert.status !== 'unregistered';
+          })
+          .map(function (r) {
+            return { org: r.orgSlug, status: r.serveCert.status,
+                     error: r.serveCert.error || null };
+          }),
       },
     };
   }

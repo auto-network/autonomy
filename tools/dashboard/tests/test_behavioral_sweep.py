@@ -14809,12 +14809,18 @@ class TestNetworkSignOn:
     # ── acceptance: one personal unlock, a persona per organization ──
 
     def test_sign_on_derives_the_persona_and_opens_no_org_root(self):
-        """The unlock decrypts the PERSONAL root once. No organization key
-        is even read, and the persona is exactly HKDF over the genesis id —
-        idkit's own derivation, byte for byte."""
+        """The unlock decrypts the PERSONAL root once, and NO organization
+        root is opened to sign on — the persona is exactly HKDF over the
+        genesis id, idkit's own derivation, byte for byte.
+
+        The organization key is read once, and for one reason only: this
+        fixture's serving certificate is due, so sign-on offers to renew it.
+        That key is legacy passphrase-armor, which a personal unlock cannot
+        open, so it is reported and no root is decrypted."""
         c = self._checks
-        assert c["org_key_reads_at_signon"] == 0
+        assert c["org_key_reads_at_signon"] == 1
         assert c["signon"]["diagnostics"]["orgRootsOpened"] == 0
+        assert c["signon"]["orgs"][0]["serveCert"]["status"] == "legacy-org-armor"
         assert c["signon"]["diagnostics"]["personaCount"] == 1
         assert c["signon"]["personalRootPub"] == NETWORK_PERSONAL_ROOT.public_hex
         entry = c["signon"]["orgs"][0]
