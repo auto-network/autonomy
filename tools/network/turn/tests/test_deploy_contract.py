@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import ipaddress
 import os
 from pathlib import Path
 import subprocess
@@ -160,6 +161,30 @@ def test_ipv4_only_contract_is_explicit_and_ipv6_requires_a_new_review():
     assert '--publish "${TURN_PUBLIC_IP}:' in run
     assert "--publish [::]" not in run
     assert "64:ff9b::/96" in readme
+
+
+def test_ipv4_only_peer_policy_does_not_shadow_public_ipv4_with_ipv6_ranges():
+    """coturn compares IPv4 peers in mapped form, so IPv6 ranges are unsafe here."""
+    config = (DEPLOY / "turnserver.conf.in").read_text()
+    denied_ranges = [
+        line.removeprefix("denied-peer-ip=")
+        for line in config.splitlines()
+        if line.startswith("denied-peer-ip=")
+    ]
+
+    # This deployment has no IPv6 listener, bridge route, or allocation family.
+    # Keeping IPv6 deny ranges in the live config is not useful defense-in-depth:
+    # The pinned coturn compares ordinary IPv4 peers as IPv4-mapped IPv6; a broad
+    # IPv6 range can therefore shadow legitimate public IPv4 destinations.
+    assert denied_ranges
+    assert all(":" not in item for item in denied_ranges)
+    assert "10.0.0.0-10.255.255.255" in denied_ranges
+    assert "169.254.0.0-169.254.255.255" in denied_ranges
+
+    public_peer = ipaddress.ip_address("5.161.179.179")
+    for item in denied_ranges:
+        first, last = map(ipaddress.ip_address, item.split("-", 1))
+        assert not first <= public_peer <= last
 
 
 def test_shell_scripts_parse():
