@@ -2117,7 +2117,7 @@ def layers_for(set_id: str, key: str, *, org: str | None) -> dict:
     """
     out: dict = {"set_id": set_id, "key": key, "org": org,
                  "base": None, "overrides": [], "resolved": None,
-                 "orphans": []}
+                 "orphans": [], "deprecated": []}
     try:
         db = _open_read(org, set_id)
     except Exception:
@@ -2125,7 +2125,7 @@ def layers_for(set_id: str, key: str, *, org: str | None) -> dict:
     try:
         rows = db.conn.execute(
             "SELECT id, payload, publication_state, supersedes, excludes, "
-            "       deprecated, created_at "
+            "       deprecated, created_at, schema_revision "
             "FROM settings WHERE set_id = ? AND key = ? "
             "ORDER BY created_at ASC, rowid ASC",
             (set_id, key),
@@ -2135,8 +2135,19 @@ def layers_for(set_id: str, key: str, *, org: str | None) -> dict:
     finally:
         db.close()
 
-    bases = [r for r in rows if r["supersedes"] is None and not r["excludes"]]
-    overrides = [r for r in rows if r["supersedes"] is not None]
+    # Deprecated rows are skipped by resolution, so a view that merges them
+    # describes a value nothing returns. They are still listed, because a row
+    # that exists and does not apply is worth seeing -- it is simply not part
+    # of the answer. Merging one silently re-pinned a workspace's model from a
+    # row resolution had already retired.
+    live = [r for r in rows if not r["deprecated"]]
+    bases = [r for r in live if r["supersedes"] is None and not r["excludes"]]
+    overrides = [r for r in live if r["supersedes"] is not None]
+    out["deprecated"] = [
+        {"id": r["id"], "state": r["publication_state"],
+         "is_override": r["supersedes"] is not None}
+        for r in rows if r["deprecated"]
+    ]
     if not bases:
         # Overrides with no base resolve to nothing and are invisible to
         # every read; they are reported here so they can be removed.
@@ -2154,6 +2165,7 @@ def layers_for(set_id: str, key: str, *, org: str | None) -> dict:
     except Exception:
         return out
     out["base"] = {"id": base["id"], "state": base["publication_state"],
+                   "schema_revision": base["schema_revision"],
                    "payload": dict(merged)}
 
     for row in overrides:
