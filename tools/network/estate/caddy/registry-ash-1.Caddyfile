@@ -1,6 +1,14 @@
 # auto.network registry v1 — fronted by Caddy.
 # This complete file is the deploy source of truth (auto-oyqlw).
 
+# Pin every listener — including the auto-HTTP :80 ACME/redirect server — to the
+# primary IP, so coturn can own :80/:443 on the TURN floating IP. Without this the
+# auto-HTTPS sites' :80 listener falls back to 0.0.0.0 and Certbot's standalone
+# HTTP-01 on the TURN IP is refused (see turn/deploy/issue-certificate.sh).
+{
+	default_bind 5.161.219.195
+}
+
 # registry.auto.network: automatic HTTPS (Let's Encrypt) -> loopback registry.
 registry.auto.network {
 	bind 5.161.219.195

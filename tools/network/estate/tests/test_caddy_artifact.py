@@ -29,6 +29,16 @@ def test_complete_caddyfile_has_exact_current_routes():
     assert "base-url" not in text
 
 
+def test_global_default_bind_pins_listeners_to_primary_ip():
+    # A global options block pins the default bind — including the auto-HTTP
+    # :80 ACME/redirect listener — to the primary IP, so the TURN floating IP's
+    # :80/:443 stay free for coturn. Without it caddy falls back to 0.0.0.0:80
+    # and turn/deploy/issue-certificate.sh refuses ("Caddy must bind only the
+    # original IP").
+    text = CADDYFILE.read_text(encoding="utf-8")
+    assert re.search(r"(?m)^\{\n\s*default_bind 5\.161\.219\.195\n\}", text)
+
+
 def test_deploy_validates_before_atomic_install_and_reload():
     script = DEPLOY.read_text(encoding="utf-8")
     validate = script.index('caddy validate --config "$REMOTE_TMP"')
