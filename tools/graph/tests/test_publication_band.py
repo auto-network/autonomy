@@ -201,3 +201,56 @@ def test_the_pin_matches_what_is_stored_today(set_id):
     from tools.graph import schemas
 
     assert "raw" in schemas.states_allowed(set_id, 1)
+
+
+# ── the second guard: not served, even if mismarked ──────────
+
+
+def test_a_mismarked_secret_row_still_does_not_cross(orgs):
+    """The band refuses the write; this refuses the read.
+
+    Both are needed because they fail independently. A row can reach a
+    peer-visible state by a path the write guard never sees -- a direct
+    database write, a restore from a backup taken before the band existed,
+    a migration. At that point the only thing between a sealed credential
+    and every peer organization is whether resolution agrees to serve it.
+    """
+    from tools.graph.db import GraphDB, resolve_caller_db_path
+
+    settings_ops.add_setting("probe.band.sealed", 1, "leak", {"v": "secret"},
+                             org="partner", state="raw")
+    # Forced past the guard, exactly as a restore or a direct write would.
+    db = GraphDB(resolve_caller_db_path("partner"))
+    try:
+        db.conn.execute(
+            "UPDATE settings SET publication_state = 'canonical' "
+            "WHERE set_id = 'probe.band.sealed' AND key = 'leak'")
+        db.conn.commit()
+    finally:
+        db.close()
+
+    seen = settings_ops.read_set_key("probe.band.sealed", "leak", org="acme")
+
+    assert seen is None, (
+        "a peer's sealed row was served across an organization boundary")
+
+
+def test_the_owner_still_reads_its_own_row(orgs):
+    """Refusing the federated read must not blind an org to its own data."""
+    settings_ops.add_setting("probe.band.sealed", 1, "mine", {"v": "s"},
+                             org="acme", state="raw")
+
+    row = settings_ops.read_set_key("probe.band.sealed", "mine", org="acme")
+
+    assert row is not None and row["payload"]["v"] == "s"
+
+
+def test_a_set_with_a_public_surface_still_federates(orgs):
+    """The guard keys on the band, not on a list of set names, so a set that
+    is meant to be shared is unaffected."""
+    settings_ops.add_setting("probe.band.shared", 1, "pub", {"v": "theirs"},
+                             org="partner", state="published")
+
+    row = settings_ops.read_set_key("probe.band.shared", "pub", org="acme")
+
+    assert row is not None and row["payload"]["v"] == "theirs"
