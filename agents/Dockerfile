@@ -109,8 +109,16 @@ RUN userdel -r ubuntu 2>/dev/null; useradd -m -s /bin/bash -u 1000 agent \
 # Codex is an npm package plus platform-specific optional dependency, not a
 # standalone host ELF like Claude, so install it inside the image directly.
 ARG CODEX_VERSION=0.147.0
-RUN npm install -g "@openai/codex@${CODEX_VERSION}" agent-browser \
+# jsdom: a DOM-in-Node implementation used by the dashboard's browser-free
+# (Category B) UI tests — those that assert data->render->interact->DOM state
+# without a real browser or layout engine. Installed globally alongside the
+# other CLIs; NODE_PATH below lets test node scripts `require('jsdom')` from
+# anywhere. Layout/positioning tests (getBoundingClientRect) still need a real
+# browser and stay on agent-browser.
+RUN npm install -g "@openai/codex@${CODEX_VERSION}" agent-browser jsdom \
     && su agent -c "agent-browser install"
+# Resolve globally-installed node modules (jsdom) from standalone test scripts.
+ENV NODE_PATH=/usr/lib/node_modules
 
 # The harness versions this image was built with, recorded on the image
 # itself. CODEX_VERSION is the same variable that installed the binary two
