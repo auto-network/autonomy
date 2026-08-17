@@ -62,6 +62,18 @@ from __future__ import annotations
 from typing import Any
 
 from tools.graph.schemas.registry import (
+    home,
+    home,
+    home,
+    home,
+    home,
+    home,
+    home,
+    home,
+    home,
+    home,
+    home,
+    home,
     SchemaValidationError,
     SettingSchema,
     append_only_log,
@@ -139,6 +151,16 @@ SYNOPSIS = {
 # ── Coordinator binding ──────────────────────────────────────────────
 
 
+#: Not forced into any one store. This records that the question was
+#: ASKED -- must this live in the operator's own database, or on
+#: this machine alone? -- and answered no, which is different
+#: from nobody having considered it.
+#:
+#: It is not a prohibition. The operator owns workspaces, so
+#: their database is the organizational home of their own
+#: things; reading this as "anywhere but personal" refuses
+#: writes that are correct.
+@home("organization")
 @singleton(key="default")
 class CoordinatorV1(SettingSchema):
     """Singleton live coordinator binding. Key: ``default``."""
@@ -591,6 +613,16 @@ def _validate_thread_common(cls, payload: Any) -> None:
         )
 
 
+#: Not forced into any one store. This records that the question was
+#: ASKED -- must this live in the operator's own database, or on
+#: this machine alone? -- and answered no, which is different
+#: from nobody having considered it.
+#:
+#: It is not a prohibition. The operator owns workspaces, so
+#: their database is the organizational home of their own
+#: things; reading this as "anywhere but personal" refuses
+#: writes that are correct.
+@home("organization")
 @keyed_per_entity(key_strategy="session_name")
 class CoordinatorThreadV1(SettingSchema):
     """Per-(coordinator, peer) thread. Key: ``<coord>:<peer-session>``.
@@ -781,6 +813,16 @@ class CoordinatorThreadV3(SettingSchema):
 # ── Decision (append-only event log; variants per kind) ──────────────
 
 
+#: Not forced into any one store. This records that the question was
+#: ASKED -- must this live in the operator's own database, or on
+#: this machine alone? -- and answered no, which is different
+#: from nobody having considered it.
+#:
+#: It is not a prohibition. The operator owns workspaces, so
+#: their database is the organizational home of their own
+#: things; reading this as "anywhere but personal" refuses
+#: writes that are correct.
+@home("organization")
 @append_only_log(key="uuid_v4")
 class CoordinatorDecisionV1(SettingSchema):
     """Append-only operator decision row. Key: uuid, payload describes the tap.
@@ -910,6 +952,16 @@ class Custom(CoordinatorDecisionV1):
 # ── Sprint (coordinator-owned editorial arc) ─────────────────────────
 
 
+#: Not forced into any one store. This records that the question was
+#: ASKED -- must this live in the operator's own database, or on
+#: this machine alone? -- and answered no, which is different
+#: from nobody having considered it.
+#:
+#: It is not a prohibition. The operator owns workspaces, so
+#: their database is the organizational home of their own
+#: things; reading this as "anywhere but personal" refuses
+#: writes that are correct.
+@home("organization")
 @keyed_per_entity(key_strategy="sprint_id")
 class CoordinatorSprintV1(SettingSchema):
     """Per-sprint-id editorial card. Key: ``<sprint-id>``.
@@ -1211,6 +1263,16 @@ class CoordinatorConvergentDecisionV1(SettingSchema):
 # ── Open follow-up (coordinator-curated, not yet beaded) ─────────────
 
 
+#: Not forced into any one store. This records that the question was
+#: ASKED -- must this live in the operator's own database, or on
+#: this machine alone? -- and answered no, which is different
+#: from nobody having considered it.
+#:
+#: It is not a prohibition. The operator owns workspaces, so
+#: their database is the organizational home of their own
+#: things; reading this as "anywhere but personal" refuses
+#: writes that are correct.
+@home("organization")
 @keyed_per_entity(key_strategy="followup_id")
 class CoordinatorOpenFollowupV1(SettingSchema):
     """Coordinator-curated open follow-up. Key: uuid."""
@@ -1248,6 +1310,16 @@ class CoordinatorOpenFollowupV1(SettingSchema):
 # ── Docs (singleton coordMap + walkthrough pointers) ─────────────────
 
 
+#: Not forced into any one store. This records that the question was
+#: ASKED -- must this live in the operator's own database, or on
+#: this machine alone? -- and answered no, which is different
+#: from nobody having considered it.
+#:
+#: It is not a prohibition. The operator owns workspaces, so
+#: their database is the organizational home of their own
+#: things; reading this as "anywhere but personal" refuses
+#: writes that are correct.
+@home("organization")
 @singleton(key="default")
 class CoordinatorDocsV1(SettingSchema):
     """Singleton coord-map + walkthrough doc pointers. Key: ``default``."""

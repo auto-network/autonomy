@@ -32,6 +32,8 @@ from datetime import datetime
 from typing import Any
 
 from .registry import (
+    home,
+    home,
     singleton,
     SchemaValidationError,
     SettingSchema,
@@ -121,6 +123,12 @@ def _require_iso_ts(payload: dict, key: str, cls_name: str) -> str:
 # ── autonomy.identity.personal ────────────────────────────────
 
 
+#: The operator's own store. Observed: every stored row lives there
+#: and none in any organization's database. Declared so it is
+#: enforced rather than agreed -- an undeclared home refuses
+#: nothing, and a plain read looks in the caller's own store and
+#: reports nothing for rows sitting one database over.
+@home("personal")
 @singleton(key="default")
 class PersonalIdentityV1(SettingSchema):
     """The person's root key — encrypted armor only (I1).
@@ -233,6 +241,12 @@ class PersonalIdentityV1(SettingSchema):
 # ── autonomy.identity.passkey ─────────────────────────────────
 
 
+#: The operator's own store. Observed: every stored row lives there
+#: and none in any organization's database. Declared so it is
+#: enforced rather than agreed -- an undeclared home refuses
+#: nothing, and a plain read looks in the caller's own store and
+#: reports nothing for rows sitting one database over.
+@home("personal")
 @keyed_per_entity(key_strategy="credential_id")
 class PasskeyCredentialV1(SettingSchema):
     """One enrolled WebAuthn credential — Gate-1 access, never signing.

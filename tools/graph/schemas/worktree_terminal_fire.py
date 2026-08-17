@@ -13,6 +13,8 @@ from __future__ import annotations
 from typing import Any
 
 from .registry import (
+    home,
+    home,
     SchemaValidationError,
     SettingSchema,
     field,
@@ -42,6 +44,16 @@ SYNOPSIS = {
 }
 
 
+#: Not forced into any one store. This records that the question was
+#: ASKED -- must this live in the operator's own database, or on
+#: this machine alone? -- and answered no, which is different
+#: from nobody having considered it.
+#:
+#: It is not a prohibition. The operator owns workspaces, so
+#: their database is the organizational home of their own
+#: things; reading this as "anywhere but personal" refuses
+#: writes that are correct.
+@home("organization")
 @keyed_per_entity(key_strategy="session_name:repo:review_id:hash")
 class WorktreeTerminalFireV1(SettingSchema):
     """Persisted dedup ledger entry for one terminal notification."""

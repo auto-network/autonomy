@@ -21,6 +21,7 @@ import string
 from typing import Any
 
 from .registry import SchemaValidationError, SettingSchema, keyed_per_entity
+from .registry import home
 
 
 AGENT_ACTIONS_SET_ID = "dashboard.agent-actions"
@@ -302,6 +303,16 @@ class AgentActionV2(SettingSchema):
         return dict(payload)
 
 
+#: Not forced into any one store. This records that the question was
+#: ASKED -- must this live in the operator's own database, or on
+#: this machine alone? -- and answered no, which is different
+#: from nobody having considered it.
+#:
+#: It is not a prohibition. The operator owns workspaces, so
+#: their database is the organizational home of their own
+#: things; reading this as "anywhere but personal" refuses
+#: writes that are correct.
+@home("organization")
 @keyed_per_entity(key_strategy="action_name")
 class AgentActionV1(SettingSchema):
     """Legacy ``dashboard.agent-actions#1`` shape — identical to ``#2``

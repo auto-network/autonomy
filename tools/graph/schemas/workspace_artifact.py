@@ -14,6 +14,8 @@ and therefore dropped from the payload.
 from __future__ import annotations
 
 from .registry import (
+    home,
+    home,
     keyed_per_entity,
     SchemaValidationError,
     SettingSchema,
@@ -54,6 +56,16 @@ SYNOPSIS = {
     # artifact, so every artifact of a workspace is reachable from it.
     key_references={"workspace_id": "autonomy.workspace"},
 )
+#: Not forced into any one store. This records that the question was
+#: ASKED -- must this live in the operator's own database, or on
+#: this machine alone? -- and answered no, which is different
+#: from nobody having considered it.
+#:
+#: It is not a prohibition. The operator owns workspaces, so
+#: their database is the organizational home of their own
+#: things; reading this as "anywhere but personal" refuses
+#: writes that are correct.
+@home("organization")
 class WorkspaceArtifactV1(SettingSchema):
     set_id = SET_ID
     schema_revision = SCHEMA_REVISION

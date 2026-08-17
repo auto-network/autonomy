@@ -1468,11 +1468,21 @@ def _assert_home(set_id: str | None, org: str | None) -> None:
             f"{set_id} lives in the operator's own database; refusing to use "
             f"organization {org!r}"
         )
-    if want == "organization" and is_personal:
-        raise schemas.SchemaValidationError(
-            f"{set_id} lives in an organization's database; refusing to use "
-            f"the operator's own store"
-        )
+    # 'organization' does NOT refuse the operator's own store. It is the
+    # unconstrained home: it says only that this is not forced into personal
+    # or machine. The operator's database IS the organizational home of the
+    # operator's own things -- they own workspaces, and those workspaces have
+    # mounts, primers and commit policies exactly like any organization's.
+    #
+    # Reading it as "not personal" refused writes that were correct, and made
+    # a declaration of scope look like a prohibition. The value of declaring
+    # it is that the decision has been TAKEN, which is what separates it from
+    # a set nobody has thought about -- not that it forbids a database.
+    #
+    # A machine-store write is already refused a few lines above, for every
+    # declared home that is not `machine` -- so nothing extra is needed here,
+    # and adding it would be a second rule saying the same thing in a
+    # different voice.
 
 
 def _open(org: str | None, set_id: str | None = None) -> GraphDB:

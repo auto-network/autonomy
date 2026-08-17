@@ -29,6 +29,7 @@ from dataclasses import dataclass
 
 from tools.graph import settings_ops
 from tools.graph.schemas.registry import SettingSchema, field, singleton
+from tools.graph.schemas.registry import home
 
 from tools.dashboard import voice_whisperlive as _vw
 
@@ -38,6 +39,12 @@ SCHEMA_REVISION = 1
 SINGLETON_KEY = "default"
 
 
+#: The operator's own store. Observed: every stored row lives there
+#: and none in any organization's database. Declared so it is
+#: enforced rather than agreed -- an undeclared home refuses
+#: nothing, and a plain read looks in the caller's own store and
+#: reports nothing for rows sitting one database over.
+@home("personal")
 @singleton(key=SINGLETON_KEY)
 class VoiceTranscriptionV1(SettingSchema):
     """Global WhisperLive transcription config — one row."""

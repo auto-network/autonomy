@@ -106,11 +106,36 @@ def test_a_personal_setting_refuses_an_organization(homed_schemas, orgs_root):
         )
 
 
-def test_an_organization_setting_refuses_the_personal_store(homed_schemas, orgs_root):
-    with pytest.raises(SchemaValidationError, match="organization's database"):
+def test_an_organization_setting_accepts_the_operators_own_store(
+        homed_schemas, orgs_root):
+    """`organization` is a decision marker, not a prohibition.
+
+    It records that someone asked "must this be forced into the operator's
+    store or this machine's?" and answered no. It does NOT mean "anywhere
+    except the operator's" -- the operator owns workspaces, and their
+    database is the organizational home of their own things, mounts and
+    commit policies included.
+
+    Read the other way it refused writes that were correct, which is what
+    this test used to assert.
+    """
+    sid = settings_ops.add_setting(
+        "probe.home.ours", 1, "ws-a", {"v": "x"}, org="personal")
+
+    assert sid
+    row = settings_ops.read_set_key("probe.home.ours", "ws-a",
+                                    org="personal", peers=[])
+    assert row["payload"]["v"] == "x"
+
+
+def test_an_organization_setting_still_refuses_the_machine_store(
+        homed_schemas, orgs_root):
+    """The one rule it keeps, and it is not its own: every declared home
+    that is not `machine` already refuses the machine store, because a store
+    that never leaves this computer reaches nobody who needs the value."""
+    with pytest.raises(SchemaValidationError, match="never leaves the machine"):
         settings_ops.add_setting(
-            "probe.home.ours", 1, "ws-a", {"v": "x"}, org="personal",
-        )
+            "probe.home.ours", 1, "ws-b", {"v": "x"}, org="machine")
 
 
 def test_a_read_resolves_to_the_home_instead_of_refusing(homed_schemas, orgs_root):
