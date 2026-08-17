@@ -42,16 +42,7 @@ tools/dashboard/tests/sessions/test_browser.py::TestUserCanSeeSessions::test_hos
 tools/dashboard/tests/sessions/test_browser.py::TestUserCanSeeSessions::test_labels_visible
 tools/dashboard/tests/sessions/test_browser.py::TestUserCanSeeSessions::test_role_badges
 tools/dashboard/tests/sessions/test_browser.py::TestUserCanSeeSessions::test_session_ids_set
-tools/dashboard/tests/sessions/test_nag_bell_states.py::TestNagBellFourStates::test_both_on_class
-tools/dashboard/tests/sessions/test_nag_bell_states.py::TestNagBellFourStates::test_dispatch_only_class
-tools/dashboard/tests/sessions/test_nag_bell_states.py::TestNagBellFourStates::test_idle_only_class
-tools/dashboard/tests/sessions/test_nag_bell_states.py::TestNagBellFourStates::test_off_off_class
-tools/dashboard/tests/sessions/test_nag_bell_states.py::TestNagBellStyleDistinctness::test_both_has_pulse_animation
-tools/dashboard/tests/sessions/test_nag_bell_states.py::TestNagBellStyleDistinctness::test_dispatch_uses_hue_rotate
-tools/dashboard/tests/sessions/test_nag_bell_states.py::TestNagBellStyleDistinctness::test_off_is_dimmed
 tools/dashboard/tests/test_action_templates_static.py::test_every_live_template_renders_cleanly
-tools/dashboard/tests/test_activity_state.py::TestActivityStateDerivation::test_parallel_tool_use_all_returned
-tools/dashboard/tests/test_activity_state.py::TestActivityStateDerivation::test_parallel_tool_use_partial_return
 tools/dashboard/tests/test_api_agent_action_dispatch.py::test_dispatch_trace_agentic_bead_shape
 tools/dashboard/tests/test_api_agent_action_dispatch.py::test_dispatch_trace_agentic_shape
 tools/dashboard/tests/test_api_agent_action_dispatch.py::test_live_active_resolves_agentic_target_title
@@ -94,4 +85,3 @@ tools/dashboard/tests/test_worktree_directives.py::test_rebase_directive_dispatc
 tools/dashboard/tests/test_worktree_directives.py::test_rebase_directive_failure_writes_failed_status
 tools/dashboard/tests/unified_viewer/test_browser.py::TestUnresolvedState::test_link_button_visible
 tools/dashboard/tests/unified_viewer/test_browser.py::TestUnresolvedState::test_no_entries_when_unresolved
-tools/graph/tests/test_declared_references.py::test_two_repositories_on_one_host_need_one_credential
