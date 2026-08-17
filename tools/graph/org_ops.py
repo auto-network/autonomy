@@ -1394,3 +1394,113 @@ def _ensure_org(
     return create_org(
         slug, type_=type_, identity_payload=identity, root=root,
     )
+
+
+def _current_legacy_org_key(slug: str) -> "tuple[str, dict] | None":
+    """The org's stored revision-1 (passphrase-armored) row: (id, payload).
+
+    Revision-targeted for the same reason as :func:`_current_sealed_org_key`:
+    both revisions live under one key, so the revision is the only selector
+    that distinguishes them.
+    """
+    from . import settings_ops
+    from .schemas.network_identity import (
+        NETWORK_ORG_KEY_REVISION,
+        NETWORK_ORG_KEY_SET_ID,
+    )
+
+    members = list(settings_ops.read_owned_set(
+        NETWORK_ORG_KEY_SET_ID,
+        org=slug,
+        target_revision=NETWORK_ORG_KEY_REVISION,
+    ))
+    for member in members:
+        if isinstance(member.payload, dict) and member.payload.get(
+                "armored_private_key"):
+            return member.id, member.payload
+    return None
+
+
+def migrate_org_key_to_sealed(
+    slug: str, sealed_payload: dict, signature_hex: str,
+) -> None:
+    """Retrofit a FOUNDED org from a passphrase-armored root key to one sealed
+    to the owner's personal root — the revision-1-to-2 path.
+
+    A passphrase-armored org root answers only to that ORGANIZATION's
+    passphrase, so a personal unlock cannot open it. Every capability that
+    needs the org root from a personal sign-on — serving-certificate renewal
+    above all — is therefore unavailable to such an org, and its certificates
+    expire unattended.
+
+    This is a RE-WRAP, exactly as :func:`reseal_org_key` is: the org root
+    itself is unchanged, so the ledger's commitment to it is untouched and the
+    founding lock does not apply. That is enforced, not trusted — a payload
+    naming a different ``root_pub`` than the armored row is refused.
+
+    The ORG ROOT signs the new payload, so only a caller who can already open
+    the org root may change who it opens for. That grants no power they did not
+    have: they demonstrably held it a moment ago to produce this signature.
+
+    THE CALLER MUST HAVE VERIFIED THE SEAL BEFORE CALLING THIS. Seal, re-open
+    with the personal seed, and confirm the recovered key is ``root_pub``. This
+    is not advice: the sealed row becomes what every revision-agnostic reader
+    serves the instant it is written, while the armored row is still present
+    but no longer read, so a seal nobody can open takes effect immediately and
+    the surviving armored row is not a fallback. Write ordering therefore buys
+    no verification window, and the server cannot supply one -- it holds no
+    personal seed and so cannot open what it is being handed. Only the caller,
+    holding the org root and the personal seed at the same moment, can.
+
+    Re-running is idempotent.
+    """
+    from tools.network.idkit.keys import verify_signature
+
+    _validate_sealed_org_key_payload(sealed_payload)
+    if get_org(slug) is None:
+        raise OrgNotFoundError(f"org does not exist: {slug}")
+
+    if _current_sealed_org_key(slug) is not None:
+        return  # already migrated; idempotent
+
+    legacy = _current_legacy_org_key(slug)
+    if legacy is None:
+        raise OrgError(
+            f"org {slug} has no passphrase-armored root key to migrate"
+        )
+    legacy_id, legacy_payload = legacy
+
+    legacy_root_pub = legacy_payload.get("root_pub")
+    if legacy_root_pub and sealed_payload["root_pub"] != legacy_root_pub:
+        raise OrgError(
+            "a migration may not change the org root key: this organization's "
+            f"ledger has committed to {legacy_root_pub[:16]}...; replacing the "
+            "key itself is a ledger rotation, not a re-wrap"
+        )
+    verify_signature(
+        sealed_payload["root_pub"], signature_hex,
+        reseal_input(slug, sealed_payload),
+    )
+
+    from . import settings_ops
+    from .schemas.network_identity import (
+        NETWORK_ORG_KEY_REVISION_2,
+        NETWORK_ORG_KEY_SET_ID,
+        ORG_ROOT_ARMOR_PURPOSE,
+    )
+
+    settings_ops.upsert_by_key(
+        NETWORK_ORG_KEY_SET_ID,
+        NETWORK_ORG_KEY_REVISION_2,
+        "default",
+        {
+            "root_pub": sealed_payload["root_pub"],
+            "sealed_root_key": sealed_payload["sealed_root_key"],
+            "owner_kem_pub": sealed_payload["owner_kem_pub"],
+            "seal_purpose": ORG_ROOT_ARMOR_PURPOSE,
+        },
+        org=slug,
+    )
+    # Only now is the armored row redundant. Until this line the org still
+    # reads revision 1 and nothing about it has changed.
+    settings_ops.remove_setting(legacy_id, org=slug)
