@@ -303,13 +303,11 @@ class GapRecoveryHarness:
         # Clear events file for fresh start
         self.events_path.write_text("")
         self._restart_idx += 1
-        self.proc = _start_server(
-            self.fixture_path, self.events_path, TEST_PORT,
+        global TEST_PORT
+        self.proc, TEST_PORT = _start_server(
+            self.fixture_path, self.events_path, self.nonce,
             state_path=self._state_path_for_run(),
         )
-        if not _wait_for_server(TEST_PORT):
-            self.stop()
-            raise RuntimeError(f"Server failed to restart on port {TEST_PORT}")
 
     def stop(self):
         _stop_server(self.proc)
