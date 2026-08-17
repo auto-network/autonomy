@@ -43,17 +43,33 @@ RUN install -m 0755 -d /etc/apt/keyrings \
     && node --version | grep -q "^v22\." \
     && npm --version > /dev/null
 
-# ── bd CLI (Go binary, statically-ish linked — just needs libc) ──
-COPY bin/bd /usr/local/bin/bd
-RUN chmod +x /usr/local/bin/bd
+# ── bd CLI (beads) — fetched + checksum-pinned so the image builds from a
+#    clean clone with nothing hand-fed (was: COPY bin/bd from the operator host).
+ARG BD_VERSION=1.2.2
+ARG BD_SHA256=8140098a51d3b81d5548d1c5e6db1a2d9930e5d141efe2a4bff7d079c4d321e8
+RUN curl -fsSL -o /tmp/bd.tgz \
+      "https://github.com/gastownhall/beads/releases/download/v${BD_VERSION}/beads_${BD_VERSION}_linux_amd64.tar.gz" \
+    && echo "${BD_SHA256}  /tmp/bd.tgz" | sha256sum -c - \
+    && tar xzf /tmp/bd.tgz -C /tmp bd \
+    && install -m 0755 /tmp/bd /usr/local/bin/bd \
+    && rm -f /tmp/bd.tgz /tmp/bd
 
-# ── dolt (required by bd for database access) ──
-COPY bin/dolt /usr/local/bin/dolt
-RUN chmod +x /usr/local/bin/dolt
+# ── dolt (required by bd) — fetched + checksum-pinned ──
+ARG DOLT_VERSION=2.3.0
+ARG DOLT_SHA256=f702aa9fc4246b076e6e255f5bb6eb6f0a120962ab8895dda9e77a0a77cfe10d
+RUN curl -fsSL -o /tmp/dolt.tgz \
+      "https://github.com/dolthub/dolt/releases/download/v${DOLT_VERSION}/dolt-linux-amd64.tar.gz" \
+    && echo "${DOLT_SHA256}  /tmp/dolt.tgz" | sha256sum -c - \
+    && tar xzf /tmp/dolt.tgz -C /tmp dolt-linux-amd64/bin/dolt \
+    && install -m 0755 /tmp/dolt-linux-amd64/bin/dolt /usr/local/bin/dolt \
+    && rm -rf /tmp/dolt.tgz /tmp/dolt-linux-amd64
 
-# ── Claude Code CLI ──
-COPY bin/claude /usr/local/bin/claude
-RUN chmod +x /usr/local/bin/claude
+# ── Claude Code CLI — official published installer (was: COPY bin/claude).
+#    NOTE: the installer fetches the current release; pinning claude to a
+#    version+checksum is the remaining reproducibility step (tracked).
+RUN curl -fsSL https://claude.ai/install.sh | bash \
+    && ( install -m 0755 "$(readlink -f /root/.local/bin/claude)" /usr/local/bin/claude \
+         || ln -sf /root/.local/bin/claude /usr/local/bin/claude )
 
 # Commit-signing shim (git gpg.program). Worktree setup points gpg.program
 # here when a workspace's policy requires a GPG signature; needs python3 + curl
