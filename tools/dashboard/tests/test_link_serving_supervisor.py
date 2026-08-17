@@ -518,3 +518,67 @@ def test_startup_org_discovery_covers_every_local_org(env, monkeypatch, tmp_path
         lambda: [SimpleNamespace(slug="autonomy"), SimpleNamespace(slug="dynbench")],
     )
     assert sup._discover_startup_orgs() == [None, "autonomy", "dynbench", ORG]
+
+
+# ── when a serving credential is due for renewal ──
+
+
+def _renewal_decision(ttl_days: float) -> dict:
+    """What the status route tells the browser about a cert with this much
+    life left: the JSON body of GET /api/network/serve-cert."""
+    import json as _json
+
+    from starlette.applications import Starlette
+    from starlette.testclient import TestClient
+
+    from tools.dashboard import network_routes
+
+    app = Starlette(routes=network_routes.ROUTES)
+    # The route refuses a cross-org read; scope the caller to this org, as a
+    # signed-in browser would be.
+    previous = os.environ.get("GRAPH_ORG")
+    os.environ["GRAPH_ORG"] = ORG
+    try:
+        with TestClient(app) as client:
+            resp = client.get(f"/api/network/serve-cert?org={ORG}")
+    finally:
+        if previous is None:
+            os.environ.pop("GRAPH_ORG", None)
+        else:
+            os.environ["GRAPH_ORG"] = previous
+    body = _json.loads(resp.content)
+    assert resp.status_code == 200, body
+    return body
+
+
+def test_a_fresh_credential_is_not_reminted_on_every_sign_in(env, tmp_path):
+    """A 30-day delegate has 30 days left the moment it is minted, so it must
+    sit well clear of the threshold -- otherwise signing in daily would mint a
+    new credential every day."""
+    _provision_serve_cert(tmp_path, ttl=30 * 24 * 3600)
+    decision = _renewal_decision(30)
+    assert decision["status"] == "ok"
+    assert decision["required"] is False
+    assert 29 < decision["days_remaining"] <= 30
+
+
+def test_a_credential_past_its_first_ten_days_is_renewed(env, tmp_path):
+    """Renewing below 20 days of a 30-day life means a fresh credential is
+    left alone for its first 10 days and replaced by any sign-in after that --
+    at most one mint per 10 days, however often the operator signs in."""
+    _provision_serve_cert(tmp_path, ttl=19 * 24 * 3600)
+    decision = _renewal_decision(19)
+    assert decision["required"] is True
+    assert decision["status"] == "ok", (
+        "still perfectly usable -- serving must not stop while it is renewed")
+    assert 18 < decision["days_remaining"] <= 19
+
+
+def test_a_credential_days_from_death_is_renewed(env, tmp_path):
+    """The case that went unnoticed: valid, so the old check called it 'ok'
+    and never re-minted, and it would have expired before anything replaced
+    it."""
+    _provision_serve_cert(tmp_path, ttl=4 * 24 * 3600)
+    decision = _renewal_decision(4)
+    assert decision["required"] is True
+    assert 3 < decision["days_remaining"] <= 4

@@ -1067,13 +1067,19 @@ var signRegistryRequestCore;
         checked: true,
         repaired: false,
         status: state.status || 'ready',
+        daysRemaining: state.days_remaining === undefined
+          ? null : state.days_remaining,
       };
     }
     await provisionServeCert(passphrase, {
       org: orgSlug,
       orgUuid: binding.org_uuid,
     });
-    return { checked: true, repaired: true, status: state.status || 'required' };
+    return {
+      checked: true, repaired: true, status: state.status || 'required',
+      daysRemaining: state.days_remaining === undefined
+        ? null : state.days_remaining,
+    };
   }
 
   // EVERY organization's serving credential, from one unlock.
@@ -1099,8 +1105,11 @@ var signRegistryRequestCore;
       var slug = slugs[i];
       try {
         var result = await repairServeCredential(passphrase, { org: slug });
-        if (result.repaired) repaired.push(slug);
-        else ready.push(slug);
+        var label = result.daysRemaining === null ||
+                    result.daysRemaining === undefined
+          ? slug : (slug + ' (' + result.daysRemaining + 'd)');
+        if (result.repaired) repaired.push(label);
+        else ready.push(label);
       } catch (e) {
         failed.push({ org: slug, error: (e && e.message) || String(e) });
       }
