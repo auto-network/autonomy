@@ -567,3 +567,37 @@ def test_a_single_row_read_stays_quiet(acme, capsys):
     set_cmd._print_composition("probe.check.plain", "single", "acme")
 
     assert capsys.readouterr().err == ""
+
+
+def test_the_command_a_message_tells_you_to_run_exists(acme, monkeypatch, capsys):
+    """A report that names a command must name one that parses.
+
+    The composition line shipped telling readers to run
+    `graph set layers <set_id> <key>` while the command takes --key. A
+    diagnostic that hands out an invocation which errors is worse than one
+    that hands out none, because the reader concludes the tool is broken
+    rather than that the instruction was.
+    """
+    import argparse
+    import shlex
+
+    from tools.graph import set_cmd
+
+    base = settings_ops.add_setting("probe.check.plain", 1, "cmd", {"v": "1"},
+                                    org="acme")
+    monkeypatch.setattr(settings_ops, "_collapse_amendment",
+                        lambda *a, **k: None)
+    settings_ops.override_setting(base, {"v": "2"}, org="acme")
+
+    set_cmd._print_composition("probe.check.plain", "cmd", "acme")
+    suggested = capsys.readouterr().err.split("`")[1]
+
+    parser = argparse.ArgumentParser(prog="graph")
+    set_cmd.attach_set_subparser(parser.add_subparsers(dest="command"))
+
+    # shlex minus the leading "graph" -- the real argv the reader would type.
+    parsed = parser.parse_args(shlex.split(suggested)[1:])
+
+    assert parsed.key == "cmd"
+    assert parsed.set_at_rev == "probe.check.plain"
+    assert parsed.func is set_cmd.cmd_set_layers

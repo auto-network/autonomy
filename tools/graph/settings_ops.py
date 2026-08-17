@@ -1754,7 +1754,7 @@ class ShadowedWrite:
                 f"{', '.join(sorted(self.masked_fields))}. Readers keep the "
                 f"override's values for those fields, so the write did not "
                 f"change what anything reads. Amend or remove the override; "
-                f"`graph set layers` shows both rows."
+                f"`graph set layers {self.key}` shows both rows."
             )
         where = (f"organization {self.winner_org!r}"
                  if self.winner_org != self.written_org
