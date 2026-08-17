@@ -1,8 +1,13 @@
-"""Live-path proof for the shared Node sign-on command."""
+"""Live-path proof for the shared Node sign-on command.
+
+Sign-on is a PERSONAL act (design §2, §1c): one unlock of the personal root
+armor yields one persona per organization. These tests drive the full path
+headlessly (§21) with a throwaway personal identity belonging to several test
+organizations — no browser, no second passphrase, no organization root key.
+"""
 
 from __future__ import annotations
 
-import copy
 import json
 import os
 import shutil
@@ -14,7 +19,6 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-import httpx
 import pytest
 import uvicorn
 from starlette.applications import Starlette
@@ -24,8 +28,7 @@ from starlette.routing import Route
 
 from tools.network.idkit import KeyPair
 from tools.network.idkit.armor import encrypt_root_key
-from tools.network.registry.app import create_app
-from tools.network.registry.signing import sign_request
+from tools.network.idkit.persona import derive_persona
 
 REPO = Path(__file__).resolve().parents[6]
 COMMAND = (
@@ -33,8 +36,6 @@ COMMAND = (
     / "tools" / "dashboard" / "static" / "js"
     / "ceremony" / "node" / "signon.mjs"
 )
-ORG_SLUG = "headless-live-org"
-TARGET = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
 
 def _free_port() -> int:
@@ -65,71 +66,128 @@ def _live_server(app, port: int):
         assert not thread.is_alive(), f"server on port {port} did not stop"
 
 
-def _identity_source(*, armor: str, root_pub: str, org_uuid: str,
-                     registry_url: str, requests: list[str],
-                     genesis_id: str | None = None,
-                     personal_armor: str | None = None,
-                     personal_root_pub: str | None = None,
-                     org_key_payload: dict | None = None) -> Starlette:
-    async def org_key(request: Request):
-        requests.append(str(request.url.path))
-        if request.query_params.get("org") != ORG_SLUG:
-            return JSONResponse({"error": "unknown org"}, status_code=404)
-        if org_key_payload is not None:
-            return JSONResponse(org_key_payload)
-        return JSONResponse({
-            "label": "default",
-            "armored_private_key": armor,
-            "root_pub": root_pub,
-        })
+class OrgFixture:
+    """One throwaway organization the personal identity belongs to.
 
-    async def binding(request: Request):
-        requests.append(str(request.url.path))
-        if request.query_params.get("org") != ORG_SLUG:
-            return JSONResponse({"error": "unknown org"}, status_code=404)
-        return JSONResponse({
-            "org_uuid": org_uuid,
-            "root_pub": root_pub,
-            "registry_url": registry_url,
-        })
+    ``genesis_id`` present means the ledger is founded, so the identity has a
+    persona there. ``rekey`` is the organization's opportunistic-refresh
+    policy row (§1d trigger 2) — ``None`` for an organization that publishes
+    no interval.
+    """
 
-    async def ledger_heads(request: Request):
+    def __init__(self, slug: str, *, genesis_id: str | None,
+                 rekey: dict | None = None, bound: bool = True):
+        self.slug = slug
+        self.genesis_id = genesis_id
+        self.rekey = rekey
+        self.org_uuid = str(uuid.uuid4())
+        self.root = KeyPair.generate()
+        self.bound = bound
+
+    def persona_pub(self, personal_root: KeyPair) -> str:
+        return derive_persona(
+            bytes.fromhex(personal_root.private_hex), self.genesis_id,
+        ).public_hex
+
+
+def _identity_source(*, personal_armor: str, personal_root_pub: str,
+                     orgs: list[OrgFixture], requests: list[str],
+                     rekeyed: list[dict],
+                     registry_url: str = "http://127.0.0.1:9") -> Starlette:
+    """The dashboard-shaped identity source the Node command reads.
+
+    Every route records its path in *requests*, so a test can assert what the
+    ceremony did and — for ``/api/network/org-key`` — what it never touched.
+    """
+    by_slug = {org.slug: org for org in orgs}
+
+    def _org(request: Request) -> OrgFixture | None:
+        return by_slug.get(request.query_params.get("org") or "")
+
+    async def org_list(request: Request):
         requests.append(str(request.url.path))
-        if request.query_params.get("org") != ORG_SLUG or genesis_id is None:
-            return JSONResponse(
-                {"ok": False, "error": "organization ledger is not founded"},
-                status_code=404,
-            )
-        return JSONResponse({"genesis_id": genesis_id, "heads": [genesis_id]})
+        return JSONResponse({
+            "orgs": [{"org": {"slug": org.slug}} for org in orgs],
+        })
 
     async def personal(request: Request):
         requests.append(str(request.url.path))
-        if personal_armor is None:
-            return JSONResponse(
-                {"error": "no personal identity"}, status_code=404,
-            )
         return JSONResponse({
             "armored_private_key": personal_armor,
             "root_pub": personal_root_pub,
         })
 
+    async def org_key(request: Request):
+        # Sign-on must never reach this route. It answers so that a
+        # regression shows up as an assertion on the trace rather than as an
+        # unrelated transport error.
+        requests.append(str(request.url.path))
+        org = _org(request)
+        if org is None:
+            return JSONResponse({"error": "unknown org"}, status_code=404)
+        return JSONResponse({
+            "label": "default",
+            "armored_private_key": encrypt_root_key(
+                org.root, "the org armor nobody should open", iterations=10_000,
+            ),
+            "root_pub": org.root.public_hex,
+        })
+
+    async def ledger_heads(request: Request):
+        requests.append(str(request.url.path))
+        org = _org(request)
+        if org is None or org.genesis_id is None:
+            return JSONResponse(
+                {"ok": False, "error": "organization ledger is not founded"},
+                status_code=404,
+            )
+        return JSONResponse({
+            "genesis_id": org.genesis_id, "heads": [org.genesis_id],
+        })
+
+    async def binding(request: Request):
+        requests.append(str(request.url.path))
+        org = _org(request)
+        if org is None or not org.bound:
+            return JSONResponse({"error": "unknown org"}, status_code=404)
+        return JSONResponse({
+            "org_uuid": org.org_uuid,
+            "root_pub": org.root.public_hex,
+            "registry_url": registry_url,
+        })
+
+    async def rekey_policy(request: Request):
+        requests.append(str(request.url.path))
+        org = _org(request)
+        if org is None or org.rekey is None:
+            return JSONResponse({"error": "no policy"}, status_code=404)
+        return JSONResponse(org.rekey)
+
+    async def rekey(request: Request):
+        requests.append(str(request.url.path))
+        rekeyed.append(await request.json())
+        return JSONResponse({"ok": True})
+
     return Starlette(routes=[
-        Route("/api/network/org-key", org_key),
-        Route("/api/network/binding", binding),
-        Route("/api/network/ledger/heads", ledger_heads),
+        Route("/api/orgs", org_list),
         Route("/api/identity/personal", personal),
+        Route("/api/network/org-key", org_key),
+        Route("/api/network/ledger/heads", ledger_heads),
+        Route("/api/network/binding", binding),
+        Route("/api/network/rekey-policy", rekey_policy),
+        Route("/api/network/rekey", rekey, methods=["POST"]),
     ])
 
 
-def _passphrase_environment() -> dict[str, str]:
+def _clean_environment() -> dict[str, str]:
     return {
         key: value
         for key, value in os.environ.items()
-        if key != "AUTONOMY_ORG_PASSPHRASE"
+        if key not in ("AUTONOMY_ORG_PASSPHRASE", "AUTONOMY_PERSONAL_PASSPHRASE")
     }
 
 
-def _run_with_passphrase(identity_url: str, passphrase: str) -> subprocess.CompletedProcess:
+def _run(identity_url: str, passphrase: str, *extra: str) -> subprocess.CompletedProcess:
     read_fd, write_fd = os.pipe()
     try:
         os.write(write_fd, f"{passphrase}\n".encode())
@@ -138,21 +196,14 @@ def _run_with_passphrase(identity_url: str, passphrase: str) -> subprocess.Compl
     try:
         return subprocess.run(
             [
-                "node",
-                str(COMMAND),
-                "--server",
-                identity_url,
-                "--org",
-                ORG_SLUG,
-                "--target",
-                TARGET,
-                "--ttl",
-                "3600",
-                "--passphrase-fd",
-                str(read_fd),
+                "node", str(COMMAND),
+                "--server", identity_url,
+                "--ttl", "3600",
+                "--passphrase-fd", str(read_fd),
+                *extra,
             ],
             cwd=REPO,
-            env=_passphrase_environment(),
+            env=_clean_environment(),
             pass_fds=(read_fd,),
             capture_output=True,
             text=True,
@@ -162,347 +213,253 @@ def _run_with_passphrase(identity_url: str, passphrase: str) -> subprocess.Compl
         os.close(read_fd)
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
-def test_node_signon_is_accepted_and_tampering_is_rejected():
-    root = KeyPair.generate()
-    org_uuid = str(uuid.uuid4())
-    passphrase = "headless live sign-on passphrase"
-    armor = encrypt_root_key(root, passphrase, iterations=10_000)
-
-    registry_port = _free_port()
-    registry_url = f"http://127.0.0.1:{registry_port}"
-    registry_posts: list[str] = []
-    registry = create_app(
-        ":memory:",
-        base_url=registry_url,
-        secure_cookies=False,
-    )
-
-    @registry.middleware("http")
-    async def count_link_posts(request: Request, call_next):
-        if request.method == "POST" and request.url.path == "/v1/links":
-            registry_posts.append(request.url.path)
-        return await call_next(request)
-
-    identity_requests: list[str] = []
-    identity_port = _free_port()
+def _sign_on(orgs: list[OrgFixture], *, passphrase: str,
+             personal_root: KeyPair, extra: tuple[str, ...] = ()
+             ) -> tuple[dict, list[str], list[dict]]:
+    """Run one headless sign-on; return (output, request trace, re-keys)."""
+    requests: list[str] = []
+    rekeyed: list[dict] = []
     identity = _identity_source(
-        armor=armor,
-        root_pub=root.public_hex,
-        org_uuid=org_uuid,
-        registry_url=registry_url,
-        requests=identity_requests,
+        personal_armor=encrypt_root_key(
+            personal_root, passphrase, iterations=10_000,
+        ),
+        personal_root_pub=personal_root.public_hex,
+        orgs=orgs,
+        requests=requests,
+        rekeyed=rekeyed,
+    )
+    with _live_server(identity, _free_port()) as identity_url:
+        command = _run(identity_url, passphrase, *extra)
+    assert command.returncode == 0, command.stdout + "\n" + command.stderr
+    return json.loads(command.stdout), requests, rekeyed
+
+
+def _three_founded_orgs() -> list[OrgFixture]:
+    return [
+        OrgFixture("alpha-org", genesis_id="a1" * 32),
+        OrgFixture("beta-org", genesis_id="b2" * 32),
+        OrgFixture("gamma-org", genesis_id="c3" * 32),
+    ]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_one_unlock_derives_one_persona_per_organization():
+    """A throwaway personal identity belonging to three organizations gets
+    three DISTINCT personas from a single passphrase entry, each of them
+    exactly HKDF(personal_root_seed, genesis_id) — byte-identical to idkit's
+    derivation."""
+    personal_root = KeyPair.generate()
+    orgs = _three_founded_orgs()
+    output, requests, _ = _sign_on(
+        orgs, passphrase="one personal password", personal_root=personal_root,
     )
 
-    with (
-        _live_server(registry, registry_port),
-        _live_server(identity, identity_port) as identity_url,
-    ):
-        registration_payload = {
-            "org_uuid": org_uuid,
-            "root_pub": root.public_hex,
-            "recovery_policy": "none",
-        }
-        registration = httpx.post(
-            f"{registry_url}/v1/orgs",
-            json=sign_request(
-                root,
-                "POST",
-                "/v1/orgs",
-                registration_payload,
-                ts=int(time.time()),
-            ),
-            timeout=10,
-        )
-        assert registration.status_code == 201, registration.text
+    signed_on = output["signOn"]
+    assert signed_on["personalRootPub"] == personal_root.public_hex
+    assert signed_on["diagnostics"]["personaCount"] == 3
+    assert [org["orgSlug"] for org in signed_on["orgs"]] == [
+        "alpha-org", "beta-org", "gamma-org",
+    ]
+    personas = {
+        org["orgSlug"]: org["personaPub"] for org in signed_on["orgs"]
+    }
+    assert personas == {
+        org.slug: org.persona_pub(personal_root) for org in orgs
+    }
+    assert len(set(personas.values())) == 3, "personas must differ per org"
+    # One unlock: the personal armor is fetched exactly once, so there is no
+    # second place a passphrase could have been entered.
+    assert requests.count("/api/identity/personal") == 1
+    # One session key, worn as three personas.
+    assert len({org["subject"]["id"] for org in signed_on["orgs"]}) == 3
+    assert signed_on["sessionPub"]
 
-        command = _run_with_passphrase(identity_url, passphrase)
-        assert command.returncode == 0, command.stdout + "\n" + command.stderr
-        output = json.loads(command.stdout)
-        assert output["status"] == 201
-        assert output["registry"]["token"]
-        assert output["registry"]["url"].endswith(
-            f"/l/{output['registry']['token']}"
-        )
-        assert output["signOn"]["org"] == org_uuid
-        assert output["signOn"]["rootPub"] == root.public_hex
-        assert output["request"] == {
-            "method": "POST",
-            "path": "/v1/links",
-            "payload": {
-                "org": org_uuid,
-                "target_uuid": TARGET,
-                "target_type": "present",
-            },
-        }
-        assert registry_posts == ["/v1/links"]
-        # The unfounded ledger (heads → 404) short-circuits the persona
-        # resolution before the personal armor is ever fetched, and the
-        # cert falls back to the legacy label subject.
-        assert identity_requests == [
-            "/api/network/org-key",
-            "/api/network/binding",
-            "/api/network/ledger/heads",
-        ]
-        legacy_subject = json.loads(output["envelope"]["cert"])["subject"]
-        assert legacy_subject["kind"] == "operator"
-        assert legacy_subject["id"].startswith("browser-")
-        diagnostics = output["signOn"]["diagnostics"]
-        assert diagnostics["subjectResolution"] == "label"
-        assert diagnostics["subjectFallbackReason"] == "ledger-not-founded"
 
-        signature_mutation = copy.deepcopy(output["envelope"])
-        signature_mutation["sig"] = (
-            ("0" if signature_mutation["sig"][0] != "0" else "1")
-            + signature_mutation["sig"][1:]
-        )
-        bad_signature = httpx.post(
-            f"{registry_url}/v1/links",
-            json=signature_mutation,
-            timeout=10,
-        )
-        assert 400 <= bad_signature.status_code < 500, bad_signature.text
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_sign_on_never_decrypts_an_organization_root_key():
+    """The removed ``_openOrgRoot(orgKey, passphrase)`` path is not taken:
+    sign-on never even fetches an organization's key, however many
+    organizations it covers."""
+    personal_root = KeyPair.generate()
+    output, requests, _ = _sign_on(
+        _three_founded_orgs(),
+        passphrase="one personal password",
+        personal_root=personal_root,
+    )
+    assert "/api/network/org-key" not in requests
+    assert output["signOn"]["diagnostics"]["orgRootsOpened"] == 0
 
-        payload_mutation = copy.deepcopy(output["envelope"])
-        payload_mutation["payload"]["target_uuid"] = str(uuid.uuid4())
-        bad_payload = httpx.post(
-            f"{registry_url}/v1/links",
-            json=payload_mutation,
-            timeout=10,
-        )
-        assert 400 <= bad_payload.status_code < 500, bad_payload.text
 
-        posts_before_missing_passphrase = len(registry_posts)
-        identity_reads_before_missing_passphrase = len(identity_requests)
-        missing_passphrase = subprocess.run(
-            [
-                "node",
-                str(COMMAND),
-                "--server",
-                identity_url,
-                "--org",
-                ORG_SLUG,
-            ],
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_the_actor_is_the_per_organization_persona():
+    """The delegation cert's subject is that organization's persona public
+    key — not a random browser label and not the personal key — and the
+    persona is what SIGNED it, so the chain resolves to the persona (§7)."""
+    from tools.network.idkit import DelegationCert, verify_chain
+
+    personal_root = KeyPair.generate()
+    orgs = _three_founded_orgs()
+    output, _, _ = _sign_on(
+        orgs, passphrase="one personal password", personal_root=personal_root,
+    )
+    by_slug = {org.slug: org for org in orgs}
+    for entry in output["signOn"]["orgs"]:
+        persona_pub = by_slug[entry["orgSlug"]].persona_pub(personal_root)
+        assert entry["subject"] == {"kind": "operator", "id": persona_pub}
+        assert not entry["subject"]["id"].startswith("browser-")
+        assert entry["subject"]["id"] != personal_root.public_hex
+        cert = DelegationCert.from_json(entry["certWire"])
+        # Anchored at the persona: verification against the persona public
+        # key is what "the actor is the persona" means cryptographically.
+        result = verify_chain(cert, persona_pub, org=entry["org"])
+        assert result.subject_id == persona_pub
+        assert result.leaf_pub == output["signOn"]["sessionPub"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_opportunistic_rekey_is_evaluated_per_organization():
+    """One unlock re-keys EXACTLY the organizations whose interval has
+    elapsed (§1d trigger 2), and leaves the others alone."""
+    now = int(time.time())
+    personal_root = KeyPair.generate()
+    orgs = [
+        OrgFixture("elapsed-org", genesis_id="a1" * 32, rekey={
+            "interval_seconds": 3600, "last_rekey_at": now - 7200,
+        }),
+        OrgFixture("fresh-org", genesis_id="b2" * 32, rekey={
+            "interval_seconds": 3600, "last_rekey_at": now - 60,
+        }),
+        OrgFixture("no-policy-org", genesis_id="c3" * 32, rekey=None),
+    ]
+    output, _, rekeyed = _sign_on(
+        orgs,
+        passphrase="one personal password",
+        personal_root=personal_root,
+        extra=("--rekey-endpoint", "/api/network/rekey"),
+    )
+
+    assert [row["org"] for row in rekeyed] == ["elapsed-org"]
+    assert rekeyed[0]["genesis_id"] == "a1" * 32
+    assert rekeyed[0]["persona_pub"] == orgs[0].persona_pub(personal_root)
+    assert rekeyed[0]["reason"] == "OPPORTUNISTIC"
+
+    decisions = {
+        entry["orgSlug"]: entry["rekey"] for entry in output["signOn"]["orgs"]
+    }
+    assert decisions["elapsed-org"]["fired"] is True
+    assert decisions["elapsed-org"]["due"] is True
+    assert decisions["elapsed-org"]["elapsedSeconds"] >= 7200
+    assert decisions["fresh-org"]["fired"] is False
+    assert decisions["fresh-org"]["due"] is False
+    assert decisions["fresh-org"]["reason"] == "interval-not-elapsed"
+    assert decisions["no-policy-org"]["evaluated"] is False
+    assert decisions["no-policy-org"]["reason"] == "no-interval-configured"
+    assert output["signOn"]["diagnostics"]["rekeyedOrgs"] == ["elapsed-org"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_rekey_evaluation_is_reported_without_an_executor():
+    """With no re-key adapter installed the interval is still evaluated per
+    organization — the decision is reported and nothing fires."""
+    now = int(time.time())
+    output, _, rekeyed = _sign_on(
+        [OrgFixture("elapsed-org", genesis_id="a1" * 32, rekey={
+            "interval_seconds": 3600, "last_rekey_at": now - 7200,
+        })],
+        passphrase="one personal password",
+        personal_root=KeyPair.generate(),
+    )
+    decision = output["signOn"]["orgs"][0]["rekey"]
+    assert decision["due"] is True
+    assert decision["fired"] is False
+    assert decision["reason"] == "no-rekey-adapter"
+    assert rekeyed == []
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_unfounded_organization_is_skipped_not_labelled():
+    """No genesis ⇒ no persona (§2). An unfounded organization is reported as
+    skipped; it never signs on behind a stand-in browser label."""
+    personal_root = KeyPair.generate()
+    output, _, _ = _sign_on(
+        [
+            OrgFixture("founded-org", genesis_id="a1" * 32),
+            OrgFixture("unfounded-org", genesis_id=None),
+        ],
+        passphrase="one personal password",
+        personal_root=personal_root,
+    )
+    signed_on = output["signOn"]
+    assert [org["orgSlug"] for org in signed_on["orgs"]] == ["founded-org"]
+    assert signed_on["skipped"] == [
+        {"orgSlug": "unfounded-org", "reason": "ledger-not-founded"},
+    ]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_named_organizations_restrict_one_unlock():
+    """``--org`` restricts which organizations the one unlock covers; the
+    personal armor is still opened exactly once."""
+    personal_root = KeyPair.generate()
+    output, requests, _ = _sign_on(
+        _three_founded_orgs(),
+        passphrase="one personal password",
+        personal_root=personal_root,
+        extra=("--org", "beta-org", "--org", "gamma-org"),
+    )
+    assert [org["orgSlug"] for org in output["signOn"]["orgs"]] == [
+        "beta-org", "gamma-org",
+    ]
+    assert requests.count("/api/identity/personal") == 1
+    assert "/api/orgs" not in requests
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_wrong_passphrase_fails_closed():
+    """A passphrase that does not open the personal armor signs on nowhere —
+    no persona is derived and no organization is touched."""
+    personal_root = KeyPair.generate()
+    requests: list[str] = []
+    rekeyed: list[dict] = []
+    identity = _identity_source(
+        personal_armor=encrypt_root_key(
+            personal_root, "the real personal password", iterations=10_000,
+        ),
+        personal_root_pub=personal_root.public_hex,
+        orgs=_three_founded_orgs(),
+        requests=requests,
+        rekeyed=rekeyed,
+    )
+    with _live_server(identity, _free_port()) as identity_url:
+        command = _run(identity_url, "opens nothing")
+    assert command.returncode != 0
+    assert "passphrase" in (command.stdout + command.stderr)
+    assert "/api/network/ledger/heads" not in requests
+    assert rekeyed == []
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_missing_passphrase_touches_nothing():
+    personal_root = KeyPair.generate()
+    requests: list[str] = []
+    identity = _identity_source(
+        personal_armor=encrypt_root_key(
+            personal_root, "unused", iterations=10_000,
+        ),
+        personal_root_pub=personal_root.public_hex,
+        orgs=_three_founded_orgs(),
+        requests=requests,
+        rekeyed=[],
+    )
+    with _live_server(identity, _free_port()) as identity_url:
+        command = subprocess.run(
+            ["node", str(COMMAND), "--server", identity_url],
             cwd=REPO,
-            env=_passphrase_environment(),
+            env=_clean_environment(),
             capture_output=True,
             text=True,
             timeout=20,
         )
-        assert missing_passphrase.returncode != 0
-        assert "missing passphrase source" in missing_passphrase.stderr
-        assert len(registry_posts) == posts_before_missing_passphrase
-        assert len(identity_requests) == identity_reads_before_missing_passphrase
-
-
-def _publish_run(*, root: KeyPair, org_uuid: str, passphrase: str,
-                 identity_kwargs: dict) -> tuple[dict, list[str]]:
-    """Stand up registry + identity source, register the org, run the
-    command with *passphrase*, and return (parsed output, identity trace)."""
-    registry_port = _free_port()
-    registry_url = f"http://127.0.0.1:{registry_port}"
-    registry = create_app(
-        ":memory:",
-        base_url=registry_url,
-        secure_cookies=False,
-    )
-    identity_requests: list[str] = []
-    identity_port = _free_port()
-    identity = _identity_source(
-        armor=encrypt_root_key(root, passphrase, iterations=10_000),
-        root_pub=root.public_hex,
-        org_uuid=org_uuid,
-        registry_url=registry_url,
-        requests=identity_requests,
-        **identity_kwargs,
-    )
-    with (
-        _live_server(registry, registry_port),
-        _live_server(identity, identity_port) as identity_url,
-    ):
-        registration = httpx.post(
-            f"{registry_url}/v1/orgs",
-            json=sign_request(
-                root,
-                "POST",
-                "/v1/orgs",
-                {
-                    "org_uuid": org_uuid,
-                    "root_pub": root.public_hex,
-                    "recovery_policy": "none",
-                },
-                ts=int(time.time()),
-            ),
-            timeout=10,
-        )
-        assert registration.status_code == 201, registration.text
-        command = _run_with_passphrase(identity_url, passphrase)
-    assert command.returncode == 0, command.stdout + "\n" + command.stderr
-    return json.loads(command.stdout), identity_requests
-
-
-@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
-def test_node_signon_mints_persona_subject_for_a_founded_org():
-    """D13: with a founded ledger and a personal identity whose armor the
-    entered passphrase opens, the session cert names the derived persona
-    as its subject — byte-identical to idkit's derivation — and the
-    registry accepts the resulting envelope unchanged."""
-    from tools.network.idkit.persona import derive_persona
-
-    root = KeyPair.generate()
-    personal_root = KeyPair.generate()
-    passphrase = "one passphrase opens both armors"
-    genesis_id = "c0" * 32
-    output, identity_requests = _publish_run(
-        root=root,
-        org_uuid=str(uuid.uuid4()),
-        passphrase=passphrase,
-        identity_kwargs={
-            "genesis_id": genesis_id,
-            "personal_armor": encrypt_root_key(
-                personal_root, passphrase, iterations=10_000,
-            ),
-            "personal_root_pub": personal_root.public_hex,
-        },
-    )
-    expected = derive_persona(
-        bytes.fromhex(personal_root.private_hex), genesis_id,
-    ).public_hex
-    assert output["status"] == 201
-    # Kind stays 'operator' on the rung-1 HTTP transport (the registry
-    # 501s kind 'persona'); the persona rides in subject.id, which is
-    # what the dashboard's fold-based gate authorizes.
-    assert json.loads(output["envelope"]["cert"])["subject"] == {
-        "kind": "operator",
-        "id": expected,
-    }
-    diagnostics = output["signOn"]["diagnostics"]
-    assert diagnostics["subjectResolution"] == "persona"
-    assert diagnostics["subjectFallbackReason"] is None
-    assert identity_requests == [
-        "/api/network/org-key",
-        "/api/network/binding",
-        "/api/network/ledger/heads",
-        "/api/identity/personal",
-    ]
-
-
-@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
-def test_node_signon_falls_back_to_label_when_personal_armor_stays_shut():
-    """A passphrase that opens the org armor but not the personal armor
-    must not fail sign-on: the cert falls back to the legacy label
-    subject (and the founded ledger changes nothing about that)."""
-    root = KeyPair.generate()
-    personal_root = KeyPair.generate()
-    passphrase = "opens only the org armor"
-    output, identity_requests = _publish_run(
-        root=root,
-        org_uuid=str(uuid.uuid4()),
-        passphrase=passphrase,
-        identity_kwargs={
-            "genesis_id": "d1" * 32,
-            "personal_armor": encrypt_root_key(
-                personal_root, "a different personal password",
-                iterations=10_000,
-            ),
-            "personal_root_pub": personal_root.public_hex,
-        },
-    )
-    assert output["status"] == 201
-    subject = json.loads(output["envelope"]["cert"])["subject"]
-    assert subject["kind"] == "operator"
-    assert subject["id"].startswith("browser-")
-    diagnostics = output["signOn"]["diagnostics"]
-    assert diagnostics["subjectResolution"] == "label"
-    assert diagnostics["subjectFallbackReason"] == "personal-armor-locked"
-    assert identity_requests == [
-        "/api/network/org-key",
-        "/api/network/binding",
-        "/api/network/ledger/heads",
-        "/api/identity/personal",
-    ]
-
-
-def _sealed_org_key_payload(root: KeyPair, personal_root: KeyPair) -> dict:
-    """The revision-2 org-key payload the founding ceremony writes."""
-    from tools.graph.schemas.network_identity import ORG_ROOT_ARMOR_PURPOSE
-    from tools.network.idkit.sealing import derive_encapsulation_keypair, seal
-
-    _, recipient_pub = derive_encapsulation_keypair(
-        bytes.fromhex(personal_root.private_hex), ORG_ROOT_ARMOR_PURPOSE,
-    )
-    return {
-        "label": "default",
-        "root_pub": root.public_hex,
-        "sealed_root_key": seal(
-            bytes.fromhex(root.private_hex), recipient_pub,
-            ORG_ROOT_ARMOR_PURPOSE,
-        ).hex(),
-        "owner_kem_pub": recipient_pub,
-        "seal_purpose": ORG_ROOT_ARMOR_PURPOSE,
-    }
-
-
-@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
-def test_node_signon_opens_sealed_org_armor_and_publishes():
-    """auto-05tom: a founding-ceremony org (revision-2 sealed root) signs
-    on with the ONE personal password — the passphrase opens the personal
-    armor, the derived X25519 key opens the seal, and the publish flows
-    with the persona subject."""
-    from tools.network.idkit.persona import derive_persona
-
-    root = KeyPair.generate()
-    personal_root = KeyPair.generate()
-    passphrase = "the one personal password"
-    genesis_id = "e2" * 32
-    output, identity_requests = _publish_run(
-        root=root,
-        org_uuid=str(uuid.uuid4()),
-        passphrase=passphrase,
-        identity_kwargs={
-            "genesis_id": genesis_id,
-            "personal_armor": encrypt_root_key(
-                personal_root, passphrase, iterations=10_000,
-            ),
-            "personal_root_pub": personal_root.public_hex,
-            "org_key_payload": _sealed_org_key_payload(root, personal_root),
-        },
-    )
-    expected = derive_persona(
-        bytes.fromhex(personal_root.private_hex), genesis_id,
-    ).public_hex
-    assert output["status"] == 201
-    assert output["signOn"]["rootPub"] == root.public_hex
-    assert json.loads(output["envelope"]["cert"])["subject"] == {
-        "kind": "operator",
-        "id": expected,
-    }
-    diagnostics = output["signOn"]["diagnostics"]
-    assert diagnostics["subjectResolution"] == "persona"
-    assert diagnostics["subjectFallbackReason"] is None
-
-
-@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
-def test_node_signon_sealed_org_fails_closed_on_wrong_password():
-    """A passphrase that does not open the personal armor cannot reach the
-    sealed org root — sign-on refuses before any registry call."""
-    root = KeyPair.generate()
-    personal_root = KeyPair.generate()
-    identity_requests: list[str] = []
-    identity_port = _free_port()
-    identity = _identity_source(
-        armor="",
-        root_pub=root.public_hex,
-        org_uuid=str(uuid.uuid4()),
-        registry_url="http://127.0.0.1:9",
-        requests=identity_requests,
-        personal_armor=encrypt_root_key(
-            personal_root, "a different personal password", iterations=10_000,
-        ),
-        personal_root_pub=personal_root.public_hex,
-        org_key_payload=_sealed_org_key_payload(root, personal_root),
-    )
-    with _live_server(identity, identity_port) as identity_url:
-        command = _run_with_passphrase(identity_url, "opens nothing")
     assert command.returncode != 0
-    assert "wrong passphrase" in (command.stdout + command.stderr)
+    assert "missing passphrase source" in command.stderr
+    assert requests == []
