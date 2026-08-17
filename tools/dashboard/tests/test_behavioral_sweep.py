@@ -5757,9 +5757,11 @@ LINK_PUBLISH_APPROVAL_CHECKS = """(async () => {
         window.showToast = function() {};
         window.AutonomyNetworkSession = {
             state: function() { return authority ? {
-                signedIn: true, org: baseRow.registry_request.payload.org,
-                subject: {kind: 'operator', id: 'browser-test'}
-            } : {signedIn: false}; },
+                signedIn: true,
+                orgs: [{org: baseRow.registry_request.payload.org,
+                        orgSlug: baseRow.org_slug || null, live: true,
+                        subject: {kind: 'operator', id: 'aa'.repeat(32)}}]
+            } : {signedIn: false, orgs: []}; },
             signOn: async function(password, opts) {
                 signOnCalls.push({password: password, org: opts.org});
                 if (password === 'missing key') {
@@ -6144,9 +6146,11 @@ ORG_JOIN_APPROVAL_CHECKS = """(async () => {
         window.AutonomyNetworkSession = {
             state: function() {
                 return authority
-                    ? {signedIn: true, org: payload.org,
-                       subject: {kind: 'operator', id: 'browser-test'}}
-                    : {signedIn: false};
+                    ? {signedIn: true,
+                       orgs: [{org: payload.org, orgSlug: null, live: true,
+                               subject: {kind: 'operator',
+                                         id: 'aa'.repeat(32)}}]}
+                    : {signedIn: false, orgs: []};
             },
             signOn: async function(password) {
                 if (password !== 'correct password') throw new Error('wrong passphrase');
@@ -15127,14 +15131,28 @@ _NETWORK_IDENTITY_JS = r"""
         r.state_recovery_block_after = (II.state() || {}).recoveryBlock;
         ID.close();
 
-        // 5 · keystone: C2's sign-on opens the armor C1 just stored
+        // 5 · keystone: the armor C1 stored opens through C2's root-ceremony
+        // seam. Sign-on itself no longer touches an organization key — it is
+        // a personal act — so what the two beads share is this seam, which
+        // the remaining root-direct ceremonies (§8) all go through.
         try {
-            const so = await S.signOn(PASS, {ttlSeconds: 3600});
-            r.signon = {sessionPub: so.sessionPub, certWire: so.certWire};
-            r.signon_available = window.AutonomyNetworkSigner.available();
+            const opened = await S._internals.openOrgRoot(storedKey, PASS);
+            r.org_root_opened = {
+                rootPub: opened.rootPub, seedLength: opened.seed.length,
+            };
+            opened.seed.fill(0);
+        } catch (e) {
+            r.org_root_open_error = String(e.message || e);
+        }
+        // And a personal sign-on refuses outright on a node that has only an
+        // organization key: the personal identity is what it unlocks.
+        try {
+            await S.signOn(PASS, {org: 'sweep-c1-org', ttlSeconds: 3600});
+            r.signon_error = null;
         } catch (e) {
             r.signon_error = String(e.message || e);
         }
+        r.signon_available = window.AutonomyNetworkSigner.available();
         await S.signOut();
 
         // 6 · an org WITH a key sees status, never the create flow
@@ -15241,20 +15259,20 @@ class TestNetworkIdentityCeremony:
         opened = decrypt_root_key(post["armored_private_key"], C1_PASSPHRASE)
         assert opened.public_hex == post["root_pub"]
 
-    def test_c1_armor_opens_c2_signon(self):
-        """THE cross-bead contract: C2's sign-on decrypted the armor C1
-        stored and minted a live session key without owning shell chrome."""
+    def test_c1_armor_opens_c2_root_ceremony_seam(self):
+        """THE cross-bead contract: the armor C1 stored opens in C2's
+        root-ceremony seam, yielding the ceremony-generated root."""
         c = self._checks
-        assert c.get("signon_error") is None, c.get("signon_error")
-        assert c["signon"]["sessionPub"]
-        assert c["signon_available"] is True
-        # And the minted cert chains to the ceremony-generated root.
+        assert c.get("org_root_open_error") is None, c.get("org_root_open_error")
         root_pub = c["captured"]["orgKeyPosts"][0]["root_pub"]
-        org_uuid = c["captured"]["registerPosts"][0]["envelope"]["payload"]["org_uuid"]
-        cert = DelegationCert.from_json(c["signon"]["certWire"])
-        result = verify_chain(cert, root_pub, org=org_uuid,
-                              required_scope="link:publish")
-        assert result.leaf_pub == c["signon"]["sessionPub"]
+        assert c["org_root_opened"] == {"rootPub": root_pub, "seedLength": 32}
+
+    def test_sign_on_refuses_without_a_personal_identity(self):
+        """Sign-on is a PERSONAL act: an organization key alone signs on
+        nowhere, and the refusal says which identity is missing."""
+        c = self._checks
+        assert "personal act" in (c.get("signon_error") or "")
+        assert c["signon_available"] is False
 
     # ── acceptance: recovery block is real, downloadable, never stored ──
 
