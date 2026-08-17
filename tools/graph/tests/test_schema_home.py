@@ -113,12 +113,28 @@ def test_an_organization_setting_refuses_the_personal_store(homed_schemas, orgs_
         )
 
 
-def test_a_read_looking_in_the_wrong_place_fails_the_same_way(homed_schemas, orgs_root):
-    """Checked on the way to the database, so the direction of travel does
-    not change the answer. A read that silently finds nothing in the wrong
-    store is the harder bug of the two."""
-    with pytest.raises(SchemaValidationError, match="operator's own database"):
-        settings_ops.read_set("probe.home.mine", org="acme", peers=[])
+def test_a_read_resolves_to_the_home_instead_of_refusing(homed_schemas, orgs_root):
+    """Reads route, writes refuse -- and the asymmetry is the point.
+
+    This test previously asserted that a read from the wrong organization
+    raises, on the reasoning that a read silently finding nothing in the
+    wrong store is the harder bug of the two. That reasoning was right about
+    the danger and wrong about the options: it assumed the alternative to
+    refusing was looking in the wrong place. Resolving to the declared home
+    is a third answer, and it removes the danger by construction -- there is
+    no wrong store left to look in.
+
+    Refusing broke every consumer that legitimately scopes by organization.
+    `/api/sign-key?org=anchore` asks which KEY, not which database, and the
+    guard turned it into a 500 that the operator's overlay reported as "User
+    declined signing request".
+    """
+    settings_ops.add_setting("probe.home.mine", 1, "acme", {"v": "p"},
+                             org="personal")
+
+    seen = settings_ops.read_set("probe.home.mine", org="acme", peers=[])
+
+    assert [m.key for m in seen.members] == ["acme"]
 
 
 def test_each_setting_is_accepted_in_the_database_it_declares(homed_schemas, orgs_root):
@@ -135,3 +151,60 @@ def test_each_setting_is_accepted_in_the_database_it_declares(homed_schemas, org
 def test_an_undeclared_setting_is_routed_anywhere(homed_schemas, orgs_root):
     settings_ops.add_setting("probe.home.undeclared", 1, "default", {"v": "a"}, org="acme")
     settings_ops.add_setting("probe.home.undeclared", 1, "default", {"v": "b"}, org="personal")
+
+
+# ── a read resolves to the home; it does not refuse the caller ──
+
+
+def test_a_read_scoped_to_an_org_finds_a_personal_homed_set(homed_schemas, orgs_root):
+    """The org names WHICH KEY, not which database.
+
+    `/api/sign-key?org=anchore` asks for the signing key anchore's commits
+    are signed with. The key is personal-homed -- one operator, one store --
+    so the organization is a key component, and reading it at the caller's
+    org made the guard refuse a request that was entirely correct.
+
+    It surfaced as HTTP 500, and the operator's overlay reported it as "User
+    declined signing request". A refusal that misreports itself as a human
+    decision is worse than the misrouting it was added to prevent.
+    """
+    # Every organization has a database in production; the fixture only makes
+    # one, and a read as an organization also opens that organization's own
+    # store.
+    root = orgs_root
+    for slug in ("anchore", "autonomy"):
+        GraphDB.create_org_db(slug, path=root / f"{slug}.db").close()
+    settings_ops.add_setting("probe.home.mine", 1, "anchore",
+                             {"v": "anchore-key"}, org="personal")
+
+    for caller in ("anchore", "autonomy", "personal", None):
+        row = settings_ops.read_set_key(
+            "probe.home.mine", "anchore", org=caller, peers=[])
+        assert row is not None, (
+            f"a read as {caller!r} could not reach a personal-homed set")
+        assert row["payload"]["v"] == "anchore-key"
+
+
+def test_a_write_to_the_wrong_home_is_still_refused(homed_schemas, orgs_root):
+    """Reads route; writes must not.
+
+    A write landing in the wrong database is a value nobody can find or
+    everybody can read, and neither failure announces itself. That is what
+    the declaration exists to prevent, so routing a write would remove the
+    only protection while looking like a convenience.
+    """
+    with pytest.raises(SchemaValidationError, match="operator's own database"):
+        settings_ops.add_setting("probe.home.mine", 1, "acme",
+                                 {"v": "x"}, org="acme")
+
+
+def test_an_organization_homed_set_still_reads_at_the_callers_org(homed_schemas, orgs_root):
+    """Routing applies where a home names ONE database. `organization` names
+    a class of them, so the caller's org is the right answer and refusing a
+    personal caller stays correct."""
+    settings_ops.add_setting("probe.home.ours", 1, "ws-a", {"v": "o"},
+                             org="acme")
+
+    seen = settings_ops.read_set("probe.home.ours", org="acme", peers=[])
+
+    assert [m.key for m in seen.members] == ["ws-a"]
