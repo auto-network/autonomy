@@ -487,8 +487,9 @@ class TestRecoverRunningAgents:
         (output_dir / ".worktree_path").write_text("/tmp/wt")
         (output_dir / ".branch").write_text("agent/auto-xyz")
 
-        # Patch REPO_ROOT to our tmp_path
-        with patch("agents.dispatcher.REPO_ROOT", tmp_path):
+        # recover_running_agents scans DATA_ROOT/agent-runs (DATA_ROOT replaced
+        # REPO_ROOT/data in auto-dnjn0); point it at our tmp data dir.
+        with patch("agents.dispatcher.DATA_ROOT", tmp_path / "data"):
             agents = recover_running_agents()
 
         assert len(agents) == 1
