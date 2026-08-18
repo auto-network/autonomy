@@ -1032,7 +1032,13 @@ def _resolve_optional_tool_mounts(
     # Codex unavailable (the truthful state). This is the ONLY credential
     # path; the host ~/.codex/auth.json mount is retired.
     if run_dir is not None:
-        codex_auth = _materialize_codex_auth_json(run_dir)
+        # DECLARE the target path (no write) when materialize_auth is False, so the
+        # plan can reference the credential's future location before mount
+        # validation succeeds; write it only when True (auto-vm8qh criterion 6).
+        codex_auth = (
+            _materialize_codex_auth_json(run_dir) if materialize_auth
+            else _codex_auth_target(run_dir)
+        )
         if codex_auth is not None:
             mounts[str(codex_auth)] = "/home/agent/.codex/auth.json:ro"
 

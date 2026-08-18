@@ -104,10 +104,16 @@ def test_pre_1_45_host_path_bind_fallback():
     plan = mp.MountPlan()
     plan.set(_spec("/app/data/.beads", "/data/.beads:ro", origin=mp.Origin.NODE))
     args = mp.mount_args(plan, topo)
+    # --mount type=bind, NOT -v: the daemon REFUSES a missing source (verified on
+    # sjc-2), so the fallback cannot fabricate an empty dir the way -v would — the
+    # no-fabrication contract that makes it equivalent to volume-subpath.
     assert args == [
-        "-v", "/var/lib/docker/volumes/autonomy-state/_data/.beads:/data/.beads:ro",
+        "--mount",
+        "type=bind,src=/var/lib/docker/volumes/autonomy-state/_data/.beads,"
+        "dst=/data/.beads,readonly",
     ]
-    assert "type=volume" not in " ".join(args)   # NOT a whole-volume mount
+    assert "-v" not in args                       # never the fabricating -v
+    assert "type=volume" not in " ".join(args)    # never a whole-volume mount
 
 def test_pre_1_45_refuses_only_when_host_path_unknown():
     """Refusal is the EDGE (no host Source to build the safe fallback from), never
