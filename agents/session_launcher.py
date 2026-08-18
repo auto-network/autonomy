@@ -968,9 +968,22 @@ def _materialize_codex_auth_json(run_dir: Path) -> Path | None:
     return out
 
 
+def _codex_auth_target(run_dir) -> "Path | None":
+    """The path _materialize_codex_auth_json WOULD write, iff a usable Codex
+    credential row exists — a DECLARE with no write, so the plan can reference the
+    credential's future location before mount validation has succeeded (auto-vm8qh
+    criterion 6: no credential is written until resolve/emit has passed)."""
+    if run_dir is None:
+        return None
+    if _pick_codex_credential_row(_codex_credential_rows()) is None:
+        return None
+    return Path(run_dir) / "codex-auth.json"
+
+
 def _resolve_optional_tool_mounts(
     worktree_host: Path | None = None,
     run_dir: Path | None = None,
+    materialize_auth: bool = True,
 ) -> dict[str, str]:
     """Return optional host mounts that make Codex usable inside containers.
 
@@ -1028,6 +1041,124 @@ def _resolve_optional_tool_mounts(
         mounts[str(agents_home)] = "/home/agent/.agents:ro"
 
     return mounts
+
+
+# ── Shared mount plan builder ─────────────────────────────────────────────────
+
+def _delete_if_present(path) -> None:
+    """Best-effort delete of a materialized per-session credential copy on an
+    early-return (mount validation) failure path, where no container exists yet
+    to schedule the normal post-exit cleanup against."""
+    if not path:
+        return
+    try:
+        Path(path).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def build_mount_plan(
+    *,
+    run_dir,
+    sessions_dir,
+    harness: str,
+    working_dir: str,
+    caller_mounts=None,
+    include_capabilities: bool = False,
+    capabilities=(),
+    global_claude_md=None,
+    startup_script=None,
+):
+    """The one dest-keyed MountPlan both entry points build and emit (auto-vm8qh).
+
+    Origins are DERIVED from source paths (mount_plan.mount_spec): platform-managed
+    paths under REPO_ROOT/DATA_ROOT are NODE, external workspace-declared host
+    paths are HOST, /dev/null is DEVICE — so a platform worktree/clone in the
+    caller dict can never be mislabelled HOST and fabricate raw -v /app/... on a
+    containerized node. Returns (plan, shim_env, codex_auth_copy).
+
+    include_capabilities gates the capability/shim/skill block (launch_session
+    only; the CLI does not mount capabilities). global_claude_md/startup_script
+    are present only for launch_session.
+    """
+    from agents.mount_plan import MountPlan, mount_spec
+
+    transcript_mount = (
+        "/home/agent/.codex/sessions" if harness == "codex"
+        else "/home/agent/.claude/projects"
+    )
+    plan = MountPlan()
+    plan.set(mount_spec(REPO_ROOT / ".beads", "/data/.beads"), replace=False)
+    # ``.beads`` is rw for bd, but its dolt-remote credential is host-only
+    # material no session reads; mask it with an empty ro device bind (auto-j3oj3).
+    plan.set(mount_spec("/dev/null", "/data/.beads/.beads-credential-key:ro"), replace=False)
+    plan.set(mount_spec(run_dir, "/workspace/output"), replace=False)
+    plan.set(mount_spec(sessions_dir, transcript_mount), replace=False)
+
+    # Caller mounts: dispatcher worktrees/clones/git-metadata/artifacts (NODE, under
+    # DATA_ROOT) plus workspace-declared host paths (HOST), or the CLI's
+    # --worktree/--git-dir. Override; origin derived per source.
+    for host_path, container_spec in (caller_mounts or {}).items():
+        plan.set(mount_spec(host_path, container_spec))
+
+    # Platform snapshot when nothing claims /workspace/repo.
+    if not plan.has_dest("/workspace/repo"):
+        snapshot = _ensure_platform_snapshot()
+        if snapshot is not None:
+            plan.set(mount_spec(snapshot, "/workspace/repo:ro"), replace=False)
+
+    # Nested data/uploads view — only where its mount point exists (a read-only
+    # /workspace/repo without data/uploads makes runc's mkdir an OCI failure).
+    repo_mount_host = next(
+        (s.source for s in plan.specs() if s.dest == "/workspace/repo"), None,
+    )
+    uploads_target = "/workspace/repo/data/uploads"
+    if (repo_mount_host is not None
+            and (Path(repo_mount_host) / "data" / "uploads").is_dir()
+            and not plan.has_dest(uploads_target)):
+        plan.set(mount_spec(DATA_ROOT / "uploads", f"{uploads_target}:ro"), replace=False)
+
+    # Capability mounts / shim / skills (launch_session only; fill-if-absent, so a
+    # caller mount at the same dest still wins).
+    shim_env: dict = {}
+    if include_capabilities:
+        for host_path, container_spec in _capability_mounts(capabilities).items():
+            plan.set(mount_spec(host_path, container_spec), replace=False)
+        shim_mounts, shim_env = _capability_command_surface(capabilities, run_dir)
+        for host_path, container_spec in shim_mounts.items():
+            plan.set(mount_spec(host_path, container_spec), replace=False)
+        for host_path, container_spec in _capability_skill_surface(
+                capabilities, run_dir, harness).items():
+            plan.set(mount_spec(host_path, container_spec), replace=False)
+
+    # Codex trust pre-seed: worktree_host from the plan built so far (before the
+    # optional tool mounts) — the pre-refactor derivation point.
+    working_mounts: list = []
+    for s in plan.specs():
+        cp = s.dest.rstrip("/") or "/"
+        if working_dir == cp or working_dir.startswith(f"{cp}/"):
+            working_mounts.append((len(cp), Path(s.source)))
+    worktree_host = max(working_mounts, default=(0, None), key=lambda i: i[0])[1]
+
+    # DECLARE the optional tool mounts, including the Codex auth.json at the path
+    # it WILL occupy — materialize_auth=False writes no credential here. The caller
+    # writes it only after mount validation succeeds (criterion 6).
+    codex_auth_target = None
+    for host_path, container_spec in _resolve_optional_tool_mounts(
+        worktree_host=worktree_host, run_dir=run_dir, materialize_auth=False,
+    ).items():
+        plan.set(mount_spec(host_path, container_spec))
+        if container_spec.split(":")[0] == "/home/agent/.codex/auth.json":
+            codex_auth_target = host_path
+
+    if global_claude_md is not None:
+        plan.set(mount_spec(global_claude_md, "/home/agent/.claude/CLAUDE.md:ro"))
+        # Mirror to AGENTS.md so Codex picks up the same workspace primer.
+        plan.set(mount_spec(global_claude_md, "/home/agent/.codex/AGENTS.md:ro"))
+    if startup_script is not None:
+        plan.set(mount_spec(startup_script, "/startup.sh:ro"))
+
+    return plan, shim_env, codex_auth_target
 
 
 # ── Main Launch Function ──────────────────────────────────────────────────────
@@ -1265,129 +1396,55 @@ def launch_session(
     # mount is a git snapshot (code only — a checkout reproduces no gitignored
     # key, org DB, or secret) and never the live host root (auto-j3oj3), and
     # why host ``data/`` is exposed only as the single deliberate
-    # ``data/uploads`` read-only mount below.
-    transcript_mount = (
-        "/home/agent/.codex/sessions"
-        if harness == "codex"
-        else "/home/agent/.claude/projects"
-    )
+    # ``data/uploads`` read-only mount below (built in build_mount_plan).
     try:
         # Pre-create so docker binds the operator-owned directory instead of
         # manufacturing a root-owned one inside the live repo.
         (DATA_ROOT / "uploads").mkdir(parents=True, exist_ok=True)
     except OSError:
         pass
-    default_mounts: dict[str, str] = {
-        str(REPO_ROOT / ".beads"): "/data/.beads",
-        # ``.beads`` must be read-write for bd, but the dolt-remote credential
-        # inside it is host-only material no session reads (repo-wide grep:
-        # zero consumers). Mask it with an empty read-only bind so the rw
-        # mount doesn't hand every container a shared secret (auto-j3oj3).
-        "/dev/null": "/data/.beads/.beads-credential-key:ro",
-        str(run_dir): "/workspace/output",
-        str(sessions_dir): transcript_mount,
-    }
-
-    # Apply caller overrides: if a caller mount targets the same container path
-    # as a default, replace the default.
-    if mounts:
-        for host_path, container_spec in mounts.items():
-            container_path = container_spec.split(":")[0]
-            # Drop any default that maps to the same container path
-            for dk in list(default_mounts):
-                if default_mounts[dk].split(":")[0] == container_path:
-                    del default_mounts[dk]
-            default_mounts[str(host_path)] = container_spec
-
-    # Platform mount: when no caller mount claims /workspace/repo, provide the
-    # platform as a read-only git snapshot of the host checkout — never the
-    # live root, which carries data/ (org DBs, private keys, session secrets)
-    # into the container. Failure to prepare the snapshot launches WITHOUT a
-    # platform mount: graph/bd tooling breaks loudly for that session, which
-    # beats silently re-exposing host data/ or stopping the fleet.
-    if not any(
-        spec.split(":")[0] == "/workspace/repo"
-        for spec in default_mounts.values()
-    ):
-        snapshot = _ensure_platform_snapshot()
-        if snapshot is not None:
-            default_mounts[snapshot] = "/workspace/repo:ro"
-
-    # File handoff: POST /api/upload writes host data/uploads and sessions
-    # read it at /workspace/repo/data/uploads — the one deliberate
-    # in-container view of host data/, read-only, this directory only.
-    # The nested bind needs its mount point to EXIST inside whatever is
-    # mounted at /workspace/repo: runc must mkdir the target and a read-only
-    # parent makes that an OCI launch failure, fleet-wide (the platform
-    # snapshot materializes it via the tracked data/uploads/.gitkeep).
-    # Deciding host-side keeps a missing mount point a skipped mount, never
-    # a dead container.
-    repo_mount_host = next(
-        (hp for hp, spec in default_mounts.items()
-         if spec.split(":")[0] == "/workspace/repo"),
-        None,
+    # One dest-keyed plan, built once through the shared builder and emitted once
+    # (declare->resolve->emit, bead auto-vm8qh). Origins are DERIVED from source
+    # paths, so platform-managed mounts under DATA_ROOT/REPO_ROOT resolve as NODE
+    # and only external workspace-declared host paths are HOST. The docker socket
+    # is refused once, over the FULL plan, inside mount_args() below.
+    from agents.mount_plan import (
+        mount_args, discover_topology, SocketMountRefused, MountUnresolvable,
+        VolumeSubpathUnsupported,
     )
-    uploads_target = "/workspace/repo/data/uploads"
-    if (
-        repo_mount_host is not None
-        and (Path(repo_mount_host) / "data" / "uploads").is_dir()
-        and not any(
-            spec.split(":")[0] == uploads_target
-            for spec in default_mounts.values()
-        )
-    ):
-        default_mounts[str(DATA_ROOT / "uploads")] = f"{uploads_target}:ro"
+    plan, shim_env, codex_auth_target = build_mount_plan(
+        run_dir=run_dir,
+        sessions_dir=sessions_dir,
+        harness=harness,
+        working_dir=working_dir,
+        caller_mounts=mounts,
+        include_capabilities=True,
+        capabilities=capabilities,
+        global_claude_md=global_claude_md,
+        startup_script=startup_script,
+    )
 
-    # Capability mounts: package roots, tool subtrees, and secret files for
-    # every enabled MaterializedCapability. Caller-supplied mounts for the
-    # same container path still win (matching the override semantics above).
-    for host_path, container_spec in _capability_mounts(capabilities).items():
-        container_path = container_spec.split(":")[0]
-        if any(
-            spec.split(":")[0] == container_path
-            for spec in default_mounts.values()
-        ):
-            continue
-        default_mounts[host_path] = container_spec
+    # Resolve+validate the DECLARED plan into argv NOW — before any authority is
+    # minted below (the session token, the materialized Codex credential). A
+    # socket / unresolvable / subpath refusal returns here having written nothing
+    # and minted nothing, so there is nothing to leak or clean up (auto-vm8qh
+    # criterion 6). The validated argv is spliced into cmd at the emission point.
+    try:
+        _mount_argv = mount_args(plan, discover_topology())
+    except SocketMountRefused:
+        print(f"  ERROR: refusing host Docker socket mount for session '{name}'",
+              file=sys.stderr)
+        return None
+    except (MountUnresolvable, VolumeSubpathUnsupported) as _exc:
+        print(f"  ERROR: {_exc}", file=sys.stderr)
+        return None
 
-    # Per-session shim directory for ``tool_target.expose_commands``.
-    # Built lazily — when no capability declares expose_commands, no
-    # disk artefact, mount, or env var is created.
-    shim_mounts, shim_env = _capability_command_surface(capabilities, run_dir)
-    for host_path, container_spec in shim_mounts.items():
-        container_path = container_spec.split(":")[0]
-        if any(
-            spec.split(":")[0] == container_path
-            for spec in default_mounts.values()
-        ):
-            continue
-        default_mounts[host_path] = container_spec
-
-    # Capability skills: SKILL.md files installed at the harness's skill
-    # discovery path (per-session copies under run_dir, like the shim dir).
-    for host_path, container_spec in _capability_skill_surface(
-            capabilities, run_dir, harness).items():
-        container_path = container_spec.split(":")[0]
-        if any(
-            spec.split(":")[0] == container_path
-            for spec in default_mounts.values()
-        ):
-            continue
-        default_mounts[host_path] = container_spec
-
-    # The node may hold the host Docker socket to spawn sessions, but no
-    # session receives that socket under any isolation runtime. Refuse both a
-    # source and a target reference so an accidental read-only mount cannot
-    # weaken the boundary.
-    host_socket = "/var/run/docker.sock"
-    for host_path, container_spec in default_mounts.items():
-        container_path = container_spec.split(":", 1)[0]
-        if str(host_path).rstrip("/") == host_socket or container_path.rstrip("/") == host_socket:
-            print(
-                f"  ERROR: refusing host Docker socket mount for session '{name}'",
-                file=sys.stderr,
-            )
-            return None
+    # Validation passed — NOW it is safe to materialize the Codex credential the
+    # plan declared (at codex_auth_target). Nothing above this line wrote a
+    # credential or minted a token.
+    codex_auth_copy = None
+    if codex_auth_target is not None and _materialize_codex_auth_json(run_dir) is not None:
+        codex_auth_copy = codex_auth_target  # str path, for post-exit cleanup
 
     _lap("mounts_assembled")
 
@@ -1468,42 +1525,9 @@ def launch_session(
                 graph_tags = ",".join(str(t) for t in graph_tags)
             cmd.extend(["-e", f"GRAPH_TAGS={graph_tags}"])
 
-    for host_path, container_spec in default_mounts.items():
-        cmd.extend(["-v", f"{host_path}:{container_spec}"])
-
-    # Codex trust pre-seed: find the mount containing the actual working
-    # directory and trust that worktree's git-root. Workspaces may keep the
-    # platform checkout at /workspace/repo while working in their own repo at
-    # /workspace/<id>; hardcoding /workspace/repo makes those sessions trust
-    # the wrong repository and strand Codex on its read-only trust dialog.
-    working_mounts: list[tuple[int, Path]] = []
-    for host_path, spec in default_mounts.items():
-        container_path = spec.split(":", 1)[0].rstrip("/") or "/"
-        if working_dir == container_path or working_dir.startswith(f"{container_path}/"):
-            working_mounts.append((len(container_path), Path(host_path)))
-    worktree_host = max(working_mounts, default=(0, None), key=lambda item: item[0])[1]
-    codex_auth_copy: str | None = None
-    for host_path, container_spec in _resolve_optional_tool_mounts(
-        worktree_host=worktree_host, run_dir=run_dir
-    ).items():
-        cmd.extend(["-v", f"{host_path}:{container_spec}"])
-        # The per-session Codex auth.json is materialized from the substrate
-        # row and carries live OAuth tokens; schedule its deletion after the
-        # container exits (like the Claude creds copy) so no plaintext token
-        # accumulates in run_dir once the session is gone.
-        if container_spec.split(":")[0] == "/home/agent/.codex/auth.json":
-            codex_auth_copy = host_path
-
-    if global_claude_md is not None:
-        cmd.extend(["-v", f"{global_claude_md}:/home/agent/.claude/CLAUDE.md:ro"])
-        # Mirror to AGENTS.md so Codex picks up the same workspace primer.
-        # Claude reads CLAUDE.md, Codex reads AGENTS.md — same content,
-        # different file, no harness branching needed.
-        cmd.extend(["-v", f"{global_claude_md}:/home/agent/.codex/AGENTS.md:ro"])
-
-    # Per-project startup script (used by the dind entrypoint wrapper).
-    if startup_script is not None:
-        cmd.extend(["-v", f"{startup_script}:/startup.sh:ro"])
+    # Splice in the mount argv resolved+validated above (before the token mint),
+    # so a mount refusal never reached this point after minting authority.
+    cmd.extend(_mount_argv)
 
     if extra_env:
         for k, v in extra_env.items():

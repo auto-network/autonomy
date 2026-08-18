@@ -97,3 +97,21 @@ def isolated_settings_db(tmp_path, monkeypatch):
         yield db_path
     finally:
         GraphDB.close_all_pooled()
+
+
+import pytest as _pytest
+
+
+@_pytest.fixture(autouse=True)
+def _pin_host_process_topology(monkeypatch):
+    """Launcher tests pin the dev-install (host-process) mount shape.
+
+    The suite runs INSIDE a container, so mount_plan.discover_topology() would
+    otherwise classify the launcher as containerized (and shell to docker).
+    AUTONOMY_CONTAINER=0 makes it return is_host_process without any docker call,
+    which is the shape these tests were written against (bead auto-vm8qh)."""
+    monkeypatch.setenv("AUTONOMY_CONTAINER", "0")
+    from agents import mount_plan
+    mount_plan.reset_topology_cache()  # the topology is cached once; don't leak it across tests
+    yield
+    mount_plan.reset_topology_cache()

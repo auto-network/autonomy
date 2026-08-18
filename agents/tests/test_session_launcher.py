@@ -1707,3 +1707,136 @@ def test_every_session_gets_the_bd_close_gate(
     cmd = captured_run[0]
     mounts = _mounts(cmd)
     assert f"{run_dir / 'cap-bin'}:/etc/autonomy/cap-bin:ro" in mounts
+
+
+def test_golden_mount_argv_is_byte_identical(
+    tmp_path, fake_creds, fake_crosstalk, captured_run, monkeypatch,
+):
+    """GOLDEN (bead auto-vm8qh, criterion 1): pins the COMPLETE docker-run argv
+    launch_session emits for a representative host-process launch, and asserts the
+    declare->resolve->emit refactor reproduces it byte-for-byte. Hermetic: the
+    platform roots, snapshot, optional-tool mounts and the session token are all
+    pinned, and REPO_ROOT is deliberately NOT /workspace/repo, so normalizing host
+    source prefixes can never rewrite a fixed container destination."""
+    repo = tmp_path / "repo"
+    data = repo / "data"
+    (data / "uploads").mkdir(parents=True)
+    monkeypatch.setattr(session_launcher, "REPO_ROOT", repo)
+    monkeypatch.setattr(session_launcher, "DATA_ROOT", data)
+    snap = tmp_path / "snap"
+    (snap / "data" / "uploads").mkdir(parents=True)
+    monkeypatch.setattr(session_launcher, "_ensure_platform_snapshot", lambda: str(snap))
+    monkeypatch.setattr(
+        session_launcher, "_resolve_optional_tool_mounts",
+        lambda **kw: {str(tmp_path / "codex-config.toml"): "/home/agent/.codex/config.toml:ro"},
+    )
+    monkeypatch.setattr(session_launcher.secrets, "token_urlsafe", lambda n=32: "TOKEN")
+    run_dir = tmp_path / "run"
+    gmd = tmp_path / "CLAUDE.md"; gmd.write_text("primer")
+    startup = tmp_path / "startup.sh"; startup.write_text("#!/bin/sh\n")
+    ws_src = tmp_path / "wsmount"; ws_src.mkdir()
+
+    session_launcher.launch_session(
+        session_type="dispatch", name="test-session", prompt=None, detach=True,
+        image="autonomy-agent:enterprise", metadata={"org": "test-org"},
+        output_dir=str(run_dir), global_claude_md=str(gmd),
+        startup_script=str(startup), mounts={str(ws_src): "/opt/data:ro"},
+    )
+    cmd = list(captured_run[0])
+
+    def norm(tok):  # normalize ONLY dynamic host-source prefixes, never a dest
+        for pre, tag in ((str(run_dir), "{RUN}"), (str(snap), "{SNAP}"),
+                         (str(data), "{DATA}"), (str(repo), "{REPO}"),
+                         (str(tmp_path), "{TMP}")):
+            tok = tok.replace(pre, tag)
+        return tok
+    got = [norm(t) for t in cmd]
+
+    # GOLDEN — the complete pinned argv the launcher emits today. The refactor
+    # must reproduce it byte-for-byte; update only when the launch shape
+    # intentionally changes.
+    expected = [
+        "docker", "run", "-d", "--init", "--name", "test-session", "--network=host",
+        "-e", "BD_ACTOR=dispatch:test-session",
+        "-e", "AUTONOMY_SESSION=test-session",
+        "-e", "BD_READONLY=0",
+        "-e", "GRAPH_API=https://localhost:8080",
+        "-e", "CROSSTALK_TOKEN=TOKEN",
+        "-e", "CODEX_HOME=/home/agent/.codex",
+        "-e", "CLAUDE_CODE_OAUTH_TOKEN=tok-xyz",
+        "-e", "GRAPH_ORG=test-org",
+        "-v", "{REPO}/.beads:/data/.beads",
+        "-v", "/dev/null:/data/.beads/.beads-credential-key:ro",
+        "-v", "{RUN}:/workspace/output",
+        "-v", "{RUN}/sessions:/home/agent/.claude/projects",
+        "-v", "{TMP}/wsmount:/opt/data:ro",
+        "-v", "{SNAP}:/workspace/repo:ro",
+        "-v", "{DATA}/uploads:/workspace/repo/data/uploads:ro",
+        "-v", "{RUN}/cap-bin:/etc/autonomy/cap-bin:ro",
+        "-v", "{TMP}/codex-config.toml:/home/agent/.codex/config.toml:ro",
+        "-v", "{TMP}/CLAUDE.md:/home/agent/.claude/CLAUDE.md:ro",
+        "-v", "{TMP}/CLAUDE.md:/home/agent/.codex/AGENTS.md:ro",
+        "-v", "{TMP}/startup.sh:/startup.sh:ro",
+        "-e", "AUTONOMY_CAPABILITY_BIN=/etc/autonomy/cap-bin",
+        "-w", "/workspace/repo",
+        "autonomy-agent:enterprise", "--dangerously-skip-permissions",
+        "--model", "claude-opus-4-8[1m]",
+    ]
+    assert got == expected
+
+
+def test_build_mount_plan_socket_via_startup_is_refused_at_emit(tmp_path, monkeypatch):
+    """Integrated (auto-vm8qh, criterion 3): a startup_script pointing at the
+    docker socket goes THROUGH build_mount_plan into the plan, and mount_args
+    refuses it over the full plan — closing the bypass those inputs used to have.
+    Exercises build_mount_plan with the real input, not just an appended spec."""
+    import pytest
+    from agents.mount_plan import mount_args, NodeTopology, SocketMountRefused
+    monkeypatch.setattr(session_launcher, "_ensure_platform_snapshot", lambda: None)
+    monkeypatch.setattr(session_launcher, "_resolve_optional_tool_mounts", lambda **k: {})
+    run_dir = tmp_path / "run"
+    plan, _se, _ca = session_launcher.build_mount_plan(
+        run_dir=run_dir, sessions_dir=run_dir / "sessions",
+        harness="claude", working_dir="/workspace/repo",
+        startup_script="/var/run/docker.sock",
+    )
+    with pytest.raises(SocketMountRefused):
+        mount_args(plan, NodeTopology(is_host_process=True))
+
+
+def test_mount_refusal_mints_no_token_and_materializes_no_credential(tmp_path, fake_creds, monkeypatch):
+    """auto-vm8qh criterion 6: a mount refusal returns having minted NO session
+    token and materialized NO Codex credential — validation runs before authority."""
+    import types
+    minted, materialized = [], []
+    fake_dao = types.SimpleNamespace(
+        auth_db=types.SimpleNamespace(insert_token=lambda *a, **k: minted.append(a)))
+    monkeypatch.setitem(__import__("sys").modules, "tools.dashboard.dao", fake_dao)
+    monkeypatch.setattr(session_launcher, "_materialize_codex_auth_json",
+                        lambda run_dir: materialized.append(run_dir))
+    monkeypatch.setattr(session_launcher, "_ensure_platform_snapshot", lambda: None)
+    monkeypatch.setattr(session_launcher, "_resolve_optional_tool_mounts", lambda **k: {})
+    result = session_launcher.launch_session(
+        session_type="dispatch", name="t", prompt=None, detach=True,
+        image="x", metadata={"org": "o"}, output_dir=str(tmp_path / "run"),
+        mounts={"/var/run/docker.sock": "/data/leak"},   # forces SocketMountRefused
+    )
+    assert result is None
+    assert minted == [], "no session token may be minted on a refused launch"
+    assert materialized == [], "no credential may be materialized on a refused launch"
+
+
+def test_build_mount_plan_socket_via_global_claude_md_is_refused(tmp_path, monkeypatch):
+    """Integrated socket refusal for the OTHER bypass input (global_claude_md),
+    through build_mount_plan (auto-vm8qh criterion 3/4)."""
+    import pytest
+    from agents.mount_plan import mount_args, NodeTopology, SocketMountRefused
+    monkeypatch.setattr(session_launcher, "_ensure_platform_snapshot", lambda: None)
+    monkeypatch.setattr(session_launcher, "_resolve_optional_tool_mounts", lambda **k: {})
+    run_dir = tmp_path / "run"
+    plan, _se, _ca = session_launcher.build_mount_plan(
+        run_dir=run_dir, sessions_dir=run_dir / "sessions", harness="claude",
+        working_dir="/workspace/repo", global_claude_md="/var/run/docker.sock",
+    )
+    with pytest.raises(SocketMountRefused):
+        mount_args(plan, NodeTopology(is_host_process=True))
