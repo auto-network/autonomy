@@ -1851,6 +1851,40 @@ def test_mount_refusal_mints_no_token_and_materializes_no_credential(tmp_path, f
     assert materialized == [], "no credential may be materialized on a refused launch"
 
 
+def test_declared_credential_failed_materialization_refuses_before_token(tmp_path, fake_creds, monkeypatch):
+    """auto-vm8qh criterion 6: a credential DECLARED at plan time but that fails to
+    materialize (write error, or the row expired/raced away) is a launch refusal —
+    taken BEFORE the session token is minted, leaving no partial credential file.
+    Otherwise the validated argv binds a path that doesn't exist: host-process -v
+    would fabricate a dir there, the fallback bind would fail only at docker-run,
+    both AFTER the token was minted."""
+    import types
+    from pathlib import Path
+    minted = []
+    fake_dao = types.SimpleNamespace(
+        auth_db=types.SimpleNamespace(insert_token=lambda *a, **k: minted.append(a)))
+    monkeypatch.setitem(__import__("sys").modules, "tools.dashboard.dao", fake_dao)
+    _stub_usable_codex_row(monkeypatch)                 # row exists -> auth mount DECLARED
+    monkeypatch.setattr(session_launcher, "_ensure_platform_snapshot", lambda: None)
+
+    run_dir = tmp_path / "run"; run_dir.mkdir()
+    partial = run_dir / "codex-auth.json"
+    def failing_materialize(rd):
+        # Simulate a write that landed before failing (or a chmod failure): a file
+        # is on disk, but the materializer reports failure by returning None.
+        Path(rd).joinpath("codex-auth.json").write_text("partial-credential")
+        return None
+    monkeypatch.setattr(session_launcher, "_materialize_codex_auth_json", failing_materialize)
+
+    result = session_launcher.launch_session(
+        session_type="dispatch", name="t", prompt=None, detach=True,
+        image="x", metadata={"org": "o"}, output_dir=str(run_dir),
+    )
+    assert result is None, "a declared credential that fails to materialize must refuse the launch"
+    assert minted == [], "no session token may be minted when materialization failed"
+    assert not partial.exists(), "the refusal path must leave no partial credential file behind"
+
+
 def test_build_mount_plan_socket_via_global_claude_md_is_refused(tmp_path, monkeypatch):
     """Integrated socket refusal for the OTHER bypass input (global_claude_md),
     through build_mount_plan (auto-vm8qh criterion 3/4)."""

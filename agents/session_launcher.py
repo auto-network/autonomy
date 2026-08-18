@@ -964,6 +964,14 @@ def _materialize_codex_auth_json(run_dir: Path) -> Path | None:
         out.chmod(0o600)
     except OSError:
         logger.exception("session_launcher: could not write codex auth.json")
+        # A partial write (or a write that landed before chmod failed) would
+        # leave a credential file behind — possibly at default perms. Remove it
+        # so a None return always means "nothing on disk", never a lingering,
+        # possibly world-readable credential.
+        try:
+            out.unlink(missing_ok=True)
+        except OSError:
+            pass
         return None
     return out
 
@@ -1449,7 +1457,23 @@ def launch_session(
     # plan declared (at codex_auth_target). Nothing above this line wrote a
     # credential or minted a token.
     codex_auth_copy = None
-    if codex_auth_target is not None and _materialize_codex_auth_json(run_dir) is not None:
+    if codex_auth_target is not None:
+        # A credential was DECLARED (a usable row existed at plan time, so the
+        # validated argv already binds codex_auth_target). If materialization
+        # fails HERE (write error, or the row expired/raced away between declare
+        # and now), the file the argv references does not exist: host-process -v
+        # would fabricate a directory there, and the fallback bind would fail at
+        # docker-run — but only AFTER the token below is minted. So a declared
+        # credential that fails to materialize is a launch refusal, taken before
+        # any authority is minted, leaving no partial file behind.
+        if _materialize_codex_auth_json(run_dir) is None:
+            _delete_if_present(codex_auth_target)
+            print(
+                f"  ERROR: refusing to launch session '{name}': a Codex "
+                "credential was declared but failed to materialize",
+                file=sys.stderr,
+            )
+            return None
         codex_auth_copy = codex_auth_target  # str path, for post-exit cleanup
 
     _lap("mounts_assembled")
