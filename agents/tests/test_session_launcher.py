@@ -1804,9 +1804,34 @@ def test_build_mount_plan_socket_via_startup_is_refused_at_emit(tmp_path, monkey
         mount_args(plan, NodeTopology(is_host_process=True))
 
 
+def _stub_usable_codex_row(monkeypatch):
+    """Make a usable Codex credential row exist, so the auth mount is DECLARED —
+    without this the declare/materialize distinction has nothing to prove."""
+    import types
+    monkeypatch.setattr(session_launcher, "_pick_codex_credential_row",
+                        lambda rows: types.SimpleNamespace(key="acct", payload={}))
+    monkeypatch.setattr(session_launcher, "_codex_credential_rows", lambda: [object()])
+
+
+def test_declare_mode_declares_but_does_not_materialize_credential(tmp_path, monkeypatch):
+    """auto-vm8qh criterion 6: the REAL _resolve_optional_tool_mounts in declare
+    mode (materialize_auth=False) references the Codex auth path but writes NO
+    credential. Only the materializer + row-pick are stubbed."""
+    materialized = []
+    monkeypatch.setattr(session_launcher, "_materialize_codex_auth_json",
+                        lambda run_dir: materialized.append(run_dir))
+    _stub_usable_codex_row(monkeypatch)
+    run_dir = tmp_path / "run"; run_dir.mkdir()
+    mounts = session_launcher._resolve_optional_tool_mounts(run_dir=run_dir, materialize_auth=False)
+    assert materialized == [], "declare mode must NOT write the credential"
+    target = str(run_dir / "codex-auth.json")
+    assert mounts.get(target) == "/home/agent/.codex/auth.json:ro", "auth mount is still declared"
+
+
 def test_mount_refusal_mints_no_token_and_materializes_no_credential(tmp_path, fake_creds, monkeypatch):
     """auto-vm8qh criterion 6: a mount refusal returns having minted NO session
-    token and materialized NO Codex credential — validation runs before authority."""
+    token and materialized NO Codex credential — exercising the REAL declare path
+    (a usable row exists, so the auth mount is genuinely declared)."""
     import types
     minted, materialized = [], []
     fake_dao = types.SimpleNamespace(
@@ -1814,8 +1839,8 @@ def test_mount_refusal_mints_no_token_and_materializes_no_credential(tmp_path, f
     monkeypatch.setitem(__import__("sys").modules, "tools.dashboard.dao", fake_dao)
     monkeypatch.setattr(session_launcher, "_materialize_codex_auth_json",
                         lambda run_dir: materialized.append(run_dir))
+    _stub_usable_codex_row(monkeypatch)
     monkeypatch.setattr(session_launcher, "_ensure_platform_snapshot", lambda: None)
-    monkeypatch.setattr(session_launcher, "_resolve_optional_tool_mounts", lambda **k: {})
     result = session_launcher.launch_session(
         session_type="dispatch", name="t", prompt=None, detach=True,
         image="x", metadata={"org": "o"}, output_dir=str(tmp_path / "run"),

@@ -286,21 +286,27 @@ def emit(r: ResolvedMount, topo: NodeTopology) -> list:
     dest, readonly = _spec_dest_mode(r.container_spec)
     if r.volume is not None:
         if r.subpath and not topo.volume_subpath:
-            # Pre-1.45 daemon: no --mount volume-subpath. Fall back to a host-path
-            # bind of the SPECIFIC subpath, from the volume's host mountpoint
-            # (captured once at topology discovery). This exposes ONLY that
-            # subdirectory — never the whole volume, unlike a whole-volume mount +
-            # symlink — so it has the same isolation as volume-subpath on any
-            # Docker version. The path is node-constructed (the volume mountpoint
-            # plus the platform's own subpath), so there's no attacker symlink to
-            # follow at mount time.
+            # Pre-1.45 daemon: no --mount volume-subpath. Fall back to a bind of the
+            # SPECIFIC subpath, from the volume's host mountpoint (captured once at
+            # topology discovery). Exposes ONLY that subdirectory — never the whole
+            # volume — so it has the same isolation as volume-subpath on any Docker
+            # version. Emitted as `--mount type=bind`, NOT `-v`: --mount REFUSES a
+            # nonexistent source, matching volume-subpath's refuse-missing behavior,
+            # whereas -v would fabricate an empty source dir and report success (the
+            # very bug this epic exists to close). The subpath is a NODE-origin
+            # input the platform trusts — that trust is the premise; a path
+            # component could still be a symlink, so this does not rely on the bind
+            # being symlink-proof.
             host = _volume_host_source(topo, r.volume)
             if not host:
                 # Can't locate the volume's host path (no Source in self-inspect)
                 # -> no safe fallback possible; refuse rather than over-expose.
                 raise VolumeSubpathUnsupported(dest, r.volume)
             src = os.path.join(host, r.subpath)
-            return ["-v", f"{src}:{dest}" + (":ro" if readonly else "")]
+            parts = ["type=bind", f"src={src}", f"dst={dest}"]
+            if readonly:
+                parts.append("readonly")
+            return ["--mount", ",".join(parts)]
         parts = ["type=volume", f"src={r.volume}", f"dst={dest}"]
         if r.subpath:
             parts.append(f"volume-subpath={r.subpath}")
