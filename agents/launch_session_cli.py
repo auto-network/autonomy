@@ -267,45 +267,29 @@ def main() -> int:
         # org DBs and private keys, and container uid == host uid so a mount
         # is fully readable — auto-j3oj3). The .beads dolt credential is
         # masked; data/uploads is the one deliberate host-data view.
-        mounts = {
-            str(REPO_ROOT / ".beads"): "/data/.beads",
-            "/dev/null": "/data/.beads/.beads-credential-key:ro",
-            str(run_dir): "/workspace/output",
-            str(sessions_dir): (
-                "/home/agent/.codex/sessions"
-                if args.harness == "codex"
-                else "/home/agent/.claude/projects"
-            ),
-        }
+        # One dest-keyed plan, built through the SAME shared builder as
+        # launch_session, so both entry points share one mount path (auto-vm8qh).
+        # The CLI's --worktree/--git-dir are its caller mounts; origins are
+        # derived from source paths inside build_mount_plan.
+        from agents.session_launcher import build_mount_plan
+        from agents.mount_plan import (
+            mount_args, discover_topology, SocketMountRefused, MountUnresolvable,
+            VolumeSubpathUnsupported,
+        )
+        caller_mounts: dict = {}
         if args.worktree:
-            mounts[args.worktree] = "/workspace/repo"
-            repo_mount_host = args.worktree
-        else:
-            from agents.session_launcher import _ensure_platform_snapshot
-
-            repo_mount_host = _ensure_platform_snapshot()
-            if repo_mount_host is not None:
-                mounts[repo_mount_host] = "/workspace/repo:ro"
-        # The uploads bind may only nest where its mount point exists — a
-        # read-only /workspace/repo without data/uploads makes runc's mkdir
-        # an OCI launch failure (see launch_session; the platform snapshot
-        # tracks data/uploads/.gitkeep exactly so this holds).
-        if repo_mount_host is not None and (
-            Path(repo_mount_host) / "data" / "uploads"
-        ).is_dir():
-            mounts[str(DATA_ROOT / "uploads")] = (
-                "/workspace/repo/data/uploads:ro"
-            )
+            caller_mounts[str(args.worktree)] = "/workspace/repo"
         if args.git_dir:
-            mounts[args.git_dir] = args.git_dir
-        host_socket = "/var/run/docker.sock"
-        if any(
-            str(host).rstrip("/") == host_socket
-            or spec.split(":", 1)[0].rstrip("/") == host_socket
-            for host, spec in mounts.items()
-        ):
-            print("ERROR: refusing host Docker socket mount", file=sys.stderr)
-            return 1
+            caller_mounts[str(args.git_dir)] = str(args.git_dir)
+        plan, _shim_env, _codex_auth = build_mount_plan(
+            run_dir=run_dir,
+            sessions_dir=sessions_dir,
+            harness=args.harness,
+            working_dir="/workspace/repo",
+            caller_mounts=caller_mounts,
+            include_capabilities=False,
+        )
+        # Docker socket refusal is enforced in mount_args() over the full plan.
 
         cmd: list[str] = [
             "docker", "run",
@@ -333,20 +317,21 @@ def main() -> int:
         cmd.extend(["-e", f"GRAPH_ORG={org}"])
         if args.graph_tags:
             cmd.extend(["-e", f"GRAPH_TAGS={args.graph_tags}"])
-        for host_path, container_spec in mounts.items():
-            cmd.extend(["-v", f"{host_path}:{container_spec}"])
-        # Codex trust pre-seed: generate a per-session config trusting the
-        # worktree's git-root so Codex doesn't hang writing to the :ro config
-        # (auto-sigkn).
-        worktree_host = next(
-            (Path(hp) for hp, spec in mounts.items()
-             if spec.split(":", 1)[0] == "/workspace/repo"),
-            None,
-        )
-        for host_path, container_spec in _resolve_optional_tool_mounts(
-            worktree_host=worktree_host, run_dir=run_dir
-        ).items():
-            cmd.extend(["-v", f"{host_path}:{container_spec}"])
+        # Resolve+validate the DECLARED plan before materializing any credential
+        # (the Codex auth.json declared by build_mount_plan) — a refusal here
+        # writes and mints nothing (auto-vm8qh criterion 6).
+        try:
+            _mount_argv = mount_args(plan, discover_topology())
+        except SocketMountRefused:
+            print("ERROR: refusing host Docker socket mount", file=sys.stderr)
+            return 1
+        except (MountUnresolvable, VolumeSubpathUnsupported) as _exc:
+            print(f"ERROR: {_exc}", file=sys.stderr)
+            return 1
+        if _codex_auth is not None:
+            from agents.session_launcher import _materialize_codex_auth_json
+            _materialize_codex_auth_json(run_dir)
+        cmd.extend(_mount_argv)
         cmd.extend(["-w", "/workspace/repo"])
 
         resolved_model = args.model or workspace_model or (
