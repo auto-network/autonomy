@@ -17,6 +17,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from tools.data_paths import DATA_ROOT
 from agents.dispatch_db import (
     DB_PATH,
     REPO_ROOT,
@@ -26,7 +27,7 @@ from agents.dispatch_db import (
     init_db,
 )
 
-AGENT_RUNS_DIR = REPO_ROOT / "data" / "agent-runs"
+AGENT_RUNS_DIR = DATA_ROOT / "agent-runs"
 
 
 def _read_dotfile(run_dir: Path, name: str) -> str:

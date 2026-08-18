@@ -15,12 +15,12 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 
-from tools.data_paths import resolve_store
+from tools.data_paths import DATA_ROOT, resolve_store
 from typing import Any
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_DB_PATH = REPO_ROOT / "data" / "dashboard_identity_sessions.db"
+DEFAULT_DB_PATH = DATA_ROOT / "dashboard_identity_sessions.db"
 TOUCH_INTERVAL_S = 60
 _SCHEMA_USER_VERSION = 2
 

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from tools.data_paths import (
+    DATA_ROOT,
     RealDataFallbackRefused,
     refuse_real_data_fallback_enabled,
     resolve_data_root,
@@ -52,8 +53,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # instead of failing — retiring the manual-install dependency for universal
 # enforcement.
 _SCHEMA_USER_VERSION = 4
-DEFAULT_DB = REPO_ROOT / "data" / "graph.db"
-DEFAULT_ORGS_DIR = REPO_ROOT / "data" / "orgs"
+DEFAULT_DB = DATA_ROOT / "graph.db"
+DEFAULT_ORGS_DIR = DATA_ROOT / "orgs"
 
 # Keep SQLite's existing default lock wait explicit so contention tests can
 # shorten it without changing production behavior.  An rw open gets three

@@ -67,6 +67,7 @@ from starlette.routing import Route
 
 from tools.graph import settings_ops
 from tools.graph.db import GraphDBNotReady
+from tools.data_paths import DATA_ROOT
 from tools.dashboard.dao import identity_sessions
 from tools.dashboard.dashboard_access_approvals import (
     GRANT_SIGNING_DOMAIN as APPROVAL_GRANT_SIGNING_DOMAIN,
@@ -144,7 +145,7 @@ def _secret_path() -> Path:
     override = os.environ.get("DASHBOARD_SESSION_SECRET_FILE")
     if override:
         return Path(override)
-    return _REPO_ROOT / "data" / "dashboard-session.secret"
+    return DATA_ROOT / "dashboard-session.secret"
 
 
 _secret_cache: dict = {"path": None, "value": None}

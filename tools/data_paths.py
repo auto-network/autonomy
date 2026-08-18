@@ -140,6 +140,17 @@ def resolve_data_root() -> Optional[Path]:
     return path
 
 
+#: The single effective volume base directory, imported everywhere in place
+#: of a per-module repo-local ``data/`` join (auto-dnjn0). It is the ambient
+#: :data:`AUTONOMY_DATA_ROOT` when that is set, else the historical
+#: repository-local :data:`DEFAULT_DATA_ROOT` — so with the variable unset
+#: (the case today) ``DATA_ROOT == DEFAULT_DATA_ROOT`` and no default moves.
+#: Composing with :func:`resolve_data_root` keeps one env-reading path and
+#: inherits its fail-closed refusal of an ambiguous relative root, rather than
+#: introducing a second, laxer reader of the same variable.
+DATA_ROOT = resolve_data_root() or DEFAULT_DATA_ROOT
+
+
 def refuse_real_data_fallback_enabled() -> bool:
     """Return whether repository-local fallback paths must be refused."""
     value = os.environ.get(REFUSE_REAL_DATA_FALLBACK_ENV, "")

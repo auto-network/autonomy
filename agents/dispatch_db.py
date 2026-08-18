@@ -14,8 +14,10 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
+from tools.data_paths import DATA_ROOT
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DB_PATH = Path(os.environ.get("DISPATCH_DB", str(REPO_ROOT / "data" / "dispatch.db")))
+DB_PATH = Path(os.environ.get("DISPATCH_DB", str(DATA_ROOT / "dispatch.db")))
 
 CREATE_TABLE = """\
 CREATE TABLE IF NOT EXISTS dispatch_runs (

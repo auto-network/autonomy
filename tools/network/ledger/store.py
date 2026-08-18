@@ -46,7 +46,7 @@ import time
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
-from tools.data_paths import resolve_orgs_root
+from tools.data_paths import DATA_ROOT, resolve_orgs_root
 from tools.network.idkit import canonical_json, verify_signature
 from tools.network.idkit.errors import IdkitError
 
@@ -85,7 +85,7 @@ class TamperError(StoreError):
 
 
 def _orgs_dir(root=None) -> Path:
-    return resolve_orgs_root(root, default=_REPO_ROOT / "data" / "orgs")
+    return resolve_orgs_root(root, default=DATA_ROOT / "orgs")
 
 
 def org_ledger_db_path(slug: str, root=None) -> Path:

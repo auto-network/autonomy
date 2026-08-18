@@ -67,9 +67,9 @@ def _screenshot_path(revision_id: str) -> Path | None:
     rev_id = _safe_revision_id(revision_id)
     if not rev_id:
         return None
-    from agents.design_db import REPO_ROOT
+    from tools.data_paths import DATA_ROOT
 
-    base = (REPO_ROOT / "data" / "experiments").resolve()
+    base = (DATA_ROOT / "experiments").resolve()
     candidate = (base / rev_id / "screenshot.png").resolve()
     try:
         candidate.relative_to(base)
@@ -92,9 +92,9 @@ def _screenshot_revision_ids() -> set[str]:
     cached = _screenshot_cache.get("revision_ids")
     if cached is not None and now < float(_screenshot_cache.get("expires_at") or 0):
         return set(cached)
-    from agents.design_db import REPO_ROOT
+    from tools.data_paths import DATA_ROOT
 
-    base = REPO_ROOT / "data" / "experiments"
+    base = DATA_ROOT / "experiments"
     revision_ids = {
         path.parent.name
         for path in base.glob("*/screenshot.png")

@@ -37,6 +37,8 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from tools.data_paths import DATA_ROOT
+
 from starlette.applications import Starlette
 from starlette.background import BackgroundTask
 from starlette.middleware import Middleware
@@ -369,19 +371,19 @@ def _static_version() -> str:
     logger.warning("[static_version] computed in %.1fms → %s", elapsed_ms, version)
     return version
 
-DISPATCH_STATE_PATH = _REPO_ROOT / "data" / "dispatch.state"
+DISPATCH_STATE_PATH = DATA_ROOT / "dispatch.state"
 # Tests override this via the DASHBOARD_EVENT_BUS_STATE env var to avoid
 # polluting the real repo path when TestClient drives the lifespan.
 EVENT_BUS_STATE_PATH = Path(
     os.environ.get("DASHBOARD_EVENT_BUS_STATE")
-    or str(_REPO_ROOT / "data" / "event_bus.state")
+    or str(DATA_ROOT / "event_bus.state")
 )
 # Resource collector ring buffers survive hot reloads the same way the
 # event bus does: snapshot on shutdown, restore on boot. Env-overridable
 # for tests, mirroring DASHBOARD_EVENT_BUS_STATE.
 RESOURCE_MONITOR_STATE_PATH = Path(
     os.environ.get("DASHBOARD_RESOURCE_MONITOR_STATE")
-    or str(_REPO_ROOT / "data" / "resource_monitor.state")
+    or str(DATA_ROOT / "resource_monitor.state")
 )
 # Labels always shown in pause UI even if not in dispatch.state
 _KNOWN_PAUSE_LABELS = ["dashboard"]
@@ -7454,7 +7456,7 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
         extra_env = extra_env or None
 
         ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        run_dir = _REPO_ROOT / "data" / "agent-runs" / f"{tmux_name}-{ts}"
+        run_dir = DATA_ROOT / "agent-runs" / f"{tmux_name}-{ts}"
         run_dir.mkdir(parents=True, exist_ok=True)
         primer_path = run_dir / ".claude_md"
         primer_path.write_text(render_workspace_primer(proj))
@@ -7885,7 +7887,7 @@ def _run_simple_session_start(job: LifecycleJob, writer: SessionLifecycleStateWr
             sess_dir = None
         else:
             ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-            run_dir = _REPO_ROOT / "data" / "agent-runs" / f"{tmux_name}-{ts}"
+            run_dir = DATA_ROOT / "agent-runs" / f"{tmux_name}-{ts}"
             run_dir.mkdir(parents=True, exist_ok=True)
             sess_dir = run_dir / "sessions"
             cmd_str = launch_session(
@@ -8895,7 +8897,7 @@ async def api_session_resume(request):
         )
 
     # ── Determine session type ──
-    agent_runs_dir = str(_REPO_ROOT / "data" / "agent-runs")
+    agent_runs_dir = str(DATA_ROOT / "agent-runs")
     if session_type is None:
         if file_path.startswith(agent_runs_dir) or "/agent-runs/" in file_path:
             session_type = "container"
@@ -9219,7 +9221,7 @@ async def api_upload(request):
                     status_code=404,
                 )
     else:
-        target_dir = _REPO_ROOT / "data" / "uploads"
+        target_dir = DATA_ROOT / "uploads"
 
     target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -9578,7 +9580,7 @@ def _open_voice_audio_capture(bind: str):
     """Open a 16kHz mono int16 WAV writer for raw browser PCM frames, or None."""
     import wave
     try:
-        d = _REPO_ROOT / "data" / "voice-captures"
+        d = DATA_ROOT / "voice-captures"
         d.mkdir(parents=True, exist_ok=True)
         ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         safe = re.sub(r"[^A-Za-z0-9_-]", "_", str(bind))[:40] or "voice"
@@ -10447,7 +10449,7 @@ async def api_design_screenshot(request):
     if not design:
         return JSONResponse({"error": "not found"}, status_code=404)
 
-    screenshot_dir = _REPO_ROOT / "data" / "experiments" / rev_id
+    screenshot_dir = DATA_ROOT / "experiments" / rev_id
     screenshot_dir.mkdir(parents=True, exist_ok=True)
     screenshot_path = screenshot_dir / "screenshot.png"
 
@@ -11894,7 +11896,7 @@ import uuid as _uuid_mod
 _DIAG_AGGREGATORS: dict[str, dict] = {}
 _DIAG_AGGREGATOR_TTL_SECONDS = 30.0
 _DIAG_COLLECTION_WINDOW_SECONDS = 3.0
-_DIAG_DIR = _REPO_ROOT / "data" / "diag"
+_DIAG_DIR = DATA_ROOT / "diag"
 
 
 def _diag_janitor_sweep(now: float | None = None) -> None:
@@ -13250,7 +13252,7 @@ async def api_voice_trace(request):
                 {"ok": False, "error": "rendered voice trace exceeds the 2 MiB limit"},
                 status_code=413,
             )
-        traces_dir = _REPO_ROOT / "data" / "voice-traces"
+        traces_dir = DATA_ROOT / "voice-traces"
         traces_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
         reason = re.sub(r"[^a-z0-9]+", "-", str(body.get("reason", "trace")).lower())[:24] or "trace"
@@ -16808,10 +16810,9 @@ async def api_agent_action_dispatch(request):
     # dispatch_runs row at launch — the live-trace endpoint and the
     # completion watcher both read it from there. Mirrors the layout
     # session_launcher would otherwise pick (data/agent-runs/{name}-{ts}).
-    from agents.session_launcher import REPO_ROOT as _SESSION_REPO_ROOT
     _run_ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     output_dir_path = (
-        _SESSION_REPO_ROOT / "data" / "agent-runs" / f"{container_name}-{_run_ts}"
+        DATA_ROOT / "agent-runs" / f"{container_name}-{_run_ts}"
     )
     output_dir = str(output_dir_path)
 
