@@ -101,3 +101,37 @@ run through production code and real services.
 `NotImplementedError`. The sync sprint replaces those refusals with real
 network controls and convergence assertions; this harness never reports a
 fake sync success.
+
+## Production TURN acceptance
+
+The TURN acceptance is a separate command because it writes short-lived test
+organizations to the selected Registry, while the admission/portability
+ladder above owns an entirely local Registry:
+
+```bash
+python3 -m deploy.harness.production_turn \
+  --registry-url https://registry.auto.network \
+  --relay-url wss://relay.auto.network
+```
+
+Both endpoints are required; the runner has no implicit production host. It
+creates two data-root-isolated serving nodes, registers and publishes through
+the normal signed Registry API, and marks only the nodes' local Mission grants
+`relay_only`. Each serving tunnel uses the WSS form of the Registry URL; guest
+link channels use the separately supplied Relay URL. In both directions it
+requires a selected relay/relay candidate
+pair, fetches a Mission document larger than one record, receives a sealed
+Mission feed event, and makes another request afterward. It then opens a fresh
+TURN-backed channel before closing the first and proves the replacement still
+serves after the old channel closes.
+
+Link tokens, org roots, serving keys, TURN coupons, and feed keys remain in
+temporary mode-0600 state. By default the runner revokes both links and deletes
+that state; two successful revocations, stopped connector processes, and
+deleted secret roots are required before the run records a pass.
+`--keep-state` is only for bounded diagnosis. The durable
+`evidence.json` contains candidate types, artifact sizes and hashes, feed and
+renewal results, and no bearer material. The local SSE source is the sole
+stand-in: it replaces the Dashboard's `/api/events` emitter, while Registry,
+relay, TURN, connector, encryption, Mission rendering, and feed delivery all
+use production implementations.
