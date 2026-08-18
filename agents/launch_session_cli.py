@@ -329,8 +329,20 @@ def main() -> int:
             print(f"ERROR: {_exc}", file=sys.stderr)
             return 1
         if _codex_auth is not None:
-            from agents.session_launcher import _materialize_codex_auth_json
-            _materialize_codex_auth_json(run_dir)
+            # The plan DECLARED the Codex auth mount, so _mount_argv already binds
+            # _codex_auth. If materialization fails here (write error, or the row
+            # expired/raced away since declare), the bound path was never written:
+            # host-process -v would fabricate a dir there, the fallback bind would
+            # fail only at docker-run. Refuse instead — delete any partial file and
+            # return before Docker runs (auto-vm8qh criterion 6, foreground path).
+            from agents.session_launcher import (
+                _materialize_codex_auth_json, _delete_if_present,
+            )
+            if _materialize_codex_auth_json(run_dir) is None:
+                _delete_if_present(_codex_auth)
+                print("ERROR: a Codex credential was declared but failed to "
+                      "materialize", file=sys.stderr)
+                return 1
         cmd.extend(_mount_argv)
         cmd.extend(["-w", "/workspace/repo"])
 
