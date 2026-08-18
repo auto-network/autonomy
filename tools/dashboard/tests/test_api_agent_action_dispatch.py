@@ -655,6 +655,93 @@ def test_dispatch_explicit_workspace_materializes_workspace_settings(
     assert call["global_claude_md"].name == ".claude_md"
 
 
+def _seed_cross_org_action(org_db: Path, *, key: str, workspace: str) -> None:
+    """One action row naming a workspace this org's DB does not itself hold.
+
+    Same insert shape as ``_seed_actions``, isolated so this specific
+    vulnerability case does not perturb the shared per-org action set every
+    other test in this file depends on.
+    """
+    payload = {
+        "asset_type": "note",
+        "label": "Cross-org workspace probe",
+        "model": "claude-haiku-4-5-20251001",
+        "workspace": workspace,
+        "prompt_template": "Review {asset[id]}.\n",
+    }
+    schemas.validate_payload(AGENT_ACTIONS_SET_ID, AGENT_ACTIONS_REVISION, payload)
+    db = GraphDB(org_db)
+    try:
+        now = "2026-04-28T00:00:00Z"
+        db.conn.execute(
+            "INSERT INTO settings(id, set_id, schema_revision, key, "
+            "payload, publication_state, created_at, updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            ("ag-" + key.replace(".", "-"), AGENT_ACTIONS_SET_ID,
+             AGENT_ACTIONS_REVISION, key, json.dumps(payload), "canonical",
+             now, now),
+        )
+        db.conn.commit()
+    finally:
+        db.close()
+
+
+def test_dispatch_refuses_cross_org_workspace_even_when_canonical(
+    client, per_org_universe,
+):
+    """auto-2izkp — the vulnerability this dispatcher-side check closes.
+
+    An action stored in autonomy's DB names ``anchore-rig``, which
+    ``per_org_universe`` seeds into anchore's DB at publication_state
+    ``canonical`` — read-through visible cross-org by design. Without the
+    ``peers=[]`` scoping in the dispatcher's check, this exact row would be
+    FOUND via read-through and the dispatch would succeed, running the
+    autonomy-authored prompt against anchore's mounted workspace. That is
+    the bug; this test fails if the fix regresses to peers=None.
+    """
+    asset_id = "77777777-7777-7777-7777-777777777777"
+    _insert_note_source(org="autonomy", source_id=asset_id, title="Cross-org probe")
+    _seed_cross_org_action(
+        per_org_universe / "autonomy.db",
+        key="note.cross-org-probe",
+        workspace="anchore-rig",
+    )
+
+    r = client.post("/api/agent-actions/dispatch", json={
+        "member_key": "note.cross-org-probe",
+        "asset_id": asset_id,
+    })
+
+    assert r.status_code == 409, r.json()
+    assert r.json()["error"] == "unknown workspace"
+    # Same shape as a workspace that does not exist anywhere — deliberately
+    # indistinguishable from "not found", matching the existing
+    # target_org_auth_error policy of never confirming that something
+    # exists in an org the caller cannot see.
+    assert r.json()["workspace"] == "anchore-rig"
+
+
+def test_dispatch_accepts_same_org_workspace_unaffected(
+    client, per_org_universe,
+):
+    """The control. Without it, a check that refused everything would pass
+    the test above for the wrong reason."""
+    asset_id = "88888888-8888-8888-8888-888888888888"
+    _insert_note_source(org="autonomy", source_id=asset_id, title="Same-org probe")
+    _seed_cross_org_action(
+        per_org_universe / "autonomy.db",
+        key="note.same-org-probe",
+        workspace="autonomy-rig",
+    )
+
+    r = client.post("/api/agent-actions/dispatch", json={
+        "member_key": "note.same-org-probe",
+        "asset_id": asset_id,
+    })
+
+    assert r.status_code == 201, r.json()
+
+
 def test_dispatch_bead_action_creates_agentic_source(
     client, per_org_universe, patch_launch_session, monkeypatch,
 ):

@@ -16718,6 +16718,24 @@ async def api_agent_action_dispatch(request):
     # ── Step 4b: non-universal action — workspace lookup ─────────
     explicit_workspace = str(payload.get("workspace") or "").strip()
     if explicit_workspace:
+        # Same-org enforcement, independent of the schema-level write guard
+        # (auto-2izkp): get_workspace() reads a machine-global cache merged
+        # across every org's DB, so an action stored in one org could name
+        # another org's workspace and run its prompt against that org's
+        # mounted source tree. Checked here, at the org (target_org) that
+        # owns THIS action row, with peers=[] so a published/canonical
+        # workspace in a different org can't be found by read-through — the
+        # same check the write guard performs, kept independent so a row
+        # that reaches this table by any path other than the guarded write
+        # is still refused at dispatch.
+        if settings_ops.read_set_key(
+            workspace_settings.WORKSPACE_SET_ID, explicit_workspace,
+            org=target_org, peers=[],
+        ) is None:
+            return JSONResponse(
+                {"error": "unknown workspace", "workspace": explicit_workspace},
+                status_code=409,
+            )
         try:
             workspace = workspace_settings.get_workspace(explicit_workspace)
         except KeyError:
