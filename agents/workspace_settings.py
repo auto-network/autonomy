@@ -71,9 +71,10 @@ from tools.graph.schemas.org_capability_primer import (
     resolve_order as resolve_capability_primer_order,
 )
 from tools.graph.settings_ops import ResolvedSetting
+from tools.data_paths import DATA_ROOT
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_ARTIFACTS_ROOT = REPO_ROOT / "data" / "artifacts"
+DEFAULT_ARTIFACTS_ROOT = DATA_ROOT / "artifacts"
 ARTIFACTS_MOUNT_DIR = "/etc/autonomy/artifacts"
 CAPABILITIES_MOUNT_DIR = "/opt/autonomy/capabilities"
 

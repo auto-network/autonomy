@@ -34,6 +34,8 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+from tools.data_paths import DATA_ROOT
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_IMAGE = "autonomy-agent:dashboard"
 
@@ -1196,7 +1198,7 @@ def launch_session(
         # litter the real repo's data/agent-runs with launch fixtures.
         base = Path(os.environ.get(
             "DASHBOARD_AGENT_RUNS_DIR",
-            str(REPO_ROOT / "data" / "agent-runs"),
+            str(DATA_ROOT / "agent-runs"),
         ))
         run_dir = base / f"{name}-{ts}"
 
@@ -1272,7 +1274,7 @@ def launch_session(
     try:
         # Pre-create so docker binds the operator-owned directory instead of
         # manufacturing a root-owned one inside the live repo.
-        (REPO_ROOT / "data" / "uploads").mkdir(parents=True, exist_ok=True)
+        (DATA_ROOT / "uploads").mkdir(parents=True, exist_ok=True)
     except OSError:
         pass
     default_mounts: dict[str, str] = {
@@ -1334,7 +1336,7 @@ def launch_session(
             for spec in default_mounts.values()
         )
     ):
-        default_mounts[str(REPO_ROOT / "data" / "uploads")] = f"{uploads_target}:ro"
+        default_mounts[str(DATA_ROOT / "uploads")] = f"{uploads_target}:ro"
 
     # Capability mounts: package roots, tool subtrees, and secret files for
     # every enabled MaterializedCapability. Caller-supplied mounts for the

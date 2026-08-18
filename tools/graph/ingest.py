@@ -19,6 +19,7 @@ from tools.codex_transcript import (
 
 from .models import Source, Thought, Derivation, Entity, Edge, now_iso
 from .db import GraphDB, resolve_caller_db_path
+from tools.data_paths import DATA_ROOT
 
 
 # ── Frontmatter Parser ───────────────────────────────────────
@@ -1925,7 +1926,7 @@ def _scan_session_files() -> list[Path]:
                 continue
             files.extend(sorted(project_dir.glob("*.jsonl")))
 
-    agent_runs_dir = _REPO_ROOT / "data" / "agent-runs"
+    agent_runs_dir = DATA_ROOT / "agent-runs"
     if agent_runs_dir.exists():
         for run_dir in sorted(agent_runs_dir.iterdir()):
             if not run_dir.is_dir():

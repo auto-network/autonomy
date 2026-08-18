@@ -53,10 +53,11 @@ from agents.librarian_db import enqueue as enqueue_job, dequeue, complete_job, f
 from agents.workspace_manager import WORKTREES_DIR, cleanup_session_worktrees
 from agents.workspace_settings import WorkspaceV1, load_workspaces
 from agents.session_launcher import launch_session, DEFAULT_OPUS_MODEL
+from tools.data_paths import DATA_ROOT
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LAUNCH_SCRIPT = Path(__file__).parent / "launch.sh"
-DISPATCH_STATE_PATH = REPO_ROOT / "data" / "dispatch.state"
+DISPATCH_STATE_PATH = DATA_ROOT / "dispatch.state"
 
 DEFAULT_IMAGE = "autonomy-agent"
 # DEFAULT_OPUS_MODEL is imported from session_launcher — the single source of
@@ -1139,7 +1140,7 @@ _DASHBOARD_WATCH_PATHS = (
     "tools/dashboard/dao/",
 )
 
-_DISPATCH_STATE_PATH = REPO_ROOT / "data" / "dispatch.state"
+_DISPATCH_STATE_PATH = DATA_ROOT / "dispatch.state"
 _START_DISPATCHER_SCRIPT = REPO_ROOT / "agents" / "start-dispatcher.sh"
 _DISPATCHER_WATCH_PATHS = (
     "agents/dispatcher.py",
@@ -2204,7 +2205,7 @@ def start_librarian(job: dict) -> RunningLibrarian | None:
 
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     run_id = f"librarian-{job_type}-{job_id[:8]}-{ts}"
-    output_dir = str(REPO_ROOT / "data" / "agent-runs" / run_id)
+    output_dir = str(DATA_ROOT / "agent-runs" / run_id)
 
     container_name = f"librarian-{job_type}-{os.getpid()}-{job_id[:8]}"
     harness = "claude"
@@ -2870,7 +2871,7 @@ def _open_dispatch_db():
     standard dispatch_db helpers; this handle is used only for the
     SELECT step.
     """
-    db_path = REPO_ROOT / "data" / "dispatch.db"
+    db_path = DATA_ROOT / "dispatch.db"
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     return conn
@@ -3364,7 +3365,7 @@ def reconcile_stale_monitor_rows() -> None:
     """
     import sqlite3 as _sq
 
-    db_path = os.environ.get("DASHBOARD_DB", str(REPO_ROOT / "data" / "dashboard.db"))
+    db_path = os.environ.get("DASHBOARD_DB", str(DATA_ROOT / "dashboard.db"))
     try:
         conn = _sq.connect(db_path)
         conn.row_factory = _sq.Row
@@ -3546,7 +3547,7 @@ def reconcile_state(running: list[RunningAgent]) -> None:
 
             # Get branch_base from the most recent output dir for this bead
             branch_base = ""
-            runs_dir = REPO_ROOT / "data" / "agent-runs"
+            runs_dir = DATA_ROOT / "agent-runs"
             if runs_dir.exists():
                 run_candidates = sorted(
                     runs_dir.glob(f"{bead_id}-*"),
@@ -3620,7 +3621,7 @@ def recover_running_agents() -> list[RunningAgent]:
             bead_id = bead_id_and_pid.rsplit("-", 1)[0]
 
             # Find output dir
-            runs_dir = REPO_ROOT / "data" / "agent-runs"
+            runs_dir = DATA_ROOT / "agent-runs"
             if not runs_dir.exists():
                 continue
             candidates = sorted(
@@ -3708,7 +3709,7 @@ def main():
     print(f"  Loop: {config.loop} (interval: {config.interval}s)")
 
     # Ensure only one dispatcher runs at a time
-    pid_file = REPO_ROOT / "data" / "dispatcher.pid"
+    pid_file = DATA_ROOT / "dispatcher.pid"
     if pid_file.exists():
         old_pid = pid_file.read_text().strip()
         try:

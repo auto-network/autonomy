@@ -26,7 +26,7 @@ from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Any
 
-from tools.data_paths import resolve_orgs_root
+from tools.data_paths import DATA_ROOT, resolve_orgs_root
 
 from .db import GraphDB
 from . import schemas
@@ -34,7 +34,7 @@ from .schemas.registry import SchemaValidationError
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_ORGS_DIR = REPO_ROOT / "data" / "orgs"
+DEFAULT_ORGS_DIR = DATA_ROOT / "orgs"
 
 VALID_ORG_TYPES = ("shared", "personal")
 

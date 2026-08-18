@@ -29,6 +29,7 @@ import sys
 from pathlib import Path
 
 from agents.session_launcher import launch_session, DEFAULT_IMAGE, DEFAULT_OPUS_MODEL, REPO_ROOT
+from tools.data_paths import DATA_ROOT
 from agents.workspace_settings import load_workspaces
 
 
@@ -50,7 +51,7 @@ def _workspace_org(workspace_id: str) -> str | None:
 def _available_orgs() -> list[str]:
     """Best-effort list of known org slugs, for the missing-org error message."""
     try:
-        orgs_dir = REPO_ROOT / "data" / "orgs"
+        orgs_dir = DATA_ROOT / "orgs"
         return sorted(p.stem for p in orgs_dir.glob("*.db"))
     except Exception:
         return []
@@ -203,7 +204,7 @@ def main() -> int:
         if not container_id:
             return 1
 
-        resolved_output = output_dir or str(REPO_ROOT / "data" / "agent-runs" / args.name)
+        resolved_output = output_dir or str(DATA_ROOT / "agent-runs" / args.name)
         print(f"CONTAINER_ID={container_id}")
         print(f"OUTPUT_DIR={resolved_output}")
         return 0
@@ -229,7 +230,7 @@ def main() -> int:
             run_dir = Path(output_dir)
         else:
             ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-            run_dir = REPO_ROOT / "data" / "agent-runs" / f"{args.name}-{ts}"
+            run_dir = DATA_ROOT / "agent-runs" / f"{args.name}-{ts}"
 
         run_dir.mkdir(parents=True, exist_ok=True)
         sessions_dir = run_dir / "sessions"
@@ -292,7 +293,7 @@ def main() -> int:
         if repo_mount_host is not None and (
             Path(repo_mount_host) / "data" / "uploads"
         ).is_dir():
-            mounts[str(REPO_ROOT / "data" / "uploads")] = (
+            mounts[str(DATA_ROOT / "uploads")] = (
                 "/workspace/repo/data/uploads:ro"
             )
         if args.git_dir:

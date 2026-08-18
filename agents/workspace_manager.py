@@ -46,6 +46,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Iterable
 
+from tools.data_paths import DATA_ROOT
 from agents.git_status import has_working_tree_changes
 from agents.workspace_settings import (
     RepoMount,
@@ -55,7 +56,7 @@ from agents.workspace_settings import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = REPO_ROOT / "data"
+DATA_DIR = DATA_ROOT
 REPOS_DIR = DATA_DIR / "repos"
 WORKTREES_DIR = DATA_DIR / "worktrees"
 LOCAL_WORKSPACE_REPOS_DIR = DATA_DIR / "workspace-repos"

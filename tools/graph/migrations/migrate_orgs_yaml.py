@@ -34,7 +34,7 @@ from typing import Any
 
 import yaml
 
-from tools.data_paths import resolve_orgs_root
+from tools.data_paths import DATA_ROOT, resolve_orgs_root
 from tools.graph import org_ops, schemas
 from tools.graph.db import GraphDB
 from tools.graph.org_ops import uuid7
@@ -42,7 +42,7 @@ from tools.graph.schemas.org import ORG_SET_ID, ORG_REVISION
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_ORGS_DIR = REPO_ROOT / "data" / "orgs"
+DEFAULT_ORGS_DIR = DATA_ROOT / "orgs"
 DEFAULT_PROJECTS_YAML = REPO_ROOT / "agents" / "projects.yaml"
 
 
