@@ -242,6 +242,44 @@ agent-browser eval "document.title"   # run JS in page context
 Run `agent-browser --help` for full reference.
 See `agents/shared/dashboard/agent-browser-primer.md` for dashboard-specific patterns.
 
+### Defining agents
+
+Agentic workloads are defined by "agent-actions" settings which define a reusable
+prompt to run against a given input inside a specific workspace.
+
+To define a new action:
+
+    graph set add dashboard.agent-actions#2 --key note.adversarial-review --from action.json
+
+- `asset_type` — bead, note, design, session; must match the key prefix
+- `label` — text shown in the dashboard dropdown
+- `model` — model id, e.g. `gpt-5.6-sol`
+- `workspace` — workspace id, from `graph set members autonomy.workspace`; sets the harness
+- `prompt_template` — the agent's instructions
+
+`graph set schema dashboard.agent-actions` lists every field.
+
+To list the defined actions:
+
+    graph set members dashboard.agent-actions
+
+### Running agents
+
+To dispatch an agentic run on an existing action:
+
+    POST /api/agent-actions/dispatch
+
+- `asset_id` — id of the bead, note or design to run against
+- `member_key` — action key
+
+To start a session you can send messages to:
+
+    POST /api/session/create → {"tmux_name"}
+
+- `project` — workspace id, from `graph set members autonomy.workspace`; sets harness and model
+- `primer` — `graph://<id>` of any note; becomes the session's first message
+- `type` — `container` or `host`
+
 ### CrossTalk — Session Messaging
 Other sessions (including the dispatcher and coordinators) may send you
 messages via CrossTalk. They appear in your JSONL stream as

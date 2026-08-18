@@ -100,7 +100,7 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 | `graph set read <set_id> <key>` | Resolved effective payload for a member | `graph set read dashboard.agent-actions bead.dry-run-implement` |
 | `graph set schema <set_id>` | Print the registered schema for a set_id | `graph set schema dashboard.agent-actions` |
 | `graph set example <set_id>` | Emit a stub JSON payload for a registered schema | `graph set example dashboard.agent-actions` |
-| `graph set add <set_id> <key> --payload @<file>` | Create **or update** a base Setting — writes the whole payload, upserting in place when the key exists | `graph set add dashboard.agent-actions bead.ask-question --payload @ask-question.json` |
+| `graph set add <set_id>#<rev> --key <key> --from <file>` | Create **or update** a base Setting — writes the whole payload, upserting in place when the key exists | `graph set add dashboard.agent-actions#2 --key bead.ask-question --from action.json` |
 | `graph set override <id> --inline '{...}'` | Patch selected fields of an existing Setting, leaving the rest alone | `graph set override 40d144a4-b5 --inline '{"image":"autonomy-agent:scale-harness"}'` |
 | `graph set exclude / deprecate / remove` | Lifecycle commands | `graph set --help` for full list |
 | `graph set find <noun>` | Search schemas by topic | `graph set find action` |
@@ -186,8 +186,11 @@ labels** — there is no per-bead flag on `graph dispatch approve` (see
 
 - **Model** — selected with an optional `model:<name>` label so a simple bead
   can run cheap and a complex one expensive. Precedence, highest first:
-  1. **bead label** — `model:opus`, `model:sonnet`, or `model:haiku` (a known
-     full model id is also accepted). Wins over everything.
+  1. **bead label** — `model:opus`, `model:sonnet`, `model:haiku`, `model:opus-5`,
+     `model:sonnet-5`, `model:fable-5`, `model:haiku-4-5`, `model:opus-4-8`,
+     `model:sonnet-4-6`, or a full model id. Family aliases are pinned to a
+     version and deliberately not repointed on a new release. Wins over
+     everything.
   2. **workspace model** — the model declared on the bead's workspace.
   3. **built-in default** — `DEFAULT_OPUS_MODEL` for claude, resolved in
      `agents/session_launcher.py`.
