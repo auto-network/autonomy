@@ -13626,6 +13626,27 @@ async def _harness_usage_poller() -> None:
         await asyncio.sleep(_HARNESS_USAGE_POLL_INTERVAL)
 
 
+async def _vault_release_sweeper() -> None:
+    """Destroy delivered secrets at their deadline or session end (auto-pw9bs.5).
+
+    The durable record store survives a dashboard restart; this loop is the
+    live half that acts on it. Runs off-loop (the sweep unlinks host files
+    and probes tmux). One failing tick never kills the loop — the record
+    stays outstanding and the next tick retries."""
+    from tools.dashboard import vault_release_sweeper as _vault_sweeper
+
+    while True:
+        try:
+            await asyncio.to_thread(
+                _vault_sweeper.sweep, session_exists=_tmux_session_exists,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("vault release sweeper tick failed")
+        await asyncio.sleep(_vault_sweeper.SWEEP_INTERVAL_S)
+
+
 async def _dispatch_watcher():
     """Background task: poll dispatch state and broadcast to SSE topics.
 
@@ -18243,6 +18264,7 @@ _claude_credentials_refresh_task: asyncio.Task | None = None
 _codex_credentials_refresh_task: asyncio.Task | None = None
 _event_loop_watchdog_task: asyncio.Task | None = None
 _recent_sessions_refresher_task: asyncio.Task | None = None
+_vault_release_sweeper_task: asyncio.Task | None = None
 _settings_mediator_started: bool = False
 
 
@@ -18570,6 +18592,28 @@ async def _on_startup():
             target=_loop_stall_sampler, name="loop-stall-sampler", daemon=True,
         ).start()
     _recent_sessions_refresher_task = asyncio.create_task(_recent_sessions_refresher())
+    # Vault release reconciliation + sweeper (auto-pw9bs.5). Reconcile FIRST,
+    # before the sweeper loop and before traffic: a delivered secret whose
+    # cleanup was owed when the prior process died is still present in ramfs
+    # (which survives a dashboard restart, only a reboot wipes it), and the
+    # durable record is the only state that points at it. Reconciliation
+    # destroys the ones now overdue or whose session is gone and reclaims
+    # orphaned session directories; the loop then keeps the rest to their
+    # deadlines. Best-effort: a reconciliation failure must not stop startup,
+    # but it is logged loudly because an unswept secret is the thing this
+    # subsystem exists to prevent.
+    try:
+        from tools.dashboard import vault_release_sweeper as _vault_sweeper
+        await asyncio.to_thread(
+            _vault_sweeper.reconcile_on_startup,
+            session_exists=_tmux_session_exists,
+        )
+    except Exception:
+        logger.exception(
+            "vault release reconciliation failed on startup; the periodic "
+            "sweeper will still run and catch outstanding releases",
+        )
+    _vault_release_sweeper_task = asyncio.create_task(_vault_release_sweeper())
     # Session lifecycle worker (FSM redesign 2026-06-18): start the single
     # off-loop thread that owns workspace start/stop/retry. It sits idle until
     # api_session_create is rewired to enqueue — starting it now is additive and
@@ -18661,6 +18705,7 @@ async def _on_shutdown():
     global _harness_usage_poller_task, _claude_credentials_refresh_task
     global _codex_credentials_refresh_task
     global _settings_mediator_started, _serving_bootstrap_task
+    global _vault_release_sweeper_task
     # Clear the emit hook so a subsequent process / test reload doesn't
     # leak a stale binding into a swapped module-level event_bus.
     try:
@@ -18706,6 +18751,7 @@ async def _on_shutdown():
             _codex_credentials_refresh_task,
             _event_loop_watchdog_task,
             _recent_sessions_refresher_task,
+            _vault_release_sweeper_task,
         )
         if t and not t.done()
     ]
@@ -18718,6 +18764,7 @@ async def _on_shutdown():
     _harness_usage_poller_task = None
     _claude_credentials_refresh_task = None
     _codex_credentials_refresh_task = None
+    _vault_release_sweeper_task = None
     try:
         await session_monitor.stop()
     except Exception:
