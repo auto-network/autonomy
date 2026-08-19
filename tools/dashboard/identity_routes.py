@@ -311,6 +311,7 @@ async def post_personal(request: Request) -> JSONResponse:
     from tools.network.idkit.armor import (
         ArmorError,
         armor_root_pub,
+        armor_version,
         canonicalize_armor_any,
     )
     try:
@@ -339,15 +340,41 @@ async def post_personal(request: Request) -> JSONResponse:
                              "error": f"could not read the personal identity: {e}"},
                             status_code=500)
     if existing is not None:
-        return JSONResponse({"ok": False, "error": (
-            "a personal identity already exists — the Get started flow "
-            "never overwrites your root key"
-        )}, status_code=409)
+        # THROWAWAY carve-out for the one-time v1 -> v2 upgrade (auto-wx94n),
+        # deleted with the v1 reader once the operator has signed in once.
+        # Narrow deliberately: ONLY a v1 row may be replaced, ONLY by a v2
+        # armor, and ONLY when the enclosed public key is unchanged. So this
+        # cannot swap the operator's identity for another one — the strongest
+        # property the 409 was giving us — while still letting the upgrade
+        # land. Deleting the 409 outright would have given that away for the
+        # same one-time effect.
+        from tools.network.idkit.armor import ARMOR_VERSION, ARMOR_VERSION_2
+        try:
+            old_armor = existing.payload.get("armored_private_key") or ""
+            is_upgrade = (
+                armor_version(old_armor) == ARMOR_VERSION
+                and armor_version(canonical_armor) == ARMOR_VERSION_2
+                and existing.payload.get("root_pub") == root_pub
+            )
+        except ArmorError:
+            is_upgrade = False
+        if not is_upgrade:
+            return JSONResponse({"ok": False, "error": (
+                "a personal identity already exists — the Get started flow "
+                "never overwrites your root key"
+            )}, status_code=409)
+        display_name = existing.payload.get("display_name") or display_name
+        label = existing.key
     payload = {
         "armored_private_key": canonical_armor,
         "root_pub": root_pub,
         "display_name": display_name,
-        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        # Re-armoring is not a new identity. Restamping created_at on the
+        # upgrade would rewrite the date the operator actually enrolled.
+        "created_at": (
+            (existing.payload.get("created_at") if existing is not None else None)
+            or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        ),
     }
     try:
         # The identity sets are write-protected against the generic

@@ -6,6 +6,9 @@ import {
   decryptArmor,
   decryptArmorAny,
   encryptArmorV2,
+  // THROWAWAY, with the rest of the v1 path (auto-wx94n).
+  armorVersion,
+  migrateArmorV1ToV2,
   importEd25519RootSigningKey,
   openSealedArmor,
   deriveEncapsulationKeypair,
@@ -1191,6 +1194,9 @@ var signRegistryRequestCore;
       decryptArmor: decryptArmor,
       decryptArmorAny: decryptArmorAny,
       encryptArmorV2: encryptArmorV2,
+      // THROWAWAY, with the rest of the v1 path (auto-wx94n).
+      armorVersion: armorVersion,
+      migrateArmorV1ToV2: migrateArmorV1ToV2,
       openOrgRoot: _openOrgRoot,
       derivePersona: derivePersona,
       resolveOrgEntry: function (ref) {
