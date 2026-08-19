@@ -395,6 +395,18 @@ CREATE TABLE IF NOT EXISTS settings (
     signing_key       TEXT,                         -- hex Ed25519 key the signature verifies against
     signature         TEXT,                         -- hex Ed25519 over the domain-separated canonical record
     witness           TEXT,                         -- cited witness attestation, JSON; NULL = org never published
-    terminal_persona  TEXT                          -- persona boundary verification resolved the signer to
+    terminal_persona  TEXT,                         -- persona boundary verification resolved the signer to
+    -- A row is unsigned (all five NULL) or signed (the four non-witness
+    -- columns all present; witness stays free, because a signed row of an
+    -- org that has never published legitimately cites nothing). The 29
+    -- partial states in between are storage corruption, refused here for
+    -- fresh tables and by the equivalent triggers in _migrate_settings for
+    -- tables that predate this constraint (SQLite cannot ADD CHECK).
+    CHECK (
+        (signed_at IS NULL AND signing_key IS NULL AND signature IS NULL
+         AND witness IS NULL AND terminal_persona IS NULL)
+        OR (signed_at IS NOT NULL AND signing_key IS NOT NULL
+            AND signature IS NOT NULL AND terminal_persona IS NOT NULL)
+    )
 );
 -- Indices created via _migrate_settings so legacy DBs survive executescript.

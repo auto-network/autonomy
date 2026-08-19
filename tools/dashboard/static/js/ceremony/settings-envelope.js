@@ -174,11 +174,33 @@ async function signSettingsRecord(record, ed25519SigningKey) {
   ) {
     throw new Error('signSettingsRecord requires an Ed25519 private signing key');
   }
+  const signingInput = settingsSigningInput(record);
   const signature = await webCrypto.subtle.sign(
     'Ed25519',
     ed25519SigningKey,
-    settingsSigningInput(record),
+    signingInput,
   );
+  // The record names its signer; a signature by any other key would fail
+  // verification everywhere else, so prove it against the NAMED key before
+  // returning rather than handing back a silently useless signature. Mirrors
+  // the Python side's sign_record refusal — WebCrypto cannot compare a
+  // private CryptoKey to a public hex directly, so the proof is a verify.
+  const namedKey = await webCrypto.subtle.importKey(
+    'raw',
+    hexToBytes(record.signing_key),
+    { name: 'Ed25519' },
+    false,
+    ['verify'],
+  );
+  const signedByNamedKey = await webCrypto.subtle.verify(
+    'Ed25519',
+    namedKey,
+    signature,
+    signingInput,
+  );
+  if (!signedByNamedKey) {
+    throw new Error('record.signing_key does not match the signing key');
+  }
   return bytesToHex(signature);
 }
 

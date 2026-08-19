@@ -147,3 +147,97 @@ def test_an_edited_signed_column_fails_verification(signed_row_db, tamper):
     row = fetch_row(db)
     with pytest.raises(SignatureError):
         verify_record(record_from_row(row, GENESIS), row["signature"])
+
+
+# --- a row is unsigned or signed; the 29 states in between do not store -----
+
+ENVELOPE_VALUES = {
+    "signed_at": 1_755_500_000_123,
+    "signing_key": PERSONA.public_hex,
+    "signature": "ab" * 64,
+    "witness": '{"entry": {}}',
+    "terminal_persona": PERSONA.public_hex,
+}
+
+
+def _valid_pattern(present: set[str]) -> bool:
+    if not present:
+        return True  # unsigned
+    return {"signed_at", "signing_key", "signature", "terminal_persona"} <= present
+
+
+def _all_patterns():
+    columns = list(ENVELOPE_VALUES)
+    for mask in range(2 ** len(columns)):
+        yield {columns[i] for i in range(len(columns)) if mask >> i & 1}
+
+
+def _assert_envelope_state_invariant(db):
+    accepted, refused = [], []
+    for present in _all_patterns():
+        row_id = "pattern-" + "-".join(sorted(present)) if present else "pattern-none"
+        values = {c: (ENVELOPE_VALUES[c] if c in present else None)
+                  for c in ENVELOPE_VALUES}
+        try:
+            with db.conn:
+                db.conn.execute(
+                    "INSERT INTO settings (id, set_id, schema_revision, key,"
+                    " payload, signed_at, signing_key, signature, witness,"
+                    " terminal_persona) VALUES (?, 'a.set', 1, ?, '{}',"
+                    " ?, ?, ?, ?, ?)",
+                    (row_id, row_id, values["signed_at"], values["signing_key"],
+                     values["signature"], values["witness"],
+                     values["terminal_persona"]),
+                )
+            accepted.append(present)
+        except sqlite3.IntegrityError:
+            refused.append(present)
+    assert [p for p in accepted if not _valid_pattern(p)] == [], (
+        "an invalid partial signing state was stored"
+    )
+    assert [p for p in refused if _valid_pattern(p)] == [], (
+        "a valid signing state was refused"
+    )
+    assert len(accepted) == 3  # unsigned, signed+witness, signed sans witness
+
+    # The same invariant on the UPDATE path: partially signing a stored
+    # unsigned row is refused too.
+    with pytest.raises(sqlite3.IntegrityError):
+        with db.conn:
+            db.conn.execute(
+                "UPDATE settings SET signed_at = 1 WHERE id = 'pattern-none'"
+            )
+
+
+def test_a_fresh_table_refuses_every_partial_signing_state(tmp_path):
+    db = GraphDB.create_org_db("fresh-inv", path=tmp_path / "fresh-inv.db")
+    try:
+        _assert_envelope_state_invariant(db)
+    finally:
+        db.close()
+
+
+def test_a_migrated_legacy_table_refuses_them_identically(tmp_path):
+    """SQLite cannot ADD CHECK, so pre-envelope tables enforce the invariant
+    through the migration's triggers — same predicate, same refusals."""
+    path = tmp_path / "legacy-inv.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE settings ("
+        " id TEXT PRIMARY KEY, set_id TEXT NOT NULL,"
+        " schema_revision INTEGER NOT NULL, key TEXT NOT NULL,"
+        " payload TEXT NOT NULL,"
+        " publication_state TEXT NOT NULL DEFAULT 'raw',"
+        " supersedes TEXT, excludes TEXT,"
+        " deprecated INTEGER NOT NULL DEFAULT 0, successor_id TEXT,"
+        " created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),"
+        " updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))"
+        ")"
+    )
+    conn.commit()
+    conn.close()
+    db = GraphDB(path)
+    try:
+        _assert_envelope_state_invariant(db)
+    finally:
+        db.close()

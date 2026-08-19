@@ -137,6 +137,21 @@ for (let i = 0; i < rows.length; i += 1) {
   }
 }
 
+// --- the integer domain is shared: max-safe encodes, one-over refuses ---
+assert.equal(
+  canonicalHex(fixture.max_safe_integer.input),
+  fixture.max_safe_integer.canonical_hex,
+  'max-safe integer: byte-identical at every depth',
+);
+
+// --- signing with a key other than the named signer is refused ---
+const personaB = await derivePersona(rootSeed, fixture.genesis_ids[1]);
+await assert.rejects(
+  signSettingsRecord(base.input, personaB.signingKey),
+  /signing_key does not match/,
+  'a signature by a key the record does not name is never returned',
+);
+
 // --- structural refusals shared with Python, for both key strategies ---
 for (const [name, input] of Object.entries(fixture.refusals)) {
   assert.throws(
