@@ -68,7 +68,7 @@ def _seed_node(volume: Path) -> dict:
     # Personal root material: a real passphrase-encrypted root whose seed also
     # derives the founder persona below.  The round-trip therefore proves key
     # continuity, not merely preservation of an opaque fixture string.
-    personal = volume / "orgs" / "personal.db"
+    personal = volume / "personal.db"
     personal_seed = bytes.fromhex("34" * 32)
     personal_root = KeyPair.from_private_hex(personal_seed.hex())
     identity_payload = json.dumps({
@@ -236,7 +236,7 @@ def _seed_node(volume: Path) -> dict:
 
 
 def _assert_same_node(volume: Path, expected: dict) -> None:
-    with sqlite3.connect(volume / "orgs" / "personal.db") as conn:
+    with sqlite3.connect(volume / "personal.db") as conn:
         row = conn.execute(
             "SELECT payload FROM settings WHERE id='portable-identity'"
         ).fetchone()
@@ -483,7 +483,7 @@ def test_beads_publish_failure_rolls_back_the_node_restore(tmp_path, monkeypatch
 
 
 def _seed_expected_from_volume(volume: Path) -> dict:
-    with sqlite3.connect(volume / "orgs" / "personal.db") as conn:
+    with sqlite3.connect(volume / "personal.db") as conn:
         identity_payload = conn.execute(
             "SELECT payload FROM settings WHERE id='portable-identity'"
         ).fetchone()[0]
@@ -557,7 +557,7 @@ def test_migrate_on_mount_upgrades_legacy_volume_and_stamps_it(tmp_path):
             "SELECT name FROM sqlite_master "
             "WHERE type='table' AND name='dashboard_access_grants'"
         ).fetchone()
-    assert (volume / "orgs" / "personal.db").is_file()
+    assert (volume / "personal.db").is_file()
     assert (volume / "graph.db").is_file()
     with sqlite3.connect(other_org) as conn:
         # A graph org DB heals to the CURRENT graph schema version on

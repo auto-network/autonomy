@@ -68,14 +68,24 @@ def _rooted_env(volume: Path) -> dict:
 def test_every_store_is_env_rooted():
     """A store with no environment variable cannot be relocated, so it is
     rooted only by coincidence of layout — the auth.db/tls failure mode."""
-    unrooted = [s.key for s in STORE_MANIFEST if not s.env]
+    unrooted = [s.key for s in STORE_MANIFEST if not s.env and not s.roots_with]
     assert unrooted == [], f"stores with no rooting variable: {unrooted}"
+    # Derived-rooting stores must anchor to a store that IS env-rooted, or
+    # the derivation bottoms out in coincidence after all.
+    from tools.data_paths import STORES_BY_KEY
+    for s in STORE_MANIFEST:
+        if s.roots_with:
+            assert STORES_BY_KEY[s.roots_with].env, (
+                f"{s.key} roots with {s.roots_with}, which has no variable"
+            )
 
 
 def test_resolver_precedence_is_env_then_root():
     """The writer that is handed a root and the reader that only knows the
     env must agree, or state lands where nothing looks for it."""
-    store = STORE_MANIFEST[1]  # graph.db
+    from tools.data_paths import STORES_BY_KEY
+
+    store = STORES_BY_KEY["graph"]
     os.environ.pop(store.env, None)
     assert resolve_store(store.key, root=Path("/vol")) == Path("/vol") / store.relative
     os.environ[store.env] = "/elsewhere/graph.db"
@@ -109,11 +119,14 @@ def test_unrooted_resolution_raises_under_the_guard(monkeypatch):
 
 
 def test_manifest_matches_deploy_md():
+    from tools.data_paths import STORES_BY_KEY
+
     """DEPLOY.md's volume table is generated truth, not hand-maintained."""
     table = (REPO_ROOT / "DEPLOY.md").read_text()
     for store in STORE_MANIFEST:
         assert store.relative in table, f"{store.relative} missing from DEPLOY.md"
-        assert store.env in table, f"{store.env} missing from DEPLOY.md"
+        anchor = store.env or f"roots with `{STORES_BY_KEY[store.roots_with].env}`"
+        assert anchor in table, f"{anchor} missing from DEPLOY.md"
 
 
 # -- 2. proven by measurement -------------------------------------------------------
@@ -255,7 +268,9 @@ def test_data_root_composes_with_org_routing_never_pins(monkeypatch, tmp_path):
     monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))
     assert resolve_caller_db_path("demo") == tmp_path / "orgs" / "demo.db"
     assert resolve_caller_db_path("other") == tmp_path / "orgs" / "other.db"
-    assert resolve_caller_db_path(None) == tmp_path / "orgs" / "personal.db"
+    # The scopeless default routes to the personal store, which is not an
+    # organization and composes to its own home BESIDE orgs/ (auto-35kmy).
+    assert resolve_caller_db_path(None) == tmp_path / "personal.db"
 
 
 def test_relative_data_root_is_refused_fail_closed(monkeypatch):

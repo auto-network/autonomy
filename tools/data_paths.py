@@ -55,6 +55,11 @@ class Store:
     env: Optional[str]  # the variable that roots it
     kind: str  # "db" | "dir" | "file"
     description: str  # rendered into DEPLOY.md's volume table
+    #: Derived rooting: this store has no variable of its own and instead
+    #: roots BESIDE the named anchor store, moving wherever the anchor's
+    #: variable moves it. Still contract-rooted — one knob, two stores —
+    #: never coincidence rooting.
+    roots_with: Optional[str] = None
 
     def default(self, root: Optional[Path] = None) -> Path:
         base = Path(root) if root is not None else DEFAULT_DATA_ROOT
@@ -65,7 +70,23 @@ class Store:
 STORE_MANIFEST: tuple = (
     Store("orgs", "orgs", "AUTONOMY_ORGS_DIR", "dir",
           "per-org graph DBs — identity Settings and credential rows "
-          "(**the secret store**; `orgs/personal.db` is the per-operator DB)"),
+          "(**the secret store**; organizations only)"),
+    # The two local stores deliberately have NO environment variable of
+    # their own: they root beside the orgs directory, wherever that
+    # resolves, so the ONE knob (`AUTONOMY_ORGS_DIR` / the ambient root)
+    # moves all three identity-bearing stores together. A second variable
+    # would be a second resolver for the same data — the split-brain this
+    # manifest exists to prevent — and anything that pins every store env
+    # per-process (the hermetic test harness) would silently share one
+    # personal store across isolation boundaries.
+    Store("personal", "personal.db", None, "db",
+          "the operator's own store — follows them across their fleet; "
+          "not an organization, lives beside `orgs/` and roots with it",
+          roots_with="orgs"),
+    Store("machine", "machine.db", None, "db",
+          "this machine's own store — never leaves this computer; "
+          "not an organization, lives beside `orgs/` and roots with it",
+          roots_with="orgs"),
     Store("graph", "graph.db", "GRAPH_DB", "db",
           "main knowledge-graph DB"),
     Store("dashboard", "dashboard.db", "DASHBOARD_DB", "db",
@@ -186,6 +207,15 @@ def resolve_store(key: str, *, root: Path | str | None = None) -> Path:
         store = STORES_BY_KEY[key]
     except KeyError:
         raise KeyError(f"{key!r} is not in the volume contract manifest") from None
+    if store.roots_with:
+        # Derived rooting: beside the ANCHOR store, wherever the anchor's
+        # own resolution puts it (its env variable, the ambient base, the
+        # caller's volume root, or the default — in that order). The same
+        # rule tools.graph.db applies for the local stores, stated once in
+        # the contract so a rooted deployment moves anchor and dependent
+        # together.
+        anchor = resolve_store(store.roots_with, root=root)
+        return anchor.parent / store.relative
     if store.env:
         env_value = os.environ.get(store.env)
         if env_value:

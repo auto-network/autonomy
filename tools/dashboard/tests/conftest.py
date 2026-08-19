@@ -150,6 +150,12 @@ def _configure_hermetic_stores():
         # loudly by the refuse guard until they do.
         if store.key == "graph":
             continue
+        if store.env is None:
+            # The local stores (personal/machine) root beside the orgs dir
+            # by design and are isolated BY AUTONOMY_ORGS_DIR; a per-worker
+            # pin here would share one personal store across every test on
+            # the worker.
+            continue
         if _os.environ.get(store.env, "").startswith(str(root)):
             continue
         dst = root / store.relative

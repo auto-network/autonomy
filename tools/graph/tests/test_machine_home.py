@@ -61,7 +61,7 @@ def test_a_machine_setting_lives_in_its_own_database(orgs):
         "probe.home.machine", 1, "claude",
         {"path": "/home/j/.local/bin/claude"}, org="machine")
 
-    assert (orgs / "machine.db").exists(), (
+    assert (orgs.parent / "machine.db").exists(), (
         "a separate file is what lets a fleet sync skip it wholesale")
     row = settings_ops.read_set_key(
         "probe.home.machine", "claude", org="machine", peers=[])
@@ -70,11 +70,11 @@ def test_a_machine_setting_lives_in_its_own_database(orgs):
 
 def test_nobody_provisions_the_machine_store_first(orgs):
     """Like the operator's own store, it comes into being where it is used."""
-    assert not (orgs / "machine.db").exists()
+    assert not (orgs.parent / "machine.db").exists()
     settings_ops.add_setting(
         "probe.home.machine", 1, "codex", {"path": "/usr/bin/codex"},
         org="machine")
-    assert (orgs / "machine.db").exists()
+    assert (orgs.parent / "machine.db").exists()
 
 
 @pytest.mark.parametrize("org", ["acme", "personal", None])

@@ -215,7 +215,9 @@ persistent state:
 
 | Path in volume | Roots via | What it is |
 |---|---|---|
-| `orgs`/ | `AUTONOMY_ORGS_DIR` | per-org graph DBs — identity Settings and credential rows (**the secret store**; `orgs/personal.db` is the per-operator DB) |
+| `orgs`/ | `AUTONOMY_ORGS_DIR` | per-org graph DBs — identity Settings and credential rows (**the secret store**; organizations only) |
+| `personal.db` | beside `orgs/` (roots with `AUTONOMY_ORGS_DIR`) | the operator's own store — follows them across their fleet; not an organization |
+| `machine.db` | beside `orgs/` (roots with `AUTONOMY_ORGS_DIR`) | this machine's own store — never leaves this computer; not an organization |
 | `graph.db` | `GRAPH_DB` | main knowledge-graph DB |
 | `dashboard.db` | `DASHBOARD_DB` | dashboard operational store |
 | `auth.db` | `AUTH_DB` | dashboard auth store |

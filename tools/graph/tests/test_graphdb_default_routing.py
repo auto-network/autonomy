@@ -44,7 +44,7 @@ def test_no_args_routes_to_personal_when_per_org_db_present(orgs_root):
 
     db = GraphDB()
     try:
-        assert db.db_path == orgs_root / "personal.db"
+        assert db.db_path == orgs_root.parent / "personal.db"
     finally:
         db.close()
 

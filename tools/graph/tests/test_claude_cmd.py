@@ -42,7 +42,7 @@ def graph_db_env(tmp_path, monkeypatch):
     # tree's own personal.db so pin and org resolution agree.
     orgs_dir = tmp_path / "orgs"
     orgs_dir.mkdir()
-    db_path = orgs_dir / "personal.db"
+    db_path = orgs_dir.parent / "personal.db"
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
     monkeypatch.setenv("GRAPH_DB", str(db_path))
     monkeypatch.delenv("GRAPH_API", raising=False)

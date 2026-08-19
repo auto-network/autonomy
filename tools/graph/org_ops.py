@@ -171,12 +171,30 @@ def _orgs_dir(root: Path | str | None = None) -> Path:
 
 
 def _slug_db_path(slug: str, root: Path | str | None = None) -> Path:
-    return _orgs_dir(root) / f"{slug}.db"
+    # Routed through db's constructor so the two reserved local-store
+    # names resolve to their own home outside data/orgs/ (auto-35kmy) —
+    # a second, unrouted copy here is how the personal store would get
+    # re-created at the legacy path on a fresh install.
+    from .db import _org_db_path
+
+    return _org_db_path(slug, root)
 
 
-def _validate_slug(slug: str) -> None:
+def _validate_slug(slug: str, *, allow_local_store: bool = False) -> None:
     if not isinstance(slug, str) or not slug:
         raise OrgError(f"invalid slug: {slug!r}")
+    from .db import LOCAL_STORE_SLUGS
+
+    if slug in LOCAL_STORE_SLUGS and not allow_local_store:
+        # Reserved (auto-35kmy): routing is by string, and one string
+        # cannot name two stores. After an ORGANIZATION named "personal"
+        # existed, org="personal" would have to mean the operator's store
+        # to keep every existing call site working AND the new org's store
+        # to reach it — no path helper can tell which the caller meant.
+        raise OrgError(
+            f"{slug!r} is reserved for the operator's local store and "
+            f"cannot name an organization"
+        )
     if slug != slug.strip():
         raise OrgError(f"slug must not have surrounding whitespace: {slug!r}")
     if any(c in slug for c in "/\\."):
@@ -213,10 +231,19 @@ def list_orgs(*, root: Path | str | None = None) -> list[OrgRef]:
     (legacy or partial) are skipped silently.
     """
     d = _orgs_dir(root)
-    if not d.exists():
-        return []
     refs: list[OrgRef] = []
-    for path in sorted(d.glob("*.db")):
+    candidate_paths = sorted(d.glob("*.db")) if d.exists() else []
+    # The operator's local stores live BESIDE the orgs directory
+    # (auto-35kmy) and are walked by name: they are not organizations, but
+    # this is the operator's store inventory, and the TYPE column is what
+    # tells them apart.
+    from .db import LOCAL_STORE_SLUGS, _local_store_db_path
+
+    for name in LOCAL_STORE_SLUGS:
+        local = _local_store_db_path(name, root)
+        if local.exists() and local not in candidate_paths:
+            candidate_paths.append(local)
+    for path in candidate_paths:
         # Skip WAL/SHM artifacts that glob('*.db') wouldn't match anyway,
         # plus the rare empty/ancillary file.
         try:
@@ -352,7 +379,18 @@ def find_references(
     d = _orgs_dir(root)
     if not d.exists():
         return refs
-    for path in sorted(d.glob("*.db")):
+    # References live in the operator's LOCAL stores too — a personal
+    # override keyed by this org's slug is exactly the reference this scan
+    # exists to surface — and those stores are no longer in the orgs glob
+    # (auto-35kmy), so they are walked by name.
+    from .db import LOCAL_STORE_SLUGS, _local_store_db_path
+
+    candidate_paths = sorted(d.glob("*.db"))
+    for name in LOCAL_STORE_SLUGS:
+        local = _local_store_db_path(name, root)
+        if local.exists() and local not in candidate_paths:
+            candidate_paths.append(local)
+    for path in candidate_paths:
         if exclude_self and path == own_path:
             continue
         try:
@@ -420,7 +458,9 @@ def create_org(
     seed is silently skipped — the cascade falls through to the generated
     fallback until an operator authors canonical identity later.
     """
-    _validate_slug(slug)
+    # The one legitimate reserved-name creation is provisioning the
+    # operator's own store: slug "personal" with the "personal" type.
+    _validate_slug(slug, allow_local_store=(slug == "personal" and type_ == "personal"))
     if type_ not in VALID_ORG_TYPES:
         raise OrgError(
             f"invalid type {type_!r}; valid: {VALID_ORG_TYPES}"
@@ -1384,6 +1424,13 @@ def ensure_bootstrap_orgs(
 
     Returns the list of orgs after bootstrap.
     """
+    from .db import relocate_local_stores
+
+    # The bootstrap is where the process is about to own the stores it
+    # would move, so the one-time relocation of the local stores out of
+    # data/orgs/ runs here (auto-35kmy) — dashboard startup and first-run
+    # both pass through, and nothing else ever moves a live file.
+    relocate_local_stores(root)
     if personal_only:
         return [_ensure_org("personal", "personal", _PERSONAL_SEED_PAYLOAD, root=root)]
     slug = first_org or os.environ.get(FIRST_ORG_ENV)

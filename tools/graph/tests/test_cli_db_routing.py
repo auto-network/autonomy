@@ -41,7 +41,7 @@ def test_no_env_per_org_present_returns_personal_db(orgs_root):
     # Scopeless default shifted to ``personal`` in auto-txg5.3.
     graph_db.GraphDB.create_org_db("personal", type_="personal").close()
 
-    assert _get_db_path() == orgs_root / "personal.db"
+    assert _get_db_path() == orgs_root.parent / "personal.db"
 
 
 def test_no_env_per_org_absent_falls_back_to_legacy(orgs_root):

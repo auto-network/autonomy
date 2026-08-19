@@ -52,7 +52,7 @@ def graph_db_env(tmp_path, monkeypatch):
     orgs = tmp_path / "orgs"
     orgs.mkdir()
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs))
-    db_path = orgs / "personal.db"
+    db_path = orgs.parent / "personal.db"
     monkeypatch.setenv("GRAPH_DB", str(db_path))
     monkeypatch.delenv("GRAPH_API", raising=False)
     monkeypatch.delenv("GRAPH_ORG", raising=False)

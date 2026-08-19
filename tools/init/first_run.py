@@ -292,14 +292,19 @@ def _init_orgs(
 ) -> None:
     from tools.graph import org_ops
 
+    from tools.graph.db import _org_db_path
+
     orgs_root = resolve_store("orgs", root=data)
     slug = org_ops.resolve_first_org_slug(first_org)
     for org_slug in (slug, "personal"):
-        existed = (orgs_root / f"{org_slug}.db").exists()
+        # Routed: "personal" is a local store living beside orgs/
+        # (auto-35kmy); checking the legacy path would report it created
+        # on every run and break second-run idempotence.
+        org_path = _org_db_path(org_slug, orgs_root)
         report.add(
             f"org:{org_slug}",
-            EXISTS if existed else CREATED,
-            str(orgs_root / f"{org_slug}.db"),
+            EXISTS if org_path.exists() else CREATED,
+            str(org_path),
         )
     org_ops.ensure_bootstrap_orgs(
         root=orgs_root, first_org=slug, first_org_name=first_org_name,
@@ -317,11 +322,15 @@ def _init_join(data: Path, report: InitReport, *, invite: str) -> None:
     from tools.graph import org_ops
     from tools.network.invitation import InvitationError, decode_invitation
 
+    from tools.graph.db import _local_store_db_path
+
     orgs_root = resolve_store("orgs", root=data)
-    existed = (orgs_root / "personal.db").exists()
+    personal_path = _local_store_db_path("personal", orgs_root)
+    existed = personal_path.exists()
     org_ops.ensure_bootstrap_orgs(root=orgs_root, first_org=None, personal_only=True)
     report.add(
-        "org:personal", EXISTS if existed else CREATED, str(orgs_root / "personal.db")
+        "org:personal", EXISTS if existed else CREATED,
+        str(_local_store_db_path("personal", orgs_root)),
     )
     try:
         invitation = decode_invitation(invite)
@@ -423,7 +432,9 @@ def _seed_bootstrap_allowlist(data: Path, report: InitReport) -> None:
     }
     schemas.validate_payload(SET_ID, SCHEMA_REVISION, payload)
 
-    personal = resolve_store("orgs", root=data) / "personal.db"
+    from tools.graph.db import _local_store_db_path
+
+    personal = _local_store_db_path("personal", resolve_store("orgs", root=data))
     if not personal.exists():
         report.add(name, SKIPPED, f"personal org DB missing: {personal}")
         return

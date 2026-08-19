@@ -92,7 +92,7 @@ def test_the_persona_lands_in_personal_db_and_not_the_orgs_db(orgs_env):
     """
     org_ops.create_org_with_identity("acme", PASSWORD, root=orgs_env.root)
 
-    personal = _set_ids_in(orgs_env.orgs / "personal.db")
+    personal = _set_ids_in(orgs_env.orgs.parent / "personal.db")
     shared = _set_ids_in(orgs_env.orgs / "acme.db")
 
     assert personal.count(NETWORK_PERSONA_SET_ID) == 1, (
@@ -111,7 +111,7 @@ def test_the_org_root_key_still_goes_to_the_orgs_own_db(orgs_env):
     org_ops.create_org_with_identity("acme", PASSWORD, root=orgs_env.root)
 
     assert NETWORK_ORG_KEY_SET_ID in _set_ids_in(orgs_env.orgs / "acme.db")
-    assert NETWORK_ORG_KEY_SET_ID not in _set_ids_in(orgs_env.orgs / "personal.db")
+    assert NETWORK_ORG_KEY_SET_ID not in _set_ids_in(orgs_env.orgs.parent / "personal.db")
 
 
 def test_the_org_scoped_read_finds_no_persona(orgs_env):

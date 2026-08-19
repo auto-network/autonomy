@@ -74,7 +74,7 @@ def test_the_operators_own_store_is_created_on_demand(orgs_root):
     settings_ops.add_setting(
         SET_ID, REVISION, "ws-a", {"enabled": True}, org="personal",
     )
-    assert (orgs_root / "personal.db").exists()
+    assert (orgs_root.parent / "personal.db").exists()
 
     members = settings_ops.read_set(SET_ID, org="personal", peers=[])
     assert [m.key for m in members.members] == ["ws-a"]

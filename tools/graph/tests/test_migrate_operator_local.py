@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from tools.graph.db import _org_db_path
 from tools.graph import cli, ops
 from tools.graph.db import GraphDB
 from tools.graph.schemas import artifact_path, org_peer_subscription  # noqa: F401
@@ -140,7 +141,7 @@ def _settings_rows(db_path: Path) -> list[dict]:
 def test_build_plan_enumerates_all_operator_sections(synthetic_yaml, orgs_dir):
     plan = build_plan(synthetic_yaml, orgs_root=orgs_dir)
     assert isinstance(plan, MigrationPlan)
-    assert plan.personal_db == orgs_dir / "personal.db"
+    assert plan.personal_db == _org_db_path("personal", orgs_dir)
 
     by_key = {(e.set_id, e.key): e for e in plan.entries}
     assert (ARTIFACT_PATH_SET_ID, "anchore:license.yaml") in by_key
@@ -180,7 +181,7 @@ def test_build_plan_empty_yaml_yields_nothing(empty_yaml, orgs_dir):
     plan = build_plan(empty_yaml, orgs_root=orgs_dir)
     assert plan.entries == []
     # Still records the target DB for display / apply.
-    assert plan.personal_db == orgs_dir / "personal.db"
+    assert plan.personal_db == _org_db_path("personal", orgs_dir)
 
 
 def test_build_plan_missing_yaml_yields_empty_plan(tmp_path, orgs_dir):
@@ -260,13 +261,13 @@ def test_apply_migration_inserts_canonical_settings(synthetic_yaml, orgs_dir):
     # Each entry lands in the store its schema declares: an artifact's
     # filesystem location is true on this machine only, while a peer
     # subscription is the operator's on every machine they own.
-    assert (orgs_dir / "personal.db").exists()
-    assert (orgs_dir / "machine.db").exists()
-    rows = (_settings_rows(orgs_dir / "personal.db")
-            + _settings_rows(orgs_dir / "machine.db"))
+    assert (_org_db_path("personal", orgs_dir)).exists()
+    assert (_org_db_path("machine", orgs_dir)).exists()
+    rows = (_settings_rows(_org_db_path("personal", orgs_dir))
+            + _settings_rows(_org_db_path("machine", orgs_dir)))
 
-    machine_sets = {r["set_id"] for r in _settings_rows(orgs_dir / "machine.db")}
-    personal_sets = {r["set_id"] for r in _settings_rows(orgs_dir / "personal.db")}
+    machine_sets = {r["set_id"] for r in _settings_rows(_org_db_path("machine", orgs_dir))}
+    personal_sets = {r["set_id"] for r in _settings_rows(_org_db_path("personal", orgs_dir))}
     assert ARTIFACT_PATH_SET_ID in machine_sets
     assert ARTIFACT_PATH_SET_ID not in personal_sets, (
         "an artifact's filesystem location must not reach a store that travels")
@@ -315,8 +316,8 @@ def test_apply_migration_dry_run_writes_nothing(synthetic_yaml, orgs_dir):
     plan = build_plan(synthetic_yaml, orgs_root=orgs_dir)
     apply_migration(plan, dry_run=True)
 
-    if (orgs_dir / "personal.db").exists():
-        rows = _settings_rows(orgs_dir / "personal.db")
+    if (_org_db_path("personal", orgs_dir)).exists():
+        rows = _settings_rows(_org_db_path("personal", orgs_dir))
         assert not any(
             r["set_id"] in (ARTIFACT_PATH_SET_ID, PEER_SUB_SET_ID)
             for r in rows
@@ -328,16 +329,16 @@ def test_apply_migration_empty_plan_is_noop(empty_yaml, orgs_dir):
     apply_migration(plan)
     # personal.db should not be materialised on an empty plan — the
     # migration has nothing to commit.
-    assert not (orgs_dir / "personal.db").exists()
+    assert not (_org_db_path("personal", orgs_dir)).exists()
 
 
 def test_apply_migration_bootstraps_personal_db_when_absent(
     synthetic_yaml, orgs_dir,
 ):
-    assert not (orgs_dir / "personal.db").exists()
+    assert not (_org_db_path("personal", orgs_dir)).exists()
     plan = build_plan(synthetic_yaml, orgs_root=orgs_dir)
     apply_migration(plan)
-    assert (orgs_dir / "personal.db").exists()
+    assert (_org_db_path("personal", orgs_dir)).exists()
 
 
 def test_apply_migration_payload_validates_against_schema(
@@ -346,7 +347,7 @@ def test_apply_migration_payload_validates_against_schema(
     plan = build_plan(synthetic_yaml, orgs_root=orgs_dir)
     apply_migration(plan)
     from tools.graph import schemas
-    for row in _settings_rows(orgs_dir / "personal.db"):
+    for row in _settings_rows(_org_db_path("personal", orgs_dir)):
         if row["set_id"] not in (ARTIFACT_PATH_SET_ID, PEER_SUB_SET_ID):
             continue
         schemas.validate_payload(
@@ -522,8 +523,8 @@ def test_migrate_main_dry_run(synthetic_yaml, orgs_dir, capsys):
     captured = capsys.readouterr()
     assert "to insert, 0 already present" in captured.out
     # Nothing should have been written.
-    if (orgs_dir / "personal.db").exists():
-        rows = _settings_rows(orgs_dir / "personal.db")
+    if (_org_db_path("personal", orgs_dir)).exists():
+        rows = _settings_rows(_org_db_path("personal", orgs_dir))
         assert not any(
             r["set_id"] in (ARTIFACT_PATH_SET_ID, PEER_SUB_SET_ID)
             for r in rows
@@ -538,7 +539,7 @@ def test_migrate_main_writes(synthetic_yaml, orgs_dir, capsys):
     assert rc == 0
     captured = capsys.readouterr()
     assert "5 to insert" in captured.out
-    assert (orgs_dir / "personal.db").exists()
+    assert (_org_db_path("personal", orgs_dir)).exists()
 
 
 def test_migrate_main_empty_plan_no_op(empty_yaml, orgs_dir, capsys):
@@ -549,7 +550,7 @@ def test_migrate_main_empty_plan_no_op(empty_yaml, orgs_dir, capsys):
     assert rc == 0
     captured = capsys.readouterr()
     assert "nothing to migrate" in captured.out
-    assert not (orgs_dir / "personal.db").exists()
+    assert not (_org_db_path("personal", orgs_dir)).exists()
 
 
 def test_migrate_main_handles_missing_yaml(orgs_dir, tmp_path, capsys):

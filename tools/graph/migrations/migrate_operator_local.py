@@ -108,6 +108,10 @@ class MigrationPlan:
     """What the migration intends to do."""
     yaml_path: Path | None
     personal_db: Path
+    #: The per-org DB directory the plan was built against. Carried
+    #: explicitly because personal_db no longer lives INSIDE it
+    #: (auto-35kmy), so deriving it back from personal_db.parent is wrong.
+    orgs_dir: Path | None = None
     entries: list[OperatorLocalEntry] = field(default_factory=list)
 
     @property
@@ -249,8 +253,15 @@ def build_plan(
     resolves to ``<orgs_root>/personal.db``.
     """
     orgs_dir = _resolve_orgs_dir(orgs_root)
-    personal_db = orgs_dir / f"{PERSONAL_ORG_SLUG}.db"
-    plan = MigrationPlan(yaml_path=None, personal_db=personal_db)
+    from tools.graph.db import _org_db_path
+
+    # Routed: the personal store lives BESIDE the orgs dir since
+    # auto-35kmy, and a legacy file still inside it keeps resolving until
+    # the one-time relocation runs.
+    personal_db = _org_db_path(PERSONAL_ORG_SLUG, orgs_dir)
+    plan = MigrationPlan(
+        yaml_path=None, personal_db=personal_db, orgs_dir=orgs_dir,
+    )
 
     if yaml_path is None:
         return plan
@@ -322,7 +333,9 @@ def apply_migration(
     if not plan.entries:
         return plan
 
-    orgs_dir = plan.personal_db.parent
+    orgs_dir = (
+        plan.orgs_dir if plan.orgs_dir is not None else _resolve_orgs_dir(None)
+    )
 
     # Group by destination: each entry goes where its schema declares, so a
     # machine fact never lands in a store that would carry it to another
@@ -351,7 +364,11 @@ def _destination_db(set_id: str, orgs_dir: Path) -> Path:
         home = _schemas.declared_home(set_id)
     except Exception:
         home = None
-    return orgs_dir / f"{home or PERSONAL_ORG_SLUG}.db"
+    from tools.graph.db import _org_db_path
+
+    # Both destinations are LOCAL stores, which live beside the orgs dir
+    # since auto-35kmy — routed, not joined.
+    return _org_db_path(home or PERSONAL_ORG_SLUG, orgs_dir)
 
 
 def _apply_to_db(
