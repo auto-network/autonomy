@@ -132,12 +132,12 @@ class StorageDelegate:
         return now_ms < self.not_after
 
 
-def _parents(ledger, parents):
-    return list(ledger.heads()) if parents is None else list(parents)
+def _parents(store, parents):
+    return list(store.heads()) if parents is None else list(parents)
 
 
 def provision(
-    ledger,
+    store,
     issuer: KeyPair,
     member_persona,
     genesis_id: str,
@@ -151,10 +151,19 @@ def provision(
     """Mint a fresh storage agent delegate.
 
     Generates a fresh signing key (unless ``signing_key`` is supplied — the
-    renewal path reuses the child), appends a ledger ``delegate`` event
-    from ``issuer`` granting EXACTLY the two storage scopes to that key,
-    bounded by ``ttl_ms``, and returns the :class:`StorageDelegate` holding
+    renewal path reuses the child), appends a ``delegate`` event THROUGH
+    ``store`` from ``issuer`` granting EXACTLY the two storage scopes to that
+    key, bounded by ``ttl_ms``, and returns the :class:`StorageDelegate` holding
     the private half for placement in the MEMORY-class cache.
+
+    ``store`` is the ledger the event is appended to. Pass the durable
+    :class:`~tools.network.ledger.store.LedgerStore` — NOT its in-memory
+    ``.ledger`` — or the delegate exists only in this process and vanishes the
+    moment anything re-opens the ledger from disk, which a per-call key holder
+    or sealer does every time. A bare in-memory ledger is for simulation only;
+    both answer the same ``append`` / ``genesis_id`` / ``heads`` interface, so
+    this function does not care which it is handed, only that a durable caller
+    hands it the store.
 
     ``issuer`` is the key that signs the ``delegate`` event — a CURRENT
     member persona holding the two storage scopes, typically through a
@@ -190,12 +199,12 @@ def provision(
         "ttl": int(ttl_ms),
         "grant_nonce": nonce,
         "proof": sign_delegate_proof(
-            key, ledger.genesis_id, issuer.public_hex,
+            key, store.genesis_id, issuer.public_hex,
             storage_delegate_scopes(domain_id),
             can_redelegate=False, ttl=int(ttl_ms), grant_nonce=nonce,
         ),
     }
-    grant_id = ledger.add(make_event(issuer, payload, _parents(ledger, parents), hlc))
+    grant_id = store.append(make_event(issuer, payload, _parents(store, parents), hlc))
     return StorageDelegate(
         signing_key=key,
         child_pub=key.public_hex,
@@ -210,7 +219,7 @@ def provision(
 
 
 def renew(
-    ledger,
+    store,
     issuer: KeyPair,
     delegate: StorageDelegate,
     *,
@@ -227,7 +236,7 @@ def renew(
     authority window moves. Returns the updated :class:`StorageDelegate`.
     """
     renewed = provision(
-        ledger,
+        store,
         issuer,
         delegate.member_persona,
         delegate.genesis_id,
@@ -241,7 +250,7 @@ def renew(
 
 
 def revoke(
-    ledger,
+    store,
     issuer: KeyPair,
     delegate: StorageDelegate,
     *,
@@ -263,7 +272,7 @@ def revoke(
     payload = {"type": "revoke", "target_key": delegate.child_pub}
     if reason is not None:
         payload["reason"] = reason
-    return ledger.add(make_event(issuer, payload, _parents(ledger, parents), hlc))
+    return store.append(make_event(issuer, payload, _parents(store, parents), hlc))
 
 
 # -- signing the unattended records ---------------------------------------------------

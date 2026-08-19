@@ -537,6 +537,13 @@ class LedgerStore:
     def heads(self) -> tuple:
         return self.ledger.heads()
 
+    @property
+    def genesis_id(self):
+        """The store-compatible read the in-memory ledger already exposes, so a
+        writer takes one interface — ``append`` / ``genesis_id`` / ``heads`` —
+        over either a store or a bare ledger."""
+        return self.ledger.genesis_id
+
     def events(self) -> List[Event]:
         return self.ledger.events()
 
