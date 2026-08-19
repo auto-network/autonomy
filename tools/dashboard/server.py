@@ -15922,6 +15922,25 @@ async def api_graph_settings_chain(request):
     return JSONResponse(chain)
 
 
+async def api_graph_settings_contested(request):
+    """GET /api/graph/settings/<set_id>/contested — contended slot report.
+
+    Keys of the set holding more than one eligible signed slot at the
+    winning rung and store (graph://21a0da9e-1c2 "Resolution"): resolution
+    answers exactly one value, and this is the query that makes a live
+    disagreement visible. Metadata only — personas, timestamps, states —
+    never payloads.
+    """
+    from tools.graph import settings_ops as _settings_ops
+
+    set_id = request.path_params["set_id"]
+    org = _caller_org(request)
+    contested = _settings_ops.contested_keys(
+        set_id, org=org or graph_ops.CALLER_ORG,
+    )
+    return JSONResponse({"set_id": set_id, "contested": contested})
+
+
 # ── Agentic actions dispatch (auto-pqgrl) ────────────────────
 
 
@@ -18026,6 +18045,8 @@ routes = [
     Route("/api/graph/sets", api_graph_set_ids, methods=["GET"]),
     Route("/api/graph/setting-resolve/{value}", api_graph_setting_resolve, methods=["GET"]),
     Route("/api/graph/settings/{set_id}/{key}/chain", api_graph_settings_chain, methods=["GET"]),
+    # Before {set_id}/{key}, or "contested" would be captured as a key.
+    Route("/api/graph/settings/{set_id}/contested", api_graph_settings_contested, methods=["GET"]),
     Route("/api/graph/settings/{set_id}/{key}", api_graph_settings_get_by_key, methods=["GET"]),
     Route("/api/graph/settings/{set_id}/migrate", api_graph_settings_migrate, methods=["POST"]),
     Route("/api/graph/settings/{set_id}", api_graph_settings_list, methods=["GET"]),

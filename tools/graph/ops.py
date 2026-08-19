@@ -64,6 +64,7 @@ from .settings_ops import (  # noqa: F401 — re-exported as ops.* surface
     resolve_setting_strict,
     read_set_key,
     chain_setting,
+    contested_keys,
     json_merge_patch,
     set_emit_hook,
 )
