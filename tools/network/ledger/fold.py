@@ -309,6 +309,39 @@ class FoldState:
         self.loss_heads: tuple = folder.loss_heads_at(ctx)
         self.delegation_parents: Dict[str, tuple] = folder.delegation_parents_at(ctx)
 
+        # Backward key resolution (auto-7c7po): every key a persona has ever
+        # validly held, from the rekey continuity chain the folder already
+        # computed. A valid claim binds the persona id itself; every VALID and
+        # ALIVE rekey binds its new_pub — including a rekey that lost a
+        # concurrent race (its continuity signature is a genuine statement
+        # that the persona controlled the key; only current_key follows the
+        # winner), and excluding a self-authorized rekey that lost to the
+        # revocation of its authorizing key (_rekey_alive — there the binding
+        # never held). Sorted iteration + setdefault makes the theoretical
+        # collision (one key continuity-signed for two personas at once)
+        # resolve identically in every store. Membership and continuity never
+        # consult ref_ts, so this maps caches safely with the heads-keyed
+        # view; delegation authority does and must not.
+        key_personas: Dict[str, str] = {}
+        for cid in sorted(folder.claims):
+            claim = folder.claims[cid]
+            if cid in ctx and folder.valid[cid]:
+                key_personas.setdefault(claim.persona_pub, claim.persona_pub)
+        for rid in sorted(folder.rekeys):
+            rekey = folder.rekeys[rid]
+            if (
+                rid in ctx
+                and folder.valid[rid]
+                and folder._rekey_alive(rekey, ctx)
+            ):
+                key_personas.setdefault(rekey.new_pub, rekey.persona)
+        self._key_personas = key_personas
+        self._revoked_keys = frozenset(
+            r.target_key
+            for r in folder._kills(ctx)
+            if r.target_key is not None
+        )
+
     # -- queries ---------------------------------------------------------------
 
     def authority(self, key: str) -> frozenset:
@@ -331,6 +364,34 @@ class FoldState:
     def delegable(self, key: str) -> frozenset:
         """Scope patterns *key* may re-delegate."""
         return self._deleg.get(key, frozenset())
+
+    def persona_for_key(self, key: str) -> Optional[str]:
+        """The stable persona that held *key*, or ``None`` for no binding.
+
+        Answers "was this ever this persona's key", never "is it their
+        current key" — continuity verifies the past, currency authorizes
+        the present, and a caller asking the second question compares
+        against ``members[persona].current_key``. ``None`` is an ordinary
+        answer (a key the ledger has never seen), not an error. Verification
+        resolves a member key through here; a DELEGATE key resolves upward
+        through :attr:`delegation_parents` first, which is deliberately a
+        separate, public view.
+        """
+        return self._key_personas.get(key)
+
+    def key_revoked(self, key: str) -> bool:
+        """Whether *key* ITSELF is revoked — independent of membership and
+        of key strategy.
+
+        A key revocation leaves ``members`` intact and suppresses the key
+        only inside ``authority()``, so a membership check cannot see it.
+        Needed together with :meth:`persona_for_key` by the same caller: a
+        boundary holding one without the other passes rows signed by a
+        compromised key belonging to a member in good standing. A revoked
+        key still RESOLVES to its persona — what it signed stays
+        attributable — the two facts are independent.
+        """
+        return key in self._revoked_keys
 
     def holds(self, key: str, scope: str) -> bool:
         return set_covers(self._held.get(key, frozenset()), scope)

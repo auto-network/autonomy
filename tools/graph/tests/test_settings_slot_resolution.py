@@ -457,7 +457,7 @@ def test_the_fold_builds_once_per_ledger_advancement_not_once_per_call(
     deliver(path, slot_row(a, NOW_MS - MIN_MS))
     deliver(path, slot_row(b, NOW_MS - 2 * MIN_MS))
 
-    settings_ops._FOLD_MEMBERS_CACHE.clear()
+    settings_ops._FOLD_VIEW_CACHE.clear()
     settings_ops._fold_builds = 0
     for _ in range(5):
         resolve()
