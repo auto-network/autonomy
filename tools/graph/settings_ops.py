@@ -1115,6 +1115,7 @@ def unresolved_references(
             target = spec.get("references")
             if not target:
                 continue
+            single = not isinstance(item, list)
             for one in (item if isinstance(item, list) else [item]):
                 if not isinstance(one, str) or not one:
                     continue
@@ -1183,6 +1184,41 @@ class CheckFinding:
     #: said so reports a launch as ready and is wrong in the direction
     #: nobody re-examines. Advisory is declared, never inferred.
     severity: str = "blocking"
+
+    # ── The same finding as DATA ──────────────────────────────
+    #
+    # ``detail`` and ``looked_in`` above are rendered English. A consumer
+    # given only those has to parse a sentence to recover what the finding
+    # is about -- a readiness UI built against this had to regex the quoted
+    # path back out of ``detail`` to put it in a heading. That is the tell
+    # that the wrong thing is being transported: the checker HELD every one
+    # of these values and threw them away to build a string.
+    #
+    # So the fields below carry them. ``detail`` stays, because the CLI
+    # prints it and a sentence is the right thing THERE; it is no longer the
+    # only way to reach the facts.
+    set_id: str = ""
+    key: str = ""
+    org: str = ""
+    #: The declaring field that produced this, e.g. ``host_path``. Empty when
+    #: the finding is about the row itself rather than one of its fields.
+    field: str = ""
+    #: What is missing: the path, the variable name, the referenced key.
+    subject: str = ""
+    #: Where the question was answered, as an identifier rather than a
+    #: sentence, so a consumer can branch on it.
+    frame: str = ""
+    #: Straight off the declaration, when there is one to read. These are
+    #: what let a reader see WHAT the thing is instead of only where it is
+    #: not -- ``help`` especially, which is the only part that says what to
+    #: do about it.
+    name: str = ""
+    description: str = ""
+    help: str = ""
+    expects: str = ""     # "file" | "dir", when the declaration says
+    #: The schema's description of ``field`` -- what this KIND of thing is,
+    #: as opposed to what this PARTICULAR one is.
+    field_description: str = ""
 
 
 def _existence_frame(
@@ -1298,6 +1334,8 @@ def check_setting(
     org: str,
     _seen: set | None = None,
     _org_scoped: bool = False,
+    _via_field: str = "",
+    _via_description: str = "",
 ) -> list[CheckFinding]:
     """Is this row satisfied, and everything it declares it depends on?
 
@@ -1348,8 +1386,11 @@ def check_setting(
     try:
         row = read_set_key(set_id, key, org=read_org, peers=peers)
     except Exception as exc:
-        return [CheckFinding(address, "unreadable",
-                             f"{type(exc).__name__}: {exc}"[:160], frame)]
+        return [CheckFinding(
+            address, "unreadable", f"{type(exc).__name__}: {exc}"[:160], frame,
+            set_id=set_id, key=key, org=read_org, subject=key,
+            field=_via_field, field_description=_via_description,
+            frame="settings-store")]
     if row is None:
         elsewhere = _owned_but_unreadable(set_id, key, read_org)
         if elsewhere is not None:
@@ -1362,8 +1403,11 @@ def check_setting(
                 f"the first stays unreadable leaves two answers and no way to "
                 f"tell which one anything used",
                 frame)]
-        return [CheckFinding(address, "missing_reference",
-                             "no row under this key", frame)]
+        return [CheckFinding(
+            address, "missing_reference", "no row under this key", frame,
+            set_id=set_id, key=key, org=read_org, subject=key,
+            field=_via_field, field_description=_via_description,
+            frame="settings-store")]
 
     schema = schemas.get_schema(set_id, int(row["schema_revision"]))
     payload = row.get("payload") or {}
@@ -1376,6 +1420,32 @@ def check_setting(
     row_severity = (
         "advisory" if gate is not None and not payload.get(gate) else "blocking"
     )
+
+    def _row_meta(*, describes_subject: bool) -> dict:
+        """Row-level metadata, straight off the top-level payload.
+
+        ``describes_subject`` is the whole care here. A row's ``name`` and
+        ``description`` describe the thing THAT ROW IS ABOUT. A mount row is
+        about the one path it declares, so they describe it. A workspace row
+        listing six names in ``env_from_host`` is not about any one of them,
+        and attaching its ``name`` to a variable produces a confident label
+        that is simply wrong -- a missing GH_TOKEN reported as "Alpha",
+        because a field existed and meant something else.
+
+        So the caller says whether the field it is reporting on is the row's
+        own subject, and only then do the display fields travel. Identity
+        (set/key/org) always travels; it is a fact either way.
+        """
+        base = {"set_id": set_id, "key": key, "org": read_org}
+        if not describes_subject:
+            return base
+        return {
+            **base,
+            "name": str(payload.get("name") or ""),
+            "description": str(payload.get("description") or ""),
+            "help": str(payload.get("help") or ""),
+            "expects": str(payload.get("kind") or ""),
+        }
 
     def _sev(field_spec: dict) -> str:
         if row_severity == "advisory":
@@ -1395,6 +1465,7 @@ def check_setting(
                 for index, entry in enumerate(item):
                     walk(element, entry, f"{path_prefix}{name}[{index}].")
                 continue
+            single = not isinstance(item, list)
             for one in (item if isinstance(item, list) else [item]):
                 if not isinstance(one, str) or not one:
                     continue
@@ -1404,7 +1475,12 @@ def check_setting(
                     ref_key = f"{org}:{one}" if scoped else one
                     findings.extend(check_setting(
                         target, ref_key, org=org, _seen=seen,
-                        _org_scoped=scoped))
+                        _org_scoped=scoped,
+                        # The referring field is the ONLY thing that can say
+                        # what a missing row was for: the row that would have
+                        # described it is the one that is not there.
+                        _via_field=f"{path_prefix}{name}",
+                        _via_description=spec.get("description", "") or ""))
                 kind = spec.get("exists")
                 if kind:
                     if (spec.get("exists_frame") == "platform-host"
@@ -1424,6 +1500,10 @@ def check_setting(
                             "a container filesystem, which is not the platform "
                             "host's",
                             _sev(spec),
+                            field=f"{path_prefix}{name}", subject=one,
+                            frame="container-fs",
+                            field_description=spec.get("description", "") or "",
+                            **_row_meta(describes_subject=single),
                         ))
                         continue
                     ok = (_os.path.isfile(one) if kind == "file"
@@ -1436,6 +1516,12 @@ def check_setting(
                             f"which is not there",
                             f"the filesystem of the process running this check",
                             _sev(spec),
+                            field=f"{path_prefix}{name}", subject=one,
+                            frame=("platform-host"
+                                   if spec.get("exists_frame") == "platform-host"
+                                   else "check-process-fs"),
+                            field_description=spec.get("description", "") or "",
+                            **_row_meta(describes_subject=single),
                         ))
                 if spec.get("names_host_env") and one not in _os.environ:
                     # A launcher forwards the variables that are set and
@@ -1452,6 +1538,10 @@ def check_setting(
                         "which is the launcher's only if they are the same "
                         "process",
                         _sev(spec),
+                        field=f"{path_prefix}{name}", subject=one,
+                        frame="check-process-env",
+                        field_description=spec.get("description", "") or "",
+                        **_row_meta(describes_subject=single),
                     ))
 
     if schema is not None:

@@ -17029,7 +17029,59 @@ def _finding_json(finding) -> dict:
         "what": finding.detail,
         "looked_in": finding.looked_in,
         "severity": getattr(finding, "severity", "blocking"),
+        # The same finding as fields rather than as a sentence. ``what`` and
+        # ``looked_in`` above are rendered English and stay for the callers
+        # that print them; everything below is what a UI should read, so it
+        # does not have to parse a quoted path back out of a sentence to put
+        # it in a heading.
+        "set_id": getattr(finding, "set_id", ""),
+        "key": getattr(finding, "key", ""),
+        "org": getattr(finding, "org", ""),
+        "field": getattr(finding, "field", ""),
+        "subject": getattr(finding, "subject", ""),
+        "frame": getattr(finding, "frame", ""),
+        "name": getattr(finding, "name", ""),
+        "description": getattr(finding, "description", ""),
+        "help": getattr(finding, "help", ""),
+        "expects": getattr(finding, "expects", ""),
+        "field_description": getattr(finding, "field_description", ""),
     }
+
+
+def _things_missing(rows) -> list[dict]:
+    """The distinct things missing, each with the workspaces that need it.
+
+    The per-workspace view repeats a shared fact once per workspace: one
+    unprovisioned credential rendered as seven separate problems, two host
+    variables as six each -- twenty-three rows for six facts, on real data.
+    A reader cannot see that setting one variable clears six workspaces,
+    which is the only thing they actually wanted to know.
+
+    Identity is (kind, subject): the same missing thing, however many
+    declarations point at it. Severity is the WORST any declaration gave it
+    -- a thing one workspace treats as optional and another requires is
+    required, and reporting the softer answer says a launch will work when
+    it will not.
+    """
+    things: dict[tuple, dict] = {}
+    for w in rows:
+        for finding in (*w.blocking, *w.unanswerable, *w.advisory):
+            data = _finding_json(finding)
+            sig = (data["kind"], data["subject"] or data["at"])
+            thing = things.get(sig)
+            if thing is None:
+                thing = things[sig] = {**data, "needed_by": []}
+            label = w.name or w.workspace_id
+            if label not in thing["needed_by"]:
+                thing["needed_by"].append(label)
+            if data["severity"] == "blocking":
+                thing["severity"] = "blocking"
+            # Prefer a declaration that actually carries display metadata:
+            # two rows can name the same file and only one describe it.
+            for richer in ("name", "description", "help", "field_description"):
+                if not thing.get(richer) and data.get(richer):
+                    thing[richer] = data[richer]
+    return list(things.values())
 
 
 async def api_org_workspace_health(request):
@@ -17061,6 +17113,10 @@ async def api_org_workspace_health(request):
         "asked_in": ("a container, which cannot see the platform host's "
                      "filesystem" if settings_ops._running_in_a_container()
                      else "the platform host"),
+        # What is actually missing, once. The per-workspace lists below stay
+        # for callers that read them, but they are the same facts multiplied
+        # by the workspaces that happen to want them.
+        "things": _things_missing(rows),
         "workspaces": [
             {
                 "id": w.workspace_id,
