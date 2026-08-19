@@ -12,7 +12,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
-BEADS_DIR="${BEADS_DIR:-$REPO_ROOT/.beads}"
+# Beads state lives on the STATE volume, not beside the code (auto-qk4ip).
+BEADS_DIR="${BEADS_DIR:-${AUTONOMY_DATA_ROOT:-$REPO_ROOT/data}/.beads}"
+# The dolt repository is one level down. --data-dir must point AT it, not at
+# its parent, or dolt sees no database and serves nothing.
+DOLT_DIR="$BEADS_DIR/dolt"
 
 # Read fixed port from config.yaml (grep for dolt-server-port)
 PORT=$(grep -oP 'dolt-server-port:\s*\K[0-9]+' "$BEADS_DIR/config.yaml" 2>/dev/null || echo "3306")
@@ -95,10 +99,19 @@ if [[ -f "$PID_FILE" ]]; then
     fi
 fi
 
-# ── Initialize dolt repo if needed ───────────────────
-if [[ ! -d "$BEADS_DIR/.dolt" ]]; then
-    echo "Initializing dolt repository in $BEADS_DIR..."
-    (cd "$BEADS_DIR" && dolt init --name autonomy --email agent@autonomy.local 2>/dev/null) || true
+# ── The repository must already exist ────────────────
+# This used to `dolt init` whenever it did not find one, which is how a wrong
+# path became an EMPTY DATABASE that started cleanly and served nothing: bd
+# 404s, every bead looks gone, and the exit code says success. Refuse instead.
+# Creating the repo is a provisioning act, not something a restart does.
+if [[ ! -d "$DOLT_DIR/.dolt" ]]; then
+    echo "ERROR: no dolt repository at $DOLT_DIR" >&2
+    echo "       (looked for $DOLT_DIR/.dolt)" >&2
+    echo "" >&2
+    echo "Refusing to init an empty one — that starts fine and serves no" >&2
+    echo "beads, which is worse than not starting. Check BEADS_DIR, or" >&2
+    echo "provision the repository deliberately." >&2
+    exit 1
 fi
 
 # ── Start server ─────────────────────────────────────
@@ -108,7 +121,7 @@ echo "Starting dolt sql-server on port $PORT..."
 nohup dolt sql-server \
     --host 0.0.0.0 \
     --port "$PORT" \
-    --data-dir "$BEADS_DIR" \
+    --data-dir "$DOLT_DIR" \
     >> "$LOG_FILE" 2>&1 &
 
 DOLT_PID=$!
