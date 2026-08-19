@@ -29,6 +29,17 @@ python3 -m tools.portability migrate-on-mount /app/data $INIT_ARGS
 # demand, not up front.
 mkdir -p /app/orgs
 
+# In-memory (ramfs) secret stores, provisioned before serving: per-session
+# secret delivery and the dashboard key cache. Automatic via the Docker socket
+# on a containerized node (a one-shot privileged helper mounts ramfs in the
+# host mount namespace — no CAP_SYS_ADMIN on this container); idempotent every
+# boot; ramfs is ephemeral across a host reboot, so re-checking each boot is
+# what self-heals. Best-effort and LOUD on failure: the vault re-checks the
+# filesystem class on every write and fails closed, so a provisioning miss
+# degrades the secret features rather than taking the whole node down.
+python3 -m agents.secret_ramfs || \
+    echo "WARNING: secret ramfs provisioning failed — secret delivery and the key cache will fail closed until resolved" >&2
+
 SSL_ARGS=""
 if [ -f ${AUTONOMY_TLS_CERT:-/app/data/tls.crt} ] && [ -f ${AUTONOMY_TLS_KEY:-/app/data/tls.key} ] && [ "${DASHBOARD_TLS:-}" != "off" ]; then
     SSL_ARGS="--ssl-certfile ${AUTONOMY_TLS_CERT:-/app/data/tls.crt} --ssl-keyfile ${AUTONOMY_TLS_KEY:-/app/data/tls.key}"

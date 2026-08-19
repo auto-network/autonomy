@@ -64,6 +64,23 @@ services:
       # wholesale — a session receives only the resolved concrete dir, via the
       # hybrid resolver, auto-fteke). Nothing else lives here.
       - autonomy-orgs:/app/orgs
+      # The dashboard's memory-class key cache (auto-a1pub): opened key material
+      # lives on ramfs, never disk, never swap. This is only the mountpoint +
+      # rslave propagation; the entrypoint mounts the ramfs on the host at boot
+      # (agents.secret_ramfs) and rslave carries that host mount into this
+      # running container. Propagation, not a plain bind, so no restart is
+      # needed to see the mount and no CAP_SYS_ADMIN is added here. Provisioning
+      # needs the Docker socket (see the compose override that grants it, the
+      # same one session-launching needs); without it the mount stays an empty
+      # dir and the vault's per-write ramfs check fails closed. The per-session
+      # delivery ramfs (/run/autonomy-secrets) needs no bind here — sessions
+      # mount their own subdir at launch; the dashboard never touches it.
+      - type: bind
+        source: /run/autonomy-keycache
+        target: /run/autonomy-keycache
+        bind:
+          propagation: rslave
+          create_host_path: true
 
   # Optional: dolt SQL server backing the beads issue tracker. Image
   # source is operator-chosen via DOLT_IMAGE; the beads schema itself is
