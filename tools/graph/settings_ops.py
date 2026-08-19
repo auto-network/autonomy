@@ -201,6 +201,47 @@ def _org_fold_members(slug: "str | None") -> frozenset:
     return frozenset(state.members) if state is not None else frozenset()
 
 
+def _resolution_peers(set_id: str, resolved_org: "str | None",
+                      peers: "list[str] | None") -> list[str]:
+    """THE candidate-store selection, shared by every resolution-shaped
+    read (read_set, chain_setting, contested_keys).
+
+    Candidate SELECTION is upstream of the shared ranking helper, and a
+    shared ranker over different candidate sets gives different answers
+    with identical ordering logic — so the selection lives here, once:
+
+    - An organization read draws from its peers: the operator's other
+      organizations, personal, and the machine store (subject to the
+      subscription, which can never remove the operator's own stores).
+    - A PERSONAL read takes the machine store as its ONE peer — the single
+      store more local than personal — and no organization ever
+      contributes to it (graph://21a0da9e-1c2 v42): the sovereignty ladder
+      read one rung down, not an aggregation point for org content.
+    - A set whose band forbids every peer-visible state opens no peer
+      database at all: the band already refuses the write and the
+      promotion, and this refuses to SERVE a row that reached a federated
+      state by a path nobody anticipated.
+
+    Id-addressed lookups (get_setting, resolve_setting_strict) and set
+    enumeration (list_set_ids) are NOT resolution: they find a row the
+    caller already names rather than answer "what is the value", and they
+    deliberately keep the wide peer set.
+
+    Only the store list is shared; each caller keeps its own row fetch
+    (whole set, one key, bases-plus-exclusions) because the row SHAPES
+    genuinely differ — the hazard was three copies of the selection, not
+    three fetches downstream of one selection.
+    """
+    from .cross_org import MACHINE_DB_SLUG, resolve_peers
+
+    resolved = resolve_peers(resolved_org, peers)
+    if resolved_org is None:
+        resolved = [p for p in resolved if p == MACHINE_DB_SLUG]
+    if not set(schemas.states_allowed(set_id, 1)) & set(PEER_VISIBLE_STATES):
+        return []
+    return sorted(resolved)
+
+
 def _rank_candidates(
     candidate_bases: list,
     *,
@@ -3428,7 +3469,7 @@ def chain_setting(
         db.close()
 
     placeholders = ",".join("?" for _ in PEER_VISIBLE_STATES)
-    for peer in sorted(resolve_peers(resolved_org, peers)):
+    for peer in _resolution_peers(set_id, resolved_org, peers):
         peer_db = open_peer_db(peer)
         if peer_db is None:
             continue
@@ -3828,7 +3869,7 @@ def contested_keys(
     finally:
         db.close()
     placeholders = ",".join("?" for _ in PEER_VISIBLE_STATES)
-    for peer in sorted(resolve_peers(resolved_org, peers)):
+    for peer in _resolution_peers(set_id, resolved_org, peers):
         peer_db = open_peer_db(peer)
         if peer_db is None:
             continue
@@ -3989,20 +4030,8 @@ def read_set(
     # a peer-visible state by some path nobody anticipated -- a direct
     # write, a restore, a migration -- still does not cross the boundary.
     # The two guards fail independently, which is the point of having both.
-    resolved_peers = resolve_peers(resolved_org, peers)
-    if resolved_org is None:
-        # A personal read takes the machine store as its ONE peer — the
-        # single store more local than personal, so a machine-specific
-        # answer outranks a fleet-wide one on that machine. No organization
-        # is a peer of a personal read (graph://21a0da9e-1c2 v42): the
-        # sovereignty ladder read one rung down, not an aggregation point
-        # for org content.
-        from .cross_org import MACHINE_DB_SLUG
-
-        resolved_peers = [p for p in resolved_peers if p == MACHINE_DB_SLUG]
-    if not set(schemas.states_allowed(set_id, 1)) & set(PEER_VISIBLE_STATES):
-        resolved_peers = []
-    for peer in sorted(resolved_peers):
+    resolved_peers = _resolution_peers(set_id, resolved_org, peers)
+    for peer in resolved_peers:
         peer_db = open_peer_db(peer)
         if peer_db is None:
             continue
