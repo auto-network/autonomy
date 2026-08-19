@@ -237,9 +237,31 @@
     var iconHost = el('span', 'identity-panel-action-icon identity-org-mark');
     // The org's own initial rather than a generic glyph — several of these
     // sit in a list and the first thing a reader does is tell them apart.
-    iconHost.appendChild(el('span', '', String(
-      (org && org.initial) || (slug || '?').charAt(0)).toUpperCase()));
+    var initial = el('span', '', String(
+      (org && org.initial) || (slug || '?').charAt(0)).toUpperCase());
+    iconHost.appendChild(initial);
     if (org && org.color) iconHost.style.background = org.color;
+    // The org declares a favicon and it is the better mark: a logo is
+    // recognised before a letter is read, and two orgs starting with the same
+    // letter are otherwise told apart only by colour.
+    //
+    // Layered over the initial rather than replacing it. Every org that
+    // declares a favicon today serves it, but the declaration is a path in a
+    // Setting and nothing checks the file is still there — an org can be
+    // created naming one that was never added. On error the image removes
+    // itself and the letter is already underneath, so a missing file costs
+    // nothing and never leaves a broken-image glyph in the list.
+    if (org && org.favicon) {
+      var mark = new root.Image();
+      mark.className = 'identity-org-favicon';
+      mark.alt = '';
+      mark.setAttribute('aria-hidden', 'true');
+      mark.addEventListener('error', function () {
+        if (mark.parentNode) mark.parentNode.removeChild(mark);
+      });
+      mark.src = org.favicon;
+      iconHost.appendChild(mark);
+    }
     row.appendChild(iconHost);
     var copy = el('span', 'identity-panel-action-copy');
     copy.appendChild(el('span', 'identity-panel-action-label',

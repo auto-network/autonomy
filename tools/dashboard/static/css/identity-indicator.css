@@ -427,4 +427,17 @@
   color: #e5e7eb;
   font-size: 0.6875rem;
   font-weight: 700;
+  position: relative;   /* the favicon sits over the initial */
+  overflow: hidden;
+}
+
+/* Covers the initial rather than replacing it in the DOM, so a favicon that
+ * 404s can simply remove itself and reveal the letter already underneath. */
+.identity-org-favicon {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: inherit;
 }
