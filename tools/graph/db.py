@@ -119,32 +119,58 @@ class LocalStoreCollisionError(RuntimeError):
     the file as a local store."""
 
 
-def _bootstrap_org_type(path: Path) -> "str | None":
-    """The bootstrap orgs-row ``type`` of the DB at *path*, or ``None``
-    (no row, no table, unreadable — all mean 'not a claimed organization')."""
+class LocalStoreUnreadableError(RuntimeError):
+    """A file at a local store's legacy path cannot be read at all.
+
+    "There is no data" and "I cannot read this" are different states, and
+    merging them makes a damaged store indistinguishable from an empty one
+    — every downstream decision then treats damage as absence, and absence
+    is the benign case, so the merge fails toward accepting (and here,
+    MOVING) the broken thing. A corrupt file is never classified, never
+    served, and never migrated; the operator inspects or restores it."""
+
+
+#: Tri-state legacy-file classification. The three states are distinct on
+#: purpose (see LocalStoreUnreadableError): a readable database with no
+#: orgs row or no orgs table is the legitimate unclaimed shape (the
+#: on-demand machine store); only an actual read failure is "unreadable".
+_CLASSIFY_SHARED_ORG = "shared-org"
+_CLASSIFY_UNCLAIMED = "local-or-unclaimed"
+_CLASSIFY_UNREADABLE = "unreadable"
+
+
+def _bootstrap_org_classification(path: Path) -> str:
     try:
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         try:
             row = conn.execute("SELECT type FROM orgs LIMIT 1").fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc).lower():
+                return _CLASSIFY_UNCLAIMED
+            return _CLASSIFY_UNREADABLE
         finally:
             conn.close()
     except sqlite3.Error:
-        return None
-    return row[0] if row else None
+        return _CLASSIFY_UNREADABLE
+    if row is None:
+        return _CLASSIFY_UNCLAIMED
+    return _CLASSIFY_SHARED_ORG if row[0] == "shared" else _CLASSIFY_UNCLAIMED
 
 
 #: Per-process memo of legacy-file classification. A hit only ever refers to
 #: a file still at its legacy path; the operator remedy moves the file away,
 #: after which the exists() check short-circuits before this is consulted.
-_LEGACY_STORE_IS_SHARED_ORG: dict[str, bool] = {}
+#: A cached "shared" or "unreadable" after an in-place repair over-refuses
+#: until restart — the correct direction to be wrong.
+_LEGACY_STORE_CLASSIFICATION: dict[str, str] = {}
 
 
-def _legacy_is_shared_org(legacy: Path) -> bool:
+def _classify_legacy_store(legacy: Path) -> str:
     key = str(legacy)
-    cached = _LEGACY_STORE_IS_SHARED_ORG.get(key)
+    cached = _LEGACY_STORE_CLASSIFICATION.get(key)
     if cached is None:
-        cached = _bootstrap_org_type(legacy) == "shared"
-        _LEGACY_STORE_IS_SHARED_ORG[key] = cached
+        cached = _bootstrap_org_classification(legacy)
+        _LEGACY_STORE_CLASSIFICATION[key] = cached
     return cached
 
 
@@ -168,12 +194,21 @@ def _local_store_db_path(name: str, root: Path | str | None = None) -> Path:
     if target.exists():
         return target
     legacy = orgs / f"{name}.db"
-    if legacy.exists() and not _legacy_is_shared_org(legacy):
-        return legacy
-    # Absent, or a shared organization stranded under a reserved name (a
-    # pre-reservation creation): the latter is NEVER served as the local
-    # store — resolution answers with the (possibly not-yet-created) real
-    # home, and startup separately refuses until the operator renames it.
+    if legacy.exists():
+        classification = _classify_legacy_store(legacy)
+        if classification == _CLASSIFY_UNCLAIMED:
+            return legacy
+        if classification == _CLASSIFY_UNREADABLE:
+            raise LocalStoreUnreadableError(
+                f"{legacy} cannot be read; refusing to classify it, serve "
+                f"it as the {name!r} store, or migrate it. Inspect or "
+                f"restore the file, then restart."
+            )
+        # A shared organization stranded under a reserved name (a
+        # pre-reservation creation) is NEVER served as the local store —
+        # resolution answers with the (possibly not-yet-created) real
+        # home, and startup separately refuses until the operator renames
+        # it.
     return target
 
 
@@ -194,7 +229,15 @@ def relocate_local_stores(root: Path | str | None = None) -> None:
         legacy = orgs / f"{name}.db"
         if not legacy.exists():
             continue
-        if _legacy_is_shared_org(legacy):
+        classification = _classify_legacy_store(legacy)
+        if classification == _CLASSIFY_UNREADABLE:
+            raise LocalStoreUnreadableError(
+                f"{legacy} cannot be read; refusing to migrate it. A "
+                f"corrupt file moved to {orgs.parent / (name + '.db')} "
+                f"would become the operator's live store. Inspect or "
+                f"restore the file, then restart."
+            )
+        if classification == _CLASSIFY_SHARED_ORG:
             suggested = orgs / "<newname>.db"
             raise LocalStoreCollisionError(
                 f"{legacy} is a SHARED organization named {name!r} — created "

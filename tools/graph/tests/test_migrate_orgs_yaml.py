@@ -267,7 +267,7 @@ def test_type_inference_from_bootstrap_row(tmp_path, yaml_path):
     # A shared-typed file squatting on the reserved name is not the
     # personal store; the migration must not adopt it as one.
     from tools.graph import db as graph_db_mod
-    graph_db_mod._LEGACY_STORE_IS_SHARED_ORG.clear()
+    graph_db_mod._LEGACY_STORE_CLASSIFICATION.clear()
     GraphDB.create_org_db(
         "personal", type_="shared", path=orgs_dir / "personal.db",
     ).close()
