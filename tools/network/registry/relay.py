@@ -78,7 +78,8 @@ CLOSE_LISTENER_FELL_BEHIND = 4416
 
 # Stream (auto-albp6.7) retention, in precedence order -- the order is
 # load-bearing, see Stream._apply_retention.
-STREAM_EXPIRY_SECONDS = 60
+# Owned by tools.network.clock (an expiry sweep); re-exported here.
+from tools.network.clock import STREAM_EXPIRY_SECONDS
 STREAM_BUFFER_CAP_BYTES = 1024 * 1024
 STREAM_MIN_RETAINED_FRAMES = 10
 

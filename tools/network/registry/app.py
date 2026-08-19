@@ -64,9 +64,12 @@ from .signing import (
 from .store import LinkGrant, OrgBinding, RegistryStore
 from .witness import MAX_WITNESS_HEADS, sign_attestation
 
-DEFAULT_BINDING_TTL = 30 * 86_400  # spec §4.2: binding TTL default 30d
-MIN_BINDING_TTL = 3_600
-MAX_BINDING_TTL = DEFAULT_BINDING_TTL
+# Owned by tools.network.clock (validity intervals); re-exported here.
+from tools.network.clock import (
+    DEFAULT_BINDING_TTL,
+    MAX_BINDING_TTL,
+    MIN_BINDING_TTL,
+)
 
 RECOVERY_POLICIES = frozenset({"none", "recovery-key"})
 
@@ -235,9 +238,12 @@ from tools.network.clock import MAX_ATTESTATION_FUTURE_TS
 # Nodes refresh on a heartbeat; anything that stops refreshing goes dark.
 MAX_NODE_ADDRS = 8
 MAX_NODE_URL_LEN = 256
-DEFAULT_HINT_TTL = 3_600
-MIN_HINT_TTL = 60
-MAX_HINT_TTL = 86_400
+# Owned by tools.network.clock (validity intervals); re-exported here.
+from tools.network.clock import (
+    DEFAULT_HINT_TTL,
+    MAX_HINT_TTL,
+    MIN_HINT_TTL,
+)
 
 
 # -- E1 session linking (spec §4.7, §4.8, §6.8) ------------------------------
@@ -249,9 +255,12 @@ MAX_HINT_TTL = 86_400
 # page scripts cannot read it, SameSite=Lax because redemption is a
 # top-level POST from the auto.network origin itself.
 SESSION_COOKIE = "an_link_session"
-SESSION_TTL = 24 * 3600          # identified session lifetime (matches §6.3)
-ANON_SESSION_TTL = 3600          # an anonymous QR-minting session
-CHALLENGE_TTL = 60               # §4.8: "~60s" cross-device challenge
+# Owned by tools.network.clock (validity intervals); re-exported here.
+from tools.network.clock import (
+    ANON_SESSION_TTL,
+    CHALLENGE_TTL,
+    SESSION_TTL,
+)
 SSE_MAX_WAIT = 30                # hard real-time cap on one SSE hold
 
 
