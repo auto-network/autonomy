@@ -58,11 +58,10 @@ ASSERTION_VERSION = 1
 #: The only scope a bootstrap assertion may carry (§7A: identify-only).
 IDENTIFY_SCOPE = "viewer:identify"
 
-#: Hard ceiling on the assertion validity window. Spec §7A: the TTL is
-#: "seconds," and the QR challenge (§4.8) is ~60s; 120s leaves room for
-#: clock skew between the minting dashboard and the registry while keeping
-#: a stolen assertion useless within a breath.
-MAX_ASSERTION_TTL = 120
+#: Hard ceiling on the assertion validity window, seconds. Owned by
+#: tools.network.clock (a validity-interval gate); re-exported here for the
+#: assertion call sites that always read it from this module.
+from tools.network.clock import MAX_ASSERTION_TTL
 
 #: A nonce/challenge is a 128-bit CSPRNG value, hex-encoded (32 chars).
 _NONCE_HEX_LEN = 32

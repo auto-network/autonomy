@@ -43,8 +43,10 @@ ENVELOPE_VERSION = 1
 #: can never be substituted for a succession authorization and vice versa.
 RECOVERY_SUCCESSION_DOMAIN = b"autonomy.network.registry.recovery-succession.v1\n"
 
-#: Maximum tolerated |server now - envelope ts|, seconds.
-MAX_CLOCK_SKEW = 300
+#: Maximum tolerated |server now - envelope ts|, seconds. Owned by
+#: tools.network.clock (a freshness gate); re-exported here for the
+#: registry-side call sites that always read it from this module.
+from tools.network.clock import MAX_CLOCK_SKEW
 
 
 def request_signing_input(method: str, path: str, ts: int, signer: str, payload: dict) -> bytes:

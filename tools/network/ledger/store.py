@@ -42,11 +42,11 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-import time
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
 from tools.data_paths import DATA_ROOT, resolve_orgs_root
+from tools.network import clock
 from tools.network.idkit import canonical_json, verify_signature
 from tools.network.idkit.errors import IdkitError
 
@@ -70,8 +70,10 @@ LEDGER_DB_SUFFIX = ".ledger.db"
 #: (auto-cz4fb). Pinned-position finalize means the invite's own expiry
 #: no longer bounds when an admission can land, so the staging row needs
 #: its own bound or an admission could be resurrected indefinitely from
-#: stale staging state. Server wall clock, not the client's HLC.
-PENDING_CLAIM_TTL_MS = 7 * 24 * 60 * 60 * 1000
+#: stale staging state. Server wall clock, not the client's HLC. Owned by
+#: tools.network.clock (an expiry-sweep gate); re-exported here for the
+#: staging call sites that always read it from this module.
+from tools.network.clock import PENDING_CLAIM_TTL_MS
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -321,7 +323,7 @@ class LedgerStore:
             raise SchemaError("stage_pending_claim takes a member.claim event")
         p = event.payload
         key = self.claim_key(p["invite_ref"], p["persona_pub"])
-        staged_at = int(time.time() * 1000) if now is None else int(now)
+        staged_at = clock.now_ms(now)
         with self.db:
             self.db.execute(
                 "INSERT OR REPLACE INTO ledger_pending_claims VALUES "
@@ -457,7 +459,7 @@ class LedgerStore:
         )
         expired = (
             record["staged_at"] is not None
-            and (int(time.time() * 1000) if now is None else int(now))
+            and clock.now_ms(now)
             > record["staged_at"] + PENDING_CLAIM_TTL_MS
         )
         if expired:

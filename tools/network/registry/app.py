@@ -226,7 +226,8 @@ MIN_BUNDLE_BYTES = 12 + 16
 MAX_TOPIC_PAGE = 256
 MAX_LISTING_PAGE = 256
 #: An attestation minted further in the future than this is junk, not skew.
-MAX_ATTESTATION_FUTURE_TS = MAX_CLOCK_SKEW
+#: Owned by tools.network.clock (a freshness gate).
+from tools.network.clock import MAX_ATTESTATION_FUTURE_TS
 
 # -- G1 node reachability hints (spec §8) -------------------------------------
 #
