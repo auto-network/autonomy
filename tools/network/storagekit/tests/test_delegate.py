@@ -26,7 +26,7 @@ from __future__ import annotations
 import pytest
 
 from tools.network.idkit import KeyPair
-from tools.network.ledger import HLC
+from tools.network.ledger import HLC, sign_delegate_proof
 from tools.network.ledger.projections import organization_content_domain_id
 from tools.network.ledger.tests.conftest import Sim
 from tools.network.storagekit import (
@@ -38,6 +38,7 @@ from tools.network.storagekit import (
     credentials,
     delegate as delegate_mod,
     filesystem_magic,
+    storage_delegate_scopes,
 )
 from tools.network.storagekit.acceptance import (
     ScopeError,
@@ -70,13 +71,21 @@ class World:
         # two storage scopes (role scopes are non-delegable, so this is
         # required and is the whole of the issuer's delegable storage reach).
         delegate_mod.authorize_member_storage(
-            s.ledger, s.root, self.issuer, self.dom, hlc=self._hlc()
+            s.ledger, s.root, self.issuer, self.dom, hlc=self._hlc(),
+            child_proof=sign_delegate_proof(
+                self.issuer, self.gen, s.root.public_hex,
+                storage_delegate_scopes(self.dom),
+            ),
         )
         # A non-member also granted the two scopes re-delegably: a chain
         # through it terminates OUTSIDE the roster.
         self.outside = KeyPair.generate()
         delegate_mod.authorize_member_storage(
-            s.ledger, s.root, self.outside, self.dom, hlc=self._hlc()
+            s.ledger, s.root, self.outside, self.dom, hlc=self._hlc(),
+            child_proof=sign_delegate_proof(
+                self.outside, self.gen, s.root.public_hex,
+                storage_delegate_scopes(self.dom),
+            ),
         )
 
     def _admit(self):

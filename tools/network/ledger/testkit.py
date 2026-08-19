@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from tools.network.idkit import KeyPair
 
-from . import HLC, LedgerStore, make_event
+from . import HLC, LedgerStore, make_event, sign_delegate_proof
 
 T0 = 1_800_000_000_000  # unix ms, matches tests/conftest.py
 
@@ -51,14 +51,18 @@ class OrgSim:
         scope=("link:publish",),
         parents=None,
     ) -> str:
+        child = child or KeyPair.generate()
         return self.emit(
             store,
             self.root,
             {
                 "type": "delegate",
-                "child_pub": (child or KeyPair.generate()).public_hex,
+                "child_pub": child.public_hex,
                 "scope": sorted(set(scope)),
                 "can_redelegate": False,
+                "proof": sign_delegate_proof(
+                    child, store.ledger.genesis_id, self.root.public_hex, scope,
+                ),
             },
             parents=parents,
         )

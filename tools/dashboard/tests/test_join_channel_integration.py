@@ -31,7 +31,7 @@ from tools.graph.schemas.network_identity import (
     NETWORK_LINK_GRANT_SET_ID,
 )
 from tools.network.idkit import KeyPair, derive_persona, generate_token
-from tools.network.ledger import HLC, LedgerStore, make_event, org_ledger_db_path, sign_approval
+from tools.network.ledger import HLC, LedgerStore, make_event, org_ledger_db_path, sign_approval, sign_delegate_proof
 from tools.network.ledger.claims import mint_member_claim
 from tools.network.ledger.found import found_org_ledger
 
@@ -67,6 +67,10 @@ class World:
         self._emit(self.root, {
             "type": "delegate", "child_pub": self.admin.public_hex,
             "scope": ["role:grant:member"], "can_redelegate": False,
+            "proof": sign_delegate_proof(
+                self.admin, self.founded.genesis_id,
+                self.root.public_hex, ["role:grant:member"],
+            ),
         })
         self.token = generate_token()
         self.invite_ref = self._emit(self.root, {
@@ -130,13 +134,18 @@ class World:
     def advance_heads_past_invite_expiry(self):
         """Make current-frontier finalization late without expiring wall time."""
         with LedgerStore(org_ledger_db_path(ORG)) as store:
+            filler = KeyPair.generate()
             store.append(make_event(
                 self.root,
                 {
                     "type": "delegate",
-                    "child_pub": KeyPair.generate().public_hex,
+                    "child_pub": filler.public_hex,
                     "scope": ["link:publish"],
                     "can_redelegate": False,
+                    "proof": sign_delegate_proof(
+                        filler, store.ledger.genesis_id,
+                        self.root.public_hex, ["link:publish"],
+                    ),
                 },
                 store.heads(),
                 HLC(FAR + 1_000),
@@ -374,8 +383,12 @@ def test_finalize_after_the_invite_expires(tmp_path, monkeypatch):
         position = store.evaluate_pending_claim(claim_key)["position"]
         store.append(make_event(
             world.root,
-            {"type": "delegate", "child_pub": KeyPair.generate().public_hex,
-             "scope": ["link:publish"], "can_redelegate": False},
+            (lambda k: {"type": "delegate", "child_pub": k.public_hex,
+             "scope": ["link:publish"], "can_redelegate": False,
+             "proof": sign_delegate_proof(
+                 k, store.ledger.genesis_id, world.root.public_hex,
+                 ["link:publish"],
+             )})(KeyPair.generate()),
             sorted(store.heads()), HLC(real_now + 120_000),
         ))
         approvals = store.get_pending_claim(claim_key)["approvals"]

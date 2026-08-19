@@ -18,6 +18,7 @@ from tools.network.ledger.fold import (
     R_INVITE_EXPIRED,
 )
 from tools.network.ledger.store import PENDING_CLAIM_TTL_MS, StoreError
+from tools.network.ledger.events import sign_delegate_proof
 
 ORG_ID = "018f6b2a-7c4d-7e11-8a3b-9d5c1e2f4a6b"
 T0 = 1_800_000_000_000
@@ -54,6 +55,10 @@ class Org:
                 "child_pub": self.admin.public_hex,
                 "scope": ["role:grant:member"],
                 "can_redelegate": False,
+                "proof": sign_delegate_proof(
+                    self.admin, self.genesis_id, self.root.public_hex,
+                    ["role:grant:member"],
+                ),
             },
         )
         self.seed = os.urandom(32)
@@ -163,6 +168,10 @@ def test_full_pending_flow_admin_ack_threshold_two():
             "child_pub": admin2.public_hex,
             "scope": ["role:grant:member"],
             "can_redelegate": False,
+            "proof": sign_delegate_proof(
+                admin2, org.genesis_id, org.root.public_hex,
+                ["role:grant:member"],
+            ),
         },
     )
     bare = org.mint_claim()
@@ -308,6 +317,10 @@ def test_readiness_tracks_the_fold_verdict():
             "child_pub": admin2.public_hex,
             "scope": ["role:grant:member"],
             "can_redelegate": False,
+            "proof": sign_delegate_proof(
+                admin2, org.genesis_id, org.root.public_hex,
+                ["role:grant:member"],
+            ),
         },
     )
     bare = org.mint_claim()
@@ -406,6 +419,10 @@ def test_admitting_is_a_need_sized_deterministic_subset():
             "child_pub": admin2.public_hex,
             "scope": ["role:grant:member"],
             "can_redelegate": False,
+            "proof": sign_delegate_proof(
+                admin2, org.genesis_id, org.root.public_hex,
+                ["role:grant:member"],
+            ),
         },
     )
     claim_key = org.store.stage_pending_claim(org.mint_claim())
@@ -453,13 +470,18 @@ def test_finalize_survives_approval_outlasting_the_invite():
     # Org activity pushes the heads well past the invite's expiry.
     for i in range(3):
         org._ts = expiry + 600_000 * (i + 1)
+        filler = KeyPair.generate()
         org._emit(
             org.root,
             {
                 "type": "delegate",
-                "child_pub": KeyPair.generate().public_hex,
+                "child_pub": filler.public_hex,
                 "scope": ["link:publish"],
                 "can_redelegate": False,
+                "proof": sign_delegate_proof(
+                    filler, org.genesis_id, org.root.public_hex,
+                    ["link:publish"],
+                ),
             },
         )
     record = org.store.get_pending_claim(claim_key)

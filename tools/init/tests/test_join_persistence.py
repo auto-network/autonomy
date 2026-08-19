@@ -19,6 +19,7 @@ from tools.data_paths import REFUSE_REAL_DATA_FALLBACK_ENV, STORE_MANIFEST
 from tools.network.idkit import KeyPair, generate_token
 from tools.network.invitation import Invitation, encode_invitation
 from tools.network.ledger import (
+    sign_delegate_proof,
     HLC,
     LedgerStore,
     make_event,
@@ -156,6 +157,10 @@ class FoundedInvite:
                     "child_pub": self.admin.public_hex,
                     "scope": ["role:grant:member"],
                     "can_redelegate": False,
+                    "proof": sign_delegate_proof(
+                        self.admin, self.genesis_id,
+                        self.root_key.public_hex, ["role:grant:member"],
+                    ),
                 })
                 claim_token = generate_token()
                 channel_token = generate_token()

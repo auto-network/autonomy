@@ -22,6 +22,7 @@ from tools.network.ledger import (
     make_event,
     sign_approval,
     sign_rotate_continuity,
+    sign_delegate_proof,
     sign_rekey_continuity,
     sign_rotate_recovery,
 )
@@ -70,12 +71,19 @@ class Sim:
 
     # -- event helpers -----------------------------------------------------------
 
-    def delegate(self, author, child, scope, redelegate=False, parents=None, ttl=None, ts=None):
+    def delegate(self, author, child, scope, redelegate=False, parents=None, ttl=None, ts=None, proof=None):
+        # The named child signs the grant (auto-le0kg): pass a KeyPair, or
+        # supply an explicit (possibly bogus) proof for refusal tests.
+        if proof is None:
+            proof = sign_delegate_proof(
+                child, self.genesis_id, key(author), scope,
+            )
         payload = {
             "type": "delegate",
             "child_pub": key(child),
             "scope": sorted(set(scope)),
             "can_redelegate": redelegate,
+            "proof": proof,
         }
         if ttl is not None:
             payload["ttl"] = ttl
@@ -290,12 +298,15 @@ def random_events(seed: int, n: int = 40) -> list:
             child = rng.choice(keys)
             emit(
                 author,
-                {
+                (lambda _scope: {
                     "type": "delegate",
                     "child_pub": child.public_hex,
-                    "scope": sorted(set(rng.sample(SCOPE_POOL, rng.randint(1, 4)))),
+                    "scope": _scope,
                     "can_redelegate": rng.random() < 0.5,
-                },
+                    "proof": sign_delegate_proof(
+                        child, gid, author.public_hex, _scope,
+                    ),
+                })(sorted(set(rng.sample(SCOPE_POOL, rng.randint(1, 4))))),
                 parents,
                 ts,
             )

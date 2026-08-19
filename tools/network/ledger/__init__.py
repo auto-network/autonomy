@@ -31,6 +31,7 @@ from .events import (
     rotate_recovery_input,
     sign_approval,
     sign_rotate_continuity,
+    sign_delegate_proof,
     sign_rekey_continuity,
     sign_rotate_recovery,
     validate_payload,
@@ -142,6 +143,7 @@ __all__ = [
     "rekey_continuity_input",
     "rotate_recovery_input",
     "sign_rotate_continuity",
+    "sign_delegate_proof",
     "sign_rekey_continuity",
     "sign_rotate_recovery",
     # fold
