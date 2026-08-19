@@ -959,6 +959,124 @@ def sanitize_next(raw: str | None) -> str:
     return raw
 
 
+
+# ── the vault's one warm moment ───────────────────────────────────────
+
+
+async def post_unlock_vault_keys(request: Request) -> JSONResponse:
+    """Receive the generation keys the browser opened, and bring the vault up.
+
+    The personal root never reaches this process. The browser opens the armor,
+    derives the per-organization persona encapsulation key, opens the
+    CapabilityGrants addressed to it, and sends only the recovered generation
+    keys — content keys, never identity keys (crib §12). This route loads them
+    into the in-memory cache and registers the read and write seams, which is
+    the entire difference between a vault that is built and a vault that works.
+
+    Nothing here is persisted. The cache dies with the process, so a restart
+    forces a fresh unlock rather than resurrecting keys from disk — the design
+    calls that the accepted cost of a reboot, not a defect (§10).
+
+    Requires a live session, because it is only reachable AFTER an unlock has
+    succeeded. That is not belt-and-braces: a caller without a session has not
+    proved possession of the root, and the keys it is offering could be
+    anything.
+    """
+    if session_from_request(request) is None:
+        return JSONResponse({"ok": False, "error": (
+            "bringing the vault up requires an unlocked session — this is the "
+            "step AFTER proving possession of the root, not a way to skip it"
+        )}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "body must be JSON"},
+                            status_code=400)
+    keys = body.get("generation_keys") if isinstance(body, dict) else None
+    if not isinstance(keys, dict) or not keys:
+        return JSONResponse({"ok": False, "error": (
+            "body must carry 'generation_keys' as {state_id: hex} — an empty "
+            "set means the browser opened no grants, which is a failure to "
+            "report rather than a vault to bring up half-way"
+        )}, status_code=400)
+
+    decoded: dict[str, bytes] = {}
+    for state_id, hexed in keys.items():
+        if not isinstance(state_id, str) or not isinstance(hexed, str):
+            return JSONResponse({"ok": False, "error": (
+                "generation_keys must map a state id to a hex secret"
+            )}, status_code=400)
+        try:
+            raw = bytes.fromhex(hexed)
+        except ValueError:
+            return JSONResponse({"ok": False, "error": (
+                f"generation key for {state_id} is not hex"
+            )}, status_code=400)
+        if len(raw) != 32:
+            # Refuse rather than cache a wrong-length secret: it would fail
+            # later, at a read, looking like a key-agreement problem.
+            return JSONResponse({"ok": False, "error": (
+                f"generation key for {state_id} is {len(raw)} bytes, not 32"
+            )}, status_code=400)
+        decoded[state_id] = raw
+
+    try:
+        loaded = _bring_vault_up(decoded)
+    except Exception as exc:  # noqa: BLE001 — one refusal shape to the caller
+        logger.warning("vault bring-up failed", exc_info=True)
+        return JSONResponse({"ok": False, "error": (
+            f"the vault could not be brought up: {exc}"
+        )}, status_code=500)
+    return JSONResponse({"ok": True, "generations": loaded})
+
+
+def _bring_vault_up(generation_keys: dict) -> int:
+    """Install the vault seams for this process. Returns how many keys landed.
+
+    Split out so the route stays about the request and this stays about the
+    wiring — and so a test can drive the wiring without a session cookie.
+    """
+    from tools.data_paths import DATA_ROOT
+    from tools.vault.bringup import register_vault_for_unlock
+
+    cache = register_vault_for_unlock(
+        generation_keys=generation_keys,
+        author_provider=_agent_delegate,
+        org_ledger_provider=_org_fold,
+        personal_ledger_provider=_personal_fold,
+        keycontrol_path=DATA_ROOT / "keycontrol.db",
+        content_path=DATA_ROOT / "content",
+        cache=_VAULT_CACHE.get("cache"),
+    )
+    _VAULT_CACHE["cache"] = cache
+    return len(cache.secrets)
+
+
+#: Survives across unlocks within one process, so unlocking a second
+#: organization adds to the same cache rather than replacing it.
+_VAULT_CACHE: dict = {}
+
+
+def _agent_delegate():
+    """The attenuated delegate that authors a seal, or None before one exists.
+
+    Provisioning it is auto-pw9bs.2's ceremony and is not wired yet; until it
+    is, a write fails closed naming the unlock, which is the correct refusal
+    rather than a placeholder that authors as something it should not.
+    """
+    return None
+
+
+def _org_fold(org):
+    """The organization's folded ledger, or None if it is not founded."""
+    return None
+
+
+def _personal_fold(org):
+    """The operator's own folded ledger, or None before it is founded."""
+    return None
+
+
 ROUTES = [
     Route("/api/identity/unlock/passkey/options", post_unlock_passkey_options,
           methods=["POST"]),
@@ -969,6 +1087,8 @@ ROUTES = [
     Route("/api/identity/unlock/password", post_unlock_password,
           methods=["POST"]),
     Route("/api/identity/unlock/approval", post_unlock_approval,
+          methods=["POST"]),
+    Route("/api/identity/unlock/vault-keys", post_unlock_vault_keys,
           methods=["POST"]),
     Route("/api/identity/session", get_session, methods=["GET"]),
     Route("/api/identity/lock", post_lock, methods=["POST"]),
