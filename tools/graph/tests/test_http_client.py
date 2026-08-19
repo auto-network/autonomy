@@ -360,3 +360,82 @@ def test_headers_omit_bearer_when_no_crosstalk_token(monkeypatch):
     monkeypatch.delenv("GRAPH_ORG", raising=False)
     h = _make_client()._headers()
     assert "Authorization" not in h
+
+
+# ── the session bearer reaches the SETTINGS path ─────────────
+#
+# auto-w1ktf's title is "the graph CLI sends the session-token bearer ON
+# SETTINGS REQUESTS". It landed the bearer in `HttpClient._headers` and
+# asserted on `_headers` — but every Settings call builds its headers with
+# the module-level `_settings_headers`, which sent `X-Graph-Org` and nothing
+# else. So the suite was green while the named path carried no credential,
+# and an authentication guard on the Settings readers took the fleet down
+# twice before anyone looked at which builder was in play.
+#
+# These tests therefore call the SETTINGS METHODS the way a caller reaches
+# them and inspect the request that actually goes out. A test that never
+# calls a settings method cannot say anything about settings requests,
+# however green it is.
+
+
+def _capture_settings_request(monkeypatch, token: str | None):
+    """Drive a real settings read and return the outgoing request."""
+    if token is None:
+        monkeypatch.delenv("CROSSTALK_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("CROSSTALK_TOKEN", token)
+    captured: dict = {}
+
+    def fake_urlopen(req, timeout=None, context=None):
+        captured["headers"] = dict(req.headers)
+        captured["url"] = req.full_url
+        return _FakeResponse({"members": []})
+
+    with patch("urllib.request.urlopen", fake_urlopen):
+        _make_client().read_set("autonomy.workspace.mount", org="anchore")
+    return captured
+
+
+def test_settings_read_sends_the_session_bearer(monkeypatch):
+    captured = _capture_settings_request(monkeypatch, "sess-tok-settings")
+
+    # urllib title-cases header names on the Request object.
+    auth = captured["headers"].get("Authorization")
+    assert auth == "Bearer sess-tok-settings", (
+        f"a settings read went out with {auth!r}; this is the exact path the "
+        f"bead names, and a guard requiring a credential 401s the whole fleet "
+        f"without it"
+    )
+    assert "/api/graph/settings/" in captured["url"]
+
+
+def test_settings_read_still_sends_the_org_header(monkeypatch):
+    """The bearer is additive; it does not displace the scope selector."""
+    captured = _capture_settings_request(monkeypatch, "sess-tok-settings")
+
+    assert captured["headers"].get("X-graph-org") == "anchore"
+
+
+def test_settings_read_omits_the_bearer_without_a_token(monkeypatch):
+    """A host caller has none and must send none."""
+    captured = _capture_settings_request(monkeypatch, None)
+
+    assert "Authorization" not in captured["headers"]
+
+
+def test_no_settings_call_site_can_opt_out_of_the_bearer():
+    """It is attached per REQUEST, not per header builder.
+
+    Attaching it per builder is what allowed one of two builders to be
+    missed. This asserts the credential is applied at the single chokepoint
+    every call passes through, so a third builder cannot reintroduce the gap.
+    """
+    import inspect
+
+    from tools.graph import client as client_mod
+
+    source = inspect.getsource(client_mod.HttpClient._request)
+    assert "CROSSTALK_TOKEN" in source and "Authorization" in source, (
+        "the bearer is no longer attached in _request; if it moved back into "
+        "the header builders, a settings call can silently lose it again"
+    )
