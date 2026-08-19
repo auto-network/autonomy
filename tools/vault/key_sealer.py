@@ -97,8 +97,11 @@ def build_vault_sealer(
     over a process's life, and a captured one would go stale exactly when it
     matters.
 
-    ``ledger_provider(org)`` returns ``(frontier, fold_at, authority_ancestry)``
-    or ``None``. Three seams rather than one, because they are not
+    ``ledger_provider(set_id, org)`` returns ``(frontier, fold_at,
+    authority_ancestry)`` or ``None``. It takes the SET as well as the org
+    because which fold to seal against is decided by the set's declared HOME,
+    not by the org a caller happens to be acting as: a personal-homed set seals
+    against the operator's own fold whatever org is in scope. Three seams rather than one, because they are not
     interchangeable and conflating them is silently wrong:
 
     * ``frontier`` is a folded VALUE, for :func:`seal_revision`.
@@ -139,7 +142,7 @@ def build_vault_sealer(
                 f"before writing a secret — there is no unattended path that "
                 f"skips it, by design."
             )
-        ledger = ledger_provider(org)
+        ledger = ledger_provider(set_id, org)
         if ledger is None:
             raise VaultSealerNotReady(
                 f"{set_id} is a vault set, but organization {org!r} has no "

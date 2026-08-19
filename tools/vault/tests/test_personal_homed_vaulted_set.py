@@ -65,7 +65,7 @@ def test_seal_revision_cannot_seal_without_an_organization():
         "/tmp/does-not-matter/kc.db",
         "/tmp/does-not-matter/content",
         lambda: object(),          # an author is available
-        lambda org: None,          # ...but the personal store has no ledger
+        lambda set_id, org: None,  # ...but the personal store has no ledger
     )
 
     with pytest.raises(VaultSealerNotReady, match="no folded ledger"):
@@ -81,7 +81,7 @@ def test_the_refusal_names_the_organization_rather_than_the_mechanism():
     gets the same refusal."""
     register_vault_sealer(
         VaultKeyCache(), "/tmp/x/kc.db", "/tmp/x/content",
-        lambda: object(), lambda org: None,
+        lambda: object(), lambda set_id, org: None,
     )
 
     with pytest.raises(VaultSealerNotReady) as excinfo:
@@ -116,7 +116,7 @@ def test_ehyoh_can_store_the_operators_github_token():
     """
     register_vault_sealer(
         VaultKeyCache(), "/tmp/x/kc.db", "/tmp/x/content",
-        lambda: object(), lambda org: None,
+        lambda: object(), lambda set_id, org: None,
     )
 
     settings_ops.add_setting(
