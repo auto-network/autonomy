@@ -62,8 +62,22 @@ RUN printf '#!/bin/sh\nexec python3 -m tools.graph "$@"\n' > /usr/local/bin/grap
     && chmod +x /usr/local/bin/graph \
     && chmod +x /app/deploy/entrypoint.sh
 
+# Version stamp. The code volume ships as bare FILES (no .git, no remote — the
+# node never phones home), so it can't self-report its version. Bake the seed
+# commit and build time here; this answers "what code is this node running?"
+# for debugging/repro at zero cost, with no history in the image or volume.
+# The file seeds into the autonomy-code volume with the rest of /app. Pass real
+# values at build: `--build-arg AUTONOMY_VERSION=$(git rev-parse HEAD)`.
+ARG AUTONOMY_VERSION=unknown
+ARG AUTONOMY_BUILD_TIME=unknown
+RUN printf 'commit=%s\nbuilt=%s\n' "$AUTONOMY_VERSION" "$AUTONOMY_BUILD_TIME" > /app/VERSION
+
 # Persistent state: per-org DBs (identity + credential Settings — the
-# secret store), graph.db, auth.db, TLS keypair. One volume holds it all.
+# secret store), graph.db, auth.db, TLS keypair. Its own volume, mounted at
+# /app/data over the code volume. (The code volume is declared in compose, not
+# here: a Dockerfile VOLUME /app would force an anonymous volume on every plain
+# `docker run` and freeze image code behind it — the compose named volume is
+# the deliberate, operator-controlled seat for it.)
 VOLUME /app/data
 
 EXPOSE 8080

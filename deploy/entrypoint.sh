@@ -22,12 +22,43 @@ fi
 # volume. This subsumes first-run init for an empty volume.
 python3 -m tools.portability migrate-on-mount /app/data $INIT_ARGS
 
+# Org-mount root (the autonomy-orgs volume mounts here). Ensure it exists even
+# on a plain `docker run` without the volume, so provisioning and the hybrid
+# resolver (auto-fteke) have a root to create orgs/<org>/ subdirs under. The
+# node process is root, so it can read/write here; org subdirs are made on
+# demand, not up front.
+mkdir -p /app/orgs
+
 SSL_ARGS=""
 if [ -f ${AUTONOMY_TLS_CERT:-/app/data/tls.crt} ] && [ -f ${AUTONOMY_TLS_KEY:-/app/data/tls.key} ] && [ "${DASHBOARD_TLS:-}" != "off" ]; then
     SSL_ARGS="--ssl-certfile ${AUTONOMY_TLS_CERT:-/app/data/tls.crt} --ssl-keyfile ${AUTONOMY_TLS_KEY:-/app/data/tls.key}"
 fi
 
+# Rebuild CSS on template edits, so a live code update renders fully — the same
+# tailwind --watch the dev launcher (tools/dashboard/start-dashboard.sh) runs.
+# Best-effort: a missing binary or a tailwind failure must never take the node
+# down, so it is backgrounded and its exit is ignored.
+if [ -x /usr/local/bin/tailwindcss ]; then
+    /usr/local/bin/tailwindcss --cwd /app/tools/dashboard \
+        -i tailwind.input.css -o static/tailwind.css --watch=always \
+        >/app/data/tailwind.log 2>&1 &
+fi
+
+# Hot-reload the code from the autonomy-code volume, exactly like the dev box:
+# an operator's in-place code update takes effect live, with no image rebuild
+# and no restart. Same reload dirs/excludes as start-dashboard.sh; uvicorn 0.44
+# uses its StatReload backend (no watchfiles needed — the dev box runs the same
+# way). This replaces the previous static, no-reload invocation.
 exec python3 -m uvicorn tools.dashboard.server:app \
     --host "${DASHBOARD_HOST:-0.0.0.0}" \
     --port "${DASHBOARD_PORT:-8080}" \
+    --reload \
+    --reload-dir tools/dashboard \
+    --reload-dir tools/graph \
+    --reload-dir agents \
+    --reload-exclude 'tools/dashboard/tests/*' \
+    --reload-exclude 'tools/graph/tests/*' \
+    --reload-exclude 'agents/tests/*' \
+    --reload-exclude '**/__pycache__/*' \
+    --timeout-graceful-shutdown 5 \
     $SSL_ARGS

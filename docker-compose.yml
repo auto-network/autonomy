@@ -24,6 +24,12 @@ services:
         #   AUTONOMY_TAILWIND_URL=https://mirror.example.internal/tailwindcss-linux-x64
         BASE_IMAGE: ${AUTONOMY_BASE_IMAGE:-python:3.12-slim}
         TAILWIND_URL: ${AUTONOMY_TAILWIND_URL:-}
+        # Version stamp baked into /app/VERSION (the code ships as bare files).
+        # Populate from git at build time, e.g.:
+        #   AUTONOMY_VERSION=$(git rev-parse HEAD) \
+        #   AUTONOMY_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) docker compose build
+        AUTONOMY_VERSION: ${AUTONOMY_VERSION:-unknown}
+        AUTONOMY_BUILD_TIME: ${AUTONOMY_BUILD_TIME:-unknown}
     # Published path: set AUTONOMY_IMAGE to the verified immutable reference
     # from image-lock.env (repo/image@sha256:...), then use
     # `docker compose pull && docker compose up -d --no-build`.
@@ -41,10 +47,25 @@ services:
       # supported state (beads surfaces degrade to empty, one warning).
       DOLT_SQL_HOST: dolt
     volumes:
+      # The three-volume node model (graph b20f2468-b12 "FINAL ARCHITECTURE").
+      #
+      # autonomy-code -> /app : the platform code, as files. Seeded from the
+      # image on first boot, then hot-reloaded in place (the entrypoint runs
+      # uvicorn --reload). No .git, no remote: the node never phones home. Code
+      # updates are a deliberate operator action into this volume, on the
+      # operator's schedule — not an image rebuild and not an origin pull. (An
+      # operator who prefers to edit a host checkout directly can bind-mount it
+      # here instead: `- /path/to/checkout:/app`.)
+      - autonomy-code:/app
       # THE persistent state: per-org DBs (identity + credential Settings
       # — the secret store), graph.db, auth.db, TLS keypair, traces.
       # Back this volume up and you have backed up the deployment.
       - autonomy-data:/app/data
+      # Org-partitioned workspace inputs the node provisions and resolves:
+      # /app/orgs/<org>/<subpath>. Held by the NODE (never handed to a session
+      # wholesale — a session receives only the resolved concrete dir, via the
+      # hybrid resolver, auto-fteke). Nothing else lives here.
+      - autonomy-orgs:/app/orgs
 
   # Optional: dolt SQL server backing the beads issue tracker. Image
   # source is operator-chosen via DOLT_IMAGE; the beads schema itself is
@@ -58,5 +79,7 @@ services:
       - dolt-data:/var/lib/dolt
 
 volumes:
+  autonomy-code:
   autonomy-data:
+  autonomy-orgs:
   dolt-data:
