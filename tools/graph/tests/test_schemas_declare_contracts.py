@@ -268,7 +268,6 @@ _HOME_UNDECLARED_GRANDFATHERED = {
     "autonomy.network.persona",
     "autonomy.org.peer-subscription",
     "autonomy.secure.setting",
-    "autonomy.workspace",
     "dashboard.feature_flags",
     "dashboard.operator-message-to-coordinator",
     "dashboard.surface.ping",
