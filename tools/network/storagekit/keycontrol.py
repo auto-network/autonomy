@@ -162,7 +162,9 @@ CREATE TABLE IF NOT EXISTS keycontrol_state (
 CREATE TABLE IF NOT EXISTS keycontrol_credential (
     kem_key_id TEXT PRIMARY KEY,
     persona    TEXT NOT NULL,
-    wire       BLOB NOT NULL
+    -- NULL is a local tail-body prune. Fleet reconciliation restores a body
+    -- from any peer that still holds it; a prune never erases a remote body.
+    wire       BLOB
 );
 CREATE INDEX IF NOT EXISTS keycontrol_credential_persona
     ON keycontrol_credential (persona);
@@ -486,6 +488,10 @@ class KeyControlStore:
             "SELECT kem_key_id, persona, wire FROM keycontrol_credential"
         ).fetchall()
         for kem_key_id, _persona, wire in rows:
+            if wire is None:
+                # Tail-body prune: the durable row remains the audit anchor,
+                # but there is no credential to offer until a peer restores it.
+                continue
             wire = bytes(wire)
             # Full re-verification on every hydrate, not just at write:
             # ``validate`` re-checks the Ed25519 signature and recomputes

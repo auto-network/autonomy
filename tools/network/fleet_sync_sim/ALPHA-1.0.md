@@ -47,6 +47,10 @@ hash tie-break.
   rows remain ordinary raw personal graph data and do replicate.
 - Attachment metadata is graph state; bytes are separately content addressed
   and must pass size and SHA-256 verification before database publication.
+- Vault ciphertext, object headers, and key-control records are embedded
+  immutable graph state. Same-key differences fail closed; nullable local
+  key-control body prunes never override a complete peer copy. Derived vault
+  counts and machine-local key-control queues do not replicate.
 
 ## Resource bounds
 
@@ -105,10 +109,12 @@ Not adopted:
 
 ## Production activation requirements
 
-Activation requires a GraphDB migration for the five tracking tables,
+GraphDB schema version 8 supplies the vault/key-control receiver tables but
+does not activate fleet synchronization. Activation requires a migration for the five tracking tables,
 logical-key/catalog indexes, and triggers; a one-time bootstrap that gives
 every existing logical row initial winner metadata; conversion of every
-personal-store writer to the authored transaction adapter in the same rollout; the
+personal-store writer, including vault/key-control writers, to the authored
+transaction adapter in the same rollout; the
 roster/RelayKit scheduler and ACK protocol; attachment-object transport; and
 an operational online handoff strategy. No new daemon or network service is
 required by the engine itself.

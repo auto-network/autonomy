@@ -223,6 +223,10 @@ def _validate_policy(mutation: Mutation) -> None:
         raise CodecError(f"unknown logical table: {mutation.table}")
     if policy.kind in {PolicyKind.LOCAL, PolicyKind.DERIVED}:
         raise CodecError(f"table is not replicating: {mutation.table}")
+    if mutation.tombstone and policy.kind in {
+        PolicyKind.IMMUTABLE, PolicyKind.IMMUTABLE_PRUNABLE,
+    }:
+        raise CodecError(f"immutable table does not accept tombstones: {mutation.table}")
     if len(mutation.address) != len(policy.key):
         raise CodecError(f"wrong logical address width for {mutation.table}")
     value_columns = {column for column, _ in mutation.values}

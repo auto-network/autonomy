@@ -26,6 +26,8 @@ class PolicyKind(str, Enum):
     LWW = "timestamp-lww"
     SPECIAL = "special"
     EXTERNAL_BLOB = "external-content-addressed-blob"
+    IMMUTABLE = "immutable-content-addressed"
+    IMMUTABLE_PRUNABLE = "immutable-content-addressed-local-body-prune"
     LOCAL = "local-only"
     DERIVED = "derived-rebuilt"
 
@@ -122,6 +124,59 @@ TABLE_POLICIES: Final[dict[str, TablePolicy]] = {
             "base rows use the natural address; override/exclusion roles retain their "
             "target identity. Personal-root and passkey set_ids are refused separately"
         ),
+    ),
+    "vault_content_bodies": TablePolicy(
+        "vault_content_bodies", PolicyKind.IMMUTABLE,
+        ("ciphertext_hash",), timestamp_columns=(),
+        note=(
+            "AEAD ciphertext is carried as canonical BLOB bytes; identical replay "
+            "is a no-op and any same-hash byte difference fails closed"
+        ),
+    ),
+    "vault_content_objects": TablePolicy(
+        "vault_content_objects", PolicyKind.IMMUTABLE,
+        ("object_id", "revision_id"), timestamp_columns=(),
+        note=(
+            "immutable encrypted-object header; header_json is exact BLOB bytes, "
+            "not graph JSON text"
+        ),
+    ),
+    "vault_state_object_counts": TablePolicy(
+        "vault_state_object_counts", PolicyKind.DERIVED, (), timestamp_columns=(),
+        note="rebuilt as COUNT(*) grouped by storage_state_id after materialization",
+    ),
+    "keycontrol_state": TablePolicy(
+        "keycontrol_state", PolicyKind.IMMUTABLE, ("state_id",),
+        timestamp_columns=(),
+        note="signed storage-state descriptor wire bytes",
+    ),
+    "keycontrol_credential": TablePolicy(
+        "keycontrol_credential", PolicyKind.IMMUTABLE_PRUNABLE,
+        ("kem_key_id",), timestamp_columns=(),
+        note=(
+            "immutable signed credential; wire may be pruned to NULL locally, "
+            "but a non-NULL peer copy always restores it"
+        ),
+    ),
+    "keycontrol_bridge": TablePolicy(
+        "keycontrol_bridge", PolicyKind.IMMUTABLE_PRUNABLE,
+        ("bridge_id",), timestamp_columns=(),
+        note=(
+            "immutable signed parent bridge; wire may be pruned to NULL locally, "
+            "but a non-NULL peer copy always restores it"
+        ),
+    ),
+    "keycontrol_meta": TablePolicy(
+        "keycontrol_meta", PolicyKind.LOCAL, (), timestamp_columns=(),
+        note="this machine's key-control schema/progress metadata",
+    ),
+    "keycontrol_pending": TablePolicy(
+        "keycontrol_pending", PolicyKind.LOCAL, (), timestamp_columns=(),
+        note="this machine's dependency wait queue",
+    ),
+    "keycontrol_pending_usage": TablePolicy(
+        "keycontrol_pending_usage", PolicyKind.LOCAL, (), timestamp_columns=(),
+        note="locally derived key-control pending-queue counters",
     ),
     "orgs": TablePolicy(
         "orgs", PolicyKind.LOCAL, (), timestamp_columns=(),

@@ -23,6 +23,7 @@ from .codec import (
 )
 from .compaction import AuthoredMutation, WatermarkError
 from .materialize import materialize
+from .merge import mutation_wins
 from .policies import EXCLUDED_SETTING_SET_IDS, PolicyKind, TABLE_POLICIES
 from .snapshot import _logical_address, _logical_values
 
@@ -133,6 +134,42 @@ def _trigger_sql(table: str) -> tuple[str, str, str]:
         CREATE TRIGGER fleet_sync_{table}_insert AFTER INSERT ON {_quote(table)}
         WHEN {when_new} BEGIN {_capture_statement(table, 'NEW', 0)} END
     """
+    policy = TABLE_POLICIES[table]
+    if policy.kind is PolicyKind.IMMUTABLE:
+        update = f"""
+            CREATE TRIGGER fleet_sync_{table}_update BEFORE UPDATE ON {_quote(table)}
+            BEGIN SELECT RAISE(ABORT, 'fleet-sync immutable row cannot update'); END
+        """
+        delete = f"""
+            CREATE TRIGGER fleet_sync_{table}_delete BEFORE DELETE ON {_quote(table)}
+            BEGIN SELECT RAISE(ABORT, 'fleet-sync immutable row cannot delete'); END
+        """
+        return insert, update, delete
+    if policy.kind is PolicyKind.IMMUTABLE_PRUNABLE:
+        stable_columns = [
+            column for column in _table_columns[table] if column != "wire"
+        ]
+        stable = " AND ".join(
+            f"OLD.{_quote(column)} IS NEW.{_quote(column)}"
+            for column in stable_columns
+        )
+        wire_transition = (
+            "((OLD.wire IS NULL AND NEW.wire IS NOT NULL) OR "
+            "(OLD.wire IS NOT NULL AND NEW.wire IS NULL))"
+        )
+        update = f"""
+            CREATE TRIGGER fleet_sync_{table}_update BEFORE UPDATE ON {_quote(table)}
+            BEGIN
+                SELECT CASE WHEN NOT ({stable} AND {wire_transition})
+                    THEN RAISE(ABORT, 'fleet-sync immutable row has invalid update') END;
+                {_capture_statement(table, 'NEW', 0, condition=capture)}
+            END
+        """
+        delete = f"""
+            CREATE TRIGGER fleet_sync_{table}_delete BEFORE DELETE ON {_quote(table)}
+            BEGIN SELECT RAISE(ABORT, 'fleet-sync immutable row cannot delete'); END
+        """
+        return insert, update, delete
     delete = f"""
         CREATE TRIGGER fleet_sync_{table}_delete AFTER DELETE ON {_quote(table)}
         WHEN {when_old} BEGIN {_capture_statement(table, 'OLD', 1)} END
@@ -695,7 +732,26 @@ class MutationCatalog:
                     (address_blob,),
                 ).fetchone()
                 if current is not None:
+                    policy = TABLE_POLICIES[mutation.table]
                     current_timestamp = int(current[0])
+                    if policy.kind in {
+                        PolicyKind.IMMUTABLE, PolicyKind.IMMUTABLE_PRUNABLE,
+                    }:
+                        current_values = _logical_values(
+                            policy,
+                            self._live_row(
+                                self.conn, mutation.table, mutation.address
+                            ),
+                        )
+                        current_mutation = Mutation(
+                            mutation.table, mutation.address,
+                            current_timestamp, bool(current[4]), current_values,
+                        )
+                        if not mutation_wins(current_mutation, mutation):
+                            ignored += 1
+                            continue
+                        winners.append((authored, address_blob))
+                        continue
                     if current_timestamp > mutation.timestamp_ns:
                         ignored += 1
                         continue
