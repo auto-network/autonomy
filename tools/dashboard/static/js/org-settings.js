@@ -185,56 +185,144 @@
 
   var lastHealth = null;
 
+  // What a missing thing is CALLED, and what sort of thing it is. Both come
+  // off the declaration; neither is composed here.
+  //
+  // Composing them here is not a style preference. Two earlier passes at this
+  // screen wrote the subtitle at render time and produced a git credential
+  // described as "An approved secret, sealed per workspace", and a missing
+  // GH_TOKEN titled "Alpha" — the workspace's own name, because a field
+  // existed and meant something else. Neither looks broken from outside. So
+  // when the data says nothing, this renders nothing.
+  var STATE = {
+    missing_reference: 'Never provisioned here',
+    missing_env: 'Not set',
+    missing_path: 'Not on this machine',
+    unanswerable_here: 'Cannot be answered from here',
+    unreadable: 'Could not be read',
+    unreadable_reference: 'Exists, but not readable from here',
+    unknown_target: 'No schema for this',
+  };
+
+  function thingTitle(t) {
+    // `name` is the authored short label. `description` is a sentence and is
+    // only a fallback — its lead clause, since some run past 90 characters.
+    if (t.name) return t.name;
+    if (t.description) return String(t.description).split('—')[0].trim();
+    return t.subject || t.at || '';
+  }
+
+  var thingSeq = 0;
+
+  function thingNode(t) {
+    var card = el('section', 'orgset-thing');
+    card.setAttribute('data-testid', 'orgset-thing-' + (t.kind || '') + '-' + (t.subject || ''));
+    var blocking = t.severity !== 'advisory';
+    var id = 'orgset-thing-detail-' + (++thingSeq);
+
+    var head = el('button', 'orgset-thing-head');
+    head.type = 'button';
+    head.setAttribute('aria-expanded', 'false');
+    head.setAttribute('aria-controls', id);
+
+    var main = el('span', 'orgset-thing-main');
+    main.appendChild(el('span', 'orgset-thing-title', thingTitle(t)));
+    // The schema's description of the declaring field: what this KIND of
+    // thing is. Absent for some kinds, and absent is rendered as absent.
+    if (t.field_description) {
+      main.appendChild(el('span', 'orgset-thing-cat', t.field_description));
+    }
+    var state = el('span', 'orgset-thing-state');
+    state.appendChild(el('i', 'orgset-dot ' + (blocking ? 'orgset-dot-blocking' : 'orgset-dot-advisory')));
+    state.appendChild(el('span', '', (STATE[t.kind] || t.kind || '') + ' · '
+      + (blocking ? 'Blocks launch' : 'Still runs without it')));
+    main.appendChild(state);
+    head.appendChild(main);
+
+    var right = el('span', 'orgset-thing-right');
+    var needed = (t.needed_by || []).length;
+    var count = el('span', 'orgset-thing-count', String(needed));
+    count.setAttribute('title', needed === 1 ? '1 workspace needs this'
+                                             : needed + ' workspaces need this');
+    right.appendChild(count);
+    right.appendChild(el('span', 'orgset-thing-chev', '⌄'));
+    head.appendChild(right);
+    card.appendChild(head);
+
+    // Everything explanatory lives here and only here. It is the whole
+    // reason the collapsed row is readable: the same 14-word sentence about
+    // launchers forwarding what is set was previously printed on every row.
+    var detail = el('dl', 'orgset-thing-detail');
+    detail.id = id;
+    detail.hidden = true;
+    function pair(term, value) {
+      if (!value) return;
+      detail.appendChild(el('dt', '', term));
+      detail.appendChild(el('dd', '', String(value)));
+    }
+    // First, because it is the only part that says what to DO about it.
+    pair('How to get it', t.help);
+    pair('Description', t.description);
+    pair(t.kind === 'missing_reference' ? 'Key' : 'Expected at', t.subject);
+    pair('Needed by', (t.needed_by || []).join(', '));
+    pair('Declared by', t.field ? t.field + ' on ' + t.set_id : t.set_id);
+    // The frame the answer came from. This is the field that admits a host
+    // variable was looked for in the checking process's own environment.
+    pair('Checked in', t.looked_in);
+    card.appendChild(detail);
+
+    head.addEventListener('click', function () {
+      var open = head.getAttribute('aria-expanded') === 'true';
+      head.setAttribute('aria-expanded', open ? 'false' : 'true');
+      detail.hidden = open;
+    });
+    return card;
+  }
+
   function healthNode(report) {
     var wrap = el('div', 'orgset-workspaces');
+    var things = report.things || [];
+    var spaces = report.workspaces || [];
 
-    var frame = el('div', 'orgset-frame');
-    frame.textContent = 'Checked from ' + (report.asked_in || 'this process') + '.';
-    wrap.appendChild(frame);
-
-    var list = report.workspaces || [];
-    if (!list.length) {
+    if (!spaces.length) {
       wrap.appendChild(el('div', 'orgset-empty',
         'This organization declares no workspaces.'));
       return wrap;
     }
 
-    list.forEach(function (ws) {
-      var card = el('section', 'rounded-lg border border-gray-700 bg-gray-900/50 p-3 mb-2');
-      card.setAttribute('data-testid', 'orgset-workspace-' + ws.id);
+    // One heading over the things, not one card per workspace repeating them.
+    // The old shape drew a fact once per workspace that wanted it — on real
+    // data, 23 rows for 6 facts — which hides the only thing worth knowing:
+    // that fixing one clears several workspaces at once.
+    if (things.length) {
+      wrap.appendChild(el('h3', 'orgset-things-head',
+        things.length === 1 ? '1 thing to install on this machine'
+                            : things.length + ' things to install on this machine'));
+      wrap.appendChild(el('p', 'orgset-frame',
+        'Checked on ' + (report.asked_in || 'this process')
+        + '. Fixing one clears it everywhere it is needed.'));
+      things.forEach(function (t) { wrap.appendChild(thingNode(t)); });
+    } else {
+      wrap.appendChild(el('h3', 'orgset-things-head', 'Nothing to install'));
+      wrap.appendChild(el('p', 'orgset-frame',
+        'Checked on ' + (report.asked_in || 'this process')
+        + '. Everything these workspaces declare is present here.'));
+    }
 
-      var head = el('div', 'flex items-center justify-between gap-2 mb-1');
-      head.appendChild(el('span', 'text-sm text-gray-200 font-medium', ws.name || ws.id));
-      var tag = el('span', 'orgset-count ' + (ws.ready ? 'orgset-count-ready' : 'orgset-count-blocking'),
-                   ws.ready ? 'Ready' : String((ws.blocking || []).length || '?'));
+    var ready = spaces.filter(function (w) { return w.ready; }).length;
+    wrap.appendChild(el('h3', 'orgset-ws-head',
+      'Workspaces — ' + ready + ' of ' + spaces.length + ' ready'));
+    var chips = el('div', 'orgset-ws-chips');
+    spaces.forEach(function (ws) {
+      var chip = el('span', 'orgset-ws-chip' + (ws.ready ? ' orgset-ws-chip-ready' : ''));
+      chip.setAttribute('data-testid', 'orgset-workspace-' + ws.id);
+      chip.appendChild(el('span', '', ws.name || ws.id));
+      var tag = el('b', '', ws.ready ? '✓' : String((ws.blocking || []).length));
       tag.setAttribute('data-testid', 'orgset-workspace-state-' + ws.id);
-      head.appendChild(tag);
-      card.appendChild(head);
-
-      // Three groups, never one list. "Everything declared is present" and
-      // "this can run" are different questions, and printed together the
-      // reader learns to treat all of it as noise.
-      [['blocking', 'Needed here', 'text-red-300'],
-       ['unanswerable', 'Cannot be answered from here', 'text-amber-300'],
-       ['advisory', 'Missing, but it still runs', 'text-gray-400']
-      ].forEach(function (group) {
-        var items = ws[group[0]] || [];
-        if (!items.length) return;
-        card.appendChild(el('div', 'text-xs mt-2 mb-1 ' + group[2], group[1]));
-        items.forEach(function (f) {
-          var row = el('div', 'text-xs text-gray-400 pl-2 mb-1');
-          row.appendChild(el('div', '', f.what));
-          row.appendChild(el('div', 'text-gray-500', f.at));
-          card.appendChild(row);
-        });
-      });
-
-      if (ws.ready && !(ws.advisory || []).length) {
-        card.appendChild(el('div', 'text-xs text-gray-500',
-          'Everything it declares is present here.'));
-      }
-      wrap.appendChild(card);
+      chip.appendChild(tag);
+      chips.appendChild(chip);
     });
+    wrap.appendChild(chips);
     return wrap;
   }
 
