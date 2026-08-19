@@ -31,7 +31,6 @@ not something unlock does. Every unlock after the first only READS the fold.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Callable
 
 from tools.vault.key_holder import VaultKeyCache, register_key_holder
@@ -115,8 +114,6 @@ def register_vault_for_unlock(
     author_provider: Callable[[], object],
     org_ledger_provider: Callable[["str | None"], object],
     personal_ledger_provider: Callable[["str | None"], object],
-    keycontrol_path: "str | Path",
-    content_path: "str | Path",
     cache: "VaultKeyCache | None" = None,
 ) -> VaultKeyCache:
     """Make the vault usable in this process. Call once per unlock.
@@ -128,6 +125,11 @@ def register_vault_for_unlock(
     globally unique, so there is nothing to keep apart — and a second cache
     would mean a write minting a generation the read side cannot see, which is
     the failure the sealer's advance handling exists to prevent.
+
+    NO STORE PATHS. Both seams resolve the scoped database per call, so a
+    vault set's ciphertext lands in the same file its settings row does. A
+    single path here put every scope in one sidecar — a store the design does
+    not have, and a leak between organizations.
 
     ONE SEALER, routing on the set's declared home. Personal-homed vaulted sets
     seal against the operator's own fold; everything else against its
@@ -146,11 +148,9 @@ def register_vault_for_unlock(
         for state_id, secret in dict(generation_keys).items():
             cache.add(state_id, secret)
 
-    register_key_holder(cache, keycontrol_path, content_path)
+    register_key_holder(cache)
     register_vault_sealer(
         cache,
-        keycontrol_path,
-        content_path,
         author_provider,
         _home_routed_ledger_provider(org_ledger_provider, personal_ledger_provider),
     )

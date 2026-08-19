@@ -61,13 +61,11 @@ def _world_with_production_holder(tmp_path):
     """A founded world writing through its real sealer and reading through the
     production holder, cache loaded with the persona's real generation keys —
     the shape the dashboard has after an unlock."""
-    world = VaultWorld(tmp_path / "world")
+    world = VaultWorld(tmp_path / "world", scoped=True)
     settings_ops.set_vault_sealer(world.sealer)
     cache = VaultKeyCache()
     cache.load(dict(world.world.held(world.author)))
-    register_key_holder(
-        cache, tmp_path / "world" / "keycontrol.db", tmp_path / "world" / "content"
-    )
+    register_key_holder(cache)
     return world, cache
 
 
@@ -89,12 +87,10 @@ def test_empty_cache_fails_closed_not_with_a_missing_holder(graph_db, vaulted_se
     """Before the first unlock the holder is registered but the cache is empty.
     An audited read then fails closed on the missing key material, not with the
     "no holder registered" error the whole bead exists to remove."""
-    world = VaultWorld(tmp_path / "world")
+    world = VaultWorld(tmp_path / "world", scoped=True)
     settings_ops.set_vault_sealer(world.sealer)
     cache = VaultKeyCache()  # deliberately not loaded
-    register_key_holder(
-        cache, tmp_path / "world" / "keycontrol.db", tmp_path / "world" / "content"
-    )
+    register_key_holder(cache)
 
     settings_ops.add_setting(SET_ID, 1, KEY, {"secret_value": SECRET}, org=None, state="raw")
     resolved = settings_ops.read_set(SET_ID, org=None)
@@ -116,9 +112,9 @@ def test_empty_cache_fails_closed_not_with_a_missing_holder(graph_db, vaulted_se
 
 def test_holder_is_registered_after_register_key_holder(tmp_path):
     cache = VaultKeyCache()
-    build_key_holder(cache, tmp_path / "kc.db", tmp_path / "content")  # pure build, no install
+    build_key_holder(cache)  # pure build, no install
     assert settings_ops._vault_key_holder is None
-    register_key_holder(cache, tmp_path / "kc.db", tmp_path / "content")
+    register_key_holder(cache)
     assert settings_ops._vault_key_holder is not None
     settings_ops.set_vault_key_holder(None)
 

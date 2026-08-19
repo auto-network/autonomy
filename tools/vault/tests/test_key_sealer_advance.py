@@ -39,7 +39,16 @@ TTL_MS = 3_600_000
 
 
 @pytest.fixture
-def world(tmp_path):
+def world(tmp_path, monkeypatch):
+    # The sealer resolves its stores from the scoped database now, so the data
+    # root has to be the test's — otherwise it writes into the real one.
+    monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
+    (tmp_path / "orgs").mkdir(parents=True, exist_ok=True)
+    from tools.graph.db import GraphDB
+    GraphDB.create_org_db("personal", type_="personal",
+                          path=tmp_path / "orgs" / "personal.db").close()
+
     """A founded org on a REAL Ledger, with a delegate authorized to seal.
 
     Reuses the delegate suite's World, which is built on ``Sim`` and therefore
@@ -69,8 +78,6 @@ def world(tmp_path):
         # public half is what the fold resolves up to the member persona.
         "agent": agent.signing_key,
         "ledger_provider": ledger_provider,
-        "kc": tmp_path / "keycontrol.db",
-        "content": tmp_path / "content",
     }
 
 
@@ -84,10 +91,10 @@ def test_a_first_write_is_readable_after_it_mints(world):
     """
     cache = VaultKeyCache()
     seal = build_vault_sealer(
-        cache, world["kc"], world["content"],
+        cache,
         lambda: world["agent"], world["ledger_provider"],
     )
-    hold = build_key_holder(cache, world["kc"], world["content"])
+    hold = build_key_holder(cache)
 
     secret = {"value": "ghp_" + "a" * 36}
     locator = seal(
@@ -113,14 +120,16 @@ def test_the_minted_descriptor_is_durable(world):
     """
     cache = VaultKeyCache()
     seal = build_vault_sealer(
-        cache, world["kc"], world["content"],
+        cache,
         lambda: world["agent"], world["ledger_provider"],
     )
 
     seal(set_id="autonomy.vault.audited", schema_revision=1, key="github.token",
          setting_id="s-1", payload={"value": "x" * 40}, tier="audited", org="acme")
 
-    with KeyControlStore(world["kc"]) as reopened:
+    from tools.vault.key_holder import _scoped_db
+
+    with KeyControlStore(_scoped_db("autonomy.vault.audited", "acme")) as reopened:
         assert reopened.states, "the generation this write minted is not on disk"
 
 
@@ -130,7 +139,7 @@ def test_the_new_generation_key_reaches_the_cache(world):
     call. Without an explicit add, the cache never learns the key."""
     cache = VaultKeyCache()
     seal = build_vault_sealer(
-        cache, world["kc"], world["content"],
+        cache,
         lambda: world["agent"], world["ledger_provider"],
     )
     assert not cache, "precondition: the cache starts empty"
@@ -150,11 +159,13 @@ def test_the_storage_ancestry_is_refused_on_this_path(world):
 
     def wrong_ledger(_set_id, _org):
         frontier, fold_at, _authority = world["ledger_provider"](_set_id, _org)
-        with KeyControlStore(world["kc"]) as kc:
+        from tools.vault.key_holder import _scoped_db
+
+        with KeyControlStore(_scoped_db("autonomy.vault.audited", "acme")) as kc:
             return frontier, fold_at, kc.ancestry     # the STORAGE DAG
 
     seal = build_vault_sealer(
-        cache, world["kc"], world["content"],
+        cache,
         lambda: world["agent"], wrong_ledger,
     )
 
@@ -170,7 +181,7 @@ def test_no_delegate_means_no_write(world):
     from tools.vault.key_sealer import VaultSealerNotReady
 
     seal = build_vault_sealer(
-        VaultKeyCache(), world["kc"], world["content"],
+        VaultKeyCache(),
         lambda: None, world["ledger_provider"],
     )
 
