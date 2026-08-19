@@ -28,6 +28,20 @@ from tools.graph.schemas import registry as reg
 #: fact about live data, which this test cannot see, so each entry records the
 #: audit that justified it. Re-run the audit before adding one.
 RETIRED_REVISIONS: dict[str, dict[int, str]] = {
+    "autonomy.network.org-key": {
+        1: (
+            "Retired 2026-08-19 with armor V1 (auto-wx94n). Revision 1 held "
+            "the org root under a passphrase armor of its own; revision 2 "
+            "seals it to the owner's personal root, and no conversion exists "
+            "or could -- converting needs that organization's passphrase, "
+            "which nothing holds. Audited before deleting the class, not "
+            "after: every set of every store enumerated over the settings "
+            "API -- 622 rows across 164 set reads in six stores (anchore, "
+            "autonomy, blindhash, dynbench, machine, personal) -- yielded "
+            "exactly ONE armor blob in the estate, the operator's personal "
+            "root, at revision 2. Zero rows at org-key revision 1 anywhere."
+        ),
+    },
     "autonomy.network.serve-cert": {
         1: (
             "Retired 2026-08-17. Revision 2 added the identity-neutral viewer "

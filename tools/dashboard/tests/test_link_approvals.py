@@ -456,16 +456,13 @@ def test_rerender_shows_frozen_destination_and_drift(env, session_key,
 # ── register-on-first-publish: enrich surfaces a graceful seam, not C1 ──
 
 def _seed_org_key(org, root):
-    """Store a keyed org WITHOUT a registry binding (the D3a autonomy state)."""
-    from tools.graph.schemas.network_identity import (
-        NETWORK_ORG_KEY_SET_ID, NETWORK_ORG_KEY_REVISION)
-    from tools.network.idkit.armor import encrypt_root_key
-    settings_ops.add_setting(
-        NETWORK_ORG_KEY_SET_ID, NETWORK_ORG_KEY_REVISION, "default",
-        {"armored_private_key": encrypt_root_key(root, "org-pw-123", iterations=10_000),
-         "root_pub": root.public_hex},
-        org=org,
-    )
+    """Store a keyed org WITHOUT a registry binding (the D3a autonomy state).
+
+    There is one stored shape for an org root — sealed to the owner — so this
+    is the sealed seeder. It stays as a separate name because the CASE it sets
+    up (keyed but unregistered) is what the tests below are about.
+    """
+    return _seed_org_key_sealed(org, root)
 
 
 def _seed_org_key_sealed(org, root):

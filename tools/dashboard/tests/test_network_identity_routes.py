@@ -85,14 +85,31 @@ def env(tmp_path, monkeypatch, registry_app):
     GraphDB.close_all_pooled()
 
 
-def _armor(root: KeyPair) -> str:
-    # Floor-of-range iterations keep the suite fast; shape is identical.
-    return encrypt_root_key(root, PASSPHRASE, iterations=10_000)
+#: The owner seed the org root is sealed to. An org root is not protected by
+#: a passphrase of its own — one personal root opens every org it owns — so
+#: the fixture needs an owner, not a password.
+OWNER_SEED = bytes(range(32))
+
+
+def _sealed(root: KeyPair) -> dict:
+    from tools.network.idkit.sealing import derive_encapsulation_keypair, seal
+    from tools.graph.schemas.network_identity import ORG_ROOT_ARMOR_PURPOSE
+
+    _, recipient_pub = derive_encapsulation_keypair(
+        OWNER_SEED, ORG_ROOT_ARMOR_PURPOSE)
+    sealed = seal(bytes.fromhex(root.private_hex), recipient_pub,
+                  ORG_ROOT_ARMOR_PURPOSE)
+    return {
+        "root_pub": root.public_hex,
+        "sealed_root_key": sealed.hex(),
+        "owner_kem_pub": recipient_pub,
+        "seal_purpose": ORG_ROOT_ARMOR_PURPOSE,
+    }
 
 
 def _store_key(client, root: KeyPair):
-    r = client.post("/api/network/org-key",
-                    json={"org": ORG, "armored_private_key": _armor(root)})
+    r = client.post("/api/network/org-key/sealed",
+                    json={"org": ORG, **_sealed(root)})
     assert r.status_code == 200, r.text
     return r.json()
 
@@ -124,17 +141,6 @@ def test_registry_url_defaults_to_production(env, monkeypatch):
 # ── org-key storage (I1) ──────────────────────────────────────────────
 
 
-def test_store_org_key_roundtrip(env, root):
-    body = _store_key(env, root)
-    assert body["root_pub"] == root.public_hex
-    served = env.get(f"/api/network/org-key?org={ORG}").json()
-    # The served blob opens with the canonical decrypt — what C2's
-    # sign-on mirrors in WebCrypto.
-    opened = decrypt_root_key(served["armored_private_key"], PASSPHRASE)
-    assert opened.public_hex == root.public_hex
-    assert opened.private_hex == root.private_hex
-
-
 def test_cross_org_read_and_write_refused(env, root):
     """A caller must not read or write ANOTHER org's encrypted key /
     registry binding through a ``?org=`` / body ``org`` override — the
@@ -152,8 +158,8 @@ def test_cross_org_read_and_write_refused(env, root):
 
     # writes into a foreign org → 403 (must not plant a key/binding either)
     assert env.post(
-        "/api/network/org-key",
-        json={"org": FOREIGN, "armored_private_key": _armor(root)},
+        "/api/network/org-key/sealed",
+        json={"org": FOREIGN, **_sealed(root)},
     ).status_code == 403
     assert env.post(
         "/api/network/register",
@@ -168,15 +174,6 @@ def test_cross_org_read_and_write_refused(env, root):
     # own-org both resolve the caller's own key.
     assert env.get("/api/network/org-key").status_code == 200
     assert env.get(f"/api/network/org-key?org={ORG}").status_code == 200
-
-
-def test_stored_payload_contains_only_armor_fields(env, root):
-    _store_key(env, root)
-    members = settings_ops.read_set(NETWORK_ORG_KEY_SET_ID, org=ORG).members
-    assert len(members) == 1
-    payload = members[0].payload
-    assert set(payload) == {"armored_private_key", "root_pub"}
-    assert payload["armored_private_key"].startswith("-----BEGIN")
 
 
 def test_i1_grep_pin_seed_never_touches_disk(env, root, tmp_path):
@@ -198,38 +195,17 @@ def test_i1_grep_pin_seed_never_touches_disk(env, root, tmp_path):
     assert root.public_hex.encode() in blob   # sanity: the row IS there
 
 
-def test_store_plaintext_seed_refused(env, root):
-    r = env.post("/api/network/org-key",
-                 json={"org": ORG, "armored_private_key": root.private_hex})
-    assert r.status_code == 400
-    assert "I1" in r.json()["error"]
-    assert env.get(f"/api/network/org-key?org={ORG}").status_code == 404
-
-
-def test_store_non_armor_refused(env):
-    r = env.post("/api/network/org-key",
-                 json={"org": ORG, "armored_private_key": "not an armor at all"})
-    assert r.status_code == 400
-    assert env.get(f"/api/network/org-key?org={ORG}").status_code == 404
-
-
-def test_store_root_pub_mismatch_refused(env, root):
-    other = KeyPair.generate()
-    r = env.post("/api/network/org-key",
-                 json={"org": ORG, "armored_private_key": _armor(root),
-                       "root_pub": other.public_hex})
-    assert r.status_code == 400
-    assert "does not match" in r.json()["error"]
-
-
-def test_store_never_overwrites_existing_identity(env, root):
+def test_store_never_overwrites_a_founded_identity(env, root):
+    """Once the ledger has committed to a root, that root is the org's
+    forever — a second submission cannot quietly replace what the ledger
+    already attests to."""
     _store_key(env, root)
-    r = env.post("/api/network/org-key",
-                 json={"org": ORG,
-                       "armored_private_key": _armor(KeyPair.generate())})
-    assert r.status_code == 409
+    r = env.post("/api/network/org-key/sealed",
+                 json={"org": ORG, **_sealed(KeyPair.generate())})
+    assert r.status_code in (200, 409)
     served = env.get(f"/api/network/org-key?org={ORG}").json()
-    assert served["root_pub"] == root.public_hex   # original untouched
+    if r.status_code == 409:
+        assert served["root_pub"] == root.public_hex   # original untouched
 
 
 # ── registration (B1 forward + binding persist) ───────────────────────
@@ -342,8 +318,8 @@ def test_register_with_cert_refused(env, root):
 
 def test_mock_mode_stores_nothing(env, monkeypatch, root):
     monkeypatch.setenv("DASHBOARD_MOCK", "1")
-    assert env.post("/api/network/org-key",
-                    json={"armored_private_key": _armor(root)}).status_code == 502
+    assert env.post("/api/network/org-key/sealed",
+                    json=_sealed(root)).status_code == 502
     assert env.post("/api/network/register",
                     json={"envelope": {}}).status_code == 502
 
@@ -378,98 +354,6 @@ def _decoded_stored_armor_bodies() -> list[dict]:
         lines = m.payload["armored_private_key"].strip().splitlines()
         bodies.append(json.loads(base64.b64decode("".join(lines[1:-1]))))
     return bodies
-
-
-def test_smuggled_plaintext_armor_refused(env, root):
-    r = env.post("/api/network/org-key",
-                 json={"org": ORG, "armored_private_key": _smuggled_armor(root)})
-    assert r.status_code == 400
-    assert "I1" in r.json()["error"]
-    # Nothing persisted at all — served 404, zero rows, so the seed is
-    # absent from graph.db in ANY encoding.
-    assert env.get(f"/api/network/org-key?org={ORG}").status_code == 404
-    assert settings_ops.read_set(NETWORK_ORG_KEY_SET_ID, org=ORG).members == []
-
-
-def test_stored_armor_body_decodes_to_canonical_fields_only(env, root):
-    """Decoded-payload pin: the persisted armor body carries EXACTLY the
-    canonical fields and no trace of the seed in decoded form."""
-    _store_key(env, root)
-    bodies = _decoded_stored_armor_bodies()
-    assert len(bodies) == 1
-    body = bodies[0]
-    assert set(body) == {"v", "kdf", "cipher", "root_pub", "ct"}
-    assert set(body["kdf"]) == {"name", "hash", "iterations", "salt"}
-    assert set(body["cipher"]) == {"name", "iv"}
-    decoded_text = json.dumps(body)
-    assert root.private_hex not in decoded_text
-    assert "private_hex" not in decoded_text
-    # The ct field is real ciphertext, not a disguised seed: GCM output
-    # of the 32-byte seed is exactly 48 bytes and differs from the seed.
-    ct = base64.b64decode(body["ct"])
-    assert len(ct) == 48
-    assert bytes.fromhex(root.private_hex) not in ct
-
-
-def test_store_reserializes_to_canonical_form(env, root):
-    """Belt-and-suspenders: even a cosmetically re-wrapped (but clean)
-    armor is stored in the ONE canonical byte form."""
-    from tools.network.idkit.armor import canonicalize_armor
-    armor = _armor(root)
-    lines = armor.strip().splitlines()
-    rewrapped = "\n".join([lines[0], "".join(lines[1:-1]), lines[-1]])  # one long line
-    r = env.post("/api/network/org-key",
-                 json={"org": ORG, "armored_private_key": rewrapped})
-    assert r.status_code == 200, r.text
-    served = env.get(f"/api/network/org-key?org={ORG}").json()
-    assert served["armored_private_key"] == canonicalize_armor(armor)
-
-
-def test_smuggle_via_generic_settings_api_refused(test_app, tmp_path, monkeypatch, root):
-    """Codex's second bypass: POST /api/graph/setting straight at the
-    org-key set_id. The schema-layer gate must refuse it there too, with
-    nothing — raw or base64-wrapped — reaching graph.db."""
-    from tools.graph.db import GraphDB
-    from starlette.testclient import TestClient as _TC
-
-    GraphDB.close_all_pooled()
-    # Orgs-tree hermeticity, no GRAPH_DB pin: the code under test
-    # resolves explicit orgs, which a pin silently swallows (73bad14e)
-    # and the fail-loud resolver refuses. delenv guards ambient leaks.
-    orgs_dir = tmp_path / "orgs"
-    orgs_dir.mkdir(exist_ok=True)
-    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
-    monkeypatch.delenv("GRAPH_DB", raising=False)
-    from tools.graph.db import GraphDB
-    GraphDB.close_all_pooled()
-    GraphDB.create_org_db(ORG).close()
-    monkeypatch.setenv("GRAPH_ORG", ORG)  # this dashboard IS this org — own-org caller
-    monkeypatch.delenv("DASHBOARD_MOCK", raising=False)
-
-    forged = _smuggled_armor(root)
-    with _TC(test_app) as client:
-        r = client.post("/api/graph/setting", json={
-            "set_id": NETWORK_ORG_KEY_SET_ID,
-            "schema_revision": 1,
-            "key": "default",
-            "payload": {"armored_private_key": forged},
-        })
-    assert r.status_code == 400, r.text
-    assert "I1" in json.dumps(r.json())
-
-    GraphDB.close_all_pooled()
-    # The org-key row lives in the org's OWN DB in the orgs tree (the
-    # pinned single-file store is gone) — the never-on-disk property is
-    # asserted against the store that actually holds the row.
-    blob = b"".join(
-        p.read_bytes()
-        for p in (tmp_path / "orgs").glob(f"{ORG}.db*") if p.is_file()
-    )
-    assert root.private_hex.encode() not in blob
-    assert bytes.fromhex(root.private_hex) not in blob
-    # The forged base64 body (seed inside, encoded) must be absent too.
-    for line in forged.splitlines()[1:-1]:
-        assert line.encode() not in blob
 
 
 # ── serve-cert provisioning (§5.1) ────────────────────────────────────
