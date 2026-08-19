@@ -44,6 +44,7 @@ PEER_STATE_SQL_CLAUSE = " AND s.publication_state IN ('published','canonical')"
 PEER_SUBSCRIPTION_SET_ID = "autonomy.org.peer-subscription"
 PEER_SUBSCRIPTION_REVISION = 1
 PERSONAL_DB_SLUG = "personal"
+MACHINE_DB_SLUG = "machine"
 
 # RRF tuning per graph://bcce359d-a1d § Merge algorithms.
 RRF_K = 60
