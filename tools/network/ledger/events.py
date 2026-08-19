@@ -39,6 +39,13 @@ APPROVAL_DOMAIN = b"autonomy.ledger.approval.v1\n"
 ROTATE_DOMAIN = b"autonomy.ledger.rotate-continuity.v1\n"
 REKEY_CONTINUITY_DOMAIN = b"autonomy.ledger.member-rekey-continuity.v1\n"
 ROTATE_RECOVERY_DOMAIN = b"autonomy.ledger.rotate-recovery.v1\n"
+#: A member's recovery co-signature over a member.rekey (auto-c3yl1): the third
+#: door on the credential axis, authorising a rekey with the member's enrolled
+#: recovery key rather than the current key or the org root. DISTINCT from
+#: REKEY_CONTINUITY_DOMAIN (the new key's possession proof) and from
+#: ROTATE_RECOVERY_DOMAIN (the ORG root's recovery, keyed by genesis+key pair,
+#: not persona) so no one signature can ever substitute for another.
+REKEY_RECOVERY_DOMAIN = b"autonomy.ledger.member-rekey-recovery.v1\n"
 #: Frozen, byte-identical to storagekit.credentials.CREDENTIAL_DOMAIN —
 #: the fold verifies an embedded kem_credential with idkit only, and a
 #: cross-package fidelity test keeps the two constants from drifting.
@@ -728,6 +735,39 @@ def sign_rekey_continuity(new_key: KeyPair, persona: str, old_pub: str) -> str:
     key the persona is rotating onto."""
     return new_key.sign_hex(
         rekey_continuity_input(persona, old_pub, new_key.public_hex)
+    )
+
+
+def rekey_recovery_input(
+    genesis_id: str, persona: str, old_pub: str, new_pub: str
+) -> bytes:
+    """member.rekey's RECOVERY co-signature binding (auto-c3yl1).
+
+    Genesis-bound AND persona-bound, under a domain distinct from the rekey
+    continuity proof: the enrolled recovery key signs THIS to authorise moving a
+    (possibly stolen) persona onto ``new_pub``, and because the domain differs
+    from ``REKEY_CONTINUITY_DOMAIN`` the recovery signature can never stand in
+    for the new key's possession proof, nor the reverse. The genesis binding
+    stops a recovery signature minted for one organization being replayed in
+    another where the member enrolled the same recovery key.
+    """
+    return REKEY_RECOVERY_DOMAIN + canonical_json(
+        {
+            "genesis_id": genesis_id,
+            "persona": persona,
+            "old_pub": old_pub,
+            "new_pub": new_pub,
+        }
+    )
+
+
+def sign_rekey_recovery(
+    recovery_key: KeyPair, genesis_id: str, persona: str, old_pub: str, new_pub: str
+) -> str:
+    """The enrolled RECOVERY key signs the recovery-rekey binding, proving the
+    owner authorises the move off the current (stolen) key."""
+    return recovery_key.sign_hex(
+        rekey_recovery_input(genesis_id, persona, old_pub, new_pub)
     )
 
 
