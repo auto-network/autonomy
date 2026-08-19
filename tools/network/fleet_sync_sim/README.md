@@ -97,3 +97,25 @@ This remains simulation code, not the production database adapter.  In
 particular, a current SQLite snapshot cannot recover overwritten values or
 tombstones that were never logged.  The production engine must capture each
 mutation at write time and retain tombstones through the compaction frontier.
+
+## Indexed bounded-memory base codec
+
+`streaming.py` is the production-shape counterpart to the in-memory oracle.
+It installs skinny SQLite indexes over every replicated table's logical key,
+holds one WAL-consistent read snapshot, and iterates those indexes in a fixed
+dependency-safe numeric table order. A keyset cursor resumes exclusively from
+`(table, logical_address)` without `OFFSET` or visiting prior tables.
+
+One canonical row frame at a time is written into immutable record-aligned
+chunks. The durable catalog records the policy digest, chunk sequence, first
+and last keys, sizes, record counts, SHA-256 commitments, and an ordered root.
+Decoding verifies those commitments one chunk at a time and applies bounded
+batches into a staging GraphDB. The staging database is published only after
+the complete root is validated.
+
+On a one-million-row, 437 MiB SQLite corpus, the 8 MiB configuration emitted
+650 MiB in 82 chunks at 15.2 MiB/s with 187 MiB peak RSS. Full realization ran
+at 7,570 rows/s with the same 187 MiB peak. The earlier oracle used about
+2,982 MiB on a smaller 207 MiB encoded corpus. The logical-key indexes add
+23.0 MiB (5.3%) to the million-row database and every query plan is an index
+walk with no temporary sort.

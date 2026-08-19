@@ -249,6 +249,14 @@ def _frame(mutation: Mutation) -> bytes:
     ])
 
 
+def encode_mutation_frame(mutation: Mutation) -> bytes:
+    """Return one canonical frame without constructing a whole stream."""
+    frame = _frame(mutation)
+    if len(frame) > MAX_FRAME_BYTES:
+        raise CodecError("mutation frame exceeds size bound")
+    return frame
+
+
 def _sort_key(mutation: Mutation) -> tuple[int, bytes, bytes]:
     frame = _frame(mutation)
     return mutation.timestamp_ns, mutation.candidate_hash, frame
@@ -297,6 +305,13 @@ def _mutation_from_frame(frame: bytes) -> Mutation:
     if _frame(mutation) != frame:
         raise CodecError("mutation frame is not canonical")
     return mutation
+
+
+def decode_mutation_frame(frame: bytes) -> Mutation:
+    """Strictly decode one frame emitted by :func:`encode_mutation_frame`."""
+    if len(frame) > MAX_FRAME_BYTES:
+        raise CodecError("mutation frame exceeds size bound")
+    return _mutation_from_frame(frame)
 
 
 def decode_stream(data: bytes) -> list[Mutation]:
