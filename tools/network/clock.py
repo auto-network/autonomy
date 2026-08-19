@@ -37,9 +37,26 @@ the inverse of freshness. Nothing in the tree implements one today; the
 first one defines its constant HERE rather than inventing its own home.
 
 Not gates at all, and deliberately not here: elapsed-time measurement
-(progress deadlines, rate limiting) reads the MONOTONIC clock and bounds
-no one's claim about wall time; timestamp records (``created_at`` and
-friends) write the clock down without gating on it.
+(progress deadlines, rate limiting) belongs on the MONOTONIC clock, which
+bounds no one's claim about wall time — one live site currently violates
+this (``TurnCredentialIssuer`` ages its issuance quota against the same
+wall clock that stamps ``expires_at``; defect ``auto-wsnvj``, not licence)
+— and timestamp records (``created_at`` and friends) write the clock down
+without gating on it.
+
+Named exclusions — constants that MATCH a time-gate name pattern and stay
+where they are, each for a stated reason (`DOMAIN_OWNED_EXCLUSIONS` below
+is the machine-readable copy the property test enforces):
+
+- ``relaykit/attachment_download.WINDOW`` / ``LAST_IN_WINDOW`` — flow
+  control, measured in BYTES and a flag bit; not time.
+- ``relaykit/connector._LIFECYCLE_LOG_WINDOW_S`` — diagnostic log
+  bucketing; no adversary, nothing refused.
+- ``tools/graph`` metrics windows (``_STATS_*_WINDOW_SECONDS``) — operator
+  telemetry arithmetic; and ``CLAUDE_SETUP_TOKEN_TTL`` — a Setting-schema
+  payload default owned by its schema, expressed as a ``timedelta`` in the
+  schema's own vocabulary. Graph-side ADVERSARIAL gates (the settings
+  window and allowance) consume this module's helpers instead.
 
 Units
 -----
@@ -105,27 +122,86 @@ SETTINGS_PLAUSIBILITY_WINDOW_S = 30 * 60
 #: adversarial pressure pulls it smaller, because an attacker's reach and the
 #: member's grow by the same constant and recovery depends only on citing a
 #: newer attestation. Provisional product value — retuning it is editing this
-#: line.
+#: line. Coincidentally equal to PENDING_CLAIM_TTL_MS below; they are
+#: unrelated, and retuning one must not touch the other.
 SETTINGS_OFFLINE_WRITE_ALLOWANCE_S = 7 * 24 * 3600
 
 # -- Validity intervals -------------------------------------------------------
 
-#: Hard ceiling on the identity-assertion validity window, seconds. Spec §7A:
+#: Hard ceiling on the identity-ASSERTION validity window, seconds. Spec §7A:
 #: the TTL is "seconds," and the QR challenge (§4.8) is ~60s; 120s leaves room
 #: for clock skew between the minting dashboard and the registry while keeping
-#: a stolen assertion useless within a breath.
+#: a stolen assertion useless within a breath. Not MAX_ATTESTATION_TTL below —
+#: near-namesakes, unrelated instruments.
 MAX_ASSERTION_TTL = 120
+
+#: Hard ceiling on a listing ATTESTATION's declared validity, seconds (one
+#: year). Not MAX_ASSERTION_TTL above.
+MAX_ATTESTATION_TTL = 365 * 86_400
+
+#: TURN relay credential lifetime, seconds. Long enough to carry an ICE
+#: session, short enough that a leaked credential dies on its own.
+TURN_CREDENTIAL_TTL_SECONDS = 15 * 60
+
+#: Default lifetime of a storage delegate grant, milliseconds (the
+#: key-control plane is HLC/millisecond-based).
+DEFAULT_DELEGATE_TTL_MS = 12 * 60 * 60 * 1000
+
+#: Registry binding TTLs, seconds (spec §4.2: default 30d).
+DEFAULT_BINDING_TTL = 30 * 86_400
+MIN_BINDING_TTL = 3_600
+MAX_BINDING_TTL = DEFAULT_BINDING_TTL
+
+#: Node reachability hint TTLs, seconds (spec §8). Short is the point: a
+#: hint is a live-address claim, not a record.
+DEFAULT_HINT_TTL = 3_600
+MIN_HINT_TTL = 60
+MAX_HINT_TTL = 86_400
+
+#: Registry session lifetimes, seconds (§6.3), and the ~60s cross-device
+#: challenge (§4.8).
+SESSION_TTL = 24 * 3600
+ANON_SESSION_TTL = 3600
+CHALLENGE_TTL = 60
+
+#: TURN issuance quota window, seconds — an ELAPSED-TIME quota, which by the
+#: taxonomy above belongs on the monotonic clock; the issuer currently ages
+#: it against the wall clock it also stamps expires_at with (auto-wsnvj).
+#: The constant is a tolerance either way and lives here; the clock-source
+#: fix belongs to that bead.
+TURN_ISSUANCE_WINDOW_SECONDS = 60
 
 # -- Expiry sweeps ------------------------------------------------------------
 
 #: How long a staged member claim stays finalizable, measured from staging,
 #: milliseconds (auto-cz4fb). Late enforcement is harmless — an expired row
 #: surfaces as a distinct terminal state, never a silent pending. The origin
-#: is the server wall clock at staging, not the client's HLC.
+#: is the server wall clock at staging, not the client's HLC. Coincidentally
+#: equal to SETTINGS_OFFLINE_WRITE_ALLOWANCE_S above; they are unrelated
+#: (different kind, different unit), and retuning one must not touch the
+#: other.
 PENDING_CLAIM_TTL_MS = 7 * 24 * 60 * 60 * 1000
+
+#: How long a relay stream offer waits unclaimed before the server sweeps
+#: it, seconds. Late sweeping is harmless; the stream just lingers.
+STREAM_EXPIRY_SECONDS = 60
 
 # Settings ``expires_at`` and invite expiry are per-record data of this same
 # kind; they carry their own values and take no shared constant.
+
+
+# -- Named exclusions ---------------------------------------------------------
+
+#: Constants whose NAMES match a time-gate pattern but which stay in their
+#: own modules, each for the reason in the module docstring above. The
+#: property test in tools/network/tests/test_clock.py enforces that any
+#: OTHER match outside this module is a defect — this tuple is the single
+#: allowlist, so an exclusion cannot be silent.
+DOMAIN_OWNED_EXCLUSIONS = (
+    ("tools/network/relaykit/attachment_download.py", "WINDOW"),
+    ("tools/network/relaykit/attachment_download.py", "LAST_IN_WINDOW"),
+    ("tools/network/relaykit/connector.py", "_LIFECYCLE_LOG_WINDOW_S"),
+)
 
 # -- Deliberate delays --------------------------------------------------------
 # None implemented. The first one belongs here.

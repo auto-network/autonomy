@@ -28,8 +28,13 @@ from tools.network.relaykit.ice_signaling import (
 )
 
 
-TURN_CREDENTIAL_TTL_SECONDS = 15 * 60
-TURN_ISSUANCE_WINDOW_SECONDS = 60
+# Owned by tools.network.clock (validity interval / elapsed quota window);
+# re-exported here for the issuance call sites that read them from this
+# module.
+from tools.network.clock import (
+    TURN_CREDENTIAL_TTL_SECONDS,
+    TURN_ISSUANCE_WINDOW_SECONDS,
+)
 # These are abuse tripwires, not normal product quotas.  One authenticated org
 # can mint ten fresh coupons per second before refusal; the whole first node can
 # mint forty per second.  Coturn's allocation and bandwidth caps remain the

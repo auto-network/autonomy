@@ -72,7 +72,8 @@ from .errors import StorageError
 #: the next unlock, so a short life keeps the exposure window tight; the
 #: caller may shorten or lengthen it, but the fold — not this default — is
 #: the boundary.
-DEFAULT_DELEGATE_TTL_MS = 12 * 60 * 60 * 1000
+# Owned by tools.network.clock (a validity interval, ms); re-exported here.
+from tools.network.clock import DEFAULT_DELEGATE_TTL_MS
 
 
 class DelegateError(StorageError):

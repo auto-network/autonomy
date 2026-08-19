@@ -94,7 +94,9 @@ ATTESTATION_CLAIM_TYPES = frozenset({"display_name", "domain"})
 MAX_CLAIM_VALUE_CHARS = 256
 MAX_EVIDENCE_TYPE_CHARS = 64
 MAX_EVIDENCE_CHARS = 2_048
-MAX_ATTESTATION_TTL = 365 * 86_400
+# Owned by tools.network.clock (a validity-interval ceiling); re-exported
+# here. Distinct from MAX_ASSERTION_TTL, its near-namesake.
+from tools.network.clock import MAX_ATTESTATION_TTL
 
 _LISTING_FIELDS = (
     "v", "publisher", "name", "version", "bundle_hash", "description",

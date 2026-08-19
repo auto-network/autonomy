@@ -47,14 +47,61 @@ def test_the_two_units_are_distinct():
 
 def test_every_tolerance_is_owned_by_the_clock_module():
     from tools.network.ledger import store as ledger_store
-    from tools.network.registry import app, assertion, signing
+    from tools.network.registry import (
+        app,
+        assertion,
+        listings,
+        relay,
+        signing,
+        turn_credentials,
+    )
     from tools.network.relaykit import peer
+    from tools.network.storagekit import delegate
 
     assert signing.MAX_CLOCK_SKEW is clock.MAX_CLOCK_SKEW
     assert peer.MAX_RELAY_SKEW is clock.MAX_RELAY_SKEW
     assert assertion.MAX_ASSERTION_TTL is clock.MAX_ASSERTION_TTL
     assert app.MAX_ATTESTATION_FUTURE_TS is clock.MAX_ATTESTATION_FUTURE_TS
     assert ledger_store.PENDING_CLAIM_TTL_MS is clock.PENDING_CLAIM_TTL_MS
+    assert listings.MAX_ATTESTATION_TTL is clock.MAX_ATTESTATION_TTL
+    assert relay.STREAM_EXPIRY_SECONDS is clock.STREAM_EXPIRY_SECONDS
+    assert delegate.DEFAULT_DELEGATE_TTL_MS is clock.DEFAULT_DELEGATE_TTL_MS
+    assert (turn_credentials.TURN_CREDENTIAL_TTL_SECONDS
+            is clock.TURN_CREDENTIAL_TTL_SECONDS)
+    assert (turn_credentials.TURN_ISSUANCE_WINDOW_SECONDS
+            is clock.TURN_ISSUANCE_WINDOW_SECONDS)
+    for name in ("DEFAULT_BINDING_TTL", "MIN_BINDING_TTL", "MAX_BINDING_TTL",
+                 "DEFAULT_HINT_TTL", "MIN_HINT_TTL", "MAX_HINT_TTL",
+                 "SESSION_TTL", "ANON_SESSION_TTL", "CHALLENGE_TTL"):
+        assert getattr(app, name) is getattr(clock, name), name
+
+
+TIME_GATE_NAME = re.compile(
+    r"^(_?[A-Z][A-Z0-9_]*(?:TTL|SKEW|EXPIRY|WINDOW|ALLOWANCE)[A-Z0-9_]*)\s*=",
+    re.M,
+)
+
+
+def test_no_module_outside_clock_defines_a_time_gate_constant():
+    """The property, not the enumeration: 'every named tolerance lives in
+    clock.py' is an ABSENCE claim, and a test listing the constants that
+    moved certifies the claim while it silently rots. This scans the tree
+    for any assignment whose name matches a time-gate pattern; the only
+    permitted survivors are clock.py itself and the explicit, named
+    exclusions clock.py declares — so a new gate constant added anywhere
+    else fails here until it is either moved or visibly excluded."""
+    offenders = []
+    for path in sorted((REPO_ROOT / "tools" / "network").rglob("*.py")):
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        if "/tests/" in rel or rel == "tools/network/clock.py":
+            continue
+        for match in TIME_GATE_NAME.finditer(path.read_text()):
+            if (rel, match.group(1)) not in clock.DOMAIN_OWNED_EXCLUSIONS:
+                offenders.append((rel, match.group(1)))
+    assert offenders == [], (
+        "time-gate constants defined outside tools/network/clock.py and not "
+        f"in its DOMAIN_OWNED_EXCLUSIONS: {offenders}"
+    )
 
 
 def test_registry_hello_freshness_is_unchanged():
