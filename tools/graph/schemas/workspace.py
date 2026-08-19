@@ -29,6 +29,7 @@ from .registry import (
     SettingSchema,
     SchemaValidationError,
     field,
+    home,
     keyed_per_entity,
 )
 
@@ -172,6 +173,19 @@ def _validate_repo(repo: Any, idx: int) -> None:
 
 
 @keyed_per_entity(key_strategy="workspace_id")
+#: A workspace is one value correct for every member of the org that owns it —
+#: its image, harness, repos, tags and container paths do not differ per
+#: reader or per machine. Undeclared until now, which asserted nothing: the
+#: rubric (graph://4d88c2ad-625) says a schema that predates the decorator is
+#: outstanding rather than silently defaulted, and this one was never worked.
+#:
+#: Declaring it does NOT make the row safe to hold secrets. `env` currently
+#: carries the operator's own credentials in several orgs (auto-ehyoh), and
+#: those are `personal` by the one-line rule — "if it is MINE on every machine
+#: I own, my identity, MY CREDENTIALS, my preferences". They leave for the
+#: vault rather than being re-homed with the row; the row itself is genuinely
+#: the organization's and stays here.
+@home("organization")
 class WorkspaceV1(SettingSchema):
     """Shape of an ``autonomy.workspace#1`` Setting payload.
 
