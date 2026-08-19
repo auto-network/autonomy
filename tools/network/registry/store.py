@@ -50,7 +50,12 @@ from typing import Optional
 
 from tools.network.idkit import RevocationRecord, RevocationSet
 
-from .witness import build_entry, entry_id as _entry_id
+from .witness import (
+    WITNESS_TOPICS,
+    build_entry,
+    build_entry_v2,
+    entry_id as _entry_id,
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS orgs (
@@ -183,6 +188,22 @@ CREATE TABLE IF NOT EXISTS witness_log (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_witness_entry
     ON witness_log (org_uuid, topic, entry_id);
+
+-- Witness v2 (auto-jqd9q): one grouped, timestamped chain per org. The v1
+-- table above is retained read-only for archived chains.
+CREATE TABLE IF NOT EXISTS witness_log_v2 (
+    org_uuid     TEXT NOT NULL,
+    seq          INTEGER NOT NULL,
+    prev_id      TEXT,
+    t            INTEGER NOT NULL,
+    heads_json   TEXT NOT NULL,
+    entry_id     TEXT NOT NULL,
+    publisher    TEXT NOT NULL,
+    witnessed_at INTEGER NOT NULL,
+    PRIMARY KEY (org_uuid, seq)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_witness_v2_entry
+    ON witness_log_v2 (org_uuid, entry_id);
 
 -- G1 node reachability hints (spec §8) --------------------------------------
 
@@ -1143,6 +1164,118 @@ class RegistryStore:
             (org_uuid, topic, since, limit),
         ).fetchall()
         return [self._witness_row(r) for r in rows]
+
+    # -- Witness v2: one grouped, timestamped chain per org (auto-jqd9q) --------
+
+    def _witness_row_v2(self, row) -> dict:
+        return {
+            "entry": {
+                "v": 2,
+                "org": row["org_uuid"],
+                "seq": row["seq"],
+                "prev": row["prev_id"],
+                "t": row["t"],
+                "heads": json.loads(row["heads_json"]),
+                "publisher": row["publisher"],
+            },
+            "entry_id": row["entry_id"],
+        }
+
+    @_locked
+    def witness_tip_v2(self, org_uuid: str) -> Optional[dict]:
+        """The org's current v2 tip attestation entry, or ``None`` if empty."""
+        row = self._conn.execute(
+            "SELECT * FROM witness_log_v2 WHERE org_uuid = ? ORDER BY seq DESC LIMIT 1",
+            (org_uuid,),
+        ).fetchone()
+        return self._witness_row_v2(row) if row is not None else None
+
+    def _migrate_v1_to_v2_if_needed(self, org_uuid: str, *, now: int) -> None:
+        """One-time, at the first v2 append for an org: if the v2 chain is empty
+        and v1 chains exist, seed ``seq 1`` from the v1 topic tips.
+
+        Each v1 topic's tip head set maps to its v2 group — ``storage`` stays
+        ``storage``, every other v1 topic (the ledger topic included) maps to
+        ``authority``. The archived v1 chain is left in place and fetchable.
+        Clients holding a v1 journal treat this first v2 attestation as a fresh
+        baseline (the client's v1 re-anchor).
+        """
+        if self._conn.execute(
+            "SELECT 1 FROM witness_log_v2 WHERE org_uuid = ? LIMIT 1", (org_uuid,)
+        ).fetchone() is not None:
+            return
+        v1_topics = [
+            r["topic"] for r in self._conn.execute(
+                "SELECT DISTINCT topic FROM witness_log WHERE org_uuid = ?", (org_uuid,)
+            ).fetchall()
+        ]
+        if not v1_topics:
+            return
+        heads_by_group: dict = {}
+        for topic in v1_topics:
+            tip = self.witness_tip(org_uuid, topic)
+            if tip is None:
+                continue
+            group = "storage" if topic == "storage" else "authority"
+            merged = set(heads_by_group.get(group, [])) | set(tip["entry"]["heads"])
+            heads_by_group[group] = sorted(merged)
+        if not heads_by_group:
+            return
+        entry = build_entry_v2(org_uuid, 1, heads_by_group, None, now, tip["entry"]["publisher"])
+        eid = _entry_id(entry)
+        self._conn.execute(
+            "INSERT INTO witness_log_v2 (org_uuid, seq, prev_id, t, heads_json,"
+            " entry_id, publisher, witnessed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (org_uuid, 1, None, now, json.dumps(entry["heads"]), eid,
+             entry["publisher"], now),
+        )
+        self._conn.commit()
+
+    @_locked
+    def append_witness_v2(
+        self, org_uuid: str, topic: str, heads: list, publisher: str, *, now: int
+    ) -> dict:
+        """Append one topic's head set into the org's single grouped chain.
+
+        ``topic`` must be a member of :data:`WITNESS_TOPICS`. The stored entry
+        always carries the FULL current head map — every topic seen so far,
+        with this publication's topic replaced — so domination and re-serves are
+        self-contained. Idempotent when the resulting map equals the tip's.
+        ``t = max(now, tip.t)`` so the chain's timestamp is non-decreasing by
+        construction and the server never emits a backdated entry. The
+        ``(org, seq)`` primary key turns any lost single-writer race into a loud
+        ``IntegrityError`` rather than a forked chain.
+        """
+        if topic not in WITNESS_TOPICS:
+            raise ValueError(f"unknown witness topic {topic!r}")
+        self._migrate_v1_to_v2_if_needed(org_uuid, now=now)
+        tip = self.witness_tip_v2(org_uuid)
+        current = dict(tip["entry"]["heads"]) if tip is not None else {}
+        current[topic] = sorted(set(heads))
+        if tip is not None and current == tip["entry"]["heads"]:
+            return tip
+        seq = 1 if tip is None else tip["entry"]["seq"] + 1
+        prev = None if tip is None else tip["entry_id"]
+        t = now if tip is None else max(now, tip["entry"]["t"])
+        entry = build_entry_v2(org_uuid, seq, current, prev, t, publisher)
+        eid = _entry_id(entry)
+        self._conn.execute(
+            "INSERT INTO witness_log_v2 (org_uuid, seq, prev_id, t, heads_json,"
+            " entry_id, publisher, witnessed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (org_uuid, seq, prev, t, json.dumps(entry["heads"]), eid, publisher, now),
+        )
+        self._conn.commit()
+        return {"entry": entry, "entry_id": eid}
+
+    @_locked
+    def witness_since_v2(self, org_uuid: str, since: int, limit: int = 256) -> list:
+        """v2 chain entries with ``seq > since`` (for the client's chain walk)."""
+        rows = self._conn.execute(
+            "SELECT * FROM witness_log_v2 WHERE org_uuid = ? AND seq > ?"
+            " ORDER BY seq LIMIT ?",
+            (org_uuid, since, limit),
+        ).fetchall()
+        return [self._witness_row_v2(r) for r in rows]
 
     # -- E1 session linking (§4.7, §4.8, §6.8) ---------------------------------
 
