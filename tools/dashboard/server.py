@@ -18397,6 +18397,61 @@ async def _on_startup():
     # up with a hook bound to *this* module's ``event_bus`` name.
     from tools.graph import settings_ops as _settings_ops
     _settings_ops.set_emit_hook(_settings_emit_hook)
+    # THE UNREADABLE-STORE GATE RUNS FIRST — before the event-bus restore,
+    # before any monitor wiring, and in BOTH mock and real mode. The
+    # monitors resolve workspaces → orgs → the operator's personal store on
+    # their very first sweep, so any store-touching step ahead of this gate
+    # makes it unreachable for the exact failure it was written for: a
+    # corrupt store then kills startup from inside a monitor broadcast with
+    # a raw traceback instead of the one message that tells the operator
+    # what to do. (The mock branch previously returned before the gate
+    # entirely, which is where review caught it dead.)
+    from tools.data_paths import LocalStoreUnreadableError
+
+    def _refuse_to_start_on_unreadable_store():
+        # The operator's local store exists and CANNOT BE READ. This is not
+        # about migration — it is refusing to run on a store we cannot
+        # read: continuing would leave every later resolution of the
+        # personal store raising for the life of the process while the
+        # dashboard pretends to be up. Damage is not absence; absence is
+        # handled (the resolver serves the real home), damage stops us.
+        logger.critical(
+            "the operator's local store cannot be read; refusing to start",
+            exc_info=True,
+        )
+
+    if os.environ.get("DASHBOARD_MOCK"):
+        # Mock mode gets the gate WITHOUT the provisioning. A mock server
+        # serves fixtures and must not materialize real stores (every mock
+        # TestClient boot creating SQLite files is measurable I/O across a
+        # parallel test run), but its worktree monitor still resolves
+        # stores on the first sweep, so the damage check must still stop
+        # startup here. Resolution is path routing plus a read-only
+        # classification probe — it creates nothing.
+        try:
+            from tools.graph.db import LOCAL_STORE_SLUGS, _local_store_db_path
+            for _local_name in LOCAL_STORE_SLUGS:
+                _local_store_db_path(_local_name)
+        except LocalStoreUnreadableError:
+            _refuse_to_start_on_unreadable_store()
+            raise
+    else:
+        from agents.dispatch_db import init_db
+        init_db()  # ensure dispatch schema exists
+        dashboard_db.init_db()  # ensure dashboard.db schema exists
+        auth_db.init_db()  # ensure auth.db schema exists
+        # First-launch bootstrap: ensure data/orgs/{autonomy,personal}.db
+        # exist. Idempotent — pre-existing DBs are left untouched. See
+        # graph://d970d946-f95.
+        try:
+            from tools.graph import org_ops
+            org_ops.ensure_bootstrap_orgs()
+        except LocalStoreUnreadableError:
+            _refuse_to_start_on_unreadable_store()
+            raise
+        except Exception:
+            logger.exception("ensure_bootstrap_orgs() failed; continuing startup")
+
     # Restore EventBus sequence/buffer state from the prior process. restore()
     # advances the persisted epoch so clients show the existing reload banner
     # while still retaining gap-replay continuity.
@@ -18450,30 +18505,6 @@ async def _on_startup():
             _mock_event_watcher_task = asyncio.create_task(mock_event_watcher())
         return
 
-    from agents.dispatch_db import init_db
-    init_db()  # ensure dispatch schema exists
-    dashboard_db.init_db()  # ensure dashboard.db schema exists
-    auth_db.init_db()  # ensure auth.db schema exists
-    # First-launch bootstrap: ensure data/orgs/{autonomy,personal}.db exist.
-    # Idempotent — pre-existing DBs are left untouched. See graph://d970d946-f95.
-    try:
-        from tools.data_paths import LocalStoreUnreadableError
-        from tools.graph import org_ops
-        org_ops.ensure_bootstrap_orgs()
-    except LocalStoreUnreadableError:
-        # The operator's local store exists and CANNOT BE READ. This is not
-        # about migration — it is refusing to run on a store we cannot
-        # read: continuing would leave every later resolution of the
-        # personal store raising for the life of the process while the
-        # dashboard pretends to be up. Damage is not absence; absence is
-        # handled (the resolver serves the real home), damage stops us.
-        logger.critical(
-            "ensure_bootstrap_orgs(): the operator's local store cannot be "
-            "read; refusing to start", exc_info=True,
-        )
-        raise
-    except Exception:
-        logger.exception("ensure_bootstrap_orgs() failed; continuing startup")
     # Materialize Setting *schema* meta rows (autonomy.schema#1 +
     # autonomy.schema.synopsis#1) into every org DB. Decoupled from
     # _SCHEMA_USER_VERSION (auto-06ziz): the hot-reload restarts this process on
