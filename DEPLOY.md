@@ -58,9 +58,11 @@ dashboard serves is vendored in the image
 (`tools/dashboard/static/vendor/`, see `VENDOR.md` there), the CSP names
 no third-party origin, and browsers never contact a CDN — a fresh
 install works offline. Pinned by
-`tools/dashboard/tests/test_no_cdn_dependencies.py`. Distribution is
-`git clone` / tarball / an image you push to a registry *you* choose —
-never a mandated one.
+`tools/dashboard/tests/test_no_cdn_dependencies.py`. Distribution is a
+`git clone` you build from, or an image you push to a registry *you* choose —
+never a mandated one. (Building from source is always from a git clone: the
+image stamps `/app/VERSION` by reading the commit from `.git` at build, so a
+detached source tarball with no `.git` is not a build input — clone instead.)
 
 The container entrypoint (`deploy/entrypoint.sh`) runs the idempotent
 migrate-on-mount initializer and then uvicorn, serving HTTPS when the
