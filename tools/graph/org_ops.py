@@ -1135,8 +1135,10 @@ def retrofit_found_ledgers(
     now_ms = int(time.time() * 1000) if now is None else now
 
     report = RetrofitReport()
+    from .db import LOCAL_STORE_SLUGS
+
     for org in list_orgs(root=root):
-        if org.slug == "personal":
+        if org.slug in LOCAL_STORE_SLUGS:
             continue
         entry = {"slug": org.slug, "outcome": None, "genesis_id": None}
         report.outcomes.append(entry)
@@ -1241,6 +1243,17 @@ def remove_org(
     list of references for the operator. Returns a :class:`RemovalReport`
     describing what happened.
     """
+    from .db import LOCAL_STORE_SLUGS
+
+    if slug in LOCAL_STORE_SLUGS:
+        # The reservation covers destruction, not only creation (peer
+        # review F6): "remove the org named personal" reaching the
+        # operator's identity store — via the DELETE route, graph org rm,
+        # or force — must not exist as an operation.
+        raise OrgError(
+            f"{slug!r} is the operator's local store, not an organization; "
+            f"it cannot be removed through the organization surface"
+        )
     org = get_org(slug, root=root)
     if org is None:
         raise OrgNotFoundError(f"org not found: {slug}")
@@ -1270,6 +1283,16 @@ def rename_org(
 
     Bootstrap UUID is preserved.
     """
+    from .db import LOCAL_STORE_SLUGS
+
+    if slug in LOCAL_STORE_SLUGS:
+        # Renaming the personal store into the organization namespace
+        # would make list_org_slugs return it as a peer org — inverting
+        # the reach guarantee the store table rests on (peer review F6).
+        raise OrgError(
+            f"{slug!r} is the operator's local store, not an organization; "
+            f"it cannot be renamed into one"
+        )
     _validate_slug(new_slug)
     if slug == new_slug:
         raise OrgError("new slug equals current slug")

@@ -36,6 +36,11 @@ backup_sqlite() {
 }
 
 backup_sqlite "graph.db"       "${ROOT}/data/graph.db"
+# The operator's LOCAL stores (auto-35kmy): beside orgs/, not in it, so the
+# orgs glob below no longer covers them — and personal.db is the identity
+# armor. Explicit entries so absence would at least print a SKIPPED line.
+backup_sqlite "personal.db"    "${ROOT}/data/personal.db"
+backup_sqlite "machine.db"     "${ROOT}/data/machine.db"
 backup_sqlite "dispatch.db"    "${ROOT}/data/dispatch.db"
 backup_sqlite "experiments.db" "${ROOT}/data/experiments.db"
 backup_sqlite "dashboard.db"   "${ROOT}/data/dashboard.db"

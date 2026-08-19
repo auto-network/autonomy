@@ -98,8 +98,25 @@ def org_ledger_db_path(slug: str, root=None) -> Path:
     override, default ``data/orgs/``) without importing tools.graph — the
     network library stays dependency-light. The legacy separate file is
     ``<slug>{LEDGER_DB_SUFFIX}``; see :func:`relocate_ledger_to_org_db`.
+
+    The two LOCAL stores are not organizations and live beside the orgs
+    directory (auto-35kmy); this resolver must agree with the graph's
+    about that or the same slug names two files (the split-resolver
+    failure). Both consume ``tools.data_paths.LOCAL_STORE_KEYS``. No
+    local store ever holds a founded ledger — this routing exists so a
+    path QUESTION about one gets the true answer rather than minting a
+    stray file in the org namespace.
     """
-    return _orgs_dir(root) / f"{slug}.db"
+    from tools.data_paths import LOCAL_STORE_KEYS
+
+    d = _orgs_dir(root)
+    if slug in LOCAL_STORE_KEYS:
+        target = d.parent / f"{slug}.db"
+        legacy = d / f"{slug}.db"
+        if target.exists() or not legacy.exists():
+            return target
+        return legacy
+    return d / f"{slug}.db"
 
 
 _TYPE_LIST = ", ".join(f"'{t}'" for t in sorted(EVENT_TYPES))
