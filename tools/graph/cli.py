@@ -89,7 +89,7 @@ def _get_db_path(org: str | None = None) -> Path:
       2. Explicit ``org`` kwarg → that org's DB.
       3. ``GRAPH_ORG`` env → that org's DB (session launcher exports it
          in containers rooted on a specific org).
-      4. Scopeless default: ``data/orgs/personal.db`` (auto-txg5.3 — host
+      4. Scopeless default: ``data/personal.db`` (auto-txg5.3 — host
          CLI writes with no org context converge on the operator's
          personal DB, absorbing auto-s45z9).
       5. Legacy ``data/graph.db`` fallback when the per-org DB file is

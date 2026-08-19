@@ -150,3 +150,45 @@ def test_bootstrap_relocates_a_legacy_layout(orgs_root):
     assert not (orgs_root / "personal.db").exists()
     # And the relocated store still reads/writes by its literal name.
     settings_ops._open("personal", None).close()
+
+
+# ── a pre-reservation SHARED org under a reserved name (Codex P1a) ───
+
+def seed_shared_org_at(path, slug):
+    GraphDB.create_org_db(slug, type_="shared", path=path).close()
+
+
+def test_a_shared_org_named_personal_is_never_served_as_the_local_store(
+    orgs_root,
+):
+    """The file was valid when created; classification is by BOOTSTRAP ROW,
+    never by filename. Resolution answers with the real (fresh) home so no
+    personal credential can land in the shared organization."""
+    graph_db_mod._LEGACY_STORE_IS_SHARED_ORG.clear()
+    seed_shared_org_at(orgs_root / "personal.db", "personal")
+    resolved = _local_store_db_path("personal", orgs_root)
+    assert resolved == orgs_root.parent / "personal.db"
+    assert resolved != orgs_root / "personal.db"
+
+
+def test_relocation_refuses_a_shared_org_collision_loudly(orgs_root):
+    graph_db_mod._LEGACY_STORE_IS_SHARED_ORG.clear()
+    seed_shared_org_at(orgs_root / "machine.db", "machine")
+    with pytest.raises(graph_db_mod.LocalStoreCollisionError) as caught:
+        relocate_local_stores(orgs_root)
+    message = str(caught.value)
+    assert "SHARED organization" in message
+    assert "UPDATE orgs SET slug" in message, "the remedy is in the error"
+    # Not migrated, not deleted: the operator renames, nothing else moves it.
+    assert (orgs_root / "machine.db").exists()
+    assert not (orgs_root.parent / "machine.db").exists()
+
+
+def test_a_personal_typed_legacy_row_still_migrates(orgs_root):
+    graph_db_mod._LEGACY_STORE_IS_SHARED_ORG.clear()
+    GraphDB.create_org_db(
+        "personal", type_="personal", path=orgs_root / "personal.db",
+    ).close()
+    relocate_local_stores(orgs_root)
+    assert (orgs_root.parent / "personal.db").exists()
+    assert not (orgs_root / "personal.db").exists()

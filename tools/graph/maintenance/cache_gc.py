@@ -179,17 +179,22 @@ def run_cache_gc(
     retains them; ``GraphDB.close_all_pooled`` is owned by
     startup/teardown.
     """
-    from ..cross_org import list_org_slugs
+    from ..cross_org import all_store_slugs
 
     report = CacheGCReport()
     now = _now_iso()
 
+    # Every settings-bearing store, not just organizations: cache schemas
+    # are homed in personal and machine too (claude_setup_tokens is
+    # @home("personal") @cache), and a sweep that enumerated organizations
+    # only would let their expired rows accumulate forever (auto-35kmy
+    # review finding).
     if org is not None:
-        if org not in list_org_slugs():
+        if org not in all_store_slugs():
             raise ValueError(f"unknown org: {org!r}")
         slugs = [org]
     else:
-        slugs = sorted(list_org_slugs())
+        slugs = sorted(all_store_slugs())
 
     for slug in slugs:
         try:

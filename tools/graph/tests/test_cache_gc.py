@@ -447,3 +447,41 @@ def test_run_cache_gc_org_filter_narrows_to_one_db(orgs_root, cache_schema):
 def test_run_cache_gc_unknown_org_raises(orgs_root, cache_schema):
     with pytest.raises(ValueError, match="unknown org"):
         run_cache_gc(org="ghost", limit=10)
+
+
+def test_run_cache_gc_sweeps_the_personal_store(tmp_path, monkeypatch, cache_schema):
+    """The sweep enumerates every settings-bearing store, not only
+    organizations: personal-homed cache schemas exist
+    (claude_setup_tokens), and an orgs-only enumeration lets their expired
+    rows accumulate forever (auto-35kmy Codex P1b)."""
+    from tools.graph.db import GraphDB
+    from tools.graph.maintenance.cache_gc import run_cache_gc
+
+    orgs = tmp_path / "orgs"
+    orgs.mkdir()
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    GraphDB.close_all_pooled()
+    GraphDB.create_org_db("acme").close()
+    GraphDB.create_org_db("personal", type_="personal").close()
+    try:
+        personal = GraphDB.for_org("personal", mode="rw")
+        personal.conn.execute(
+            "INSERT INTO settings(id, set_id, schema_revision, key, payload, "
+            "publication_state, created_at, updated_at, expires_at) "
+            "VALUES('expired-tok','autonomy.test.cache',1,'tok','{}','raw',"
+            "'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','2026-01-02T00:00:00Z')"
+        )
+        personal.conn.commit()
+
+        report = run_cache_gc()
+
+        assert "personal" in report.by_org, "personal store absent from sweep"
+        assert report.swept >= 1
+        remaining = personal.conn.execute(
+            "SELECT COUNT(*) FROM settings WHERE id = 'expired-tok'"
+        ).fetchone()[0]
+        assert remaining == 0, "the personal store's expired cache row survives"
+    finally:
+        GraphDB.close_all_pooled()

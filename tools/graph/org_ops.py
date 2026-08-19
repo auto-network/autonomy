@@ -1401,7 +1401,8 @@ def ensure_bootstrap_orgs(
     first_org_name: str | None = None,
     personal_only: bool = False,
 ) -> list[OrgRef]:
-    """Ensure the first shared org and ``personal.db`` exist under ``data/orgs/``.
+    """Ensure the first shared org (under ``data/orgs/``) and the personal
+    store (``data/personal.db``, beside it — auto-35kmy) exist.
 
     ``personal_only`` creates just the operator's own store and founds no
     shared org — the invite-join path (auto-8v5ri), where membership
