@@ -228,6 +228,15 @@ def resolve_local_store_path(name: str, orgs_dir: Path) -> Path:
         if classification == LOCAL_STORE_UNCLAIMED:
             return legacy
         if classification == LOCAL_STORE_UNREADABLE:
+            if not legacy.exists():
+                # The file vanished between the exists() check and the
+                # probe — a lost race with a concurrent relocator, which is
+                # ABSENCE, not damage; the distinction is the filesystem's
+                # to make, not the error message's. Drop the memoized
+                # verdict: it described a file that no longer exists, and a
+                # rollout-window writer may legitimately recreate the path.
+                _LEGACY_STORE_CLASSIFICATION.pop(str(legacy), None)
+                return target
             raise LocalStoreUnreadableError(
                 f"{legacy} cannot be read; refusing to classify it, serve "
                 f"it as the {name!r} store, or migrate it. Inspect or "

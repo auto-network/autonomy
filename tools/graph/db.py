@@ -148,6 +148,14 @@ def relocate_local_stores(root: Path | str | None = None) -> None:
             continue
         classification = _classify_legacy_store(legacy)
         if classification == _CLASSIFY_UNREADABLE:
+            if not legacy.exists():
+                # Vanished under us: a concurrent relocator won. Absence,
+                # not damage — and the memoized verdict described a file
+                # that no longer exists, so drop it.
+                from tools.data_paths import _LEGACY_STORE_CLASSIFICATION
+
+                _LEGACY_STORE_CLASSIFICATION.pop(str(legacy), None)
+                continue
             raise LocalStoreUnreadableError(
                 f"{legacy} cannot be read; refusing to migrate it. A "
                 f"corrupt file moved to {orgs.parent / (name + '.db')} "
@@ -191,7 +199,16 @@ def relocate_local_stores(root: Path | str | None = None) -> None:
         # busy database we skip this boot and log the live holder rather
         # than moving a file out from under it.
         try:
-            conn = sqlite3.connect(legacy, timeout=0.5)
+            # mode=rw, NEVER create: a bare sqlite3.connect(path) CREATES a
+            # missing file, so a relocator that lost the race would conjure
+            # an empty legacy store, back THAT up over the winner's backup,
+            # and clobber the winner's relocated store with it — destroying
+            # both copies (pillar reproduction on 30859c0f). With rw, a
+            # missing file raises and lands in the skip below, which also
+            # covers the losing racer crash-free.
+            conn = sqlite3.connect(
+                f"file:{legacy}?mode=rw", uri=True, timeout=0.5,
+            )
             try:
                 conn.execute("BEGIN IMMEDIATE")
                 conn.execute("COMMIT")
@@ -200,21 +217,33 @@ def relocate_local_stores(root: Path | str | None = None) -> None:
                 conn.close()
         except sqlite3.Error:
             logger.warning(
-                "local store %r at %s is busy or briefly unreadable; "
-                "skipping relocation this boot (a live pre-relocation "
-                "holder keeps its store; the next quiet boot migrates)",
-                name, legacy, exc_info=True,
+                "local store %r at %s is busy, briefly unreadable, or was "
+                "just relocated by a concurrent process; skipping this "
+                "boot", name, legacy, exc_info=True,
             )
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
-        # One backup copy before the move — taken after the checkpoint, so
-        # it is the single self-contained file. Worth more than every
-        # crash-safety argument; the operator deletes it when satisfied.
-        shutil.copy2(legacy, Path(str(legacy) + ".pre-relocation-backup"))
+        # Re-check BOTH ends immediately before the move: the guards above
+        # are several file operations old, and a concurrent relocator may
+        # have won in between.
+        if not legacy.exists() or target.exists():
+            continue
         try:
-            os.replace(legacy, target)
+            # One backup copy before the move — taken after the checkpoint,
+            # so it is the single self-contained file. Worth more than
+            # every crash-safety argument; the operator deletes it when
+            # satisfied. (Deliberately left behind — a stated exception to
+            # "nothing left behind".)
+            shutil.copy2(legacy, Path(str(legacy) + ".pre-relocation-backup"))
+            # Non-clobbering move: link-then-unlink raises FileExistsError
+            # if the target appeared in the remaining window — a guarantee
+            # os.replace structurally cannot give.
+            os.link(legacy, target)
+            os.unlink(legacy)
         except FileNotFoundError:
-            continue  # a concurrent relocator won the race; already moved
+            continue  # lost the race after the re-check; the winner's work stands
+        except FileExistsError:
+            continue  # the winner's relocated store is in place; ours never landed
         # Restore the platform's journal mode at the new home, and clear
         # any stale sidecars left beside the OLD path (never moved).
         try:
