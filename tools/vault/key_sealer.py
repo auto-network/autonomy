@@ -1,0 +1,267 @@
+"""Production vault sealer — the seam ``settings_ops`` WRITES through.
+
+The write-direction twin of :mod:`tools.vault.key_holder`. ``settings_ops``
+asks a registered *sealer* for the locator a ``@vaulted`` row stores in place
+of its payload; in tests that sealer is injected, and in production nothing
+built one, so every vaulted write failed closed with ``VaultSealerMissing``
+and no vault row could ever be CREATED — the exact mirror of the read-side gap
+``key_holder`` closed (``auto-a1pub``).
+
+Fails closed is the correct behaviour and is preserved here: there is no path
+that writes a payload in the clear because sealing was unavailable.
+
+## Three things this needs that the read side did not
+
+Opening never mints. Sealing does — the first write after an access removal
+advances the generation — so a sealer needs the material to author that
+advance, which a holder never touches:
+
+* an **author**, to sign,
+* a **frontier**, the org's folded ledger, for its ``genesis_id``,
+* an **ancestry** provider over the authority ledger.
+
+## The author is the DELEGATE, never the persona
+
+Crib ``1e005d5c-c11`` §12: the dashboard may hold domain content keys and the
+agent delegate's signing key, and MUST NOT hold a persona signing key. So the
+author here is the attenuated agent delegate (``auto-pw9bs.2``) whose chain
+resolves to the member persona — not the persona itself.
+
+That is not a style preference. Authoring as the persona would require a key
+this process is forbidden to hold, so it would fail closed; the delegate is
+what makes an unattended seal legitimate rather than a hole. The delegate is
+scope-attenuated to exactly the two storage scopes and TTL-bounded, and
+over-reach is refused by the FOLD rather than by an in-process check.
+
+## Cold until a human unlocks, and that is the design
+
+The delegate is MEMORY-class: empty after reboot until an unlock
+re-provisions it. Crib §10 — "a reboot requiring a human to sign in and
+reactivate the node is the ACCEPTED cost, not a defect to engineer around.
+There is NO mode where a machine resumes usable without an unlock." So a
+sealer registered before the first unlock has no author and refuses, and that
+refusal is the system working.
+
+Unattended operation on a fresh node therefore comes from the AGENT
+performing the unlock — a throwaway persona whose factor the agents hold — and
+never from the vault being warm across a restart. Do not add a provisioning
+path that bypasses unlock; that is the hot-key-surviving-restart shape §10
+retired.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Callable
+
+from tools.graph import settings_ops
+from tools.network.storagekit.keycontrol import KeyControlStore
+from tools.network.storagekit.store import ContentStore
+from tools.vault.storage_object import Holdings, seal_revision
+
+
+class VaultSealerNotReady(RuntimeError):
+    """No author is available, so nothing can be sealed.
+
+    Raised rather than returned so the write aborts with the plaintext
+    unwritten — ``_seal_vault_payload`` treats a raising sealer exactly like a
+    missing one, which is what we want: the only outcomes are a real locator
+    or no row.
+    """
+
+
+def _refuse_storage_ancestry(ancestry, where: str) -> None:
+    """Refuse the storage-DAG ancestry where the authority ledger's is meant.
+
+    The two are interchangeable to the type system and to the eye: both are
+    one-argument callables named ``ancestry``, and a ``KeyControlStore`` is
+    usually in scope with one hanging off it. They are not interchangeable in
+    fact — they close over disjoint identifier spaces — and passing the wrong
+    one is SILENT. It reaches ``state_covers``, which asks a graph of storage
+    ``state_id``s whether it contains a set of ledger loss heads; depending on
+    how permissive the closure is about identifiers it has never seen, either
+    nothing is ever safe or everything is.
+
+    Worse, the storagekit test double IS permissive and wires its ancestry to
+    the ledger's, so the mistake is green in tests and wrong against a real
+    ``Ledger``. That combination — invisible at the call, invisible in review,
+    invisible in CI — is why this check exists rather than a comment.
+
+    It is a cheap identity test, not a proof: it catches the storage ancestry
+    specifically, which is the one that is in scope and the one that has been
+    passed by mistake twice. Anything else is let through.
+    """
+    owner = getattr(ancestry, "__self__", None)
+    if isinstance(owner, KeyControlStore):
+        raise TypeError(
+            f"{where} takes the AUTHORITY LEDGER's ancestry, and this is the "
+            f"KeyControlStore's — a different DAG over a different identifier "
+            f"space. Both seams here resolve LOSS HEADS, which are ledger "
+            f"events, so the closure must be over ledger ids. The storage "
+            f"graph is internal to the key-control store's own reachability "
+            f"and is not an argument to anything on this path."
+        )
+
+
+def build_vault_sealer(
+    cache,
+    keycontrol_path: "str | Path",
+    content_path: "str | Path",
+    author_provider: Callable[[], object],
+    ledger_provider: Callable[["str | None"], object],
+) -> Callable[..., str]:
+    """Return the sealer callable ``settings_ops`` invokes on a vaulted write.
+
+    ``cache`` is the same :class:`~tools.vault.key_holder.VaultKeyCache` the
+    holder reads. The ``Holdings`` built here is deliberately byte-identical to
+    the holder's: one shape, constructed the same way in both directions, so a
+    value sealed by this process is opened by the same material that sealed it
+    and a divergence cannot hide in a second construction.
+
+    ``author_provider`` returns the attenuated agent delegate, or ``None``
+    before an unlock has provisioned one. It is a callable rather than a value
+    because the delegate is renewed and revoked over a process's life, and a
+    captured one would go stale exactly when it matters.
+
+    ``ledger_provider(org)`` returns ``(frontier, fold_at, authority_ancestry)``
+    or ``None``. Three seams rather than one, because they are not
+    interchangeable and conflating them is silently wrong:
+
+    * ``frontier`` is a folded VALUE, for :func:`seal_revision`.
+    * ``fold_at`` is a CALLABLE — ``accept_state`` folds at the descriptor's
+      own cited ``authority_heads``, not at ours.
+    * ``authority_ancestry`` is the LEDGER's ancestry, and BOTH calls take it.
+      Neither takes the storage DAG. The rule is the argument, not the callee:
+      both seams resolve LOSS HEADS, and a loss head is a ledger event, so the
+      closure has to be over ledger ids. ``keycontrol`` says it outright —
+      acceptance runs with the ledger ancestry, "never this store's, which
+      closes over storage ``state_id``s and is a different DAG over a different
+      identifier space". The storage DAG is internal to the store's own
+      reachability and is not an argument to anything here.
+
+    A provider rather than captured values for the same reason the author is:
+    the fold advances, and sealing against a stale frontier mints into a
+    generation the org has moved past.
+    """
+    keycontrol_path = Path(keycontrol_path)
+    content_path = Path(content_path)
+
+    def sealer(
+        *,
+        set_id: str,
+        schema_revision: int,
+        key: str,
+        setting_id: str,
+        payload: dict,
+        tier: str,
+        org: "str | None",
+    ) -> str:
+        author = author_provider()
+        if author is None:
+            raise VaultSealerNotReady(
+                f"{set_id} is a vault set, but this process holds no agent "
+                f"delegate to author the seal. The delegate is provisioned at "
+                f"unlock and does not survive a restart, so unlock this node "
+                f"before writing a secret — there is no unattended path that "
+                f"skips it, by design."
+            )
+        ledger = ledger_provider(org)
+        if ledger is None:
+            raise VaultSealerNotReady(
+                f"{set_id} is a vault set, but organization {org!r} has no "
+                f"folded ledger to seal against — a secret is addressed by its "
+                f"genesis, so an unfounded organization cannot hold one."
+            )
+        frontier, fold_at, authority_ancestry = ledger
+        _refuse_storage_ancestry(authority_ancestry, "seal_revision/accept_state")
+        with KeyControlStore(keycontrol_path) as key_control:
+            holdings = Holdings(
+                secrets=cache.secrets,
+                descriptors=key_control.states,
+                bridges=list(key_control.accepted_bridges()),
+            )
+            sealed = seal_revision(
+                author=author,
+                frontier=frontier,
+                set_id=set_id,
+                key=key,
+                setting_id=setting_id,
+                payload=payload,
+                holdings=holdings,
+                # AUTHORITY-ledger ancestry, the same one accept_state takes.
+                # Both resolve LOSS HEADS, which are ledger events: this one
+                # reaches state_covers(descriptor, frontier.loss_heads,
+                # ancestry) -> ancestry(descriptor.covered_loss_heads). The
+                # storage DAG is a different identifier space and appears in
+                # neither top-level call — it is internal to the key-control
+                # store's own reachability.
+                ancestry=authority_ancestry,
+                content_store=ContentStore(content_path),
+                tier=tier,
+            )
+            if sealed.advance is not None:
+                _land_advance(
+                    sealed.advance, cache, key_control, fold_at,
+                    authority_ancestry,
+                )
+            return sealed.locator
+
+    return sealer
+
+
+def _land_advance(advance, cache, key_control, fold_at, authority_ancestry) -> None:
+    """Persist and cache the generation a write just minted.
+
+    Sealing MINTS on the first vault write and on the first write after an
+    access removal, and ``seal_revision`` deliberately does not publish what it
+    minted: "its descriptor, bridges and grants are the caller's to hand to the
+    broker." Dropping it does not fail the write — it writes an object sealed
+    under a generation whose descriptor is in no store and whose secret is in
+    no cache, so the row is written and CANNOT BE READ BACK, and the next write
+    re-mints because it cannot find the first.
+
+    Two things are load-bearing on one machine:
+
+    * The DESCRIPTOR is accepted into the key-control store, so the holder —
+      which builds its ``Holdings`` from exactly that store — finds the
+      generation on the way back.
+    * The SECRET is fed to the cache. ``seal_revision`` did add it to the
+      holdings we passed, but ``VaultKeyCache.secrets`` hands out a COPY, so
+      that mutation lands on a dict that dies with this call.
+
+    ``advance.grants`` are for OTHER machines and belong to the broker
+    (``auto-pw9bs.3``). Dropping them is correct for one box and is a RECORDED
+    LIMIT, not an omission: until the broker is wired, a secret written here is
+    readable ONLY here, because no other fleet member receives a grant for the
+    generation this write minted.
+    """
+    key_control.accept_state(
+        advance.descriptor,
+        fold_at,
+        authority_ancestry,
+        bridges=tuple(advance.bridges),
+    )
+    cache.add(advance.descriptor.state_id, advance.secret)
+
+
+def register_vault_sealer(
+    cache,
+    keycontrol_path: "str | Path",
+    content_path: "str | Path",
+    author_provider: Callable[[], object],
+    ledger_provider: Callable[["str | None"], object],
+) -> Callable[..., str]:
+    """Build the sealer and install it as the process's vault sealer.
+
+    Call once per process, alongside
+    :func:`~tools.vault.key_holder.register_key_holder`. Registering before the
+    first unlock is correct and intended: the providers are read live, so a
+    write attempted before unlock fails with "no delegate to author the seal"
+    — which says what to do — rather than with "no sealer registered", which
+    reads like a missing installation.
+    """
+    sealer = build_vault_sealer(
+        cache, keycontrol_path, content_path, author_provider, ledger_provider
+    )
+    settings_ops.set_vault_sealer(sealer)
+    return sealer
