@@ -54,10 +54,23 @@ from tools.network.idkit.keys import (
 WITNESS_DOMAIN = b"autonomy.network.registry.witness.v1\n"
 WITNESS_VERSION = 1
 
+#: Version 2 (auto-jqd9q): one hash-chained journal per org, whose entry
+#: carries a signed non-decreasing ``t`` and heads grouped by topic, so a single
+#: chain attests a consistent (authority frontier, key-control frontier) pair.
+#: The v1 constant is retained to verify archived v1 chains.
+WITNESS_DOMAIN_V2 = b"autonomy.network.registry.witness.v2\n"
+WITNESS_VERSION_2 = 2
+
+#: The closed topic set a v2 entry's ``heads`` map may key on. Only key-control
+#: records (states, bridges, grants, receipts) contribute ``storage`` heads;
+#: object headers never do.
+WITNESS_TOPICS = ("authority", "storage")
+
 #: Head-set cap, shared with the hint surface (:data:`app.MAX_HINT_HEADS`).
 MAX_WITNESS_HEADS = 64
 
 _ENTRY_FIELDS = ("org", "topic", "seq", "heads", "prev", "publisher")
+_ENTRY_FIELDS_V2 = ("v", "org", "seq", "prev", "t", "heads", "publisher")
 
 
 class WitnessFormatError(MalformedError):
@@ -140,7 +153,14 @@ def entry_id(entry: dict) -> str:
 
 
 def attestation_signing_input(entry: dict) -> bytes:
-    """The exact bytes a witness signature covers (domain-separated)."""
+    """The exact bytes a witness signature covers (domain-separated).
+
+    Dispatches on ``entry["v"]``: a v2 entry signs under ``WITNESS_DOMAIN_V2``,
+    so a v1 signature can never be replayed as a v2 attestation or the reverse.
+    A v1 entry carries no ``v`` field.
+    """
+    if entry.get("v") == WITNESS_VERSION_2:
+        return WITNESS_DOMAIN_V2 + canonical_json(entry)
     return WITNESS_DOMAIN + canonical_json(entry)
 
 
@@ -167,11 +187,21 @@ def verify_attestation(attestation: object, witness_pub: str) -> dict:
     does not verify under *witness_pub* — the pin is the whole point, so a
     caller passes the key it trusts, not the one the blob advertises.
     """
+    return _verify_attestation_with(attestation, witness_pub, validate_entry)
+
+
+def _verify_attestation_with(attestation, witness_pub, validator) -> dict:
+    """Shared verify body, parameterised by the entry validator (v1 or v2).
+
+    The signing input dispatches on ``entry["v"]`` inside
+    :func:`attestation_signing_input`, so the domain is always the entry's own —
+    the validator only decides which *shape* is accepted.
+    """
     if not isinstance(attestation, dict):
         raise WitnessFormatError("attestation must be a JSON object")
     if set(attestation) < {"entry", "sig"}:
         raise WitnessFormatError("attestation must carry at least entry and sig")
-    entry = validate_entry(attestation["entry"])
+    entry = validator(attestation["entry"])
     sig = attestation.get("sig")
     if not isinstance(sig, str) or len(sig) != SIGNATURE_HEX_LEN:
         raise WitnessFormatError("attestation sig must be a 128-char hex signature")
@@ -186,3 +216,130 @@ def verify_attestation(attestation: object, witness_pub: str) -> dict:
     if got is not None and got != entry_id(entry):
         raise WitnessFormatError("attestation entry_id does not match its entry")
     return entry
+
+
+# ── Version 2: one grouped, timestamped chain per org (auto-jqd9q) ────────────
+
+
+def build_entry_v2(
+    org: str,
+    seq: int,
+    heads_by_topic: dict,
+    prev: Optional[str],
+    t: int,
+    publisher: str,
+) -> dict:
+    """Assemble a v2 witness entry (validated, canonical field set).
+
+    ``heads_by_topic`` maps a topic in :data:`WITNESS_TOPICS` to its 1..
+    ``MAX_WITNESS_HEADS`` head ids; each topic's ids are stored sorted and
+    de-duplicated so the entry — and its :func:`entry_id` — is a pure function
+    of the head *sets*. At least one topic must be present; a topic absent from
+    an entry means "unchanged since the last entry that carried it". ``t`` is
+    unix seconds, an integer ``>= 0``, and the chain enforces non-decrease.
+    """
+    if not isinstance(seq, int) or seq < 1:
+        raise WitnessFormatError("witness entry seq must be a positive integer")
+    if not isinstance(t, int) or isinstance(t, bool) or t < 0:
+        raise WitnessFormatError("witness entry t must be a non-negative integer (unix seconds)")
+    if not isinstance(heads_by_topic, dict) or not heads_by_topic:
+        raise WitnessFormatError("witness entry heads must name at least one topic")
+    canonical_heads: dict = {}
+    for topic, heads in heads_by_topic.items():
+        if topic not in WITNESS_TOPICS:
+            raise WitnessFormatError(
+                f"unknown witness topic {topic!r}; allowed: {list(WITNESS_TOPICS)}"
+            )
+        if not isinstance(heads, list) or not heads or len(heads) > MAX_WITNESS_HEADS:
+            raise WitnessFormatError(
+                f"witness topic {topic!r} heads must be 1..{MAX_WITNESS_HEADS} ids"
+            )
+        for h in heads:
+            if not _is_hash(h):
+                raise WitnessFormatError("witness entry heads must be 64-char lowercase hex")
+        canonical_heads[topic] = sorted(set(heads))
+    if prev is not None and not _is_hash(prev):
+        raise WitnessFormatError("witness entry prev must be null or a 64-char hex id")
+    if (seq == 1) != (prev is None):
+        raise WitnessFormatError("witness entry prev is null iff seq == 1")
+    if not _is_hash(publisher):
+        raise WitnessFormatError("witness entry publisher must be a 64-char hex pubkey")
+    if not isinstance(org, str) or not org:
+        raise WitnessFormatError("witness entry org must be a non-empty string")
+    # Key order is fixed by _ENTRY_FIELDS_V2 through canonical_json, which sorts
+    # keys — so field insertion order here is irrelevant to the content address.
+    return {
+        "v": WITNESS_VERSION_2,
+        "org": org,
+        "seq": seq,
+        "prev": prev,
+        "t": t,
+        "heads": {topic: canonical_heads[topic] for topic in sorted(canonical_heads)},
+        "publisher": publisher,
+    }
+
+
+def validate_entry_v2(entry: object) -> dict:
+    """Re-validate a received v2 entry, returning it in canonical form.
+
+    Rejects a missing/extra field, a ``v`` that is not 2, an unknown topic, an
+    unsorted or duplicated head list, ``t < 0``, and the ``prev``/``seq``
+    disagreement — the same anti-malleability posture as :func:`validate_entry`,
+    one level down into the grouped shape. A v1-shaped entry (carrying ``topic``,
+    no ``v``) fails closed here.
+    """
+    if not isinstance(entry, dict):
+        raise WitnessFormatError("witness entry must be a JSON object")
+    if set(entry) != set(_ENTRY_FIELDS_V2):
+        raise WitnessFormatError(
+            f"v2 witness entry must carry exactly {list(_ENTRY_FIELDS_V2)}"
+        )
+    if entry["v"] != WITNESS_VERSION_2:
+        raise WitnessFormatError("v2 witness entry must carry v == 2")
+    if not isinstance(entry["heads"], dict):
+        raise WitnessFormatError("v2 witness entry heads must be a topic-keyed object")
+    rebuilt = build_entry_v2(
+        entry["org"], entry["seq"], entry["heads"], entry["prev"],
+        entry["t"], entry["publisher"],
+    )
+    if entry["heads"] != rebuilt["heads"]:
+        raise WitnessFormatError(
+            "v2 witness entry heads must be per-topic sorted and duplicate-free"
+        )
+    return rebuilt
+
+
+def validate_any_entry(entry: object) -> dict:
+    """Validate an entry of either version, dispatching on its shape.
+
+    A ``v: 2`` entry goes to :func:`validate_entry_v2`; an entry with no ``v``
+    field goes to the v1 :func:`validate_entry`. Any other ``v`` fails closed,
+    so a future version cannot be silently accepted under an old validator.
+    """
+    if isinstance(entry, dict) and "v" in entry:
+        if entry.get("v") != WITNESS_VERSION_2:
+            raise WitnessFormatError(f"unknown witness entry version {entry.get('v')!r}")
+        return validate_entry_v2(entry)
+    return validate_entry(entry)
+
+
+def sign_attestation_v2(witness_key: KeyPair, entry: dict) -> dict:
+    """Mint a served v2 attestation. The signature is domain-separated to v2 via
+    :func:`attestation_signing_input`, which dispatches on ``entry["v"]``."""
+    if entry.get("v") != WITNESS_VERSION_2:
+        raise WitnessFormatError("sign_attestation_v2 requires a v2 entry")
+    return sign_attestation(witness_key, entry)
+
+
+def verify_attestation_v2(attestation: object, witness_pub: str) -> dict:
+    """Verify a served v2 attestation against a pinned witness key.
+
+    Fails closed on a v1-shaped entry (no ``v: 2``): a client expecting a v2
+    attestation must not accept a v1 one smuggled in its place.
+    """
+    if not isinstance(attestation, dict):
+        raise WitnessFormatError("attestation must be a JSON object")
+    entry = attestation.get("entry")
+    if not isinstance(entry, dict) or entry.get("v") != WITNESS_VERSION_2:
+        raise WitnessFormatError("expected a v2 attestation entry")
+    return _verify_attestation_with(attestation, witness_pub, validate_entry_v2)
