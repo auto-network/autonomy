@@ -18457,8 +18457,21 @@ async def _on_startup():
     # First-launch bootstrap: ensure data/orgs/{autonomy,personal}.db exist.
     # Idempotent — pre-existing DBs are left untouched. See graph://d970d946-f95.
     try:
+        from tools.data_paths import LocalStoreUnreadableError
         from tools.graph import org_ops
         org_ops.ensure_bootstrap_orgs()
+    except LocalStoreUnreadableError:
+        # The operator's local store exists and CANNOT BE READ. This is not
+        # about migration — it is refusing to run on a store we cannot
+        # read: continuing would leave every later resolution of the
+        # personal store raising for the life of the process while the
+        # dashboard pretends to be up. Damage is not absence; absence is
+        # handled (the resolver serves the real home), damage stops us.
+        logger.critical(
+            "ensure_bootstrap_orgs(): the operator's local store cannot be "
+            "read; refusing to start", exc_info=True,
+        )
+        raise
     except Exception:
         logger.exception("ensure_bootstrap_orgs() failed; continuing startup")
     # Materialize Setting *schema* meta rows (autonomy.schema#1 +

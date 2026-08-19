@@ -110,7 +110,6 @@ from tools.data_paths import (  # noqa: F401 — canonical homes, re-exported
     LOCAL_STORE_SHARED_ORG as _CLASSIFY_SHARED_ORG,
     LOCAL_STORE_UNCLAIMED as _CLASSIFY_UNCLAIMED,
     LOCAL_STORE_UNREADABLE as _CLASSIFY_UNREADABLE,
-    LocalStoreCollisionError,
     LocalStoreUnreadableError,
     classify_legacy_local_store as _classify_legacy_store,
     resolve_local_store_path,
