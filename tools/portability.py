@@ -220,10 +220,11 @@ def create_snapshot(
         raise PortabilityError("snapshot artifact must be outside the source volume")
     graph_path = _resolved_store_path(root, "graph", "graph.db")
     orgs_path = _resolved_store_path(root, "orgs", "orgs")
-    if not graph_path.is_file() or not (orgs_path / "personal.db").is_file():
+    personal_homes = (orgs_path.parent / "personal.db", orgs_path / "personal.db")
+    if not graph_path.is_file() or not any(p.is_file() for p in personal_homes):
         raise PortabilityError(
             "selected volume is not an initialized node "
-            "(graph.db and orgs/personal.db are required)"
+            "(graph.db and the personal store are required)"
         )
 
     dump_path = Path(beads_dump).resolve() if beads_dump is not None else None
@@ -630,7 +631,20 @@ def restore_snapshot(
 @contextmanager
 def _root_volume_stores(volume_root: Path) -> Iterator[None]:
     saved: dict[str, str | None] = {}
+    # The ambient base roots everything that composes with it — including
+    # the graph store, which must NEVER be pinned whole: a GRAPH_DB pin
+    # collapses org resolution to one file and conflicts with the join and
+    # bootstrap flows' explicit org='personal' writes under the fail-loud
+    # resolver (this was the root cause of the join-suite failures).
+    from tools.data_paths import DATA_ROOT_ENV
+
+    saved[DATA_ROOT_ENV] = os.environ.get(DATA_ROOT_ENV)
+    os.environ[DATA_ROOT_ENV] = str(volume_root)
     for store in STORE_MANIFEST:
+        if store.key == "graph":
+            saved[store.env] = os.environ.get(store.env)
+            os.environ.pop(store.env, None)
+            continue
         if store.env:
             saved[store.env] = os.environ.get(store.env)
             os.environ[store.env] = str(volume_root / store.relative)

@@ -34,7 +34,8 @@ def _clean_first_org_env(monkeypatch):
     from tools.data_paths import DATA_ROOT_ENV, STORE_MANIFEST
     monkeypatch.delenv(DATA_ROOT_ENV, raising=False)
     for store in STORE_MANIFEST:
-        monkeypatch.delenv(store.env, raising=False)
+        if store.env:
+            monkeypatch.delenv(store.env, raising=False)
 
 
 def _tables(db_path):
@@ -112,7 +113,7 @@ def test_second_run_is_noop(tmp_path):
 
     # Idempotency in the data too: exactly one orgs row, no duplicate
     # allowlist Setting.
-    conn = sqlite3.connect(str(tmp_path / "data" / "orgs" / "personal.db"))
+    conn = sqlite3.connect(str(tmp_path / "data" / "personal.db"))
     try:
         (n_orgs,) = conn.execute("SELECT COUNT(*) FROM orgs").fetchone()
         (n_allow,) = conn.execute(
@@ -143,7 +144,7 @@ def test_zero_content_search_is_empty_not_error(tmp_path):
 def test_bootstrap_allowlist_setting_seeded_and_valid(tmp_path):
     initialize(tmp_path, first_org="acme", tls=False)
 
-    conn = sqlite3.connect(str(tmp_path / "data" / "orgs" / "personal.db"))
+    conn = sqlite3.connect(str(tmp_path / "data" / "personal.db"))
     try:
         row = conn.execute(
             "SELECT key, schema_revision, payload FROM settings "

@@ -72,6 +72,12 @@ def _node_volume(root: Path):
     )
     os.environ[REFUSE_REAL_DATA_FALLBACK_ENV] = "1"
     for store in STORE_MANIFEST:
+        if store.key == "graph":
+            # Deliberately NOT pinned — the dashboard conftest's rule: a
+            # GRAPH_DB pin conflicts with every explicit-org settings write
+            # under the fail-loud resolver (org='personal' writes are part
+            # of the join/bootstrap flow itself).
+            continue
         if store.env:
             os.environ[store.env] = str(root / store.relative)
     try:
@@ -289,11 +295,10 @@ def _run_node_process(
 
 
 def _personal_armor(volume: Path) -> str:
-    # The volume contract explicitly pins GRAPH_DB, and settings_ops treats
-    # that as the operator-selected Settings store. The personal org DB still
-    # exists as the join branch's only org database; the armor row is in the
-    # pinned Settings DB by that resolver contract.
-    with sqlite3.connect(volume / "graph.db") as conn:
+    # The identity row lives in the operator's own store — data/personal.db,
+    # beside orgs/ (auto-35kmy). The old GRAPH_DB whole-store pin is gone:
+    # it conflicted with the join flow's explicit org='personal' writes.
+    with sqlite3.connect(volume / "personal.db") as conn:
         row = conn.execute(
             "SELECT payload FROM settings "
             "WHERE set_id = 'autonomy.identity.personal'"
@@ -310,7 +315,7 @@ def test_docker_path_pending_join_survives_a_process_restart(tmp_path):
     password_file.write_text(PASSWORD + "\n")
 
     first = _run_node(volume, world, password_file)
-    assert first["org_dbs"] == ["personal.db"]
+    assert first["org_dbs"] == [] and first["personal_db"]
     assert len(first["pending"]) == 1
     pending = first["pending"][0]
     assert pending["invite_ref"] == world.invitation.invite_ref
@@ -359,7 +364,7 @@ def test_docker_path_pending_join_survives_a_process_restart(tmp_path):
         # pinned cz4fb finalize exemption survived the process boundary.
         wall_clock_ms=world.expiry + 1,
     )
-    assert second["org_dbs"] == ["personal.db"]
+    assert second["org_dbs"] == [] and second["personal_db"]
     assert second["pending"] == []
     assert _personal_armor(volume) == armor_before
 
