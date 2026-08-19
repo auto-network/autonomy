@@ -54,6 +54,13 @@ def client(tmp_path, monkeypatch):
     monkeypatch.delenv("GRAPH_DB", raising=False)
     # The caller's own org, per the scope cascade the route resolves through.
     monkeypatch.setenv("GRAPH_ORG", "acme")
+    # Pinned, not inherited. The route is operator-only (auto-6ff9b) and this
+    # app mounts no identity middleware, so these requests are compatibility
+    # traffic that reaches the handler through the unenforced-gate stand-down.
+    # Stating it keeps this a test of STORAGE SEMANTICS; the authorization
+    # contract lives in test_org_key_routes_require_operator.py.
+    from tools.dashboard import unlock_routes
+    monkeypatch.setattr(unlock_routes, "gate_enforced", lambda: False)
     GraphDB.close_all_pooled()
     GraphDB.create_org_db(
         "personal", type_="personal", path=orgs / "personal.db"
