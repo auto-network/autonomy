@@ -8,7 +8,7 @@ scopes are non-delegable, so a member holding the storage scopes through a
 role was refused with the fold having already established they HOLD the
 scope. The new branch admits a CURRENT MEMBER PERSONA minting a strictly
 weaker, non-redelegable, expiring instrument of its own held authority,
-restricted to ``SELF_DELEGABLE`` — the scopes whose acceptance re-derives
+restricted to the exact storage scope pair — the scopes whose acceptance re-derives
 authority from current membership at use time, so mint-time attenuation
 does no security work for them.
 """
@@ -23,7 +23,7 @@ from tools.network.ledger.fold import (
     R_DELEGATE_NONCE_REUSED,
     R_NOT_REDELEGABLE,
     R_SCOPE_ESCALATION,
-    SELF_DELEGABLE,
+    self_delegable_exact,
 )
 from tools.network.ledger.projections import organization_content_domain_id
 from tools.network.storagekit import storage_delegate_scopes
@@ -88,7 +88,7 @@ def test_a_scope_outside_self_delegable_is_refused_even_when_held():
     scope, and the mint-time-check-does-no-security-work argument is
     established only for the storage scopes (their acceptance re-derives
     authority from current membership at use). A role-held scope outside
-    SELF_DELEGABLE is refused even though it attenuates held — this test
+    the self-delegable pair is refused even though it attenuates held — this test
     FAILS if the branch is written without the scope restriction."""
     sim = Sim()
     sim.role_define(
@@ -97,9 +97,7 @@ def test_a_scope_outside_self_delegable_is_refused_even_when_held():
     member = KeyPair.generate()
     invite = sim.invite(sim.root, "member", invite_key=member)
     sim.claim(invite, member, member)
-    assert not any(  # the guard below is only meaningful while this holds
-        s.startswith("link:") for s in SELF_DELEGABLE
-    )
+    assert not self_delegable_exact(["link:publish"])  # the guard's premise
     grant = sim.delegate(member, KeyPair.generate(), ["link:publish"], ttl=60_000)
     state = sim.fold()
     assert state.valid[grant] is False
@@ -150,7 +148,7 @@ def test_root_authored_mints_behave_exactly_as_before():
     """The root branch is DECIDED, not inherited: root passes on the
     ordinary-delegation condition via its UNIVERSE delegable authority, so
     its behaviour is unchanged by this bead — redelegable grants, no-ttl
-    grants, and scopes far outside SELF_DELEGABLE all still admit.
+    grants, and scopes far outside the self-delegable pair all still admit.
     (Whether the fold should refuse root-authored delegates at all is a
     separate, unsettled question.)"""
     sim = Sim()
@@ -227,3 +225,52 @@ def test_acceptance_follows_current_membership_not_the_mint():
     sim.rekey(member, member, member, new_key)
     after = sim.fold()
     assert resolve_member_key(after, agent.public_hex) != member.public_hex
+
+
+def test_the_scope_check_is_an_exact_same_domain_pair_not_coverage():
+    """The gate reviewer's requirement, driven: pattern coverage admits a
+    SINGLETON (an instrument the design does not define), a MIXED-DOMAIN
+    pair (one delegate spanning two domains), and the PAIR PLUS A THIRD
+    (reach beyond the defined shape). All three attenuate the member's
+    held authority, so each must be refused by the exactness predicate —
+    this test FAILS on a coverage implementation, which admitted all
+    three (measured on 44898efc)."""
+    d1, d2 = "aa" * 32, "bb" * 32
+    s1, s2 = storage_delegate_scopes(d1), storage_delegate_scopes(d2)
+    sim = Sim()
+    sim.role_define(
+        sim.root, "member", requires="self",
+        scope_set=sorted(set(s1 + s2)),
+    )
+    member = KeyPair.generate()
+    invite = sim.invite(sim.root, "member", invite_key=member)
+    sim.claim(invite, member, member)
+
+    singleton = sim.delegate(member, KeyPair.generate(), [s1[0]], ttl=60_000)
+    mixed = sim.delegate(
+        member, KeyPair.generate(), sorted([s1[0], s2[1]]), ttl=60_000,
+    )
+    triple = sim.delegate(
+        member, KeyPair.generate(), sorted(set(s1 + [s2[0]])), ttl=60_000,
+    )
+    exact = sim.delegate(member, KeyPair.generate(), s1, ttl=60_000)
+
+    state = sim.fold()
+    for grant, label in ((singleton, "singleton"), (mixed, "mixed-domain"),
+                         (triple, "pair-plus-third")):
+        assert state.valid[grant] is False, f"{label} admitted"
+        assert state.reasons[grant] == R_NOT_REDELEGABLE, label
+    assert state.valid[exact] is True, state.reasons.get(exact)
+
+
+def test_the_exactness_predicate_rejects_pattern_shaped_scopes():
+    """A wildcard is not a domain: a member cannot self-mint
+    ``storage:capability:grant:*`` even if a role somehow held it — the
+    predicate requires one literal shared domain."""
+    assert self_delegable_exact(storage_delegate_scopes("cc" * 32))
+    assert not self_delegable_exact(
+        ["storage:capability:grant:*", "storage:state:advance:*"]
+    )
+    assert not self_delegable_exact(
+        ["storage:capability:grant:", "storage:state:advance:"]
+    )

@@ -41,7 +41,7 @@ resolves the signer's chain to a member. The scope discipline is enforced
 one hop earlier, at delegation-event admission, by the bounded
 self-delegation rule (auto-wrkaq): a CURRENT member persona may mint a
 strictly weaker, NON-redelegable, EXPIRING instrument of scopes it holds
-— through a role, typically — restricted to ``fold.SELF_DELEGABLE``
+— through a role, typically — restricted by ``fold.self_delegable_exact``
 (exactly the two storage scope families, because their acceptance
 re-derives authority from current membership at use time). A mint that
 reaches beyond the author's held scopes, beyond that set, omits the
