@@ -1,8 +1,14 @@
 # Build context hygiene for deploy/Dockerfile (home-base image).
 # Persistent/host state never ships in the image — it lives in the
 # /app/data volume, created by first-run init (tools/init).
+#
+# NOTE: .git is intentionally NOT excluded. deploy/Dockerfile's builder stage
+# reads the commit hash + commit date from it to stamp /app/VERSION, then drops
+# it — the final image (and the autonomy-code volume it seeds) still ships bare
+# files with no .git. Only deploy/Dockerfile builds from this context; the agent
+# images use their own flat context (agents/build.sh), so this does not put .git
+# in any other image.
 
-.git
 .gitignore
 .venv
 .browser_profile

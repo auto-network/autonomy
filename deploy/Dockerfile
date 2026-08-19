@@ -13,27 +13,22 @@
 # image family — this image is just the always-on dashboard/graph core.
 
 ARG BASE_IMAGE=python:3.12-slim
-FROM ${BASE_IMAGE}
 
-ENV DEBIAN_FRONTEND=noninteractive \
-    PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app
-
-# git: graph ingest + worktree surfaces; sqlite3: operator debugging;
-# curl: healthcheck + build-time fetches; openssl: first-run TLS keypair.
+# ── Stage 1: assemble /app, read the version from .git, then drop .git ──────
+# The build context includes .git (see .dockerignore). This stage reads the
+# commit hash + commit date to stamp /app/VERSION and then removes .git, so the
+# runtime image below — and the autonomy-code volume it seeds — ship bare files
+# with no history and no remote. Both values come from the commit, so the build
+# is reproducible and no version arg is ever passed in.
+FROM ${BASE_IMAGE} AS appsrc
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git sqlite3 curl openssl ca-certificates \
+        git curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /app
 
-# Python deps first — cache layer survives source edits.
-COPY deploy/requirements.txt /app/deploy/requirements.txt
-RUN pip install --no-cache-dir -r /app/deploy/requirements.txt
-
 # Tailwind standalone binary (anonymous GitHub release download; override
-# TAILWIND_URL to point at your own mirror). Used once below to build the
-# dashboard CSS, and kept on PATH for operators who run the dev launcher.
+# TAILWIND_URL to point at your own mirror). Built once below into the CSS and
+# carried into the runtime image for the entrypoint's --watch.
 ARG TAILWIND_VERSION=v4.3.2
 ARG TAILWIND_URL=""
 RUN set -e; \
@@ -49,38 +44,58 @@ RUN set -e; \
     curl -fsSL "$TAILWIND_URL" -o /usr/local/bin/tailwindcss; \
     chmod +x /usr/local/bin/tailwindcss
 
-# Source tree (data/, .git, venvs etc. excluded via .dockerignore — the
-# persistent state lives in the /app/data volume, never in the image).
 COPY . /app
+
+# Version stamp: read the commit hash + commit DATE from the checkout being
+# built. Both are deterministic per commit (reproducible image); the build
+# takes no version arg and nobody passes anything. Then drop .git.
+RUN set -e; \
+    if [ ! -d /app/.git ]; then \
+        echo "ERROR: build context has no .git; the version stamp needs a git checkout (git clone, not a source tarball)." >&2; \
+        exit 1; \
+    fi; \
+    printf 'commit=%s\ncommit_date=%s\n' \
+        "$(git -C /app rev-parse HEAD)" \
+        "$(git -C /app show -s --format=%cI HEAD)" \
+        > /app/VERSION; \
+    rm -rf /app/.git
 
 # Build the dashboard CSS once, at image build — no network at startup.
 RUN /usr/local/bin/tailwindcss --cwd /app/tools/dashboard \
         -i tailwind.input.css -o static/tailwind.css --minify
 
+# ── Stage 2: runtime image ─────────────────────────────────────────────────
+FROM ${BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app
+
+# git: graph ingest + worktree surfaces; sqlite3: operator debugging;
+# curl: healthcheck; openssl: first-run TLS keypair.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git sqlite3 curl openssl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Python deps first — cache layer survives source edits.
+COPY deploy/requirements.txt /app/deploy/requirements.txt
+RUN pip install --no-cache-dir -r /app/deploy/requirements.txt
+
+# The tailwind binary the entrypoint's --watch needs at runtime; reuse the one
+# the builder already fetched instead of downloading it again.
+COPY --from=appsrc /usr/local/bin/tailwindcss /usr/local/bin/tailwindcss
+
+# The assembled source tree: code + /app/VERSION + built CSS, and NO .git
+# (dropped in the builder stage). This is exactly what seeds the autonomy-code
+# volume on a containerized node.
+COPY --from=appsrc /app /app
+
 # graph CLI convenience wrapper (same shape as the agent images).
 RUN printf '#!/bin/sh\nexec python3 -m tools.graph "$@"\n' > /usr/local/bin/graph \
     && chmod +x /usr/local/bin/graph \
     && chmod +x /app/deploy/entrypoint.sh
-
-# Version stamp. The code volume ships as bare FILES (no .git, no remote — the
-# node never phones home), so it can't self-report its version. Bake the seed
-# commit and build time here; this answers "what code is this node running?"
-# for debugging/repro at zero cost, with no history in the image or volume. The
-# file seeds into the autonomy-code volume with the rest of /app.
-#
-# commit is a real SHA (deploy/publish-images.sh and deploy/build.sh pass one)
-# or the honest marker `source` for a bare from-source build — never empty and
-# never "unknown", which would carry no information into the long-lived volume.
-# build time is always real: passed in, or captured here at build.
-ARG AUTONOMY_VERSION=source
-ARG AUTONOMY_BUILD_TIME=
-RUN v="$AUTONOMY_VERSION"; t="$AUTONOMY_BUILD_TIME"; \
-    [ -n "$t" ] || t="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
-    echo "$v" | grep -Eq '^(source|[0-9a-f]{40})$' || { \
-        echo "ERROR: AUTONOMY_VERSION must be a 40-hex commit SHA or the literal 'source', got '$v'." >&2; exit 1; }; \
-    echo "$t" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' || { \
-        echo "ERROR: AUTONOMY_BUILD_TIME must be UTC YYYY-MM-DDTHH:MM:SSZ, got '$t'." >&2; exit 1; }; \
-    printf 'commit=%s\nbuilt=%s\n' "$v" "$t" > /app/VERSION
 
 # Persistent state: per-org DBs (identity + credential Settings — the
 # secret store), graph.db, auth.db, TLS keypair. Its own volume, mounted at
