@@ -49,8 +49,8 @@ from tools.graph.schemas.workspace_artifact import (
 from tools.graph.schemas.org import ORG_SET_ID, ORG_REVISION
 from tools.graph.schemas.mount import (
     SET_ID as MOUNT_SET_ID,
-    SCHEMA_REVISION as MOUNT_REVISION,
-    WorkspaceMountV1,
+    MOUNT_SCHEMA_REVISION_2 as MOUNT_REVISION_2,
+    WorkspaceMountV2,
 )
 from tools.graph.schemas.workspace_capability_enable import (
     SET_ID as WORKSPACE_CAPABILITY_ENABLE_SET_ID,
@@ -657,24 +657,28 @@ def _artifacts_by_workspace(
 def load_mounts(
     workspace_id: str, *, org: str | None = None,
 ) -> dict[str, ResolvedSetting]:
-    """Return the :class:`WorkspaceMountV1` Settings for *workspace_id*.
+    """Return the :class:`WorkspaceMountV2` Settings for *workspace_id*.
 
-    Reads ``autonomy.workspace.mount#1`` with composite-key prefix
+    Reads ``autonomy.workspace.mount#2`` with composite-key prefix
     ``<workspace-id>:`` and validates each payload through
-    :class:`WorkspaceMountV1`. The returned dict maps composite key
+    :class:`WorkspaceMountV2`. The returned dict maps composite key
     (``<workspace-id>:<mount-name>``) to the resolved Setting so
     consumers can inspect ``payload`` (typed), ``state``, and ``org``
     without re-querying. Missing schema registration returns an empty
     dict (mount declaration is optional per workspace).
     """
-    if get_schema(MOUNT_SET_ID, MOUNT_REVISION) is None:
+    if get_schema(MOUNT_SET_ID, MOUNT_REVISION_2) is None:
         return {}
+    # Rev 2: org-free subpath into autonomy-orgs. No 1->2 upconverter, so a row
+    # still at rev 1 (host_path shape) drops here rather than resolving against
+    # different physical storage — the resolver never sees a machine path.
     return ops.read_set(
         MOUNT_SET_ID,
         org=org,
         peers=[],
+        target_revision=MOUNT_REVISION_2,
         prefix=workspace_id,
-        model=WorkspaceMountV1,
+        model=WorkspaceMountV2,
     ).to_dict()
 
 
@@ -685,10 +689,11 @@ def _mounts_by_workspace(
     grouped: dict[str, dict[str, ResolvedSetting]] = {
         wid: {} for wid in workspace_ids
     }
-    if get_schema(MOUNT_SET_ID, MOUNT_REVISION) is None:
+    if get_schema(MOUNT_SET_ID, MOUNT_REVISION_2) is None:
         return grouped
     members = ops.read_set(
-        MOUNT_SET_ID, org=org, peers=[], model=WorkspaceMountV1,
+        MOUNT_SET_ID, org=org, peers=[],
+        target_revision=MOUNT_REVISION_2, model=WorkspaceMountV2,
     ).members
     for member in members:
         workspace_id, separator, _ = member.key.partition(":")

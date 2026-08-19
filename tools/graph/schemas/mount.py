@@ -22,13 +22,28 @@ Composite key convention (graph://0d3f750f-f9c § Composite keys):
 
 from __future__ import annotations
 
+import posixpath
+from pathlib import PurePosixPath
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 SET_ID = "autonomy.workspace.mount"
 SCHEMA_REVISION = 1
+
+
+def _reject_traversal_segments(value: str, *, label: str) -> None:
+    """Raise if any path segment is empty, ``.`` or ``..``.
+
+    The realpath guard in the resolver is the runtime defence; this is
+    defence-in-depth at write time, closer to whoever typed the row.
+    """
+    for seg in PurePosixPath(value).parts:
+        if seg in ("", ".", ".."):
+            raise ValueError(
+                f"{label} must not contain empty, '.' or '..' segments: {value!r}"
+            )
 
 
 SYNOPSIS = {
@@ -162,3 +177,176 @@ class _WorkspaceMountSchemaAdapter(SettingSchema):
             raise SchemaValidationError(
                 f"{cls.__name__}: {exc}"
             ) from exc
+
+
+# ── Revision 2 — org-free subpath into the autonomy-orgs volume ────────────
+#
+# `host_path` (absolute, machine-specific, unconstrained) is REPLACED by
+# `subpath` (relative, org-free). The org is NEVER in the payload: the resolver
+# prepends `orgs/<authenticated-session-org>/` at launch, realpath-resolves the
+# result, and refuses anything escaping that org's tree. So a subpath that tries
+# to name another org just resolves inside the caller's OWN org and the guard
+# stops any `..`/symlink escape. This is a BREAKING change (a host_path string
+# does not map to a subpath under different physical storage), so NO 1->2
+# upconverter is registered — a caller requesting rev 2 drops any row still at
+# rev 1 rather than resolving it wrong (registry.py:11-14 convention).
+#
+# The resolved target may be a FILE or a directory (folds in what the retired
+# artifact mechanism did): readiness is "does orgs/<org>/<subpath> resolve inside
+# autonomy-orgs", checked frame-correctly by the resolver, NOT a dir-shaped
+# host-frame `exists` — so there is no `exists="dir"` metadata here.
+
+MOUNT_SCHEMA_REVISION_2 = 2
+
+
+class WorkspaceMountV2(BaseModel):
+    """A file or directory inside the org-partitioned autonomy-orgs volume,
+    bind-mounted into a workspace container.
+
+    `subpath` is relative and org-free (e.g. ``personal/scale-harness/license.yaml``
+    or ``vuln-diff-validation``); the launcher resolves it under
+    ``orgs/<authenticated-org>/`` in autonomy-orgs. The shared|personal x
+    org|workspace scope the old artifact layering encoded is now just a leading
+    subpath convention, never a payload field.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    subpath: str = Field(
+        ..., description="Relative, org-free path under orgs/<org>/ in autonomy-orgs"
+    )
+    container_path: str = Field(..., description="Absolute path inside container")
+    # What the declaration expects to find. REQUIRED and undefaulted: there is no
+    # safe guess (defaulting 'dir' reproduces the old file bug; 'file' breaks
+    # directory mounts). Replaces the presence+type double-duty of the removed
+    # exists="dir": the resolver refuses a PRESENT-BUT-WRONG-TYPE target (a dir
+    # where a file is expected binds a dir where the app opens a file — the
+    # fabrication failure mode: succeeds by exit code, wrong by content).
+    kind: Literal["file", "dir"] = Field(
+        ..., description="Expected target type; the resolver refuses a mismatch"
+    )
+    mode: Literal["ro", "rw"] = "ro"
+    # A SHORT title for a readiness tile — not a sentence. Capped so it can't
+    # drift into being used as `description` is today (100-char sentences). The
+    # UI puts `name` on top and `description` under it.
+    name: str | None = Field(
+        default=None, max_length=60,
+        description="Short display label, e.g. 'Anchore Enterprise license'",
+    )
+    description: str | None = None
+    # Long-form guidance shown when the mount is MISSING — the only part that
+    # tells the operator what to DO (where to get the file). Carried forward from
+    # autonomy.workspace.artifact#1's `help`, which the collapse would otherwise
+    # silently drop.
+    help: str | None = None
+    required: bool = True
+
+    @field_validator("subpath")
+    @classmethod
+    def subpath_relative_and_contained(cls, v: str) -> str:
+        if not v:
+            raise ValueError("subpath must not be empty")
+        if v.startswith("/"):
+            raise ValueError(f"subpath must be relative (no leading '/'): {v!r}")
+        _reject_traversal_segments(v, label="subpath")
+        # PurePosixPath.parts collapses '//' silently, so also require the raw
+        # string to be already-normalized — rejects 'a//b', 'a/b/', 'a/./b'.
+        if posixpath.normpath(v) != v:
+            raise ValueError(
+                f"subpath must be already-normalized (no '.', trailing or "
+                f"doubled '/'): {v!r}"
+            )
+        return v
+
+    @field_validator("container_path")
+    @classmethod
+    def container_absolute_and_normalized(cls, v: str) -> str:
+        # An ARBITRARY absolute destination is deliberate — it is the feature that
+        # distinguishes a mount from an artifact (fixed /etc/autonomy/artifacts/),
+        # and a mount row applies only to its own org's workspaces, so the
+        # destination carries no cross-org property (coordinator ruling,
+        # 2026-08-19). This validator only requires CANONICAL spelling — absolute,
+        # normalized, no `..` — so the stored path is exactly what gets bound and
+        # traversal cannot be smuggled in via `.`/`..`/`//`; it does NOT restrict
+        # which destination.
+        if not v.startswith("/"):
+            raise ValueError(f"container_path must be absolute: {v!r}")
+        _reject_traversal_segments(v, label="container_path")
+        if posixpath.normpath(v) != v:
+            raise ValueError(
+                f"container_path must be already-normalized (no '.', '..', "
+                f"trailing or doubled '/'): {v!r}"
+            )
+        return v
+
+
+@keyed_per_entity(
+    key_strategy="workspace_id:mount_name",
+    key_references={"workspace_id": "autonomy.workspace"},
+)
+@home("organization")
+@readiness_gated_by("required")
+class _WorkspaceMountV2SchemaAdapter(SettingSchema):
+    """Registers ``autonomy.workspace.mount#2`` alongside #1. No upconverter is
+    registered for the 1->2 hop (breaking change — see the note above)."""
+
+    set_id = SET_ID
+    schema_revision = MOUNT_SCHEMA_REVISION_2
+    model = WorkspaceMountV2
+
+    _field_metadata: dict[str, dict] = {
+        "subpath": {
+            "type": "string",
+            "required": True,
+            "description": (
+                "Relative, org-free path under orgs/<org>/ in autonomy-orgs; "
+                "resolved and refused-if-escaping at launch (may be a file or dir)"
+            ),
+        },
+        "container_path": {
+            "type": "string",
+            "required": True,
+            "description": "Absolute, normalized path inside the container to mount at",
+        },
+        "kind": {
+            "type": "string",
+            "required": True,
+            "enum": ["file", "dir"],
+            "description": "Expected target type; the resolver refuses a present-but-wrong-type mismatch",
+        },
+        "mode": {
+            "type": "string",
+            "description": "Mount mode — 'ro' for read-only, 'rw' for writable",
+            "enum": ["ro", "rw"],
+            "default": "ro",
+        },
+        "name": {
+            "type": "string",
+            "description": "Short display label (a title, not a sentence); max 60 chars",
+        },
+        "description": {
+            "type": "string",
+            "description": "Operator-facing description of what this mount provides",
+        },
+        "help": {
+            "type": "string",
+            "description": "Long-form guidance shown when the mount is missing (what to do)",
+        },
+        "required": {
+            "type": "boolean",
+            "description": "Whether the mount is required at workspace launch",
+            "default": True,
+        },
+    }
+
+    @classmethod
+    def validate(cls, payload) -> None:
+        if not isinstance(payload, dict):
+            raise SchemaValidationError(
+                f"{cls.__name__}: payload must be a dict, "
+                f"got {type(payload).__name__}"
+            )
+        try:
+            cls.model.model_validate(payload)
+        except Exception as exc:
+            raise SchemaValidationError(f"{cls.__name__}: {exc}") from exc
