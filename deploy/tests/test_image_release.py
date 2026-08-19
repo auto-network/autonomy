@@ -97,6 +97,12 @@ def test_publish_builds_pushes_and_records_exact_digests_without_signing(release
     node_build = calls[0]
     assert "AUTONOMY_VERSION" not in node_build, node_build
     assert "AUTONOMY_BUILD_TIME" not in node_build, node_build
+    # Built from a throwaway clone, NOT the repo/worktree directly — so a release
+    # run from a linked worktree (this suite runs from one) still self-stamps the
+    # committed HEAD. The build context is the clone dir, never ROOT (auto-m7vh7).
+    ctx = node_build.split()[-1]
+    assert ctx != str(ROOT), f"publish must build from a temp clone, not {ROOT}"
+    assert ctx.endswith("/repo"), f"expected a clone context dir, got {ctx}"
     assert "agent-build --pull --core-only" in calls
     assert sum(line.startswith("docker push ") for line in calls) == 4
     assert not any(line.startswith("cosign ") for line in calls)

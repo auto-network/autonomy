@@ -35,21 +35,26 @@ dashboard_ref="$base/autonomy-session-dashboard:$RELEASE_TAG"
 dind_ref="$base/autonomy-session-dind:$RELEASE_TAG"
 
 echo "==> Building node image from deploy/Dockerfile"
-# The version stamp is not passed here: deploy/Dockerfile's builder stage reads
-# the commit hash + date from the checkout's .git itself and drops .git before
-# the final image. Building from REPO_ROOT (a git checkout) is what gives the
-# published image its provenance.
+# Build from a throwaway clean clone. deploy/Dockerfile self-stamps /app/VERSION
+# by reading the commit hash + date from the checkout's own .git; a linked
+# worktree's .git is a pointer the build can't resolve, so cloning to a
+# standalone repo (real .git dir, committed HEAD) lets the release self-stamp
+# correctly no matter where this script is run. Uncommitted changes are excluded
+# by design — a release is the committed state. --depth 1 keeps it cheap.
+node_src="$(mktemp -d)"
+git clone --quiet --depth 1 "file://$REPO_ROOT/.git" "$node_src/repo"
 node_build=(
     docker build --pull
     --build-arg "BASE_IMAGE=${AUTONOMY_BASE_IMAGE:-python:3.12-slim}"
-    -f "$REPO_ROOT/deploy/Dockerfile"
+    -f "$node_src/repo/deploy/Dockerfile"
     -t "$node_ref"
 )
 if [[ -n "${AUTONOMY_TAILWIND_URL:-}" ]]; then
     node_build+=(--build-arg "TAILWIND_URL=$AUTONOMY_TAILWIND_URL")
 fi
-node_build+=("$REPO_ROOT")
+node_build+=("$node_src/repo")
 "${node_build[@]}"
+rm -rf "$node_src"
 
 echo "==> Building existing session image family"
 "$AGENT_BUILD" --pull --core-only
