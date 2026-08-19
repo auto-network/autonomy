@@ -1,0 +1,114 @@
+# Personal fleet synchronization 1.0 alpha
+
+## Release claim
+
+This alpha is an executable, bounded-memory synchronization engine and
+simulation over the complete logical personal GraphDB schema. It proves the
+format and lifecycle before production dashboard integration. It is not a
+production deployment and does not modify a database unless a caller
+explicitly constructs `FleetSyncAlpha` for that path.
+
+The exercised lifecycle is:
+
+1. attribute graph writes to a monotonic machine transaction;
+2. capture current winners, tombstones, and unacknowledged transaction frames
+   atomically with those writes;
+3. freeze one coherent WAL cut and persistent no-more-before floor;
+4. stream the logical graph directly from SQLite indexes into immutable,
+   record-aligned base objects without a global Python list or external sort;
+5. stream payload-free winner/tombstone metadata from the same cut;
+6. reconstruct immutable objects through real RaptorQ;
+7. verify and realize the base incrementally into a staging GraphDB;
+8. verify every winner candidate against that realized state;
+9. preserve receiver-local identity/bootstrap state; and
+10. publish the database atomically, or retain the old database on failure.
+
+Between bases, bounded transaction deltas stream over the existing reliable
+authenticated channel. A receiver retains origin identity when forwarding a
+mutation. Replays are inert under timestamp LWW and the canonical candidate
+hash tie-break.
+
+## Correctness boundaries
+
+- The active roster epoch and hash are committed by every full checkpoint.
+- The scalar compaction frontier is the minimum *earned* watermark of the
+  frozen active roster. An earned watermark requires an atomic writer cut, a
+  persistent no-more-before floor, a sealed prefix, and a second durable
+  holder; an observed timestamp is not a watermark.
+- Exact state compaction and semantic garbage collection are separate. Exact
+  base ACKs retire represented source artifacts; the minimum earned watermark
+  controls tombstone/suppression deletion and replay refusal.
+- A root-authorized kick changes the active roster epoch. It can release a
+  stale peer's hold on the minimum only after the remaining active peers have
+  incorporated the kick.
+- Base order, winner order, and RaptorQ packet order are independent. Changing
+  one cannot silently redefine either of the others.
+- The two identity-armor Settings sets never enter replication. Fleet roster
+  rows remain ordinary raw personal graph data and do replicate.
+- Attachment metadata is graph state; bytes are separately content addressed
+  and must pass size and SHA-256 verification before database publication.
+
+## Resource bounds
+
+- Base encoding holds one SQLite row and one configured immutable segment.
+- Base realization holds one configured batch and one segment.
+- Winner installation streams metadata; it does not collect the winner set.
+- Hot-delta application holds one authored transaction, capped at 16,384
+  operations and 128 MiB of canonical frames.
+- The current Python RaptorQ adapter holds one segment. It never materializes
+  the full database.
+- The measured/default immutable segment is 4 MiB. On the fixed 524,000,000
+  byte corpus it balanced 125 objects, 590 MiB/s four-worker coding, a 297 MiB
+  conservative pool-memory bound, and the lowest measured lifecycle time.
+- The steady catalog contains no live payload. The compressed journal is
+  temporary payload history retained only until a covering exact base is
+  durably acknowledged.
+
+## External deep-review disposition
+
+The alpha was attacked against `graph://b298d988-d49` and its compaction
+addendum `graph://53828897-327`.
+
+Adopted now:
+
+- atomic watermark cuts and durable no-more-before floors;
+- separate winner/watermark, canonical-base, and transport orderings;
+- a skinny current-winner/tombstone catalogue;
+- bounded unacknowledged transaction history;
+- direct indexed SQLite streaming and keyset resume;
+- roster-epoch/hash-pinned artifacts;
+- durable staging, integrity validation, recoverable publication;
+- exact-base versus semantic-GC separation; and
+- reliable-channel hot deltas instead of fountain-coding tiny changes.
+
+Deliberately deferred to production/native work:
+
+- a generated Rust codec and schema bindings;
+- native systematic-first RaptorQ with arbitrary repair ESI ranges;
+- record/key-aware stable chunk boundaries;
+- compression selection (including zstd) from a whole-chain benchmark;
+- online database handoff and dashboard writer migration;
+- fleet scheduling, durable ACK exchange, and RelayKit discovery/channel
+  lifecycle; and
+- a startup write gate after an externally restored machine snapshot. The
+  alpha persists and enforces its floor across ordinary restarts, but only the
+  production lifecycle can distinguish a restored old image from a normal
+  restart and recover the fleet-held floor or rotate the incarnation.
+
+Not adopted:
+
+- per-row cryptographic signatures, organization-ledger semantics, or causal
+  version vectors. The operator's bounded personal fleet trusts a
+  roster-authorized, proof-of-possession-authenticated peer at the application
+  boundary. These mechanisms add a different threat model without improving
+  the chosen one.
+
+## Production activation requirements
+
+Activation requires a GraphDB migration for the five tracking tables,
+logical-key/catalog indexes, and triggers; a one-time bootstrap that gives
+every existing logical row initial winner metadata; conversion of every
+personal-store writer to the authored transaction adapter in the same rollout; the
+roster/RelayKit scheduler and ACK protocol; attachment-object transport; and
+an operational online handoff strategy. No new daemon or network service is
+required by the engine itself.

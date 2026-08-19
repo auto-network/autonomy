@@ -142,6 +142,14 @@ EXCLUDED_SETTING_SET_IDS: Final[frozenset[str]] = frozenset({
     "autonomy.identity.passkey",
 })
 
+LOCAL_SYNC_TABLES: Final[frozenset[str]] = frozenset({
+    "fleet_sync_catalog",
+    "fleet_sync_journal",
+    "fleet_sync_origins",
+    "fleet_sync_state",
+    "fleet_sync_transactions",
+})
+
 
 def classify_table(name: str) -> PolicyKind | None:
     """Return the explicit classification for *name*, or ``None``."""
@@ -151,6 +159,8 @@ def classify_table(name: str) -> PolicyKind | None:
         return policy.kind
     if name.startswith(DERIVED_TABLE_PREFIXES):
         return PolicyKind.DERIVED
+    if name in LOCAL_SYNC_TABLES:
+        return PolicyKind.LOCAL
     return None
 
 
