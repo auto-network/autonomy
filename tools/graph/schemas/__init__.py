@@ -48,6 +48,7 @@ from .registry import (
     # Whether this set's payloads are secrets stored as encrypted storage
     # objects, and who must participate to read one back.
     signer,
+    signer_declaration,
     vaulted,
     declared_signer,
     declared_vault_tier,
@@ -110,6 +111,7 @@ __all__ = [
     "PUBLICATION_ORDER",
     "VALID_HOMES",
     "signer",
+    "signer_declaration",
     "vaulted",
     "declared_signer",
     "declared_vault_tier",

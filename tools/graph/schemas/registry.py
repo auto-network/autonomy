@@ -762,9 +762,27 @@ def declared_signer(set_id: str, revision: int) -> str:
     does with a set that has no schema at all is the boundary's policy,
     not this resolver's.
     """
+    return signer_declaration(set_id, revision)["tier"]
+
+
+def signer_declaration(set_id: str, revision: int) -> dict:
+    """``{tier, explicit}`` — the signing tier AND whether it was declared.
+
+    :func:`declared_signer` deliberately collapses silence into
+    ``delegate``; this is the introspection that keeps the collapse
+    AUDITABLE. A sensitive schema that forgot ``@signer("persona")`` signs
+    unattended and looks identical to a reviewed ``@signer("delegate")``
+    in the resolved tier — here the two differ: ``explicit`` is whether
+    any revision-class on the MRO declared a tier, so "defaulted" is a
+    listable fact rather than an invisible one. An unregistered revision
+    is ``{tier: "delegate", explicit: False}``.
+    """
     cls = SCHEMAS.get(f"{set_id}#{revision}")
     tier = getattr(cls, "_signer_tier", None) if cls is not None else None
-    return tier if tier is not None else "delegate"
+    return {
+        "tier": tier if tier is not None else "delegate",
+        "explicit": tier is not None,
+    }
 
 
 def cache(
@@ -1171,6 +1189,13 @@ class SettingSchema:
     # was — see :func:`vaulted`.
     _vault_tier: str | None = None
 
+    # ``@signer(tier)``-only: which key signs this set's organization rows.
+    # ``None`` means UNDECLARED — resolution collapses that to ``delegate``
+    # (:func:`declared_signer`), but the None is kept distinguishable here
+    # so introspection can list a defaulted schema apart from a reviewed
+    # ``@signer("delegate")`` — see :func:`signer_declaration`.
+    _signer_tier: str | None = None
+
     #: A schema that is NOT a Setting row. Typed payload contracts borrow this
     #: class for its field metadata -- to drive TypeScript generation and to
     #: validate a JSON boundary -- without ever being stored as Settings.
@@ -1304,6 +1329,15 @@ class SettingSchema:
         payload["schema_revision"] = cls.schema_revision
         payload["access_pattern"] = cls._access_pattern
         payload["key_strategy"] = cls._key_strategy
+        # Both the resolved tier and whether it was a reviewed choice: a
+        # sensitive schema that FORGOT @signer("persona") signs unattended
+        # and is invisible in the resolved tier alone — the export is where
+        # an audit can list every defaulted schema.
+        signer_tier = getattr(cls, "_signer_tier", None)
+        payload["signer"] = {
+            "tier": signer_tier if signer_tier is not None else "delegate",
+            "explicit": signer_tier is not None,
+        }
         if cls._cache_ttl_seconds is not None:
             payload["cache_ttl_seconds"] = int(cls._cache_ttl_seconds)
         return payload

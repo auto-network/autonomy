@@ -87,6 +87,58 @@ def test_two_revisions_may_declare_different_tiers_and_both_resolve():
     assert declared_signer(SET_ID, 2) == "delegate"
 
 
+def test_a_defaulted_schema_is_distinguishable_from_a_reviewed_delegate():
+    """declared_signer collapses silence into delegate BY DESIGN; the
+    collapse must stay auditable. A schema that forgot @signer('persona')
+    signs unattended — introspection and the schema export are where that
+    shows as 'defaulted' rather than 'reviewed'."""
+    from tools.graph.schemas.registry import signer_declaration
+
+    @signer("delegate")
+    class Reviewed(SettingSchema):
+        pass
+
+    class Forgot(SettingSchema):
+        pass
+
+    register_schema(SET_ID + ".reviewed", 1, Reviewed)
+    register_schema(SET_ID + ".forgot", 1, Forgot)
+
+    # The resolved tier is identical — that is the collapse.
+    assert declared_signer(SET_ID + ".reviewed", 1) == "delegate"
+    assert declared_signer(SET_ID + ".forgot", 1) == "delegate"
+
+    # The declaration record is not.
+    assert signer_declaration(SET_ID + ".reviewed", 1) == {
+        "tier": "delegate", "explicit": True,
+    }
+    assert signer_declaration(SET_ID + ".forgot", 1) == {
+        "tier": "delegate", "explicit": False,
+    }
+    assert signer_declaration("autonomy.never.registered", 1) == {
+        "tier": "delegate", "explicit": False,
+    }
+
+    # And the export carries both, so an audit can list every defaulted
+    # schema without importing each class.
+    assert Reviewed.export_json_schema()["signer"] == {
+        "tier": "delegate", "explicit": True,
+    }
+    assert Forgot.export_json_schema()["signer"] == {
+        "tier": "delegate", "explicit": False,
+    }
+
+
+def test_a_persona_declaration_exports_as_explicit():
+    @signer("persona")
+    class Attended(SettingSchema):
+        pass
+
+    assert Attended.export_json_schema()["signer"] == {
+        "tier": "persona", "explicit": True,
+    }
+
+
 def test_an_unknown_tier_is_refused_at_declaration_time():
     with pytest.raises(SchemaValidationError) as caught:
         signer("root")
