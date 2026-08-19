@@ -12723,9 +12723,6 @@ async def api_diag_eventbus_snapshot(request):
 
 async def api_diag_settings(request):
     """Process-local Settings throughput snapshot."""
-    auth_error = api_auth.require_authenticated_api_caller(request)
-    if auth_error is not None:
-        return auth_error
     from tools.graph import settings_ops
 
     return JSONResponse(settings_ops.settings_api_stats_snapshot())
@@ -12733,9 +12730,6 @@ async def api_diag_settings(request):
 
 async def api_diag_settings_sets(request):
     """Storage + activity summary for Settings sets in the selected org."""
-    auth_error = api_auth.require_authenticated_api_caller(request)
-    if auth_error is not None:
-        return auth_error
     org = _caller_org(request)
     resolved_org, windows, rows = _settings_diag_rows(org=org)
     from tools.graph import settings_ops as _settings_ops
@@ -12754,9 +12748,6 @@ async def api_diag_settings_sets(request):
 
 async def api_diag_settings_set_detail(request):
     """Storage detail for one Settings set, including per-key footprint."""
-    auth_error = api_auth.require_authenticated_api_caller(request)
-    if auth_error is not None:
-        return auth_error
     set_id = request.path_params["set_id"]
     org = _caller_org(request)
     resolved_org, windows, rows = _settings_diag_rows(org=org)
@@ -15284,9 +15275,6 @@ async def _emit_setting_changed(
 
 async def api_graph_settings_list(request):
     """GET /api/graph/settings/<set_id> — resolved members of a SET."""
-    auth_error = api_auth.require_authenticated_api_caller(request)
-    if auth_error is not None:
-        return auth_error
     set_id = request.path_params["set_id"]
     target, minrev, stored, err = _parse_settings_read_params(request.query_params)
     if err:
@@ -15312,9 +15300,6 @@ async def api_graph_settings_list(request):
 
 async def api_graph_settings_get_by_key(request):
     """GET /api/graph/settings/<set_id>/<key> — single resolved member by key."""
-    auth_error = api_auth.require_authenticated_api_caller(request)
-    if auth_error is not None:
-        return auth_error
     set_id = request.path_params["set_id"]
     key = request.path_params["key"]
     target, minrev, stored, err = _parse_settings_read_params(request.query_params)
@@ -15925,9 +15910,6 @@ async def api_graph_settings_chain(request):
     contributions (base → override-1 → override-2 → ...). 404 when no
     base resolves under the caller's scope.
     """
-    auth_error = api_auth.require_authenticated_api_caller(request)
-    if auth_error is not None:
-        return auth_error
     set_id = request.path_params["set_id"]
     key = request.path_params["key"]
     org = _caller_org(request)
