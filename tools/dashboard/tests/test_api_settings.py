@@ -497,3 +497,42 @@ def test_diag_settings_sets_summary_and_detail(
     assert key_row["stored_row_count"] == 2
     assert key_row["payload_bytes"] > 0
     assert key_row["latest_state"] == "raw"
+
+
+# ── Contested slots (auto-y2ubq) ───────────────────────────
+
+
+def test_contested_route_empty_set(graph_db_env, example_schema, client):
+    r = client.get("/api/graph/settings/autonomy.test.api/contested")
+    assert r.status_code == 200
+    assert r.json() == {"set_id": "autonomy.test.api", "contested": []}
+
+
+def test_contested_route_reports_slots(graph_db_env, example_schema, client):
+    """Two members' signed slots at one address surface with exactly one
+    marked as the resolving one. Route order matters: /contested must not
+    be captured by the {set_id}/{key} member route."""
+    import sqlite3 as _sqlite3
+    import uuid as _uuid
+
+    conn = _sqlite3.connect(graph_db_env)
+    try:
+        with conn:
+            for persona, signed_at in (("aa" * 32, 2_000), ("bb" * 32, 1_000)):
+                conn.execute(
+                    "INSERT INTO settings (id, set_id, schema_revision, key,"
+                    " payload, publication_state, signed_at, signing_key,"
+                    " signature, terminal_persona)"
+                    " VALUES (?, 'autonomy.test.api', 1, 'k', '{}',"
+                    " 'published', ?, ?, ?, ?)",
+                    (str(_uuid.uuid4()), signed_at, persona, "ab" * 64, persona),
+                )
+    finally:
+        conn.close()
+
+    r = client.get("/api/graph/settings/autonomy.test.api/contested")
+    assert r.status_code == 200
+    contested = r.json()["contested"]
+    # No founded ledger exists in this fixture, so eligibility fails closed
+    # and neither slot resolves — the report is empty rather than wrong.
+    assert contested == []

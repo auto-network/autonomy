@@ -885,6 +885,23 @@ class HttpClient:
         except LookupError:
             return None
 
+    def contested_keys(self, set_id, *, org):
+        """Keys of *set_id* with more than one eligible signed slot at the
+        winning rung and store — the organization is contesting the value.
+
+        Returns the ``contested`` list (metadata only, never payloads);
+        empty when nothing is contested.
+        """
+        org = _resolve_client_org_arg(org)
+        result = self._request(
+            "GET",
+            f"/api/graph/settings/{urllib.parse.quote(set_id, safe='')}/contested",
+            headers=_settings_headers(org),
+        )
+        if isinstance(result, dict):
+            return result.get("contested", [])
+        return []
+
     def migrate_setting_revisions(
         self, set_id, to_rev, *, org, dry_run=False,
     ):

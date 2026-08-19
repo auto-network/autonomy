@@ -303,6 +303,101 @@ def cmd_set_members(args) -> None:
         print(f"Dropped: {members.dropped.to_dict()}")
 
 
+def _fmt_signed_at(ms) -> str:
+    if not ms:
+        return "-"
+    from datetime import datetime, timezone
+
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime(
+        "%Y-%m-%d %H:%M:%SZ"
+    )
+
+
+def cmd_set_contested(args) -> None:
+    """Contended slots: keys where more than one member's signed slot sits
+    at the winning rung and store. Stats across sets by default; per-slot
+    detail for one exact set_id."""
+    import fnmatch
+
+    client = get_client()
+    org = _org(args)
+    target = getattr(args, "set_id", None)
+    key_glob = getattr(args, "key", None)
+    limit = getattr(args, "limit", None)
+    is_glob = bool(target) and any(c in target for c in "*?[")
+    detail = bool(target) and not is_glob
+
+    if detail:
+        set_ids = [target]
+    else:
+        set_ids = client.list_set_ids(org=org)
+        if target:
+            set_ids = [s for s in set_ids if fnmatch.fnmatch(s, target)]
+
+    per_set: list[tuple[str, list[dict]]] = []
+    for set_id in sorted(set_ids):
+        entries = client.contested_keys(set_id, org=org) or []
+        if key_glob:
+            entries = [
+                e for e in entries if fnmatch.fnmatch(e.get("key", ""), key_glob)
+            ]
+        if entries:
+            per_set.append((set_id, entries))
+
+    if getattr(args, "json", False):
+        print(json.dumps(
+            {set_id: entries for set_id, entries in per_set}, indent=2,
+        ))
+        return
+
+    if not per_set:
+        scope = target or "any set"
+        print(f"(no contested keys in {scope})")
+        return
+
+    if detail:
+        entries = per_set[0][1]
+        shown = entries[:limit] if limit else entries
+        for entry in shown:
+            print(f"{entry['key']}  ({len(entry['slots'])} slots)")
+            for slot in entry["slots"]:
+                marker = "→" if slot.get("resolves") else " "
+                persona = (slot.get("terminal_persona") or "")[:16]
+                print(
+                    f"  {marker} {persona:<16}  {slot.get('state', '-'):<10}"
+                    f"  {_fmt_signed_at(slot.get('signed_at')):<21}"
+                    f"  {slot.get('org') or '-'}"
+                )
+        if limit and len(entries) > limit:
+            print(f"… {len(entries) - limit} more contested keys (raise --limit)")
+        return
+
+    rows = []
+    for set_id, entries in per_set:
+        slots = [s for e in entries for s in e["slots"]]
+        rows.append({
+            "set_id": set_id,
+            "keys": str(len(entries)),
+            "slots": str(len(slots)),
+            "signers": str(len({s.get("terminal_persona") for s in slots})),
+            "latest": _fmt_signed_at(
+                max((s.get("signed_at") or 0) for s in slots)
+            ),
+        })
+    shown = rows[:limit] if limit else rows
+    _print_table(shown, [
+        ("set_id", "SET_ID", 40),
+        ("keys", "KEYS", 5),
+        ("slots", "SLOTS", 5),
+        ("signers", "SIGNERS", 7),
+        ("latest", "LATEST SIGNED", 20),
+    ])
+    if limit and len(rows) > limit:
+        print(f"… {len(rows) - limit} more sets (raise --limit)")
+    print()
+    print("One exact set_id for per-slot detail; globs and --key filter.")
+
+
 def cmd_set_show(args) -> None:
     target, _, _, no_upconvert = _resolve_read_flags(args)
     if no_upconvert:
@@ -1225,6 +1320,27 @@ def attach_set_subparser(sub) -> None:
     add_read_flags(p_members)
     _add_org_arg(p_members)
     p_members.set_defaults(func=cmd_set_members)
+
+    # contested — contended slot report (auto-y2ubq)
+    p_contested = set_sub.add_parser(
+        "contested",
+        help="Keys where members' signed slots contest the resolved value",
+    )
+    p_contested.add_argument(
+        "set_id", nargs="?", default=None, metavar="SET_ID",
+        help="Exact set_id for per-slot detail; a glob (e.g. 'autonomy.org.*') "
+             "or nothing for high-level stats across sets",
+    )
+    p_contested.add_argument(
+        "--key", metavar="GLOB",
+        help="Only keys matching this glob (e.g. 'workspace:*')",
+    )
+    p_contested.add_argument("--limit", type=int, help="Cap output rows")
+    p_contested.add_argument(
+        "--json", action="store_true", help="Raw JSON instead of tables",
+    )
+    _add_org_arg(p_contested)
+    p_contested.set_defaults(func=cmd_set_contested)
 
     # show
     p_show = set_sub.add_parser("show", help="Show a single Setting in detail")
