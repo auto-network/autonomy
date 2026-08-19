@@ -164,7 +164,7 @@ def test_a_shared_org_named_personal_is_never_served_as_the_local_store(
     """The file was valid when created; classification is by BOOTSTRAP ROW,
     never by filename. Resolution answers with the real (fresh) home so no
     personal credential can land in the shared organization."""
-    graph_db_mod._LEGACY_STORE_IS_SHARED_ORG.clear()
+    graph_db_mod._LEGACY_STORE_CLASSIFICATION.clear()
     seed_shared_org_at(orgs_root / "personal.db", "personal")
     resolved = _local_store_db_path("personal", orgs_root)
     assert resolved == orgs_root.parent / "personal.db"
@@ -172,7 +172,7 @@ def test_a_shared_org_named_personal_is_never_served_as_the_local_store(
 
 
 def test_relocation_refuses_a_shared_org_collision_loudly(orgs_root):
-    graph_db_mod._LEGACY_STORE_IS_SHARED_ORG.clear()
+    graph_db_mod._LEGACY_STORE_CLASSIFICATION.clear()
     seed_shared_org_at(orgs_root / "machine.db", "machine")
     with pytest.raises(graph_db_mod.LocalStoreCollisionError) as caught:
         relocate_local_stores(orgs_root)
@@ -185,10 +185,42 @@ def test_relocation_refuses_a_shared_org_collision_loudly(orgs_root):
 
 
 def test_a_personal_typed_legacy_row_still_migrates(orgs_root):
-    graph_db_mod._LEGACY_STORE_IS_SHARED_ORG.clear()
+    graph_db_mod._LEGACY_STORE_CLASSIFICATION.clear()
     GraphDB.create_org_db(
         "personal", type_="personal", path=orgs_root / "personal.db",
     ).close()
     relocate_local_stores(orgs_root)
     assert (orgs_root.parent / "personal.db").exists()
     assert not (orgs_root / "personal.db").exists()
+
+
+# ── damage is not absence (Codex P1 round three) ─────────────
+
+def test_a_corrupt_legacy_file_is_never_served_or_migrated(orgs_root):
+    """'There is no data' and 'I cannot read this' are different states;
+    merging them fails toward adopting the broken thing as the live store."""
+    graph_db_mod._LEGACY_STORE_CLASSIFICATION.clear()
+    corrupt = orgs_root / "personal.db"
+    corrupt.write_bytes(b"this is not a sqlite database at all")
+
+    with pytest.raises(graph_db_mod.LocalStoreUnreadableError):
+        _local_store_db_path("personal", orgs_root)
+    with pytest.raises(graph_db_mod.LocalStoreUnreadableError) as caught:
+        relocate_local_stores(orgs_root)
+    assert "restore" in str(caught.value).lower()
+    # Untouched: not moved, not deleted, not adopted.
+    assert corrupt.exists()
+    assert corrupt.read_bytes().startswith(b"this is not")
+    assert not (orgs_root.parent / "personal.db").exists()
+
+
+def test_a_readable_rowless_file_is_still_the_unclaimed_middle_state(
+    orgs_root,
+):
+    """The on-demand machine store is a readable database with no orgs row —
+    tri-state classification must keep it valid, not lump it with damage."""
+    graph_db_mod._LEGACY_STORE_CLASSIFICATION.clear()
+    GraphDB(orgs_root / "machine.db").close()  # full schema, no orgs row
+    assert _local_store_db_path("machine", orgs_root) == orgs_root / "machine.db"
+    relocate_local_stores(orgs_root)
+    assert (orgs_root.parent / "machine.db").exists()
