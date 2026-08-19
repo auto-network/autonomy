@@ -113,11 +113,14 @@ def _row_col(row, name):
 #: auto-7c7po warns against a second ever existing). Keyed on the ledger's
 #: current HEADS, so any number of resolutions against an unchanged ledger
 #: build nothing and a ledger advancement invalidates by key inequality,
-#: never by a sweep. Membership and rekey continuity are time-independent
-#: and cache with the fold; delegation authority is ref_ts-dependent and is
-#: NOT served from here. Owned by resolution (auto-y2ubq) because it is the
-#: first consumer; the boundary (auto-wah16) consumes this same cache.
-_FOLD_MEMBERS_CACHE: dict[str, tuple[tuple, frozenset]] = {}
+#: never by a sweep. The cached value is the whole FoldState, so every
+#: time-independent query — membership, backward key resolution
+#: (persona_for_key), key revocation — is served from one cache by every
+#: consumer (resolution here; the boundary, auto-wah16, next). Delegation
+#: authority is ref_ts-dependent and MUST NOT be read from a cached view —
+#: a cached view silently extends an expired delegation. Owned by
+#: resolution (auto-y2ubq) because it is the first consumer.
+_FOLD_VIEW_CACHE: dict[str, tuple[tuple, Any]] = {}
 _fold_builds = 0  # how many times a fold was actually constructed
 
 
@@ -144,26 +147,27 @@ def _ledger_heads(slug: str) -> "tuple | None":
         conn.close()
 
 
-def _org_fold_members(slug: "str | None") -> frozenset:
-    """The current fold's member personas for org *slug*.
+def _org_fold_view(slug: "str | None"):
+    """The current FoldState for org *slug*, or ``None``.
 
     Built ONCE PER LEDGER ADVANCEMENT: the heads-keyed cache above serves
     every call whose heads probe matches, so resolution cost does not scale
-    with reads and a per-row fold read cannot creep back in.
+    with reads and a per-row fold read cannot creep back in. Callers may
+    read only the time-independent surface from the returned view —
+    ``members``, ``persona_for_key``, ``key_revoked`` — never delegation
+    authority (see the cache comment).
 
-    Fail-closed: an org with no founded ledger — or no ledger tables at
-    all, or a fold that cannot be built — yields the empty set, so a signed
-    row such a store somehow holds does not resolve.
+    Fail-closed: no founded ledger, no ledger tables, or a fold that cannot
+    be built all yield ``None``.
     """
     if not slug:
-        return frozenset()
+        return None
     heads = _ledger_heads(slug)
     if heads is None or not heads:
-        return frozenset()
-    cached = _FOLD_MEMBERS_CACHE.get(slug)
+        return None
+    cached = _FOLD_VIEW_CACHE.get(slug)
     if cached is not None and cached[0] == heads:
         return cached[1]
-    members: frozenset = frozenset()
     try:
         from tools.network.ledger import LedgerStore, org_ledger_db_path
 
@@ -171,8 +175,9 @@ def _org_fold_members(slug: "str | None") -> frozenset:
         _fold_builds += 1
         store = LedgerStore(org_ledger_db_path(slug))
         try:
-            if store.ledger.genesis_id:
-                members = frozenset(store.fold().members)
+            if not store.ledger.genesis_id:
+                return None
+            state = store.fold()
         finally:
             store.close()
     except Exception:
@@ -180,9 +185,16 @@ def _org_fold_members(slug: "str | None") -> frozenset:
             "eligibility: fold for org %r unavailable; its signed rows "
             "will not resolve", slug, exc_info=True,
         )
-        return frozenset()
-    _FOLD_MEMBERS_CACHE[slug] = (heads, members)
-    return members
+        return None
+    _FOLD_VIEW_CACHE[slug] = (heads, state)
+    return state
+
+
+def _org_fold_members(slug: "str | None") -> frozenset:
+    """The current fold's member personas for org *slug* (empty when the
+    fold is unavailable — a signed row then fails eligibility, fail-closed)."""
+    state = _org_fold_view(slug)
+    return frozenset(state.members) if state is not None else frozenset()
 
 
 def _rank_candidates(
