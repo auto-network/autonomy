@@ -104,6 +104,30 @@ def test_no_module_outside_clock_defines_a_time_gate_constant():
     )
 
 
+TESTS_IMPORT = re.compile(
+    r"^\s*(?:from|import)\s+[\w.]*\btests\b", re.M,
+)
+
+
+def test_no_production_module_imports_from_a_tests_package():
+    """Companion to the scan above, closing its one blind spot: the scan
+    skips /tests/ paths (fixtures legitimately define constants), so a
+    production module importing a gate constant FROM a tests package would
+    keep the property green. This forbids the import edge itself — which is
+    the stronger invariant anyway: production code depending on test code
+    is a defect whatever name it imports."""
+    offenders = []
+    for path in sorted((REPO_ROOT / "tools" / "network").rglob("*.py")):
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        if "/tests/" in rel:
+            continue
+        for match in TESTS_IMPORT.finditer(path.read_text()):
+            offenders.append((rel, match.group(0).strip()))
+    assert offenders == [], (
+        f"production modules importing from a tests package: {offenders}"
+    )
+
+
 def test_registry_hello_freshness_is_unchanged():
     """Still ±300s, still two-sided — the consolidation moved no behavior."""
     assert clock.MAX_CLOCK_SKEW == 300
