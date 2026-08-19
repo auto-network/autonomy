@@ -4,8 +4,8 @@ import {
   bytesToHex,
   domainBytes,
   decryptArmor,
-  decryptArmorAny,
-  encryptArmorV2,
+  decryptArmor,
+  encryptArmor,
   importEd25519RootSigningKey,
   openSealedArmor,
   deriveEncapsulationKeypair,
@@ -320,7 +320,7 @@ var signRegistryRequestCore;
           'personal identity, but no personal identity is stored on this ' +
           'node — set one up from the getting-started flow first');
       }
-      var openedPersonal = await decryptArmorAny(
+      var openedPersonal = await decryptArmor(
         personal.armored_private_key, passphrase);
       try {
         var seed = await openSealedArmor(orgKey, openedPersonal.seed);
@@ -376,7 +376,7 @@ var signRegistryRequestCore;
     }
     var openedPersonal = null;
     try {
-      openedPersonal = await decryptArmorAny(
+      openedPersonal = await decryptArmor(
         personal.armored_private_key, passphrase);
     } catch (e) {
       // The entered passphrase opens the org armor but not the personal
@@ -561,7 +561,7 @@ var signRegistryRequestCore;
         'identity is stored on this node — set one up from the ' +
         'getting-started flow first');
     }
-    var opened = await decryptArmorAny(personal.armored_private_key, passphrase);
+    var opened = await decryptArmor(personal.armored_private_key, passphrase);
     return {
       seed: opened.seed,
       rootPub: opened.rootPub || personal.root_pub || null,
@@ -1189,8 +1189,11 @@ var signRegistryRequestCore;
     _internals: {
       canonicalJson: canonicalJson,
       decryptArmor: decryptArmor,
-      decryptArmorAny: decryptArmorAny,
-      encryptArmorV2: encryptArmorV2,
+      decryptArmor: decryptArmor,
+      encryptArmor: encryptArmor,
+      openPersonalRoot: _openPersonalRoot,
+      deriveEncapsulationKeypair: deriveEncapsulationKeypair,
+      sealToEncapsulationKey: sealToEncapsulationKey,
       openOrgRoot: _openOrgRoot,
       derivePersona: derivePersona,
       resolveOrgEntry: function (ref) {

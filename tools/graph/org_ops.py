@@ -1068,7 +1068,6 @@ def _resolve_org_root_for_retrofit(slug: str, personal_password: str, personal_s
     sealed, by the caller). A key that will not open aborts THIS org.
     """
     from tools.network.idkit import KeyPair
-    from tools.network.idkit.armor import decrypt_root_key
     from tools.network.idkit.sealing import derive_encapsulation_keypair
     from tools.network.idkit.sealing import open as seal_open
 
@@ -1086,17 +1085,24 @@ def _resolve_org_root_for_retrofit(slug: str, personal_password: str, personal_s
     if not members:
         return KeyPair.generate(), True
     payload = members[0].payload
-    if payload.get("sealed_root_key"):
-        recipient_priv, _ = derive_encapsulation_keypair(
-            personal_seed, ORG_ROOT_ARMOR_PURPOSE
+    if not payload.get("sealed_root_key"):
+        # There is no other shape. The password-armored org root was retired
+        # when org keys moved to the owner-sealed form, and no stored row
+        # carries armored_private_key any more. Refusing beats reaching for a
+        # reader that would open a v1 blob nobody should still hold.
+        raise OrgError(
+            f"the stored key for {slug!r} is not in the sealed form — it "
+            "predates the owner-sealed org root and must be re-sealed"
         )
-        seed = seal_open(
-            bytes.fromhex(payload["sealed_root_key"]),
-            recipient_priv,
-            payload.get("seal_purpose", ORG_ROOT_ARMOR_PURPOSE),
-        )
-        return KeyPair.from_private_hex(seed.hex()), False
-    return decrypt_root_key(payload["armored_private_key"], personal_password), False
+    recipient_priv, _ = derive_encapsulation_keypair(
+        personal_seed, ORG_ROOT_ARMOR_PURPOSE
+    )
+    seed = seal_open(
+        bytes.fromhex(payload["sealed_root_key"]),
+        recipient_priv,
+        payload.get("seal_purpose", ORG_ROOT_ARMOR_PURPOSE),
+    )
+    return KeyPair.from_private_hex(seed.hex()), False
 
 
 def retrofit_found_ledgers(

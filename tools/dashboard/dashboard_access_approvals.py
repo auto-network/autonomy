@@ -16,7 +16,7 @@ from starlette.requests import Request
 
 from tools.dashboard.dao import identity_sessions
 from tools.dashboard.identity_routes import _personal_member
-from tools.network.idkit.armor import parse_armor
+from tools.network.idkit.armor import armor_root_pub
 from tools.network.idkit.canonical import canonical_json
 from tools.network.idkit.errors import IdkitError
 from tools.network.idkit.keys import load_public_key, verify_signature
@@ -90,7 +90,7 @@ def _personal_root_pub() -> str:
     if not armor:
         raise ValueError("the personal identity has no signing key")
     try:
-        return parse_armor(armor)["root_pub"]
+        return armor_root_pub(armor)
     except IdkitError as exc:
         raise ValueError(f"the personal identity public key is unreadable: {exc}") from exc
 

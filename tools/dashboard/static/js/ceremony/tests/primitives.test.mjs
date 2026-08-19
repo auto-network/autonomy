@@ -9,11 +9,8 @@ const {
   bytesToHex,
   canonicalJson,
   decryptArmor,
-  decryptArmorV2,
-  decryptArmorAny,
   armorVersion,
-  migrateArmorV1ToV2,
-  parseArmorV2,
+  parseArmor,
   domainBytes,
   hexToBytes,
   importEd25519RootSigningKey,
@@ -59,31 +56,26 @@ await assert.rejects(
 );
 
 // ── Armor v2: cross-open the Python-minted v2, migrate v1->v2, strict parse ──
-const openedV2 = await decryptArmorV2(fixture.armor_v2, fixture.passphrase);
+const openedV2 = await decryptArmor(fixture.armor_v2, fixture.passphrase);
 assert.equal(bytesToHex(openedV2.seed), fixture.seed_hex, 'JS opens Python-minted v2');
 assert.equal(openedV2.rootPub, fixture.root_pub);
 openedV2.seed.fill(0);
 
 await assert.rejects(
-  decryptArmorV2(fixture.armor_v2, 'wrong-passphrase'),
+  decryptArmor(fixture.armor_v2, 'wrong-passphrase'),
   /wrong passphrase/,
   'v2 wrong passphrase must fail closed',
 );
 
 // Migrate the Python-minted v1 to v2 in JS, then open it -> exact seed.
-const migratedV2 = await migrateArmorV1ToV2(fixture.armor, fixture.passphrase, 10000);
-const openedMig = await decryptArmorV2(migratedV2, fixture.passphrase);
-assert.equal(bytesToHex(openedMig.seed), fixture.seed_hex, 'JS v1->v2 migrate recovers seed');
-openedMig.seed.fill(0);
-
 // Version-agnostic open + version peek across v1 and v2.
 assert.equal(armorVersion(fixture.armor), 1);
 assert.equal(armorVersion(fixture.armor_v2), 2);
-const anyV1 = await decryptArmorAny(fixture.armor, fixture.passphrase);
-assert.equal(bytesToHex(anyV1.seed), fixture.seed_hex, 'decryptArmorAny opens v1');
+const anyV1 = await decryptArmor(fixture.armor, fixture.passphrase);
+assert.equal(bytesToHex(anyV1.seed), fixture.seed_hex, 'decryptArmor opens v1');
 anyV1.seed.fill(0);
-const anyV2 = await decryptArmorAny(fixture.armor_v2, fixture.passphrase);
-assert.equal(bytesToHex(anyV2.seed), fixture.seed_hex, 'decryptArmorAny opens v2');
+const anyV2 = await decryptArmor(fixture.armor_v2, fixture.passphrase);
+assert.equal(bytesToHex(anyV2.seed), fixture.seed_hex, 'decryptArmor opens v2');
 anyV2.seed.fill(0);
 
 function editV2Body(edit) {
@@ -98,12 +90,12 @@ function editV2Body(edit) {
 
 // I1 preserved: an injected extra field is refused at parse.
 assert.throws(
-  () => parseArmorV2(editV2Body((d) => { d.smuggled = 'AAAA'; })),
+  () => parseArmor(editV2Body((d) => { d.smuggled = 'AAAA'; })),
   'v2 injected extra field must be refused',
 );
 // Total factor dispatch (F4): an unknown factor type is refused, never passed.
 assert.throws(
-  () => parseArmorV2(editV2Body((d) => { d.factors[0].type = 'backdoor'; })),
+  () => parseArmor(editV2Body((d) => { d.factors[0].type = 'backdoor'; })),
   'v2 unknown factor type must be refused',
 );
 

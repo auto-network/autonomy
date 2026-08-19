@@ -32,13 +32,13 @@ from datetime import datetime
 from typing import Any
 
 from .registry import (
-    home,
-    home,
-    singleton,
     SchemaValidationError,
     SettingSchema,
     field,
+    home,
     keyed_per_entity,
+    publication_band,
+    singleton,
 )
 
 
@@ -128,7 +128,12 @@ def _require_iso_ts(payload: dict, key: str, cls_name: str) -> str:
 #: enforced rather than agreed -- an undeclared home refuses
 #: nothing, and a plain read looks in the caller's own store and
 #: reports nothing for rows sitting one database over.
+#: Banded because the row CARRIES key material, not because anything
+#: labelled it secret. Every write passing state="raw" by hand is a
+#: convention; a band is enforced at write, at promote, and at the
+#: federated read, each of which fails independently.
 @home("personal")
+@publication_band(max="raw")
 @singleton(key="default")
 class PersonalIdentityV1(SettingSchema):
     """The person's root key — encrypted armor only (I1).
@@ -194,7 +199,7 @@ class PersonalIdentityV1(SettingSchema):
             from tools.network.idkit.armor import (
                 ArmorError,
                 armor_root_pub,
-                canonicalize_armor_any,
+                canonicalize_armor,
             )
         except Exception as exc:  # pragma: no cover — env without idkit deps
             raise SchemaValidationError(
@@ -207,11 +212,11 @@ class PersonalIdentityV1(SettingSchema):
             # format, and the ceremonies are moving to the newer one. Both are
             # strictly parsed and both must already be in canonical byte form.
             armor_data = {"root_pub": armor_root_pub(armor)}
-            if canonicalize_armor_any(armor) != armor:
+            if canonicalize_armor(armor) != armor:
                 raise SchemaValidationError(
                     f"{cls.__name__}: 'armored_private_key' must be the "
                     "canonical armor byte form — re-emit it with "
-                    "tools.network.idkit.armor.canonicalize_armor_any (I1)"
+                    "tools.network.idkit.armor.canonicalize_armor (I1)"
                 )
         except ArmorError as e:
             raise SchemaValidationError(

@@ -5,7 +5,6 @@ if (!globalThis.crypto) {
 }
 
 const {
-  armorSeed,
   buildRecoveryBlock,
   buildRegistrationEnvelope,
   generateOrgRootKey,
@@ -21,7 +20,6 @@ const seedHex = Array.from(
   (byte) => (`0${byte.toString(16)}`).slice(-2),
 ).join('');
 try {
-  const armor = await armorSeed(pair.seed, pair.pubHex, passphrase);
   const signingKey = await importEd25519RootSigningKey(pair.seed);
   const payload = {
     root_pub: pair.pubHex,
@@ -66,7 +64,6 @@ try {
       passphrase,
       seedHex,
       rootPub: pair.pubHex,
-      armor,
       envelope,
       recoveryPub: recovery.pubHex,
       recoverySeedHex,

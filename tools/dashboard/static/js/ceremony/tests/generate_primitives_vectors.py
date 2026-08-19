@@ -11,7 +11,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tools.network.idkit import KeyPair
-from tools.network.idkit.armor import encrypt_root_key, encrypt_root_key_v2
+from tools.network.idkit.armor import encrypt_root_key, encrypt_root_key
 from tools.network.idkit.canonical import canonical_json
 
 PASSPHRASE = "pw"
@@ -64,7 +64,7 @@ def build_vectors() -> dict:
             PASSPHRASE,
             iterations=10_000,
         ),
-        "armor_v2": encrypt_root_key_v2(
+        "armor_v2": encrypt_root_key(
             root,
             PASSPHRASE,
             iterations=10_000,

@@ -663,9 +663,9 @@ async def post_unlock_password(request: Request) -> JSONResponse:
     if not root_pub:
         # Older rows might omit the optional column; the armor always
         # encloses the public half.
-        from tools.network.idkit.armor import parse_armor
+        from tools.network.idkit.armor import armor_root_pub
         try:
-            root_pub = parse_armor(personal.payload["armored_private_key"])["root_pub"]
+            root_pub = armor_root_pub(personal.payload["armored_private_key"])
         except Exception as e:
             return JSONResponse({"ok": False, "error": (
                 f"the stored identity's public key is unreadable: {e}"

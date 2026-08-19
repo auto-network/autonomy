@@ -15,7 +15,6 @@ import {
 
 const ARMOR_BEGIN = '-----BEGIN AUTONOMY NETWORK ROOT KEY-----';
 const ARMOR_END = '-----END AUTONOMY NETWORK ROOT KEY-----';
-const ARMOR_AAD_PREFIX = 'autonomy.idkit.armor.v1\n';
 const REQUEST_DOMAIN = 'autonomy.network.registry.request.v1\n';
 const REGISTRATION_PATH = '/v1/orgs';
 const DEFAULT_ITERATIONS = 600000;
@@ -89,86 +88,6 @@ async function generateOrgRootKey() {
     seed,
     pubHex: bytesToHex(publicBytes),
   };
-}
-
-async function armorSeed(
-  ed25519SigningSeed,
-  rootPubHex,
-  passphrase,
-  iterations = armorIterations,
-) {
-  const seed = new Uint8Array(ed25519SigningSeed);
-  if (seed.length !== 32) {
-    throw new Error('Ed25519 root signing seed must be exactly 32 bytes');
-  }
-  assertRootPub(rootPubHex);
-  if (typeof passphrase !== 'string' || !passphrase) {
-    throw new Error('passphrase must be a non-empty string');
-  }
-  if (
-    !Number.isSafeInteger(iterations)
-    || iterations < MIN_ITERATIONS
-    || iterations > MAX_ITERATIONS
-  ) {
-    throw new Error(
-      `armor iterations must be in [${MIN_ITERATIONS}, ${MAX_ITERATIONS}]`,
-    );
-  }
-
-  const salt = webCrypto.getRandomValues(new Uint8Array(16));
-  const iv = webCrypto.getRandomValues(new Uint8Array(12));
-  const passphraseMaterial = await webCrypto.subtle.importKey(
-    'raw',
-    textEncoder.encode(passphrase),
-    'PBKDF2',
-    false,
-    ['deriveKey'],
-  );
-  const armorKey = await webCrypto.subtle.deriveKey(
-    {
-      name: 'PBKDF2',
-      salt,
-      iterations,
-      hash: 'SHA-256',
-    },
-    passphraseMaterial,
-    { name: 'AES-GCM', length: 256 },
-    false,
-    ['encrypt'],
-  );
-  const ciphertext = new Uint8Array(await webCrypto.subtle.encrypt(
-    {
-      name: 'AES-GCM',
-      iv,
-      additionalData: textEncoder.encode(
-        ARMOR_AAD_PREFIX + rootPubHex,
-      ),
-    },
-    armorKey,
-    seed,
-  ));
-  const body = canonicalJson({
-    v: 1,
-    kdf: {
-      name: 'PBKDF2',
-      hash: 'SHA-256',
-      iterations,
-      salt: bytesToB64(salt),
-    },
-    cipher: {
-      name: 'AES-256-GCM',
-      iv: bytesToB64(iv),
-    },
-    root_pub: rootPubHex,
-    ct: bytesToB64(ciphertext),
-  });
-  const encodedBody = btoa(body);
-  const lines = [ARMOR_BEGIN];
-  for (let index = 0; index < encodedBody.length; index += 64) {
-    lines.push(encodedBody.slice(index, index + 64));
-  }
-  lines.push(ARMOR_END);
-  return lines.join('\n');
 }
 
 function validateRegistrationPayload(payload, rootPubHex) {
@@ -285,7 +204,6 @@ function buildRecoveryBlock(
 }
 
 export {
-  armorSeed,
   buildRecoveryBlock,
   buildRegistrationEnvelope,
   generateOrgRootKey,

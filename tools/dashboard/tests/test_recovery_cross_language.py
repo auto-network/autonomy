@@ -22,7 +22,7 @@ from tools.network.idkit.armor import (
     RECOVERY_ARMOR_PURPOSE,
     add_recovery_factor,
     decrypt_root_key_with_recovery,
-    encrypt_root_key_v2,
+    encrypt_root_key,
 )
 from tools.network.idkit.keys import KeyPair
 from tools.network.idkit.sealing import derive_encapsulation_keypair
@@ -76,7 +76,7 @@ def test_a_code_printed_by_the_browser_opens_an_armor_locked_here():
 
     # The command line locks an identity, knowing only the code's public half.
     key = KeyPair.generate()
-    armor = encrypt_root_key_v2(key, "a-password", iterations=10_000)
+    armor = encrypt_root_key(key, "a-password", iterations=10_000)
     kek_seed = recovery.derive_recovery_factors(code)["kek_recovery_seed"]
     _, kem_pub = derive_encapsulation_keypair(kek_seed, RECOVERY_ARMOR_PURPOSE)
     armor = add_recovery_factor(armor, "a-password", kem_pub)

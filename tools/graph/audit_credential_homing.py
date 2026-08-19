@@ -39,7 +39,12 @@ VALUE_LOOKS_SECRET = re.compile(
 
 #: A field NAME that says the value is credential material.
 FIELD_SAYS_SECRET = re.compile(
-    r"(token|secret|password|passwd|api[_-]?key|\bkey\b|credential|auth)",
+    # ``key`` must match as a WORD PART, not a whole word: ``\bkey\b`` cannot
+    # match inside ``private_key`` because ``_`` is a word character, so the
+    # audit reported CLEAN on the two sets holding the operator's actual root
+    # keys — armored_private_key and sealed_root_key. Found by reading the
+    # final-form identity schemas, not by the audit.
+    r"(token|secret|password|passwd|api[_-]?key|key|credential|auth|armor|seal)",
     re.IGNORECASE,
 )
 

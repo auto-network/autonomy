@@ -5,7 +5,6 @@
  * module free of DOM, storage, and transport dependencies.
  */
 
-const ARMOR_AAD_PREFIX = 'autonomy.idkit.armor.v1\n';
 const ARMOR_BEGIN = '-----BEGIN AUTONOMY NETWORK ROOT KEY-----';
 const ARMOR_END = '-----END AUTONOMY NETWORK ROOT KEY-----';
 
@@ -160,103 +159,6 @@ function canonicalBase64Length(value) {
   return bytes.length;
 }
 
-async function decryptArmor(armorText, passphrase) {
-  if (typeof armorText !== 'string') {
-    throw new Error('armor must be text');
-  }
-  const lines = armorText
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
-  if (
-    lines.length < 3
-    || lines[0] !== ARMOR_BEGIN
-    || lines[lines.length - 1] !== ARMOR_END
-  ) {
-    throw new Error('this is not an auto.network root key armor');
-  }
-
-  let data;
-  try {
-    const body = b64ToBytes(lines.slice(1, -1).join(''));
-    data = JSON.parse(new TextDecoder().decode(body));
-  } catch {
-    throw new Error('armor body does not decode');
-  }
-
-  if (
-    !sameKeys(data, ['v', 'kdf', 'cipher', 'root_pub', 'ct'])
-    || data.v !== 1
-    || !sameKeys(data.kdf, ['name', 'hash', 'iterations', 'salt'])
-    || data.kdf.name !== 'PBKDF2'
-    || data.kdf.hash !== 'SHA-256'
-    || !Number.isSafeInteger(data.kdf.iterations)
-    || data.kdf.iterations < 10000
-    || data.kdf.iterations > 100000000
-    || !sameKeys(data.cipher, ['name', 'iv'])
-    || data.cipher.name !== 'AES-256-GCM'
-    || typeof data.root_pub !== 'string'
-    || !/^[0-9a-f]{64}$/.test(data.root_pub)
-    || canonicalBase64Length(data.kdf.salt) !== 16
-    || canonicalBase64Length(data.cipher.iv) !== 12
-    || canonicalBase64Length(data.ct) !== 48
-  ) {
-    throw new Error('unsupported or non-canonical armor format');
-  }
-
-  const passphraseMaterial = await webCrypto.subtle.importKey(
-    'raw',
-    textEncoder.encode(passphrase),
-    'PBKDF2',
-    false,
-    ['deriveKey'],
-  );
-  const armorKey = await webCrypto.subtle.deriveKey(
-    {
-      name: 'PBKDF2',
-      salt: b64ToBytes(data.kdf.salt),
-      iterations: data.kdf.iterations,
-      hash: 'SHA-256',
-    },
-    passphraseMaterial,
-    { name: 'AES-GCM', length: 256 },
-    false,
-    ['decrypt'],
-  );
-
-  let ed25519SigningSeed;
-  try {
-    ed25519SigningSeed = new Uint8Array(await webCrypto.subtle.decrypt(
-      {
-        name: 'AES-GCM',
-        iv: b64ToBytes(data.cipher.iv),
-        additionalData: textEncoder.encode(
-          ARMOR_AAD_PREFIX + data.root_pub,
-        ),
-      },
-      armorKey,
-      b64ToBytes(data.ct),
-    ));
-  } catch {
-    throw new Error('wrong passphrase (the key blob did not open)');
-  }
-  if (ed25519SigningSeed.length !== 32) {
-    throw new Error('armor plaintext is not an Ed25519 signing seed');
-  }
-  return {
-    seed: ed25519SigningSeed,
-    rootPub: data.root_pub,
-  };
-}
-
-/**
- * Import a raw 32-byte Ed25519 root SIGNING seed as a non-extractable key.
- *
- * This function always interprets its input as Ed25519 signing material; it
- * never imports an X25519 encapsulation key. The raw key shapes overlap, so
- * callers must use role-specific sources and this module exposes no ambiguous
- * generic key importer.
- */
 async function importEd25519RootSigningKey(ed25519SigningSeed) {
   // Both the raw seed copy and the pkcs8 it is spliced into carry root key
   // material and must be zeroed on every exit -- the outer finally covers the
@@ -297,7 +199,7 @@ async function importEd25519RootSigningKey(ed25519SigningSeed) {
 // factor-type dispatch — a registered type always has a strict parser, so a type
 // can never clear the membership check yet hit no field-closure (F4).
 
-const ARMOR_VERSION_2 = 2;
+const ARMOR_VERSION = 2;
 const V2_SEAL_AAD = 'autonomy.idkit.armor.v2.kek-seal\n';
 const V2_FACTOR_AAD = 'autonomy.idkit.armor.v2.factor\n';
 const V2_MIN_ITERATIONS = 10000;
@@ -382,7 +284,7 @@ function parseV2PasswordFactor(f) {
 // new lock type is added).
 const V2_FACTOR_PARSERS = { password: parseV2PasswordFactor };
 
-function parseArmorV2(armorText) {
+function parseArmor(armorText) {
   if (typeof armorText !== 'string') throw new Error('armor must be text');
   const lines = armorText
     .split('\n')
@@ -430,8 +332,8 @@ function parseArmorV2(armorText) {
   return data;
 }
 
-async function decryptArmorV2(armorText, passphrase) {
-  const data = parseArmorV2(armorText);
+async function decryptArmor(armorText, passphrase) {
+  const data = parseArmor(armorText);
   const pw = data.factors.find((f) => f.type === 'password');
   if (!pw) throw new Error('v2 armor has no password factor');
   const material = await webCrypto.subtle.importKey(
@@ -483,7 +385,7 @@ async function decryptArmorV2(armorText, passphrase) {
   return { seed, rootPub: data.root_pub };
 }
 
-async function encryptArmorV2(
+async function encryptArmor(
   ed25519SigningSeed, rootPub, passphrase, iterations = V2_DEFAULT_ITERATIONS,
 ) {
   if (
@@ -530,7 +432,7 @@ async function encryptArmorV2(
       kekKey, seed,
     ));
     const body = canonicalJson({
-      v: ARMOR_VERSION_2,
+      v: ARMOR_VERSION,
       root_pub: rootPub,
       kek_seal: {
         cipher: 'AES-256-GCM', iv: bytesToB64(sealIv), ct: bytesToB64(sealCt),
@@ -547,17 +449,6 @@ async function encryptArmorV2(
 
 // One-shot v1 -> v2 upgrade. Opens the legacy v1 blob and re-seals it as v2. The
 // v1 reader is deleted with the rest of the v1 path once migration has run.
-async function migrateArmorV1ToV2(
-  v1ArmorText, passphrase, iterations = V2_DEFAULT_ITERATIONS,
-) {
-  const opened = await decryptArmor(v1ArmorText, passphrase);
-  try {
-    return await encryptArmorV2(opened.seed, opened.rootPub, passphrase, iterations);
-  } finally {
-    opened.seed.fill(0);
-  }
-}
-
 function armorVersion(armorText) {
   if (typeof armorText !== 'string') throw new Error('armor must be text');
   const lines = armorText
@@ -585,12 +476,6 @@ function armorVersion(armorText) {
 
 // Open a v1 OR v2 armor. The v1 branch exists only to read a pre-migration blob
 // and is deleted from the shipped product once migration has run.
-async function decryptArmorAny(armorText, passphrase) {
-  return armorVersion(armorText) === 2
-    ? decryptArmorV2(armorText, passphrase)
-    : decryptArmor(armorText, passphrase);
-}
-
 export {
   canonicalJson,
   hexToBytes,
@@ -598,12 +483,9 @@ export {
   b64ToBytes,
   domainBytes,
   decryptArmor,
-  decryptArmorV2,
-  decryptArmorAny,
   armorVersion,
-  encryptArmorV2,
-  migrateArmorV1ToV2,
-  parseArmorV2,
+  encryptArmor,
+  parseArmor,
   importEd25519RootSigningKey,
 };
 
