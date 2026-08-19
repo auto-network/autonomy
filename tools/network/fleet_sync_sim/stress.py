@@ -30,7 +30,13 @@ from tools.network.swarmkit.fountain_fetch import fountain_fetch
 from tools.network.swarmkit.fountain_protocol import fountain_handler
 
 from .codec import Mutation
-from .compaction import ActiveRosterFrontier, CanonicalBase, Replica, make_kick
+from .compaction import (
+    ActiveRosterFrontier,
+    CanonicalBase,
+    Replica,
+    WatermarkReceipt,
+    make_kick,
+)
 from .merge import MutationInbox
 
 
@@ -296,18 +302,33 @@ def run_randomized_schedules(seeds=DEFAULT_SEEDS) -> list[dict[str, Any]]:
         frontiers = {peer: rng.randrange(20, 81) for peer in ("A", "B", "C", "D")}
         root = KeyPair.generate()
         roster = ActiveRosterFrontier(root.public_hex, frontiers)
+        receipts = {}
         for peer, frontier in frontiers.items():
-            roster.complete(peer, frontier)
+            receipt = WatermarkReceipt(
+                peer, roster.epoch, frontier, f"prefix-{seed}-{peer}",
+                (peer, "custodian"),
+            )
+            receipts[peer] = receipt
+            roster.complete(receipt)
         before = roster.frontier
         laggard = min(frontiers, key=frontiers.get)
         others = sorted(set(frontiers) - {laggard})
         kick = make_kick(root, laggard, seed)
         for observer in others:
             roster.observe_kick(observer, kick)
+        for peer in roster.active:
+            roster.complete(WatermarkReceipt(
+                peer, roster.epoch, frontiers[peer],
+                f"prefix-{seed}-{peer}-epoch-{roster.epoch}",
+                (peer, "custodian"),
+            ))
         after = roster.frontier
         assert after >= before
 
-        base = CanonicalBase.build(before, mutations)
+        base = CanonicalBase.build(
+            1, frontiers, receipts, mutations,
+            (receipt.prefix_digest for receipt in receipts.values()),
+        )
         post_base = []
         for peer in ("A", "B", "C", "D"):
             replica = Replica(peer, mutations)
