@@ -24,12 +24,15 @@ services:
         #   AUTONOMY_TAILWIND_URL=https://mirror.example.internal/tailwindcss-linux-x64
         BASE_IMAGE: ${AUTONOMY_BASE_IMAGE:-python:3.12-slim}
         TAILWIND_URL: ${AUTONOMY_TAILWIND_URL:-}
-        # Version stamp baked into /app/VERSION (the code ships as bare files).
-        # Populate from git at build time, e.g.:
-        #   AUTONOMY_VERSION=$(git rev-parse HEAD) \
-        #   AUTONOMY_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) docker compose build
-        AUTONOMY_VERSION: ${AUTONOMY_VERSION:-unknown}
-        AUTONOMY_BUILD_TIME: ${AUTONOMY_BUILD_TIME:-unknown}
+        # Version stamp baked into /app/VERSION (the code ships as bare files, so
+        # it can't self-report). The bare `docker compose up` path stamps
+        # commit=source with a real build time (honest: a from-source build, time
+        # known, commit not captured — never "unknown"). For the real commit SHA,
+        # either build via `deploy/build.sh <compose args>` (the supported wrapper)
+        # or pass AUTONOMY_VERSION=$(git rev-parse HEAD) yourself. Published images
+        # always carry the real SHA (deploy/publish-images.sh).
+        AUTONOMY_VERSION: ${AUTONOMY_VERSION:-source}
+        AUTONOMY_BUILD_TIME: ${AUTONOMY_BUILD_TIME:-}
     # Published path: set AUTONOMY_IMAGE to the verified immutable reference
     # from image-lock.env (repo/image@sha256:...), then use
     # `docker compose pull && docker compose up -d --no-build`.
@@ -79,7 +82,15 @@ services:
       - dolt-data:/var/lib/dolt
 
 volumes:
+  # Explicit `name:` pins the DAEMON volume name. Without it Compose scopes the
+  # volume to the project (`<project>_autonomy-code`, e.g. `autonomy_autonomy-orgs`
+  # from a checkout named `autonomy`). The hybrid resolver (auto-fteke) looks these
+  # up by BARE name — `docker volume inspect autonomy-orgs` — so the daemon names
+  # must be exactly these regardless of the checkout's directory name.
   autonomy-code:
+    name: autonomy-code
   autonomy-data:
+    name: autonomy-data
   autonomy-orgs:
+    name: autonomy-orgs
   dolt-data:

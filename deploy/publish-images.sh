@@ -35,9 +35,18 @@ dashboard_ref="$base/autonomy-session-dashboard:$RELEASE_TAG"
 dind_ref="$base/autonomy-session-dind:$RELEASE_TAG"
 
 echo "==> Building node image from deploy/Dockerfile"
+# Provenance for the long-lived code volume: a published node image must carry
+# the real commit it was built from, not the `source` marker a bare compose
+# build stamps. Derive the SHA from the checkout (overridable) and fail loudly
+# rather than publish an unprovenanced image.
+node_version="${AUTONOMY_VERSION:-$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)}"
+[[ -n "$node_version" ]] || { echo "cannot determine repo SHA for the version stamp; set AUTONOMY_VERSION" >&2; exit 2; }
+node_build_time="${AUTONOMY_BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 node_build=(
     docker build --pull
     --build-arg "BASE_IMAGE=${AUTONOMY_BASE_IMAGE:-python:3.12-slim}"
+    --build-arg "AUTONOMY_VERSION=$node_version"
+    --build-arg "AUTONOMY_BUILD_TIME=$node_build_time"
     -f "$REPO_ROOT/deploy/Dockerfile"
     -t "$node_ref"
 )
