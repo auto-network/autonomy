@@ -230,6 +230,51 @@ bd close <id> --reason "…"   # close a completed bead
 ```
 Run `bd --help` for full reference.
 
+### “What NOW?” — fast reorientation
+
+Use this after a long pause, context compaction, model handoff, or an explicit
+“What now?” / sitrep request. It reconstructs the useful present tense before
+you choose work: local repository state, the named workstream, globally ready
+work, recent peer traffic, and the operator's latest focus.
+
+Replace the example bead IDs with the current, adjacent, and parent/capstone
+beads that define this session's work. Remove entries you do not need.
+
+```bash
+BEAD_IDS=(BEAD_ID_CURRENT BEAD_ID_ADJACENT BEAD_ID_PARENT)
+
+git status --short --branch
+git log -5 --oneline --decorate
+
+for bead_id in "${BEAD_IDS[@]}"; do
+  bd show "$bead_id"
+done
+
+bd ready | sed -n '1,220p'
+graph crosstalk --since 24h | tail -240
+graph attention --last 20
+```
+
+Do not run this as a startup ritual. Run it once the user has identified the
+workstream, so the bead list is deliberate rather than a guess. Read the
+results as a single snapshot: a clean worktree does not mean the mission is
+done, and a ready bead does not supersede newer operator direction.
+
+When the fast scan exposes a gap, deepen only that slice:
+
+```bash
+bd dep tree BEAD_ID_CURRENT             # why the current bead can or cannot move
+graph sessions --status --topics        # who is live and what they say they own
+graph context SESSION_OR_SOURCE last    # latest context behind one relevant hit
+graph notes --since 24h                 # durable findings that may not be in chat
+git diff --stat                         # scope when the tree is dirty
+git diff --check                        # whitespace/error hygiene before committing
+```
+
+If the host says a commit merged but `git log` cannot see it, use the
+non-destructive **Pulling fresh master from host** procedure above before
+drawing conclusions from local history.
+
 ### agent-browser — Headless Chrome
 Pre-configured: dark mode, PNG screenshots to `/tmp/screenshots/`, `--no-sandbox`.
 
