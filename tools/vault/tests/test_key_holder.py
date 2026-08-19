@@ -99,9 +99,19 @@ def test_empty_cache_fails_closed_not_with_a_missing_holder(graph_db, vaulted_se
     settings_ops.add_setting(SET_ID, 1, KEY, {"secret_value": SECRET}, org=None, state="raw")
     resolved = settings_ops.read_set(SET_ID, org=None)
     row = resolved.to_dict()[KEY]
-    # A holder IS registered — so this is a decryption failure, never the
-    # missing-holder condition. The secret does not come back.
-    assert row.payload != {"secret_value": SECRET}
+    # Fail closed, and assert the POSITIVE contract, not just "the secret is
+    # absent": a vault member that does not open resolves to a
+    # VaultReadFailure carried on vault_error — never to a payload. Asserting
+    # only `payload != SECRET` would also pass a regression that returned some
+    # non-matching payload with vault_error=None, which a caller branching on
+    # vault_error would read as a real value.
+    assert row.vault_error is not None, "empty-cache read did not fail closed"
+    assert row.payload is None
+    # And it is a DOWNSTREAM failure (no key material held), never the
+    # missing-holder condition the bead exists to remove — the holder IS
+    # registered.
+    assert row.vault_error.reason == settings_ops.VAULT_NO_KEY_HELD
+    assert row.vault_error.reason != settings_ops.VAULT_NO_KEY_HOLDER
 
 
 def test_holder_is_registered_after_register_key_holder(tmp_path):
