@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Callable, Dict
 
 from tools.network.storagekit.keycontrol import KeyControlStore
-from tools.network.storagekit.store import ContentStore
+from tools.vault.db_content_store import DbContentStore, vault_db_path_for
 from tools.vault.storage_object import Holdings
 from tools.graph import settings_ops
 
@@ -73,51 +73,50 @@ class VaultKeyCache:
         return bool(self._secrets)
 
 
-def build_key_holder(
-    cache: VaultKeyCache,
-    keycontrol_path: "str | Path",
-    content_path: "str | Path",
-) -> Callable[..., settings_ops.VaultKeyControl]:
+def _scoped_db(set_id: str, org: "str | None"):
+    """The database a vault set's records live in, by DECLARED HOME.
+
+    The same routing key the sealer and the ledger provider use. Home, not the
+    org argument: a personal-homed set's records belong in personal.db whatever
+    organization the caller is acting as.
+    """
+    from tools.graph import schemas
+
+    home = schemas.declared_home(set_id)
+    return vault_db_path_for(None if home == "personal" else org)
+
+
+def build_key_holder(cache) -> Callable[..., settings_ops.VaultKeyControl]:
     """Return the holder callable ``settings_ops`` invokes on an audited read.
 
-    The callable takes ``set_id``/``org`` (which it does not need — the cache is
-    already scoped to the unlocked org) and returns a
-    :class:`settings_ops.VaultKeyControl` built from the current cache and the
-    persisted key-control store. The store is re-opened per read for the reason
-    the read path documents: ``states`` and ``accepted_bridges`` are snapshots of
-    already-verified records, so re-opening costs nothing and picks up records
-    written since the last read.
+    No store paths. The content and key-control records are read from the SAME
+    database file the settings row was written to, resolved per call. A single
+    path put every scope in one sidecar — a store the design does not have, and
+    a leak between organizations.
     """
-    keycontrol_path = Path(keycontrol_path)
-    content_path = Path(content_path)
 
     def holder(*, set_id: str, org: "str | None") -> settings_ops.VaultKeyControl:
-        with KeyControlStore(keycontrol_path) as key_control:
+        db = _scoped_db(set_id, org)
+        with KeyControlStore(db) as key_control:
             holdings = Holdings(
                 secrets=cache.secrets,
                 descriptors=key_control.states,
                 bridges=list(key_control.accepted_bridges()),
             )
         return settings_ops.VaultKeyControl(
-            holdings=holdings,
-            content_store=ContentStore(content_path),
+            holdings=holdings, content_store=DbContentStore(db)
         )
 
     return holder
 
 
-def register_key_holder(
-    cache: VaultKeyCache,
-    keycontrol_path: "str | Path",
-    content_path: "str | Path",
-) -> Callable[..., settings_ops.VaultKeyControl]:
+def register_key_holder(cache) -> Callable[..., settings_ops.VaultKeyControl]:
     """Build the holder and install it as the process's vault key holder.
 
-    Call once per process, after the key-control and content store paths are
-    known. The cache may be empty at registration and filled at unlock — the
-    holder reads it live, so an audited read before the first unlock fails
-    closed with an empty holdings rather than with a missing-holder error.
+    Call once per process. The cache may be empty at registration and filled at
+    unlock — the holder reads it live, so a read before the first unlock fails
+    closed with empty holdings rather than a missing-holder error.
     """
-    holder = build_key_holder(cache, keycontrol_path, content_path)
+    holder = build_key_holder(cache)
     settings_ops.set_vault_key_holder(holder)
     return holder

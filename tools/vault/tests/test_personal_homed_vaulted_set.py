@@ -68,8 +68,6 @@ def test_seal_revision_cannot_seal_without_an_organization():
     """
     register_vault_sealer(
         VaultKeyCache(),
-        "/tmp/does-not-matter/kc.db",
-        "/tmp/does-not-matter/content",
         lambda: object(),          # an author is available
         lambda set_id, org: None,  # ...but the personal store has no ledger
     )
@@ -86,7 +84,7 @@ def test_the_refusal_names_the_organization_rather_than_the_mechanism():
     not a missing installation, or the next person re-registers the sealer and
     gets the same refusal."""
     register_vault_sealer(
-        VaultKeyCache(), "/tmp/x/kc.db", "/tmp/x/content",
+        VaultKeyCache(),
         lambda: object(), lambda set_id, org: None,
     )
 

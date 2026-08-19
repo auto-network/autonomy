@@ -1043,7 +1043,6 @@ def _bring_vault_up(generation_keys: dict, delegate_hex: "str | None" = None) ->
     Split out so the route stays about the request and this stays about the
     wiring — and so a test can drive the wiring without a session cookie.
     """
-    from tools.data_paths import DATA_ROOT
     from tools.vault.bringup import register_vault_for_unlock
 
     if delegate_hex:
@@ -1059,8 +1058,6 @@ def _bring_vault_up(generation_keys: dict, delegate_hex: "str | None" = None) ->
         author_provider=_agent_delegate,
         org_ledger_provider=_org_fold,
         personal_ledger_provider=_personal_fold,
-        keycontrol_path=DATA_ROOT / "keycontrol.db",
-        content_path=DATA_ROOT / "content",
         cache=_VAULT_CACHE.get("cache"),
     )
     _VAULT_CACHE["cache"] = cache

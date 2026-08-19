@@ -56,7 +56,6 @@ from typing import Callable
 
 from tools.graph import settings_ops
 from tools.network.storagekit.keycontrol import KeyControlStore
-from tools.network.storagekit.store import ContentStore
 from tools.vault.storage_object import Holdings, seal_revision
 
 
@@ -73,12 +72,17 @@ class VaultSealerNotReady(RuntimeError):
 
 def build_vault_sealer(
     cache,
-    keycontrol_path: "str | Path",
-    content_path: "str | Path",
     author_provider: Callable[[], object],
-    ledger_provider: Callable[["str | None"], object],
+    ledger_provider: Callable[[str, "str | None"], object],
 ) -> Callable[..., str]:
     """Return the sealer callable ``settings_ops`` invokes on a vaulted write.
+
+    There are no store paths. A vault set's ciphertext and key-control records
+    land in the SAME database file ``settings_ops`` writes the row to, resolved
+    per call by :func:`~tools.vault.db_content_store.vault_db_path_for`. A
+    single path here would have put every scope's secrets in one sidecar —
+    both a store the design does not have, and a routing leak between
+    organizations.
 
     ``cache`` is the same :class:`~tools.vault.key_holder.VaultKeyCache` the
     holder reads. The ``Holdings`` built here is deliberately byte-identical to
@@ -120,9 +124,6 @@ def build_vault_sealer(
     the fold advances, and sealing against a stale frontier mints into a
     generation the org has moved past.
     """
-    keycontrol_path = Path(keycontrol_path)
-    content_path = Path(content_path)
-
     def sealer(
         *,
         set_id: str,
@@ -150,7 +151,14 @@ def build_vault_sealer(
                 f"genesis, so an unfounded organization cannot hold one."
             )
         frontier, fold_at, authority_ancestry = ledger
-        with KeyControlStore(keycontrol_path) as key_control:
+        # Routed by the set's declared HOME, exactly as the ledger is: a
+        # personal-homed set's ciphertext belongs in personal.db whatever org
+        # the caller is acting as.
+        from tools.vault.db_content_store import DbContentStore
+        from tools.vault.key_holder import _scoped_db
+
+        scoped = _scoped_db(set_id, org)
+        with KeyControlStore(scoped) as key_control:
             holdings = Holdings(
                 secrets=cache.secrets,
                 descriptors=key_control.states,
@@ -172,7 +180,7 @@ def build_vault_sealer(
                 # neither top-level call — it is internal to the key-control
                 # store's own reachability.
                 ancestry=authority_ancestry,
-                content_store=ContentStore(content_path),
+                content_store=DbContentStore(scoped),
                 tier=tier,
             )
             if sealed.advance is not None:
@@ -222,10 +230,8 @@ def _land_advance(advance, cache, key_control, fold_at, authority_ancestry) -> N
 
 def register_vault_sealer(
     cache,
-    keycontrol_path: "str | Path",
-    content_path: "str | Path",
     author_provider: Callable[[], object],
-    ledger_provider: Callable[["str | None"], object],
+    ledger_provider: Callable[[str, "str | None"], object],
 ) -> Callable[..., str]:
     """Build the sealer and install it as the process's vault sealer.
 
@@ -236,8 +242,6 @@ def register_vault_sealer(
     — which says what to do — rather than with "no sealer registered", which
     reads like a missing installation.
     """
-    sealer = build_vault_sealer(
-        cache, keycontrol_path, content_path, author_provider, ledger_provider
-    )
+    sealer = build_vault_sealer(cache, author_provider, ledger_provider)
     settings_ops.set_vault_sealer(sealer)
     return sealer

@@ -131,8 +131,6 @@ def test_bringup_installs_both_seams(tmp_path):
         author_provider=lambda: object(),
         org_ledger_provider=lambda org: None,
         personal_ledger_provider=lambda org: None,
-        keycontrol_path=tmp_path / "kc.db",
-        content_path=tmp_path / "content",
     )
 
     assert settings_ops._vault_sealer is not None, "no write path installed"
@@ -148,14 +146,12 @@ def test_a_second_unlock_adds_to_the_same_cache(tmp_path):
         author_provider=lambda: object(),
         org_ledger_provider=lambda org: None,
         personal_ledger_provider=lambda org: None,
-        keycontrol_path=tmp_path / "kc.db", content_path=tmp_path / "c",
     )
     again = register_vault_for_unlock(
         generation_keys={"state-2": b"j" * 32},
         author_provider=lambda: object(),
         org_ledger_provider=lambda org: None,
         personal_ledger_provider=lambda org: None,
-        keycontrol_path=tmp_path / "kc.db", content_path=tmp_path / "c",
         cache=cache,
     )
 

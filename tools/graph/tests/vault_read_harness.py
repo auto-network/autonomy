@@ -102,18 +102,29 @@ class VaultWorld:
     the storage layer.
     """
 
-    def __init__(self, root: Path, member_count: int = 2):
+    def __init__(self, root: Path, member_count: int = 2, *, scoped: bool = False):
         root = Path(root)
         self.world = World(member_count=member_count)
         self.author = self.world.member(0)
         self.initial, _ = self.world.mint_initial_state(self.author)
         self.genesis_id = self.world.gen
-        self.content_store = ContentStore(root / "content")
+        if scoped:
+            # Read through the PRODUCTION holder and it resolves the scoped
+            # database, so a world that wrote to a sidecar would be testing a
+            # store nothing reads. Opt-in, because most tests here inject
+            # their own holder and want the isolated files.
+            from tools.vault.db_content_store import DbContentStore, vault_db_path_for
+
+            self._scoped_db = vault_db_path_for(None)
+            self.content_store = DbContentStore(self._scoped_db)
+        else:
+            self._scoped_db = None
+            self.content_store = ContentStore(root / "content")
         self.store = self.content_store
         # The real one, on disk. Every open re-verifies content addresses and
         # bridge signatures, so a descriptor this test could not have written
         # cannot appear in the holdings the read path is handed.
-        self.key_control = KeyControlStore(root / "keycontrol.db")
+        self.key_control = KeyControlStore(self._scoped_db or (root / "keycontrol.db"))
         self.policy_class = None
         self.opener_seeds: dict = {}
         self.holder_calls: list = []
@@ -150,7 +161,7 @@ class VaultWorld:
             dict(self._held_override) if self._held_override is not None
             else dict(self.world.held(persona or self.author))
         )
-        with KeyControlStore(self._root / "keycontrol.db") as key_control:
+        with KeyControlStore(self._scoped_db or (self._root / "keycontrol.db")) as key_control:
             return Holdings(
                 secrets=secrets,
                 descriptors=key_control.states,
