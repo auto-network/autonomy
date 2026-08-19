@@ -132,38 +132,6 @@ def test_two_consenting_grants_are_both_valid_and_attribution_is_deterministic()
     )
 
 
-def test_authorize_member_storage_requires_the_members_proof():
-    from tools.network.ledger.projections import organization_content_domain_id
-    from tools.network.storagekit import delegate as delegate_mod
-    from tools.network.storagekit import storage_delegate_scopes
-
-    sim = Sim()
-    persona = KeyPair.generate()
-    sim.role_define(sim.root, "member", requires="self")
-    invite = sim.invite(sim.root, "member", invite_key=persona)
-    sim.claim(invite, persona, persona)
-    domain = organization_content_domain_id(sim.genesis_id)
-
-    with pytest.raises(delegate_mod.DelegateError, match="consent"):
-        delegate_mod.authorize_member_storage(
-            sim.ledger, sim.root, persona, domain,
-            hlc=HLC(sim.next_ts()), child_proof="",
-            grant_nonce="55" * 32,
-        )
-
-    grant = delegate_mod.authorize_member_storage(
-        sim.ledger, sim.root, persona, domain,
-        hlc=HLC(sim.next_ts()),
-        child_proof=sign_delegate_proof(
-            persona, sim.genesis_id, sim.root.public_hex,
-            storage_delegate_scopes(domain),
-            can_redelegate=True, grant_nonce="51" * 32,
-        ),
-        grant_nonce="51" * 32,
-    )
-    assert sim.fold().valid[grant] is True
-
-
 def test_provision_produces_its_own_proof_and_needs_no_extra_input():
     """provision holds the child private half it just generated, so consent
     costs nothing — the minted grant folds valid with no new argument."""
@@ -173,20 +141,16 @@ def test_provision_produces_its_own_proof_and_needs_no_extra_input():
 
     sim = Sim()
     issuer = KeyPair.generate()
-    sim.role_define(sim.root, "member", requires="self")
+    domain = organization_content_domain_id(sim.genesis_id)
+    # The member holds the two storage scopes THROUGH ITS ROLE; the fold's
+    # bounded self-delegation rule (auto-wrkaq) admits the mint with no
+    # root-present enabling act.
+    sim.role_define(
+        sim.root, "member", requires="self",
+        scope_set=storage_delegate_scopes(domain),
+    )
     invite = sim.invite(sim.root, "member", invite_key=issuer)
     sim.claim(invite, issuer, issuer)
-    domain = organization_content_domain_id(sim.genesis_id)
-    delegate_mod.authorize_member_storage(
-        sim.ledger, sim.root, issuer, domain,
-        hlc=HLC(sim.next_ts()),
-        child_proof=sign_delegate_proof(
-            issuer, sim.genesis_id, sim.root.public_hex,
-            storage_delegate_scopes(domain),
-            can_redelegate=True, grant_nonce="52" * 32,
-        ),
-        grant_nonce="52" * 32,
-    )
     minted = delegate_mod.provision(
         sim.ledger, issuer, issuer, sim.genesis_id, hlc=HLC(sim.next_ts()),
     )
@@ -341,19 +305,13 @@ def test_renewal_signs_anew_and_the_two_grants_carry_distinct_nonces():
 
     sim = Sim()
     issuer = KeyPair.generate()
-    sim.role_define(sim.root, "member", requires="self")
+    domain = organization_content_domain_id(sim.genesis_id)
+    sim.role_define(
+        sim.root, "member", requires="self",
+        scope_set=storage_delegate_scopes(domain),
+    )
     invite = sim.invite(sim.root, "member", invite_key=issuer)
     sim.claim(invite, issuer, issuer)
-    domain = organization_content_domain_id(sim.genesis_id)
-    delegate_mod.authorize_member_storage(
-        sim.ledger, sim.root, issuer, domain, hlc=HLC(sim.next_ts()),
-        child_proof=sign_delegate_proof(
-            issuer, sim.genesis_id, sim.root.public_hex,
-            storage_delegate_scopes(domain),
-            can_redelegate=True, grant_nonce="56" * 32,
-        ),
-        grant_nonce="56" * 32,
-    )
     minted = delegate_mod.provision(
         sim.ledger, issuer, issuer, sim.genesis_id, hlc=HLC(sim.next_ts()),
     )

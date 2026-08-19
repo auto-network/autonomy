@@ -57,39 +57,31 @@ TTL = 10_000  # ms
 
 class World:
     """A founded test org with a member issuer holding the two storage
-    scopes re-delegably, a recipient member, and a non-member outsider."""
+    scopes THROUGH ITS ROLE, a recipient member, and a non-member
+    outsider. No root-present enabling act exists any more (auto-wrkaq
+    deleted authorize_member_storage): a member persona mints its own
+    bounded delegates from role-held authority."""
 
     def __init__(self):
         self.sim = Sim()
         s = self.sim
-        s.role_define(s.root, "member", scope_set=["link:publish"])
-        self.issuer = self._admit()
-        self.recipient = self._admit()
         self.gen = s.genesis_id
         self.dom = organization_content_domain_id(self.gen)
-        # Root-present enabling act: the issuer may re-delegate exactly the
-        # two storage scopes (role scopes are non-delegable, so this is
-        # required and is the whole of the issuer's delegable storage reach).
-        delegate_mod.authorize_member_storage(
-            s.ledger, s.root, self.issuer, self.dom, hlc=self._hlc(),
-            child_proof=sign_delegate_proof(
-                self.issuer, self.gen, s.root.public_hex,
-                storage_delegate_scopes(self.dom),
-                can_redelegate=True, grant_nonce="53" * 32,
+        s.role_define(
+            s.root, "member",
+            scope_set=sorted(
+                ["link:publish"] + storage_delegate_scopes(self.dom)
             ),
-            grant_nonce="53" * 32,
         )
-        # A non-member also granted the two scopes re-delegably: a chain
-        # through it terminates OUTSIDE the roster.
+        self.issuer = self._admit()
+        self.recipient = self._admit()
+        # A non-member granted the two scopes re-delegably by the root
+        # (root delegation is unchanged by auto-wrkaq): a chain through it
+        # terminates OUTSIDE the roster.
         self.outside = KeyPair.generate()
-        delegate_mod.authorize_member_storage(
-            s.ledger, s.root, self.outside, self.dom, hlc=self._hlc(),
-            child_proof=sign_delegate_proof(
-                self.outside, self.gen, s.root.public_hex,
-                storage_delegate_scopes(self.dom),
-                can_redelegate=True, grant_nonce="54" * 32,
-            ),
-            grant_nonce="54" * 32,
+        s.delegate(
+            s.root, self.outside, storage_delegate_scopes(self.dom),
+            redelegate=True,
         )
 
     def _admit(self):
