@@ -75,10 +75,11 @@ RUN printf '#!/bin/sh\nexec python3 -m tools.graph "$@"\n' > /usr/local/bin/grap
 ARG AUTONOMY_VERSION=source
 ARG AUTONOMY_BUILD_TIME=
 RUN v="$AUTONOMY_VERSION"; t="$AUTONOMY_BUILD_TIME"; \
-    case "$v" in \
-        ""|unknown) echo "ERROR: AUTONOMY_VERSION must be a commit SHA or 'source', not '$v'." >&2; exit 1 ;; \
-    esac; \
     [ -n "$t" ] || t="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
+    echo "$v" | grep -Eq '^(source|[0-9a-f]{40})$' || { \
+        echo "ERROR: AUTONOMY_VERSION must be a 40-hex commit SHA or the literal 'source', got '$v'." >&2; exit 1; }; \
+    echo "$t" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' || { \
+        echo "ERROR: AUTONOMY_BUILD_TIME must be UTC YYYY-MM-DDTHH:MM:SSZ, got '$t'." >&2; exit 1; }; \
     printf 'commit=%s\nbuilt=%s\n' "$v" "$t" > /app/VERSION
 
 # Persistent state: per-org DBs (identity + credential Settings — the

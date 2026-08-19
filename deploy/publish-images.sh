@@ -40,8 +40,18 @@ echo "==> Building node image from deploy/Dockerfile"
 # build stamps. Derive the SHA from the checkout (overridable) and fail loudly
 # rather than publish an unprovenanced image.
 node_version="${AUTONOMY_VERSION:-$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)}"
-[[ -n "$node_version" ]] || { echo "cannot determine repo SHA for the version stamp; set AUTONOMY_VERSION" >&2; exit 2; }
 node_build_time="${AUTONOMY_BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+# A PUBLISHED image must carry a real commit — never the bare-compose `source`
+# marker and never an arbitrary override. Reject anything but a 40-hex SHA and a
+# UTC timestamp, fail closed rather than distribute an unprovenanced image.
+if [[ ! "$node_version" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "AUTONOMY_VERSION must be a 40-hex commit SHA for a published image, got '$node_version'" >&2
+    exit 2
+fi
+if [[ ! "$node_build_time" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+    echo "AUTONOMY_BUILD_TIME must be UTC YYYY-MM-DDTHH:MM:SSZ, got '$node_build_time'" >&2
+    exit 2
+fi
 node_build=(
     docker build --pull
     --build-arg "BASE_IMAGE=${AUTONOMY_BASE_IMAGE:-python:3.12-slim}"
