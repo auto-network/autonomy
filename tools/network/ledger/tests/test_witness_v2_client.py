@@ -176,3 +176,43 @@ def test_v1_last_reanchors_on_first_v2(key):
     a1 = _att(key, 1, {"authority": [_h(1)]}, None, 10)
     j.admit(a1)  # first v2 is a fresh baseline despite the v1 last
     assert j.seq == 1 and j.reanchored_from_v1 is True
+
+
+# -- section 4: the equivocation proofs verify (EquivocationProof.verify on v2) --
+
+from tools.network.ledger.witness import EquivocationProof
+
+
+def test_decreasing_t_proof_verifies(key):
+    j = _journal(key, {"authority": {_h(1): [], _h(2): [_h(1)]}})
+    a1 = _att(key, 1, {"authority": [_h(1)]}, None, 5000)
+    j.admit(a1)
+    a2 = _att(key, 2, {"authority": [_h(2)]}, ww.entry_id(a1["entry"]), 4000)
+    with pytest.raises(WitnessEquivocation) as ei:
+        j.admit(a2)
+    proof = ei.value.proof
+    assert proof.kind == "decreasing-t"
+    assert proof.verify(key.public_hex) is True
+    assert proof.verify(KeyPair.generate().public_hex) is False  # wrong pin
+
+
+def test_split_seq_proof_verifies_on_v2(key):
+    j = _journal(key, {"authority": {_h(1): [], _h(2): []}})
+    j.admit(_att(key, 1, {"authority": [_h(1)]}, None, 10))
+    with pytest.raises(WitnessEquivocation) as ei:
+        j.admit(_att(key, 1, {"authority": [_h(2)]}, None, 10))
+    assert ei.value.proof.verify(key.public_hex) is True
+
+
+def test_fork_prev_proof_verifies_on_v2(key):
+    j = _journal(key, {"authority": {_h(1): [], _h(2): [_h(1)]}})
+    j.admit(_att(key, 1, {"authority": [_h(1)]}, None, 10))
+    with pytest.raises(WitnessEquivocation) as ei:
+        j.admit(_att(key, 2, {"authority": [_h(2)]}, _h(9), 11))  # bad prev
+    assert ei.value.proof.verify(key.public_hex) is True
+
+
+def test_cross_version_pair_never_verifies(key):
+    v1 = ww.sign_attestation(key, ww.build_entry(ORG, "ledger", 1, [_h(1)], None, PUB))
+    v2 = _att(key, 1, {"authority": [_h(1)]}, None, 10)
+    assert EquivocationProof(v1, v2, "split-seq").verify(key.public_hex) is False
