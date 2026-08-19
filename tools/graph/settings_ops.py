@@ -209,6 +209,15 @@ def _rank_candidates(
     eligible = []
     for src_org, row in candidate_bases:
         persona = _row_col(row, "terminal_persona")
+        # PERMISSIVE BRANCH, deliberately: an unsigned row (persona is None)
+        # takes no eligibility test even in an organization store. The design
+        # says an unsigned org row does not resolve — but that rule is safe
+        # only once auto-4zzxd's one-time signing pass has migrated the store
+        # atomically; today's population is entirely unsigned and enforcing it
+        # would dark every org's settings. auto-4zzxd owns the flip and
+        # carries the acceptance that FAILS while this branch survives it:
+        # after the pass, an unsigned row in a founded org store must not
+        # resolve. Ratified 2026-08-19 (crypto pillar).
         if persona is not None:
             if persona not in _org_fold_members(src_org):
                 if dropped is not None:
