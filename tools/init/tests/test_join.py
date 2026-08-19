@@ -75,6 +75,12 @@ class FakeOrg:
 def volume(tmp_path, monkeypatch):
     monkeypatch.setenv(REFUSE_REAL_DATA_FALLBACK_ENV, "1")
     for store in STORE_MANIFEST:
+        if store.key == "graph":
+            # Deliberately NOT pinned — the dashboard conftest's rule: a
+            # GRAPH_DB pin conflicts with every explicit-org settings write
+            # under the fail-loud resolver (org='personal' writes are part
+            # of the join/bootstrap flow itself).
+            continue
         if store.env:
             monkeypatch.setenv(store.env, str(tmp_path / "data" / store.relative))
     (tmp_path / "data").mkdir(exist_ok=True)

@@ -119,6 +119,12 @@ def main() -> int:
     os.environ["AUTONOMY_TEST_PERSONAL_PASSWORD_FILE"] = str(args.password_file)
     os.environ.pop("AUTONOMY_FIRST_ORG", None)
     for store in STORE_MANIFEST:
+        if store.key == "graph":
+            # Deliberately NOT pinned — the dashboard conftest's rule: a
+            # GRAPH_DB pin conflicts with every explicit-org settings write
+            # under the fail-loud resolver (org='personal' writes are part
+            # of the join/bootstrap flow itself).
+            continue
         if store.env:
             os.environ[store.env] = str(args.volume / store.relative)
 
@@ -142,6 +148,7 @@ def main() -> int:
         "org_dbs": sorted(
             path.name for path in (args.volume / "orgs").glob("*.db")
         ),
+        "personal_db": (args.volume / "personal.db").exists(),
     }, sort_keys=True))
     return 0
 

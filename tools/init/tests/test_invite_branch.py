@@ -33,8 +33,17 @@ def volume(tmp_path, monkeypatch):
     store we forgot to root raises rather than touching real data/."""
     monkeypatch.setenv(REFUSE_REAL_DATA_FALLBACK_ENV, "1")
     for store in STORE_MANIFEST:
+        if store.key == "graph":
+            # Never pinned: a GRAPH_DB pin conflicts with the join flow's
+            # explicit org='personal' writes; the ambient base below roots
+            # graph.db at the same path without collapsing org routing.
+            monkeypatch.delenv(store.env, raising=False)
+            continue
         if store.env:
             monkeypatch.setenv(store.env, str(tmp_path / "data" / store.relative))
+    from tools.data_paths import DATA_ROOT_ENV
+
+    monkeypatch.setenv(DATA_ROOT_ENV, str(tmp_path / "data"))
     monkeypatch.delenv("AUTONOMY_FIRST_ORG", raising=False)
     monkeypatch.delenv("AUTONOMY_INVITE", raising=False)
     return tmp_path
@@ -49,7 +58,10 @@ def test_invite_branch_founds_no_shared_org(volume):
     a node that also founded its own would have two identities."""
     report = initialize(volume, invite=code(), tls=False)
     orgs = {p.stem for p in (volume / "data" / "orgs").glob("*.db")}
-    assert orgs == {"personal"}, f"join path created a shared org: {orgs}"
+    assert orgs == set(), f"join path created a shared org: {orgs}"
+    # The personal store is not an organization; it lands beside orgs/
+    # (auto-35kmy).
+    assert (volume / "data" / "personal.db").exists()
     assert _step(report, "org:personal").action == CREATED
     join = _step(report, "join")
     assert join.action == PENDING
@@ -58,7 +70,8 @@ def test_invite_branch_founds_no_shared_org(volume):
 def test_create_branch_still_founds(volume):
     report = initialize(volume, first_org="acme", tls=False)
     orgs = {p.stem for p in (volume / "data" / "orgs").glob("*.db")}
-    assert orgs == {"acme", "personal"}
+    assert orgs == {"acme"}
+    assert (volume / "data" / "personal.db").exists()
     assert _step(report, "join") is None
 
 
@@ -85,7 +98,7 @@ def test_the_report_never_carries_the_bearer(volume):
 def test_join_branch_writes_only_inside_the_volume(volume):
     """The B1 contract holds on the join path too."""
     initialize(volume, invite=code(), tls=False)
-    assert (volume / "data" / "orgs" / "personal.db").exists()
+    assert (volume / "data" / "personal.db").exists()
     assert (volume / "data" / "graph.db").exists()
 
 
