@@ -62,7 +62,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # unsigned rows, idx_settings_one_slot adds terminal_persona for signed rows,
 # and the duplicate-base self-heal groups by the same columns (the pair moves
 # as one).
-_SCHEMA_USER_VERSION = 7
+_SCHEMA_USER_VERSION = 8
 DEFAULT_DB = DATA_ROOT / "graph.db"
 DEFAULT_ORGS_DIR = DATA_ROOT / "orgs"
 
@@ -484,6 +484,7 @@ class GraphDB:
         self._migrate_sources_type_index()
         self._migrate_settings()
         self._migrate_orgs()
+        self._migrate_keycontrol_credential_wire()
         self._migrate_message_id_unique()
         self._seed_tags()
         # NOTE (auto-06ziz): schema-meta Settings are intentionally NOT flushed
@@ -493,6 +494,31 @@ class GraphDB:
         # comment above.
         # Stamp the version so subsequent opens hit the fast-path guard above.
         self.conn.execute(f"PRAGMA user_version = {_SCHEMA_USER_VERSION}")
+
+    def _migrate_keycontrol_credential_wire(self):
+        """Allow the credential body to be pruned while its audit row remains."""
+        columns = self.conn.execute(
+            "PRAGMA table_info(keycontrol_credential)"
+        ).fetchall()
+        wire = next((row for row in columns if row[1] == "wire"), None)
+        if wire is None or not bool(wire[3]):
+            return
+        self.conn.executescript("""
+            DROP INDEX IF EXISTS keycontrol_credential_persona;
+            ALTER TABLE keycontrol_credential
+                RENAME TO keycontrol_credential_pre_v8;
+            CREATE TABLE keycontrol_credential (
+                kem_key_id TEXT PRIMARY KEY,
+                persona    TEXT NOT NULL,
+                wire       BLOB
+            );
+            INSERT INTO keycontrol_credential(kem_key_id,persona,wire)
+                SELECT kem_key_id,persona,wire
+                FROM keycontrol_credential_pre_v8;
+            DROP TABLE keycontrol_credential_pre_v8;
+            CREATE INDEX keycontrol_credential_persona
+                ON keycontrol_credential(persona);
+        """)
 
     def _migrate_attachments_alt_text(self):
         """Add alt_text column to attachments table if missing (idempotent)."""

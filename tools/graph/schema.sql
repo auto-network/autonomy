@@ -410,3 +410,80 @@ CREATE TABLE IF NOT EXISTS settings (
     )
 );
 -- Indices created via _migrate_settings so legacy DBs survive executescript.
+
+-- ============================================================
+-- VAULT CONTENT + KEY CONTROL — scoped durable encrypted state
+-- ============================================================
+-- These tables live in the database whose scope owns the encrypted content.
+-- Fleet sync carries immutable records; local progress/caches are rebuilt or
+-- retained only on the machine that owns them.
+CREATE TABLE IF NOT EXISTS vault_content_bodies (
+    ciphertext_hash TEXT PRIMARY KEY,
+    size_bytes      INTEGER NOT NULL,
+    body            BLOB NOT NULL,
+    created_at      INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS vault_content_objects (
+    object_id        TEXT NOT NULL,
+    revision_id      TEXT NOT NULL,
+    genesis_id       TEXT NOT NULL,
+    domain_id        TEXT NOT NULL,
+    storage_state_id TEXT NOT NULL,
+    ciphertext_hash  TEXT NOT NULL,
+    header_json      BLOB NOT NULL,
+    created_at       INTEGER NOT NULL,
+    PRIMARY KEY (object_id, revision_id)
+);
+CREATE INDEX IF NOT EXISTS idx_vault_content_objects_hash
+    ON vault_content_objects(ciphertext_hash);
+CREATE INDEX IF NOT EXISTS idx_vault_content_objects_state
+    ON vault_content_objects(storage_state_id);
+
+-- Derived locally from vault_content_objects after materialization.
+CREATE TABLE IF NOT EXISTS vault_state_object_counts (
+    storage_state_id TEXT PRIMARY KEY,
+    object_count     INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS keycontrol_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS keycontrol_state (
+    state_id TEXT PRIMARY KEY,
+    wire     BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS keycontrol_credential (
+    kem_key_id TEXT PRIMARY KEY,
+    persona    TEXT NOT NULL,
+    wire       BLOB
+);
+CREATE INDEX IF NOT EXISTS keycontrol_credential_persona
+    ON keycontrol_credential (persona);
+CREATE TABLE IF NOT EXISTS keycontrol_bridge (
+    bridge_id       TEXT PRIMARY KEY,
+    child_state_id  TEXT NOT NULL,
+    parent_state_id TEXT NOT NULL,
+    wire            BLOB
+);
+CREATE INDEX IF NOT EXISTS keycontrol_bridge_edge
+    ON keycontrol_bridge (child_state_id, parent_state_id);
+CREATE TABLE IF NOT EXISTS keycontrol_pending (
+    record_type            TEXT NOT NULL,
+    claimed_id             TEXT NOT NULL,
+    unmet_dependency_kind  TEXT NOT NULL,
+    unmet_dependency_id    TEXT NOT NULL,
+    first_held_at_ms       INTEGER NOT NULL,
+    first_delivery_peer_id TEXT,
+    wire                   BLOB NOT NULL,
+    wire_len               INTEGER NOT NULL,
+    PRIMARY KEY (record_type, claimed_id)
+);
+CREATE INDEX IF NOT EXISTS keycontrol_pending_dependency
+    ON keycontrol_pending (unmet_dependency_kind, unmet_dependency_id);
+CREATE TABLE IF NOT EXISTS keycontrol_pending_usage (
+    id            INTEGER PRIMARY KEY CHECK (id = 1),
+    pending_rows  INTEGER NOT NULL,
+    pending_bytes INTEGER NOT NULL
+);

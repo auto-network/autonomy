@@ -19,7 +19,7 @@ import tempfile
 from typing import Callable, Iterable
 
 from .codec import CanonicalValue, Mutation, encode_value
-from .policies import TABLE_POLICIES
+from .policies import PolicyKind, TABLE_POLICIES
 
 
 class MaterializationError(ValueError):
@@ -73,7 +73,9 @@ class ContentAddressedBlobStore:
 # Parents precede children. Tables without declared foreign keys are still
 # placed after the content they describe so failures are understandable.
 _TABLE_ORDER = (
-    "sources", "entities", "nodes", "tags", "threads", "settings",
+    "sources", "entities", "nodes", "tags", "threads",
+    "vault_content_bodies", "keycontrol_state", "keycontrol_credential",
+    "keycontrol_bridge", "vault_content_objects", "settings",
     "thoughts", "derivations", "claims", "edges", "entity_mentions",
     "node_refs", "note_comments", "note_reads", "captures", "attachments",
     "note_versions",
@@ -114,6 +116,10 @@ def _edge_id(mutation: Mutation) -> str:
 
 def _delete(conn: sqlite3.Connection, mutation: Mutation) -> None:
     policy = TABLE_POLICIES[mutation.table]
+    if policy.kind in {PolicyKind.IMMUTABLE, PolicyKind.IMMUTABLE_PRUNABLE}:
+        raise MaterializationError(
+            f"immutable table does not accept tombstones: {mutation.table}"
+        )
     if mutation.table == "note_versions":
         source_id, created_at, content_hash = mutation.address
         rows = conn.execute(
@@ -224,9 +230,10 @@ def _upsert(conn: sqlite3.Connection, mutation: Mutation, row: dict[str, object]
 
     where, params = _where(key_columns, row)
     existing = conn.execute(
-        f'SELECT rowid FROM "{mutation.table}" WHERE {where}', params
+        f'SELECT * FROM "{mutation.table}" WHERE {where}', params
     ).fetchone()
     if existing is None:
+        _validate_immutable_row(mutation.table, row)
         try:
             _insert(conn, mutation.table, row)
         except sqlite3.IntegrityError as exc:
@@ -235,11 +242,80 @@ def _upsert(conn: sqlite3.Connection, mutation: Mutation, row: dict[str, object]
                 f"{mutation.address!r}: {exc}"
             ) from exc
         return
+    if policy.kind in {PolicyKind.IMMUTABLE, PolicyKind.IMMUTABLE_PRUNABLE}:
+        _merge_immutable_row(conn, mutation.table, where, params, row, existing)
+        return
     assignments = ",".join(f'"{column}"=?' for column in sorted(row))
     values = [row[column] for column in sorted(row)]
     conn.execute(
         f'UPDATE "{mutation.table}" SET {assignments} WHERE {where}',
         values + params,
+    )
+
+
+def _validate_immutable_row(table: str, row: dict[str, object]) -> None:
+    if table != "vault_content_bodies":
+        return
+    body = row.get("body")
+    digest = row.get("ciphertext_hash")
+    size = row.get("size_bytes")
+    if not isinstance(body, bytes) or not isinstance(digest, str):
+        raise MaterializationError("vault ciphertext body has invalid storage types")
+    if not isinstance(size, int) or isinstance(size, bool):
+        raise MaterializationError("vault ciphertext size has invalid storage type")
+    if len(body) != size or hashlib.sha256(body).hexdigest() != digest:
+        raise MaterializationError("vault ciphertext body does not match its hash/size")
+
+
+def _merge_immutable_row(
+    conn: sqlite3.Connection,
+    table: str,
+    where: str,
+    params: list[object],
+    incoming: dict[str, object],
+    existing_raw: sqlite3.Row | tuple[object, ...],
+) -> None:
+    """Insert-once semantics, with one explicitly local nullable body."""
+
+    columns = [str(item[1]) for item in conn.execute(f'PRAGMA table_info("{table}")')]
+    existing = dict(zip(columns, existing_raw, strict=True))
+    if set(existing) != set(incoming):
+        raise MaterializationError(f"immutable {table} row has incomplete columns")
+    _validate_immutable_row(table, incoming)
+    if existing == incoming:
+        return
+    policy = TABLE_POLICIES[table]
+    if policy.kind is PolicyKind.IMMUTABLE_PRUNABLE:
+        non_wire = set(existing) - {"wire"}
+        if all(existing[column] == incoming[column] for column in non_wire):
+            old_wire = existing["wire"]
+            new_wire = incoming["wire"]
+            if old_wire is None and new_wire is not None:
+                conn.execute(f'UPDATE "{table}" SET wire=? WHERE {where}', [new_wire] + params)
+                return
+            if old_wire is not None and new_wire is None:
+                # A remote/local prune cannot erase a body this peer holds.
+                return
+    raise MaterializationError(
+        f"immutable {table} row conflicts at its logical address"
+    )
+
+
+def _finish_vault_materialization(conn: sqlite3.Connection) -> None:
+    missing = conn.execute(
+        "SELECT object_id,revision_id FROM vault_content_objects o "
+        "WHERE NOT EXISTS (SELECT 1 FROM vault_content_bodies b "
+        "WHERE b.ciphertext_hash=o.ciphertext_hash) LIMIT 1"
+    ).fetchone()
+    if missing is not None:
+        raise MaterializationError(
+            "vault content object references a missing ciphertext body"
+        )
+    conn.execute("DELETE FROM vault_state_object_counts")
+    conn.execute(
+        "INSERT INTO vault_state_object_counts(storage_state_id,object_count) "
+        "SELECT storage_state_id,COUNT(*) FROM vault_content_objects "
+        "GROUP BY storage_state_id"
     )
 
 
@@ -299,4 +375,5 @@ def materialize(
                     row["file_path"] = str(path)
                 _upsert(conn, mutation, row)
                 applied += 1
+        _finish_vault_materialization(conn)
     return MaterializationReport(applied, deleted, tuple(sorted(pending)))

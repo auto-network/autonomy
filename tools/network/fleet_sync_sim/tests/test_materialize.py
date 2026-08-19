@@ -18,6 +18,8 @@ REPLICATED_TABLES = {
     "attachments", "captures", "claims", "derivations", "edges", "entities",
     "entity_mentions", "node_refs", "nodes", "note_comments", "note_reads",
     "note_versions", "settings", "sources", "tags", "thoughts", "threads",
+    "vault_content_bodies", "vault_content_objects", "keycontrol_state",
+    "keycontrol_credential", "keycontrol_bridge",
 }
 
 
@@ -159,7 +161,23 @@ def test_settings_override_tombstone_does_not_delete_base_slot(tmp_path: Path) -
 
 def _seed_every_logical_table(db: GraphDB, blob: bytes, local_root: Path) -> str:
     digest = _seed_source_graph(db, blob, local_root)
+    ciphertext = b"sealed personal secret"
+    ciphertext_hash = hashlib.sha256(ciphertext).hexdigest()
     statements = [
+        ("INSERT INTO vault_content_bodies(ciphertext_hash,size_bytes,body,created_at) "
+         "VALUES(?,?,?,?)",
+         (ciphertext_hash, len(ciphertext), ciphertext, 1_787_000_000)),
+        ("INSERT INTO vault_content_objects(object_id,revision_id,genesis_id,domain_id,"
+         "storage_state_id,ciphertext_hash,header_json,created_at) VALUES(?,?,?,?,?,?,?,?)",
+         ("vault-object", "revision-1", "genesis", "personal", "state-1",
+          ciphertext_hash, b'{"exact":"bytes"}', 1_787_000_000)),
+        ("INSERT INTO keycontrol_state(state_id,wire) VALUES(?,?)",
+         ("state-1", b"state-wire")),
+        ("INSERT INTO keycontrol_credential(kem_key_id,persona,wire) VALUES(?,?,?)",
+         ("kem-1", "persona-1", b"credential-wire")),
+        ("INSERT INTO keycontrol_bridge(bridge_id,child_state_id,parent_state_id,wire) "
+         "VALUES(?,?,?,?)",
+         ("bridge-1", "state-1", "state-0", b"bridge-wire")),
         ("INSERT INTO derivations(id,source_id,thought_id,content,model,created_at) "
          "VALUES(?,?,?,?,?,?)",
          ("d1", "s1", "t1", "An answer", "model", "2026-08-19T10:00:04Z")),

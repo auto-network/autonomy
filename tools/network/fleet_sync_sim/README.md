@@ -12,7 +12,9 @@ the durable rows from these tables:
 `attachments` (metadata), `captures`, `claims`, `derivations`, `edges`,
 `entities`, `entity_mentions`, `node_refs`, `nodes`, `note_comments`,
 `note_reads`, `note_versions`, `settings`, `sources`, `tags`, `thoughts`, and
-`threads`.
+`threads`; encrypted `vault_content_bodies` and `vault_content_objects`; and
+the `keycontrol_state`, `keycontrol_credential`, and `keycontrol_bridge`
+records required to open those secrets on another fleet machine.
 
 It deliberately does not carry:
 
@@ -20,6 +22,8 @@ It deliberately does not carry:
 - FTS virtual/shadow tables, indexes, and triggers, which are rebuilt locally;
 - `file_path` values, which have meaning only on the originating machine;
 - personal-root and passkey Settings rows; and
+- derived `vault_state_object_counts` (rebuilt exactly from object rows) or
+  machine-local key-control metadata, pending queues, and usage counters; and
 - attachment bytes inside graph-row frames.  Attachment metadata names the
   SHA-256 object; the bytes are a separately coded RaptorQ artifact and the
   target path is published only after hash/size verification and atomic rename.
@@ -61,6 +65,14 @@ candidate_hash)`.  This timestamp LWW rule is associative, commutative, and
 idempotent.  A checkpoint is fed through the same inbox as live mutations and
 is always a bulk merge, never a database replacement.
 
+The vault families intentionally narrow that general rule. Ciphertext bodies,
+object headers, and state descriptors are immutable: a byte-identical replay
+is inert and any same-key difference fails closed. Credential and bridge
+records are immutable except for a local `wire = NULL` tail-body prune. A
+non-NULL copy always wins over NULL regardless of timestamp, so synchronizing
+with any complete peer restores a pruned body and a prune never erases a body
+another peer still holds.
+
 ## Earned watermarks and exact bases
 
 For every active origin `p`, a published watermark `Wp` is a durable promise,
@@ -91,8 +103,9 @@ and digest; acknowledgments happen only after atomic durable installation.
 `materialize()` applies converged winners to an actual GraphDB in dependency
 order.  It derives local edge IDs, resolves Settings slots, assigns note
 display-version numbers from `(created_at, content_hash)`, regenerates FTS via
-the normal database triggers, and stages attachment metadata until verified
-bytes exist locally.
+the normal database triggers, verifies embedded vault ciphertext by size and
+SHA-256, installs bodies before their object headers, rebuilds per-state vault
+counts, and stages attachment metadata until verified bytes exist locally.
 
 ## Transactional mutation catalog
 
@@ -245,13 +258,15 @@ SQLite/GraphDB, RelayKit/swarmkit, and the pinned `raptorq` package. It opens no
 listener and adds no daemon, service unit, background process, account, port,
 or external database.
 
-Calling `FleetSyncAlpha` on a database currently installs the five local
-tracking tables, one local catalog-order index, logical-key indexes for the 17
-replicated tables, and insert/update/delete triggers on those tables. It does
-not increment GraphDB's `user_version` because this package is not activated in
-production. Production adoption therefore requires a real GraphDB migration,
-including a one-time initial winner for every existing logical row, followed
-atomically by converting every personal-store writer to the authored
+GraphDB schema version 8 creates the scoped vault and key-control tables so a
+fresh checkpoint receiver has the exact durable schema before materializing
+records. This schema migration does not activate synchronization. Calling
+`FleetSyncAlpha` still explicitly installs the five local tracking tables, one
+local catalog-order index, logical-key indexes for the 22 replicated tables,
+and insert/update/delete triggers on those tables. Production activation still
+requires a one-time initial winner for every existing logical row, followed
+atomically by converting every personal-store writer—including the vault and
+key-control stores' current independent SQLite connections—to the authored
 transaction API. The alpha refuses to checkpoint a populated database whose
 live-row count is not completely covered by its catalog. Installing the
 fail-closed triggers before bootstrapping existing rows or converting all

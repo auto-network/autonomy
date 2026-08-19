@@ -430,6 +430,27 @@ def _copy_local_state(source: Path, target: sqlite3.Connection) -> None:
                 + ") VALUES(" + ",".join("?" for _ in columns) + ")",
                 [row[column] for column in columns],
             )
+        local_tables = {
+            str(row[0]) for row in local.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        for table in (
+            "keycontrol_meta", "keycontrol_pending", "keycontrol_pending_usage"
+        ):
+            if table not in local_tables:
+                continue
+            for raw in local.execute(f'SELECT * FROM "{table}"'):
+                row = dict(raw)
+                columns = sorted(row)
+                target.execute(
+                    f'INSERT INTO "{table}"('
+                    + ",".join(f'"{column}"' for column in columns)
+                    + ") VALUES("
+                    + ",".join("?" for _ in columns)
+                    + ")",
+                    [row[column] for column in columns],
+                )
         target.commit()
         local.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     finally:

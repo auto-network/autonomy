@@ -22,6 +22,13 @@ def test_current_graph_schema_is_completely_classified(tmp_path: Path) -> None:
     assert classified["sources"] is PolicyKind.LWW
     assert classified["note_versions"] is PolicyKind.SPECIAL
     assert classified["attachments"] is PolicyKind.EXTERNAL_BLOB
+    assert classified["vault_content_bodies"] is PolicyKind.IMMUTABLE
+    assert classified["vault_content_objects"] is PolicyKind.IMMUTABLE
+    assert classified["vault_state_object_counts"] is PolicyKind.DERIVED
+    assert classified["keycontrol_state"] is PolicyKind.IMMUTABLE
+    assert classified["keycontrol_credential"] is PolicyKind.IMMUTABLE_PRUNABLE
+    assert classified["keycontrol_bridge"] is PolicyKind.IMMUTABLE_PRUNABLE
+    assert classified["keycontrol_pending"] is PolicyKind.LOCAL
     assert classified["orgs"] is PolicyKind.LOCAL
     assert classified["sources_fts_data"] is PolicyKind.DERIVED
 
