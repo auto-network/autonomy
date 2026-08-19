@@ -56,7 +56,7 @@ def world(tmp_path):
         hlc=w._hlc(), ttl_ms=TTL_MS,
     )
 
-    def ledger_provider(_org):
+    def ledger_provider(_set_id, _org):
         return (
             w.sim.fold(),
             lambda heads: w.sim.fold(heads=list(heads)),
@@ -148,8 +148,8 @@ def test_the_storage_ancestry_is_refused_on_this_path(world):
     """
     cache = VaultKeyCache()
 
-    def wrong_ledger(_org):
-        frontier, fold_at, _authority = world["ledger_provider"](_org)
+    def wrong_ledger(_set_id, _org):
+        frontier, fold_at, _authority = world["ledger_provider"](_set_id, _org)
         with KeyControlStore(world["kc"]) as kc:
             return frontier, fold_at, kc.ancestry     # the STORAGE DAG
 
