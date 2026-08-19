@@ -157,7 +157,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--rows", type=int, default=100_000)
     parser.add_argument("--payload-bytes", type=int, default=400)
-    parser.add_argument("--target-bytes", type=int, default=8 * 1024 * 1024)
+    parser.add_argument("--target-bytes", type=int, default=4 * 1024 * 1024)
     parser.add_argument("--target-database", type=Path)
     parser.add_argument("--batch-records", type=int, default=1024)
     args = parser.parse_args()

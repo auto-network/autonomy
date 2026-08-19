@@ -1,7 +1,8 @@
 # Fleet checkpoint simulation
 
-This package proves the checkpoint synchronization design against the real
-personal GraphDB schema before the production engine is introduced.
+This package contains the executable 1.0-alpha library and simulator for the
+checkpoint synchronization design against the real personal GraphDB schema.
+It is not yet installed into the dashboard's production GraphDB write paths.
 
 ## Replication boundary
 
@@ -93,10 +94,50 @@ display-version numbers from `(created_at, content_hash)`, regenerates FTS via
 the normal database triggers, and stages attachment metadata until verified
 bytes exist locally.
 
-This remains simulation code, not the production database adapter.  In
-particular, a current SQLite snapshot cannot recover overwritten values or
-tombstones that were never logged.  The production engine must capture each
-mutation at write time and retain tombstones through the compaction frontier.
+## Transactional mutation catalog
+
+`catalog.py` closes the snapshot-only gap. It adds five local-only tables: a
+singleton containing the catalog version, machine incarnation, last authored
+timestamp and no-more-before floor; normalized machine and transaction
+dictionaries; one skinny current-winner/tombstone row per canonical logical
+address; and a bounded unacknowledged transaction journal. The winner catalog
+never duplicates live payload.
+
+SQLite insert/update/delete triggers capture the address transition in the
+same transaction as the graph write. Writes to a replicated table without an
+authored transaction context fail closed; the two excluded identity Settings
+remain writable outside replication. A logical-key change emits a live new
+address and a tombstone for the old address. Rollback removes both effects.
+
+An authored transaction has one monotonic scalar timestamp and stable operation
+indexes. The receiver groups its records, resolves current winners, realizes
+them in dependency order, and commits atomically. Store-forward retains the
+original machine incarnation and transaction identity. Equal timestamps use
+the canonical candidate hash; replay is inert.
+
+On 100,000 400-byte source rows, normalization reduced current-winner tracking
+allocation from 269 to 141 bytes per address. After pruning the journal and
+VACUUM, the measured steady file delta was 113 bytes/address relative to the
+same indexed graph. Canonical logical-key indexes remain a separate ~24
+bytes/address on the million-row source corpus, for an estimated 137 MiB of
+steady local overhead per million short-key addresses. Without journal
+framing, tracked ingestion accepted 18,782 rows/s versus 24,804 rows/s; with
+the current per-row Python compression callback it accepted 5,011 versus
+24,506 rows/s. Native transaction-level framing/compression is therefore a
+performance requirement for production, not a format change.
+
+The current-winner catalog cannot replace transaction history: a hot receiver
+that missed a multi-table transaction needs the original frames in their
+atomic group. `fleet_sync_journal` therefore retains compressed canonical
+frames only until a durably acknowledged exact base covers them. On the same
+workload that transient journal costs 390 bytes per unacknowledged changed row
+(39.0 MiB for 100,000 changes), then becomes reusable free SQLite space after
+pruning. It is measured separately from steady catalog overhead.
+
+The payload-free winner artifact measured 229 bytes/address. That is checkpoint
+wire metadata, not another persistent payload copy: each live row's values
+appear only in the canonical base, while the winner stream supplies the LWW
+timestamp/provenance and tombstones needed to merge it correctly.
 
 ## Indexed bounded-memory base codec
 
@@ -119,3 +160,119 @@ at 7,570 rows/s with the same 187 MiB peak. The earlier oracle used about
 2,982 MiB on a smaller 207 MiB encoded corpus. The logical-key indexes add
 23.0 MiB (5.3%) to the million-row database and every query plan is an index
 walk with no temporary sort.
+
+## 1.0-alpha checkpoint lifecycle
+
+`alpha.py` composes the pieces into one lifecycle:
+
+1. persist the no-more-before floor and establish a frozen WAL read snapshot;
+2. release writers and stream the snapshot into key-ordered base chunks;
+3. stream one payload-free current winner/tombstone record per logical address
+   from that same cut (independent of whether older acknowledged journal
+   history has retired);
+4. commit every immutable chunk and strict catalog by SHA-256 root;
+5. reconstruct each immutable object through real RaptorQ;
+6. validate and realize the base in bounded batches into a staging GraphDB;
+7. apply transaction-grouped deltas, preserving origin and tombstones;
+8. retain the receiving machine's excluded identity armor; and
+9. publish the completed SQLite file only after validation and fsync.
+
+The alpha manifest commits the frozen roster epoch and hash, origin
+incarnation, watermark, base root, and payload-free winner root. The winner
+stream carries address, timestamp, tombstone, origin/transaction identity,
+operation index, and candidate hash. The installer recomputes every live
+candidate hash from the realized base and refuses a mismatch. Consequently a
+full checkpoint contains each live payload once rather than duplicating the
+database in a second mutation stream. Incremental hot deltas still carry
+payload, because they must be applicable without a new base.
+
+Base order, delta/winner order, and RaptorQ packet order are independent.
+Decoders reject wrong versions, policies, sequences, framing, canonical bytes,
+hashes, and trailing input.
+
+The alpha is an embedded library. It adds no process, daemon, port, external
+service, or dependency beyond the repository's existing SQLite, GraphDB,
+RelayKit/swarmkit, and pinned `raptorq` runtime. The current installer requires
+the target personal database to be offline during atomic replacement. Before
+production activation, catalog installation must become a GraphDB migration
+and every production personal-store writer must enter the authored transaction
+adapter; installing the triggers first would intentionally reject legacy direct
+writes.
+
+`live_workload.py` runs actual concurrent SQLite writer and reader connections
+while repeatedly freezing checkpoints, reconstructing every artifact through
+RaptorQ, and installing them on a receiver. It asserts coherent cuts, no read
+errors, dependency-safe transactions, retained tombstones, and zero final lag
+after the writer stops. This is sustained-load evidence, not a pre-generated
+event schedule.
+
+The final six-second Alpha run committed 507 eight-row transactions while 900
+source reads and 900 receiver reads ran concurrently. Thirteen incremental
+installs bounded observed lag at 73 transactions; the final reliable delta
+drained it to zero in 1.27 seconds. Both databases ended with the same 3,551
+rows and no read errors. The measured authored rate was 81.7 transactions/s
+(about 654 inserted rows/s, plus deletes) with the current Python trigger and
+compression path.
+
+`alpha_benchmark.py` drives the complete authored-write → frozen checkpoint →
+RaptorQ reconstruction → verified staging install lifecycle with a configurable
+real-schema corpus and records per-stage wall/CPU time, artifact/database size,
+logical digest, and peak RSS. `chain_benchmark.py` holds the logical corpus
+constant while sweeping 2/4/8/16/32/64 MiB objects and one/two/four RaptorQ
+workers. On exactly 524,000,000 logical bytes (one million rows), 4 MiB was the
+best measured lifecycle balance: 125 objects, 216/392/590 MiB/s at one/two/four
+workers, a 297 MiB conservative four-worker RSS upper bound, and 163.65 seconds
+for encode, RaptorQ, and verified realization. Two MiB improved four-worker
+coding to 670 MiB/s and reduced that memory bound to 215 MiB, but doubled the
+object count to 250 and slowed encoding enough to make the lifecycle 166.78
+seconds. The Alpha checkpoint default is therefore 4 MiB. These are local
+coding rates, not a claim about production network capacity; an actual channel
+remains bounded by its transport and TURN allocation limits.
+
+The final 100,000-row Alpha lifecycle used 400-byte payloads and the 4 MiB
+default. It produced a 102,188,863-byte checkpoint from a 116,568,064-byte
+tracked database: 12.93 seconds to author the corpus, 8.36 seconds to freeze
+and encode the exact base plus winner metadata, 0.74 seconds to reconstruct
+all immutable artifacts through RaptorQ, and 17.93 seconds to verify, realize,
+fsync, and atomically publish the receiver. Peak process RSS was 218.4 MiB and
+the receiver's logical digest matched the source.
+
+## Installation and operational boundary
+
+Alpha 1.0 is a Python library and evidence harness inside the existing
+Autonomy repository. It uses only dependencies already present in the runtime:
+SQLite/GraphDB, RelayKit/swarmkit, and the pinned `raptorq` package. It opens no
+listener and adds no daemon, service unit, background process, account, port,
+or external database.
+
+Calling `FleetSyncAlpha` on a database currently installs the five local
+tracking tables, one local catalog-order index, logical-key indexes for the 17
+replicated tables, and insert/update/delete triggers on those tables. It does
+not increment GraphDB's `user_version` because this package is not activated in
+production. Production adoption therefore requires a real GraphDB migration,
+including a one-time initial winner for every existing logical row, followed
+atomically by converting every personal-store writer to the authored
+transaction API. The alpha refuses to checkpoint a populated database whose
+live-row count is not completely covered by its catalog. Installing the
+fail-closed triggers before bootstrapping existing rows or converting all
+writers would intentionally reject the migration or those legacy writes.
+
+Checkpoint creation is online: it briefly serializes an `IMMEDIATE` cut,
+persists the no-more-before floor, establishes a WAL snapshot, and releases
+writers before streaming. Alpha installation is offline: it realizes into a
+new staging database, preserves the receiving machine's local `orgs` bootstrap
+row and excluded identity armor, validates and fsyncs the result, then replaces
+the target through a recoverable backup. Production online handoff, scheduler,
+fleet discovery/enrollment, RelayKit channel establishment, durable ACK
+collection, and exact-base round coordination remain outside this package.
+
+Attachment graph metadata participates in the base. Attachment bytes are
+content-addressed artifacts fetched through the supplied blob-store adapter;
+an install refuses publication while any referenced object is unavailable or
+fails its size/SHA-256 check. FTS and other derived indexes rebuild locally.
+
+Transaction memory is explicitly bounded: at most 16,384 operations and 128
+MiB of canonical mutation frames per authored transaction. Base memory is one
+record-aligned chunk plus one materialization batch; hot-delta memory is at
+most one bounded transaction. RaptorQ's current Python wrapper materializes
+one immutable segment at a time, never the complete personal database.

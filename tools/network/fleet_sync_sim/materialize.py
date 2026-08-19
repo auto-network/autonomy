@@ -9,6 +9,7 @@ object model.  Checkpoint and streaming records first converge in a
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import nullcontext
 import hashlib
 import json
 import os
@@ -257,6 +258,7 @@ def materialize(
     mutations: Iterable[Mutation],
     *,
     blob_store: ContentAddressedBlobStore | None = None,
+    manage_transaction: bool = True,
 ) -> MaterializationReport:
     """Apply already-converged winners as one foreign-key-safe transaction."""
 
@@ -269,7 +271,8 @@ def materialize(
     applied = 0
     deleted = 0
     pending: list[str] = []
-    with conn:
+    transaction = conn if manage_transaction else nullcontext()
+    with transaction:
         for table in _TABLE_ORDER:
             table_mutations = grouped[table]
             if table == "note_versions":

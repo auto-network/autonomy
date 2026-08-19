@@ -92,7 +92,7 @@ def _mutations(scale: float) -> Iterator[Mutation]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--scale", type=float, default=0.1)
-    parser.add_argument("--segment-bytes", type=int, default=8 * 1024 * 1024)
+    parser.add_argument("--segment-bytes", type=int, default=4 * 1024 * 1024)
     args = parser.parse_args()
     if not 0 < args.scale <= 1:
         parser.error("--scale must be in (0,1]")

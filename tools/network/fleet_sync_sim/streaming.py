@@ -281,7 +281,7 @@ def stream_snapshot_to_chunks(
     conn: sqlite3.Connection,
     directory: Path,
     *,
-    target_chunk_bytes: int = 8 * 1024 * 1024,
+    target_chunk_bytes: int = 4 * 1024 * 1024,
     start_after: tuple[str, tuple[object, ...]] | None = None,
 ) -> BaseCatalog:
     if target_chunk_bytes < 4096:
@@ -387,6 +387,8 @@ def iter_catalog_mutations(
     if root != catalog.root_sha256:
         raise StreamingCodecError("base catalog root mismatch")
     for entry in catalog.chunks[start_chunk:]:
+        if entry.filename != f"{entry.sequence:08d}-{entry.sha256}.base":
+            raise StreamingCodecError("base artifact filename is not canonical")
         path = directory / entry.filename
         digest = hashlib.sha256()
         with path.open("rb") as handle:

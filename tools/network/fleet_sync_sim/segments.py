@@ -22,7 +22,7 @@ class Segment:
 def encode_segments(
     mutations: Iterable[Mutation],
     *,
-    target_bytes: int = 8 * 1024 * 1024,
+    target_bytes: int = 4 * 1024 * 1024,
 ) -> list[Segment]:
     """Partition canonical frames without ever cutting a mutation frame.
 
