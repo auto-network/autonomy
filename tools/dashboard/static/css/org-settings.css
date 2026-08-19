@@ -181,15 +181,50 @@
   .orgset-overlay { align-items: stretch; justify-content: stretch; }
   .orgset-dialog {
     width: 100%;
-    height: 100%;
+    /* 100dvh, not 100%: on iOS the dynamic viewport shrinks as the browser
+     * chrome collapses, and a percentage height resolves against the LARGE
+     * viewport — so the bottom of the dialog sits below the fold. */
+    height: 100dvh;
     border: none;
     border-radius: 0;
+  }
+
+  /* base.html sets viewport-fit=cover, so content renders UNDER the status
+   * bar and home indicator unless it insets itself. Without this the header —
+   * which carries the only close control — sat beneath the notch and could
+   * not be tapped: the dialog was unclosable and the app had to be force
+   * quit. Every other component here already does this (action-sheet.css,
+   * identity-indicator.css, voice-ui.css, base.html's own sidebar); this one
+   * did not, which is the whole defect. */
+  @supports (padding-top: env(safe-area-inset-top)) {
+    .orgset-header {
+      padding-top: calc(0.75rem + env(safe-area-inset-top));
+      padding-left: calc(1rem + env(safe-area-inset-left));
+      padding-right: calc(1rem + env(safe-area-inset-right));
+    }
+    .orgset-rail,
+    .orgset-pane {
+      padding-bottom: calc(0.5rem + env(safe-area-inset-bottom));
+      padding-left: calc(0.5rem + env(safe-area-inset-left));
+      padding-right: calc(0.5rem + env(safe-area-inset-right));
+    }
   }
   .orgset-rail {
     width: 100%;
     border-right: none;
   }
   .orgset-rail-item { padding: 0.75rem 0.625rem; font-size: 0.875rem; }
+
+  /* 44px minimum tap target (iOS HIG). The desktop size is 2rem = 32px,
+   * which is below it — and on a full-screen mobile dialog the close control
+   * is the ONLY way out, because the overlay has no exposed backdrop to tap.
+   * A single undersized escape hatch is what turned a layout bug into a
+   * force-quit. */
+  .orgset-close,
+  .orgset-back {
+    min-width: 2.75rem;
+    height: 2.75rem;
+  }
   /* One at a time. Which one is on the dialog, so the two panes cannot
    * disagree about who is showing. */
   .orgset-dialog[data-view="list"] .orgset-pane { display: none; }
