@@ -181,6 +181,29 @@
       challenge: minted.challenge, signature: sig,
     });
 
+    // ── THROWAWAY: one-time v1 -> v2 armor upgrade (auto-wx94n) ──
+    // Deleted, with the v1 reader and the route's upgrade carve-out, once
+    // the operator has signed in once. It runs HERE because this is the
+    // only moment both halves exist together: the password, and a session
+    // that authorises the write. It runs AFTER the unlock POST so a failure
+    // can never cost anybody their sign-in — the whole block is advisory.
+    try {
+      if (S.armorVersion(stored.armored_private_key) === 1) {
+        var upgraded = await S.migrateArmorV1ToV2(
+          stored.armored_private_key, password);
+        await _postJson('/api/identity/personal', {
+          display_name: stored.display_name,
+          label: stored.label,
+          armored_private_key: upgraded,
+          root_pub: stored.root_pub,
+        });
+      }
+    } catch (e) {
+      if (window.console && console.warn) {
+        console.warn('armor upgrade did not run:', e && e.message);
+      }
+    }
+
     // Access authentication has succeeded.  Reuse this password-backed root
     // ceremony to maintain the unattended serving credential if necessary.
     // The normal case is a cheap local status read; repair failures never
