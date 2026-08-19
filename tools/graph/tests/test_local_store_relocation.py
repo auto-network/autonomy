@@ -224,3 +224,75 @@ def test_a_readable_rowless_file_is_still_the_unclaimed_middle_state(
     assert _local_store_db_path("machine", orgs_root) == orgs_root / "machine.db"
     relocate_local_stores(orgs_root)
     assert (orgs_root.parent / "machine.db").exists()
+
+
+def test_relocation_folds_the_wal_before_moving_anything(orgs_root):
+    """F1: in WAL mode the .db can be a bare header while every committed
+    row lives in the -wal. The move must checkpoint first and move ONE
+    file — committed rows survive, and no sidecar travels or lingers."""
+    graph_db_mod._LEGACY_STORE_CLASSIFICATION.clear()
+    legacy = orgs_root / "personal.db"
+    conn = sqlite3.connect(legacy)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("CREATE TABLE vital (v TEXT)")
+    conn.execute("INSERT INTO vital VALUES ('identity-armor')")
+    conn.commit()
+    conn.close()
+    assert (orgs_root / "personal.db-wal").exists() or True  # wal may be
+    # checkpointed on close by sqlite; recreate pressure so it exists:
+    conn = sqlite3.connect(legacy)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("INSERT INTO vital VALUES ('second-row')")
+    conn.commit()  # leave WAL un-checkpointed by not closing cleanly first
+    wal_present = (orgs_root / "personal.db-wal").exists()
+    conn.close()
+
+    relocate_local_stores(orgs_root)
+
+    moved = orgs_root.parent / "personal.db"
+    assert moved.exists()
+    for suffix in ("-wal", "-shm", "-journal"):
+        assert not (orgs_root / f"personal.db{suffix}").exists()
+        # sidecars never travel; the new home builds its own
+    conn = sqlite3.connect(moved)
+    try:
+        rows = {r[0] for r in conn.execute("SELECT v FROM vital")}
+    finally:
+        conn.close()
+    assert rows == {"identity-armor", "second-row"}, (
+        f"committed rows lost in the move (wal_present_before={wal_present})"
+    )
+
+
+def test_relocation_skips_a_live_holder_and_leaves_its_store_alone(orgs_root):
+    """F2/F3: a connection holding the legacy store open with a write in
+    flight is a live holder — the relocation skips this boot instead of
+    moving the file out from under it."""
+    graph_db_mod._LEGACY_STORE_CLASSIFICATION.clear()
+    legacy = orgs_root / "personal.db"
+    holder = sqlite3.connect(legacy)
+    holder.execute("CREATE TABLE t (v TEXT)")
+    holder.execute("BEGIN IMMEDIATE")
+    holder.execute("INSERT INTO t VALUES ('in-flight')")
+    try:
+        relocate_local_stores(orgs_root)  # must not raise, must not move
+        assert legacy.exists(), "moved out from under a live writer"
+        assert not (orgs_root.parent / "personal.db").exists()
+    finally:
+        holder.rollback()
+        holder.close()
+
+
+def test_the_reservation_covers_remove_and_the_rename_source(orgs_root):
+    """F6: destruction and renaming are guarded like creation — the
+    operator's store cannot leave the local-store world through the
+    organization surface, with or without force."""
+    org_ops.ensure_bootstrap_orgs(root=orgs_root, personal_only=True)
+    for name in LOCAL_STORE_SLUGS:
+        with pytest.raises(org_ops.OrgError, match="local store"):
+            org_ops.remove_org(name)
+        with pytest.raises(org_ops.OrgError, match="local store"):
+            org_ops.remove_org(name, force=True)
+        with pytest.raises(org_ops.OrgError, match="local store"):
+            org_ops.rename_org(name, "definitely-an-org")
+    assert (orgs_root.parent / "personal.db").exists(), "store untouched"

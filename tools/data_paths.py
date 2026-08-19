@@ -125,6 +125,15 @@ STORE_MANIFEST: tuple = (
 
 STORES_BY_KEY = {store.key: store for store in STORE_MANIFEST}
 
+#: The operator's local stores, derived from the manifest (the rows with
+#: derived rooting beside the orgs store). THE single source for these
+#: names: tools.graph.db and tools.network.ledger both consume it, so the
+#: two resolvers cannot disagree about which slugs are not organizations
+#: (the split-resolver failure this module exists to prevent).
+LOCAL_STORE_KEYS = tuple(
+    store.key for store in STORE_MANIFEST if store.roots_with == "orgs"
+)
+
 
 class AmbiguousDataRoot(RuntimeError):
     """``AUTONOMY_DATA_ROOT`` was set to something that cannot be an

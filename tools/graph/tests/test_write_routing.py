@@ -128,7 +128,7 @@ def test_explicit_org_routes_add_comment_to_that_db(orgs_root):
 
     # The comment should exist in anchore.db; personal.db should be empty.
     ac = sqlite3.connect(str(orgs_root / "anchore.db"))
-    pc = sqlite3.connect(str(orgs_root / "personal.db"))
+    pc = sqlite3.connect(str(orgs_root.parent / "personal.db"))
     try:
         assert ac.execute(
             "SELECT COUNT(*) FROM note_comments WHERE source_id = ?", (src_id,),
@@ -148,7 +148,7 @@ def test_explicit_org_routes_insert_capture_to_that_db(orgs_root):
     ops.insert_capture("cap-1", "routed capture", org="anchore")
 
     ac = sqlite3.connect(str(orgs_root / "anchore.db"))
-    pc = sqlite3.connect(str(orgs_root / "personal.db"))
+    pc = sqlite3.connect(str(orgs_root.parent / "personal.db"))
     try:
         assert ac.execute(
             "SELECT COUNT(*) FROM captures WHERE id = ?", ("cap-1",),
@@ -168,7 +168,7 @@ def test_explicit_org_routes_insert_thread_to_that_db(orgs_root):
     ops.insert_thread("thread-1", "routed thread", org="anchore")
 
     ac = sqlite3.connect(str(orgs_root / "anchore.db"))
-    pc = sqlite3.connect(str(orgs_root / "personal.db"))
+    pc = sqlite3.connect(str(orgs_root.parent / "personal.db"))
     try:
         assert ac.execute(
             "SELECT COUNT(*) FROM threads WHERE id = ?", ("thread-1",),
@@ -188,7 +188,7 @@ def test_explicit_org_routes_update_tag_description(orgs_root):
     ops.update_tag_description("security", "Security notes", org="anchore")
 
     ac = sqlite3.connect(str(orgs_root / "anchore.db"))
-    pc = sqlite3.connect(str(orgs_root / "personal.db"))
+    pc = sqlite3.connect(str(orgs_root.parent / "personal.db"))
     try:
         ac_row = ac.execute(
             "SELECT description FROM tags WHERE name = ?", ("security",),
@@ -216,7 +216,7 @@ def test_graph_org_env_drives_routing(orgs_root, monkeypatch):
     ops.insert_capture("cap-env", "env-routed capture")
 
     ac = sqlite3.connect(str(orgs_root / "anchore.db"))
-    pc = sqlite3.connect(str(orgs_root / "personal.db"))
+    pc = sqlite3.connect(str(orgs_root.parent / "personal.db"))
     try:
         assert ac.execute(
             "SELECT COUNT(*) FROM captures WHERE id = ?", ("cap-env",),
@@ -266,7 +266,7 @@ def test_scopeless_write_lands_in_personal_db(orgs_root):
 
     ops.insert_capture("cap-personal", "scopeless default")
 
-    pc = sqlite3.connect(str(orgs_root / "personal.db"))
+    pc = sqlite3.connect(str(orgs_root.parent / "personal.db"))
     au = sqlite3.connect(str(orgs_root / "autonomy.db"))
     try:
         assert pc.execute(
@@ -343,7 +343,7 @@ def test_parallel_writes_to_different_orgs_do_not_cross(orgs_root):
 
     ac = sqlite3.connect(str(orgs_root / "anchore.db"))
     au = sqlite3.connect(str(orgs_root / "autonomy.db"))
-    pc = sqlite3.connect(str(orgs_root / "personal.db"))
+    pc = sqlite3.connect(str(orgs_root.parent / "personal.db"))
     try:
         a_ids = {r[0] for r in ac.execute("SELECT id FROM captures")}
         au_ids = {r[0] for r in au.execute("SELECT id FROM captures")}
@@ -385,7 +385,7 @@ def test_settings_add_setting_routes_by_org(orgs_root, stub_schema):
     )
 
     assert _count_settings(orgs_root / "anchore.db") == 1
-    assert _count_settings(orgs_root / "personal.db") == 0
+    assert _count_settings(orgs_root.parent / "personal.db") == 0
 
     ac = sqlite3.connect(str(orgs_root / "anchore.db"))
     try:
@@ -407,7 +407,7 @@ def test_settings_scopeless_add_setting_lands_in_personal(orgs_root, stub_schema
         "test.routing", 1, "scopeless", {"ok": True},
      org=ops.CALLER_ORG)
 
-    assert _count_settings(orgs_root / "personal.db") == 1
+    assert _count_settings(orgs_root.parent / "personal.db") == 1
     assert _count_settings(orgs_root / "autonomy.db") == 0
 
 
@@ -421,7 +421,7 @@ def test_settings_graph_org_env_drives_routing(orgs_root, stub_schema, monkeypat
      org=ops.CALLER_ORG)
 
     assert _count_settings(orgs_root / "anchore.db") == 1
-    assert _count_settings(orgs_root / "personal.db") == 0
+    assert _count_settings(orgs_root.parent / "personal.db") == 0
 
 
 # ── Session ingest routing via .session_meta.json ──────────────────────

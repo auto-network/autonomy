@@ -95,17 +95,28 @@ def _registry_inventory() -> dict[str, dict]:
 def _org_databases(orgs_dir: Path) -> list[tuple[str, Path]]:
     """Every settings-bearing database: orgs from the glob, plus the local
     stores, which live BESIDE the directory since auto-35kmy — a footprint
-    diagnostic that skipped the personal store would silently under-count."""
+    diagnostic that skipped the personal store would silently under-count.
+
+    The local stores are resolved BY NAME through the routed helper and
+    the glob never supplies them: during a both-locations conflict the
+    glob's hit is the STALE file, and a diagnostic naming the file nothing
+    reads is worse than none (peer review F4 — this is the tool an
+    operator reaches for in exactly that state)."""
     from .db import LOCAL_STORE_SLUGS, _local_store_db_path
 
     out = (
-        sorted((p.stem, p) for p in orgs_dir.glob("*.db"))
+        sorted(
+            (p.stem, p) for p in orgs_dir.glob("*.db")
+            if p.stem not in LOCAL_STORE_SLUGS
+        )
         if orgs_dir.is_dir() else []
     )
-    named = {name for name, _ in out}
     for name in LOCAL_STORE_SLUGS:
-        local = _local_store_db_path(name, orgs_dir)
-        if local.exists() and name not in named:
+        try:
+            local = _local_store_db_path(name, orgs_dir)
+        except Exception:
+            continue  # unreadable legacy file: already loud elsewhere
+        if local.exists():
             out.append((name, local))
     return sorted(out)
 

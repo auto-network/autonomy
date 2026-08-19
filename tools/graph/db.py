@@ -105,7 +105,7 @@ def _orgs_dir(root: Path | str | None = None) -> Path:
 #: it, so iteration over organizations CANNOT produce one, their names are
 #: refused as org slugs, and the only way either enters a read is the
 #: explicit own-stores rule in ``resolve_peers`` (auto-9uj7i).
-LOCAL_STORE_SLUGS = ("personal", "machine")
+from tools.data_paths import LOCAL_STORE_KEYS as LOCAL_STORE_SLUGS
 
 
 class LocalStoreCollisionError(RuntimeError):
@@ -249,18 +249,66 @@ def relocate_local_stores(root: Path | str | None = None) -> None:
             )
         target = orgs.parent / f"{name}.db"
         if target.exists():
+            logger.error(
+                "local store %r exists at BOTH %s and %s; leaving both — "
+                "resolution serves the relocated copy, and anything a "
+                "pre-relocation process wrote into the legacy file is not "
+                "being read. Reconcile and delete the legacy file. (During "
+                "a mixed-version rollout, old code recreates the legacy "
+                "path on every write; this error repeats each boot until "
+                "no old-code writer remains.)", name, legacy, target,
+            )
+            continue
+        # The move is ONE file, and only after the WAL is folded in. In WAL
+        # mode the .db can be a bare header while every committed row lives
+        # in the -wal; moving .db and -wal as two separate renames leaves a
+        # crash window in which the new location holds an empty store and
+        # the orphaned WAL sits where nothing looks again — silent total
+        # loss (peer review F1). Converting journal_mode to DELETE
+        # checkpoints the WAL fully and removes the sidecar in one SQLite
+        # operation; the sidecars are never moved (-shm is rebuildable
+        # scratch, and moving it is what confuses a live reader).
+        #
+        # The BEGIN IMMEDIATE is the lock (F2/F3): it serializes concurrent
+        # relocators AND answers "is anyone else in here" positively — on a
+        # busy database we skip this boot and log the live holder rather
+        # than moving a file out from under it.
+        try:
+            conn = sqlite3.connect(legacy, timeout=0.5)
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute("COMMIT")
+                conn.execute("PRAGMA journal_mode=DELETE")
+            finally:
+                conn.close()
+        except sqlite3.Error:
             logger.warning(
-                "local store %r exists at both %s and %s; leaving both — "
-                "resolution serves the relocated copy, the operator "
-                "resolves the conflict", name, legacy, target,
+                "local store %r at %s is busy or briefly unreadable; "
+                "skipping relocation this boot (a live pre-relocation "
+                "holder keeps its store; the next quiet boot migrates)",
+                name, legacy, exc_info=True,
             )
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(legacy, target)
-        for suffix in ("-wal", "-shm"):
-            sidecar = Path(str(legacy) + suffix)
-            if sidecar.exists():
-                os.replace(sidecar, Path(str(target) + suffix))
+        try:
+            os.replace(legacy, target)
+        except FileNotFoundError:
+            continue  # a concurrent relocator won the race; already moved
+        # Restore the platform's journal mode at the new home, and clear
+        # any stale sidecars left beside the OLD path (never moved).
+        try:
+            conn = sqlite3.connect(target)
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            logger.warning(
+                "could not restore WAL mode on %s; store remains valid in "
+                "rollback-journal mode", target, exc_info=True,
+            )
+        for suffix in ("-wal", "-shm", "-journal"):
+            Path(str(legacy) + suffix).unlink(missing_ok=True)
 
 
 def _org_db_path(slug: str, root: Path | str | None = None) -> Path:
