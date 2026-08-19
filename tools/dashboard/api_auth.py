@@ -89,6 +89,25 @@ def require_global_api_authority(request: Request) -> JSONResponse | None:
     authenticated organization sessions receive 403.  The distinction lets a
     legitimate agent see that its credential is valid but deliberately too
     narrow, while missing or unrecognized credentials gain no authority.
+
+    One exception, and it is not a weakening.  While
+    :func:`~tools.dashboard.unlock_routes.gate_enforced` is false —
+    ``DASHBOARD_AUTH`` set to a disabling value, or nothing enrolled yet —
+    :class:`~tools.dashboard.unlock_routes.HumanGateMiddleware` admits the
+    browser WITHOUT a session cookie.  The operator's own requests then arrive
+    as compatibility traffic, and refusing them here would contradict the gate
+    that just let them in.  Refusing also protects nothing: the gate is open,
+    so the same browser reaches the underlying stores through every ungated
+    route regardless.
+
+    Both halves are states a real deployment sits in.  The switch is the
+    recovery path for a dashboard whose unlock is broken, and a guard that
+    fails there fails exactly when it is being relied on.  Unenrolled is every
+    dashboard that has not set up a passkey — including one that never will.
+
+    It applies to compatibility traffic ONLY.  An org-bound agent is positively
+    identified and deliberately narrow; the state of the HUMAN gate says nothing
+    about it, so its 403 stands.
     """
 
     principal = principal_from_request(request)
@@ -107,6 +126,11 @@ def require_global_api_authority(request: Request) -> JSONResponse | None:
             {"error": "global operator authority required"},
             status_code=403,
         )
+    # Imported here, not at module scope: unlock_routes pulls in the identity
+    # and network route modules, which import this one back.
+    from tools.dashboard import unlock_routes
+    if not unlock_routes.gate_enforced():
+        return None
     return JSONResponse({"error": "authentication required"}, status_code=401)
 
 
