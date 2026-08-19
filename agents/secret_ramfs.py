@@ -40,6 +40,7 @@ is verified, not assumed).
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -98,28 +99,29 @@ def _own_image(cid: str) -> str:
     return out.stdout.strip()
 
 
-def _mount_via_socket_helper(path: str) -> None:
-    """Provision on the host through the Docker socket the node already has: a
-    one-shot ``--privileged --pid=host`` helper that ``nsenter``s PID 1's mount
-    namespace and mounts ramfs there. No new capability on this container. The
-    helper self-verifies ramfs and exits non-zero (fail closed) otherwise."""
+def _run_in_host_mount_ns(script: str, *, what: str, timeout: int = 90) -> None:
+    """Run *script* in PID 1's mount namespace through the Docker socket the node
+    already has: a one-shot ``--privileged --pid=host`` helper that ``nsenter``s
+    the host mount ns. No new capability on this container — the socket is the
+    privilege. The script is expected to self-verify and exit non-zero (fail
+    closed) on any problem."""
     cid = _own_container_id()
     if cid is None:
-        raise ProvisionError(
-            "containerized provisioning requested but own container id is unknown"
-        )
+        raise ProvisionError(f"{what}: own container id is unknown")
     image = _own_image(cid)
     r = subprocess.run(
         ["docker", "run", "--rm", "--privileged", "--pid=host",
          "--entrypoint", "nsenter", image,
-         "-t", "1", "-m", "--", "sh", "-c", _host_helper_script(path)],
-        capture_output=True, text=True, timeout=90,
+         "-t", "1", "-m", "--", "sh", "-c", script],
+        capture_output=True, text=True, timeout=timeout,
     )
     if r.returncode != 0:
-        raise ProvisionError(
-            f"socket helper failed to provision ramfs at {path} "
-            f"(rc={r.returncode}): {(r.stderr or r.stdout).strip()}"
-        )
+        raise ProvisionError(f"{what} (rc={r.returncode}): {(r.stderr or r.stdout).strip()}")
+
+
+def _mount_via_socket_helper(path: str) -> None:
+    """Provision the ramfs mount at *path* on the host — host-side + fail-closed."""
+    _run_in_host_mount_ns(_host_helper_script(path), what=f"provision ramfs at {path}")
 
 
 def _mount_host_native(path: str) -> None:
@@ -134,6 +136,92 @@ def _mount_host_native(path: str) -> None:
     if subprocess.run(["mountpoint", "-q", path]).returncode != 0:
         subprocess.run(["mount", "-t", "ramfs", "ramfs", path], check=True)
     os.chmod(path, 0o700)
+
+
+# ── Per-session secret delivery subdir (auto-f51kg) ──────────────────────────
+# Each session gets its OWN subdirectory under the delivery ramfs, owned by the
+# session's uid and readable by nobody else, bound into the container at
+# ``SESSION_SECRET_DST``. In ``delivered`` mode the SESSION (not the dashboard)
+# opens the sealed content key, decrypts the body, and writes the plaintext file
+# here; only the path enters the tool result. The guard exists for three real
+# reasons — state them right, because a guard with a wrong stated purpose gets
+# deleted by whoever notices it is not real:
+#   1. No dashboard variable ever holds the plaintext — the session materialises
+#      it, so a traceback or logging middleware cannot serialise a secret.
+#   2. Plaintext never reaches disk — the subdir is ramfs, never swappable tmpfs
+#      (a tmpfs page can reach a swap slot, and a swap slot cannot be wiped).
+#   3. Cross-session isolation — 0700 + per-uid ownership, so session A cannot
+#      read session B's secrets.
+# Provisioning is host-side (the launcher creates the subdir before the container
+# starts; the container binds it with refuse-missing, so a failed mkdir fails the
+# launch rather than yielding a look-alike on-disk directory). Teardown is the
+# launcher's — the component that created it removes it. Per auto-f51kg.
+
+#: Container-side mount point for a session's own delivery subdir (f51kg spec).
+SESSION_SECRET_DST = "/run/secrets"
+
+_SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def _session_dir(session_name: str, base: str) -> str:
+    if not _SESSION_NAME_RE.match(session_name) or session_name in (".", ".."):
+        raise ProvisionError(f"unsafe session name for a secret subdir: {session_name!r}")
+    return f"{base.rstrip('/')}/{session_name}"
+
+
+def _session_dir_script(path: str, uid: int) -> str:
+    ramfs = f"{RAMFS_MAGIC:x}"
+    tmpfs = f"{TMPFS_MAGIC:x}"
+    return (
+        f'set -e; mkdir -p "{path}"; chown {int(uid)}:{int(uid)} "{path}"; chmod 0700 "{path}"; '
+        f'm=$(stat -f -c %t "{path}"); '
+        f'case "$m" in '
+        f'{ramfs}) : ;; '
+        f'{tmpfs}) echo "REFUSE: {path} is tmpfs (0x{tmpfs}), swappable — a secret here can reach disk" >&2; exit 4 ;; '
+        f'*) echo "REFUSE: {path} is not ramfs (magic 0x$m)" >&2; exit 3 ;; '
+        f'esac'
+    )
+
+
+def provision_session_dir(session_name: str, uid: int, *, base: str = DELIVERY_MOUNT) -> str:
+    """Create *session_name*'s own writable ramfs subdir under the delivery mount,
+    owned by *uid* (mode 0700), and return its host path. Fails closed: the subdir
+    must be ramfs afterward. The caller binds this ``src`` with refuse-missing, so
+    a helper failure fails the launch rather than yielding a writable on-disk
+    directory that looks identical and is not memory-backed."""
+    path = _session_dir(session_name, base)
+    if _own_container_id() is not None and Path(_DOCKER_SOCKET).exists():
+        _run_in_host_mount_ns(
+            _session_dir_script(path, uid), what=f"provision session secret dir {path}"
+        )
+    else:
+        if os.geteuid() != 0:
+            raise ProvisionError(
+                f"cannot create {path}: host-native node running unprivileged, no socket to borrow root from"
+            )
+        Path(path).mkdir(parents=True, exist_ok=True)
+        os.chown(path, int(uid), int(uid))
+        os.chmod(path, 0o700)
+        assert_memory_backed(path)  # ramfs only; tmpfs refused by name
+    return path
+
+
+def teardown_session_dir(session_name: str, *, base: str = DELIVERY_MOUNT) -> None:
+    """Unlink a session's secret subdir to return its ramfs memory. The LAUNCHER's
+    job: the component that created it removes it (a sweeper is only a
+    died-launcher backstop, since ramfs pages belong to the file, not the writer).
+    Best-effort — teardown must never raise into session cleanup."""
+    try:
+        path = _session_dir(session_name, base)
+    except ProvisionError:
+        return
+    try:
+        if _own_container_id() is not None and Path(_DOCKER_SOCKET).exists():
+            _run_in_host_mount_ns(f'rm -rf "{path}"', what=f"teardown session secret dir {path}", timeout=30)
+        elif os.geteuid() == 0:
+            subprocess.run(["rm", "-rf", path], timeout=15)
+    except (ProvisionError, subprocess.SubprocessError, OSError):
+        pass
 
 
 def _is_ramfs(path: str) -> bool:
