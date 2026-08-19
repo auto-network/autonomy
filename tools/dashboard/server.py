@@ -526,7 +526,9 @@ async def api_beads_search(request):
             pass
 
     # Fallback: read issues.jsonl directly and filter
-    issues_path = _REPO_ROOT / ".beads" / "issues.jsonl"
+    # Beads state lives on the STATE volume (auto-qk4ip), not beside the code.
+    from tools.data_paths import DATA_ROOT as _DATA_ROOT
+    issues_path = _DATA_ROOT / ".beads" / "issues.jsonl"
     if not issues_path.exists():
         return JSONResponse({"error": "no beads data found"})
 

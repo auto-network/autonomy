@@ -1102,7 +1102,15 @@ def build_mount_plan(
         else "/home/agent/.claude/projects"
     )
     plan = MountPlan()
-    plan.set(mount_spec(REPO_ROOT / ".beads", "/data/.beads"), replace=False)
+    # Beads state comes from the STATE volume, not the code volume. It is
+    # Dolt-backed accumulated state — the same category as worktrees and
+    # agent-runs — and the code volume has no .beads on a fresh node, because
+    # it is gitignored and never in the image. Sourcing it from REPO_ROOT
+    # emitted volume-subpath=.beads against autonomy-code, docker refused the
+    # missing subpath, and NO CONTAINER WAS CREATED: every downstream symptom
+    # on a fresh node, including a tmux session that looked like it died, was
+    # this one mount (auto-qk4ip, found on sjc-2).
+    plan.set(mount_spec(DATA_ROOT / ".beads", "/data/.beads"), replace=False)
     # ``.beads`` is rw for bd, but its dolt-remote credential is host-only
     # material no session reads; mask it with an empty ro device bind (auto-j3oj3).
     plan.set(mount_spec("/dev/null", "/data/.beads/.beads-credential-key:ro"), replace=False)

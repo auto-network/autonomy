@@ -1529,10 +1529,14 @@ def test_beads_credential_key_is_masked(
     tmp_path, fake_creds, fake_crosstalk, captured_run, platform_snapshot,
 ):
     """.beads stays read-write for bd, but the dolt credential inside it is
-    shadowed by an empty read-only bind in every container."""
+    shadowed by an empty read-only bind in every container.
+
+    Sourced from the STATE volume: the code volume has no .beads on a fresh
+    node, so mounting it from there created no container at all (auto-qk4ip).
+    """
     _run(output_dir=str(tmp_path / "run"))
     specs = _mount_specs(captured_run[0])
-    assert f"{session_launcher.REPO_ROOT / '.beads'}:/data/.beads" in specs
+    assert f"{session_launcher.DATA_ROOT / '.beads'}:/data/.beads" in specs
     assert "/dev/null:/data/.beads/.beads-credential-key:ro" in specs
 
 
@@ -1765,7 +1769,7 @@ def test_golden_mount_argv_is_byte_identical(
         "-e", "CODEX_HOME=/home/agent/.codex",
         "-e", "CLAUDE_CODE_OAUTH_TOKEN=tok-xyz",
         "-e", "GRAPH_ORG=test-org",
-        "-v", "{REPO}/.beads:/data/.beads",
+        "-v", "{DATA}/.beads:/data/.beads",
         "-v", "/dev/null:/data/.beads/.beads-credential-key:ro",
         "-v", "{RUN}:/workspace/output",
         "-v", "{RUN}/sessions:/home/agent/.claude/projects",
