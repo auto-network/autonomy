@@ -218,6 +218,25 @@ persistent state:
 | `orgs`/ | `AUTONOMY_ORGS_DIR` | per-org graph DBs — identity Settings and credential rows (**the secret store**; organizations only) |
 | `personal.db` | beside `orgs/` (roots with `AUTONOMY_ORGS_DIR`) | the operator's own store — follows them across their fleet; not an organization |
 | `machine.db` | beside `orgs/` (roots with `AUTONOMY_ORGS_DIR`) | this machine's own store — never leaves this computer; not an organization |
+
+### Relocating the local stores (one-time, manual)
+
+Installations that predate the local-store split still have `personal.db`
+(and possibly `machine.db`) inside `data/orgs/`. **Everything keeps working
+from that location indefinitely** — resolution serves whichever location
+holds the store — so do this whenever convenient, not urgently:
+
+```bash
+# stop the dashboard, then:
+mv data/orgs/personal.db data/personal.db
+mv data/orgs/machine.db  data/machine.db   # if present
+# start the dashboard
+```
+
+One file each, seconds. Do it with the dashboard stopped so nothing holds
+the files open. There is deliberately no automated migration: the store is
+the identity armor, and a quiet manual move beats any amount of
+crash-safety machinery around a live one.
 | `graph.db` | `GRAPH_DB` | main knowledge-graph DB |
 | `dashboard.db` | `DASHBOARD_DB` | dashboard operational store |
 | `auth.db` | `AUTH_DB` | dashboard auth store |
