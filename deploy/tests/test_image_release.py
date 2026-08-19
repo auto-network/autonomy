@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -91,6 +92,14 @@ def test_publish_builds_pushes_and_records_exact_digests_without_signing(release
 
     calls = log.read_text(encoding="utf-8").splitlines()
     assert calls[0].startswith("docker build --pull ")
+    # Published node image must carry a real commit + build time, not the
+    # `source`/`unknown` markers a bare source build stamps (auto-m7vh7).
+    node_build = calls[0]
+    assert re.search(r"--build-arg AUTONOMY_VERSION=[0-9a-f]{40}\b", node_build), node_build
+    assert re.search(
+        r"--build-arg AUTONOMY_BUILD_TIME=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", node_build
+    ), node_build
+    assert "AUTONOMY_VERSION=unknown" not in node_build
     assert "agent-build --pull --core-only" in calls
     assert sum(line.startswith("docker push ") for line in calls) == 4
     assert not any(line.startswith("cosign ") for line in calls)
