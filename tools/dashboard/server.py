@@ -162,7 +162,7 @@ from tools.dashboard.plugin_api import loader as plugin_loader  # noqa: E402
 
 # Settings-mediator substrate (bead auto-f93wj) — imported eagerly so
 # its cursor + state schemas are in the registry before
-# ``flush_schema_meta_all_orgs`` runs at lifespan startup. The dispatch
+# ``flush_schema_meta_machine_store`` runs at lifespan startup. The dispatch
 # loop itself starts inside the lifespan hook.
 from tools.dashboard import settings_mediator as _settings_mediator  # noqa: E402, F401
 from tools.dashboard import harness_usage_settings as _harness_usage_settings  # noqa: E402, F401
@@ -178,7 +178,7 @@ from tools.graph import settings_ops  # noqa: E402
 # Activity tab notifications substrate (bead auto-5u8zb) — imported
 # eagerly so the four ``dashboard.activity.*`` SettingSchema classes
 # (ask, ask_vote, ask_refresh, operator_dismissed) are in the registry
-# before ``flush_schema_meta_all_orgs`` runs at lifespan startup.
+# before ``flush_schema_meta_machine_store`` runs at lifespan startup.
 # See pitfall ``graph://3fe60c25-fab``.
 from tools.dashboard import notifications_settings as _notifications_settings  # noqa: E402, F401
 
@@ -186,7 +186,7 @@ from tools.dashboard import notifications_settings as _notifications_settings  #
 # imported eagerly for the same reason: its three SettingSchema classes
 # (dashboard.surface.presence, dashboard.surface.ping,
 # dashboard.operator.activity) must be in the registry before
-# ``flush_schema_meta_all_orgs`` runs at lifespan startup.
+# ``flush_schema_meta_machine_store`` runs at lifespan startup.
 # See pitfall ``graph://3fe60c25-fab``.
 from tools.graph import surface as _surface  # noqa: E402, F401
 
@@ -209,12 +209,12 @@ from tools.dashboard import notifications_actions as _notifications_actions  # n
 # the ``dashboard.session.crosstalk`` namespace root is established and
 # any concrete subclass (request-rebase, request-identity-refresh, …)
 # composing under it via ``set_id_suffix`` registers before
-# ``flush_schema_meta_all_orgs`` runs at lifespan startup.
+# ``flush_schema_meta_machine_store`` runs at lifespan startup.
 from tools.dashboard import crosstalk_directive as _crosstalk_directive  # noqa: E402, F401
 
 # Settings Nexus plugin schemas (bead auto-ct3ey) — imported eagerly so
 # ``dashboard.nexus.scene#1`` + ``dashboard.nexus.tile#1`` are in the
-# registry before ``flush_schema_meta_all_orgs`` runs at lifespan
+# registry before ``flush_schema_meta_machine_store`` runs at lifespan
 # startup. The plugin loader also imports the module via the
 # manifest's ``entrypoints.schemas`` list, but that import runs *after*
 # this top-level reference; the explicit import is the contract per
@@ -18515,11 +18515,14 @@ async def _on_startup():
     # eager schema-module imports at the top of this file guarantee the registry
     # is fully populated before this runs.
     try:
-        from tools.graph.schemas.registry import flush_schema_meta_all_orgs
-        n = await asyncio.to_thread(flush_schema_meta_all_orgs)
-        logger.info("flush_schema_meta_all_orgs: flushed %d org DB(s)", n)
+        from tools.graph.schemas.registry import flush_schema_meta_machine_store
+        n = await asyncio.to_thread(flush_schema_meta_machine_store)
+        logger.info(
+            "flush_schema_meta_machine_store: machine store %s",
+            "flushed" if n else "NOT flushed",
+        )
     except Exception:
-        logger.exception("flush_schema_meta_all_orgs() failed; continuing startup")
+        logger.exception("flush_schema_meta_machine_store() failed; continuing startup")
     try:
         await asyncio.to_thread(_warm_personal_settings_store)
     except Exception:

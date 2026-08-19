@@ -126,8 +126,8 @@ def orgs_root(tmp_path, monkeypatch):
     # Materialize schema-meta rows the way dashboard startup does (auto-06ziz):
     # this is no longer done implicitly on connection open, and the TestClient
     # here never enters the lifespan, so the fixture must flush explicitly.
-    from tools.graph.schemas.registry import flush_schema_meta_all_orgs
-    flush_schema_meta_all_orgs()
+    from tools.graph.schemas.registry import flush_schema_meta_machine_store
+    flush_schema_meta_machine_store()
     GraphDB.close_all_pooled()
     try:
         yield root

@@ -88,7 +88,7 @@ def _trigger_flush(graph_db_env):
 
     Schema-meta materialization is decoupled from ``_SCHEMA_USER_VERSION``
     (auto-06ziz): it is no longer done implicitly on connection open, but
-    once at dashboard startup via ``flush_schema_meta_all_orgs``. Here we
+    once at dashboard startup via ``flush_schema_meta_machine_store``. Here we
     call ``flush_schema_meta`` directly against the ``GRAPH_DB``-pinned
     file, which is what the CLI-facing ``set schema/example/find`` tests
     depend on.
@@ -438,7 +438,8 @@ def test_register_schema_synopsis_round_trip(graph_db_env, monkeypatch):
 # The flush no longer rides on ``GraphDB._init_schema`` behind the
 # ``_SCHEMA_USER_VERSION`` guard. Materializing (or re-materializing) schema
 # meta rows happens once at dashboard startup via
-# ``flush_schema_meta_all_orgs`` and must NOT run on ordinary connection
+# ``flush_schema_meta_machine_store`` — into the MACHINE store, not any
+# organization's (auto-n77vh) — and must NOT run on ordinary connection
 # opens, nor trigger a full table re-init.
 
 
@@ -482,15 +483,16 @@ def test_ordinary_writable_open_does_not_flush_schema_meta(tmp_path, monkeypatch
         GraphDB.close_all_pooled()
 
 
-def test_flush_all_orgs_materializes_new_schema_without_version_bump(
+def test_flush_materializes_new_schema_in_the_machine_store(
     tmp_path, monkeypatch
 ):
     """A schema registered after DB creation materializes on the next
-    ``flush_schema_meta_all_orgs`` with NO ``_SCHEMA_USER_VERSION`` bump
-    and NO full table re-init (the version stays put).
+    ``flush_schema_meta_machine_store`` with NO ``_SCHEMA_USER_VERSION``
+    bump and NO full table re-init — and it lands in the MACHINE store,
+    with the organization database untouched (auto-n77vh).
     """
-    from tools.graph.db import GraphDB, _SCHEMA_USER_VERSION
-    from tools.graph.schemas.registry import flush_schema_meta_all_orgs
+    from tools.graph.db import GraphDB, _SCHEMA_USER_VERSION, _org_db_path
+    from tools.graph.schemas.registry import flush_schema_meta_machine_store
 
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
     monkeypatch.delenv("GRAPH_DB", raising=False)
@@ -498,52 +500,66 @@ def test_flush_all_orgs_materializes_new_schema_without_version_bump(
     GraphDB.close_all_pooled()
 
     db = GraphDB.create_org_db("flush-probe")
-    db_path = db.db_path
+    org_db_path = db.db_path
     db.close()
     GraphDB.close_all_pooled()
 
     _build_demo_schema()  # register after creation; no version bump
 
-    flushed = flush_schema_meta_all_orgs()
-    assert flushed >= 1
+    flushed = flush_schema_meta_machine_store()
+    assert flushed == 1
 
-    reopened = GraphDB(str(db_path), mode="rw")
+    machine = GraphDB(str(_org_db_path("machine")), mode="rw")
     try:
-        # Version unchanged — materialization did not force a re-init.
-        assert reopened.conn.execute(
+        # Materialization did not ride a version bump on the machine store
+        # either.
+        assert machine.conn.execute(
             "PRAGMA user_version"
         ).fetchone()[0] == _SCHEMA_USER_VERSION
         rows = {
-            r[0] for r in reopened.conn.execute(
+            r[0] for r in machine.conn.execute(
                 f"SELECT key FROM settings WHERE set_id = '{SCHEMA_META_SET_ID}'"
             ).fetchall()
         }
         assert "autonomy.test.demo#1" in rows, (
-            "registered schema absent after flush_schema_meta_all_orgs"
+            "registered schema absent after flush_schema_meta_machine_store"
         )
         # The whole registry lands, not just the demo schema.
         assert set(SCHEMAS) <= rows
+    finally:
+        machine.close()
+
+    reopened = GraphDB(str(org_db_path), mode="rw")
+    try:
+        org_rows = reopened.conn.execute(
+            "SELECT COUNT(*) FROM settings WHERE set_id IN (?, ?)",
+            (SCHEMA_META_SET_ID, SYNOPSIS_META_SET_ID),
+        ).fetchone()[0]
+        assert org_rows == 0, (
+            "the flush wrote machine-projection rows into an organization "
+            "database"
+        )
     finally:
         reopened.close()
         GraphDB.close_all_pooled()
 
 
-def test_flush_all_orgs_also_materializes_synopsis(tmp_path, monkeypatch):
+def test_flush_also_materializes_synopsis_in_the_machine_store(
+    tmp_path, monkeypatch
+):
     """Editing only a module SYNOPSIS is a third materialization route and
-    must land through ``flush_schema_meta_all_orgs`` too — it is what
+    must land through ``flush_schema_meta_machine_store`` too — it is what
     ``graph set find`` ranks on.
     """
-    from tools.graph.db import GraphDB
-    from tools.graph.schemas.registry import flush_schema_meta_all_orgs
+    from tools.graph.db import GraphDB, _org_db_path
+    from tools.graph.schemas.registry import flush_schema_meta_machine_store
 
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
     monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.delenv("GRAPH_ORG", raising=False)
     GraphDB.close_all_pooled()
 
-    db = GraphDB.create_org_db("synopsis-probe")
-    db_path = db.db_path
-    db.close()
+    GraphDB.create_org_db("synopsis-probe").close()
     GraphDB.close_all_pooled()
 
     demo_cls = _build_demo_schema()
@@ -556,18 +572,18 @@ def test_flush_all_orgs_also_materializes_synopsis(tmp_path, monkeypatch):
         raising=False,
     )
 
-    flush_schema_meta_all_orgs()
+    flush_schema_meta_machine_store()
 
-    reopened = GraphDB(str(db_path), mode="rw")
+    machine = GraphDB(str(_org_db_path("machine")), mode="rw")
     try:
         rows = {
-            r[0] for r in reopened.conn.execute(
+            r[0] for r in machine.conn.execute(
                 f"SELECT key FROM settings WHERE set_id = '{SYNOPSIS_META_SET_ID}'"
             ).fetchall()
         }
         assert "autonomy.test.demo#1" in rows
     finally:
-        reopened.close()
+        machine.close()
         GraphDB.close_all_pooled()
 
 
