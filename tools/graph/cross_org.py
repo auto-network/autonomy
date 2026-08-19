@@ -160,7 +160,27 @@ def resolve_peers(
     if org:
         subscribed = _read_peer_subscription(org)
         if subscribed is not None:
-            return _filter_existing_peers(subscribed, org, root=root)
+            pinned = _filter_existing_peers(subscribed, org, root=root)
+            # The operator's own stores are ALWAYS peers, whatever the
+            # subscription declares (auto-9uj7i, graph://21a0da9e-1c2). The
+            # subscription exists to opt out of other ORGANIZATIONS'
+            # published settings; personal.db never leaves the operator's
+            # fleet and the machine store never leaves the machine, so
+            # neither can carry another user's content into a read and there
+            # is nothing for a subscription to protect against. Silently
+            # dropping them would deny D4's sovereignty (every personal
+            # answer for this org) and break schema metadata (auto-n77vh
+            # puts it in the machine store). BOTH, named individually — an
+            # "own stores" list derived from a two-store mental model
+            # re-adds personal and drops machine. Only the SUBSCRIPTION
+            # branch does this: an explicit ``explicit_peers`` kwarg stays
+            # literal, because ``peers=[]`` deliberately means
+            # own-store-only for identity, credential and policy readers.
+            existing = set(list_org_slugs(root=root))
+            for own in (PERSONAL_DB_SLUG, MACHINE_DB_SLUG):
+                if own != org and own not in pinned and own in existing:
+                    pinned.append(own)
+            return pinned
 
     # Default: every other org under data/orgs.
     all_slugs = list_org_slugs(root=root)

@@ -130,11 +130,14 @@ def test_resolve_peers_honours_subscription_setting(orgs_root):
     )
 
     peers = cross_org.resolve_peers("anchore", None)
-    assert peers == ["autonomy"]
+    # The pin governs ORGANIZATIONS; the operator's own personal store is
+    # always a peer regardless (auto-9uj7i) — "third" stays excluded.
+    assert peers == ["autonomy", "personal"]
+    assert "third" not in peers
 
 
 def test_resolve_peers_empty_subscription_means_isolated(orgs_root):
-    """``peers=[]`` in the Setting = fully isolated (distinct from absence)."""
+    """``peers=[]`` in the Setting = isolated from every other org."""
     _seed_org("autonomy")
     _seed_org("anchore")
     _seed_org("personal")
@@ -148,7 +151,9 @@ def test_resolve_peers_empty_subscription_means_isolated(orgs_root):
         state="canonical",
     )
 
-    assert cross_org.resolve_peers("anchore", None) == []
+    # Isolated from every other ORGANIZATION — the operator's own store is
+    # not an organization one subscribes to and survives (auto-9uj7i).
+    assert cross_org.resolve_peers("anchore", None) == ["personal"]
 
 
 def test_resolve_peers_absent_subscription_is_default(orgs_root):
