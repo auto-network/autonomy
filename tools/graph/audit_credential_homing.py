@@ -52,8 +52,15 @@ FIELD_SAYS_SECRET = re.compile(
 #: rather than tightened into the regex: each is a real field that WOULD be
 #: reported, and naming them is how the next person knows they were
 #: considered rather than missed.
+#:
+#: ``_path`` is here on the rubric's own logic. A path is not a credential —
+#: "store the credential, not the path to the file containing it" — so a field
+#: holding one is a DIFFERENT finding: a secret that has not left the
+#: filesystem, which is auto-xhb74's class, not this audit's. Naming it
+#: matters because the value can still LOOK secret: serve-cert's key_path is a
+#: portable basename shaped ``serve-<uuid>``, with no slash to give it away.
 FIELD_IS_NOT_SECRET = re.compile(
-    r"(_sha|_hash|_id$|fingerprint|key_id|rel_path|filename|lastRowId)",
+    r"(_sha|_hash|_id$|fingerprint|key_id|_path|rel_path|filename|lastRowId)",
     re.IGNORECASE,
 )
 

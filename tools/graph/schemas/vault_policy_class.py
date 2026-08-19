@@ -47,7 +47,7 @@ SYNOPSIS = {
         "class key", "vault policy", "access policy", "password class",
     ],
     "related_set_ids": [
-        "autonomy.vault.secret#1",
+        "autonomy.vault.secured#1",
         "autonomy.secure.setting#1",
     ],
 }
