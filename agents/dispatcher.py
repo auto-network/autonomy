@@ -138,7 +138,11 @@ _restart_scheduled = False
 
 def _read_rig_image() -> str:
     """Read default container image from .beads/config.yaml."""
-    config_path = Path(os.environ.get("BEADS_DIR", ".beads")) / "config.yaml"
+    # Default to the STATE volume rather than a relative ".beads" beside the
+    # cwd, which resolves differently depending on where a process starts
+    # (auto-qk4ip). BEADS_DIR still overrides for a caller that knows better.
+    from tools.data_paths import DATA_ROOT as _DATA_ROOT
+    config_path = Path(os.environ.get("BEADS_DIR", _DATA_ROOT / ".beads")) / "config.yaml"
     try:
         for line in config_path.read_text().splitlines():
             m = re.match(r"^image:\s*(.+)$", line)
