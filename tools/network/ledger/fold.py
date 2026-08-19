@@ -975,7 +975,6 @@ class _Folder:
         # member remains valid (that IS the recovery path).
         if self_authorized and self._key_revoked(current, ctx):
             return R_REKEY_REVOKED_KEY
-        _ = recovery_authorized  # (item 4 will consume this to revoke old_pub)
         taken = set(members)
         taken.update(rec[2] for rec in members.values())
         if p["new_pub"] in taken:
@@ -999,6 +998,23 @@ class _Folder:
             new_pub=p["new_pub"],
             self_authorized=self_authorized,
         )
+        # Item 4 (auto-c3yl1): a recovery-authorized rekey implicitly REVOKES the
+        # key it leaves, so the attacker who still holds old_pub cannot rekey
+        # again from it — and, crucially, a concurrent self-authorized rekey the
+        # attacker forks off old_pub loses via _rekey_alive (a self-authorized
+        # rekey cannot outrun a concurrent revocation of its own key). This
+        # rekey is recovery-authorized, hence NOT self_authorized, so it never
+        # race-loses to its own revoke. Expressed as a revocation, not a
+        # precedence rule — the member analogue of _rotation_race. The revoke is
+        # keyed to THIS event's id so the ancestry checks in _rekey_alive resolve
+        # against a node the causal map already knows.
+        if recovery_authorized:
+            self.revokes[event.event_id] = _Revoke(
+                id=event.event_id,
+                author=event.author_key,
+                target_event=None,
+                target_key=p["old_pub"],
+            )
         return None
 
     def _h_key_rotate(self, event, ctx) -> Optional[str]:
