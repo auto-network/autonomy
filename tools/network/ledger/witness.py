@@ -67,6 +67,19 @@ class WitnessError(LedgerError):
     """Base for witness-verification failures."""
 
 
+def _verify_any_attestation(attestation: dict, witness_pub: str) -> dict:
+    """Verify an attestation of either version, dispatching on its entry shape.
+
+    A ``v: 2`` entry verifies under the v2 domain; a v1 entry (no ``v``) under
+    the v1 domain. Used by :meth:`EquivocationProof.verify`, which may hold a
+    proof of either version.
+    """
+    entry = attestation.get("entry") if isinstance(attestation, dict) else None
+    if isinstance(entry, dict) and entry.get("v") == WITNESS_VERSION_2:
+        return verify_attestation_v2(attestation, witness_pub)
+    return verify_attestation(attestation, witness_pub)
+
+
 def _verified_entry(attestation: dict, witness_pub: str) -> dict:
     """Verify against the pinned key, surfacing one uniform error type.
 
@@ -170,19 +183,29 @@ class EquivocationProof:
 
     a: dict
     b: dict
-    kind: str  # "split-seq" | "fork-prev"
+    kind: str  # "split-seq" | "fork-prev" | "decreasing-t"
 
     def verify(self, witness_pub: str) -> bool:
         """True iff both attestations verify under *witness_pub* and the
         stated contradiction genuinely holds. Any tampering — a doctored
         entry, a swapped signature, a mislabelled kind — makes this False,
-        so a proof is only as good as it is checkable."""
+        so a proof is only as good as it is checkable.
+
+        Dispatches per version: a v2 entry verifies under the v2 domain and
+        carries no ``topic`` (one grouped chain per org), so the same-chain
+        check is ``org`` alone. Both entries must be the same version — a
+        cross-version pair is never one honest chain equivocating.
+        """
         try:
-            ea = verify_attestation(self.a, witness_pub)
-            eb = verify_attestation(self.b, witness_pub)
+            ea = _verify_any_attestation(self.a, witness_pub)
+            eb = _verify_any_attestation(self.b, witness_pub)
         except Exception:
             return False
-        if ea["org"] != eb["org"] or ea["topic"] != eb["topic"]:
+        if ea.get("v") != eb.get("v"):
+            return False
+        if ea["org"] != eb["org"]:
+            return False
+        if ea.get("v") != WITNESS_VERSION_2 and ea.get("topic") != eb.get("topic"):
             return False
         if self.kind == "split-seq":
             return ea["seq"] == eb["seq"] and entry_id(ea) != entry_id(eb)
@@ -190,6 +213,15 @@ class EquivocationProof:
             # b sits one step above a, but roots on a different seq-N entry
             # than the one a IS — two signed seq-N histories.
             return eb["seq"] == ea["seq"] + 1 and eb["prev"] != entry_id(ea)
+        if self.kind == "decreasing-t":
+            # b is later in the chain than a (higher seq) yet carries a smaller
+            # signed t — a decreasing witness clock. v2 only; v1 entries have no
+            # t and can never carry this contradiction.
+            return (
+                ea.get("v") == WITNESS_VERSION_2
+                and eb["seq"] > ea["seq"]
+                and eb["t"] < ea["t"]
+            )
         return False
 
     def transcript(self) -> dict:
@@ -438,7 +470,9 @@ class WitnessJournalV2:
         # chain — self-incriminating (ruled 2026-08-16). Checked before the
         # prev-chain link so the clock contradiction surfaces on its own terms.
         if entry["t"] < last_entry["t"]:
-            proof = EquivocationProof(self._last, attestation, "split-seq")
+            # a = the lower-seq (earlier) entry, b = this higher-seq entry with
+            # the smaller t — the orientation decreasing-t verify expects.
+            proof = EquivocationProof(self._last, attestation, "decreasing-t")
             raise WitnessEquivocation(
                 f"entry at seq {seq} carries a t ({entry['t']}) below the witnessed "
                 f"seq {last_seq}'s t ({last_entry['t']}): a decreasing witness clock",
