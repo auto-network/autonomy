@@ -60,7 +60,7 @@ def _flush_schema_meta(graph_db_env):
 
     Schema-meta materialization is decoupled from connection open
     (auto-06ziz) and runs once at dashboard startup via
-    ``flush_schema_meta_all_orgs``. Tests that read the ``autonomy.schema``
+    ``flush_schema_meta_machine_store``. Tests that read the ``autonomy.schema``
     meta set must flush the pinned ``GRAPH_DB`` file explicitly.
     """
     from tools.graph.db import GraphDB

@@ -20,7 +20,7 @@ hand-curated synopsis surfacing as ``autonomy.schema.synopsis#1``.
 idempotent — payload match is a no-op.
 
 Materialization is decoupled from ``_SCHEMA_USER_VERSION`` (auto-06ziz):
-``flush_schema_meta_all_orgs()`` walks every per-org DB and flushes each,
+``flush_schema_meta_machine_store()`` flushes the machine store once,
 and is invoked once at dashboard startup (the hot-reload restarts the
 process on every code change, which is the only thing that can change the
 registry). Adding a schema, editing a schema, or editing only a module's
@@ -1773,8 +1773,8 @@ def flush_schema_meta(db) -> None:
     defining module's ``SYNOPSIS`` dict). Editing only a synopsis therefore
     lands here too — that route is what ``graph set find`` ranks on.
 
-    Invoked once per org at dashboard startup via
-    :func:`flush_schema_meta_all_orgs`; it costs roughly two idempotent
+    Invoked once, against the machine store, at dashboard startup via
+    :func:`flush_schema_meta_machine_store`; it costs roughly two idempotent
     SELECT lookups per registered schema (~70+ on the current registry, and
     growing with every schema added), which is why it runs once at startup
     rather than on every writable open.
@@ -1813,8 +1813,8 @@ def flush_schema_meta(db) -> None:
     db.conn.commit()
 
 
-def flush_schema_meta_all_orgs(*, root=None) -> int:
-    """Flush schema + synopsis meta-Settings into every per-org DB.
+def flush_schema_meta_machine_store(*, root=None) -> int:
+    """Materialize schema + synopsis meta-Settings in the MACHINE STORE.
 
     Called once at dashboard startup (see :mod:`tools.dashboard.server`).
     The dashboard hot-reloads — i.e. restarts the process — on every code
@@ -1824,43 +1824,92 @@ def flush_schema_meta_all_orgs(*, root=None) -> int:
     re-init. Deliberately not wired into ``GraphDB._init_schema``; that
     coupling was the bug fixed in auto-06ziz.
 
-    Each org is opened writably and flushed via :func:`flush_schema_meta`,
-    which is idempotent (an unchanged registry re-flushes to no-ops).
-    Read-only / broken org DBs are skipped rather than raised. Returns the
-    number of DBs successfully flushed.
+    ONE store, not one per organization (auto-n77vh). Schema metadata is a
+    projection of the code THIS PROCESS is running: no member authors it,
+    nothing can sign it, and two machines on different code versions have
+    no single true answer per organization — flushing it into shared org
+    databases made whoever restarted last win, and was the one unsigned
+    ingress the signed-settings design could not cover. The machine store
+    is resolved BY NAME (never by constructing an org-namespace path —
+    auto-35kmy moved it beside ``data/orgs/``), created on demand, and its
+    ``canonical`` rows participate in every organization's read on this
+    machine because ``resolve_peers`` names the operator's own stores
+    EXPLICITLY and unconditionally (auto-9uj7i) — a peer subscription
+    governs OTHER organizations only and cannot remove them, so a pinned
+    org resolves schemas identically to an unpinned one.
 
-    Note: an org DB that is only ever opened read-only never materializes
-    its own rows under any design. Cross-org schema discovery does not
-    depend on per-org materialization — schema-meta rows are written
-    ``publication_state="canonical"`` and every org resolves platform
-    schemas through peer merge from ``autonomy``. That holds only while an
-    org subscribes to ``autonomy`` as a peer; an org pinning a narrower
-    ``autonomy.org.peer-subscription`` would lose platform-schema discovery
-    entirely, and this flush would not restore it.
+    Also sweeps the rows this flush historically wrote into organization
+    databases and the personal store, so exactly one copy exists per
+    machine. Returns 1 on a successful machine-store flush, 0 otherwise.
     """
     # Imported lazily to avoid an import cycle: db -> schemas (settings_ops)
     # -> back into db. org_ops likewise pulls in db.
+    from ..db import GraphDB, _org_db_path
+
+    try:
+        db = GraphDB(_org_db_path("machine", root), create=True)
+    except Exception:
+        logger.warning(
+            "flush_schema_meta_machine_store: could not open the machine "
+            "store; schema metadata not materialized", exc_info=True,
+        )
+        return 0
+    try:
+        flush_schema_meta(db)
+        flushed = 1
+    except Exception:
+        logger.warning(
+            "flush_schema_meta_machine_store: flush failed", exc_info=True,
+        )
+        flushed = 0
+    finally:
+        db.close()
+    _sweep_org_schema_meta(root=root)
+    return flushed
+
+
+def _sweep_org_schema_meta(*, root=None) -> int:
+    """One-time removal of schema metadata from org DBs and personal.
+
+    Machine-projection rows have exactly one correct home; a copy left in
+    a shared database keeps the whoever-restarted-last fight alive and is
+    an unsigned row where every row must be signed. Hard delete — these
+    are startup-refreshed cache rows, not authored content. Idempotent and
+    cheap once clean. Returns rows removed.
+    """
     from ..db import GraphDB
     from .. import org_ops
 
-    flushed = 0
-    for ref in org_ops.list_orgs(root=root):
+    removed = 0
+    targets = [ref.slug for ref in org_ops.list_orgs(root=root)]
+    for slug in targets:
+        if slug == "machine":
+            continue  # the one correct home
         try:
-            db = GraphDB.open_org_db(ref.slug, mode="rw", root=root)
+            db = GraphDB.open_org_db(slug, mode="rw", root=root)
         except Exception:
             logger.warning(
-                "flush_schema_meta_all_orgs: could not open org %r; skipping",
-                ref.slug, exc_info=True,
+                "_sweep_org_schema_meta: could not open %r; skipping",
+                slug, exc_info=True,
             )
             continue
         try:
-            flush_schema_meta(db)
-            flushed += 1
+            cur = db.conn.execute(
+                "DELETE FROM settings WHERE set_id IN (?, ?)",
+                (SCHEMA_META_SET_ID, SYNOPSIS_META_SET_ID),
+            )
+            if cur.rowcount:
+                removed += cur.rowcount
+                logger.info(
+                    "_sweep_org_schema_meta: removed %d schema-meta row(s) "
+                    "from %r", cur.rowcount, slug,
+                )
+            db.conn.commit()
         except Exception:
             logger.warning(
-                "flush_schema_meta_all_orgs: flush failed for org %r; skipping",
-                ref.slug, exc_info=True,
+                "_sweep_org_schema_meta: sweep failed for %r; skipping",
+                slug, exc_info=True,
             )
         finally:
             db.close()
-    return flushed
+    return removed

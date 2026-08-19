@@ -40,7 +40,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # `graph set schema/example/find` — is deliberately NOT gated by this constant.
 # Adding a Setting schema, editing one, or editing only its SYNOPSIS does NOT
 # require a bump. Those meta rows are (re-)flushed once at dashboard startup by
-# `schemas.registry.flush_schema_meta_all_orgs`, which the hot-reload runs on
+# `schemas.registry.flush_schema_meta_machine_store`, which the hot-reload runs on
 # every code change. Coupling that flush to this version — whose change frequency
 # and cost are unrelated — was the bug fixed here: a schema change forced an
 # expensive full re-init, or (without a bump) never landed at all.
@@ -489,7 +489,7 @@ class GraphDB:
         # NOTE (auto-06ziz): schema-meta Settings are intentionally NOT flushed
         # here. Materializing them is decoupled from _SCHEMA_USER_VERSION and now
         # runs once at dashboard startup via
-        # ``schemas.registry.flush_schema_meta_all_orgs``. See the constant's
+        # ``schemas.registry.flush_schema_meta_machine_store``. See the constant's
         # comment above.
         # Stamp the version so subsequent opens hit the fast-path guard above.
         self.conn.execute(f"PRAGMA user_version = {_SCHEMA_USER_VERSION}")

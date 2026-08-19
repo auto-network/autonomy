@@ -2141,8 +2141,8 @@ def sweep_server(tmp_path_factory):
     # (dashboard.harness.usage among them) — import the modules real
     # server startup pulls in.
     _importlib.import_module("tools.dashboard.harness_usage_settings")
-    from tools.graph.schemas.registry import flush_schema_meta_all_orgs
-    flush_schema_meta_all_orgs()
+    from tools.graph.schemas.registry import flush_schema_meta_machine_store
+    flush_schema_meta_machine_store()
     _GraphDB.close_all_pooled()
     state = start_mock_server(
         _build_fixture(), tmpdir, port=worker_test_port(8094),
