@@ -227,16 +227,32 @@ from that location indefinitely** — resolution serves whichever location
 holds the store — so do this whenever convenient, not urgently:
 
 ```bash
-# stop the dashboard, then:
+# stop the dashboard first; nothing may hold the store open
+sqlite3 data/orgs/personal.db "PRAGMA journal_mode=DELETE;"
 mv data/orgs/personal.db data/personal.db
-mv data/orgs/machine.db  data/machine.db   # if present
-# start the dashboard
+sqlite3 data/orgs/machine.db  "PRAGMA journal_mode=DELETE;"   # if present
+mv data/orgs/machine.db  data/machine.db                      # if present
+ls data/orgs/*.db-wal 2>/dev/null   # MUST print nothing before you start
+# start the dashboard; it returns each store to WAL on first open
 ```
 
-One file each, seconds. Do it with the dashboard stopped so nothing holds
-the files open. There is deliberately no automated migration: the store is
-the identity armor, and a quiet manual move beats any amount of
-crash-safety machinery around a live one.
+**The PRAGMA line is not optional, and skipping it silently loses data.**
+These stores run in SQLite WAL mode: committed rows can live in a
+`personal.db-wal` sidecar while the `.db` file itself is little more than a
+header. Moving the `.db` alone orphans that sidecar — the new location
+reads as an EMPTY store, nothing raises, and every read quietly falls back
+to the organization's value as if the operator had never written one.
+`PRAGMA journal_mode=DELETE` folds the WAL into the main file and removes
+the sidecars, making the store one self-contained file that a single `mv`
+moves whole. The `ls` check is the one-line proof the fold happened: any
+surviving `*.db-wal` beside the old location means committed data is about
+to be left behind — stop and fold before moving.
+
+Do it with the dashboard stopped so nothing holds the files open (the
+PRAGMA refuses on a busy store, which is itself a check). There is
+deliberately no automated migration: the store is the identity armor, and
+a quiet manual move beats any amount of crash-safety machinery around a
+live one.
 | `graph.db` | `GRAPH_DB` | main knowledge-graph DB |
 | `dashboard.db` | `DASHBOARD_DB` | dashboard operational store |
 | `auth.db` | `AUTH_DB` | dashboard auth store |
