@@ -403,12 +403,44 @@ def _v_invite(p: dict) -> None:
     _require_key(p["sponsor"], "invite.sponsor")
 
 
+def _v_member_recovery(value: object, persona_pub: str) -> None:
+    """A member's recovery enrollment (auto-c3yl1), same shape as
+    ``genesis.recovery`` one level down: ``{"policy": "none"|"recovery-key",
+    "recovery_pub"?: key}``. The recovery key must differ from ``persona_pub`` —
+    equal, and one stolen credential signs both the possession proof and the
+    recovery co-signature, so the second factor is no factor. (That it must
+    derive from the recovery factor rather than the personal root is a
+    client-side property the fold cannot see and does not assert here.)
+    """
+    if not isinstance(value, dict):
+        raise SchemaError("member.claim.recovery must be an object")
+    _require_fields(
+        value, "member.claim.recovery",
+        frozenset({"policy"}), frozenset({"recovery_pub"}),
+    )
+    if value["policy"] not in ("none", "recovery-key"):
+        raise SchemaError("member.claim.recovery.policy must be 'none' or 'recovery-key'")
+    if value["policy"] == "recovery-key":
+        if "recovery_pub" not in value:
+            raise SchemaError(
+                "member.claim.recovery.policy 'recovery-key' requires recovery_pub"
+            )
+        _require_key(value["recovery_pub"], "member.claim.recovery.recovery_pub")
+        if value["recovery_pub"] == persona_pub:
+            raise SchemaError(
+                "member.claim.recovery.recovery_pub must differ from persona_pub -- "
+                "one credential cannot be both the possession proof and the recovery key"
+            )
+    elif "recovery_pub" in value:
+        raise SchemaError("member.claim.recovery.policy 'none' forbids recovery_pub")
+
+
 def _v_member_claim(p: dict) -> None:
     _require_fields(
         p,
         "member.claim",
         frozenset({"invite_ref", "persona_pub", "profile", "approvals"}),
-        frozenset({"token", "kem_credential"}),
+        frozenset({"token", "kem_credential", "recovery"}),
     )
     _require_hash(p["invite_ref"], "member.claim.invite_ref")
     _require_key(p["persona_pub"], "member.claim.persona_pub")
@@ -418,12 +450,15 @@ def _v_member_claim(p: dict) -> None:
         _require_str(p["token"], "member.claim.token", max_len=128)
     if "kem_credential" in p:
         _require_kem_credential(p["kem_credential"], p["persona_pub"])
+    if "recovery" in p:
+        _v_member_recovery(p["recovery"], p["persona_pub"])
 
 
 def _v_member_rekey(p: dict) -> None:
     _require_fields(
         p, "member.rekey",
         frozenset({"persona", "old_pub", "new_pub", "continuity", "approvals"}),
+        frozenset({"recovery_sig"}),
     )
     _require_key(p["persona"], "member.rekey.persona")
     _require_key(p["old_pub"], "member.rekey.old_pub")
@@ -437,6 +472,15 @@ def _v_member_rekey(p: dict) -> None:
         _decode_hex(p["continuity"], SIGNATURE_HEX_LEN, "member.rekey.continuity")
     except _IdkitMalformed as exc:
         raise SchemaError(str(exc)) from None
+    # Optional recovery co-signature (auto-c3yl1): the enrolled recovery key
+    # signs rekey_recovery_input, authorising the third door. Structurally a
+    # signature; the fold verifies it against the member's enrolled recovery key.
+    if "recovery_sig" in p:
+        _require_str(p["recovery_sig"], "member.rekey.recovery_sig", max_len=SIGNATURE_HEX_LEN)
+        try:
+            _decode_hex(p["recovery_sig"], SIGNATURE_HEX_LEN, "member.rekey.recovery_sig")
+        except _IdkitMalformed as exc:
+            raise SchemaError(str(exc)) from None
     _require_approvals(p["approvals"], "member.rekey.approvals")
 
 
