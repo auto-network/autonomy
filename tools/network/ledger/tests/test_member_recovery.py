@@ -164,3 +164,28 @@ def test_attacker_cannot_rekey_again_from_the_revoked_stolen_key():
     state = fold(sim.ledger)
     assert state.valid[again] is False
     assert state.members[key(persona)].current_key == key(owner_key)
+
+
+# -- item 5: the enrolled recovery key is immutable in v1 (no policy-change event) --
+
+def test_recovery_key_survives_a_rekey_unchanged():
+    """The recovery key is enrolled at claim time and is not touched by a rekey,
+    so it persists across a persona-key rotation and an attacker who takes the
+    current key still cannot reach it — there is no re-enrollment event in v1,
+    so nothing an attacker holds can swap it (auto-c3yl1 item 5, by absence)."""
+    sim = Sim()
+    recovery = KeyPair.generate()
+    persona = _enrolled_member(sim, recovery.public_hex)
+    # Ordinary self-rekey to a new key.
+    new_key = KeyPair.generate()
+    sim.rekey(persona, persona, persona, new_key)
+    state = fold(sim.ledger)
+    claim = state.members[key(persona)]
+    # The recovery key still authorises a recovery: prove it by recovering AGAIN
+    # from the (now current) new_key onto a third key using the SAME recovery key.
+    third = KeyPair.generate()
+    sig = sign_rekey_recovery(recovery, sim.genesis_id, key(persona), key(new_key), key(third))
+    ev = sim.rekey(third, persona, new_key, third, recovery_sig=sig)
+    state = fold(sim.ledger)
+    assert state.valid[ev] is True
+    assert state.members[key(persona)].current_key == key(third)
