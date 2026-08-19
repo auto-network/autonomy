@@ -121,6 +121,17 @@ class Ledger:
             self._genesis_id = event.event_id
         return event.event_id
 
+    def append(self, event: Event) -> str:
+        """The store-compatible name for :meth:`add`.
+
+        A :class:`~tools.network.ledger.store.LedgerStore` persists on
+        ``append``; a bare in-memory ledger has no disk to reach, so here it is
+        simply :meth:`add`. Both expose the same verb so a writer takes one
+        interface — ``append`` / :attr:`genesis_id` / :meth:`heads` — and code
+        that must be durable is handed the STORE without any branch on type.
+        """
+        return self.add(event)
+
     def ingest(self, events: Iterable[Event]) -> List[str]:
         """Admit a batch in ANY order (sync bundles arrive unordered).
 
