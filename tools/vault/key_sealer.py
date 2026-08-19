@@ -70,38 +70,6 @@ class VaultSealerNotReady(RuntimeError):
     """
 
 
-def _refuse_storage_ancestry(ancestry, where: str) -> None:
-    """Refuse the storage-DAG ancestry where the authority ledger's is meant.
-
-    The two are interchangeable to the type system and to the eye: both are
-    one-argument callables named ``ancestry``, and a ``KeyControlStore`` is
-    usually in scope with one hanging off it. They are not interchangeable in
-    fact — they close over disjoint identifier spaces — and passing the wrong
-    one is SILENT. It reaches ``state_covers``, which asks a graph of storage
-    ``state_id``s whether it contains a set of ledger loss heads; depending on
-    how permissive the closure is about identifiers it has never seen, either
-    nothing is ever safe or everything is.
-
-    Worse, the storagekit test double IS permissive and wires its ancestry to
-    the ledger's, so the mistake is green in tests and wrong against a real
-    ``Ledger``. That combination — invisible at the call, invisible in review,
-    invisible in CI — is why this check exists rather than a comment.
-
-    It is a cheap identity test, not a proof: it catches the storage ancestry
-    specifically, which is the one that is in scope and the one that has been
-    passed by mistake twice. Anything else is let through.
-    """
-    owner = getattr(ancestry, "__self__", None)
-    if isinstance(owner, KeyControlStore):
-        raise TypeError(
-            f"{where} takes the AUTHORITY LEDGER's ancestry, and this is the "
-            f"KeyControlStore's — a different DAG over a different identifier "
-            f"space. Both seams here resolve LOSS HEADS, which are ledger "
-            f"events, so the closure must be over ledger ids. The storage "
-            f"graph is internal to the key-control store's own reachability "
-            f"and is not an argument to anything on this path."
-        )
-
 
 def build_vault_sealer(
     cache,
@@ -173,7 +141,6 @@ def build_vault_sealer(
                 f"genesis, so an unfounded organization cannot hold one."
             )
         frontier, fold_at, authority_ancestry = ledger
-        _refuse_storage_ancestry(authority_ancestry, "seal_revision/accept_state")
         with KeyControlStore(keycontrol_path) as key_control:
             holdings = Holdings(
                 secrets=cache.secrets,

@@ -106,6 +106,8 @@ co-located path resolution only), and the standard library.
 
 from __future__ import annotations
 
+from tools.network.dag_tag import STORAGE, tag_dag
+
 import enum
 import sqlite3
 import time
@@ -1112,6 +1114,7 @@ class KeyControlStore:
         """A snapshot copy of ``state_id -> descriptor``."""
         return dict(self._states)
 
+    @tag_dag(STORAGE)
     def ancestry(self, heads) -> frozenset:
         """Inclusive closure over ``parent_state_ids`` edges (register pin 4).
 

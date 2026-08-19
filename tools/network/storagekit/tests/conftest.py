@@ -23,6 +23,8 @@ ciphertext.
 
 from __future__ import annotations
 
+from tools.network.dag_tag import AUTHORITY, STORAGE, tag_dag
+
 import random
 
 import pytest
@@ -80,6 +82,7 @@ class KeyControlDouble:
         self.bridges: list = []
         self.grants: list = []
 
+    @tag_dag(STORAGE)
     def ancestry(self, ids) -> frozenset:
         seen: set = set()
         stack = list(ids)
@@ -257,6 +260,7 @@ class World:
     def fold(self, heads=None):
         return self.sim.fold(heads=list(heads) if heads is not None else None)
 
+    @tag_dag(AUTHORITY)
     def ancestry(self, ids) -> frozenset:
         return self.sim.ledger.ancestry(ids)
 

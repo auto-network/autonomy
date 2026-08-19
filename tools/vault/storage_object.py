@@ -44,6 +44,7 @@ wrap from ``tools.vault.policy_class``, and the inner body seal is the same
 
 from __future__ import annotations
 
+
 import base64
 import hashlib
 import json

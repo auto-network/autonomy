@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tools.network.dag_tag import AUTHORITY, tag_dag
+
 import dataclasses
 import os
 
@@ -77,6 +79,7 @@ class World:
             authority_heads=list(child.authority_heads),
         )
 
+    @tag_dag(AUTHORITY)
     def ancestry(self, ids):
         return self.sim.ledger.ancestry(ids)
 
