@@ -79,32 +79,16 @@ class MountSpec:
     container_spec: str         # "<dest>" or "<dest>:<mode>" — emitted verbatim
     origin: Origin = Origin.HOST
     required: bool = True
-    #: Strict-bind provenance carried from the resolver: emit `--mount type=bind`
-    #: (refuse-missing), never `-v`. Set by build_mount_plan from a
-    #: BindRefuseMissing container_spec — never inferred from the source path.
-    bind_refuse_missing: bool = False
 
     @property
     def dest(self) -> str:
         return _dest_of(self.container_spec)
 
 
-def mount_spec(source, container_spec: str, required: bool = True,
-               bind_refuse_missing: bool = False) -> MountSpec:
+def mount_spec(source, container_spec: str, required: bool = True) -> MountSpec:
     """Build a MountSpec with its origin DERIVED from the source path
-    (classify_origin), so no call site can mislabel a platform path as HOST.
-
-    EXCEPT a resolved workspace bind (``bind_refuse_missing``, declared via a
-    BindRefuseMissing container_spec): its source is already a concrete
-    DAEMON-HOST path the resolver translated, so it is forced Origin.HOST and
-    bound literally. It must NOT be lexically classified against node roots — its
-    STRING may coincide with DATA_ROOT/REPO_ROOT/home (e.g. a custom docker
-    data-root under /app/data), which would wrongly map it to a node volume and
-    drop the strict bind. Origin AND refusal mode both stay explicit after
-    translation."""
-    refuse = bind_refuse_missing or getattr(container_spec, "bind_refuse_missing", False)
-    origin = Origin.HOST if refuse else classify_origin(source)
-    return MountSpec(str(source), container_spec, origin, required, refuse)
+    (classify_origin), so no call site can mislabel a platform path as HOST."""
+    return MountSpec(str(source), container_spec, classify_origin(source), required)
 
 
 class MountPlan:
@@ -217,30 +201,12 @@ class SocketMountRefused(RuntimeError):
     """A mount references the docker socket as source or dest — never given to a session."""
 
 
-class BindRefuseMissing(str):
-    """A ``container_spec`` that MUST emit ``--mount type=bind`` (which refuses a
-    nonexistent source), never ``-v`` (which fabricates one) — so a resolved
-    workspace source that vanishes before docker run fails the launch instead of
-    silently mounting an empty dir (the epic's core bug).
-
-    A ``str`` subclass so it rides the ``{host_path: container_spec}`` dict and
-    ``dict.update()`` transparently and reads as a plain spec everywhere; only
-    ``build_mount_plan`` inspects ``.bind_refuse_missing`` and stamps it onto the
-    MountSpec. Provenance thus FOLLOWS the resolver's declaration through the plan
-    — it is never rediscovered by comparing paths, which is unsound across the
-    node/daemon-host frame boundary (a host-frame Source is not a node-frame path
-    and must not be filesystem-resolved in the node namespace)."""
-    bind_refuse_missing = True
-
-
 @dataclass(frozen=True)
 class ResolvedMount:
     container_spec: str
-    host_source: Optional[str] = None    # emit as a bind (-v, or --mount if bind_refuse_missing)
+    host_source: Optional[str] = None    # emit as a -v bind
     volume: Optional[str] = None         # emit as a --mount type=volume
     subpath: Optional[str] = None
-    #: A workspace bind: emit `--mount type=bind` (refuse-missing), never `-v`.
-    bind_refuse_missing: bool = False
 
 
 def _deeper(a, b):
@@ -257,17 +223,9 @@ def resolve(spec: MountSpec, topo: NodeTopology) -> "Optional[ResolvedMount]":
     unresolvable). Never touches the filesystem for a NODE-origin spec — the node
     topology is the authority, not a wrong-frame ``.exists()``."""
     # Host process, or an origin that always binds by its literal source path:
-    # byte-identical to today's ``-v source:spec`` — EXCEPT a spec the resolver
-    # explicitly declared as a strict workspace bind (bind_refuse_missing, carried
-    # from a BindRefuseMissing container_spec), which emits `--mount type=bind` so
-    # a source that vanished after the resolver's check refuses the launch instead
-    # of fabricating an empty mount. The property is declared, never inferred from
-    # the path (which is unsound across the node/daemon-host frame boundary).
+    # byte-identical to today's ``-v source:spec``.
     if topo.is_host_process or spec.origin in (Origin.DEVICE, Origin.HOST):
-        return ResolvedMount(
-            container_spec=spec.container_spec, host_source=spec.source,
-            bind_refuse_missing=spec.bind_refuse_missing,
-        )
+        return ResolvedMount(container_spec=spec.container_spec, host_source=spec.source)
 
     # NODE origin on a containerized node: map the source to the deepest node
     # mount that contains it (/app/data before /app).
@@ -352,14 +310,6 @@ def emit(r: ResolvedMount, topo: NodeTopology) -> list:
         parts = ["type=volume", f"src={r.volume}", f"dst={dest}"]
         if r.subpath:
             parts.append(f"volume-subpath={r.subpath}")
-        if readonly:
-            parts.append("readonly")
-        return ["--mount", ",".join(parts)]
-    if r.bind_refuse_missing:
-        # A resolved workspace bind: `--mount type=bind` REFUSES a nonexistent
-        # source, so a source that vanished between the resolver's check and now
-        # fails the launch instead of `-v` fabricating an empty dir at it.
-        parts = ["type=bind", f"src={r.host_source}", f"dst={dest}"]
         if readonly:
             parts.append("readonly")
         return ["--mount", ",".join(parts)]
