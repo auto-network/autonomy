@@ -52,7 +52,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # index is built, so re-init on a DB carrying legacy duplicates converges
 # instead of failing — retiring the manual-install dependency for universal
 # enforcement.
-_SCHEMA_USER_VERSION = 4
+# v5 (auto-4oxee): signed-settings envelope columns (signed_at, signing_key,
+# signature, witness, terminal_persona) on the settings table, everywhere.
+_SCHEMA_USER_VERSION = 5
 DEFAULT_DB = DATA_ROOT / "graph.db"
 DEFAULT_ORGS_DIR = DATA_ROOT / "orgs"
 
@@ -700,6 +702,22 @@ class GraphDB:
             "CREATE INDEX IF NOT EXISTS idx_settings_expires_at "
             "ON settings(expires_at) WHERE expires_at IS NOT NULL"
         )
+        # Signed-settings envelope columns (auto-4oxee, graph://21a0da9e-1c2).
+        # Nullable: NULL on every row of a store that does not sign —
+        # personal.db, the machine store, and an org DB whose ledger is not
+        # founded. `witness` NULL on a *signed* row means the org had never
+        # published when it was written. The one-slot-per-signer uniqueness
+        # change over terminal_persona belongs to auto-y2ubq together with the
+        # duplicate-base migration above — the pair moves as one.
+        for column, decl in (
+            ("signed_at", "INTEGER"),
+            ("signing_key", "TEXT"),
+            ("signature", "TEXT"),
+            ("witness", "TEXT"),
+            ("terminal_persona", "TEXT"),
+        ):
+            if column not in cols:
+                self.conn.execute(f"ALTER TABLE settings ADD COLUMN {column} {decl}")
         self.conn.commit()
 
     def _migrate_orgs(self):
