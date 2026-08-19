@@ -15,7 +15,7 @@ from tools.graph.schemas.registry import SchemaValidationError
 from tools.network.idkit import KeyPair
 from tools.network.idkit.armor import (
     encrypt_root_key,
-    encrypt_root_key_v2,
+    encrypt_root_key,
 )
 
 PASSWORD = "the-personal-password"
@@ -44,7 +44,7 @@ def test_a_multi_lock_armored_identity_is_accepted():
     """The format the ceremonies are moving to must be storable."""
     key = KeyPair.generate()
     validate(
-        payload(encrypt_root_key_v2(key, PASSWORD, iterations=ITERS), key.public_hex)
+        payload(encrypt_root_key(key, PASSWORD, iterations=ITERS), key.public_hex)
     )
 
 
@@ -54,14 +54,14 @@ def test_a_multi_lock_identity_carrying_a_recovery_lock_is_accepted():
     from tools.network.idkit.sealing import derive_encapsulation_keypair
 
     key = KeyPair.generate()
-    armor = encrypt_root_key_v2(key, PASSWORD, iterations=ITERS)
+    armor = encrypt_root_key(key, PASSWORD, iterations=ITERS)
     code = recovery.generate_recovery_code()
     seed = recovery.derive_recovery_factors(code)["kek_recovery_seed"]
     _, kem_pub = derive_encapsulation_keypair(seed, RECOVERY_ARMOR_PURPOSE)
     validate(payload(add_recovery_factor(armor, PASSWORD, kem_pub), key.public_hex))
 
 
-@pytest.mark.parametrize("mint", [encrypt_root_key, encrypt_root_key_v2])
+@pytest.mark.parametrize("mint", [encrypt_root_key, encrypt_root_key])
 def test_a_mismatched_root_pub_is_refused_in_both_formats(mint):
     key = KeyPair.generate()
     other = KeyPair.generate()
@@ -69,7 +69,7 @@ def test_a_mismatched_root_pub_is_refused_in_both_formats(mint):
         validate(payload(mint(key, PASSWORD, iterations=ITERS), other.public_hex))
 
 
-@pytest.mark.parametrize("mint", [encrypt_root_key, encrypt_root_key_v2])
+@pytest.mark.parametrize("mint", [encrypt_root_key, encrypt_root_key])
 def test_a_non_canonical_armor_is_refused_in_both_formats(mint):
     """Accepting two versions must not mean accepting them loosely."""
     key = KeyPair.generate()
@@ -92,7 +92,7 @@ def test_an_armor_with_a_smuggled_field_is_refused():
     import json
 
     key = KeyPair.generate()
-    armor = encrypt_root_key_v2(key, PASSWORD, iterations=ITERS)
+    armor = encrypt_root_key(key, PASSWORD, iterations=ITERS)
     lines = [ln for ln in armor.split("\n") if ln]
     body = json.loads(base64.b64decode("".join(lines[1:-1])))
     body["smuggled"] = "AAAA"

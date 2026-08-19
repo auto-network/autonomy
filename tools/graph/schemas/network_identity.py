@@ -45,19 +45,13 @@ from datetime import datetime
 from typing import Any
 
 from .registry import (
-    home,
-    home,
-    home,
-    home,
-    home,
-    home,
-    home,
-    home,
-    singleton,
     SchemaValidationError,
     SettingSchema,
     field,
+    home,
     keyed_per_entity,
+    publication_band,
+    singleton,
 )
 
 
@@ -194,114 +188,15 @@ def _require_iso_ts(payload: dict, key: str, cls_name: str) -> str:
 # ── autonomy.network.org-key ──────────────────────────────────
 
 
-#: Not forced into any one store. This records that the question was
-#: ASKED -- must this live in the operator's own database, or on
-#: this machine alone? -- and answered no, which is different
-#: from nobody having considered it.
+#: An organization's own root key lives in that organization's database
+#: -- there is one per org and it means nothing outside it.
 #:
-#: It is not a prohibition. The operator owns workspaces, so
-#: their database is the organizational home of their own
-#: things; reading this as "anywhere but personal" refuses
-#: writes that are correct.
+#: Banded because the row carries the SEALED ROOT SEED. Every write
+#: passing state="raw" by hand is a convention; a band is enforced at
+#: write, at promote, and at the federated read, each of which fails
+#: independently.
 @home("organization")
-@singleton(key="default")
-class NetworkOrgKeyV1(SettingSchema):
-    """The org's auto.network root key — encrypted armor only (I1).
-
-    Key: an operator-chosen label (e.g. ``default``) — one org may hold
-    more than one network identity, mirroring the commit signing-key
-    pattern. Payload: the armored, passphrase-encrypted Ed25519 root
-    private key. The plaintext key exists only in the operator's browser
-    during ceremonies; nothing stored here is usable without the
-    passphrase.
-    """
-
-    set_id = NETWORK_ORG_KEY_SET_ID
-    schema_revision = NETWORK_ORG_KEY_REVISION
-
-    armored_private_key: str = field(
-        required=True,
-        description=(
-            "The armored, passphrase-encrypted Ed25519 org root private key "
-            "in the CANONICAL idkit byte form (tools/network/idkit/armor.py "
-            "canonicalize_armor). Encrypted at rest; only ever decrypted in "
-            "the operator's browser with the passphrase, which the server "
-            "never sees (I1)."
-        ),
-    )
-    root_pub: str = field(
-        required=False,
-        description=(
-            "Hex-encoded public half (64 lowercase hex chars = the key id). "
-            "Public by definition; lets tooling match this blob to its "
-            "registry binding without decrypting anything."
-        ),
-    )
-
-    @classmethod
-    def validate(cls, payload: Any) -> None:
-        super().validate(payload)
-        if not isinstance(payload, dict):
-            return
-        armor = _require_str(payload, "armored_private_key", cls.__name__, max_len=16384)
-        # I1 tripwire: a raw Ed25519 private key is exactly 64 hex chars.
-        # Anything that parses as one is plaintext key material, not an
-        # encrypted armor — refuse it loudly (kept for the clearer message;
-        # the canonical check below refuses it too).
-        if len(armor) == 2 * 32 and _HEX_RE.match(armor):
-            raise SchemaValidationError(
-                f"{cls.__name__}: 'armored_private_key' looks like a raw hex "
-                "Ed25519 private key — plaintext key material must never be "
-                "stored (I1); store the passphrase-encrypted armor instead"
-            )
-
-        # THE I1 gate, at the layer every write path shares. A hardened
-        # HTTP route is not enough: settings_ops.add_setting and
-        # POST /api/graph/setting reach this schema directly, so the
-        # strict/canonical armor requirement must live here. The armor
-        # must be EXACTLY the canonical idkit byte form — strict parse
-        # (exact field sets, formats, lengths, no duplicate keys) plus
-        # byte-for-byte equality with its own re-serialization, so no
-        # unknown field, smuggled plaintext, or alternate encoding can
-        # ride into storage through ANY path. Import is deliberately
-        # lazy (tools.graph stays importable without `cryptography`) and
-        # FAIL-CLOSED: no verifier available → no write.
-        try:
-            from tools.network.idkit.armor import (
-                ArmorError,
-                canonicalize_armor,
-                parse_armor,
-            )
-        except Exception as exc:  # pragma: no cover — env without idkit deps
-            raise SchemaValidationError(
-                f"{cls.__name__}: cannot verify 'armored_private_key' — "
-                f"tools.network.idkit is unavailable ({exc}); refusing the "
-                "write (I1 fail-closed)"
-            ) from exc
-        try:
-            armor_data = parse_armor(armor)
-            if canonicalize_armor(armor) != armor:
-                raise SchemaValidationError(
-                    f"{cls.__name__}: 'armored_private_key' must be the "
-                    "canonical armor byte form — re-emit it with "
-                    "tools.network.idkit.armor.canonicalize_armor (I1)"
-                )
-        except ArmorError as e:
-            raise SchemaValidationError(
-                f"{cls.__name__}: 'armored_private_key' is not a canonical "
-                f"passphrase-encrypted org key armor (I1 — plaintext key "
-                f"material must never be stored): {e}"
-            ) from e
-
-        if "root_pub" in payload:
-            _require_hex(payload, "root_pub", cls.__name__, length=NETWORK_PUB_HEX_LEN)
-            if payload["root_pub"] != armor_data["root_pub"]:
-                raise SchemaValidationError(
-                    f"{cls.__name__}: 'root_pub' does not match the armor's "
-                    "enclosed public key"
-                )
-
-
+@publication_band(max="raw")
 @singleton(key="default")
 class NetworkOrgKeyV2(SettingSchema):
     """Revision 2 — the org root seed SEALED to the owner's key (B4/Option B).

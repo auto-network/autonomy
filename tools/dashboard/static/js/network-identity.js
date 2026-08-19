@@ -35,7 +35,6 @@
 
   var ARMOR_BEGIN = '-----BEGIN AUTONOMY NETWORK ROOT KEY-----';
   var ARMOR_END = '-----END AUTONOMY NETWORK ROOT KEY-----';
-  var ARMOR_AAD_PREFIX = 'autonomy.idkit.armor.v1\n';
   var REGISTRATION_PATH = '/v1/orgs';
 
   // PBKDF2 work factor — mirrors armor.DEFAULT_ITERATIONS. Tests may
@@ -94,56 +93,20 @@
     return { seed: seed, pubHex: _I().bytesToHex(pub) };
   }
 
-  // Passphrase-armor the seed — byte-compatible with armor.py: PBKDF2-
-  // SHA256 → AES-256-GCM with the version+root_pub AAD, canonical-JSON
-  // body, base64 wrapped at 64 columns between BEGIN/END lines.
-  async function armorSeed(seed, rootPubHex, passphrase, iterations) {
-    if (typeof passphrase !== 'string' || !passphrase) {
-      throw new Error('passphrase must be a non-empty string');
-    }
-    iterations = iterations || _iterations;
-    var salt = crypto.getRandomValues(new Uint8Array(16));
-    var iv = crypto.getRandomValues(new Uint8Array(12));
-    var material = await crypto.subtle.importKey(
-      'raw', _te.encode(passphrase), 'PBKDF2', false, ['deriveKey']);
-    var aesKey = await crypto.subtle.deriveKey(
-      { name: 'PBKDF2', salt: salt, iterations: iterations, hash: 'SHA-256' },
-      material, { name: 'AES-GCM', length: 256 }, false, ['encrypt']);
-    var ct = new Uint8Array(await crypto.subtle.encrypt(
-      { name: 'AES-GCM', iv: iv,
-        additionalData: _te.encode(ARMOR_AAD_PREFIX + rootPubHex) },
-      aesKey, seed));
-    var body = _I().canonicalJson({
-      v: 1,
-      kdf: { name: 'PBKDF2', hash: 'SHA-256', iterations: iterations,
-             salt: bytesToB64(salt) },
-      cipher: { name: 'AES-256-GCM', iv: bytesToB64(iv) },
-      root_pub: rootPubHex,
-      ct: bytesToB64(ct),
-    });
-    var b64 = btoa(body);   // canonical JSON is pure ASCII by construction
-    var lines = [ARMOR_BEGIN];
-    for (var i = 0; i < b64.length; i += 64) lines.push(b64.slice(i, i + 64));
-    lines.push(ARMOR_END);
-    return lines.join('\n');
-  }
-
   // The PERSONAL identity's armor, in the multi-lock format (v2). It
   // delegates to the single implementation in ceremony/primitives.js rather
   // than hand-rolling a second one here: the v1 minter below exists because
   // this file predates that module, and duplicating the newer format would
   // be how the two quietly drift apart.
   //
-  // The ORG key armor stays on armorSeed (v1) — the server validates that
-  // one as v1, so moving it is a separate, server-side change.
-  async function armorSeedV2(seed, rootPubHex, passphrase, iterations) {
+  async function armorSeed(seed, rootPubHex, passphrase, iterations) {
     if (typeof passphrase !== 'string' || !passphrase) {
       throw new Error('passphrase must be a non-empty string');
     }
     if (!/^[0-9a-f]{64}$/.test(rootPubHex)) {
       throw new Error('root_pub must be 64 lowercase hex chars');
     }
-    return _I().encryptArmorV2(
+    return _I().encryptArmor(
       seed, rootPubHex, passphrase, iterations || _iterations,
     );
   }
@@ -284,46 +247,42 @@
     if (el) el.remove();
   }
 
-  async function _startCreate(passphrase, confirm) {
-    if (typeof passphrase !== 'string' || passphrase.length < 8) {
-      throw new Error('the passphrase must be at least 8 characters');
+  //: The org root is SEALED to the operator's PERSONAL root, never armored
+  //: under a passphrase of its own. One password opens every org they own,
+  //: and re-sealing to another recipient transfers ownership without ever
+  //: exposing the seed. Both seeds live only inside this function and are
+  //: zeroed in the same finally (I1).
+  var ORG_ROOT_SEAL_PURPOSE = 'autonomy/org-root-armor/v1';
+
+  async function _startCreate(personalPassword) {
+    if (typeof personalPassword !== 'string' || !personalPassword) {
+      throw new Error('enter your personal password');
     }
-    if (passphrase !== confirm) {
-      throw new Error('the passphrases do not match');
-    }
+    var opened = await _I().openPersonalRoot(personalPassword);
     var pair = await generateEd25519();
+    var recipient, sealedHex;
     try {
+      recipient = await _I().deriveEncapsulationKeypair(
+        opened.seed, ORG_ROOT_SEAL_PURPOSE);
+      sealedHex = _I().bytesToHex(await _I().sealToEncapsulationKey(
+        pair.seed, recipient.publicKeyHex, ORG_ROOT_SEAL_PURPOSE));
       W.rootPub = pair.pubHex;
       W.orgUuid = crypto.randomUUID();
-      W.armor = await armorSeed(pair.seed, pair.pubHex, passphrase);
       W.rootKey = await importSigningKey(pair.seed);
     } finally {
-      pair.seed.fill(0);   // I1: plaintext root dies here
-      pair.seed = null;
+      pair.seed.fill(0); pair.seed = null;
+      opened.seed.fill(0); opened.seed = null;
     }
-    // Store the encrypted blob BEFORE registration: an identity that is
+    // Store the sealed key BEFORE registration: an identity that is
     // registered but not stored dies with this tab.
-    await _postJson('/api/network/org-key', {
-      org: W.org, armored_private_key: W.armor, root_pub: W.rootPub,
+    await _postJson('/api/network/org-key/sealed', {
+      org: W.org,
+      root_pub: W.rootPub,
+      sealed_root_key: sealedHex,
+      owner_kem_pub: recipient.publicKeyHex,
+      seal_purpose: ORG_ROOT_SEAL_PURPOSE,
     }, W.org);
     W.armorStored = true;
-  }
-
-  // Resume: the armor is already stored (a previous run stopped before
-  // registration) — decrypt it with C2's own decrypt path and continue
-  // at the recovery step.
-  async function _startResume(passphrase) {
-    var opened = await _I().decryptArmor(W.orgKey.armored_private_key, passphrase);
-    try {
-      W.rootPub = opened.rootPub;
-      W.orgUuid = crypto.randomUUID();
-      W.armor = W.orgKey.armored_private_key;
-      W.armorStored = true;
-      W.rootKey = await importSigningKey(opened.seed);
-    } finally {
-      opened.seed.fill(0);
-      opened.seed = null;
-    }
   }
 
   async function _mintRecovery() {
@@ -646,7 +605,6 @@
     _internals: {
       generateEd25519: generateEd25519,
       armorSeed: armorSeed,
-      armorSeedV2: armorSeedV2,
       importSigningKey: importSigningKey,
       signRegistration: signRegistration,
       buildRecoveryBlock: buildRecoveryBlock,

@@ -83,24 +83,30 @@ INVITE_REF = "bc" * 32
 
 
 def _org_key_material():
-    """A REAL canonical armor — the schema validator strict-parses it
-    (Codex I1 finding: the gate lives at the schema layer, so fixture
-    payloads must be genuine canonical armors, not look-alikes)."""
+    """A REAL sealed org root — the schema strict-parses it, so a fixture has
+    to be genuine rather than a look-alike (the I1 gate lives at the schema
+    layer, not at the route)."""
     from tools.network.idkit import KeyPair
-    from tools.network.idkit.armor import encrypt_root_key
+    from tools.network.idkit.sealing import derive_encapsulation_keypair, seal
 
+    owner_seed = bytes(range(32))
     root = KeyPair.generate()
-    return root, encrypt_root_key(root, "test passphrase", iterations=10_000)
+    _, recipient_pub = derive_encapsulation_keypair(
+        owner_seed, ni.ORG_ROOT_ARMOR_PURPOSE)
+    sealed = seal(bytes.fromhex(root.private_hex), recipient_pub,
+                  ni.ORG_ROOT_ARMOR_PURPOSE)
+    return root, {
+        "sealed_root_key": sealed.hex(),
+        "owner_kem_pub": recipient_pub,
+        "seal_purpose": ni.ORG_ROOT_ARMOR_PURPOSE,
+    }
 
 
-_ORG_KEY_ROOT, _ORG_KEY_ARMOR = _org_key_material()
+_ORG_KEY_ROOT, _ORG_KEY_SEAL = _org_key_material()
 
 
 def org_key_payload() -> dict:
-    return {
-        "armored_private_key": _ORG_KEY_ARMOR,
-        "root_pub": _ORG_KEY_ROOT.public_hex,
-    }
+    return {"root_pub": _ORG_KEY_ROOT.public_hex, **_ORG_KEY_SEAL}
 
 
 def binding_payload() -> dict:
@@ -167,7 +173,7 @@ def serve_cert_payload() -> dict:
 
 
 ALL_SET_IDS = {
-    ni.NETWORK_ORG_KEY_SET_ID: (ni.NETWORK_ORG_KEY_REVISION, org_key_payload),
+    ni.NETWORK_ORG_KEY_SET_ID: (ni.NETWORK_ORG_KEY_REVISION_2, org_key_payload),
     ni.NETWORK_BINDING_SET_ID: (ni.NETWORK_BINDING_REVISION, binding_payload),
     ni.NETWORK_LINK_GRANT_SET_ID: (ni.NETWORK_LINK_GRANT_REVISION, link_grant_payload),
     ni.NETWORK_SERVE_CERT_SET_ID: (ni.NETWORK_SERVE_CERT_REVISION, serve_cert_payload),
@@ -246,24 +252,25 @@ def test_vocabulary_is_pinned_to_idkit():
 # ── org-key rejections ────────────────────────────────────────
 
 
-def test_org_key_requires_armor():
+def test_org_key_requires_the_sealed_root():
     with pytest.raises(SchemaValidationError):
-        validate_payload(ni.NETWORK_ORG_KEY_SET_ID, 1, {})
+        validate_payload(ni.NETWORK_ORG_KEY_SET_ID, 2, {})
 
 
-def test_org_key_rejects_plaintext_hex_key_material():
-    """I1 tripwire: a 64-hex string IS a raw Ed25519 private key."""
+def test_org_key_rejects_plaintext_key_material():
+    """I1 tripwire: a 64-hex string IS a raw Ed25519 private key, and no
+    field of this row may carry one."""
     payload = org_key_payload()
-    payload["armored_private_key"] = "0f" * 32
-    with pytest.raises(SchemaValidationError, match="plaintext|I1"):
-        validate_payload(ni.NETWORK_ORG_KEY_SET_ID, 1, payload)
+    payload["sealed_root_key"] = "0f" * 32
+    with pytest.raises(SchemaValidationError):
+        validate_payload(ni.NETWORK_ORG_KEY_SET_ID, 2, payload)
 
 
 def test_org_key_rejects_malformed_root_pub():
     payload = org_key_payload()
     payload["root_pub"] = "AB" * 32  # uppercase
     with pytest.raises(SchemaValidationError):
-        validate_payload(ni.NETWORK_ORG_KEY_SET_ID, 1, payload)
+        validate_payload(ni.NETWORK_ORG_KEY_SET_ID, 2, payload)
 
 
 # ── binding rejections ────────────────────────────────────────
@@ -757,14 +764,6 @@ def test_i1_no_plaintext_key_field_in_schema_sources():
     assert not offenders, f"raw key-material fields declared in schemas: {offenders}"
 
 
-def test_org_key_schema_stores_encrypted_armor_only():
-    """The one field that touches key material is the armored blob."""
-    schema = get_schema(ni.NETWORK_ORG_KEY_SET_ID, 1)
-    props = schema.export_json_schema()["properties"]
-    assert set(props) == {"armored_private_key", "root_pub"}
-    assert "encrypted" in props["armored_private_key"]["description"].lower()
-
-
 # ── org-key: the I1 gate lives at the SCHEMA layer (Codex re-attack) ──
 #
 # Hardening one HTTP route was not enough: settings_ops.add_setting and
@@ -785,50 +784,3 @@ def _smuggled_org_key_armor() -> str:
     return "\n".join([ARMOR_BEGIN, body, ARMOR_END])
 
 
-def test_org_key_smuggled_armor_refused_at_schema():
-    with pytest.raises(SchemaValidationError, match="I1"):
-        validate_payload(ni.NETWORK_ORG_KEY_SET_ID, 1,
-                         {"armored_private_key": _smuggled_org_key_armor()})
-
-
-def test_org_key_smuggle_via_settings_ops_refused(graph_db_env):
-    """Codex's exact bypass: writing the setting directly through
-    settings_ops. Both write primitives must refuse, and the seed must be
-    absent from the DB bytes in raw AND base64-wrapped form."""
-    forged = _smuggled_org_key_armor()
-    seed = _ORG_KEY_ROOT.private_hex
-    with pytest.raises(SchemaValidationError, match="I1"):
-        ops.add_setting(ni.NETWORK_ORG_KEY_SET_ID, 1, "default",
-                        {"armored_private_key": forged}, org=ops.CALLER_ORG)
-    with pytest.raises(SchemaValidationError, match="I1"):
-        ops.upsert_by_key(ni.NETWORK_ORG_KEY_SET_ID, 1, "default",
-                          {"armored_private_key": forged}, org=ops.CALLER_ORG)
-    assert ops.read_set(ni.NETWORK_ORG_KEY_SET_ID, org=ops.CALLER_ORG).members == []
-    from tools.graph.db import GraphDB
-    GraphDB.close_all_pooled()
-    blob = b"".join(
-        p.read_bytes() for p in graph_db_env.parent.glob("graph.db*") if p.is_file()
-    )
-    assert seed.encode() not in blob
-    assert bytes.fromhex(seed) not in blob
-    # The forged armor's base64 body (which CONTAINS the seed, encoded)
-    # must not have landed either.
-    assert forged.splitlines()[1].encode() not in blob
-
-
-def test_org_key_non_canonical_layout_refused_at_schema():
-    """Same fields, different byte layout (body unwrapped to one line):
-    the schema requires THE canonical form, byte for byte."""
-    lines = _ORG_KEY_ARMOR.strip().splitlines()
-    rewrapped = "\n".join([lines[0], "".join(lines[1:-1]), lines[-1]])
-    assert rewrapped != _ORG_KEY_ARMOR
-    with pytest.raises(SchemaValidationError, match="canonical"):
-        validate_payload(ni.NETWORK_ORG_KEY_SET_ID, 1,
-                         {"armored_private_key": rewrapped})
-
-
-def test_org_key_root_pub_must_match_armor():
-    payload = org_key_payload()
-    payload["root_pub"] = ROOT_PUB  # valid hex, wrong key
-    with pytest.raises(SchemaValidationError, match="does not match"):
-        validate_payload(ni.NETWORK_ORG_KEY_SET_ID, 1, payload)

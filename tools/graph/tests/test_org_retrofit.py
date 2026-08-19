@@ -53,19 +53,12 @@ def env(tmp_path, monkeypatch):
             },
             org=None,
         )
-    # The pre-existing "autonomy"-style org: keyed with a LEGACY password
-    # armor of an independent root, orgs row present, no ledger.
+    # The pre-existing "autonomy"-style org: already keyed, its root SEALED
+    # to the owner (the only stored shape), orgs row present, no ledger.
     GraphDB.create_org_db("autonomy", root=orgs).close()
     legacy_root = KeyPair.generate()
-    settings_ops.add_setting(
-        NETWORK_ORG_KEY_SET_ID, 1, "default",
-        {
-            "armored_private_key": encrypt_root_key(
-                legacy_root, PASSWORD, iterations=10_000
-            ),
-            "root_pub": legacy_root.public_hex,
-        },
-        org="autonomy", state="canonical",
+    org_ops._seal_org_root_setting(
+        "autonomy", legacy_root, bytes.fromhex(personal_root.private_hex),
     )
     # A legacy KEYLESS org: orgs row, no key Setting, no ledger.
     GraphDB.create_org_db("keyless", root=orgs).close()

@@ -11,8 +11,8 @@ import pytest
 
 from tools.network.idkit import KeyPair, recovery
 from tools.network.idkit.armor import (
-    decrypt_root_key_v2,
-    encrypt_root_key_v2,
+    decrypt_root_key,
+    encrypt_root_key,
 )
 from tools.network.idkit.errors import MalformedError, SignatureError
 from tools.network.idkit.root_rotation import (
@@ -46,13 +46,13 @@ def rotate(origin_pub, seq, old, new, rec):
 
 def test_a_stolen_armor_opens_a_key_that_is_no_longer_you(identity):
     origin, _code, rec = identity
-    stolen = encrypt_root_key_v2(origin, "the-password-they-know", iterations=ITERS)
+    stolen = encrypt_root_key(origin, "the-password-they-know", iterations=ITERS)
 
     new_root = KeyPair.generate()
     history = [rotate(origin.public_hex, 1, origin, new_root, rec)]
 
     # The thief's copy still opens. That is expected and unavoidable.
-    assert decrypt_root_key_v2(stolen, "the-password-they-know").public_hex == origin.public_hex
+    assert decrypt_root_key(stolen, "the-password-they-know").public_hex == origin.public_hex
     # It just is not the current identity any more.
     current = resolve_current_root(origin.public_hex, history, recovery_pub=rec.public_hex)
     assert current == new_root.public_hex

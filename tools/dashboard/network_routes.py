@@ -963,82 +963,6 @@ async def post_ledger_invite(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "invite_id": invite_id})
 
 
-async def put_org_key(request: Request) -> JSONResponse:
-    """Store the org root key's passphrase-encrypted armor (C1 step 2).
-
-    Body: ``{org?, label?, armored_private_key}``. The armor must parse
-    with the canonical implementation (``tools/network/idkit/armor.py``)
-    — that check is the I1 gate: a raw seed, a bare hex string, or any
-    non-armor blob is refused before it can touch storage. An org that
-    already holds a network identity gets 409; the create ceremony is
-    for orgs without one (replacing a root key is a D2 rebind concern).
-    """
-    if _mock_mode():
-        return JSONResponse({"ok": False, "error": "mock dashboard stores no org keys"},
-                            status_code=502)
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"ok": False, "error": "body must be JSON"}, status_code=400)
-    if not isinstance(body, dict) or not isinstance(body.get("armored_private_key"), str):
-        return JSONResponse({"ok": False, "error": (
-            "body must carry 'armored_private_key' as the armor text"
-        )}, status_code=400)
-
-    # Refuse a cross-org write BEFORE processing the (foreign) payload.
-    org, refused = _scoped_org(body.get("org"), request=request)
-    if refused is not None:
-        return refused
-
-    # I1 gate: only the canonical passphrase-encrypted armor is storable.
-    # parse_armor is STRICT (exact field sets, formats, lengths — unknown
-    # fields refused so nothing can be smuggled inside the body), and the
-    # armor is RE-SERIALIZED from the parsed fields before storage, so the
-    # persisted bytes can only ever carry the canonical armor fields.
-    from tools.network.idkit.armor import ArmorError, canonicalize_armor, parse_armor
-    try:
-        canonical_armor = canonicalize_armor(body["armored_private_key"])
-        armor_data = parse_armor(canonical_armor)
-    except ArmorError as e:
-        return JSONResponse({"ok": False, "error": (
-            f"refusing to store: not a canonical passphrase-encrypted org "
-            f"key armor (I1 — plaintext key material must never be "
-            f"persisted): {e}"
-        )}, status_code=400)
-    root_pub = armor_data["root_pub"]
-    if body.get("root_pub") is not None and body["root_pub"] != root_pub:
-        return JSONResponse({"ok": False, "error": (
-            "root_pub does not match the armor's enclosed public key"
-        )}, status_code=400)
-
-    label = body.get("label") or "default"
-    if not isinstance(label, str) or len(label) > 64:
-        return JSONResponse({"ok": False, "error": "label must be a short string"},
-                            status_code=400)
-    try:
-        existing = _first_member(NETWORK_ORG_KEY_SET_ID, org)
-    except Exception as e:
-        return JSONResponse({"ok": False,
-                             "error": f"could not read the org key setting: {e}"},
-                            status_code=500)
-    if existing is not None:
-        return JSONResponse({"ok": False, "error": (
-            "this org already holds a network identity — the create "
-            "ceremony never overwrites a stored root key"
-        )}, status_code=409)
-    try:
-        settings_ops.upsert_by_key(
-            NETWORK_ORG_KEY_SET_ID, NETWORK_ORG_KEY_REVISION, label,
-            {"armored_private_key": canonical_armor, "root_pub": root_pub},
-            org=org,
-        )
-    except Exception as e:
-        return JSONResponse({"ok": False,
-                             "error": f"could not store the org key: {e}"},
-                            status_code=500)
-    return JSONResponse({"ok": True, "label": label, "root_pub": root_pub})
-
-
 async def post_sealed_org_key(request: Request) -> JSONResponse:
     """Persist an org root key the BROWSER sealed (I1, auto-jdba4).
 
@@ -1774,7 +1698,6 @@ async def get_unlock_maintenance_report(request: Request) -> JSONResponse:
 
 ROUTES = [
     Route("/api/network/org-key", get_org_key, methods=["GET"]),
-    Route("/api/network/org-key", put_org_key, methods=["POST"]),
     Route("/api/network/org-key/sealed", post_sealed_org_key, methods=["POST"]),
     Route("/api/network/binding", get_binding, methods=["GET"]),
     Route("/api/network/registry", get_registry, methods=["GET"]),

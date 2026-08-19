@@ -311,11 +311,11 @@ async def post_personal(request: Request) -> JSONResponse:
     from tools.network.idkit.armor import (
         ArmorError,
         armor_root_pub,
-        canonicalize_armor_any,
+        canonicalize_armor,
     )
     try:
         # Either armor version: existing identities are v1, new ones are v2.
-        canonical_armor = canonicalize_armor_any(body["armored_private_key"])
+        canonical_armor = canonicalize_armor(body["armored_private_key"])
         armor_data = {"root_pub": armor_root_pub(canonical_armor)}
     except ArmorError as e:
         return JSONResponse({"ok": False, "error": (
