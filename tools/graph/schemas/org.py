@@ -83,6 +83,11 @@ class OrgV1(SettingSchema):
         },
         "byline": {
             "type": "string",
+            # 60, because it sits under the org's name in a list and has to
+            # stay one line on a phone. The three bylines that read well are
+            # 12, 17 and 28 characters; the one that does not is 98 and wraps
+            # to two lines, which is how a tagline turns into a description.
+            "max_length": 60,
             "description": "Tagline shown on org cards / dashboard headers",
         },
         "color": {

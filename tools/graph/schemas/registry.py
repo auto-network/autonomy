@@ -1428,7 +1428,14 @@ def enforce_declared_fields(schema: type, payload: Any) -> None:
       aliased or misspelled field a failure instead of a silently ignored key;
     * a required field that is absent, or present as ``None``, is missing;
     * a declared type is checked, but only for a non-``None`` value;
-    * a declared enum is checked, likewise only for a non-``None`` value.
+    * a declared enum is checked, likewise only for a non-``None`` value;
+    * a declared ``max_length`` is checked on a string, likewise.
+
+    ``max_length`` is here rather than in any one schema because a length
+    bound is a fact about a field, and ``_field_metadata`` is what
+    ``graph set schema`` and the dashboard's schema route read. A cap
+    enforced inside a single schema's own validator holds, but is invisible
+    to both, so nothing renders it and no other schema can declare it.
 
     ``None`` is permitted for an optional field rather than treated as a type
     error. That is the convention the hand-written validators already follow
@@ -1488,6 +1495,12 @@ def enforce_declared_fields(schema: type, payload: Any) -> None:
             raise SchemaValidationError(
                 f"{schema.__name__}: {name!r} must be one of {enum}, "
                 f"got {value!r}"
+            )
+        cap = spec.get("max_length")
+        if cap and isinstance(value, str) and len(value) > cap:
+            raise SchemaValidationError(
+                f"{schema.__name__}: {name!r} is {len(value)} characters, "
+                f"over the {cap} this field allows"
             )
 
 
