@@ -369,7 +369,9 @@ def cmd_set_contested(args) -> None:
                     f"  {slot.get('org') or '-'}"
                 )
         if limit and len(entries) > limit:
-            print(f"… {len(entries) - limit} more contested keys (raise --limit)")
+            more = len(entries) - limit
+            noun = "key" if more == 1 else "keys"
+            print(f"… {more} more contested {noun} (raise --limit)")
         return
 
     rows = []
@@ -393,7 +395,9 @@ def cmd_set_contested(args) -> None:
         ("latest", "LATEST SIGNED", 20),
     ])
     if limit and len(rows) > limit:
-        print(f"… {len(rows) - limit} more sets (raise --limit)")
+        more = len(rows) - limit
+        noun = "set" if more == 1 else "sets"
+        print(f"… {more} more {noun} (raise --limit)")
     print()
     print("One exact set_id for per-slot detail; globs and --key filter.")
 
