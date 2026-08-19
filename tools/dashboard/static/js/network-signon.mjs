@@ -4,7 +4,6 @@ import {
   bytesToHex,
   domainBytes,
   decryptArmor,
-  decryptArmor,
   encryptArmor,
   importEd25519RootSigningKey,
   openSealedArmor,
@@ -1188,7 +1187,6 @@ var signRegistryRequestCore;
     // enforcement they exercise lives in the real paths above.
     _internals: {
       canonicalJson: canonicalJson,
-      decryptArmor: decryptArmor,
       decryptArmor: decryptArmor,
       encryptArmor: encryptArmor,
       openPersonalRoot: _openPersonalRoot,

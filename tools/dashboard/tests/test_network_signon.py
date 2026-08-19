@@ -103,10 +103,25 @@ def _store_binding(root):
     )
 
 
-def _store_org_key(root, armor):
+#: The owner an org root is sealed to. An org root has no passphrase of its
+#: own — one personal root opens every org it owns.
+OWNER_SEED = bytes(range(32))
+
+
+def _store_org_key(root, _unused=None):
+    from tools.graph.schemas.network_identity import (
+        NETWORK_ORG_KEY_REVISION_2, ORG_ROOT_ARMOR_PURPOSE,
+    )
+    from tools.network.idkit.sealing import derive_encapsulation_keypair, seal
+
+    _, recipient_pub = derive_encapsulation_keypair(
+        OWNER_SEED, ORG_ROOT_ARMOR_PURPOSE)
+    sealed = seal(bytes.fromhex(root.private_hex), recipient_pub,
+                  ORG_ROOT_ARMOR_PURPOSE)
     settings_ops.add_setting(
-        NETWORK_ORG_KEY_SET_ID, NETWORK_ORG_KEY_REVISION, "default",
-        {"armored_private_key": armor, "root_pub": root.public_hex},
+        NETWORK_ORG_KEY_SET_ID, NETWORK_ORG_KEY_REVISION_2, "default",
+        {"root_pub": root.public_hex, "sealed_root_key": sealed.hex(),
+         "owner_kem_pub": recipient_pub, "seal_purpose": ORG_ROOT_ARMOR_PURPOSE},
         org=ORG,
     )
 
@@ -130,18 +145,6 @@ def test_org_key_404_when_unset(env):
     assert "no signing key" in error
     # No internal codename or retired-ceremony language reaches the caller.
     assert "C1" not in error and "ceremony" not in error
-
-
-def test_org_key_serves_encrypted_armor_only(env, root):
-    armor = encrypt_root_key(root, PASSPHRASE, iterations=10_000)
-    _store_org_key(root, armor)
-    r = env.get(f"/api/network/org-key?org={ORG}")
-    assert r.status_code == 200
-    body = r.json()
-    assert body["armored_private_key"] == armor
-    assert body["root_pub"] == root.public_hex
-    # I1: nothing in the response is usable without the passphrase.
-    assert root.private_hex not in r.text
 
 
 def test_org_key_serves_sealed_revision_2(env, root):
