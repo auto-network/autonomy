@@ -12723,6 +12723,11 @@ async def api_diag_eventbus_snapshot(request):
 
 async def api_diag_settings(request):
     """Process-local Settings throughput snapshot."""
+    # Enumerates EVERY set, including secret-bearing ones, so it cannot be
+    # allowlisted per-set — the enumeration itself is the disclosure.
+    auth_error = api_auth.require_global_api_authority(request)
+    if auth_error is not None:
+        return auth_error
     from tools.graph import settings_ops
 
     return JSONResponse(settings_ops.settings_api_stats_snapshot())
@@ -12730,6 +12735,11 @@ async def api_diag_settings(request):
 
 async def api_diag_settings_sets(request):
     """Storage + activity summary for Settings sets in the selected org."""
+    # Enumerates EVERY set, including secret-bearing ones, so it cannot be
+    # allowlisted per-set — the enumeration itself is the disclosure.
+    auth_error = api_auth.require_global_api_authority(request)
+    if auth_error is not None:
+        return auth_error
     org = _caller_org(request)
     resolved_org, windows, rows = _settings_diag_rows(org=org)
     from tools.graph import settings_ops as _settings_ops
@@ -12749,6 +12759,12 @@ async def api_diag_settings_sets(request):
 async def api_diag_settings_set_detail(request):
     """Storage detail for one Settings set, including per-key footprint."""
     set_id = request.path_params["set_id"]
+    # Serves storage metadata rather than payloads, so no secret BYTES cross
+    # here — but key names and the existence of a set are still disclosure,
+    # and the same fail-closed policy applies for the same reason.
+    refusal = _refuse_non_public_setting(request, set_id)
+    if refusal is not None:
+        return refusal
     org = _caller_org(request)
     resolved_org, windows, rows = _settings_diag_rows(org=org)
     summary = next((row for row in rows if row["set_id"] == set_id), None)
@@ -15273,9 +15289,33 @@ async def _emit_setting_changed(
     await event_bus.broadcast("setting.changed", payload, dedup=False)
 
 
+def _refuse_non_public_setting(request, set_id):
+    """Refuse a generic Settings read unless the set is publicly readable.
+
+    auto-1wwpf.10. ONE guard, consulted by every generic reader — not a
+    per-handler copy, which would drift and leave a reader serving while the
+    synthetic-set test still passed.
+
+    Fail-closed: `settings_read_policy` decides from a PUBLIC allowlist, so a
+    set nobody has classified is refused rather than served. Runs BEFORE the
+    storage read and before the DASHBOARD_MOCK branch, so neither can
+    serialize material the caller may not have.
+
+    Returns a JSONResponse to return, or None to proceed.
+    """
+    from tools.dashboard import settings_read_policy
+
+    if not settings_read_policy.requires_global_authority(set_id):
+        return None
+    return api_auth.require_global_api_authority(request)
+
+
 async def api_graph_settings_list(request):
     """GET /api/graph/settings/<set_id> — resolved members of a SET."""
     set_id = request.path_params["set_id"]
+    refusal = _refuse_non_public_setting(request, set_id)
+    if refusal is not None:
+        return refusal
     target, minrev, stored, err = _parse_settings_read_params(request.query_params)
     if err:
         return JSONResponse({"error": err}, status_code=400)
@@ -15302,6 +15342,9 @@ async def api_graph_settings_get_by_key(request):
     """GET /api/graph/settings/<set_id>/<key> — single resolved member by key."""
     set_id = request.path_params["set_id"]
     key = request.path_params["key"]
+    refusal = _refuse_non_public_setting(request, set_id)
+    if refusal is not None:
+        return refusal
     target, minrev, stored, err = _parse_settings_read_params(request.query_params)
     if err:
         return JSONResponse({"error": err}, status_code=400)
@@ -15912,6 +15955,9 @@ async def api_graph_settings_chain(request):
     """
     set_id = request.path_params["set_id"]
     key = request.path_params["key"]
+    refusal = _refuse_non_public_setting(request, set_id)
+    if refusal is not None:
+        return refusal
     org = _caller_org(request)
     chain = graph_ops.chain_setting(set_id, key, org=org or graph_ops.CALLER_ORG)
     if chain is None:
