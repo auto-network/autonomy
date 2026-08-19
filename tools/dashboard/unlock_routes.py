@@ -1020,8 +1020,15 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
             )}, status_code=400)
         decoded[state_id] = raw
 
+    delegate_hex = body.get("delegate_signing_key")
+    if delegate_hex is not None and not isinstance(delegate_hex, str):
+        return JSONResponse({"ok": False, "error": (
+            "delegate_signing_key must be the attenuated delegate's private "
+            "key as hex, or absent"
+        )}, status_code=400)
+
     try:
-        loaded = _bring_vault_up(decoded)
+        loaded = _bring_vault_up(decoded, delegate_hex)
     except Exception as exc:  # noqa: BLE001 — one refusal shape to the caller
         logger.warning("vault bring-up failed", exc_info=True)
         return JSONResponse({"ok": False, "error": (
@@ -1030,7 +1037,7 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "generations": loaded})
 
 
-def _bring_vault_up(generation_keys: dict) -> int:
+def _bring_vault_up(generation_keys: dict, delegate_hex: "str | None" = None) -> int:
     """Install the vault seams for this process. Returns how many keys landed.
 
     Split out so the route stays about the request and this stays about the
@@ -1038,6 +1045,14 @@ def _bring_vault_up(generation_keys: dict) -> int:
     """
     from tools.data_paths import DATA_ROOT
     from tools.vault.bringup import register_vault_for_unlock
+
+    if delegate_hex:
+        from tools.network.idkit import KeyPair
+
+        # The dashboard MAY hold this one (crib §12) — it is the attenuated
+        # agent delegate, scope-bound to the two storage scopes and TTL-bounded,
+        # never a persona signing key.
+        _VAULT_CACHE["delegate"] = KeyPair.from_private_hex(delegate_hex)
 
     cache = register_vault_for_unlock(
         generation_keys=generation_keys,
@@ -1058,23 +1073,58 @@ _VAULT_CACHE: dict = {}
 
 
 def _agent_delegate():
-    """The attenuated delegate that authors a seal, or None before one exists.
+    """The attenuated delegate's signing key, or None before one is held.
 
-    Provisioning it is auto-pw9bs.2's ceremony and is not wired yet; until it
-    is, a write fails closed naming the unlock, which is the correct refusal
-    rather than a placeholder that authors as something it should not.
+    MEMORY-class: it arrives at unlock, lives in this dict, and dies with the
+    process. Nothing persists it, so a restart leaves no author and a write
+    refuses naming the unlock — which is the design, not a gap.
     """
-    return None
+    return _VAULT_CACHE.get("delegate")
+
+
+def _fold_for(slug):
+    """``(frontier, fold_at, authority_ancestry)`` for *slug*, or None.
+
+    The three ledger seams the sealer needs, and they are NOT interchangeable:
+    ``frontier`` is a folded VALUE for seal_revision, ``fold_at`` is a CALLABLE
+    that folds at a descriptor's own cited heads, and the ancestry is the
+    AUTHORITY ledger's — a different DAG from the storage one.
+
+    Returns None when the ledger has no genesis, which is what an unfounded
+    store looks like. The sealer turns that into a refusal naming the
+    organization rather than a crash naming a missing attribute.
+    """
+    from tools.network.ledger import LedgerStore, org_ledger_db_path
+
+    try:
+        store = LedgerStore(org_ledger_db_path(slug))
+    except Exception:
+        return None
+    try:
+        frontier = store.fold()
+    except Exception:
+        # No genesis: an unfounded store, not an error worth raising here.
+        return None
+    return (
+        frontier,
+        lambda heads: store.fold(heads=list(heads)),
+        store.ledger.ancestry,
+    )
 
 
 def _org_fold(org):
     """The organization's folded ledger, or None if it is not founded."""
-    return None
+    return _fold_for(org) if org else None
 
 
-def _personal_fold(org):
-    """The operator's own folded ledger, or None before it is founded."""
-    return None
+def _personal_fold(_org):
+    """The operator's own folded ledger.
+
+    Ignores the org argument deliberately: a personal-homed set seals against
+    the operator's own fold whatever organization a caller happens to be
+    acting as. The row's home and the acting org are different axes.
+    """
+    return _fold_for("personal")
 
 
 ROUTES = [
