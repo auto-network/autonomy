@@ -107,16 +107,43 @@ def env(tmp_path, monkeypatch):
     from tools.graph.db import GraphDB
 
     GraphDB.close_all_pooled()
-    # Agreement pin (test_feature_flags.py's recipe): the routes write at
-    # org=None while the tests read/write at explicit org=ORG, so the pin
-    # points AT the orgs tree's own db for ORG — explicit-org resolution
-    # and the pin converge on one hermetic file instead of the pin
-    # contradicting the org (OrgResolutionConflict).
     orgs_dir = tmp_path / "orgs"
     orgs_dir.mkdir()
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
-    monkeypatch.setenv("GRAPH_DB", str(orgs_dir / f"{ORG}.db"))
+    # NO GRAPH_DB PIN, deliberately. A whole-store pin and an EXPLICIT org are
+    # mutually exclusive by design (auto-23d9m): naming both raises
+    # OrgResolutionConflict rather than silently discarding one.
+    #
+    # An earlier recipe here pinned at ORG's own file, reasoning that the pin
+    # and explicit-org resolution then converge on one hermetic file. That
+    # holds for the tests' own reads at org=ORG and misses the caller that
+    # matters: the gate reads enrollment at explicit org='personal', a
+    # DIFFERENT explicit org, precisely so it cannot be steered by a request's
+    # X-Graph-Org or the ambient GRAPH_ORG. Pinned, that read raised, and
+    # `human_auth_enrolled` swallowed it under "storage unreadable, therefore
+    # enforce" — so every gated route 401'd before any enrollment existed.
+    #
+    # AUTONOMY_ORGS_DIR + GRAPH_ORG give the same isolation and COMPOSE with
+    # org routing. The dashboard's own conftest already refuses to pin graph.
     monkeypatch.setenv("GRAPH_ORG", ORG)
+    # No store is pre-created. Five tests in this file still fail and each is
+    # a real question the pin was hiding rather than answering:
+    #
+    #   * the two "fresh/missing store" tests name `{ORG}.db` as `personal_db`
+    #     — under the pin the gate's explicit-personal read resolved to the
+    #     PINNED file, so the two were the same path and the confusion was
+    #     invisible. Unpinned they are different stores, and what those tests
+    #     actually assert (a gate that has never been set up reads empty and
+    #     stays OPEN) is now a statement about personal.db.
+    #   * three construct hostile rows by WRITING a personal-homed set into an
+    #     org DB, which `@home` now correctly refuses. The read guard is what
+    #     is under test, so they need to force the row in directly — a row can
+    #     reach a store by a path no write guard sees (0d3f750f-f9c), which is
+    #     precisely the case they cover.
+    #
+    # Left failing rather than papered over: they are worth answering
+    # properly, and a pre-created store would silence them without deciding
+    # anything.
     monkeypatch.setenv("DASHBOARD_SESSION_SECRET_FILE",
                        str(tmp_path / "session.secret"))
     monkeypatch.setenv("DASHBOARD_IDENTITY_SESSION_DB",
