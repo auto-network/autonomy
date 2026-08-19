@@ -29,6 +29,7 @@ B1 audit and both invisible to ``test_no_hardcoded_host_paths.py``
 from __future__ import annotations
 
 import os
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -133,6 +134,106 @@ STORES_BY_KEY = {store.key: store for store in STORE_MANIFEST}
 LOCAL_STORE_KEYS = tuple(
     store.key for store in STORE_MANIFEST if store.roots_with == "orgs"
 )
+
+
+class LocalStoreCollisionError(RuntimeError):
+    """A file at a local store's legacy path is a SHARED organization.
+
+    'personal' and 'machine' were creatable as shared-org slugs before the
+    names were reserved, so such a database may exist and was valid when it
+    was made. Treating it as the operator's store by FILENAME would write
+    personal credentials into a shared organization and vanish the org from
+    enumeration — so startup refuses instead, and resolution never serves
+    the file as a local store."""
+
+
+class LocalStoreUnreadableError(RuntimeError):
+    """A file at a local store's legacy path cannot be read at all.
+
+    "There is no data" and "I cannot read this" are different states, and
+    merging them makes a damaged store indistinguishable from an empty one
+    — every downstream decision then treats damage as absence, and absence
+    is the benign case, so the merge fails toward accepting (and here,
+    MOVING) the broken thing. A corrupt file is never classified, never
+    served, and never migrated; the operator inspects or restores it."""
+
+
+#: Tri-state legacy-file classification. The three states are distinct on
+#: purpose (see LocalStoreUnreadableError): a readable database with no
+#: orgs row or no orgs table is the legitimate unclaimed shape (the
+#: on-demand machine store); only an actual read failure is "unreadable".
+LOCAL_STORE_SHARED_ORG = "shared-org"
+LOCAL_STORE_UNCLAIMED = "local-or-unclaimed"
+LOCAL_STORE_UNREADABLE = "unreadable"
+
+
+def _bootstrap_org_classification(path: Path) -> str:
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            row = conn.execute("SELECT type FROM orgs LIMIT 1").fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc).lower():
+                return LOCAL_STORE_UNCLAIMED
+            return LOCAL_STORE_UNREADABLE
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return LOCAL_STORE_UNREADABLE
+    if row is None:
+        return LOCAL_STORE_UNCLAIMED
+    return LOCAL_STORE_SHARED_ORG if row[0] == "shared" else LOCAL_STORE_UNCLAIMED
+
+
+#: Per-process memo of legacy-file classification. A hit only ever refers to
+#: a file still at its legacy path; the operator remedy moves the file away,
+#: after which the exists() check short-circuits before this is consulted.
+#: A cached "shared" or "unreadable" verdict after an in-place repair
+#: over-refuses until restart — the correct direction to be wrong.
+_LEGACY_STORE_CLASSIFICATION: dict = {}
+
+
+def classify_legacy_local_store(legacy: Path) -> str:
+    key = str(legacy)
+    cached = _LEGACY_STORE_CLASSIFICATION.get(key)
+    if cached is None:
+        cached = _bootstrap_org_classification(legacy)
+        _LEGACY_STORE_CLASSIFICATION[key] = cached
+    return cached
+
+
+def resolve_local_store_path(name: str, orgs_dir: Path) -> Path:
+    """THE resolver for a local store's file, given the resolved orgs dir.
+
+    One function, every consumer — tools.graph.db and the ledger's
+    org_ledger_db_path both call it, so the classification (shared-org
+    routing, unreadable refusal) cannot be enforced on one side and absent
+    on the other. Deriving a NAME from the manifest prevents drift in the
+    name; only sharing the LOGIC prevents drift in behavior, and two
+    copies that agree on the normal cases agree exactly where agreement is
+    worthless.
+
+    ``data/<name>.db`` beside the orgs directory; a file still at the
+    legacy ``orgs/<name>.db`` keeps resolving THERE until relocation, but
+    only when it is genuinely unclaimed: a shared organization stranded
+    under a reserved name is never served as a local store (the real,
+    possibly not-yet-created home is answered instead), and an unreadable
+    file refuses loudly rather than being adopted."""
+    target = orgs_dir.parent / f"{name}.db"
+    if target.exists():
+        return target
+    legacy = orgs_dir / f"{name}.db"
+    if legacy.exists():
+        classification = classify_legacy_local_store(legacy)
+        if classification == LOCAL_STORE_UNCLAIMED:
+            return legacy
+        if classification == LOCAL_STORE_UNREADABLE:
+            raise LocalStoreUnreadableError(
+                f"{legacy} cannot be read; refusing to classify it, serve "
+                f"it as the {name!r} store, or migrate it. Inspect or "
+                f"restore the file, then restart."
+            )
+    return target
 
 
 class AmbiguousDataRoot(RuntimeError):

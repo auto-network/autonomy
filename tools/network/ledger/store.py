@@ -107,15 +107,13 @@ def org_ledger_db_path(slug: str, root=None) -> Path:
     path QUESTION about one gets the true answer rather than minting a
     stray file in the org namespace.
     """
-    from tools.data_paths import LOCAL_STORE_KEYS
+    from tools.data_paths import LOCAL_STORE_KEYS, resolve_local_store_path
 
     d = _orgs_dir(root)
     if slug in LOCAL_STORE_KEYS:
-        target = d.parent / f"{slug}.db"
-        legacy = d / f"{slug}.db"
-        if target.exists() or not legacy.exists():
-            return target
-        return legacy
+        # THE shared resolver — routing and classification identical to
+        # the graph side by construction, not by parallel maintenance.
+        return resolve_local_store_path(slug, d)
     return d / f"{slug}.db"
 
 

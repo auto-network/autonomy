@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from tools.graph.db import _org_db_path
+from tools import data_paths
 from tools.graph import org_ops, schemas
 from tools.graph.db import GraphDB
 from tools.graph.migrations.migrate_orgs_yaml import (
@@ -267,7 +268,7 @@ def test_type_inference_from_bootstrap_row(tmp_path, yaml_path):
     # A shared-typed file squatting on the reserved name is not the
     # personal store; the migration must not adopt it as one.
     from tools.graph import db as graph_db_mod
-    graph_db_mod._LEGACY_STORE_CLASSIFICATION.clear()
+    data_paths._LEGACY_STORE_CLASSIFICATION.clear()
     GraphDB.create_org_db(
         "personal", type_="shared", path=orgs_dir / "personal.db",
     ).close()
