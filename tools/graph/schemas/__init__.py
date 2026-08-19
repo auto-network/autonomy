@@ -98,6 +98,8 @@ from . import vault_secret  # noqa: F401 — autonomy.vault.secret#1
 from . import secure_setting  # noqa: F401 — autonomy.secure.setting#1
 from . import commit_signing_key  # noqa: F401 — autonomy.commit.signing-key#1
 from . import credential_file  # noqa: F401 — autonomy.credential-file#1
+from . import fleet_roster  # noqa: F401 — autonomy.fleet.roster#1
+from . import machine_identity  # noqa: F401 — autonomy.machine.identity#1
 
 __all__ = [
     "SchemaValidationError",
