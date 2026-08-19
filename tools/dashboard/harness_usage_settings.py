@@ -24,7 +24,8 @@ HARNESS_USAGE_SCHEMA_REVISION = 1
 # scope instead of independently deriving it from GRAPH_ORG.
 HARNESS_USAGE_ORG = "personal"
 
-# The background publisher refreshes active identities every minute.
+# The background publisher refreshes active identities every 15 minutes
+# (server._HARNESS_USAGE_POLL_INTERVAL), matched to the cache TTL below.
 # Keep UI staleness much tighter than the cache TTL, and let cache-gc
 # sweep old rows eventually when identities stop reporting entirely.
 HARNESS_USAGE_CACHE_TTL = timedelta(minutes=15)
