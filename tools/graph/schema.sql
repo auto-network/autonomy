@@ -384,6 +384,17 @@ CREATE TABLE IF NOT EXISTS settings (
     successor_id      TEXT,
     created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    expires_at        TEXT                          -- @cache(ttl=...) absolute TTL stamp; NULL = never expires
+    expires_at        TEXT,                         -- @cache(ttl=...) absolute TTL stamp; NULL = never expires
+    -- Signed-settings envelope (graph://21a0da9e-1c2). All NULL on every row
+    -- of a store that does not sign: personal.db, the machine store, and an
+    -- org DB whose ledger is not founded. The signature covers the addressed
+    -- record rebuilt from this row plus the owning org's genesis id
+    -- (settingskit.record_from_row), so editing any signed column in place
+    -- makes verification fail.
+    signed_at         INTEGER,                      -- signer-asserted, unix ms; witness-bounded at the boundary
+    signing_key       TEXT,                         -- hex Ed25519 key the signature verifies against
+    signature         TEXT,                         -- hex Ed25519 over the domain-separated canonical record
+    witness           TEXT,                         -- cited witness attestation, JSON; NULL = org never published
+    terminal_persona  TEXT                          -- persona boundary verification resolved the signer to
 );
 -- Indices created via _migrate_settings so legacy DBs survive executescript.
