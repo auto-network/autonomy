@@ -706,6 +706,67 @@ def declared_vault_tier(set_id: str) -> str | None:
     return seen.pop()
 
 
+VALID_SIGNER_TIERS = ("persona", "delegate")
+
+
+def signer(tier: str) -> Any:
+    """Schema decorator: which key signs this set's ORGANIZATION rows.
+
+    Every row in an organization database is signed — that follows the
+    STORE, not the set, and this declaration cannot opt out of it (nor does
+    it constrain where the set lives: an org-homed set may still hold the
+    operator's own unsigned row in ``personal.db``). What a schema declares
+    here is WHICH KEY signs where signing applies:
+
+    - ``persona`` — the acting persona, derived from the personal root and
+      therefore requiring an unlock. A value of this set may not be chosen
+      with nobody present (D8).
+    - ``delegate`` — the attenuated agent delegate, unattended (D7).
+
+    ``delegate`` is the common case and the default; the declaration exists
+    so choosing PERSONA is deliberate and choosing delegate is at least
+    visible. Distinct from ``key_strategy``, which answers where
+    verification resolves the signer FROM, not which key signs.
+    """
+    if tier not in VALID_SIGNER_TIERS:
+        raise SchemaValidationError(
+            f"signer tier must be one of {list(VALID_SIGNER_TIERS)}, got {tier!r}"
+        )
+
+    def _wrap(target: type) -> type:
+        existing = target.__dict__.get("_signer_tier")
+        if existing is not None and existing != tier:
+            raise SchemaValidationError(
+                f"{target.__name__}: declares two signer tiers "
+                f"({existing!r} and {tier!r}); a revision has one signer"
+            )
+        target._signer_tier = tier
+        return target
+
+    return _wrap
+
+
+def declared_signer(set_id: str, revision: int) -> str:
+    """The signing tier governing rows of ``set_id`` AT ``revision``.
+
+    REVISION-AWARE, unlike :func:`declared_vault_tier`, and deliberately so:
+    a row stores its revision and is governed by that revision's
+    declaration, so two revisions of one set may declare different tiers
+    and both resolve — attendance is a property of how a value is CHOSEN,
+    decided per contract generation, where a vault tier is a property of
+    secrets already at rest, which a revision bump must not quietly weaken.
+
+    Silence resolves to ``delegate`` — the common case, and not an error;
+    the decorator exists so ``persona`` is a deliberate act. An
+    unregistered revision also resolves to ``delegate``: what a boundary
+    does with a set that has no schema at all is the boundary's policy,
+    not this resolver's.
+    """
+    cls = SCHEMAS.get(f"{set_id}#{revision}")
+    tier = getattr(cls, "_signer_tier", None) if cls is not None else None
+    return tier if tier is not None else "delegate"
+
+
 def cache(
     cls: type | None = None,
     *,
