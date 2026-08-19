@@ -189,3 +189,23 @@ def test_recovery_key_survives_a_rekey_unchanged():
     state = fold(sim.ledger)
     assert state.valid[ev] is True
     assert state.members[key(persona)].current_key == key(third)
+
+
+# -- item 2 integration: a DERIVED recovery key drives the whole recovery --
+
+def test_derived_recovery_key_enrolls_and_recovers():
+    """The per-org key from idkit.recovery.member_recovery_key enrolls in the
+    claim and authorises a real recovery rekey — item 2 composes with 1/3/4."""
+    from tools.network.idkit.recovery import (
+        generate_recovery_code, member_recovery_key,
+    )
+    sim = Sim()
+    code = generate_recovery_code()
+    recovery = member_recovery_key(code, sim.genesis_id)
+    persona = _enrolled_member(sim, recovery.public_hex)
+    new_key = KeyPair.generate()
+    sig = sign_rekey_recovery(recovery, sim.genesis_id, key(persona), key(persona), key(new_key))
+    ev = sim.rekey(new_key, persona, persona, new_key, recovery_sig=sig)
+    state = fold(sim.ledger)
+    assert state.valid[ev] is True
+    assert state.members[key(persona)].current_key == key(new_key)

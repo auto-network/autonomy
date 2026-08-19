@@ -28,7 +28,15 @@ from .keys import KeyPair
 #: neither collides with the persona/KEM derivations.
 RECOVERY_SIGN_INFO = "autonomy.recovery.signing.v1"
 RECOVERY_KEK_INFO = "autonomy.recovery.kek.v1"
+#: A MEMBER's per-organization recovery signing key (auto-c3yl1). Distinct from
+#: RECOVERY_SIGN_INFO (the org-root recovery key the genesis declares) AND folded
+#: with the genesis id, so a member's recovery key is per-organization: the same
+#: recovery code yields a DIFFERENT key in every org, so an identical value never
+#: links a member's personas across organizations (the same unlinkability the
+#: persona derivation gives, one level down on the recovery axis).
+MEMBER_RECOVERY_SIGN_INFO = "autonomy.recovery.member-sign.v1"
 RECOVERY_MIN_CODE_BYTES = 32  # at least 256 bits of entropy
+_GENESIS_ID_HEX_LEN = 64
 
 #: Crockford base32: no I, L, O or U, so 1/I/L and 0/O cannot be misread apart
 #: and the decoder maps the confusable glyphs home.
@@ -83,6 +91,37 @@ def recovery_signing_key(recovery_code: bytes) -> KeyPair:
     return KeyPair.from_private_hex(
         _hkdf32(bytes(recovery_code), RECOVERY_SIGN_INFO).hex()
     )
+
+
+def member_recovery_key(recovery_code: bytes, genesis_id: str) -> KeyPair:
+    """A member's PER-ORGANIZATION recovery keypair (auto-c3yl1 item 2).
+
+    This is the ``recovery_pub`` a member enrols in ``member.claim`` and the key
+    that co-signs ``rekey_recovery_input`` to move a stolen persona off. It is
+    derived from the recovery code folded with the organization's ``genesis_id``,
+    so the same code yields a DIFFERENT key in every org — an identical value
+    never links a member's personas across organizations. Domain-separated from
+    :func:`recovery_signing_key` (the org-root recovery key), so the two are
+    never the same key even in one org.
+
+    The public half is what enrolls; the private half never leaves the client.
+    """
+    if (
+        not isinstance(recovery_code, (bytes, bytearray))
+        or len(recovery_code) < RECOVERY_MIN_CODE_BYTES
+    ):
+        raise MalformedError(
+            f"recovery code must be at least {RECOVERY_MIN_CODE_BYTES} bytes"
+        )
+    if not isinstance(genesis_id, str) or len(genesis_id) != _GENESIS_ID_HEX_LEN:
+        raise MalformedError("genesis_id must be a 64-char hex string")
+    info = f"{MEMBER_RECOVERY_SIGN_INFO}:{genesis_id}"
+    return KeyPair.from_private_hex(_hkdf32(bytes(recovery_code), info).hex())
+
+
+def member_recovery_pub(recovery_code: bytes, genesis_id: str) -> str:
+    """The public half a member enrols — :func:`member_recovery_key` public hex."""
+    return member_recovery_key(recovery_code, genesis_id).public_hex
 
 
 def _base32_encode(data: bytes) -> str:
