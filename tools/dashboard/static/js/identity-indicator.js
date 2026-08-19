@@ -221,8 +221,16 @@
     }
   }
 
-  function orgRow(org) {
-    var slug = org && (org.slug || org.name);
+  function orgRow(entry) {
+    // /api/orgs returns {org:{slug,...}, identity:{payload:{name,byline,color,
+    // initial}}, identity_resolved}. The bootstrap row and the display fields
+    // are separate objects, and the first cut read both off the top level —
+    // which rendered six real organizations as "?" with no names, because
+    // every field it asked for was one level down.
+    var bootstrap = (entry && entry.org) || {};
+    var org = (entry && entry.identity && entry.identity.payload)
+      || (entry && entry.identity_resolved) || {};
+    var slug = bootstrap.slug || org.slug || "";
     var row = el('button', 'identity-panel-action identity-panel-org');
     row.type = 'button';
     row.setAttribute('data-testid', 'identity-org-' + slug);
@@ -259,14 +267,22 @@
       section.appendChild(el('div', 'identity-panel-action-detail', 'Loading…'));
       return section;
     }
-    if (!orgs.length) {
+    // personal.db and machine.db are STORES, not organizations — they appear
+    // in /api/orgs because that route enumerates data/orgs/*.db, which is the
+    // same reason they are default peers in a read. Neither is a thing the
+    // operator "belongs to", and neither has an organization settings screen.
+    var listed = orgs.filter(function (e) {
+      var slug = ((e && e.org) || {}).slug;
+      return slug !== "personal" && slug !== "machine";
+    });
+    if (!listed.length) {
       // Not an error, and worth saying: an operator with no organizations
       // has one obvious next move and the panel already offers it below.
       section.appendChild(el('div', 'identity-panel-action-detail',
         'None yet. Accept an invitation to join one.'));
       return section;
     }
-    orgs.forEach(function (org) { section.appendChild(orgRow(org)); });
+    listed.forEach(function (e) { section.appendChild(orgRow(e)); });
     return section;
   }
 
