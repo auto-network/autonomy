@@ -198,6 +198,25 @@ class HttpClient:
         if content_type:
             headers = dict(headers or {})
             headers["Content-Type"] = content_type
+        # The session bearer is attached HERE, at the one chokepoint every
+        # request passes through, rather than in a header builder.
+        #
+        # There are two builders — `_headers` and the module-level
+        # `_settings_headers` — and only the first ever carried the bearer.
+        # Every Settings call uses the second, so the CLI presented no
+        # credential on exactly the path this was meant to authenticate,
+        # while a test asserting on `_headers` stayed green. Attaching it per
+        # builder is what allowed one to be missed; attaching it per REQUEST
+        # means a third builder cannot reintroduce the gap.
+        #
+        # A host caller has no CROSSTALK_TOKEN and simply sends none, which
+        # is correct: host callers do not use this transport at all (no
+        # GRAPH_API), and a local org-less caller is classified on its own
+        # terms server-side.
+        token = os.environ.get("CROSSTALK_TOKEN")
+        if token:
+            headers = dict(headers or {})
+            headers.setdefault("Authorization", f"Bearer {token}")
         req = urllib.request.Request(
             url, data=data, headers=headers or {}, method=method,
         )
