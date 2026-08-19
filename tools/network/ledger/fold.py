@@ -54,6 +54,7 @@ from .events import (
     delegate_proof_input,
     rotate_continuity_input,
     rekey_continuity_input,
+    rekey_recovery_input,
     rotate_recovery_input,
 )
 from .ledger import Ledger
@@ -98,6 +99,9 @@ R_REKEY_REVOKED_KEY = "rekey-revoked-key"
 R_NOT_ROOT = "not-root"
 R_ROTATE_WRONG_OLD = "rotate-wrong-old"
 R_BAD_CONTINUITY = "bad-continuity"
+R_RECOVERY_EQUALS_ROOT = "recovery-equals-root"
+R_RECOVERY_NOT_ENROLLED = "recovery-not-enrolled"
+R_RECOVERY_SIG_BAD = "recovery-sig-bad"
 R_RECOVERY_CONTINUITY_MISSING = "recovery-continuity-missing"
 R_BAD_RECOVERY_CONTINUITY = "bad-recovery-continuity"
 R_RECOVERY_NOT_DECLARED = "recovery-continuity-not-declared"
@@ -226,6 +230,9 @@ class _Claim:
     persona_pub: str
     hlc_ts: int
     kem_credential: Optional[dict] = None
+    #: The member's enrolled recovery key (auto-c3yl1), or None under policy
+    #: "none". Authorises the third door on member.rekey.
+    recovery_pub: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -859,12 +866,24 @@ class _Folder:
         if reason is not None:
             return reason
 
+        # Recovery enrollment (auto-c3yl1). Shape and recovery_pub != persona_pub
+        # are payload-validated; the != root guard needs the fold, which knows
+        # the current root. A recovery key equal to the org root is the genesis
+        # self-defeat one level down (events.py:_v_genesis_recovery) — refuse it.
+        recovery = p.get("recovery")
+        recovery_pub = None
+        if recovery is not None and recovery.get("policy") == "recovery-key":
+            recovery_pub = recovery.get("recovery_pub")
+            if recovery_pub == self.root_at(ctx):
+                return R_RECOVERY_EQUALS_ROOT
+
         self.claims[event.event_id] = _Claim(
             id=event.event_id,
             invite_ref=invite_id,
             persona_pub=p["persona_pub"],
             hlc_ts=event.hlc.ts,
             kem_credential=credential,
+            recovery_pub=recovery_pub,
         )
         return None
 
@@ -919,18 +938,44 @@ class _Folder:
         members, _ = self.members_at(ctx)
         if p["persona"] not in members:
             return R_UNKNOWN_PERSONA
+        claim = members[p["persona"]][0]
         current = members[p["persona"]][2]
         if p["old_pub"] != current:
             return R_REKEY_WRONG_KEY
         self_authorized = event.author_key == current
-        if not self_authorized and event.author_key != self.root_at(ctx):
-            return R_REKEY_UNAUTHORIZED
+        by_root = event.author_key == self.root_at(ctx)
+        # Third door (auto-c3yl1): the member's ENROLLED RECOVERY KEY co-signs
+        # the move, so the owner recovers a stolen persona WITHOUT ever holding
+        # the current (stolen) key. Distinct domain from the continuity proof, so
+        # the two signatures can never substitute. Under policy "none" (no
+        # recovery key enrolled) a recovery-authorised rekey is REFUSED, never
+        # ignored — an attacker must not be able to fall through to a softer
+        # path by simply omitting enrollment.
+        recovery_authorized = False
+        if not self_authorized and not by_root:
+            sig = p.get("recovery_sig")
+            if sig is None:
+                return R_REKEY_UNAUTHORIZED
+            if claim.recovery_pub is None:
+                return R_RECOVERY_NOT_ENROLLED
+            try:
+                verify_signature(
+                    claim.recovery_pub,
+                    sig,
+                    rekey_recovery_input(
+                        self.genesis_id, p["persona"], p["old_pub"], p["new_pub"]
+                    ),
+                )
+            except IdkitError:
+                return R_RECOVERY_SIG_BAD
+            recovery_authorized = True
         # Fail closed: a revoked key cannot authorize its own rekey — that
         # would let it rotate to a fresh key and carry its authority out of
-        # the revocation. Root-authorized rekey of a compromised member
-        # remains valid (that IS the recovery path).
+        # the revocation. Root- and recovery-authorized rekey of a compromised
+        # member remains valid (that IS the recovery path).
         if self_authorized and self._key_revoked(current, ctx):
             return R_REKEY_REVOKED_KEY
+        _ = recovery_authorized  # (item 4 will consume this to revoke old_pub)
         taken = set(members)
         taken.update(rec[2] for rec in members.values())
         if p["new_pub"] in taken:

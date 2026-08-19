@@ -161,6 +161,7 @@ class Sim:
         profile=None,
         parents=None,
         ts=None,
+        recovery=None,
     ):
         payload = {
             "type": "member.claim",
@@ -171,12 +172,14 @@ class Sim:
         }
         if token is not None:
             payload["token"] = token
+        if recovery is not None:
+            payload["recovery"] = recovery
         approvals = [sign_approval(a, "member.claim", payload) for a in approvers]
         payload["approvals"] = sorted(approvals, key=lambda e: e["key"])
         return self.emit(signer, payload, parents=parents, ts=ts)
 
     def rekey(self, signer, persona, old, new, approvers=(),
-              continuity=None, parents=None):
+              continuity=None, parents=None, recovery_sig=None):
         payload = {
             "type": "member.rekey",
             "persona": key(persona),
@@ -187,6 +190,8 @@ class Sim:
             else sign_rekey_continuity(new, key(persona), key(old)),
             "approvals": [],
         }
+        if recovery_sig is not None:
+            payload["recovery_sig"] = recovery_sig
         approvals = [sign_approval(a, "member.rekey", payload) for a in approvers]
         payload["approvals"] = sorted(approvals, key=lambda e: e["key"])
         return self.emit(signer, payload, parents=parents)
