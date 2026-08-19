@@ -20,6 +20,7 @@ from tools.network.ledger import (
     Ledger,
     fold,
     make_event,
+    mint_grant_nonce,
     sign_approval,
     sign_rotate_continuity,
     sign_delegate_proof,
@@ -71,18 +72,24 @@ class Sim:
 
     # -- event helpers -----------------------------------------------------------
 
-    def delegate(self, author, child, scope, redelegate=False, parents=None, ttl=None, ts=None, proof=None):
-        # The named child signs the grant (auto-le0kg): pass a KeyPair, or
-        # supply an explicit (possibly bogus) proof for refusal tests.
+    def delegate(self, author, child, scope, redelegate=False, parents=None,
+                 ttl=None, ts=None, proof=None, nonce=None):
+        # The named child signs the grant's full terms + nonce (auto-le0kg
+        # v2): pass a KeyPair, or supply an explicit (possibly bogus) proof
+        # for refusal tests. Pass ``nonce`` to replay one deliberately.
+        if nonce is None:
+            nonce = mint_grant_nonce()
         if proof is None:
             proof = sign_delegate_proof(
                 child, self.genesis_id, key(author), scope,
+                can_redelegate=redelegate, ttl=ttl, grant_nonce=nonce,
             )
         payload = {
             "type": "delegate",
             "child_pub": key(child),
             "scope": sorted(set(scope)),
             "can_redelegate": redelegate,
+            "grant_nonce": nonce,
             "proof": proof,
         }
         if ttl is not None:
@@ -296,17 +303,23 @@ def random_events(seed: int, n: int = 40) -> list:
             if rng.random() < 0.3:
                 keys.append(KeyPair.generate())
             child = rng.choice(keys)
+            _scope = sorted(set(rng.sample(SCOPE_POOL, rng.randint(1, 4))))
+            _redeleg = rng.random() < 0.5
+            # rng-derived so the fuzz stays reproducible under its seed.
+            _nonce = "%064x" % rng.getrandbits(256)
             emit(
                 author,
-                (lambda _scope: {
+                {
                     "type": "delegate",
                     "child_pub": child.public_hex,
                     "scope": _scope,
-                    "can_redelegate": rng.random() < 0.5,
+                    "can_redelegate": _redeleg,
+                    "grant_nonce": _nonce,
                     "proof": sign_delegate_proof(
                         child, gid, author.public_hex, _scope,
+                        can_redelegate=_redeleg, grant_nonce=_nonce,
                     ),
-                })(sorted(set(rng.sample(SCOPE_POOL, rng.randint(1, 4))))),
+                },
                 parents,
                 ts,
             )

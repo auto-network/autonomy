@@ -63,6 +63,7 @@ from .scopes import UNIVERSE, attenuates, covered_subset, set_covers
 R_SCOPE_ESCALATION = "scope-escalation"
 R_NOT_REDELEGABLE = "not-redelegable"
 R_DELEGATE_UNPROVEN = "delegate-unproven"
+R_DELEGATE_NONCE_REUSED = "delegate-nonce-reused"
 R_REVOKE_UNAUTHORIZED = "revoke-unauthorized"
 R_REVOKE_BAD_TARGET = "revoke-bad-target"
 R_REVOKE_NOT_IN_ANCESTRY = "revoke-target-not-in-ancestry"
@@ -491,6 +492,13 @@ class _Folder:
         self.checkpoint_ids: List[str] = []
 
         self._ttl_present = False
+        # Single-use grant nonces (auto-le0kg v2): one ADMITTED delegate
+        # event per (child_pub, grant_nonce). Only admitted events burn a
+        # nonce — a grant refused for any other reason must not block the
+        # corrected re-issue that follows it. Topo order (ties by event id)
+        # makes the winner of a concurrent duplicate deterministic on
+        # every replica.
+        self._used_grant_nonces: set = set()
         self._auth_cache: Dict[tuple, tuple] = {}
         self._members_cache: Dict[tuple, tuple] = {}
         self._lineage_cache: Dict[frozenset, list] = {}
@@ -564,19 +572,26 @@ class _Folder:
 
     def _h_delegate(self, event, ctx) -> Optional[str]:
         p = event.payload
-        # Proof of possession AND consent by the named child key, verified
-        # here rather than in payload validation because the binding needs
-        # the genesis and the issuing member's key, which the payload alone
-        # does not carry (auto-le0kg; same placement as the
-        # recovery-rotation continuity proof). Without it, any member with
-        # delegation authority could publish a grant over a public key they
-        # merely observed and take attribution for every row it writes.
+        # Proof of possession AND consent by the named child key over the
+        # FULL grant terms, verified here rather than in payload validation
+        # because the binding needs the genesis and the issuing member's
+        # key, which the payload alone does not carry (auto-le0kg; same
+        # placement as the recovery-rotation continuity proof). Without
+        # possession, any member with delegation authority could publish a
+        # grant over a public key they merely observed and take
+        # attribution for every row it writes; without the terms, a grant
+        # the child consented to could be reissued with wider authority
+        # under the child's own signature.
         try:
             verify_signature(
                 p["child_pub"],
                 p["proof"],
                 delegate_proof_input(
-                    self.genesis_id, event.author_key, p["child_pub"], p["scope"],
+                    self.genesis_id, event.author_key, p["child_pub"],
+                    p["scope"],
+                    can_redelegate=p["can_redelegate"],
+                    ttl=p.get("ttl"),
+                    grant_nonce=p["grant_nonce"],
                 ),
             )
         except IdkitError:
@@ -589,6 +604,16 @@ class _Folder:
                 if attenuates(scopes, held.get(event.author_key, frozenset())):
                     return R_NOT_REDELEGABLE
                 return R_SCOPE_ESCALATION
+        # Single-use nonce, checked LAST so only an otherwise-admissible
+        # grant burns one. This is what makes consent revocable rather
+        # than perpetual: a revoked grant republished with its original
+        # proof carries the revocation in its ancestry — the kill check
+        # never reaches the republication, so the nonce is the only thing
+        # standing between the child and a withdrawal that does not stick.
+        nonce_key = (p["child_pub"], p["grant_nonce"])
+        if nonce_key in self._used_grant_nonces:
+            return R_DELEGATE_NONCE_REUSED
+        self._used_grant_nonces.add(nonce_key)
         self._mark_grant(event, by_root)
         return None
 

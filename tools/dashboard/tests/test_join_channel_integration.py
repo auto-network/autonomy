@@ -67,9 +67,10 @@ class World:
         self._emit(self.root, {
             "type": "delegate", "child_pub": self.admin.public_hex,
             "scope": ["role:grant:member"], "can_redelegate": False,
+            "grant_nonce": "36" * 32,
             "proof": sign_delegate_proof(
                 self.admin, self.founded.genesis_id,
-                self.root.public_hex, ["role:grant:member"],
+                self.root.public_hex, ["role:grant:member"], grant_nonce="36" * 32,
             ),
         })
         self.token = generate_token()
@@ -142,9 +143,10 @@ class World:
                     "child_pub": filler.public_hex,
                     "scope": ["link:publish"],
                     "can_redelegate": False,
+                    "grant_nonce": "37" * 32,
                     "proof": sign_delegate_proof(
                         filler, store.ledger.genesis_id,
-                        self.root.public_hex, ["link:publish"],
+                        self.root.public_hex, ["link:publish"], grant_nonce="37" * 32,
                     ),
                 },
                 store.heads(),
@@ -385,9 +387,10 @@ def test_finalize_after_the_invite_expires(tmp_path, monkeypatch):
             world.root,
             (lambda k: {"type": "delegate", "child_pub": k.public_hex,
              "scope": ["link:publish"], "can_redelegate": False,
+             "grant_nonce": "38" * 32,
              "proof": sign_delegate_proof(
                  k, store.ledger.genesis_id, world.root.public_hex,
-                 ["link:publish"],
+                 ["link:publish"], grant_nonce="38" * 32,
              )})(KeyPair.generate()),
             sorted(store.heads()), HLC(real_now + 120_000),
         ))

@@ -163,9 +163,11 @@ class FoundedInvite:
                     "child_pub": self.admin.public_hex,
                     "scope": ["role:grant:member"],
                     "can_redelegate": False,
+                    "grant_nonce": "22" * 32,
                     "proof": sign_delegate_proof(
                         self.admin, self.genesis_id,
                         self.root_key.public_hex, ["role:grant:member"],
+                        grant_nonce="22" * 32,
                     ),
                 })
                 claim_token = generate_token()

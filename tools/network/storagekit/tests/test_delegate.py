@@ -75,7 +75,9 @@ class World:
             child_proof=sign_delegate_proof(
                 self.issuer, self.gen, s.root.public_hex,
                 storage_delegate_scopes(self.dom),
+                can_redelegate=True, grant_nonce="53" * 32,
             ),
+            grant_nonce="53" * 32,
         )
         # A non-member also granted the two scopes re-delegably: a chain
         # through it terminates OUTSIDE the roster.
@@ -85,7 +87,9 @@ class World:
             child_proof=sign_delegate_proof(
                 self.outside, self.gen, s.root.public_hex,
                 storage_delegate_scopes(self.dom),
+                can_redelegate=True, grant_nonce="54" * 32,
             ),
+            grant_nonce="54" * 32,
         )
 
     def _admit(self):
