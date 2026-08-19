@@ -853,6 +853,88 @@ async def post_invite_email(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, **receipt})
 
 
+async def post_ledger_delegate(request: Request) -> JSONResponse:
+    """Append one client-signed storage delegate event (auto-pw9bs.2).
+
+    The unattended agent delegate is minted in the BROWSER, where the persona
+    key lives — this process may hold the delegate's signing key (crib §12) but
+    never the persona's, so it cannot mint one itself. The browser signs the
+    delegation event and posts it here to be made durable.
+
+    Durability is the whole point. A delegate that exists only in the minting
+    process resolves against that process's fold and nowhere else, so the first
+    thing to re-open the ledger — a key holder, a sealer — cannot resolve the
+    author to a member and every write fails with an authority error that names
+    the wrong cause.
+
+    This route contributes no signatures and inspects no secret. It verifies
+    the event is a delegate, is self-consistent, and cites the current heads,
+    then appends it.
+    """
+    if _mock_mode():
+        return JSONResponse(
+            {"ok": False, "error": "mock dashboard has no authority ledger"},
+            status_code=502,
+        )
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "body must be JSON"},
+                            status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"ok": False, "error": "body must be a JSON object"},
+                            status_code=400)
+    requested_org = body.get("org")
+    if not isinstance(requested_org, str) or not requested_org:
+        return JSONResponse({"ok": False, "error": "body must carry the local org slug"},
+                            status_code=400)
+    _org, refused = _scoped_org(requested_org, request=request)
+    if refused is not None:
+        return refused
+    wire = body.get("event")
+    if not isinstance(wire, str):
+        return JSONResponse({"ok": False, "error": (
+            "body must carry the delegate event as a canonical wire string"
+        )}, status_code=400)
+
+    from tools.network.ledger import Event, LedgerError, LedgerStore, org_ledger_db_path
+
+    try:
+        event = Event.from_json(wire)
+        if event.type != "delegate":
+            raise ValueError(f"event type must be delegate, got {event.type!r}")
+        event.verify_sig()
+    except (LedgerError, ValueError, TypeError) as exc:
+        return JSONResponse({"ok": False, "error": f"delegate rejected: {exc}"},
+                            status_code=400)
+
+    store_path = org_ledger_db_path(requested_org)
+    if not store_path.exists():
+        return JSONResponse({"ok": False, "error": (
+            "this store has no founded ledger — a delegate is authorized by "
+            "membership, and there is no roster to resolve against"
+        )}, status_code=404)
+    try:
+        with LedgerStore(store_path) as store:
+            current = store.heads()
+            if tuple(event.parents) != tuple(current):
+                # Refuse rather than append at a stale frontier: the fold that
+                # authorizes this delegate would not be the one it cited.
+                return JSONResponse({"ok": False, "error": (
+                    "authority ledger advanced; re-mint the delegate at the "
+                    "current heads and retry"
+                )}, status_code=409)
+            event_id = store.append(event)
+    except LedgerError as exc:
+        return JSONResponse({"ok": False, "error": f"delegate refused: {exc}"},
+                            status_code=400)
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": (
+            f"could not append the delegate: {exc}"
+        )}, status_code=500)
+    return JSONResponse({"ok": True, "event_id": event_id})
+
+
 async def post_ledger_invite(request: Request) -> JSONResponse:
     """Authorize and append one client-signed routine invitation."""
     if _mock_mode():
@@ -1703,6 +1785,7 @@ ROUTES = [
     Route("/api/network/registry", get_registry, methods=["GET"]),
     Route("/api/network/ledger/found", post_ledger_found, methods=["POST"]),
     Route("/api/network/ledger/heads", get_ledger_heads, methods=["GET"]),
+    Route("/api/network/ledger/delegate", post_ledger_delegate, methods=["POST"]),
     Route("/api/network/ledger/invite", post_ledger_invite, methods=["POST"]),
     Route("/api/network/ledger/claim", post_ledger_claim, methods=["POST"]),
     Route(
