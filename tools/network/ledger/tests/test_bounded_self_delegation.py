@@ -23,8 +23,8 @@ from tools.network.ledger.fold import (
     R_DELEGATE_NONCE_REUSED,
     R_NOT_REDELEGABLE,
     R_SCOPE_ESCALATION,
-    self_delegable_exact,
 )
+from tools.network.ledger.scopes import self_delegable_exact
 from tools.network.ledger.projections import organization_content_domain_id
 from tools.network.storagekit import storage_delegate_scopes
 
