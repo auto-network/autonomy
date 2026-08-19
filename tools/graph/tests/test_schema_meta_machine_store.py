@@ -92,6 +92,19 @@ def test_flush_writes_one_store_and_no_organization_database(orgs_root):
     assert _schema_meta_rows(acme_path) == 0
     assert _schema_meta_rows(beta_path) == 0
 
+    # First creation writes the typed bootstrap row: list_orgs is the
+    # operator's STORE INVENTORY and silently skips files without one, so
+    # a bare machine store would exist, hold the whole registry, serve
+    # reads — and report as absent (the absent-versus-broken shape,
+    # inverted). Local stores carry type='personal'; the slug tells the
+    # two apart.
+    from tools.graph import org_ops
+
+    inventory = {ref.slug: ref.type for ref in org_ops.list_orgs()}
+    assert inventory.get("machine") == "personal", (
+        f"machine store missing from the store inventory: {inventory}"
+    )
+
 
 def test_flush_sweeps_rows_previous_versions_wrote_into_shared_stores(
     orgs_root,

@@ -1847,7 +1847,23 @@ def flush_schema_meta_machine_store(*, root=None) -> int:
     from ..db import GraphDB, _org_db_path
 
     try:
-        db = GraphDB(_org_db_path("machine", root), create=True)
+        path = _org_db_path("machine", root)
+        if path.exists():
+            db = GraphDB(path)
+        else:
+            # First creation writes the typed bootstrap row, not a bare
+            # file: list_orgs is the operator's store inventory and skips
+            # files without one, so a bare store would exist, hold the
+            # whole registry, serve reads — and report as absent. Local
+            # stores carry type='personal'; the slug tells them apart.
+            try:
+                db = GraphDB.create_org_db(
+                    "machine", type_="personal", root=root,
+                )
+            except FileExistsError:
+                # Lost a concurrent-creation race; the winner's file is
+                # there now.
+                db = GraphDB(path)
     except Exception:
         logger.warning(
             "flush_schema_meta_machine_store: could not open the machine "
