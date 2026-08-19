@@ -24,15 +24,10 @@ services:
         #   AUTONOMY_TAILWIND_URL=https://mirror.example.internal/tailwindcss-linux-x64
         BASE_IMAGE: ${AUTONOMY_BASE_IMAGE:-python:3.12-slim}
         TAILWIND_URL: ${AUTONOMY_TAILWIND_URL:-}
-        # Version stamp baked into /app/VERSION (the code ships as bare files, so
-        # it can't self-report). The bare `docker compose up` path stamps
-        # commit=source with a real build time (honest: a from-source build, time
-        # known, commit not captured — never "unknown"). For the real commit SHA,
-        # either build via `deploy/build.sh <compose args>` (the supported wrapper)
-        # or pass AUTONOMY_VERSION=$(git rev-parse HEAD) yourself. Published images
-        # always carry the real SHA (deploy/publish-images.sh).
-        AUTONOMY_VERSION: ${AUTONOMY_VERSION:-source}
-        AUTONOMY_BUILD_TIME: ${AUTONOMY_BUILD_TIME:-}
+        # No version build arg: the build reads the commit hash + date from the
+        # checkout's .git itself and stamps /app/VERSION, then drops .git (see
+        # deploy/Dockerfile). Plain `docker compose up` self-stamps; nobody passes
+        # a version, and the image ships no .git.
     # Published path: set AUTONOMY_IMAGE to the verified immutable reference
     # from image-lock.env (repo/image@sha256:...), then use
     # `docker compose pull && docker compose up -d --no-build`.

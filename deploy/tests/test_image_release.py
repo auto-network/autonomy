@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -92,14 +91,12 @@ def test_publish_builds_pushes_and_records_exact_digests_without_signing(release
 
     calls = log.read_text(encoding="utf-8").splitlines()
     assert calls[0].startswith("docker build --pull ")
-    # Published node image must carry a real commit + build time, not the
-    # `source`/`unknown` markers a bare source build stamps (auto-m7vh7).
+    # The version stamp is NOT a build arg: the Dockerfile builder stage reads
+    # the commit hash + date from the checkout's .git itself (auto-m7vh7). So the
+    # release build passes no AUTONOMY_VERSION/AUTONOMY_BUILD_TIME.
     node_build = calls[0]
-    assert re.search(r"--build-arg AUTONOMY_VERSION=[0-9a-f]{40}\b", node_build), node_build
-    assert re.search(
-        r"--build-arg AUTONOMY_BUILD_TIME=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", node_build
-    ), node_build
-    assert "AUTONOMY_VERSION=unknown" not in node_build
+    assert "AUTONOMY_VERSION" not in node_build, node_build
+    assert "AUTONOMY_BUILD_TIME" not in node_build, node_build
     assert "agent-build --pull --core-only" in calls
     assert sum(line.startswith("docker push ") for line in calls) == 4
     assert not any(line.startswith("cosign ") for line in calls)
@@ -112,34 +109,6 @@ def test_publish_builds_pushes_and_records_exact_digests_without_signing(release
     image_lines = [line for line in lock if line.startswith("AUTONOMY_")][2:]
     assert len(image_lines) == 4
     assert all(f"@sha256:{DIGEST}" in line for line in image_lines)
-
-
-@pytest.mark.parametrize("bad_version", ["source", "not-a-sha", "DEADBEEF"])
-def test_publish_refuses_non_sha_version_override(release_env, bad_version):
-    """A published node image must carry a real commit — never the bare-compose
-    `source` marker and never arbitrary text. Reject before building/pushing."""
-    env, log, _, _ = release_env
-    env["AUTONOMY_VERSION"] = bad_version
-    result = subprocess.run(
-        ["bash", str(PUBLISH)], env=env, capture_output=True, text=True, check=False
-    )
-    assert result.returncode != 0, f"publish must reject AUTONOMY_VERSION={bad_version!r}"
-    if log.exists():
-        assert "docker build" not in log.read_text(encoding="utf-8"), (
-            "publish must fail closed before building anything"
-        )
-
-
-@pytest.mark.parametrize("bad_time", ["not-a-time", "2026-08-19 01:00:00", "2026-08-19T01:00:00"])
-def test_publish_refuses_malformed_build_time_override(release_env, bad_time):
-    env, log, _, _ = release_env
-    env["AUTONOMY_BUILD_TIME"] = bad_time
-    result = subprocess.run(
-        ["bash", str(PUBLISH)], env=env, capture_output=True, text=True, check=False
-    )
-    assert result.returncode != 0, f"publish must reject AUTONOMY_BUILD_TIME={bad_time!r}"
-    if log.exists():
-        assert "docker build" not in log.read_text(encoding="utf-8")
 
 
 def test_operator_signing_requires_confirmation_and_signs_exact_digests(release_env):

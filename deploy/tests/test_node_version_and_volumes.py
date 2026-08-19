@@ -1,20 +1,18 @@
 """Contract tests for auto-m7vh7: the three daemon volume names are pinned, and
-the version stamp is real (never empty/unknown) on every supported build path."""
+the image self-stamps its version from the checkout's .git at build time (no
+build arg, nothing passed in, no .git in the final image)."""
 
 from __future__ import annotations
 
-import os
-import re
-import subprocess
 from pathlib import Path
 
-import pytest
 import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_PATH = ROOT / "docker-compose.yml"
-BUILD_SH = ROOT / "deploy" / "build.sh"
+DOCKERFILE = ROOT / "deploy" / "Dockerfile"
+DOCKERIGNORE = ROOT / ".dockerignore"
 
 FORBIDDEN_ALIASES = ("autonomy-state", "autonomy-mounts", "autonomy-workspace-data")
 EXPECTED_MOUNTS = {
@@ -28,12 +26,10 @@ def _compose():
     return yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
 
 
+# ── the three volumes ──────────────────────────────────────────────────────
 def test_dashboard_mounts_the_three_volumes_at_the_locked_destinations():
     svc = _compose()["services"]["dashboard"]
-    mounts = {}
-    for entry in svc["volumes"]:
-        src, dst = entry.split(":")[0], entry.split(":")[1]
-        mounts[src] = dst
+    mounts = {entry.split(":")[0]: entry.split(":")[1] for entry in svc["volumes"]}
     for vol, dest in EXPECTED_MOUNTS.items():
         assert mounts.get(vol) == dest, f"{vol} must mount at {dest}, got {mounts.get(vol)}"
 
@@ -55,73 +51,46 @@ def test_no_forbidden_volume_aliases_anywhere_in_compose():
         assert alias not in text, f"stale volume alias {alias!r} present in compose"
 
 
-def test_compose_never_defaults_the_version_to_empty_or_unknown():
-    """The bare `docker compose up` path must stamp an honest marker, not
-    unknown/empty which would carry no provenance into the code volume."""
-    args = _compose()["services"]["dashboard"]["build"]["args"]
-    ver = str(args["AUTONOMY_VERSION"])
-    assert "unknown" not in ver
-    assert ":-source}" in ver, "bare-compose default must be the 'source' marker"
+# ── the self-stamped version ───────────────────────────────────────────────
+def test_compose_passes_no_version_build_arg():
+    """The version is not passed in — the build reads it from .git itself."""
+    args = _compose()["services"]["dashboard"]["build"].get("args", {})
+    assert "AUTONOMY_VERSION" not in args
+    assert "AUTONOMY_BUILD_TIME" not in args
 
 
-def test_build_wrapper_stamps_a_real_commit_and_time(tmp_path):
-    """deploy/build.sh derives a real SHA + UTC time from the checkout and hands
-    them to docker compose — the supported real-commit source build."""
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    log = tmp_path / "docker.log"
-    stub = fake_bin / "docker"
-    stub.write_text(
-        "#!/usr/bin/env bash\n"
-        'printf "VERSION=%s\\nTIME=%s\\nARGV=%s\\n" '
-        '"$AUTONOMY_VERSION" "$AUTONOMY_BUILD_TIME" "$*" >> "$DOCKER_LOG"\n',
-        encoding="utf-8",
-    )
-    stub.chmod(0o755)
-
-    env = os.environ.copy()
-    env["PATH"] = f"{fake_bin}:{env['PATH']}"
-    env["DOCKER_LOG"] = str(log)
-    env.pop("AUTONOMY_VERSION", None)
-    env.pop("AUTONOMY_BUILD_TIME", None)
-
-    subprocess.run(["bash", str(BUILD_SH), "build"], env=env, check=True)
-
-    out = log.read_text(encoding="utf-8")
-    ver = re.search(r"VERSION=([0-9a-f]{40})\b", out)
-    tim = re.search(r"TIME=(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)", out)
-    assert ver, f"build.sh must pass a real 40-hex commit SHA; got:\n{out}"
-    assert tim, f"build.sh must pass a UTC build time; got:\n{out}"
-    assert "compose" in out and "build" in out, "build.sh must invoke docker compose"
+def test_dockerignore_does_not_exclude_dot_git():
+    """The builder stage needs .git in the context to read the commit; a line
+    that excludes it (not a comment mentioning it) would blind the build."""
+    lines = [
+        ln.strip()
+        for ln in DOCKERIGNORE.read_text(encoding="utf-8").splitlines()
+        if ln.strip() and not ln.strip().startswith("#")
+    ]
+    assert ".git" not in lines, ".dockerignore must not exclude .git (build reads it)"
 
 
-@pytest.mark.parametrize(
-    "bad_env",
-    [
-        {"AUTONOMY_VERSION": "not-a-sha"},
-        {"AUTONOMY_VERSION": "source"},      # build.sh is the real-SHA path; source is invalid here
-        {"AUTONOMY_VERSION": "DEADBEEF" * 5},  # 40 chars but uppercase — not a git SHA
-        {"AUTONOMY_BUILD_TIME": "not-a-time"},
-    ],
-)
-def test_build_wrapper_rejects_invalid_overrides(tmp_path, bad_env):
-    """A bad version/time override must fail closed BEFORE docker is invoked, so
-    garbage can never reach the image."""
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    called = tmp_path / "docker-was-called"
-    stub = fake_bin / "docker"
-    stub.write_text(f'#!/usr/bin/env bash\ntouch {called}\n', encoding="utf-8")
-    stub.chmod(0o755)
+def test_dockerfile_self_stamps_commit_and_date_and_drops_git():
+    df = DOCKERFILE.read_text(encoding="utf-8")
+    # multi-stage: a named builder stage, and the runtime /app comes from it.
+    assert "AS appsrc" in df, "expected a builder stage that reads .git"
+    assert "COPY --from=appsrc /app /app" in df, "runtime /app must come from the builder"
+    # reads BOTH the commit hash and the commit date from the checkout.
+    assert "rev-parse HEAD" in df
+    assert "show -s --format=%cI HEAD" in df
+    assert "commit=%s" in df and "commit_date=%s" in df
+    # drops .git so the final image ships bare files, and never takes a version arg.
+    assert "rm -rf /app/.git" in df
+    assert "ARG AUTONOMY_VERSION" not in df
+    assert "ARG AUTONOMY_BUILD_TIME" not in df
+    # The runtime (last) stage must not `COPY . /app` — that would drag .git back
+    # into the final image. The builder stage does, and that's fine. Its /app
+    # comes only from the cleaned builder stage.
+    runtime_stage = "FROM " + df.split("\nFROM ")[-1]
+    assert "COPY . /app" not in runtime_stage, "runtime stage must not COPY the raw context"
+    assert "COPY --from=appsrc /app /app" in runtime_stage
 
-    env = os.environ.copy()
-    env["PATH"] = f"{fake_bin}:{env['PATH']}"
-    env.pop("AUTONOMY_VERSION", None)
-    env.pop("AUTONOMY_BUILD_TIME", None)
-    env.update(bad_env)
 
-    result = subprocess.run(
-        ["bash", str(BUILD_SH), "build"], env=env, capture_output=True, text=True
-    )
-    assert result.returncode != 0, f"build.sh must reject {bad_env}"
-    assert not called.exists(), "docker must not run when the version/time is invalid"
+def test_no_build_wrapper_script_remains():
+    """The self-stamp removes any need for a manual build wrapper."""
+    assert not (ROOT / "deploy" / "build.sh").exists()
