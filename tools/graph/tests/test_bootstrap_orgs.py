@@ -76,7 +76,7 @@ def test_ensure_bootstrap_creates_both_dbs(orgs_root, stub_org_schema):
     slugs = sorted(r.slug for r in refs)
     assert slugs == ["autonomy", "personal"]
     assert (orgs_root / "autonomy.db").exists()
-    assert (orgs_root / "personal.db").exists()
+    assert (orgs_root.parent / "personal.db").exists()
 
 
 def test_ensure_bootstrap_seeds_identity(orgs_root, stub_org_schema):
@@ -89,7 +89,7 @@ def test_ensure_bootstrap_seeds_identity(orgs_root, stub_org_schema):
     assert aut_settings[0]["publication_state"] == "canonical"
     assert aut_settings[0]["key"] == "autonomy"
 
-    per_settings = _read_settings(orgs_root / "personal.db")
+    per_settings = _read_settings(orgs_root.parent / "personal.db")
     assert len(per_settings) == 1
     payload = json.loads(per_settings[0]["payload"])
     assert payload["name"] == "Personal"
@@ -107,7 +107,7 @@ def test_bootstrap_skips_seed_when_schema_unregistered(orgs_root):
     assert sorted(r.slug for r in refs) == ["autonomy", "personal"]
     # DB exists, but no autonomy.org#1 Setting was seeded.
     assert _read_settings(orgs_root / "autonomy.db") == []
-    assert _read_settings(orgs_root / "personal.db") == []
+    assert _read_settings(orgs_root.parent / "personal.db") == []
 
 
 def test_bootstrap_is_idempotent(orgs_root, stub_org_schema):
@@ -121,7 +121,7 @@ def test_bootstrap_is_idempotent(orgs_root, stub_org_schema):
     # No duplicate Setting rows.
     aut = _read_settings(orgs_root / "autonomy.db")
     assert len(aut) == 1
-    per = _read_settings(orgs_root / "personal.db")
+    per = _read_settings(orgs_root.parent / "personal.db")
     assert len(per) == 1
 
 

@@ -212,7 +212,7 @@ def test_remove_refuses_when_referenced(orgs_root, stub_org_schema):
     # Insert a Setting in personal.db keyed by 'anchore' to simulate
     # an operator override referencing the anchore org.
     import sqlite3
-    conn = sqlite3.connect(str(orgs_root / "personal.db"))
+    conn = sqlite3.connect(str(orgs_root.parent / "personal.db"))
     conn.execute(
         "INSERT INTO settings(id, set_id, schema_revision, key, payload, "
         "publication_state, created_at, updated_at) "
@@ -232,7 +232,7 @@ def test_remove_force_overrides_references(orgs_root, stub_org_schema):
     _run_cli(["org", "create", "anchore"])
     _run_cli(["org", "create", "personal", "--type", "personal"])
     import sqlite3
-    conn = sqlite3.connect(str(orgs_root / "personal.db"))
+    conn = sqlite3.connect(str(orgs_root.parent / "personal.db"))
     conn.execute(
         "INSERT INTO settings(id, set_id, schema_revision, key, payload, "
         "publication_state, created_at, updated_at) "

@@ -232,9 +232,9 @@ def _iter_org_dbs() -> "list[tuple[str, GraphDB]]":
     The handles come from :func:`cross_org.open_peer_db` which uses the
     process-lifetime pool — **callers MUST NOT close them.**
     """
-    from .cross_org import list_org_slugs
+    from .cross_org import all_store_slugs
     out: list[tuple[str, GraphDB]] = []
-    for slug in sorted(list_org_slugs()):
+    for slug in all_store_slugs():
         db = open_peer_db(slug)
         if db is None:
             continue
@@ -462,8 +462,8 @@ def get_source(
         # DBs without applying the peer-visible-states filter. Used by
         # dashboard URL handlers and any operator UI where the caller
         # isn't acting from an org seat.
-        from .cross_org import list_org_slugs
-        for slug in sorted(list_org_slugs()):
+        from .cross_org import all_store_slugs
+        for slug in all_store_slugs():
             slug_db = open_peer_db(slug)
             if slug_db is None:
                 continue
@@ -514,8 +514,8 @@ def locate_source_org(
     ``org`` is accepted for client-interface parity and ignored — the
     whole point is to look outside the caller's scope.
     """
-    from .cross_org import list_org_slugs
-    for slug in sorted(list_org_slugs()):
+    from .cross_org import all_store_slugs
+    for slug in all_store_slugs():
         # This lookup is used as an authorization fact by by-ID actions.
         # Do not use the process-lifetime peer pool: a stale/immutable peer
         # snapshot may disagree with a fresh explicit-org read, producing the
@@ -893,10 +893,10 @@ def resolve_attachment_strict(
         return result
 
     if _global_scope_active(resolved_org, None):
-        from .cross_org import list_org_slugs
+        from .cross_org import all_store_slugs
 
         prefix_hits: list[dict] = []
-        for slug in sorted(list_org_slugs()):
+        for slug in all_store_slugs():
             slug_db = open_peer_db(slug)
             if slug_db is None:
                 continue

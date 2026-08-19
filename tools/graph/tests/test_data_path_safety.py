@@ -60,8 +60,8 @@ def test_refuse_mode_accepts_explicitly_rooted_org_paths(
     assert cross_org.list_org_slugs() == []
 
     personal = settings_ops._db_path(None)
-    assert personal == str(root / "personal.db")
-    assert (root / "personal.db").exists()
+    assert personal == str(root.parent / "personal.db")
+    assert (root.parent / "personal.db").exists()
 
     # Refusal mode also prevents a rooted lookup from escaping to the legacy
     # graph.db merely because the requested per-org DB has not been created.
@@ -99,7 +99,7 @@ def test_fresh_personal_identity_write_never_uses_legacy_db(
             org=None,
         )
 
-    personal = root / "personal.db"
+    personal = root.parent / "personal.db"
     assert personal.exists()
     with sqlite3.connect(personal) as conn:
         assert conn.execute(

@@ -93,9 +93,21 @@ def _registry_inventory() -> dict[str, dict]:
 
 
 def _org_databases(orgs_dir: Path) -> list[tuple[str, Path]]:
-    if not orgs_dir.is_dir():
-        return []
-    return sorted((p.stem, p) for p in orgs_dir.glob("*.db"))
+    """Every settings-bearing database: orgs from the glob, plus the local
+    stores, which live BESIDE the directory since auto-35kmy — a footprint
+    diagnostic that skipped the personal store would silently under-count."""
+    from .db import LOCAL_STORE_SLUGS, _local_store_db_path
+
+    out = (
+        sorted((p.stem, p) for p in orgs_dir.glob("*.db"))
+        if orgs_dir.is_dir() else []
+    )
+    named = {name for name, _ in out}
+    for name in LOCAL_STORE_SLUGS:
+        local = _local_store_db_path(name, orgs_dir)
+        if local.exists() and name not in named:
+            out.append((name, local))
+    return sorted(out)
 
 
 def _scan_database(path: Path) -> dict[str, dict]:

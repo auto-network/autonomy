@@ -778,10 +778,10 @@ def _resolve_source_in_orgs_by_id(graph_source_id: str) -> bool:
     if not graph_source_id:
         return False
     try:
-        from tools.graph.cross_org import list_org_slugs, open_peer_db
+        from tools.graph.cross_org import all_store_slugs, open_peer_db
     except Exception:
         return False
-    for slug in list_org_slugs():
+    for slug in all_store_slugs():
         peer = open_peer_db(slug)
         if peer is None:
             continue
@@ -803,10 +803,10 @@ def _resolve_source_id_by_path(jsonl_path: str) -> str | None:
     if not jsonl_path:
         return None
     try:
-        from tools.graph.cross_org import list_org_slugs, open_peer_db
+        from tools.graph.cross_org import all_store_slugs, open_peer_db
     except Exception:
         return None
-    for slug in list_org_slugs():
+    for slug in all_store_slugs():
         peer = open_peer_db(slug)
         if peer is None:
             continue
@@ -825,10 +825,10 @@ def _resolve_source_and_org_by_path(jsonl_path: str) -> tuple[str, str] | None:
     if not jsonl_path:
         return None
     try:
-        from tools.graph.cross_org import list_org_slugs, open_peer_db
+        from tools.graph.cross_org import all_store_slugs, open_peer_db
     except Exception:
         return None
-    for slug in list_org_slugs():
+    for slug in all_store_slugs():
         peer = open_peer_db(slug)
         if peer is None:
             continue
@@ -1007,10 +1007,10 @@ def get_source_max_turn_number(graph_source_id: str) -> int | None:
     if not graph_source_id:
         return None
     try:
-        from tools.graph.cross_org import list_org_slugs, open_peer_db
+        from tools.graph.cross_org import all_store_slugs, open_peer_db
     except Exception:
         return None
-    for slug in list_org_slugs():
+    for slug in all_store_slugs():
         peer = open_peer_db(slug)
         if peer is None:
             continue

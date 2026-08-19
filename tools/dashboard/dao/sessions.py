@@ -208,9 +208,9 @@ def _repair_status_graph_source_ids(rows: list[dict]) -> None:
     if not rows:
         return
 
-    from tools.graph.cross_org import list_org_slugs, open_peer_db
+    from tools.graph.cross_org import all_store_slugs, open_peer_db
 
-    slugs = sorted(list_org_slugs())
+    slugs = all_store_slugs()
     if not slugs:
         return
 
@@ -510,11 +510,11 @@ def get_recent_sessions(
     # Sessions live in data/orgs/<slug>.db post per-org migration; the
     # legacy data/graph.db stub no longer carries them. Iterate every
     # known org and union the rows.
-    from tools.graph.cross_org import list_org_slugs, open_peer_db
+    from tools.graph.cross_org import all_store_slugs, open_peer_db
 
     graph_rows: list[dict] = []
     sample_limit = max(total_quota * 25, 1000) if sort in ("turns", "ctx") else max(total_quota * 15, 600)
-    for slug in sorted(list_org_slugs()):
+    for slug in all_store_slugs():
         slug_db = open_peer_db(slug)
         if slug_db is None:
             continue

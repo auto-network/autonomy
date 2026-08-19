@@ -110,7 +110,7 @@ def test_api_graph_note_routes_by_x_graph_org(dashboard_client, orgs_root):
 
     # Verify it actually landed in anchore.db, not personal.db.
     ac = sqlite3.connect(str(orgs_root / "anchore.db"))
-    pc = sqlite3.connect(str(orgs_root / "personal.db"))
+    pc = sqlite3.connect(str(orgs_root.parent / "personal.db"))
     try:
         assert ac.execute(
             "SELECT COUNT(*) FROM sources WHERE id = ?", (body["source_id"],),
@@ -131,7 +131,7 @@ def test_api_graph_note_scopeless_lands_in_personal(dashboard_client, orgs_root)
     body = resp.json()
     assert body["ok"] is True
 
-    pc = sqlite3.connect(str(orgs_root / "personal.db"))
+    pc = sqlite3.connect(str(orgs_root.parent / "personal.db"))
     try:
         assert pc.execute(
             "SELECT COUNT(*) FROM sources WHERE id = ?", (body["source_id"],),

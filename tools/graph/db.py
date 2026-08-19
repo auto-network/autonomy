@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import json
+import logging
 import math
 import os
 import secrets
@@ -97,8 +98,79 @@ def _orgs_dir(root: Path | str | None = None) -> Path:
     return resolve_orgs_root(root, default=DEFAULT_ORGS_DIR)
 
 
+#: The operator's LOCAL stores, deliberately outside the organization
+#: namespace (auto-35kmy, graph://21a0da9e-1c2 D4). ``personal`` follows the
+#: operator across their fleet; ``machine`` never leaves this computer.
+#: Neither is an organization: they live beside ``data/orgs/`` rather than in
+#: it, so iteration over organizations CANNOT produce one, their names are
+#: refused as org slugs, and the only way either enters a read is the
+#: explicit own-stores rule in ``resolve_peers`` (auto-9uj7i).
+LOCAL_STORE_SLUGS = ("personal", "machine")
+
+
+def _local_store_db_path(name: str, root: Path | str | None = None) -> Path:
+    """The path of local store *name* — ``data/<name>.db``, beside the orgs
+    directory, wherever that directory resolves (so any isolation of the
+    orgs root isolates the local stores with it).
+
+    No dedicated environment variable, deliberately: rooting follows the
+    orgs directory, so one isolation knob moves all three identity stores
+    together (see the manifest note in tools/data_paths.py).
+    Until :func:`relocate_local_stores` has run, a store that still
+    sits at the legacy ``data/orgs/<name>.db`` keeps resolving THERE — the
+    move is a deliberate startup act, never a side effect of asking for a
+    path, because a path question asked by an unisolated process (a test,
+    a CLI one-liner) must not relocate the operator's live store out from
+    under a running dashboard.
+    """
+    orgs = _orgs_dir(root)
+    target = orgs.parent / f"{name}.db"
+    if target.exists():
+        return target
+    legacy = orgs / f"{name}.db"
+    if legacy.exists():
+        return legacy
+    return target
+
+
+def relocate_local_stores(root: Path | str | None = None) -> None:
+    """One-time move of the local stores out of ``data/orgs/`` (auto-35kmy).
+
+    Called from the bootstrap path (``ensure_bootstrap_orgs``) — dashboard
+    startup and first-run — where the process is about to own the stores it
+    is moving. Idempotent and cheap when there is nothing to move. MOVES,
+    never copies: the WAL sidecars travel with each database. When both the
+    legacy and the new location hold a file, nothing is touched and the
+    conflict is logged — one string cannot name two stores, and guessing
+    which is real is worse than serving the already-relocated one.
+    """
+    logger = logging.getLogger(__name__)
+    orgs = _orgs_dir(root)
+    for name in LOCAL_STORE_SLUGS:
+        legacy = orgs / f"{name}.db"
+        if not legacy.exists():
+            continue
+        target = orgs.parent / f"{name}.db"
+        if target.exists():
+            logger.warning(
+                "local store %r exists at both %s and %s; leaving both — "
+                "resolution serves the relocated copy, the operator "
+                "resolves the conflict", name, legacy, target,
+            )
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(legacy, target)
+        for suffix in ("-wal", "-shm"):
+            sidecar = Path(str(legacy) + suffix)
+            if sidecar.exists():
+                os.replace(sidecar, Path(str(target) + suffix))
+
+
 def _org_db_path(slug: str, root: Path | str | None = None) -> Path:
-    """Return ``<orgs_dir>/<slug>.db``."""
+    """Return ``<orgs_dir>/<slug>.db`` — or the local store's own home for
+    the two reserved local-store names, which are not organizations."""
+    if slug in LOCAL_STORE_SLUGS:
+        return _local_store_db_path(slug, root)
     return _orgs_dir(root) / f"{slug}.db"
 
 

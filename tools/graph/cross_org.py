@@ -73,7 +73,33 @@ def list_org_slugs(*, root: Path | str | None = None) -> list[str]:
     d = Path(root) if root else _orgs_root()
     if not d.exists():
         return []
-    return sorted(p.stem for p in d.glob("*.db"))
+    from .db import LOCAL_STORE_SLUGS
+
+    # The local stores are not organizations (auto-35kmy). They live
+    # beside this directory, not in it — and until the one-time relocation
+    # has run on an older tree, a file still sitting here is STILL not an
+    # organization, so enumeration never yields one either way.
+    return sorted(
+        p.stem for p in d.glob("*.db") if p.stem not in LOCAL_STORE_SLUGS
+    )
+
+
+def all_store_slugs(*, root: Path | str | None = None) -> list[str]:
+    """Every store on this machine: organizations plus the operator's local
+    stores that exist. For CONTENT scans — find a source wherever it lives,
+    union sessions across stores — where the personal and machine stores
+    hold rows exactly as organizations do. NOT for settings peer
+    resolution: a local store enters a settings read only through
+    ``resolve_peers``' explicit own-stores rule (auto-9uj7i), and an
+    organization enumeration stays :func:`list_org_slugs`.
+    """
+    from .db import LOCAL_STORE_SLUGS, _local_store_db_path
+
+    slugs = list(list_org_slugs(root=root))
+    for name in LOCAL_STORE_SLUGS:
+        if _local_store_db_path(name, root).exists():
+            slugs.append(name)
+    return sorted(slugs)
 
 
 def _read_peer_subscription(caller_slug: str) -> list[str] | None:
@@ -176,19 +202,39 @@ def resolve_peers(
             # answer for this org) and break schema metadata (auto-n77vh
             # puts it in the machine store). BOTH, named individually — an
             # "own stores" list derived from a two-store mental model
-            # re-adds personal and drops machine. Only the SUBSCRIPTION
-            # branch does this: an explicit ``explicit_peers`` kwarg stays
-            # literal, because ``peers=[]`` deliberately means
-            # own-store-only for identity, credential and policy readers.
-            existing = set(list_org_slugs(root=root))
-            for own in (PERSONAL_DB_SLUG, MACHINE_DB_SLUG):
-                if own != org and own not in pinned and own in existing:
-                    pinned.append(own)
-            return pinned
+            # re-adds personal and drops machine. The explicit
+            # ``explicit_peers`` kwarg stays literal, because ``peers=[]``
+            # deliberately means own-store-only for identity, credential
+            # and policy readers.
+            return _with_local_stores(pinned, org, root=root)
 
-    # Default: every other org under data/orgs.
-    all_slugs = list_org_slugs(root=root)
-    return [s for s in all_slugs if s != (org or "")]
+    # Default: every other org under data/orgs — which since auto-35kmy is
+    # ORGANIZATIONS ONLY, so the operator's own stores enter here the same
+    # way they enter a pinned subscription: by the explicit rule, never by
+    # a glob happening to include them.
+    all_slugs = [s for s in list_org_slugs(root=root) if s != (org or "")]
+    return _with_local_stores(all_slugs, org, root=root)
+
+
+def _with_local_stores(
+    peers: list[str], org: str | None, *, root: Path | str | None = None,
+) -> list[str]:
+    """Append the operator's own stores that exist on disk (auto-9uj7i).
+
+    THE one place a local store enters a peer set. Both named
+    individually; existence is the store's own file, since neither
+    appears in the org enumeration any more (auto-35kmy).
+    """
+    from .db import _local_store_db_path
+
+    for own in (PERSONAL_DB_SLUG, MACHINE_DB_SLUG):
+        if (
+            own != org
+            and own not in peers
+            and _local_store_db_path(own, root).exists()
+        ):
+            peers.append(own)
+    return peers
 
 
 def _filter_existing_peers(
@@ -197,14 +243,26 @@ def _filter_existing_peers(
     *,
     root: Path | str | None = None,
 ) -> list[str]:
-    """Drop the caller from ``peers`` and filter to slugs whose DB exists."""
+    """Drop the caller from ``peers`` and filter to slugs whose DB exists.
+
+    A LOCAL store named explicitly (``personal``, ``machine``) exists when
+    its own file does — it is no longer in the org enumeration
+    (auto-35kmy), and an explicit mention must stay addressable.
+    """
+    from .db import LOCAL_STORE_SLUGS, _local_store_db_path
+
     all_slugs = set(list_org_slugs(root=root))
     out: list[str] = []
     seen: set[str] = set()
     for p in peers:
         if not p or p == org or p in seen:
             continue
-        if p in all_slugs:
+        exists = (
+            _local_store_db_path(p, root).exists()
+            if p in LOCAL_STORE_SLUGS
+            else p in all_slugs
+        )
+        if exists:
             out.append(p)
             seen.add(p)
     return out

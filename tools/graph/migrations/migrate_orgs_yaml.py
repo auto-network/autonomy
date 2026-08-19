@@ -205,7 +205,9 @@ def build_plan(
             raise OrgMigrationError(
                 f"orgs[{slug!r}] must be a mapping or null"
             )
-        org_db = orgs_dir / f"{slug}.db"
+        from tools.graph.db import _org_db_path
+
+        org_db = _org_db_path(slug, orgs_dir)
         org_type = _infer_type(slug, org_db)
         payload = _build_payload(slug, raw, org_type)
 

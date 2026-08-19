@@ -87,7 +87,7 @@ def test_create_note_lands_in_caller_org(orgs_root):
     assert result["source_id"] == result["id"]
 
     ac = sqlite3.connect(str(orgs_root / "anchore.db"))
-    pc = sqlite3.connect(str(orgs_root / "personal.db"))
+    pc = sqlite3.connect(str(orgs_root.parent / "personal.db"))
     try:
         assert ac.execute(
             "SELECT COUNT(*) FROM sources WHERE id = ?", (result["id"],),
@@ -148,7 +148,7 @@ def test_create_note_leaves_attachment_tokens_in_markdown_code(
 def test_create_note_with_provenance_edge(orgs_root):
     GraphDB.create_org_db("personal", type_="personal").close()
 
-    peer_src = _make_peer_note(orgs_root / "personal.db", title="session-src")
+    peer_src = _make_peer_note(orgs_root.parent / "personal.db", title="session-src")
 
     r = ops.create_note(
         "provenanced",
@@ -158,7 +158,7 @@ def test_create_note_with_provenance_edge(orgs_root):
     assert r["auto_provenance"] == {"source_id": peer_src, "turn": 5}
 
     # Verify the edge exists in personal.db (caller's own DB)
-    conn = sqlite3.connect(str(orgs_root / "personal.db"))
+    conn = sqlite3.connect(str(orgs_root.parent / "personal.db"))
     try:
         edge_row = conn.execute(
             "SELECT relation, target_id FROM edges WHERE source_id = ?",
@@ -187,7 +187,7 @@ def test_update_note_bumps_version(orgs_root):
     # body-only updates — the auto-rederive that used to happen here
     # was the regression that bricked the agentic Update Title flow.
     # Title-changes require an explicit ``title=`` argument.
-    conn = sqlite3.connect(str(orgs_root / "personal.db"))
+    conn = sqlite3.connect(str(orgs_root.parent / "personal.db"))
     try:
         row = conn.execute(
             "SELECT title FROM sources WHERE id = ?", (r["id"],),
@@ -229,7 +229,7 @@ def test_update_note_body_only_reuses_attachment_slots(orgs_root, tmp_path):
     assert "{1}" not in updated["content"]
     assert "{2}" not in updated["content"]
 
-    conn = sqlite3.connect(str(orgs_root / "personal.db"))
+    conn = sqlite3.connect(str(orgs_root.parent / "personal.db"))
     try:
         row = conn.execute(
             "SELECT metadata FROM sources WHERE id = ?",
@@ -260,7 +260,7 @@ def test_update_note_legacy_slots_require_one_explicit_rebind(
     )
     first_id, second_id = [att["id"] for att in created["attachments"]]
 
-    conn = sqlite3.connect(str(orgs_root / "personal.db"))
+    conn = sqlite3.connect(str(orgs_root.parent / "personal.db"))
     try:
         metadata = json.loads(conn.execute(
             "SELECT metadata FROM sources WHERE id = ?",
@@ -306,7 +306,7 @@ def test_update_note_legacy_slots_require_one_explicit_rebind(
     assert f"graph://{second_id[:12]}" in updated["content"]
     assert "`{1}/NULLIF({90},0)`" in updated["content"]
 
-    conn = sqlite3.connect(str(orgs_root / "personal.db"))
+    conn = sqlite3.connect(str(orgs_root.parent / "personal.db"))
     try:
         metadata = json.loads(conn.execute(
             "SELECT metadata FROM sources WHERE id = ?",
@@ -330,7 +330,7 @@ def test_update_note_explicit_title_overrides(orgs_root):
     assert upd["title"] == "My Real Title"
     assert upd["new_version"] is None, "metadata-only update doesn't bump version"
 
-    conn = sqlite3.connect(str(orgs_root / "personal.db"))
+    conn = sqlite3.connect(str(orgs_root.parent / "personal.db"))
     try:
         row = conn.execute(
             "SELECT title FROM sources WHERE id = ?", (r["id"],),
@@ -360,7 +360,7 @@ def test_update_note_title_preserved_when_body_changes(orgs_root):
     r = ops.create_note("first body", title="Pinned Title")
     ops.update_note(r["id"], "# Different Heading\n\nNew body content here")
 
-    conn = sqlite3.connect(str(orgs_root / "personal.db"))
+    conn = sqlite3.connect(str(orgs_root.parent / "personal.db"))
     try:
         row = conn.execute(
             "SELECT title FROM sources WHERE id = ?", (r["id"],),
@@ -380,7 +380,7 @@ def test_update_note_lazy_derive_when_title_empty(orgs_root):
 
     r = ops.create_note("first body")
     # Force-clear the title to simulate a legacy note without one.
-    conn = sqlite3.connect(str(orgs_root / "personal.db"))
+    conn = sqlite3.connect(str(orgs_root.parent / "personal.db"))
     try:
         conn.execute(
             "UPDATE sources SET title = '' WHERE id = ?", (r["id"],),
@@ -391,7 +391,7 @@ def test_update_note_lazy_derive_when_title_empty(orgs_root):
 
     ops.update_note(r["id"], "# Derived From Body\n\ncontent")
 
-    conn = sqlite3.connect(str(orgs_root / "personal.db"))
+    conn = sqlite3.connect(str(orgs_root.parent / "personal.db"))
     try:
         row = conn.execute(
             "SELECT title FROM sources WHERE id = ?", (r["id"],),
@@ -413,7 +413,7 @@ def test_update_note_metadata_only_no_version_bump(orgs_root):
         keywords="k1,k2",
     )
 
-    conn = sqlite3.connect(str(orgs_root / "personal.db"))
+    conn = sqlite3.connect(str(orgs_root.parent / "personal.db"))
     try:
         row = conn.execute(
             "SELECT title, short_description, keywords "
@@ -469,7 +469,7 @@ def test_update_note_integrates_comments(orgs_root):
     )
     assert upd["integrated"] == [comment["id"]]
 
-    conn = sqlite3.connect(str(orgs_root / "personal.db"))
+    conn = sqlite3.connect(str(orgs_root.parent / "personal.db"))
     try:
         row = conn.execute(
             "SELECT integrated FROM note_comments WHERE id = ?",
@@ -531,7 +531,7 @@ def test_update_note_scopeless_caller_against_moved_source(orgs_root):
 
     # Body landed in the new home org, NOT in the personal stub.
     ac = sqlite3.connect(str(orgs_root / "autonomy.db"))
-    pc = sqlite3.connect(str(orgs_root / "personal.db"))
+    pc = sqlite3.connect(str(orgs_root.parent / "personal.db"))
     try:
         autonomy_thought = ac.execute(
             "SELECT content FROM thoughts WHERE source_id = ?",
@@ -577,7 +577,7 @@ def test_update_note_scopeless_metadata_only_against_moved_source(orgs_root):
     )
 
     ac = sqlite3.connect(str(orgs_root / "autonomy.db"))
-    pc = sqlite3.connect(str(orgs_root / "personal.db"))
+    pc = sqlite3.connect(str(orgs_root.parent / "personal.db"))
     try:
         autonomy_row = ac.execute(
             "SELECT title, keywords FROM sources WHERE id = ?",
@@ -626,7 +626,7 @@ def test_attach_file_lands_in_caller_org(orgs_root, tmp_path):
     assert att["size_bytes"] == len("diagnostic payload")
 
     ac = sqlite3.connect(str(orgs_root / "anchore.db"))
-    pc = sqlite3.connect(str(orgs_root / "personal.db"))
+    pc = sqlite3.connect(str(orgs_root.parent / "personal.db"))
     try:
         assert ac.execute(
             "SELECT COUNT(*) FROM attachments WHERE id = ?", (att["id"],),
@@ -757,7 +757,7 @@ def test_move_source_copies_live_row_and_leaves_origin_stub(orgs_root, tmp_path)
     moved = ops.create_note("move me {1}", attachments=[str(f)], org="personal")
 
     target_id = _make_peer_note(
-        orgs_root / "personal.db", title="move target",
+        orgs_root.parent / "personal.db", title="move target",
     )
     ops.create_edge(
         moved["source_id"], target_id,
@@ -778,7 +778,7 @@ def test_move_source_copies_live_row_and_leaves_origin_stub(orgs_root, tmp_path)
     assert result["from_org"] == "personal"
     assert result["to_org"] == "autonomy"
 
-    pc = sqlite3.connect(str(orgs_root / "personal.db"))
+    pc = sqlite3.connect(str(orgs_root.parent / "personal.db"))
     ac = sqlite3.connect(str(orgs_root / "autonomy.db"))
     pc.row_factory = sqlite3.Row
     ac.row_factory = sqlite3.Row
@@ -869,7 +869,7 @@ def test_cmd_move_uses_explicit_from_org_even_when_graph_org_differs(orgs_root):
     finally:
         monkeypatch.undo()
 
-    pc = sqlite3.connect(str(orgs_root / "personal.db"))
+    pc = sqlite3.connect(str(orgs_root.parent / "personal.db"))
     ac = sqlite3.connect(str(orgs_root / "autonomy.db"))
     try:
         prow = pc.execute(
@@ -999,7 +999,7 @@ def test_create_note_follows_graph_org_env(orgs_root, monkeypatch):
     assert r["org"] == "anchore"
 
     ac = sqlite3.connect(str(orgs_root / "anchore.db"))
-    pc = sqlite3.connect(str(orgs_root / "personal.db"))
+    pc = sqlite3.connect(str(orgs_root.parent / "personal.db"))
     try:
         assert ac.execute(
             "SELECT COUNT(*) FROM sources WHERE id = ?", (r["id"],),

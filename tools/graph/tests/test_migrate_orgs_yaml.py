@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from tools.graph.db import _org_db_path
 from tools.graph import org_ops, schemas
 from tools.graph.db import GraphDB
 from tools.graph.migrations.migrate_orgs_yaml import (
@@ -119,7 +120,7 @@ def test_migration_creates_per_org_dbs(yaml_path, orgs_dir):
     apply_migration(build_plan(yaml_path, orgs_dir))
 
     for slug in ("autonomy", "anchore", "personal"):
-        assert (orgs_dir / f"{slug}.db").exists(), (
+        assert _org_db_path(slug, orgs_dir).exists(), (
             f"expected {slug}.db to be created"
         )
 
@@ -149,7 +150,7 @@ def test_migration_payload_shape(yaml_path, orgs_dir):
     assert anc["payload"]["byline"] == "Security platform"
 
     per = {
-        r["key"]: r for r in _settings_rows(orgs_dir / "personal.db")
+        r["key"]: r for r in _settings_rows(_org_db_path("personal", orgs_dir))
         if r["set_id"] == ORG_SET_ID
     }["personal"]
     assert per["payload"] == {
@@ -162,7 +163,7 @@ def test_migration_payload_shape(yaml_path, orgs_dir):
 def test_migrated_payload_validates_against_schema(yaml_path, orgs_dir):
     apply_migration(build_plan(yaml_path, orgs_dir))
     for slug in ("autonomy", "anchore", "personal"):
-        for row in _settings_rows(orgs_dir / f"{slug}.db"):
+        for row in _settings_rows(_org_db_path(slug, orgs_dir)):
             if row["set_id"] != ORG_SET_ID:
                 continue
             schemas.validate_payload(
@@ -175,7 +176,7 @@ def test_migration_one_setting_per_org(yaml_path, orgs_dir):
     apply_migration(build_plan(yaml_path, orgs_dir))
     for slug in ("autonomy", "anchore", "personal"):
         rows = [
-            r for r in _settings_rows(orgs_dir / f"{slug}.db")
+            r for r in _settings_rows(_org_db_path(slug, orgs_dir))
             if r["set_id"] == ORG_SET_ID
         ]
         assert len(rows) == 1
@@ -186,7 +187,7 @@ def test_migration_is_idempotent(yaml_path, orgs_dir):
     apply_migration(build_plan(yaml_path, orgs_dir))
     before = {
         slug: [
-            r["id"] for r in _settings_rows(orgs_dir / f"{slug}.db")
+            r["id"] for r in _settings_rows(_org_db_path(slug, orgs_dir))
             if r["set_id"] == ORG_SET_ID
         ]
         for slug in ("autonomy", "anchore", "personal")
@@ -200,7 +201,7 @@ def test_migration_is_idempotent(yaml_path, orgs_dir):
     apply_migration(report2)
     after = {
         slug: [
-            r["id"] for r in _settings_rows(orgs_dir / f"{slug}.db")
+            r["id"] for r in _settings_rows(_org_db_path(slug, orgs_dir))
             if r["set_id"] == ORG_SET_ID
         ]
         for slug in ("autonomy", "anchore", "personal")
@@ -375,11 +376,14 @@ def test_cli_apply(yaml_path, orgs_dir, capsys):
     ])
     assert rc == 0
     assert {p.name for p in orgs_dir.glob("*.db")} == {
-        "autonomy.db", "anchore.db", "personal.db",
+        "autonomy.db", "anchore.db",
     }
+    # The personal store is not an organization and lands beside the
+    # directory (auto-35kmy).
+    assert _org_db_path("personal", orgs_dir).exists()
     for slug in ("autonomy", "anchore", "personal"):
         rows = [
-            r for r in _settings_rows(orgs_dir / f"{slug}.db")
+            r for r in _settings_rows(_org_db_path(slug, orgs_dir))
             if r["set_id"] == ORG_SET_ID
         ]
         assert len(rows) == 1
@@ -406,7 +410,7 @@ def test_real_projects_yaml_migrates_cleanly(tmp_path, monkeypatch):
     assert {"autonomy", "anchore", "personal"}.issubset(slugs)
     for slug in ("autonomy", "anchore", "personal"):
         rows = [
-            r for r in _settings_rows(orgs_dir / f"{slug}.db")
+            r for r in _settings_rows(_org_db_path(slug, orgs_dir))
             if r["set_id"] == ORG_SET_ID
         ]
         assert len(rows) == 1
