@@ -64,6 +64,17 @@ services:
       # wholesale — a session receives only the resolved concrete dir, via the
       # hybrid resolver, auto-fteke). Nothing else lives here.
       - autonomy-orgs:/app/orgs
+      # The Docker socket. REQUIRED, not optional: the node launches each
+      # session as a HOST-LEVEL sibling container through this socket, never as
+      # a child of a node-owned daemon — because session images can run their
+      # own nested docker daemon (agents/Dockerfile.dind, for project stacks
+      # such as the Anchore Enterprise compose), and nesting the node too would
+      # make that DOUBLE docker-in-docker, which is unsupported. The launcher
+      # (`docker run`), topology discovery (`docker inspect`) and secret-ramfs
+      # provisioning all shell out to `docker` against this socket. It is
+      # effective host-root: a node that deliberately will not launch sessions
+      # or hold secrets may drop it, but then it is a viewer, not a working node.
+      - /var/run/docker.sock:/var/run/docker.sock
       # The dashboard's memory-class key cache (auto-a1pub): opened key material
       # lives on ramfs, never disk, never swap. This is only the mountpoint +
       # rslave propagation; the entrypoint mounts the ramfs on the host at boot

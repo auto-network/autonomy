@@ -64,6 +64,26 @@ never a mandated one. (Building from source is always from a git clone: the
 image stamps `/app/VERSION` by reading the commit from `.git` at build, so a
 detached source tarball with no `.git` is not a build input — clone instead.)
 
+### The Docker socket — required for a working node
+
+The compose file bind-mounts `/var/run/docker.sock` into the dashboard, and it
+is **required**, not an optional hardening choice. The node launches every agent
+session as a **host-level sibling container** through that socket, never as a
+child of a node-owned daemon. The reason is the session topology: a session
+image can run its own nested Docker daemon (`agents/Dockerfile.dind`, for
+project stacks such as the Anchore Enterprise compose), and that nested daemon
+falls back to the `vfs` storage driver because OverlayFS is not reliable inside
+a container. If the node were *also* a nested daemon, the session would sit two
+levels deep and its own daemon three — overlay-on-overlay, which does not work.
+Host-socket-at-node keeps every session a flat host-daemon sibling, one nesting
+level each, which is why it works. (Design of record: `graph://a284bdea`.)
+
+The socket is effective host-root. A node that will deliberately never launch
+sessions or hold secrets can remove the mount, but it is then a viewer, not a
+working node — session launch (`docker run`), topology discovery
+(`docker inspect`), and the in-memory secret-store provisioning
+(`agents/secret_ramfs.py`) all reach the daemon through it.
+
 The container entrypoint (`deploy/entrypoint.sh`) runs the idempotent
 migrate-on-mount initializer and then uvicorn, serving HTTPS when the
 init-generated keypair is present (`DASHBOARD_TLS=off` for plain HTTP behind
