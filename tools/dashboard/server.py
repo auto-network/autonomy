@@ -12795,7 +12795,10 @@ async def api_diag_settings_mediator(request):
 # ── Background watchers ───────────────────────────────────────
 
 _DISPATCH_WATCHER_INTERVAL = 5   # seconds between dispatch polls
-_HARNESS_USAGE_POLL_INTERVAL = 300.0
+# 15 min: no point polling the provider /usage APIs faster than the cache
+# lives (HARNESS_USAGE_CACHE_TTL = 15 min), and the slower cadence keeps us
+# off the Claude /usage rate limit (was 300s).
+_HARNESS_USAGE_POLL_INTERVAL = 900.0
 
 _WATCHER_HELPERS = [
     "collect_dispatch_data", "get_bead_counts", "count_active_sessions",
