@@ -65,20 +65,6 @@ R_NOT_REDELEGABLE = "not-redelegable"
 R_DELEGATE_UNPROVEN = "delegate-unproven"
 R_DELEGATE_NONCE_REUSED = "delegate-nonce-reused"
 
-#: Scopes a CURRENT MEMBER PERSONA may self-delegate (auto-wrkaq): a
-#: strictly weaker, non-redelegable, expiring instrument of its own held
-#: authority — PIN 6b, "a persona provisions and expires its own
-#: delegates". Restricted BY SCOPE deliberately: these are the scopes
-#: whose ACCEPTANCE re-derives authority from current membership at USE
-#: time (storagekit/acceptance.py consults the roster projection, never a
-#: generic scope holding), so mint-time attenuation does no security work
-#: for them. A scope whose acceptance reads the delegated holding instead
-#: would have mint-time attenuation as its ONLY gate — an unrestricted
-#: rule would open it silently, which is why this set is not "*".
-SELF_DELEGABLE = frozenset({
-    "storage:capability:grant:*",
-    "storage:state:advance:*",
-})
 R_REVOKE_UNAUTHORIZED = "revoke-unauthorized"
 R_REVOKE_BAD_TARGET = "revoke-bad-target"
 R_REVOKE_NOT_IN_ANCESTRY = "revoke-target-not-in-ancestry"
@@ -117,6 +103,48 @@ INVITE_CLAIMED = "claimed"
 INVITE_REVOKED = "revoked"
 INVITE_DEAD = "dead"
 INVITE_EXPIRED = "expired"
+
+#: The two storage scope families a CURRENT MEMBER PERSONA may
+#: self-delegate (auto-wrkaq): a strictly weaker, non-redelegable,
+#: expiring instrument of its own held authority — PIN 6b, "a persona
+#: provisions and expires its own delegates". Restricted BY SCOPE
+#: deliberately: these are the scopes whose ACCEPTANCE re-derives
+#: authority from current membership at USE time
+#: (storagekit/acceptance.py consults the roster projection, never a
+#: generic scope holding), so mint-time attenuation does no security work
+#: for them. A scope whose acceptance reads the delegated holding instead
+#: would have mint-time attenuation as its ONLY gate — an unrestricted
+#: rule would open it silently.
+_SELF_DELEGABLE_GRANT_PREFIX = "storage:capability:grant:"
+_SELF_DELEGABLE_ADVANCE_PREFIX = "storage:state:advance:"
+
+
+def self_delegable_exact(scopes) -> bool:
+    """EXACTLY the storage delegate's scope shape: one grant scope and one
+    advance scope, over ONE shared domain. An exact predicate, not pattern
+    coverage — coverage would admit a singleton (an instrument the design
+    does not define), a mixed-domain pair (a single delegate spanning two
+    domains), and the pair plus a third (reach beyond the defined shape).
+    The storage delegate is defined as exactly two scopes (§8, §9) and
+    that definition is enforced here, at admission."""
+    scopes = frozenset(scopes)
+    if len(scopes) != 2:
+        return False
+    domains = {"grant": None, "advance": None}
+    for s in scopes:
+        if s.startswith(_SELF_DELEGABLE_GRANT_PREFIX):
+            domains["grant"] = s[len(_SELF_DELEGABLE_GRANT_PREFIX):]
+        elif s.startswith(_SELF_DELEGABLE_ADVANCE_PREFIX):
+            domains["advance"] = s[len(_SELF_DELEGABLE_ADVANCE_PREFIX):]
+        else:
+            return False
+    return (
+        domains["grant"] is not None
+        and domains["grant"] != ""
+        and domains["grant"] == domains["advance"]
+        and "*" not in domains["grant"]
+    )
+
 
 SCOPE_ROLE_DEFINE = "role:define"
 SCOPE_CHECKPOINT = "checkpoint"
@@ -623,7 +651,7 @@ class _Folder:
             pass
         else:
             # Bounded self-delegation (auto-wrkaq): a member holding
-            # SELF_DELEGABLE scopes — through a role, typically — may mint
+            # self-delegable scopes — through a role, typically — may mint
             # a strictly weaker, NON-redelegable, EXPIRING instrument of
             # itself. The persona condition is what actually terminates
             # the chain at depth one: a non-redelegable grant still puts
@@ -637,7 +665,7 @@ class _Folder:
             )
             if (
                 author_is_persona
-                and attenuates(scopes, SELF_DELEGABLE)
+                and self_delegable_exact(scopes)
                 and attenuates(scopes, held.get(event.author_key, frozenset()))
                 and p["can_redelegate"] is False
                 and "ttl" in p
