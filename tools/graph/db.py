@@ -6,6 +6,7 @@ import logging
 import math
 import os
 import secrets
+import shutil
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -105,111 +106,27 @@ def _orgs_dir(root: Path | str | None = None) -> Path:
 #: it, so iteration over organizations CANNOT produce one, their names are
 #: refused as org slugs, and the only way either enters a read is the
 #: explicit own-stores rule in ``resolve_peers`` (auto-9uj7i).
-from tools.data_paths import LOCAL_STORE_KEYS as LOCAL_STORE_SLUGS
-
-
-class LocalStoreCollisionError(RuntimeError):
-    """A file at a local store's legacy path is a SHARED organization.
-
-    'personal' and 'machine' were creatable as shared-org slugs before the
-    names were reserved, so such a database may exist and was valid when it
-    was made. Treating it as the operator's store by FILENAME would write
-    personal credentials into a shared organization and vanish the org from
-    enumeration — so startup refuses instead, and resolution never serves
-    the file as a local store."""
-
-
-class LocalStoreUnreadableError(RuntimeError):
-    """A file at a local store's legacy path cannot be read at all.
-
-    "There is no data" and "I cannot read this" are different states, and
-    merging them makes a damaged store indistinguishable from an empty one
-    — every downstream decision then treats damage as absence, and absence
-    is the benign case, so the merge fails toward accepting (and here,
-    MOVING) the broken thing. A corrupt file is never classified, never
-    served, and never migrated; the operator inspects or restores it."""
-
-
-#: Tri-state legacy-file classification. The three states are distinct on
-#: purpose (see LocalStoreUnreadableError): a readable database with no
-#: orgs row or no orgs table is the legitimate unclaimed shape (the
-#: on-demand machine store); only an actual read failure is "unreadable".
-_CLASSIFY_SHARED_ORG = "shared-org"
-_CLASSIFY_UNCLAIMED = "local-or-unclaimed"
-_CLASSIFY_UNREADABLE = "unreadable"
-
-
-def _bootstrap_org_classification(path: Path) -> str:
-    try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-        try:
-            row = conn.execute("SELECT type FROM orgs LIMIT 1").fetchone()
-        except sqlite3.OperationalError as exc:
-            if "no such table" in str(exc).lower():
-                return _CLASSIFY_UNCLAIMED
-            return _CLASSIFY_UNREADABLE
-        finally:
-            conn.close()
-    except sqlite3.Error:
-        return _CLASSIFY_UNREADABLE
-    if row is None:
-        return _CLASSIFY_UNCLAIMED
-    return _CLASSIFY_SHARED_ORG if row[0] == "shared" else _CLASSIFY_UNCLAIMED
-
-
-#: Per-process memo of legacy-file classification. A hit only ever refers to
-#: a file still at its legacy path; the operator remedy moves the file away,
-#: after which the exists() check short-circuits before this is consulted.
-#: A cached "shared" or "unreadable" after an in-place repair over-refuses
-#: until restart — the correct direction to be wrong.
-_LEGACY_STORE_CLASSIFICATION: dict[str, str] = {}
-
-
-def _classify_legacy_store(legacy: Path) -> str:
-    key = str(legacy)
-    cached = _LEGACY_STORE_CLASSIFICATION.get(key)
-    if cached is None:
-        cached = _bootstrap_org_classification(legacy)
-        _LEGACY_STORE_CLASSIFICATION[key] = cached
-    return cached
+from tools.data_paths import (  # noqa: F401 — canonical homes, re-exported
+    LOCAL_STORE_KEYS as LOCAL_STORE_SLUGS,
+    LOCAL_STORE_SHARED_ORG as _CLASSIFY_SHARED_ORG,
+    LOCAL_STORE_UNCLAIMED as _CLASSIFY_UNCLAIMED,
+    LOCAL_STORE_UNREADABLE as _CLASSIFY_UNREADABLE,
+    LocalStoreCollisionError,
+    LocalStoreUnreadableError,
+    classify_legacy_local_store as _classify_legacy_store,
+    resolve_local_store_path,
+)
 
 
 def _local_store_db_path(name: str, root: Path | str | None = None) -> Path:
-    """The path of local store *name* — ``data/<name>.db``, beside the orgs
-    directory, wherever that directory resolves (so any isolation of the
-    orgs root isolates the local stores with it).
+    """The path of local store *name* — delegation, not logic.
 
-    No dedicated environment variable, deliberately: rooting follows the
-    orgs directory, so one isolation knob moves all three identity stores
-    together (see the manifest note in tools/data_paths.py).
-    Until :func:`relocate_local_stores` has run, a store that still
-    sits at the legacy ``data/orgs/<name>.db`` keeps resolving THERE — the
-    move is a deliberate startup act, never a side effect of asking for a
-    path, because a path question asked by an unisolated process (a test,
-    a CLI one-liner) must not relocate the operator's live store out from
-    under a running dashboard.
+    The resolver (routing AND classification: shared-org real-home,
+    unreadable refusal) lives in tools.data_paths.resolve_local_store_path
+    and is shared verbatim with the ledger's org_ledger_db_path, so the
+    two cannot agree on only the normal cases.
     """
-    orgs = _orgs_dir(root)
-    target = orgs.parent / f"{name}.db"
-    if target.exists():
-        return target
-    legacy = orgs / f"{name}.db"
-    if legacy.exists():
-        classification = _classify_legacy_store(legacy)
-        if classification == _CLASSIFY_UNCLAIMED:
-            return legacy
-        if classification == _CLASSIFY_UNREADABLE:
-            raise LocalStoreUnreadableError(
-                f"{legacy} cannot be read; refusing to classify it, serve "
-                f"it as the {name!r} store, or migrate it. Inspect or "
-                f"restore the file, then restart."
-            )
-        # A shared organization stranded under a reserved name (a
-        # pre-reservation creation) is NEVER served as the local store —
-        # resolution answers with the (possibly not-yet-created) real
-        # home, and startup separately refuses until the operator renames
-        # it.
-    return target
+    return resolve_local_store_path(name, _orgs_dir(root))
 
 
 def relocate_local_stores(root: Path | str | None = None) -> None:
@@ -290,6 +207,10 @@ def relocate_local_stores(root: Path | str | None = None) -> None:
             )
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
+        # One backup copy before the move — taken after the checkpoint, so
+        # it is the single self-contained file. Worth more than every
+        # crash-safety argument; the operator deletes it when satisfied.
+        shutil.copy2(legacy, Path(str(legacy) + ".pre-relocation-backup"))
         try:
             os.replace(legacy, target)
         except FileNotFoundError:

@@ -13,6 +13,7 @@ import sqlite3
 
 import pytest
 
+from tools import data_paths
 from tools.graph import cross_org, org_ops, settings_ops
 from tools.graph import db as graph_db_mod
 from tools.graph.db import (
@@ -164,7 +165,7 @@ def test_a_shared_org_named_personal_is_never_served_as_the_local_store(
     """The file was valid when created; classification is by BOOTSTRAP ROW,
     never by filename. Resolution answers with the real (fresh) home so no
     personal credential can land in the shared organization."""
-    graph_db_mod._LEGACY_STORE_CLASSIFICATION.clear()
+    data_paths._LEGACY_STORE_CLASSIFICATION.clear()
     seed_shared_org_at(orgs_root / "personal.db", "personal")
     resolved = _local_store_db_path("personal", orgs_root)
     assert resolved == orgs_root.parent / "personal.db"
@@ -172,7 +173,7 @@ def test_a_shared_org_named_personal_is_never_served_as_the_local_store(
 
 
 def test_relocation_refuses_a_shared_org_collision_loudly(orgs_root):
-    graph_db_mod._LEGACY_STORE_CLASSIFICATION.clear()
+    data_paths._LEGACY_STORE_CLASSIFICATION.clear()
     seed_shared_org_at(orgs_root / "machine.db", "machine")
     with pytest.raises(graph_db_mod.LocalStoreCollisionError) as caught:
         relocate_local_stores(orgs_root)
@@ -185,7 +186,7 @@ def test_relocation_refuses_a_shared_org_collision_loudly(orgs_root):
 
 
 def test_a_personal_typed_legacy_row_still_migrates(orgs_root):
-    graph_db_mod._LEGACY_STORE_CLASSIFICATION.clear()
+    data_paths._LEGACY_STORE_CLASSIFICATION.clear()
     GraphDB.create_org_db(
         "personal", type_="personal", path=orgs_root / "personal.db",
     ).close()
@@ -199,7 +200,7 @@ def test_a_personal_typed_legacy_row_still_migrates(orgs_root):
 def test_a_corrupt_legacy_file_is_never_served_or_migrated(orgs_root):
     """'There is no data' and 'I cannot read this' are different states;
     merging them fails toward adopting the broken thing as the live store."""
-    graph_db_mod._LEGACY_STORE_CLASSIFICATION.clear()
+    data_paths._LEGACY_STORE_CLASSIFICATION.clear()
     corrupt = orgs_root / "personal.db"
     corrupt.write_bytes(b"this is not a sqlite database at all")
 
@@ -219,7 +220,7 @@ def test_a_readable_rowless_file_is_still_the_unclaimed_middle_state(
 ):
     """The on-demand machine store is a readable database with no orgs row —
     tri-state classification must keep it valid, not lump it with damage."""
-    graph_db_mod._LEGACY_STORE_CLASSIFICATION.clear()
+    data_paths._LEGACY_STORE_CLASSIFICATION.clear()
     GraphDB(orgs_root / "machine.db").close()  # full schema, no orgs row
     assert _local_store_db_path("machine", orgs_root) == orgs_root / "machine.db"
     relocate_local_stores(orgs_root)
@@ -230,7 +231,7 @@ def test_relocation_folds_the_wal_before_moving_anything(orgs_root):
     """F1: in WAL mode the .db can be a bare header while every committed
     row lives in the -wal. The move must checkpoint first and move ONE
     file — committed rows survive, and no sidecar travels or lingers."""
-    graph_db_mod._LEGACY_STORE_CLASSIFICATION.clear()
+    data_paths._LEGACY_STORE_CLASSIFICATION.clear()
     legacy = orgs_root / "personal.db"
     conn = sqlite3.connect(legacy)
     conn.execute("PRAGMA journal_mode=WAL")
@@ -268,7 +269,7 @@ def test_relocation_skips_a_live_holder_and_leaves_its_store_alone(orgs_root):
     """F2/F3: a connection holding the legacy store open with a write in
     flight is a live holder — the relocation skips this boot instead of
     moving the file out from under it."""
-    graph_db_mod._LEGACY_STORE_CLASSIFICATION.clear()
+    data_paths._LEGACY_STORE_CLASSIFICATION.clear()
     legacy = orgs_root / "personal.db"
     holder = sqlite3.connect(legacy)
     holder.execute("CREATE TABLE t (v TEXT)")
@@ -296,3 +297,52 @@ def test_the_reservation_covers_remove_and_the_rename_source(orgs_root):
         with pytest.raises(org_ops.OrgError, match="local store"):
             org_ops.rename_org(name, "definitely-an-org")
     assert (orgs_root.parent / "personal.db").exists(), "store untouched"
+
+
+# ── the graph and ledger resolvers are ONE function (Codex, F5 round 2) ──
+
+def test_graph_and_ledger_resolve_local_stores_identically_in_every_state(
+    orgs_root,
+):
+    """Two copies that agree on the normal cases agree exactly where
+    agreement is worthless. Both consumers delegate to
+    tools.data_paths.resolve_local_store_path, and this asserts the
+    behavior — same answer or same exception — across all four states:
+    fresh, unclaimed-legacy, shared-org squatter, corrupt."""
+    from tools.network.ledger.store import org_ledger_db_path
+
+    def both(name):
+        outcomes = []
+        for resolver in (
+            lambda: _local_store_db_path(name, orgs_root),
+            lambda: org_ledger_db_path(name, orgs_root),
+        ):
+            try:
+                outcomes.append(("path", resolver()))
+            except Exception as exc:
+                outcomes.append(("raise", type(exc).__name__))
+        return outcomes
+
+    # Fresh: both answer the real home.
+    data_paths._LEGACY_STORE_CLASSIFICATION.clear()
+    a, b = both("personal")
+    assert a == b == ("path", orgs_root.parent / "personal.db")
+
+    # Unclaimed legacy: both serve the legacy file.
+    GraphDB(orgs_root / "machine.db").close()
+    a, b = both("machine")
+    assert a == b == ("path", orgs_root / "machine.db")
+
+    # Shared-org squatter: both answer the real home, neither serves it.
+    data_paths._LEGACY_STORE_CLASSIFICATION.clear()
+    GraphDB.create_org_db(
+        "personal", type_="shared", path=orgs_root / "personal.db",
+    ).close()
+    a, b = both("personal")
+    assert a == b == ("path", orgs_root.parent / "personal.db")
+
+    # Corrupt: both refuse with the same named error.
+    data_paths._LEGACY_STORE_CLASSIFICATION.clear()
+    (orgs_root / "personal.db").write_bytes(b"garbage, not sqlite")
+    a, b = both("personal")
+    assert a == b == ("raise", "LocalStoreUnreadableError")
