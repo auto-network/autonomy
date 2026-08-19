@@ -38,16 +38,22 @@ controls the code path. This delegate is:
 How the fold enforces "exactly two scopes" (the non-obvious part).
 Storage acceptance never reads the delegate's declared scopes — it only
 resolves the signer's chain to a member. The scope discipline is enforced
-one hop earlier, at delegation-event admission: a member's DELEGABLE
-storage authority is exactly the two scopes an operator granted it
-re-delegably (role-held scopes are NON-delegable — ``fold.authority``),
-so a mint that reaches beyond those two (``*``, an intent scope, a third
-scope) fails the ledger's attenuation check (``R_SCOPE_ESCALATION`` /
-``R_NOT_REDELEGABLE``), the ``delegate`` event is invalid, no delegation
-edge enters the fold, and the signer no longer resolves to a member — so
-the storage records that key signs are refused by every honest node. An
+one hop earlier, at delegation-event admission, by the bounded
+self-delegation rule (auto-wrkaq): a CURRENT member persona may mint a
+strictly weaker, NON-redelegable, EXPIRING instrument of scopes it holds
+— through a role, typically — restricted to ``fold.SELF_DELEGABLE``
+(exactly the two storage scope families, because their acceptance
+re-derives authority from current membership at use time). A mint that
+reaches beyond the author's held scopes, beyond that set, omits the
+``ttl``, or sets ``can_redelegate`` fails admission
+(``R_SCOPE_ESCALATION`` / ``R_NOT_REDELEGABLE``), no delegation edge
+enters the fold, and the signer no longer resolves to a member — so the
+storage records that key signs are refused by every honest node. An
 issuer that is not itself a member persona yields the same refusal from
-the other direction: the chain terminates outside the roster.
+the other direction: the chain terminates outside the roster, and the
+persona condition is also what pins the chain at depth one (a delegate
+still HOLDS its scopes, but a delegate is not a persona and cannot use
+this rule to mint onward).
 
 Pure over the ledger it is handed: it appends authority events and signs
 records, and never touches the filesystem. The MEMORY-class home for the
@@ -130,62 +136,6 @@ def _parents(ledger, parents):
     return list(ledger.heads()) if parents is None else list(parents)
 
 
-def authorize_member_storage(
-    ledger,
-    root: KeyPair,
-    member_persona,
-    domain_id: str,
-    *,
-    hlc: HLC,
-    child_proof: str,
-    grant_nonce: str,
-    parents=None,
-    can_redelegate: bool = True,
-) -> str:
-    """Root-present enabling act: grant a MEMBER persona the two storage
-    scopes RE-DELEGABLY, so it can later mint agent delegates unattended.
-
-    ``child_proof`` is the MEMBER'S consent (auto-le0kg): their persona
-    key's signature over this grant's FULL terms and its single-use
-    ``grant_nonce`` (``sign_delegate_proof`` with this ledger's genesis,
-    the root's key, the storage scopes, this ``can_redelegate``, no ttl,
-    and the same nonce passed here — nonce minted on the member's side by
-    preference). This function cannot produce it — the persona key derives
-    from the member's OWN personal root, which the root-present ceremony
-    does not hold — so the enabling act gains one exchange with the member
-    it grants, and BECAUSE THE NONCE IS SINGLE-USE, SO DOES EVERY RENEWAL:
-    an issuer cannot silently re-issue or extend this grant on the
-    member's old consent. Refused without a proof; the fold refuses the
-    event if it does not verify or the nonce was already used.
-
-    Role-held scopes are non-delegable in the fold, so without this
-    explicit re-delegable grant a member cannot mint a storage delegate at
-    all (the mint would fail attenuation). This is authored with the org
-    root present — the same login at which the re-key's frontier marker is
-    written — and is the one root act the delegate lifecycle depends on.
-    Returns the ``delegate`` event id.
-    """
-    if (
-        not isinstance(child_proof, str)
-        or len(child_proof) != 128
-        or any(c not in "0123456789abcdef" for c in child_proof)
-    ):
-        raise DelegateError(
-            "authorize_member_storage requires the member's consent proof — "
-            "the persona key's signature over this grant's terms and nonce "
-            "(sign_delegate_proof); refusing to issue without one"
-        )
-    payload = {
-        "type": "delegate",
-        "child_pub": _key_hex(member_persona),
-        "scope": storage_delegate_scopes(domain_id),
-        "can_redelegate": bool(can_redelegate),
-        "grant_nonce": grant_nonce,
-        "proof": child_proof,
-    }
-    return ledger.add(make_event(root, payload, _parents(ledger, parents), hlc))
-
-
 def provision(
     ledger,
     issuer: KeyPair,
@@ -206,11 +156,14 @@ def provision(
     bounded by ``ttl_ms``, and returns the :class:`StorageDelegate` holding
     the private half for placement in the MEMORY-class cache.
 
-    ``issuer`` is the key that signs the ``delegate`` event — a member
-    persona (or a key that itself resolves to one) holding the two storage
-    scopes re-delegably via :func:`authorize_member_storage`.
-    ``member_persona`` is the roster key the chain must terminate at, and
-    is carried on the result for the caller's records only.
+    ``issuer`` is the key that signs the ``delegate`` event — a CURRENT
+    member persona holding the two storage scopes, typically through a
+    role: the fold's bounded self-delegation rule (auto-wrkaq) admits a
+    persona minting a strictly weaker, non-redelegable, expiring
+    instrument of its own held authority, so no root-present enabling act
+    exists or is needed. ``member_persona`` is the roster key the chain
+    must terminate at, and is carried on the result for the caller's
+    records only.
 
     This never pre-judges usability. Whether the delegate can author
     storage records is decided by the fold at acceptance: an issuer without

@@ -64,6 +64,21 @@ R_SCOPE_ESCALATION = "scope-escalation"
 R_NOT_REDELEGABLE = "not-redelegable"
 R_DELEGATE_UNPROVEN = "delegate-unproven"
 R_DELEGATE_NONCE_REUSED = "delegate-nonce-reused"
+
+#: Scopes a CURRENT MEMBER PERSONA may self-delegate (auto-wrkaq): a
+#: strictly weaker, non-redelegable, expiring instrument of its own held
+#: authority — PIN 6b, "a persona provisions and expires its own
+#: delegates". Restricted BY SCOPE deliberately: these are the scopes
+#: whose ACCEPTANCE re-derives authority from current membership at USE
+#: time (storagekit/acceptance.py consults the roster projection, never a
+#: generic scope holding), so mint-time attenuation does no security work
+#: for them. A scope whose acceptance reads the delegated holding instead
+#: would have mint-time attenuation as its ONLY gate — an unrestricted
+#: rule would open it silently, which is why this set is not "*".
+SELF_DELEGABLE = frozenset({
+    "storage:capability:grant:*",
+    "storage:state:advance:*",
+})
 R_REVOKE_UNAUTHORIZED = "revoke-unauthorized"
 R_REVOKE_BAD_TARGET = "revoke-bad-target"
 R_REVOKE_NOT_IN_ANCESTRY = "revoke-target-not-in-ancestry"
@@ -597,12 +612,40 @@ class _Folder:
         except IdkitError:
             return R_DELEGATE_UNPROVEN
         by_root = event.author_key == self.root_at(ctx)
-        if not by_root:
-            held, deleg = self.authority(ctx, ref_ts=event.hlc.ts)
-            scopes = frozenset(p["scope"])
-            if not attenuates(scopes, deleg.get(event.author_key, frozenset())):
-                if attenuates(scopes, held.get(event.author_key, frozenset())):
-                    return R_NOT_REDELEGABLE
+        held, deleg = self.authority(ctx, ref_ts=event.hlc.ts)
+        scopes = frozenset(p["scope"])
+        if attenuates(scopes, deleg.get(event.author_key, frozenset())):
+            # Ordinary delegation — unchanged. Root passes HERE, via its
+            # UNIVERSE delegable authority (auto-wrkaq decided the root
+            # branch explicitly: its behaviour is unchanged by that bead;
+            # whether the fold should refuse root-authored delegates at
+            # all is a separate, unsettled question).
+            pass
+        else:
+            # Bounded self-delegation (auto-wrkaq): a member holding
+            # SELF_DELEGABLE scopes — through a role, typically — may mint
+            # a strictly weaker, NON-redelegable, EXPIRING instrument of
+            # itself. The persona condition is what actually terminates
+            # the chain at depth one: a non-redelegable grant still puts
+            # its scopes in held[child] (can_redelegate gates deleg only),
+            # so without it, delegate A would mint B under this very
+            # exception and B would resolve upward to the same member. A
+            # delegate is not a persona.
+            members, _ = self.members_at(ctx)
+            author_is_persona = any(
+                rec[2] == event.author_key for rec in members.values()
+            )
+            if (
+                author_is_persona
+                and attenuates(scopes, SELF_DELEGABLE)
+                and attenuates(scopes, held.get(event.author_key, frozenset()))
+                and p["can_redelegate"] is False
+                and "ttl" in p
+            ):
+                pass
+            elif attenuates(scopes, held.get(event.author_key, frozenset())):
+                return R_NOT_REDELEGABLE
+            else:
                 return R_SCOPE_ESCALATION
         # Single-use nonce, checked LAST so only an otherwise-admissible
         # grant burns one. This is what makes consent revocable rather
