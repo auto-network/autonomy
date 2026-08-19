@@ -99,9 +99,11 @@ from .hello import HELLO_VERSION, HelloError, hello_signing_input, parse_tunnel_
 RELAY_HELLO_DOMAIN = b"autonomy.network.relay.hello.v1\n"
 RELAY_HELLO_VERSION = 1
 
-#: Maximum tolerated |verifier now - relay hello ts|, seconds. Mirrors the
-#: registry envelope skew; defined here so relaykit never imports registry.
-MAX_RELAY_SKEW = 300
+#: Maximum tolerated |verifier now - relay hello ts|, seconds. Owned by
+#: tools.network.clock, which both relaykit and registry import — that shared
+#: home is what keeps this equal to the registry envelope skew without
+#: relaykit ever importing registry.
+from tools.network.clock import MAX_RELAY_SKEW
 
 NONCE_HEX_LEN = 32
 SESSION_HEX_LEN = 32
