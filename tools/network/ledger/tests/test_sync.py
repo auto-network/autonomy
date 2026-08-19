@@ -295,9 +295,10 @@ def test_sync_key_is_deterministic_and_org_specific(org):
             "child_pub": delegate_child.public_hex,
             "scope": ["link:publish"],
             "can_redelegate": False,
+            "grant_nonce": "11" * 32,
             "proof": sign_delegate_proof(
                 delegate_child, org.genesis.event_id, org.root.public_hex,
-                ["link:publish"],
+                ["link:publish"], grant_nonce="11" * 32,
             ),
         },
         [org.genesis.event_id],

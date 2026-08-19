@@ -33,6 +33,7 @@ def delegate_payload(**over):
         "child_pub": child.public_hex,
         "scope": ["link:publish"],
         "can_redelegate": False,
+        "grant_nonce": "ab" * 32,
         # Payload validation checks shape only; the binding is verified at
         # fold admission, so any 128-hex signature satisfies the schema.
         "proof": child.sign_hex(b"shape-only"),

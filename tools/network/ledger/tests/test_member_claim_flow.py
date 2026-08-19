@@ -55,9 +55,10 @@ class Org:
                 "child_pub": self.admin.public_hex,
                 "scope": ["role:grant:member"],
                 "can_redelegate": False,
+                "grant_nonce": "31" * 32,
                 "proof": sign_delegate_proof(
                     self.admin, self.genesis_id, self.root.public_hex,
-                    ["role:grant:member"],
+                    ["role:grant:member"], grant_nonce="31" * 32,
                 ),
             },
         )
@@ -168,9 +169,10 @@ def test_full_pending_flow_admin_ack_threshold_two():
             "child_pub": admin2.public_hex,
             "scope": ["role:grant:member"],
             "can_redelegate": False,
+            "grant_nonce": "32" * 32,
             "proof": sign_delegate_proof(
                 admin2, org.genesis_id, org.root.public_hex,
-                ["role:grant:member"],
+                ["role:grant:member"], grant_nonce="32" * 32,
             ),
         },
     )
@@ -317,9 +319,10 @@ def test_readiness_tracks_the_fold_verdict():
             "child_pub": admin2.public_hex,
             "scope": ["role:grant:member"],
             "can_redelegate": False,
+            "grant_nonce": "33" * 32,
             "proof": sign_delegate_proof(
                 admin2, org.genesis_id, org.root.public_hex,
-                ["role:grant:member"],
+                ["role:grant:member"], grant_nonce="33" * 32,
             ),
         },
     )
@@ -419,9 +422,10 @@ def test_admitting_is_a_need_sized_deterministic_subset():
             "child_pub": admin2.public_hex,
             "scope": ["role:grant:member"],
             "can_redelegate": False,
+            "grant_nonce": "34" * 32,
             "proof": sign_delegate_proof(
                 admin2, org.genesis_id, org.root.public_hex,
-                ["role:grant:member"],
+                ["role:grant:member"], grant_nonce="34" * 32,
             ),
         },
     )
@@ -478,9 +482,10 @@ def test_finalize_survives_approval_outlasting_the_invite():
                 "child_pub": filler.public_hex,
                 "scope": ["link:publish"],
                 "can_redelegate": False,
+                "grant_nonce": "35" * 32,
                 "proof": sign_delegate_proof(
                     filler, org.genesis_id, org.root.public_hex,
-                    ["link:publish"],
+                    ["link:publish"], grant_nonce="35" * 32,
                 ),
             },
         )

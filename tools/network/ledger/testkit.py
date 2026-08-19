@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from tools.network.idkit import KeyPair
 
-from . import HLC, LedgerStore, make_event, sign_delegate_proof
+from . import HLC, LedgerStore, make_event, mint_grant_nonce, sign_delegate_proof
 
 T0 = 1_800_000_000_000  # unix ms, matches tests/conftest.py
 
@@ -52,6 +52,7 @@ class OrgSim:
         parents=None,
     ) -> str:
         child = child or KeyPair.generate()
+        nonce = mint_grant_nonce()
         return self.emit(
             store,
             self.root,
@@ -60,8 +61,10 @@ class OrgSim:
                 "child_pub": child.public_hex,
                 "scope": sorted(set(scope)),
                 "can_redelegate": False,
+                "grant_nonce": nonce,
                 "proof": sign_delegate_proof(
                     child, store.ledger.genesis_id, self.root.public_hex, scope,
+                    can_redelegate=False, grant_nonce=nonce,
                 ),
             },
             parents=parents,

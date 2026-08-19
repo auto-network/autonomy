@@ -159,9 +159,10 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
                 "child_pub": extra_approver.public_hex,
                 "scope": ["role:grant:member"],
                 "can_redelegate": False,
+                "grant_nonce": "39" * 32,
                 "proof": sign_delegate_proof(
                     extra_approver, founded.genesis_id,
-                    root.public_hex, ["role:grant:member"],
+                    root.public_hex, ["role:grant:member"], grant_nonce="39" * 32,
                 ),
             },
         )
@@ -694,9 +695,10 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
                 "child_pub": filler.public_hex,
                 "scope": ["link:publish"],
                 "can_redelegate": False,
+                "grant_nonce": "3a" * 32,
                 "proof": sign_delegate_proof(
                     filler, founded.genesis_id,
-                    root.public_hex, ["link:publish"],
+                    root.public_hex, ["link:publish"], grant_nonce="3a" * 32,
                 ),
             },
             store.heads(),

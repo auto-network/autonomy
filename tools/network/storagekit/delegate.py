@@ -60,7 +60,7 @@ from dataclasses import dataclass, replace
 from typing import Optional
 
 from tools.network.idkit import KeyPair
-from tools.network.ledger import HLC, make_event, sign_delegate_proof
+from tools.network.ledger import HLC, make_event, mint_grant_nonce, sign_delegate_proof
 from tools.network.ledger.projections import organization_content_domain_id
 
 from . import capability as capability_mod
@@ -138,6 +138,7 @@ def authorize_member_storage(
     *,
     hlc: HLC,
     child_proof: str,
+    grant_nonce: str,
     parents=None,
     can_redelegate: bool = True,
 ) -> str:
@@ -145,12 +146,17 @@ def authorize_member_storage(
     scopes RE-DELEGABLY, so it can later mint agent delegates unattended.
 
     ``child_proof`` is the MEMBER'S consent (auto-le0kg): their persona
-    key's signature over this grant (``sign_delegate_proof`` with this
-    ledger's genesis, the root's key and the storage scopes). This function
-    cannot produce it — the persona key derives from the member's OWN
-    personal root, which the root-present ceremony does not hold — so the
-    enabling act gains one exchange with the member it grants. Refused
-    without one; the fold refuses the event if it does not verify.
+    key's signature over this grant's FULL terms and its single-use
+    ``grant_nonce`` (``sign_delegate_proof`` with this ledger's genesis,
+    the root's key, the storage scopes, this ``can_redelegate``, no ttl,
+    and the same nonce passed here — nonce minted on the member's side by
+    preference). This function cannot produce it — the persona key derives
+    from the member's OWN personal root, which the root-present ceremony
+    does not hold — so the enabling act gains one exchange with the member
+    it grants, and BECAUSE THE NONCE IS SINGLE-USE, SO DOES EVERY RENEWAL:
+    an issuer cannot silently re-issue or extend this grant on the
+    member's old consent. Refused without a proof; the fold refuses the
+    event if it does not verify or the nonce was already used.
 
     Role-held scopes are non-delegable in the fold, so without this
     explicit re-delegable grant a member cannot mint a storage delegate at
@@ -166,7 +172,7 @@ def authorize_member_storage(
     ):
         raise DelegateError(
             "authorize_member_storage requires the member's consent proof — "
-            "the persona key's signature over this grant "
+            "the persona key's signature over this grant's terms and nonce "
             "(sign_delegate_proof); refusing to issue without one"
         )
     payload = {
@@ -174,6 +180,7 @@ def authorize_member_storage(
         "child_pub": _key_hex(member_persona),
         "scope": storage_delegate_scopes(domain_id),
         "can_redelegate": bool(can_redelegate),
+        "grant_nonce": grant_nonce,
         "proof": child_proof,
     }
     return ledger.add(make_event(root, payload, _parents(ledger, parents), hlc))
@@ -217,18 +224,22 @@ def provision(
     if domain_id is None:
         domain_id = organization_content_domain_id(genesis_id)
     key = signing_key if signing_key is not None else KeyPair.generate()
+    # A fresh nonce EVERY mint, renewals included: each grant is a new
+    # consent, and the child key is in hand here so the fresh signature
+    # costs nothing (auto-le0kg) — the renewal path reuses the child key
+    # it is extending and still signs anew.
+    nonce = mint_grant_nonce()
     payload = {
         "type": "delegate",
         "child_pub": key.public_hex,
         "scope": storage_delegate_scopes(domain_id),
         "can_redelegate": False,
         "ttl": int(ttl_ms),
-        # The mint holds the child's private half, so consent costs nothing
-        # (auto-le0kg) — and the same is true on the renewal path, which
-        # reuses the child key it is extending.
+        "grant_nonce": nonce,
         "proof": sign_delegate_proof(
             key, ledger.genesis_id, issuer.public_hex,
             storage_delegate_scopes(domain_id),
+            can_redelegate=False, ttl=int(ttl_ms), grant_nonce=nonce,
         ),
     }
     grant_id = ledger.add(make_event(issuer, payload, _parents(ledger, parents), hlc))
