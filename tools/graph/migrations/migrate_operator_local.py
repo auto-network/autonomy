@@ -250,7 +250,8 @@ def build_plan(
 
     ``orgs_root`` overrides the per-org DB location for tests; honoured
     alongside the ``AUTONOMY_ORGS_DIR`` env var. The personal DB path
-    resolves to ``<orgs_root>/personal.db``.
+    resolves beside the orgs root (``data/personal.db``, auto-35kmy), or to
+    a legacy ``<orgs_root>/personal.db`` still awaiting relocation.
     """
     orgs_dir = _resolve_orgs_dir(orgs_root)
     from tools.graph.db import _org_db_path

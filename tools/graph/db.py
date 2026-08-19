@@ -108,6 +108,46 @@ def _orgs_dir(root: Path | str | None = None) -> Path:
 LOCAL_STORE_SLUGS = ("personal", "machine")
 
 
+class LocalStoreCollisionError(RuntimeError):
+    """A file at a local store's legacy path is a SHARED organization.
+
+    'personal' and 'machine' were creatable as shared-org slugs before the
+    names were reserved, so such a database may exist and was valid when it
+    was made. Treating it as the operator's store by FILENAME would write
+    personal credentials into a shared organization and vanish the org from
+    enumeration — so startup refuses instead, and resolution never serves
+    the file as a local store."""
+
+
+def _bootstrap_org_type(path: Path) -> "str | None":
+    """The bootstrap orgs-row ``type`` of the DB at *path*, or ``None``
+    (no row, no table, unreadable — all mean 'not a claimed organization')."""
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            row = conn.execute("SELECT type FROM orgs LIMIT 1").fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+    return row[0] if row else None
+
+
+#: Per-process memo of legacy-file classification. A hit only ever refers to
+#: a file still at its legacy path; the operator remedy moves the file away,
+#: after which the exists() check short-circuits before this is consulted.
+_LEGACY_STORE_IS_SHARED_ORG: dict[str, bool] = {}
+
+
+def _legacy_is_shared_org(legacy: Path) -> bool:
+    key = str(legacy)
+    cached = _LEGACY_STORE_IS_SHARED_ORG.get(key)
+    if cached is None:
+        cached = _bootstrap_org_type(legacy) == "shared"
+        _LEGACY_STORE_IS_SHARED_ORG[key] = cached
+    return cached
+
+
 def _local_store_db_path(name: str, root: Path | str | None = None) -> Path:
     """The path of local store *name* — ``data/<name>.db``, beside the orgs
     directory, wherever that directory resolves (so any isolation of the
@@ -128,8 +168,12 @@ def _local_store_db_path(name: str, root: Path | str | None = None) -> Path:
     if target.exists():
         return target
     legacy = orgs / f"{name}.db"
-    if legacy.exists():
+    if legacy.exists() and not _legacy_is_shared_org(legacy):
         return legacy
+    # Absent, or a shared organization stranded under a reserved name (a
+    # pre-reservation creation): the latter is NEVER served as the local
+    # store — resolution answers with the (possibly not-yet-created) real
+    # home, and startup separately refuses until the operator renames it.
     return target
 
 
@@ -150,6 +194,16 @@ def relocate_local_stores(root: Path | str | None = None) -> None:
         legacy = orgs / f"{name}.db"
         if not legacy.exists():
             continue
+        if _legacy_is_shared_org(legacy):
+            suggested = orgs / "<newname>.db"
+            raise LocalStoreCollisionError(
+                f"{legacy} is a SHARED organization named {name!r} — created "
+                f"before the name was reserved — not the operator's local "
+                f"store. Refusing to migrate it, and resolution will not "
+                f"serve it as one. Rename the organization and restart:\n"
+                f"  sqlite3 {legacy} \"UPDATE orgs SET slug='<newname>'\"\n"
+                f"  mv {legacy} {suggested}"
+            )
         target = orgs.parent / f"{name}.db"
         if target.exists():
             logger.warning(

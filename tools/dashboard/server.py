@@ -18458,7 +18458,18 @@ async def _on_startup():
     # Idempotent — pre-existing DBs are left untouched. See graph://d970d946-f95.
     try:
         from tools.graph import org_ops
+        from tools.graph.db import LocalStoreCollisionError
         org_ops.ensure_bootstrap_orgs()
+    except LocalStoreCollisionError:
+        # A shared organization stranded under a reserved local-store name:
+        # continuing would split the operator's identity between two files.
+        # This is the one bootstrap failure that must STOP the dashboard
+        # and demand the operator rename (the error says exactly how).
+        logger.critical(
+            "ensure_bootstrap_orgs(): reserved-name collision; refusing to "
+            "start", exc_info=True,
+        )
+        raise
     except Exception:
         logger.exception("ensure_bootstrap_orgs() failed; continuing startup")
     # Materialize Setting *schema* meta rows (autonomy.schema#1 +

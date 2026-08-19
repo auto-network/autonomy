@@ -482,8 +482,18 @@ def test_the_fold_builds_once_per_ledger_advancement_not_once_per_call(
 # ── the store ladder: most local wins ────────────────────────
 
 def make_plain_store(root, slug):
-    GraphDB.create_org_db(slug, path=root / f"{slug}.db").close()
-    return root / f"{slug}.db"
+    """A local store in the LEGACY location (exercising the fallback).
+
+    Typed correctly: classification is by bootstrap row (Codex P1a on
+    auto-35kmy), so a shared-typed file under a reserved name is refused
+    as a local store — personal gets its own type, machine gets no orgs
+    row at all, matching how each is really provisioned."""
+    path = root / f"{slug}.db"
+    if slug == "personal":
+        GraphDB.create_org_db(slug, type_="personal", path=path).close()
+    else:
+        GraphDB(path).close()
+    return path
 
 
 def deliver_unsigned(path, *, state, payload, key=KEY, rev=1):

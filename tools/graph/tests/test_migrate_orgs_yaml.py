@@ -253,19 +253,31 @@ def test_migration_is_noop_after_ensure_bootstrap(
 
 
 def test_type_inference_from_bootstrap_row(tmp_path, yaml_path):
-    """When the org DB pre-exists with a given type, migration honours it."""
+    """When the org DB pre-exists with a given type, migration honours it —
+    for ORGANIZATIONS. A shared-typed file under the reserved 'personal'
+    name is no longer trusted as the personal store (Codex P1a on
+    auto-35kmy): classification is by bootstrap row, the collision file is
+    never served, and the plan targets the real home instead."""
     orgs_dir = tmp_path / "orgs"
     orgs_dir.mkdir()
-    # Intentional off-convention: create 'personal' slug as shared type
-    # to verify the migration trusts the bootstrap row.
+    # An ORGANIZATION with a pre-existing shared row is honoured as such.
+    GraphDB.create_org_db(
+        "anchore", type_="shared", path=orgs_dir / "anchore.db",
+    ).close()
+    # A shared-typed file squatting on the reserved name is not the
+    # personal store; the migration must not adopt it as one.
+    from tools.graph import db as graph_db_mod
+    graph_db_mod._LEGACY_STORE_IS_SHARED_ORG.clear()
     GraphDB.create_org_db(
         "personal", type_="shared", path=orgs_dir / "personal.db",
     ).close()
 
     report = build_plan(yaml_path, orgs_dir)
     by_slug = {e.slug: e for e in report.entries}
-    assert by_slug["personal"].org_type == "shared"
-    assert by_slug["personal"].payload["type"] == "shared"
+    assert by_slug["anchore"].org_type == "shared"
+    assert by_slug["personal"].org_type != "shared", (
+        "the squatting shared file must not be adopted as the personal store"
+    )
 
 
 def test_type_inference_defaults_by_slug(yaml_path, orgs_dir):
