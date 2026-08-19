@@ -190,6 +190,35 @@ def test_structural_defects_are_refused(field, value):
         build_record(**base_fields(**{field: value}))
 
 
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("signed_at", 2**53),
+        ("schema_revision", 2**53),
+        ("payload", {"n": 2**53}),
+        ("payload", {"deep": [{"n": -(2**53)}]}),
+        ("witness", {"entry": {"t": 2**53}}),
+    ],
+)
+def test_integers_javascript_cannot_encode_are_refused_everywhere(field, value):
+    """D11: an integer only one builder can represent is not an envelope
+    value. The browser encoder throws outside ±(2^53 − 1); Python must
+    refuse the same domain, recursively — payload and witness included."""
+    with pytest.raises(EnvelopeFormatError):
+        build_record(**base_fields(**{field: value}))
+
+
+def test_the_maximum_safe_integer_is_accepted_at_every_depth():
+    record = build_record(
+        **base_fields(
+            signed_at=2**53 - 1,
+            payload={"n": 2**53 - 1, "deep": [{"m": -(2**53 - 1)}]},
+            witness={**WITNESS, "entry": {**WITNESS["entry"], "t": 2**53 - 1}},
+        )
+    )
+    assert record_bytes(record)
+
+
 def test_signing_with_a_key_other_than_the_named_signer_is_refused():
     with pytest.raises(EnvelopeFormatError):
         sign_record(PERSONA_B, build_record(**base_fields()))

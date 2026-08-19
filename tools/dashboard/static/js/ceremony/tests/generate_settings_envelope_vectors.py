@@ -14,7 +14,12 @@ import json
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[5]
+# parents[6] is the repo root: tests(0) ceremony(1) js(2) static(3)
+# dashboard(4) tools(5) <repo>(6). parents[5] is <repo>/tools, which makes
+# `import tools.*` resolve only if something ELSE put the repo on sys.path —
+# and on a machine holding a second checkout it can resolve against that one,
+# turning a cross-language equality test into a cross-TREE comparison.
+REPO_ROOT = Path(__file__).resolve().parents[6]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -148,6 +153,35 @@ def build_vectors() -> dict:
         "key": "ops-policy",
     }
 
+    # D11's integer domain: 2^53 − 1 encodes identically on both sides at
+    # every depth; 2^53 has no JavaScript representation and both builders
+    # refuse it rather than let the two sides accept different worlds.
+    max_safe = build_record(
+        **{
+            **base_fields,
+            "signed_at": 2**53 - 1,
+            "payload": {"n": 2**53 - 1, "deep": [{"m": -(2**53 - 1)}]},
+        }
+    )
+    unsafe_refusals = {
+        "unsafe_int_signed_at": {**base_fields, "signed_at": 2**53},
+        "unsafe_int_payload": {**base_fields, "payload": {"n": 2**53}},
+        "unsafe_int_witness": {
+            **base_fields,
+            "witness": {
+                **base_fields["witness"],
+                "entry": {**base_fields["witness"]["entry"], "t": 2**53},
+            },
+        },
+    }
+    for fields in unsafe_refusals.values():
+        try:
+            build_record(**fields)
+        except Exception:
+            pass
+        else:
+            raise AssertionError("Python accepted an integer JS cannot encode")
+
     return {
         "personal_root_seed_hex": PERSONAL_ROOT_SEED.hex(),
         "genesis_ids": GENESIS_IDS,
@@ -169,9 +203,14 @@ def build_vectors() -> dict:
             payload, ensure_ascii=False, indent=3, sort_keys=True
         ),
         "cross_org": cross_org,
+        "max_safe_integer": {
+            "input": max_safe,
+            "canonical_hex": record_bytes(max_safe).hex(),
+        },
         "refusals": {
             "missing_signing_key_persona": persona_shaped,
             "missing_signing_key_delegate": delegate_shaped,
+            **unsafe_refusals,
         },
     }
 

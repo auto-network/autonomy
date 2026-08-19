@@ -54,7 +54,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # enforcement.
 # v5 (auto-4oxee): signed-settings envelope columns (signed_at, signing_key,
 # signature, witness, terminal_persona) on the settings table, everywhere.
-_SCHEMA_USER_VERSION = 5
+# v6 (auto-4oxee): all-or-nothing envelope-state triggers on those columns for
+# tables that predate the schema.sql CHECK (SQLite cannot ALTER TABLE ADD
+# CHECK), so no database accepts a partially signed row.
+_SCHEMA_USER_VERSION = 6
 DEFAULT_DB = DATA_ROOT / "graph.db"
 DEFAULT_ORGS_DIR = DATA_ROOT / "orgs"
 
@@ -718,6 +721,34 @@ class GraphDB:
         ):
             if column not in cols:
                 self.conn.execute(f"ALTER TABLE settings ADD COLUMN {column} {decl}")
+        # A row is unsigned (all five NULL) or signed (the four non-witness
+        # columns present; witness free — a signed row of an org that has
+        # never published cites nothing). Fresh tables enforce this with the
+        # CHECK in schema.sql; SQLite cannot ALTER TABLE ADD CHECK, so tables
+        # that predate it get the same predicate as insert/update triggers.
+        # A table rebuild would retrofit the real CHECK but runs on the org-DB
+        # open path every process depends on, which is the wrong place for a
+        # 12-step rewrite; triggers are additive, idempotent, and enforce the
+        # identical predicate. Created unconditionally so every database
+        # behaves the same whichever constraint it also carries. Existing
+        # rows need no heal: before the columns existed every row was
+        # all-NULL, which is the valid unsigned state.
+        for verb, when in (("INSERT", "insert"), ("UPDATE", "update")):
+            self.conn.execute(
+                f"CREATE TRIGGER IF NOT EXISTS trg_settings_envelope_{when} "
+                f"BEFORE {verb} ON settings "
+                "WHEN NOT ("
+                " (NEW.signed_at IS NULL AND NEW.signing_key IS NULL"
+                "  AND NEW.signature IS NULL AND NEW.witness IS NULL"
+                "  AND NEW.terminal_persona IS NULL)"
+                " OR (NEW.signed_at IS NOT NULL AND NEW.signing_key IS NOT NULL"
+                "  AND NEW.signature IS NOT NULL"
+                "  AND NEW.terminal_persona IS NOT NULL)"
+                ") BEGIN "
+                "SELECT RAISE(ABORT, 'settings envelope columns must be all "
+                "NULL (unsigned) or complete (witness optional)'); "
+                "END"
+            )
         self.conn.commit()
 
     def _migrate_orgs(self):

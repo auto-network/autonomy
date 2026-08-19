@@ -63,9 +63,37 @@ ENVELOPE_FIELDS = (
 
 _GENESIS_ID_HEX_LEN = 64
 
+#: JavaScript's Number.isSafeInteger bound. Both builders must encode every
+#: envelope, so an integer only one of them can represent is not an envelope
+#: value: Python's canonical_json is unbounded, the browser encoder throws
+#: outside ±(2^53 − 1), and a record that admits the difference breaks D11.
+#: Bounded HERE, on the envelope path, recursively — not in idkit's
+#: canonical.py, whose blast radius (every signed record in the system) is
+#: not this module's to take.
+MAX_SAFE_INTEGER = 2**53 - 1
+
 
 class EnvelopeFormatError(MalformedError):
     """A settings envelope record is structurally malformed."""
+
+
+def _check_safe_integers(value: object, where: str) -> None:
+    if isinstance(value, bool) or value is None or isinstance(value, str):
+        return
+    if isinstance(value, int):
+        if not -MAX_SAFE_INTEGER <= value <= MAX_SAFE_INTEGER:
+            raise EnvelopeFormatError(
+                f"{where}: integer {value} is outside the JavaScript-safe "
+                f"range ±{MAX_SAFE_INTEGER} and has no browser encoding"
+            )
+        return
+    if isinstance(value, dict):
+        for k, v in value.items():
+            _check_safe_integers(v, f"{where}.{k}")
+        return
+    if isinstance(value, (list, tuple)):
+        for i, v in enumerate(value):
+            _check_safe_integers(v, f"{where}[{i}]")
 
 
 def _require_str(value: object, what: str) -> str:
@@ -144,6 +172,10 @@ def build_record(
         canonical_json(record)
     except MalformedError as exc:
         raise EnvelopeFormatError(str(exc)) from None
+    # Then the shared-domain gate: every integer anywhere in the record must
+    # be representable by BOTH builders (D11), so the JavaScript-safe bound
+    # applies recursively — payload and witness included.
+    _check_safe_integers(record, "record")
     return record
 
 
