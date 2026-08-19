@@ -93,3 +93,35 @@ def test_build_wrapper_stamps_a_real_commit_and_time(tmp_path):
     assert ver, f"build.sh must pass a real 40-hex commit SHA; got:\n{out}"
     assert tim, f"build.sh must pass a UTC build time; got:\n{out}"
     assert "compose" in out and "build" in out, "build.sh must invoke docker compose"
+
+
+@pytest.mark.parametrize(
+    "bad_env",
+    [
+        {"AUTONOMY_VERSION": "not-a-sha"},
+        {"AUTONOMY_VERSION": "source"},      # build.sh is the real-SHA path; source is invalid here
+        {"AUTONOMY_VERSION": "DEADBEEF" * 5},  # 40 chars but uppercase — not a git SHA
+        {"AUTONOMY_BUILD_TIME": "not-a-time"},
+    ],
+)
+def test_build_wrapper_rejects_invalid_overrides(tmp_path, bad_env):
+    """A bad version/time override must fail closed BEFORE docker is invoked, so
+    garbage can never reach the image."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    called = tmp_path / "docker-was-called"
+    stub = fake_bin / "docker"
+    stub.write_text(f'#!/usr/bin/env bash\ntouch {called}\n', encoding="utf-8")
+    stub.chmod(0o755)
+
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+    env.pop("AUTONOMY_VERSION", None)
+    env.pop("AUTONOMY_BUILD_TIME", None)
+    env.update(bad_env)
+
+    result = subprocess.run(
+        ["bash", str(BUILD_SH), "build"], env=env, capture_output=True, text=True
+    )
+    assert result.returncode != 0, f"build.sh must reject {bad_env}"
+    assert not called.exists(), "docker must not run when the version/time is invalid"

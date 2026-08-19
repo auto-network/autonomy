@@ -114,6 +114,34 @@ def test_publish_builds_pushes_and_records_exact_digests_without_signing(release
     assert all(f"@sha256:{DIGEST}" in line for line in image_lines)
 
 
+@pytest.mark.parametrize("bad_version", ["source", "not-a-sha", "DEADBEEF"])
+def test_publish_refuses_non_sha_version_override(release_env, bad_version):
+    """A published node image must carry a real commit — never the bare-compose
+    `source` marker and never arbitrary text. Reject before building/pushing."""
+    env, log, _, _ = release_env
+    env["AUTONOMY_VERSION"] = bad_version
+    result = subprocess.run(
+        ["bash", str(PUBLISH)], env=env, capture_output=True, text=True, check=False
+    )
+    assert result.returncode != 0, f"publish must reject AUTONOMY_VERSION={bad_version!r}"
+    if log.exists():
+        assert "docker build" not in log.read_text(encoding="utf-8"), (
+            "publish must fail closed before building anything"
+        )
+
+
+@pytest.mark.parametrize("bad_time", ["not-a-time", "2026-08-19 01:00:00", "2026-08-19T01:00:00"])
+def test_publish_refuses_malformed_build_time_override(release_env, bad_time):
+    env, log, _, _ = release_env
+    env["AUTONOMY_BUILD_TIME"] = bad_time
+    result = subprocess.run(
+        ["bash", str(PUBLISH)], env=env, capture_output=True, text=True, check=False
+    )
+    assert result.returncode != 0, f"publish must reject AUTONOMY_BUILD_TIME={bad_time!r}"
+    if log.exists():
+        assert "docker build" not in log.read_text(encoding="utf-8")
+
+
 def test_operator_signing_requires_confirmation_and_signs_exact_digests(release_env):
     env, log, lock_file, _ = release_env
     subprocess.run(["bash", str(PUBLISH)], env=env, check=True)
