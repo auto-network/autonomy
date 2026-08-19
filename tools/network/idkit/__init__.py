@@ -34,7 +34,14 @@ from .errors import (
     WrongOrgError,
 )
 from .keys import KeyPair, load_public_key, verify_signature
-from .persona import PERSONA_SALT, PERSONA_SEED_LEN, derive_persona
+from .persona import (
+    MACHINE_KEY_SALT,
+    PERSONA_SALT,
+    PERSONA_SEED_LEN,
+    derive_machine_key,
+    derive_persona,
+    mint_machine_id,
+)
 from .revocation import (
     REVOCATION_DOMAIN,
     REVOCATION_VERSION,
@@ -72,6 +79,9 @@ __all__ = [
     "ChainVerifyResult",
     # persona
     "derive_persona",
+    "derive_machine_key",
+    "mint_machine_id",
+    "MACHINE_KEY_SALT",
     "PERSONA_SALT",
     "PERSONA_SEED_LEN",
     # sealing
