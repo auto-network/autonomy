@@ -220,6 +220,10 @@ def test_ingest_all_claude_code_discovers_nested_codex_rollouts(
         _user_message("Nested codex rollout should be discovered.", "2026-04-24T06:00:01Z"),
     ])
 
+    # ingest_all_claude_code scans "<DATA_ROOT>/agent-runs" (ingest.py) since the
+    # one-DATA_ROOT refactor (auto-dnjn0); _REPO_ROOT no longer drives that scan.
+    # Point DATA_ROOT at the tmp tree where this test writes the nested rollout.
+    monkeypatch.setattr("tools.graph.ingest.DATA_ROOT", tmp_path / "data")
     monkeypatch.setattr("tools.graph.ingest._REPO_ROOT", tmp_path)
     monkeypatch.setattr("tools.graph.ingest.Path.home", lambda: tmp_path / "home")
 

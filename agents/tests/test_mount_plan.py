@@ -37,7 +37,7 @@ def test_classify_origin_is_path_derived():
     assert mp.classify_origin(os.path.join(str(mp._DATA_ROOT), "worktrees", "s", "r")) is mp.Origin.NODE
     assert mp.classify_origin(os.path.join(str(mp._REPO_ROOT), "agents", "x")) is mp.Origin.NODE
     assert mp.classify_origin("/dev/null") is mp.Origin.DEVICE
-    assert mp.classify_origin("/home/jeremy/workspace/vuln-diff") is mp.Origin.HOST
+    assert mp.classify_origin("/opt/vendor/vuln-diff") is mp.Origin.HOST
 
 def test_mount_spec_factory_derives_origin():
     s = mp.mount_spec(os.path.join(str(mp._DATA_ROOT), "worktrees", "x"), "/workspace/x")
@@ -186,8 +186,8 @@ def test_plain_container_spec_stays_byte_identical_v():
     """An ordinary (non-workspace) caller mount stays byte-identical -v."""
     topo = mp.NodeTopology(is_host_process=False)
     plan = mp.MountPlan()
-    plan.set(mp.mount_spec("/home/jeremy/external/thing", "/opt/thing:ro"))
-    assert mp.mount_args(plan, topo) == ["-v", "/home/jeremy/external/thing:/opt/thing:ro"]
+    plan.set(mp.mount_spec("/opt/vendor/thing", "/opt/thing:ro"))
+    assert mp.mount_args(plan, topo) == ["-v", "/opt/vendor/thing:/opt/thing:ro"]
 
 
 def test_marker_rides_dict_update_and_is_read_by_mount_spec(tmp_path):
