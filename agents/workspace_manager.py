@@ -54,6 +54,10 @@ from agents.workspace_settings import (
     WorkspaceMountInvalidError,
     WorkspaceMountMissingError,
 )
+from agents import mount_plan
+
+#: The org-partitioned volume workspace mounts resolve inside (auto-m7vh7).
+ORGS_VOLUME_NAME = "autonomy-orgs"
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = DATA_ROOT
@@ -908,41 +912,211 @@ def prepare_session_mounts(
     return mounts
 
 
+def _orgs_mount_context(topo) -> "tuple[str, str | None, bool] | None":
+    """Where the autonomy-orgs pool lives in the node's OWN frame, and how to
+    translate a resolved path in that frame to a host path the daemon can bind.
+
+    Returns ``(node_view_root, host_source, is_host_process)``:
+
+    * host-process (dev): the node's view IS the host, so the pool is a real
+      path under DATA_ROOT and there is nothing to translate (host_source None).
+    * containerized: the autonomy-orgs volume's container mount point plus its
+      host source, both from vm8qh's cached self-inspection — no docker call
+      per launch. host_source may be None if self-inspect found no Source; the
+      caller REFUSES in that case (never binds the node-container path).
+
+    Returns ``None`` on a containerized node that has NO autonomy-orgs volume:
+    the caller must refuse rather than hand the daemon a node-container path it
+    would fabricate on the host (the fabrication bug, one layer down).
+    """
+    if topo.is_host_process:
+        # DATA_DIR/org-mounts, NOT DATA_DIR/orgs: the latter already holds the
+        # per-org DATABASES (orgs/<org>.db). autonomy-orgs (the mountable pool)
+        # and autonomy-data (secret-bearing, never session-mountable) are SEPARATE
+        # volumes on a node, so they get separate names in the dev frame too —
+        # otherwise dev merges them into one tree and can't catch a mistake prod
+        # would (the epic's core failure shape). The subpath is then the same
+        # string in both frames.
+        return str(DATA_DIR / "org-mounts"), None, True
+    for v in topo.volumes:
+        if v.name == ORGS_VOLUME_NAME:
+            return v.mount_point, (v.host_source or None), False
+    return None
+
+
+def _resolve_org_mount(key, rs, orgs_ctx, org):
+    """Resolve one rev-2 workspace mount to ``(host_path, container_spec)``.
+
+    The hybrid resolver (graph b20f2468-b12): build
+    ``orgs/<authenticated-org>/<subpath>`` in the node's own frame, realpath it
+    and REFUSE if it escapes the org tree (a planted symlink reaching a sibling
+    org), check the target's type against ``kind`` (refuse present-but-wrong-
+    type), then TRANSLATE the node-frame path to a host path for the bind. The
+    org comes from session identity, never the payload. Returns ``None`` for an
+    optional mount whose target is absent.
+    """
+    payload = rs.payload
+    subdesc = f"orgs/{org}/{payload.subpath}"
+
+    if orgs_ctx is None:
+        # Containerized node without the autonomy-orgs volume: cannot resolve a
+        # host path without fabricating one. Refuse loudly (deploy auto-m7vh7).
+        raise WorkspaceMountInvalidError(
+            mount_key=key,
+            reason=(
+                "autonomy-orgs volume is not mounted on this node; refusing to "
+                "resolve a workspace mount rather than fabricate a host path"
+            ),
+        )
+    node_root, host_source, is_host_process = orgs_ctx
+
+    # On a containerized node host_source is REQUIRED and must be absolute — it is
+    # the only thing that maps the node-container view to a real host path. Its
+    # absence is NOT the host-process case (view == host); binding the node path
+    # would fabricate on the host. Refuse. Only host-process legitimately has no
+    # host_source, and there the node view IS the host.
+    if not is_host_process and (not host_source or not os.path.isabs(host_source)):
+        raise WorkspaceMountInvalidError(
+            mount_key=key,
+            reason=(
+                "autonomy-orgs host source is unknown or not absolute on this node; "
+                "refusing rather than bind a node-container path the daemon would "
+                "fabricate on the host"
+            ),
+        )
+    # org is the authenticated identity segment; guard it as one clean component.
+    if os.sep in org or org in ("", ".", ".."):
+        raise WorkspaceMountInvalidError(
+            mount_key=key, reason=f"invalid org segment {org!r} for a scoped mount")
+
+    node_real = os.path.realpath(node_root)
+    # The org root must be the LITERAL direct child of the pool root — not itself
+    # a symlink redirecting elsewhere, or the "authorized boundary" is attacker-
+    # movable (orgs/<me> -> orgs/<other-org> would make a sibling's tree look
+    # in-bounds). Validate that BEFORE trusting org_real as the boundary.
+    org_real = os.path.realpath(os.path.join(node_root, org))
+    if org_real != os.path.join(node_real, org):
+        raise WorkspaceMountInvalidError(
+            mount_key=key,
+            reason=f"org root for {org!r} is redirected (symlink) — refused")
+
+    # realpath the target IN THE NODE'S FRAME; a component symlinking out of the
+    # org tree is caught here — the attack that killed "just bind the constructed
+    # path". (The container_path guard lives at the schema: absolute, normalized.)
+    resolved = os.path.realpath(os.path.join(node_root, org, payload.subpath))
+    if resolved != org_real and not resolved.startswith(org_real + os.sep):
+        raise WorkspaceMountInvalidError(
+            mount_key=key,
+            reason=(
+                f"subpath {payload.subpath!r} resolves outside {org!r}'s tree "
+                f"(symlink or traversal escape) — refused"
+            ),
+        )
+
+    # existence + STRICT type: absent vs present-but-wrong-type vs ok. kind=file
+    # means a regular file (S_ISREG) and kind=dir a directory (S_ISDIR) — a FIFO,
+    # socket or device passing as a "file" is the same succeeds-by-exit/wrong-by-
+    # content class kind exists to catch. os.path.isfile/isdir are exactly those
+    # stat checks (and follow the already-resolved, symlink-free path).
+    if not os.path.exists(resolved):
+        if payload.required:
+            raise WorkspaceMountMissingError(
+                mount_key=key, origin_org=rs.org, state=rs.state,
+                host_path=subdesc, container_path=payload.container_path,
+            )
+        logger.debug("workspace: optional mount %s absent (%s) — skipping", key, subdesc)
+        return None
+    if payload.kind == "dir" and not os.path.isdir(resolved):
+        raise WorkspaceMountInvalidError(
+            mount_key=key, reason=f"declares kind=dir but {subdesc} is not a directory")
+    if payload.kind == "file" and not os.path.isfile(resolved):
+        raise WorkspaceMountInvalidError(
+            mount_key=key, reason=f"declares kind=file but {subdesc} is not a regular file")
+
+    # (c) TRANSLATE node-frame -> host path. On a containerized node the node's
+    # view is a container path meaningless to the daemon; rebase it onto the
+    # volume's host source. On host-process the view IS the host.
+    #
+    # LOCAL VOLUME DRIVER ASSUMPTION (a trust boundary, not a detected condition):
+    # rebasing onto host_source TRUSTS that autonomy-orgs is a local-driver volume
+    # whose docker-reported Source is a concrete path bind-mountable on THIS daemon
+    # host (the default `local` driver). The guard above only catches the cases it
+    # actually can — a missing or relative Source — and refuses those early. It
+    # does NOT certify usability: a non-local driver (NFS, cloud, CSI, plugin) can
+    # report an ABSOLUTE Source/Mountpoint that is not a usable local bind, and no
+    # arithmetic here detects that. Non-local drivers are simply UNSUPPORTED; the
+    # strict `--mount type=bind` emission is the backstop — it at least refuses the
+    # launch if the translated Source does not exist, rather than fabricating one.
+    if is_host_process:
+        host_path = resolved
+    else:
+        host_path = os.path.join(host_source, os.path.relpath(resolved, node_real))
+    # DECLARE strict-bind provenance on the spec itself (BindRefuseMissing): the
+    # emission MUST be `--mount type=bind` (refuse-missing), never `-v` (which
+    # fabricates a vanished source). Carried through the mount dict to
+    # build_mount_plan explicitly — never rediscovered by comparing this
+    # daemon-host path in the node frame, which is the wrong-frame op this epic
+    # removes.
+    container_spec = mount_plan.BindRefuseMissing(f"{payload.container_path}:{payload.mode}")
+    return host_path, container_spec
+
+
 def _apply_workspace_mount_settings(
     workspace: WorkspaceV1, mounts: dict[str, str],
 ) -> None:
-    """Extend *mounts* with ``autonomy.workspace.mount#1`` host directories.
+    """Extend *mounts* with ``autonomy.workspace.mount#2`` mounts, DUAL-DISPATCHED
+    by which source field the payload carries (exactly one is set, per schema):
 
-    Required mounts whose host path is missing raise
-    :class:`WorkspaceMountMissingError`; optional mounts are silently
-    skipped (logged at DEBUG). A host path that exists but is not a
-    directory raises :class:`WorkspaceMountInvalidError`.
+    * ``subpath`` -> the guarded resolver: resolved under ``orgs/<workspace-org>/``
+      in autonomy-orgs, realpath-refused if it escapes, type-checked against
+      ``kind``, translated to a host path and emitted strict-bind
+      (:func:`_resolve_org_mount`).
+    * ``host_path`` -> the DEPRECATED rev-1 fallback: the pre-refactor HOST
+      behavior, kept so un-migrated rows keep working through the transition
+      (b20f2468-b12). Its wrong-frame ``host.exists()`` is the acceptable status
+      quo for a legacy row; migrating it to a subpath moves it to the guarded path.
+
+    Required mounts whose target is absent raise
+    :class:`WorkspaceMountMissingError`; optional absent ones are skipped.
     """
+    if not workspace.mounts:
+        return
+    org = getattr(workspace, "graph_project", None)
+    orgs_ctx = None
+    orgs_ctx_ready = False   # discover topology lazily — only if a subpath row needs it
     for key, rs in workspace.mounts.items():
         payload = rs.payload
-        host = Path(payload.host_path)
-        if not host.exists():
-            if payload.required:
-                raise WorkspaceMountMissingError(
+        if payload.subpath is not None:
+            # Guarded path. Org identity and node topology are needed only here.
+            if not org:
+                raise WorkspaceMountInvalidError(
                     mount_key=key,
-                    origin_org=rs.org,
-                    state=rs.state,
-                    host_path=payload.host_path,
-                    container_path=payload.container_path,
+                    reason="workspace has no org (graph_project) to scope a subpath "
+                           "mount under",
                 )
-            logger.debug(
-                "workspace: optional mount %s host_path %s absent — skipping",
-                key, payload.host_path,
-            )
-            continue
-        # A mount host path may be a directory OR a single file — the
-        # narrowest credential mount is one key file, not a directory (e.g.
-        # blindhash-operations' encrypted decrypt key at
-        # .../private-key-encrypted.pem). Docker bind-mounts both. The old
-        # is_dir() check rejected legitimate single-file secret mounts and,
-        # because WorkspaceMountInvalidError wasn't caught by the
-        # session-create handler, crashed the request with an unhandled 500.
-        mounts[str(host)] = f"{payload.container_path}:{payload.mode}"
+            if not orgs_ctx_ready:
+                orgs_ctx = _orgs_mount_context(mount_plan.discover_topology())
+                orgs_ctx_ready = True
+            spec = _resolve_org_mount(key, rs, orgs_ctx, org)
+            if spec is None:
+                continue
+            host_path, container_spec = spec
+            mounts[host_path] = container_spec
+        else:
+            # Deprecated host_path fallback (pre-fteke HOST behavior).
+            host = Path(payload.host_path)
+            if not host.exists():
+                if payload.required:
+                    raise WorkspaceMountMissingError(
+                        mount_key=key, origin_org=rs.org, state=rs.state,
+                        host_path=payload.host_path, container_path=payload.container_path,
+                    )
+                logger.debug(
+                    "workspace: optional legacy mount %s host_path %s absent — skipping",
+                    key, payload.host_path,
+                )
+                continue
+            mounts[str(host)] = f"{payload.container_path}:{payload.mode}"
 
 
 # ── Session teardown ──────────────────────────────────────────────

@@ -22,13 +22,28 @@ Composite key convention (graph://0d3f750f-f9c § Composite keys):
 
 from __future__ import annotations
 
+import posixpath
+from pathlib import PurePosixPath
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 SET_ID = "autonomy.workspace.mount"
 SCHEMA_REVISION = 1
+
+
+def _reject_traversal_segments(value: str, *, label: str) -> None:
+    """Raise if any path segment is empty, ``.`` or ``..``.
+
+    The realpath guard in the resolver is the runtime defence; this is
+    defence-in-depth at write time, closer to whoever typed the row.
+    """
+    for seg in PurePosixPath(value).parts:
+        if seg in ("", ".", ".."):
+            raise ValueError(
+                f"{label} must not contain empty, '.' or '..' segments: {value!r}"
+            )
 
 
 SYNOPSIS = {
@@ -162,3 +177,256 @@ class _WorkspaceMountSchemaAdapter(SettingSchema):
             raise SchemaValidationError(
                 f"{cls.__name__}: {exc}"
             ) from exc
+
+
+# ── Revision 2 — org-free subpath, WITH a deprecated host_path fallback ────────
+#
+# `subpath` (relative, org-free) is ADDED as the guarded path; `host_path` is kept
+# as a DEPRECATED optional field so existing rev-1 rows keep working through the
+# transition (b20f2468-b12). Exactly one is set per row. For a subpath row the
+# resolver prepends `orgs/<authenticated-session-org>/` at launch, realpath-
+# resolves, and refuses anything escaping that org's tree — so a subpath naming
+# another org just resolves inside the caller's OWN org, and the guard stops any
+# `..`/symlink escape. The resolved target may be a FILE or a directory (folds in
+# what the retired artifact mechanism did).
+#
+# Because host_path is KEPT, a rev-1 payload is already a valid rev-2 payload, so
+# the 1->2 upconverter is the IDENTITY (registered below) — NOT the impossible
+# host_path->subpath transform. That is what keeps existing rows from dropping on
+# a rev-2 read. A DEPRECATED FALLBACK FIELD KEEPS ITS ORIGINAL VALIDATION: legacy
+# host_path/container_path stay rev-1 (absolute only, exact spelling incl. a
+# trailing slash), so their argv is byte-identical; the stricter canonical
+# container_path spelling applies to subpath rows only.
+
+MOUNT_SCHEMA_REVISION_2 = 2
+
+
+class WorkspaceMountV2(BaseModel):
+    """A workspace mount: EITHER a `subpath` in the org-partitioned autonomy-orgs
+    volume (the guarded path), OR a deprecated absolute `host_path` (the rev-1
+    fallback the design kept "so existing rows keep working through the
+    transition", b20f2468-b12). Exactly one is set.
+
+    `subpath` is relative and org-free (e.g. ``personal/scale-harness/license.yaml``
+    or ``vuln-diff-validation``); the launcher resolves it under
+    ``orgs/<authenticated-org>/`` in autonomy-orgs, realpath-refusing an escape.
+    The shared|personal x org|workspace scope the old artifact layering encoded is
+    now just a leading subpath convention, never a payload field.
+
+    `host_path` is the legacy absolute machine path. A rev-1 payload is a valid
+    rev-2 payload by construction (host_path present, subpath/kind absent), so the
+    1->2 upconverter is the IDENTITY and no row has to be rewritten to survive.
+    The consumer dual-dispatches: host_path rows keep the old HOST-origin behavior,
+    subpath rows get the guarded resolver. Migration host_path -> subpath is
+    voluntary and per-row.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    host_path: str | None = Field(
+        default=None,
+        description="DEPRECATED absolute machine path (rev-1 fallback). Exactly one "
+                    "of host_path / subpath is set; new rows use subpath.",
+    )
+    subpath: str | None = Field(
+        default=None,
+        description="Relative, org-free path under orgs/<org>/ in autonomy-orgs",
+    )
+    container_path: str = Field(..., description="Absolute path inside container")
+    # What the declaration expects to find. REQUIRED and undefaulted: there is no
+    # safe guess (defaulting 'dir' reproduces the old file bug; 'file' breaks
+    # directory mounts). Replaces the presence+type double-duty of the removed
+    # exists="dir": the resolver refuses a PRESENT-BUT-WRONG-TYPE target (a dir
+    # where a file is expected binds a dir where the app opens a file — the
+    # fabrication failure mode: succeeds by exit code, wrong by content).
+    kind: Literal["file", "dir"] | None = Field(
+        default=None,
+        description="Expected target type; REQUIRED with subpath, forbidden with "
+                    "host_path (legacy rows carry no kind). The resolver refuses a "
+                    "present-but-wrong-type target.",
+    )
+    mode: Literal["ro", "rw"] = "ro"
+    # A SHORT title for a readiness tile — not a sentence. Capped so it can't
+    # drift into being used as `description` is today (100-char sentences). The
+    # UI puts `name` on top and `description` under it.
+    name: str | None = Field(
+        default=None, max_length=60,
+        description="Short display label, e.g. 'Anchore Enterprise license'",
+    )
+    description: str | None = None
+    # Long-form guidance shown when the mount is MISSING — the only part that
+    # tells the operator what to DO (where to get the file). Carried forward from
+    # autonomy.workspace.artifact#1's `help`, which the collapse would otherwise
+    # silently drop.
+    help: str | None = None
+    required: bool = True
+
+    @field_validator("subpath")
+    @classmethod
+    def subpath_relative_and_contained(cls, v: str) -> str:
+        if not v:
+            raise ValueError("subpath must not be empty")
+        if v.startswith("/"):
+            raise ValueError(f"subpath must be relative (no leading '/'): {v!r}")
+        _reject_traversal_segments(v, label="subpath")
+        # PurePosixPath.parts collapses '//' silently, so also require the raw
+        # string to be already-normalized — rejects 'a//b', 'a/b/', 'a/./b'.
+        if posixpath.normpath(v) != v:
+            raise ValueError(
+                f"subpath must be already-normalized (no '.', trailing or "
+                f"doubled '/'): {v!r}"
+            )
+        return v
+
+    @field_validator("container_path")
+    @classmethod
+    def container_absolute(cls, v: str) -> str:
+        # Absolute is required for BOTH row types (it is rev-1's ONLY constraint).
+        # The stricter CANONICAL spelling — normalized, no `..`/`.`/trailing/doubled
+        # `/` — is applied to SUBPATH rows only, in the model validator: a legacy
+        # host_path row must keep its EXACT V1 container_path (a live row carries a
+        # trailing slash, `/etc/autonomy/artifacts/scale-harness/`) so its deprecated
+        # mount argv stays byte-identical to today. An arbitrary absolute
+        # destination is deliberate either way (coordinator ruling, 2026-08-19).
+        if not v.startswith("/"):
+            raise ValueError(f"container_path must be absolute: {v!r}")
+        return v
+
+    @field_validator("host_path")
+    @classmethod
+    def host_path_absolute(cls, v):
+        # The legacy fallback keeps rev-1's only constraint — absolute — and no
+        # more (it is the un-migrated shape, resolved by the old HOST behavior).
+        if v is not None and not v.startswith("/"):
+            raise ValueError(f"host_path must be absolute: {v!r}")
+        return v
+
+    @model_validator(mode="after")
+    def exactly_one_source_with_kind_rule(self):
+        has_host = self.host_path is not None
+        has_sub = self.subpath is not None
+        if has_host == has_sub:
+            raise ValueError(
+                "exactly one of host_path (deprecated) or subpath must be set")
+        if has_host:
+            # Deprecated legacy row: kind forbidden, and NO canonical-spelling check
+            # on container_path — rev-1 semantics preserved verbatim so a valid V1
+            # row (incl. a trailing-slash container_path) stays valid and its argv
+            # unchanged. This is what makes the 1->2 upconverter identity-COMPATIBLE
+            # in effect, not just in name.
+            if self.kind is not None:
+                raise ValueError("host_path (legacy) must not carry kind")
+        else:
+            # Guarded subpath row: kind required, and container_path must be
+            # CANONICAL (the point-4 destination guard) — new rows are held to the
+            # strict spelling that legacy rows are grandfathered out of.
+            if self.kind is None:
+                raise ValueError("subpath requires kind (file|dir)")
+            cp = self.container_path
+            _reject_traversal_segments(cp, label="container_path")
+            if posixpath.normpath(cp) != cp:
+                raise ValueError(
+                    f"container_path for a subpath mount must be already-normalized "
+                    f"(no '.', '..', trailing or doubled '/'): {cp!r}")
+        return self
+
+
+@keyed_per_entity(
+    key_strategy="workspace_id:mount_name",
+    key_references={"workspace_id": "autonomy.workspace"},
+)
+@home("organization")
+@readiness_gated_by("required")
+class _WorkspaceMountV2SchemaAdapter(SettingSchema):
+    """Registers ``autonomy.workspace.mount#2`` alongside #1. An IDENTITY 1->2
+    upconverter is registered (see the note above) so rev-1 rows survive a rev-2
+    read as deprecated host_path rows."""
+
+    set_id = SET_ID
+    schema_revision = MOUNT_SCHEMA_REVISION_2
+    model = WorkspaceMountV2
+
+    _field_metadata: dict[str, dict] = {
+        # host_path/subpath/kind are each OPTIONAL at the field level; the
+        # exactly-one + kind-iff-subpath invariant is enforced by the model
+        # validator, not by per-field `required` (which enforce_declared_fields
+        # reads independently). A legacy host_path row must pass here.
+        "host_path": {
+            "type": "string",
+            "description": "DEPRECATED absolute machine path (rev-1 fallback); exactly "
+                           "one of host_path/subpath is set",
+        },
+        "subpath": {
+            "type": "string",
+            "description": (
+                "Relative, org-free path under orgs/<org>/ in autonomy-orgs; "
+                "resolved and refused-if-escaping at launch (may be a file or dir)"
+            ),
+        },
+        "container_path": {
+            "type": "string",
+            "required": True,
+            "description": "Absolute container path to mount at. For a subpath row it "
+                           "must also be CANONICAL (normalized, no '..'/trailing slash); "
+                           "a legacy host_path row keeps rev-1 semantics (absolute only, "
+                           "exact spelling preserved).",
+        },
+        "kind": {
+            "type": "string",
+            "enum": ["file", "dir"],
+            "description": "Expected target type (required with subpath); the resolver "
+                           "refuses a present-but-wrong-type mismatch",
+        },
+        "mode": {
+            "type": "string",
+            "description": "Mount mode — 'ro' for read-only, 'rw' for writable",
+            "enum": ["ro", "rw"],
+            "default": "ro",
+        },
+        "name": {
+            "type": "string",
+            "description": "Short display label (a title, not a sentence); max 60 chars",
+        },
+        "description": {
+            "type": "string",
+            "description": "Operator-facing description of what this mount provides",
+        },
+        "help": {
+            "type": "string",
+            "description": "Long-form guidance shown when the mount is missing (what to do)",
+        },
+        "required": {
+            "type": "boolean",
+            "description": "Whether the mount is required at workspace launch",
+            "default": True,
+        },
+    }
+
+    @classmethod
+    def validate(cls, payload) -> None:
+        if not isinstance(payload, dict):
+            raise SchemaValidationError(
+                f"{cls.__name__}: payload must be a dict, "
+                f"got {type(payload).__name__}"
+            )
+        try:
+            cls.model.model_validate(payload)
+        except Exception as exc:
+            raise SchemaValidationError(f"{cls.__name__}: {exc}") from exc
+
+
+# The 1->2 upconverter is the IDENTITY. This is NOT the host_path -> subpath
+# transform the design rejected as impossible (a machine path cannot become an
+# org-relative subpath by pure function). Because rev 2 KEEPS host_path as a
+# valid field, a rev-1 payload {host_path, container_path, mode, required, ...}
+# is already a valid rev-2 payload unchanged — so the pure function that carries
+# it forward is identity. Registering it is what keeps existing rev-1 rows from
+# dropping when a consumer requests rev 2 (without it, `--as-rev 2` drops them
+# all — the exact measurement that caught the first merge). Migration
+# host_path -> subpath stays a voluntary, per-row rewrite; nothing is rewritten
+# merely to survive the revision bump.
+from .registry import register_upconverter as _register_upconverter
+
+_register_upconverter(
+    SET_ID, SCHEMA_REVISION, MOUNT_SCHEMA_REVISION_2, lambda payload: dict(payload)
+)
