@@ -27,6 +27,10 @@ from tools.graph.schemas.vault_credential import (
 )
 from tools.vault.key_holder import VaultKeyCache
 from tools.vault.key_sealer import VaultSealerNotReady, register_vault_sealer
+from tools.vault.db_content_store import DbContentStore
+from tools.vault.storage_object import Holdings
+from tools.graph.tests.vault_read_harness import VaultWorld
+from tools.network.storagekit.keycontrol import KeyControlStore
 
 import tools.graph.schemas  # noqa: F401 — registers the sets
 
@@ -34,8 +38,10 @@ import tools.graph.schemas  # noqa: F401 — registers the sets
 @pytest.fixture(autouse=True)
 def _no_sealer():
     settings_ops.set_vault_sealer(None)
+    settings_ops.set_vault_key_holder(None)
     yield
     settings_ops.set_vault_sealer(None)
+    settings_ops.set_vault_key_holder(None)
 
 
 def test_the_set_is_declared_personal_and_vaulted():
@@ -95,31 +101,55 @@ def test_the_refusal_names_the_organization_rather_than_the_mechanism():
     assert "organization" in message
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "auto-ehyoh's whole point: the operator's GitHub token lives in their "
-        "OWN store, released unattended. The set is declared for it, but a "
-        "personal object's CEK must be wrapped under the owner's vault master "
-        "KEK and that path is not wired into settings — only the org "
-        "storage-domain path is, and it needs a genesis the personal store "
-        "does not have. Flips to xpass the day the owner-wrap lands, which is "
-        "the signal that ehyoh can move."
-    ),
-)
-def test_ehyoh_can_store_the_operators_github_token():
-    """What the demo needs, expressed as the test that will one day pass.
+def test_ehyoh_can_store_the_operators_github_token(tmp_path, monkeypatch):
+    """auto-ehyoh: the operator's GitHub token, stored in their OWN store and
+    released unattended.
 
-    Written failing on purpose. The refusal tests above pin what the system
-    does TODAY; this one pins what it must do, so the gap is a red mark
-    somebody has to answer for rather than a paragraph in a note.
+    The personal store is a degenerate single-member domain — the same storage
+    machinery an organization uses, run at N=1 — so the token seals by the org
+    code (``seal_revision``) and its ciphertext lands INSIDE ``personal.db``,
+    the file that follows the operator across the fleet. This drives the real
+    ``settings_ops`` write/read path against a founded single-member domain.
     """
-    register_vault_sealer(
-        VaultKeyCache(), "/tmp/x/kc.db", "/tmp/x/content",
-        lambda: object(), lambda set_id, org: None,
-    )
+    monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))  # personal.db under here
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    db = tmp_path / "personal.db"  # where the personal home resolves
 
+    world = VaultWorld(tmp_path / "scaffold", member_count=1)
+    world.content_store = DbContentStore(db)
+    world.store = world.content_store
+    world.key_control = KeyControlStore(db)
+    world.sync()
+
+    def holder(*, set_id, org):
+        with KeyControlStore(db) as kc:
+            holdings = Holdings(
+                secrets=world.world.held(world.author),
+                descriptors=kc.states,
+                bridges=list(kc.accepted_bridges()),
+            )
+        return settings_ops.VaultKeyControl(
+            holdings=holdings, content_store=DbContentStore(db)
+        )
+
+    settings_ops.set_vault_sealer(world.sealer)
+    settings_ops.set_vault_key_holder(holder)
+
+    token = "ghp_" + "a" * 36
     settings_ops.add_setting(
         VAULT_AUDITED_SET_ID, VAULT_CREDENTIAL_REVISION,
-        "github.token", {"value": "ghp_" + "a" * 36}, org=None,
+        "github.token", {"value": token}, org=None,
     )
+
+    # It reads back decrypted, through the real read path.
+    resolved = settings_ops.read_set(VAULT_AUDITED_SET_ID, org=None)
+    values = {s.key: s for s in resolved}
+    assert values["github.token"].payload["value"] == token
+
+    # And the ciphertext is a row INSIDE personal.db — no sidecar.
+    import sqlite3
+    n = sqlite3.connect(db).execute(
+        "SELECT count(*) FROM vault_content_bodies"
+    ).fetchone()[0]
+    assert n >= 1
+    assert not (db.parent / "content").exists()
