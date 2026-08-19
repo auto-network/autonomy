@@ -8,6 +8,8 @@ and v1 re-anchor.
 
 from __future__ import annotations
 
+from tools.network.dag_tag import AUTHORITY, tag_dag
+
 import pytest
 
 from tools.network.idkit import KeyPair
@@ -38,6 +40,7 @@ class FakeProvider:
     def __contains__(self, i):
         return i in self.parents
 
+    @tag_dag(AUTHORITY)
     def ancestry(self, ids):
         seen, stack = set(), list(ids)
         while stack:

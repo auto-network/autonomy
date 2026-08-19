@@ -20,6 +20,8 @@ only composes the state and bridge records.
 
 from __future__ import annotations
 
+from tools.network.dag_tag import AUTHORITY, require_dag
+
 from . import bridge as bridge_mod
 from . import state as state_mod
 from .errors import StorageError
@@ -32,7 +34,15 @@ class StateAdvanceRequired(StorageError):
 
 
 def state_covers(descriptor, required_loss_heads, ancestry) -> bool:
-    """Contract §6 safety predicate. An empty required set is covered."""
+    """Contract §6 safety predicate. An empty required set is covered.
+
+    One of the two leaves where an ``ancestry`` is actually APPLIED to loss
+    heads, so the DAG check lives here rather than at the call sites: every
+    caller — ``select_safe_state``, and through it ``create_object`` and
+    ``seal_revision`` — funnels through this line, including callers not
+    written yet.
+    """
+    require_dag(ancestry, AUTHORITY, "state_covers")
     covered = ancestry(descriptor.covered_loss_heads)
     return all(head in covered for head in required_loss_heads)
 

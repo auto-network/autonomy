@@ -13,6 +13,8 @@ event set are identical regardless of insertion order.
 
 from __future__ import annotations
 
+from tools.network.dag_tag import AUTHORITY, tag_dag
+
 from typing import Dict, Iterable, List, Optional, Set
 
 from .errors import CausalityError, GenesisError, LedgerError, UnknownParentError
@@ -60,6 +62,7 @@ class Ledger:
         """Ids of events no other event names as a parent, sorted."""
         return tuple(sorted(i for i in self._events if not self._children.get(i)))
 
+    @tag_dag(AUTHORITY)
     def ancestry(self, event_ids: Iterable[str]) -> frozenset:
         """The ancestor closure of *event_ids* (inclusive)."""
         seen: Set[str] = set()

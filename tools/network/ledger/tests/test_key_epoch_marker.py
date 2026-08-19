@@ -14,6 +14,8 @@ and opportunistic refresh write nothing, so they need a marker.
 
 from __future__ import annotations
 
+from tools.network.dag_tag import AUTHORITY, tag_dag
+
 import pytest
 
 from tools.network.idkit import KeyPair
@@ -37,6 +39,7 @@ def heads(sim):
     return tuple(sorted(sim.ledger.heads()))
 
 
+@tag_dag(AUTHORITY)
 def ancestry(sim):
     return lambda hs: set(sim.ledger.ancestry(hs))
 

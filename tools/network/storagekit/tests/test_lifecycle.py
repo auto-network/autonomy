@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tools.network.dag_tag import AUTHORITY, tag_dag
+
 import hashlib
 import random
 
@@ -31,6 +33,7 @@ EID = {name: hashlib.sha256(name.encode()).hexdigest() for name in _DAG}
 _PARENTS = {EID[k]: tuple(EID[p] for p in v) for k, v in _DAG.items()}
 
 
+@tag_dag(AUTHORITY)
 def ancestry(ids) -> frozenset:
     """Inclusive ancestor closure over the hand-built DAG."""
     seen: set = set()

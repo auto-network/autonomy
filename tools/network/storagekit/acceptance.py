@@ -29,6 +29,8 @@ unwraps key material.
 
 from __future__ import annotations
 
+from tools.network.dag_tag import AUTHORITY, require_dag
+
 from dataclasses import dataclass
 from typing import Optional
 
