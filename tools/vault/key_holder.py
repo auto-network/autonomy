@@ -50,6 +50,18 @@ class VaultKeyCache:
         set — an unlock is authoritative, not additive."""
         self._secrets = dict(secrets)
 
+    def add(self, state_id: str, secret: bytes) -> None:
+        """Add one generation key the process itself just minted.
+
+        A vaulted write that advances the generation (the first write, or the
+        first after an access removal) mints a new generation key inside the
+        seal. That key must land here, because the read holder opens objects
+        from this same cache — without it, a value this process just wrote reads
+        back as unopenable. This is additive, unlike :meth:`load`: a mint extends
+        the held set, it does not replace it.
+        """
+        self._secrets[state_id] = secret
+
     def clear(self) -> None:
         self._secrets = {}
 

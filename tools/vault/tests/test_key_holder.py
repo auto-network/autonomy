@@ -121,3 +121,13 @@ def test_holder_is_registered_after_register_key_holder(tmp_path):
     register_key_holder(cache, tmp_path / "kc.db", tmp_path / "content")
     assert settings_ops._vault_key_holder is not None
     settings_ops.set_vault_key_holder(None)
+
+
+def test_cache_add_extends_without_replacing():
+    """A minted generation key is added to the held set, not replacing it — so
+    the holder opens both prior and just-minted generations (the write-then-read
+    property the sealer needs)."""
+    cache = VaultKeyCache()
+    cache.load({"gen-a": b"A" * 32})
+    cache.add("gen-b", b"B" * 32)
+    assert cache.secrets == {"gen-a": b"A" * 32, "gen-b": b"B" * 32}
