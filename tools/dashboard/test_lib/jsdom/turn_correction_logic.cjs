@@ -49,6 +49,8 @@ assert.strictEqual(typeof apply, "function", "window.applyTurnCorrection must be
   const rb = apply(b, committed);
   assert.ok(ra === true && rb === true, "both stores must report applied");
   assert.ok(a._turnCorrections.m1 && b._turnCorrections.m1, "both stores must hold the row");
+  assert.strictEqual(a._turnCorrections.m1, committed,
+    "map must hold the exact committed row object (by reference, not a copy)");
   assert.strictEqual(JSON.stringify(a._turnCorrections), JSON.stringify(b._turnCorrections),
     "independent stores must converge to identical state");
 }

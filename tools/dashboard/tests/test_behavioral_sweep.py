@@ -7611,45 +7611,10 @@ TURN_CORRECTION_BEFORE_TILE_CHECKS = r"""(async () => {
 })()"""
 
 
-TURN_CORRECTION_STALE_ORDERING = r"""(() => {
-  var s = { _turnCorrections: {} };
-  window.applyTurnCorrection(s, { target_message_id:'m', status:'accepted',
-    updated_at:2, corrected_text:'accepted body' });
-  // A slow GET-hydration snapshot (older, still pending) arrives late.
-  var staleRefused = window.applyTurnCorrection(s, { target_message_id:'m',
-    status:'pending', updated_at:1, corrected_text:'accepted body' });
-  var afterStale = s._turnCorrections.m.status;
-  // A genuinely newer terminal row still advances.
-  var newerApplied = window.applyTurnCorrection(s, { target_message_id:'m',
-    status:'dismissed', updated_at:3, corrected_text:'accepted body' });
-  // Equal updated_at (optimistic rollback shape) is still applied.
-  var equalApplied = window.applyTurnCorrection(s, { target_message_id:'m',
-    status:'dismissed', updated_at:3, corrected_text:'accepted body' });
-  return JSON.stringify({
-    stale_refused: staleRefused === false,
-    still_terminal_after_stale: afterStale === 'accepted',
-    newer_applied: newerApplied === true && s._turnCorrections.m.status === 'dismissed',
-    equal_applied: equalApplied === true
-  });
-})()"""
-
-
-TURN_CORRECTION_TWO_STORE_CONVERGE = r"""(() => {
-  var a = { _turnCorrections: {} };
-  var b = { _turnCorrections: {} };
-  var committed = { session_uuid:'s', target_message_id:'m1', status:'pending',
-    original_sha256:'h', corrected_text:'converged text', mode:null, reason:null,
-    confidence:null, created_at:1, updated_at:1 };
-  var ra = window.applyTurnCorrection(a, committed);
-  var rb = window.applyTurnCorrection(b, committed);
-  return JSON.stringify({
-    returned_true: ra === true && rb === true,
-    a_has: !!(a._turnCorrections && a._turnCorrections.m1),
-    b_has: !!(b._turnCorrections && b._turnCorrections.m1),
-    immutable_new_ref_a: a._turnCorrections.m1 === committed,
-    converge: JSON.stringify(a._turnCorrections) === JSON.stringify(b._turnCorrections)
-  });
-})()"""
+# TURN_CORRECTION_STALE_ORDERING and TURN_CORRECTION_TWO_STORE_CONVERGE moved to
+# jsdom (browser-free): tools/dashboard/test_lib/jsdom/turn_correction_logic.cjs.
+# They drove the pure window.applyTurnCorrection handler on a plain store object
+# with no DOM/layout, so a real browser was never needed for them.
 
 
 class TestSessionTurnCorrectionLiveSync:
@@ -7674,8 +7639,9 @@ class TestSessionTurnCorrectionLiveSync:
         time.sleep(1.5)
         request.cls._live = _run_async_eval(TURN_CORRECTION_LIVE_SYNC_CHECKS)
         request.cls._before = _run_async_eval(TURN_CORRECTION_BEFORE_TILE_CHECKS)
-        request.cls._two = _run_async_eval(TURN_CORRECTION_TWO_STORE_CONVERGE)
-        request.cls._stale = _run_async_eval(TURN_CORRECTION_STALE_ORDERING)
+        # The pure-logic checks (stale-ordering, two-store convergence) moved to
+        # jsdom — they need no browser. See
+        # tools/dashboard/test_lib/jsdom/turn_correction_logic.cjs.
 
     def test_production_handler_is_wired(self):
         assert self._live.get("has_apply_fn"), (
@@ -7733,23 +7699,12 @@ class TestSessionTurnCorrectionLiveSync:
             "overlay must attach when the user entry finally loads"
         )
 
-    def test_two_stores_converge_through_production_handler(self):
-        c = self._two
-        assert c.get("returned_true"), "applyTurnCorrection must report it applied the row"
-        assert c.get("a_has") and c.get("b_has"), "both stores must receive the row"
-        assert c.get("immutable_new_ref_a"), "map must hold the exact committed row object"
-        assert c.get("converge"), "two independent stores must converge to the same map"
-
-    def test_stale_delivery_does_not_regress_terminal_state(self):
-        """A late GET-hydration snapshot (older, pending) must not revert a tile
-        that a newer accept/dismiss already moved to terminal."""
-        c = self._stale
-        assert c.get("stale_refused"), "older-updated_at row must be dropped"
-        assert c.get("still_terminal_after_stale"), (
-            "terminal state regressed to pending on stale delivery"
-        )
-        assert c.get("newer_applied"), "a genuinely newer row must still advance"
-        assert c.get("equal_applied"), "equal-updated_at (rollback shape) must apply"
+    # test_two_stores_converge_through_production_handler and
+    # test_stale_delivery_does_not_regress_terminal_state moved to jsdom
+    # (browser-free, deterministic) — they exercised the pure applyTurnCorrection
+    # handler with no DOM/layout. See
+    # tools/dashboard/test_lib/jsdom/turn_correction_logic.cjs, run by
+    # tools/dashboard/tests/test_jsdom_smoke.py.
 
 
 class TestHostSessionTailContract:
