@@ -109,6 +109,8 @@ STORE_MANIFEST: tuple = (
           "identity unlock-session store"),
     Store("pending_joins", "pending_joins.db", "AUTONOMY_PENDING_JOINS_DB", "db",
           "restart-safe invite-join progress (identifiers and counts only)"),
+    Store("vault_releases", "vault_releases.db", "VAULT_RELEASES_DB", "db",
+          "durable record of secret releases (paths + deadlines, never plaintext)"),
     Store("serving_keys", "network", "AUTONOMY_NETWORK_KEY_DIR", "dir",
           "mode-0600 auto.network tunnel-serving delegate keys"),
     Store("repl_login_key", "repl-login.key", "REPL_LOGIN_KEY_FILE", "file",
