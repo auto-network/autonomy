@@ -136,17 +136,6 @@ LOCAL_STORE_KEYS = tuple(
 )
 
 
-class LocalStoreCollisionError(RuntimeError):
-    """A file at a local store's legacy path is a SHARED organization.
-
-    'personal' and 'machine' were creatable as shared-org slugs before the
-    names were reserved, so such a database may exist and was valid when it
-    was made. Treating it as the operator's store by FILENAME would write
-    personal credentials into a shared organization and vanish the org from
-    enumeration — so startup refuses instead, and resolution never serves
-    the file as a local store."""
-
-
 class LocalStoreUnreadableError(RuntimeError):
     """A file at a local store's legacy path cannot be read at all.
 
