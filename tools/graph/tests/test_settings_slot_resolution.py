@@ -558,3 +558,35 @@ def test_a_personal_read_takes_the_machine_store_as_its_one_peer(
         "with the machine store empty, a personal read answers from "
         "personal — never from an organization"
     )
+
+
+def test_every_resolution_path_selects_the_same_stores_for_a_personal_read(
+    org, orgs_env,
+):
+    """Candidate SELECTION is upstream of the shared ranking helper, so a
+    divergence there gives different answers with identical ordering logic
+    and every per-path test still passes. All three resolution-shaped
+    paths — read_set, chain_setting, contested_keys — go through the one
+    selection helper; this asserts the property across the trio at once.
+    What would make it stale: a new resolution-shaped read added without
+    going through _resolution_peers and without a case here."""
+    root = orgs_env("selection-parity")
+    path = make_store(root, org)
+    a, b = org.personas
+    deliver(path, slot_row(a, NOW_MS - MIN_MS, payload={"from": "org"}))
+    deliver(path, slot_row(b, NOW_MS - 2 * MIN_MS, payload={"from": "org-b"}))
+    make_plain_store(root, "personal")
+
+    # read_set: no org content in a personal read.
+    members = settings_ops.read_set(SET_ID, org=None, now=NOW_MS)
+    assert all(m.payload.get("from") != "org" for m in members.members)
+
+    # chain_setting: the explanation path must not explain a value the
+    # read cannot return.
+    chain = settings_ops.chain_setting(SET_ID, KEY, org=None)
+    assert chain is None
+
+    # contested_keys: two org slots contest for an ORG read, and no
+    # contention exists from the personal perspective at all.
+    assert settings_ops.contested_keys(SET_ID, org="signedorg", now=NOW_MS) != []
+    assert settings_ops.contested_keys(SET_ID, org=None, now=NOW_MS) == []
