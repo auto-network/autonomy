@@ -44,6 +44,12 @@ def sweep_env(tmp_path, monkeypatch):
 
     agent_runs = tmp_path / "data" / "agent-runs"
     agent_runs.mkdir(parents=True)
+    # The sweep resolves agent-runs from DATA_ROOT ("<DATA_ROOT>/agent-runs",
+    # ingest.py) since the one-DATA_ROOT refactor (auto-dnjn0); _REPO_ROOT no
+    # longer drives that scan. Point DATA_ROOT at the tmp tree so the sweep
+    # looks where this fixture writes. (_REPO_ROOT is still patched for the
+    # host ~/.claude/projects path-encode below.)
+    monkeypatch.setattr("tools.graph.ingest.DATA_ROOT", tmp_path / "data")
     monkeypatch.setattr("tools.graph.ingest._REPO_ROOT", tmp_path)
     # No host ~/.claude/projects in the sweep for these tests.
     monkeypatch.setattr("tools.graph.ingest.Path.home", lambda: tmp_path / "no-home")

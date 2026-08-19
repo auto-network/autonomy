@@ -559,12 +559,16 @@ def test_session_launcher_writes_graph_org_in_meta(tmp_path, monkeypatch):
     """
     import agents.session_launcher as launcher
 
-    # Force the launcher to write into tmp_path so we can read the meta.
-    # DASHBOARD_AGENT_RUNS_DIR outranks REPO_ROOT in the launcher's run-dir
-    # fallback, and the dashboard tests' conftest sets it per worker in a
-    # combined default run — clear it so the REPO_ROOT patch decides.
-    monkeypatch.setattr(launcher, "REPO_ROOT", tmp_path)
-    monkeypatch.delenv("DASHBOARD_AGENT_RUNS_DIR", raising=False)
+    # Route the run dir into tmp so we can read the meta without a real
+    # container. Since the one-DATA_ROOT + mount-reconciliation refactors
+    # (auto-dnjn0 / auto-vm8qh) the run-dir base is DASHBOARD_AGENT_RUNS_DIR or
+    # DATA_ROOT/agent-runs — REPO_ROOT no longer drives it — and the launcher
+    # REFUSES an agent-runs mount that sits under a node root (REPO_ROOT /
+    # DATA_ROOT) with no backing volume. tmp_path is under /tmp, outside the
+    # node roots, so pointing the env here writes the meta without a refusal.
+    # (Do NOT patch REPO_ROOT to tmp_path — that would make tmp_path itself a
+    # node root and re-trigger the refusal.)
+    monkeypatch.setenv("DASHBOARD_AGENT_RUNS_DIR", str(tmp_path / "data" / "agent-runs"))
 
     # Stub credentials and docker run — we only care about the meta file.
     monkeypatch.setattr(launcher, "_resolve_credentials",
@@ -607,8 +611,10 @@ def test_session_launcher_preserves_explicit_graph_org(tmp_path, monkeypatch):
     does not overwrite it with ``graph_project``."""
     import agents.session_launcher as launcher
 
-    monkeypatch.setattr(launcher, "REPO_ROOT", tmp_path)
-    monkeypatch.delenv("DASHBOARD_AGENT_RUNS_DIR", raising=False)
+    # See test_session_launcher_writes_graph_org_in_meta: route the run dir into
+    # tmp (outside the node roots) rather than patching REPO_ROOT, so the
+    # agent-runs mount is not refused under the mount-reconciliation refactor.
+    monkeypatch.setenv("DASHBOARD_AGENT_RUNS_DIR", str(tmp_path / "data" / "agent-runs"))
     monkeypatch.setattr(launcher, "_resolve_credentials",
                         lambda: {"type": "token", "token": "x"})
     monkeypatch.setattr(launcher, "_setup_auth_docker_args",
@@ -646,7 +652,17 @@ def test_session_launcher_exports_graph_org_env(tmp_path, monkeypatch):
     the in-container ``graph`` CLI + ``ops.*`` routes to the right DB."""
     import agents.session_launcher as launcher
 
-    monkeypatch.setattr(launcher, "REPO_ROOT", tmp_path)
+    # See test_session_launcher_writes_graph_org_in_meta: route the run dir into
+    # tmp (outside the node roots) rather than patching REPO_ROOT, so the
+    # agent-runs mount is not refused under the mount-reconciliation refactor.
+    monkeypatch.setenv("DASHBOARD_AGENT_RUNS_DIR", str(tmp_path / "data" / "agent-runs"))
+    # This test asserts only on the container's -e GRAPH_ORG arg; mounts are
+    # orthogonal. In a no-volume test env the mount reconciliation (auto-vm8qh)
+    # fail-closes on the unbacked .beads node-root mount and aborts the launch
+    # before the docker-run cmd is built, so stub it out — the same isolation the
+    # test already applies to subprocess.run / credentials. mount_args is a local
+    # import from agents.mount_plan inside launch_session, so patch it at source.
+    monkeypatch.setattr("agents.mount_plan.mount_args", lambda plan, topo: [])
     monkeypatch.setattr(launcher, "_resolve_credentials",
                         lambda: {"type": "token", "token": "x"})
     monkeypatch.setattr(launcher, "_setup_auth_docker_args",
