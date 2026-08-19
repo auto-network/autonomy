@@ -1448,13 +1448,6 @@ def ensure_bootstrap_orgs(
 
     Returns the list of orgs after bootstrap.
     """
-    from .db import relocate_local_stores
-
-    # The bootstrap is where the process is about to own the stores it
-    # would move, so the one-time relocation of the local stores out of
-    # data/orgs/ runs here (auto-35kmy) — dashboard startup and first-run
-    # both pass through, and nothing else ever moves a live file.
-    relocate_local_stores(root)
     if personal_only:
         return [_ensure_org("personal", "personal", _PERSONAL_SEED_PAYLOAD, root=root)]
     slug = first_org or os.environ.get(FIRST_ORG_ENV)

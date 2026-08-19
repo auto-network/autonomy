@@ -18458,23 +18458,7 @@ async def _on_startup():
     # Idempotent — pre-existing DBs are left untouched. See graph://d970d946-f95.
     try:
         from tools.graph import org_ops
-        from tools.graph.db import (
-            LocalStoreCollisionError,
-            LocalStoreUnreadableError,
-        )
         org_ops.ensure_bootstrap_orgs()
-    except (LocalStoreCollisionError, LocalStoreUnreadableError):
-        # A shared organization stranded under a reserved local-store name,
-        # or a local-store file that cannot be read at all: continuing
-        # would split the operator's identity between two files (or adopt
-        # a corrupt one as the live store). These are the two bootstrap
-        # failures that must STOP the dashboard and demand operator action
-        # (each error says exactly what).
-        logger.critical(
-            "ensure_bootstrap_orgs(): local-store integrity failure; "
-            "refusing to start", exc_info=True,
-        )
-        raise
     except Exception:
         logger.exception("ensure_bootstrap_orgs() failed; continuing startup")
     # Materialize Setting *schema* meta rows (autonomy.schema#1 +
