@@ -86,10 +86,16 @@ def build_vault_sealer(
     value sealed by this process is opened by the same material that sealed it
     and a divergence cannot hide in a second construction.
 
-    ``author_provider`` returns the attenuated agent delegate, or ``None``
-    before an unlock has provisioned one. It is a callable rather than a value
-    because the delegate is renewed and revoked over a process's life, and a
-    captured one would go stale exactly when it matters.
+    ``author_provider`` returns the attenuated agent delegate's SIGNING KEY,
+    or ``None`` before an unlock has provisioned one — not the
+    ``StorageDelegate`` wrapper, which carries the public facts around it.
+    ``seal_revision`` signs with what it is given (``creator.sign_hex``), and
+    the public half is what the fold resolves up the delegation chain to the
+    member persona.
+
+    A callable rather than a value because the delegate is renewed and revoked
+    over a process's life, and a captured one would go stale exactly when it
+    matters.
 
     ``ledger_provider(org)`` returns ``(frontier, fold_at, authority_ancestry)``
     or ``None``. Three seams rather than one, because they are not
