@@ -712,6 +712,16 @@ def _persona_member(genesis_id: str):
     return None
 
 
+#: Process-lifetime read-through cache for persona_pub_for_org. A hit can
+#: never become wrong: persona_pub is the stable member id bound at claim
+#: time, fixed forever for a genesis id (a rekey moves the signing key and
+#: preserves the member id; a re-founded org has a new genesis and so is a
+#: different entry). Misses are NOT cached — the found/join ceremony writes
+#: the row that turns a miss into a hit while the process runs, and a
+#: cached miss would leave locality silently wrong until restart.
+_persona_pub_cache: dict[str, str] = {}
+
+
 def persona_pub_for_org(genesis_id: str) -> str | None:
     """This node's persona public key in the org with *genesis_id*, or None.
 
@@ -723,12 +733,22 @@ def persona_pub_for_org(genesis_id: str) -> str | None:
     No side effects: never derives, never prompts, never touches the seed.
     Returning None means "not recorded on this node", never "you are not a
     member" — membership is the ledger's answer to give, not this row's.
+
+    Read-through: one personal.db read per genesis id per process, ever
+    (see ``_persona_pub_cache`` above for why a hit is safe forever and a
+    miss is never cached).
     """
+    cached = _persona_pub_cache.get(genesis_id)
+    if cached is not None:
+        return cached
     member = _persona_member(genesis_id)
     if member is None:
         return None
     pub = member.payload.get("persona_pub")
-    return pub if isinstance(pub, str) and pub else None
+    if isinstance(pub, str) and pub:
+        _persona_pub_cache[genesis_id] = pub
+        return pub
+    return None
 
 
 def _seal_org_root_setting(slug: str, org_root, personal_seed: bytes) -> None:

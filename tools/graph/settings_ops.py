@@ -54,6 +54,199 @@ PEER_VISIBLE_STATES = ("published", "canonical")
 _personal_db_init_lock = threading.Lock()
 
 
+# ── Slot resolution (auto-y2ubq, graph://21a0da9e-1c2) ───────
+#
+# An organization row is a per-signer SLOT: several members may hold the
+# same (set_id, schema_revision, key, publication_state) address, one row
+# each, and every store must resolve the same winner from the same slots in
+# any delivery order. The ordering below is therefore a function of the
+# rows plus each owning org's fold — never of anything store-local.
+# ``created_at`` records when THIS store received a row and participates
+# only as the legacy within-store tiebreak among UNSIGNED rows, which have
+# a single writer.
+
+
+def _store_rank(src_org: "str | None", reading_org: "str | None") -> int:
+    """Resolution step 3 — most local wins.
+
+    The machine store replicates nowhere, personal crosses only this
+    operator's fleet, an organization's rows reach its members. When the
+    read itself is personal (``reading_org is None``) the org-being-read
+    tier collapses out and the relative order of the rest is unchanged.
+    """
+    from .cross_org import MACHINE_DB_SLUG, PERSONAL_DB_SLUG
+
+    if src_org == MACHINE_DB_SLUG:
+        return 0
+    if src_org is None or src_org == PERSONAL_DB_SLUG:
+        return 1
+    if reading_org is not None and src_org == reading_org:
+        return 2
+    return 3
+
+
+def _slot_tiebreak_hash(row) -> str:
+    """Step 6 — ``H(set_id ‖ key ‖ terminal_persona)``, lower wins.
+
+    Reachable only on an exact ``signed_at`` collision between two
+    personas; exists to keep the ordering total, and unprofitable to
+    engineer (matching a timestamp gains nothing over exceeding it).
+    """
+    import hashlib
+
+    material = "\x00".join(
+        (row["set_id"], row["key"], row["terminal_persona"])
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _row_col(row, name):
+    """Column value, or None on a row from a store predating the column
+    (a read-only peer database migrates only when next opened writable)."""
+    try:
+        return row[name]
+    except (IndexError, KeyError):
+        return None
+
+
+#: THE fold cache — the single one (graph://21a0da9e-1c2 "The fold";
+#: auto-7c7po warns against a second ever existing). Keyed on the ledger's
+#: current HEADS, so any number of resolutions against an unchanged ledger
+#: build nothing and a ledger advancement invalidates by key inequality,
+#: never by a sweep. Membership and rekey continuity are time-independent
+#: and cache with the fold; delegation authority is ref_ts-dependent and is
+#: NOT served from here. Owned by resolution (auto-y2ubq) because it is the
+#: first consumer; the boundary (auto-wah16) consumes this same cache.
+_FOLD_MEMBERS_CACHE: dict[str, tuple[tuple, frozenset]] = {}
+_fold_builds = 0  # how many times a fold was actually constructed
+
+
+def _ledger_heads(slug: str) -> "tuple | None":
+    """The org ledger's current heads, without hydrating the ledger.
+
+    A cheap SQL probe of the ``ledger_heads`` table in the org's own DB —
+    this is the cache KEY read, performed per lookup; building the FOLD is
+    what the key exists to avoid. ``None`` means no ledger at all.
+    """
+    from tools.network.ledger import org_ledger_db_path
+
+    path = org_ledger_db_path(slug)
+    if not path.exists():
+        return None
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return tuple(sorted(
+            r[0] for r in conn.execute("SELECT event_id FROM ledger_heads")
+        ))
+    except sqlite3.OperationalError:
+        return None  # no ledger tables in this DB
+    finally:
+        conn.close()
+
+
+def _org_fold_members(slug: "str | None") -> frozenset:
+    """The current fold's member personas for org *slug*.
+
+    Built ONCE PER LEDGER ADVANCEMENT: the heads-keyed cache above serves
+    every call whose heads probe matches, so resolution cost does not scale
+    with reads and a per-row fold read cannot creep back in.
+
+    Fail-closed: an org with no founded ledger — or no ledger tables at
+    all, or a fold that cannot be built — yields the empty set, so a signed
+    row such a store somehow holds does not resolve.
+    """
+    if not slug:
+        return frozenset()
+    heads = _ledger_heads(slug)
+    if heads is None or not heads:
+        return frozenset()
+    cached = _FOLD_MEMBERS_CACHE.get(slug)
+    if cached is not None and cached[0] == heads:
+        return cached[1]
+    members: frozenset = frozenset()
+    try:
+        from tools.network.ledger import LedgerStore, org_ledger_db_path
+
+        global _fold_builds
+        _fold_builds += 1
+        store = LedgerStore(org_ledger_db_path(slug))
+        try:
+            if store.ledger.genesis_id:
+                members = frozenset(store.fold().members)
+        finally:
+            store.close()
+    except Exception:
+        logger.warning(
+            "eligibility: fold for org %r unavailable; its signed rows "
+            "will not resolve", slug, exc_info=True,
+        )
+        return frozenset()
+    _FOLD_MEMBERS_CACHE[slug] = (heads, members)
+    return members
+
+
+def _rank_candidates(
+    candidate_bases: list,
+    *,
+    reading_org: "str | None",
+    now: "int | None",
+    dropped: "DropAccounting | None" = None,
+):
+    """Filter and order candidate base rows by the six-step slot ordering.
+
+    Steps: 1 eligibility (a signed row's terminal persona must be in the
+    OWNING org's current fold), then the plausibility window (a row whose
+    ``signed_at`` is beyond the reader's window is stored and ignored, not
+    refused); 2 rung; 3 store; 4 schema revision; 5 ``signed_at``; 6 the
+    persona hash. Unsigned rows take no eligibility test, carry no
+    ``signed_at``, and fall back to the legacy created_at/rowid tiebreak —
+    they have a single writer, so that value is not cross-store state.
+
+    Returns the ordered list; ``candidate_bases`` is ``[(src_org, row)]``.
+    """
+    from tools.network import clock
+
+    eligible = []
+    for src_org, row in candidate_bases:
+        persona = _row_col(row, "terminal_persona")
+        if persona is not None:
+            if persona not in _org_fold_members(src_org):
+                if dropped is not None:
+                    dropped.ineligible_signer += 1
+                continue
+            signed_at = _row_col(row, "signed_at")
+            if signed_at is not None and not clock.settings_signed_at_is_plausible(
+                signed_at, now=now
+            ):
+                if dropped is not None:
+                    dropped.beyond_window += 1
+                continue
+        eligible.append((src_org, row))
+
+    def _signed_at_key(om):
+        signed_at = _row_col(om[1], "signed_at")
+        # Later wins; an unsigned row (no claim at all) orders after every
+        # signed one at the same rung/store/revision.
+        return -(signed_at if signed_at is not None else -1)
+
+    def _tiebreak_key(om):
+        # Signed rows: deterministic hash, ascending. Unsigned rows: empty
+        # key, so the stable created_at/rowid passes below decide.
+        if _row_col(om[1], "terminal_persona") is not None:
+            return _slot_tiebreak_hash(om[1])
+        return ""
+
+    # Stable sorts, least significant first.
+    eligible.sort(key=lambda om: _row_col(om[1], "_rowid") or 0, reverse=True)
+    eligible.sort(key=lambda om: om[1]["created_at"] or "", reverse=True)
+    eligible.sort(key=_tiebreak_key)
+    eligible.sort(key=_signed_at_key)
+    eligible.sort(key=lambda om: -int(om[1]["schema_revision"]))
+    eligible.sort(key=lambda om: _store_rank(om[0], reading_org))
+    eligible.sort(key=lambda om: PRECEDENCE.get(om[1]["publication_state"], 99))
+    return eligible
+
+
 # ── protected identity sets (dashboard-access credentials) ───
 #
 # These set IDs store the human dashboard-access credentials that the
@@ -899,6 +1092,12 @@ class DropAccounting:
     above_target_no_downgrade: int = 0
     schema_invalid: int = 0
     deprecated_filtered: int = 0
+    #: Signed slots whose terminal persona is not in the owning org's
+    #: current fold — a departed member's rows, dropped at eligibility.
+    ineligible_signer: int = 0
+    #: Signed slots whose ``signed_at`` is beyond the reader's plausibility
+    #: window — stored and ignored until the clock reaches them.
+    beyond_window: int = 0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -3237,10 +3436,15 @@ def chain_setting(
     ]
     if not candidate_bases:
         return None
-    candidate_bases.sort(key=lambda om: om[1]["created_at"] or "", reverse=True)
-    candidate_bases.sort(
-        key=lambda om: PRECEDENCE.get(om[1]["publication_state"], 99),
+    # Same six-step ordering the resolver uses — a chain view that picks a
+    # different base than read_set describes a value nothing returns.
+    candidate_bases = _rank_candidates(
+        candidate_bases,
+        reading_org=resolved_org,
+        now=None,
     )
+    if not candidate_bases:
+        return None
     chosen_org, chosen_row = candidate_bases[0]
 
     base_payload = json.loads(chosen_row["payload"])
@@ -3550,6 +3754,102 @@ def _unwrap_vault_locator(
     return opened, None, None
 
 
+def contested_keys(
+    set_id: str,
+    *,
+    org: "str | None | _CallerOrgSentinel",
+    peers: list[str] | None = None,
+    now: int | None = None,
+) -> list[dict]:
+    """Keys of *set_id* whose value the organization is contesting.
+
+    Contention is more than one ELIGIBLE signed slot at the winning rung and
+    store (graph://21a0da9e-1c2 "Resolution"): resolution still answers
+    exactly one thing — there is no third state for consumers — and this is
+    the separate query that makes the disagreement visible. Two authorized
+    members churning a value is governance's problem to settle; while it
+    lasts, it shows here.
+
+    Returns ``[{key, slots: [{terminal_persona, signed_at, state, org,
+    resolves}]}]`` — ``resolves`` marks the slot resolution currently
+    answers with. Slots are the contenders at the winning rung and store
+    only; unsigned rows never contest (single writer, one base).
+    """
+    from .cross_org import PEER_VISIBLE_STATES, open_peer_db, resolve_peers
+
+    org = _resolve_org_arg(org)
+    resolved_org = org
+    raw_rows: list[tuple[str | None, Any]] = []
+    db = _open_read(org, set_id)
+    try:
+        for r in db.conn.execute(
+            "SELECT rowid AS _rowid, * FROM settings WHERE set_id = ? "
+            "  AND deprecated = 0 AND supersedes IS NULL AND excludes IS NULL",
+            (set_id,),
+        ).fetchall():
+            raw_rows.append((resolved_org, r))
+    finally:
+        db.close()
+    placeholders = ",".join("?" for _ in PEER_VISIBLE_STATES)
+    for peer in sorted(resolve_peers(resolved_org, peers)):
+        peer_db = open_peer_db(peer)
+        if peer_db is None:
+            continue
+        try:
+            rows = peer_db.conn.execute(
+                f"SELECT rowid AS _rowid, * FROM settings WHERE set_id = ? "
+                f"  AND deprecated = 0 AND supersedes IS NULL "
+                f"  AND excludes IS NULL "
+                f"  AND publication_state IN ({placeholders})",
+                (set_id, *PEER_VISIBLE_STATES),
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table: settings" in str(exc).lower():
+                continue
+            raise
+        for r in rows:
+            raw_rows.append((peer, r))
+
+    by_key: dict[str, list] = {}
+    for src_org, row in raw_rows:
+        by_key.setdefault(row["key"], []).append((src_org, row))
+
+    contested: list[dict] = []
+    for key in sorted(by_key):
+        ranked = _rank_candidates(
+            by_key[key],
+            reading_org=resolved_org,
+            now=now,
+        )
+        if not ranked:
+            continue
+        top_org, top_row = ranked[0]
+        top_rung = PRECEDENCE.get(top_row["publication_state"], 99)
+        top_store = _store_rank(top_org, resolved_org)
+        slots = [
+            (src, row) for src, row in ranked
+            if _row_col(row, "terminal_persona") is not None
+            and PRECEDENCE.get(row["publication_state"], 99) == top_rung
+            and _store_rank(src, resolved_org) == top_store
+        ]
+        if len(slots) < 2:
+            continue
+        contested.append({
+            "key": key,
+            "slots": [
+                {
+                    "terminal_persona": row["terminal_persona"],
+                    "signed_at": _row_col(row, "signed_at"),
+                    "state": row["publication_state"],
+                    "org": src,
+                    "resolves": row["id"] == top_row["id"],
+                }
+                for src, row in slots
+            ],
+        })
+    return contested
+
+
 def read_set(
     set_id: str,
     *,
@@ -3559,6 +3859,7 @@ def read_set(
     min_revision: int | None = None,
     prefix: str | None = None,
     model: type[Any] | None = None,
+    now: int | None = None,
 ) -> SetMembers[Any]:
     """Resolve members of *set_id* visible to org's session.
 
@@ -3643,6 +3944,16 @@ def read_set(
     # write, a restore, a migration -- still does not cross the boundary.
     # The two guards fail independently, which is the point of having both.
     resolved_peers = resolve_peers(resolved_org, peers)
+    if resolved_org is None:
+        # A personal read takes the machine store as its ONE peer — the
+        # single store more local than personal, so a machine-specific
+        # answer outranks a fleet-wide one on that machine. No organization
+        # is a peer of a personal read (graph://21a0da9e-1c2 v42): the
+        # sovereignty ladder read one rung down, not an aggregation point
+        # for org content.
+        from .cross_org import MACHINE_DB_SLUG
+
+        resolved_peers = [p for p in resolved_peers if p == MACHINE_DB_SLUG]
     if not set(schemas.states_allowed(set_id, 1)) & set(PEER_VISIBLE_STATES):
         resolved_peers = []
     for peer in sorted(resolved_peers):
@@ -3720,25 +4031,22 @@ def read_set(
         if not candidate_bases:
             continue
 
-        # Pick highest precedence; tie-break by stored revision, then by most
-        # recent created_at. Stable sorts applied least-significant first.
-        #
-        # Revision belongs in this order because a key can hold a row at more
-        # than one revision -- stored-row uniqueness is per
-        # (set_id, schema_revision, key, publication_state), so nothing stops
-        # it, and a schema whose generations deliberately coexist will have it.
-        # Without revision here the two tie on precedence, and on created_at
-        # whenever they were written in the same second, leaving the winner to
-        # be whichever the database happened to return first. That is how a
-        # newer generation of a value becomes invisible while the row is
-        # sitting right there.
-        candidate_bases.sort(key=lambda om: om[1]["created_at"] or "", reverse=True)
-        candidate_bases.sort(
-            key=lambda om: int(om[1]["schema_revision"]), reverse=True,
+        # The six-step slot ordering (auto-y2ubq): eligibility and the
+        # plausibility window filter, then rung → store → revision →
+        # signed_at → persona hash, with the legacy created_at tiebreak
+        # surviving only among unsigned single-writer rows. Revision sits
+        # below store because the reachability filter below has already
+        # dropped every candidate that cannot serve a requested revision;
+        # within one store it still discriminates two coexisting
+        # generations of a value.
+        candidate_bases = _rank_candidates(
+            candidate_bases,
+            reading_org=resolved_org,
+            now=now,
+            dropped=dropped,
         )
-        candidate_bases.sort(
-            key=lambda om: PRECEDENCE.get(om[1]["publication_state"], 99),
-        )
+        if not candidate_bases:
+            continue
 
         # Asking for a revision should consider the rows that can be served as
         # it, rather than picking a winner first and discovering afterwards

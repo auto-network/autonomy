@@ -57,7 +57,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # v6 (auto-4oxee): all-or-nothing envelope-state triggers on those columns for
 # tables that predate the schema.sql CHECK (SQLite cannot ALTER TABLE ADD
 # CHECK), so no database accepts a partially signed row.
-_SCHEMA_USER_VERSION = 6
+# v7 (auto-y2ubq): one slot per signer — idx_settings_one_base narrows to
+# unsigned rows, idx_settings_one_slot adds terminal_persona for signed rows,
+# and the duplicate-base self-heal groups by the same columns (the pair moves
+# as one).
+_SCHEMA_USER_VERSION = 7
 DEFAULT_DB = DATA_ROOT / "graph.db"
 DEFAULT_ORGS_DIR = DATA_ROOT / "orgs"
 
@@ -643,52 +647,10 @@ class GraphDB:
             "CREATE INDEX IF NOT EXISTS idx_settings_schema "
             "ON settings(set_id, schema_revision)"
         )
-        # One live base row per composite key. Partial, so it constrains ONLY
-        # base rows: overrides (supersedes) and exclusions (excludes) are not
-        # in the index and stay unlimited, and deprecating a base frees the
-        # slot. publication_state is included because the resolver deliberately
-        # allows e.g. a raw draft beside a canonical row and picks by
-        # precedence.
+        # Column adds run BEFORE the self-heal below, because the heal's
+        # grouping references terminal_persona and a true-legacy table does
+        # not have it yet.
         #
-        # Without this, `add_setting` could append a second base for a key that
-        # already had one and the resolver would silently pick the newer,
-        # leaving the older shadowing it — which is how one workspace primer
-        # reached seven live bases and how overrides aimed at the "wrong" base
-        # went dead. The API now upserts, so this is the backstop that keeps it
-        # true for any future caller.
-        # Self-heal legacy duplicates BEFORE the unique index is built, so an
-        # org DB carrying pre-index same-state duplicate base rows opens and
-        # converges instead of bricking on CREATE UNIQUE INDEX — a fail-closed on
-        # the org-DB-open path the whole platform depends on (auto-55jwx). For
-        # each (set_id, schema_revision, key, publication_state) group of live
-        # bases, keep the newest (created_at DESC, id DESC — the same row
-        # upsert_by_key updates and the resolver's within-state tiebreak picks)
-        # and deprecate the rest. Deprecated rows leave the partial index's WHERE
-        # clause, so the index below succeeds; they are retained, not deleted, so
-        # the history survives. Correlated "a newer live sibling exists" so the
-        # winner (no newer sibling) is never touched whatever the row order;
-        # no-op on an already-clean DB.
-        self.conn.execute(
-            "UPDATE settings SET deprecated = 1 "
-            "WHERE supersedes IS NULL AND excludes IS NULL AND deprecated = 0 "
-            "AND EXISTS ("
-            "  SELECT 1 FROM settings AS newer "
-            "  WHERE newer.set_id = settings.set_id "
-            "    AND newer.schema_revision = settings.schema_revision "
-            "    AND newer.key = settings.key "
-            "    AND newer.publication_state = settings.publication_state "
-            "    AND newer.supersedes IS NULL AND newer.excludes IS NULL "
-            "    AND newer.deprecated = 0 "
-            "    AND (newer.created_at > settings.created_at "
-            "         OR (newer.created_at = settings.created_at "
-            "             AND newer.id > settings.id))"
-            ")"
-        )
-        self.conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_settings_one_base "
-            "ON settings(set_id, schema_revision, key, publication_state) "
-            "WHERE supersedes IS NULL AND excludes IS NULL AND deprecated = 0"
-        )
         # Cache GC (auto-5ch66): cache-tagged schemas stamp an absolute
         # ``expires_at`` on every write. Non-cache rows leave it NULL
         # forever — the partial index keeps the index file tight on a
@@ -709,9 +671,7 @@ class GraphDB:
         # Nullable: NULL on every row of a store that does not sign —
         # personal.db, the machine store, and an org DB whose ledger is not
         # founded. `witness` NULL on a *signed* row means the org had never
-        # published when it was written. The one-slot-per-signer uniqueness
-        # change over terminal_persona belongs to auto-y2ubq together with the
-        # duplicate-base migration above — the pair moves as one.
+        # published when it was written.
         for column, decl in (
             ("signed_at", "INTEGER"),
             ("signing_key", "TEXT"),
@@ -721,6 +681,82 @@ class GraphDB:
         ):
             if column not in cols:
                 self.conn.execute(f"ALTER TABLE settings ADD COLUMN {column} {decl}")
+        # One live base row per composite key — per SIGNER where rows are
+        # signed (auto-y2ubq, graph://21a0da9e-1c2 "one slot per signer").
+        # Partial, so it constrains ONLY base rows: overrides (supersedes) and
+        # exclusions (excludes) are not in the index and stay unlimited, and
+        # deprecating a base frees the slot. publication_state is included
+        # because the resolver deliberately allows e.g. a raw draft beside a
+        # canonical row and picks by precedence.
+        #
+        # Without this, `add_setting` could append a second base for a key that
+        # already had one and the resolver would silently pick the newer,
+        # leaving the older shadowing it — which is how one workspace primer
+        # reached seven live bases and how overrides aimed at the "wrong" base
+        # went dead. The API now upserts, so this is the backstop that keeps it
+        # true for any future caller.
+        #
+        # Self-heal legacy duplicates BEFORE the unique indexes are built, so
+        # an org DB carrying pre-index same-state duplicate base rows opens and
+        # converges instead of bricking on CREATE UNIQUE INDEX — a fail-closed on
+        # the org-DB-open path the whole platform depends on (auto-55jwx). For
+        # each (set_id, schema_revision, key, publication_state,
+        # terminal_persona) group of live bases, keep the newest (created_at
+        # DESC, id DESC — the same row upsert_by_key updates and the resolver's
+        # within-state tiebreak picks) and deprecate the rest. Deprecated rows
+        # leave the partial indexes' WHERE clauses, so index creation succeeds;
+        # they are retained, not deleted, so the history survives. Correlated
+        # "a newer live sibling exists" so the winner (no newer sibling) is
+        # never touched whatever the row order; no-op on an already-clean DB.
+        #
+        # The heal's grouping and the indexes below are a PAIR: terminal_persona
+        # joins the group (NULL matches NULL via IS) exactly as it joins the
+        # slot index, or the heal would collapse a second member's slot the
+        # index permits.
+        self.conn.execute(
+            "UPDATE settings SET deprecated = 1 "
+            "WHERE supersedes IS NULL AND excludes IS NULL AND deprecated = 0 "
+            "AND EXISTS ("
+            "  SELECT 1 FROM settings AS newer "
+            "  WHERE newer.set_id = settings.set_id "
+            "    AND newer.schema_revision = settings.schema_revision "
+            "    AND newer.key = settings.key "
+            "    AND newer.publication_state = settings.publication_state "
+            "    AND newer.terminal_persona IS settings.terminal_persona "
+            "    AND newer.supersedes IS NULL AND newer.excludes IS NULL "
+            "    AND newer.deprecated = 0 "
+            "    AND (newer.created_at > settings.created_at "
+            "         OR (newer.created_at = settings.created_at "
+            "             AND newer.id > settings.id))"
+            ")"
+        )
+        # Two partial unique indexes, split on terminal_persona, because a
+        # store cannot be told apart at the schema level — every database
+        # ships the same schema, and SQLite cannot condition an index on
+        # which file it lives in. The row property does the discriminating:
+        # terminal_persona is non-NULL exactly on a signed row (the v6
+        # envelope-state constraint), signed rows exist only in org stores
+        # with a founded ledger, and SQLite's UNIQUE treats NULLs as
+        # distinct, so a five-column index alone would silently not
+        # constrain unsigned rows at all. Unsigned rows (personal, machine,
+        # pre-founding org) keep the one-base rule; signed rows get one slot
+        # PER SIGNER. The old four-column index is dropped by name — its
+        # WHERE clause changed, and CREATE IF NOT EXISTS would keep the
+        # stale one.
+        self.conn.execute("DROP INDEX IF EXISTS idx_settings_one_base")
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_settings_one_base "
+            "ON settings(set_id, schema_revision, key, publication_state) "
+            "WHERE supersedes IS NULL AND excludes IS NULL AND deprecated = 0 "
+            "AND terminal_persona IS NULL"
+        )
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_settings_one_slot "
+            "ON settings(set_id, schema_revision, key, publication_state, "
+            "terminal_persona) "
+            "WHERE supersedes IS NULL AND excludes IS NULL AND deprecated = 0 "
+            "AND terminal_persona IS NOT NULL"
+        )
         # A row is unsigned (all five NULL) or signed (the four non-witness
         # columns present; witness free — a signed row of an org that has
         # never published cites nothing). Fresh tables enforce this with the
