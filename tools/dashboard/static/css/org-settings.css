@@ -160,6 +160,143 @@
   font-size: 0.6875rem;
 }
 
+/* ── what this machine still owes ────────────────────────── */
+
+.orgset-things-head,
+.orgset-ws-head {
+  margin: 0 0 0.15rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: #e5e7eb;
+}
+.orgset-ws-head { margin-top: 1.25rem; margin-bottom: 0.5rem; color: #9ca3af; }
+
+.orgset-thing {
+  border: 1px solid #1f2937;
+  border-radius: 0.5rem;
+  background: #111827;
+  margin-bottom: 0.4rem;
+  overflow: hidden;
+}
+
+/* A grid, so the identifier and the description get a real column that can
+ * wrap. The previous markup put them in bare divs, and a 70-character host
+ * path ran off the right edge and clipped mid-string — taking with it the
+ * one fact the reader needed, which file it was complaining about. */
+.orgset-thing-head {
+  width: 100%;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  padding: 0.6rem 0.7rem;
+  min-height: 2.75rem;   /* a touch has to be able to land on it */
+  cursor: pointer;
+}
+.orgset-thing-head:hover { background: #0f1a2e; }
+.orgset-thing-head:focus-visible { outline: 2px solid #60a5fa; outline-offset: -2px; }
+
+.orgset-thing-main {
+  flex: 1;
+  min-width: 0;          /* without this a flex child refuses to wrap at all */
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+.orgset-thing-title {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: #f3f4f6;
+  overflow-wrap: anywhere;
+}
+.orgset-thing-cat {
+  font-size: 0.6875rem;
+  color: #9ca3af;
+  overflow-wrap: anywhere;
+}
+.orgset-thing-state {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-top: 0.1rem;
+  font-size: 0.6875rem;
+  color: #cbd5e1;
+  overflow-wrap: anywhere;
+}
+.orgset-dot { width: 0.45rem; height: 0.45rem; border-radius: 999px; flex: none; }
+.orgset-dot-blocking { background: #f87171; }
+.orgset-dot-advisory { background: #6b7280; }
+
+.orgset-thing-right {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding-top: 0.1rem;
+}
+.orgset-thing-count {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  background: #1f2937;
+  color: #d1d5db;
+  border-radius: 999px;
+  min-width: 1.4rem;
+  height: 1.4rem;
+  padding: 0 0.4rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.orgset-thing-chev { color: #6b7280; font-size: 0.9rem; line-height: 1; }
+.orgset-thing-head[aria-expanded="true"] .orgset-thing-chev { transform: rotate(180deg); }
+
+.orgset-thing-detail {
+  margin: 0;
+  padding: 0.55rem 0.7rem 0.7rem;
+  border-top: 1px solid #1f2937;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.2rem 0.65rem;
+  font-size: 0.6875rem;
+}
+.orgset-thing-detail dt { color: #6b7280; white-space: nowrap; }
+.orgset-thing-detail dd {
+  margin: 0;
+  color: #cbd5e1;
+  overflow-wrap: anywhere;
+  word-break: break-word;   /* host paths have no spaces to break at */
+}
+
+.orgset-ws-chips { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+.orgset-ws-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.6875rem;
+  color: #d1d5db;
+  background: #111827;
+  border: 1px solid #1f2937;
+  border-radius: 999px;
+  padding: 0.25rem 0.4rem 0.25rem 0.6rem;
+}
+.orgset-ws-chip b {
+  background: #7f1d1d;
+  color: #fca5a5;
+  border-radius: 999px;
+  min-width: 1.15rem;
+  height: 1.15rem;
+  padding: 0 0.3rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.625rem;
+}
+.orgset-ws-chip-ready b { background: #064e3b; color: #6ee7b7; }
+
 /* ── desktop: both panes, always ─────────────────────────── */
 
 @media (min-width: 768px) {
