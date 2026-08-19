@@ -19,13 +19,27 @@ from starlette.testclient import TestClient
 from tools.data_paths import LocalStoreUnreadableError
 
 
+@pytest.mark.parametrize("mock_mode", [False, True], ids=["real", "mock"])
 def test_startup_refuses_a_corrupt_personal_store(
-    test_db, mock_tmux, tmp_path, monkeypatch,
+    test_db, mock_tmux, tmp_path, monkeypatch, mock_mode,
 ):
     """Asserts the PROPAGATION, not a log line: the lifespan must raise,
-    not continue. This test fails on 4fdf7b08, where the deletion of the
-    mover's error plumbing also removed the one fatal-stop whose raiser —
-    the resolver — deliberately survives."""
+    not continue — and must raise FROM THE DELIBERATE GATE in BOTH startup
+    modes. The mock branch is where review caught the gate dead: it
+    started the worktree monitor (whose first sweep resolves workspaces →
+    orgs → the personal store) and returned before bootstrap ever ran, so
+    a corrupt store died inside a monitor broadcast with a raw traceback
+    instead of the gate's operator message.
+
+    The two modes gate differently by design: real mode provisions
+    (ensure_bootstrap_orgs) and the raise surfaces there; mock mode serves
+    fixtures and must not materialize real stores, so its gate is a
+    read-only resolution probe of each local store — same refusal, zero
+    writes."""
+    if mock_mode:
+        monkeypatch.setenv("DASHBOARD_MOCK", "1")
+    else:
+        monkeypatch.delenv("DASHBOARD_MOCK", raising=False)
     monkeypatch.setenv("DASHBOARD_DB", test_db)
     monkeypatch.setenv(
         "DASHBOARD_EVENT_BUS_STATE", str(tmp_path / "event_bus.state"),
@@ -59,6 +73,22 @@ def test_startup_refuses_a_corrupt_personal_store(
         frame.name
         for frame in traceback.extract_tb(caught.value.__traceback__)
     ]
-    assert "ensure_bootstrap_orgs" in frames, (
-        f"startup died somewhere else, not at the bootstrap gate: {frames}"
+    gate_frame = (
+        "_local_store_db_path" if mock_mode else "ensure_bootstrap_orgs"
     )
+    # Adjacency, not membership: the monitor's own first sweep ALSO passes
+    # through the resolver, so "_local_store_db_path somewhere in the
+    # traceback" would be satisfied by the exact incidental crash the gate
+    # exists to preempt. The deliberate gate is the one _on_startup calls
+    # directly.
+    call_pairs = list(zip(frames, frames[1:]))
+    assert ("_on_startup", gate_frame) in call_pairs, (
+        f"startup died somewhere else, not at the {gate_frame} gate: {frames}"
+    )
+    if mock_mode:
+        # The mock gate must be the probe, not provisioning: a corrupt
+        # legacy file refused with nothing created beside it.
+        assert not (tmp_path / "personal.db").exists(), (
+            "mock startup materialized a store"
+        )
+        assert "ensure_bootstrap_orgs" not in frames
