@@ -346,3 +346,126 @@ def test_graph_and_ledger_resolve_local_stores_identically_in_every_state(
     (orgs_root / "personal.db").write_bytes(b"garbage, not sqlite")
     a, b = both("personal")
     assert a == b == ("raise", "LocalStoreUnreadableError")
+
+
+# ── two relocators, both interleaves (all-reviewer rejection of 30859c0f) ──
+# Assertions are on ROWS in the served store and the backup, because the
+# failure mode is silent: the losing code path reported success while
+# destroying both copies (graph://35bb284f-3b3 — sqlite3.connect CREATES
+# the file, so it is neither an existence probe nor a lock).
+
+def _seed_real_store(legacy):
+    conn = sqlite3.connect(legacy)
+    conn.execute("CREATE TABLE settings (v TEXT)")
+    conn.executemany(
+        "INSERT INTO settings VALUES (?)",
+        [("identity-armor",), ("credentials",)],
+    )
+    conn.commit()
+    conn.close()
+
+
+def _rows(path):
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return {r[0] for r in conn.execute("SELECT v FROM settings")}
+    finally:
+        conn.close()
+
+
+def test_a_loser_that_raced_past_its_guards_destroys_nothing(
+    orgs_root, monkeypatch,
+):
+    """The winner completes ENTIRELY between the loser's pre-checks and its
+    connect. On the rejected code the loser conjured an empty legacy file,
+    backed it up over the winner's backup, and clobbered the winner's
+    relocated store — both copies lost, success reported."""
+    data_paths._LEGACY_STORE_CLASSIFICATION.clear()
+    legacy = orgs_root / "personal.db"
+    _seed_real_store(legacy)
+
+    # The interleave point is the CONNECT — after every guard the loser
+    # has (a hook at any earlier guard tests the wrong path; the rejected
+    # code survives it via its both-exist check).
+    real_connect = sqlite3.connect
+    fired = {"done": False}
+
+    def winner_then_connect(*args, **kwargs):
+        # Fire at the MOVER'S connect (never the classifier's read-only
+        # probe): the reproduced destruction requires the loser to have
+        # passed every guard including classification before the winner
+        # moves the file.
+        if (
+            not fired["done"] and args
+            and "personal.db" in str(args[0])
+            and "mode=ro" not in str(args[0])
+        ):
+            fired["done"] = True
+            monkeypatch.undo()  # the winner runs unpatched, to completion
+            relocate_local_stores(orgs_root)
+            monkeypatch.setattr(
+                graph_db_mod.sqlite3, "connect", winner_then_connect,
+            )
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(graph_db_mod.sqlite3, "connect", winner_then_connect)
+    relocate_local_stores(orgs_root)  # the loser's run; winner fires inside
+    monkeypatch.undo()
+
+    served = orgs_root.parent / "personal.db"
+    backup = orgs_root / "personal.db.pre-relocation-backup"
+    assert _rows(served) == {"identity-armor", "credentials"}, "served store lost"
+    assert _rows(backup) == {"identity-armor", "credentials"}, "backup lost"
+    assert not legacy.exists(), "no conjured legacy file left behind"
+
+
+def test_barrier_started_relocators_never_crash_and_never_lose_rows(
+    tmp_path,
+):
+    """Pairs of REAL processes started on a barrier. On the rejected code:
+    60/60 raised FileNotFoundError out of relocate_local_stores; here every
+    pair must exit 0 with the served store and backup intact."""
+    import subprocess
+    import sys
+    import time as _time
+
+    driver = tmp_path / "driver.py"
+    driver.write_text(
+        "import os, sys, time\n"
+        "sys.path.insert(0, %r)\n"
+        "os.environ['AUTONOMY_ORGS_DIR'] = sys.argv[1]\n"
+        "start_flag = sys.argv[2]\n"
+        "from tools.graph.db import relocate_local_stores\n"
+        "while not os.path.exists(start_flag):\n"
+        "    time.sleep(0.001)\n"
+        "relocate_local_stores(sys.argv[1])\n" % "/workspace/repo"
+    )
+    for i in range(8):
+        root = tmp_path / f"round-{i}" / "orgs"
+        root.mkdir(parents=True)
+        legacy = root / "personal.db"
+        _seed_real_store(legacy)
+        flag = tmp_path / f"round-{i}" / "go"
+        procs = [
+            subprocess.Popen(
+                [sys.executable, str(driver), str(root), str(flag)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            for _ in range(2)
+        ]
+        _time.sleep(0.15)
+        flag.touch()
+        for p in procs:
+            _, err = p.communicate(timeout=60)
+            assert p.returncode == 0, (
+                f"round {i}: relocator crashed:\n{err.decode()[-800:]}"
+            )
+        served = root.parent / "personal.db"
+        assert _rows(served) == {"identity-armor", "credentials"}, (
+            f"round {i}: served store lost rows"
+        )
+        backup = root / "personal.db.pre-relocation-backup"
+        if backup.exists():
+            assert _rows(backup) == {"identity-armor", "credentials"}, (
+                f"round {i}: backup lost rows"
+            )
