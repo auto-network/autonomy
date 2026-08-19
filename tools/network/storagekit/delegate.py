@@ -60,7 +60,7 @@ from dataclasses import dataclass, replace
 from typing import Optional
 
 from tools.network.idkit import KeyPair
-from tools.network.ledger import HLC, make_event
+from tools.network.ledger import HLC, make_event, sign_delegate_proof
 from tools.network.ledger.projections import organization_content_domain_id
 
 from . import capability as capability_mod
@@ -137,11 +137,20 @@ def authorize_member_storage(
     domain_id: str,
     *,
     hlc: HLC,
+    child_proof: str,
     parents=None,
     can_redelegate: bool = True,
 ) -> str:
     """Root-present enabling act: grant a MEMBER persona the two storage
     scopes RE-DELEGABLY, so it can later mint agent delegates unattended.
+
+    ``child_proof`` is the MEMBER'S consent (auto-le0kg): their persona
+    key's signature over this grant (``sign_delegate_proof`` with this
+    ledger's genesis, the root's key and the storage scopes). This function
+    cannot produce it — the persona key derives from the member's OWN
+    personal root, which the root-present ceremony does not hold — so the
+    enabling act gains one exchange with the member it grants. Refused
+    without one; the fold refuses the event if it does not verify.
 
     Role-held scopes are non-delegable in the fold, so without this
     explicit re-delegable grant a member cannot mint a storage delegate at
@@ -150,11 +159,22 @@ def authorize_member_storage(
     written — and is the one root act the delegate lifecycle depends on.
     Returns the ``delegate`` event id.
     """
+    if (
+        not isinstance(child_proof, str)
+        or len(child_proof) != 128
+        or any(c not in "0123456789abcdef" for c in child_proof)
+    ):
+        raise DelegateError(
+            "authorize_member_storage requires the member's consent proof — "
+            "the persona key's signature over this grant "
+            "(sign_delegate_proof); refusing to issue without one"
+        )
     payload = {
         "type": "delegate",
         "child_pub": _key_hex(member_persona),
         "scope": storage_delegate_scopes(domain_id),
         "can_redelegate": bool(can_redelegate),
+        "proof": child_proof,
     }
     return ledger.add(make_event(root, payload, _parents(ledger, parents), hlc))
 
@@ -203,6 +223,13 @@ def provision(
         "scope": storage_delegate_scopes(domain_id),
         "can_redelegate": False,
         "ttl": int(ttl_ms),
+        # The mint holds the child's private half, so consent costs nothing
+        # (auto-le0kg) — and the same is true on the renewal path, which
+        # reuses the child key it is extending.
+        "proof": sign_delegate_proof(
+            key, ledger.genesis_id, issuer.public_hex,
+            storage_delegate_scopes(domain_id),
+        ),
     }
     grant_id = ledger.add(make_event(issuer, payload, _parents(ledger, parents), hlc))
     return StorageDelegate(

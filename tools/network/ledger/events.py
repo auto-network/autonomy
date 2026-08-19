@@ -279,12 +279,23 @@ def _v_genesis_recovery(value: object) -> None:
 
 def _v_delegate(p: dict) -> None:
     _require_fields(
-        p, "delegate", frozenset({"child_pub", "scope", "can_redelegate"}), frozenset({"ttl"})
+        p, "delegate",
+        frozenset({"child_pub", "scope", "can_redelegate", "proof"}),
+        frozenset({"ttl"}),
     )
     _require_key(p["child_pub"], "delegate.child_pub")
     validate_scope_list(p["scope"], "delegate.scope")
     if not isinstance(p["can_redelegate"], bool):
         raise SchemaError("delegate.can_redelegate must be a boolean")
+    # Presence and shape only: verifying the proof needs the genesis and the
+    # issuing member's key, which the payload alone does not carry — the
+    # fold verifies it where the event is admitted (auto-le0kg), in the
+    # manner of the recovery-rotation continuity proof.
+    _require_str(p["proof"], "delegate.proof", max_len=SIGNATURE_HEX_LEN)
+    try:
+        _decode_hex(p["proof"], SIGNATURE_HEX_LEN, "delegate.proof")
+    except _IdkitMalformed as exc:
+        raise SchemaError(str(exc)) from None
     if "ttl" in p:
         if type(p["ttl"]) is not int or p["ttl"] <= 0 or p["ttl"] > 2**63 - 1:
             raise SchemaError("delegate.ttl must be a positive integer (milliseconds)")
@@ -710,6 +721,40 @@ def sign_rekey_continuity(new_key: KeyPair, persona: str, old_pub: str) -> str:
     key the persona is rotating onto."""
     return new_key.sign_hex(
         rekey_continuity_input(persona, old_pub, new_key.public_hex)
+    )
+
+
+DELEGATE_CONSENT_DOMAIN = b"autonomy.ledger.delegate-consent.v1\n"
+
+
+def delegate_proof_input(
+    genesis_id: str, issuer_key: str, child_pub: str, scope,
+) -> bytes:
+    """The bytes a delegate's consent proof covers (auto-le0kg).
+
+    Binds the organization's GENESIS, the ISSUING member's key, the child
+    key itself and the granted SCOPES, so a signature obtained in any other
+    context — another organization, another issuer, a different grant —
+    does not verify here. The scope binding is to the SET (sorted,
+    de-duplicated), matching what the fold enforces.
+    """
+    return DELEGATE_CONSENT_DOMAIN + canonical_json({
+        "genesis_id": genesis_id,
+        "issuer_key": issuer_key,
+        "child_pub": child_pub,
+        "scope": sorted(set(scope)),
+    })
+
+
+def sign_delegate_proof(
+    child_key: KeyPair, genesis_id: str, issuer_key: str, scope,
+) -> str:
+    """The named delegate key signs the grant that names it — proof of
+    possession AND consent, which is what makes concurrent grants over one
+    key equally legitimate rather than one of them forged, and what stops
+    a member publishing a grant over a public key they merely observed."""
+    return child_key.sign_hex(
+        delegate_proof_input(genesis_id, issuer_key, child_key.public_hex, scope)
     )
 
 

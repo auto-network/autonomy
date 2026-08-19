@@ -51,6 +51,7 @@ from tools.network.idkit.errors import IdkitError
 from .events import (
     KEM_CREDENTIAL_DOMAIN,
     approval_signing_input,
+    delegate_proof_input,
     rotate_continuity_input,
     rekey_continuity_input,
     rotate_recovery_input,
@@ -61,6 +62,7 @@ from .scopes import UNIVERSE, attenuates, covered_subset, set_covers
 # Stable invalidity reasons (pinned by tests).
 R_SCOPE_ESCALATION = "scope-escalation"
 R_NOT_REDELEGABLE = "not-redelegable"
+R_DELEGATE_UNPROVEN = "delegate-unproven"
 R_REVOKE_UNAUTHORIZED = "revoke-unauthorized"
 R_REVOKE_BAD_TARGET = "revoke-bad-target"
 R_REVOKE_NOT_IN_ANCESTRY = "revoke-target-not-in-ancestry"
@@ -562,6 +564,23 @@ class _Folder:
 
     def _h_delegate(self, event, ctx) -> Optional[str]:
         p = event.payload
+        # Proof of possession AND consent by the named child key, verified
+        # here rather than in payload validation because the binding needs
+        # the genesis and the issuing member's key, which the payload alone
+        # does not carry (auto-le0kg; same placement as the
+        # recovery-rotation continuity proof). Without it, any member with
+        # delegation authority could publish a grant over a public key they
+        # merely observed and take attribution for every row it writes.
+        try:
+            verify_signature(
+                p["child_pub"],
+                p["proof"],
+                delegate_proof_input(
+                    self.genesis_id, event.author_key, p["child_pub"], p["scope"],
+                ),
+            )
+        except IdkitError:
+            return R_DELEGATE_UNPROVEN
         by_root = event.author_key == self.root_at(ctx)
         if not by_root:
             held, deleg = self.authority(ctx, ref_ts=event.hlc.ts)

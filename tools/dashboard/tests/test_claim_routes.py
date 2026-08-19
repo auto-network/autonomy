@@ -20,6 +20,7 @@ from tools.dashboard import claim_service, network_routes
 from tools.graph.db import GraphDB
 from tools.network.idkit import KeyPair, derive_persona
 from tools.network.ledger import (
+    sign_delegate_proof,
     Event,
     HLC,
     INVITE_CLAIMED,
@@ -158,6 +159,10 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
                 "child_pub": extra_approver.public_hex,
                 "scope": ["role:grant:member"],
                 "can_redelegate": False,
+                "proof": sign_delegate_proof(
+                    extra_approver, founded.genesis_id,
+                    root.public_hex, ["role:grant:member"],
+                ),
             },
         )
         emit(
@@ -681,13 +686,18 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
     }
 
     with LedgerStore(path) as store:
+        filler = KeyPair.generate()
         store.append(make_event(
             root,
             {
                 "type": "delegate",
-                "child_pub": KeyPair.generate().public_hex,
+                "child_pub": filler.public_hex,
                 "scope": ["link:publish"],
                 "can_redelegate": False,
+                "proof": sign_delegate_proof(
+                    filler, founded.genesis_id,
+                    root.public_hex, ["link:publish"],
+                ),
             },
             store.heads(),
             HLC(delayed_expiry + 1_000),

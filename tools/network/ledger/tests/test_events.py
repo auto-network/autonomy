@@ -27,11 +27,15 @@ def make(payload, parents=(PARENT,), ts=T0):
 
 
 def delegate_payload(**over):
+    child = KeyPair.generate()
     payload = {
         "type": "delegate",
-        "child_pub": KeyPair.generate().public_hex,
+        "child_pub": child.public_hex,
         "scope": ["link:publish"],
         "can_redelegate": False,
+        # Payload validation checks shape only; the binding is verified at
+        # fold admission, so any 128-hex signature satisfies the schema.
+        "proof": child.sign_hex(b"shape-only"),
     }
     payload.update(over)
     return payload

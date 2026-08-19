@@ -15,6 +15,7 @@ import pytest
 
 from tools.network.idkit import KeyPair
 from tools.network.ledger import (
+    sign_delegate_proof,
     HLC,
     BundleError,
     Event,
@@ -286,13 +287,18 @@ def test_sync_key_is_deterministic_and_org_specific(org):
     other = OrgSim("22222222-2222-4222-8222-222222222222")
     assert derive_sync_key(org.genesis) == derive_sync_key(org.genesis)
     assert derive_sync_key(org.genesis) != derive_sync_key(other.genesis)
+    delegate_child = KeyPair.generate()
     delegate_event = make_event(
         org.root,
         {
             "type": "delegate",
-            "child_pub": KeyPair.generate().public_hex,
+            "child_pub": delegate_child.public_hex,
             "scope": ["link:publish"],
             "can_redelegate": False,
+            "proof": sign_delegate_proof(
+                delegate_child, org.genesis.event_id, org.root.public_hex,
+                ["link:publish"],
+            ),
         },
         [org.genesis.event_id],
         HLC(T0 + 1),
