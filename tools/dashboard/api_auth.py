@@ -77,6 +77,50 @@ def principal_from_request(request: Request) -> ApiPrincipal:
     return getattr(request.state, "api_principal", COMPATIBILITY_PRINCIPAL)
 
 
+def require_authenticated_api_caller(request: Request) -> JSONResponse | None:
+    """Refuse an API caller that presents no credential at all.
+
+    Invariant 4 of the org-scope lockdown (graph://f42db05f-7ca): "Every
+    registered ``/api`` route rejects a no-credential request unless on an
+    explicit public allowlist."  A CREDENTIAL, not the operator's — which is
+    the distinction this function exists to make.
+
+    Use this, not :func:`require_global_api_authority`, on a surface every
+    authenticated caller legitimately uses.  An earlier guard on the generic
+    Settings readers demanded global authority and 401'd every agent on the
+    fleet, because agents read Settings constantly as normal operation and
+    hold an ORG bearer, never the operator's.  "Only the operator reads
+    arbitrary Settings" was simply false.
+
+    What the caller may then READ is a separate question answered elsewhere:
+    the token forces the org (invariant 1), and a schema's ``@home`` plus its
+    ``@publication_band`` decide whether a row is reachable at all — six
+    secret-bearing sets are pinned ``max=raw`` and so are structurally never
+    read-through-able.  That is why this guard needs no list of secret sets:
+    a new one is protected by declaring its band, not by someone remembering
+    to edit a constant here.
+
+    ``None`` means authorized.  Only compatibility traffic is refused, with
+    401; every authenticated principal passes, including an org-bound one.
+
+    Like the global guard, this stands down while the human gate is
+    deliberately open — refusing a caller the gate has just admitted
+    contradicts it, and the gate is what decides whether this dashboard is
+    open at all.
+    """
+    principal = principal_from_request(request)
+    if principal.authenticated:
+        return None
+    from tools.dashboard import unlock_routes
+    if not unlock_routes.gate_enforced():
+        return None
+    logger.warning(
+        "api_authz_refused policy=authenticated method=%s path=%s",
+        request.method, request.url.path,
+    )
+    return JSONResponse({"error": "authentication required"}, status_code=401)
+
+
 def require_global_api_authority(request: Request) -> JSONResponse | None:
     """Refuse an API caller that lacks global operator authority.
 
