@@ -73,3 +73,45 @@ def covered_subset(scopes, parent_set) -> frozenset:
 
 #: The universal scope set — what the org root holds implicitly.
 UNIVERSE = frozenset({"*"})
+
+
+#: The two storage scope families a CURRENT MEMBER PERSONA may
+#: self-delegate (auto-wrkaq): a strictly weaker, non-redelegable,
+#: expiring instrument of its own held authority — PIN 6b, "a persona
+#: provisions and expires its own delegates". Restricted BY SCOPE
+#: deliberately: these are the scopes whose ACCEPTANCE re-derives
+#: authority from current membership at USE time
+#: (storagekit/acceptance.py consults the roster projection, never a
+#: generic scope holding), so mint-time attenuation does no security work
+#: for them. A scope whose acceptance reads the delegated holding instead
+#: would have mint-time attenuation as its ONLY gate — an unrestricted
+#: rule would open it silently.
+_SELF_DELEGABLE_GRANT_PREFIX = "storage:capability:grant:"
+_SELF_DELEGABLE_ADVANCE_PREFIX = "storage:state:advance:"
+
+
+def self_delegable_exact(scopes) -> bool:
+    """EXACTLY the storage delegate's scope shape: one grant scope and one
+    advance scope, over ONE shared domain. An exact predicate, not pattern
+    coverage — coverage would admit a singleton (an instrument the design
+    does not define), a mixed-domain pair (a single delegate spanning two
+    domains), and the pair plus a third (reach beyond the defined shape).
+    The storage delegate is defined as exactly two scopes (§8, §9) and
+    that definition is enforced here, at admission."""
+    scopes = frozenset(scopes)
+    if len(scopes) != 2:
+        return False
+    domains = {"grant": None, "advance": None}
+    for s in scopes:
+        if s.startswith(_SELF_DELEGABLE_GRANT_PREFIX):
+            domains["grant"] = s[len(_SELF_DELEGABLE_GRANT_PREFIX):]
+        elif s.startswith(_SELF_DELEGABLE_ADVANCE_PREFIX):
+            domains["advance"] = s[len(_SELF_DELEGABLE_ADVANCE_PREFIX):]
+        else:
+            return False
+    return (
+        domains["grant"] is not None
+        and domains["grant"] != ""
+        and domains["grant"] == domains["advance"]
+        and "*" not in domains["grant"]
+    )
