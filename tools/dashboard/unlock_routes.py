@@ -307,6 +307,24 @@ def bust_enforce_cache() -> None:
     _enforce_cache["at"] = 0.0
 
 
+def gate_enforced() -> bool:
+    """Whether the human gate actually demands a session right now.
+
+    False means :class:`HumanGateMiddleware` admits a browser that carries no
+    session cookie — either the env-only recovery switch is set or nothing is
+    enrolled yet. Both are states in which the dashboard is deliberately open,
+    so an API guard downstream cannot treat a cookie-less caller as an
+    intruder: the gate already decided this one is the operator.
+
+    Order matters and mirrors the middleware exactly. ``gate_disabled`` is
+    read FIRST so the escape hatch survives a wedged settings DB that would
+    make the enrollment read fail.
+    """
+    if gate_disabled():
+        return False
+    return human_auth_enrolled()
+
+
 def human_auth_enrolled() -> bool:
     """True the moment ANY human auth method exists — a personal
     identity (password floor) or an enrolled passkey. This is the
@@ -800,7 +818,7 @@ async def get_session(request: Request) -> JSONResponse:
         # 'enforced' is what the gate actually DOES right now — the
         # kill-switch zeroes it even while enrollment exists, so the
         # chrome renders the forced-open marker instead of 'Locked'.
-        "enforced": human_auth_enrolled() and not disabled,
+        "enforced": gate_enforced(),
         "unlocked": payload is not None,
         "method": (payload or {}).get("method"),
         "expires_at": (payload or {}).get("exp"),
@@ -904,10 +922,7 @@ class HumanGateMiddleware:
         if not _path_is_gated(path):
             await self.app(scope, receive, send)
             return
-        if gate_disabled():
-            await self.app(scope, receive, send)
-            return
-        if not human_auth_enrolled():
+        if not gate_enforced():
             await self.app(scope, receive, send)
             return
         if verify_session_token(_cookie_from_scope(scope)) is not None:
