@@ -84,6 +84,15 @@ def live(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs))
     monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.setenv("GRAPH_ORG", ORG)
+    # Pinned, not inherited. The sealed-key route is operator-only
+    # (auto-6ff9b) and this app mounts no identity middleware, so its requests
+    # are compatibility traffic that reaches the handler only through the
+    # unenforced-gate stand-down. Stating it keeps this a test of the FOUNDING
+    # SEQUENCE: the authorization contract is
+    # test_org_key_routes_require_operator.py, and if that stand-down ever
+    # changes these should fail loudly rather than quietly swap meaning.
+    from tools.dashboard import unlock_routes
+    monkeypatch.setattr(unlock_routes, "gate_enforced", lambda: False)
     GraphDB.close_all_pooled()
     GraphDB.create_org_db("personal", type_="personal", path=orgs / "personal.db").close()
 

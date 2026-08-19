@@ -57,6 +57,9 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from tools.data_paths import resolve_store
+# Safe at module scope: api_auth imports only starlette, and defers its one
+# unlock_routes import into the call. The reverse edge is what is circular.
+from tools.dashboard.api_auth import require_global_api_authority
 from tools.graph import schemas, settings_ops
 # Importing registers the autonomy.network.* Setting schemas (they
 # self-register on import).
@@ -216,9 +219,27 @@ def _first_member(set_id: str, org: str | None):
 
 
 async def get_org_key(request: Request) -> JSONResponse:
-    """The org's armored (encrypted) network root key, or 404."""
+    """The org's armored (encrypted) network root key, or 404.
+
+    Operator-only (auto-6ff9b). :func:`_scoped_org` refuses a caller that
+    NAMES another org, which is a different question from whether the caller
+    may read at all: an unauthenticated request for its OWN org passed that
+    check and received the key. The blob is passphrase-encrypted or sealed
+    rather than plaintext, so this is not immediate compromise — it is
+    unauthenticated disclosure of offline-attackable material, which is the
+    same severity argument that closed ``auto-1wwpf.2``.
+
+    Every browser caller reaches this AFTER the session cookie exists, so the
+    guard costs them nothing: unlock's serving-credential maintenance runs
+    downstream of ``POST /api/identity/unlock/password`` (``unlock.js``
+    awaits the cookie-issuing call before it starts maintenance), and the
+    network-identity and worktrees screens are behind the human gate.
+    """
     if _mock_mode():
         return JSONResponse({"error": "no network org key configured"}, status_code=404)
+    refused = require_global_api_authority(request)
+    if refused is not None:
+        return refused
     org, refused = _scoped_org(request.query_params.get("org"), request=request)
     if refused is not None:
         return refused
@@ -1037,6 +1058,13 @@ async def post_sealed_org_key(request: Request) -> JSONResponse:
             {"ok": False, "error": "mock dashboard stores no org keys"},
             status_code=502,
         )
+    # Operator-only (auto-6ff9b), refused BEFORE the body is read: founding an
+    # organization is an operator act, and an org-bound agent session is
+    # deliberately too narrow for it even when it names its own org. An agent
+    # that legitimately drives a founding presents operator credentials.
+    refused = require_global_api_authority(request)
+    if refused is not None:
+        return refused
     try:
         body = await request.json()
     except Exception:
