@@ -13,9 +13,11 @@ Peer-org visibility rules (from graph://bcce359d-a1d):
 - Peer set defaults to *every other org DB under* ``data/orgs/*.db``; an
   operator may pin a narrower list via the
   ``autonomy.org.peer-subscription#1`` Setting in ``personal.db`` keyed
-  by the caller's own slug. An **empty** list means "fully isolated";
-  an **absent** Setting means "subscribe to every peer" (the default).
-  Consumers MUST distinguish the two.
+  by the caller's own slug. An **empty** list means "isolated from every
+  other organization" — the operator's own stores (``personal``,
+  ``machine``) remain peers, since they are not organizations one
+  subscribes to; an **absent** Setting means "subscribe to every peer"
+  (the default). Consumers MUST distinguish the two.
 - ``GRAPH_DB`` env var shorts every routing decision so tests + overrides
   still pin a single DB; peer resolution returns an empty list in that
   mode.
@@ -139,8 +141,10 @@ def resolve_peers(
     1. Explicit ``explicit_peers`` kwarg (call-site override; ``[]`` means
        "isolated", a non-empty list pins the set).
     2. ``autonomy.org.peer-subscription#1`` Setting in ``personal.db``
-       keyed by ``org`` — when the Setting declares ``peers``,
-       its value wins regardless of how many other org DBs exist.
+       keyed by ``org`` — when the Setting declares ``peers``, its value
+       decides which ORGANIZATIONS contribute, however many other org DBs
+       exist; the operator's own stores (``personal``, ``machine``) are
+       appended regardless of what it names (auto-9uj7i).
     3. Default: every other org slug under ``data/orgs/*.db``, minus the
        caller.
 
