@@ -50,10 +50,13 @@ from typing import Callable, List, Optional, Tuple
 from tools.network.idkit import DelegationCert, KeyPair
 from tools.network.registry.signing import sign_request
 from tools.network.registry.witness import (
+    WITNESS_TOPICS,
+    WITNESS_VERSION_2,
     WitnessFormatError,
     entry_id,
     validate_entry,
     verify_attestation,
+    verify_attestation_v2,
 )
 
 from .errors import LedgerError
@@ -117,6 +120,42 @@ def dominates(store: LedgerStore, new_heads, old_heads) -> bool:
             )
     anc = ledger.ancestry(new_heads)
     return all(h in anc for h in old_heads)
+
+
+def dominates_with(provider, new_heads, old_heads) -> bool:
+    """``dominates`` over a pluggable ancestry *provider* (auto-jqd9q §3).
+
+    A provider exposes ``ancestry(ids) -> set[str]`` and ``__contains__`` — the
+    same interface :class:`LedgerStore.ledger` already offers and the key-control
+    store offers for storage heads (``KeyControlStore.ancestry``, auto-3e9v6).
+    True iff ``ancestry(new) ⊇ old``: no previously-witnessed head dropped without
+    a descendant replacing it. Every id must be present in the provider, which
+    fails closed on an unknown id (sync first) rather than mislabelling an
+    advance as a retraction.
+    """
+    for h in list(new_heads) + list(old_heads):
+        if h not in provider:
+            raise WitnessError(
+                f"cannot judge supersession: head {h[:12]} not in the local replica "
+                "(sync before verifying the witness)"
+            )
+    anc = provider.ancestry(new_heads)
+    return all(h in anc for h in old_heads)
+
+
+class LedgerAncestryProvider:
+    """The authority-topic provider: wraps a :class:`LedgerStore`'s ledger so
+    ``dominates_with`` behaves exactly as ``dominates`` did (unchanged
+    semantics)."""
+
+    def __init__(self, store: LedgerStore):
+        self._ledger = store.ledger
+
+    def __contains__(self, event_id: str) -> bool:
+        return event_id in self._ledger
+
+    def ancestry(self, ids):
+        return self._ledger.ancestry(ids)
 
 
 @dataclass(frozen=True)
@@ -288,6 +327,165 @@ class WitnessJournal:
             if self.seq > before:
                 advanced += 1
         return advanced
+
+
+class WitnessJournalV2:
+    """A member's running record of the org's single v2 witness chain (jqd9q §3).
+
+    One chain per org carries a signed non-decreasing ``t`` and heads grouped by
+    topic. This journal enforces, against a pinned key: the same chain rules as
+    v1 (baseline / one-step / split-seq / fork-prev / stale / gap), a monotonic
+    ``t`` (a signed decreasing clock inside one chain is self-incriminating), and
+    per-topic-group domination through injected ancestry providers. A clock
+    disagreement is OBSERVED, never a refusal (ruled 2026-08-16).
+
+    ``providers`` maps a topic in :data:`WITNESS_TOPICS` to an ancestry provider.
+    A topic absent from an entry means "unchanged since the last entry that
+    carried it", so the journal accumulates the current head map across entries.
+    ``clock`` returns ``(wall_seconds, monotonic_seconds)`` and defaults to the
+    real clocks; it exists so drift observation is testable.
+    """
+
+    def __init__(
+        self,
+        witness_pub: str,
+        providers: dict,
+        *,
+        org: Optional[str] = None,
+        max_skew_s: int = 300,
+        clock: Optional[Callable[[], Tuple[float, float]]] = None,
+    ):
+        self.witness_pub = witness_pub
+        self.providers = dict(providers)
+        self.org = org
+        self.max_skew_s = max_skew_s
+        self._clock = clock or (lambda: (time.time(), time.monotonic()))
+        self._last: Optional[dict] = None
+        self._heads: dict = {}                     # accumulated current head map
+        self.drift_samples: List[Tuple[int, float, float]] = []
+        self.reanchored_from_v1 = False
+
+    @property
+    def last(self) -> Optional[dict]:
+        return self._last
+
+    @property
+    def seq(self) -> int:
+        return 0 if self._last is None else self._last["entry"]["seq"]
+
+    @property
+    def t(self) -> Optional[int]:
+        return None if self._last is None else self._last["entry"]["t"]
+
+    @property
+    def heads(self) -> dict:
+        """The accumulated current head map, per topic."""
+        return {k: list(v) for k, v in self._heads.items()}
+
+    def _last_is_v1(self) -> bool:
+        return self._last is not None and self._last["entry"].get("v") != WITNESS_VERSION_2
+
+    def _verify(self, attestation: dict) -> dict:
+        entry = verify_attestation_v2(attestation, self.witness_pub)
+        if self.org is not None and entry["org"] != self.org:
+            raise WitnessError("attestation org does not match this journal")
+        return entry
+
+    def _observe_drift(self, entry_t: int) -> None:
+        wall, mono = self._clock()
+        self.drift_samples.append((entry_t, wall, mono))
+
+    def _baseline(self, attestation: dict, entry: dict) -> dict:
+        if self._last_is_v1():
+            # v1 re-anchor: no cross-format chain check is possible, so the first
+            # valid v2 attestation is a fresh baseline. Record the transition.
+            self.reanchored_from_v1 = True
+        self._last = attestation
+        self._heads = {t: list(h) for t, h in entry["heads"].items()}
+        return attestation
+
+    def admit(self, attestation: dict) -> dict:
+        """Admit one v2 attestation as the journal's next step; advance or raise.
+
+        Order: verify → observe drift (never refuse) → monotonic ``t`` →
+        chain rules → grouped domination. A refused attestation advances
+        nothing.
+        """
+        entry = self._verify(attestation)
+        self._observe_drift(entry["t"])
+
+        if self._last is None or self._last_is_v1():
+            return self._baseline(attestation, entry)
+
+        last_entry = self._last["entry"]
+        last_id = entry_id(last_entry)
+        seq, last_seq = entry["seq"], last_entry["seq"]
+
+        if seq == last_seq:
+            if entry_id(entry) != last_id:
+                proof = EquivocationProof(self._last, attestation, "split-seq")
+                raise WitnessEquivocation(f"witness signed two entries at seq {seq}", proof)
+            return self._last
+        if seq < last_seq:
+            # A legitimately older entry has a legitimately smaller t; that is
+            # not a decreasing clock, just a stale re-serve. No t comparison.
+            raise WitnessStale(f"served tip seq {seq} is behind the witnessed seq {last_seq}")
+        if seq > last_seq + 1:
+            raise WitnessGap(f"advance skips from seq {last_seq} to {seq}; fetch the chain")
+
+        # A one-step advance. t is non-decreasing along the chain, so a LATER
+        # entry carrying a SMALLER t is a signed decreasing clock inside one
+        # chain — self-incriminating (ruled 2026-08-16). Checked before the
+        # prev-chain link so the clock contradiction surfaces on its own terms.
+        if entry["t"] < last_entry["t"]:
+            proof = EquivocationProof(self._last, attestation, "split-seq")
+            raise WitnessEquivocation(
+                f"entry at seq {seq} carries a t ({entry['t']}) below the witnessed "
+                f"seq {last_seq}'s t ({last_entry['t']}): a decreasing witness clock",
+                proof,
+            )
+        if entry["prev"] != last_id:
+            proof = EquivocationProof(self._last, attestation, "fork-prev")
+            raise WitnessEquivocation(
+                f"entry at seq {seq} does not chain to the witnessed seq {last_seq}", proof
+            )
+
+        # Grouped domination: a topic absent from the incoming entry is unchanged,
+        # so only topics the entry carries are checked, each against the
+        # accumulated current head set for that topic.
+        for topic, new_heads in entry["heads"].items():
+            provider = self.providers.get(topic)
+            if provider is None:
+                raise WitnessError(
+                    f"no ancestry provider for topic {topic!r}; configure it before verifying"
+                )
+            old_heads = self._heads.get(topic, [])
+            if not dominates_with(provider, new_heads, old_heads):
+                raise WitnessRetraction(
+                    f"head-set for topic {topic!r} at seq {seq} drops a previously-"
+                    "witnessed head without a superseding descendant (append-only violation)"
+                )
+
+        self._last = attestation
+        self._heads = {**self._heads, **{t: list(h) for t, h in entry["heads"].items()}}
+        return attestation
+
+    def admit_chain(self, attestations: List[dict]) -> int:
+        """Admit a contiguous run (a ``witness/since`` page); returns how many
+        advanced the journal. Ordered by seq."""
+        advanced = 0
+        for att in sorted(attestations, key=lambda a: a["entry"]["seq"]):
+            before = self.seq
+            self.admit(att)
+            if self.seq > before:
+                advanced += 1
+        return advanced
+
+    def witnessed_frontiers(self) -> dict:
+        """Expose the accumulated ``{topic: heads}`` pair to storage-layer
+        consumers — the authority frontier and the key-control frontier a single
+        attestation binds together."""
+        return self.heads
 
 
 def witnessed_fold(store: LedgerStore, attestation: dict, witness_pub: str,
