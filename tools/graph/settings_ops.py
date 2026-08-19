@@ -141,8 +141,12 @@ def _ledger_heads(slug: str) -> "tuple | None":
         return tuple(sorted(
             r[0] for r in conn.execute("SELECT event_id FROM ledger_heads")
         ))
-    except sqlite3.OperationalError:
-        return None  # no ledger tables in this DB
+    except sqlite3.Error:
+        # No ledger tables, or a database that cannot be read at all (a
+        # corrupt file raises DatabaseError, not OperationalError). Either
+        # way the answer is "no usable ledger": the org's signed rows fail
+        # eligibility closed rather than the whole read failing open.
+        return None
     finally:
         conn.close()
 
@@ -3801,6 +3805,7 @@ def contested_keys(
     org = _resolve_org_arg(org)
     resolved_org = org
     raw_rows: list[tuple[str | None, Any]] = []
+    excluded_ids: set = set()
     db = _open_read(org, set_id)
     try:
         for r in db.conn.execute(
@@ -3809,6 +3814,17 @@ def contested_keys(
             (set_id,),
         ).fetchall():
             raw_rows.append((resolved_org, r))
+        # Exclusions apply here exactly as in read_set, or this report's
+        # winning rung/store baseline could name a base resolution drops.
+        # Only unsigned rows can carry or be targeted by one (the envelope
+        # forbids excludes on org rows), so this matters solely in the
+        # pre-signing transitional world — which is the world this ships in.
+        for r in db.conn.execute(
+            "SELECT excludes FROM settings WHERE set_id = ? "
+            "  AND deprecated = 0 AND excludes IS NOT NULL",
+            (set_id,),
+        ).fetchall():
+            excluded_ids.add(r["excludes"])
     finally:
         db.close()
     placeholders = ",".join("?" for _ in PEER_VISIBLE_STATES)
@@ -3824,6 +3840,13 @@ def contested_keys(
                 f"  AND publication_state IN ({placeholders})",
                 (set_id, *PEER_VISIBLE_STATES),
             ).fetchall()
+            for r in peer_db.conn.execute(
+                f"SELECT excludes FROM settings WHERE set_id = ? "
+                f"  AND deprecated = 0 AND excludes IS NOT NULL "
+                f"  AND publication_state IN ({placeholders})",
+                (set_id, *PEER_VISIBLE_STATES),
+            ).fetchall():
+                excluded_ids.add(r["excludes"])
         except sqlite3.OperationalError as exc:
             if "no such table: settings" in str(exc).lower():
                 continue
@@ -3833,6 +3856,8 @@ def contested_keys(
 
     by_key: dict[str, list] = {}
     for src_org, row in raw_rows:
+        if row["id"] in excluded_ids:
+            continue
         by_key.setdefault(row["key"], []).append((src_org, row))
 
     contested: list[dict] = []
