@@ -674,3 +674,5 @@ def browser():
     b = BrowserHelper(f"http://localhost:{worker_test_port(8082)}")
     yield b
     b.close()
+
+
