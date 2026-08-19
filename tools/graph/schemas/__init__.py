@@ -47,7 +47,9 @@ from .registry import (
     VALID_HOMES,
     # Whether this set's payloads are secrets stored as encrypted storage
     # objects, and who must participate to read one back.
+    signer,
     vaulted,
+    declared_signer,
     declared_vault_tier,
     VALID_VAULT_TIERS,
     # Mediator-action marker decorators: declare a default action or a
@@ -107,7 +109,9 @@ __all__ = [
     "states_allowed",
     "PUBLICATION_ORDER",
     "VALID_HOMES",
+    "signer",
     "vaulted",
+    "declared_signer",
     "declared_vault_tier",
     "VALID_VAULT_TIERS",
     "SettingSchema",
