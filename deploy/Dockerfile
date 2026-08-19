@@ -74,8 +74,20 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # git: graph ingest + worktree surfaces; sqlite3: operator debugging;
 # curl: healthcheck; openssl: first-run TLS keypair.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git sqlite3 curl openssl ca-certificates \
+        git sqlite3 curl openssl ca-certificates tmux \
     && rm -rf /var/lib/apt/lists/*
+
+# docker CLI (client only): a containerized node shells out to `docker` against
+# the host socket (provided via a compose override) to inspect its OWN mount
+# topology (agents/mount_plan.discover_topology) and to run session containers
+# (agents/session_launcher). The daemon is the host's; only the client belongs
+# in the image. Pinned + mirror-overridable, same pattern as the tailwind binary.
+ARG DOCKER_CLI_VERSION=29.7.2
+ARG DOCKER_CLI_URL=https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz
+RUN curl -fsSL "$DOCKER_CLI_URL" -o /tmp/docker.tgz \
+    && tar -xzf /tmp/docker.tgz --strip-components=1 -C /usr/local/bin docker/docker \
+    && rm -f /tmp/docker.tgz \
+    && docker --version
 
 WORKDIR /app
 
