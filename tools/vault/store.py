@@ -218,6 +218,17 @@ class VaultStore:
             raise VaultError(f"no factor {factor_id!r}")
         return PublishedFactor(factor_id, row[0], row[1])
 
+    def factors(self) -> list[PublishedFactor]:
+        rows = self.db.execute(
+            "SELECT factor_id, factor_type, public_key FROM vault_factors ORDER BY factor_id"
+        ).fetchall()
+        return [PublishedFactor(*row) for row in rows]
+
+    def class_ids(self) -> list[str]:
+        return [r[0] for r in self.db.execute(
+            "SELECT class_id FROM policy_classes ORDER BY class_id"
+        ).fetchall()]
+
     # -- vault secrets -------------------------------------------------------
 
     def put_secret(self, record: VaultSecretRecord) -> None:

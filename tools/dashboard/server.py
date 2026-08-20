@@ -128,6 +128,7 @@ from tools.dashboard import mcp_relay_routes
 from tools.dashboard import jira_routes
 from tools.dashboard import identity_routes
 from tools.dashboard import unlock_routes
+from tools.dashboard import vault_routes
 from tools.dashboard import api_auth
 from tools.dashboard import network_routes
 if os.environ.get("DASHBOARD_MOCK"):
@@ -18239,6 +18240,7 @@ routes = [
 
     # Personal identity + passkey enrollment (Get started onboarding)
     *identity_routes.ROUTES,
+    *vault_routes.ROUTES,
 
     # Invite bridge, local half (auto-1ihgz): display/consent shell only.
     # Acceptance mechanics are held for the ceremony-workflow ruling
