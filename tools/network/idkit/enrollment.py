@@ -78,6 +78,16 @@ longer matches anything the root said.
 There is no path that adds PRF to an already-enrolled credential (``auto-oox5r``,
 operator 2026-08-03). A device that wants it enrolls a NEW passkey — which mints
 its own statement at the ceremony — and the old row is deleted.
+
+## Wire compatibility
+
+There is none to preserve, deliberately. Statements minted before
+``initial_sign_count`` became part of the binding do not parse, and that is the
+correct outcome rather than an oversight: accepting one would mean accepting a
+counter floor nobody signed, which is exactly the guarantee the field exists to
+give. No such statement ever reached production. A parser default here would
+have bought compatibility with a handful of throwaway test artifacts at the
+price of a silent hole.
 """
 
 from __future__ import annotations
@@ -294,8 +304,8 @@ def mint(
     origin: str,
     nonce: str,
     created_hlc: tuple,
+    initial_sign_count: int,
     provisioning_public_key: str | None = None,
-    initial_sign_count: int = 0,
     label: str | None = None,
     transports: tuple = (),
     aaguid: str | None = None,
