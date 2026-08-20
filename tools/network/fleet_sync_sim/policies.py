@@ -150,6 +150,14 @@ TABLE_POLICIES: Final[dict[str, TablePolicy]] = {
         timestamp_columns=(),
         note="signed storage-state descriptor wire bytes",
     ),
+    "keycontrol_grant": TablePolicy(
+        "keycontrol_grant", PolicyKind.IMMUTABLE, ("grant_id",),
+        timestamp_columns=(),
+        note=(
+            "signed capability-grant wire bytes; immutable content-addressed "
+            "record required to open a newly synchronized generation"
+        ),
+    ),
     "keycontrol_credential": TablePolicy(
         "keycontrol_credential", PolicyKind.IMMUTABLE_PRUNABLE,
         ("kem_key_id",), timestamp_columns=(),

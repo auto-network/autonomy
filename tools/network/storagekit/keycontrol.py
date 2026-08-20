@@ -159,6 +159,14 @@ CREATE TABLE IF NOT EXISTS keycontrol_state (
     state_id TEXT PRIMARY KEY,
     wire     BLOB NOT NULL
 );
+CREATE TABLE IF NOT EXISTS keycontrol_grant (
+    grant_id             TEXT PRIMARY KEY,
+    storage_state_id     TEXT NOT NULL,
+    recipient_kem_key_id TEXT NOT NULL,
+    wire                 BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS keycontrol_grant_state
+    ON keycontrol_grant (storage_state_id);
 CREATE TABLE IF NOT EXISTS keycontrol_credential (
     kem_key_id TEXT PRIMARY KEY,
     persona    TEXT NOT NULL,

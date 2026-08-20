@@ -54,6 +54,11 @@ def _insert_vault_and_keycontrol(conn: sqlite3.Connection) -> tuple:
         "INSERT INTO keycontrol_state VALUES(?,?)",
         (descriptor.state_id, descriptor.to_json()),
     )
+    grant_wire = b"signed-capability-grant-wire"
+    conn.execute(
+        "INSERT INTO keycontrol_grant VALUES(?,?,?,?)",
+        ("grant-1", descriptor.state_id, credential.kem_key_id, grant_wire),
+    )
     conn.execute(
         "INSERT INTO keycontrol_credential VALUES(?,?,?)",
         (credential.kem_key_id, credential.persona, credential.to_json()),
@@ -69,7 +74,7 @@ def _insert_vault_and_keycontrol(conn: sqlite3.Connection) -> tuple:
         "INSERT INTO vault_state_object_counts VALUES(?,?)",
         (descriptor.state_id, 999),
     )
-    return ciphertext, header, descriptor, credential, bridge
+    return ciphertext, header, descriptor, credential, bridge, grant_wire
 
 
 def test_vault_and_keycontrol_round_trip_through_real_alpha_checkpoint(
@@ -79,14 +84,14 @@ def test_vault_and_keycontrol_round_trip_through_real_alpha_checkpoint(
     target_path = tmp_path / "target.db"
     with FleetSyncAlpha(origin_path, "machine-a") as origin:
         with origin.author(100, "vault-transaction"):
-            ciphertext, header, descriptor, credential, bridge = (
+                ciphertext, header, descriptor, credential, bridge, grant_wire = (
                 _insert_vault_and_keycontrol(origin.graph.conn)
             )
         checkpoint = origin.checkpoint(
             tmp_path / "checkpoint", roster_epoch=1,
             active_roster=("machine-a", "machine-b"), target_chunk_bytes=4096,
         )
-        assert checkpoint.base_records == 5
+        assert checkpoint.base_records == 6
 
     transport_checkpoint_via_raptorq(
         tmp_path / "checkpoint", tmp_path / "received", symbol_size=256
@@ -125,6 +130,9 @@ def test_vault_and_keycontrol_round_trip_through_real_alpha_checkpoint(
         assert bytes(target.conn.execute(
             "SELECT wire FROM keycontrol_state"
         ).fetchone()[0]) == descriptor.to_json()
+        assert bytes(target.conn.execute(
+            "SELECT wire FROM keycontrol_grant WHERE grant_id='grant-1'"
+        ).fetchone()[0]) == grant_wire
         assert bytes(target.conn.execute(
             "SELECT wire FROM keycontrol_credential"
         ).fetchone()[0]) == credential.to_json()
