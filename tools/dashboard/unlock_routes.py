@@ -993,11 +993,22 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": "body must be JSON"},
                             status_code=400)
     keys = body.get("generation_keys") if isinstance(body, dict) else None
-    if not isinstance(keys, dict) or not keys:
+    if not isinstance(keys, dict):
         return JSONResponse({"ok": False, "error": (
-            "body must carry 'generation_keys' as {state_id: hex} — an empty "
-            "set means the browser opened no grants, which is a failure to "
-            "report rather than a vault to bring up half-way"
+            "body must carry 'generation_keys' as {state_id: hex}"
+        )}, status_code=400)
+    if not keys and _personal_store_has_generations():
+        # Refusing empty is right for a store that HAS sealed content: it means
+        # the browser opened no grants, which is a failure to report rather
+        # than a vault to bring up half-way. It is wrong on a first unlock,
+        # where there are legitimately none — nothing has ever been sealed, and
+        # the sealer mints the first generation on the first write. Treating
+        # that as an error is why the vault could never be woken up on a fresh
+        # personal store.
+        return JSONResponse({"ok": False, "error": (
+            "generation_keys is empty but this store holds sealed content — "
+            "the browser opened no grants, which is a failure to report rather "
+            "than a vault to bring up half-way"
         )}, status_code=400)
 
     decoded: dict[str, bytes] = {}
@@ -1035,6 +1046,24 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
             f"the vault could not be brought up: {exc}"
         )}, status_code=500)
     return JSONResponse({"ok": True, "generations": loaded})
+
+
+def _personal_store_has_generations() -> bool:
+    """Whether anything has ever been sealed in the operator's own store.
+
+    Distinguishes "the browser opened no grants" (a failure) from "there are no
+    grants to open" (a first unlock). Fails to False on any error: an
+    unreadable key-control store must not be the thing that blocks a fresh
+    identity from ever bringing its vault up.
+    """
+    try:
+        from tools.network.storagekit.keycontrol import KeyControlStore
+        from tools.vault.db_content_store import vault_db_path_for
+
+        with KeyControlStore(vault_db_path_for(None)) as kc:
+            return bool(kc.states)
+    except Exception:
+        return False
 
 
 def _bring_vault_up(generation_keys: dict, delegate_hex: "str | None" = None) -> int:
