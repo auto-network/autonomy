@@ -114,3 +114,120 @@ def test_no_operator_string_claims_revocation_removes_existing_access():
             for m in pat.finditer(text):
                 offenders.append(f"{path.name}: {m.group(0)!r}")
     assert not offenders, "operator text claims revocation removes existing access:\n" + "\n".join(offenders)
+
+
+# ── a passkey's address must come from the root, not from the caller ────────
+#
+# Reported by the relay pillar, 2026-08-20: enroll_passkey_factor took a bare
+# PublishedFactor and persisted its public key, and enroll_into_class then
+# sealed every existing generation to it. Nothing consulted a statement.
+#
+# These pin the fixed shape rather than the fix: the unsafe call must be
+# UNWRITABLE, not merely discouraged. A guard is forgotten at the next call
+# site; a signature that cannot be expressed is not.
+
+
+def _enrolment(root, *, prov, label="Test device"):
+    from tools.network.idkit.enrollment import mint
+
+    return mint(
+        root=root,
+        credential_id="Y3JlZA",
+        credential_public_key="a1" * 20,
+        rp_id="localhost",
+        origin="https://localhost:8080",
+        nonce="ab" * 32,
+        created_hlc=(1_755_600_000_000, 0),
+        initial_sign_count=0,
+        label=label,
+        provisioning_public_key=prov,
+    )
+
+
+def _passkey_root():
+    from tools.network.idkit import KeyPair
+    from tools.vault.factors import create_passkey_factor, random_seed
+
+    root = KeyPair.generate()
+    seed = random_seed()
+    published = create_passkey_factor(seed, factor_id="pk-1")
+    return root, seed, published
+
+
+def test_a_bare_public_key_can_no_longer_be_enrolled():
+    """THE REGRESSION. The old signature accepted a PublishedFactor — a public
+    key with no provenance. Passing one must now fail to bind at all."""
+    store = _store()
+    _, _, published = _passkey_root()
+    with pytest.raises(TypeError):
+        service.enroll_passkey_factor(store, "pk-1", published)
+
+
+def test_a_statement_enrols_the_address_it_attests():
+    store = _store()
+    root, _, published = _passkey_root()
+    statement = _enrolment(root, prov=published.public_key)
+    got = service.enroll_passkey_factor(
+        store, "pk-1", statement=statement, root_pub=root.public_hex
+    )
+    assert got.public_key == published.public_key
+    assert store.get_published_factor("pk-1").public_key == published.public_key
+
+
+def test_a_statement_from_a_stranger_enrols_nothing():
+    from tools.network.idkit import KeyPair
+
+    store = _store()
+    root, _, published = _passkey_root()
+    stranger = KeyPair.generate()
+    statement = _enrolment(stranger, prov=published.public_key)
+    with pytest.raises(Exception):
+        service.enroll_passkey_factor(
+            store, "pk-1", statement=statement, root_pub=root.public_hex
+        )
+    with pytest.raises(VaultError):
+        store.get_published_factor("pk-1")
+
+
+def test_a_row_disagreeing_with_its_statement_enrols_nothing():
+    """The address is the statement's, and the row's copy must agree with it —
+    the attack is a row edited to an attacker key with the statement intact."""
+    store = _store()
+    root, _, published = _passkey_root()
+    statement = _enrolment(root, prov=published.public_key)
+    with pytest.raises(Exception):
+        service.enroll_passkey_factor(
+            store, "pk-1", statement=statement, root_pub=root.public_hex,
+            row_key="ee" * 32,
+        )
+    with pytest.raises(VaultError):
+        store.get_published_factor("pk-1")
+
+
+def test_extending_a_class_seals_only_to_an_attested_address():
+    """enroll_into_class is the higher-value target: it seals EVERY existing
+    generation to the new factor, so an unattested address there reaches
+    everything already stored, not only what is written next."""
+    store = _store()
+    genesis = make_test_genesis()
+    a = make_test_identity(factor_id="pw-1", password="alpha")
+    service.enroll_password_factor(store, a.factor_id, a.password)
+    class_id = service.create_policy_class(store, "password", ["pw-1"], created_at="t0")
+    cek = service.seal_setting(store, "s.a", class_id, genesis, "password",
+                               _seeds(store, a))
+
+    root, seed, published = _passkey_root()
+    statement = _enrolment(root, prov=published.public_key)
+
+    # a bare key is not an accepted shape any more
+    with pytest.raises(TypeError):
+        service.enroll_into_class(
+            store, class_id, _seeds(store, a), "pk-1", new_passkey=published
+        )
+    # and a statement without a root to check it against is refused
+    with pytest.raises(VaultError, match="root_pub"):
+        service.enroll_into_class(
+            store, class_id, _seeds(store, a), "pk-1",
+            new_passkey_statement=statement,
+        )
+    assert service.open_setting(store, "s.a", _seeds(store, a)) == cek
