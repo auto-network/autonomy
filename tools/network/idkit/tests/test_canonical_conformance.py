@@ -18,8 +18,24 @@ import pytest
 
 from tools.network.idkit import KeyPair
 from tools.network.idkit.canonical import canonical_json
-from tools.network.idkit.enrollment import ENROLLMENT_DOMAIN, mint, verify
+from tools.network.idkit.enrollment import (
+    ENROLLMENT_DOMAIN,
+    EnrollmentError,
+    mint,
+    verify,
+)
 from tools.network.idkit.errors import MalformedError
+
+# Shared valid statement kwargs (a unicode label is added per-test where needed).
+_STMT_KW = dict(
+    credential_id="Y3JlZGVudGlhbA",
+    credential_public_key="a1" * 20,
+    rp_id="localhost",
+    origin="https://localhost:8080",
+    nonce="ab" * 32,
+    created_hlc=(1_755_600_000_000, 0),
+    provisioning_public_key="aa" * 32,
+)
 
 # name, input, expected canonical bytes, cross-impl trap it pins
 CANONICAL_VECTORS = [
@@ -92,20 +108,33 @@ def test_enrollment_signing_input_escapes_a_unicode_label():
     raw UTF-8 — so a mirror computing signing_input with a naive JSON.stringify
     would build different bytes and fail to verify a genuine statement."""
     root = KeyPair.generate()
-    stmt = mint(
-        root=root,
-        credential_id="Y3JlZGVudGlhbA",
-        credential_public_key="a1" * 20,
-        rp_id="localhost",
-        origin="https://localhost:8080",
-        nonce="ab" * 32,
-        created_hlc=(1_755_600_000_000, 0),
-        initial_sign_count=7,
-        provisioning_public_key="aa" * 32,
-        label="café \U0001F512",
-    )
+    stmt = mint(root=root, initial_sign_count=7, label="café \U0001F512", **_STMT_KW)
     si = stmt.signing_input()
     assert si.startswith(ENROLLMENT_DOMAIN)
     assert b'"label":"caf\\u00e9 \\ud83d\\udd12"' in si  # escaped, ASCII
     assert "café".encode("utf-8") not in si              # never the raw bytes
     assert verify(stmt, root_pub=root.public_hex) is not None
+
+
+def test_wire_parse_rejects_noncanonical_integer_forms():
+    """The SECOND cross-impl surface: the WIRE parse, not just canonicalisation.
+    ``JSON.parse`` collapses ``100``, ``100.0`` and ``1e2`` to the same Number,
+    so a mirror that parses with it (and checks ``Number.isInteger``) would ACCEPT
+    an integer field written as ``100.0`` / ``1e2`` — which Python rejects
+    (``json.loads`` -> float -> strict-int check). A conformant mirror MUST reject
+    any integer field whose wire text carries ``.`` or ``e``/``E``. (``+100`` and
+    ``0100`` are rejected by the JSON grammar on both sides — pinned for
+    completeness.) The signature is unaffected either way — canonicalisation
+    re-emits ``100`` — so this is a VALIDITY divergence: the same bytes are
+    malformed to Python and valid to a naive mirror, which is a split-brain the
+    format's 'one signed object, one interpretation' property forbids."""
+    root = KeyPair.generate()
+    genuine = mint(root=root, initial_sign_count=100, **_STMT_KW)
+    wire = genuine.to_json().decode()
+    assert verify(wire.encode(), root_pub=root.public_hex) is not None  # baseline
+    for bad in ("100.0", "1e2", "1E2", "+100", "0100"):
+        tampered = wire.replace(
+            '"initial_sign_count":100', f'"initial_sign_count":{bad}')
+        assert tampered != wire, f"replacement for {bad!r} did not apply"
+        with pytest.raises(EnrollmentError):
+            verify(tampered.encode(), root_pub=root.public_hex)
