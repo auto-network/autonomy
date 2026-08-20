@@ -36,6 +36,7 @@ from .registry import (
     SettingSchema,
     field,
     keyed_per_entity,
+    publication_band,
 )
 
 
@@ -68,7 +69,16 @@ SYNOPSIS = {
 #: undeclared home cannot refuse a write into an organization's database,
 #: and leaves a bare `graph set members` looking in the caller's own
 #: store and reporting "(no Settings)" for rows that plainly exist.
+#: Band-pinned for the same reason its sibling ``dashboard.claude.credentials``
+#: is: the payload carries an OAuth token triple. Without this the band resolves
+#: to the full range, and two things follow that nobody chose — the row can be
+#: promoted to a peer-visible state, and ``read_set`` opens peer databases for
+#: this set at all, because whether peers compose is derived from exactly this
+#: declaration (``settings_ops`` drops peers when the band cannot reach a
+#: peer-visible state). A secret at ``published`` is the one real read-side leak
+#: the rubric names, and the sibling set was already pinned against it.
 @home("personal")
+@publication_band(max="raw")
 @keyed_per_entity(key_strategy="account_uuid")
 class CodexCredentialsV1(SettingSchema):
     """Per-account Codex OAuth credentials.
