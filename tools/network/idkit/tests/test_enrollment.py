@@ -1,8 +1,8 @@
 """What a passkey enrollment statement must refuse.
 
-The settings store is agent-writable by design, so the row describing a passkey
-is attacker-controlled input. These tests are about one property: no path
-produces a sealing address the personal root did not sign.
+These tests are about one property: no path produces a sealing address the
+personal root did not sign — at ingest from another machine, or at use, whenever
+and however the row got where it is.
 
 The per-field assertions are deliberate rather than a single "tampering is
 caught" case. A binding that covers most of its fields looks identical to one
@@ -41,6 +41,10 @@ def _kw():
         origin="https://localhost:8080",
         nonce="ab" * 32,
         created_hlc=(1_755_600_000_000, 0),
+        label="Jeremy's MacBook Pro",
+        initial_sign_count=7,
+        transports=("internal",),
+        aaguid="fbfc3007-154e-4ecc-8c0b-6e020557d7bd",
     )
 
 
@@ -129,6 +133,11 @@ def test_a_non_prf_statement_cannot_GROW_a_provisioning_key(root, plain_statemen
         ("provisioning_public_key", ATTACKER),
         ("created_hlc", [1, 1]),
         ("version", ENROLLMENT_VERSION + 1),
+        # confirmed unsigned by the Mission Control pillar review, 2026-08-20
+        ("label", "Jeremy's YubiKey"),
+        ("initial_sign_count", 0),
+        ("transports", ["usb"]),
+        ("aaguid", "00000000-0000-0000-0000-000000000000"),
     ],
 )
 def test_every_signed_field_is_actually_covered(root, prf_statement, field, value):
@@ -171,3 +180,95 @@ def test_the_domain_prefix_separates_this_from_other_signed_records(prf_statemen
     assert prf_statement.signing_input().startswith(
         b"autonomy.identity.passkey-enrollment.v1\n"
     )
+
+
+# ── what the operator READS is what the operator DECIDES on ──
+
+
+def test_the_label_a_human_chooses_by_cannot_be_forged(root, prf_statement):
+    """The attack this closes: the address is signed, so it cannot be swapped —
+    but the operator never sees an address. They see a name, and they authorise
+    a ceremony against the device that name refers to. Leave the name unsigned
+    and the signature protects the half of the decision nobody makes."""
+    relabelled = prf_statement.to_dict()
+    relabelled["label"] = "Jeremy's YubiKey"
+    with pytest.raises(SignatureError):
+        verify(relabelled, root_pub=root.public_hex)
+
+
+def test_a_statement_with_no_label_cannot_grow_one(root):
+    """Same omission discipline as the provisioning key: a credential enrolled
+    without a name commits to a payload that has none."""
+    unnamed = mint(root=root, **{**_kw(), "label": None})
+    assert verify(unnamed, root_pub=root.public_hex).label is None
+    grown = unnamed.to_dict()
+    grown["label"] = "Jeremy's MacBook Pro"
+    with pytest.raises(SignatureError):
+        verify(grown, root_pub=root.public_hex)
+
+
+def test_the_counter_baseline_is_signed_but_the_live_counter_is_not(root, prf_statement):
+    """A static statement can bind what the counter read at enrollment. It
+    cannot bind the live one — that would need re-signing per assertion, which
+    this record deliberately does not do. Anything checking monotonicity must
+    compare against this floor rather than a previous row read."""
+    assert verify(prf_statement, root_pub=root.public_hex).initial_sign_count == 7
+    lowered = prf_statement.to_dict()
+    lowered["initial_sign_count"] = 0
+    with pytest.raises(SignatureError):
+        verify(lowered, root_pub=root.public_hex)
+
+
+def test_a_renamed_device_needs_a_new_statement(root):
+    """The consequence of signing the label, asserted so it is not discovered
+    later as a bug: you cannot edit a name in place."""
+    original = mint(root=root, **_kw())
+    renamed = mint(root=root, **{**_kw(), "label": "Work laptop"})
+    assert original.signature != renamed.signature
+    assert verify(renamed, root_pub=root.public_hex).label == "Work laptop"
+
+
+# ── a boolean is not an integer, however hard Python insists ──
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"version": True},
+        {"created_hlc": (True, False)},
+        {"initial_sign_count": True},
+    ],
+)
+def test_a_correctly_signed_record_with_booleans_for_numbers_is_refused(root, override):
+    """Reported by the relay pillar. `True == 1` and `isinstance(True, int)`, so
+    a naive check accepts a record whose wire form carries `true` where a number
+    belongs — correctly signed, so no signature check catches it.
+
+    Not a forgery vector: the root signed it. It matters because a second
+    implementation reading the same bytes is free to reject what this one
+    accepts, and two verifiers that disagree while both believing they agree is
+    the failure cross-implementation vectors exist to find.
+    """
+    from dataclasses import fields as dc_fields
+
+    base = dict(
+        version=ENROLLMENT_VERSION,
+        credential_id="Yw",
+        credential_public_key="a1" * 20,
+        rp_id="localhost",
+        origin="https://localhost:8080",
+        nonce="ab" * 32,
+        created_hlc=(1, 0),
+        signer=root.public_hex,
+        signature="0" * 128,
+        provisioning_public_key=PROV,
+        initial_sign_count=0,
+    )
+    base.update(override)
+    draft = PasskeyEnrollmentStatement(**base)
+    signed = PasskeyEnrollmentStatement(
+        **{**{f.name: getattr(draft, f.name) for f in dc_fields(draft)},
+           "signature": root.sign_hex(draft.signing_input())}
+    )
+    with pytest.raises(EnrollmentError, match="not a boolean"):
+        verify(signed, root_pub=root.public_hex)
