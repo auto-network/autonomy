@@ -204,7 +204,7 @@ def _land_advance(advance, cache, key_control, fold_at, authority_ancestry) -> N
     no cache, so the row is written and CANNOT BE READ BACK, and the next write
     re-mints because it cannot find the first.
 
-    Two things are load-bearing on one machine:
+    Three things are load-bearing:
 
     * The DESCRIPTOR is accepted into the key-control store, so the holder —
       which builds its ``Holdings`` from exactly that store — finds the
@@ -212,12 +212,16 @@ def _land_advance(advance, cache, key_control, fold_at, authority_ancestry) -> N
     * The SECRET is fed to the cache. ``seal_revision`` did add it to the
       holdings we passed, but ``VaultKeyCache.secrets`` hands out a COPY, so
       that mutation lands on a dict that dies with this call.
-
-    ``advance.grants`` are for OTHER machines and belong to the broker
-    (``auto-pw9bs.3``). Dropping them is correct for one box and is a RECORDED
-    LIMIT, not an omission: until the broker is wired, a secret written here is
-    readable ONLY here, because no other fleet member receives a grant for the
-    generation this write minted.
+    * The GRANTS are persisted into the key-control store. Each seals the new
+      generation's secret to a member's KEM credential; for a personal store —
+      one member, the operator — that is a self-grant. It is the ONLY DURABLE
+      copy of the generation secret: the cache is in-memory and dies on
+      restart, so without the persisted grant a reboot loses the key and the
+      secret can never be reopened. At the next unlock the operator re-derives
+      their KEM key from the root and opens the grant to rebuild the cache
+      (``open_generation_keys``). Grants for OTHER fleet members still reach
+      them through the broker (``auto-pw9bs.3``); persisting here — the local
+      recipient's own recovery copy — does not replace that.
     """
     key_control.accept_state(
         advance.descriptor,
@@ -226,6 +230,8 @@ def _land_advance(advance, cache, key_control, fold_at, authority_ancestry) -> N
         bridges=tuple(advance.bridges),
     )
     cache.add(advance.descriptor.state_id, advance.secret)
+    for grant in advance.grants:
+        key_control.accept_grant(grant)
 
 
 def register_vault_sealer(
