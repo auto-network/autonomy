@@ -91,6 +91,19 @@ def platform_snapshot(monkeypatch, tmp_path):
     return fake
 
 
+@pytest.fixture(autouse=True)
+def neutralize_mount_preflight(monkeypatch):
+    """Every test here asserts on the ASSEMBLED docker argv with docker and the
+    filesystem stubbed; none stages the real mount sources on disk. The launcher
+    now preflights every emitted mount SOURCE against the frame the daemon binds
+    from and refuses a missing one by name — so on a machine that simply has no
+    ``<repo>/.beads`` (this one) it would refuse every launch under test. Report
+    'nothing missing' by default; the dedicated preflight test below re-patches
+    this to stage an absence and assert the refusal."""
+    from agents import secret_ramfs
+    monkeypatch.setattr(secret_ramfs, "daemon_missing", lambda paths: [])
+
+
 def _run(**kw):
     """Call launch_session with common defaults filled in.
 
@@ -297,6 +310,26 @@ def test_codex_interactive_uses_codex_entrypoint(
     assert "--no-alt-screen" in cmd
     assert "--dangerously-bypass-approvals-and-sandbox" in cmd
     assert "--dangerously-skip-permissions" not in cmd
+
+
+def test_launch_refuses_and_names_a_missing_mount_source(
+    tmp_path, fake_creds, fake_crosstalk, captured_run, monkeypatch, capsys,
+):
+    """A mount SOURCE absent in the daemon's bind frame refuses the launch BY
+    NAME before docker run — never the nameless 'produced no container' that
+    cost an hour on the node (host-0818 / qk4ip). Docker is never invoked."""
+    from agents import secret_ramfs
+    # The daemon frame reports the beads source (only) as absent.
+    monkeypatch.setattr(
+        secret_ramfs, "daemon_missing",
+        lambda paths: [p for p in paths if p.endswith("/.beads")],
+    )
+    out = _run(output_dir=str(tmp_path / "run"))
+    assert out is None                       # refused, not launched
+    assert captured_run == []                # docker run never invoked
+    err = capsys.readouterr().err
+    assert "do not exist on the daemon host" in err
+    assert "/.beads -> /data/.beads" in err  # the exact path + dest are named
 
 
 def test_codex_interactive_does_not_require_claude_credentials(

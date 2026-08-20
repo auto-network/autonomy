@@ -387,6 +387,45 @@ def mount_args(plan: MountPlan, topo: NodeTopology) -> list:
     return out
 
 
+def preflight_sources(plan: "MountPlan", topo: "NodeTopology") -> list:
+    """``(host_path, dest)`` for every mount whose SOURCE is a concrete host path
+    that must already exist for ``docker run`` to succeed — so a missing one can
+    be NAMED before the run instead of failing namelessly (``docker run`` with a
+    missing source, bind OR volume-subpath, creates NO container and reports
+    nothing that identifies the path — the wjzh4/qk4ip class of failure).
+
+    Resolves the plan exactly as ``mount_args`` does and covers the two source
+    kinds a missing path can hide in:
+
+      * host BINDS (``bind_refuse_missing`` and plain ``-v``): the ``host_source``.
+      * VOLUME-SUBPATH mounts: the subpath must already exist INSIDE the volume,
+        whether the daemon takes it natively (``volume-subpath=``) or via the
+        pre-1.45 bind fallback. Its host path is ``<volume mountpoint>/<subpath>``,
+        the same derivation ``emit`` uses for the fallback.
+
+    Skipped (nothing the launcher should stat): a WHOLE-volume mount (the daemon
+    names a missing named volume itself), a ``/dev/null`` device bind, and a
+    volume whose host mountpoint can't be located (no safe path to check —
+    ``emit`` refuses that case at run time anyway). Every returned path is in the
+    frame the DAEMON binds from, so the caller must stat it there, not locally."""
+    out: list = []
+    for spec in plan.specs():
+        r = resolve(spec, topo)
+        if r is None:
+            continue
+        dest, _ = _spec_dest_mode(r.container_spec)
+        if r.volume is not None:
+            if r.subpath:
+                host = _volume_host_source(topo, r.volume)
+                if host:
+                    out.append((os.path.join(host, r.subpath), dest))
+            continue  # whole-volume: daemon owns its existence
+        src = r.host_source
+        if src and src != "/dev/null":
+            out.append((src, dest))
+    return out
+
+
 # ── Topology discovery ───────────────────────────────────────────────────────
 
 def _daemon_supports_volume_subpath() -> bool:

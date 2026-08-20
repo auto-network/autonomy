@@ -39,6 +39,7 @@ is verified, not assumed).
 """
 from __future__ import annotations
 
+import base64
 import os
 import re
 import subprocess
@@ -222,6 +223,58 @@ def teardown_session_dir(session_name: str, *, base: str = DELIVERY_MOUNT) -> No
             subprocess.run(["rm", "-rf", path], timeout=15)
     except (ProvisionError, subprocess.SubprocessError, OSError):
         pass
+
+
+def daemon_missing(paths: list) -> "list | None":
+    """The subset of *paths* that do NOT exist in the frame the Docker daemon
+    binds a ``--mount`` source from — or ``None`` if the check could not be run,
+    so the caller fails OPEN (docker itself stays the backstop) instead of
+    refusing a launch it could not actually disprove.
+
+    On a containerized node the daemon binds from PID 1's mount namespace, which
+    this container does NOT share: a session's per-session ramfs subdir and a
+    volume's ``/var/lib/docker/volumes`` mountpoint both exist there and not
+    here, and a translated volume path exists here at a different path than the
+    daemon uses — so a stat in our own frame is wrong in both directions. Stat
+    THERE, through the socket the node already holds, the same privilege used to
+    provision the ramfs above. Paths are passed base64-encoded so a source with
+    shell metacharacters cannot break the probe. On a host-native node the
+    process frame IS the daemon frame, so stat in-process.
+    """
+    uniq = [p for p in dict.fromkeys(paths) if p]
+    if not uniq:
+        return []
+    cid = _own_container_id()
+    if cid is None:
+        return [p for p in uniq if not os.path.exists(p)]
+    if not Path(_DOCKER_SOCKET).exists():
+        return None  # containerized but no socket to reach the daemon frame
+    try:
+        image = _own_image(cid)
+    except ProvisionError:
+        return None
+    enc = " ".join(base64.b64encode(p.encode()).decode() for p in uniq)
+    script = (
+        f'for b in {enc}; do '
+        f'p=$(printf %s "$b" | base64 -d); '
+        f'[ -e "$p" ] || printf "%s\\n" "$p"; '
+        f'done'
+    )
+    try:
+        r = subprocess.run(
+            ["docker", "run", "--rm", "--privileged", "--pid=host",
+             "--entrypoint", "nsenter", image,
+             "-t", "1", "-m", "--", "sh", "-c", script],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if r.returncode != 0:
+        return None
+    # Decode-then-stat can only report a path that was IN the probe set; trust
+    # exact-match membership, not substring, so an odd path can't smuggle a line.
+    absent = {ln for ln in r.stdout.splitlines() if ln}
+    return [p for p in uniq if p in absent]
 
 
 def _is_ramfs(path: str) -> bool:
