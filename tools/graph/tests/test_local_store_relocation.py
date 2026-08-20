@@ -40,7 +40,6 @@ def orgs_root(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(root))
     monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.delenv("GRAPH_ORG", raising=False)
-    monkeypatch.setattr(graph_db_mod, "DEFAULT_DB", tmp_path / "legacy.db")
     GraphDB.close_all_pooled()
     data_paths._LEGACY_STORE_CLASSIFICATION.clear()
     yield root

@@ -60,9 +60,8 @@ def test_initialize_creates_empty_deployment(tmp_path):
     for rel in ("", "orgs", "agent-runs", "session-traces"):
         assert (data / rel).is_dir()
 
-    # graph.db carries the canonical schema.
-    graph_tables = _tables(data / "graph.db")
-    assert {"sources", "thoughts", "settings", "orgs"} <= graph_tables
+    # The obsolete single-DB store is never provisioned.
+    assert not (data / "graph.db").exists()
 
     # Org DBs: operator-named first org + personal, each with its
     # bootstrap row and identity Setting.

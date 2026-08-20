@@ -218,13 +218,12 @@ def create_snapshot(
         pass
     else:
         raise PortabilityError("snapshot artifact must be outside the source volume")
-    graph_path = _resolved_store_path(root, "graph", "graph.db")
     orgs_path = _resolved_store_path(root, "orgs", "orgs")
     personal_homes = (orgs_path.parent / "personal.db", orgs_path / "personal.db")
-    if not graph_path.is_file() or not any(p.is_file() for p in personal_homes):
+    if not any(p.is_file() for p in personal_homes):
         raise PortabilityError(
             "selected volume is not an initialized node "
-            "(graph.db and the personal store are required)"
+            "(the personal store is required)"
         )
 
     dump_path = Path(beads_dump).resolve() if beads_dump is not None else None
@@ -640,11 +639,11 @@ def _root_volume_stores(volume_root: Path) -> Iterator[None]:
 
     saved[DATA_ROOT_ENV] = os.environ.get(DATA_ROOT_ENV)
     os.environ[DATA_ROOT_ENV] = str(volume_root)
+    # GRAPH_DB is a whole-DB pin, not a store location: never point it at
+    # the volume — clearing it lets per-org resolution route normally.
+    saved["GRAPH_DB"] = os.environ.get("GRAPH_DB")
+    os.environ.pop("GRAPH_DB", None)
     for store in STORE_MANIFEST:
-        if store.key == "graph":
-            saved[store.env] = os.environ.get(store.env)
-            os.environ.pop(store.env, None)
-            continue
         if store.env:
             saved[store.env] = os.environ.get(store.env)
             os.environ[store.env] = str(volume_root / store.relative)

@@ -39,11 +39,11 @@ from tools.graph.ingest import _open_db_for_session, session_target_org
 
 @pytest.fixture
 def orgs_root(tmp_path, monkeypatch):
-    """Pin ``AUTONOMY_ORGS_DIR`` + ``DEFAULT_DB`` to tmp, unset ``GRAPH_DB``.
+    """Pin ``AUTONOMY_ORGS_DIR`` to tmp, unset ``GRAPH_DB``.
 
     Every write-routing test must clear ``GRAPH_DB`` because the dispatch
     container exports it; tests inherit that env in CI otherwise.
-    ``DEFAULT_DB`` redirects so the legacy fallback branch never touches
+    so nothing touches
     the real ``data/graph.db``.
     """
     root = tmp_path / "orgs"
@@ -51,7 +51,6 @@ def orgs_root(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(root))
     monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.delenv("GRAPH_ORG", raising=False)
-    monkeypatch.setattr(graph_db_mod, "DEFAULT_DB", legacy)
     return root
 
 
@@ -280,22 +279,20 @@ def test_scopeless_write_lands_in_personal_db(orgs_root):
         au.close()
 
 
-def test_scopeless_write_falls_back_to_legacy_when_personal_absent(orgs_root):
-    """Pre-bootstrap (personal.db not yet materialised): scopeless writes
-    fall through to the legacy ``data/graph.db`` path so pre-migration
-    installations keep working."""
-    # No personal.db, no autonomy.db — only the legacy fallback exists.
-    ops.insert_capture("cap-legacy", "legacy fallback")
+def test_scopeless_write_materializes_personal_before_bootstrap(orgs_root):
+    """Pre-bootstrap (personal.db not yet materialised): a scopeless content
+    write materializes the personal store and lands there — nothing ever
+    resolves to any other file."""
+    ops.insert_capture("cap-fresh", "fresh personal")
 
-    # The fixture redirected DEFAULT_DB to a tmp path.
-    assert graph_db_mod.DEFAULT_DB.exists()
-    legacy = sqlite3.connect(str(graph_db_mod.DEFAULT_DB))
+    personal = sqlite3.connect(str(orgs_root.parent / "personal.db"))
     try:
-        assert legacy.execute(
-            "SELECT COUNT(*) FROM captures WHERE id = ?", ("cap-legacy",),
+        assert personal.execute(
+            "SELECT COUNT(*) FROM captures WHERE id = ?", ("cap-fresh",),
         ).fetchone()[0] == 1
     finally:
-        legacy.close()
+        personal.close()
+
 
 
 def test_graph_db_env_still_wins(orgs_root, tmp_path, monkeypatch):
@@ -399,15 +396,19 @@ def test_settings_add_setting_routes_by_org(orgs_root, stub_schema):
         ac.close()
 
 
-def test_settings_scopeless_add_setting_lands_in_personal(orgs_root, stub_schema):
+def test_settings_scopeless_write_to_unhomed_set_refuses(orgs_root, stub_schema):
+    """There is no default scope (operator ruling 2026-08-20, superseding
+    auto-txg5.3 for Settings): a set with no pinned home cannot choose an
+    organization for the caller, so a write with none named fails closed."""
     GraphDB.create_org_db("personal", type_="personal").close()
     GraphDB.create_org_db("autonomy").close()
 
-    settings_ops.add_setting(
-        "test.routing", 1, "scopeless", {"ok": True},
-     org=ops.CALLER_ORG)
+    with pytest.raises(schemas.SchemaValidationError, match="no default scope"):
+        settings_ops.add_setting(
+            "test.routing", 1, "scopeless", {"ok": True},
+         org=ops.CALLER_ORG)
 
-    assert _count_settings(orgs_root.parent / "personal.db") == 1
+    assert _count_settings(orgs_root.parent / "personal.db") == 0
     assert _count_settings(orgs_root / "autonomy.db") == 0
 
 

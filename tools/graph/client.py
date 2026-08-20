@@ -60,17 +60,16 @@ def _resolve_client_org_arg(org):
     """Mirror :func:`settings_ops._resolve_org_arg` for HTTP-client use.
 
     Settings methods (auto-cfb8u) require ``org=``. The
-    :data:`settings_ops.CALLER_ORG` sentinel opts into the env-cascade
-    (only ``GRAPH_ORG`` is checked in container/CLI contexts — there is
-    no per-request contextvar on the client side; the dashboard server
-    does that resolution server-side from ``X-Graph-Org``).
+    :data:`settings_ops.CALLER_ORG` sentinel resolves to ``None`` on the
+    client side — the client asserts no scope of its own; the server
+    derives a container's org from its session token.
 
     A non-empty string slug routes that org. ``None`` is preserved as
     "no ``X-Graph-Org`` header" — the server treats that as scopeless.
     """
     from .settings_ops import _CallerOrgSentinel
     if isinstance(org, _CallerOrgSentinel):
-        return os.environ.get("GRAPH_ORG")
+        return None
     return org
 
 
@@ -142,10 +141,10 @@ class HttpClient:
     def _headers(self, org: str | None = None) -> dict:
         """Build per-request headers.
 
-        Precedence for ``X-Graph-Org``: explicit ``org`` arg > ``GRAPH_ORG``
-        env. Matches how ``ops.*`` resolves the caller org on the host so
-        the CLI reaches the same DB in both modes without callers having
-        to pass ``--org`` explicitly.
+        ``X-Graph-Org`` is sent only for an explicit ``org`` argument —
+        a deliberate per-call selection. The client reads no ambient
+        scope: a container's org is stamped on its session token and
+        enforced server-side; a host caller names an org or omits one.
 
         A container session token (``CROSSTALK_TOKEN``) is sent additively as
         ``Authorization: Bearer`` so the server can take a remote caller's org
@@ -159,7 +158,7 @@ class HttpClient:
         caller server-side).
         """
         h = {}
-        caller = org or os.environ.get("GRAPH_ORG")
+        caller = org or None
         if caller:
             h["X-Graph-Org"] = caller
         token = os.environ.get("CROSSTALK_TOKEN")

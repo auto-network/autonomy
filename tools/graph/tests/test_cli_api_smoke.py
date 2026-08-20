@@ -118,7 +118,6 @@ def orgs_root(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(root))
     monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.delenv("GRAPH_ORG", raising=False)
-    monkeypatch.setattr(graph_db_mod, "DEFAULT_DB", legacy)
     GraphDB.close_all_pooled()
     # Create the target org DBs so graph_ops writes have somewhere to land.
     GraphDB.create_org_db("personal", type_="personal").close()
@@ -495,7 +494,7 @@ def test_read_source_full_via_api_uses_resolve_endpoint(monkeypatch):
     monkeypatch.setattr(graph_cli, "get_client", lambda: _StubHttpClient())
 
     result = graph_cli._read_source_full_via_api(
-        "abc-def", org="autonomy", around_turn=5, window=2,
+        "abc-def", around_turn=5, window=2,
     )
 
     assert result is not None
@@ -504,7 +503,9 @@ def test_read_source_full_via_api_uses_resolve_endpoint(monkeypatch):
     path, params, org = captured[0]
     assert path == "/api/graph/abc-def"
     assert params == {"turn": "5", "window": "2"}
-    assert org == "autonomy"
+    # The client asserts no scope of its own: the server derives the
+    # caller's org from the session token.
+    assert org is None
 
 
 def test_read_source_full_via_api_tail_n_uses_from(monkeypatch):
@@ -537,7 +538,7 @@ def test_read_source_full_via_api_tail_n_uses_from(monkeypatch):
     monkeypatch.setattr(graph_cli, "get_client", lambda: _StubHttpClient())
 
     result = graph_cli._read_source_full_via_api(
-        "abc-def", org="autonomy", tail_n=7,
+        "abc-def", tail_n=7,
     )
 
     assert result is not None
@@ -655,7 +656,7 @@ def test_read_source_full_via_api_no_window_omits_params(monkeypatch):
             return {"source": {"id": "abc"}, "entries": []}
 
     monkeypatch.setattr(graph_cli, "get_client", lambda: _StubHttpClient())
-    graph_cli._read_source_full_via_api("abc", org=None)
+    graph_cli._read_source_full_via_api("abc")
 
     assert captured == [("/api/graph/abc", None)]
 

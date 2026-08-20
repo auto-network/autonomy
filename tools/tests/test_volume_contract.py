@@ -85,12 +85,12 @@ def test_resolver_precedence_is_env_then_root():
     env must agree, or state lands where nothing looks for it."""
     from tools.data_paths import STORES_BY_KEY
 
-    store = STORES_BY_KEY["graph"]
+    store = STORES_BY_KEY["dashboard"]
     os.environ.pop(store.env, None)
     assert resolve_store(store.key, root=Path("/vol")) == Path("/vol") / store.relative
-    os.environ[store.env] = "/elsewhere/graph.db"
+    os.environ[store.env] = "/elsewhere/dashboard.db"
     try:
-        assert resolve_store(store.key, root=Path("/vol")) == Path("/elsewhere/graph.db")
+        assert resolve_store(store.key, root=Path("/vol")) == Path("/elsewhere/dashboard.db")
     finally:
         os.environ.pop(store.env, None)
 
@@ -165,8 +165,8 @@ def test_the_measurement_catches_an_escaping_store(tmp_path):
     volume = tmp_path / "app-data"
     volume.mkdir()
     env = _rooted_env(volume)
-    escaped = tmp_path / "outside" / "graph.db"
-    env["GRAPH_DB"] = str(escaped)  # a store rooted OUTSIDE the volume
+    escaped = tmp_path / "outside" / "dashboard.db"
+    env["DASHBOARD_DB"] = str(escaped)  # a store rooted OUTSIDE the volume
 
     subprocess.run(
         [sys.executable, "-m", "tools.init", "--root", str(volume)],
@@ -174,7 +174,7 @@ def test_the_measurement_catches_an_escaping_store(tmp_path):
     )
     # The escape is visible: state landed outside the volume root.
     assert escaped.exists(), "expected the un-rooted store to escape the volume"
-    assert not (volume / "graph.db").exists()
+    assert not (volume / "dashboard.db").exists()
 
 
 # -- one precedence rule across every store, orgs included (auto-sthm3) -------------
@@ -237,12 +237,12 @@ def test_data_root_precedence_sits_between_store_env_and_root_arg(
 
     # Ambient base beats the explicit root argument (env-outranks-root,
     # the manifest's standing convergence rule)…
-    assert resolve_store("graph", root=tmp_path / "other") == (
-        tmp_path / "base" / "graph.db"
+    assert resolve_store("dashboard", root=tmp_path / "other") == (
+        tmp_path / "base" / "dashboard.db"
     )
     # …and the store's own variable beats the ambient base.
-    monkeypatch.setenv("GRAPH_DB", str(tmp_path / "pinned.db"))
-    assert resolve_store("graph") == tmp_path / "pinned.db"
+    monkeypatch.setenv("DASHBOARD_DB", str(tmp_path / "pinned.db"))
+    assert resolve_store("dashboard") == tmp_path / "pinned.db"
 
 
 def test_data_root_satisfies_the_refuse_guard(monkeypatch, tmp_path):
@@ -254,7 +254,7 @@ def test_data_root_satisfies_the_refuse_guard(monkeypatch, tmp_path):
     monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.setenv("AUTONOMY_REFUSE_REAL_DATA_FALLBACK", "1")
     monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))
-    assert resolve_store("graph") == tmp_path / "graph.db"
+    assert resolve_store("dashboard") == tmp_path / "dashboard.db"
 
 
 def test_data_root_composes_with_org_routing_never_pins(monkeypatch, tmp_path):
@@ -281,7 +281,7 @@ def test_relative_data_root_is_refused_fail_closed(monkeypatch):
     monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.setenv("AUTONOMY_DATA_ROOT", "relative/base")
     with pytest.raises(AmbiguousDataRoot):
-        resolve_store("graph")
+        resolve_store("dashboard")
 
 
 def test_data_root_does_not_disturb_the_pin_conflict_semantics(

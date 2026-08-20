@@ -14,14 +14,16 @@ import textwrap
 import time
 from pathlib import Path
 
-from .db import GraphDB, DEFAULT_DB, resolve_caller_db_path
+from .db import GraphDB, resolve_caller_db_path
 
 
 # ── Scoped Access ────────────────────────────────────────────
-# GRAPH_ORG env var selects the org DB every read/write in this process
-# routes to — that database is the only scope boundary. GRAPH_DB env var
-# overrides the database path. Agents never see these — they just run
-# `graph search "foo"`.
+# Scope has no ambient source in this CLI. An explicit --org names the org
+# DB a command reads or writes — that database is the only scope boundary.
+# A container's org is stamped on its session token and enforced by the
+# dashboard; a host caller with no --org gets the labeled scopeless view
+# for reads and a refusal for Settings writes with no pinned home.
+# GRAPH_DB env var overrides the database path (test/pin only).
 
 class _pin_db:
     """Context manager that pins ``GRAPH_DB`` env to ``args.db`` for the
@@ -84,19 +86,20 @@ def _get_session_name() -> str:
 def _get_db_path(org: str | None = None) -> Path:
     """Resolve DB path via :func:`resolve_caller_db_path`.
 
-    Priority (inherited from the resolver + CLI cascade):
+    Priority (inherited from the resolver):
       1. ``GRAPH_DB`` env (test override / explicit pin).
       2. Explicit ``org`` kwarg → that org's DB.
-      3. ``GRAPH_ORG`` env → that org's DB (session launcher exports it
-         in containers rooted on a specific org).
-      4. Scopeless default: ``data/personal.db`` (auto-txg5.3 — host
-         CLI writes with no org context converge on the operator's
-         personal DB, absorbing auto-s45z9).
-      5. Legacy ``data/graph.db`` fallback when the per-org DB file is
+      3. Scopeless default: ``data/personal.db`` (auto-txg5.3, content
+         reads/writes only — a Settings write with no pinned home refuses
+         instead; there is no default scope for Settings).
+      4. Legacy ``data/graph.db`` fallback when the per-org DB file is
          absent (pre-migration compatibility).
+
+    Scope comes from the caller's explicit ``--org`` or nothing: the CLI
+    no longer reads ``GRAPH_ORG``. A container's org is stamped on its
+    session token and enforced server-side; a host caller names an org
+    per command or gets the labeled scopeless view.
     """
-    if org is None:
-        org = os.environ.get("GRAPH_ORG")
     return resolve_caller_db_path(org)
 
 
@@ -145,7 +148,7 @@ def _parse_org_args(args) -> tuple[str | None, list[str] | None]:
 
     * ``--only-org SLUG`` (or ``--org SLUG``) → ``only_org=SLUG, peers=None``.
       One-DB scan, peer merge bypassed.
-    * ``--org all`` → ``only_org=None, peers=<all known orgs minus caller>``.
+    * ``--org all`` → ``only_org=None, peers=<every known org>``.
       Admin/host mode: overrides any personal subscription Setting.
     * No flags → ``(None, None)`` → default cross-org per subscription.
 
@@ -170,9 +173,7 @@ def _parse_org_args(args) -> tuple[str | None, list[str] | None]:
 
     if org_mode == "all":
         from .cross_org import list_org_slugs
-        caller = os.environ.get("GRAPH_ORG")
-        all_slugs = list_org_slugs()
-        peers = [s for s in all_slugs if s != (caller or "")]
+        peers = list_org_slugs()
         return None, peers
 
     # `--org <slug>` shortcut (non-"all") behaves like `--only-org`.
@@ -501,7 +502,6 @@ def _resolve_source_cross_org(args, source_arg, *, first=False, allow_title=True
       ``False`` for peer-pooled handles (pool owns them).
     """
     from . import ops as _ops
-    org = os.environ.get("GRAPH_ORG")
 
     # Step 1: own-org resolution against args.db (honours --db pins).
     own_db = GraphDB(args.db)
@@ -518,25 +518,25 @@ def _resolve_source_cross_org(args, source_arg, *, first=False, allow_title=True
 
     if own_result is not None:
         if isinstance(own_result, dict):
-            own_result.setdefault("org", org or "")
+            own_result.setdefault("org", "")
             return own_result, GraphDB(args.db), True
         # Ambiguous in own-org — mirror pre-rewire behavior.
         for r in own_result:
-            r.setdefault("org", org or "")
+            r.setdefault("org", "")
         if first:
             return own_result[0], GraphDB(args.db), True
         return own_result, None, False
 
     if own_title_matches:
         for s in own_title_matches:
-            s.setdefault("org", org or "")
+            s.setdefault("org", "")
         if len(own_title_matches) == 1 or first:
             return own_title_matches[0], GraphDB(args.db), True
         return own_title_matches, None, False
 
     # Step 2: cross-org peer scan (public-surface only).
     peer_result = _ops.resolve_source_strict(
-        source_arg, org=org,
+        source_arg,
     )
 
     if peer_result is None:
@@ -554,8 +554,7 @@ def _resolve_source_cross_org(args, source_arg, *, first=False, allow_title=True
             return peer_result, None, False
 
     home_org = peer_result.get("org") or ""
-    caller = org or ""
-    if home_org and home_org != caller:
+    if home_org:
         try:
             db = GraphDB.for_org(home_org, mode="ro")
         except FileNotFoundError:
@@ -564,7 +563,7 @@ def _resolve_source_cross_org(args, source_arg, *, first=False, allow_title=True
 
     # Peer scan surfaced an own-org match — open that org's DB by slug
     # so subsequent reads target the routed file (args.db may be stale
-    # if ``GRAPH_ORG`` was set after parser bootstrap).
+    # if the org was routed after parser bootstrap).
     if home_org:
         try:
             return peer_result, GraphDB.open_org_db(home_org, mode="rw"), True
@@ -919,7 +918,6 @@ def _print_source_not_found(source_arg: str, *, client=None, display_arg: str | 
     before session resolution) so the message and retry echo their input.
     """
     shown = display_arg or source_arg
-    caller = os.environ.get("GRAPH_ORG") or ""
     hit = None
     if client is not None and hasattr(client, "locate_source_org"):
         try:
@@ -931,11 +929,10 @@ def _print_source_not_found(source_arg: str, *, client=None, display_arg: str | 
         # the org-scoped source read missed — the session API told us its
         # home org even if the graph locate probe can't (older dashboard).
         hit = {"org": _LAST_TMUX_RESOLVED_ORG, "id": source_arg, "type": "session"}
-    if hit and hit.get("org") and hit["org"] != caller:
+    if hit and hit.get("org"):
         import shlex
-        scope = f"org '{caller}'" if caller else "the caller's scope"
         kind = "Session" if hit.get("type") == "session" else "Source"
-        print(f"Source not found in {scope}: {shown}")
+        print(f"Source not found in the caller's scope: {shown}")
         print(
             f"  {kind} {hit['id'][:12]} exists in org '{hit['org']}' — "
             f"outside this session's org scope."
@@ -947,9 +944,9 @@ def _print_source_not_found(source_arg: str, *, client=None, display_arg: str | 
         )
         if is_graph_cli:
             retry = shlex.join(["graph", *sys.argv[1:]])
-            print(f"  To read it anyway: GRAPH_ORG={hit['org']} {retry}")
+            print(f"  To read it anyway: {retry} --only-org {hit['org']}")
         else:
-            print(f"  To read it anyway, re-run with GRAPH_ORG={hit['org']}")
+            print(f"  To read it anyway, re-run with --only-org {hit['org']}")
         return
     print(f"Source not found: {shown}")
 
@@ -1198,9 +1195,8 @@ def _cmd_read_via_api(args, source_arg: str, version_req, client: "HttpClient", 
     through ``/api/graph/note/<id>/version[s]``. HTML-body export is
     still host-only for rich-content notes.
     """
-    org = os.environ.get("GRAPH_ORG")
     try:
-        payload = client._get(f"/api/graph/{source_arg}", org=org)
+        payload = client._get(f"/api/graph/{source_arg}")
     except LookupError:
         _print_source_not_found(source_arg, client=client, display_arg=original_arg)
         return
@@ -1224,7 +1220,7 @@ def _cmd_read_via_api(args, source_arg: str, version_req, client: "HttpClient", 
         sid = source.get("id") or source_arg
         if version_req == "list":
             try:
-                versions = client.list_note_versions(sid, org=org)
+                versions = client.list_note_versions(sid)
             except LookupError:
                 print(f"No source found matching '{sid}'")
                 return
@@ -1240,7 +1236,7 @@ def _cmd_read_via_api(args, source_arg: str, version_req, client: "HttpClient", 
                 print(f"  v{v.get('version')}  {created}  {preview}")
             return
         try:
-            ver = client.get_note_version(sid, version_req, org=org)
+            ver = client.get_note_version(sid, version_req)
         except LookupError:
             print(
                 f"Version {version_req} not found for {sid[:12]}",
@@ -1644,7 +1640,6 @@ def cmd_context(args):
     Accepts ``<turn>``, ``last`` (latest turn centered with --window), or
     ``last:N`` (last N turns of the source as a tail-read).
     """
-    org = os.environ.get("GRAPH_ORG")
     client = get_client()
 
     original_arg = args.source
@@ -1665,7 +1660,7 @@ def cmd_context(args):
             print("'last:N' requires N >= 1", file=sys.stderr)
             return
 
-    source = client.get_source(args.source, org=org)
+    source = client.get_source(args.source)
     # W4 (auto-gah4g): no more host-only auto-ingest fallback on a lookup
     # miss — eager source creation (W2) means a session's source exists
     # from launch, so a genuine miss here means the session doesn't exist
@@ -1673,7 +1668,7 @@ def cmd_context(args):
     if not source:
         _print_source_not_found(args.source, client=client, display_arg=original_arg)
         return
-    source.setdefault("org", org or "")
+    source.setdefault("org", "")
     if not isinstance(client, HttpClient):
         source = refresh_session_source(source)
 
@@ -1686,16 +1681,16 @@ def cmd_context(args):
         if tail_n is not None:
             # Server resolves max turn + slice in a single round trip.
             entries = (_read_source_full_via_api(
-                source["id"], org=org, tail_n=tail_n,
+                source["id"], tail_n=tail_n,
             ) or {}).get("entries") or []
         elif args.turn != "last":
             entries = (_read_source_full_via_api(
-                source["id"], org=org,
+                source["id"],
                 around_turn=int(args.turn), window=args.window,
             ) or {}).get("entries") or []
         else:
             entries = (_read_source_full_via_api(
-                source["id"], org=org,
+                source["id"],
             ) or {}).get("entries") or []
     else:
         home_org = source.get("org") or ""
@@ -1809,7 +1804,6 @@ def cmd_tail(args):
 def _read_source_full_via_api(
     source_id: str,
     *,
-    org: str | None,
     around_turn: int | None = None,
     window: int | None = None,
     tail_n: int | None = None,
@@ -1826,7 +1820,7 @@ def _read_source_full_via_api(
     client = get_client()
     if not isinstance(client, HttpClient):
         return None
-    kwargs: dict = {"org": org}
+    kwargs: dict = {}
     if around_turn is not None:
         kwargs["around_turn"] = around_turn
     if window is not None:
@@ -1839,11 +1833,10 @@ def _read_source_full_via_api(
 def cmd_entities(args):
     """List or search entities."""
     client = get_client()
-    org = os.environ.get("GRAPH_ORG")
     if args.query:
-        entities = client.search_entities(args.query, limit=args.limit, org=org)
+        entities = client.search_entities(args.query, limit=args.limit)
     else:
-        entities = client.list_entities(entity_type=args.type, limit=args.limit, org=org)
+        entities = client.list_entities(entity_type=args.type, limit=args.limit)
     if not entities:
         print("No entities found.")
         return
@@ -1855,13 +1848,13 @@ def cmd_entities(args):
         elif isinstance(client, HttpClient):
             mentions = 0
         else:
-            mentions = client.entity_mention_count(e["id"], org=org)
+            mentions = client.entity_mention_count(e["id"])
         print(f"  {e['name']:40s}  [{e['type']:12s}]  {mentions:3d} mentions")
 
 
 def cmd_stats(args):
     """Show database statistics."""
-    stats = get_client().stats(org=os.environ.get("GRAPH_ORG"))
+    stats = get_client().stats()
     print("Knowledge Graph Stats:")
     for table, count in stats.items():
         print(f"  {table:20s}  {count:6d}")
@@ -1870,8 +1863,7 @@ def cmd_stats(args):
 def cmd_tree(args):
     """Show the knowledge hierarchy tree."""
     nodes = get_client().get_tree(
-        args.root, depth=args.depth, org=os.environ.get("GRAPH_ORG"),
-    )
+        args.root, depth=args.depth,    )
     if not nodes:
         print("No hierarchy nodes found. Use 'seed' to create the initial structure.")
         return
@@ -2059,7 +2051,6 @@ def cmd_sessions(args):
             result = client.ingest_sessions(
                 session=session_target,
                 force=bool(getattr(args, "force", False)),
-                org=os.environ.get("GRAPH_ORG"),
             ) or {}
             if result.get("error"):
                 print(f"Error: {result['error']}", file=sys.stderr)
@@ -2073,7 +2064,6 @@ def cmd_sessions(args):
             all_projects=bool(args.all),
             project=args.project,
             force=bool(getattr(args, "force", False)),
-            org=os.environ.get("GRAPH_ORG"),
         ) or {}
         output = result.get("output") or ""
         if output:
@@ -2567,7 +2557,6 @@ def cmd_bead(args):
             args.title, priority=args.priority,
             description=desc, bead_type=args.type,
             source=args.source, turns=args.turns, note=args.note,
-            org=os.environ.get("GRAPH_ORG"),
         ) or {}
         output = result.get("output") or ""
         if output:
@@ -2792,7 +2781,6 @@ def cmd_attention(args):
 
     ctx = getattr(args, "context", 0)
     rows = client.list_attention(
-        org=os.environ.get("GRAPH_ORG"),
         since=getattr(args, "since", None),
         search=getattr(args, "search", None),
         last=getattr(args, "last", None),
@@ -2855,11 +2843,10 @@ def cmd_collab_list(args):
 def cmd_collab_tag(args):
     """Add the 'collab' tag to an existing note."""
     client = get_client()
-    org = os.environ.get("GRAPH_ORG")
     resolved_id, title = _resolve_source_for_tag(client, args.source_id)
     if resolved_id is None:
         sys.exit(1)
-    added = client.add_tag(resolved_id, "collab", org=org)
+    added = client.add_tag(resolved_id, "collab")
     if added:
         print(f"  \u2713 Tagged {resolved_id[:12]} \"{title[:60]}\" as collab")
     else:
@@ -2868,7 +2855,7 @@ def cmd_collab_tag(args):
 
 def cmd_collab_topics(args):
     """List tags with descriptions and note counts."""
-    tags = get_client().list_collab_topics(org=os.environ.get("GRAPH_ORG"))
+    tags = get_client().list_collab_topics()
     # Limit client-side; server already returns the full taxonomy.
     if args.limit:
         tags = tags[: args.limit]
@@ -2892,7 +2879,6 @@ def cmd_collab_tag_describe(args):
     get_client().update_tag_description(
         args.tag_name, desc,
         actor=os.environ.get("BD_ACTOR", "user"),
-        org=os.environ.get("GRAPH_ORG"),
     )
     print(f"  \u2713 Tag '{args.tag_name}': {desc[:60]}")
 
@@ -2907,14 +2893,13 @@ def cmd_tag_add(args):
         print("Error: no tags specified", file=sys.stderr)
         sys.exit(1)
     client = get_client()
-    org = os.environ.get("GRAPH_ORG")
     for sid in args.source_ids:
         # Host prefix-resolve convenience; container passes full UUID.
         resolved_id, title = _resolve_source_for_tag(client, sid)
         if resolved_id is None:
             continue
         for tag in tags:
-            added = client.add_tag(resolved_id, tag, org=org)
+            added = client.add_tag(resolved_id, tag)
             if added:
                 print(f"  ✓ Tagged {resolved_id[:12]} \"{title[:50]}\" ← {tag}")
             else:
@@ -2928,13 +2913,12 @@ def cmd_tag_remove(args):
         print("Error: no tags specified", file=sys.stderr)
         sys.exit(1)
     client = get_client()
-    org = os.environ.get("GRAPH_ORG")
     for sid in args.source_ids:
         resolved_id, title = _resolve_source_for_tag(client, sid)
         if resolved_id is None:
             continue
         for tag in tags:
-            removed = client.remove_tag(resolved_id, tag, org=org)
+            removed = client.remove_tag(resolved_id, tag)
             if removed:
                 print(f"  ✓ Untagged {resolved_id[:12]} \"{title[:50]}\" ✗ {tag}")
             else:
@@ -2976,7 +2960,6 @@ def cmd_move(args):
             args.from_org,
             args.to_org,
             reason=args.reason,
-            org=None,
         )
     except _ops.CrossOrgWriteError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -2999,13 +2982,13 @@ def cmd_move(args):
 def cmd_promote(args):
     """Transition a source's publication_state (raw|curated|published|canonical)."""
     client = get_client()
-    org = args.org or os.environ.get("GRAPH_ORG")
+    org = args.org or None
     resolved_id, title = _resolve_source_for_tag(client, args.source_id)
     if resolved_id is None:
         sys.exit(1)
     from . import ops as _ops
     try:
-        result = client.promote_source(resolved_id, args.to_state, org=org)
+        result = client.promote_source(resolved_id, args.to_state)
     except _ops.CrossOrgWriteError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(2)
@@ -3030,7 +3013,7 @@ def _resolve_source_for_tag(client, sid: str) -> tuple[str | None, str]:
     ``HttpClient.get_source`` on container round-trips to the dashboard
     which also resolves — both return a dict or ``None``.
     """
-    source = client.get_source(sid, org=os.environ.get("GRAPH_ORG"))
+    source = client.get_source(sid)
     if not source:
         print(f"  ✗ No source found matching '{sid}'", file=sys.stderr)
         return None, ""
@@ -3049,10 +3032,9 @@ def cmd_tag_merge(args):
     transaction locally; container round-trips the same op server-side.
     """
     client = get_client()
-    org = os.environ.get("GRAPH_ORG")
     result = client.tag_merge(
         args.from_tag, args.to_tag,
-        reason=args.reason or "", force=bool(args.force), org=org,
+        reason=args.reason or "", force=bool(args.force),
     )
     if not isinstance(result, dict):
         result = {}
@@ -3186,7 +3168,6 @@ def cmd_thread_create(args, title: str):
         thread_id, title,
         priority=args.priority,
         created_by=os.environ.get("BD_ACTOR", "user"),
-        org=os.environ.get("GRAPH_ORG"),
     )
     print(f"  \u2713 Thread: {thread_id[:11]} \"{title}\" [active, P{args.priority}]")
 
@@ -3197,7 +3178,6 @@ def cmd_threads(args):
     status = None if include_all else (args.status if hasattr(args, 'status') and args.status else "active")
     threads = get_client().list_threads(
         status=status, include_all=include_all, limit=args.limit,
-        org=os.environ.get("GRAPH_ORG"),
     )
     if not threads:
         print("No threads found")
@@ -3216,17 +3196,16 @@ def cmd_threads(args):
 def cmd_thread_action(args, action: str, thread_id: str, target: str | None = None):
     """Thread actions: park, done, active, assign."""
     client = get_client()
-    org = os.environ.get("GRAPH_ORG")
     if action in ("park", "done", "active"):
-        client.thread_action(action, thread_id, org=org)
-        thread = client.get_thread(thread_id, org=org)
+        client.thread_action(action, thread_id)
+        thread = client.get_thread(thread_id)
         title = thread["title"] if thread else thread_id
         print(f"  \u2713 {action.capitalize()}: {thread_id} \"{title}\"")
     elif action in ("assign", "attach"):
         if not target:
             print("assign requires a thread ID: graph thread assign CAPTURE_ID THREAD_ID", file=sys.stderr)
             sys.exit(1)
-        client.thread_action(action, thread_id, target=target, org=org)
+        client.thread_action(action, thread_id, target=target)
         print(f"  \u2713 Assigned {thread_id} \u2192 thread {target}")
 
 
@@ -3286,7 +3265,6 @@ def cmd_notes(args):
             only_org=only_org, peers=peers,
             session_source_ids=session_ids,
             session_author_pattern=author_pattern,
-            org=os.environ.get("GRAPH_ORG"),
         )
         if not sources:
             print("No notes found")
@@ -3475,8 +3453,7 @@ def cmd_journal_write(args):
                 sys.exit(1)
         _attach_source_session_id(data)
         result = get_client().write_journal_entry(
-            data, org=os.environ.get("GRAPH_ORG"),
-        ) or {}
+            data,        ) or {}
         sid = result.get("source_id") or ""
         edge_count = result.get("edge_count") or 0
         print(f"  \u2713 Journal entry saved (src:{sid[:12]}) \u2014 {edge_count} edges")
@@ -3560,8 +3537,7 @@ def cmd_journal_write(args):
     _attach_source_session_id(data)
 
     result = get_client().write_journal_entry(
-        data, org=os.environ.get("GRAPH_ORG"),
-    ) or {}
+        data,    ) or {}
     sid = result.get("source_id") or ""
     edge_count = result.get("edge_count") or 0
     print(f"  \u2713 Journal entry saved (src:{sid[:12]}) \u2014 {edge_count} edges")
@@ -3584,7 +3560,6 @@ def cmd_journal_list(args):
         source_type="journal",
         since=since_iso,
         limit=args.limit,
-        org=os.environ.get("GRAPH_ORG"),
     )
     try:
         if not sources:
@@ -3620,14 +3595,12 @@ def cmd_journal_list(args):
                 else:
                     # Fall back to normal level from thought (turn 1).
                     content = get_client().get_turn_content(
-                        s["id"], 1, org=os.environ.get("GRAPH_ORG"),
-                    )
+                        s["id"], 1,                    )
                     if content:
                         print(f"\n{content}")
             elif getattr(args, "normal", False):
                 content = get_client().get_turn_content(
-                    s["id"], 1, org=os.environ.get("GRAPH_ORG"),
-                ) or ""
+                    s["id"], 1,                ) or ""
                 print(f"\n  {sid}  {time_range}")
                 if content:
                     for line in content.split("\n"):
@@ -3811,10 +3784,10 @@ def cmd_comment_add(args):
     client = get_client()
 
     with _pin_db(args):
-        resolved = client.resolve_source_strict(args.source, org=org)
+        resolved = client.resolve_source_strict(args.source)
         if resolved is None:
             # Retry via get_source so own-org raw matches are visible.
-            resolved = client.get_source(args.source, org=org)
+            resolved = client.get_source(args.source)
         if resolved is None:
             print(f"No source found matching '{args.source}'", file=sys.stderr)
             sys.exit(1)
@@ -3834,7 +3807,7 @@ def cmd_comment_add(args):
 
         try:
             comment = client.add_comment(
-                resolved["id"], content, actor=args.actor, org=org,
+                resolved["id"], content, actor=args.actor,
             )
         except _ops.CrossOrgWriteError as e:
             print(f"Error: {e}", file=sys.stderr)
@@ -3872,20 +3845,6 @@ def cmd_comment_integrate(args):
 
 def cmd_note_update(args):
     """Update a note with versioned history."""
-    from . import ops as _ops
-    # Cross-org gate runs first: updating a peer-org note is a policy error
-    # (CrossOrgWriteError, exit 2) that should surface cleanly without making
-    # the caller read the Revision Protocol note to find out they shouldn't
-    # have tried. The Revision Protocol gate fires only if the target is
-    # actually writable from the caller's org.
-    caller_org = os.environ.get("GRAPH_ORG")
-    if caller_org:
-        src = get_client().get_source(args.source, org=caller_org)
-        src_org = (src or {}).get("org")
-        if src and src_org and src_org != caller_org:
-            raise_err = _ops.CrossOrgWriteError(args.source, src_org)
-            print(f"Error: {raise_err}", file=sys.stderr)
-            sys.exit(2)
 
     if getattr(args, "html", None):
         _require_read("c62b0142", "Agents must read the Rich-Content Creation Guide before creating/updating rich-content notes.\n  See: graph://c62b0142-fb3")
@@ -4323,8 +4282,7 @@ def cmd_ui_design(args):
 def cmd_related(args):
     """Find content related to a search term."""
     client = get_client()
-    org = os.environ.get("GRAPH_ORG")
-    entities = client.search_entities(args.term, org=org)
+    entities = client.search_entities(args.term)
     if not entities:
         print(f"No entity found matching '{args.term}'")
         return
@@ -4332,7 +4290,7 @@ def cmd_related(args):
     entity = entities[0]
     print(f"Entity: {entity['name']} [{entity['type']}]\n")
 
-    thoughts = client.entity_thoughts(entity["id"], org=org)
+    thoughts = client.entity_thoughts(entity["id"])
     if thoughts:
         print(f"Referenced in {len(thoughts)} thought(s):")
         for t in thoughts[:10]:
@@ -4677,11 +4635,10 @@ def cmd_attach(args):
 
 def cmd_attachment(args):
     """Show metadata for a single attachment (cross-org aware)."""
-    org = os.environ.get("GRAPH_ORG")
     client = get_client()
 
     if isinstance(client, HttpClient):
-        att = client.get_attachment(args.id, org=org)
+        att = client.get_attachment(args.id)
     else:
         own_db = GraphDB(args.db)
         try:
@@ -4689,7 +4646,7 @@ def cmd_attachment(args):
         finally:
             own_db.close()
         if att is None:
-            att = client.get_attachment(args.id, org=org)
+            att = client.get_attachment(args.id)
 
     if not att:
         print(f"No attachment found matching '{args.id}'", file=sys.stderr)
@@ -4733,9 +4690,8 @@ def cmd_attachment_download(args):
         )
         sys.exit(1)
 
-    org = os.environ.get("GRAPH_ORG")
     client = get_client()
-    resolved = client.resolve_attachment_strict(attachment_id, org=org)
+    resolved = client.resolve_attachment_strict(attachment_id)
     if resolved is None:
         print(
             f"Error: no attachment found matching {attachment_id!r}",
@@ -4759,7 +4715,7 @@ def cmd_attachment_download(args):
 
     full_id = resolved["id"]
     try:
-        payload = client.download_attachment(full_id, org=org)
+        payload = client.download_attachment(full_id)
     except (FileNotFoundError, LookupError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -4840,7 +4796,6 @@ def cmd_attachments(args):
     """
     source_id = getattr(args, "source_id", None)
     limit = getattr(args, "limit", 50)
-    org = os.environ.get("GRAPH_ORG")
     client = get_client()
 
     if isinstance(client, HttpClient):
@@ -4851,12 +4806,12 @@ def cmd_attachments(args):
                 file=sys.stderr,
             )
             return
-        src = client.get_source(source_id, org=org)
+        src = client.get_source(source_id)
         if src is None:
             print("  No attachments found.")
             return
         atts = client.list_attachments(
-            source_id=src["id"], org=org, limit=limit,
+            source_id=src["id"], limit=limit,
         )
         if not atts:
             print("  No attachments found.")
@@ -4879,14 +4834,13 @@ def cmd_attachments(args):
             lookup_id = src["id"]
         else:
             # Step 2: cross-org peer scan via the client.
-            src = get_client().get_source(source_id, org=org)
+            src = get_client().get_source(source_id)
             if src is None:
                 print("  No attachments found.")
                 return
             home_org = src.get("org") or ""
-            caller = org or ""
             lookup_id = src["id"]
-            if home_org and home_org != caller:
+            if home_org:
                 try:
                     db = GraphDB.for_org(home_org, mode="ro")
                 except FileNotFoundError:
@@ -5567,7 +5521,7 @@ def main():
     p = sub.add_parser("docs-ingest", help="Ingest documentation files (TOOL.md, README.md, etc.)")
     p.add_argument("path", help="File or directory to scan")
     p.add_argument("--force", action="store_true", help="Re-ingest existing files")
-    p.add_argument("--org", help="Target org slug (default: GRAPH_ORG)")
+    p.add_argument("--org", help="Target org slug")
     p.set_defaults(func=cmd_docs_ingest)
 
     # status-ingest
@@ -5644,7 +5598,7 @@ def main():
             "(or set AUTONOMY_INVITE_TOKEN)"
         ),
     )
-    p.add_argument("--org", help="Org slug (default: GRAPH_ORG)")
+    p.add_argument("--org", help="Org slug")
     p.set_defaults(func=cmd_link_router)
 
     # attention
@@ -6259,11 +6213,6 @@ def main():
     # not silently reset to False on every ``cli.main()`` invocation.
     if getattr(args, "force_host", False):
         _client_mod._FORCE_HOST_DIRECT = True
-
-    # Show org banner if active — the org DB is the only scope boundary.
-    org = os.environ.get("GRAPH_ORG")
-    if org and args.command in ("search", "sources", "read", "context", "entities", "related"):
-        print(f"  [org: {org}]", file=sys.stderr)
 
     args.func(args)
 

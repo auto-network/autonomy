@@ -36,7 +36,6 @@ def orgs_root(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(root))
     monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.delenv("GRAPH_ORG", raising=False)
-    monkeypatch.setattr(graph_db_mod, "DEFAULT_DB", legacy)
     # Cross-org peer-DB reads flow through the process-lifetime pool
     # (``GraphDB.for_org``); clear it so a prior test's cached handle
     # to a now-deleted tmp path can't shadow this test's new org DBs.

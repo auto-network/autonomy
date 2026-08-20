@@ -265,7 +265,6 @@ def test_no_new_schema_repeats_its_own_key_in_the_payload(registered_schemas):
 _HOME_UNDECLARED_GRANDFATHERED = {
     "autonomy.network.ledger-projection",
     "autonomy.network.ledger-state",
-    "autonomy.network.persona",
     "autonomy.org.peer-subscription",
     "autonomy.secure.setting",
     "dashboard.feature_flags",

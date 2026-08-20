@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import subprocess
 
-from .db import GraphDB, DEFAULT_DB, _sanitize_fts_query
+from .db import GraphDB, resolve_caller_db_path, _sanitize_fts_query
 
 
 def _open_source_db(source_id: str, own_db: GraphDB) -> GraphDB:
@@ -91,7 +91,7 @@ def collect_primer_data(
     """
     close_db = False
     if db is None:
-        db = GraphDB(DEFAULT_DB)
+        db = GraphDB(resolve_caller_db_path(None))
         close_db = True
 
     result = {"bead_id": bead_id, "bead": None, "provenance": [],

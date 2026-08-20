@@ -99,7 +99,7 @@ def test_join_branch_writes_only_inside_the_volume(volume):
     """The B1 contract holds on the join path too."""
     initialize(volume, invite=code(), tls=False)
     assert (volume / "data" / "personal.db").exists()
-    assert (volume / "data" / "graph.db").exists()
+    assert not (volume / "data" / "graph.db").exists()
 
 
 def test_first_run_runs_the_join_ceremony_when_a_transport_is_given(volume, tmp_path):

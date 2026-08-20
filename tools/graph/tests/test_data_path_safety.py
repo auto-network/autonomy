@@ -28,11 +28,9 @@ def test_refuse_mode_rejects_every_unrooted_org_path(monkeypatch, tmp_path):
     monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.setenv(REFUSE_REAL_DATA_FALLBACK_ENV, "1")
     monkeypatch.setattr(graph_db, "DEFAULT_ORGS_DIR", trap_orgs)
-    monkeypatch.setattr(graph_db, "DEFAULT_DB", trap_legacy)
     monkeypatch.setattr(org_ops, "DEFAULT_ORGS_DIR", trap_orgs)
 
     resolvers = (
-        lambda: resolve_caller_db_path("missing"),
         lambda: settings_ops._db_path(None),
         lambda: org_ledger_db_path("missing"),
         lambda: org_ops.list_orgs(),
@@ -63,10 +61,10 @@ def test_refuse_mode_accepts_explicitly_rooted_org_paths(
     assert personal == str(root.parent / "personal.db")
     assert (root.parent / "personal.db").exists()
 
-    # Refusal mode also prevents a rooted lookup from escaping to the legacy
-    # graph.db merely because the requested per-org DB has not been created.
-    with pytest.raises(RealDataFallbackRefused, match="missing org"):
-        resolve_caller_db_path("acme")
+    # A rooted lookup resolves to the org's own path whether or not the
+    # file exists yet — there is nowhere else to escape to. A missing named
+    # org fails at OPEN, loudly, naming this path.
+    assert resolve_caller_db_path("acme") == root / "acme.db"
     GraphDB.create_org_db("acme").close()
     assert resolve_caller_db_path("acme") == root / "acme.db"
 
@@ -80,7 +78,6 @@ def test_fresh_personal_identity_write_never_uses_legacy_db(
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(root))
     monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.delenv(REFUSE_REAL_DATA_FALLBACK_ENV, raising=False)
-    monkeypatch.setattr(graph_db, "DEFAULT_DB", legacy)
 
     owner = KeyPair.generate()
     with settings_ops.identity_write_context():

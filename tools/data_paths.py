@@ -88,8 +88,6 @@ STORE_MANIFEST: tuple = (
           "this machine's own store — never leaves this computer; "
           "not an organization, lives beside `orgs/` and roots with it",
           roots_with="orgs"),
-    Store("graph", "graph.db", "GRAPH_DB", "db",
-          "main knowledge-graph DB"),
     Store("dashboard", "dashboard.db", "DASHBOARD_DB", "db",
           "dashboard operational store"),
     Store("auth", "auth.db", "AUTH_DB", "db",
