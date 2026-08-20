@@ -54,6 +54,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import os
 import secrets
 import sqlite3
@@ -68,6 +69,8 @@ from starlette.routing import Route
 from tools.graph import settings_ops
 from tools.graph.db import GraphDBNotReady
 from tools.data_paths import DATA_ROOT
+
+logger = logging.getLogger(__name__)
 from tools.dashboard.dao import identity_sessions
 from tools.dashboard.dashboard_access_approvals import (
     GRANT_SIGNING_DOMAIN as APPROVAL_GRANT_SIGNING_DOMAIN,
@@ -1066,6 +1069,11 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
             )}, status_code=500)
         for state_id, secret in recovered.items():
             decoded.setdefault(state_id, secret)
+        # Retain the persona KEM private key (§12 permits the dashboard to hold
+        # it after sign-in) so a graceful hot reload can hand it to the next
+        # process, which then opens grants — including ones minted on another
+        # machine and synced in — with nobody present.
+        _VAULT_CACHE["kem_private"] = kem_private_hex
 
     if not decoded and _personal_store_has_generations():
         # Refusing empty is right for a store that HAS sealed content: neither
@@ -1157,6 +1165,141 @@ def _agent_delegate():
     refuses naming the unlock — which is the design, not a gap.
     """
     return _VAULT_CACHE.get("delegate")
+
+
+# ── Surviving a GRACEFUL hot reload (auto-a1pub) ─────────────────────────────
+#
+# A dashboard hot reload restarts the process. The in-memory vault cache dies,
+# and cold recovery needs a human unlock — the accepted cost of a REBOOT
+# (crib §10). A graceful reload is not a reboot: the shutdown hook runs, so it
+# can hand the warm keys to the next process through the ramfs key cache and
+# come back warm with nobody present.
+#
+# What crosses: the agent delegate's signing key and the persona KEM private
+# key — two fixed 32-byte values (§12 sanctions the dashboard holding both after
+# sign-in; ramfs is memory — it never swaps and dies at reboot, the same
+# exposure class as the heap). The KEM key is deliberately included: it is what
+# lets this process open grants it does not already hold — a secret minted or
+# rotated on ANOTHER machine and synced in — and serve it unattended after the
+# reload. The generation keys are NOT saved: they re-derive from the on-disk
+# grants with the KEM key, so there is nothing variable-sized to persist.
+#
+# Files live only in ramfs, and the startup hook CLEARS them once loaded — they
+# exist only for the reload window. A CRASH skips the shutdown hook, so no file
+# is written and the next process boots locked, the correct fail-closed posture
+# for a non-graceful restart.
+
+
+def _keycache_dir() -> "Path":
+    from pathlib import Path
+
+    override = os.environ.get("AUTONOMY_KEYCACHE_MOUNT")
+    if override:
+        return Path(override)
+    from agents.secret_ramfs import KEYCACHE_MOUNT
+
+    return Path(KEYCACHE_MOUNT)
+
+
+def _keycache_write(name: str, data: bytes) -> None:
+    from tools.network.storagekit.memory_cache import assert_memory_backed
+
+    directory = _keycache_dir()
+    assert_memory_backed(directory)  # ramfs only — refuses tmpfs/disk
+    path = directory / name
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    try:
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view):]
+        os.fsync(fd)  # flushed before we return
+    finally:
+        os.close(fd)
+
+
+def _keycache_read(name: str) -> "bytes | None":
+    from tools.network.storagekit.memory_cache import assert_memory_backed
+
+    path = _keycache_dir() / name
+    if not path.exists():
+        return None
+    assert_memory_backed(path.parent)
+    return path.read_bytes()
+
+
+def _keycache_clear(name: str) -> None:
+    try:
+        (_keycache_dir() / name).unlink()
+    except FileNotFoundError:
+        pass
+
+
+_HOTRELOAD_DELEGATE = "vault.hotreload.delegate"
+_HOTRELOAD_KEM = "vault.hotreload.kem"
+
+
+def save_vault_across_hot_reload() -> bool:
+    """Shutdown hook: hand the warm vault to the next process, or do nothing.
+
+    Writes the delegate signing key and the persona KEM private key. Absent
+    either (a locked process, or an unlock that never supplied the KEM key)
+    it writes nothing, so a non-warm process reloads to locked.
+    """
+    delegate = _VAULT_CACHE.get("delegate")
+    kem_private = _VAULT_CACHE.get("kem_private")
+    if delegate is None or not kem_private:
+        return False
+    try:
+        _keycache_write(_HOTRELOAD_DELEGATE, delegate.private_hex.encode("ascii"))
+        _keycache_write(_HOTRELOAD_KEM, kem_private.encode("ascii"))
+        return True
+    except Exception:
+        logger.exception(
+            "vault hot-reload snapshot failed; the next process will boot locked"
+        )
+        _keycache_clear(_HOTRELOAD_DELEGATE)
+        _keycache_clear(_HOTRELOAD_KEM)
+        return False
+
+
+def restore_vault_across_hot_reload() -> bool:
+    """Startup hook: re-warm the vault from a graceful-shutdown snapshot.
+
+    Reads the two keys, RE-DERIVES the generation keys from the on-disk grants
+    with the KEM key (the same server-side recovery an unlock runs), installs
+    the delegate, and re-retains the KEM key for the next reload. The files are
+    CLEARED once read. Missing files — a crash, or a cold boot — leave the
+    vault locked.
+    """
+    delegate_raw = _keycache_read(_HOTRELOAD_DELEGATE)
+    kem_raw = _keycache_read(_HOTRELOAD_KEM)
+    if not delegate_raw or not kem_raw:
+        return False
+    try:
+        from tools.network.storagekit.keycontrol import KeyControlStore
+        from tools.vault.db_content_store import vault_db_path_for
+        from tools.vault.unlock import open_generation_keys
+
+        delegate_hex = delegate_raw.decode("ascii").strip()
+        kem_private_hex = kem_raw.decode("ascii").strip()
+        with KeyControlStore(vault_db_path_for(None)) as kc:
+            generation_keys = open_generation_keys(
+                kem_private_hex, kc.accepted_grants(), kc.states
+            )
+        _bring_vault_up(generation_keys, delegate_hex)
+        _VAULT_CACHE["kem_private"] = kem_private_hex  # retain for the next reload
+        return True
+    except Exception:
+        logger.exception(
+            "vault hot-reload restore failed; leaving the vault locked"
+        )
+        return False
+    finally:
+        _keycache_clear(_HOTRELOAD_DELEGATE)
+        _keycache_clear(_HOTRELOAD_KEM)
 
 
 def _fold_for(slug):
