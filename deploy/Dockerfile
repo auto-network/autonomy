@@ -89,6 +89,29 @@ RUN curl -fsSL "$DOCKER_CLI_URL" -o /tmp/docker.tgz \
     && rm -f /tmp/docker.tgz \
     && docker --version
 
+# bd (beads) CLI — the dashboard shells out to it for the graph bead API path,
+# so a node without bd fails server-side with `bd: command not found` the moment
+# that path runs (not a stale-version mismatch — an outright absence). Fetched +
+# checksum-pinned from the release, same shape as agents/Dockerfile.
+ARG BD_VERSION=1.2.2
+ARG BD_SHA256=8140098a51d3b81d5548d1c5e6db1a2d9930e5d141efe2a4bff7d079c4d321e8
+RUN curl -fsSL -o /tmp/bd.tgz \
+      "https://github.com/gastownhall/beads/releases/download/v${BD_VERSION}/beads_${BD_VERSION}_linux_amd64.tar.gz" \
+    && echo "${BD_SHA256}  /tmp/bd.tgz" | sha256sum -c - \
+    && tar xzf /tmp/bd.tgz -C /tmp bd \
+    && install -m 0755 /tmp/bd /usr/local/bin/bd \
+    && rm -f /tmp/bd.tgz /tmp/bd
+
+# dolt (required by bd — beads is Dolt-backed) — fetched + checksum-pinned.
+ARG DOLT_VERSION=2.3.0
+ARG DOLT_SHA256=f702aa9fc4246b076e6e255f5bb6eb6f0a120962ab8895dda9e77a0a77cfe10d
+RUN curl -fsSL -o /tmp/dolt.tgz \
+      "https://github.com/dolthub/dolt/releases/download/v${DOLT_VERSION}/dolt-linux-amd64.tar.gz" \
+    && echo "${DOLT_SHA256}  /tmp/dolt.tgz" | sha256sum -c - \
+    && tar xzf /tmp/dolt.tgz -C /tmp dolt-linux-amd64/bin/dolt \
+    && install -m 0755 /tmp/dolt-linux-amd64/bin/dolt /usr/local/bin/dolt \
+    && rm -rf /tmp/dolt.tgz /tmp/dolt-linux-amd64
+
 WORKDIR /app
 
 # Python deps first — cache layer survives source edits.
