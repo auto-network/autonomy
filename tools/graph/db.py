@@ -14,8 +14,6 @@ from typing import Any, Literal
 
 from tools.data_paths import (
     DATA_ROOT,
-    RealDataFallbackRefused,
-    refuse_real_data_fallback_enabled,
     resolve_data_root,
     resolve_orgs_root,
 )
@@ -63,7 +61,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # and the duplicate-base self-heal groups by the same columns (the pair moves
 # as one).
 _SCHEMA_USER_VERSION = 8
-DEFAULT_DB = DATA_ROOT / "graph.db"
 DEFAULT_ORGS_DIR = DATA_ROOT / "orgs"
 
 # Keep SQLite's existing default lock wait explicit so contention tests can
@@ -192,14 +189,11 @@ def resolve_caller_db_path(
          The legitimate pin callers (tests, ``graph --db``, harness) pass
          ``org=None`` and are unaffected.
       2. ``data/orgs/<org>.db`` — ``org`` defaults to ``'personal'``
-         (scopeless convergence, auto-txg5.3). NOTE (auto-23d9m follow-on):
-         this ``org or 'personal'`` default is itself a silent default; making
-         callers pin their home explicitly is the settings-read/caller-pin
-         work tracked under auto-ogj1e, not changed here.
-      3. Legacy ``data/graph.db`` (``DEFAULT_DB``) when the per-org DB
-         file is absent — preserves pre-migration fallback so existing
-         installations keep reading their legacy store until bootstrap
-         has materialised the per-org files.
+         (scopeless convergence, auto-txg5.3, content reads/writes; the
+         Settings layer refuses an unhomed write with no org instead).
+         The path is returned whether or not the file exists: personal and
+         machine materialize on demand, and a named org's absent database
+         fails at open, naming the path.
 
     ``root`` (packaging's ``AUTONOMY_DATA_ROOT`` base directory, auto-fm4zz) is
     a *base* that composes with the org via :func:`_org_db_path` — never a
@@ -222,21 +216,11 @@ def resolve_caller_db_path(
     org_path = _org_db_path(slug, root)
     if org_path.exists():
         return org_path
-    if resolve_data_root() is not None:
-        # An ambient-rooted deployment (AUTONOMY_DATA_ROOT, auto-fm4zz)
-        # never falls back to the repository-relative legacy DB — that
-        # would resolve OUTSIDE the declared volume, the exact split-brain
-        # the base root exists to prevent. The org's in-root path is the
-        # answer whether or not the file exists yet; initialization
-        # creates it there.
-        return org_path
-    if refuse_real_data_fallback_enabled():
-        raise RealDataFallbackRefused(
-            f"refusing legacy graph DB fallback for missing org {slug!r}: "
-            f"initialize {org_path} or set GRAPH_DB"
-        )
-    # Pre-migration fallback: legacy single DB when no per-org file yet.
-    return DEFAULT_DB
+    # The org's path is the answer whether or not the file exists yet:
+    # personal and machine materialize on demand, and a NAMED org whose
+    # database is absent fails at open, loudly, naming the path — never by
+    # silently resolving somewhere else.
+    return org_path
 
 
 # ── Per-org connection pool ────────────────────────────────────

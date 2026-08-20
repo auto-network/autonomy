@@ -862,9 +862,17 @@ class NetworkServeCertV2(SettingSchema):
             ) from e
 
 
+@home("personal")
+@publication_band(max="raw")
 @keyed_per_entity(key_strategy="genesis_id")
 class NetworkPersonaV1(SettingSchema):
     """Which persona THIS NODE holds the seed for, in one organization.
+
+    Home: the operator's own database, declared because the write site
+    already depends on it (``org_ops._record_persona``: two members'
+    personas on one shared org row would each read the other's identity).
+    The declaration replaces the ``org=None``-means-personal convention the
+    caller relied on before writes without an org were refused.
 
     Key: the org's genesis event id (64 lowercase hex) — the same value the
     persona was derived under. Not a label like ``default``: org-key uses one

@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .db import GraphDB, DEFAULT_DB
+from .db import GraphDB
 from .models import Source, Thought, Node, new_id, now_iso
 
 

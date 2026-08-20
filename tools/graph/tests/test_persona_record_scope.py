@@ -123,8 +123,25 @@ def test_the_org_scoped_read_finds_no_persona(orgs_env):
     """
     result = org_ops.create_org_with_identity("acme", PASSWORD, root=orgs_env.root)
 
+    # The set now declares @home("personal"), so an org-scoped READ resolves
+    # to the home rather than refusing or missing — the read asymmetry. The
+    # isolation claim moves where it belongs: the org's own database FILE
+    # never holds a persona row, so nothing about it can replicate to
+    # another member.
     scoped = settings_ops.read_owned_set(NETWORK_PERSONA_SET_ID, org="acme").members
-    assert scoped == []
+    assert len(scoped) == 1
+    assert scoped[0].payload["persona_pub"] == result.founder_persona_pub
+
+    import sqlite3
+    conn = sqlite3.connect(orgs_env.orgs / "acme.db")
+    try:
+        rows = conn.execute(
+            "SELECT COUNT(*) FROM settings WHERE set_id = ?",
+            (NETWORK_PERSONA_SET_ID,),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert rows == 0
 
     scopeless = settings_ops.read_owned_set(NETWORK_PERSONA_SET_ID, org=None).members
     assert len(scopeless) == 1

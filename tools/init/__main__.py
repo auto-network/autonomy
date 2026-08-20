@@ -24,7 +24,7 @@ def main(argv: list[str] | None = None) -> int:
         prog="python -m tools.init",
         description=(
             "Idempotent first-run initialization: data dirs, empty schema'd "
-            "graph.db, personal + first org, default Settings, TLS keypair."
+            "personal + first org databases, default Settings, TLS keypair."
         ),
     )
     parser.add_argument(

@@ -52,7 +52,6 @@ def orgs_root(tmp_path, monkeypatch):
     # ``get_client()`` dispatch would route through HTTP and miss the
     # seeded test DBs.
     monkeypatch.delenv("GRAPH_API", raising=False)
-    monkeypatch.setattr(graph_db_mod, "DEFAULT_DB", legacy)
     return root
 
 
@@ -353,18 +352,19 @@ def test_locate_source_org_unknown_id_returns_none(orgs_root):
 
 
 def test_cmd_context_not_found_hint_names_home_org(orgs_root, capsys, monkeypatch):
-    """A peer-raw miss names the org that holds the ID and the retry env,
-    without leaking any of the content itself."""
+    """A peer-raw miss names the org that holds the ID and the exact retry,
+    without leaking any of the content itself. The ambient env is ignored:
+    the caller's scope comes from nothing but its own arguments."""
     ids = _seed_anchore_and_autonomy(orgs_root)
-    monkeypatch.setenv("GRAPH_ORG", "anchore")
+    monkeypatch.setenv("GRAPH_ORG", "anchore")  # deliberately inert
 
     args = _make_args(source=ids["autonomy_raw"], turn="1", window=3)
     graph_cli.cmd_context(args)
 
     out = capsys.readouterr().out
-    assert "Source not found in org 'anchore'" in out
+    assert "Source not found in the caller's scope" in out
     assert "exists in org 'autonomy'" in out
-    assert "GRAPH_ORG=autonomy" in out
+    assert "--only-org autonomy" in out
     assert "internal raw" not in out
 
 

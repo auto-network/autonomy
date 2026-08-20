@@ -194,7 +194,7 @@ def _seed_node(volume: Path) -> dict:
             ),
         )
 
-    graph = GraphDB(volume / "graph.db")
+    graph = GraphDB(volume / "personal.db")
     graph.insert_source(Source(
         id="portable-source",
         type="note",
@@ -275,7 +275,7 @@ def _assert_same_node(volume: Path, expected: dict) -> None:
     proof = b"portable-node-constitutional-proof"
     verify_signature(org_root.public_hex, org_root.sign_hex(proof), proof)
 
-    with sqlite3.connect(volume / "graph.db") as conn:
+    with sqlite3.connect(volume / "personal.db") as conn:
         row = conn.execute(
             "SELECT title FROM sources WHERE id='portable-source'"
         ).fetchone()
@@ -558,7 +558,6 @@ def test_migrate_on_mount_upgrades_legacy_volume_and_stamps_it(tmp_path):
             "WHERE type='table' AND name='dashboard_access_grants'"
         ).fetchone()
     assert (volume / "personal.db").is_file()
-    assert (volume / "graph.db").is_file()
     with sqlite3.connect(other_org) as conn:
         # A graph org DB heals to the CURRENT graph schema version on
         # open (crypto's fleet-wide self-heal), not the version this
@@ -599,7 +598,7 @@ def test_snapshot_refuses_store_resolved_outside_selected_volume(
 ):
     volume = tmp_path / "node"
     _seed_node(volume)
-    monkeypatch.setenv("GRAPH_DB", str(tmp_path / "outside.db"))
+    monkeypatch.setenv("DASHBOARD_DB", str(tmp_path / "outside.db"))
     with pytest.raises(PortabilityError, match="outside the selected volume"):
         create_snapshot(
             volume,

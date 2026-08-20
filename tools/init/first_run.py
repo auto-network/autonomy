@@ -5,7 +5,6 @@ deployment, from nothing:
 
 * data directories (``data/``, ``data/orgs``, ``data/agent-runs``,
   ``data/session-traces``),
-* an empty schema'd ``data/graph.db``,
 * per-org DBs: ``personal`` plus one operator-named first org,
 * default Settings — org identity seeds plus the bootstrap
   public-surface allowlist (``autonomy.org.bootstrap-allowlist#1``,
@@ -188,7 +187,6 @@ def _initialize_data_root(
 ) -> InitReport:
     report = InitReport(root=str(report_root))
     _init_data_dirs(data, report)
-    _init_graph_db(data, report)
     if invite:
         invitation = _init_join(data, report, invite=invite)
     else:
@@ -262,25 +260,6 @@ def _init_data_dirs(data: Path, report: InitReport) -> None:
         else:
             path.mkdir(parents=True, exist_ok=True)
             report.add(name, CREATED, str(path))
-
-
-def _init_graph_db(data: Path, report: InitReport) -> None:
-    """Ensure ``data/graph.db`` exists with the full canonical schema.
-
-    Opening a :class:`GraphDB` on a fresh path runs ``schema.sql`` plus
-    every migration — all idempotent, so we open unconditionally and
-    only report whether the file pre-existed.
-    """
-    from tools.graph.db import GraphDB
-
-    path = resolve_store("graph", root=data)
-    existed = path.exists()
-    GraphDB(path).close()
-    report.add(
-        "graph.db",
-        EXISTS if existed else CREATED,
-        f"{path} (schema ensured)",
-    )
 
 
 def _init_orgs(

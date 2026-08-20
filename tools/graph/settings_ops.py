@@ -1921,7 +1921,9 @@ def _assert_home(set_id: str | None, org: str | None) -> None:
     # different voice.
 
 
-def _open(org: str | None, set_id: str | None = None) -> GraphDB:
+def _open(
+    org: str | None, set_id: str | None = None, *, for_read: bool = False,
+) -> GraphDB:
     """Open the database :func:`_db_path` resolved, creating nothing.
 
     A NAMED organization's database must already be there, because
@@ -1937,7 +1939,38 @@ def _open(org: str | None, set_id: str | None = None) -> GraphDB:
     Naming ``personal`` reaches the same database as saying nothing, so
     it is treated the same way -- an operator's own store is not
     something anyone provisions first.
+
+    A WRITE with no org names its destination or is refused. Placement has
+    exactly three sources -- the caller's credential, an explicit selection,
+    or the schema's declared home -- and no default (operator ruling
+    2026-08-20; supersedes the auto-txg5.3 write-converges-on-personal
+    default for Settings). A pinned home IS the destination, so absence of
+    an org routes there; a set with no pinned home cannot choose an
+    organization for the caller, so the write fails closed, loudly, at the
+    caller. ``for_read`` exempts the read paths that fall through here: a
+    read never refuses (the rubric's asymmetry), and a ``GRAPH_DB`` pin is
+    unaffected because :func:`_assert_home` already asserts nothing there.
     """
+    if not for_read and org is None and set_id is not None \
+            and not os.environ.get("GRAPH_DB"):
+        want = schemas.declared_home(set_id)
+        if want == "personal":
+            # Keep org=None: in this layer None already means the personal
+            # store, and it is the SAFE spelling — _db_path(None) routes
+            # straight to personal.db, while the literal "personal" goes
+            # through resolve_caller_db_path, which still carries the legacy
+            # data/graph.db fallback when personal.db does not exist yet.
+            # One store, two spellings, one of them wrong: a known wart, not
+            # a design.
+            pass
+        elif want == "machine":
+            org = "machine"
+        else:
+            raise schemas.SchemaValidationError(
+                f"{set_id} declares no single home, so a write must name its "
+                "organization explicitly (org=<slug> / --org <slug>) — there "
+                "is no default scope"
+            )
     _assert_home(set_id, org)
     return GraphDB(_db_path(org), create=org in _CREATED_ON_DEMAND)
 
@@ -1987,7 +2020,7 @@ def _open_read(org: str | None, set_id: str | None = None) -> GraphDB:
     path = _db_path(org)
     if path and Path(path).exists():
         return GraphDB(path, mode="ro")
-    return _open(org, set_id)
+    return _open(org, set_id, for_read=True)
 
 
 # ── JSON merge-patch (RFC 7396) ──────────────────────────────
@@ -2878,7 +2911,7 @@ def _existing_base_id(
 ) -> "str | None":
     """The live base row for a key, or None. Bases only — an override or an
     exclusion is not a write target."""
-    db = _open(org, set_id)
+    db = _open(org, set_id, for_read=True)
     try:
         row = db.conn.execute(
             "SELECT id FROM settings "
@@ -3675,7 +3708,7 @@ def chain_setting(
     org = _resolve_org_arg(org)
     resolved_org = org
     raw_rows: list[tuple[str | None, Any]] = []
-    db = _open(org, set_id)
+    db = _open(org, set_id, for_read=True)
     try:
         rows = db.conn.execute(
             "SELECT rowid AS _rowid, * FROM settings WHERE set_id = ? AND key = ? "

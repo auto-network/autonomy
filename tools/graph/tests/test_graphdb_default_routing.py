@@ -1,14 +1,8 @@
 """``GraphDB()`` default path routes through ``resolve_caller_db_path``.
 
-Regression for auto-5fc7x: direct ``GraphDB()`` calls used to hardcode
-``DEFAULT_DB = data/graph.db``, which re-created the legacy file even after
-the per-org migration (auto-9iq2s) split content into ``data/orgs/*.db``.
-After this bead the default is ``None``, which resolves via
-``resolve_caller_db_path`` — identical routing to the ``ops.*`` layer.
-
-Default slug shifted from ``autonomy`` → ``personal`` in auto-txg5.3
-(scopeless write convergence, absorbing auto-s45z9). Tests below pin
-the expected slug explicitly.
+The resolver has exactly one behavior: an org (default ``personal``,
+auto-txg5.3) resolves to its own database path, whether or not the file
+exists yet. There is no other destination.
 """
 
 from __future__ import annotations
@@ -21,19 +15,14 @@ from tools.graph.db import GraphDB
 
 @pytest.fixture
 def orgs_root(tmp_path, monkeypatch):
-    """Pin ``AUTONOMY_ORGS_DIR`` + ``DEFAULT_DB`` to tmp, unset ``GRAPH_DB``.
+    """Pin ``AUTONOMY_ORGS_DIR`` to tmp, unset ``GRAPH_DB``.
 
     ``GRAPH_DB`` has highest priority inside ``resolve_caller_db_path``, so
-    tests that want to exercise per-org / legacy routing must clear it.
-    We also redirect ``DEFAULT_DB`` so the legacy-fallback case never
-    touches the real ``data/graph.db`` — the whole point of this bead is
-    that callers stop writing there.
+    tests that want to exercise per-org routing must clear it.
     """
     root = tmp_path / "orgs"
-    legacy = tmp_path / "legacy.db"
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(root))
     monkeypatch.delenv("GRAPH_DB", raising=False)
-    monkeypatch.setattr(graph_db, "DEFAULT_DB", legacy)
     return root
 
 
@@ -49,12 +38,12 @@ def test_no_args_routes_to_personal_when_per_org_db_present(orgs_root):
         db.close()
 
 
-def test_no_args_falls_back_to_legacy_when_per_org_absent(orgs_root):
-    # No autonomy.db materialised — resolver falls back to DEFAULT_DB
-    # (redirected to tmp by the fixture so we don't touch the real file).
+def test_no_args_resolves_to_personal_even_before_the_file_exists(orgs_root):
+    # The org's own path is the answer whether or not the file exists —
+    # personal materializes on demand; nothing ever resolves elsewhere.
     db = GraphDB()
     try:
-        assert db.db_path == graph_db.DEFAULT_DB
+        assert db.db_path == orgs_root.parent / "personal.db"
     finally:
         db.close()
 

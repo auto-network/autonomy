@@ -77,12 +77,21 @@ def test_nobody_provisions_the_machine_store_first(orgs):
     assert (orgs.parent / "machine.db").exists()
 
 
-@pytest.mark.parametrize("org", ["acme", "personal", None])
+@pytest.mark.parametrize("org", ["acme", "personal"])
 def test_a_machine_setting_is_refused_anywhere_that_travels(orgs, org):
     """Every other store either follows the operator or reaches an org."""
     with pytest.raises(SchemaValidationError, match="never leaves it"):
         settings_ops.add_setting(
             "probe.home.machine", 1, "claude", {"path": "/p"}, org=org)
+
+
+def test_an_unnamed_write_routes_by_the_machine_declaration(orgs):
+    """A pinned home IS the destination: absence of an org routes there
+    rather than refusing — placement comes from the schema, and the caller
+    only ever had permission to decide, not placement."""
+    settings_ops.add_setting(
+        "probe.home.machine", 1, "claude", {"path": "/p"}, org=None)
+    assert (orgs.parent / "machine.db").exists()
 
 
 def test_the_machine_store_takes_nothing_that_should_travel(orgs):
