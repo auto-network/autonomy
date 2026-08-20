@@ -33,11 +33,22 @@ import tools.graph.schemas as schemas
 from tools.graph.schemas.registry import SCHEMAS
 
 
+#: Schemas ship from this package. ``SettingSchema`` registers every subclass
+#: into the global ``SCHEMAS``, so any test that declares a probe schema leaks
+#: one in for the rest of the session — and whether this file sees it depends
+#: on which other tests ran first. Scoping by module keeps the rule about sets
+#: that actually ship, and keeps a SECURITY gate from being flaky, which is how
+#: a security gate ends up deleted for being noisy.
+_SHIPPED = "tools.graph.schemas."
+
+
 def _personal_sets():
-    """Every personal-homed set, with the band its schema declares (or None)."""
+    """Every personal-homed set that ships, with its declared band (or None)."""
     found: dict[str, object] = {}
     for key, cls in SCHEMAS.items():
         set_id = getattr(cls, "set_id", None) or key.split("#")[0]
+        if not getattr(cls, "__module__", "").startswith(_SHIPPED):
+            continue
         if schemas.declared_home(set_id) != "personal":
             continue
         # Any revision declaring one is enough; the decorator is per-class.
@@ -92,6 +103,40 @@ def test_the_secret_bearing_personal_sets_are_pinned_to_raw():
         f"these must never reach a peer-visible state, and do not resolve to "
         f"raw alone: {wider}"
     )
+
+
+def test_the_module_filter_has_not_made_this_file_vacuous():
+    """The scoping above is the kind of thing that silently empties a suite.
+
+    If ``_SHIPPED`` stops matching — a package move, a rename — every test here
+    passes by examining nothing, and the band rule is unguarded while the suite
+    stays green. Assert the population directly rather than trusting it.
+    """
+    examined = _personal_sets()
+    assert len(examined) >= 10, (
+        f"only {len(examined)} personal-homed set(s) examined; the module "
+        f"filter '{_SHIPPED}' is probably no longer matching shipped schemas"
+    )
+    for expected in ("autonomy.identity.personal", "autonomy.vault.audited"):
+        assert expected in examined, f"{expected} was not examined at all"
+
+
+def test_a_probe_schema_from_another_test_does_not_break_this_one():
+    """The pollution this file was flaky on, made explicit.
+
+    ``SettingSchema`` registers every subclass globally, so a probe declared in
+    any other test file joins ``SCHEMAS`` for the rest of the session. Declaring
+    one here proves the filter excludes it — and that this file's result no
+    longer depends on which tests ran before it.
+    """
+    from tools.graph.schemas.registry import SettingSchema, home
+
+    @home("personal")
+    class _Probe(SettingSchema):  # deliberately no @publication_band
+        set_id = "probe.band.pollution"
+        schema_revision = 1
+
+    assert "probe.band.pollution" not in _personal_sets()
 
 
 def test_a_declared_wide_band_is_allowed():
