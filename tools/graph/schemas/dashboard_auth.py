@@ -58,18 +58,32 @@ one), a software authenticator letting a headless node satisfy a passkey
 requirement, or accepting that two-factor is desktop-only and modelling the
 machine dimension explicitly. That is a decision above this schema.
 
-## Until the signing question is answered
+## Root-signed, always
 
-Whether this row is root-signed is an open operator decision. The schema carries
-``signer``/``signature`` as optional so that turning signing on is a policy
-change rather than a migration, and so the signed payload is defined now instead
-of being invented later by whoever adds it.
+Operator ruling: this row is root-signed. That is the security model the
+surrounding flows were built around, not a hardening option — so ``signer`` and
+``signature`` are REQUIRED, and there is no unsigned form to fall back to.
 
-While they are absent the gate must treat the row as able only to TIGHTEN beyond
-its built-in default, never to loosen. That interim rule is safe under either
-eventual ruling: an unsigned row that can only make sign-in harder is worthless
-to an attacker who rewrites it, and a signed row can be trusted in both
-directions once verification exists.
+The gate must verify before applying, and ``signer`` must be checked against the
+personal identity's ``root_pub`` rather than taken from the row. A policy that
+vouches for itself is the tautology ``idkit.enrollment.verify`` warns about, one
+line away and indistinguishable from a real check.
+
+``policy_binding`` below defines exactly what the signature covers, so the
+signed payload is a property of the schema rather than something the first
+writer invents and every later reader has to reverse-engineer.
+
+**What this ruling does NOT answer, and somebody must.** A tampered row fails
+verification and is therefore treated as absent — at which point the gate falls
+back to its built-in default. If the operator's real policy was stricter than
+that default, an attacker who merely CORRUPTS the row has achieved a downgrade
+without forging anything. Refusing all sign-in instead is worse: that is a
+lockout obtainable by writing garbage.
+
+Closing it needs the *existence* of a policy to be authenticated somewhere the
+row cannot reach — the personal identity row is the natural candidate, being
+root-authored, protected, and refusing overwrite. Not built here; recorded so it
+is not discovered later as a surprise.
 """
 
 from __future__ import annotations
@@ -172,20 +186,46 @@ class DashboardAuthPolicyV1(SettingSchema):
         description="ISO-8601 UTC timestamp the policy was last written.",
     )
     signer: str = field(
-        required=False,
+        required=True,
         description=(
             "The personal root public key that signed this policy, 64 "
-            "lowercase hex. Optional while the signing decision is open; when "
-            "present the gate must verify before applying."
+            "lowercase hex. An identifier for key selection after a root "
+            "rotation — NEVER the reason to believe the policy. The gate "
+            "compares it against the personal identity's root_pub and refuses "
+            "on mismatch."
         ),
     )
     signature: str = field(
-        required=False,
+        required=True,
         description=(
-            "Ed25519 over the policy fields, 128 lowercase hex. Present only "
-            "alongside 'signer'; neither is meaningful without the other."
+            "Ed25519 over policy_binding(), 128 lowercase hex. The gate "
+            "verifies before applying; an unverifiable policy is not a policy."
         ),
     )
+
+    @staticmethod
+    def policy_binding(payload: dict) -> dict:
+        """Exactly what the signature covers.
+
+        Everything that decides who gets in, and nothing else. ``signature`` is
+        excluded because it cannot cover itself; ``signer`` IS covered, so a
+        policy cannot be re-attributed to a different root key without breaking.
+
+        Absent optional fields are omitted rather than nulled, on the same
+        discipline as the enrollment statement: absence is part of what the root
+        committed to, so a row that grows an exclusion list later no longer
+        matches anything that was signed.
+        """
+        binding = {
+            "methods": sorted(payload["methods"]),
+            "require_count": payload["require_count"],
+            "updated_at": payload["updated_at"],
+            "signer": payload["signer"],
+        }
+        excluded = payload.get("excluded_credential_ids")
+        if excluded:
+            binding["excluded_credential_ids"] = sorted(excluded)
+        return binding
 
     @classmethod
     def validate(cls, payload: Any) -> None:
@@ -257,19 +297,12 @@ class DashboardAuthPolicyV1(SettingSchema):
                         f"a non-empty credential id"
                     )
 
-        # Half a signature is worse than none: it looks verified to a reader
-        # skimming the row and verifies nothing.
         signer, signature = payload.get("signer"), payload.get("signature")
-        if (signer is None) != (signature is None):
-            raise SchemaValidationError(
-                f"{cls.__name__}: 'signer' and 'signature' must be present "
-                f"together or absent together"
-            )
-        if signer is not None and not _HEX64.match(signer):
+        if not _HEX64.match(signer or ""):
             raise SchemaValidationError(
                 f"{cls.__name__}: 'signer' must be 64 lowercase hex characters"
             )
-        if signature is not None and not _HEX128.match(signature):
+        if not _HEX128.match(signature or ""):
             raise SchemaValidationError(
                 f"{cls.__name__}: 'signature' must be 128 lowercase hex "
                 f"characters"
