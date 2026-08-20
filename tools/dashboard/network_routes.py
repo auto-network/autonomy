@@ -174,21 +174,22 @@ def _scoped_org(requested_org, *, request=None):
 
     A network route reads/writes another org's ENCRYPTED root key + registry
     binding — an org-key blob is offline-attackable, so a cross-org read is a
-    real leak. The caller's OWN org is taken from the authenticated session
-    token when a bearer is present (auto-h4kzx, derive-when-present): the
-    caller can no longer name its own org, closing the surface where a
-    consistent caller passed a spoofed ``?org=`` + a matching caller-controlled
-    ``X-Graph-Org``. With no bearer (host / old client) the caller org falls
-    back to the env-cascade resolution (per-request ``X-Graph-Org`` contextvar
-    → ``GRAPH_ORG`` env → scopeless), unchanged and never refused.
+    real leak. Two caller classes, two rules (invariant 1, auto-h4kzx):
 
-    An explicit ``?org=`` / body ``org`` is honored ONLY when it names the
-    caller's OWN org; any other value is a cross-org attempt and is refused.
+    * An org-stamped session token IS the caller's org. An explicit
+      ``?org=`` / body ``org`` is honored only when it names that org; any
+      other value is a cross-org attempt and is refused. Nothing the
+      request carries can widen it.
+    * A caller with no org-stamped token is local — the operator's browser
+      or a host process. Its explicit ``?org=`` is a SELECTION, not an
+      escalation: the operator holds every org's key, and the org names
+      WHICH one, not which authority (the ``/api/sign-key?org=`` case).
 
-    Returns ``(org, None)`` on success — the token slug when a bearer resolved
-    it (so the route reads the token's own DB), else
-    :data:`settings_ops.CALLER_ORG`, the env-cascade sentinel — or
-    ``(None, JSONResponse)`` (403) when an unauthorized override was passed.
+    # org-scope: request — token org for agents, explicit selection for
+    # local callers; no ambient source exists.
+
+    Returns ``(org, None)`` on success — the org the route should read —
+    or ``(None, JSONResponse)`` (403) on a cross-org attempt.
     """
     token_org = None
     if request is not None:
@@ -196,13 +197,14 @@ def _scoped_org(requested_org, *, request=None):
         # import would be circular; at request time server is fully loaded.
         from tools.dashboard.server import _token_org_or_none
         token_org = _token_org_or_none(request)
-    caller = token_org if token_org is not None else settings_ops._resolve_settings_caller(None)
-    if requested_org and requested_org != caller:
-        return None, JSONResponse({"error": (
-            "cross-org access to another org's network identity is not "
-            "permitted"
-        )}, status_code=403)
-    return (token_org if token_org is not None else settings_ops.CALLER_ORG), None
+    if token_org is not None:
+        if requested_org and requested_org != token_org:
+            return None, JSONResponse({"error": (
+                "cross-org access to another org's network identity is not "
+                "permitted"
+            )}, status_code=403)
+        return token_org, None
+    return (requested_org or settings_ops.CALLER_ORG), None
 
 
 def _first_member(set_id: str, org: str | None):
@@ -836,7 +838,18 @@ async def post_invite_email(request: Request) -> JSONResponse:
             status_code=400,
         )
 
-    org = requested_org or settings_ops._resolve_settings_caller(None)
+    # org-scope: request — an invite belongs to the org whose join link it
+    # carries; the SMTP install is resolved from that org. No ambient
+    # fallback exists, so an unnamed org is refused by name.
+    org = requested_org
+    if not org:
+        return JSONResponse(
+            {"ok": False, "error": (
+                "name the org this invite is for (body 'org') — its SMTP "
+                "install is what sends the mail"
+            )},
+            status_code=400,
+        )
     try:
         receipt = await asyncio.to_thread(
             send_invite_email,

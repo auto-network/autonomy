@@ -61,16 +61,6 @@ def test_non_default_org_routes_to_that_org_db(orgs_root):
     assert _get_db_path("anchore") == orgs_root / "anchore.db"
 
 
-def test_graph_org_env_is_ignored(orgs_root, monkeypatch):
-    """The CLI reads no ambient scope: ``GRAPH_ORG`` in the environment
-    does not route anything. Scope is an explicit ``--org`` or nothing."""
-    graph_db.GraphDB.create_org_db("anchore").close()
-    monkeypatch.setenv("GRAPH_ORG", "anchore")
-
-    assert _get_db_path() != orgs_root / "anchore.db"
-    assert _get_db_path() == _get_db_path(None)
-
-
 def test_explicit_org_beats_graph_org_env(orgs_root, monkeypatch):
     """Explicit kwarg wins over ``GRAPH_ORG`` env — tests/API handlers
     with a concrete caller pin the destination regardless of env."""

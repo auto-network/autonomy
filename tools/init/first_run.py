@@ -289,6 +289,8 @@ def _init_orgs(
         root=orgs_root, first_org=slug, first_org_name=first_org_name,
     )
 
+    _seed_shell_default_org(data, report, slug)
+
 
 def _init_join(data: Path, report: InitReport, *, invite: str) -> None:
     """Prepare the JOIN path: personal identity store + a validated code.
@@ -375,6 +377,54 @@ def _init_operational_dbs(data: Path, report: InitReport) -> None:
         existed = path.exists()
         init_fn(path)
         report.add(filename, EXISTS if existed else CREATED, str(path))
+
+
+def _seed_shell_default_org(data: Path, report: InitReport, slug: str) -> None:
+    """Declare the shell's default org for this node (dashboard.shell.default-org).
+
+    # org-scope: machine — the dashboard renders from this declaration;
+    # no ambient scope exists. Written by explicit path under *data*, like
+    # every root-scoped seed here: ambient resolution would split-brain a
+    # writer handed a root from readers knowing only the env.
+    """
+    from uuid import uuid4
+
+    from tools.graph import schemas
+    from tools.graph.db import GraphDB, _local_store_db_path
+    from tools.graph.org_ops import _now_iso
+    from tools.graph.schemas.dashboard_shell import (
+        SHELL_DEFAULT_ORG_KEY,
+        SHELL_DEFAULT_ORG_REVISION,
+        SHELL_DEFAULT_ORG_SET_ID,
+    )
+
+    payload = {"org": slug}
+    schemas.validate_payload(
+        SHELL_DEFAULT_ORG_SET_ID, SHELL_DEFAULT_ORG_REVISION, payload,
+    )
+    machine = _local_store_db_path("machine", resolve_store("orgs", root=data))
+    name = "shell-default-org"
+    db = GraphDB(machine, create=True)
+    try:
+        row = db.conn.execute(
+            "SELECT id FROM settings WHERE set_id = ? AND key = ?",
+            (SHELL_DEFAULT_ORG_SET_ID, SHELL_DEFAULT_ORG_KEY),
+        ).fetchone()
+        if row is not None:
+            report.add(name, EXISTS, f"{slug} (machine.db)")
+            return
+        now = _now_iso()
+        db.conn.execute(
+            "INSERT INTO settings(id, set_id, schema_revision, key, payload, "
+            "created_at, updated_at) VALUES(?,?,?,?,?,?,?)",
+            (str(uuid4()), SHELL_DEFAULT_ORG_SET_ID,
+             SHELL_DEFAULT_ORG_REVISION, SHELL_DEFAULT_ORG_KEY,
+             json.dumps(payload), now, now),
+        )
+        db.conn.commit()
+    finally:
+        db.close()
+    report.add(name, CREATED, f"{slug} (machine.db)")
 
 
 def _seed_bootstrap_allowlist(data: Path, report: InitReport) -> None:

@@ -122,12 +122,12 @@ def test_load_mounts_reads_rev2_and_filters_by_prefix(graph_db_env):
         MOUNT_SET_ID, MOUNT_SCHEMA_REVISION_2, key="enterprise-ng:vuln-diff",
         payload={"subpath": "vuln-diff-validation", "container_path": "/opt/vuln-diff",
                  "kind": "dir", "mode": "ro", "required": True},
-        state="raw", org=ops.CALLER_ORG)
+        state="raw", org="personal")
     ops.add_setting(
         MOUNT_SET_ID, MOUNT_SCHEMA_REVISION_2, key="other-workspace:fixture",
         payload={"subpath": "x", "container_path": "/opt/other", "kind": "dir",
                  "required": True},
-        state="raw", org=ops.CALLER_ORG)
+        state="raw", org="personal")
     mounts = load_mounts("enterprise-ng")
     assert set(mounts.keys()) == {"enterprise-ng:vuln-diff"}
     vd = mounts["enterprise-ng:vuln-diff"]
@@ -345,11 +345,11 @@ def test_load_mounts_keeps_rev1_rows_via_identity_upconverter(graph_db_env):
     ops.add_setting(
         MOUNT_SET_ID, 1, key="w:old",
         payload={"host_path": "/abs/x", "container_path": "/opt/x", "required": True},
-        state="raw", org=ops.CALLER_ORG)
+        state="raw", org="personal")
     ops.add_setting(
         MOUNT_SET_ID, MOUNT_SCHEMA_REVISION_2, key="w:new",
         payload={"subpath": "x", "container_path": "/opt/y", "kind": "dir", "required": True},
-        state="raw", org=ops.CALLER_ORG)
+        state="raw", org="personal")
     mounts = load_mounts("w")
     assert set(mounts) == {"w:old", "w:new"}
     assert mounts["w:old"].payload.host_path == "/abs/x"
@@ -383,7 +383,7 @@ def test_rev1_trailing_slash_row_read_at_rev2_and_applied_across_the_seam(graph_
         payload={"host_path": str(host_dir),
                  "container_path": "/etc/autonomy/artifacts/scale-harness/",
                  "required": True},
-        state="raw", org=ops.CALLER_ORG)
+        state="raw", org="personal")
     mounts_rs = load_mounts("scale-harness")            # real rev1 -> rev2 read
     assert set(mounts_rs) == {"scale-harness:artifacts-dir"}
     payload = mounts_rs["scale-harness:artifacts-dir"].payload

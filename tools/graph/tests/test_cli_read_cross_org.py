@@ -356,7 +356,6 @@ def test_cmd_context_not_found_hint_names_home_org(orgs_root, capsys, monkeypatc
     without leaking any of the content itself. The ambient env is ignored:
     the caller's scope comes from nothing but its own arguments."""
     ids = _seed_anchore_and_autonomy(orgs_root)
-    monkeypatch.setenv("GRAPH_ORG", "anchore")  # deliberately inert
 
     args = _make_args(source=ids["autonomy_raw"], turn="1", window=3)
     graph_cli.cmd_context(args)

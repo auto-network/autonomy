@@ -30,7 +30,15 @@ def graph_db_env(tmp_path, monkeypatch):
     GraphDB.create_org_db("autonomy").close()
     db_path = orgs / "autonomy.db"
     monkeypatch.delenv("GRAPH_API", raising=False)
+    # The suite DECLARES its scope: bind the caller contextvar to
+    # 'autonomy' — the same org the server's request paths write at — via
+    # the mechanism the identity middleware uses for a real caller. Seeds
+    # at CALLER_ORG then resolve through the production sentinel path;
+    # nothing leans on an internal default (none exists for Settings).
+    from tools.graph import ops as _ops
+    _tok = _ops.set_caller_org("autonomy")
     yield db_path
+    _ops.reset_caller_org(_tok)
 
 
 @pytest.fixture(autouse=True)
@@ -72,7 +80,11 @@ def strict_schema():
 
 @pytest.fixture
 def client(test_app):
-    with TestClient(test_app) as c:
+    # The request-side selection: the real SPA stamps X-Graph-Org from the
+    # shell's default-org meta on every fetch (auto-t0auy); for a local
+    # caller the header is a SELECTION. The suite's client selects the same
+    # org its seeds declare.
+    with TestClient(test_app, headers={"X-Graph-Org": "autonomy"}) as c:
         yield c
 
 

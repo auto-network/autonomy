@@ -757,7 +757,6 @@ def _discover_startup_orgs() -> list[str | None]:
     must reconcile all of them after a reload; limiting startup to the caller
     org strands every other org's connector outside the watchdog.
     """
-    configured = os.environ.get("GRAPH_ORG") or None
     if os.environ.get("GRAPH_DB"):
         # A pinned GRAPH_DB is the single-database test world; per-org DBs
         # alongside it mean a mis-shaped deployment whose org connectors can
@@ -767,20 +766,20 @@ def _discover_startup_orgs() -> list[str | None]:
             if _org_ops.list_orgs():
                 logging.getLogger(__name__).warning(
                     "GRAPH_DB is pinned but per-org databases exist under the "
-                    "orgs dir; serving reconciles ONLY the pinned scope %r — "
+                    "orgs dir; serving reconciles ONLY the pinned database — "
                     "org connectors will not start (unset GRAPH_DB on "
-                    "multi-org nodes)", configured,
+                    "multi-org nodes)",
                 )
         except Exception:
             pass
-        return [configured]
+        return [None]
 
     from tools.graph import org_ops
 
+    # org-scope: enumerate — one connector per local org database, plus the
+    # scopeless legacy slot; nothing ambient can add or hide a scope.
     discovered: list[str | None] = [None]
     discovered.extend(ref.slug for ref in org_ops.list_orgs())
-    if configured is not None and configured not in discovered:
-        discovered.append(configured)
     return discovered
 
 

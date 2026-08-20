@@ -157,29 +157,22 @@ def reset_caller_org(token) -> None:
 
 
 def _resolve_org(org: str | None) -> str | None:
-    """Apply the org resolution cascade (explicit → contextvar → env → default).
+    """Resolve the caller's org: explicit → per-request contextvar → None.
 
-    Priority:
-      1. Explicit ``org=`` kwarg (wins; used by code that knows exactly
-         which org it wants — ``ops`` internal helpers, host CLI tests).
-      2. Per-request contextvar — set by the dashboard API identity middleware
-         from authenticated token scope or an allowed ``X-Graph-Org``
-         selector. Handlers don't need to thread ``org=`` through; the ops
-         layer picks it up automatically.
-      3. ``GRAPH_ORG`` env — host CLI (no middleware in play).
-      4. ``None`` — scopeless default (callers iterate every per-org DB
-         in :func:`_iter_org_dbs`, except when ``GRAPH_DB`` pinning is
-         active — see :func:`_global_scope_active`).
+    Scope has exactly three sources — the session credential (which the
+    dashboard's identity middleware binds into the contextvar), an explicit
+    ``org=`` argument, and a setting's own declared home (applied in the
+    settings layer). There is no ambient source: nothing in the process
+    environment can widen, narrow, or redirect a caller's scope.
+
+    ``None`` means scopeless — content reads iterate every per-org DB
+    (:func:`_iter_org_dbs`, unless ``GRAPH_DB`` pins a single database),
+    content writes converge on the personal store (auto-txg5.3), and a
+    Settings write with no pinned home refuses.
     """
     if org is not None:
         return org
-    ctx_org = _caller_org_var.get()
-    if ctx_org:
-        return ctx_org
-    env_org = os.environ.get("GRAPH_ORG")
-    if env_org:
-        return env_org
-    return None
+    return _caller_org_var.get() or None
 
 
 def _global_scope_active(resolved_org: str | None, only_org: str | None) -> bool:

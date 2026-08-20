@@ -1955,14 +1955,7 @@ def _open(
             and not os.environ.get("GRAPH_DB"):
         want = schemas.declared_home(set_id)
         if want == "personal":
-            # Keep org=None: in this layer None already means the personal
-            # store, and it is the SAFE spelling — _db_path(None) routes
-            # straight to personal.db, while the literal "personal" goes
-            # through resolve_caller_db_path, which still carries the legacy
-            # data/graph.db fallback when personal.db does not exist yet.
-            # One store, two spellings, one of them wrong: a known wart, not
-            # a design.
-            pass
+            pass  # None already means the personal store in this layer.
         elif want == "machine":
             org = "machine"
         else:
@@ -3523,9 +3516,9 @@ def list_set_ids(
 
 def _resolve_settings_caller(org: str | None) -> str | None:
     """Thin wrapper over ``ops._resolve_org`` to avoid the import cycle
-    at module import time. Honours the same cascade: explicit kwarg,
-    then per-request contextvar (set by dashboard middleware), then
-    ``GRAPH_ORG`` env, then ``None`` (scopeless default)."""
+    at module import time. One resolution, no ambient source: explicit
+    kwarg, then the per-request contextvar the dashboard middleware binds
+    from the caller's credential, then ``None`` (scopeless)."""
     from . import ops as _ops
     return _ops._resolve_org(org)
 

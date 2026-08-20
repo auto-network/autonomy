@@ -67,7 +67,7 @@ def _describe_org(workspace_id: str | None, explicit_org: str | None) -> str | N
 
 
 def _display_org(explicit_org: str | None) -> str:
-    return explicit_org or os.environ.get("GRAPH_ORG") or "personal"
+    return explicit_org or "personal"
 
 
 def cmd_commit_policy_describe(args: Any) -> None:

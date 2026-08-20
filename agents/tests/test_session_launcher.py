@@ -259,7 +259,6 @@ def test_metadata_graph_project_exported(tmp_path, fake_creds, fake_crosstalk, c
                   "graph_tags": ["enterprise", "ng"]},
     )
     cmd = captured_run[0]
-    assert "GRAPH_ORG=anchore" in cmd
     assert "GRAPH_TAGS=enterprise,ng" in cmd
 
     # Meta doc on disk also carries them.
@@ -278,8 +277,7 @@ def test_graph_tags_string_passed_through_unchanged(tmp_path, fake_creds, fake_c
 
 
 def test_no_graph_tags_without_tags(tmp_path, fake_creds, fake_crosstalk, captured_run):
-    # Org is mandatory now (default metadata carries it), so GRAPH_ORG is always
-    # present; a launch with no tags still exports no GRAPH_TAGS.
+    # A launch with no tags exports no GRAPH_TAGS.
     _run(output_dir=str(tmp_path / "run"))
     cmd = captured_run[0]
     assert not any(s.startswith("GRAPH_TAGS=") for s in cmd)
@@ -1876,7 +1874,6 @@ def test_golden_mount_argv_is_byte_identical(
         "-e", "CROSSTALK_TOKEN=TOKEN",
         "-e", "CODEX_HOME=/home/agent/.codex",
         "-e", "CLAUDE_CODE_OAUTH_TOKEN=tok-xyz",
-        "-e", "GRAPH_ORG=test-org",
         "-v", "{DATA}/.beads:/data/.beads",
         "-v", "/dev/null:/data/.beads/.beads-credential-key:ro",
         "-v", "{RUN}:/workspace/output",

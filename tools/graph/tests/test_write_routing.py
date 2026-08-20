@@ -5,7 +5,6 @@ beads plumbed through ``ops.*``. Routing cascade (see module docstring
 in ``tools.graph.ops``):
 
   1. Explicit ``org=`` kwarg
-  2. ``GRAPH_ORG`` env var
   3. Scopeless default → ``personal``
 
 ``GRAPH_DB`` env var still wins above all of the above (test pinning).
@@ -17,7 +16,7 @@ Also covers:
   ``graph_project`` field accepted for pre-rename sessions), defaulting
   to ``personal.db`` for sessions with no org context.
 * ``session_launcher`` bakes ``graph_org`` into session meta and exports
-  ``GRAPH_ORG`` into the container env.
+  no scope variable into the container env — the token is the scope.
 """
 
 from __future__ import annotations
@@ -197,32 +196,6 @@ def test_explicit_org_routes_update_tag_description(orgs_root):
         ).fetchone()
         assert ac_row is not None and ac_row[0] == "Security notes"
         assert pc_row is None
-    finally:
-        ac.close()
-        pc.close()
-
-
-# ── GRAPH_ORG env var fallback ─────────────────────────────────────────
-
-
-def test_graph_org_env_drives_routing(orgs_root, monkeypatch):
-    """With no explicit org, ``GRAPH_ORG`` env picks the DB."""
-    GraphDB.create_org_db("anchore").close()
-    GraphDB.create_org_db("personal", type_="personal").close()
-
-    monkeypatch.setenv("GRAPH_ORG", "anchore")
-
-    ops.insert_capture("cap-env", "env-routed capture")
-
-    ac = sqlite3.connect(str(orgs_root / "anchore.db"))
-    pc = sqlite3.connect(str(orgs_root.parent / "personal.db"))
-    try:
-        assert ac.execute(
-            "SELECT COUNT(*) FROM captures WHERE id = ?", ("cap-env",),
-        ).fetchone()[0] == 1
-        assert pc.execute(
-            "SELECT COUNT(*) FROM captures WHERE id = ?", ("cap-env",),
-        ).fetchone()[0] == 0
     finally:
         ac.close()
         pc.close()
@@ -410,22 +383,6 @@ def test_settings_scopeless_write_to_unhomed_set_refuses(orgs_root, stub_schema)
 
     assert _count_settings(orgs_root.parent / "personal.db") == 0
     assert _count_settings(orgs_root / "autonomy.db") == 0
-
-
-def test_settings_graph_org_env_drives_routing(orgs_root, stub_schema, monkeypatch):
-    GraphDB.create_org_db("anchore").close()
-    GraphDB.create_org_db("personal", type_="personal").close()
-    monkeypatch.setenv("GRAPH_ORG", "anchore")
-
-    settings_ops.add_setting(
-        "test.routing", 1, "env-driven", {"ok": True},
-     org=ops.CALLER_ORG)
-
-    assert _count_settings(orgs_root / "anchore.db") == 1
-    assert _count_settings(orgs_root.parent / "personal.db") == 0
-
-
-# ── Session ingest routing via .session_meta.json ──────────────────────
 
 
 def _write_session_meta(dir_path: Path, meta: dict) -> Path:
@@ -648,68 +605,6 @@ def test_session_launcher_preserves_explicit_graph_org(tmp_path, monkeypatch):
     assert meta.get("graph_org") == "anchore"
 
 
-def test_session_launcher_exports_graph_org_env(tmp_path, monkeypatch):
-    """Container command line must include ``-e GRAPH_ORG=<slug>`` so
-    the in-container ``graph`` CLI + ``ops.*`` routes to the right DB."""
-    import agents.session_launcher as launcher
-
-    # See test_session_launcher_writes_graph_org_in_meta: route the run dir into
-    # tmp (outside the node roots) rather than patching REPO_ROOT, so the
-    # agent-runs mount is not refused under the mount-reconciliation refactor.
-    monkeypatch.setenv("DASHBOARD_AGENT_RUNS_DIR", str(tmp_path / "data" / "agent-runs"))
-    # This test asserts only on the container's -e GRAPH_ORG arg; mounts are
-    # orthogonal. In a no-volume test env the mount reconciliation (auto-vm8qh)
-    # fail-closes on the unbacked .beads node-root mount and aborts the launch
-    # before the docker-run cmd is built, so stub it out — the same isolation the
-    # test already applies to subprocess.run / credentials. mount_args is a local
-    # import from agents.mount_plan inside launch_session, so patch it at source.
-    monkeypatch.setattr("agents.mount_plan.mount_args", lambda plan, topo: [])
-    monkeypatch.setattr(launcher, "_resolve_credentials",
-                        lambda: {"type": "token", "token": "x"})
-    monkeypatch.setattr(launcher, "_setup_auth_docker_args",
-                        lambda creds, run_dir: [])
-
-    captured: dict = {}
-
-    def _capture_run(cmd, *a, **kw):
-        captured["cmd"] = cmd
-        class R:
-            returncode = 0
-            stdout = "CONTAINER_ID=env-test\n"
-            stderr = ""
-        return R()
-
-    import subprocess
-    monkeypatch.setattr(subprocess, "run", _capture_run)
-
-    # The launcher mints a session token on the way to the docker cmd —
-    # keep that write off the ambient auth store.
-    from tools.dashboard.dao import auth_db
-    auth_db.init_db(tmp_path / "auth.db")
-
-    launcher.launch_session(
-        session_type="dispatch",
-        name="env-session",
-        prompt=None,
-        # The canonical org key: the launcher refuses to mint a session
-        # token from the legacy graph_org/graph_project fallbacks.
-        metadata={"org": "anchore"},
-        detach=True,
-    )
-
-    # The docker cmd is a flat list of strings — look for ``-e GRAPH_ORG=...``.
-    cmd = captured["cmd"]
-    idx = None
-    for i, arg in enumerate(cmd):
-        if isinstance(arg, str) and arg == "-e" and i + 1 < len(cmd):
-            nxt = cmd[i + 1]
-            if isinstance(nxt, str) and nxt.startswith("GRAPH_ORG="):
-                idx = i
-                break
-    assert idx is not None, f"GRAPH_ORG env not exported; cmd: {cmd}"
-    assert cmd[idx + 1] == "GRAPH_ORG=anchore"
-
-
 def test_session_launcher_refuses_legacy_only_org_metadata(tmp_path, monkeypatch):
     """Legacy ``graph_project``/``graph_org`` metadata alone must NOT launch:
     the session token is stamped only from canonical ``metadata['org']``, and
@@ -752,3 +647,21 @@ def test_session_launcher_refuses_legacy_only_org_metadata(tmp_path, monkeypatch
     docker_calls = [c for c in calls
                     if c and isinstance(c[0], str) and "docker" in c[0]]
     assert not docker_calls, f"no docker command may run after the refusal: {docker_calls}"
+
+
+def test_policy_sentinel_resolution_has_no_ambient_source():
+    """The sentinel branch of both policy resolvers goes through the one
+    caller resolver — explicit, contextvar, or None. Pinned because the
+    branch shipped once calling a resolver name that did not exist, and no
+    test walked it."""
+    from tools.graph import commit_policy, network_policy
+
+    assert network_policy._effective_org_slug(ops.CALLER_ORG) is None
+    assert commit_policy._effective_org_slug(ops.CALLER_ORG) is None
+    assert commit_policy._effective_org_slug("acme") == "acme"
+
+    token = ops.set_caller_org("beta")
+    try:
+        assert network_policy._effective_org_slug(ops.CALLER_ORG) == "beta"
+    finally:
+        ops.reset_caller_org(token)

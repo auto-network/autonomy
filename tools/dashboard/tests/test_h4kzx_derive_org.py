@@ -92,13 +92,15 @@ def test_scoped_org_bearer_own_org_honored_and_returns_token_slug():
         assert refused2 is None and org2 == "beta"
 
 
-def test_scoped_org_no_bearer_falls_back_to_cascade():
-    """No bearer: compares ?org= against the env-cascade (unchanged), returning
-    the CALLER_ORG sentinel — additive, never refused for a matching caller."""
-    with _scoped_token(None), patch.object(
-        settings_ops, "_resolve_settings_caller", lambda _x: "anchore"
-    ):
+def test_scoped_org_no_bearer_explicit_org_is_a_selection():
+    """No bearer means a LOCAL caller — the operator or a host process, whose
+    authority already spans every org. An explicit ?org= is a selection of
+    WHICH org's key, never an escalation, so it is honored, not compared
+    against any ambient value (none exists). No org named -> the sentinel."""
+    with _scoped_token(None):
         org, refused = network_routes._scoped_org("anchore", request=_Req())
-        assert refused is None and org is settings_ops.CALLER_ORG
+        assert refused is None and org == "anchore"
         org2, refused2 = network_routes._scoped_org("beta", request=_Req())
-        assert org2 is None and refused2.status_code == 403
+        assert refused2 is None and org2 == "beta"
+        org3, refused3 = network_routes._scoped_org(None, request=_Req())
+        assert refused3 is None and org3 is settings_ops.CALLER_ORG

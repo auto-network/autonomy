@@ -1730,22 +1730,10 @@ def launch_session(
         *auth_args,
     ]
 
-    # Org scoping:
-    #   GRAPH_ORG   — per-org write + search routing slug. Every ops.*
-    #                 write in this container lands in that org's DB, and
-    #                 search/list reads are scoped to that DB (+ peers) —
-    #                 the database is the only scope boundary (auto-p6vn7).
-    #                 Resolved from metadata["org"] (canonical, auto-nuupw)
-    #                 with "graph_org" / "graph_project" (legacy caller
-    #                 keys — dispatcher.py, server.py) as back-compat
-    #                 fallbacks.
-    #   GRAPH_TAGS  — soft tags auto-applied to notes.
+    # GRAPH_TAGS — soft tags auto-applied to notes. The container carries
+    # no scope variable: its org is stamped on the session token and
+    # enforced server-side; the CLI reads no ambient scope.
     if metadata:
-        resolved_org = (
-            metadata.get("org") or metadata.get("graph_org") or metadata.get("graph_project")
-        )
-        if resolved_org:
-            cmd.extend(["-e", f"GRAPH_ORG={resolved_org}"])
         graph_tags = metadata.get("graph_tags")
         if graph_tags:
             if isinstance(graph_tags, (list, tuple)):
