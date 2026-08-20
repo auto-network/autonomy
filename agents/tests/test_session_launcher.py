@@ -335,6 +335,36 @@ def test_launch_refuses_and_names_missing_inputs(
     assert "agents/build.sh" in err                   # with the fix
 
 
+def test_workspace_env_credential_resolves_to_env_arg(
+    tmp_path, fake_creds, fake_crosstalk, captured_run, monkeypatch,
+):
+    """A workspace env value of credential:<key> resolves through the vault into
+    the container's -e; literals — including scheme-looking ones — pass through
+    unchanged (workspace env is not blanket source-resolved)."""
+    monkeypatch.setattr(session_launcher, "_resolve_credential", lambda key: "ghp_REAL")
+    _run(output_dir=str(tmp_path / "run"), extra_env={
+        "GH_TOKEN": "credential:github.token",
+        "PLAIN": "literal-value",
+        "HOSTY": "host:8080",   # literal — must NOT be reinterpreted as a scheme
+    })
+    joined = " ".join(captured_run[0])
+    assert "GH_TOKEN=ghp_REAL" in joined            # resolved from the vault
+    assert "PLAIN=literal-value" in joined          # literal passes through
+    assert "HOSTY=host:8080" in joined              # scheme-looking literal untouched
+    assert "credential:github.token" not in joined  # never the raw pointer
+
+
+def test_workspace_env_credential_dropped_when_unavailable(
+    tmp_path, fake_creds, fake_crosstalk, captured_run, monkeypatch,
+):
+    """A credential: that can't resolve drops the binding — never 'KEY=None'."""
+    monkeypatch.setattr(session_launcher, "_resolve_credential", lambda key: None)
+    _run(output_dir=str(tmp_path / "run"),
+         extra_env={"GH_TOKEN": "credential:github.token"})
+    joined = " ".join(captured_run[0])
+    assert "GH_TOKEN" not in joined
+
+
 def test_codex_interactive_does_not_require_claude_credentials(
     tmp_path, fake_crosstalk, captured_run, monkeypatch,
 ):

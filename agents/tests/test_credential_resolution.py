@@ -124,3 +124,25 @@ def test_declared_credential_keys_extracts_only_credential_sources():
 
 def test_declared_credential_keys_empty_when_none_declared():
     assert sl._declared_credential_keys([_cap({"X": "host:Y"})]) == set()
+
+
+# ── _credential_keys_in_env (workspace env / extra_env) ──────────────────────
+
+def test_credential_keys_in_env_extracts_only_credential_values():
+    env = {
+        "GH_TOKEN": "credential:github.token",
+        "PLAIN": "literal-value",
+        "LOOKS_LIKE_HOST": "host:8080",       # literal, NOT a credential
+        "FILE_URI": "file:///etc/x",          # literal, NOT a credential
+        "PULL": "credential:github.release-pull-token",
+        "EMPTY": "credential:",
+    }
+    assert sl._credential_keys_in_env(env) == {
+        "github.token", "github.release-pull-token",
+    }
+
+
+def test_credential_keys_in_env_empty_cases():
+    assert sl._credential_keys_in_env(None) == set()
+    assert sl._credential_keys_in_env({}) == set()
+    assert sl._credential_keys_in_env({"X": "plain", "Y": "host:Z"}) == set()
