@@ -84,6 +84,11 @@ RUN chmod +x /usr/local/bin/commit-sign-shim
 RUN echo '#!/usr/bin/env bash\nexec python3 -m tools.graph "$@"' > /usr/local/bin/graph \
     && chmod +x /usr/local/bin/graph
 
+# Agent Test resolves from the runtime repository mount just like graph. The
+# CLI returns immediately while its owned supervisor retains pytest evidence.
+RUN echo '#!/usr/bin/env bash\nexec python3 -m tools.agent_test "$@"' > /usr/local/bin/agent-test \
+    && chmod +x /usr/local/bin/agent-test
+
 # Point PYTHONPATH at the runtime mount so `tools.graph` and `agents` both resolve.
 ENV PYTHONPATH=/workspace/repo
 
@@ -103,6 +108,7 @@ ENV PATH="/etc/autonomy/cap-bin:${PATH}"
 RUN bd --help > /dev/null 2>&1 || echo "WARN: bd not functional (expected if cross-arch)" \
     && dolt version > /dev/null 2>&1 || echo "WARN: dolt not functional" \
     && graph --help > /dev/null 2>&1 || echo "WARN: graph not functional" \
+    && agent-test --help > /dev/null 2>&1 || echo "WARN: agent-test not functional" \
     && claude --version > /dev/null 2>&1 || echo "WARN: claude not functional" \
     && node --version > /dev/null 2>&1 || echo "WARN: node not functional"
 
