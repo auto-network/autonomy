@@ -1781,11 +1781,28 @@ def test_every_session_gets_the_bd_close_gate(
     assert f"{run_dir / 'cap-bin'}:/etc/autonomy/cap-bin:ro" in mounts
 
 
-def test_every_session_refuses_raw_pytest_commands(
+def test_every_session_exposes_agent_test_and_refuses_raw_pytest_commands(
     tmp_path, fake_creds, fake_crosstalk, captured_run,
 ):
     run_dir = tmp_path / "run"
     _run(output_dir=str(run_dir), capabilities=())
+
+    agent_test = run_dir / "cap-bin" / "agent-test"
+    assert agent_test.is_file()
+    assert agent_test.stat().st_mode & 0o100
+    process = subprocess.Popen(
+        [str(agent_test), "--version"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={
+            **os.environ,
+            "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
+        },
+    )
+    stdout, stderr = process.communicate(timeout=10)
+    assert process.returncode == 0, stderr
+    assert stdout.strip() == "0.3.0"
 
     for command in ("pytest", "py.test"):
         gate = run_dir / "cap-bin" / command

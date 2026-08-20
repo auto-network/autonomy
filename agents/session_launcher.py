@@ -112,9 +112,8 @@ def _capability_command_surface(
     ``AUTONOMY_CAPABILITY_BIN`` env var so the container image can prepend
     it to ``PATH``.
 
-    Returns ``(mounts, env)`` — both empty when no capability declares an
-    ``expose_commands`` list, so the function is a no-op for callers that
-    do not opt in.
+    The surface also carries universal agent commands and safety gates, so it
+    is mounted even when no capability declares an ``expose_commands`` list.
     """
     # Command names share one shim directory, so collisions are possible in
     # principle. First capability wins (input is contract-sorted, so the
@@ -135,6 +134,18 @@ def _capability_command_surface(
             shims_to_emit[cmd] = f"{tt.target}/{cmd}"
     shim_dir = run_dir / "cap-bin"
     shim_dir.mkdir(parents=True, exist_ok=True)
+
+    # Materialize the supported test entry point from the runtime-mounted
+    # repository. This makes Agent Test available to newly launched sessions
+    # immediately, including sessions whose base image predates its console
+    # script installation.
+    agent_test_path = shim_dir / "agent-test"
+    agent_test_path.write_text(
+        '#!/bin/sh\nexec python3 -m tools.agent_test "$@"\n',
+        encoding="utf-8",
+    )
+    agent_test_path.chmod(0o755)
+
     for cmd, exec_target in shims_to_emit.items():
         shim_path = shim_dir / cmd
         shim_path.write_text(
@@ -152,8 +163,6 @@ def _capability_command_surface(
         gate_path = shim_dir / "bd"
         gate_path.write_text(gate_src.read_text(encoding="utf-8"))
         gate_path.chmod(0o755)
-    elif not shims_to_emit:
-        return {}, {}
     # Agent sessions use Agent Test, whose detached supervisor, retained
     # evidence, run fingerprinting, and machine-wide leases cannot be reached
     # through the raw pytest console scripts. Keep both historical entry-point
