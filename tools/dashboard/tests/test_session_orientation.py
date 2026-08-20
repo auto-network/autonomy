@@ -61,6 +61,47 @@ def test_per_workspace_override_wins():
     assert out == "Custom auto-9999"
 
 
+def test_host_override_reads_personal_host_key():
+    """Native host sessions resolve the reserved host row from personal."""
+    members = _mock_members([
+        _Member("host", {
+            "template": "Host {{tmux_name}} ready",
+            "enabled": True,
+        }),
+    ])
+    with patch(
+        "tools.graph.settings_ops.read_set", return_value=members,
+    ) as read_set:
+        out = render_orientation(
+            tmux_name="host-9999",
+            workspace_id="host",
+            workspace_name="host",
+            org="personal",
+        )
+    assert out == "Host host-9999 ready"
+    assert read_set.call_args.kwargs["org"] == "personal"
+
+
+def test_server_host_helper_uses_reserved_personal_target():
+    """The launch seam cannot drift back to the empty autonomy lookup."""
+    from tools.dashboard import server
+
+    with patch(
+        "tools.dashboard.session_orientation.render_orientation",
+        return_value="welcome",
+    ) as render:
+        out = server._render_host_orientation(tmux_name="host-1234")
+
+    assert out == "welcome"
+    render.assert_called_once_with(
+        tmux_name="host-1234",
+        workspace_id="host",
+        workspace_name="host",
+        org="personal",
+        resumed=False,
+    )
+
+
 def test_default_fallback_when_workspace_unmapped():
     """No per-workspace row → __default__ row applies."""
     members = _mock_members([
@@ -148,6 +189,48 @@ def test_broken_template_falls_back_to_default():
     assert out is not None
     assert "started in workspace Y at" in out
     assert "auto-broken" in out
+
+
+def test_resume_template_is_independently_customizable():
+    """A stored resume template is valid schema surface and wins on resume."""
+    members = _mock_members([
+        _Member("host", {
+            "template": "Fresh {{tmux_name}}",
+            "resume_template": "Continue {{tmux_name}}",
+            "enabled": True,
+        }),
+    ])
+    with patch("tools.graph.settings_ops.read_set", return_value=members):
+        out = render_orientation(
+            tmux_name="host-resumed",
+            workspace_id="host",
+            workspace_name="host",
+            org="personal",
+            resumed=True,
+        )
+    assert out == "Continue host-resumed"
+
+
+def test_broken_resume_template_falls_back_to_resume_default():
+    """A malformed resume override must not re-orient a session as fresh."""
+    members = _mock_members([
+        _Member("host", {
+            "template": "Fresh {{tmux_name}}",
+            "resume_template": "{% broken syntax",
+            "enabled": True,
+        }),
+    ])
+    with patch("tools.graph.settings_ops.read_set", return_value=members):
+        out = render_orientation(
+            tmux_name="host-resumed",
+            workspace_id="host",
+            workspace_name="host",
+            org="personal",
+            resumed=True,
+        )
+    assert out is not None
+    assert out.startswith("Session host-resumed resumed at ")
+    assert "prior context is intact" in out
 
 
 def test_settings_backend_exception_falls_back():
