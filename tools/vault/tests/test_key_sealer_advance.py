@@ -78,6 +78,8 @@ def world(tmp_path, monkeypatch):
         # public half is what the fold resolves up to the member persona.
         "agent": agent.signing_key,
         "ledger_provider": ledger_provider,
+        "issuer": w.issuer,
+        "genesis": w.gen,
     }
 
 
@@ -189,3 +191,57 @@ def test_no_delegate_means_no_write(world):
         seal(set_id="autonomy.vault.audited", schema_revision=1,
              key="github.token", setting_id="s-1", payload={"value": "x" * 40},
              tier="audited", org="acme")
+
+
+def test_a_mint_persists_a_grant_that_survives_the_process(world):
+    """The restart proof, at the unit seam: publish a credential, write once,
+    then throw the process state away and recover from disk alone.
+
+    A generation used to live in exactly one place — the cache — because the
+    production sealer passed no recipient credentials, so ``advance.grants``
+    was always empty and grant persistence had nothing to keep. With a
+    credential published (what warm-up now does), the mint must seal a grant
+    to it, ``_land_advance`` must persist it, and a FRESH cache fed only what
+    ``open_generation_keys`` recovers from the reopened store must read the
+    sealed revision back. If any link is missing, the read cannot open."""
+    from tools.network.storagekit import credentials as creds_mod
+    from tools.vault.db_content_store import vault_db_path_for
+    from tools.vault.unlock import open_generation_keys
+
+    # Publish the recipient BEFORE the first write, as warm-up does.
+    kem_seed = b"\x07" * 32
+    credential, kem_private = creds_mod.build(
+        world["issuer"], world["genesis"], kem_seed,
+        [world["genesis"]], (1, 0),
+    )
+    with KeyControlStore(vault_db_path_for(None)) as kc:
+        kc.accept_credential(credential)
+
+    cache = VaultKeyCache()
+    seal = build_vault_sealer(
+        cache, lambda: world["agent"], world["ledger_provider"],
+    )
+    secret = {"value": "survives-the-restart"}
+    locator = seal(
+        set_id="autonomy.vault.audited", schema_revision=1,
+        key="github.token", setting_id="s-1", payload=secret,
+        tier="audited", org="acme",
+    )
+
+    # "Restart": the cache is gone; only the reopened store remains.
+    with KeyControlStore(vault_db_path_for(None)) as kc:
+        grants = kc.accepted_grants()
+        assert grants, "the mint persisted no grant"
+        recovered = open_generation_keys(kem_private, grants, kc.states)
+    assert recovered, "the persisted grant did not open with the derived key"
+
+    fresh = VaultKeyCache()
+    for state_id, generation_key in recovered.items():
+        fresh.add(state_id, generation_key)
+    hold = build_key_holder(fresh)
+    control = hold(set_id="autonomy.vault.audited", org="acme")
+    opened = open_revision(
+        locator, holdings=control.holdings,
+        content_store=control.content_store,
+    )
+    assert opened == secret

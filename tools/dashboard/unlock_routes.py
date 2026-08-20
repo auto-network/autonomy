@@ -997,20 +997,6 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": (
             "body must carry 'generation_keys' as {state_id: hex}"
         )}, status_code=400)
-    if not keys and _personal_store_has_generations():
-        # Refusing empty is right for a store that HAS sealed content: it means
-        # the browser opened no grants, which is a failure to report rather
-        # than a vault to bring up half-way. It is wrong on a first unlock,
-        # where there are legitimately none — nothing has ever been sealed, and
-        # the sealer mints the first generation on the first write. Treating
-        # that as an error is why the vault could never be woken up on a fresh
-        # personal store.
-        return JSONResponse({"ok": False, "error": (
-            "generation_keys is empty but this store holds sealed content — "
-            "the browser opened no grants, which is a failure to report rather "
-            "than a vault to bring up half-way"
-        )}, status_code=400)
-
     decoded: dict[str, bytes] = {}
     for state_id, hexed in keys.items():
         if not isinstance(state_id, str) or not isinstance(hexed, str):
@@ -1030,6 +1016,71 @@ async def post_unlock_vault_keys(request: Request) -> JSONResponse:
                 f"generation key for {state_id} is {len(raw)} bytes, not 32"
             )}, status_code=400)
         decoded[state_id] = raw
+
+    # Publish the caller's PersonaKemCredential when offered. This is what a
+    # self-grant is addressed TO: without a stored credential the sealer mints
+    # a generation with no durable recovery copy, and the secret dies with the
+    # process cache. The record is persona-signed and fully re-verified by
+    # accept_credential before a row is written; posting it is idempotent
+    # (content-addressed by kem_key_id). The default founding path omits the
+    # credential (auto-5dh9a RESOLUTION-2), so first warm-up is where it lands.
+    kem_credential = body.get("kem_credential")
+    if kem_credential is not None:
+        try:
+            from tools.network.storagekit.keycontrol import KeyControlStore
+            from tools.vault.db_content_store import vault_db_path_for
+
+            with KeyControlStore(vault_db_path_for(None)) as kc:
+                kc.accept_credential(kem_credential)
+        except Exception as exc:
+            return JSONResponse({"ok": False, "error": (
+                f"kem_credential was refused: {exc}"
+            )}, status_code=400)
+
+    # Server-side recovery (crib §1c/§12): the caller re-derived the persona's
+    # decrypt-only KEM private key from the root and hands it here; this
+    # process opens the PERSISTED grants against the held descriptors and
+    # rebuilds every generation key the in-memory cache lost. The KEM key can
+    # sign nothing and authors nothing — §12 places it exactly here after
+    # sign-in. Keys the caller sent explicitly win over recovered ones.
+    kem_private_hex = body.get("persona_kem_private_key")
+    if kem_private_hex is not None:
+        if not isinstance(kem_private_hex, str):
+            return JSONResponse({"ok": False, "error": (
+                "persona_kem_private_key must be the persona's KEM private "
+                "key as hex, or absent"
+            )}, status_code=400)
+        try:
+            from tools.network.storagekit.keycontrol import KeyControlStore
+            from tools.vault.db_content_store import vault_db_path_for
+            from tools.vault.unlock import open_generation_keys
+
+            with KeyControlStore(vault_db_path_for(None)) as kc:
+                recovered = open_generation_keys(
+                    kem_private_hex, kc.accepted_grants(), kc.states,
+                )
+        except Exception as exc:  # noqa: BLE001 — one refusal shape
+            logger.warning("grant recovery failed", exc_info=True)
+            return JSONResponse({"ok": False, "error": (
+                f"generation-key recovery from persisted grants failed: {exc}"
+            )}, status_code=500)
+        for state_id, secret in recovered.items():
+            decoded.setdefault(state_id, secret)
+
+    if not decoded and _personal_store_has_generations():
+        # Refusing empty is right for a store that HAS sealed content: neither
+        # the caller nor grant recovery produced a single generation key, so
+        # bringing the vault up would answer every read with a missing-key
+        # error while looking healthy. It is wrong on a first unlock, where
+        # there are legitimately none — nothing has ever been sealed, and the
+        # sealer mints the first generation on the first write. Treating that
+        # as an error is why the vault could never be woken on a fresh store.
+        return JSONResponse({"ok": False, "error": (
+            "no generation keys: the caller sent none and none could be "
+            "recovered from persisted grants, but this store holds sealed "
+            "content. Send persona_kem_private_key for recovery, or report "
+            "the failure — do not bring the vault up half-way"
+        )}, status_code=400)
 
     delegate_hex = body.get("delegate_signing_key")
     if delegate_hex is not None and not isinstance(delegate_hex, str):
