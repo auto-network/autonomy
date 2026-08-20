@@ -14,6 +14,11 @@ from tools.dashboard import server
 
 
 def _client(tmp_path, monkeypatch) -> TestClient:
+    # The voice-trace dir resolves from DATA_ROOT ("<DATA_ROOT>/voice-traces",
+    # server.py) since the one-DATA_ROOT refactor (auto-dnjn0); _REPO_ROOT no
+    # longer drives it. Point DATA_ROOT at the tmp tree so uploads land — and
+    # pruning acts — where this test plants and reads (tmp_path/data/voice-traces).
+    monkeypatch.setattr(server, "DATA_ROOT", tmp_path / "data")
     monkeypatch.setattr(server, "_REPO_ROOT", tmp_path)
     app = Starlette(routes=[
         Route("/api/voice/trace", server.api_voice_trace, methods=["POST"]),
