@@ -155,6 +155,36 @@ def workspace_fingerprint(repo: Path, selectors: list[str]) -> str:
     return digest.hexdigest()
 
 
+def pytest_parallelism(repo: Path, profile: dict[str, Any]) -> int:
+    """Infer actual pytest worker parallelism independently of slot weight."""
+    path = repo / "pyproject.toml"
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+        addopts = data.get("tool", {}).get("pytest", {}).get("ini_options", {}).get("addopts", "")
+    except (OSError, tomllib.TOMLDecodeError):
+        addopts = ""
+    tokens = shlex.split(addopts) if isinstance(addopts, str) else list(addopts or [])
+    tokens.extend(str(value) for value in profile.get("pytest_args") or [])
+    workers = 1
+    for index, token in enumerate(tokens):
+        if token in {"-n", "--numprocesses"} and index + 1 < len(tokens):
+            try:
+                workers = max(1, int(tokens[index + 1]))
+            except ValueError:
+                workers = (os.cpu_count() or 1) if tokens[index + 1] == "auto" else 1
+        elif token.startswith("-n") and token != "-n":
+            try:
+                workers = max(1, int(token[2:].removeprefix("=")))
+            except ValueError:
+                pass
+        elif token.startswith("--numprocesses="):
+            try:
+                workers = max(1, int(token.split("=", 1)[1]))
+            except ValueError:
+                pass
+    return workers
+
+
 def requested_resources(repo: Path, profile: dict[str, Any], mode: str) -> dict[str, int]:
     """Return honest machine-wide slot weights for one pytest process."""
     configured = profile.get("resources") or {}
@@ -166,32 +196,7 @@ def requested_resources(repo: Path, profile: dict[str, Any], mode: str) -> dict[
             raise ValueError(f"profile resource {name!r} must be a positive integer")
         resources[str(name)] = amount
     if "tests" not in resources:
-        workers = 1
-        path = repo / "pyproject.toml"
-        try:
-            data = tomllib.loads(path.read_text(encoding="utf-8"))
-            addopts = data.get("tool", {}).get("pytest", {}).get("ini_options", {}).get("addopts", "")
-        except (OSError, tomllib.TOMLDecodeError):
-            addopts = ""
-        tokens = shlex.split(addopts) if isinstance(addopts, str) else list(addopts or [])
-        tokens.extend(str(value) for value in profile.get("pytest_args") or [])
-        for index, token in enumerate(tokens):
-            if token in {"-n", "--numprocesses"} and index + 1 < len(tokens):
-                try:
-                    workers = max(1, int(tokens[index + 1]))
-                except ValueError:
-                    workers = os.cpu_count() or 1 if tokens[index + 1] == "auto" else 1
-            elif token.startswith("-n") and token != "-n":
-                try:
-                    workers = max(1, int(token[2:].removeprefix("=")))
-                except ValueError:
-                    pass
-            elif token.startswith("--numprocesses="):
-                try:
-                    workers = max(1, int(token.split("=", 1)[1]))
-                except ValueError:
-                    pass
-        resources["tests"] = workers
+        resources["tests"] = pytest_parallelism(repo, profile)
     if mode == "collect":
         resources.pop("browsers", None)
     return resources

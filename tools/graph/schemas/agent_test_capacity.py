@@ -2,15 +2,25 @@
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Any
 
-from .registry import SettingSchema, field, home, keyed_per_entity, publication_band, SchemaValidationError
+from .registry import (
+    SchemaValidationError,
+    SettingSchema,
+    append_only_log,
+    field,
+    home,
+    keyed_per_entity,
+    publication_band,
+)
 
 
 CAPACITY_SET_ID = "dashboard.agent-test.capacity"
 LEASE_SET_ID = "dashboard.agent-test.lease"
 TELEMETRY_SET_ID = "dashboard.agent-test.telemetry"
+DURATION_SET_ID = "dashboard.agent-test.duration"
 SCHEMA_REVISION = 1
 _RESOURCE_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
@@ -115,3 +125,62 @@ class AgentTestTelemetryV1(SettingSchema):
             raise SchemaValidationError(f"{cls.__name__}: last_event is invalid")
         if isinstance(payload["last_at"], bool) or not isinstance(payload["last_at"], (int, float)):
             raise SchemaValidationError(f"{cls.__name__}: last_at must be numeric")
+
+
+@home("machine")
+@publication_band(max="raw")
+@append_only_log
+class AgentTestDurationObservationV1(SettingSchema):
+    """One immutable completed test-node timing observation."""
+
+    set_id = DURATION_SET_ID
+    schema_revision = SCHEMA_REVISION
+
+    repository: str = field(required=True, description="Stable repository identity.")
+    run_id: str = field(required=True, description="Agent Test run that produced the observation.")
+    nodeid: str = field(required=True, description="Fully qualified pytest node id.")
+    duration_seconds: float = field(required=True, description="Total setup, call, and teardown time.")
+    outcome: str = field(required=True, description="Terminal test-node outcome.")
+    recorded_at: float = field(required=True, description="Machine timestamp when the observation was appended.")
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        super().validate(payload)
+        if not isinstance(payload, dict):
+            return
+        required = {
+            "repository",
+            "run_id",
+            "nodeid",
+            "duration_seconds",
+            "outcome",
+            "recorded_at",
+        }
+        if set(payload) != required:
+            raise SchemaValidationError(f"{cls.__name__}: fields must be exactly {sorted(required)!r}")
+        for name, maximum in (("repository", 1000), ("run_id", 200), ("nodeid", 4000)):
+            value = payload[name]
+            if not isinstance(value, str) or not value or len(value) > maximum:
+                raise SchemaValidationError(
+                    f"{cls.__name__}: {name} must be a non-empty string no longer than {maximum}"
+                )
+        duration = payload["duration_seconds"]
+        if (
+            isinstance(duration, bool)
+            or not isinstance(duration, (int, float))
+            or not math.isfinite(duration)
+            or duration < 0
+            or duration > 7 * 24 * 3600
+        ):
+            raise SchemaValidationError(
+                f"{cls.__name__}: duration_seconds must be from 0 to 604800"
+            )
+        if payload["outcome"] not in {"passed", "failed", "error", "skipped"}:
+            raise SchemaValidationError(f"{cls.__name__}: outcome is invalid")
+        recorded_at = payload["recorded_at"]
+        if (
+            isinstance(recorded_at, bool)
+            or not isinstance(recorded_at, (int, float))
+            or not math.isfinite(recorded_at)
+        ):
+            raise SchemaValidationError(f"{cls.__name__}: recorded_at must be numeric")

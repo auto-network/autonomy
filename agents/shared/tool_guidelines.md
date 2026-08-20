@@ -359,12 +359,14 @@ agent-test trace <run-id> 1                  # one retained traceback
 agent-test output <run-id> --limit-lines 40  # bounded retained stdout/stderr
 agent-test coverage <run-id>                 # coverage of changed lines
 agent-test rerun-failures <run-id>            # only failed nodes
+agent-test timings <node-id>                  # latest ten durations; read-only
 ```
 
 Use `agent-test doctor` when dependencies or virtualenv selection are unclear;
 it invokes the chosen interpreter directly and never installs anything. Use
 `agent-test collect` plus `inventory`/`validate` to discover node ids without
-guessing. Use `agent-test capacity` to see machine-wide test and browser slots.
+guessing. `run` and `plan` report median-based estimates from capped timing
+history. Use `agent-test capacity` to see machine-wide test and browser slots.
 
 Broad runs still require a reason. Put broad suites behind a named profile with
 honest resource weights; the machine lease ledger queues them when the shared

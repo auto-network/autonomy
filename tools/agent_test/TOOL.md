@@ -23,6 +23,7 @@ agent-test coverage <run-id>
 agent-test baseline <run-id>
 agent-test capacity
 agent-test metrics
+agent-test timings tools/graph/tests/test_ops.py::test_name
 agent-test stop
 ```
 
@@ -59,6 +60,14 @@ machine capacity is 16 test slots and 4 browser slots. Runs queue without
 blocking the agent when capacity is exhausted; leases renew while running and
 expire after a crashed container. `agent-test capacity` reports a bounded
 machine-wide summary.
+
+Each completed pytest node contributes its total setup, call, and teardown
+duration to an immutable machine-store observation. The dashboard retains the
+latest 10 observations per repository and node, pruning only older rows after
+an append. `run` and `plan` report a median-based estimate before execution;
+xdist profiles divide aggregate test time by their detected worker count,
+independently of machine-capacity weights.
+`timings` shows a bounded view of the retained samples and never starts tests.
 
 Pytest's captured output, including output from passing tests, is written to
 the retained run log. It is never streamed into the launching agent's context.

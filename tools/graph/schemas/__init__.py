@@ -101,7 +101,7 @@ from . import commit_signing_key  # noqa: F401 — autonomy.commit.signing-key#1
 from . import credential_file  # noqa: F401 — autonomy.credential-file#1
 from . import fleet_roster  # noqa: F401 — autonomy.fleet.roster#1
 from . import machine_identity  # noqa: F401 — autonomy.machine.identity#1
-from . import agent_test_capacity  # noqa: F401 — dashboard.agent-test.{capacity,lease}#1
+from . import agent_test_capacity  # noqa: F401 — dashboard.agent-test.{capacity,lease,telemetry,duration}#1
 
 __all__ = [
     "SchemaValidationError",

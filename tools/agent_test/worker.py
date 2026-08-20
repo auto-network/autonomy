@@ -16,8 +16,9 @@ from pathlib import Path
 from typing import Any
 
 from .environment import project_config
-from .lease_client import lease_request, telemetry_request
+from .lease_client import duration_request, lease_request, telemetry_request
 from .store import atomic_write_json, read_json, update_manifest, utc_now
+from .timing import aggregate_test_durations
 
 
 _stop_requested = False
@@ -448,6 +449,7 @@ def run(directory: Path) -> int:
     summary, failures = _summarize(events)
     collection = _collection(events)
     coverage = _coverage(events)
+    duration_observations = aggregate_test_durations(events) if mode != "collect" else []
     summary["collected"] = len(collection)
     summary.update(_classify_failures(directory, repo, failures))
     atomic_write_json(directory / "failures.json", failures)
@@ -466,6 +468,23 @@ def run(directory: Path) -> int:
     else:
         status = "error"
 
+    duration_history: dict[str, Any] = {"state": "no_completed_tests"}
+    if duration_observations:
+        duration_result = duration_request(
+            "record",
+            repository=str(manifest.get("repository") or repo.name),
+            run_id=run_id,
+            observations=duration_observations,
+        )
+        duration_history = {
+            "state": "recorded" if duration_result.get("ok") else "unavailable",
+            "observations": len(duration_observations),
+            "appended": duration_result.get("appended", 0),
+            "history_limit": duration_result.get("history_limit", 10),
+        }
+        if not duration_result.get("ok"):
+            duration_history["detail"] = duration_result.get("error")
+
     final = update_manifest(
         directory,
         {
@@ -479,6 +498,7 @@ def run(directory: Path) -> int:
             "events_dir": str(events_dir),
             "collection_path": str(directory / "collection.json"),
             "coverage_path": str(directory / "coverage.json"),
+            "duration_history": duration_history,
         },
     )
     text = _notification_text(run_id, status, summary, duration)

@@ -141,3 +141,26 @@ def test_appending_to_it_is_what_works(orgs):
 
     members = settings_ops.read_set("probe.pattern.log", org="acme", peers=[])
     assert len(members.members) == 3
+
+
+def test_bulk_append_and_raw_prune_preserve_log_contract(orgs):
+    entries = [(str(uuid.uuid4()), {"v": value}) for value in ("a", "b", "c")]
+
+    setting_ids = settings_ops.append_log_entries(
+        "probe.pattern.log", 1, entries, org="acme"
+    )
+
+    assert len(setting_ids) == 3
+    members = settings_ops.read_set("probe.pattern.log", org="acme", peers=[])
+    assert {member.payload["v"] for member in members} == {"a", "b", "c"}
+    assert settings_ops.remove_raw_settings(setting_ids[:2], org="acme") == 2
+    survivors = settings_ops.read_set("probe.pattern.log", org="acme", peers=[])
+    assert [member.payload["v"] for member in survivors] == ["c"]
+
+    with pytest.raises(ValueError, match="does not declare 'append_only_log'"):
+        settings_ops.append_log_entries(
+            "probe.pattern.per-entity",
+            1,
+            [("acme", {"v": "wrong cardinality"})],
+            org="acme",
+        )
