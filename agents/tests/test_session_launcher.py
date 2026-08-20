@@ -92,16 +92,16 @@ def platform_snapshot(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
-def neutralize_mount_preflight(monkeypatch):
+def neutralize_launch_preflight(monkeypatch):
     """Every test here asserts on the ASSEMBLED docker argv with docker and the
-    filesystem stubbed; none stages the real mount sources on disk. The launcher
-    now preflights every emitted mount SOURCE against the frame the daemon binds
-    from and refuses a missing one by name — so on a machine that simply has no
-    ``<repo>/.beads`` (this one) it would refuse every launch under test. Report
-    'nothing missing' by default; the dedicated preflight test below re-patches
-    this to stage an absence and assert the refusal."""
-    from agents import secret_ramfs
-    monkeypatch.setattr(secret_ramfs, "daemon_missing", lambda paths: [])
+    filesystem stubbed; none stages the real image, runtime, or mount sources.
+    The launcher now preflights all three against the daemon and refuses a
+    missing one by name — so on this machine (no such image built, no
+    ``<repo>/.beads``) it would refuse every launch under test. Report 'nothing
+    missing' by default; the dedicated preflight tests below re-patch this to
+    stage an absence and assert the refusal."""
+    from agents import launch_preflight
+    monkeypatch.setattr(launch_preflight, "preflight", lambda **kw: [])
 
 
 def _run(**kw):
@@ -312,24 +312,27 @@ def test_codex_interactive_uses_codex_entrypoint(
     assert "--dangerously-skip-permissions" not in cmd
 
 
-def test_launch_refuses_and_names_a_missing_mount_source(
+def test_launch_refuses_and_names_missing_inputs(
     tmp_path, fake_creds, fake_crosstalk, captured_run, monkeypatch, capsys,
 ):
-    """A mount SOURCE absent in the daemon's bind frame refuses the launch BY
-    NAME before docker run — never the nameless 'produced no container' that
-    cost an hour on the node (host-0818 / qk4ip). Docker is never invoked."""
-    from agents import secret_ramfs
-    # The daemon frame reports the beads source (only) as absent.
-    monkeypatch.setattr(
-        secret_ramfs, "daemon_missing",
-        lambda paths: [p for p in paths if p.endswith("/.beads")],
-    )
+    """A missing launch input — image, runtime, or mount source — refuses the
+    launch BY NAME before docker run, never the nameless 'produced no container'
+    that cost an hour on the node. All problems are reported at once; docker is
+    never invoked."""
+    from agents import launch_preflight
+    from agents.launch_preflight import LaunchProblem
+    monkeypatch.setattr(launch_preflight, "preflight", lambda **kw: [
+        LaunchProblem("image", "autonomy-agent:dashboard", "not built — run `agents/build.sh`."),
+        LaunchProblem("mount", "/x/.beads", "source does not exist (would mount at /data/.beads)."),
+    ])
     out = _run(output_dir=str(tmp_path / "run"))
     assert out is None                       # refused, not launched
     assert captured_run == []                # docker run never invoked
     err = capsys.readouterr().err
-    assert "do not exist on the daemon host" in err
-    assert "/.beads -> /data/.beads" in err  # the exact path + dest are named
+    assert "2 launch input(s) missing" in err
+    assert "[image] autonomy-agent:dashboard" in err  # the image is named
+    assert "[mount] /x/.beads" in err                 # and the mount, together
+    assert "agents/build.sh" in err                   # with the fix
 
 
 def test_codex_interactive_does_not_require_claude_credentials(

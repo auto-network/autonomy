@@ -1510,37 +1510,26 @@ def launch_session(
             return None
         codex_auth_copy = codex_auth_target  # str path, for post-exit cleanup
 
-    # Preflight the emitted mount SOURCES (host binds AND volume-subpaths).
-    # `docker run` with a missing source of either kind creates NO container and
-    # reports only a nameless failure — an hour lost to hand-enumeration of a
-    # mount the launcher already had in hand (host-0818 incident; the wjzh4/qk4ip
-    # class, exposed once emission moved to --mount's correct refuse-missing).
-    # Confirm each source exists in the frame the daemon binds
-    # from — on a containerized node that is PID 1's mount ns, not ours — and
-    # refuse with the exact path(s) BEFORE minting the token below. Runs HERE
-    # (after the codex credential is materialized above) so every declared source
-    # already exists and nothing needs excluding. Fails OPEN if the check itself
-    # cannot run: docker stays the backstop, we lose only the naming, never a
-    # good launch.
-    from agents.mount_plan import preflight_sources
-    from agents import secret_ramfs as _secret_ramfs
-    _preflight_pairs = preflight_sources(plan, _topo)
-    _missing_srcs = _secret_ramfs.daemon_missing([s for s, _ in _preflight_pairs])
-    if _missing_srcs is None:
-        logger.warning(
-            "session %s: mount-source preflight could not run (no daemon-frame "
-            "access); docker run remains the backstop", name,
-        )
-    elif _missing_srcs:
-        _absent = set(_missing_srcs)
-        _named = "\n".join(
-            f"    {s} -> {d}" for s, d in _preflight_pairs if s in _absent
-        )
+    # Preflight EVERY input the docker run depends on that could be missing —
+    # the image, the runtime, and every mount source (host binds AND
+    # volume-subpaths) — and refuse with the whole list, by name, BEFORE minting
+    # the token below. `docker run` with any of these missing creates NO
+    # container and reports only a nameless failure (an hour lost to a missing
+    # image; the wjzh4/qk4ip class for mounts). Discover what is missing first,
+    # do not hand docker a doomed command. Runs HERE (after the codex credential
+    # is materialized above) so every declared source already exists and nothing
+    # needs excluding. Each check fails OPEN if it cannot run: docker stays the
+    # backstop, we lose only the naming, never a good launch.
+    from agents import launch_preflight
+    _problems = launch_preflight.preflight(
+        image=image, runtime_args=runtime_args, plan=plan, topo=_topo,
+    )
+    if _problems:
         print(
             f"  ERROR: refusing to launch session '{name}': "
-            f"{len(_missing_srcs)} mount source path(s) do not exist on the "
-            f"daemon host — docker would refuse with no container and no name:\n"
-            f"{_named}",
+            f"{len(_problems)} launch input(s) missing — docker would fail to "
+            f"create a container with no useful message:\n"
+            + "\n".join(p.line() for p in _problems),
             file=sys.stderr,
         )
         if codex_auth_copy is not None:
