@@ -877,18 +877,24 @@ def _enrich_semantic_tile(entry: dict) -> None:
 
 
 def _classify_system_message(text: str) -> dict | None:
+    import html as _html
+
     stripped = text.strip()
     if "<task-notification>" in stripped:
         summary = ""
         status = ""
+        body = ""
         m_summary = re.search(r"<summary>(.*?)</summary>", stripped, re.DOTALL)
         m_status = re.search(r"<status>(.*?)</status>", stripped, re.DOTALL)
+        m_body = re.search(r"<body>(.*?)</body>", stripped, re.DOTALL)
         if m_summary:
-            summary = m_summary.group(1).strip()
+            summary = _html.unescape(m_summary.group(1).strip())
         if m_status:
-            status = m_status.group(1).strip()
+            status = _html.unescape(m_status.group(1).strip())
+        if m_body:
+            body = _html.unescape(m_body.group(1).strip())
         label = summary if summary else f"Task {status}" if status else "Task notification"
-        return {"summary": label, "tag": "task-notification"}
+        return {"summary": label, "tag": "task-notification", **({"body": body} if body else {})}
     if "<system-reminder>" in stripped:
         m = re.search(r"<system-reminder>(.*?)</system-reminder>", stripped, re.DOTALL)
         body = m.group(1).strip() if m else stripped
