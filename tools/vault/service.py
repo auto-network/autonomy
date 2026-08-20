@@ -13,6 +13,7 @@ from __future__ import annotations
 import secrets
 
 from tools.network.idkit.enrollment import verified_provisioning_key
+from tools.network.idkit.armor import canonicalize_armor
 
 from .errors import VaultError
 from .factors import (
@@ -42,6 +43,25 @@ def enroll_password_factor(store: VaultStore, factor_id: str, password: str) -> 
     factor = create_password_factor(password, factor_id=factor_id)
     store.put_password_factor(factor_id, factor.published.public_key, factor.armor)
     return factor.published
+
+
+def enroll_password_factor_material(
+    store: VaultStore, factor_id: str, public_key: str, armor: str
+) -> PublishedFactor:
+    """Persist browser-produced password material without receiving a password.
+
+    The browser derives the factor public key and creates the PBKDF2/AES armor;
+    the server only validates and canonicalizes the armor envelope.
+    """
+    canonical = canonicalize_armor(armor)
+    if not isinstance(public_key, str) or len(public_key) != 64:
+        raise VaultError("factor public_key must be 64 hex characters")
+    try:
+        int(public_key, 16)
+    except ValueError as exc:
+        raise VaultError("factor public_key must be lowercase hexadecimal") from exc
+    store.put_password_factor(factor_id, public_key, canonical)
+    return PublishedFactor(factor_id, PASSWORD, public_key)
 
 
 def enroll_passkey_factor(
