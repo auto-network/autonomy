@@ -178,6 +178,20 @@ CREATE TABLE IF NOT EXISTS keycontrol_bridge (
 );
 CREATE INDEX IF NOT EXISTS keycontrol_bridge_edge
     ON keycontrol_bridge (child_state_id, parent_state_id);
+-- A grant delivers one generation's secret to one recipient, sealed to their
+-- KEM credential. It is the DURABLE recovery material: at unlock the operator
+-- re-derives their KEM key from the root and opens the grant to recover the
+-- generation key. ``wire`` is NOT NULL — unlike a bridge/credential body a
+-- grant is never pruned, because pruning it would make the generation it
+-- carries unrecoverable.
+CREATE TABLE IF NOT EXISTS keycontrol_grant (
+    grant_id             TEXT PRIMARY KEY,
+    storage_state_id     TEXT NOT NULL,
+    recipient_kem_key_id TEXT NOT NULL,
+    wire                 BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS keycontrol_grant_state
+    ON keycontrol_grant (storage_state_id);
 CREATE TABLE IF NOT EXISTS keycontrol_pending (
     record_type            TEXT NOT NULL,
     claimed_id             TEXT NOT NULL,
@@ -423,6 +437,7 @@ class KeyControlStore:
         self._credentials_by_persona: dict = {}  # persona -> {kem_key_id: cred}
         self._bridge_rows: dict = {}  # bridge_id -> _BridgeRow
         self._bridge_edges: dict = {}  # (child, parent) -> set of bridge_id
+        self._grants: dict = {}  # grant_id -> CapabilityGrant
         self._hydrate()
 
     # -- lifecycle -------------------------------------------------------------------
@@ -451,6 +466,7 @@ class KeyControlStore:
             self._states[state_id] = descriptor
         self._hydrate_credentials()
         self._hydrate_bridges()
+        self._hydrate_grants()
 
     def _hydrate_bridges(self) -> None:
         rows = self.db.execute(
@@ -1057,6 +1073,58 @@ class KeyControlStore:
             for _, row in sorted(self._bridge_rows.items())
             if row.bridge is not None
         )
+
+    def accept_grant(self, grant) -> str:
+        """Persist one capability grant, content-addressed by ``grant_id``.
+
+        Idempotent — the same grant re-offered writes no second row. The
+        grant's signature and fold context are verified on USE
+        (``open_generation_keys`` opens it against the descriptor), not here:
+        this store's one job is to keep the record durable. A grant whose
+        generation secret was held only in the process's in-memory cache is
+        exactly the loss this closes — persisted, it lets an unlock re-derive
+        the recipient's KEM key from the root and recover the generation key.
+        """
+        wire = grant.to_json()
+        grant_id = grant.grant_id
+        if record_id(wire) != grant_id:  # invariant guard; true for a real record
+            raise TamperError("grant_id does not equal record_id(wire)")
+        if grant_id in self._grants:
+            return grant_id
+        with self.db:
+            self.db.execute(
+                "INSERT OR IGNORE INTO keycontrol_grant"
+                "(grant_id, storage_state_id, recipient_kem_key_id, wire)"
+                " VALUES (?, ?, ?, ?)",
+                (grant_id, grant.storage_state_id, grant.recipient_kem_key_id, wire),
+            )
+        self._grants[grant_id] = grant
+        return grant_id
+
+    def accepted_grants(self) -> tuple:
+        """Every stored capability grant, ascending by ``grant_id``.
+
+        The durable recovery material an unlock reads: for each grant, the
+        recipient re-derives their KEM key from the root and opens it to rebuild
+        a generation key the in-memory cache lost on restart."""
+        return tuple(g for _, g in sorted(self._grants.items()))
+
+    def _hydrate_grants(self) -> None:
+        from .capability import CapabilityGrant
+
+        rows = self.db.execute(
+            "SELECT grant_id, wire FROM keycontrol_grant"
+        ).fetchall()
+        for grant_id, wire in rows:
+            # Anti-malleable strict parse; the grant's own grant_id equals
+            # record_id(wire) by construction, re-checked here.
+            grant = CapabilityGrant.from_json(bytes(wire))
+            if grant.grant_id != grant_id:
+                raise TamperError(
+                    f"stored grant {grant_id[:12]} is indexed under an id its "
+                    "own bytes do not name"
+                )
+            self._grants[grant_id] = grant
 
     def history_complete(self, state_id: str) -> bool:
         """Whether every signed parent edge of *state_id* has exactly one

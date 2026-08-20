@@ -95,3 +95,32 @@ def test_wrong_persona_seed_opens_nothing():
         wrong, GENESIS, [grant], {descriptor.state_id: descriptor}
     )
     assert opened == {}
+
+
+def test_a_persisted_grant_recovers_the_generation_key_after_a_reload(tmp_path):
+    """The login/unlock recovery path: the in-memory cache dies on restart, so
+    the persisted grant is the ONLY thing that brings the generation key back.
+
+    Seals nothing here — it drives the two halves the sealer and the unlock
+    now share: ``accept_grant`` writes the grant to disk (what
+    ``_land_advance`` does at mint), and after the store is closed and re-opened
+    (a reboot), ``open_generation_keys`` reopens that grant with the KEM key the
+    operator re-derives from their root, recovering the exact secret."""
+    from tools.network.storagekit.keycontrol import KeyControlStore
+
+    grant, kem_private, descriptor, secret = _one_grant()
+    path = tmp_path / "personal.db"
+
+    with KeyControlStore(path) as kc:
+        grant_id = kc.accept_grant(grant)
+        assert kc.accept_grant(grant) == grant_id  # idempotent, content-addressed
+
+    # RELOAD — a fresh process with an empty cache, re-opening the store.
+    with KeyControlStore(path) as reopened:
+        grants = reopened.accepted_grants()
+        assert [g.grant_id for g in grants] == [grant_id]  # it survived on disk
+        recovered = open_generation_keys(
+            kem_private, grants, {descriptor.state_id: descriptor}
+        )
+
+    assert recovered == {descriptor.state_id: secret}
