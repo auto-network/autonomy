@@ -251,7 +251,13 @@ class PersonalIdentityV1(SettingSchema):
 #: enforced rather than agreed -- an undeclared home refuses
 #: nothing, and a plain read looks in the caller's own store and
 #: reports nothing for rows sitting one database over.
+#: Pinned, though the row holds no secret. Two reasons, and the second is the
+#: one that was missed: published rows expose the operator's whole DEVICE
+#: INVENTORY to any peer, and — because peer composition is derived from exactly
+#: this declaration — an absent band also means ``read_set`` opens peer
+#: databases for a set that authentication decisions read.
 @home("personal")
+@publication_band(max="raw")
 @keyed_per_entity(key_strategy="credential_id")
 class PasskeyCredentialV1(SettingSchema):
     """One enrolled WebAuthn credential — Gate-1 access, never signing.

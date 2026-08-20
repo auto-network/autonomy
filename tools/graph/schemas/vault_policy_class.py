@@ -24,6 +24,7 @@ surface contract of the same record.
 from __future__ import annotations
 
 from .registry import (
+    publication_band,
     SettingSchema,
     field,
     home,
@@ -53,7 +54,12 @@ SYNOPSIS = {
 }
 
 
+#: Pinned. The record carries the sealed wraps of a class key: useless without
+#: a factor seed, and still nobody else's business. The band is what stops the
+#: row reaching a peer-visible state AND what stops peer databases being opened
+#: for this set at all, since the two are the same declaration.
 @home("personal")
+@publication_band(max="raw")
 @keyed_per_entity(key_strategy="class_id")
 class VaultPolicyClassV1(SettingSchema):
     """One policy class: its policy, its factor wraps, and when it was minted.
