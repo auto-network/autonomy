@@ -7643,17 +7643,33 @@ def _register_resumed_session_from_worker(
         coro.close()
 
 
+def _render_host_orientation(
+    *, tmux_name: str, resumed: bool = False,
+) -> str | None:
+    """Render the personal Settings-backed welcome for a native host session."""
+    from tools.dashboard.session_orientation import render_orientation
+
+    return render_orientation(
+        tmux_name=tmux_name,
+        workspace_id="host",
+        workspace_name="host",
+        org="personal",
+        resumed=resumed,
+    )
+
+
 def _render_resume_message(*, tmux_name: str, cfg: dict) -> str | None:
     """Resume-appropriate orientation (continue, don't re-orient as fresh)."""
     from tools.dashboard.session_orientation import render_orientation
 
+    is_host = cfg.get("kind") == "host"
     try:
+        if is_host:
+            return _render_host_orientation(tmux_name=tmux_name, resumed=True)
         return render_orientation(
             tmux_name=tmux_name,
             workspace_id=cfg.get("project_id") or "",
-            workspace_name=cfg.get("workspace_name") or (
-                "host" if cfg.get("kind") == "host" else "default"
-            ),
+            workspace_name=cfg.get("workspace_name") or "default",
             org=cfg.get("org") or "autonomy",
             resumed=True,
         )
@@ -8409,14 +8425,8 @@ async def api_session_create(request):
         # render returning None means the operator disabled orientation —
         # no injection, manual "Link Terminal" fallback covers it. Only a
         # render CRASH falls back to a unique fingerprint line.
-        from tools.dashboard.session_orientation import render_orientation
         try:
-            first_message = render_orientation(
-                tmux_name=tmux_name,
-                workspace_id="",
-                workspace_name="host",
-                org="autonomy",
-            )
+            first_message = _render_host_orientation(tmux_name=tmux_name)
         except Exception:
             logger.warning(
                 "api_session_create: host orientation render failed for %s; "
@@ -8660,7 +8670,7 @@ def _build_session_relaunch_config(
             ),
             "harness": "claude",
             "register_project": project or str(_REPO_ROOT).replace("/", "-"),
-            "first_message": f"Session {tmux_name} restarted.",
+            "first_message": _render_host_orientation(tmux_name=tmux_name),
             "event_loop": event_loop,
             "session_type": session_type,
         }, None

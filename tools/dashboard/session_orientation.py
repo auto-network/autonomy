@@ -19,23 +19,11 @@ from jinja2 import Environment, StrictUndefined, TemplateError
 
 from tools.dashboard.session_orientation_settings import (
     DEFAULT_KEY,
+    DEFAULT_RESUME_TEMPLATE,
     DEFAULT_TEMPLATE,
     SCHEMA_REVISION,
     SESSION_ORIENTATION_SET_ID,
 )
-
-# Resume injection (Bead B2). A resumed session carries its full prior context,
-# so the create-side "session started" orientation would wrongly make the agent
-# re-orient as if fresh. This prompts a first NEW assistant turn — so the
-# session exits awaiting_first_response and the tile shows a reply — while
-# telling the agent to CONTINUE, not restart. Per-workspace override via the
-# orientation payload's ``resume_template``; the enabled=false opt-out still
-# suppresses it (shared with the create-side orientation).
-DEFAULT_RESUME_TEMPLATE = (
-    "Session {{tmux_name}} resumed at {{ts}}. Your prior context is intact — "
-    "briefly confirm where things stand and that you're ready to continue."
-)
-
 
 logger = logging.getLogger(__name__)
 
@@ -100,8 +88,8 @@ def render_orientation(
         (``payload.enabled is False``) — caller skips injection entirely
 
     Resolution falls back through, in order:
-      1. ``dashboard.session.orientation:{workspace_id}`` (per-workspace)
-      2. ``dashboard.session.orientation:__default__`` (global)
+      1. ``dashboard.session.orientation:{workspace_id}`` (workspace or host)
+      2. ``dashboard.session.orientation:__default__`` (store-local fallback)
       3. The hardcoded ``DEFAULT_TEMPLATE`` (Settings backend unreachable)
 
     A template that raises a Jinja error logs a warning and falls
@@ -132,7 +120,8 @@ def render_orientation(
             "falling back to default",
             workspace_id, exc_info=True,
         )
-        rendered = _JINJA_ENV.from_string(DEFAULT_TEMPLATE).render(**context)
+        fallback_src = DEFAULT_RESUME_TEMPLATE if resumed else DEFAULT_TEMPLATE
+        rendered = _JINJA_ENV.from_string(fallback_src).render(**context)
 
     rendered = rendered.strip()
     return rendered or None
