@@ -250,6 +250,7 @@ def _capability_skill_surface(capabilities, run_dir: Path, harness: str) -> dict
 
 _HOST_ENV_PREFIX = "host:"
 _FILE_ENV_PREFIX = "file:"
+_CREDENTIAL_ENV_PREFIX = "credential:"
 
 
 def _resolve_env_source(env_name: str, source: str) -> str | None:
@@ -345,9 +346,83 @@ def _resolve_env_source(env_name: str, source: str) -> str | None:
         )
         return None
 
+    if source.startswith(_CREDENTIAL_ENV_PREFIX):
+        key = source[len(_CREDENTIAL_ENV_PREFIX):].strip()
+        if not key:
+            logger.warning(
+                "capability env %s: malformed credential source %r (empty key)",
+                env_name, source,
+            )
+            return None
+        value = _resolve_credential(key)
+        if value is None:
+            # Vault locked, key absent, or release refused. Drop the binding —
+            # the capability probe then surfaces `degraded reason=env_missing`,
+            # and we NEVER fall through to a wrong or empty value. Logged by KEY
+            # only; the value is never logged and never mentioned.
+            logger.info(
+                "capability env %s: credential %r unavailable; binding dropped",
+                env_name, key,
+            )
+            return None
+        return value
+
     # Plain literal value — backward compat with test fixtures and any
     # caller that hasn't migrated to the source-scheme syntax.
     return source
+
+
+def _resolve_credential(key: str) -> str | None:
+    """Open a vault-sealed credential by *key* at launch and return its plaintext
+    value, or None if the vault is locked, the key is absent, or the release is
+    refused — the fail-closed cases the caller drops the binding on.
+
+    NEVER logs, formats, or re-raises the value. The plaintext exists only as
+    this return value, which the launcher places directly into the container's
+    ``-e`` arg; nothing else holds it, so a traceback or logging middleware
+    cannot serialize a secret.
+    """
+    from tools.graph import ops as _ops, settings_ops as _settings_ops
+    from tools.graph.schemas.vault_credential import VAULT_AUDITED_SET_ID
+
+    # Fail CLOSED on a cold vault. With no key holder registered no decryption
+    # is possible, so read_set cannot return plaintext — and this must NOT be
+    # mistaken for "credential not configured" (auto-0815). The launch-time
+    # preflight refuses the launch by name on this state; here we only ensure no
+    # wrong value flows, logging it as a vault state and never as a missing key.
+    if getattr(_settings_ops, "_vault_key_holder", None) is None:
+        logger.error(
+            "credential %r: vault key holder not registered (vault cold); "
+            "cannot decrypt", key,
+        )
+        return None
+
+    # The audited set is @home("personal"); org=None routes to personal.db
+    # regardless of the acting org (required, not a default — auto-0815).
+    try:
+        members = _ops.read_set(VAULT_AUDITED_SET_ID, org=None, peers=[])
+    except Exception:
+        logger.exception("credential %r: vault set read failed", key)
+        return None
+
+    for row in getattr(members, "members", []) or []:
+        if getattr(row, "key", None) != key:
+            continue
+        if getattr(row, "vault_error", None) is not None:
+            # Row exists but did not open (e.g. VAULT_NO_KEY_HOLDER) — a vault
+            # state, fail closed; never the value, never confused with absence.
+            logger.error(
+                "credential %r: vault open failed (%s)", key,
+                getattr(row.vault_error, "reason", "unknown"),
+            )
+            return None
+        payload = getattr(row, "payload", None)
+        if isinstance(payload, dict):
+            val = payload.get("value")
+            if isinstance(val, str) and val:
+                return val
+        return None  # row present but malformed -> fail closed
+    return None  # key genuinely absent -> "not configured", caller drops binding
 
 
 def _capability_env(capabilities) -> dict[str, str]:
@@ -371,6 +446,22 @@ def _capability_env(capabilities) -> dict[str, str]:
             if value is not None:
                 out[env_name] = value
     return out
+
+
+def _declared_credential_keys(capabilities) -> set:
+    """The vault credential keys any capability's ``env_bindings`` declare via a
+    ``credential:<key>`` source. The launch preflight uses this to refuse a
+    launch by name on a COLD vault — a launch that needs a vault credential must
+    fail loudly ("cannot read"), not silently drop the binding as if the
+    credential were "not configured"."""
+    keys: set = set()
+    for cap in capabilities:
+        for _env_name, source in getattr(cap, "env_bindings", {}).items():
+            if isinstance(source, str) and source.startswith(_CREDENTIAL_ENV_PREFIX):
+                k = source[len(_CREDENTIAL_ENV_PREFIX):].strip()
+                if k:
+                    keys.add(k)
+    return keys
 
 
 # ── Credential Resolution ─────────────────────────────────────────────────────
@@ -1523,6 +1614,7 @@ def launch_session(
     from agents import launch_preflight
     _problems = launch_preflight.preflight(
         image=image, runtime_args=runtime_args, plan=plan, topo=_topo,
+        credential_keys=_declared_credential_keys(capabilities),
     )
     if _problems:
         print(
