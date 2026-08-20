@@ -1,18 +1,52 @@
 """Passkey enrollment statements — the root's signed claim about a credential.
 
-The settings store is agent-writable by design: the adversary in scope is a
-coopted local agent, and security comes from VERIFICATION AT USE rather than
-from the store being trustworthy (crib B1). So a row in
-``autonomy.identity.passkey`` proves nothing on its own. This module is what
-turns it into evidence.
+Security comes from VERIFICATION AT USE rather than from the store being
+trustworthy (crib B1), so a row in ``autonomy.identity.passkey`` proves nothing
+on its own. This module is what turns it into evidence.
+
+Note on the threat model, because an earlier version of this docstring stated it
+too broadly. A coopted LOCAL agent cannot edit a passkey row today, on three
+independent guards: both identity sets are in
+``settings_ops.PROTECTED_IDENTITY_SET_IDS`` so the generic settings API refuses
+them without the identity-route capability; both passkey registration routes are
+in ``unlock_routes._GATED_API_PATHS`` so they sit behind the human unlock rather
+than the open agent surface; and ``POST /api/identity/personal`` refuses
+overwrite with 409, so ``root_pub`` cannot be swapped once it exists.
+
+So this module's live value is NOT the local agent. It is:
+
+* **ingest** — a row arriving from another machine enters through none of those
+  three guards, and
+* **use** — a signature checked at the moment of sealing survives a compromise
+  of whatever wrote the row, whenever that happens and however it got there.
+
+Entry validation and use validation are different jobs. A design that verifies
+only on the way in is precisely a design that trusts the store afterwards.
 
 A statement is one root-signed record binding, together:
 
 * which credential this is (``credential_id``, ``credential_public_key``),
 * where it may be asserted (``rp_id``, ``origin``),
+* what the operator SEES when choosing it (``label``, ``transports``,
+  ``aaguid``) — see below,
+* its counter at enrollment (``initial_sign_count``),
 * and — only when the authenticator supports the WebAuthn PRF extension —
   ``provisioning_public_key``: the X25519 encapsulation public half derived
   from that credential's PRF output.
+
+## Why the label is signed
+
+``label`` is the text a human reads when deciding which device to trust,
+promote or revoke. Signing the address while leaving the NAME forgeable
+protects the wrong half of the decision: relabel an attacker's credential
+"Jeremy's YubiKey" and the operator authorises the following ceremony against
+it, correctly, having been told a lie by the only part of the record they can
+read.
+
+Consequence worth stating plainly: renaming a device therefore mints a NEW
+statement, and that is a root ceremony. This is not the periodic re-signing the
+design rejects — it is a deliberate act, and a rename genuinely does change what
+the operator will consent to.
 
 ## Why one record rather than loose columns
 
@@ -73,6 +107,7 @@ _REQUIRED = (
     "nonce",
     "created_hlc",
     "signer",
+    "initial_sign_count",
 )
 
 
@@ -83,6 +118,18 @@ class EnrollmentError(MalformedError):
 def _require_hex(value, pattern, length, what: str) -> None:
     if not isinstance(value, str) or not pattern.match(value):
         raise EnrollmentError(f"{what} must be {length} lowercase hex characters")
+
+
+def _require_int(value, what: str, *, minimum: int = 0) -> None:
+    """A strict integer. ``bool`` is deliberately excluded: Python makes
+    ``True == 1`` and ``isinstance(True, int)`` true, so a naive check accepts a
+    record whose wire form is ``true`` where a number belongs. The root would
+    have signed it quite happily, and a second implementation reading the same
+    bytes is free to reject it — which is a divergence between two verifiers
+    that both believe they agree.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise EnrollmentError(f"{what} must be an integer >= {minimum}, not a boolean")
 
 
 def _require_text(value, what: str) -> None:
@@ -105,6 +152,16 @@ class PasskeyEnrollmentStatement:
     #              personal-root rotation — never itself an authority claim.
     signature: str
     provisioning_public_key: str | None = None  # absent for non-PRF passkeys
+    #: What the authenticator's counter read AT ENROLLMENT. A static statement
+    #: cannot bind the LIVE counter — that would need re-signing per assertion,
+    #: which this record deliberately does not do. What it gives is a signed
+    #: floor: a row claiming a counter below this one is lying about its own
+    #: history. Anything that later checks monotonicity must compare against
+    #: this, not against a previous row read.
+    initial_sign_count: int = 0
+    label: str | None = None  # what a HUMAN reads when choosing this device
+    transports: tuple = ()
+    aaguid: str | None = None
 
     # ── the signed payload ──
 
@@ -125,8 +182,18 @@ class PasskeyEnrollmentStatement:
             "created_hlc": list(self.created_hlc),
             "signer": self.signer,
         }
+        payload["initial_sign_count"] = self.initial_sign_count
         if self.provisioning_public_key is not None:
             payload["provisioning_public_key"] = self.provisioning_public_key
+        # Omitted rather than nulled, on the same discipline as the
+        # provisioning key: absence is part of what the root committed to, so a
+        # row that grows one of these no longer matches the statement.
+        if self.label is not None:
+            payload["label"] = self.label
+        if self.transports:
+            payload["transports"] = list(self.transports)
+        if self.aaguid is not None:
+            payload["aaguid"] = self.aaguid
         return payload
 
     def signing_input(self) -> bytes:
@@ -168,6 +235,10 @@ class PasskeyEnrollmentStatement:
             signer=data["signer"],
             signature=data["signature"],
             provisioning_public_key=data.get("provisioning_public_key"),
+            initial_sign_count=data["initial_sign_count"],
+            label=data.get("label"),
+            transports=tuple(data.get("transports") or ()),
+            aaguid=data.get("aaguid"),
         )
 
     @classmethod
@@ -182,6 +253,7 @@ class PasskeyEnrollmentStatement:
 
 
 def _validate(statement: PasskeyEnrollmentStatement) -> None:
+    _require_int(statement.version, "version")
     if statement.version != ENROLLMENT_VERSION:
         raise EnrollmentError(f"unsupported statement version: {statement.version!r}")
     _require_text(statement.credential_id, "credential_id")
@@ -195,9 +267,18 @@ def _validate(statement: PasskeyEnrollmentStatement) -> None:
         _require_hex(
             statement.provisioning_public_key, _HEX64, 64, "provisioning_public_key"
         )
+    _require_int(statement.initial_sign_count, "initial_sign_count")
+    if statement.label is not None:
+        _require_text(statement.label, "label")
+    if not isinstance(statement.transports, (tuple, list)):
+        raise EnrollmentError("transports must be a list")
+    for i, t in enumerate(statement.transports):
+        _require_text(t, f"transports[{i}]")
+    if statement.aaguid is not None:
+        _require_text(statement.aaguid, "aaguid")
     ts, count = statement.created_hlc
-    if not isinstance(ts, int) or not isinstance(count, int) or ts < 0 or count < 0:
-        raise EnrollmentError("created_hlc must be two non-negative integers")
+    _require_int(ts, "created_hlc[0]")
+    _require_int(count, "created_hlc[1]")
     try:
         load_public_key(statement.signer)
     except Exception as exc:  # noqa: BLE001 — surfaced as our own error type
@@ -214,6 +295,10 @@ def mint(
     nonce: str,
     created_hlc: tuple,
     provisioning_public_key: str | None = None,
+    initial_sign_count: int = 0,
+    label: str | None = None,
+    transports: tuple = (),
+    aaguid: str | None = None,
 ) -> PasskeyEnrollmentStatement:
     """Sign a statement with the personal root. One static signature, at the
     enrollment ceremony — there is no re-signing and no counter."""
@@ -228,6 +313,10 @@ def mint(
         signer=root.public_hex,
         signature="0" * 128,  # placeholder; not part of binding_dict
         provisioning_public_key=provisioning_public_key,
+        initial_sign_count=initial_sign_count,
+        label=label,
+        transports=tuple(transports),
+        aaguid=aaguid,
     )
     _validate(draft)
     signature = root.sign_hex(draft.signing_input())
