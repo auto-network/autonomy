@@ -153,7 +153,7 @@ def get_dispatch_beads() -> dict[str, list[dict]]:
             WHERE i.status = %s
               AND NOT EXISTS (
                   SELECT 1 FROM dependencies d
-                  JOIN issues di ON di.id = d.depends_on_id
+                  JOIN issues di ON di.id = d.depends_on_issue_id
                   WHERE d.issue_id = i.id
                     AND d.type != %s
                     AND di.status != %s
@@ -179,7 +179,7 @@ def get_dispatch_beads() -> dict[str, list[dict]]:
             FROM issues i
             JOIN labels la ON la.issue_id = i.id AND la.label = %s
             JOIN dependencies d ON d.issue_id = i.id AND d.type != %s
-            JOIN issues di ON di.id = d.depends_on_id AND di.status != %s
+            JOIN issues di ON di.id = d.depends_on_issue_id AND di.status != %s
             LEFT JOIN labels l ON l.issue_id = i.id
             WHERE i.status = %s
             GROUP BY i.id
@@ -270,12 +270,12 @@ def get_bead(bead_id: str) -> dict | None:
         # Dependencies with dep bead metadata
         cur.execute(
             """
-            SELECT d.depends_on_id AS id, d.type,
+            SELECT d.depends_on_issue_id AS id, d.type,
                    di.title, di.status, di.priority
             FROM dependencies d
-            JOIN issues di ON di.id = d.depends_on_id
+            JOIN issues di ON di.id = d.depends_on_issue_id
             WHERE d.issue_id = %s
-            ORDER BY d.type, d.depends_on_id
+            ORDER BY d.type, d.depends_on_issue_id
             """,
             (bead_id,),
         )
@@ -304,7 +304,7 @@ def get_bead(bead_id: str) -> dict | None:
             FROM dependencies d
             JOIN issues ci ON ci.id = d.issue_id
             LEFT JOIN labels l ON l.issue_id = ci.id
-            WHERE d.depends_on_id = %s
+            WHERE d.depends_on_issue_id = %s
               AND d.type = %s
             GROUP BY ci.id
             ORDER BY ci.priority ASC, ci.updated_at DESC
@@ -391,7 +391,7 @@ def get_bead_counts() -> dict[str, int]:
                     )
                     AND EXISTS (
                         SELECT 1 FROM dependencies d
-                        JOIN issues di ON di.id = d.depends_on_id
+                        JOIN issues di ON di.id = d.depends_on_issue_id
                         WHERE d.issue_id = i.id
                           AND d.type != %s
                           AND di.status != %s
