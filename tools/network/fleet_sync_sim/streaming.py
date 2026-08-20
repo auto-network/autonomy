@@ -48,7 +48,8 @@ _U32 = struct.Struct(">I")
 # tuple position; production code generation can freeze those IDs explicitly.
 BASE_TABLE_ORDER = (
     "sources", "entities", "nodes", "tags", "threads",
-    "vault_content_bodies", "keycontrol_state", "keycontrol_credential",
+    "vault_content_bodies", "keycontrol_state", "keycontrol_grant",
+    "keycontrol_credential",
     "keycontrol_bridge", "vault_content_objects", "settings",
     "thoughts", "derivations", "claims", "edges", "entity_mentions",
     "node_refs", "note_comments", "note_reads", "captures", "attachments",
