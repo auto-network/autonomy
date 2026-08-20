@@ -500,7 +500,7 @@ Five scopes compose session primers. Pick the one matching the content you're ad
 | Every workspace `{{ org }}` owns | `autonomy.org.primer#1` Setting, key `{{ org }}` |
 | One enabled capability across `{{ org }}` | `autonomy.org.capability.primer#1` Setting, key `<implementation>` |
 | Every workspace on the platform | `agents/primers/workspace.md.j2` in the repo — a code change, not a Setting |
-| Native host terminal | `dashboard.session.orientation#1` Setting, key `host` in `personal` — delivered as the first welcome message |
+| Native host terminal | `dashboard.session.orientation#1` Setting, key `host` in `personal` — write it from a host terminal; it is delivered as the first welcome message |
 
 Each Settings layer is assembled from the bare key **plus any number of named blocks** keyed `<key>:<block-name>`. Every block has its own `enabled` flag defaulting to true, so one section can be switched off without disturbing the rest and without losing the text.
 
