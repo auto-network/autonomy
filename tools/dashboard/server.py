@@ -18803,6 +18803,17 @@ async def _on_startup():
             "sweeper will still run and catch outstanding releases",
         )
     _vault_release_sweeper_task = asyncio.create_task(_vault_release_sweeper())
+    # Restore a WARM vault from a graceful hot-reload snapshot before traffic
+    # (auto-a1pub). Present only after a graceful shutdown wrote it; a cold boot
+    # or a crash finds nothing and the vault stays locked until a human unlock.
+    # The snapshot files are cleared once consumed.
+    try:
+        from tools.dashboard.unlock_routes import restore_vault_across_hot_reload
+        await asyncio.to_thread(restore_vault_across_hot_reload)
+    except Exception:
+        logger.exception(
+            "vault hot-reload restore raised on startup; the vault stays locked"
+        )
     # Session lifecycle worker (FSM redesign 2026-06-18): start the single
     # off-loop thread that owns workspace start/stop/retry. It sits idle until
     # api_session_create is rewired to enqueue — starting it now is additive and
@@ -18982,6 +18993,18 @@ async def _on_shutdown():
             snapshot_fn(EVENT_BUS_STATE_PATH)
         except Exception:
             logger.exception("event_bus.snapshot() raised unexpectedly; continuing")
+    # Hand a WARM vault to the next process across a graceful reload
+    # (auto-a1pub): the delegate signing key and the persona KEM private key go
+    # to the ramfs key cache, and the next boot re-derives the generation keys
+    # from the on-disk grants with that KEM key. A CRASH skips this hook, so a
+    # non-graceful restart writes nothing and boots locked — fail-closed.
+    try:
+        from tools.dashboard.unlock_routes import save_vault_across_hot_reload
+        save_vault_across_hot_reload()
+    except Exception:
+        logger.exception(
+            "vault hot-reload snapshot raised; the next process boots locked"
+        )
 
 @asynccontextmanager
 async def _lifespan(app):
