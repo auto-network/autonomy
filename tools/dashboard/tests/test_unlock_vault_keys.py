@@ -67,14 +67,49 @@ def test_without_a_session_the_vault_does_not_come_up(client, monkeypatch):
 # ── what it refuses rather than half-installing ──────────────
 
 
-def test_an_empty_set_is_refused(client, unlocked):
+def test_an_empty_set_is_refused_when_the_store_HAS_sealed_content(
+        client, unlocked, monkeypatch):
     """The browser opening no grants is a failure to report, not a vault to
-    bring up half-way."""
+    bring up half-way — but only where there were grants to open."""
+    monkeypatch.setattr(unlock_routes, "_personal_store_has_generations",
+                        lambda: True)
     response = client.post("/api/identity/unlock/vault-keys",
                            json={"generation_keys": {}})
 
     assert response.status_code == 400
     assert settings_ops._vault_key_holder is None
+
+
+def test_an_empty_set_is_ACCEPTED_on_a_first_unlock(client, unlocked, monkeypatch):
+    """THE ONE THAT MATTERS, and the reason a fresh identity could never have a
+    vault at all.
+
+    On a store where nothing has ever been sealed there are legitimately no
+    grants: the sealer mints the first generation on the first write. The old
+    rule could not tell that apart from a browser that failed to open grants it
+    should have, so it refused the only state a new store can be in — and the
+    single path to bringing the vault up rejected every new identity.
+    """
+    monkeypatch.setattr(unlock_routes, "_personal_store_has_generations",
+                        lambda: False)
+    response = client.post("/api/identity/unlock/vault-keys",
+                           json={"generation_keys": {}})
+
+    assert response.status_code == 200, response.text
+    assert settings_ops._vault_key_holder is not None
+
+
+def test_an_unreadable_key_control_store_does_not_block_a_first_unlock():
+    """Fails to False deliberately: an unreadable store must not be the thing
+    that stops a fresh identity from ever having a vault."""
+    import tools.vault.db_content_store as dcs
+
+    original = dcs.vault_db_path_for
+    try:
+        dcs.vault_db_path_for = lambda *a, **k: (_ for _ in ()).throw(OSError("nope"))
+        assert unlock_routes._personal_store_has_generations() is False
+    finally:
+        dcs.vault_db_path_for = original
 
 
 def test_a_wrong_length_secret_is_refused(client, unlocked):
