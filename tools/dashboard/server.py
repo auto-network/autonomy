@@ -182,6 +182,7 @@ from tools.graph import settings_ops  # noqa: E402
 # before ``flush_schema_meta_machine_store`` runs at lifespan startup.
 # See pitfall ``graph://3fe60c25-fab``.
 from tools.dashboard import notifications_settings as _notifications_settings  # noqa: E402, F401
+from tools.dashboard import agent_test_leases as _agent_test_leases  # noqa: E402
 
 # Surface Presence + OperatorActivity substrate (bead auto-i3tki) —
 # imported eagerly for the same reason: its three SettingSchema classes
@@ -5782,6 +5783,84 @@ async def api_session_send(request):
     if client_id:
         resp["client_id"] = client_id
     return JSONResponse(resp)
+
+
+_SESSION_NOTIFICATION_IDS: dict[tuple[str, str], float] = {}
+_SESSION_NOTIFICATION_MAX = 4096
+
+
+async def api_session_notify(request):
+    """Deliver one idempotent, harness-neutral system notification.
+
+    The task-notification envelope is already understood by both Claude and
+    Codex transcript adapters. Unlike CrossTalk or ordinary session input, it
+    is normalized as ``type=system`` and therefore does not update operator
+    activity. Callers provide a stable notification id so retries cannot wake
+    the agent twice during one dashboard process lifetime.
+    """
+    import html as _html
+
+    body = await request.json()
+    tmux_session = str(body.get("tmux_session") or "").strip()
+    notification_id = str(body.get("notification_id") or "").strip()
+    kind = str(body.get("kind") or "system").strip()
+    status = str(body.get("status") or "complete").strip()
+    summary = str(body.get("summary") or "").strip()
+    detail = str(body.get("body") or "").strip()
+    if not tmux_session or not notification_id or not summary:
+        return JSONResponse(
+            {"error": "tmux_session, notification_id, and summary are required"},
+            status_code=400,
+        )
+    identifier = re.compile(r"^[A-Za-z0-9:._-]{1,200}$")
+    if not identifier.fullmatch(notification_id) or not identifier.fullmatch(kind):
+        return JSONResponse({"error": "invalid notification_id or kind"}, status_code=400)
+    if len(summary) > 2000 or len(detail) > 4000:
+        return JSONResponse({"error": "notification content exceeds its bounded limit"}, status_code=400)
+    try:
+        exists = _tmux_session_exists(tmux_session)
+    except FileNotFoundError:
+        return JSONResponse({"error": "tmux is not available in this environment"}, status_code=503)
+    if not exists:
+        return JSONResponse({"error": f"tmux session '{tmux_session}' not found"}, status_code=404)
+
+    key = (tmux_session, notification_id)
+    if key in _SESSION_NOTIFICATION_IDS:
+        return JSONResponse({"ok": True, "status": "duplicate", "notification_id": notification_id})
+    escaped = {
+        "id": _html.escape(notification_id),
+        "kind": _html.escape(kind),
+        "status": _html.escape(status[:100]),
+        "summary": _html.escape(summary),
+        "body": _html.escape(detail),
+    }
+    envelope = (
+        "<task-notification>\n"
+        f"<id>{escaped['id']}</id>\n"
+        f"<kind>{escaped['kind']}</kind>\n"
+        f"<summary>{escaped['summary']}</summary>\n"
+        f"<status>{escaped['status']}</status>\n"
+        + (f"<body>{escaped['body']}</body>\n" if detail else "")
+        + "</task-notification>"
+    )
+    await tmux_send(tmux_session, envelope)
+    _SESSION_NOTIFICATION_IDS[key] = time.time()
+    if len(_SESSION_NOTIFICATION_IDS) > _SESSION_NOTIFICATION_MAX:
+        oldest = sorted(_SESSION_NOTIFICATION_IDS, key=_SESSION_NOTIFICATION_IDS.get)
+        for stale in oldest[: len(_SESSION_NOTIFICATION_IDS) - _SESSION_NOTIFICATION_MAX]:
+            _SESSION_NOTIFICATION_IDS.pop(stale, None)
+    return JSONResponse({"ok": True, "status": "accepted", "notification_id": notification_id})
+
+
+async def api_agent_test_leases(request):
+    """Acquire, renew, release, or inspect machine-wide Agent Test slots."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        return JSONResponse({"ok": False, "error": "JSON object required"}, status_code=400)
+    action = str(body.get("action") or "status").strip()
+    result = await asyncio.to_thread(_agent_test_leases.transact, action, body)
+    status_code = 200 if result.get("ok") else 400
+    return JSONResponse(result, status_code=status_code)
 
 
 async def api_session_interrupt(request):
@@ -18164,6 +18243,8 @@ routes = [
     Route("/api/session/{tmux_name}/restart", api_session_restart, methods=["POST"]),
     Route("/api/session/send-handshake", api_session_send_handshake, methods=["POST"]),
     Route("/api/session/confirm-link", api_session_confirm_link, methods=["POST"]),
+    Route("/api/session/notify", api_session_notify, methods=["POST"]),
+    Route("/api/agent-test/leases", api_agent_test_leases, methods=["POST"]),
     Route("/api/session/{tmux_name}", api_session_get, methods=["GET"]),
     Route("/api/session/{tmux_name}/output/{path:path}", api_session_output, methods=["GET"]),
     Route("/api/session/{tmux_name}/request-identity-refresh", api_session_request_identity_refresh, methods=["POST"]),

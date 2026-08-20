@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 
-LIVE_STATUSES = frozenset({"starting", "running", "stopping"})
+LIVE_STATUSES = frozenset({"starting", "queued", "running", "stopping"})
 
 
 def utc_now() -> str:

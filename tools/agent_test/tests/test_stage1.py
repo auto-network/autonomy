@@ -29,6 +29,8 @@ def cli_env(tmp_path: Path) -> dict[str, str]:
     )
     env["AGENT_TEST_STATE_DIR"] = str(tmp_path / "state")
     env["AGENT_TEST_NOTIFY"] = "none"
+    env["AGENT_TEST_NO_SUPERVISOR"] = "1"
+    env["AGENT_TEST_MACHINE_LEASE"] = "none"
     env.pop("AUTONOMY_SESSION", None)
     env.pop("CROSSTALK_TOKEN", None)
     return env
@@ -55,7 +57,7 @@ def _wait_terminal(env: dict[str, str], timeout: float = 10) -> dict:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         values = _manifests(env)
-        if values and values[0]["status"] not in {"starting", "running", "stopping"}:
+        if values and values[0]["status"] not in {"starting", "queued", "running", "stopping"}:
             return values[0]
         time.sleep(0.05)
     raise AssertionError("Agent Test run did not reach a terminal state")
@@ -125,7 +127,8 @@ def test_guidance_becomes_compact_after_first_completed_run(project: Path, cli_e
     assert "Keep working; do not poll" in first.stdout
     _wait_terminal(cli_env)
 
-    second = _cli(project, cli_env, "run", "test_ok.py")
+    (project / "test_other.py").write_text("def test_other():\n    pass\n")
+    second = _cli(project, cli_env, "run", "test_other.py")
     assert second.returncode == 0
     assert "Completion will be delivered here" in second.stdout
     assert "Keep working; do not poll" not in second.stdout
