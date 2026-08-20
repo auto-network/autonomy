@@ -1,13 +1,98 @@
 from __future__ import annotations
 
+import pytest
+
 from tools.dashboard import agent_test_leases
 from tools.graph.db import GraphDB
+from tools.graph import settings_ops
+from tools.graph.schemas import get_schema
+from tools.graph.schemas.agent_test_capacity import DURATION_SET_ID, SCHEMA_REVISION
 
 
 def test_machine_store_enforces_cross_container_resource_capacity(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
     monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.delenv("GRAPH_API", raising=False)
+    GraphDB.close_all_pooled()
+
+
+def test_duration_history_is_append_only_idempotent_and_capped_per_test(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.delenv("GRAPH_API", raising=False)
+    GraphDB.close_all_pooled()
+    clock = [1_800_000_000.0]
+    monkeypatch.setattr(agent_test_leases.time, "time", lambda: clock[0])
+    repository = "github.example/acme/project"
+    nodeid = "tests/test_widget.py::test_widget"
+
+    schema = get_schema(DURATION_SET_ID, SCHEMA_REVISION)
+    assert schema is not None
+    assert schema._access_pattern == "append_only_log"
+    assert schema._key_strategy == "uuid_v4"
+
+    invalid = agent_test_leases.record_durations(
+        "github.example/acme/invalid",
+        "invalid-run",
+        [
+            {"nodeid": nodeid, "duration_seconds": 1.0, "outcome": "passed"},
+            {"nodeid": "tests/test_bad.py::test_bad", "duration_seconds": -1.0, "outcome": "passed"},
+        ],
+    )
+    assert invalid["ok"] is False
+    assert not [
+        member
+        for member in settings_ops.read_set(DURATION_SET_ID, org="machine", peers=[]).members
+        if member.payload["repository"] == "github.example/acme/invalid"
+    ]
+
+    for index in range(12):
+        clock[0] += 1
+        result = agent_test_leases.record_durations(
+            repository,
+            f"run-{index}",
+            [{"nodeid": nodeid, "duration_seconds": float(index), "outcome": "passed"}],
+        )
+        assert result["ok"] is True
+
+    members = settings_ops.read_set(DURATION_SET_ID, org="machine", peers=[]).members
+    assert len(members) == 10
+    assert {member.payload["run_id"] for member in members} == {
+        f"run-{index}" for index in range(2, 12)
+    }
+    with pytest.raises(ValueError, match="append_only_log"):
+        settings_ops.upsert_by_key(
+            DURATION_SET_ID,
+            SCHEMA_REVISION,
+            members[0].key,
+            members[0].payload,
+            org="machine",
+        )
+
+    duplicate = agent_test_leases.record_durations(
+        repository,
+        "run-11",
+        [{"nodeid": nodeid, "duration_seconds": 99.0, "outcome": "failed"}],
+    )
+    assert duplicate["appended"] == 0
+    assert duplicate["duplicates"] == 1
+
+    history = agent_test_leases.duration_history(repository, [nodeid])
+    assert history["matched_tests"] == 1
+    assert len(history["tests"][0]["observations"]) == 10
+    assert history["tests"][0]["observations"][0]["run_id"] == "run-11"
+    assert history["tests"][0]["median_seconds"] == 6.5
+
+    estimate = agent_test_leases.estimate_duration(
+        repository,
+        [nodeid, "tests/test_missing.py"],
+        parallelism=2,
+    )
+    assert estimate["estimated_seconds"] == 3.25
+    assert estimate["serial_seconds"] == 6.5
+    assert estimate["sampled_tests"] == 1
+    assert estimate["sample_count"] == 10
+    assert estimate["unknown_selectors"] == ["tests/test_missing.py"]
     GraphDB.close_all_pooled()
     clock = [1_800_000_000.0]
     monkeypatch.setattr(agent_test_leases.time, "time", lambda: clock[0])

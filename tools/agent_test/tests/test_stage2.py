@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 from .test_stage1 import _cli, _manifests, _wait_terminal, cli_env, project  # noqa: F401
-from tools.agent_test.environment import requested_resources
+from tools.agent_test.environment import pytest_parallelism, requested_resources
 
 
 def test_doctor_prefers_project_venv_without_shell_activation(project: Path, cli_env: dict[str, str]):
@@ -33,6 +33,8 @@ def test_resource_weight_infers_xdist_and_profile_browser_slots(project: Path):
     resources = requested_resources(project, {"resources": {"browsers": 2}}, "run")
 
     assert resources == {"tests": 6, "browsers": 2}
+    assert pytest_parallelism(project, {"resources": {"tests": 12}}) == 6
+    assert requested_resources(project, {"resources": {"tests": 12}}, "run") == {"tests": 12}
 
 
 def test_unchanged_rerun_is_refused_but_failure_only_rerun_is_allowed(project: Path, cli_env: dict[str, str]):

@@ -11,8 +11,14 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .environment import choose_python, profiles, requested_resources, workspace_fingerprint
-from .lease_client import lease_request, telemetry_request
+from .environment import (
+    choose_python,
+    profiles,
+    pytest_parallelism,
+    requested_resources,
+    workspace_fingerprint,
+)
+from .lease_client import duration_request, lease_request, telemetry_request
 from .planning import build_plan, changed_coverage, changed_lines
 from .store import (
     atomic_write_json,
@@ -31,6 +37,7 @@ from .store import (
     utc_now,
 )
 from .supervisor import start_worker, supervisor_status
+from .timing import format_estimate, repository_identity
 
 
 DEFAULT_FAILURE_LIMIT = 5
@@ -68,6 +75,33 @@ def _summary_line(manifest: dict[str, Any]) -> str:
     duration = manifest.get("duration_seconds")
     suffix = f" in {duration:.1f}s" if isinstance(duration, (int, float)) else ""
     return f"{manifest['run_id']} · {manifest.get('status', 'unknown')} · {counts}{suffix}"
+
+
+def _duration_estimate(repository: str, selectors: list[str], parallelism: int = 1) -> dict[str, Any]:
+    return duration_request(
+        "estimate",
+        repository=repository,
+        selectors=selectors,
+        parallelism=max(1, parallelism),
+    )
+
+
+def _estimate_text(estimate: dict[str, Any]) -> str | None:
+    if not estimate.get("ok"):
+        return None
+    seconds = estimate.get("estimated_seconds")
+    if not isinstance(seconds, (int, float)):
+        return "Estimated test time: unknown; no retained timing history matches this selection."
+    sampled = int(estimate.get("sampled_tests") or 0)
+    samples = int(estimate.get("sample_count") or 0)
+    parallelism = int(estimate.get("parallelism") or 1)
+    suffix = f" across {parallelism} workers" if parallelism > 1 else ""
+    unknown = len(estimate.get("unknown_selectors") or [])
+    caveat = f"; {unknown} selector(s) have no history" if unknown else ""
+    return (
+        f"Estimated test time: ~{format_estimate(float(seconds))}{suffix}, "
+        f"from {samples} retained sample(s) across {sampled} test(s){caveat}."
+    )
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -133,6 +167,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"Agent Test: {exc}", file=sys.stderr)
         return 2
+    repository = repository_identity(repo)
+    parallelism = pytest_parallelism(repo, profile)
+    estimate = _duration_estimate(repository, selectors, parallelism)
     fingerprint = workspace_fingerprint(
         repo, [mode, python, f"coverage={line_coverage}", *profile_args, *selectors]
     )
@@ -171,6 +208,9 @@ def cmd_run(args: argparse.Namespace) -> int:
                 telemetry_request(event="repeat_refused")
                 return 4
         run_id = new_run_id()
+        estimate_text = _estimate_text(estimate)
+        if estimate_text:
+            print(estimate_text, flush=True)
         directory = run_dir(root, run_id)
         directory.mkdir(parents=True, exist_ok=False)
         manifest = {
@@ -180,6 +220,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             "status": "starting",
             "created_at": utc_now(),
             "repo": str(repo),
+            "repository": repository,
             "selectors": selectors,
             "pytest_args": profile_args,
             "profile": args.profile,
@@ -188,8 +229,21 @@ def cmd_run(args: argparse.Namespace) -> int:
             "python": python,
             "notify": args.notify,
             "resources": resources,
+            "parallelism": parallelism,
             "line_coverage": line_coverage,
             "changed_lines": (plan or {}).get("changed_lines") or changed_lines(repo),
+            "duration_estimate": {
+                key: estimate.get(key)
+                for key in (
+                    "estimated_seconds",
+                    "serial_seconds",
+                    "parallelism",
+                    "sampled_tests",
+                    "sample_count",
+                    "unknown_selectors",
+                )
+                if key in estimate
+            },
         }
         if plan is not None:
             manifest["plan"] = {
@@ -407,6 +461,11 @@ def cmd_plan(args: argparse.Namespace) -> int:
         f"Agent Test plan · {plan['changed_files']} changed Python file(s) · "
         f"{len(recommendations)} recommended selector(s)"
     )
+    selectors = [item["selector"] for item in recommendations]
+    estimate = _duration_estimate(repository_identity(repo), selectors)
+    estimate_text = _estimate_text(estimate)
+    if estimate_text:
+        print(estimate_text)
     limit = _bounded_limit(args.limit)
     for item in recommendations[:limit]:
         print(f"- {item['selector']} · confidence {item['confidence']} · {item['reasons'][0]}")
@@ -465,6 +524,54 @@ def cmd_metrics(args: argparse.Namespace) -> int:
         print(f"- {name}: {amount}")
     if len(counts) > 20:
         print(f"[{len(counts) - 20} more event types omitted]")
+    return 0
+
+
+def cmd_timings(args: argparse.Namespace) -> int:
+    repo, _root_path = _root()
+    repository = repository_identity(repo)
+    estimate = _duration_estimate(repository, args.selectors)
+    if not estimate.get("ok"):
+        print(
+            f"Agent Test: timing history unavailable: {estimate.get('error', 'unknown')}",
+            file=sys.stderr,
+        )
+        return 2
+    estimate_text = _estimate_text(estimate)
+    if estimate_text:
+        print(estimate_text)
+    history = duration_request(
+        "history",
+        repository=repository,
+        selectors=args.selectors,
+        limit_tests=_bounded_limit(args.limit_tests),
+    )
+    if not history.get("ok"):
+        print(
+            f"Agent Test: timing history unavailable: {history.get('error', 'unknown')}",
+            file=sys.stderr,
+        )
+        return 2
+    tests = history.get("tests") or []
+    print(
+        f"Timing history · {len(tests)} of {history.get('matched_tests', 0)} matching test(s) · "
+        f"latest {history.get('history_limit', 10)} retained per test"
+    )
+    sample_limit = max(1, min(int(args.samples), 10))
+    for item in tests:
+        observations = (item.get("observations") or [])[:sample_limit]
+        print(
+            f"- {item['nodeid']} · median {format_estimate(float(item['median_seconds']))} "
+            f"· {len(item.get('observations') or [])} sample(s)"
+        )
+        recent = ", ".join(
+            f"{format_estimate(float(observation['duration_seconds']))} {observation['outcome']}"
+            for observation in observations
+        )
+        print(f"  recent: {recent}")
+    omitted = int(history.get("omitted_tests") or 0)
+    if omitted:
+        print(f"[{omitted} more matching tests omitted; use --limit-tests N deliberately]")
     return 0
 
 
@@ -757,6 +864,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     metrics = sub.add_parser("metrics", help="show bounded machine-wide Agent Test usage")
     metrics.set_defaults(func=cmd_metrics)
+
+    timings = sub.add_parser("timings", help="show capped per-test duration history and estimate")
+    timings.add_argument("selectors", nargs="+")
+    timings.add_argument("--limit-tests", type=int, default=5)
+    timings.add_argument("--samples", type=int, default=10)
+    timings.set_defaults(func=cmd_timings)
 
     baseline = sub.add_parser("baseline", help="publish a retained run as the workspace baseline")
     baseline.add_argument("run_id", nargs="?")

@@ -5881,6 +5881,39 @@ async def api_agent_test_telemetry(request):
     return JSONResponse(result)
 
 
+async def api_agent_test_durations(request):
+    """Append, query, or estimate capped per-test duration history."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        return JSONResponse({"ok": False, "error": "JSON object required"}, status_code=400)
+    action = str(body.get("action") or "estimate").strip()
+    repository = str(body.get("repository") or "").strip()
+    if action == "record":
+        result = await asyncio.to_thread(
+            _agent_test_leases.record_durations,
+            repository,
+            str(body.get("run_id") or "").strip(),
+            body.get("observations"),
+        )
+    elif action == "history":
+        result = await asyncio.to_thread(
+            _agent_test_leases.duration_history,
+            repository,
+            body.get("selectors") or [],
+            limit_tests=body.get("limit_tests", 10),
+        )
+    elif action == "estimate":
+        result = await asyncio.to_thread(
+            _agent_test_leases.estimate_duration,
+            repository,
+            body.get("selectors") or [],
+            parallelism=body.get("parallelism", 1),
+        )
+    else:
+        result = {"ok": False, "error": f"unsupported action: {action}"}
+    return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+
+
 async def api_session_interrupt(request):
     """Send Escape key to a tmux session to interrupt a running tool.
 
@@ -18264,6 +18297,7 @@ routes = [
     Route("/api/session/notify", api_session_notify, methods=["POST"]),
     Route("/api/agent-test/leases", api_agent_test_leases, methods=["POST"]),
     Route("/api/agent-test/telemetry", api_agent_test_telemetry, methods=["POST"]),
+    Route("/api/agent-test/durations", api_agent_test_durations, methods=["POST"]),
     Route("/api/session/{tmux_name}", api_session_get, methods=["GET"]),
     Route("/api/session/{tmux_name}/output/{path:path}", api_session_output, methods=["GET"]),
     Route("/api/session/{tmux_name}/request-identity-refresh", api_session_request_identity_refresh, methods=["POST"]),

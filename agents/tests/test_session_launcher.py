@@ -1802,7 +1802,7 @@ def test_every_session_exposes_agent_test_and_refuses_raw_pytest_commands(
     )
     stdout, stderr = process.communicate(timeout=10)
     assert process.returncode == 0, stderr
-    assert stdout.strip() == "0.3.0"
+    assert stdout.strip() == "0.4.0"
 
     for command in ("pytest", "py.test"):
         gate = run_dir / "cap-bin" / command

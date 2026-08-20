@@ -2388,6 +2388,82 @@ def add_setting(
     return sid
 
 
+def append_log_entries(
+    set_id: str,
+    schema_revision: int,
+    entries: list[tuple[str, dict]],
+    *,
+    org: "str | None | _CallerOrgSentinel",
+    state: str = "raw",
+) -> list[str]:
+    """Append a validated batch to an ``@append_only_log`` in one transaction.
+
+    Every entry supplies its immutable key and complete payload. The function
+    refuses non-log and vaulted schemas, validates the entire batch before
+    opening a write transaction, and emits the ordinary per-row Settings hook
+    only after the commit. It exists for event producers whose natural unit is
+    a batch; calling :func:`add_setting` thousands of times would otherwise
+    reopen and initialize SQLite thousands of times.
+    """
+    org = _resolve_org_arg(org)
+    _guard_protected_set(set_id)
+    if state not in VALID_STATES:
+        raise ValueError(f"invalid state {state!r}; valid: {VALID_STATES}")
+    _assert_publication_band(set_id, schema_revision, state)
+    if _access_pattern_for(set_id, schema_revision) != "append_only_log":
+        raise ValueError(f"{set_id} does not declare 'append_only_log'")
+    if schemas.declared_vault_tier(set_id) is not None:
+        raise ValueError("bulk append does not accept vaulted Settings")
+    if not entries:
+        return []
+    keys = [key for key, _payload in entries]
+    if len(set(keys)) != len(keys):
+        raise ValueError("append-only batch contains duplicate keys")
+    for key, payload in entries:
+        schemas.validate_payload(set_id, schema_revision, payload)
+        schemas.validate_key(set_id, schema_revision, key)
+
+    now = _now_iso()
+    expires_at = schemas.cache_expires_at(set_id, int(schema_revision), now)
+    setting_ids = [str(uuid4()) for _entry in entries]
+    rows = [
+        (
+            setting_id,
+            set_id,
+            int(schema_revision),
+            key,
+            json.dumps(payload),
+            state,
+            now,
+            now,
+            expires_at,
+        )
+        for setting_id, (key, payload) in zip(setting_ids, entries)
+    ]
+    db = _open(org, set_id)
+    try:
+        db.conn.execute("BEGIN IMMEDIATE")
+        db.conn.executemany(
+            "INSERT INTO settings(id, set_id, schema_revision, key, payload, "
+            "publication_state, created_at, updated_at, expires_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            rows,
+        )
+        db.conn.commit()
+    except Exception:
+        db.conn.rollback()
+        raise
+    finally:
+        db.close()
+    for key in keys:
+        _call_emit_hook(
+            operation="write",
+            snapshot=_make_snapshot(set_id, schema_revision, key, state, False),
+            org=org,
+        )
+    return setting_ids
+
+
 def upsert_by_key(
     set_id: str,
     schema_revision: int,
@@ -3298,6 +3374,65 @@ def remove_setting(
         db.close()
     if snapshot is not None:
         _call_emit_hook(operation="delete", snapshot=snapshot, org=org)
+
+
+def remove_raw_settings(
+    setting_ids: list[str],
+    *,
+    org: "str | None | _CallerOrgSentinel",
+) -> int:
+    """Hard-delete a validated batch of raw Settings in one transaction."""
+    org = _resolve_org_arg(org)
+    ids = list(dict.fromkeys(str(value) for value in setting_ids if str(value)))
+    if not ids:
+        return 0
+    db = _open(org)
+    snapshots: list[dict[str, Any]] = []
+    try:
+        db.conn.execute("BEGIN IMMEDIATE")
+        for offset in range(0, len(ids), 900):
+            chunk = ids[offset : offset + 900]
+            placeholders = ",".join("?" for _value in chunk)
+            rows = db.conn.execute(
+                "SELECT id, set_id, schema_revision, key, publication_state, "
+                f"deprecated FROM settings WHERE id IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            found = {row["id"] for row in rows}
+            missing = [setting_id for setting_id in chunk if setting_id not in found]
+            if missing:
+                raise LookupError(f"setting not found: {missing[0]!r}")
+            for set_id in {row["set_id"] for row in rows}:
+                _guard_protected_set(set_id)
+            non_raw = [row for row in rows if row["publication_state"] != "raw"]
+            if non_raw:
+                raise ValueError(
+                    "can only remove raw Settings; "
+                    f"{non_raw[0]['id']!r} is {non_raw[0]['publication_state']!r}"
+                )
+            snapshots.extend(
+                _make_snapshot(
+                    row["set_id"],
+                    row["schema_revision"],
+                    row["key"],
+                    row["publication_state"],
+                    row["deprecated"],
+                )
+                for row in rows
+            )
+            db.conn.execute(
+                f"DELETE FROM settings WHERE id IN ({placeholders})",
+                chunk,
+            )
+        db.conn.commit()
+    except Exception:
+        db.conn.rollback()
+        raise
+    finally:
+        db.close()
+    for snapshot in snapshots:
+        _call_emit_hook(operation="delete", snapshot=snapshot, org=org)
+    return len(snapshots)
 
 
 # ── Read paths ───────────────────────────────────────────────
