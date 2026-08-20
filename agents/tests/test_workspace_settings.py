@@ -319,16 +319,21 @@ def graph_db_env(tmp_path, monkeypatch):
     monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.delenv("GRAPH_API", raising=False)
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs))
-    # No GRAPH_ORG override: the seed helpers write at CALLER_ORG and
-    # resolve_capabilities reads at org=None — both resolve to the personal
-    # store, so they align without a pin. (The old GRAPH_DB pin collapsed
-    # every org to one file, which is why the mismatch was invisible.)
+    # The suite DECLARES its scope: bind the caller contextvar to the
+    # personal store — the same mechanism the identity middleware uses for
+    # a real caller — so seeds written at CALLER_ORG and reads at org=None
+    # both resolve through the production sentinel path to one declared
+    # place. Nothing here leans on an internal default; there isn't one
+    # left for Settings writes.
     monkeypatch.delenv("GRAPH_ORG", raising=False)
+    from tools.graph import ops as _ops
+    _tok = _ops.set_caller_org("personal")
     GraphDB.close_all_pooled()
     for slug, kind in (("autonomy", "shared"), ("personal", "personal")):
         GraphDB.create_org_db(slug, type_=kind, path=orgs / f"{slug}.db").close()
     GraphDB.close_all_pooled()
     yield orgs / "autonomy.db"
+    _ops.reset_caller_org(_tok)
     GraphDB.close_all_pooled()
 
 

@@ -49,7 +49,11 @@ class ResolvedLinkOperationMode:
 
 def _effective_org_slug(org: Any) -> str | None:
     if isinstance(org, settings_ops._CallerOrgSentinel):
-        return os.environ.get("GRAPH_ORG")
+        # org-scope: request — the sentinel resolves through the one caller
+        # resolver (explicit > per-request contextvar > None). No ambient
+        # source: a caller with a scope passed it or bound it.
+        from tools.graph import ops as _ops
+        return _ops._resolve_org(None)
     return org
 
 

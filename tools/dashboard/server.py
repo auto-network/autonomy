@@ -13267,8 +13267,12 @@ def _dashboard_default_org() -> str:
     ``X-Graph-Org`` on every shell-route fetch. Without it, calls like
     ``Schema.of('dashboard.harness.usage').all()`` fall through to the
     server's scopeless default and silently return ``[]``.
+
+    # org-scope: machine — dashboard.shell.default-org declares this
+    # node's shell rendering default (seeded by first-run).
     """
-    return os.environ.get("GRAPH_ORG") or "autonomy"
+    from tools.graph.schemas.dashboard_shell import shell_default_org
+    return shell_default_org()
 
 
 def _harness_usage_org() -> str:

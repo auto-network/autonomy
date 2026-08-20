@@ -207,13 +207,13 @@ VALID_MISSION_STATUSES = ("active", "paused", "complete")
 def _default_org() -> str:
     """The organization a mission belongs to when the caller did not say.
 
-    Sessions run under GRAPH_ORG; a host process without it is the
-    dashboard's own organization. Falling back to the literal is
-    deliberate: a mission with no organization has no boundary at all, and
-    an unbounded mission is worse than one attributed to the wrong place,
-    which is visible and correctable.
+    The node's declared shell default org (org-scope: machine). A mission
+    with no organization has no boundary at all, and an unbounded mission
+    is worse than one attributed to the wrong place, which is visible and
+    correctable.
     """
-    return os.environ.get("GRAPH_ORG") or "autonomy"
+    from tools.graph.schemas.dashboard_shell import shell_default_org
+    return shell_default_org()
 
 
 def _db_path(db_path: Path | str | None = None) -> Path:

@@ -623,18 +623,19 @@ def test_bootstrap_ensures_and_arms_watchdog(env, monkeypatch):
 
 
 def test_startup_org_discovery_covers_every_local_org(env, monkeypatch, tmp_path):
-    monkeypatch.setenv("GRAPH_ORG", ORG)
+    monkeypatch.setenv("GRAPH_ORG", ORG)  # deliberately inert
     # Phase 1 tests the PINNED branch explicitly (the fixture no longer
-    # pins): with GRAPH_DB set, discovery collapses to the caller org.
+    # pins): with GRAPH_DB set, discovery collapses to the pinned database's
+    # own scopeless slot — nothing ambient can label or widen it.
     monkeypatch.setenv("GRAPH_DB", str(tmp_path / "pin.db"))
-    assert sup._discover_startup_orgs() == [ORG]
+    assert sup._discover_startup_orgs() == [None]
 
     monkeypatch.delenv("GRAPH_DB")
     monkeypatch.setattr(
         "tools.graph.org_ops.list_orgs",
         lambda: [SimpleNamespace(slug="autonomy"), SimpleNamespace(slug="dynbench")],
     )
-    assert sup._discover_startup_orgs() == [None, "autonomy", "dynbench", ORG]
+    assert sup._discover_startup_orgs() == [None, "autonomy", "dynbench"]
 
 
 # ── when a serving credential is due for renewal ──

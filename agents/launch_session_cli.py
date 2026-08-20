@@ -310,11 +310,9 @@ def main() -> int:
                 else session_runtime
             )
             cmd.insert(2, f"--runtime={docker_runtime}")
-        # GRAPH_ORG selects the org DB (data/orgs/<org>.db) every ops.*
-        # write and search/list read in this container lands in — this is
-        # the fix for the personal.db-misfiling bug (auto-nuupw): this
-        # branch (foreground mode) previously never exported it at all.
-        cmd.extend(["-e", f"GRAPH_ORG={org}"])
+        # The container carries no scope variable: its org is stamped on
+        # the session token and enforced server-side (auto-nuupw's misfiling
+        # class is closed by the token, not by an env export).
         if args.graph_tags:
             cmd.extend(["-e", f"GRAPH_TAGS={args.graph_tags}"])
         # Resolve+validate the DECLARED plan before materializing any credential

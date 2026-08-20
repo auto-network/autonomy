@@ -356,7 +356,7 @@ class TestLaunchSessionMetaAndEnv:
     def test_end_to_end_meta_and_env(
         self, tmp_path, fake_creds, fake_crosstalk, captured_run
     ):
-        """Metadata dict → .session_meta.json on disk + GRAPH_ORG/GRAPH_TAGS env."""
+        """Metadata dict → .session_meta.json on disk + GRAPH_TAGS env."""
         run_dir = tmp_path / "run"
         session_launcher.launch_session(
             session_type="dispatch",
@@ -381,7 +381,6 @@ class TestLaunchSessionMetaAndEnv:
         assert meta["graph_tags"] == ["dashboard", "ui"]
 
         cmd = captured_run[0]
-        assert "GRAPH_ORG=autonomy" in cmd
         assert "GRAPH_TAGS=dashboard,ui" in cmd
 
 

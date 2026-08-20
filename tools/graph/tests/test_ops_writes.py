@@ -985,27 +985,22 @@ def test_get_context_own_org(orgs_root):
     assert any(t["turn_number"] == 1 for t in ctx["turns"])
 
 
-# ── GRAPH_ORG env wiring ──────────────────────────────────────
-
-
-def test_create_note_follows_graph_org_env(orgs_root, monkeypatch):
+def test_create_note_with_no_scope_lands_in_personal(orgs_root):
     GraphDB.create_org_db("anchore").close()
     GraphDB.create_org_db("personal", type_="personal").close()
 
-    monkeypatch.setenv("GRAPH_ORG", "anchore")
-
-    r = ops.create_note("env-routed note")
-    assert r["org"] == "anchore"
+    r = ops.create_note("unscoped note")
+    assert r["org"] in (None, "", "personal")
 
     ac = sqlite3.connect(str(orgs_root / "anchore.db"))
     pc = sqlite3.connect(str(orgs_root.parent / "personal.db"))
     try:
         assert ac.execute(
             "SELECT COUNT(*) FROM sources WHERE id = ?", (r["id"],),
-        ).fetchone()[0] == 1
+        ).fetchone()[0] == 0
         assert pc.execute(
             "SELECT COUNT(*) FROM sources WHERE id = ?", (r["id"],),
-        ).fetchone()[0] == 0
+        ).fetchone()[0] == 1
     finally:
         ac.close()
         pc.close()

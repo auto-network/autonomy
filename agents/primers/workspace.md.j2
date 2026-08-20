@@ -372,11 +372,12 @@ to reverse-engineer their routes from source.
 
 ## Graph Scoping
 
-`GRAPH_ORG={{ config.graph_project }}` is set — notes you write land in the
-**{{ config.graph_project }}** org's own database, and searches you run
-default to that database plus its subscribed peers. An org's own database
-is the only thing that determines its scope; content from unsubscribed
-orgs is invisible from this session.
+This session is scoped to **{{ config.graph_project }}** by its session
+token: notes you write land in that org's own database, and searches you
+run default to that database plus its subscribed peers. The scope is
+stamped server-side and cannot be selected by this session. An org's own
+database is the only thing that determines its scope; content from
+unsubscribed orgs is invisible from this session.
 {% if config.default_tags %}
 `GRAPH_TAGS={{ config.default_tags | join(',') }}` — auto-applied to
 notes you create; also nudges search ranking toward this workspace within

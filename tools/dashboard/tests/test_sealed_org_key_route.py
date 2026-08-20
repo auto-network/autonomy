@@ -53,7 +53,6 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs))
     monkeypatch.delenv("GRAPH_DB", raising=False)
     # The caller's own org, per the scope cascade the route resolves through.
-    monkeypatch.setenv("GRAPH_ORG", "acme")
     # Pinned, not inherited. The route is operator-only (auto-6ff9b) and this
     # app mounts no identity middleware, so these requests are compatibility
     # traffic that reaches the handler through the unenforced-gate stand-down.
@@ -77,8 +76,9 @@ def client(tmp_path, monkeypatch):
     GraphDB.close_all_pooled()
 
 
-def _post(client, payload, org=None):
-    """Post as the caller's own org (the cascade resolves it) unless named."""
+def _post(client, payload, org="acme"):
+    """Post naming the org explicitly — a local caller selects its target;
+    no ambient scope exists to resolve one."""
     body = dict(payload)
     if org is not None:
         body["org"] = org
@@ -137,11 +137,13 @@ def test_an_unknown_org_is_404(client):
     assert _post(client, sealed_payload()).status_code == 404
 
 
-def test_sealing_into_another_org_is_refused(client):
-    """An org-key blob is offline-attackable; a cross-org write is a real leak."""
+def test_sealing_names_an_org_that_must_exist(client):
+    """A local caller's org is a selection, and a selection of an org this
+    node does not hold fails by name. The AGENT cross-org refusal (403 on a
+    token/requested mismatch) is pinned in test_h4kzx_derive_org."""
     org_ops.create_org_shell("acme")
     r = _post(client, sealed_payload(), org="someone-else")
-    assert r.status_code == 403
+    assert r.status_code == 404
 
 
 def test_a_wrong_seal_purpose_is_refused(client):

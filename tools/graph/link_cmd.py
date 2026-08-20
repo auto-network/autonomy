@@ -79,9 +79,10 @@ def _requesting_session() -> str:
 
 
 def _resolve_org(args) -> str:
-    org = getattr(args, "org", None) or os.environ.get("GRAPH_ORG")
+    # org-scope: request — a link operation acts for one named org.
+    org = getattr(args, "org", None)
     if not org:
-        _fail("no org: pass --org or set GRAPH_ORG")
+        _fail("no org: pass --org <slug>")
     return org
 
 
