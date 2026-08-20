@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 
 def _events_path() -> Path | None:
@@ -50,6 +53,39 @@ def pytest_runtest_logreport(report) -> None:
         stdout=getattr(report, "capstdout", "") if failed else "",
         stderr=getattr(report, "capstderr", "") if failed else "",
     )
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_protocol(item, nextitem):
+    """Retain setup, call, and teardown lines without requiring pytest-cov."""
+    del nextitem
+    enabled = os.environ.get("AGENT_TEST_LINE_COVERAGE") == "1"
+    repo_raw = os.environ.get("AGENT_TEST_REPO", "")
+    previous = sys.gettrace()
+    lines: dict[str, set[int]] = {}
+
+    def trace(frame, event, _arg):
+        if event == "line":
+            try:
+                path = Path(frame.f_code.co_filename).resolve().relative_to(repo_raw)
+            except (OSError, ValueError):
+                return trace
+            if path.suffix == ".py" and not any(part in {".venv", "venv", "env"} for part in path.parts):
+                lines.setdefault(path.as_posix(), set()).add(frame.f_lineno)
+        return trace
+
+    if enabled and repo_raw and previous is None:
+        sys.settrace(trace)
+    try:
+        yield
+    finally:
+        if enabled and repo_raw and previous is None:
+            sys.settrace(previous)
+            _write(
+                "line_coverage",
+                nodeid=item.nodeid,
+                files={name: sorted(numbers) for name, numbers in sorted(lines.items())},
+            )
 
 
 def pytest_sessionfinish(session, exitstatus) -> None:

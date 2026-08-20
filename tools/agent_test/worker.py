@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .environment import project_config
-from .lease_client import lease_request
+from .lease_client import lease_request, telemetry_request
 from .store import atomic_write_json, read_json, update_manifest, utc_now
 
 
@@ -164,6 +164,30 @@ def _collection(events: list[dict[str, Any]]) -> list[str]:
     return sorted(nodes)
 
 
+def _coverage(events: list[dict[str, Any]]) -> dict[str, Any]:
+    tests: dict[str, dict[str, list[int]]] = {}
+    files: dict[str, dict[str, Any]] = {}
+    for event in events:
+        if event.get("kind") != "line_coverage":
+            continue
+        nodeid = str(event.get("nodeid") or "")
+        event_files = event.get("files") or {}
+        if not nodeid or not isinstance(event_files, dict):
+            continue
+        tests[nodeid] = {}
+        for name, raw_lines in event_files.items():
+            lines = sorted({int(value) for value in raw_lines if isinstance(value, int)})
+            tests[nodeid][str(name)] = lines
+            record = files.setdefault(str(name), {"lines": set(), "tests": set()})
+            record["lines"].update(lines)
+            record["tests"].add(nodeid)
+    serialized_files = {
+        name: {"lines": sorted(value["lines"]), "tests": sorted(value["tests"])}
+        for name, value in sorted(files.items())
+    }
+    return {"files": serialized_files, "tests": tests}
+
+
 def _quarantine_nodes(repo: Path) -> set[str]:
     configured = project_config(repo).get("quarantine")
     candidates = []
@@ -184,6 +208,9 @@ def _quarantine_nodes(repo: Path) -> set[str]:
 
 def _classify_failures(directory: Path, repo: Path, failures: list[dict[str, Any]]) -> dict[str, int]:
     known: set[str] = set()
+    baseline = read_json(directory.parent.parent / "baseline.json", {})
+    if isinstance(baseline, dict):
+        known.update(str(value) for value in baseline.get("failures") or [])
     for path in (directory.parent).glob("*/failures.json"):
         if path.parent == directory:
             continue
@@ -329,6 +356,7 @@ def run(directory: Path) -> int:
             {"status": status, "finished_at": utc_now(), "summary": summary, "message": lease_error},
         )
         _notify(directory, final, _notification_text(run_id, status, summary, 0))
+        telemetry_request(event=f"run_{status}")
         return 0
     update_manifest(
         directory,
@@ -342,6 +370,9 @@ def run(directory: Path) -> int:
         part for part in (str(package_root), current_path) if part
     )
     env["AGENT_TEST_EVENTS_DIR"] = str(events_dir)
+    env["AGENT_TEST_INTERNAL"] = "1"
+    env["AGENT_TEST_REPO"] = str(repo)
+    env["AGENT_TEST_LINE_COVERAGE"] = "1" if manifest.get("line_coverage") else "0"
     # Pytest normally suppresses captured output for passing tests. ``-rP``
     # writes that output to the retained log without streaming it into the
     # agent's context, so a successful run does not discard useful evidence.
@@ -416,11 +447,13 @@ def run(directory: Path) -> int:
     events = _read_events(events_dir)
     summary, failures = _summarize(events)
     collection = _collection(events)
+    coverage = _coverage(events)
     summary["collected"] = len(collection)
     summary.update(_classify_failures(directory, repo, failures))
     atomic_write_json(directory / "failures.json", failures)
     atomic_write_json(directory / "summary.json", summary)
     atomic_write_json(directory / "collection.json", collection)
+    atomic_write_json(directory / "coverage.json", coverage)
 
     if _stop_requested or exit_code < 0:
         status = "stopped"
@@ -445,10 +478,12 @@ def run(directory: Path) -> int:
             "failures_path": str(directory / "failures.json"),
             "events_dir": str(events_dir),
             "collection_path": str(directory / "collection.json"),
+            "coverage_path": str(directory / "coverage.json"),
         },
     )
     text = _notification_text(run_id, status, summary, duration)
     _notify(directory, final, text)
+    telemetry_request(event=f"run_{status}")
     return 0
 
 

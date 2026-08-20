@@ -175,8 +175,9 @@ def test_worker_waits_for_machine_lease_before_starting_pytest(project: Path, cl
         assert final["status"] == "passed"
         assert final["machine_lease"]["state"] == "released"
         assert marker.exists()
-        assert actions[:2] == ["acquire", "acquire"]
-        assert actions[-1] == "release"
+        lease_actions = [action for action in actions if action in {"acquire", "renew", "release"}]
+        assert lease_actions[:2] == ["acquire", "acquire"]
+        assert lease_actions[-1] == "release"
     finally:
         server.shutdown()
         server.server_close()

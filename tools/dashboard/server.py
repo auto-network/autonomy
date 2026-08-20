@@ -5863,6 +5863,24 @@ async def api_agent_test_leases(request):
     return JSONResponse(result, status_code=status_code)
 
 
+async def api_agent_test_telemetry(request):
+    body = await request.json()
+    if not isinstance(body, dict):
+        return JSONResponse({"ok": False, "error": "JSON object required"}, status_code=400)
+    action = str(body.get("action") or "status")
+    if action == "status":
+        result = await asyncio.to_thread(_agent_test_leases.telemetry_status)
+        return JSONResponse(result)
+    session = str(body.get("session") or "").strip()
+    event = str(body.get("event") or "").strip()
+    if not session or not re.fullmatch(r"[a-zA-Z0-9._:-]{1,200}", session):
+        return JSONResponse({"ok": False, "error": "valid session is required"}, status_code=400)
+    if not event or not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", event):
+        return JSONResponse({"ok": False, "error": "valid event is required"}, status_code=400)
+    result = await asyncio.to_thread(_agent_test_leases.record_event, session, event)
+    return JSONResponse(result)
+
+
 async def api_session_interrupt(request):
     """Send Escape key to a tmux session to interrupt a running tool.
 
@@ -18245,6 +18263,7 @@ routes = [
     Route("/api/session/confirm-link", api_session_confirm_link, methods=["POST"]),
     Route("/api/session/notify", api_session_notify, methods=["POST"]),
     Route("/api/agent-test/leases", api_agent_test_leases, methods=["POST"]),
+    Route("/api/agent-test/telemetry", api_agent_test_telemetry, methods=["POST"]),
     Route("/api/session/{tmux_name}", api_session_get, methods=["GET"]),
     Route("/api/session/{tmux_name}/output/{path:path}", api_session_output, methods=["GET"]),
     Route("/api/session/{tmux_name}/request-identity-refresh", api_session_request_identity_refresh, methods=["POST"]),

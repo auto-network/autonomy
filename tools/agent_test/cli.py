@@ -12,7 +12,8 @@ from typing import Any
 
 from . import __version__
 from .environment import choose_python, profiles, requested_resources, workspace_fingerprint
-from .lease_client import lease_request
+from .lease_client import lease_request, telemetry_request
+from .planning import build_plan, changed_coverage, changed_lines
 from .store import (
     atomic_write_json,
     guidance_first,
@@ -83,6 +84,19 @@ def cmd_run(args: argparse.Namespace) -> int:
     if not isinstance(profile_selectors, list):
         profile_selectors = []
     selectors = [str(value) for value in profile_selectors] + list(args.selectors)
+    plan = None
+    if getattr(args, "changed", False):
+        plan = build_plan(repo, root)
+        if not plan["auto_selectable"]:
+            print(
+                f"Agent Test: diff plan produced {len(plan['recommendations'])} selectors, "
+                "above the automatic safety limit of 50.",
+                file=sys.stderr,
+            )
+            print("Use a named profile or explicit selectors.", file=sys.stderr)
+            return 2
+        selectors.extend(item["selector"] for item in plan["recommendations"])
+    selectors = list(dict.fromkeys(selectors))
     if not selectors:
         print(
             "Agent Test requires an explicit test selector or named profile; "
@@ -106,12 +120,22 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"Agent Test: profile {args.profile} has invalid pytest_args.", file=sys.stderr)
         return 2
     mode = getattr(args, "mode", "run")
+    requested_line_coverage = getattr(args, "line_coverage", None)
+    line_coverage = (
+        False
+        if mode == "collect"
+        else bool(profile.get("line_coverage", True))
+        if requested_line_coverage is None
+        else bool(requested_line_coverage)
+    )
     try:
         resources = getattr(args, "resource_override", None) or requested_resources(repo, profile, mode)
     except ValueError as exc:
         print(f"Agent Test: {exc}", file=sys.stderr)
         return 2
-    fingerprint = workspace_fingerprint(repo, [mode, python, *profile_args, *selectors])
+    fingerprint = workspace_fingerprint(
+        repo, [mode, python, f"coverage={line_coverage}", *profile_args, *selectors]
+    )
     with state_lock(root):
         active = live_manifest(root)
         if active is not None:
@@ -144,6 +168,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                     else f"agent-test show {repeated['run_id']}"
                 )
                 print(f"Next: {next_command}", file=sys.stderr)
+                telemetry_request(event="repeat_refused")
                 return 4
         run_id = new_run_id()
         directory = run_dir(root, run_id)
@@ -163,7 +188,14 @@ def cmd_run(args: argparse.Namespace) -> int:
             "python": python,
             "notify": args.notify,
             "resources": resources,
+            "line_coverage": line_coverage,
+            "changed_lines": (plan or {}).get("changed_lines") or changed_lines(repo),
         }
+        if plan is not None:
+            manifest["plan"] = {
+                "recommendations": plan["recommendations"],
+                "gaps": plan["gaps"],
+            }
         rerun_of = getattr(args, "rerun_of", None)
         if rerun_of:
             manifest["rerun_of"] = rerun_of
@@ -204,6 +236,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 "worker_log": str(directory / "worker.log"),
             },
         )
+        telemetry_request(event="run_started")
 
     selected = len(selectors)
     if guidance_first(root, "stage1-background-run-v1"):
@@ -330,6 +363,8 @@ def cmd_rerun_failures(args: argparse.Namespace) -> int:
         allow_repeat=True,
         rerun_of=original["run_id"],
         resource_override=original.get("resources"),
+        line_coverage=original.get("line_coverage", True),
+        changed=False,
     )
     return cmd_run(rerun_args)
 
@@ -361,6 +396,106 @@ def cmd_capacity(args: argparse.Namespace) -> int:
             f"- {name}: {used.get(name, 0)} used · "
             f"{result['available'].get(name, 0)} available · {limits[name]} limit"
         )
+    return 0
+
+
+def cmd_plan(args: argparse.Namespace) -> int:
+    repo, root = _root()
+    plan = build_plan(repo, root)
+    recommendations = plan["recommendations"]
+    print(
+        f"Agent Test plan · {plan['changed_files']} changed Python file(s) · "
+        f"{len(recommendations)} recommended selector(s)"
+    )
+    limit = _bounded_limit(args.limit)
+    for item in recommendations[:limit]:
+        print(f"- {item['selector']} · confidence {item['confidence']} · {item['reasons'][0]}")
+    if len(recommendations) > limit:
+        print(f"[{len(recommendations) - limit} more recommendations omitted; use --limit N]")
+    if plan["gaps"]:
+        gaps = plan["gaps"][:10]
+        print(f"Coverage-history gaps ({len(gaps)} of {len(plan['gaps'])}):")
+        for name in gaps:
+            print(f"- {name}")
+    if not plan["auto_selectable"]:
+        print("Automatic execution refused: more than 50 selectors require a named profile.")
+        return 2
+    if not recommendations:
+        print("No defensible test selection was found; add a named profile or explicit selector.")
+        return 2
+    print("Run this retained plan asynchronously with: agent-test run --changed")
+    return 0
+
+
+def cmd_coverage(args: argparse.Namespace) -> int:
+    _repo, root = _root()
+    manifest = _manifest_or_error(root, args.run_id)
+    if manifest is None:
+        return 2
+    summary = changed_coverage(manifest)
+    if summary["percent"] is None:
+        print(f"{manifest['run_id']}: no changed Python lines were recorded at launch.")
+        return 0
+    print(
+        f"{manifest['run_id']} · changed-line coverage {summary['covered']}/{summary['changed']} "
+        f"({summary['percent']:.1f}%)"
+    )
+    limit = _bounded_limit(args.limit)
+    for item in summary["files"][:limit]:
+        line = f"- {item['file']}: {item['covered']}/{item['changed']}"
+        if item["missing"]:
+            missing = ",".join(str(value) for value in item["missing"][:20])
+            line += f" · missing lines {missing}"
+            if len(item["missing"]) > 20:
+                line += f" (+{len(item['missing']) - 20} retained)"
+        print(line)
+    if len(summary["files"]) > limit:
+        print(f"[{len(summary['files']) - limit} more changed files omitted; use --limit N]")
+    return 0
+
+
+def cmd_metrics(args: argparse.Namespace) -> int:
+    result = telemetry_request(action="status")
+    if not result.get("ok"):
+        print(f"Agent Test: telemetry unavailable: {result.get('error', 'unknown')}", file=sys.stderr)
+        return 2
+    counts = result.get("counts") or {}
+    print(f"Machine-wide Agent Test telemetry · {result.get('sessions', 0)} session(s)")
+    for name, amount in sorted(counts.items())[:20]:
+        print(f"- {name}: {amount}")
+    if len(counts) > 20:
+        print(f"[{len(counts) - 20} more event types omitted]")
+    return 0
+
+
+def cmd_baseline(args: argparse.Namespace) -> int:
+    _repo, root = _root()
+    manifest = _manifest_or_error(root, args.run_id)
+    if manifest is None:
+        return 2
+    if manifest.get("status") in {"starting", "queued", "running", "stopping"}:
+        print("Agent Test: a live run cannot become a baseline.", file=sys.stderr)
+        return 2
+    failure_nodes = list(
+        dict.fromkeys(
+            str(item.get("nodeid"))
+            for item in _failures(manifest)
+            if item.get("nodeid")
+        )
+    )
+    payload = {
+        "schema": 1,
+        "published_at": utc_now(),
+        "run_id": manifest["run_id"],
+        "fingerprint": manifest.get("fingerprint"),
+        "status": manifest.get("status"),
+        "failures": failure_nodes,
+        "summary": manifest.get("summary") or {},
+    }
+    atomic_write_json(root / "baseline.json", payload)
+    print(
+        f"Published baseline {manifest['run_id']}: {len(failure_nodes)} known failure node(s)."
+    )
     return 0
 
 
@@ -523,6 +658,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("AGENT_TEST_NOTIFY", "auto"),
     )
     run.add_argument("--profile")
+    run.add_argument(
+        "--changed",
+        action="store_true",
+        help="run the bounded test plan inferred from the current Python diff",
+    )
+    run.add_argument(
+        "--coverage",
+        dest="line_coverage",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="retain changed-line coverage (enabled by default)",
+    )
     run.add_argument("selectors", nargs="*")
     run.set_defaults(mode="run", allow_repeat=False, rerun_of=None)
     run.set_defaults(func=cmd_run)
@@ -544,6 +691,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     profile_parser = sub.add_parser("profiles", help="list bounded project test profiles")
     profile_parser.set_defaults(func=cmd_profiles)
+
+    plan = sub.add_parser("plan", help="recommend tests for the current Python diff")
+    plan.add_argument("--limit", type=int, default=10)
+    plan.set_defaults(func=cmd_plan)
 
     status = sub.add_parser("status", help="show the live or latest run")
     status.set_defaults(func=cmd_status)
@@ -567,6 +718,11 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument("selectors", nargs="+")
     validate.add_argument("--run", dest="run_id")
     validate.set_defaults(func=cmd_validate)
+
+    coverage = sub.add_parser("coverage", help="show retained changed-line coverage")
+    coverage.add_argument("run_id", nargs="?")
+    coverage.add_argument("--limit", type=int, default=20)
+    coverage.set_defaults(func=cmd_coverage)
 
     rerun = sub.add_parser("rerun-failures", help="run only failures retained from an earlier run")
     rerun.add_argument("run_id")
@@ -598,6 +754,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     capacity = sub.add_parser("capacity", help="show machine-wide test and browser slots")
     capacity.set_defaults(func=cmd_capacity)
+
+    metrics = sub.add_parser("metrics", help="show bounded machine-wide Agent Test usage")
+    metrics.set_defaults(func=cmd_metrics)
+
+    baseline = sub.add_parser("baseline", help="publish a retained run as the workspace baseline")
+    baseline.add_argument("run_id", nargs="?")
+    baseline.set_defaults(func=cmd_baseline)
     return parser
 
 

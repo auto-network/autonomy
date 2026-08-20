@@ -10,6 +10,8 @@ agent-test run tools/graph/tests/test_ops.py
 agent-test status
 agent-test doctor
 agent-test profiles
+agent-test plan
+agent-test run --changed
 agent-test collect tools/graph/tests
 agent-test inventory <run-id> --match parser
 agent-test validate tools/graph/tests/test_ops.py::test_name --run <run-id>
@@ -17,7 +19,10 @@ agent-test failures <run-id>
 agent-test rerun-failures <run-id>
 agent-test trace <run-id> 1
 agent-test output <run-id> --limit-lines 40
+agent-test coverage <run-id>
+agent-test baseline <run-id>
 agent-test capacity
+agent-test metrics
 agent-test stop
 ```
 
@@ -57,3 +62,20 @@ machine-wide summary.
 
 Pytest's captured output, including output from passing tests, is written to
 the retained run log. It is never streamed into the launching agent's context.
+
+`plan` reads the current Python diff and ranks selectors using direct test
+naming, prior retained per-test line coverage, and bounded import/reference
+search. It reports files for which no defensible selector was found rather
+than pretending a guess is complete. `run --changed` freezes that plan and the
+changed-line set into the run manifest. Line coverage is retained by default
+without requiring pytest-cov; `coverage` compares executed lines only with the
+lines changed at launch and bounds every missing-line listing.
+
+`baseline` publishes one retained run as the durable workspace comparison
+point. `metrics` reports machine-wide run/refusal telemetry without exposing
+individual command arguments.
+
+Raw `pytest`, `py.test`, and `python -m pytest` are refused inside Autonomy
+agent sessions. The console commands are replaced in the session command
+surface, and the repository pytest hook covers module invocation. Agent Test's
+owned worker carries the internal authorization required to invoke pytest.

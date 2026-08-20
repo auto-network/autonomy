@@ -331,61 +331,45 @@ Use `localhost:8080`, not the Tailnet IP.
 
 ## Testing
 
-**Scope your test run to the code you changed. This is the rule, not an
-optimisation.**
-
-Run the test files that cover your change. Do not run the platform suite to
-prove a change to one module. A scoped run is the default and needs no
-justification; a broad run is the exception and needs one.
+Agent sessions use `agent-test`, not `pytest` or `python -m pytest`. Agent Test
+owns the Python environment, background process, complete evidence, failure
+memory, and machine-wide test/browser capacity. Raw pytest is refused.
 
 ```bash
-# The default: the tests that cover what you touched.
-python3 -m pytest tools/graph/tests/test_settings_vault_read.py -q --tb=short 2>&1 | tee /tmp/test-results.txt
+# Discover the bounded selection supported by the current Python diff.
+agent-test plan
+
+# Start that plan and return immediately. Keep working; completion is delivered
+# to the session as a system notification.
+agent-test run --changed
+
+# An explicit file, node, or configured project profile is also valid.
+agent-test run tools/graph/tests/test_settings_vault_read.py
+agent-test run --profile smoke
 ```
 
-Three reasons, all of which have cost real runs:
-
-- **A broad sweep can cost you the entire run.** One implementation run was
-  terminated mid-sweep with 36 file-writes across 6 files uncommitted, and all
-  of it was lost. It had finished the work and was re-testing the platform.
-- **A failure in code you did not touch is not yours to diagnose.** If one
-  appears, do NOT chase it. Confirm it is unrelated (it fails on the base
-  commit too), record it in your decision with the test name, and carry on.
-  Diagnosing somebody else's failure is how a scoped change turns into an
-  afternoon.
-- **A green platform suite is not evidence about your change.** It is evidence
-  about the platform. The tests that cover your change are the ones that can
-  fail because of it.
-
-**When a broad run IS warranted:** you changed something with many callers (a
-shared helper, a schema, a serialization boundary). Then run the suites for the
-packages that import it — still not everything — and say in your decision why.
-
-ALWAYS pipe test output through `tee` — never run pytest without it.
-
-NEVER add `| tail` after `tee` — it gets backgrounded on timeout and closes tee stdout.
-NEVER sleep to wait for test completion. Set `timeout: 300000` on the Bash tool call, or use `run_in_background` and read the file when notified.
-
-The full test suite takes ~3 minutes, which is a reason to scope your run, not
-a budget to spend. The default 2-minute bash timeout will background it.
-
-This captures all output to a file while still showing live progress. If you need to inspect specific failures afterward:
+Never poll a live run, sleep for it, pipe through `tee`, or start a duplicate.
+Agent Test retains the complete output and refuses an unchanged rerun. Query
+the saved evidence without executing anything:
 
 ```bash
-grep FAILED /tmp/test-results.txt
-cat /tmp/test-results.txt
+agent-test status
+agent-test failures <run-id>                 # five by default
+agent-test trace <run-id> 1                  # one retained traceback
+agent-test output <run-id> --limit-lines 40  # bounded retained stdout/stderr
+agent-test coverage <run-id>                 # coverage of changed lines
+agent-test rerun-failures <run-id>            # only failed nodes
 ```
 
-NEVER re-run the full suite just to see a different part of the output. The file has everything.
+Use `agent-test doctor` when dependencies or virtualenv selection are unclear;
+it invokes the chosen interpreter directly and never installs anything. Use
+`agent-test collect` plus `inventory`/`validate` to discover node ids without
+guessing. Use `agent-test capacity` to see machine-wide test and browser slots.
 
-To narrow further — a single test rather than a file:
-
-```bash
-python3 -m pytest tools/dashboard/tests/test_specific.py::test_one_thing -v --tb=short 2>&1 | tee /tmp/test-results.txt
-```
-
-Dashboard features have tests under `tools/dashboard/tests/`.
-If your bead includes failing test assertions in its acceptance criteria, run them and verify they pass before writing decision.json. If tests fail, your implementation is not complete.
+Broad runs still require a reason. Put broad suites behind a named profile with
+honest resource weights; the machine lease ledger queues them when the shared
+limit is full. Publish an accepted run with `agent-test baseline <run-id>` when
+its known-failure set should become the durable comparison point.
 
 ### Visual testing with mock dashboard
 

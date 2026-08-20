@@ -154,6 +154,23 @@ def _capability_command_surface(
         gate_path.chmod(0o755)
     elif not shims_to_emit:
         return {}, {}
+    # Agent sessions use Agent Test, whose detached supervisor, retained
+    # evidence, run fingerprinting, and machine-wide leases cannot be reached
+    # through the raw pytest console scripts. Keep both historical entry-point
+    # names on the same refusal contract. ``python -m pytest`` is covered by
+    # the repository's pytest_configure hook.
+    pytest_gate = (
+        Path(__file__).resolve().parents[1]
+        / "tools"
+        / "agent_test"
+        / "pytest_refusal.sh"
+    )
+    if pytest_gate.is_file():
+        refusal = pytest_gate.read_text(encoding="utf-8")
+        for command in ("pytest", "py.test"):
+            path = shim_dir / command
+            path.write_text(refusal, encoding="utf-8")
+            path.chmod(0o755)
     return (
         {str(shim_dir): f"{CAPABILITY_BIN_DIR}:ro"},
         {"AUTONOMY_CAPABILITY_BIN": CAPABILITY_BIN_DIR},

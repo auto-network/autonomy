@@ -11,6 +11,7 @@ from tools.graph.schemas.agent_test_capacity import (
     CAPACITY_SET_ID,
     LEASE_SET_ID,
     SCHEMA_REVISION,
+    TELEMETRY_SET_ID,
 )
 
 
@@ -114,3 +115,25 @@ def _status(limits: dict[str, int], leases: list[dict[str, Any]]) -> dict[str, A
         "available": {name: max(0, limit - used.get(name, 0)) for name, limit in limits.items()},
         "active_leases": len(leases),
     }
+
+
+def record_event(session: str, event: str) -> dict[str, Any]:
+    with _LOCK:
+        row = settings_ops.read_set_key(TELEMETRY_SET_ID, session, org="machine", peers=[])
+        counts = dict((row or {}).get("payload", {}).get("counts") or {})
+        counts[event] = int(counts.get(event, 0)) + 1
+        payload = {"counts": counts, "last_event": event, "last_at": time.time()}
+        settings_ops.upsert_by_key(
+            TELEMETRY_SET_ID, SCHEMA_REVISION, session, payload, org="machine"
+        )
+        return {"ok": True, "session": session, "counts": counts}
+
+
+def telemetry_status() -> dict[str, Any]:
+    with _LOCK:
+        members = settings_ops.read_set(TELEMETRY_SET_ID, org="machine", peers=[]).members
+        totals: dict[str, int] = {}
+        for member in members:
+            for name, amount in member.payload.get("counts", {}).items():
+                totals[name] = totals.get(name, 0) + int(amount)
+        return {"ok": True, "sessions": len(members), "counts": totals}
