@@ -13,6 +13,25 @@ import pytest
 from tools.dashboard.tests._xdist import worker_index
 
 
+def pytest_configure(config):
+    """Require the managed Agent Test path inside Autonomy agent sessions."""
+    if not os.environ.get("AUTONOMY_SESSION"):
+        return
+    if os.environ.get("AGENT_TEST_INTERNAL") == "1" or os.environ.get("PYTEST_ALLOW_RAW") == "1":
+        return
+    try:
+        from tools.agent_test.lease_client import telemetry_request
+
+        telemetry_request(event="raw_pytest_refused")
+    except Exception:
+        pass
+    pytest.exit(
+        "Raw pytest is disabled for agent sessions. Use `agent-test plan`, "
+        "then `agent-test run PATH_OR_NODEID`; results are retained by run id.",
+        returncode=64,
+    )
+
+
 @pytest.fixture(scope="session")
 def worker_port_base() -> int:
     """Port base per xdist worker. Workers get 8100, 8200, 8300, ..."""

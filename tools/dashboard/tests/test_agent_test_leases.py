@@ -54,4 +54,14 @@ def test_machine_store_enforces_cross_container_resource_capacity(tmp_path, monk
     expired = agent_test_leases.transact("status", {})
     assert expired["active_leases"] == 0
     assert expired["used"] == {"tests": 0, "browsers": 0}
+
+    agent_test_leases.record_event("session-a", "run_started")
+    agent_test_leases.record_event("session-a", "raw_pytest_refused")
+    agent_test_leases.record_event("session-b", "run_started")
+    telemetry = agent_test_leases.telemetry_status()
+    assert telemetry == {
+        "ok": True,
+        "sessions": 2,
+        "counts": {"run_started": 2, "raw_pytest_refused": 1},
+    }
     GraphDB.close_all_pooled()

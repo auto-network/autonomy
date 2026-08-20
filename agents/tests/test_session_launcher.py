@@ -9,6 +9,8 @@ the container is never actually started.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1777,6 +1779,29 @@ def test_every_session_gets_the_bd_close_gate(
     cmd = captured_run[0]
     mounts = _mounts(cmd)
     assert f"{run_dir / 'cap-bin'}:/etc/autonomy/cap-bin:ro" in mounts
+
+
+def test_every_session_refuses_raw_pytest_commands(
+    tmp_path, fake_creds, fake_crosstalk, captured_run,
+):
+    run_dir = tmp_path / "run"
+    _run(output_dir=str(run_dir), capabilities=())
+
+    for command in ("pytest", "py.test"):
+        gate = run_dir / "cap-bin" / command
+        assert gate.is_file()
+        assert gate.stat().st_mode & 0o100
+        assert "agent-test run PATH_OR_NODEID" in gate.read_text()
+        process = subprocess.Popen(
+            [str(gate)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={**os.environ, "AUTONOMY_SESSION": ""},
+        )
+        _stdout, stderr = process.communicate(timeout=10)
+        assert process.returncode == 64
+        assert "Raw pytest is disabled" in stderr
 
 
 def test_golden_mount_argv_is_byte_identical(
