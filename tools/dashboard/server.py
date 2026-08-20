@@ -15394,16 +15394,25 @@ async def api_graph_setting_create(request):
         )
         return JSONResponse({"id": sid}, status_code=201)
     try:
-        # Upsert, not append. ``add_setting`` creates a NEW base row on every
-        # call, so an agent revising a setting through `graph set add` — the
-        # only CLI verb that takes a full payload — silently produced a
-        # duplicate base each time. One workspace primer accumulated seven
-        # live bases that way on 2026-08-03. ``upsert_by_key`` updates the
-        # existing base in place (same id, same created_at) and inserts only
-        # when the key is genuinely new. Library callers that legitimately
-        # append (surface pings, keyed by uuid4) call settings_ops directly
-        # and are unaffected.
-        sid = graph_ops.upsert_by_key(
+        # Upsert where upsert is legal, append where it is not. ``add_setting``
+        # creates a NEW base row on every call, so an agent revising a setting
+        # through `graph set add` — the only CLI verb that takes a full payload
+        # — silently produced a duplicate base each time. One workspace primer
+        # accumulated seven live bases that way on 2026-08-03. Upserting
+        # updates the existing base in place (same id, same created_at) and
+        # inserts only when the key is genuinely new.
+        #
+        # Two access patterns cannot be upserted at all, and refused writes
+        # here rather than choosing correctly: append-only logs, and vault
+        # sets, whose rows are encrypted object revisions addressed by row id.
+        # That left the vault with NO write path over HTTP — sealing was
+        # reachable only from inside the dashboard process — which is not a
+        # decision anybody made, just the blast radius of the upsert fix.
+        # ``write_by_key`` dispatches on the set: append for a log, seal-then-
+        # override for a vault set, upsert for everything else. Library callers
+        # that legitimately append (surface pings, keyed by uuid4) call
+        # settings_ops directly and are unaffected.
+        sid = graph_ops.write_by_key(
             body["set_id"],
             int(body["schema_revision"]),
             body["key"],

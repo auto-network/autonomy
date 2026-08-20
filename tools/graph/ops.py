@@ -49,6 +49,7 @@ from .settings_ops import (  # noqa: F401 — re-exported as ops.* surface
     MigrationReport,
     add_setting,
     upsert_by_key,
+    write_by_key,
     take_shadowed_write,
     ShadowedWrite,
     override_setting,
