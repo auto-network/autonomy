@@ -56,7 +56,33 @@ from typing import Callable
 
 from tools.graph import settings_ops
 from tools.network.storagekit.keycontrol import KeyControlStore
+from tools.network.storagekit.credentials import (
+    domain_member_keys,
+    select_current_credential,
+)
 from tools.vault.storage_object import Holdings, seal_revision
+
+
+def _current_member_credentials(frontier, key_control, authority_ancestry) -> tuple:
+    """The grant recipients a mint seals to — crib §line-167.
+
+    ``∀ p ∈ domain principals: seal(G_new, p.current_credential)``. The
+    recipients are the CURRENT domain members read from the fold
+    (``domain_member_keys``), each resolved to its ONE current credential
+    (``select_current_credential``) — not every credential the store has ever
+    held. A removed member is absent from the fold and receives nothing, which
+    is how revocation (R6) holds; a superseded credential loses the tie-break,
+    which is how a KEM rotation holds. Granting to ``accepted_credentials()``
+    instead re-grants the new generation to removed and rotated-out keys — the
+    crib's F-001 warns that "the re-key achieves NOTHING."
+    """
+    recipients = []
+    for persona in sorted(domain_member_keys(frontier)):
+        candidates = key_control.credentials_for_persona(persona)
+        if not candidates:
+            continue  # a current member who has not published a credential yet
+        recipients.append(select_current_credential(candidates, authority_ancestry))
+    return tuple(recipients)
 
 
 class VaultSealerNotReady(RuntimeError):
@@ -182,6 +208,14 @@ def build_vault_sealer(
                 ancestry=authority_ancestry,
                 content_store=DbContentStore(scoped),
                 tier=tier,
+                # Every credential published in this store receives a grant
+                # when this write mints a generation — the durable recovery
+                # copy _land_advance persists. Without this, advance.grants
+                # is () and grant persistence keeps nothing: the generation
+                # dies with the process cache (graph://991c3b85-06e).
+                recipient_credentials=_current_member_credentials(
+                    frontier, key_control, authority_ancestry
+                ),
             )
             if sealed.advance is not None:
                 _land_advance(
