@@ -2797,6 +2797,90 @@ def _is_own_row(setting_id: str, org: str | None) -> bool:
         db.close()
 
 
+def _existing_base_id(
+    set_id: str, schema_revision: int, key: str, org: "str | None",
+) -> "str | None":
+    """The live base row for a key, or None. Bases only — an override or an
+    exclusion is not a write target."""
+    db = _open(org, set_id)
+    try:
+        row = db.conn.execute(
+            "SELECT id FROM settings "
+            "WHERE set_id = ? AND schema_revision = ? AND key = ? "
+            "  AND supersedes IS NULL AND excludes IS NULL "
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            (set_id, int(schema_revision), key),
+        ).fetchone()
+    finally:
+        db.close()
+    return row["id"] if row else None
+
+
+def write_by_key(
+    set_id: str,
+    schema_revision: int,
+    key: str,
+    payload: dict,
+    *,
+    org: "str | None | _CallerOrgSentinel",
+    state: str = "raw",
+) -> str:
+    """Write a complete payload to ``key``, by whichever call the set allows.
+
+    One entry point for callers who have a key and a full payload and simply
+    want the value to be current — the API route and ``graph set add``. It
+    exists because "write this value" is a single intent that three different
+    functions implement, and which one is correct is a property of the SET, not
+    something the caller can reasonably know.
+
+    Getting that wrong is quiet rather than loud, which is why this dispatches
+    rather than documenting. :func:`upsert_by_key` refuses the two patterns it
+    cannot serve, and the obvious repair — fall back to :func:`add_setting` — is
+    right for only one of them. On a vault set, ``add_setting`` against a key
+    that already exists mints a SECOND base for it, which is the duplicate-base
+    bug upserting was introduced to fix, resurfacing where it is hardest to see:
+    vault rows are opaque locators, so the two bases cannot be told apart by
+    reading them.
+
+    The three cases:
+
+    * ``append_only_log`` — :func:`add_setting` always. Every write is a new
+      row; that is what the pattern means.
+    * a vault set — :func:`add_setting` for the FIRST value, since it mints and
+      seals the initial revision, then :func:`override_setting` to change it,
+      which seals a fresh revision of the same object and leaves the old one as
+      it was. ``override_setting`` takes the complete payload on a vault set,
+      not a patch, so passing this one straight through is correct.
+    * everything else — :func:`upsert_by_key`, unchanged, so the fix that
+      introduced it still holds.
+
+    Sealing needs a sealer registered in THIS process, which the dashboard does
+    at unlock. A cold vault raises ``VaultSealerMissing`` from the write below
+    with the plaintext unwritten; this function deliberately adds no fallback
+    of its own, because the only fallback available would be storing the value
+    in the clear.
+    """
+    org = _resolve_org_arg(org)
+    append_only = _access_pattern_for(set_id, schema_revision) == "append_only_log"
+    vaulted = schemas.declared_vault_tier(set_id) is not None
+
+    if not append_only and not vaulted:
+        return upsert_by_key(
+            set_id, schema_revision, key, payload, org=org, state=state,
+        )
+    if append_only:
+        return add_setting(
+            set_id, schema_revision, key, payload, org=org, state=state,
+        )
+
+    existing = _existing_base_id(set_id, int(schema_revision), key, org)
+    if existing is None:
+        return add_setting(
+            set_id, schema_revision, key, payload, org=org, state=state,
+        )
+    return override_setting(existing, payload, org=org, state=state)
+
+
 def override_setting(
     target_id: str,
     payload_overrides: dict,
