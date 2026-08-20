@@ -464,6 +464,24 @@ def _declared_credential_keys(capabilities) -> set:
     return keys
 
 
+def _credential_keys_in_env(env_mapping) -> set:
+    """The vault credential keys a plain env mapping (a workspace's ``env`` /
+    ``extra_env``) declares via a ``credential:<key>`` value. Anchore's six
+    workspaces deliver their GitHub tokens through workspace ``env`` today; the
+    migration rewrites those values in place to ``credential:<key>``, so the
+    launch path resolves them here (ONLY the credential: scheme — every other
+    value stays the literal it has always been). Mirrors
+    :func:`_declared_credential_keys` so the same vault-cold preflight refuses a
+    credential-bearing launch by name rather than dropping the token silently."""
+    keys: set = set()
+    for _name, source in (env_mapping or {}).items():
+        if isinstance(source, str) and source.startswith(_CREDENTIAL_ENV_PREFIX):
+            k = source[len(_CREDENTIAL_ENV_PREFIX):].strip()
+            if k:
+                keys.add(k)
+    return keys
+
+
 # ── Credential Resolution ─────────────────────────────────────────────────────
 
 
@@ -1614,7 +1632,8 @@ def launch_session(
     from agents import launch_preflight
     _problems = launch_preflight.preflight(
         image=image, runtime_args=runtime_args, plan=plan, topo=_topo,
-        credential_keys=_declared_credential_keys(capabilities),
+        credential_keys=(_declared_credential_keys(capabilities)
+                         | _credential_keys_in_env(extra_env)),
     )
     if _problems:
         print(
@@ -1713,7 +1732,27 @@ def launch_session(
 
     if extra_env:
         for k, v in extra_env.items():
-            cmd.extend(["-e", f"{k}={v}"])
+            # Workspace env resolves ONLY the credential: scheme through the
+            # vault — Anchore's GH tokens live here as credential:<key> after the
+            # migration. Every other value stays the literal it has always been;
+            # a value like "host:8080" or "file:///x" must NOT be reinterpreted
+            # as a source scheme (that is why this is not a blanket
+            # _resolve_env_source over workspace env). A credential: that cannot
+            # resolve — cold vault (named at preflight above) or absent key —
+            # drops the binding rather than injecting a wrong/empty value; the
+            # value is never logged.
+            if isinstance(v, str) and v.startswith(_CREDENTIAL_ENV_PREFIX):
+                key = v[len(_CREDENTIAL_ENV_PREFIX):].strip()
+                resolved = _resolve_credential(key) if key else None
+                if resolved is None:
+                    logger.info(
+                        "workspace env %s: credential %r unavailable; binding dropped",
+                        k, key,
+                    )
+                    continue
+                cmd.extend(["-e", f"{k}={resolved}"])
+            else:
+                cmd.extend(["-e", f"{k}={v}"])
 
     # Capability env bindings: non-secret env vars declared by org installs.
     # Secret values stay file-mounted (see _capability_mounts) and never
