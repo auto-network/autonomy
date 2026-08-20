@@ -92,6 +92,37 @@ def test_preflight_clean_when_everything_present(monkeypatch):
                         runtime_args=[], plan=plan, topo=topo) == []
 
 
+def test_preflight_names_cold_vault_when_credentials_needed(monkeypatch):
+    plan, topo = _fake_plan_and_topo()
+    monkeypatch.setattr(lp, "image_present", lambda image: True)
+    monkeypatch.setattr("agents.mount_plan.preflight_sources", lambda p, t: [])
+    monkeypatch.setattr("agents.secret_ramfs.daemon_missing", lambda paths: [])
+    monkeypatch.setattr(lp, "vault_is_cold", lambda: True)
+    problems = lp.preflight(image="autonomy-agent:dashboard", runtime_args=[],
+                            plan=plan, topo=topo, credential_keys={"github.token"})
+    assert len(problems) == 1 and problems[0].kind == "vault"
+    assert "github.token" in problems[0].detail
+
+
+def test_preflight_no_vault_problem_when_warm_or_no_credentials(monkeypatch):
+    plan, topo = _fake_plan_and_topo()
+    monkeypatch.setattr(lp, "image_present", lambda image: True)
+    monkeypatch.setattr("agents.mount_plan.preflight_sources", lambda p, t: [])
+    monkeypatch.setattr("agents.secret_ramfs.daemon_missing", lambda paths: [])
+    # cold vault but no credentials needed -> not this launch's problem
+    monkeypatch.setattr(lp, "vault_is_cold", lambda: True)
+    assert lp.preflight(image="x", runtime_args=[], plan=plan, topo=topo,
+                        credential_keys=set()) == []
+    # credentials needed but vault warm -> fine
+    monkeypatch.setattr(lp, "vault_is_cold", lambda: False)
+    assert lp.preflight(image="x", runtime_args=[], plan=plan, topo=topo,
+                        credential_keys={"github.token"}) == []
+    # credentials needed but vault state unknowable -> fail open, no problem
+    monkeypatch.setattr(lp, "vault_is_cold", lambda: None)
+    assert lp.preflight(image="x", runtime_args=[], plan=plan, topo=topo,
+                        credential_keys={"github.token"}) == []
+
+
 def test_preflight_unknowable_checks_never_add_problems(monkeypatch):
     """A check that returns None (docker unreachable, bad output) must NOT
     manufacture a problem — fail open, docker stays the backstop."""

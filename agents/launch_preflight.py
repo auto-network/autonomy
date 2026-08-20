@@ -87,7 +87,20 @@ def runtime_available(runtime: str):
     return runtime in (runtimes or {})
 
 
-def preflight(*, image: str, runtime_args, plan, topo) -> list:
+def vault_is_cold():
+    """True if the vault has no key holder registered (sealed credentials cannot
+    be decrypted), False if a holder is registered, or None if unknowable. A
+    cold vault reads every credential as absent, so a launch that NEEDS one must
+    refuse by name rather than silently drop the binding (auto-0815's dashboard-
+    restart gap surfaces here, not as a phantom missing-credential)."""
+    try:
+        from tools.graph import settings_ops
+        return getattr(settings_ops, "_vault_key_holder", None) is None
+    except Exception:
+        return None
+
+
+def preflight(*, image: str, runtime_args, plan, topo, credential_keys=()) -> list:
     """Every missing launch input, gathered into one list so the caller can
     report the whole picture and refuse once — not fail on the first and hide
     the rest. Empty list means every input the daemon needs is present (or was
@@ -96,6 +109,15 @@ def preflight(*, image: str, runtime_args, plan, topo) -> list:
     from agents import secret_ramfs
 
     problems: list = []
+
+    if credential_keys and vault_is_cold() is True:
+        problems.append(LaunchProblem(
+            "vault", "audited credential store",
+            f"vault is cold (no key holder registered) — the "
+            f"{len(credential_keys)} credential(s) this launch needs cannot be "
+            f"decrypted: {', '.join(sorted(credential_keys))}. Unlock/bring the "
+            f"vault up before launching; a cold vault reads as 'absent' otherwise.",
+        ))
 
     if image_present(image) is False:
         problems.append(LaunchProblem(
