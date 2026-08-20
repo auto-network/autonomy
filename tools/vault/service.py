@@ -12,8 +12,16 @@ from __future__ import annotations
 
 import secrets
 
+from tools.network.idkit.enrollment import verified_provisioning_key
+
 from .errors import VaultError
-from .factors import PASSWORD, PublishedFactor, create_password_factor, open_password_seed
+from .factors import (
+    PASSKEY,
+    PASSWORD,
+    PublishedFactor,
+    create_password_factor,
+    open_password_seed,
+)
 from .policy_class import (
     create_class,
     extend_class,
@@ -36,9 +44,31 @@ def enroll_password_factor(store: VaultStore, factor_id: str, password: str) -> 
     return factor.published
 
 
-def enroll_passkey_factor(store: VaultStore, factor_id: str, published: PublishedFactor) -> None:
-    """Persist a passkey factor's published identity (PRF seed never stored)."""
-    store.put_passkey_factor(factor_id, published.public_key)
+def enroll_passkey_factor(
+    store: VaultStore,
+    factor_id: str,
+    *,
+    statement,
+    root_pub: str,
+    row_key: str | None = None,
+) -> PublishedFactor:
+    """Persist a passkey factor, taking its address FROM THE ROOT'S SIGNATURE.
+
+    This deliberately does not accept a :class:`PublishedFactor`. A public key
+    handed in by a caller is a public key nobody attested, and every downstream
+    seal would be addressed to it — the settings store is agent-writable by
+    design (crib B1), so "the caller supplied it" is not evidence of anything.
+
+    Taking the statement instead makes the unsafe call unrepresentable rather
+    than merely discouraged: there is no argument shape that lets an unsigned
+    key reach ``put_passkey_factor``. The PRF seed is still never stored, and
+    still never reaches this process.
+    """
+    public_key = verified_provisioning_key(
+        statement, root_pub=root_pub, row_key=row_key
+    )
+    store.put_passkey_factor(factor_id, public_key)
+    return PublishedFactor(factor_id, PASSKEY, public_key)
 
 
 # ── openers ────────────────────────────────────────────────────────────────
@@ -69,20 +99,32 @@ def enroll_into_class(
     new_factor_id: str,
     *,
     new_password: str | None = None,
-    new_passkey: PublishedFactor | None = None,
+    new_passkey_statement=None,
+    root_pub: str | None = None,
+    row_key: str | None = None,
 ) -> None:
     """Extend a class with a new factor — requires opening the class first.
 
-    Exactly one of *new_password* / *new_passkey* names the factor being added.
+    Exactly one of *new_password* / *new_passkey_statement* names the factor
+    being added. A passkey is named by its ROOT-SIGNED ENROLLMENT STATEMENT and
+    never by a bare public key, for the reason given on
+    :func:`enroll_passkey_factor`: this call seals every existing generation to
+    that address, so an unattested one is the whole attack.
     """
     record = store.get_class(class_id)
     if new_password is not None:
         factor = create_password_factor(new_password, factor_id=new_factor_id)
         store.put_password_factor(new_factor_id, factor.published.public_key, factor.armor)
         published = factor.published
-    elif new_passkey is not None:
-        store.put_passkey_factor(new_factor_id, new_passkey.public_key)
-        published = new_passkey
+    elif new_passkey_statement is not None:
+        if not root_pub:
+            raise VaultError(
+                "enrolling a passkey needs root_pub to verify its statement against"
+            )
+        published = enroll_passkey_factor(
+            store, new_factor_id,
+            statement=new_passkey_statement, root_pub=root_pub, row_key=row_key,
+        )
     else:
         raise VaultError("enroll_into_class needs a new password or passkey factor")
     store.put_class(extend_class(record, opener_seeds, published))
