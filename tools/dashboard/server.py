@@ -398,13 +398,23 @@ async def run_cli(cmd: list[str], timeout: int = 30, stdin_data: str | None = No
     A missing binary (e.g. no ``bd`` on a fresh deployment without the
     beads toolchain, DEPLOY.md) degrades to the same soft-error shape as
     a nonzero exit instead of 500ing every endpoint that shells out.
+
+    ``BEADS_DIR`` is defaulted to ``DATA_ROOT / ".beads"`` (the same
+    default ``agents/dispatcher.py`` resolves) so ``bd`` never falls back
+    to cwd-walk discovery from this process's working directory — that
+    walk found ``<repo>/.beads`` only while beads state lived on the code
+    volume, and 8e3c3486 moved it to the state volume. An explicit
+    ``BEADS_DIR`` in the environment still wins.
     """
+    env = dict(os.environ)
+    env.setdefault("BEADS_DIR", str(DATA_ROOT / ".beads"))
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
     except (FileNotFoundError, PermissionError) as exc:
         return "", f"{cmd[0]}: {exc}", 127
