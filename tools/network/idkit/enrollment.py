@@ -343,6 +343,28 @@ def verify(record, *, root_pub: str) -> PasskeyEnrollmentStatement:
     trusts. ``signer`` selects WHICH root key after a rotation; it is never
     itself the reason to believe a statement, so a self-consistent statement
     signed by some other key is refused here rather than accepted as valid.
+
+    .. warning::
+
+       **This function is exactly as strong as where you got ``root_pub``.**
+       The fatal call is one line and reads as verification::
+
+           verify(statement, root_pub=statement.signer)   # signer == signer
+
+       That accepts anything, signed by anybody, addressed anywhere — and it
+       passes every test in this suite, because the tests supply a correct
+       ``root_pub`` and are asking a different question. Reading it from the row
+       under verification, or from any settings row a caller can influence, is
+       the same mistake by a longer route.
+
+       It must come from ``autonomy.identity.personal``: that set is protected
+       in ``settings_ops`` and the create route refuses overwrite with 409, so
+       it is the one value a caller cannot substitute.
+
+       Identified by the Test & Automation pillar as a FORWARD seam: it cannot
+       be reached today only because the passkey arm has no non-test caller,
+       which means it gets created at the moment somebody wires the route. See
+       ``graph://e9de411a-366``.
     """
     if isinstance(record, PasskeyEnrollmentStatement):
         statement = record
