@@ -71,9 +71,15 @@ def seeded(test_app, tmp_path, monkeypatch):
     orgs.mkdir(exist_ok=True)
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs))
     GraphDB.close_all_pooled()
-    if not (orgs / "personal.db").exists():
-        GraphDB.create_org_db("personal", root=tmp_path).close()
-    conn = sqlite3.connect(orgs / "personal.db")
+    # The personal store is a LOCAL store living BESIDE orgs/ (auto-35kmy):
+    # create and connect at the same path, or the probe row lands in a file
+    # the reader never opens.
+    personal = tmp_path / "personal.db"
+    if not personal.exists():
+        GraphDB.create_org_db(
+            "personal", type_="personal", path=personal,
+        ).close()
+    conn = sqlite3.connect(personal)
     try:
         conn.execute(
             "INSERT INTO settings(id, set_id, schema_revision, key, payload, "
@@ -220,7 +226,9 @@ def test_every_secret_bearing_set_is_band_pinned():
         "autonomy.secure.setting",
         "autonomy.commit.signing-key",
         "autonomy.credential-file",
-        "autonomy.vault.secret",
+        "autonomy.vault.audited",
+        "autonomy.vault.secured",
+        "autonomy.vault.policy-class",
         "dashboard.claude.credentials",
         "dashboard.claude.setup_tokens",
     ):

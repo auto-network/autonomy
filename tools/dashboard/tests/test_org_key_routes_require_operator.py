@@ -157,7 +157,8 @@ def test_a_caller_without_operator_authority_gets_no_key_material(
     """THE ONE THAT MATTERS. The container measurement that opened the bead is
     the first row: no credential, own org, HTTP 200 with the key in it."""
     response = founded_key.get(
-        "/api/network/org-key", headers=headers, cookies=cookies,
+        "/api/network/org-key", params={"org": "acme"},
+        headers=headers, cookies=cookies,
     )
 
     assert response.status_code == status, label
@@ -180,7 +181,8 @@ def test_operator_authority_still_reads_the_key(
     screens and unlock's serving-credential maintenance arrive here holding
     the session cookie."""
     response = founded_key.get(
-        "/api/network/org-key", headers=headers, cookies=cookies,
+        "/api/network/org-key", params={"org": "acme"},
+        headers=headers, cookies=cookies,
     )
 
     assert response.status_code == 200, response.text
@@ -248,7 +250,7 @@ def test_the_operator_still_seals_the_founding_root(client, enforced):
     payload = _sealed_payload()
 
     response = client.post(
-        "/api/network/org-key/sealed", json=payload,
+        "/api/network/org-key/sealed", json={**payload, "org": "acme"},
         cookies={COOKIE: "valid-cookie"},
     )
 
@@ -270,7 +272,7 @@ def test_an_unenrolled_dashboard_still_serves_the_operator(
     ungated route."""
     monkeypatch.setattr(unlock_routes, "gate_enforced", lambda: False)
 
-    response = founded_key.get("/api/network/org-key")
+    response = founded_key.get("/api/network/org-key", params={"org": "acme"})
 
     assert response.status_code == 200
 
