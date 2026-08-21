@@ -28,19 +28,10 @@ for d in /app/data /app/orgs; do
     fi
 done
 
-# The code volume (/app) itself is seeded ROOT-owned from the image, but the
-# server and everything it drives run as autonomy (uid 1000): the hot-reloader,
-# tailwind --watch, __pycache__ writes, and — above all — the git clone that
-# builds each session's /workspace/repo platform snapshot. git refuses a repo
-# owned by another user ("fatal: detected dubious ownership in repository at
-# '/app'"), which silently strips /workspace/repo (and graph/bd/tools) from
-# every session. Hand the code volume to autonomy on first seed too. -xdev keeps
-# this on the code volume's OWN filesystem so it does not descend into the
-# /app/data and /app/orgs volume mounts nested under it (chowned above; orgs is
-# large). Guarded on ownership, so it is a no-op on every reboot after the seed.
-if [ "$(stat -c '%u' /app 2>/dev/null)" != "1000" ]; then
-    find /app -xdev -print0 2>/dev/null | xargs -0 -r chown autonomy:autonomy 2>/dev/null || true
-fi
+# The code volume seeds root-owned; the server and the git clone that builds each
+# session's /workspace/repo run as autonomy, and git refuses a repo owned by
+# another user. -xdev stays off the data/orgs mounts nested under /app.
+find /app -xdev -print0 | xargs -0 -r chown autonomy:autonomy
 
 # Grant autonomy the HOST Docker group: the node launches every session as a
 # host-level sibling container through this socket (see docker-compose.yml). The
