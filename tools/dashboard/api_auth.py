@@ -36,6 +36,12 @@ class ApiPrincipalKind(str, Enum):
     OPERATOR_COOKIE = "operator_cookie"
     LOCAL_SESSION = "local_session"
     ORG_SESSION = "org_session"
+    #: A machine-scoped service credential (the ChatGPT MCP relay). Authenticated,
+    #: but deliberately BELOW local: no organization and no dashboard authority.
+    #: Produced only on the routes that credential is scoped to, so its entire
+    #: reach is those routes — everywhere else the same token does not classify
+    #: here and fails to authenticate.
+    MCP_SERVICE = "mcp_service"
     COMPATIBILITY = "compatibility"
 
 
@@ -198,6 +204,11 @@ def require_global_api_authority(request: Request) -> JSONResponse | None:
 
 BearerAuthenticator = Callable[[Request], tuple[tuple[str, str | None] | None, object | None]]
 CookieVerifier = Callable[[str | None], dict | None]
+#: Resolves a machine-scoped service credential to its principal, or ``None`` if
+#: the request is not a valid service call. The implementation owns the route
+#: scoping: it returns a principal ONLY on the routes the credential is allowed
+#: to reach, so a service token classifies as authenticated only there.
+ServiceAuthenticator = Callable[[Request], "ApiPrincipal | None"]
 
 
 class ApiIdentityMiddleware:
@@ -217,11 +228,13 @@ class ApiIdentityMiddleware:
         authenticate_bearer: BearerAuthenticator,
         verify_cookie: CookieVerifier,
         cookie_name: str,
+        authenticate_service: ServiceAuthenticator | None = None,
     ):
         self.app = app
         self.authenticate_bearer = authenticate_bearer
         self.verify_cookie = verify_cookie
         self.cookie_name = cookie_name
+        self.authenticate_service = authenticate_service
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -252,6 +265,28 @@ class ApiIdentityMiddleware:
         # gate remains their authentication boundary.
         if not path.startswith("/api/"):
             return COMPATIBILITY_PRINCIPAL, header_org
+
+        # A machine-scoped service credential is checked first, but the verifier
+        # itself decides whether this request is on a route that credential may
+        # reach — so it authenticates ONLY there and carries no org (it never
+        # sets an effective scope).  Off its routes it returns None and the
+        # ordinary bearer/cookie path runs, where a service token is not a valid
+        # session token and so does not authenticate.
+        if self.authenticate_service is not None:
+            try:
+                service_principal = self.authenticate_service(request)
+            except Exception:
+                logger.warning(
+                    "API service-token classification failed; continuing "
+                    "through ordinary authentication",
+                    exc_info=True,
+                )
+                service_principal = None
+            if service_principal is not None:
+                # A service credential carries no organization scope: return None
+                # rather than the client-supplied header, so a token holder can
+                # never select a scope via X-Graph-Org.
+                return service_principal, None
 
         authorization = request.headers.get("authorization", "")
         bearer_error_status: int | None = None
