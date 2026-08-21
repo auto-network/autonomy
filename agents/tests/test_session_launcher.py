@@ -482,7 +482,7 @@ def _github_capability() -> MaterializedCapability:
         contract="source_control",
         contract_version=1,
         implementation="autonomy/github",
-        implementation_version=1,
+        implementation_version=2,
         delivery_mode="image_baked",
         package_root="agents/capabilities/github",
         mount_target=f"{CAPABILITIES_MOUNT_DIR}/autonomy-github",
@@ -1788,7 +1788,7 @@ def _agent_test_capability() -> MaterializedCapability:
         delivery_mode="mounted_tools",
         package_root="agents/capabilities/agent_test",
         mount_target=f"{CAPABILITIES_MOUNT_DIR}/autonomy-agent-test",
-        tool_paths=("agents/capabilities/agent_test/tools",),
+        tool_paths=("agents/capabilities/agent_test/tools", "tools/agent_test"),
         primer_path="agents/capabilities/agent_test/primer.md",
         skill_path="agents/capabilities/agent_test/SKILL.md",
         tool_target=CapabilityToolTarget(
@@ -1809,7 +1809,14 @@ def test_agent_test_capability_exposes_cli_and_refuses_raw_pytest_commands(
     assert agent_test.is_file()
     assert agent_test.stat().st_mode & 0o100
     assert "/opt/agent-test-tools/agent-test" in agent_test.read_text()
+    mounts = _mounts(captured_run[0])
+    runtime_source = Path(__file__).resolve().parents[2] / "tools/agent_test"
+    assert (
+        f"{runtime_source}:{CAPABILITIES_MOUNT_DIR}/autonomy-agent-test/agent_test:ro"
+        in mounts
+    )
     source = Path(__file__).resolve().parents[2] / "agents/capabilities/agent_test/tools/agent-test"
+    assert "/opt/autonomy/capabilities/autonomy-agent-test" in source.read_text()
     process = subprocess.Popen(
         [str(source), "--version"],
         stdout=subprocess.PIPE,

@@ -1,2 +1,10 @@
 #!/bin/sh
+runtime=/opt/autonomy/capabilities/autonomy-agent-test
+if [ -d "$runtime/agent_test" ]; then
+  PYTHONPATH="$runtime${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m agent_test "$@"
+fi
+
+# Developer fallback for invoking this checked-in script outside a launched
+# capability container. Runtime sessions always take the self-contained path
+# above, so an old workspace checkout cannot select an old Agent Test client.
 exec python3 -m tools.agent_test "$@"
