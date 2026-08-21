@@ -37,6 +37,24 @@ if [ -n "$DOCKER_GID" ]; then
     usermod -aG "$DOCKER_GID" autonomy 2>/dev/null || true
 fi
 
+# Provision the autonomy user's git SSH access from the operator's key artifacts
+# (data/artifacts/<org>/<service>/id_*), so workspace preparation can clone
+# private repos over git+SSH — the containerized-node analog of a dev box where
+# the dashboard user already has keys in ~/.ssh. (Per-workspace key selection via
+# the declared ANCHORE_SSH_PRIV_KEY_PATH is the longer-term refinement; this
+# gives the single-key common case a clean, reproducible home.)
+AUT_HOME="$(getent passwd autonomy | cut -d: -f6)"
+if [ -n "$AUT_HOME" ]; then
+    mkdir -p "$AUT_HOME/.ssh" && chmod 700 "$AUT_HOME/.ssh"
+    for k in /app/data/artifacts/*/*/id_ed25519 /app/data/artifacts/*/*/id_rsa; do
+        [ -f "$k" ] && install -m 600 "$k" "$AUT_HOME/.ssh/$(basename "$k")"
+    done
+    if [ -f "$AUT_HOME/.ssh/id_ed25519" ] || [ -f "$AUT_HOME/.ssh/id_rsa" ]; then
+        ssh-keyscan -t ed25519,rsa github.com >> "$AUT_HOME/.ssh/known_hosts" 2>/dev/null || true
+    fi
+    chown -R autonomy:autonomy "$AUT_HOME/.ssh"
+fi
+
 # In-memory (ramfs) secret stores need root/the socket to provision; best-effort
 # and LOUD (the vault re-checks the filesystem class on every write and fails
 # closed, so a miss degrades secret features rather than downing the node).
