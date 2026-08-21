@@ -48,6 +48,7 @@ from __future__ import annotations
 import base64
 import ipaddress
 import json
+import secrets
 import time
 
 from starlette.requests import Request
@@ -470,15 +471,21 @@ async def post_register_options(request: Request) -> JSONResponse:
     # independently single-use; exact FIFO capacity bounds abandoned options.
     _prune_pending(reserve=1)
     challenge_key = _b64url(options.challenge)
+    # A single-use nonce the enrollment statement binds (idkit.enrollment):
+    # frozen here alongside the challenge so post_register can confirm the
+    # root-signed statement is for THIS ceremony, not one replayed from another.
+    nonce = secrets.token_hex(32)
     _pending[challenge_key] = {
         "rp_id": rp_id,
         "origin": origin,
+        "nonce": nonce,
         "expires": _now() + PENDING_TTL_S,
     }
     return JSONResponse({
         "ok": True,
         "rp_id": rp_id,
         "origin": origin,
+        "nonce": nonce,
         "options": json.loads(options_to_json(options)),
     })
 
@@ -574,6 +581,62 @@ async def post_register(request: Request) -> JSONResponse:
         )}, status_code=400)
 
     credential_id = _b64url(verification.credential_id)
+
+    # The root-signed enrollment statement (idkit.enrollment) is what turns this
+    # row from an agent-writable claim into evidence. Verify it against the root
+    # resolved from autonomy.identity.personal — NEVER the statement's own signer
+    # (the fatal one-liner verify() warns about) — and confirm it describes the
+    # credential THIS ceremony just registered.
+    statement_data = body.get("statement")
+    if not isinstance(statement_data, dict):
+        return JSONResponse({"ok": False, "error": (
+            "body must carry 'statement' — the root-signed enrollment statement"
+        )}, status_code=400)
+    try:
+        personal = _personal_member()
+    except Exception as e:
+        return JSONResponse({"ok": False,
+                             "error": f"could not read the personal identity: {e}"},
+                            status_code=500)
+    if personal is None or not personal.payload.get("root_pub"):
+        return JSONResponse({"ok": False, "error": (
+            "no personal identity to verify the enrollment statement against"
+        )}, status_code=409)
+    from tools.network.idkit import enrollment
+    from tools.network.idkit.errors import IdkitError
+    try:
+        statement = enrollment.verify(
+            statement_data, root_pub=personal.payload["root_pub"],
+        )
+    except IdkitError as e:
+        return JSONResponse({"ok": False, "error": (
+            f"enrollment statement did not verify: {e}"
+        )}, status_code=400)
+    # The browser sends the COSE key exactly as the authenticator emitted it;
+    # py_webauthn stores its canonical re-encoding. Compare canonical-to-canonical
+    # with py_webauthn's own helpers, so a non-minimal-but-valid encoding from the
+    # device is accepted while a wrong key is not. No round trip: both values are
+    # already in hand from the single request.
+    from webauthn.helpers import encode_cbor, parse_cbor
+    try:
+        _stmt_cose = encode_cbor(parse_cbor(bytes.fromhex(statement.credential_public_key)))
+    except Exception:  # noqa: BLE001 — malformed key hex/CBOR is just a mismatch
+        _stmt_cose = None
+    _stmt_bad = next((name for name, ok in (
+        ("credential_id", statement.credential_id == credential_id),
+        ("credential_public_key", _stmt_cose == verification.credential_public_key),
+        ("rp_id", statement.rp_id == pending["rp_id"]),
+        ("origin", statement.origin == pending["origin"]),
+        ("nonce", statement.nonce == pending.get("nonce")),
+        ("initial_sign_count",
+         statement.initial_sign_count == verification.sign_count),
+    ) if not ok), None)
+    if _stmt_bad is not None:
+        return JSONResponse({"ok": False, "error": (
+            "the enrollment statement does not match the registered credential "
+            f"({_stmt_bad})"
+        )}, status_code=400)
+
     try:
         existing = {row.key for row in _passkey_rows()}
     except Exception as e:
@@ -600,6 +663,7 @@ async def post_register(request: Request) -> JSONResponse:
     }
     if verification.aaguid:
         payload["aaguid"] = verification.aaguid
+    payload["statement"] = statement.to_dict()
     try:
         with settings_ops.identity_write_context():
             settings_ops.upsert_by_key(

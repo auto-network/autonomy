@@ -46,6 +46,20 @@
     return m._internals;
   }
 
+  function _signI() {
+    var m = window.AutonomyNetworkSession;
+    if (!m || !m._internals) {
+      throw new Error('network-signon.js must load before network-onboarding.js');
+    }
+    return m._internals;
+  }
+
+  // The personal root, held ONLY for the span of one onboarding ceremony:
+  // created + armored in _createIdentity, used by _enrollPasskey to sign the
+  // passkey's enrollment statement, then dropped. It is one continuous flow —
+  // creating the identity IS establishing the root the passkey enrolls against.
+  var _ceremonyRoot = null;
+
   function b64uToBytes(s) {
     var b64 = s.replace(/-/g, '+').replace(/_/g, '/');
     while (b64.length % 4) b64 += '=';
@@ -112,6 +126,12 @@
     var armor;
     try {
       armor = await I.armorSeed(pair.seed, pair.pubHex, password);
+      // Keep the root signing key for the passkey enrollment that follows in
+      // this same ceremony; the seed itself is zeroed immediately below.
+      _ceremonyRoot = {
+        signingKey: await I.importSigningKey(pair.seed),
+        publicHex: pair.pubHex,
+      };
     } finally {
       pair.seed.fill(0);
       pair.seed = null;
@@ -131,14 +151,36 @@
       throw new Error('this browser does not support passkeys — ' +
         'you can enroll a passkey from a supported browser later');
     }
-    var minted = await _postJson('/api/identity/passkey/register-options', {});
-    var pk = minted.options;
-    pk.challenge = b64uToBytes(pk.challenge);
-    pk.user.id = b64uToBytes(pk.user.id);
-    (pk.excludeCredentials || []).forEach(function (c) { c.id = b64uToBytes(c.id); });
-    var cred;
+    var S = _signI();
+    var root = _ceremonyRoot;
+    var ephemeral = false;
+    if (!root) {
+      // Existing identity (adding a device): re-derive the root from the
+      // password to sign this passkey's statement, then drop it. The password
+      // and the plaintext seed never leave this page (I1).
+      var el = document.getElementById('onboarding-addkey-password');
+      var pw = el && el.value;
+      if (!pw) throw new Error('enter your password to add this device');
+      var stored = await _fetchJson('/api/identity/personal');
+      var opened;
+      try {
+        opened = await S.decryptArmor(stored.armored_private_key, pw);
+      } catch (e) {
+        throw new Error('that password does not open your identity — check it and try again');
+      }
+      try {
+        root = {
+          signingKey: await _idI().importSigningKey(opened.seed),
+          publicHex: stored.root_pub,
+        };
+        ephemeral = true;
+      } finally {
+        opened.seed.fill(0);
+        opened.seed = null;
+      }
+    }
     try {
-      cred = await navigator.credentials.create({ publicKey: pk });
+      await S.enrollPasskey({ root: root, label: 'This device' });
     } catch (e) {
       if (e && e.name === 'InvalidStateError') {
         throw new Error('this device is already enrolled');
@@ -147,25 +189,10 @@
         throw new Error('enrollment was cancelled or timed out — try again');
       }
       throw e;
+    } finally {
+      _ceremonyRoot = null;  // never outlive the ceremony
+      if (ephemeral) root.signingKey = null;
     }
-    if (!cred) throw new Error('enrollment was cancelled — try again');
-    await _postJson('/api/identity/passkey/register', {
-      label: 'This device',
-      credential: {
-        id: cred.id,
-        rawId: bytesToB64u(cred.rawId),
-        type: cred.type,
-        authenticatorAttachment: cred.authenticatorAttachment || undefined,
-        clientExtensionResults:
-          (cred.getClientExtensionResults && cred.getClientExtensionResults()) || {},
-        response: {
-          clientDataJSON: bytesToB64u(cred.response.clientDataJSON),
-          attestationObject: bytesToB64u(cred.response.attestationObject),
-          transports:
-            (cred.response.getTransports && cred.response.getTransports()) || [],
-        },
-      },
-    });
   }
 
   // ── state ──────────────────────────────────────────────────────────
@@ -304,11 +331,20 @@
   }
 
   function _step2Html() {
+    // Existing identity (adding a device): re-prompt the password so the root
+    // can sign this passkey's statement. A fresh onboarding already holds it.
+    var pw = _ceremonyRoot ? '' :
+      '<div class="mt-6 text-left">' +
+      '<label class="block text-sm text-gray-400 mb-1.5">Your password</label>' +
+      '<input type="password" id="onboarding-addkey-password" data-testid="onboarding-addkey-password" class="' + _INPUT_CLS + '">' +
+      '<p class="text-xs text-gray-500 mt-2">Confirms it is you and unlocks your key to add this device.</p>' +
+      '</div>';
     return '<div class="text-center" data-testid="onboarding-step-device">' +
       '<svg class="w-20 h-20 mx-auto mt-8" viewBox="0 0 24 24" fill="none" stroke="#818cf8" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">' +
       '<path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/>' +
       '<path d="M8 10v1"/><path d="M16 10v1"/><path d="M12 10v3a1 1 0 0 1-1 1"/><path d="M9 16.5a5 5 0 0 0 6 0"/></svg>' +
       '<p class="text-sm text-gray-400 mt-2">This device &middot; Face&nbsp;ID / Touch&nbsp;ID</p>' +
+      pw +
       '<div class="flex gap-2.5 ' + _BOX_CLS + ' p-3 mt-6 text-sm text-gray-400 leading-relaxed text-left">' +
       '<span>' + _INFO + '</span>' +
       '<span>You can enroll more passkeys later. Lose this device and your identity ' +
