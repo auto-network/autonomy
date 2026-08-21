@@ -31,6 +31,7 @@
 
 import { canonicalJson } from './primitives.js';
 import { buildEvent, derivePersona, signEvent } from './ledger-event.js';
+import { buildPersonaKemCredential, deriveKemSeed } from './founding.js';
 
 /** Mirrors ``tools.network.ledger.events.DELEGATE_CONSENT_DOMAIN``. */
 const DELEGATE_CONSENT_DOMAIN = 'autonomy.ledger.delegate-consent.v2\n';
@@ -210,6 +211,24 @@ export async function wakeVault({
     return { ready: false, reason: `delegate-${granted.status}` };
   }
 
+  // Publish the persona's KEM credential and hand its private half to the
+  // dashboard, exactly as tools/vault/warm_client does. Without this the vault
+  // wakes for THIS process only: nothing is durably recoverable, because a
+  // mint's self-grant has no published recipient to seal to. Both are derived
+  // deterministically from the root here (counter 0); the dashboard holds only
+  // the KEM private + delegate (crib §12), never the root. Byte-parity with the
+  // Python is enforced by test_vault_unlock_crossimpl.
+  const persona = await derivePersona(personalRootSeed, genesisId);
+  const kemSeed = await deriveKemSeed(personalRootSeed);
+  const { credential: kemCredential, kemPrivateKey } =
+    await buildPersonaKemCredential({
+      persona,
+      genesisId,
+      kemSeed,
+      authorityHeads: headIds,
+      createdHlc: [now, 0],
+    });
+
   const up = await fetchImpl('/api/identity/unlock/vault-keys', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -217,6 +236,8 @@ export async function wakeVault({
     body: JSON.stringify({
       generation_keys: generationKeys,
       delegate_signing_key: delegateSigningKey,
+      kem_credential: kemCredential,
+      persona_kem_private_key: kemPrivateKey,
     }),
   });
   if (!up.ok) return { ready: false, reason: `vault-keys-${up.status}` };
