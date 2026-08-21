@@ -1621,6 +1621,7 @@ def check_setting(
     _via_field: str = "",
     _via_description: str = "",
     _passed: list[CheckPassed] | None = None,
+    _include_dependents: bool = True,
 ) -> list[CheckFinding]:
     """Is this row satisfied, and everything it declares it depends on?
 
@@ -1782,6 +1783,12 @@ def check_setting(
                         _via_field=f"{path_prefix}{name}",
                         _via_description=spec.get("description", "") or "",
                         _passed=_passed,
+                        # Following a forward reference must not then walk
+                        # backward into every other row that references the
+                        # shared target. A workspace depends on its contract;
+                        # it does not depend on every peer workspace that
+                        # enables the same contract.
+                        _include_dependents=False,
                     ))
                 kind = spec.get("exists")
                 if kind:
@@ -1960,10 +1967,12 @@ def check_setting(
     # Rows keyed by this one are part of whether it is fully installed: a
     # workspace's capability enables are found through the key segment that
     # names the workspace.
-    for dep_set, dep_key, _segment in rows_keyed_by(set_id, key, org=org):
-        findings.extend(check_setting(
-            dep_set, dep_key, org=org, _seen=seen, _passed=_passed,
-        ))
+    if _include_dependents:
+        for dep_set, dep_key, _segment in rows_keyed_by(set_id, key, org=org):
+            findings.extend(check_setting(
+                dep_set, dep_key, org=org, _seen=seen, _passed=_passed,
+                _include_dependents=True,
+            ))
     return findings
 
 
