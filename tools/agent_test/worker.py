@@ -332,10 +332,14 @@ def _dashboard_notify(session: str, run_id: str, status: str, text: str) -> tupl
             "summary": text,
         }
     ).encode()
+    headers = {"Content-Type": "application/json"}
+    token = os.environ.get("CROSSTALK_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(
         f"{base}/api/session/notify",
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     context = ssl._create_unverified_context() if base.startswith("https://") else None

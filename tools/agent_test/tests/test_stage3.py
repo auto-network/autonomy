@@ -108,3 +108,32 @@ def test_capability_primer_teaches_agent_test_not_raw_pytest():
     assert "only supported Python test entry point" in text
     assert "python3 -m pytest" not in text
     assert "ALWAYS pipe test output through `tee`" not in text
+
+
+def test_dashboard_notification_carries_session_bearer(monkeypatch):
+    from tools.agent_test import worker
+
+    captured = {}
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"ok":true}'
+
+    def fake_urlopen(request, **_kwargs):
+        captured["authorization"] = request.headers.get("Authorization")
+        return Response()
+
+    monkeypatch.setenv("CROSSTALK_TOKEN", "test-session-bearer")
+    monkeypatch.setattr(worker.urllib.request, "urlopen", fake_urlopen)
+    delivered, _detail = worker._dashboard_notify("auto-test", "at-1", "passed", "done")
+
+    assert delivered is True
+    assert captured["authorization"] == "Bearer test-session-bearer"
