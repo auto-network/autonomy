@@ -41,6 +41,12 @@ def _wrap(path, method="GET"):
     )[0]
 
 
+def _wrap_plugin(path, method="GET"):
+    return route_policy.apply_default_deny(
+        [Route(path, _ok, methods=[method])], plugin=True
+    )[0]
+
+
 async def _call(route, request):
     return await route.endpoint(request)
 
@@ -91,3 +97,42 @@ def test_plugins_may_not_be_public_exceptions():
         route_policy.assert_no_plugin_exceptions({"/api/identity/status"})
     # A disjoint plugin set is fine.
     route_policy.assert_no_plugin_exceptions({"/api/missions/x/site"})
+
+
+@pytest.fixture
+def gate_open(monkeypatch):
+    """An UNENROLLED dashboard: the human gate stands down (fail-open)."""
+    from tools.dashboard import unlock_routes
+    monkeypatch.delenv("DASHBOARD_AUTH", raising=False)
+    monkeypatch.setattr(unlock_routes, "human_auth_enrolled", lambda: False)
+    assert unlock_routes.gate_enforced() is False
+
+
+@pytest.mark.asyncio
+async def test_app_route_stands_down_when_unenrolled(gate_open):
+    """A fresh install must bootstrap: the app guard stands down while the
+    gate is not enforced, so a no-credential caller is admitted."""
+    route = _wrap("/api/some/app/route")
+    compat = api_auth.COMPATIBILITY_PRINCIPAL
+    resp = await _call(route, _req("GET", "/api/some/app/route", compat))
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_plugin_route_refuses_unauthenticated_even_when_unenrolled(gate_open):
+    """An unenrolled dashboard exposes NO plugin routes (operator ruling
+    2026-08-21). A plugin route refuses a no-credential caller regardless of
+    gate state — no bootstrap window applies to a plugin."""
+    route = _wrap_plugin("/api/missions/x/delete")
+    compat = api_auth.COMPATIBILITY_PRINCIPAL
+    resp = await _call(route, _req("DELETE", "/api/missions/x/delete", compat))
+    assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_plugin_route_admits_a_bearer_even_when_unenrolled(gate_open):
+    route = _wrap_plugin("/api/missions/x/site", method="POST")
+    agent = api_auth.ApiPrincipal(
+        api_auth.ApiPrincipalKind.ORG_SESSION, subject="s", org="anchore")
+    resp = await _call(route, _req("POST", "/api/missions/x/site", agent))
+    assert resp.status_code == 200
