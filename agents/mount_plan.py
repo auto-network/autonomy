@@ -166,6 +166,11 @@ class NodeTopology:
     volumes: tuple = ()          # tuple[NodeVolume, ...]
     binds: tuple = ()            # tuple[NodeBind, ...]
     volume_subpath: bool = True  # daemon supports --mount ...,volume-subpath (API 1.45+)
+    network: str = ""            # the node's own user-defined docker network (has
+                                 # embedded DNS). A session joins this to reach the
+                                 # dashboard by its `dashboard` alias when the node
+                                 # is itself a container. "" for a host process or a
+                                 # node on only the default bridge / host / none.
 
 
 def _own_container_id() -> Optional[str]:
@@ -182,6 +187,31 @@ def _own_container_id() -> Optional[str]:
             return None
     hostname = os.environ.get("HOSTNAME")
     return hostname or None
+
+
+def _own_primary_network(cid: str) -> str:
+    """The node's primary user-defined docker network — the one a launched
+    session joins to reach the dashboard by its ``dashboard`` alias.
+
+    A user-defined network has embedded DNS, so a sibling session attached to it
+    can resolve ``dashboard`` to the node. The default ``bridge`` has no such DNS,
+    and ``host`` / ``none`` are not attachable by name — those are skipped and ""
+    is returned, which leaves the launcher on its host.docker.internal path (the
+    correct behaviour for a dev-box node whose dashboard is a host process)."""
+    try:
+        out = subprocess.run(
+            ["docker", "inspect", "--format", "{{json .NetworkSettings.Networks}}", cid],
+            capture_output=True, text=True, timeout=15,
+        )
+        if out.returncode != 0 or not out.stdout.strip():
+            return ""
+        nets = json.loads(out.stdout) or {}
+    except Exception:
+        return ""
+    for name in nets:
+        if name not in ("bridge", "host", "none"):
+            return name
+    return ""
 
 
 def _deepest_containing(
@@ -495,4 +525,5 @@ def _discover_topology_uncached() -> NodeTopology:
     return NodeTopology(
         is_host_process=False, volumes=tuple(volumes), binds=tuple(binds),
         volume_subpath=_daemon_supports_volume_subpath(),
+        network=_own_primary_network(cid),
     )

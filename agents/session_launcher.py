@@ -926,7 +926,11 @@ def _ensure_platform_snapshot() -> str | None:
     except Exception as exc:
         print(
             "  ERROR: could not prepare the platform snapshot for "
-            f"/workspace/repo — launching without it ({exc})",
+            f"/workspace/repo — launching without it, so graph/bd/tools will be "
+            f"absent from this session ({exc}). If this is 'fatal: repository "
+            "... does not exist', the release image dropped its .git and "
+            "ensure_managed_clone cannot clone REPO_ROOT — ship the release WITH "
+            "its .git (deploy/Dockerfile; NODE-VOLUME-MODEL.md).",
             file=sys.stderr,
         )
         return None
@@ -1670,12 +1674,21 @@ def launch_session(
     _lap("session_token")
 
     # ── Networking ─────────────────────────────────────────────
-    # host-networked containers can just use localhost; bridge-networked
-    # ones need host.docker.internal + an --add-host entry so DNS resolves
-    # to the docker bridge gateway.
+    # Three topologies, in precedence order:
+    #  1. host-networked container -> localhost reaches the host dashboard;
+    #  2. a CONTAINERIZED node (dashboard is a sibling container, not a host
+    #     process) -> put the session on the node's own DNS-having network and
+    #     reach the dashboard by its `dashboard` alias, because a bridge session's
+    #     host.docker.internal resolves to the host gateway, where a container-
+    #     published, tailscale-bound 8080 does not answer;
+    #  3. a dev-box node (host process) on the default bridge -> host.docker.internal
+    #     + an --add-host entry so DNS resolves to the docker bridge gateway.
     if network_host:
         network_args = ["--network=host"]
         graph_api = "https://localhost:8080"
+    elif not _topo.is_host_process and _topo.network:
+        network_args = ["--network", _topo.network]
+        graph_api = "https://dashboard:8080"
     else:
         network_args = ["--add-host=host.docker.internal:host-gateway"]
         graph_api = "https://host.docker.internal:8080"
