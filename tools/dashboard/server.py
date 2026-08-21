@@ -9647,10 +9647,18 @@ def _list_dashboard_tmux() -> list[str]:
     result = subprocess.run(["tmux", "list-sessions", "-F", "#{session_name}"],
                             capture_output=True, text=True)
     if result.returncode != 0:
-        logger.warning(
-            "_list_dashboard_tmux: tmux list-sessions failed  rc=%d  stderr=%r",
-            result.returncode, (result.stderr or "").strip()[:200],
-        )
+        stderr = (result.stderr or "").strip()
+        # "no server" (the socket doesn't exist) just means no sessions have been
+        # created yet — the normal state of an idle node, polled every few seconds,
+        # so it must not warn. A genuine tmux failure while a server IS running
+        # still warns (the 2026-04-20 mass-deactivation root cause).
+        no_server = ("No such file or directory" in stderr
+                     or "no server running" in stderr)
+        if not no_server:
+            logger.warning(
+                "_list_dashboard_tmux: tmux list-sessions failed  rc=%d  stderr=%r",
+                result.returncode, stderr[:200],
+            )
         return []
     return [s for s in result.stdout.strip().split("\n")
             if any(s.startswith(p) for p in _DASHBOARD_PREFIXES)]

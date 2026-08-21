@@ -30,8 +30,11 @@ done
 
 # The code volume seeds root-owned; the server and the git clone that builds each
 # session's /workspace/repo run as autonomy, and git refuses a repo owned by
-# another user. -xdev stays off the data/orgs mounts nested under /app.
-find /app -xdev -print0 | xargs -0 -r chown autonomy:autonomy
+# another user. Chown the code tree, pruning the data/orgs mounts nested under it
+# (chowned in the loop above): they share /app's device — all named volumes live
+# on one host filesystem — so -xdev would not stop at them.
+find /app -path /app/data -prune -o -path /app/orgs -prune -o -print0 \
+    | xargs -0 -r chown -h autonomy:autonomy 2>/dev/null || true
 
 # Grant autonomy the HOST Docker group: the node launches every session as a
 # host-level sibling container through this socket (see docker-compose.yml). The
@@ -65,6 +68,13 @@ fi
 # closed, so a miss degrades secret features rather than downing the node).
 python3 -m agents.secret_ramfs || \
     echo "WARNING: secret ramfs provisioning failed — secret delivery and the key cache will fail closed until resolved" >&2
+
+# The key cache (/run/autonomy-keycache) is the dashboard's OWN memory-class
+# store; the dashboard runs as autonomy, so hand the ramfs to it — otherwise the
+# vault hot-reload restore reads it as root-owned, hits Permission denied, and
+# tracebacks on every boot. (The per-session delivery ramfs is chowned per-uid by
+# the launcher, so it is deliberately not touched here.)
+chown -R autonomy:autonomy /run/autonomy-keycache 2>/dev/null || true
 
 # Drop to autonomy and serve. The data volume is now autonomy-owned, so schema
 # init + everything the server does runs as the session-agent uid.
