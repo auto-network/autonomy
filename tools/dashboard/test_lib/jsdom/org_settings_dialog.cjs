@@ -179,6 +179,41 @@ async function main() {
     "a screen the reader had left rendered over the one they chose");
 }
 
+// ── readiness renders each missing fact once, from metadata only ──
+{
+  const w = boot();
+  w.fetch = async () => ({
+    ok: true,
+    json: async () => ({
+      org: "acme",
+      asked_in: "the platform host",
+      things: [{
+        kind: "missing_env", subject: "GH_TOKEN", severity: "blocking",
+        name: "", description: "", field_description: "", help: "",
+        set_id: "autonomy.workspace", field: "env_from_host",
+        looked_in: "the launcher environment", needed_by: ["Alpha", "Beta"],
+      }],
+      workspaces: [
+        { id: "alpha", name: "Alpha", ready: false, blocking: [], unanswerable: [{}] },
+        { id: "beta", name: "Beta", ready: false, blocking: [{}], unanswerable: [] },
+      ],
+    }),
+  });
+  w.AutonomyOrgSettings.open("acme");
+  await settle();
+  await settle();
+
+  assert.equal(w.document.querySelectorAll(".orgset-thing").length, 1,
+    "one fact needed by two workspaces rendered twice");
+  assert.equal(q(w, ".orgset-thing-title").textContent, "GH_TOKEN");
+  assert.equal(q(w, ".orgset-thing-cat"), null,
+    "a blank metadata subtitle was replaced with renderer-authored copy");
+  assert.equal(q(w, ".orgset-thing-count").textContent, "2");
+  assert.equal(w.document.querySelectorAll(".orgset-ws-chip").length, 2);
+  assert.equal(q(w, '[data-testid="orgset-workspace-state-alpha"]').textContent, "1",
+    "an unanswerable check made a not-ready workspace look like it had zero issues");
+}
+
 console.log("PASS: org settings dialog — registration, push navigation, "
             + "escape, failure isolation, stale-render drop");
 }

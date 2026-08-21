@@ -198,6 +198,14 @@
     missing_reference: 'Never provisioned here',
     missing_env: 'Not set',
     missing_path: 'Not on this machine',
+    unpopulated_path: 'Present, but empty',
+    invalid_mount: 'Mount declaration is unusable',
+    missing_capability_install: 'No organization installation',
+    missing_capability_contract_version: 'Contract version is unavailable',
+    capability_contract_version_mismatch: 'Contract version does not match',
+    capability_install_contract_version_mismatch: 'Install version does not match',
+    missing_capability_implementation_version: 'Implementation version is unavailable',
+    capability_implementation_contract_mismatch: 'Implementation contract does not match',
     unanswerable_here: 'Cannot be answered from here',
     unreadable: 'Could not be read',
     unreadable_reference: 'Exists, but not readable from here',
@@ -317,7 +325,8 @@
       var chip = el('span', 'orgset-ws-chip' + (ws.ready ? ' orgset-ws-chip-ready' : ''));
       chip.setAttribute('data-testid', 'orgset-workspace-' + ws.id);
       chip.appendChild(el('span', '', ws.name || ws.id));
-      var tag = el('b', '', ws.ready ? '✓' : String((ws.blocking || []).length));
+      var unresolved = (ws.blocking || []).length + (ws.unanswerable || []).length;
+      var tag = el('b', '', ws.ready ? '✓' : String(unresolved));
       tag.setAttribute('data-testid', 'orgset-workspace-state-' + ws.id);
       chip.appendChild(tag);
       chips.appendChild(chip);

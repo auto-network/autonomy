@@ -705,24 +705,32 @@ def cmd_set_check(args) -> None:
     """Is this row satisfied, and everything it declares it depends on?
 
     Metadata-driven end to end: it follows fields declaring ``references``
-    and asks fields declaring ``exists``. Nothing here knows what any
-    particular setting means, which is why a new set needs no code.
+    and asks fields declaring ``exists``. Schemas may also contribute
+    cross-row constraints whose lower-level validator is shared with runtime.
     """
-    from tools.graph import settings_ops
-
     # A revision is not needed to check a row: the stored row carries its
     # own, and the check reads what is there rather than asserting a shape.
     set_id = args.set_at_rev.split("#", 1)[0]
     org = _org(args) or "personal"
     try:
-        findings = settings_ops.check_setting(set_id, args.key, org=org)
+        findings, satisfied = get_client().inspect_setting(
+            set_id, args.key, org=org,
+        )
     except Exception as exc:
         print(f"Error: {type(exc).__name__}: {exc}", file=sys.stderr)
         sys.exit(1)
 
+    def _emit_satisfied() -> None:
+        if not satisfied:
+            return
+        print("\n  Verified checks:")
+        for item in satisfied:
+            print(f"      ✓ {item.kind}: {item.detail}")
+
     if not findings:
         print(f"  ✓ {set_id} key={args.key} — satisfied, with everything it "
               f"declares it depends on")
+        _emit_satisfied()
         return
 
     import textwrap
@@ -760,9 +768,10 @@ def cmd_set_check(args) -> None:
         _emit(advisory, "-")
     if not blocking:
         print(f"\n  ✓ nothing blocks {set_id} key={args.key}")
-    print("\n  The walk follows DECLARED edges only. A relationship carried "
-          "by convention\n  rather than by a reference declaration is not "
-          "checked, and not reported.")
+    _emit_satisfied()
+    print("\n  The walk follows declared fields, keys, and schema readiness "
+          "hooks only.\n  An undeclared relationship is not checked or "
+          "reported.")
     # Exit status answers the question a script asks, which is whether this
     # can run -- not whether every declared thing is present.
     sys.exit(1 if blocking else 0)
@@ -1380,7 +1389,12 @@ def attach_set_subparser(sub) -> None:
 
     p_check = set_sub.add_parser(
         "check",
-        help="Verify a row and everything it declares it depends on",
+        help="Ask the dashboard to verify a row and its declared dependencies",
+        description=(
+            "Run the dashboard's schema-driven readiness inspection for one "
+            "Setting row. The same inspection feeds organization workspace "
+            "health; this command renders its failures and positive evidence."
+        ),
     )
     p_check.add_argument("set_at_rev", metavar="set_id[#rev]")
     p_check.add_argument("--key", required=True, help="Which row to check")

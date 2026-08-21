@@ -9,12 +9,14 @@ import time
 import pytest
 
 import agents.workspace_settings as workspace_settings
+import agents.workspace_manager as workspace_manager
 
 from agents.workspace_settings import (
     CAPABILITIES_MOUNT_DIR,
     MaterializedCapability,
     RepoMount,
     WorkspaceSettingsError,
+    WorkspaceCapabilityError,
     _impl_mount_target,
     _parse_repo,
     _compose_workspaces,
@@ -28,6 +30,10 @@ from tools.graph import ops
 from tools.graph.schemas.capability_impl import (
     SET_ID as CAPABILITY_IMPL_SET_ID,
     SCHEMA_REVISION as CAPABILITY_IMPL_REVISION,
+)
+from tools.graph.schemas.capability_contract import (
+    SET_ID as CAPABILITY_CONTRACT_SET_ID,
+    SCHEMA_REVISION as CAPABILITY_CONTRACT_REVISION,
 )
 from tools.graph.schemas.org_capability_install import (
     SET_ID as ORG_CAPABILITY_INSTALL_SET_ID,
@@ -364,7 +370,28 @@ _JIRA_IMPL = {
 }
 
 
+def _seed_contract(name: str, *, version: int = 1):
+    ops.add_setting(
+        CAPABILITY_CONTRACT_SET_ID, CAPABILITY_CONTRACT_REVISION,
+        key=name,
+        payload={
+            "name": name,
+            "version": version,
+            "summary": f"{name} test contract",
+            "ops": [{
+                "name": "probe",
+                "summary": "test operation",
+                "input_schema": {},
+                "output_schema": {},
+            }],
+        },
+        state="published",
+        org=ops.CALLER_ORG,
+    )
+
+
 def _seed_github_install():
+    _seed_contract("source_control")
     ops.add_setting(
         CAPABILITY_IMPL_SET_ID, CAPABILITY_IMPL_REVISION,
         key="autonomy/github", payload=_GITHUB_IMPL, state="published",
@@ -383,6 +410,7 @@ def _seed_github_install():
 
 
 def _seed_jira_install():
+    _seed_contract("issue_tracker")
     ops.add_setting(
         CAPABILITY_IMPL_SET_ID, CAPABILITY_IMPL_REVISION,
         key="autonomy/jira", payload=_JIRA_IMPL, state="published",
@@ -508,10 +536,12 @@ def test_resolve_capabilities_drops_when_no_workspace_enable(graph_db_env):
     assert resolve_capabilities("ng") == ()
 
 
-def test_resolve_capabilities_drops_when_install_missing(graph_db_env):
-    """Enable without an org install resolves to nothing."""
+def test_resolve_capabilities_refuses_when_install_missing(graph_db_env):
+    """An enabled chain cannot silently disappear when its install is absent."""
+    _seed_contract("source_control")
     _enable_capability("dashboard", "source_control")
-    assert resolve_capabilities("dashboard") == ()
+    with pytest.raises(WorkspaceCapabilityError, match="no organization installation"):
+        resolve_capabilities("dashboard")
 
 
 def test_resolve_capabilities_filters_to_workspace_prefix(graph_db_env):
@@ -538,8 +568,9 @@ def test_resolve_capabilities_multiple_enabled_sorted_by_contract(graph_db_env):
     assert [c.contract for c in caps] == ["issue_tracker", "source_control"]
 
 
-def test_resolve_capabilities_drops_impl_not_implementing_contract_version(graph_db_env):
-    """If the impl declares a different contract version, the chain breaks."""
+def test_resolve_capabilities_refuses_impl_not_implementing_contract_version(graph_db_env):
+    """If the impl declares a different contract version, launch refuses."""
+    _seed_contract("source_control")
     drift_impl = dict(_GITHUB_IMPL)
     drift_impl["implements"] = [{"contract": "source_control", "version": 2}]
     ops.add_setting(
@@ -558,7 +589,79 @@ def test_resolve_capabilities_drops_impl_not_implementing_contract_version(graph
      org=ops.CALLER_ORG)
     _enable_capability("dashboard", "source_control")
 
-    assert resolve_capabilities("dashboard") == ()
+    with pytest.raises(WorkspaceCapabilityError, match="does not declare"):
+        resolve_capabilities("dashboard")
+
+
+def test_resolve_capabilities_refuses_absent_pinned_implementation_version(graph_db_env):
+    """The incident case: install pins v3 while the one implementation row is v5."""
+    _seed_contract("source_control")
+    current = dict(_GITHUB_IMPL, version=5)
+    ops.add_setting(
+        CAPABILITY_IMPL_SET_ID, CAPABILITY_IMPL_REVISION,
+        key="autonomy/github", payload=current, state="published",
+        org=ops.CALLER_ORG,
+    )
+    ops.add_setting(
+        ORG_CAPABILITY_INSTALL_SET_ID, ORG_CAPABILITY_INSTALL_REVISION,
+        key="source_control",
+        payload={
+            "contract": "source_control",
+            "contract_version": 1,
+            "implementation": "autonomy/github",
+            "implementation_version": 3,
+        },
+        org=ops.CALLER_ORG,
+    )
+    _enable_capability("dashboard", "source_control")
+
+    with pytest.raises(WorkspaceCapabilityError, match="pins autonomy/github@3"):
+        resolve_capabilities("dashboard")
+
+
+def test_broken_capability_stays_scoped_to_workspace_and_refuses_before_prepare(
+    graph_db_env,
+):
+    """One bad workspace remains listable and cannot poison healthy peers."""
+    _seed_contract("source_control")
+    current = dict(_GITHUB_IMPL, version=5)
+    ops.add_setting(
+        CAPABILITY_IMPL_SET_ID, CAPABILITY_IMPL_REVISION,
+        key="autonomy/github", payload=current, state="published",
+        org=ops.CALLER_ORG,
+    )
+    ops.add_setting(
+        ORG_CAPABILITY_INSTALL_SET_ID, ORG_CAPABILITY_INSTALL_REVISION,
+        key="source_control",
+        payload={
+            "contract": "source_control",
+            "contract_version": 1,
+            "implementation": "autonomy/github",
+            "implementation_version": 3,
+        },
+        org=ops.CALLER_ORG,
+    )
+    for workspace_id in ("broken", "healthy"):
+        ops.add_setting(
+            WORKSPACE_SET_ID, WORKSPACE_REVISION,
+            key=workspace_id,
+            payload={"name": workspace_id.title(), "image": "img"},
+            org=ops.CALLER_ORG,
+        )
+    _enable_capability("broken", "source_control")
+    invalidate_caches()
+
+    workspaces = load_workspaces()
+
+    assert set(workspaces) >= {"broken", "healthy"}
+    assert workspaces["healthy"].capability_issues == ()
+    assert [issue.subject for issue in workspaces["broken"].capability_issues] == [
+        "autonomy/github@3",
+    ]
+    with pytest.raises(WorkspaceCapabilityError, match="pins autonomy/github@3"):
+        workspace_manager.prepare_session_mounts(
+            workspaces["broken"], "test-session",
+        )
 
 
 def test_impl_mount_target_replaces_slash_with_dash():

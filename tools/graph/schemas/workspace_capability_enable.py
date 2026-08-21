@@ -17,8 +17,9 @@ which means *unpinned* — the resolver uses the current working version
 of the contract. A concrete integer pins to that canonical revision.
 The release/pin workflow is out of scope for this bead.
 
-This schema does **not** drive workspace launch yet. Resolution and
-materialization are wired by later beads.
+The workspace launcher resolves this row through the same versioned-chain
+validator used by the on-demand readiness check. A broken enabled chain is
+reported as not ready and refused at launch instead of being silently omitted.
 """
 
 from __future__ import annotations
@@ -147,6 +148,42 @@ class WorkspaceCapabilityEnableV1(SettingSchema):
             "description": "Free-form notes",
         },
     }
+
+    @classmethod
+    def readiness_findings(cls, *, key, payload, org, read):
+        """Validate the conventional and versioned capability-chain edges.
+
+        ``check_setting`` supplies the reader, keeping storage and visibility
+        policy in the Settings layer.  The actual edge rules are the same pure
+        primitive the workspace launcher consumes.
+        """
+        from tools.graph.capability_chain import validate_capability_chain
+
+        _workspace, separator, contract_key = str(key).partition(":")
+        if not separator or not contract_key or payload.get("enabled", True) is False:
+            return ()
+
+        contract_row = read(
+            "autonomy.capability.contract", contract_key, org=org, peers=None,
+        )
+        install_row = read(
+            "autonomy.org.capability.install", contract_key, org=org, peers=[],
+        )
+        install = (install_row or {}).get("payload")
+        impl_row = None
+        if isinstance(install, dict) and isinstance(install.get("implementation"), str):
+            impl_row = read(
+                "autonomy.capability.impl", install["implementation"],
+                org=org, peers=None,
+            )
+        _chain, issues = validate_capability_chain(
+            contract_key=contract_key,
+            enable=payload,
+            contract=(contract_row or {}).get("payload"),
+            install=install,
+            implementation=(impl_row or {}).get("payload"),
+        )
+        return issues
 
     @classmethod
     def validate(cls, payload: Any) -> None:  # noqa: C901 — flat checks

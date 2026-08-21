@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import sqlite3
 import sys
 import urllib.error
@@ -84,6 +85,17 @@ def _testclient_urlopen(test_client: TestClient):
             path = url[idx:] if idx != -1 else url
         method = req.get_method()
         headers = {k: v for k, v in req.header_items()}
+        # A real container carries a bearer whose server-side identity names
+        # its organization. This isolated TestClient deliberately has no real
+        # bearer, so model that identity with the same trusted org header used
+        # by local compatibility callers. Without it, every request silently
+        # falls into the personal store while the fixture seeds autonomy.
+        if not any(name.lower() == "authorization" for name in headers):
+            caller_org = os.environ.get("GRAPH_ORG")
+            if caller_org and not any(
+                name.lower() == "x-graph-org" for name in headers
+            ):
+                headers["X-Graph-Org"] = caller_org
         data = req.data
 
         if method == "GET":
@@ -118,6 +130,10 @@ def orgs_root(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(root))
     monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.delenv("GRAPH_ORG", raising=False)
+    # The developer container carries a real session bearer. Letting it leak
+    # into this in-process dashboard makes token identity override each
+    # test's temporary GRAPH_ORG and routes writes away from the isolated DB.
+    monkeypatch.delenv("CROSSTALK_TOKEN", raising=False)
     GraphDB.close_all_pooled()
     # Create the target org DBs so graph_ops writes have somewhere to land.
     GraphDB.create_org_db("personal", type_="personal").close()
@@ -970,6 +986,50 @@ def test_cmd_set_list_routes_through_api(
     # absence of either means the request didn't reach the server or the
     # flush regressed.
     assert "autonomy.schema" in out
+
+
+def test_cmd_set_check_routes_through_api(
+    api_client, forbid_cli_sqlite, capsys, monkeypatch,
+):
+    """Container-side readiness asks the dashboard instead of opening SQLite."""
+    monkeypatch.setenv("GRAPH_ORG", "autonomy")
+    args = _cli_args(
+        set_at_rev="autonomy.workspace#1",
+        key="not-provisioned",
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        set_cmd.cmd_set_check(args)
+
+    assert exc_info.value.code == 1
+    out = capsys.readouterr().out
+    assert "missing_reference" in out
+    assert "not-provisioned" in out
+
+
+def test_cmd_set_check_prints_dashboard_positive_evidence(
+    api_client, forbid_cli_sqlite, capsys, monkeypatch,
+):
+    """A green CLI answer explains which dashboard checks passed."""
+    from tools.graph import ops as graph_ops
+
+    monkeypatch.setenv("GRAPH_ORG", "autonomy")
+    graph_ops.add_setting(
+        "autonomy.workspace", 1, "ready-workspace",
+        {"name": "Ready", "image": "image"},
+        org="autonomy", state="raw",
+    )
+    GraphDB.close_all_pooled()
+    args = _cli_args(
+        set_at_rev="autonomy.workspace#1",
+        key="ready-workspace",
+    )
+
+    set_cmd.cmd_set_check(args)
+
+    out = capsys.readouterr().out
+    assert "Verified checks" in out
+    assert "resolved_setting" in out
 
 
 def test_cmd_set_add_then_show_routes_through_api(

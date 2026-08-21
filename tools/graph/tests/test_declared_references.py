@@ -47,20 +47,6 @@ def _workspace(*hosts: str) -> dict:
     }
 
 
-def _provision(org: str, target_key: str) -> None:
-    settings_ops.add_setting(
-        SECRETS, 1, f"{org}:{target_key}",
-        {
-            "ciphertext_hex": "ab" * 40,
-            "key_id": "c" * 64,
-            "purpose": f"autonomy.secure-setting.v1|{org}|{target_key}|" + "d" * 64,
-            "origin": "operator",
-            "provisioned_at": 1.0,
-        },
-        org="personal",
-    )
-
-
 # ── the declared shape ───────────────────────────────────────
 
 
@@ -102,47 +88,12 @@ def test_a_repository_is_named_one_way_or_the_other(acme):
 # ── the reference check ──────────────────────────────────────
 
 
-def test_every_unprovisioned_reference_is_named(acme):
+def test_repository_hosts_are_addresses_not_secure_setting_references(acme):
     payload = _workspace("github.com", "github-autonomy")
     settings_ops.add_setting("autonomy.workspace", 1, "w", payload, org="acme")
 
-    missing = settings_ops.unresolved_references(
-        "autonomy.workspace", 1, payload, org="acme")
-
-    assert [key for _, key in missing] == ["acme:github.com", "acme:github-autonomy"]
-    assert {target for target, _ in missing} == {SECRETS}
-
-
-def test_provisioning_one_leaves_only_the_other(acme):
-    payload = _workspace("github.com", "github-autonomy")
-    _provision("acme", "github.com")
-
-    missing = settings_ops.unresolved_references(
-        "autonomy.workspace", 1, payload, org="acme")
-
-    assert [key for _, key in missing] == ["acme:github-autonomy"]
-
-
-def test_two_repositories_on_one_host_need_one_credential(acme):
-    """The address is the host, so they collapse to a single requirement."""
-    payload = _workspace("github.com", "github.com")
-
-    missing = settings_ops.unresolved_references(
-        "autonomy.workspace", 1, payload, org="acme")
-
-    assert [key for _, key in missing] == ["acme:github.com", "acme:github.com"]
-    assert len({key for _, key in missing}) == 1
-
-
-def test_one_organizations_credential_does_not_satisfy_another(acme):
-    """The org is in the key because the store holds several organizations."""
-    payload = _workspace("github.com")
-    _provision("acme", "github.com")
-
     assert settings_ops.unresolved_references(
         "autonomy.workspace", 1, payload, org="acme") == []
-    assert [key for _, key in settings_ops.unresolved_references(
-        "autonomy.workspace", 1, payload, org="other")] == ["other:github.com"]
 
 
 def test_a_local_repository_needs_no_credential(acme):
@@ -155,14 +106,26 @@ def test_a_local_repository_needs_no_credential(acme):
 
 
 def test_an_unprovisioned_reference_does_not_block_the_write(acme):
-    """Reported, not refused — the row may legitimately come first."""
-    payload = _workspace("github.com")
+    """Generic references are reported, not refused; rows may come first."""
+    @keyed_per_entity(key_strategy="probe_id")
+    class NeedsSecret(SettingSchema):
+        set_id = "probe.reference.needs-secret"
+        schema_revision = 1
+        secret: str = field(
+            required=True,
+            description="a key in the operator's secrets",
+            references=SECRETS,
+            reference_scope="org",
+        )
+    payload = {"secret": "github.com"}
 
-    sid = settings_ops.add_setting("autonomy.workspace", 1, "w", payload, org="acme")
+    sid = settings_ops.add_setting(
+        "probe.reference.needs-secret", 1, "w", payload, org="acme",
+    )
 
     assert sid
     assert settings_ops.unresolved_references(
-        "autonomy.workspace", 1, payload, org="acme")
+        "probe.reference.needs-secret", 1, payload, org="acme")
 
 
 # ── genericity ───────────────────────────────────────────────

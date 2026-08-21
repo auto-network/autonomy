@@ -403,6 +403,13 @@ class _WorkspaceMountV2SchemaAdapter(SettingSchema):
     }
 
     @classmethod
+    def readiness_findings(cls, *, key, payload, org, read):
+        """Ask the launch resolver about VOLUME-origin mount readiness."""
+        from agents.workspace_manager import check_org_mount_readiness
+
+        return check_org_mount_readiness(key=key, payload=payload, org=org)
+
+    @classmethod
     def validate(cls, payload) -> None:
         if not isinstance(payload, dict):
             raise SchemaValidationError(
