@@ -56,6 +56,12 @@ from tools.network.storagekit import (
 
 #: Per-session secret delivery (sessions bind their own subdir; dashboard never binds).
 DELIVERY_MOUNT = "/run/autonomy-secrets"
+# Host-native fallback helper image (no own container to reuse): the socket helper
+# runs `--entrypoint nsenter <image>`, so the image MUST carry `nsenter`. The
+# node's own agent image is ubuntu-based and always present on a launching node,
+# so it has nsenter and needs no pull. Bare `alpine` is NOT usable here — its base
+# ships no util-linux, hence no nsenter. Override for a mirror/air-gapped tag.
+_HOST_NS_HELPER_IMAGE = os.environ.get("AUTONOMY_SECRET_HELPER_IMAGE", "autonomy-agent:dashboard")
 #: The dashboard's own key cache (bound into the dashboard via rslave; never a session).
 KEYCACHE_MOUNT = "/run/autonomy-keycache"
 
@@ -106,10 +112,11 @@ def _run_in_host_mount_ns(script: str, *, what: str, timeout: int = 90) -> None:
     the host mount ns. No new capability on this container — the socket is the
     privilege. The script is expected to self-verify and exit non-zero (fail
     closed) on any problem."""
+    # Containerized: reuse our own image (always local, always has nsenter).
+    # Host-native: no own container, so fall back to a node-local nsenter-bearing
+    # image. The socket itself is the privilege in both cases.
     cid = _own_container_id()
-    if cid is None:
-        raise ProvisionError(f"{what}: own container id is unknown")
-    image = _own_image(cid)
+    image = _own_image(cid) if cid is not None else _HOST_NS_HELPER_IMAGE
     r = subprocess.run(
         ["docker", "run", "--rm", "--privileged", "--pid=host",
          "--entrypoint", "nsenter", image,
@@ -191,14 +198,17 @@ def provision_session_dir(session_name: str, uid: int, *, base: str = DELIVERY_M
     a helper failure fails the launch rather than yielding a writable on-disk
     directory that looks identical and is not memory-backed."""
     path = _session_dir(session_name, base)
-    if _own_container_id() is not None and Path(_DOCKER_SOCKET).exists():
+    # The docker socket IS the privilege — a host-native node has one too (it
+    # launches sessions with it), so borrow root through it whenever it exists,
+    # container or not. Only a node with neither the socket nor root is stuck.
+    if Path(_DOCKER_SOCKET).exists():
         _run_in_host_mount_ns(
             _session_dir_script(path, uid), what=f"provision session secret dir {path}"
         )
     else:
         if os.geteuid() != 0:
             raise ProvisionError(
-                f"cannot create {path}: host-native node running unprivileged, no socket to borrow root from"
+                f"cannot create {path}: unprivileged and no docker socket to borrow root from"
             )
         Path(path).mkdir(parents=True, exist_ok=True)
         os.chown(path, int(uid), int(uid))
@@ -217,7 +227,7 @@ def teardown_session_dir(session_name: str, *, base: str = DELIVERY_MOUNT) -> No
     except ProvisionError:
         return
     try:
-        if _own_container_id() is not None and Path(_DOCKER_SOCKET).exists():
+        if Path(_DOCKER_SOCKET).exists():
             _run_in_host_mount_ns(f'rm -rf "{path}"', what=f"teardown session secret dir {path}", timeout=30)
         elif os.geteuid() == 0:
             subprocess.run(["rm", "-rf", path], timeout=15)
@@ -297,7 +307,7 @@ def provision(path: str, *, container_bound: bool) -> None:
     if container_bound and _is_ramfs(path):
         return  # already ramfs in our own view; nothing to do
 
-    if _own_container_id() is not None and Path(_DOCKER_SOCKET).exists():
+    if Path(_DOCKER_SOCKET).exists():
         _mount_via_socket_helper(path)   # host-side, self-verifying, fail closed
     else:
         _mount_host_native(path)
