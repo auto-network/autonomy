@@ -15,6 +15,7 @@ import {
 
 export const FLEET_ROSTER_DOMAIN = 'autonomy.fleet.roster-entry.v1\n';
 export const FLEET_APPROVAL_DOMAIN = 'autonomy.fleet.enrollment-approval.v1\n';
+export const FLEET_INVITE_DOMAIN = 'autonomy.network.fleet-invite.v1\n';
 export const FLEET_MACHINE_ID_DOMAIN = 'autonomy.network.fleet-machine-id.v1\n';
 export const FLEET_MACHINE_KEY_SALT = 'autonomy.identity.machine.v1';
 export const FLEET_MEMBER_ASSIGNMENT = 'personal_root_holder';
@@ -123,6 +124,95 @@ async function signHex(signingKey, input) {
   ));
 }
 
+function requireGrantRendezvous(value) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error('rendezvous must be an https fleet grant URL');
+  }
+  if (
+    parsed.protocol !== 'https:'
+    || parsed.username
+    || parsed.password
+    || parsed.search
+    || parsed.hash
+    || !/^\/l\/[0-9a-f]{32}$/.test(parsed.pathname)
+  ) {
+    throw new Error('rendezvous must be an exact https fleet grant URL');
+  }
+  return parsed.href;
+}
+
+function base64Url(bytes) {
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+/** Mint the public fleet invitation after link publication returns its URL.
+ *
+ * The grant exists first, but accepts no request until the signed result is
+ * registered with the origin Dashboard. The personal-root seed is zeroed on
+ * every path and only signed public bytes leave this function.
+ */
+export async function mintFleetInvite({
+  personalRootSeed,
+  rootPub,
+  rendezvous,
+  inviteId,
+  expiresAt = 0,
+} = {}) {
+  if (!(personalRootSeed instanceof Uint8Array)) {
+    throw new Error('personalRootSeed must be a 32-byte Uint8Array');
+  }
+  const seed = personalRootSeed;
+  let rootSigningKey = null;
+  try {
+    if (seed.length !== 32) {
+      throw new Error('personalRootSeed must be a 32-byte Uint8Array');
+    }
+    const anchor = requireHex64(rootPub, 'rootPub');
+    if (await ed25519PublicHex(seed) !== anchor) {
+      throw new Error('opened personal root does not match rootPub');
+    }
+    const target = requireGrantRendezvous(rendezvous);
+    const correlation = inviteId === undefined
+      ? bytesToHex(webCrypto.getRandomValues(new Uint8Array(32)))
+      : requireHex64(inviteId, 'inviteId');
+    const expiry = requireSafeInt(expiresAt, 'expiresAt');
+    const binding = {
+      v: 1,
+      kind: 'fleet-machine',
+      personal_root_pub: anchor,
+      rendezvous: target,
+      invite_id: correlation,
+      expires_at: expiry,
+    };
+    rootSigningKey = await importEd25519RootSigningKey(seed);
+    const signature = await signHex(
+      rootSigningKey,
+      domainBytes(FLEET_INVITE_DOMAIN, canonicalJson(binding)),
+    );
+    const wire = { ...binding, sig: signature };
+    const raw = encoder.encode(canonicalJson(wire));
+    const checksum = bytesToHex(await sha256(raw)).slice(0, 8);
+    return {
+      invite: {
+        personal_root_pub: anchor,
+        rendezvous: target,
+        invite_id: correlation,
+        expires_at: expiry,
+        signature,
+      },
+      code: `${base64Url(raw)}.${checksum}`,
+    };
+  } finally {
+    seed.fill(0);
+    rootSigningKey = null;
+  }
+}
+
 export async function mintFleetEnrollmentEvidence({
   personalRootSeed,
   rootPub,
@@ -145,6 +235,9 @@ export async function mintFleetEnrollmentEvidence({
     const anchor = requireHex64(rootPub, 'rootPub');
     if (frozen.personal_root_pub !== anchor) {
       throw new Error('request does not match the opened personal root');
+    }
+    if (await ed25519PublicHex(seed) !== anchor) {
+      throw new Error('opened personal root does not match rootPub');
     }
     const channel = requireHex64(channelBinding, 'channelBinding');
     const timestamp = requireSafeInt(issuedAt, 'issuedAt');

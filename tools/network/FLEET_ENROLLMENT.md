@@ -80,7 +80,10 @@ Fleet invitations use a RelayKit grant whose target type is ``fleet:join``.
 They do not reuse ``org:join``: organization admission and personal fleet
 authorization are different authority domains. The browser-signed invitation
 names the exact ``https://.../l/<grant-token>`` rendezvous and is registered
-against the grant before requests are accepted.
+against the grant before requests are accepted. Publication therefore happens
+first; while the personal root is open, browser code verifies that the opened
+seed matches the stored public anchor, signs that exact URL, emits the portable
+installation code, and zeroes the seed on success or failure.
 
 The first encrypted-channel message is:
 
@@ -91,10 +94,12 @@ The first encrypted-channel message is:
 The origin stores the complete request under a deterministic, domain-separated
 content id and returns ``request_id``, the shared ``verification_code``, and a
 random ``resume_token``. The raw resume token is returned only over the channel
-that first created the request; machine-local storage keeps only its
-domain-separated hash. Repeating the same request on that live channel is
-idempotent. Repeating it on another channel returns ``resume-required`` rather
-than minting another credential.
+that first created the request; origin storage keeps only its domain-separated
+hash. The joining installation keeps the raw token in its own ``machine.db``
+until enrollment completes, alongside the public request and invitation but no
+machine id, machine key, or root armor. Repeating the same request on that live
+channel is idempotent. Repeating it on another channel returns
+``resume-required`` rather than minting another credential.
 
 A reconnect proves continuity with:
 
@@ -108,6 +113,14 @@ byte-identical encrypted personal-root armor. Unknown requests, wrong resume
 tokens, unsupported versions, mismatched invitations, and expired grants fail
 closed. Several requests may use one invitation, but their content ids,
 channel bindings, operator comparisons, and approvals remain distinct.
+
+The fresh-install client fetches the public registry envelope from the signed
+rendezvous origin, verifies that its target is ``fleet:join``, and uses the
+envelope's organization root only as the ordinary RelayKit serving-key pin.
+That transport pin is not fleet authority: the invitation's personal-root
+signature authenticates the enrollment destination, while the later roster
+entry supplies durable machine authority. Public approval evidence is verified
+before encrypted armor is handed to the local browser unlock ceremony.
 
 The invitation and pending-request tables live in ``machine.db``. They are
 local rendezvous state, not personal graph data, and therefore are excluded as

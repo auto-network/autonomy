@@ -32,6 +32,7 @@ FLEET_MACHINE_ID_DOMAIN = b"autonomy.network.fleet-machine-id.v1\n"
 FLEET_APPROVAL_DOMAIN = b"autonomy.fleet.enrollment-approval.v1\n"
 FLEET_APPROVAL_VERSION = 1
 FLEET_REQUEST_ID_DOMAIN = b"autonomy.fleet.enrollment-request.v1\n"
+FLEET_CHANNEL_BINDING_DOMAIN = b"autonomy.fleet.channel-binding.v1\n"
 
 
 class FleetEnrollError(ValueError):
@@ -182,6 +183,14 @@ def request_id(request: EnrollmentRequest) -> str:
     frozen = EnrollmentRequest.from_dict(request.to_dict())
     return hashlib.sha256(
         FLEET_REQUEST_ID_DOMAIN + canonical_json(frozen.to_dict())
+    ).hexdigest()
+
+
+def resume_channel_binding(resume_token: str) -> str:
+    """Public hash bound into approval; the raw reconnect token stays local."""
+    token = _require_hex64(resume_token, "resume_token")
+    return hashlib.sha256(
+        FLEET_CHANNEL_BINDING_DOMAIN + bytes.fromhex(token)
     ).hexdigest()
 
 
