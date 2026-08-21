@@ -1,13 +1,12 @@
 {
   "name": "autonomy/agent-test",
-  "version": 2,
+  "version": 3,
   "implements": [{"contract": "test_execution", "version": 1}],
   "delivery_mode": "mounted_tools",
   "package_root": "agents/capabilities/agent_test",
-  "tool_paths": ["agents/capabilities/agent_test/tools", "tools/agent_test"],
   "tool_target": {
-    "source": "agents/capabilities/agent_test/tools",
-    "target": "/opt/agent-test-tools",
+    "source": "tools/agent_test",
+    "target": "/opt/agent_test",
     "expose_commands": ["agent-test", "pytest", "py.test"]
   },
   "skill_path": "agents/capabilities/agent_test/SKILL.md",

@@ -1,0 +1,10 @@
+#!/bin/sh
+runtime=/opt/agent_test
+if [ -f "$runtime/__main__.py" ]; then
+  PYTHONPATH="/opt${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m agent_test "$@"
+fi
+
+# Developer fallback for invoking the checked-in script outside a launched
+# capability container. Runtime sessions always use the self-contained
+# /opt/agent_test mount, never the workspace checkout.
+exec python3 -m tools.agent_test "$@"

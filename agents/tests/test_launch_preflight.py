@@ -9,6 +9,7 @@ import pytest
 
 from agents import launch_preflight as lp
 from agents.launch_preflight import LaunchProblem
+from agents.mount_plan import MountPlan, mount_spec
 
 
 class _Completed:
@@ -61,7 +62,53 @@ def test_runtime_available_none_on_bad_json_or_error(monkeypatch):
 # ── preflight aggregation ────────────────────────────────────────────────────
 
 def _fake_plan_and_topo():
-    return object(), object()  # opaque; preflight_sources is patched below
+    return MountPlan(), object()  # topology is opaque; source resolution is patched
+
+
+def test_destination_conflict_names_missing_child_below_readonly_parent(tmp_path):
+    package = tmp_path / "package"
+    package.mkdir()
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    plan = MountPlan()
+    plan.set(mount_spec(package, "/opt/capability:ro"))
+    plan.set(mount_spec(runtime, "/opt/capability/runtime:ro"))
+
+    problems = lp.destination_conflicts(plan)
+
+    assert len(problems) == 1
+    assert problems[0].kind == "mount-destination"
+    assert problems[0].name == "/opt/capability/runtime"
+    assert "read-only" in problems[0].detail
+
+
+def test_destination_conflict_allows_existing_child_mountpoint(tmp_path):
+    package = tmp_path / "package"
+    (package / "runtime").mkdir(parents=True)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    plan = MountPlan()
+    plan.set(mount_spec(package, "/opt/capability:ro"))
+    plan.set(mount_spec(runtime, "/opt/capability/runtime:ro"))
+
+    assert lp.destination_conflicts(plan) == []
+
+
+def test_preflight_reports_destination_conflict_before_docker(tmp_path, monkeypatch):
+    package = tmp_path / "package"
+    package.mkdir()
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    plan = MountPlan()
+    plan.set(mount_spec(package, "/opt/capability:ro"))
+    plan.set(mount_spec(runtime, "/opt/capability/runtime:ro"))
+    monkeypatch.setattr(lp, "image_present", lambda image: True)
+    monkeypatch.setattr("agents.mount_plan.preflight_sources", lambda p, t: [])
+    monkeypatch.setattr("agents.secret_ramfs.daemon_missing", lambda paths: [])
+
+    problems = lp.preflight(image="image", runtime_args=[], plan=plan, topo=object())
+
+    assert [problem.kind for problem in problems] == ["mount-destination"]
 
 
 def test_preflight_gathers_all_problems_at_once(monkeypatch):

@@ -1,7 +1,8 @@
 """Validate every input a ``docker run`` launch depends on BEFORE running it,
 and report ALL of them together — an image that was never built, a runtime the
-daemon doesn't have, a mount source that doesn't exist — instead of handing
-docker a doomed command and reading back a nameless "produced no container".
+daemon doesn't have, a mount source that doesn't exist, or a child destination
+runc cannot create below a read-only parent — instead of handing docker a
+doomed command and reading back a nameless "produced no container".
 
 An hour was lost to one of these (a `:dashboard` image orphaned by a rebuild):
 docker's real error existed but was thrown away by a launcher that only learned
@@ -9,25 +10,30 @@ docker's real error existed but was thrown away by a launcher that only learned
 more loudly — it is to discover what is missing FIRST, by name, and never issue
 the doomed command at all.
 
-Every check queries the DAEMON (image, runtime) or the frame the daemon binds
-from (mount sources), so each is correct whether the node is containerized and
-talking to the host socket or running host-native. A check that cannot run is
-reported as UNKNOWN, never as a failure: the launch proceeds and docker stays
-the backstop. Preflight only ever ADDS naming; it never blocks a launch it could
-not actually disprove.
+Every check queries the DAEMON (image, runtime), the frame the daemon binds
+from (mount sources), or an available read-only parent source (destination
+shape), so each is correct whether the node is containerized and talking to the
+host socket or running host-native. A check that cannot run is reported as
+UNKNOWN, never as a failure: the launch proceeds and docker stays the backstop.
+Preflight only ever ADDS naming; it never blocks a launch it could not actually
+disprove.
 """
 from __future__ import annotations
 
 import json
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
 
 
 @dataclass(frozen=True)
 class LaunchProblem:
-    """One missing launch input, named. ``kind`` is ``image`` / ``runtime`` /
-    ``mount``; ``name`` is the tag / runtime / host source path; ``detail`` is a
-    plain sentence saying what is wrong and, where it is knowable, the fix."""
+    """One invalid launch input, named.
+
+    ``kind`` is ``image`` / ``runtime`` / ``mount`` / ``mount-destination``;
+    ``name`` is the tag, runtime, source, or destination; ``detail`` says what
+    is wrong and, where it is knowable, the fix.
+    """
 
     kind: str
     name: str
@@ -100,6 +106,51 @@ def vault_is_cold():
         return None
 
 
+def destination_conflicts(plan) -> list[LaunchProblem]:
+    """Name nested mounts runc cannot materialize below a read-only parent.
+
+    Docker prepares a child bind's destination after mounting earlier parents.
+    When the parent is read-only, the child destination must therefore already
+    exist in the parent source.  If both the parent source and the missing
+    relative destination are visible in this process, the launch is guaranteed
+    to fail with ``mkdir: read-only file system`` and must be refused before
+    docker.  An invisible parent source is unknowable here and stays fail-open;
+    source preflight and docker remain its backstops.
+    """
+    specs = list(plan.specs())
+    problems: list[LaunchProblem] = []
+    for parent in specs:
+        parent_dest_text, separator, parent_mode = parent.container_spec.rpartition(":")
+        if not separator or "ro" not in parent_mode.split(","):
+            continue
+        parent_source = Path(parent.source)
+        if not parent_source.is_dir():
+            continue
+        parent_dest = PurePosixPath(parent_dest_text)
+        for child in specs:
+            if child is parent:
+                continue
+            child_dest = PurePosixPath(child.dest)
+            try:
+                relative = child_dest.relative_to(parent_dest)
+            except ValueError:
+                continue
+            if str(relative) == ".":
+                continue
+            expected = parent_source.joinpath(*relative.parts)
+            if expected.exists():
+                continue
+            problems.append(LaunchProblem(
+                "mount-destination",
+                child.dest,
+                f"nested below read-only mount {parent.dest}, but relative "
+                f"target {relative} does not exist in parent source "
+                f"{parent.source}; runc cannot create it after mounting the "
+                "parent read-only.",
+            ))
+    return problems
+
+
 def preflight(*, image: str, runtime_args, plan, topo, credential_keys=()) -> list:
     """Every missing launch input, gathered into one list so the caller can
     report the whole picture and refuse once — not fail on the first and hide
@@ -109,6 +160,8 @@ def preflight(*, image: str, runtime_args, plan, topo, credential_keys=()) -> li
     from agents import secret_ramfs
 
     problems: list = []
+
+    problems.extend(destination_conflicts(plan))
 
     if credential_keys and vault_is_cold() is True:
         problems.append(LaunchProblem(

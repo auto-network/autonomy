@@ -60,11 +60,11 @@ def _capability_mounts(capabilities) -> dict[str, str]:
       from inside the container at the same canonical path used for
       ``mounted_tools`` — agents do not need to know which delivery mode
       was chosen.
-    * any declared repo-local ``tool_paths`` mount under
-      ``<mount_target>/<basename>`` so the package surface matches the
-      repo layout. Subpaths inside the package root would be redundant
-      with the package mount; only paths that escape the package root
-      get an extra mount entry.
+    * declared repo-local ``tool_paths`` must live inside the package root and
+      are already covered by its mount. An external path is refused before a
+      docker command is built: projecting it below the read-only package mount
+      requires runc to create a child mountpoint inside that read-only tree.
+      External bundles use ``tool_target`` and its explicit non-nested target.
     * a ``tool_target`` (when set) mounts the declared repo-local
       ``source`` at the absolute container ``target`` — the Jira-style
       ``/opt/jira-tools`` runtime location described in
@@ -82,14 +82,18 @@ def _capability_mounts(capabilities) -> dict[str, str]:
         mounts[str(package_host)] = f"{cap.mount_target}:ro"
         for tool_path in cap.tool_paths:
             tool_host = REPO_ROOT / tool_path
-            # Skip subpaths already covered by the package-root mount.
+            # Subpaths are already covered by the package-root mount.  Anything
+            # else is an invalid legacy Setting that predates the schema guard;
+            # refuse it here too so it cannot reach docker/runc.
             try:
                 tool_host.relative_to(package_host)
                 continue
             except ValueError:
-                pass
-            container_path = f"{cap.mount_target}/{Path(tool_path).name}"
-            mounts[str(tool_host)] = f"{container_path}:ro"
+                raise ValueError(
+                    f"capability {cap.implementation}: tool_path {tool_path!r} "
+                    f"is outside package_root {cap.package_root!r}; use "
+                    "tool_target with an explicit non-nested container target"
+                )
         if cap.tool_target is not None:
             tt = cap.tool_target
             tt_host = REPO_ROOT / tt.source
