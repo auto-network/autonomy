@@ -309,6 +309,57 @@ def test_stops_when_last_grant_revoked(env):
     assert proc.alive() is False  # the connector was stopped
 
 
+def test_roster_assignment_stops_a_connector_owned_by_another_machine(
+    env, monkeypatch,
+):
+    """The watchdog enforces a changed synced selection on a live child."""
+    _provision_serve_cert(env)
+    _put_grant()
+    spawn = FakeSpawn()
+    supervisor = sup.ServingSupervisor(spawn=spawn)
+    assert supervisor.ensure(ORG)["reason"] == "launched"
+    proc = spawn.procs[0]
+
+    monkeypatch.setattr(
+        supervisor,
+        "_fleet_eligibility",
+        lambda: SimpleNamespace(
+            allowed=False,
+            reason="not-designated",
+            selected_machine_id="22" * 32,
+        ),
+    )
+    assert supervisor.ensure(ORG) == {
+        "running": False,
+        "reason": "not-designated",
+        "selected_machine_id": "22" * 32,
+    }
+    assert proc.alive() is False
+    assert supervisor.running_orgs() == []
+    assert len(spawn.calls) == 1
+
+
+def test_first_publish_cannot_bypass_roster_assignment(env, monkeypatch):
+    """The no-live-grant start path is gated exactly like reconciliation."""
+    _provision_serve_cert(env)
+    spawn = FakeSpawn()
+    supervisor = sup.ServingSupervisor(spawn=spawn)
+    monkeypatch.setattr(
+        supervisor,
+        "_fleet_eligibility",
+        lambda: SimpleNamespace(
+            allowed=False,
+            reason="tunnel-server-unassigned",
+            selected_machine_id=None,
+        ),
+    )
+    assert supervisor.start(ORG) == {
+        "running": False,
+        "reason": "tunnel-server-unassigned",
+    }
+    assert spawn.calls == []
+
+
 def test_start_launches_without_a_live_grant(env):
     """First publish: ensure() won't start (no grant yet), but start() must —
     the grant is created BY riding this tunnel, so it cannot pre-exist."""

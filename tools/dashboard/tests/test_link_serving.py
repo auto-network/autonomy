@@ -24,6 +24,7 @@ import json
 import os
 import time
 import uuid
+from types import SimpleNamespace
 
 import pytest
 
@@ -80,6 +81,39 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(design_db, "_initialized", False)
     yield tmp_path
     GraphDB.close_all_pooled()
+
+
+def test_direct_connector_entrypoint_refuses_non_designated_machine(
+    monkeypatch, capsys,
+):
+    """A manual module launch cannot bypass the supervisor's Fleet gate."""
+    monkeypatch.setattr(
+        "tools.network.fleet_tunnel_server.state",
+        lambda: SimpleNamespace(
+            allowed=False,
+            reason="not-designated",
+            selected_machine_id="a" * 64,
+        ),
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "link_serving",
+            "--relay", "wss://registry.auto.network",
+            "--org", "org-id",
+            "--key-file", "/does/not/matter",
+            "--cert-file", "/does/not/matter",
+            "--channel-cert-file", "/does/not/matter",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        link_serving.main()
+
+    assert exc.value.code == 2
+    error = capsys.readouterr().err
+    assert "not-designated" in error
+    assert "a" * 64 in error
 
 
 def put_grant(token: str, target_uuid: str, target_type: str, *,
