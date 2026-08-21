@@ -3,19 +3,19 @@
   <!-- Page-level toolbar: zoom (relocated from Active header) + create.
        Zoom is a global view preference and affects session cards across the page,
        so it lives above the sections rather than inside either section header. -->
-  <div class="flex items-center gap-3 pb-3 mb-4 border-b border-gray-800 flex-wrap"
+  <div class="sessions-page-toolbar flex items-center gap-3 pb-3 mb-4 border-b border-gray-800"
        data-testid="sessions-page-toolbar">
     {% include 'partials/zoom-toggle.html' %}
-    <div class="flex-grow"></div>
+    <div class="sessions-toolbar-actions">
 
     <!-- Org filter — pins the Active + Recent sections to one organization,
          or shows all (default). Mirrors the org chip pattern used on the
          search page (search.js/_normalizeOrgs, search.html sp-org-dropdown)
          but styled with this page's own sort-toggle/sort-menu chrome so it
          matches the Sort/Since dropdowns already in this toolbar. -->
-    <div class="sort-wrap" data-testid="org-filter">
+    <div class="sort-wrap sessions-org-filter" data-testid="org-filter">
       <button type="button"
-              class="sort-toggle"
+              class="sort-toggle sessions-org-filter-toggle"
               @click="orgFilterOpen = !orgFilterOpen"
               data-testid="org-filter-toggle">
         <span class="sc-org" style="width:14px;height:14px"
@@ -28,7 +28,8 @@
             <span class="sc-org-initial" style="font-size:9px;line-height:14px" x-text="orgFilterPicked ? orgFilterPicked.initial : '∞'"></span>
           </template>
         </span>
-        <span class="sort-toggle-value" x-text="orgFilterPicked ? orgFilterPicked.name : 'All Orgs'"></span>
+        <span class="sort-toggle-value sessions-org-filter-value"
+              x-text="orgFilterPicked ? orgFilterPicked.name : 'All Orgs'"></span>
         <span class="sort-toggle-icon">▾</span>
       </button>
       <div class="sort-menu"
@@ -70,8 +71,7 @@
       </div>
     </div>
 
-    <div class="flex-grow"></div>
-    <div x-data="{ open: false }" class="relative" data-testid="session-launch-dropdown">
+    <div x-data="{ open: false }" class="relative sessions-launch-control" data-testid="session-launch-dropdown">
       <button @click="open = !open"
               class="w-8 h-8 flex items-center justify-center rounded-lg
                      bg-green-600 hover:bg-green-500 text-white text-lg font-bold
@@ -145,6 +145,7 @@
         </div>
       </div>
     </div>
+    </div>
   </div>
 
   <!-- Launching (booting sessions: optimistic tiles + sessions still in
@@ -173,12 +174,26 @@
   <section aria-label="Active Sessions" class="mb-8" data-testid="active-sessions-section">
     <div class="flex items-center gap-3 mb-3 flex-wrap">
       <h2 class="text-lg font-semibold text-green-400 leading-none">● Active Sessions</h2>
+      <div class="active-sort-controls">
       {% with testid='active-sort-toggle',
               label='Sort:',
               value_expr='activeSort',
               options_expr='activeSortOptions' %}
         {% include 'partials/dropdown-toggle.html' %}
       {% endwith %}
+      <button type="button"
+              class="active-sort-direction"
+              :class="activeSortDirection === 'asc' ? 'is-ascending' : ''"
+              @click="toggleActiveSortDirection()"
+              :title="activeSortDirectionTitle()"
+              :aria-label="activeSortDirectionTitle()"
+              data-testid="active-sort-direction">
+        <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+          <path d="M4 2.5v10.5m0 0 2.5-2.5M4 13l-2.5-2.5"/>
+          <path d="M9 4h5M9 8h3.5M9 12h2"/>
+        </svg>
+      </button>
+      </div>
     </div>
     <template x-if="activeInteractive.length === 0">
       <div class="text-gray-500 text-sm">No active sessions</div>

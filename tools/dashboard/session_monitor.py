@@ -1595,6 +1595,7 @@ class SessionMonitor:
                 "entry_count": s.get("entry_count", 0),
                 "context_tokens": s.get("context_tokens", 0),
                 "last_activity": s.get("last_activity") or s["created_at"],
+                "last_input_at": s.get("last_input_at"),
                 "last_message": s.get("last_message", ""),
                 "topics": json.loads(s.get("topics") or "[]"),
                 "todos": json.loads(s.get("todos") or "[]"),

@@ -5862,7 +5862,27 @@ async def api_session_send(request):
             status_code=503,
         )
 
-    resp: dict[str, Any] = {"ok": True, "tmux_session": tmux_session}
+    # This endpoint is the authoritative boundary for direct operator input.
+    # Persist it only after tmux accepted the paste; assistant/tool/CrossTalk
+    # traffic reaches sessions through other paths and therefore cannot move
+    # the Recent Input ordering.
+    last_input_at = time.time()
+    if not os.environ.get("DASHBOARD_MOCK"):
+        try:
+            dashboard_db.update_last_input_at(tmux_session, last_input_at)
+        except Exception:
+            # tmux already accepted the paste, so returning an error here could
+            # make the client retry and duplicate the operator's message.
+            logger.exception(
+                "[session-send] failed to persist last_input_at for %s",
+                tmux_session,
+            )
+
+    resp: dict[str, Any] = {
+        "ok": True,
+        "tmux_session": tmux_session,
+        "last_input_at": last_input_at,
+    }
     if client_id:
         resp["client_id"] = client_id
     return JSONResponse(resp)

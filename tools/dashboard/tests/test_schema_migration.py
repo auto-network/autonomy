@@ -45,6 +45,11 @@ class TestNewColumnsExist:
         row = db.get_conn().execute("SELECT harness_state FROM tmux_sessions LIMIT 0").description
         assert row is not None
 
+    def test_last_input_at_column(self, _isolate_db):
+        db = _isolate_db
+        row = db.get_conn().execute("SELECT last_input_at FROM tmux_sessions LIMIT 0").description
+        assert row is not None
+
     def test_resolution_dir_column(self, _isolate_db):
         db = _isolate_db
         row = db.get_conn().execute("SELECT resolution_dir FROM tmux_sessions LIMIT 0").description
@@ -309,7 +314,37 @@ class TestMigrationIdempotent:
         db._conn = None
         db.init_db(db_path)  # Should not raise
         # Verify columns still exist
-        row = db.get_conn().execute("SELECT resolution_dir, session_uuids, curr_jsonl_file FROM tmux_sessions LIMIT 0").description
+        row = db.get_conn().execute(
+            "SELECT resolution_dir, session_uuids, curr_jsonl_file"
+            " FROM tmux_sessions LIMIT 0"
+        ).description
         assert len(row) == 3
         db._conn.close()
         db._conn = None
+
+
+class TestLastInputPersistence:
+    def test_direct_input_timestamp_is_monotonic(self, _isolate_db):
+        db = _isolate_db
+        db.insert_session("auto-input", "container", "autonomy")
+
+        db.update_last_input_at("auto-input", 200.0)
+        db.update_last_input_at("auto-input", 100.0)
+
+        assert db.get_session("auto-input")["last_input_at"] == 200.0
+
+    def test_legacy_harness_timestamp_backfills_once(self, _isolate_db):
+        db = _isolate_db
+        db.insert_session(
+            "auto-legacy",
+            "container",
+            "autonomy",
+            harness_state=json.dumps({
+                "last_user_message_at": "2026-08-21T18:24:30Z",
+            }),
+        )
+
+        db._backfill_last_input_at(db.get_conn())
+
+        expected = 1787336670.0
+        assert db.get_session("auto-legacy")["last_input_at"] == expected

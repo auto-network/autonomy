@@ -7,6 +7,7 @@ lands. These tests verify the round-trip without a browser.
 """
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -146,6 +147,7 @@ def test_api_session_send_records_client_id(tmp_path, monkeypatch):
     import importlib
     from tools.dashboard.dao import dashboard_db
     importlib.reload(dashboard_db)
+    dashboard_db.insert_session("auto-send", "container", "autonomy")
     from tools.dashboard import server as _server
     # Re-import pending_outbound — server holds a reference to the
     # module, not the buffer dict, so the autouse clear fixture above
@@ -169,9 +171,13 @@ def test_api_session_send_records_client_id(tmp_path, monkeypatch):
             return resp
 
     resp = asyncio.run(_go())
-    body = resp.body.decode()
-    assert "client_id" in body
-    assert "cid-abc" in body
+    body = json.loads(resp.body)
+    assert body["client_id"] == "cid-abc"
+    assert body["last_input_at"] > 0
+    assert (
+        dashboard_db.get_session("auto-send")["last_input_at"]
+        == body["last_input_at"]
+    )
     assert po.is_in_flight("auto-send", "cid-abc") is True
 
 

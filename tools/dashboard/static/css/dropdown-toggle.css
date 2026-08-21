@@ -52,6 +52,80 @@
 .sort-option-check { opacity: 0; font-size: 11px; }
 .sort-option.selected .sort-option-check { opacity: 1; }
 
+/* Sessions toolbar: the org picker yields width to the fixed launch control.
+   Keeping this as one nowrap row prevents the + menu from being opened below
+   the mobile viewport while long organization names ellipsize in place. */
+.sessions-page-toolbar { flex-wrap: nowrap; min-width: 0; }
+.sessions-toolbar-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.sessions-org-filter {
+  flex: 0 1 240px;
+  min-width: 0;
+}
+.sessions-org-filter-toggle {
+  max-width: 100%;
+  min-width: 0;
+}
+.sessions-org-filter-value {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sessions-org-filter .sc-org,
+.sessions-org-filter .sort-toggle-icon,
+.sessions-launch-control {
+  flex: 0 0 auto;
+}
+
+/* A compact icon with a comfortable touch target. Toggling it is also the
+   explicit "apply the current sort now" action. */
+.active-sort-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.active-sort-direction {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  padding: 0;
+  color: #7dd3fc;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: color 120ms ease, background-color 120ms ease, border-color 120ms ease;
+}
+.active-sort-direction:hover {
+  color: #bae6fd;
+  background: #334155;
+  border-color: #475569;
+}
+.active-sort-direction:focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: 2px;
+}
+.active-sort-direction svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 140ms ease;
+}
+.active-sort-direction.is-ascending svg { transform: rotate(180deg); }
+
 /* Mobile (≤767px): the trigger sits left-of-center in section headers,
    so right:0 would push the menu past the left edge of the viewport.
    Anchor to the left instead and cap width to keep the menu on-screen. */
@@ -63,4 +137,7 @@
     max-width: calc(100vw - 24px);
     width: max-content;
   }
+  .sessions-toolbar-actions { gap: 8px; }
+  .sessions-org-filter { flex-basis: 190px; }
+  .sessions-org-filter-toggle { width: 100%; }
 }

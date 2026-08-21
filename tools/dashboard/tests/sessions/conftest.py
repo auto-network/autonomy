@@ -43,6 +43,7 @@ SESSIONS_PAGE_SESSIONS = [
         entry_count=150,
         context_tokens=80000,
         last_message="Working on card CSS",
+        last_input_at=300,
         topics=["Redesigning session cards", "CSS grid layout"],
     ),
     make_session(
@@ -52,6 +53,7 @@ SESSIONS_PAGE_SESSIONS = [
         entry_count=200,
         context_tokens=120000,
         last_message="Compiling assets",
+        last_input_at=500,
         topics=["Asset pipeline", "Webpack config", "Tree shaking"],
     ),
     make_session(
@@ -61,6 +63,7 @@ SESSIONS_PAGE_SESSIONS = [
         entry_count=75,
         context_tokens=45000,
         last_message="Reviewing PR #42",
+        last_input_at=200,
         topics=["Code review"],
     ),
     make_session(
@@ -71,6 +74,7 @@ SESSIONS_PAGE_SESSIONS = [
         entry_count=300,
         context_tokens=250000,
         last_message="Dolt restarted",
+        last_input_at=400,
         topics=[],
     ),
     make_session(
