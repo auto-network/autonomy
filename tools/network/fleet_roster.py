@@ -44,7 +44,7 @@ frontier and this module does not pretend one.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from enum import Enum
 
 from tools.network.idkit import KeyPair, canonical_json
@@ -53,8 +53,9 @@ from tools.network.idkit.keys import verify_signature
 
 #: Domain separator — a personal-root signature minted for any other purpose
 #: cannot verify as a roster entry, and the version is frozen.
-FLEET_ROSTER_DOMAIN = b"autonomy.network.fleet-roster.v1\n"
+FLEET_ROSTER_DOMAIN = b"autonomy.fleet.roster-entry.v1\n"
 FLEET_ROSTER_VERSION = 1
+FLEET_MEMBER_ASSIGNMENT = "personal_root_holder"
 
 #: The settings set the entries are stored under in personal.db, one member
 #: per entry, always at ``raw`` band.
@@ -74,6 +75,7 @@ class FleetRosterError(ValueError):
 class RosterEntry:
     """One personal-root-signed statement about ONE machine.
 
+    ``machine_id`` is the durable public assignment made during approval.
     ``machine_pub`` is the machine's authorization (signing) public key — the
     key a roster entry authenticates as authorized (the machine's
     key-distribution/encapsulation address is a SEPARATE record, auto-pw9bs.6,
@@ -84,7 +86,9 @@ class RosterEntry:
     """
 
     personal_root_pub: str  # 64-hex — the fleet anchor and the signer
+    machine_id: str         # 64-hex — durable machine assignment
     machine_pub: str        # 64-hex — the machine's authorization key
+    assignment: str         # durable standing; currently personal_root_holder
     kind: EntryKind
     seq: int                # per-machine sequence
     issued_at: int          # unix ms, informational — NOT a merge input
@@ -97,40 +101,75 @@ class RosterEntry:
         re-enrolment cites."""
         import hashlib
 
-        return hashlib.sha256(_body_bytes(self)).hexdigest()
+        return hashlib.sha256(self.signing_input()).hexdigest()
+
+    def binding_dict(self) -> dict:
+        """Every durable field covered by the personal-root signature."""
+        return {
+            "v": FLEET_ROSTER_VERSION,
+            "personal_root_pub": self.personal_root_pub,
+            "machine_id": self.machine_id,
+            "machine_pub": self.machine_pub,
+            "assignment": self.assignment,
+            "kind": self.kind.value if isinstance(self.kind, EntryKind) else self.kind,
+            "seq": self.seq,
+            "issued_at": self.issued_at,
+            "supersedes": self.supersedes,
+        }
+
+    def signing_input(self) -> bytes:
+        return FLEET_ROSTER_DOMAIN + canonical_json(self.binding_dict())
+
+    def to_dict(self) -> dict:
+        return {**self.binding_dict(), "signature": self.signature}
+
+    @classmethod
+    def from_dict(cls, payload: dict) -> "RosterEntry":
+        if not isinstance(payload, dict):
+            raise FleetRosterError("roster entry must be a dict")
+        expected = {"v", *(f.name for f in fields(cls))}
+        unknown = sorted(set(payload) - expected)
+        missing = sorted(expected - set(payload))
+        if unknown:
+            raise FleetRosterError(f"unknown roster entry fields: {unknown}")
+        if missing:
+            raise FleetRosterError(f"roster entry is missing fields: {missing}")
+        if isinstance(payload["v"], bool) or not isinstance(payload["v"], int) \
+                or payload["v"] != FLEET_ROSTER_VERSION:
+            raise FleetRosterError(
+                f"unsupported roster entry version: {payload['v']!r}"
+            )
+        try:
+            kind = EntryKind(payload["kind"])
+        except (TypeError, ValueError) as exc:
+            raise FleetRosterError("roster entry kind must be enroll or kick") from exc
+        return cls(
+            personal_root_pub=payload["personal_root_pub"],
+            machine_id=payload["machine_id"],
+            machine_pub=payload["machine_pub"],
+            assignment=payload["assignment"],
+            kind=kind,
+            seq=payload["seq"],
+            issued_at=payload["issued_at"],
+            supersedes=payload["supersedes"],
+            signature=payload["signature"],
+        )
 
 
 def _body(entry_or_fields) -> dict:
-    e = entry_or_fields
-    return {
-        "v": FLEET_ROSTER_VERSION,
-        "personal_root_pub": e.personal_root_pub,
-        "machine_pub": e.machine_pub,
-        "kind": e.kind.value if isinstance(e.kind, EntryKind) else e.kind,
-        "seq": int(e.seq),
-        "issued_at": int(e.issued_at),
-        "supersedes": e.supersedes,
-    }
+    return entry_or_fields.binding_dict()
 
 
 def _body_bytes(entry) -> bytes:
-    return FLEET_ROSTER_DOMAIN + canonical_json(_body(entry))
-
-
-@dataclass(frozen=True)
-class _Unsigned:
-    personal_root_pub: str
-    machine_pub: str
-    kind: EntryKind
-    seq: int
-    issued_at: int
-    supersedes: str | None
+    return entry.signing_input()
 
 
 def _mint(
     personal_root: KeyPair,
     *,
+    machine_id: str | None = None,
     machine_pub: str,
+    assignment: str = FLEET_MEMBER_ASSIGNMENT,
     kind: EntryKind,
     seq: int,
     issued_at: int,
@@ -138,38 +177,62 @@ def _mint(
 ) -> RosterEntry:
     _require_hex64(personal_root.public_hex, "personal_root_pub")
     _require_hex64(machine_pub, "machine_pub")
+    # Compatibility for callers that minted the pre-enrollment roster shape.
+    # Production enrollment always supplies the root-derived machine id and
+    # its verifier checks that derivation. Falling back to the public key keeps
+    # old test/maintenance callers valid while still root-binding an id.
+    machine_id = machine_pub if machine_id is None else machine_id
+    _require_hex64(machine_id, "machine_id")
+    if assignment != FLEET_MEMBER_ASSIGNMENT:
+        raise FleetRosterError(
+            f"roster assignment must be {FLEET_MEMBER_ASSIGNMENT!r}"
+        )
     if not isinstance(seq, int) or isinstance(seq, bool) or seq < 0:
         raise FleetRosterError("roster entry seq must be a non-negative int")
-    unsigned = _Unsigned(
-        personal_root_pub=personal_root.public_hex, machine_pub=machine_pub,
+    if not isinstance(issued_at, int) or isinstance(issued_at, bool) \
+            or issued_at < 0:
+        raise FleetRosterError("roster entry issued_at must be a non-negative int")
+    if supersedes is not None:
+        _require_hex64(supersedes, "supersedes")
+    unsigned = RosterEntry(
+        personal_root_pub=personal_root.public_hex, machine_id=machine_id,
+        machine_pub=machine_pub, assignment=assignment,
         kind=kind, seq=seq, issued_at=int(issued_at), supersedes=supersedes,
+        signature="0" * 128,
     )
-    sig = personal_root.sign_hex(_body_bytes(unsigned))
+    sig = personal_root.sign_hex(unsigned.signing_input())
     return RosterEntry(
-        personal_root_pub=personal_root.public_hex, machine_pub=machine_pub,
+        personal_root_pub=personal_root.public_hex, machine_id=machine_id,
+        machine_pub=machine_pub, assignment=assignment,
         kind=kind, seq=seq, issued_at=int(issued_at), supersedes=supersedes,
         signature=sig,
     )
 
 
 def enroll(
-    personal_root: KeyPair, *, machine_pub: str, seq: int = 0, issued_at: int = 0,
+    personal_root: KeyPair, *, machine_id: str | None = None, machine_pub: str,
+    assignment: str = FLEET_MEMBER_ASSIGNMENT,
+    seq: int = 0, issued_at: int = 0,
 ) -> RosterEntry:
     """Add a machine to the fleet. Signed by the personal root; a fresh
     enrolment cites no tombstone."""
     return _mint(
-        personal_root, machine_pub=machine_pub, kind=EntryKind.ENROLL,
+        personal_root, machine_id=machine_id, machine_pub=machine_pub,
+        assignment=assignment, kind=EntryKind.ENROLL,
         seq=seq, issued_at=issued_at, supersedes=None,
     )
 
 
 def kick(
-    personal_root: KeyPair, *, machine_pub: str, seq: int = 0, issued_at: int = 0,
+    personal_root: KeyPair, *, machine_id: str | None = None, machine_pub: str,
+    assignment: str = FLEET_MEMBER_ASSIGNMENT,
+    seq: int = 0, issued_at: int = 0,
 ) -> RosterEntry:
     """Revoke a machine — an absorbing tombstone. Beats any concurrent or
     later ordinary renewal; only a tombstone-citing re-enrolment escapes it."""
     return _mint(
-        personal_root, machine_pub=machine_pub, kind=EntryKind.KICK,
+        personal_root, machine_id=machine_id, machine_pub=machine_pub,
+        assignment=assignment, kind=EntryKind.KICK,
         seq=seq, issued_at=issued_at, supersedes=None,
     )
 
@@ -177,7 +240,9 @@ def kick(
 def reenroll(
     personal_root: KeyPair,
     *,
+    machine_id: str | None = None,
     machine_pub: str,
+    assignment: str = FLEET_MEMBER_ASSIGNMENT,
     supersedes: str,
     seq: int = 0,
     issued_at: int = 0,
@@ -188,7 +253,8 @@ def reenroll(
     resurrect the machine."""
     _require_hex64(supersedes, "supersedes")
     return _mint(
-        personal_root, machine_pub=machine_pub, kind=EntryKind.ENROLL,
+        personal_root, machine_id=machine_id, machine_pub=machine_pub,
+        assignment=assignment, kind=EntryKind.ENROLL,
         seq=seq, issued_at=issued_at, supersedes=supersedes,
     )
 
@@ -203,11 +269,23 @@ def verify(entry: RosterEntry, *, anchor_root_pub: str) -> None:
             f"roster entry anchor {entry.personal_root_pub[:12]}… is not this "
             f"fleet's personal root {anchor[:12]}…"
         )
+    _require_hex64(entry.machine_id, "machine_id")
+    _require_hex64(entry.machine_pub, "machine_pub")
+    if entry.assignment != FLEET_MEMBER_ASSIGNMENT:
+        raise FleetRosterError(
+            f"roster assignment must be {FLEET_MEMBER_ASSIGNMENT!r}"
+        )
+    if not isinstance(entry.seq, int) or isinstance(entry.seq, bool) or entry.seq < 0:
+        raise FleetRosterError("roster entry seq must be a non-negative int")
+    if not isinstance(entry.issued_at, int) or isinstance(entry.issued_at, bool) \
+            or entry.issued_at < 0:
+        raise FleetRosterError("roster entry issued_at must be a non-negative int")
     if entry.kind == EntryKind.KICK and entry.supersedes is not None:
         raise FleetRosterError("a kick tombstone does not cite a supersedes")
+    if entry.supersedes is not None:
+        _require_hex64(entry.supersedes, "supersedes")
     try:
-        verify_signature(entry.personal_root_pub, entry.signature,
-                         _body_bytes(entry))
+        verify_signature(anchor, entry.signature, entry.signing_input())
     except SignatureError as exc:
         raise FleetRosterError(
             "roster entry does not verify against its personal root"
@@ -277,27 +355,13 @@ def resolve(entries, *, anchor_root_pub: str) -> dict[str, RosterEntry]:
 
 
 def _entry_payload(entry: RosterEntry) -> dict:
-    return {
-        "personal_root_pub": entry.personal_root_pub,
-        "machine_pub": entry.machine_pub,
-        "kind": entry.kind.value,
-        "seq": entry.seq,
-        "issued_at": entry.issued_at,
-        "supersedes": entry.supersedes,
-        "signature": entry.signature,
-    }
+    payload = entry.to_dict()
+    payload.pop("v")
+    return payload
 
 
 def _entry_from_payload(payload: dict) -> RosterEntry:
-    return RosterEntry(
-        personal_root_pub=payload["personal_root_pub"],
-        machine_pub=payload["machine_pub"],
-        kind=EntryKind(payload["kind"]),
-        seq=int(payload["seq"]),
-        issued_at=int(payload["issued_at"]),
-        supersedes=payload.get("supersedes"),
-        signature=payload["signature"],
-    )
+    return RosterEntry.from_dict({"v": FLEET_ROSTER_VERSION, **payload})
 
 
 def store_entry(entry: RosterEntry, *, org=None) -> str:
