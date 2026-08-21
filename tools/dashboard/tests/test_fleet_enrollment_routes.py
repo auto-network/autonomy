@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -11,12 +12,15 @@ from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
 from tools.dashboard import (
+    approvals_routes,
+    fleet_enrollment_approvals,
     fleet_enrollment_routes,
     fleet_enrollment_service,
     identity_routes,
     link_serving,
     unlock_routes,
 )
+from tools.dashboard.dao import approval_requests as ar
 from tools.graph.db import GraphDB
 from tools.network import fleet_enroll, fleet_invite, fleet_roster
 from tools.network.idkit import KeyPair
@@ -25,6 +29,7 @@ from tools.network.idkit import KeyPair
 NOW_MS = 1_800_000_000_000
 TOKEN = "45" * 16
 TARGET_UUID = str(uuid.UUID("12345678-1234-5678-9234-567812345678"))
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 @pytest.fixture
@@ -32,6 +37,7 @@ def operator_api(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
     monkeypatch.delenv("GRAPH_DB", raising=False)
     GraphDB.close_all_pooled()
+    monkeypatch.setattr(ar, "DB_PATH", tmp_path / "approvals.db")
     root = KeyPair.from_private_hex("34" * 32)
     invite = fleet_invite.mint(
         root,
@@ -63,7 +69,10 @@ def operator_api(tmp_path, monkeypatch):
     monkeypatch.setattr(
         fleet_enrollment_service, "FleetEnrollmentStore", lambda: store
     )
-    client = TestClient(Starlette(routes=fleet_enrollment_routes.ROUTES))
+    client = TestClient(Starlette(routes=[
+        *fleet_enrollment_routes.ROUTES,
+        *approvals_routes.ROUTES,
+    ]))
     yield client, root, invite, store
     client.close()
     GraphDB.close_all_pooled()
@@ -82,16 +91,26 @@ def _register(client: TestClient, invite: fleet_invite.FleetInvite):
     assert response.status_code == 200, response.text
 
 
-def test_operator_registers_lists_and_approves_exact_request(operator_api):
+def test_generic_approval_commits_exact_request(operator_api, monkeypatch):
     client, root, invite, store = operator_api
     _register(client, invite)
     request = fleet_enroll.build_request(
         invite=invite, enrollment_nonce="78" * 32
     )
-    pending, resume_token = store.open_request(
-        TARGET_UUID, request, now_ms=NOW_MS
+    channel = {}
+    opened = fleet_enrollment_service.handle_request(
+        {"target_type": "fleet:join", "target_uuid": TARGET_UUID},
+        {"v": 1, "op": "fleet.request", "request": request.to_dict()},
+        channel_state=channel,
+        store=store,
+        now_ms=NOW_MS,
     )
-    assert resume_token is not None
+    pending = store.get_request(opened["request_id"])
+    assert pending is not None
+    resume_token = opened["resume_token"]
+    assert pending.source_approval_id == fleet_enrollment_approvals.approval_id_for(
+        pending.request_id
+    )
 
     listed = client.get(
         "/api/fleet/enrollment/requests",
@@ -105,6 +124,8 @@ def test_operator_registers_lists_and_approves_exact_request(operator_api):
         "channel_binding": pending.channel_binding,
         "verification_code": pending.verification_code,
         "status": "pending",
+        "source_approval_id": pending.source_approval_id,
+        "last_error_code": None,
         "created_at": NOW_MS,
         "updated_at": NOW_MS,
     }]
@@ -131,18 +152,22 @@ def test_operator_registers_lists_and_approves_exact_request(operator_api):
         }
     )
     approved = client.post(
-        f"/api/fleet/enrollment/requests/{pending.request_id}/approve",
+        f"/api/approvals/{pending.source_approval_id}/decision",
         json={
-            "target_uuid": TARGET_UUID,
+            "approved": True,
             "approval": approval.to_dict(),
             "roster_entry": roster_entry.to_dict(),
         },
     )
     assert approved.status_code == 200, approved.text
-    assert approved.json() == {
+    assert approved.json() == {"ok": True}
+    result = client.get(
+        f"/api/approvals/{pending.source_approval_id}", params={"wait": 5}
+    ).json()["result"]
+    assert result["approved"] is True
+    assert result["execution"] == {
         "ok": True,
         "request_id": pending.request_id,
-        "status": "approved",
         "roster_entry_id": roster_entry.entry_id,
     }
     assert fleet_roster.load_entries(org=None) == [roster_entry]
@@ -164,16 +189,36 @@ def test_operator_can_decline_and_agent_bearer_cannot_act(
     request = fleet_enroll.build_request(
         invite=invite, enrollment_nonce="9a" * 32
     )
-    pending, _resume_token = store.open_request(
-        TARGET_UUID, request, now_ms=NOW_MS
+    opened = fleet_enrollment_service.handle_request(
+        {"target_type": "fleet:join", "target_uuid": TARGET_UUID},
+        {"v": 1, "op": "fleet.request", "request": request.to_dict()},
+        channel_state={},
+        store=store,
+        now_ms=NOW_MS,
     )
+    pending = store.get_request(opened["request_id"])
+    assert pending is not None
     declined = client.post(
-        f"/api/fleet/enrollment/requests/{pending.request_id}/decline",
-        json={"target_uuid": TARGET_UUID},
+        f"/api/approvals/{pending.source_approval_id}/decision",
+        json={"approved": False},
     )
     assert declined.status_code == 200
-    assert declined.json() == {"ok": True, "status": "declined"}
-    assert store.list_pending(TARGET_UUID) == ()
+    assert declined.json() == {"ok": True}
+    # Fleet does not copy the human verdict into its transport table.
+    assert store.get_request(pending.request_id).status == "pending"
+    resumed = fleet_enrollment_service.handle_request(
+        {"target_type": "fleet:join", "target_uuid": TARGET_UUID},
+        {
+            "v": 1,
+            "op": "fleet.resume",
+            "request_id": pending.request_id,
+            "resume_token": opened["resume_token"],
+        },
+        channel_state={},
+        store=store,
+        now_ms=NOW_MS + 1,
+    )
+    assert resumed["status"] == "declined"
 
     monkeypatch.setattr(
         unlock_routes, "session_from_request", lambda _request: None
@@ -190,6 +235,17 @@ def test_operator_can_decline_and_agent_bearer_cannot_act(
     )
     assert denied.status_code == 401
     assert "human Dashboard session" in denied.json()["error"]
+
+    # There is exactly one human-decision path: the generic approval
+    # rendezvous. The former Fleet-local decision routes do not exist.
+    assert client.post(
+        f"/api/fleet/enrollment/requests/{pending.request_id}/approve",
+        json={},
+    ).status_code == 404
+    assert client.post(
+        f"/api/fleet/enrollment/requests/{pending.request_id}/decline",
+        json={},
+    ).status_code == 404
 
 
 def test_preapproval_table_is_forward_migrated(tmp_path):
@@ -210,4 +266,21 @@ def test_preapproval_table_is_forward_migrated(tmp_path):
                 "PRAGMA table_info(fleet_enrollment_pending)"
             )
         }
-    assert {"approval_json", "roster_entry_json"} <= columns
+    assert {
+        "approval_json", "roster_entry_json", "source_approval_id",
+        "last_error_code",
+    } <= columns
+
+
+def test_current_generic_dialogue_owns_pin_and_browser_root_ceremony():
+    js = (REPO_ROOT / "tools/dashboard/static/js/pages/worktrees.js").read_text()
+    template = (
+        REPO_ROOT
+        / "tools/dashboard/templates/partials/worktree-review-overlays.html"
+    ).read_text()
+    assert "fleet_machine_admission:" in js
+    assert "mintFleetEnrollmentEvidence" in js
+    assert "roster_entry: evidence.rosterEntry" in js
+    assert "approval-fleet-pin" in template
+    assert "Machine comparison code" in template
+    assert "/api/fleet/enrollment/requests/" not in js

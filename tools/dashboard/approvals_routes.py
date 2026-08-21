@@ -163,6 +163,7 @@ from tools.dashboard import dashboard_access_approvals as _dashboard_access
 from tools.dashboard import visitor_approvals as _visitor
 from tools.dashboard import mcp_peer_approvals as _mcp_peer
 from tools.dashboard import secure_setting_approvals as _secure_setting
+from tools.dashboard import fleet_enrollment_approvals as _fleet_enrollment
 
 # Optional per-kind request preparation. A handler returns the normalized
 # request plus a server-frozen staged context. Kinds absent here retain the
@@ -173,12 +174,14 @@ PREPARE_CREATE = {
     **_visitor.PREPARE_CREATE,
     **_mcp_peer.PREPARE_CREATE,
     **_secure_setting.PREPARE_CREATE,
+    **_fleet_enrollment.PREPARE_CREATE,
 }
 AUTHORIZE_DECISION = {
     **_dashboard_access.AUTHORIZE_DECISION,
     **_visitor.AUTHORIZE_DECISION,
     **_mcp_peer.AUTHORIZE_DECISION,
     **_secure_setting.AUTHORIZE_DECISION,
+    **_fleet_enrollment.AUTHORIZE_DECISION,
 }
 
 # Per-kind GET enrichment — the only kind-specific hook on the server side of
@@ -190,6 +193,7 @@ ENRICH = {
     **_visitor.ENRICH,
     **_mcp_peer.ENRICH,
     **_secure_setting.ENRICH,
+    **_fleet_enrollment.ENRICH,
 }
 
 
@@ -214,6 +218,7 @@ EXECUTORS: dict = {
     **_visitor.EXECUTORS,
     **_mcp_peer.EXECUTORS,
     **_secure_setting.EXECUTORS,
+    **_fleet_enrollment.EXECUTORS,
 }
 
 # Requests whose executor is running: the verdict is committed but the result

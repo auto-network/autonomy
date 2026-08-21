@@ -8,6 +8,7 @@ import uuid
 import pytest
 
 from tools.dashboard import fleet_enrollment_service
+from tools.dashboard.dao import approval_requests as ar
 from tools.graph.db import GraphDB
 from tools.network import (
     fleet_enroll,
@@ -44,6 +45,7 @@ def path(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
     monkeypatch.delenv("GRAPH_DB", raising=False)
     GraphDB.close_all_pooled()
+    monkeypatch.setattr(ar, "DB_PATH", tmp_path / "approvals.db")
     root = KeyPair.from_private_hex("34" * 32)
     serving = KeyPair.from_private_hex("56" * 32)
     invite = fleet_invite.mint(

@@ -136,6 +136,39 @@ def test_validation_and_unknown(client):
     assert client.post("/api/approvals/nope/decision",
                        json={"approved": True}).status_code == 404
 
+    # Fleet admissions are produced only after the RelayKit request has been
+    # validated and frozen; a caller cannot manufacture one through the
+    # generic create route.
+    fleet = client.post("/api/approvals", json={
+        "kind": "fleet_machine_admission",
+        "session": "fleet:forged",
+        "request": {"source_request_id": "00" * 32},
+    })
+    assert fleet.status_code == 400
+    assert "invitation channel" in fleet.json()["error"]
+
+
+def test_stable_source_id_is_idempotent_and_byte_bound(tmp_path):
+    db = tmp_path / "approval_requests.db"
+    fields = {
+        "request_id": "fleet-" + "ab" * 32,
+        "kind": "fleet_machine_admission",
+        "session": "fleet:invite",
+        "request": {"source_request_id": "ab" * 32},
+        "staged": {"v": 1, "channel_binding": "cd" * 32},
+        "created_at": 123.5,
+        "db_path": db,
+    }
+    assert ar.create_idempotent(**fields) is True
+    assert ar.create_idempotent(**fields) is False
+    assert ar.decided_ids_for_kind("fleet_machine_admission", db) == set()
+    assert ar.set_result(fields["request_id"], {"approved": False}, db) is True
+    assert ar.decided_ids_for_kind("fleet_machine_admission", db) == {
+        fields["request_id"]
+    }
+    with pytest.raises(ValueError, match="different bytes"):
+        ar.create_idempotent(**{**fields, "staged": {"v": 2}})
+
 
 def test_commit_sign_diff_from_parent_and_tree(tmp_path):
     """The live diff-tree of a not-yet-committed change (parent + tree), the way

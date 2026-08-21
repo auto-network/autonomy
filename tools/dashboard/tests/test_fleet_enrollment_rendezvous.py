@@ -7,7 +7,13 @@ import uuid
 
 import pytest
 
-from tools.dashboard import fleet_enrollment_service, link_approvals, link_serving
+from tools.dashboard import (
+    fleet_enrollment_approvals,
+    fleet_enrollment_service,
+    link_approvals,
+    link_serving,
+)
+from tools.dashboard.dao import approval_requests as ar
 from tools.graph.db import GraphDB
 from tools.graph.schemas import network_identity
 from tools.graph.schemas.registry import validate_payload
@@ -25,6 +31,7 @@ def rendezvous(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
     monkeypatch.delenv("GRAPH_DB", raising=False)
     GraphDB.close_all_pooled()
+    monkeypatch.setattr(ar, "DB_PATH", tmp_path / "approvals.db")
     root = KeyPair.from_private_hex(("34" * 32))
     target_uuid = str(uuid.UUID("12345678-1234-5678-9234-567812345678"))
     invite = fleet_invite.mint(
@@ -71,9 +78,19 @@ def test_new_request_gets_one_ephemeral_resume_token(rendezvous):
     assert set(request.to_dict()) == {
         "enrollment_nonce", "personal_root_pub", "invite_id"
     }
-
+    approval_id = fleet_enrollment_approvals.approval_id_for(reply["request_id"])
+    approval = ar.get(approval_id)
+    assert approval is not None
+    assert approval["kind"] == fleet_enrollment_approvals.KIND
+    assert approval["request"] == {
+        "source_request_id": reply["request_id"],
+        "target_uuid": grant["target_uuid"],
+        "verification_code": reply["verification_code"],
+    }
     pending = store.list_pending(grant["target_uuid"])
     assert len(pending) == 1
+    assert approval["staged"]["channel_binding"] == pending[0].channel_binding
+    assert pending[0].source_approval_id == approval_id
     assert pending[0].channel_binding == (
         fleet_enrollment_service.channel_binding(reply["resume_token"])
     )
@@ -92,6 +109,7 @@ def test_same_channel_retries_but_another_channel_must_resume(rendezvous):
         grant, message, channel_state=first_channel, store=store, now_ms=NOW_MS
     )
     assert repeated == first
+    assert ar.get(fleet_enrollment_approvals.approval_id_for(first["request_id"]))
 
     other_channel = {}
     duplicate = fleet_enrollment_service.handle_request(
@@ -153,6 +171,51 @@ def test_multiple_requests_stay_distinct_and_wrong_channel_fails(rendezvous):
             resume_token=second["resume_token"],
             now_ms=NOW_MS,
         )
+
+
+def test_invitation_caps_unresolved_requests_at_one_hundred(rendezvous):
+    _root, invite, store, grant, _request = rendezvous
+    rows = []
+    for index in range(
+        fleet_enrollment_service.MAX_PENDING_REQUESTS_PER_INVITE
+    ):
+        request = fleet_enroll.build_request(
+            invite=invite,
+            enrollment_nonce=f"{index:064x}",
+        )
+        pending, token = store.open_request(
+            grant["target_uuid"], request, now_ms=NOW_MS
+        )
+        assert token is not None
+        rows.append(pending)
+
+    overflow = fleet_enroll.build_request(
+        invite=invite,
+        enrollment_nonce=f"{len(rows):064x}",
+    )
+    with pytest.raises(
+        fleet_enrollment_service.FleetEnrollmentChannelError,
+        match="100 pending-request limit",
+    ):
+        store.open_request(grant["target_uuid"], overflow, now_ms=NOW_MS)
+
+    # A retry of an existing content-id is not a new request and remains
+    # recoverable even while the invitation is full.
+    repeated, token = store.open_request(
+        grant["target_uuid"], rows[0].request, now_ms=NOW_MS
+    )
+    assert repeated.request_id == rows[0].request_id
+    assert token is None
+
+    # The generic verdict remains the only decline truth. Once it resolves,
+    # that correlated transport row no longer consumes pending capacity.
+    approval_id = fleet_enrollment_approvals.ensure_approval(rows[0], store=store)
+    assert ar.set_result(approval_id, {"approved": False}) is True
+    accepted, token = store.open_request(
+        grant["target_uuid"], overflow, now_ms=NOW_MS
+    )
+    assert accepted.request_id == fleet_enroll.request_id(overflow)
+    assert token is not None
 
 
 def test_approval_commits_roster_before_resume_delivers_unchanged_armor(
