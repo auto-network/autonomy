@@ -174,12 +174,28 @@ class PersonalIdentityV1(SettingSchema):
         required=True,
         description="ISO-8601 UTC timestamp the identity was created.",
     )
+    require_pair: bool = field(
+        required=False,
+        description=(
+            "The MFA policy: when true the root armor must keep BOTH a password "
+            "and a passkey factor (a required pair). Set by the sign-on UI's "
+            "re-arm flow; absent means false (single-factor allowed)."
+        ),
+    )
+    updated_at: str = field(
+        required=False,
+        description="ISO-8601 UTC timestamp of the last re-arm, if any.",
+    )
 
     @classmethod
     def validate(cls, payload: Any) -> None:
         super().validate(payload)
         if not isinstance(payload, dict):
             return
+        if "require_pair" in payload and not isinstance(payload["require_pair"], bool):
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'require_pair' must be a boolean"
+            )
         armor = _require_str(payload, "armored_private_key", cls.__name__, max_len=16384)
         # I1 tripwire: a raw Ed25519 private key is exactly 64 hex chars.
         # Kept for the clearer message; the canonical check below refuses

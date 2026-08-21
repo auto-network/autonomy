@@ -738,3 +738,104 @@ def test_second_device_excluded_from_reenrollment(env, root):
     opts_ts = env.post("/api/identity/passkey/register-options", json={},
                        headers={"host": TSNET_HOST}).json()
     assert not opts_ts["options"].get("excludeCredentials")
+
+
+# ── re-arming: promote / demote / set-password / require-pair ─────────────
+#
+# The browser re-wraps the SAME root under a new factor set and signs the new
+# armor with the root; the route verifies that proof against the stored root and
+# refuses a set with no daily opener. removeKey deletes a passkey, refusing
+# while it is still a root factor.
+
+
+def _rearmor_body(signer, armor_text, require_pair=None):
+    from tools.dashboard.identity_routes import REARMOR_DOMAIN
+    from tools.network.idkit.armor import canonicalize_armor
+    canonical = canonicalize_armor(armor_text)
+    sig = signer.sign_hex(REARMOR_DOMAIN + canonical.encode("utf-8"))
+    body = {"armored_private_key": canonical, "signature": sig}
+    if require_pair is not None:
+        body["require_pair"] = require_pair
+    return body
+
+
+def _passkey_armor(kp, cred="cred-a", prf=b"\x21" * 32, password=PASSWORD):
+    from tools.network.idkit.armor import (
+        PASSKEY_ARMOR_PURPOSE, add_passkey_factor, encrypt_root_key,
+    )
+    from tools.network.idkit.sealing import derive_encapsulation_keypair
+    _, kem = derive_encapsulation_keypair(prf, PASSKEY_ARMOR_PURPOSE)
+    base = encrypt_root_key(kp, password, iterations=10_000)
+    return add_passkey_factor(base, password, cred, kem)
+
+
+def test_rearmor_promotes_a_passkey(env, root):
+    from tools.network.idkit.armor import armor_factor_types
+    _store_identity(env, root)
+    r = env.post("/api/identity/personal/armor",
+                 json=_rearmor_body(root, _passkey_armor(root)))
+    assert r.status_code == 200, r.text
+    assert "passkey" in r.json()["factors"]
+    served = env.get("/api/identity/personal").json()
+    assert "passkey" in armor_factor_types(served["armored_private_key"])
+
+
+def test_rearmor_rejects_a_bad_signature(env, root):
+    _store_identity(env, root)
+    body = _rearmor_body(root, _passkey_armor(root))
+    body["signature"] = "0" * 128
+    assert env.post("/api/identity/personal/armor", json=body).status_code == 403
+
+
+def test_rearmor_rejects_a_foreign_root(env, root):
+    _store_identity(env, root)
+    other = KeyPair.generate()
+    r = env.post("/api/identity/personal/armor",
+                 json=_rearmor_body(other, _passkey_armor(other)))
+    assert r.status_code == 409
+
+
+def test_rearmor_require_pair_needs_both(env, root):
+    from tools.network.idkit.armor import encrypt_root_key
+    _store_identity(env, root)
+    pw_only = encrypt_root_key(root, PASSWORD, iterations=10_000)
+    r = env.post("/api/identity/personal/armor",
+                 json=_rearmor_body(root, pw_only, require_pair=True))
+    assert r.status_code == 400
+
+
+def test_rearmor_passkey_only_is_a_valid_opener(env, root):
+    from tools.network.idkit.armor import remove_factor
+    _store_identity(env, root)
+    passkey_only = remove_factor(_passkey_armor(root, cred="cred-x"),
+                                 PASSWORD, "password")
+    r = env.post("/api/identity/personal/armor",
+                 json=_rearmor_body(root, passkey_only))
+    assert r.status_code == 200, r.text
+    assert r.json()["factors"] == ["passkey"]
+
+
+def test_delete_passkey(env, root):
+    _store_identity(env, root)
+    assert _enroll(env, root).status_code == 200
+    cred = env.get("/api/identity/status").json()["passkeys"][0]["credential_id"]
+    assert env.delete(f"/api/identity/passkey/{cred}").status_code == 200
+    assert env.get("/api/identity/status").json()["passkeys"] == []
+
+
+def test_delete_unknown_passkey_is_404(env, root):
+    _store_identity(env, root)
+    assert env.delete("/api/identity/passkey/no-such-cred").status_code == 404
+
+
+def test_delete_refused_while_a_root_factor(env, root):
+    _store_identity(env, root)
+    assert _enroll(env, root).status_code == 200
+    cred = env.get("/api/identity/status").json()["passkeys"][0]["credential_id"]
+    # promote it to a root factor, then removal must refuse until it is demoted
+    assert env.post("/api/identity/personal/armor",
+                    json=_rearmor_body(root, _passkey_armor(root, cred=cred))
+                    ).status_code == 200
+    r = env.delete(f"/api/identity/passkey/{cred}")
+    assert r.status_code == 409
+    assert "demote" in r.json()["error"]

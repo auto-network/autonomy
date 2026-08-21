@@ -223,6 +223,9 @@ async def get_status(request: Request) -> JSONResponse:
             "display_name": personal.payload.get("display_name"),
             "root_pub": personal.payload.get("root_pub"),
             "created_at": personal.payload.get("created_at"),
+            # The current MFA policy, so the sign-on UI can show whether a
+            # required pair is in force before offering to change it.
+            "require_pair": bool(personal.payload.get("require_pair", False)),
         }
     rows = [{
         "credential_id": m.payload.get("credential_id"),
@@ -274,6 +277,7 @@ async def get_personal(request: Request) -> JSONResponse:
         "armored_private_key": member.payload["armored_private_key"],
         "root_pub": member.payload.get("root_pub"),
         "created_at": member.payload.get("created_at"),
+        "require_pair": bool(member.payload.get("require_pair", False)),
     })
 
 
@@ -387,6 +391,129 @@ async def post_personal(request: Request) -> JSONResponse:
     except Exception:
         pass
     return response
+
+
+# The root signs the re-factored armor so the server knows the submitter opened
+# the CURRENT armor (held a valid factor) rather than crafting a substitute.
+# Distinct domain so the signature cannot be replayed as any other record.
+REARMOR_DOMAIN = b"autonomy.identity.rearmor.v1\n"
+
+
+def _root_reachable(factor_types: list, require_pair: bool) -> bool:
+    """The backend copy of the sign-on machine's invariant (note 464c7021):
+    the identity must keep a DAY-TO-DAY opener, and a required pair keeps two.
+
+    A passkey armor factor and the password factor are the daily openers; the
+    recovery factor is the emergency floor, never a day-to-day unlock, so an
+    armor left with only recovery is refused. ``require_pair`` (the MFA policy)
+    additionally demands both a password AND a passkey. This is enforcement,
+    not a UX courtesy — the browser check is a courtesy; this is the gate.
+    """
+    has_password = "password" in factor_types
+    has_passkey = "passkey" in factor_types
+    if require_pair:
+        return has_password and has_passkey
+    return has_password or has_passkey
+
+
+async def post_rearmor(request: Request) -> JSONResponse:
+    """Replace the personal root's armor with a re-factored one — promote or
+    demote a passkey, set or remove the password, require a pair.
+
+    Body: ``{armored_private_key, require_pair?, signature}``. The browser opens
+    the current armor (proving possession of a factor), re-wraps the SAME root
+    seed under the new factor set, and signs the new armor with the root. The
+    server verifies that signature against the STORED root — never the armor's
+    own root_pub field alone, which a substitute armor could forge — and refuses
+    any factor set that would leave the identity without a daily opener
+    (rootReachable). I1: only the armor is stored, never plaintext.
+    """
+    if _mock_mode():
+        return JSONResponse({"ok": False,
+                             "error": "mock dashboard stores no identities"},
+                            status_code=502)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "body must be JSON"},
+                            status_code=400)
+    if not isinstance(body, dict) or not isinstance(body.get("armored_private_key"), str) \
+            or not isinstance(body.get("signature"), str):
+        return JSONResponse({"ok": False, "error": (
+            "body must carry 'armored_private_key' and the root 'signature' over it"
+        )}, status_code=400)
+
+    from tools.network.idkit.armor import (
+        ArmorError,
+        armor_factor_types,
+        armor_root_pub,
+        canonicalize_armor,
+    )
+    from tools.network.idkit.keys import verify_signature
+    from tools.network.idkit.errors import IdkitError
+    try:
+        canonical_armor = canonicalize_armor(body["armored_private_key"])
+        new_root_pub = armor_root_pub(canonical_armor)
+        factor_types = armor_factor_types(canonical_armor)
+    except ArmorError as e:
+        return JSONResponse({"ok": False, "error": (
+            f"not a canonical password-encrypted key armor (I1): {e}"
+        )}, status_code=400)
+
+    try:
+        existing = _personal_member()
+    except Exception as e:
+        return JSONResponse({"ok": False,
+                             "error": f"could not read the personal identity: {e}"},
+                            status_code=500)
+    if existing is None or not existing.payload.get("root_pub"):
+        return JSONResponse({"ok": False, "error": (
+            "no personal identity to re-armor — run Get started first"
+        )}, status_code=409)
+    stored_root_pub = existing.payload["root_pub"]
+    if new_root_pub != stored_root_pub:
+        return JSONResponse({"ok": False, "error": (
+            "the new armor is for a different root key — re-armoring never "
+            "changes which identity this is"
+        )}, status_code=409)
+
+    # Proof of possession: only someone who opened the CURRENT armor holds the
+    # root, so only they can sign the replacement. A substitute armor forged
+    # with a stolen root_pub cannot produce this signature.
+    try:
+        verify_signature(stored_root_pub, body["signature"],
+                         REARMOR_DOMAIN + canonical_armor.encode("utf-8"))
+    except IdkitError:
+        return JSONResponse({"ok": False, "error": (
+            "the re-armor signature does not verify against your root — only a "
+            "holder of the current key may replace its armor"
+        )}, status_code=403)
+
+    require_pair = bool(body.get("require_pair", existing.payload.get("require_pair", False)))
+    if not _root_reachable(factor_types, require_pair):
+        need = ("a password AND a passkey" if require_pair
+                else "a password or a passkey")
+        return JSONResponse({"ok": False, "error": (
+            f"this factor set would leave no daily way in — keep {need}"
+        )}, status_code=400)
+
+    payload = dict(existing.payload)
+    payload["armored_private_key"] = canonical_armor
+    payload["root_pub"] = stored_root_pub
+    payload["require_pair"] = require_pair
+    payload["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    try:
+        with settings_ops.identity_write_context():
+            settings_ops.upsert_by_key(
+                PERSONAL_IDENTITY_SET_ID, PERSONAL_IDENTITY_REVISION,
+                existing.key, payload, org=None,
+            )
+    except Exception as e:
+        return JSONResponse({"ok": False,
+                             "error": f"could not store the re-armored identity: {e}"},
+                            status_code=500)
+    return JSONResponse({"ok": True, "root_pub": stored_root_pub,
+                         "factors": factor_types, "require_pair": require_pair})
 
 
 # ── passkey enrollment (WebAuthn) ─────────────────────────────────────
@@ -682,11 +809,69 @@ async def post_register(request: Request) -> JSONResponse:
                          "transports": transports})
 
 
+async def delete_passkey(request: Request) -> JSONResponse:
+    """Remove an enrolled passkey (removeKey). The password floor keeps access
+    open, so this never locks anyone out. Refused while the passkey is still a
+    ROOT-ARMOR factor: demote it first (re-armor without it) so the credential
+    list and the armor's factor set never disagree.
+    """
+    if _mock_mode():
+        return JSONResponse({"ok": False,
+                             "error": "mock dashboard enrolls no passkeys"},
+                            status_code=502)
+    credential_id = request.path_params.get("credential_id")
+    try:
+        rows = _passkey_rows()
+    except Exception as e:
+        return JSONResponse({"ok": False,
+                             "error": f"could not read enrolled passkeys: {e}"},
+                            status_code=500)
+    target = next((m for m in rows
+                   if m.payload.get("credential_id") == credential_id), None)
+    if target is None:
+        return JSONResponse({"ok": False, "error": (
+            "no enrolled passkey has that credential id"
+        )}, status_code=404)
+
+    # If this passkey still wraps the root (a full factor), removing the row
+    # alone would strand that factor — refuse until it is demoted.
+    try:
+        personal = _personal_member()
+    except Exception:
+        personal = None
+    if personal is not None and personal.payload.get("armored_private_key"):
+        try:
+            from tools.network.idkit.armor import parse_armor
+            factors = parse_armor(personal.payload["armored_private_key"])["factors"]
+        except Exception:
+            factors = []
+        if any(f.get("type") == "passkey" and f.get("credential_id") == credential_id
+               for f in factors):
+            return JSONResponse({"ok": False, "error": (
+                "this passkey still unlocks your key — remove it as a factor "
+                "(demote it) before removing the device"
+            )}, status_code=409)
+
+    try:
+        with settings_ops.identity_write_context():
+            settings_ops.exclude_setting(target.id, org=None)
+    except Exception as e:
+        return JSONResponse({"ok": False,
+                             "error": f"could not remove the passkey: {e}"},
+                            status_code=500)
+    from tools.dashboard import unlock_routes
+    unlock_routes.bust_enforce_cache()
+    return JSONResponse({"ok": True, "credential_id": credential_id})
+
+
 ROUTES = [
     Route("/api/identity/status", get_status, methods=["GET"]),
     Route("/api/identity/personal", get_personal, methods=["GET"]),
     Route("/api/identity/personal", post_personal, methods=["POST"]),
+    Route("/api/identity/personal/armor", post_rearmor, methods=["POST"]),
     Route("/api/identity/passkey/register-options", post_register_options,
           methods=["POST"]),
     Route("/api/identity/passkey/register", post_register, methods=["POST"]),
+    Route("/api/identity/passkey/{credential_id}", delete_passkey,
+          methods=["DELETE"]),
 ]
