@@ -260,17 +260,26 @@ or external database.
 
 GraphDB schema version 8 creates the scoped vault and key-control tables so a
 fresh checkpoint receiver has the exact durable schema before materializing
-records. This schema migration does not activate synchronization. Calling
-`FleetSyncAlpha` still explicitly installs the five local tracking tables, one
-local catalog-order index, logical-key indexes for the 22 replicated tables,
-and insert/update/delete triggers on those tables. Production activation still
-requires a one-time initial winner for every existing logical row, followed
-atomically by converting every personal-store writer—including the vault and
-key-control stores' current independent SQLite connections—to the authored
-transaction API. The alpha refuses to checkpoint a populated database whose
-live-row count is not completely covered by its catalog. Installing the
-fail-closed triggers before bootstrapping existing rows or converting all
-writers would intentionally reject the migration or those legacy writes.
+records. `GraphDB.migrate_fleet_sync_catalog(origin_incarnation)` is the
+explicit production preparation step: one SQLite transaction installs the
+five Alpha tracking tables, one machine-local peer-state table, catalog and
+logical-key indexes, and deterministic initial winner metadata for every
+existing logical row. It fails before DDL on unknown durable tables, preserves
+identity exclusions, and can be repeated to cover writes made before the next
+rollout when those writes add new logical rows. A durable bootstrap generation
+prevents transaction/operation identity reuse across those repeats. The final
+writer-conversion rollout performs its own integrity gate before activation;
+an intervening delete or logical-key rewrite fails closed rather than guessing
+legacy mutation metadata.
+
+The production migration deliberately installs no capture triggers. Calling
+`FleetSyncAlpha` still installs them immediately for the executable Alpha, but
+production activation waits until every personal-store writer—including the
+vault and key-control stores' independent SQLite connections—enters the
+authored transaction API. The Alpha refuses to checkpoint a populated database
+whose live-row count is not completely covered by its catalog. Installing the
+fail-closed triggers before writer conversion would intentionally reject those
+legacy writes.
 
 Checkpoint creation is online: it briefly serializes an `IMMEDIATE` cut,
 persists the no-more-before floor, establishes a WAL snapshot, and releases

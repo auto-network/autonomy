@@ -14,13 +14,36 @@ from tools.network.fleet_sync_sim.merge import MutationInbox
 from tools.network.fleet_sync_sim.snapshot import encode_snapshot
 
 
-REPLICATED_TABLES = {
-    "attachments", "captures", "claims", "derivations", "edges", "entities",
-    "entity_mentions", "node_refs", "nodes", "note_comments", "note_reads",
-    "note_versions", "settings", "sources", "tags", "thoughts", "threads",
-    "vault_content_bodies", "vault_content_objects", "keycontrol_state",
-    "keycontrol_credential", "keycontrol_bridge",
+IGNORED_TABLES = {
+    # FTS5 projections and their SQLite-owned shadow tables rebuild from the
+    # replicated source rows.  Keep every concrete name here: a new prefix
+    # match is not permission for a table to disappear from this test.
+    "captures_fts", "captures_fts_config", "captures_fts_content",
+    "captures_fts_data", "captures_fts_docsize", "captures_fts_idx",
+    "derivations_fts", "derivations_fts_config", "derivations_fts_content",
+    "derivations_fts_data", "derivations_fts_docsize", "derivations_fts_idx",
+    "sources_fts", "sources_fts_config", "sources_fts_content",
+    "sources_fts_data", "sources_fts_docsize", "sources_fts_idx",
+    "thoughts_fts", "thoughts_fts_config", "thoughts_fts_content",
+    "thoughts_fts_data", "thoughts_fts_docsize", "thoughts_fts_idx",
+    # Explicit machine-local or rebuilt application state.
+    "keycontrol_meta", "keycontrol_pending", "keycontrol_pending_usage",
+    "orgs", "vault_state_object_counts",
+    # Fleet-sync's own local catalog/progress state.  These are absent before
+    # preparation and present afterward, but never cross to another machine.
+    "fleet_sync_catalog", "fleet_sync_journal", "fleet_sync_origins",
+    "fleet_sync_peer_state", "fleet_sync_state", "fleet_sync_transactions",
 }
+
+
+def _user_tables(db: GraphDB) -> set[str]:
+    return {
+        str(row[0])
+        for row in db.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%'"
+        )
+    }
 
 
 def _seed_source_graph(db: GraphDB, blob: bytes, path: Path) -> str:
@@ -173,6 +196,9 @@ def _seed_every_logical_table(db: GraphDB, blob: bytes, local_root: Path) -> str
           ciphertext_hash, b'{"exact":"bytes"}', 1_787_000_000)),
         ("INSERT INTO keycontrol_state(state_id,wire) VALUES(?,?)",
          ("state-1", b"state-wire")),
+        ("INSERT INTO keycontrol_grant(grant_id,storage_state_id,"
+         "recipient_kem_key_id,wire) VALUES(?,?,?,?)",
+         ("grant-1", "state-1", "kem-1", b"grant-wire")),
         ("INSERT INTO keycontrol_credential(kem_key_id,persona,wire) VALUES(?,?,?)",
          ("kem-1", "persona-1", b"credential-wire")),
         ("INSERT INTO keycontrol_bridge(bridge_id,child_state_id,parent_state_id,wire) "
@@ -233,7 +259,8 @@ def test_every_logical_table_round_trips_as_one_canonical_graph(tmp_path: Path) 
         digest = _seed_every_logical_table(origin, blob, tmp_path / "origin-local")
         encoded = encode_snapshot(origin.conn)
         mutations = decode_stream(encoded)
-        assert {mutation.table for mutation in mutations} == REPLICATED_TABLES
+        replicated_tables = _user_tables(origin) - IGNORED_TABLES
+        assert {mutation.table for mutation in mutations} == replicated_tables
 
         store = ContentAddressedBlobStore(
             tmp_path / "target" / "attachments",
@@ -243,7 +270,7 @@ def test_every_logical_table_round_trips_as_one_canonical_graph(tmp_path: Path) 
         assert report.applied == len(mutations)
         assert report.pending_attachments == ()
         assert encode_snapshot(target.conn) == encoded
-        for table in REPLICATED_TABLES:
+        for table in replicated_tables:
             assert target.conn.execute(
                 f'SELECT COUNT(*) FROM "{table}"'
             ).fetchone()[0] >= 1, table

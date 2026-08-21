@@ -109,13 +109,22 @@ def _index_name(table: str) -> str:
     return f"idx_fleet_sync_{table}_logical_key"
 
 
-def ensure_streaming_indexes(conn: sqlite3.Connection) -> dict[str, str]:
-    """Install only skinny logical-key indexes and return their SQL."""
+def ensure_streaming_indexes(
+    conn: sqlite3.Connection, *, manage_transaction: bool = True,
+) -> dict[str, str]:
+    """Install only skinny logical-key indexes and return their SQL.
+
+    ``manage_transaction=False`` lets the production catalog migration keep
+    the indexes, tracking tables, and initial winner bootstrap inside one
+    caller-owned SQLite transaction.  The default retains the standalone
+    Alpha helper's commit/rollback behavior.
+    """
     register_streaming_functions(conn)
     audit_schema(conn)
     _audit_base_order()
     created: dict[str, str] = {}
-    with conn:
+
+    def create() -> None:
         for table in sorted(TABLE_POLICIES):
             policy = TABLE_POLICIES[table]
             if policy.kind in {PolicyKind.LOCAL, PolicyKind.DERIVED}:
@@ -125,6 +134,12 @@ def ensure_streaming_indexes(conn: sqlite3.Connection) -> dict[str, str]:
             sql = f'CREATE INDEX IF NOT EXISTS "{name}" ON "{table}"({expressions})'
             conn.execute(sql)
             created[table] = sql
+
+    if manage_transaction:
+        with conn:
+            create()
+    else:
+        create()
     return created
 
 
