@@ -363,6 +363,8 @@
         'Finish setup', function () { openOnboarding(2); }));
     }
     if (status && status.signed_in === true && status.gate_disabled !== true) {
+      actions.appendChild(actionButton('add-passkey', 'Add a passkey',
+        'Enroll this device', function () { openOnboarding(2); }));
       actions.appendChild(actionButton('lock', lockBusy ? 'Locking...' : 'Lock dashboard',
         'This session only', lockDashboard));
     }

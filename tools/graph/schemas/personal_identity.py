@@ -333,12 +333,35 @@ class PasskeyCredentialV1(SettingSchema):
         required=True,
         description="ISO-8601 UTC timestamp the credential was enrolled.",
     )
+    statement: dict = field(
+        required=True,
+        description=(
+            "The root-signed enrollment statement (idkit.enrollment) — what "
+            "turns this agent-writable row into evidence. Re-verified at every "
+            "use against the root from autonomy.identity.personal; a passkey "
+            "without one is not a legitimate recipient and cannot be promoted."
+        ),
+    )
 
     @classmethod
     def validate(cls, payload: Any) -> None:
         super().validate(payload)
         if not isinstance(payload, dict):
             return
+        stmt = payload.get("statement")
+        if not isinstance(stmt, dict):
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'statement' must be the root-signed enrollment "
+                "statement object"
+            )
+        from tools.network.idkit.enrollment import PasskeyEnrollmentStatement
+        from tools.network.idkit.errors import IdkitError
+        try:
+            PasskeyEnrollmentStatement.from_dict(stmt)
+        except IdkitError as exc:
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'statement' is malformed: {exc}"
+            ) from exc
         cred = _require_str(payload, "credential_id", cls.__name__,
                             max_len=MAX_CREDENTIAL_ID_B64)
         if not _B64URL_RE.match(cred):

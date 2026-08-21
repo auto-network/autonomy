@@ -161,6 +161,106 @@ async function mintEnrollmentStatement(fields, rootSigningKey) {
   return { ...binding, signature };
 }
 
+function bytesToB64u(bytes) {
+  let binary = '';
+  const view = new Uint8Array(bytes);
+  for (let i = 0; i < view.length; i += 1) binary += String.fromCharCode(view[i]);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+/** The whole one-call promotable-passkey enrollment, in the browser. Assembles
+ *  the proven pieces above; the WebAuthn calls (create/get) are the only part
+ *  that needs a real authenticator (Face ID). Returns the server's register
+ *  response.
+ *
+ *  `root` is `{ signingKey: CryptoKey, publicHex }` — the personal root, held
+ *  only for this ceremony and zeroed by the caller after. `credentials`
+ *  defaults to `navigator.credentials`; `fetchImpl` to same-origin `fetch`. */
+async function enrollPasskey({
+  root,
+  label = 'This device',
+  credentials = (typeof navigator !== 'undefined' ? navigator.credentials : null),
+  fetchImpl = (typeof fetch !== 'undefined' ? fetch : null),
+  now = Date.now(),
+}) {
+  const post = (path, body) => fetchImpl(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify(body || {}),
+  });
+
+  const minted = await (await post('/api/identity/passkey/register-options', {})).json();
+  if (!minted.ok) throw new Error(`register-options failed: ${minted.error || '?'}`);
+  const pk = minted.options;
+  pk.challenge = base64UrlToBytes(pk.challenge);
+  pk.user.id = base64UrlToBytes(pk.user.id);
+  (pk.excludeCredentials || []).forEach((c) => { c.id = base64UrlToBytes(c.id); });
+  pk.extensions = prfEvalExtension();
+
+  const cred = await credentials.create({ publicKey: pk });
+  if (!cred) throw new Error('enrollment was cancelled');
+
+  const prfOutput = await evaluatePrf(cred.getClientExtensionResults(), async () => {
+    const asrt = await credentials.get({
+      publicKey: {
+        // Throwaway: the PRF output is a function of the salt and the
+        // credential, not the challenge, and this assertion is never sent to
+        // the server — we only read its PRF result.
+        challenge: webCrypto.getRandomValues(new Uint8Array(32)),
+        rpId: minted.rp_id,
+        allowCredentials: [{ type: 'public-key', id: cred.rawId }],
+        userVerification: 'required',
+        extensions: prfEvalExtension(),
+      },
+    });
+    return asrt.getClientExtensionResults();
+  });
+
+  const { credentialPublicKeyHex, signCount } =
+    attestedCredential(cred.response.getAuthenticatorData());
+
+  let provisioningPublicKey = null;
+  if (prfOutput) {
+    provisioningPublicKey = (await deriveProvisioningKey(prfOutput)).publicKeyHex;
+  }
+
+  const transports = (cred.response.getTransports && cred.response.getTransports()) || [];
+  const statement = await mintEnrollmentStatement({
+    credentialId: bytesToB64u(cred.rawId),
+    credentialPublicKey: credentialPublicKeyHex,
+    rpId: minted.rp_id,
+    origin: minted.origin,
+    nonce: minted.nonce,
+    createdHlc: [now, 0],
+    signer: root.publicHex,
+    initialSignCount: signCount,
+    provisioningPublicKey,
+    label,
+    transports,
+  }, root.signingKey);
+
+  const result = await (await post('/api/identity/passkey/register', {
+    label,
+    credential: {
+      id: cred.id,
+      rawId: bytesToB64u(cred.rawId),
+      type: cred.type,
+      authenticatorAttachment: cred.authenticatorAttachment || undefined,
+      clientExtensionResults:
+        (cred.getClientExtensionResults && cred.getClientExtensionResults()) || {},
+      response: {
+        clientDataJSON: bytesToB64u(cred.response.clientDataJSON),
+        attestationObject: bytesToB64u(cred.response.attestationObject),
+        transports,
+      },
+    },
+    statement,
+  })).json();
+  if (!result.ok) throw new Error(`register failed: ${result.error || '?'}`);
+  return result;
+}
+
 export {
   ENROLLMENT_DOMAIN,
   ENROLLMENT_VERSION,
@@ -173,4 +273,5 @@ export {
   deriveProvisioningKey,
   evaluatePrf,
   attestedCredential,
+  enrollPasskey,
 };

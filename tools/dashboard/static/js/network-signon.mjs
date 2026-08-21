@@ -13,6 +13,7 @@ import {
 import { derivePersona } from './ceremony/ledger-event.js';
 import { createBrowserStorage } from './ceremony/storage.js';
 import { wakeVault } from './ceremony/vault-unlock.js';
+import { enrollPasskey } from './ceremony/enrollment.js';
 
 var CryptoKeyConstructor = globalThis.CryptoKey;
 if (
@@ -1190,6 +1191,7 @@ var signRegistryRequestCore;
       canonicalJson: canonicalJson,
       decryptArmor: decryptArmor,
       wakeVault: wakeVault,
+      enrollPasskey: enrollPasskey,
       encryptArmor: encryptArmor,
       openPersonalRoot: _openPersonalRoot,
       deriveEncapsulationKeypair: deriveEncapsulationKeypair,

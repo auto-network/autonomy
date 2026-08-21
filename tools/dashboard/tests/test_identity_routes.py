@@ -167,16 +167,37 @@ def _make_attestation(challenge_b64url: str, *, rp_id: str, origin: str,
     }
 
 
-def _enroll(client, *, host=HOST, label=None, cred_id=b"test-credential-0001"):
+def _statement_for(root, credential, opts):
+    """The root-signed enrollment statement the register route requires, minted
+    from a built attestation + its options — the test-side mirror of what the
+    browser does. The tests hold the identity's root, so this verifies for real."""
+    from tools.network.idkit import enrollment
+    auth = cbor2.loads(_b64url_decode(
+        credential["response"]["attestationObject"]))["authData"]
+    cred_id_len = int.from_bytes(auth[53:55], "big")
+    return enrollment.mint(
+        root=root,
+        credential_id=credential["rawId"],
+        credential_public_key=auth[55 + cred_id_len:].hex(),
+        rp_id=opts["rp_id"],
+        origin=opts["origin"],
+        nonce=opts["nonce"],
+        created_hlc=(0, 0),
+        initial_sign_count=int.from_bytes(auth[33:37], "big"),
+    ).to_dict()
+
+
+def _enroll(client, root, *, host=HOST, label=None, cred_id=b"test-credential-0001"):
     """Full happy-path ceremony against *host*; returns the verify response."""
     opts = client.post("/api/identity/passkey/register-options", json={},
                        headers={"host": host})
     assert opts.status_code == 200, opts.text
     body = opts.json()
-    challenge = body["options"]["challenge"]
     credential = _make_attestation(
-        challenge, rp_id=body["rp_id"], origin=body["origin"], cred_id=cred_id)
-    payload = {"credential": credential}
+        body["options"]["challenge"], rp_id=body["rp_id"], origin=body["origin"],
+        cred_id=cred_id)
+    payload = {"credential": credential,
+               "statement": _statement_for(root, credential, body)}
     if label is not None:
         payload["label"] = label
     return client.post("/api/identity/passkey/register", json=payload,
@@ -215,7 +236,7 @@ def test_status_identity_alone_still_needs_onboarding(env, root):
 
 def test_status_fully_enrolled(env, root):
     _store_identity(env, root)
-    assert _enroll(env).status_code == 200
+    assert _enroll(env, root).status_code == 200
     body = env.get("/api/identity/status").json()
     assert body["onboarding_needed"] is False
     assert len(body["passkeys"]) == 1
@@ -442,7 +463,7 @@ def test_options_challenges_are_unique(env, root):
 
 def test_register_happy_path_stores_credential(env, root):
     _store_identity(env, root)
-    r = _enroll(env, label="This device")
+    r = _enroll(env, root, label="This device")
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["rp_id"] == "localhost"
@@ -463,7 +484,7 @@ def test_register_happy_path_stores_credential(env, root):
 
 def test_register_ts_net_end_to_end(env, root):
     _store_identity(env, root)
-    r = _enroll(env, host=TSNET_HOST, cred_id=b"tsnet-credential-01")
+    r = _enroll(env, root, host=TSNET_HOST, cred_id=b"tsnet-credential-01")
     assert r.status_code == 200, r.text
     assert r.json()["rp_id"] == TSNET_HOST
 
@@ -485,7 +506,8 @@ def test_register_challenge_is_single_use(env, root):
     credential = _make_attestation(
         opts["options"]["challenge"], rp_id="localhost",
         origin="https://localhost:8080")
-    first = env.post("/api/identity/passkey/register", json={"credential": credential})
+    first = env.post("/api/identity/passkey/register", json={
+        "credential": credential, "statement": _statement_for(root, credential, opts)})
     assert first.status_code == 200
     replay = env.post("/api/identity/passkey/register", json={"credential": credential})
     assert replay.status_code == 400
@@ -583,12 +605,14 @@ def test_two_browsers_can_complete_concurrent_registration_options(env, root):
     first = _make_attestation(
         opts1["options"]["challenge"], rp_id="localhost",
         origin="https://localhost:8080", cred_id=b"browser-one-credential")
-    r = env.post("/api/identity/passkey/register", json={"credential": first})
+    r = env.post("/api/identity/passkey/register", json={
+        "credential": first, "statement": _statement_for(root, first, opts1)})
     assert r.status_code == 200, r.text
     second = _make_attestation(
         opts2["options"]["challenge"], rp_id="localhost",
         origin="https://localhost:8080", cred_id=b"browser-two-credential")
-    r2 = env.post("/api/identity/passkey/register", json={"credential": second})
+    r2 = env.post("/api/identity/passkey/register", json={
+        "credential": second, "statement": _statement_for(root, second, opts2)})
     assert r2.status_code == 200, r2.text
 
 
@@ -602,7 +626,9 @@ def test_new_ceremony_leaves_other_hosts_pending(env, root):
     credential = _make_attestation(
         opts_local["options"]["challenge"], rp_id="localhost",
         origin="https://localhost:8080")
-    r = env.post("/api/identity/passkey/register", json={"credential": credential},
+    r = env.post("/api/identity/passkey/register", json={
+        "credential": credential,
+        "statement": _statement_for(root, credential, opts_local)},
                  headers={"host": HOST})
     assert r.status_code == 200, r.text
 
@@ -647,8 +673,8 @@ def test_register_refuses_webauthn_get_type(env, root):
 
 def test_register_refuses_duplicate_credential(env, root):
     _store_identity(env, root)
-    assert _enroll(env).status_code == 200
-    r = _enroll(env)  # same cred_id, fresh challenge
+    assert _enroll(env, root).status_code == 200
+    r = _enroll(env, root)  # same cred_id, fresh challenge
     assert r.status_code == 409
     assert "already enrolled" in r.json()["error"]
 
@@ -674,7 +700,8 @@ def test_register_unknown_transports_are_dropped(env, root):
         opts["options"]["challenge"], rp_id="localhost",
         origin="https://localhost:8080")
     credential["response"]["transports"] = ["internal", "telepathy"]
-    r = env.post("/api/identity/passkey/register", json={"credential": credential})
+    r = env.post("/api/identity/passkey/register", json={
+        "credential": credential, "statement": _statement_for(root, credential, opts)})
     assert r.status_code == 200
     assert r.json()["transports"] == ["internal"]
 
@@ -683,7 +710,7 @@ def test_second_device_excluded_from_reenrollment(env, root):
     """Options after an enrollment carry excludeCredentials for the same
     RP ID, so the same authenticator isn't double-enrolled."""
     _store_identity(env, root)
-    first = _enroll(env)
+    first = _enroll(env, root)
     assert first.status_code == 200
     opts = env.post("/api/identity/passkey/register-options", json={}).json()
     excluded = [c["id"] for c in opts["options"].get("excludeCredentials", [])]
