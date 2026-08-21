@@ -95,6 +95,7 @@ SESSION_DEFAULTS: dict[str, Any] = {
     "entry_count": 0,
     "context_tokens": 0,
     "last_activity": None,
+    "last_input_at": None,
     "last_message": "",
     "topics": "[]",
     "todos": [],

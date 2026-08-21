@@ -14,6 +14,7 @@ def make_session(
     last_message="", entry_count=100, context_tokens=50000,
     is_live=True, topics="[]",
     harness="claude", harness_state="{}", model=None,
+    last_input_at=None,
 ):
     return {
         "session_id": session_id,
@@ -24,6 +25,7 @@ def make_session(
         "last_message": last_message,
         "entry_count": entry_count,
         "context_tokens": context_tokens,
+        "last_input_at": last_input_at,
         "topics": topics,
         "harness": harness,
         "harness_state": harness_state,

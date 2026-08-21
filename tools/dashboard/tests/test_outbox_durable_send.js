@@ -85,6 +85,8 @@ describe('outbox durable send + reconciliation', () => {
     const call = h.fetchCalls.find((c) => c.url === '/api/session/send');
     assert.ok(call, 'should POST to /api/session/send');
     assert.equal(JSON.parse(call.opts.body).message, 'hello world');
+    assert.equal(JSON.parse(call.opts.body).client_id, 'ob_a');
+    assert.equal(store.lastInputAt, 0.001, 'successful direct send updates the local input timestamp');
   });
 
   it('stageOutboxSend persists synchronously before the POST resolves', async () => {

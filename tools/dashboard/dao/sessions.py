@@ -156,6 +156,7 @@ def get_active_sessions(threshold: int = 600) -> list[dict]:
             "age_seconds": round(age),
             "active": age < 60,
             "latest": row.get("last_message", ""),
+            "last_input_at": row.get("last_input_at"),
             "type": row["type"],
             "tmux_session": row["tmux_name"],
             "session_uuid": row.get("session_uuid"),

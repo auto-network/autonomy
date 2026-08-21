@@ -505,15 +505,20 @@
       // Options match the dropdown-toggle partial contract: [{k, l}, ...]
       activeSortOptions: [
         {k: 'lastActivity', l: 'Recent Activity'},
+        {k: 'recentInput',  l: 'Recent Input'},
         {k: 'idle',         l: 'Longest Idle'},
         {k: 'turns',        l: 'Most Turns'},
         {k: 'ctx',          l: 'Most Context'},
       ],
       activeSort: (function() {
         var saved = localStorage.getItem('sessionsActiveSort');
-        var allowed = ['lastActivity', 'idle', 'turns', 'ctx'];
+        var allowed = ['lastActivity', 'recentInput', 'idle', 'turns', 'ctx'];
         return allowed.indexOf(saved) !== -1 ? saved : 'lastActivity';
       })(),
+      activeSortDirection: localStorage.getItem('sessionsActiveSortDirection') === 'asc' ? 'asc' : 'desc',
+      _activeOrder: [],
+      _activeOrderReady: false,
+      _activeOrderNeedsInitialData: true,
 
       // Booting sessions: optimistic pending tiles + any live session the
       // lifecycle derivation still marks as starting up (startupVisible).
@@ -545,28 +550,98 @@
 
       get sortedInteractive() {
         var arr = this.activeInteractive.slice();
-        var mode = this.activeSort;
-        var now = Date.now() / 1000;
+        if (!this._activeOrderReady) return arr;
+        var positions = {};
+        for (var i = 0; i < this._activeOrder.length; i++) {
+          positions[this._activeOrder[i]] = i;
+        }
         arr.sort(function(a, b) {
-          switch (mode) {
-            case 'idle': {
-              var ai = a.last_activity ? now - a.last_activity : -Infinity;
-              var bi = b.last_activity ? now - b.last_activity : -Infinity;
-              return bi - ai;
-            }
-            case 'turns':
-              return (b.entry_count || 0) - (a.entry_count || 0);
-            case 'ctx':
-              return (b.context_tokens || 0) - (a.context_tokens || 0);
-            case 'lastActivity':
-            default: {
-              var av = a.last_activity || -Infinity;
-              var bv = b.last_activity || -Infinity;
-              return bv - av;
-            }
-          }
+          var ai = positions[a.session_id];
+          var bi = positions[b.session_id];
+          if (ai === undefined) ai = Number.MAX_SAFE_INTEGER;
+          if (bi === undefined) bi = Number.MAX_SAFE_INTEGER;
+          return ai - bi;
         });
         return arr;
+      },
+
+      _activeSortMetric(s) {
+        switch (this.activeSort) {
+          case 'recentInput':
+            // Never-contacted sessions are oldest: first in ascending order,
+            // last in descending order.
+            return s.last_input_at || -Infinity;
+          case 'idle':
+            // Negating activity makes an older timestamp the larger metric,
+            // so the default descending direction still means Longest Idle.
+            return -(s.last_activity || s.created_at || 0);
+          case 'turns':
+            return s.entry_count || 0;
+          case 'ctx':
+            return s.context_tokens || 0;
+          case 'lastActivity':
+          default:
+            return s.last_activity || -Infinity;
+        }
+      },
+
+      refreshActiveOrder() {
+        var self = this;
+        var arr = this.interactive.filter(function(s) { return !self._isLaunching(s); });
+        var prior = {};
+        for (var i = 0; i < this._activeOrder.length; i++) prior[this._activeOrder[i]] = i;
+        var direction = this.activeSortDirection === 'asc' ? 1 : -1;
+        arr.sort(function(a, b) {
+          var av = self._activeSortMetric(a);
+          var bv = self._activeSortMetric(b);
+          if (av < bv) return -1 * direction;
+          if (av > bv) return 1 * direction;
+          var ai = prior[a.session_id];
+          var bi = prior[b.session_id];
+          if (ai !== undefined || bi !== undefined) {
+            if (ai === undefined) ai = Number.MAX_SAFE_INTEGER;
+            if (bi === undefined) bi = Number.MAX_SAFE_INTEGER;
+            return ai - bi;
+          }
+          return (b.created_at || 0) - (a.created_at || 0);
+        });
+        this._activeOrder = arr.map(function(s) { return s.session_id; });
+        this._activeOrderReady = true;
+        if (arr.length > 0) this._activeOrderNeedsInitialData = false;
+      },
+
+      _reconcileActiveOrder() {
+        if (!this._activeOrderReady) return;
+        var self = this;
+        var active = this.interactive.filter(function(s) { return !self._isLaunching(s); });
+        var current = {};
+        for (var i = 0; i < active.length; i++) current[active[i].session_id] = true;
+        var next = this._activeOrder.filter(function(id) { return !!current[id]; });
+        var seen = {};
+        for (var j = 0; j < next.length; j++) seen[next[j]] = true;
+        // Membership changes are allowed to appear immediately, but never
+        // disturb the relative positions of cards the operator is watching.
+        for (var k = 0; k < active.length; k++) {
+          if (!seen[active[k].session_id]) next.push(active[k].session_id);
+        }
+        var changed = next.length !== this._activeOrder.length;
+        for (var n = 0; !changed && n < next.length; n++) {
+          if (next[n] !== this._activeOrder[n]) changed = true;
+        }
+        if (changed) this._activeOrder = next;
+      },
+
+      toggleActiveSortDirection() {
+        this.activeSortDirection = this.activeSortDirection === 'desc' ? 'asc' : 'desc';
+        localStorage.setItem('sessionsActiveSortDirection', this.activeSortDirection);
+        this._updateFromStore();
+        this.refreshActiveOrder();
+      },
+
+      activeSortDirectionTitle() {
+        return this.activeSortDirection === 'desc'
+          ? 'Descending order. Tap for ascending.'
+          : 'Ascending order. Tap for descending.';
       },
 
       // --- Recent Sessions: filter + resume state ---
@@ -734,7 +809,11 @@
         }, 150);
       },
       init() {
-        this.$watch('activeSort', (v) => localStorage.setItem('sessionsActiveSort', v));
+        this.$watch('activeSort', (v) => {
+          localStorage.setItem('sessionsActiveSort', v);
+          this._updateFromStore();
+          this.refreshActiveOrder();
+        });
         this.$watch('recentSort', (v) => {
           localStorage.setItem('recentSort', v);
           this._fetchRecent();
@@ -749,9 +828,29 @@
 
         // Build session list from the shared session store.
         this._updateFromStore();
+        this.refreshActiveOrder();
         var self = this;
         this._onStoreChanged = function() { self._scheduleStoreSync(); };
         window.addEventListener('sessions:store-changed', this._onStoreChanged);
+
+        // Desktop remounts this component when Sessions is entered; mobile
+        // preserves it behind the session-view overlay. Refresh at the shared
+        // foreground signal so both navigation models produce a fresh order
+        // before the operator starts scanning the list.
+        this._onSessionsNavigated = function(e) {
+          if (e && e.detail && e.detail.path === '/sessions') {
+            self._updateFromStore();
+            self.refreshActiveOrder();
+          }
+        };
+        window.addEventListener('app:navigated', this._onSessionsNavigated);
+        this._onSessionsVisible = function() {
+          if (document.visibilityState === 'visible' && window.location.pathname === '/sessions') {
+            self._updateFromStore();
+            self.refreshActiveOrder();
+          }
+        };
+        document.addEventListener('visibilitychange', this._onSessionsVisible);
 
         // Fetch recent sessions (from graph.db, not monitor). Registry churn
         // invalidates the recent list; we refresh on that signal instead of
@@ -1003,6 +1102,7 @@
             is_live: s.isLive,
             created_at: s.startedAt || 0,
             last_activity: s.lastActivity || 0,
+            last_input_at: s.lastInputAt || 0,
             latest: lastEntry ? (lastEntry.content || '').slice(0, 150) : (s.lastMessage || ''),
             type: s.sessionType || 'terminal',
             session_type: _deriveSessionType(s),
@@ -1062,6 +1162,8 @@
           this.interactive = all.filter(s =>
             s.session_id && interactiveTypes.indexOf(s.type) !== -1
           );
+          if (this._activeOrderNeedsInitialData) this.refreshActiveOrder();
+          else this._reconcileActiveOrder();
           this.loading = false;
 
           // [lc] phase-change + launching-membership transitions. We diff
@@ -1333,6 +1435,8 @@
         if (this._launchSweep) { clearInterval(this._launchSweep); this._launchSweep = null; }
         if (this._onStoreChanged) window.removeEventListener('sessions:store-changed', this._onStoreChanged);
         if (this._onRegistryChanged) window.removeEventListener('sessions:registry-changed', this._onRegistryChanged);
+        if (this._onSessionsNavigated) window.removeEventListener('app:navigated', this._onSessionsNavigated);
+        if (this._onSessionsVisible) document.removeEventListener('visibilitychange', this._onSessionsVisible);
         if (this._workspaceHandler && typeof window.unregisterHandler === 'function') {
           window.unregisterHandler('worktrees', this._workspaceHandler);
           this._workspaceHandler = null;

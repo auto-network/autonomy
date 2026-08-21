@@ -109,6 +109,7 @@ document.addEventListener('alpine:init', function() {
         store.isLive = s.is_live !== false;
         store.startedAt = s.started_at || 0;
         if (s.last_activity) store.lastActivity = s.last_activity;
+        if (s.last_input_at) store.lastInputAt = s.last_input_at;
         if (s.entry_count) store.entryCount = s.entry_count;
         if (s.context_tokens) store.contextTokens = s.context_tokens;
         // An EMPTY last_message never replaces a real one. A completed Codex
@@ -287,10 +288,16 @@ window.sendCurrentOutbox = async function(sessionId, options) {
       body: JSON.stringify({
         message: body,
         tmux_session: options.tmuxSession || sessionId,
+        client_id: o.localId,
       }),
     });
     var data = await res.json();
     ok = !!(res && res.ok && data && data.ok);
+    if (ok) {
+      var inputAt = Number(data.last_input_at) || (Number(o.ts) / 1000);
+      if (inputAt > (s.lastInputAt || 0)) s.lastInputAt = inputAt;
+      _emitSessionStoreChanged('input');
+    }
   } catch (e) {
     ok = false;
   }
@@ -408,6 +415,9 @@ window.getSessionStore = function(sessionId) {
       dispatchNagEnabled: false,
       sizeMB: '0',
       lastActivity: 0,
+      // Latest successful direct composer send. Deliberately independent of
+      // lastActivity, which advances for assistant output and tool traffic.
+      lastInputAt: 0,
       lastMessage: '',
       draftText: '',
       // Pending/optimistic outbox message (auto-xkdoi). null when idle; else
@@ -979,6 +989,7 @@ window.ensureSessionMessages = function() {
       store.isLive = s.is_live;
       store.startedAt = s.started_at || 0;
       if (s.last_activity) store.lastActivity = s.last_activity;
+      if (s.last_input_at) store.lastInputAt = s.last_input_at;
       // An EMPTY last_message never replaces a real one. A completed Codex
         // turn ends with codex_task_complete (internal, content null), so a
         // blanket `!== undefined` blanked the card preview every time a turn

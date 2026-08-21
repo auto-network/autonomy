@@ -14,6 +14,7 @@ import os
 import sqlite3
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 from tools.data_paths import resolve_store
@@ -73,6 +74,10 @@ CREATE TABLE IF NOT EXISTS tmux_sessions (
     created_at          REAL NOT NULL,
     file_offset         INTEGER DEFAULT 0,
     last_activity       REAL,
+    -- Durable timestamp of the latest direct operator send accepted by the
+    -- dashboard composer. Unlike last_activity, assistant/tool traffic never
+    -- advances this value.
+    last_input_at       REAL,
     last_message        TEXT DEFAULT '',
     entry_count         INTEGER DEFAULT 0,
     context_tokens      INTEGER DEFAULT 0,
@@ -214,6 +219,37 @@ def _backfill_new_columns(conn: sqlite3.Connection) -> None:
         logger.info("dashboard_db: backfilled %d rows with resolution_dir/session_uuids/curr_jsonl_file", updated)
 
 
+def _backfill_last_input_at(conn: sqlite3.Connection) -> None:
+    """Best-effort legacy seed from the transcript tracker.
+
+    Older rows have no dedicated input timestamp.  The harness tracker may
+    still hold its most recently observed user-message timestamp; copy that
+    once when the durable column is introduced.  New writes use the narrower
+    dashboard-send boundary and no longer depend on volatile harness state.
+    """
+    rows = conn.execute(
+        "SELECT tmux_name, harness_state FROM tmux_sessions"
+    ).fetchall()
+    updated = 0
+    for row in rows:
+        try:
+            state = json.loads(row[1] or "{}")
+            raw = state.get("last_user_message_at") if isinstance(state, dict) else None
+            if not isinstance(raw, str) or not raw:
+                continue
+            timestamp = datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        conn.execute(
+            "UPDATE tmux_sessions SET last_input_at=? WHERE tmux_name=?",
+            (timestamp, row[0]),
+        )
+        updated += 1
+    conn.commit()
+    if updated:
+        logger.info("dashboard_db: backfilled last_input_at for %d rows", updated)
+
+
 def init_db(db_path: Path | None = None) -> None:
     """Initialise dashboard.db and create schema. Idempotent."""
     global _conn, _conn_owner, _active_path
@@ -270,6 +306,15 @@ def init_db(db_path: Path | None = None) -> None:
         _conn.execute("SELECT harness_state FROM tmux_sessions LIMIT 0")
     except sqlite3.OperationalError:
         _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN harness_state TEXT NOT NULL DEFAULT '{}'")
+    # Migrate: durable direct-input timestamp. This is deliberately separate
+    # from volatile harness_state and from last_activity (which includes
+    # assistant output and tool traffic).
+    try:
+        _conn.execute("SELECT last_input_at FROM tmux_sessions LIMIT 0")
+    except sqlite3.OperationalError:
+        _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN last_input_at REAL")
+        _conn.commit()
+        _backfill_last_input_at(_conn)
     # Migrate: add resolution_dir, session_uuids, curr_jsonl_file columns (Phase 0)
     try:
         _conn.execute("SELECT resolution_dir FROM tmux_sessions LIMIT 0")
@@ -1222,6 +1267,23 @@ def update_topics(tmux_name: str, topics: list[str]) -> None:
     conn.execute("UPDATE tmux_sessions SET topics=? WHERE tmux_name=?",
                  (json.dumps(topics), tmux_name))
     conn.commit()
+
+
+def update_last_input_at(tmux_name: str, timestamp: float | None = None) -> float:
+    """Record one successful direct operator send, monotonically.
+
+    Returns the timestamp offered to the row so the sending browser can update
+    its already-local session store without another request.
+    """
+    value = float(timestamp if timestamp is not None else time.time())
+    conn = get_conn()
+    conn.execute(
+        "UPDATE tmux_sessions SET last_input_at="
+        "MAX(COALESCE(last_input_at, 0), ?) WHERE tmux_name=?",
+        (value, tmux_name),
+    )
+    conn.commit()
+    return value
 
 
 def update_todos(tmux_name: str, todos: list[dict]) -> None:

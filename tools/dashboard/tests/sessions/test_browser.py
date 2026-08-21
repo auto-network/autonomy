@@ -516,6 +516,179 @@ class TestStatsRow:
         assert "80K" in text or "120K" in text or "250K" in text
 
 
+class TestStableActiveOrdering:
+    """Active cards move only at an explicit ordering boundary."""
+
+    def test_live_activity_does_not_move_cards_until_foreground(self, h):
+        before = ab_eval("""
+            var root = document.querySelector('[x-data="sessionsPage()"]');
+            var d = root && root._x_dataStack && root._x_dataStack[0];
+            if (!d) return null;
+            d.activeSort = 'lastActivity';
+            d.activeSortDirection = 'desc';
+            d.refreshActiveOrder();
+            var cards = document.querySelectorAll(
+              '[data-testid="active-sessions-section"] [data-testid="session-card"]'
+            );
+            var ids = Array.from(cards).map(function(c) { return c.dataset.sessionId; });
+            var target = ids[ids.length - 1];
+            window.__stableSortTest = {
+              target: target,
+              previous: Alpine.store('sessions')[target].lastActivity,
+              before: ids,
+            };
+            Alpine.store('sessions')[target].lastActivity = Date.now() / 1000 + 10000;
+            window.dispatchEvent(new CustomEvent('sessions:store-changed', {detail:{reason:'test'}}));
+            return window.__stableSortTest;
+        """)
+        assert before and before["target"]
+        time.sleep(0.5)
+        while_visible = ab_eval("""
+            return Array.from(document.querySelectorAll(
+              '[data-testid="active-sessions-section"] [data-testid="session-card"]'
+            )).map(function(c) { return c.dataset.sessionId; });
+        """)
+        assert while_visible == before["before"], (
+            "A live activity update reordered cards while the list was visible"
+        )
+
+        after = ab_eval("""
+            window.dispatchEvent(new CustomEvent('app:navigated', {detail:{path:'/sessions'}}));
+            var root = document.querySelector('[x-data="sessionsPage()"]');
+            return root._x_dataStack[0].sortedInteractive.map(function(s) { return s.session_id; });
+        """)
+        assert after[0] == before["target"], "Foregrounding Sessions did not apply the latest order"
+
+        ab_eval("""
+            var t = window.__stableSortTest;
+            Alpine.store('sessions')[t.target].lastActivity = t.previous;
+            var root = document.querySelector('[x-data="sessionsPage()"]');
+            root._x_dataStack[0]._updateFromStore();
+            root._x_dataStack[0].refreshActiveOrder();
+            delete window.__stableSortTest;
+            return true;
+        """)
+
+    def test_recent_input_and_direction_toggle(self, h):
+        descending = ab_eval("""
+            var root = document.querySelector('[x-data="sessionsPage()"]');
+            var d = root && root._x_dataStack && root._x_dataStack[0];
+            if (!d) return null;
+            d.activeSort = 'recentInput';
+            d.activeSortDirection = 'desc';
+            d.refreshActiveOrder();
+            return d.sortedInteractive.map(function(s) { return s.session_id; });
+        """)
+        assert descending[:4] == [
+            "auto-test-beta", "host-test-delta", "auto-test-alpha", "auto-test-gamma"
+        ]
+        assert descending[-1] == "auto-test-epsilon", "A session with no input should be oldest"
+
+        ascending = ab_eval("""
+            var button = document.querySelector('[data-testid="active-sort-direction"]');
+            button.click();
+            var root = document.querySelector('[x-data="sessionsPage()"]');
+            var d = root._x_dataStack[0];
+            return {
+              ids: d.sortedInteractive.map(function(s) { return s.session_id; }),
+              label: d.activeSortDirectionTitle(),
+            };
+        """)
+        assert ascending["ids"][0] == "auto-test-epsilon"
+        assert "Ascending" in ascending["label"]
+
+        ab_eval("""
+            var root = document.querySelector('[x-data="sessionsPage()"]');
+            var d = root._x_dataStack[0];
+            d.activeSort = 'lastActivity';
+            d.activeSortDirection = 'desc';
+            localStorage.setItem('sessionsActiveSortDirection', 'desc');
+            d._updateFromStore();
+            d.refreshActiveOrder();
+            return true;
+        """)
+
+    def test_recent_input_is_available_in_sort_menu(self, h):
+        ab_eval("""
+            document.querySelector('[data-testid="active-sort-toggle"]').click();
+            return true;
+        """)
+        time.sleep(0.2)
+        options = ab_eval("""
+            var menu = document.querySelector('[data-testid="active-sort-toggle-menu"]');
+            return Array.from(menu.querySelectorAll('.sort-option'))
+              .map(function(o) { return o.textContent.trim(); });
+        """)
+        assert any("Recent Input" in option for option in options)
+        ab_eval("""
+            document.querySelector('[data-testid="active-sort-toggle"]').click();
+            return true;
+        """)
+
+
+class TestMobileToolbarLayout:
+    def test_long_org_name_cannot_wrap_launch_control(self, h):
+        ab_raw("set", "viewport", "320", "900")
+        ready = ab_eval("""
+            var root = document.querySelector('[x-data="sessionsPage()"]');
+            var d = root && root._x_dataStack && root._x_dataStack[0];
+            if (!d) return null;
+            window.__toolbarOrgState = {list: d.orgFilterList, selected: d.selectedOrg};
+            d.orgFilterList = [{
+              slug:'dynamic-benchmarking',
+              name:'Dynamic Benchmarking Organization With A Very Long Name',
+              color:'#10b981', initial:'D', favicon:null,
+            }];
+            d.selectedOrg = 'dynamic-benchmarking';
+            return true;
+        """)
+        assert ready
+        time.sleep(0.2)
+        state = ab_eval("""
+            var toolbar = document.querySelector('[data-testid="sessions-page-toolbar"]');
+            var launch = document.querySelector('[data-testid="session-launch-dropdown"]');
+            var value = document.querySelector('.sessions-org-filter-value');
+            var tr = toolbar.getBoundingClientRect();
+            var lr = launch.getBoundingClientRect();
+            return {
+              sameRow: lr.top >= tr.top && lr.bottom <= tr.bottom + 1,
+              launchRight: lr.right,
+              viewport: window.innerWidth,
+              truncated: value.scrollWidth > value.clientWidth,
+            };
+        """)
+        assert state["sameRow"], "Create-workspace control wrapped below the toolbar"
+        assert state["launchRight"] <= state["viewport"]
+        assert state["truncated"], "Long organization name was not ellipsized"
+
+        ab_eval("""
+            var root = document.querySelector('[data-testid="session-launch-dropdown"]');
+            root.querySelector('button').click();
+            return true;
+        """)
+        time.sleep(0.2)
+        menu = ab_eval("""
+            var root = document.querySelector('[data-testid="session-launch-dropdown"]');
+            var panel = root.querySelector('[x-show="open"]');
+            var r = panel.getBoundingClientRect();
+            return {left:r.left, right:r.right, width:r.width, viewport:window.innerWidth};
+        """)
+        assert menu["width"] > 0, "Create-workspace menu did not open"
+        assert menu["left"] >= 0 and menu["right"] <= menu["viewport"]
+
+        ab_eval("""
+            var launch = document.querySelector('[data-testid="session-launch-dropdown"]');
+            launch.querySelector('button').click();
+            var root = document.querySelector('[x-data="sessionsPage()"]');
+            var d = root._x_dataStack[0];
+            d.orgFilterList = window.__toolbarOrgState.list;
+            d.selectedOrg = window.__toolbarOrgState.selected;
+            delete window.__toolbarOrgState;
+            return true;
+        """)
+        ab_raw("set", "viewport", "430", "900")
+
+
 class TestRecentSessions:
     """Recent sessions section shows historical sessions."""
 
