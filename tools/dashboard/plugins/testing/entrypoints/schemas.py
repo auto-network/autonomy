@@ -19,6 +19,8 @@ from tools.graph.schemas.registry import (
 RUN_SET_ID = "dashboard.testing.run"
 OBSERVATION_SET_ID = "dashboard.testing.test-observation"
 TELEMETRY_SET_ID = "dashboard.testing.telemetry"
+USAGE_SET_ID = "dashboard.testing.usage"
+ERROR_SET_ID = "dashboard.testing.error"
 SCHEMA_REVISION = 1
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 _RUN_STATUSES = {"passed", "failed", "error", "stopped", "collected"}
@@ -189,3 +191,67 @@ class AgentTestTelemetryV1(SettingSchema):
         if not isinstance(payload.get("last_event"), str) or not _NAME_RE.fullmatch(payload["last_event"]):
             raise SchemaValidationError("last_event is invalid")
         _non_negative_number(payload, "last_at", 10**11)
+
+
+@home("organization")
+@publication_band(max="raw")
+@append_only_log
+class AgentTestUsageEventV1(SettingSchema):
+    """One immutable, argument-free Agent Test product-usage event."""
+
+    set_id = USAGE_SET_ID
+    schema_revision = SCHEMA_REVISION
+
+    session: str = field(required=True, description="Agent session using the feature.")
+    event: str = field(required=True, description="Bounded feature or outcome event name.")
+    recorded_at: float = field(required=True, description="Unix timestamp of feature use.")
+    agent_test_version: str = field(required=True, description="Agent Test client version reporting the event.")
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        super().validate(payload)
+        if not isinstance(payload, dict):
+            return
+        _required_text(payload, "session", 200)
+        if not isinstance(payload.get("event"), str) or not _NAME_RE.fullmatch(payload["event"]):
+            raise SchemaValidationError("event is invalid")
+        _non_negative_number(payload, "recorded_at", 10**11)
+        version = payload.get("agent_test_version")
+        if not isinstance(version, str) or len(version) > 40:
+            raise SchemaValidationError("agent_test_version must be a bounded string")
+
+
+@home("organization")
+@publication_band(max="raw")
+@append_only_log
+class AgentTestErrorEventV1(SettingSchema):
+    """One bounded operational error; test assertion failures remain run evidence."""
+
+    set_id = ERROR_SET_ID
+    schema_revision = SCHEMA_REVISION
+
+    session: str = field(required=True, description="Agent session that encountered the error.")
+    run_id: str = field(required=True, description="Associated run id, or an empty string outside a run.")
+    phase: str = field(required=True, description="Agent Test workflow phase that could not proceed.")
+    category: str = field(required=True, description="Stable machine-readable error classification.")
+    message: str = field(required=True, description="Bounded human-readable diagnostic without traceback spam.")
+    recorded_at: float = field(required=True, description="Unix timestamp when the error occurred.")
+    agent_test_version: str = field(required=True, description="Agent Test client version reporting the error.")
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        super().validate(payload)
+        if not isinstance(payload, dict):
+            return
+        _required_text(payload, "session", 200)
+        for name in ("phase", "category"):
+            if not isinstance(payload.get(name), str) or not _NAME_RE.fullmatch(payload[name]):
+                raise SchemaValidationError(f"{name} is invalid")
+        run_id = payload.get("run_id")
+        if not isinstance(run_id, str) or len(run_id) > 200:
+            raise SchemaValidationError("run_id must be a bounded string")
+        _required_text(payload, "message", 1000)
+        _non_negative_number(payload, "recorded_at", 10**11)
+        version = payload.get("agent_test_version")
+        if not isinstance(version, str) or len(version) > 40:
+            raise SchemaValidationError("agent_test_version must be a bounded string")

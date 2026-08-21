@@ -1,4 +1,4 @@
-"""Durable filesystem state for Agent Test runs."""
+"""Ephemeral run evidence and explicitly retained Agent Test artifacts."""
 
 from __future__ import annotations
 
@@ -43,10 +43,22 @@ def state_root(repo: Path) -> Path:
     if override:
         return Path(override).resolve()
     digest = hashlib.sha256(str(repo).encode()).hexdigest()[:10]
-    if Path("/workspace/output").is_dir():
-        return Path("/workspace/output/agent-test") / f"{repo.name}-{digest}"
-    xdg = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
-    return xdg / "agent-test" / f"{repo.name}-{digest}"
+    session = os.environ.get("AUTONOMY_SESSION", "local").strip() or "local"
+    safe_session = "".join(character if character.isalnum() or character in "-_" else "-" for character in session)
+    temporary = Path(os.environ.get("AGENT_TEST_TMPDIR", tempfile.gettempdir()))
+    return temporary / ".agent-test" / safe_session[:100] / f"{repo.name}-{digest}"
+
+
+def retained_root(root: Path) -> Path:
+    """Return the durable mirror used only after an explicit retain command."""
+    override = os.environ.get("AGENT_TEST_RETAIN_DIR", "").strip()
+    if override:
+        base = Path(override).resolve()
+    elif Path("/workspace/output").is_dir():
+        base = Path("/workspace/output/agent-test")
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "agent-test"
+    return base / root.name
 
 
 def new_run_id() -> str:
@@ -164,6 +176,9 @@ def resolve_manifest(root: Path, run_id: str | None) -> dict[str, Any] | None:
     if run_id:
         directory = run_dir(root, run_id)
         value = read_json(manifest_path(directory))
+        if not isinstance(value, dict):
+            directory = run_dir(retained_root(root), run_id)
+            value = read_json(manifest_path(directory))
         if not isinstance(value, dict):
             return None
         value["_directory"] = str(directory)

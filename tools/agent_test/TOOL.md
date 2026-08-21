@@ -1,7 +1,7 @@
 # Agent Test
 
 Agent Test is the supported agent-facing interface for pytest. Runs are
-asynchronous, complete evidence is retained, and every query is bounded.
+asynchronous, complete evidence is kept privately under `/tmp`, and every query is bounded.
 
 ```bash
 agent-test run tools/graph/tests/test_ops.py
@@ -19,6 +19,7 @@ agent-test failures <run-id>
 agent-test rerun-failures <run-id>
 agent-test trace <run-id> 1
 agent-test output <run-id> --limit-lines 40
+agent-test retain <run-id>
 agent-test coverage <run-id>
 agent-test baseline <run-id>
 agent-test capacity
@@ -28,7 +29,9 @@ agent-test stop
 ```
 
 Do not poll a live run. Do not start another run. Do not pipe Agent Test through
-`head`, `tail`, or `grep`; query the retained evidence instead.
+`head`, `tail`, or `grep`; query the temporary evidence instead. Use `retain`
+only when the raw run should outlive the session. Organization statistics are
+stored separately in Settings and do not depend on raw artifact retention.
 
 The resident supervisor launches isolated run process groups. Completion is
 delivered through the dashboard's typed task-notification endpoint for both

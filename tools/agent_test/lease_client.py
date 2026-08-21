@@ -44,14 +44,28 @@ def lease_request(action: str, **payload: Any) -> dict[str, Any]:
         return {"ok": False, "error": str(exc)[:1000], "unavailable": True}
 
 
-def telemetry_request(action: str = "event", event: str | None = None) -> dict[str, Any]:
+def telemetry_request(
+    action: str = "event",
+    event: str | None = None,
+    **payload_fields: Any,
+) -> dict[str, Any]:
     session = os.environ.get("AUTONOMY_SESSION", "").strip()
-    if event is not None and not session:
+    if action in {"event", "error"} and not session:
         return {"ok": False, "unavailable": True, "error": "no session identity"}
     base = os.environ.get("AGENT_TEST_DASHBOARD", "https://localhost:8080").rstrip("/")
-    payload: dict[str, Any] = {"action": action}
+    try:
+        from . import __version__
+    except ImportError:
+        __version__ = "unknown"
+    payload: dict[str, Any] = {
+        "action": action,
+        "agent_test_version": __version__,
+        **payload_fields,
+    }
     if event is not None:
         payload.update({"event": event, "session": session})
+    elif action == "error":
+        payload["session"] = session
     data = json.dumps(payload).encode()
     request = urllib.request.Request(
         f"{base}/api/plugins/testing/telemetry",
@@ -66,6 +80,23 @@ def telemetry_request(action: str = "event", event: str | None = None) -> dict[s
             return value if isinstance(value, dict) else {"ok": False, "error": "invalid response"}
     except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
         return {"ok": False, "error": str(exc)[:500], "unavailable": True}
+
+
+def error_request(
+    phase: str,
+    category: str,
+    message: str,
+    *,
+    run_id: str = "",
+) -> dict[str, Any]:
+    """Record one bounded operational failure without sending a traceback."""
+    return telemetry_request(
+        action="error",
+        phase=phase,
+        category=category,
+        message=" ".join(str(message).split())[:1000] or "unknown error",
+        run_id=str(run_id or "")[:200],
+    )
 
 
 def duration_request(action: str, **payload: Any) -> dict[str, Any]:

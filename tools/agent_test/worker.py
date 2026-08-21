@@ -18,6 +18,7 @@ from typing import Any
 from .environment import project_config
 from .lease_client import (
     duration_request,
+    error_request,
     lease_request,
     run_result_request,
     telemetry_request,
@@ -43,6 +44,8 @@ def _acquire_machine_lease(directory: Path, manifest: dict[str, Any]) -> tuple[s
     run_id = str(manifest["run_id"])
     lease_id = f"{session}:{run_id}"
     resources = manifest.get("resources") or {"tests": 1}
+    queue_reported = False
+    coordinator_error_reported = False
     while not _stop_requested:
         result = lease_request(
             "acquire",
@@ -50,6 +53,9 @@ def _acquire_machine_lease(directory: Path, manifest: dict[str, Any]) -> tuple[s
             session=session,
             run_id=run_id,
             resources=resources,
+            repository=str(manifest.get("repository") or "unknown"),
+            selectors=[str(value) for value in manifest.get("selectors") or []][:5],
+            selector_count=len(manifest.get("selectors") or []),
         )
         if result.get("ok") and result.get("state") == "granted":
             update_manifest(
@@ -65,6 +71,9 @@ def _acquire_machine_lease(directory: Path, manifest: dict[str, Any]) -> tuple[s
             )
             return lease_id, None
         if result.get("ok") and result.get("state") == "queued":
+            if not queue_reported:
+                telemetry_request(event="capacity_queued")
+                queue_reported = True
             update_manifest(
                 directory,
                 {
@@ -80,6 +89,14 @@ def _acquire_machine_lease(directory: Path, manifest: dict[str, Any]) -> tuple[s
             time.sleep(2)
             continue
         if result.get("unavailable") and mode == "auto":
+            if not coordinator_error_reported:
+                error_request(
+                    "admission",
+                    "coordinator_unavailable",
+                    str(result.get("error") or "dashboard unavailable"),
+                    run_id=run_id,
+                )
+                coordinator_error_reported = True
             update_manifest(
                 directory,
                 {
@@ -94,7 +111,12 @@ def _acquire_machine_lease(directory: Path, manifest: dict[str, Any]) -> tuple[s
             )
             time.sleep(2)
             continue
-        return None, str(result.get("error") or "machine capacity request failed")
+        detail = str(result.get("error") or "machine capacity request failed")
+        error_request("admission", "capacity_request", detail, run_id=run_id)
+        return None, detail
+    # A queued request has no granted lease_id to release in run()'s finally
+    # block, so explicitly remove its pending ledger row on cancellation.
+    lease_request("release", lease_id=lease_id)
     return None, "stopped while waiting for machine capacity"
 
 
@@ -248,13 +270,13 @@ def _notification_text(run_id: str, status: str, summary: dict[str, int], durati
     if status == "passed":
         return (
             f"Agent Test {run_id} passed: {summary['passed']} passed in {duration:.1f}s. "
-            "Evidence retained; no verification rerun is needed."
+            "Temporary evidence is available; no verification rerun is needed."
         )
     if status == "failed":
         total = summary["failed"] + summary["errors"]
         return (
             f"Agent Test {run_id} failed: {total} failure(s), {summary['passed']} passed "
-            f"in {duration:.1f}s. Full traces are retained. Next: "
+            f"in {duration:.1f}s. Full traces are available temporarily. Next: "
             f"`agent-test failures {run_id}`. Do not rerun unchanged."
         )
     return (
@@ -363,6 +385,8 @@ def run(directory: Path) -> int:
         )
         _notify(directory, final, _notification_text(run_id, status, summary, 0))
         telemetry_request(event=f"run_{status}")
+        if not _stop_requested:
+            error_request("admission", "capacity_terminal", lease_error, run_id=run_id)
         return 0
     update_manifest(
         directory,
@@ -435,9 +459,11 @@ def run(directory: Path) -> int:
                         )
                         if renewed.get("state") == "expired" or renew_failures >= 3:
                             launch_error = "machine-capacity lease could not be renewed safely"
+                            error_request("admission", "lease_renewal", launch_error, run_id=run_id)
                             os.killpg(os.getpid(), signal.SIGTERM)
     except OSError as exc:
         launch_error = str(exc)
+        error_request("execution", "process_start", launch_error, run_id=run_id)
     finally:
         if lease_id:
             released = lease_request("release", lease_id=lease_id)
@@ -508,6 +534,12 @@ def run(directory: Path) -> int:
     }
     if not run_result.get("ok"):
         run_history["detail"] = run_result.get("error")
+        error_request(
+            "persistence",
+            "run_history",
+            str(run_result.get("error") or "run history unavailable"),
+            run_id=run_id,
+        )
 
     duration_history: dict[str, Any] = {"state": "no_completed_tests"}
     if duration_observations:
@@ -525,6 +557,15 @@ def run(directory: Path) -> int:
         }
         if not duration_result.get("ok"):
             duration_history["detail"] = duration_result.get("error")
+            error_request(
+                "persistence",
+                "duration_history",
+                str(duration_result.get("error") or "duration history unavailable"),
+                run_id=run_id,
+            )
+
+    if status == "error" and not launch_error:
+        error_request("execution", "pytest_exit", f"pytest exited {exit_code}", run_id=run_id)
 
     final = update_manifest(
         directory,

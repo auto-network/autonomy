@@ -5860,6 +5860,11 @@ async def api_agent_test_leases(request):
     body = await request.json()
     if not isinstance(body, dict):
         return JSONResponse({"ok": False, "error": "JSON object required"}, status_code=400)
+    body = dict(body)
+    organization = api_auth.organization_scope_from_request(request)
+    if organization:
+        # Scope comes from the authenticated request, never from client JSON.
+        body["organization"] = organization
     action = str(body.get("action") or "status").strip()
     result = await asyncio.to_thread(_agent_test_leases.transact, action, body)
     status_code = 200 if result.get("ok") else 400

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -18,7 +19,7 @@ from .environment import (
     requested_resources,
     workspace_fingerprint,
 )
-from .lease_client import duration_request, lease_request, telemetry_request
+from .lease_client import duration_request, error_request, lease_request, telemetry_request
 from .planning import build_plan, changed_coverage, changed_lines
 from .store import (
     atomic_write_json,
@@ -29,6 +30,7 @@ from .store import (
     new_run_id,
     read_json,
     repository_root,
+    retained_root,
     resolve_manifest,
     run_dir,
     state_lock,
@@ -49,6 +51,9 @@ def _root() -> tuple[Path, Path]:
     repo = repository_root()
     root = state_root(repo)
     root.mkdir(parents=True, exist_ok=True)
+    # The default is a hidden per-session directory under /tmp. Keep the
+    # evidence owner-only even on hosts whose temporary directory is shared.
+    root.chmod(0o700)
     return repo, root
 
 
@@ -280,6 +285,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 directory,
                 {"status": "error", "message": f"launch failed: {exc}", "finished_at": utc_now()},
             )
+            error_request("launch", "supervisor_start", str(exc), run_id=run_id)
             print(f"Agent Test: could not launch managed run: {exc}", file=sys.stderr)
             return 2
         update_manifest(
@@ -296,7 +302,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     if guidance_first(root, "stage1-background-run-v1"):
         print(f"Started {run_id} in the background: {selected} selector(s).")
         print("Agent Test will notify this session when it finishes. Keep working; do not poll or start another run.")
-        print(f"Results remain available through: agent-test show {run_id}")
+        print(f"Temporary evidence is available through: agent-test show {run_id}")
+        print(f"Keep it after this session only if needed: agent-test retain {run_id}")
     else:
         print(f"Started {run_id} in background ({selected} selector(s)). Completion will be delivered here.")
     return 0
@@ -752,6 +759,38 @@ def cmd_stop(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_retain(args: argparse.Namespace) -> int:
+    """Copy one completed run from temporary state into workspace output."""
+    _repo, root = _root()
+    manifest = _manifest_or_error(root, args.run_id)
+    if manifest is None:
+        return 2
+    if manifest.get("status") in {"starting", "queued", "running", "stopping"}:
+        print("Agent Test: a live run cannot be retained; wait for its completion notification.", file=sys.stderr)
+        return 3
+    source = Path(manifest["_directory"])
+    destination = run_dir(retained_root(root), str(manifest["run_id"]))
+    if source.resolve() == destination.resolve() or destination.exists():
+        print(f"Agent Test: {manifest['run_id']} is already retained at {destination}")
+        return 0
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.copytree(source, destination)
+        update_manifest(
+            destination,
+            {
+                "retained_at": utc_now(),
+                "evidence_lifecycle": "durable",
+            },
+        )
+    except OSError as exc:
+        error_request("retention", "copy_failed", str(exc), run_id=str(manifest["run_id"]))
+        print(f"Agent Test: could not retain run: {exc}", file=sys.stderr)
+        return 2
+    print(f"Retained {manifest['run_id']} at {destination}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agent-test", description=__doc__)
     parser.add_argument("--version", action="version", version=__version__)
@@ -852,6 +891,10 @@ def build_parser() -> argparse.ArgumentParser:
     output.add_argument("--limit-lines", type=int, default=DEFAULT_OUTPUT_LINES)
     output.set_defaults(func=cmd_output)
 
+    retain = sub.add_parser("retain", help="copy one completed run into durable workspace output")
+    retain.add_argument("run_id", nargs="?")
+    retain.set_defaults(func=cmd_retain)
+
     stop = sub.add_parser("stop", help="stop only the owned live process group")
     stop.set_defaults(func=cmd_stop)
 
@@ -879,4 +922,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    command = str(args.command).replace("-", "_")
+    if command == "run":
+        if getattr(args, "changed", False):
+            command = "run_changed"
+        elif getattr(args, "profile", None):
+            command = "run_profile"
+        else:
+            command = "run_explicit"
+    telemetry_request(event=f"command_{command}"[:32])
     return int(args.func(args))

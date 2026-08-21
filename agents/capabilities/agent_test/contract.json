@@ -1,7 +1,7 @@
 {
   "name": "test_execution",
   "version": 1,
-  "summary": "Run and inspect Python tests through a retained, asynchronous agent-safe interface.",
+  "summary": "Run and inspect Python tests through a bounded, asynchronous agent-safe interface.",
   "ops": [
     {
       "name": "run",
@@ -25,7 +25,7 @@
     },
     {
       "name": "inspect",
-      "summary": "Read bounded retained results without executing tests again.",
+      "summary": "Read bounded temporary results without executing tests again.",
       "input_schema": {
         "type": "object",
         "properties": {"run_id": {"type": "string"}},
