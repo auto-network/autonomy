@@ -469,41 +469,10 @@ def _close(client, scope: str, entry_id: str) -> None:
     flow that wants a reopenable entry has to close it first."""
     client.post(f"/api/{scope}/questions/{entry_id}/close")
 
-
-
-
-@patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock)
-def test_ask_question_via_as_query_param(mock_send):
-    client = _client()
-    mission_id = _mission_with_site(client)
-    visitor = _visitor(client)
-
-    resp = client.post(
-        f"/api/missions/{mission_id}/questions?as={visitor['token']}",
-        json={"question": "What's the timeline?"},
-    )
-    assert resp.status_code == 201
-    entry = resp.json()["question"]
-    assert entry["question"] == "What's the timeline?"
-    assert entry["asked_by_participant_id"] == visitor["participant_id"]
-    assert entry["asked_by_label"] == "Alex"
-    assert entry["answer"] is None
-
-
 def test_ask_question_requires_visitor_identity():
     client = _anonymous_client()
     mission_id = _mission_with_site(client)
     resp = client.post(f"/api/missions/{mission_id}/questions", json={"question": "hi"})
-    assert resp.status_code == 401
-
-
-def test_ask_question_rejects_unresolved_token():
-    client = _client()
-    mission_id = _mission_with_site(client)
-    resp = client.post(
-        f"/api/missions/{mission_id}/questions?as=not-a-real-token",
-        json={"question": "hi"},
-    )
     assert resp.status_code == 401
 
 
@@ -526,62 +495,52 @@ def test_ask_question_missing_mission():
     assert resp.status_code == 404
 
 
-def test_ask_question_sets_cookie_from_as_param_for_next_request():
+def test_a_guest_token_never_authors_as_that_guest():
+    """The invariant that replaced three tests of a second way in.
+
+    A guest never reaches the API: they arrive over the relay connector,
+    which resolves who they are from the grant it holds. So a token in the
+    URL, a token in a cookie, and a forged cookie carrying someone else's
+    displayed participant_id are all worthless here -- the impersonation
+    those tests guarded against is now impossible by construction rather
+    than by a check that could be got wrong.
+
+    A question may still be created: this client is the operator, whom the
+    harness stamps on every request. What must never happen is it being
+    attributed to the guest whose token was presented.
+    """
     client = _https_client()
     mission_id = _mission_with_site(client)
     visitor = _visitor(client)
 
-    first = client.post(
-        f"/api/missions/{mission_id}/questions?as={visitor['token']}",
-        json={"question": "q1"},
-    )
-    assert first.status_code == 201
-    assert mc_api.VISITOR_COOKIE in client.cookies
-
-    # Second ask relies on the cookie alone -- no ?as= this time.
-    second = client.post(f"/api/missions/{mission_id}/questions", json={"question": "q2"})
-    assert second.status_code == 201
-    assert second.json()["question"]["asked_by_label"] == "Alex"
-
-
-def test_view_site_with_as_param_sets_cookie_then_ask_question_uses_it():
-    """The documented flow: visit the site once with ?as=,
-    then the site's own JS can POST a question relying on the cookie
-    alone, no token in the request."""
-    client = _https_client()
-    mission_id = _mission_with_site(client)
-    visitor = _visitor(client)
-
-    view = client.get(f"/missions/{mission_id}?as={visitor['token']}")
-    assert view.status_code == 200
-    assert mc_api.VISITOR_COOKIE in client.cookies
-
-    resp = client.post(f"/api/missions/{mission_id}/questions", json={"question": "hi"})
-    assert resp.status_code == 201
-    assert resp.json()["question"]["asked_by_label"] == "Alex"
-
-
-def test_cookie_authenticates_by_token_not_bare_participant_id():
-    """The impersonation fix: forging a cookie with someone's displayed
-    participant_id (visible in GET .../questions) must NOT let an
-    attacker post as them. Only the real token resolves."""
-    client = _client()
-    mission_id = _mission_with_site(client)
-    visitor = _visitor(client)
-
-    # Legitimately ask once so the participant_id is visible in the list.
-    client.post(
-        f"/api/missions/{mission_id}/questions?as={visitor['token']}",
-        json={"question": "q1"},
-    )
-    listed = client.get(f"/api/missions/{mission_id}/questions").json()["questions"]
-    leaked_participant_id = listed[0]["asked_by_participant_id"]
-    assert leaked_participant_id == visitor["participant_id"]
-
-    # Attacker sets a cookie to the bare participant_id they just read.
-    client.cookies.set(mc_api.VISITOR_COOKIE, leaked_participant_id)
-    forged = client.post(f"/api/missions/{mission_id}/questions", json={"question": "q2"})
-    assert forged.status_code == 401
+    attempts = {
+        "token in the URL":
+            lambda: client.post(
+                f"/api/missions/{mission_id}/questions?as={visitor['token']}",
+                json={"question": "q"}),
+        "token in a cookie":
+            lambda: client.post(f"/api/missions/{mission_id}/questions",
+                                json={"question": "q"}),
+        "someone else's participant_id":
+            lambda: client.post(f"/api/missions/{mission_id}/questions",
+                                json={"question": "q"}),
+    }
+    cookies = {
+        "token in the URL": None,
+        "token in a cookie": visitor["token"],
+        "someone else's participant_id": visitor["participant_id"],
+    }
+    with patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock):
+        for label, call in attempts.items():
+            client.cookies.clear()
+            if cookies[label] is not None:
+                client.cookies.set("mc_visitor", cookies[label])
+            resp = call()
+            if resp.status_code == 201:
+                entry = resp.json()["question"]
+                assert entry["asked_by_participant_id"] != visitor["participant_id"], (
+                    f"{label} authored as the guest")
+                assert entry["asked_by_label"] != "Alex", f"{label} authored as the guest"
 
 
 def test_list_conversation_missing_mission():
@@ -600,16 +559,17 @@ def test_ask_question_relays_via_crosstalk_in_background(mock_send):
     visitor = _visitor(client)
 
     resp = client.post(
-        f"/api/missions/{mission_id}/questions?as={visitor['token']}",
+        f"/api/missions/{mission_id}/questions",
         json={"question": "What's the timeline?"},
     )
-    entry_id = resp.json()["question"]["entry_id"]
+    entry = resp.json()["question"]
+    entry_id = entry["entry_id"]
 
     mock_send.assert_called_once()
     call_target, call_envelope = mock_send.call_args[0]
     assert call_target == "auto-coordinator"
     assert "What's the timeline?" in call_envelope
-    assert "Alex" in call_envelope
+    assert entry["asked_by_label"] in call_envelope
 
     listed = client.get(f"/api/missions/{mission_id}/questions").json()["questions"]
     assert listed[0]["relay_status"] == "sent"
@@ -1340,22 +1300,24 @@ def test_reopen_question_requires_followup_text():
     assert resp.status_code == 400
 
 
-def test_reopen_question_requires_visitor_identity():
+def test_reopen_question_requires_an_identified_caller():
+    author = _client()
     client = _anonymous_client()
-    mission_id = client.post(
+    mission_id = author.post(
         "/api/missions", json={"name": "A", "coordinator_session": "auto-coordinator"},
     ).json()["mission"]["mission_id"]
-    visitor = _visitor(client)
     with patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock):
-        asked = client.post(
-            f"/api/missions/{mission_id}/questions?as={visitor['token']}",
+        asked = author.post(
+            f"/api/missions/{mission_id}/questions",
             json={"question": "hi"},
         ).json()["question"]
-        client.post(
+        # Set the conversation up as a real caller, so the only thing this
+        # test proves is the refusal of the reopen itself.
+        author.post(
             f"/api/missions/{mission_id}/questions/{asked['entry_id']}/answer",
             json={"answer": "first answer"},
         )
-        _close(client, f"missions/{mission_id}", asked["entry_id"])
+        _close(author, f"missions/{mission_id}", asked["entry_id"])
         resp = client.post(
             f"/api/missions/{mission_id}/questions/{asked['entry_id']}/reopen",
             json={"followup": "not quite"},
@@ -2833,23 +2795,21 @@ def test_a_session_that_coordinates_nothing_here_is_nobody_here():
         _request_as(ApiPrincipalKind.ORG_SESSION, subject="auto-a-stranger")) is None
 
 
-def test_a_visitor_token_still_wins_over_a_bearer():
-    """A guest on a share link presents a token; an agent presents a bearer.
-    The two must not be confusable for one another."""
+def test_a_visitor_token_is_not_an_identity_on_this_surface():
+    """A guest's token used to outrank a bearer here. It now resolves to
+    nothing, because a guest is not a caller this surface has: their
+    identity is settled by the relay from the grant, before this module
+    is reached."""
     client = _client()
     _mission_with_site(client)
     visitor = _visitor(client)
 
     req = MagicMock()
-    req.headers = {"authorization": "Bearer whatever"}
-    req.cookies = {VISITOR_COOKIE_NAME: visitor["token"]}
-    req.query_params = {}
+    req.headers = {}
+    req.cookies = {"mc_visitor": visitor["token"]}
+    req.query_params = {"as": visitor["token"]}
 
-    identity = mc_api._resolve_visitor_identity(req)
-    assert identity["participant_id"] == visitor["participant_id"]
-
-
-VISITOR_COOKIE_NAME = mc_api.VISITOR_COOKIE
+    assert mc_api._resolve_visitor_identity(req) is None
 
 
 def test_an_edited_question_says_it_was_edited_and_by_whom():
@@ -2858,21 +2818,24 @@ def test_an_edited_question_says_it_was_edited_and_by_whom():
     remembers saying has to be able to see that it was edited. It was recorded
     from the start and never sent to anybody, which is the same as not
     recording it."""
-    client = _anonymous_client()
+    client = _client()
     mission_id = client.post(
         "/api/missions", json={"name": "A", "coordinator_session": "auto-coordinator"},
     ).json()["mission"]["mission_id"]
     client.post(f"/api/missions/{mission_id}/site", json={"html": "<html>v1</html>"})
-    visitor = _visitor(client)
     with patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock):
         asked = client.post(
-            f"/api/missions/{mission_id}/questions?as={visitor['token']}",
+            f"/api/missions/{mission_id}/questions",
             json={"question": "rambling original, mid-thought"},
         ).json()["question"]
     assert asked["question_edited_at"] is None
     assert asked["question_edited_by_session"] is None
 
-    edited = client.post(
+    # Rephrased by a caller the boundary could not identify: this assertion
+    # is ABOUT the fallback, so it needs a caller with no identity. The ask
+    # above uses one that has it, because a question must exist to be
+    # rephrased and a guest can no longer author one here.
+    edited = _anonymous_client().post(
         f"/api/missions/{mission_id}/questions/{asked['entry_id']}/rephrase",
         json={"question": "the question that was actually answered"},
     ).json()["question"]
