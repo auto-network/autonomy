@@ -79,6 +79,16 @@ def sign_key_client(monkeypatch):
         reads.append((set_id, key, org, peers))
         return {"payload": {"armored_private_key": ARMORED}}
 
+    # require_global_api_authority deliberately STANDS DOWN while the human gate
+    # is not enforced (a fresh/unenrolled or recovery dashboard), so the refusal
+    # cases below only hold when the gate is enforced. Force it explicitly rather
+    # than depend on ambient enrollment (an enrolled personal.db in the checkout)
+    # — without this the credential-less caller is admitted and reads the key.
+    from tools.dashboard import unlock_routes
+    monkeypatch.delenv("DASHBOARD_AUTH", raising=False)
+    monkeypatch.setattr(unlock_routes, "human_auth_enrolled", lambda: True)
+    assert unlock_routes.gate_enforced() is True
+
     monkeypatch.setattr(settings_ops, "_resolve_settings_caller", lambda _: "anchore")
     monkeypatch.setattr(settings_ops, "read_set_key", read_set_key)
     app = Starlette(
