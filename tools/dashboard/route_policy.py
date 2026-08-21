@@ -23,6 +23,7 @@ recovery dashboard), so the recovery path is never broken by this wrap.
 
 from __future__ import annotations
 
+from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from tools.dashboard import api_auth
@@ -68,15 +69,37 @@ PUBLIC_EXCEPTIONS: dict[tuple[str, str], str] = {
 }
 
 
-def _guarded(endpoint, path: str):
+def _guarded(endpoint, path: str, *, plugin: bool):
     """Wrap *endpoint* so a non-exception ``(method, path)`` is refused unless
-    authenticated. Exception methods pass straight through. The check is
-    per-request so a path with mixed public/authenticated methods is handled
-    correctly, and it delegates to the existing guard (which itself stands down
-    while the human gate is open)."""
+    authenticated. The check is per-request so a path with mixed
+    public/authenticated methods is handled correctly.
+
+    Two enforcement strengths, and the difference is the operator ruling of
+    2026-08-21:
+
+    * An APP route delegates to :func:`api_auth.require_authenticated_api_caller`,
+      which stands down while the human gate is not enforced — a fresh install
+      must reach the pre-enrolment bootstrap before any credential exists.
+    * A PLUGIN route is authenticated UNCONDITIONALLY: it refuses a caller the
+      middleware did not authenticate regardless of gate state, because an
+      unenrolled dashboard exposes NO plugin routes. A plugin has no bootstrap
+      role — its callers are an agent (bearer) or the operator (cookie), and
+      neither exists before enrolment — so there is no gate-open window in
+      which serving it is correct. This is also why the destructive plugin
+      routes (delete a mission/pillar, mint a visitor credential) are never
+      reachable by an anonymous caller on any dashboard state.
+    """
 
     async def guarded(request):
-        if (request.method, path) not in PUBLIC_EXCEPTIONS:
+        if (request.method, path) in PUBLIC_EXCEPTIONS:
+            return await endpoint(request)
+        if plugin:
+            principal = api_auth.principal_from_request(request)
+            if not principal.authenticated:
+                return JSONResponse(
+                    {"error": "authentication required"}, status_code=401,
+                )
+        else:
             refused = api_auth.require_authenticated_api_caller(request)
             if refused is not None:
                 return refused
@@ -85,12 +108,15 @@ def _guarded(endpoint, path: str):
     return guarded
 
 
-def apply_default_deny(routes: list) -> list:
+def apply_default_deny(routes: list, *, plugin: bool = False) -> list:
     """Return *routes* with every ``/api`` route authenticated by construction.
 
-    Applied at route-list assembly AND inside the plugin mount, so an app or
-    plugin route is closed on omission. Non-``/api`` routes (pages, static,
-    mounts) are returned untouched — the human gate governs those.
+    Applied at the app route-list assembly (``plugin=False``) AND, with
+    ``plugin=True``, inside the plugin mount, so an app or plugin route is
+    closed on omission. A plugin route is authenticated unconditionally (no
+    gate stand-down); an app route uses the fail-open-then-enforce guard so a
+    fresh install can bootstrap. Non-``/api`` routes (pages, static, mounts)
+    are returned untouched — the human gate governs those.
     """
     out = []
     for r in routes:
@@ -98,7 +124,7 @@ def apply_default_deny(routes: list) -> list:
             out.append(
                 Route(
                     r.path,
-                    _guarded(r.endpoint, r.path),
+                    _guarded(r.endpoint, r.path, plugin=plugin),
                     methods=list(r.methods or ["GET"]),
                     name=r.name,
                 )
