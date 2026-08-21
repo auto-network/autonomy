@@ -1,8 +1,9 @@
 # Fleet checkpoint simulation
 
-This package contains the executable 1.0-alpha library and simulator for the
-checkpoint synchronization design against the real personal GraphDB schema.
-It is not yet installed into the dashboard's production GraphDB write paths.
+This package contains the executable 1.0-alpha synchronization engine against
+the real personal GraphDB schema. Its catalogue preparation and authored-write
+boundary are integrated into the production personal database stores; peer
+scheduling, transport, and online handoff remain outside production startup.
 
 ## Replication boundary
 
@@ -272,14 +273,27 @@ writer-conversion rollout performs its own integrity gate before activation;
 an intervening delete or logical-key rewrite fails closed rather than guessing
 legacy mutation metadata.
 
-The production migration deliberately installs no capture triggers. Calling
-`FleetSyncAlpha` still installs them immediately for the executable Alpha, but
-production activation waits until every personal-store writer—including the
-vault and key-control stores' independent SQLite connections—enters the
-authored transaction API. The Alpha refuses to checkpoint a populated database
-whose live-row count is not completely covered by its catalog. Installing the
-fail-closed triggers before writer conversion would intentionally reject those
-legacy writes.
+The production migration deliberately installs no capture triggers.
+`GraphDB.activate_fleet_sync_writers(origin_incarnation)` repeats preparation,
+takes the SQLite writer lock, rebuilds bootstrap winner metadata from the
+locked current rows, runs the final live-row integrity gate, installs the
+complete trigger set, and attaches automatic authorship to that connection in
+one activation boundary. Triggerless authored/imported history is rejected
+rather than reinterpreted as bootstrap state. Subsequent GraphDB,
+`DbContentStore`, and
+`KeyControlStore` connections discover the active catalog and attach the same
+commit/rollback lifecycle automatically. Their application rows and compact
+journal/catalog metadata therefore commit or roll back together; caller-owned
+multi-row transactions retain one transaction identity and stable operation
+indexes. A raw SQLite writer or an unrecognized mutation form reaches the
+trigger without context and fails closed.
+
+Calling `FleetSyncAlpha` still uses its explicit caller-supplied authored
+context. Production activation is explicit and is not run by ordinary startup.
+Once active, ad-hoc `executescript` is refused because SQLite would commit it
+outside the connection lifecycle; future schema upgrades require a coordinated
+writer-gated path. The Alpha refuses to checkpoint a populated database whose
+live-row count is not completely covered by its catalog.
 
 Checkpoint creation is online: it briefly serializes an `IMMEDIATE` cut,
 persists the no-more-before floor, establishes a WAL snapshot, and releases

@@ -114,8 +114,11 @@ does not activate fleet synchronization. The production preparation migration
 now installs the five tracking tables, one local peer-state table,
 logical-key/catalog indexes, and deterministic initial winner metadata for
 every existing logical row in one rollback-safe transaction. It leaves capture
-triggers disabled. Activation still requires conversion of every personal-store
-writer, including vault/key-control writers, to the authored transaction
-adapter before those triggers are enabled; the roster/RelayKit scheduler and
-ACK protocol; attachment-object transport; and an operational online handoff
+triggers disabled. The explicit writer activation gate now rechecks complete
+coverage and rebuilds bootstrap provenance under the SQLite writer lock,
+installs all rejecting triggers, and binds GraphDB, encrypted-content, and
+key-control connection commits to automatic authored transactions. Raw or
+unrecognized writes fail closed, and ordinary startup never activates a
+prepared store implicitly. Remaining work is the roster/RelayKit scheduler and
+ACK protocol, attachment-object transport, and an operational online handoff
 strategy. No new daemon or network service is required by the engine itself.

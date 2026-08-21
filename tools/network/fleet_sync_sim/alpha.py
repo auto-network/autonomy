@@ -288,7 +288,9 @@ def _verify_catalog_file(path: Path, embedded: object, label: str) -> None:
 class FleetSyncAlpha:
     def __init__(self, path: Path, origin_incarnation: str) -> None:
         self.path = path
-        self.graph = GraphDB(path)
+        # Alpha owns an explicit caller-supplied authored context. Production
+        # GraphDB opens auto-attach the connection-bound writer hook instead.
+        self.graph = GraphDB(path, attach_fleet_sync=False)
         self.catalog = MutationCatalog(self.graph.conn, origin_incarnation)
         self.catalog.install()
         ensure_streaming_indexes(self.graph.conn)

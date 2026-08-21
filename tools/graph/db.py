@@ -18,6 +18,7 @@ from tools.data_paths import (
     resolve_data_root,
     resolve_orgs_root,
 )
+from tools.network.fleet_sync_connection import FleetSyncConnection
 
 from .models import Source, Thought, Derivation, Entity, Claim, Edge, Node, Attachment, new_id
 
@@ -351,6 +352,7 @@ class GraphDB:
         mode: Literal["rw", "ro"] = "rw",
         org: str | None = None,
         create: bool = True,
+        attach_fleet_sync: bool = True,
     ):
         if db_path is None:
             db_path = resolve_caller_db_path(org)
@@ -359,6 +361,7 @@ class GraphDB:
         self.read_only = False
         self._immutable = False
         self._pooled = False  # set to True by for_org when cached
+        self._attach_fleet_sync = bool(attach_fleet_sync)
         if mode == "ro":
             self._open_ro()
             return
@@ -389,11 +392,18 @@ class GraphDB:
         self.conn = sqlite3.connect(
             str(self.db_path),
             timeout=_SQLITE_CONNECT_TIMEOUT_S,
+            factory=FleetSyncConnection,
         )
         self.conn.row_factory = sqlite3.Row
         _register_fleet_sync_sql_functions(self.conn)
         self.conn.execute("PRAGMA journal_mode = WAL")
         self.conn.execute("PRAGMA foreign_keys = ON")
+        self._fleet_catalog = None
+        if self._attach_fleet_sync:
+            from tools.network.fleet_sync_sim.catalog import (
+                attach_active_production_catalog,
+            )
+            self._fleet_catalog = attach_active_production_catalog(self.conn)
         self._init_schema()
 
     def _discard_failed_connection(self) -> None:
@@ -960,6 +970,20 @@ class GraphDB:
             )
         from tools.network.fleet_sync_sim.catalog import MutationCatalog
         return MutationCatalog(self.conn, origin_incarnation).migrate_existing()
+
+    def activate_fleet_sync_writers(self, origin_incarnation: str) -> bool:
+        """Prepare, integrity-gate, and activate authored personal writes."""
+        if self._fleet_catalog is not None:
+            if self._fleet_catalog.origin_incarnation != origin_incarnation:
+                raise sqlite3.IntegrityError(
+                    "fleet-sync writer identity does not match activated catalog"
+                )
+            return False
+        from tools.network.fleet_sync_sim.catalog import MutationCatalog
+        catalog = MutationCatalog(self.conn, origin_incarnation)
+        installed = catalog.activate_production_writers()
+        self._fleet_catalog = catalog
+        return installed
 
     def close(self):
         """Close the underlying connection. Pool-managed instances are

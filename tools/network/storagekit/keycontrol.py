@@ -114,6 +114,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from tools.network.fleet_sync_connection import FleetSyncConnection
+
 from tools.network.ledger.store import org_ledger_db_path
 
 from . import acceptance
@@ -420,7 +422,7 @@ class KeyControlStore:
         self.path = str(path)
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(self.path)
+        self.db = sqlite3.connect(self.path, factory=FleetSyncConnection)
         if self.path != ":memory:":
             self.db.execute("PRAGMA journal_mode = WAL")
             # Two writers racing for the last pending slot must serialize,
@@ -440,6 +442,10 @@ class KeyControlStore:
                 "INSERT OR IGNORE INTO keycontrol_pending_usage"
                 "(id, pending_rows, pending_bytes) VALUES (1, 0, 0)"
             )
+        from tools.network.fleet_sync_sim.catalog import (
+            attach_active_production_catalog,
+        )
+        self._fleet_catalog = attach_active_production_catalog(self.db)
         self._states: dict = {}  # state_id -> StorageStateDescriptor
         self._credentials: dict = {}  # kem_key_id -> PersonaKemCredential
         self._credentials_by_persona: dict = {}  # persona -> {kem_key_id: cred}

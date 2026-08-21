@@ -27,6 +27,7 @@ import sqlite3
 import time
 from pathlib import Path
 
+from tools.network.fleet_sync_connection import FleetSyncConnection
 from tools.network.storagekit import object_header
 from tools.network.storagekit.errors import (
     BodyNotFoundError,
@@ -98,8 +99,14 @@ class DbContentStore:
     def __init__(self, db_path: "str | Path"):
         self.db_path = str(db_path)
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._db = sqlite3.connect(self.db_path)
+        self._db = sqlite3.connect(
+            self.db_path, factory=FleetSyncConnection
+        )
         self._db.executescript(_SCHEMA)
+        from tools.network.fleet_sync_sim.catalog import (
+            attach_active_production_catalog,
+        )
+        self._fleet_catalog = attach_active_production_catalog(self._db)
 
     def close(self) -> None:
         self._db.close()
