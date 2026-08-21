@@ -34,6 +34,10 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+from agents.env_sources import (
+    parse_capability_env_source,
+    parse_workspace_env_source,
+)
 from tools.data_paths import DATA_ROOT
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -250,11 +254,6 @@ def _capability_skill_surface(capabilities, run_dir: Path, harness: str) -> dict
     return mounts
 
 
-_HOST_ENV_PREFIX = "host:"
-_FILE_ENV_PREFIX = "file:"
-_CREDENTIAL_ENV_PREFIX = "credential:"
-
-
 def _resolve_env_source(env_name: str, source: str) -> str | None:
     """Resolve a single ``env_bindings`` source identifier to a literal value.
 
@@ -279,9 +278,10 @@ def _resolve_env_source(env_name: str, source: str) -> str | None:
     via ``state=degraded reason=env_missing`` — the operator gets the
     diagnostic without us having to fail the launch.
     """
-    if source.startswith(_HOST_ENV_PREFIX):
-        var = source[len(_HOST_ENV_PREFIX):].strip()
-        if not var:
+    parsed = parse_capability_env_source(source)
+    if parsed.kind == "host":
+        var = parsed.variable
+        if not parsed.valid:
             logger.warning(
                 "capability env %s: malformed host source %r (empty var name)",
                 env_name, source,
@@ -296,23 +296,18 @@ def _resolve_env_source(env_name: str, source: str) -> str | None:
             return None
         return value
 
-    if source.startswith(_FILE_ENV_PREFIX):
-        rest = source[len(_FILE_ENV_PREFIX):]
-        # ``rest`` is ``/abs/path:VAR_NAME``. Split from the right so a
-        # path that itself contains ``:`` (rare but possible on POSIX)
-        # still works as long as the var name doesn't contain ``:``.
-        if ":" not in rest:
-            logger.warning(
-                "capability env %s: malformed file source %r (expected "
-                "file:/path:VAR_NAME)", env_name, source,
-            )
-            return None
-        path_str, var = rest.rsplit(":", 1)
-        var = var.strip()
-        if not path_str or not var:
-            logger.warning(
-                "capability env %s: malformed file source %r", env_name, source,
-            )
+    if parsed.kind == "file":
+        path_str, var = parsed.locator, parsed.variable
+        if not parsed.valid:
+            if parsed.error == "missing_separator":
+                logger.warning(
+                    "capability env %s: malformed file source %r (expected "
+                    "file:/path:VAR_NAME)", env_name, source,
+                )
+            else:
+                logger.warning(
+                    "capability env %s: malformed file source %r", env_name, source,
+                )
             return None
         path = Path(path_str)
         if not path.is_file():
@@ -348,9 +343,9 @@ def _resolve_env_source(env_name: str, source: str) -> str | None:
         )
         return None
 
-    if source.startswith(_CREDENTIAL_ENV_PREFIX):
-        key = source[len(_CREDENTIAL_ENV_PREFIX):].strip()
-        if not key:
+    if parsed.kind == "credential":
+        key = parsed.locator
+        if not parsed.valid:
             logger.warning(
                 "capability env %s: malformed credential source %r (empty key)",
                 env_name, source,
@@ -371,7 +366,7 @@ def _resolve_env_source(env_name: str, source: str) -> str | None:
 
     # Plain literal value — backward compat with test fixtures and any
     # caller that hasn't migrated to the source-scheme syntax.
-    return source
+    return parsed.literal
 
 
 def _resolve_credential(key: str) -> str | None:
@@ -459,10 +454,10 @@ def _declared_credential_keys(capabilities) -> set:
     keys: set = set()
     for cap in capabilities:
         for _env_name, source in getattr(cap, "env_bindings", {}).items():
-            if isinstance(source, str) and source.startswith(_CREDENTIAL_ENV_PREFIX):
-                k = source[len(_CREDENTIAL_ENV_PREFIX):].strip()
-                if k:
-                    keys.add(k)
+            if isinstance(source, str):
+                parsed = parse_capability_env_source(source)
+                if parsed.kind == "credential" and parsed.valid:
+                    keys.add(parsed.locator)
     return keys
 
 
@@ -477,10 +472,10 @@ def _credential_keys_in_env(env_mapping) -> set:
     credential-bearing launch by name rather than dropping the token silently."""
     keys: set = set()
     for _name, source in (env_mapping or {}).items():
-        if isinstance(source, str) and source.startswith(_CREDENTIAL_ENV_PREFIX):
-            k = source[len(_CREDENTIAL_ENV_PREFIX):].strip()
-            if k:
-                keys.add(k)
+        if isinstance(source, str):
+            parsed = parse_workspace_env_source(source)
+            if parsed.kind == "credential" and parsed.valid:
+                keys.add(parsed.locator)
     return keys
 
 
@@ -1731,9 +1726,10 @@ def launch_session(
             # resolve — cold vault (named at preflight above) or absent key —
             # drops the binding rather than injecting a wrong/empty value; the
             # value is never logged.
-            if isinstance(v, str) and v.startswith(_CREDENTIAL_ENV_PREFIX):
-                key = v[len(_CREDENTIAL_ENV_PREFIX):].strip()
-                resolved = _resolve_credential(key) if key else None
+            parsed = parse_workspace_env_source(v) if isinstance(v, str) else None
+            if parsed is not None and parsed.kind == "credential":
+                key = parsed.locator
+                resolved = _resolve_credential(key) if parsed.valid else None
                 if resolved is None:
                     logger.info(
                         "workspace env %s: credential %r unavailable; binding dropped",

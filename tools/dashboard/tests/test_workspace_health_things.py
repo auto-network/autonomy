@@ -157,6 +157,18 @@ def test_a_finding_carries_the_facts_without_parsing_its_own_prose(org):
     # What this KIND of thing is, as opposed to what THIS one is.
     assert thing["field_description"] == (
         "Absolute host path to the directory to mount")
+    assert thing["remediation_id"] == "workspace.declared-path.v1"
+    assert thing["remediation_params"] == {}
+
+
+def test_legacy_host_env_is_explicitly_manual_not_inferred_as_vault(org):
+    _workspace("alpha", env_from_host=["GH_TOKEN"])
+
+    thing = _things("missing_env")[0]
+
+    assert thing["remediation_id"] == "workspace.env-from-host.legacy.v1"
+    assert thing["remediation_params"] == {}
+    assert "vault" not in thing["remediation_id"]
 
 
 def test_a_description_travels_from_whichever_declaration_has_one(org):

@@ -1083,6 +1083,8 @@ class VolumeMountReadinessIssue:
     looked_in: str
     severity: str = "blocking"
     frame: str = "platform-host-volume"
+    remediation_id: str = "workspace.declared-path.v1"
+    remediation_params: dict = field(default_factory=dict)
 
 
 def check_org_mount_readiness(*, key: str, payload: dict, org: str):

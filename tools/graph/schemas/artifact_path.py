@@ -59,6 +59,10 @@ class ArtifactPathV1(SettingSchema):
             "required": True,
             "exists": "file",
             "exists_frame": "platform-host",
+            "remediation": {
+                "id": "workspace.declared-path.v1",
+                "params": {},
+            },
             "description": (
                 "Absolute host path where the artifact lives, replacing the "
                 "Artifact-Layering default. Setting key is '<org>:<name>'."

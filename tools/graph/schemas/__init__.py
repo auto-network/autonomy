@@ -9,6 +9,9 @@ machinery — specific contracts ship with their own migration beads
 
 from .registry import (
     SchemaValidationError,
+    RemediationRef,
+    REMEDIATION_ID_PATTERN,
+    normalize_remediation_ref,
     SettingSchema,
     register_schema,
     register_upconverter,
@@ -106,6 +109,9 @@ from . import dashboard_shell  # noqa: F401 — dashboard.shell.default-org#1
 
 __all__ = [
     "SchemaValidationError",
+    "RemediationRef",
+    "REMEDIATION_ID_PATTERN",
+    "normalize_remediation_ref",
     "home",
     "declared_home",
     "readiness_gate",

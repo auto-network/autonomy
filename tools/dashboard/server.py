@@ -17286,6 +17286,23 @@ def _finding_json(finding) -> dict:
     different true answers in different places, and a reader who cannot see
     where it was asked cannot tell a clean result from an unasked one.
     """
+    from tools.graph import schemas as _schemas
+
+    remediation_id = getattr(finding, "remediation_id", "")
+    remediation_params = getattr(finding, "remediation_params", {}) or {}
+    if remediation_id:
+        try:
+            remediation = _schemas.normalize_remediation_ref({
+                "id": remediation_id,
+                "params": remediation_params,
+            })
+        except _schemas.SchemaValidationError:
+            # A malformed trusted hook is a code defect, not permission to
+            # reflect its unvalidated parameters across the API boundary.
+            remediation_id, remediation_params = "", {}
+        else:
+            remediation_id = remediation["id"]
+            remediation_params = remediation["params"]
     return {
         "kind": finding.kind,
         "at": finding.address,
@@ -17308,6 +17325,8 @@ def _finding_json(finding) -> dict:
         "help": getattr(finding, "help", ""),
         "expects": getattr(finding, "expects", ""),
         "field_description": getattr(finding, "field_description", ""),
+        "remediation_id": remediation_id,
+        "remediation_params": dict(remediation_params),
     }
 
 
@@ -17344,6 +17363,9 @@ def _things_missing(rows) -> list[dict]:
             for richer in ("name", "description", "help", "field_description"):
                 if not thing.get(richer) and data.get(richer):
                     thing[richer] = data[richer]
+            if not thing.get("remediation_id") and data.get("remediation_id"):
+                thing["remediation_id"] = data["remediation_id"]
+                thing["remediation_params"] = data["remediation_params"]
     return list(things.values())
 
 

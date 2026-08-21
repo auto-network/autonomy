@@ -26,6 +26,7 @@ import re
 from typing import Any
 
 from .registry import (
+    RemediationRef,
     SettingSchema,
     SchemaValidationError,
     field,
@@ -105,6 +106,7 @@ class WorkspaceRepoV1(SettingSchema):
         required=False,
         exists="dir",
         exists_frame="platform-host",
+        remediation=RemediationRef("workspace.declared-path.v1"),
         description=(
             "Absolute host path of a local-first repository that has no "
             "remote. Mutually exclusive with host and repo"
@@ -123,6 +125,7 @@ class WorkspaceRepoV1(SettingSchema):
         exists="dir",
         exists_frame="platform-host",
         severity="advisory",
+        remediation=RemediationRef("workspace.declared-path.v1"),
         description="Absolute host path to clone from instead of the remote",
     )
 
@@ -309,6 +312,10 @@ class WorkspaceV1(SettingSchema):
             # exist. A fixed value therefore satisfies the requirement even
             # when the optional host override is absent.
             "env_fallback_field": "env",
+            "remediation": {
+                "id": "workspace.env-from-host.legacy.v1",
+                "params": {},
+            },
             "description": "Names of host env vars to forward into the container",
             "element": {"type": "string"},
         },

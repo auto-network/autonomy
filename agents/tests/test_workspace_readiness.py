@@ -303,6 +303,8 @@ def test_volume_mount_presence_is_blocking_and_empty_is_advisory(
     empty = workspace_readiness("eng", org="anchore")
     assert not empty.blocking
     assert [f.kind for f in empty.advisory] == ["unpopulated_path"]
+    assert empty.advisory[0].remediation_id == "workspace.declared-path.v1"
+    assert empty.advisory[0].remediation_params == {}
 
     (target / "sentinel").write_text("ready")
     assert workspace_readiness("eng", org="anchore").ready

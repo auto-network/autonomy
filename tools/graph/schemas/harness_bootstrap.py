@@ -32,6 +32,7 @@ from typing import Any
 
 from .registry import (
     home,
+    RemediationRef,
     SchemaValidationError,
     SettingSchema,
     field,
@@ -96,6 +97,7 @@ class HarnessBootstrapV1(SettingSchema):
         required=True,
         exists="executable",
         exists_frame="platform-host",
+        remediation=RemediationRef("workspace.declared-path.v1"),
         description="Resolved absolute path of the CLI on this host's PATH.",
     )
     version: str = field(

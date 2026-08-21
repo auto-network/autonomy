@@ -32,7 +32,7 @@ import sqlite3
 import threading
 import time
 from collections import Counter
-from dataclasses import dataclass, field, asdict, replace
+from dataclasses import dataclass, field as dataclass_field, asdict, replace
 from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Generic, Iterator, TypeVar
@@ -731,17 +731,17 @@ class _SettingsStatsRollup:
     errors: int = 0
     result_count: int = 0
     total_duration_ms: float = 0.0
-    latency_ms: Counter[int] = field(default_factory=Counter)
-    operations: Counter[str] = field(default_factory=Counter)
-    set_ids: Counter[str] = field(default_factory=Counter)
-    set_reads: Counter[str] = field(default_factory=Counter)
-    set_writes: Counter[str] = field(default_factory=Counter)
-    set_upserts: Counter[str] = field(default_factory=Counter)
-    set_org_calls: Counter[tuple[str, str]] = field(default_factory=Counter)
-    set_org_reads: Counter[tuple[str, str]] = field(default_factory=Counter)
-    set_org_writes: Counter[tuple[str, str]] = field(default_factory=Counter)
-    set_org_upserts: Counter[tuple[str, str]] = field(default_factory=Counter)
-    orgs: Counter[str] = field(default_factory=Counter)
+    latency_ms: Counter[int] = dataclass_field(default_factory=Counter)
+    operations: Counter[str] = dataclass_field(default_factory=Counter)
+    set_ids: Counter[str] = dataclass_field(default_factory=Counter)
+    set_reads: Counter[str] = dataclass_field(default_factory=Counter)
+    set_writes: Counter[str] = dataclass_field(default_factory=Counter)
+    set_upserts: Counter[str] = dataclass_field(default_factory=Counter)
+    set_org_calls: Counter[tuple[str, str]] = dataclass_field(default_factory=Counter)
+    set_org_reads: Counter[tuple[str, str]] = dataclass_field(default_factory=Counter)
+    set_org_writes: Counter[tuple[str, str]] = dataclass_field(default_factory=Counter)
+    set_org_upserts: Counter[tuple[str, str]] = dataclass_field(default_factory=Counter)
+    orgs: Counter[str] = dataclass_field(default_factory=Counter)
 
 
 @dataclass
@@ -1192,7 +1192,7 @@ class SetMembers(Generic[T]):
     dashboard Settings API.
     """
     members: list[ResolvedSetting[T]]
-    dropped: DropAccounting = field(default_factory=DropAccounting)
+    dropped: DropAccounting = dataclass_field(default_factory=DropAccounting)
 
     def __iter__(self) -> Iterator[ResolvedSetting[T]]:
         return iter(self.members)
@@ -1258,7 +1258,7 @@ class MigrationReport:
     no_upconvert_path: int = 0
     already_at_target: int = 0
     above_target: int = 0
-    affected_ids: list[str] = field(default_factory=list)
+    affected_ids: list[str] = dataclass_field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -1481,6 +1481,10 @@ class CheckFinding:
     #: The schema's description of ``field`` -- what this KIND of thing is,
     #: as opposed to what this PARTICULAR one is.
     field_description: str = ""
+    #: Data-only pointer into the trusted remediation registry. Parameters are
+    #: schema-authored JSON scalars, never collected input or secret values.
+    remediation_id: str = ""
+    remediation_params: dict[str, Any] = dataclass_field(default_factory=dict)
 
 
 @dataclass
@@ -1620,6 +1624,8 @@ def check_setting(
     _org_scoped: bool = False,
     _via_field: str = "",
     _via_description: str = "",
+    _via_remediation_id: str = "",
+    _via_remediation_params: dict[str, Any] | None = None,
     _passed: list[CheckPassed] | None = None,
     _include_dependents: bool = True,
 ) -> list[CheckFinding]:
@@ -1648,6 +1654,32 @@ def check_setting(
 
     findings: list[CheckFinding] = []
 
+    def _remediation_kwargs(spec: dict | None = None, *, issue=None) -> dict:
+        raw = None
+        issue_id = getattr(issue, "remediation_id", "") if issue is not None else ""
+        if issue_id:
+            raw = {
+                "id": issue_id,
+                "params": getattr(issue, "remediation_params", {}) or {},
+            }
+        elif spec is not None:
+            raw = spec.get("remediation")
+        if raw is None:
+            return {}
+        normalized = schemas.normalize_remediation_ref(raw)
+        return {
+            "remediation_id": normalized["id"],
+            "remediation_params": dict(normalized["params"]),
+        }
+
+    via_remediation = (
+        {
+            "remediation_id": _via_remediation_id,
+            "remediation_params": dict(_via_remediation_params or {}),
+        }
+        if _via_remediation_id else {}
+    )
+
     # A set with no registered schema is not the same as a row nobody has
     # written. Reporting the first as the second sends a reader to provision
     # something that cannot be provisioned -- a write to an unregistered
@@ -1662,7 +1694,7 @@ def check_setting(
             f"nothing can satisfy this reference here. Either the reference "
             f"names a set that does not exist, or its module is not imported "
             f"in this process.",
-            "this process's schema registry",
+            "this process's schema registry", **via_remediation,
         )]
 
     read_org, peers, frame = _existence_frame(
@@ -1676,7 +1708,7 @@ def check_setting(
             address, "unreadable", f"{type(exc).__name__}: {exc}"[:160], frame,
             set_id=set_id, key=key, org=read_org, subject=key,
             field=_via_field, field_description=_via_description,
-            frame="settings-store")]
+            frame="settings-store", **via_remediation)]
     if row is None:
         elsewhere = _owned_but_unreadable(set_id, key, read_org)
         if elsewhere is not None:
@@ -1688,12 +1720,12 @@ def check_setting(
                 f"organization its own row -- writing a second one here while "
                 f"the first stays unreadable leaves two answers and no way to "
                 f"tell which one anything used",
-                frame)]
+                frame, **via_remediation)]
         return [CheckFinding(
             address, "missing_reference", "no row under this key", frame,
             set_id=set_id, key=key, org=read_org, subject=key,
             field=_via_field, field_description=_via_description,
-            frame="settings-store")]
+            frame="settings-store", **via_remediation)]
 
     schema = schemas.get_schema(set_id, int(row["schema_revision"]))
     payload = row.get("payload") or {}
@@ -1782,6 +1814,12 @@ def check_setting(
                         # described it is the one that is not there.
                         _via_field=f"{path_prefix}{name}",
                         _via_description=spec.get("description", "") or "",
+                        _via_remediation_id=(
+                            _remediation_kwargs(spec).get("remediation_id", "")
+                        ),
+                        _via_remediation_params=(
+                            _remediation_kwargs(spec).get("remediation_params", {})
+                        ),
                         _passed=_passed,
                         # Following a forward reference must not then walk
                         # backward into every other row that references the
@@ -1812,6 +1850,7 @@ def check_setting(
                             field=f"{path_prefix}{name}", subject=one,
                             frame="container-fs",
                             field_description=spec.get("description", "") or "",
+                            **_remediation_kwargs(spec),
                             **_row_meta(describes_subject=single),
                         ))
                         continue
@@ -1830,6 +1869,7 @@ def check_setting(
                                    if spec.get("exists_frame") == "platform-host"
                                    else "check-process-fs"),
                             field_description=spec.get("description", "") or "",
+                            **_remediation_kwargs(spec),
                             **_row_meta(describes_subject=single),
                         ))
                     elif _passed is not None:
@@ -1871,6 +1911,7 @@ def check_setting(
                         field=f"{path_prefix}{name}", subject=one,
                         frame="check-process-env",
                         field_description=spec.get("description", "") or "",
+                        **_remediation_kwargs(spec),
                         **_row_meta(describes_subject=single),
                     ))
                 elif spec.get("names_host_env") and _passed is not None:
@@ -1949,6 +1990,7 @@ def check_setting(
                             getattr(issue, "frame", "") or "settings-store"
                         ),
                         field_description=str(field_spec.get("description") or ""),
+                        **_remediation_kwargs(field_spec, issue=issue),
                     ))
                 if _passed is not None and not declared_findings:
                     _passed.append(CheckPassed(
