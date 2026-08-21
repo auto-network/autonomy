@@ -191,6 +191,15 @@ _FACTOR_COMMITMENTS = {
         "iterations": f["kdf"]["iterations"],
     },
     "recovery": lambda f: {"type": "recovery", "kem_pub": f["kem_pub"]},
+    # A passkey factor is plural: one per full passkey, pinned by BOTH the
+    # credential it belongs to and the encapsulation pub the master KEK is
+    # sealed to. Both are public; both must be committed, so a factor cannot be
+    # swapped for one that opens under a different device's ceremony unnoticed.
+    "passkey": lambda f: {
+        "type": "passkey",
+        "credential_id": f["credential_id"],
+        "kem_pub": f["kem_pub"],
+    },
 }
 
 
@@ -215,7 +224,9 @@ def _factor_commitment(factors: list) -> str:
                 "that pins nothing could be added or stripped unnoticed"
             )
         items.append(contribute(f))
-    items.sort(key=lambda d: d["type"])
+    # Sorted by the whole canonical item, not just type: passkey factors repeat
+    # the type, so a type-only key would not be a total order over the set.
+    items.sort(key=canonical_json)
     return hashlib.sha256(canonical_json(items)).hexdigest()
 
 
@@ -306,6 +317,12 @@ def encrypt_root_key(
 #: The one purpose a recovery wrap is ever sealed for. The seal's own info
 #: binds it, so material sealed for anything else cannot open an armor.
 RECOVERY_ARMOR_PURPOSE = "autonomy/recovery-armor/v1"
+#: The one label a passkey factor is derived and sealed under — the SAME
+#: vault-factor purpose the enrollment ceremony derives the provisioning key
+#: under (auto-oox5r: one key, one label). So the public half a passkey
+#: publishes in its enrollment statement IS the key the master KEK is sealed to
+#: here, and a fresh PRF eval re-derives the private half that opens it.
+PASSKEY_ARMOR_PURPOSE = "autonomy/vault-factor/v1"
 #: suite id (1) + X25519 encapsulated key (32) + ChaCha20-Poly1305 of a 32-byte
 #: master KEK (32 + 16 tag).
 _RECOVERY_SEAL_LEN = 1 + 32 + _MASTER_KEK_LEN + 16
@@ -320,6 +337,28 @@ def _parse_recovery_factor(f: dict, index: int) -> None:
     if not isinstance(f["kem_pub"], str) or not _ROOT_PUB_RE.match(f["kem_pub"]):
         raise ArmorError("v2 recovery factor kem_pub must be 64 lowercase hex chars")
     _b64_field(f, "sealed", length=_RECOVERY_SEAL_LEN, what="recovery.sealed")
+
+
+#: The credential id a passkey factor belongs to — the WebAuthn rawId, carried
+#: as base64url exactly as the enrollment statement and passkey row hold it.
+_CREDENTIAL_ID_RE = re.compile(r"\A[A-Za-z0-9_-]{1,256}\Z")
+
+
+def _parse_passkey_factor(f: dict, index: int) -> None:
+    if set(f) != {"type", "credential_id", "kem_pub", "sealed"}:
+        raise ArmorError(
+            f"v2 passkey factor[{index}] must carry exactly "
+            "{type, credential_id, kem_pub, sealed}"
+        )
+    if not isinstance(f["credential_id"], str) or not _CREDENTIAL_ID_RE.match(
+        f["credential_id"]
+    ):
+        raise ArmorError(
+            "v2 passkey factor credential_id must be base64url (the WebAuthn rawId)"
+        )
+    if not isinstance(f["kem_pub"], str) or not _ROOT_PUB_RE.match(f["kem_pub"]):
+        raise ArmorError("v2 passkey factor kem_pub must be 64 lowercase hex chars")
+    _b64_field(f, "sealed", length=_RECOVERY_SEAL_LEN, what="passkey.sealed")
 
 
 def _parse_password_factor(f: dict, index: int) -> None:
@@ -356,6 +395,7 @@ def _parse_password_factor(f: dict, index: int) -> None:
 _FACTOR_PARSERS = {
     "password": _parse_password_factor,
     "recovery": _parse_recovery_factor,
+    "passkey": _parse_passkey_factor,
 }
 #: Closed registry of factor types (unit 1); derived so it cannot drift from the
 #: parsers. recovery/passkey add a (type -> strict parser) entry above.
@@ -402,9 +442,16 @@ def parse_armor(armor: str) -> dict:
                 f"v2 factor[{i}] has unknown type {ftype!r}; the registry is "
                 f"closed to {sorted(_FACTOR_PARSERS)}"
             )
-        if ftype in seen:
-            raise ArmorError(f"v2 has a duplicate factor type {ftype!r}")
-        seen.add(ftype)
+        # Singular types (password, recovery) dedupe on type; passkey is plural,
+        # one per credential, so it dedupes on (type, credential_id).
+        dedup_key = (ftype, f.get("credential_id")) if ftype == "passkey" else ftype
+        if dedup_key in seen:
+            raise ArmorError(
+                f"v2 has a duplicate factor {dedup_key!r}"
+                if ftype == "passkey"
+                else f"v2 has a duplicate factor type {ftype!r}"
+            )
+        seen.add(dedup_key)
         parser(f, i)  # total dispatch — a known type always has a strict parser
     return data
 
@@ -584,6 +631,133 @@ def decrypt_root_key_with_recovery(armor: str, recovery_code: bytes) -> KeyPair:
     except Exception as exc:
         raise ArmorPassphraseError(
             "the recovery factor does not open with that code"
+        ) from exc
+    return _open_seed_under_master_kek(
+        master_kek, seal_iv, seal_ct, root_pub, data["factors"]
+    )
+
+
+def add_passkey_factor(
+    armor: str, passphrase: str, credential_id: str, passkey_kem_pub: str
+) -> str:
+    """Promote a passkey to a full factor of this armor, knowing only its
+    PUBLIC half.
+
+    ``passkey_kem_pub`` is the passkey's provisioning key — the public half a
+    passkey publishes in its enrollment statement, derived from its PRF output
+    under :data:`PASSKEY_ARMOR_PURPOSE`. Sealing the master KEK to it makes a
+    fresh PRF eval on that device able to open this armor ALONE later. The PRF
+    private half never enters this process; only the owner, who can already open
+    the armor with *passphrase*, can add a lock, and every existing factor keeps
+    working. Plural by design: one passkey factor per credential.
+    """
+    if not isinstance(credential_id, str) or not _CREDENTIAL_ID_RE.match(credential_id):
+        raise ArmorError("credential_id must be base64url (the WebAuthn rawId)")
+    if not isinstance(passkey_kem_pub, str) or not _ROOT_PUB_RE.match(passkey_kem_pub):
+        raise ArmorError("passkey_kem_pub must be 64 lowercase hex chars")
+    from .sealing import seal
+
+    data = parse_armor(armor)
+    if any(
+        f["type"] == "passkey" and f["credential_id"] == credential_id
+        for f in data["factors"]
+    ):
+        raise ArmorError(
+            "this armor already carries a factor for that passkey; replacing one "
+            "is a rotation, not an addition"
+        )
+    master_kek = _v2_master_kek(data, passphrase)
+    previous_factors = list(data["factors"])
+    sealed = seal(master_kek, passkey_kem_pub, PASSKEY_ARMOR_PURPOSE)
+    if len(sealed) != _RECOVERY_SEAL_LEN:
+        raise ArmorError("sealed passkey wrap is not the expected length")
+    data["factors"] = [
+        *data["factors"],
+        {
+            "type": "passkey",
+            "credential_id": credential_id,
+            "kem_pub": passkey_kem_pub,
+            "sealed": base64.b64encode(sealed).decode("ascii"),
+        },
+    ]
+    _reseal_to_factor_set(data, master_kek, previous_factors)
+    return _emit_v2(parse_armor(_emit_v2(data)))
+
+
+def remove_passkey_factor(armor: str, passphrase: str, credential_id: str) -> str:
+    """Demote one passkey — drop the factor for *credential_id*.
+
+    Authorised by the passphrase, like :func:`remove_factor`: changing the set
+    re-seals the seed, which needs the master KEK. The last lock can never be
+    removed. As with any factor removal, this does not reach copies of the file
+    that already exist — a real demotion of a compromised device pairs with a
+    root rotation (:mod:`tools.network.idkit.root_rotation`).
+    """
+    data = parse_armor(armor)
+    match = [
+        f
+        for f in data["factors"]
+        if f["type"] == "passkey" and f["credential_id"] == credential_id
+    ]
+    if not match:
+        raise ArmorError("this armor carries no passkey factor for that credential")
+    remaining = [
+        f
+        for f in data["factors"]
+        if not (f["type"] == "passkey" and f["credential_id"] == credential_id)
+    ]
+    if not remaining:
+        raise ArmorError(
+            "refusing to remove the last factor: an armor nothing can open is "
+            "a destroyed identity, not a hardened one"
+        )
+    master_kek = _v2_master_kek(data, passphrase)
+    previous_factors = list(data["factors"])
+    data["factors"] = remaining
+    _reseal_to_factor_set(data, master_kek, previous_factors)
+    return _emit_v2(parse_armor(_emit_v2(data)))
+
+
+def decrypt_root_key_with_passkey(armor: str, prf_output: bytes) -> KeyPair:
+    """Open a v2 armor with a passkey's PRF output ALONE.
+
+    The PRF output re-derives the passkey's encapsulation private key under
+    :data:`PASSKEY_ARMOR_PURPOSE`; its public half selects the matching factor,
+    whose seal yields the master KEK, which unseals the identity. This is a
+    single-factor open — a passkey-only unlock — and is refused when no passkey
+    factor's public half matches this output.
+    """
+    from .sealing import derive_encapsulation_keypair
+    from .sealing import open as seal_open
+
+    data = parse_armor(armor)
+    root_pub = data["root_pub"]
+    private_hex, public_hex = derive_encapsulation_keypair(
+        bytes(prf_output), PASSKEY_ARMOR_PURPOSE
+    )
+    factor = next(
+        (
+            f
+            for f in data["factors"]
+            if f["type"] == "passkey" and f["kem_pub"] == public_hex
+        ),
+        None,
+    )
+    if factor is None:
+        raise ArmorPassphraseError(
+            "no passkey factor on this armor opens with that ceremony's output"
+        )
+    try:
+        sealed = base64.b64decode(factor["sealed"], validate=True)
+        seal_iv = base64.b64decode(data["kek_seal"]["iv"], validate=True)
+        seal_ct = base64.b64decode(data["kek_seal"]["ct"], validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ArmorError(f"v2 armor fields do not base64-decode: {exc}") from exc
+    try:
+        master_kek = seal_open(sealed, private_hex, PASSKEY_ARMOR_PURPOSE)
+    except Exception as exc:
+        raise ArmorPassphraseError(
+            "the passkey factor does not open with that ceremony's output"
         ) from exc
     return _open_seed_under_master_kek(
         master_kek, seal_iv, seal_ct, root_pub, data["factors"]
