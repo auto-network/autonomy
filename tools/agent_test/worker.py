@@ -44,6 +44,7 @@ def _acquire_machine_lease(directory: Path, manifest: dict[str, Any]) -> tuple[s
     run_id = str(manifest["run_id"])
     lease_id = f"{session}:{run_id}"
     resources = manifest.get("resources") or {"tests": 1}
+    estimate = manifest.get("duration_estimate") or {}
     queue_reported = False
     coordinator_error_reported = False
     while not _stop_requested:
@@ -56,6 +57,14 @@ def _acquire_machine_lease(directory: Path, manifest: dict[str, Any]) -> tuple[s
             repository=str(manifest.get("repository") or "unknown"),
             selectors=[str(value) for value in manifest.get("selectors") or []][:5],
             selector_count=len(manifest.get("selectors") or []),
+            estimated_seconds=estimate.get("estimated_seconds"),
+            estimated_low_seconds=estimate.get("estimated_low_seconds"),
+            estimated_high_seconds=estimate.get("estimated_high_seconds"),
+            unknown_selector_count=len(estimate.get("unknown_selectors") or []),
+            uncertain_selector_count=len(set(
+                (estimate.get("unknown_selectors") or [])
+                + (estimate.get("open_ended_selectors") or [])
+            )),
         )
         if result.get("ok") and result.get("state") == "granted":
             update_manifest(
@@ -527,6 +536,21 @@ def run(directory: Path) -> int:
             "agent_test_version": str(manifest.get("agent_test_version") or "")[:100],
             "fingerprint": str(manifest.get("fingerprint") or "")[:1000],
             "rerun_of": str(manifest.get("rerun_of") or "")[:200],
+            "estimated_seconds": float(
+                (manifest.get("duration_estimate") or {}).get("estimated_seconds") or 0
+            ),
+            "estimated_low_seconds": float(
+                (manifest.get("duration_estimate") or {}).get("estimated_low_seconds") or 0
+            ),
+            "estimated_high_seconds": float(
+                (manifest.get("duration_estimate") or {}).get("estimated_high_seconds") or 0
+            ),
+            "estimate_complete": bool(
+                (manifest.get("duration_estimate") or {}).get("estimate_complete", False)
+            ),
+            "estimate_sampled_tests": int(
+                (manifest.get("duration_estimate") or {}).get("sampled_tests") or 0
+            ),
         },
     )
     run_history: dict[str, Any] = {

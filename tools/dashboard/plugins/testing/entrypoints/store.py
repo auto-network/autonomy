@@ -142,15 +142,18 @@ def telemetry_status(org: str) -> dict[str, Any]:
         if name.startswith("command_")
         or name in {"raw_pytest_refused", "repeat_refused", "capacity_queued"}
     }
+    behavior = _behavior_patterns(usage)
     return {
         "ok": True,
         "sessions": len(members),
         "counts": totals,
         "feature_counts": feature_counts,
         "versions": versions,
+        "behavior": behavior,
         "recent_events": [
             {
                 "session": member.payload["session"],
+                "session_title": _session_title(str(member.payload["session"])),
                 "event": member.payload["event"],
                 "recorded_at": float(member.payload["recorded_at"]),
                 "agent_test_version": member.payload.get("agent_test_version") or "unknown",
@@ -158,6 +161,109 @@ def telemetry_status(org: str) -> dict[str, Any]:
             for member in usage[:20]
         ],
         "usage_history_limit": MAX_USAGE_EVENTS,
+    }
+
+
+def _behavior_patterns(usage: list[Any]) -> dict[str, Any]:
+    """Derive argument-free workflow patterns from ordered usage events."""
+    by_session: dict[str, list[Any]] = {}
+    for member in reversed(usage):
+        by_session.setdefault(str(member.payload.get("session") or "unknown"), []).append(member)
+
+    rows: list[dict[str, Any]] = []
+    total_names = (
+        "completed_runs", "background_runs", "polled_runs", "status_polls",
+        "status_poll_bursts", "repeated_commands", "failed_runs_inspected",
+        "focused_recoveries", "broad_recovery_attempts", "repeat_refusals",
+        "raw_pytest_refusals", "queue_waits", "output_reads", "retained_runs",
+    )
+    totals = {name: 0 for name in total_names}
+    terminal_events = {
+        "run_passed", "run_failed", "run_error", "run_stopped", "run_collected",
+    }
+    evidence_commands = {"command_failures", "command_trace", "command_output"}
+    run_commands = {"command_run_explicit", "command_run_changed", "command_run_profile"}
+
+    for session, events in by_session.items():
+        counts = {name: 0 for name in total_names}
+        live: dict[str, Any] | None = None
+        failed_run_open = False
+        failed_run_inspected = False
+        last_command = ""
+        last_command_at = 0.0
+        last_status_at = 0.0
+        latest_version = "unknown"
+        sequence: list[dict[str, Any]] = []
+        for member in events:
+            payload = member.payload
+            event = str(payload.get("event") or "unknown")
+            at = float(payload.get("recorded_at") or 0)
+            version = str(payload.get("agent_test_version") or "")
+            if version:
+                latest_version = version
+            sequence.append({"event": event, "recorded_at": at})
+
+            if event.startswith("command_"):
+                if event == last_command and at - last_command_at <= 60:
+                    counts["repeated_commands"] += 1
+                last_command, last_command_at = event, at
+            if event == "run_started":
+                live = {"status_polls": 0}
+                last_status_at = 0.0
+            elif event == "command_status" and live is not None:
+                live["status_polls"] += 1
+                counts["status_polls"] += 1
+                if last_status_at and at - last_status_at <= 60:
+                    counts["status_poll_bursts"] += 1
+                last_status_at = at
+            elif event in terminal_events:
+                if live is not None:
+                    counts["completed_runs"] += 1
+                    if live["status_polls"]:
+                        counts["polled_runs"] += 1
+                    else:
+                        counts["background_runs"] += 1
+                live = None
+                failed_run_open = event == "run_failed"
+                failed_run_inspected = False
+            elif event in evidence_commands:
+                if event == "command_output":
+                    counts["output_reads"] += 1
+                if failed_run_open and not failed_run_inspected:
+                    counts["failed_runs_inspected"] += 1
+                    failed_run_inspected = True
+            elif event == "command_rerun_failures":
+                counts["focused_recoveries"] += 1
+                failed_run_open = False
+            elif event in run_commands and failed_run_open:
+                counts["broad_recovery_attempts"] += 1
+            elif event == "repeat_refused":
+                counts["repeat_refusals"] += 1
+            elif event == "raw_pytest_refused":
+                counts["raw_pytest_refusals"] += 1
+            elif event == "capacity_queued":
+                counts["queue_waits"] += 1
+            elif event == "command_retain":
+                counts["retained_runs"] += 1
+
+        for name in total_names:
+            totals[name] += counts[name]
+        rows.append({
+            "session": session,
+            "session_title": _session_title(session),
+            "agent_test_version": latest_version,
+            "event_count": len(events),
+            "last_seen_at": float(events[-1].payload.get("recorded_at") or 0),
+            "counts": counts,
+            "recent_sequence": sequence[-10:],
+        })
+    rows.sort(key=lambda item: (-item["last_seen_at"], item["session"]))
+    return {
+        "totals": totals,
+        "sessions": rows[:50],
+        "session_count": len(rows),
+        "sequence_limit": 10,
+        "derivation": "argument-free ordered usage events",
     }
 
 
@@ -433,6 +539,8 @@ def duration_history(
         tests.append({
             "nodeid": nodeid,
             "median_seconds": median(samples),
+            "minimum_seconds": min(samples),
+            "maximum_seconds": max(samples),
             "observations": [
                 {
                     "run_id": member.payload["run_id"],
@@ -481,21 +589,43 @@ def estimate_duration(
         nodeid: [duration for _at, duration in sorted(samples, reverse=True)[:MAX_OBSERVATIONS_PER_TEST]]
         for nodeid, samples in by_node.items()
     }
-    total = sum(float(median(samples)) for samples in recent.values())
+    medians = [float(median(samples)) for samples in recent.values()]
+    minima = [min(samples) for samples in recent.values()]
+    maxima = [max(samples) for samples in recent.values()]
+    total = sum(medians)
+    effective_parallelism = min(parallelism, len(by_node)) if by_node else 1
+
+    def modeled_wall_time(values: list[float]) -> float | None:
+        if not values:
+            return None
+        return max(max(values), sum(values) / effective_parallelism)
     known = {
         selector for selector in selectors
         if any(_selector_matches(nodeid, selector) for nodeid in by_node)
     }
+    unknown = [selector for selector in selectors if selector not in known]
+    open_ended = [
+        selector for selector in selectors
+        if selector in known and not any(nodeid == selector for nodeid in by_node)
+    ]
     return {
         "ok": True,
         "repository": repository,
         "selectors": selectors,
-        "estimated_seconds": total / parallelism if by_node else None,
+        "estimated_seconds": modeled_wall_time(medians),
+        "estimated_low_seconds": modeled_wall_time(minima),
+        "estimated_high_seconds": modeled_wall_time(maxima),
         "serial_seconds": total if by_node else None,
         "parallelism": parallelism,
+        "effective_parallelism": effective_parallelism,
         "sampled_tests": len(by_node),
         "sample_count": sum(len(samples) for samples in recent.values()),
-        "unknown_selectors": [selector for selector in selectors if selector not in known],
+        "known_selector_count": len(known),
+        "requested_selector_count": len(selectors),
+        "selector_history_coverage": len(known) / len(selectors),
+        "unknown_selectors": unknown,
+        "open_ended_selectors": open_ended,
+        "estimate_complete": not unknown and not open_ended and bool(by_node),
         "history_limit": MAX_OBSERVATIONS_PER_TEST,
     }
 
@@ -538,6 +668,22 @@ def dashboard_summary(
             totals[name] += int(payload.get(name) or 0)
     terminal = status_counts.get("passed", 0) + status_counts.get("failed", 0) + status_counts.get("error", 0)
     pass_ratio = status_counts.get("passed", 0) / terminal if terminal else None
+    estimate_ratios = [
+        float(member.payload["duration_seconds"]) / float(member.payload["estimated_seconds"])
+        for member in runs
+        if member.payload.get("estimate_complete") is True
+        and float(member.payload.get("estimated_seconds") or 0) > 0
+    ]
+    estimate_quality = {
+        "samples": len(estimate_ratios),
+        "median_actual_to_estimate": median(estimate_ratios) if estimate_ratios else None,
+        "within_factor_2": (
+            sum(0.5 <= ratio <= 2 for ratio in estimate_ratios) / len(estimate_ratios)
+            if estimate_ratios else None
+        ),
+        "underestimated": sum(ratio > 1 for ratio in estimate_ratios),
+        "overestimated": sum(ratio < 1 for ratio in estimate_ratios),
+    }
 
     observations = _members(OBSERVATION_SET_ID, org)
     if repository:
@@ -545,11 +691,15 @@ def dashboard_summary(
             member for member in observations
             if member.payload.get("repository") == repository
         ]
-    by_node: dict[str, list[Any]] = {}
+    by_node: dict[tuple[str, str], list[Any]] = {}
     for member in observations:
-        by_node.setdefault(str(member.payload.get("nodeid") or ""), []).append(member)
+        identity = (
+            str(member.payload.get("repository") or ""),
+            str(member.payload.get("nodeid") or ""),
+        )
+        by_node.setdefault(identity, []).append(member)
     ranked = []
-    for nodeid, history in by_node.items():
+    for (node_repository, nodeid), history in by_node.items():
         history.sort(
             key=lambda member: (
                 float(member.payload.get("recorded_at") or 0),
@@ -565,6 +715,7 @@ def dashboard_summary(
         decisions = failures + passes
         durations = [float(member.payload["duration_seconds"]) for member in history]
         ranked.append({
+            "repository": node_repository,
             "nodeid": nodeid,
             "samples": len(history),
             "failure_rate": failures / decisions if decisions else 0.0,
@@ -605,6 +756,11 @@ def dashboard_summary(
             "skipped": payload["skipped"],
             "parallelism": payload.get("parallelism", 1),
             "rerun_of": payload.get("rerun_of") or None,
+            "estimated_seconds": float(payload.get("estimated_seconds") or 0) or None,
+            "estimated_low_seconds": float(payload.get("estimated_low_seconds") or 0) or None,
+            "estimated_high_seconds": float(payload.get("estimated_high_seconds") or 0) or None,
+            "estimate_complete": bool(payload.get("estimate_complete", False)),
+            "estimate_sampled_tests": int(payload.get("estimate_sampled_tests") or 0),
         })
     telemetry = telemetry_status(org)
     operational_errors = error_status(org)
@@ -728,14 +884,29 @@ def dashboard_summary(
             "total": len(runs),
             "status_counts": status_counts,
             "pass_ratio": pass_ratio,
+            "estimate_quality": estimate_quality,
             "test_totals": totals,
         },
         "tests": {
             "observed": len(by_node),
+            "observation_rows": len(observations),
+            "maximum_rows_for_observed_tests": len(by_node) * MAX_OBSERVATIONS_PER_TEST,
+            "average_samples_per_test": len(observations) / len(by_node) if by_node else 0.0,
+            "sample_depths": {
+                str(depth): sum(len(history) == depth for history in by_node.values())
+                for depth in range(1, MAX_OBSERVATIONS_PER_TEST + 1)
+                if any(len(history) == depth for history in by_node.values())
+            },
             "flaky": flaky,
             "slow": slow,
             "ranked_limit": ranked_limit,
             "history_limit": MAX_OBSERVATIONS_PER_TEST,
+        },
+        "retention": {
+            "timing_observations_per_test": MAX_OBSERVATIONS_PER_TEST,
+            "terminal_runs_per_repository": MAX_RUNS_PER_REPOSITORY,
+            "usage_events_per_organization": MAX_USAGE_EVENTS,
+            "operational_errors_per_organization": MAX_ERROR_EVENTS,
         },
         "recent_runs": recent_runs,
         "activity": activity,

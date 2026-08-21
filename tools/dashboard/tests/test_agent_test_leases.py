@@ -22,6 +22,10 @@ def test_machine_store_enforces_cross_container_resource_capacity(tmp_path, monk
         "repository": "github.test/acme/widget",
         "selectors": ["tests/test_a.py"],
         "selector_count": 1,
+        "estimated_seconds": 42.5,
+        "estimated_low_seconds": 30.0,
+        "estimated_high_seconds": 70.0,
+        "uncertain_selector_count": 1,
     })
     test_waiter = agent_test_leases.transact("acquire", {
         "lease_id": "session-b:run-b",
@@ -55,6 +59,10 @@ def test_machine_store_enforces_cross_container_resource_capacity(tmp_path, monk
     assert status["queued"] == {"tests": 8, "browsers": 2}
     alpha = agent_test_leases.activity_snapshot("alpha")
     assert [item["session"] for item in alpha["running"]] == ["session-a"]
+    assert alpha["running"][0]["estimated_seconds"] == 42.5
+    assert alpha["running"][0]["estimated_low_seconds"] == 30.0
+    assert alpha["running"][0]["estimated_high_seconds"] == 70.0
+    assert alpha["running"][0]["uncertain_selector_count"] == 1
     assert [item["session"] for item in alpha["queue"]] == ["session-b"]
     assert alpha["global_queued_requests"] == 2
     assert (tmp_path / "machine.db").exists()

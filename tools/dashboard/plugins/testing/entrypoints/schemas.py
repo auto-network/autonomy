@@ -92,6 +92,11 @@ class AgentTestRunV1(SettingSchema):
     agent_test_version: str = field(default="", description="Agent Test version that produced the run.")
     fingerprint: str = field(default="", description="Code and selector fingerprint used for repeat refusal.")
     rerun_of: str = field(default="", description="Prior run whose retained failures selected this run.")
+    estimated_seconds: float = field(default=0.0, description="History-based estimate shown before launch.")
+    estimated_low_seconds: float = field(default=0.0, description="Observed low estimate for known tests.")
+    estimated_high_seconds: float = field(default=0.0, description="Observed high estimate for known tests.")
+    estimate_complete: bool = field(default=False, description="Whether every requested test node had timing history.")
+    estimate_sampled_tests: int = field(default=0, description="Historical test nodes contributing to the estimate.")
 
     @classmethod
     def validate(cls, payload: Any) -> None:
@@ -126,6 +131,14 @@ class AgentTestRunV1(SettingSchema):
         parallelism = payload.get("parallelism", 1)
         if isinstance(parallelism, bool) or not isinstance(parallelism, int) or not 1 <= parallelism <= 256:
             raise SchemaValidationError("parallelism must be from 1 to 256")
+        for name in ("estimated_seconds", "estimated_low_seconds", "estimated_high_seconds"):
+            if name in payload:
+                _non_negative_number(payload, name, 7 * 24 * 3600)
+        if "estimate_complete" in payload and not isinstance(payload["estimate_complete"], bool):
+            raise SchemaValidationError("estimate_complete must be boolean")
+        sampled_tests = payload.get("estimate_sampled_tests", 0)
+        if isinstance(sampled_tests, bool) or not isinstance(sampled_tests, int) or sampled_tests < 0:
+            raise SchemaValidationError("estimate_sampled_tests must be a non-negative integer")
 
 
 @home("organization")

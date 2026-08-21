@@ -32,6 +32,8 @@ Do not poll a live run. Do not start another run. Do not pipe Agent Test through
 `head`, `tail`, or `grep`; query the temporary evidence instead. Use `retain`
 only when the raw run should outlive the session. Organization statistics are
 stored separately in Settings and do not depend on raw artifact retention.
+`status` reports a history-based ETA for a live run when timing samples exist;
+use it once when needed, then wait for the completion notification.
 
 The resident supervisor launches isolated run process groups. Completion is
 delivered through the dashboard's typed task-notification endpoint for both
@@ -67,10 +69,16 @@ machine-wide summary.
 Each completed pytest node contributes its total setup, call, and teardown
 duration to an immutable machine-store observation. The dashboard retains the
 latest 10 observations per repository and node, pruning only older rows after
-an append. `run` and `plan` report a median-based estimate before execution;
-xdist profiles divide aggregate test time by their detected worker count,
-independently of machine-capacity weights.
-`timings` shows a bounded view of the retained samples and never starts tests.
+an append. `run` and `plan` report a median-based estimate before execution.
+Parallel profiles use the larger of the longest known test and aggregate known
+work divided by effective workers, so one long test is never divided across
+idle workers; machine-capacity weights remain independent.
+`timings` shows each node's observed minimum, median, maximum, and bounded
+latest samples without starting tests. Exact node selections are complete
+only when every requested node has history. File, class, and directory
+selectors are explicitly open-ended: their estimate covers previously seen
+descendants but remains a known-work floor because collection may discover
+new nodes.
 
 Pytest's captured output, including output from passing tests, is written to
 the retained run log. It is never streamed into the launching agent's context.

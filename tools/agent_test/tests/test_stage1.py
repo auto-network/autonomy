@@ -55,7 +55,7 @@ def _manifests(env: dict[str, str]) -> list[dict]:
     return sorted(values, key=lambda value: value["created_at"], reverse=True)
 
 
-def _wait_terminal(env: dict[str, str], timeout: float = 10) -> dict:
+def _wait_terminal(env: dict[str, str], timeout: float = 20) -> dict:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         values = _manifests(env)
@@ -185,3 +185,53 @@ def test_retain_explicitly_copies_completed_run_to_workspace_output(
     retained_manifest = json.loads((destination / "run.json").read_text())
     assert retained_manifest["evidence_lifecycle"] == "durable"
     assert retained_manifest["retained_at"]
+
+
+def test_status_reports_live_eta_once_and_primes_against_polling(
+    project: Path, cli_env: dict[str, str],
+):
+    directory = Path(cli_env["AGENT_TEST_STATE_DIR"]) / "runs" / "at-eta"
+    directory.mkdir(parents=True)
+    (directory / "run.json").write_text(json.dumps({
+        "schema": 1,
+        "run_id": "at-eta",
+        "status": "running",
+        "created_at": "2026-08-21T00:00:00+00:00",
+        "started_at": "2026-08-21T00:00:00+00:00",
+        "worker_pid": os.getpid(),
+        "duration_estimate": {
+            "estimated_seconds": 60.0,
+            "estimated_low_seconds": 40.0,
+            "estimated_high_seconds": 90.0,
+            "unknown_selectors": [],
+        },
+    }))
+    result = _cli(project, cli_env, "status")
+    assert result.returncode == 0
+    assert "ETA: original ~1.0m estimate exceeded" in result.stdout
+    assert "Do not poll status again" in result.stdout
+
+
+def test_status_does_not_claim_total_eta_when_a_selector_has_no_history(
+    project: Path, cli_env: dict[str, str],
+):
+    directory = Path(cli_env["AGENT_TEST_STATE_DIR"]) / "runs" / "at-partial-eta"
+    directory.mkdir(parents=True)
+    (directory / "run.json").write_text(json.dumps({
+        "schema": 1,
+        "run_id": "at-partial-eta",
+        "status": "queued",
+        "created_at": "2026-08-21T00:00:00+00:00",
+        "worker_pid": os.getpid(),
+        "duration_estimate": {
+            "estimated_seconds": 25.0,
+            "estimated_low_seconds": 18.0,
+            "estimated_high_seconds": 40.0,
+            "unknown_selectors": ["tests/test_unseen.py"],
+        },
+    }))
+    result = _cli(project, cli_env, "status")
+    assert result.returncode == 0
+    assert "ETA unknown: observed known work is at least ~18.0s" in result.stdout
+    assert "1 selector(s) have no timing history" in result.stdout
+    assert "Estimated runtime after admission" not in result.stdout

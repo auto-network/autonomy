@@ -96,6 +96,28 @@
         const omitted = Math.max(0, Number(run.selector_count || 0) - selectors.length);
         return (preview || 'selectors unavailable') + (omitted ? ' +' + omitted + ' more' : '');
       },
+      etaText(run) {
+        const estimate = Number(run.estimated_seconds || 0);
+        if (!estimate) return 'ETA unknown · waiting for timing history';
+        const unknown = Number(run.unknown_selector_count || 0);
+        const uncertain = Number(run.uncertain_selector_count || unknown);
+        const floor = Number(run.estimated_low_seconds || estimate);
+        if (uncertain) return 'at least ~' + this.duration(floor) + ' observed known work · ' + uncertain + ' selectors incomplete';
+        const elapsed = Math.max(0, Date.now() / 1000 - Number(run.acquired_at || 0));
+        const remaining = estimate - elapsed;
+        const low = Math.max(0, Number(run.estimated_low_seconds || estimate) - elapsed);
+        const high = Math.max(0, Number(run.estimated_high_seconds || estimate) - elapsed);
+        const range = low !== high ? ' · observed ' + this.duration(low) + '–' + this.duration(high) + ' left' : '';
+        return remaining > 0
+          ? '~' + this.duration(remaining) + ' remaining' + range + ' · ' + this.duration(elapsed) + ' elapsed'
+          : 'estimate exceeded · ' + this.duration(elapsed) + ' elapsed';
+      },
+      etaProgress(run) {
+        const estimate = Number(run.estimated_seconds || 0);
+        if (!estimate || Number(run.uncertain_selector_count || run.unknown_selector_count || 0)) return 0;
+        const elapsed = Math.max(0, Date.now() / 1000 - Number(run.acquired_at || 0));
+        return Math.min(96, Math.max(3, Math.round(elapsed / estimate * 100)));
+      },
       featureLabel(value) {
         return String(value || 'unknown').replace(/^command_/, '').replaceAll('_', ' ');
       },
@@ -109,6 +131,11 @@
         return Object.entries((this.summary.telemetry || {}).versions || {})
           .map(([name, count]) => ({ name, count }))
           .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+      },
+      behaviorTotal(name) { return (((this.summary.telemetry || {}).behavior || {}).totals || {})[name] || 0; },
+      behaviorSessions() { return ((((this.summary.telemetry || {}).behavior || {}).sessions) || []).slice(0, 8); },
+      sequenceText(sequence) {
+        return (sequence || []).map(item => this.featureLabel(item.event)).join('  →  ');
       },
       recentUsage() { return ((this.summary.telemetry || {}).recent_events || []).slice(0, 6); },
       errorCounts() {

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Any
 
@@ -76,6 +77,11 @@ class AgentTestLeaseV1(SettingSchema):
     repository: str = field(required=False, description="Repository identity reported by Agent Test.")
     selectors: list = field(required=False, description="Bounded selector preview for the live activity surface.")
     selector_count: int = field(required=False, description="Total selectors requested by the run.")
+    estimated_seconds: float = field(required=False, description="History-based estimated execution time.")
+    estimated_low_seconds: float = field(required=False, description="Sum of recent observed minima for known tests.")
+    estimated_high_seconds: float = field(required=False, description="Sum of recent observed maxima for known tests.")
+    unknown_selector_count: int = field(required=False, description="Requested selectors without timing history.")
+    uncertain_selector_count: int = field(required=False, description="Selectors whose complete test-node inventory is not known.")
 
     @classmethod
     def validate(cls, payload: Any) -> None:
@@ -83,7 +89,12 @@ class AgentTestLeaseV1(SettingSchema):
         if not isinstance(payload, dict):
             return
         required = {"session", "run_id", "resources", "acquired_at", "expires_at"}
-        optional = {"organization", "repository", "selectors", "selector_count"}
+        optional = {
+            "organization", "repository", "selectors", "selector_count",
+            "estimated_seconds", "estimated_low_seconds", "estimated_high_seconds",
+            "unknown_selector_count",
+            "uncertain_selector_count",
+        }
         extra = set(payload) - required - optional
         missing = required - set(payload)
         if extra or missing:
@@ -129,6 +140,26 @@ def _validate_activity_context(owner: str, payload: dict[str, Any]) -> None:
         raise SchemaValidationError(
             f"{owner}: selector_count must cover the preview and be at most 100000"
         )
+    for name in ("estimated_seconds", "estimated_low_seconds", "estimated_high_seconds"):
+        estimate = payload.get(name)
+        if estimate is not None and (
+            isinstance(estimate, bool)
+            or not isinstance(estimate, (int, float))
+            or not math.isfinite(estimate)
+            or estimate <= 0
+            or estimate > 7 * 24 * 3600
+        ):
+            raise SchemaValidationError(
+                f"{owner}: {name} must be positive and no more than seven days"
+            )
+    for name in ("unknown_selector_count", "uncertain_selector_count"):
+        count = payload.get(name)
+        if count is not None and (
+            isinstance(count, bool)
+            or not isinstance(count, int)
+            or not 0 <= count <= 100_000
+        ):
+            raise SchemaValidationError(f"{owner}: {name} is invalid")
 
 
 @home("machine")
@@ -146,6 +177,11 @@ class AgentTestQueueV1(SettingSchema):
     repository: str = field(required=True, description="Repository identity reported by Agent Test.")
     selectors: list = field(required=True, description="Bounded selector preview for the activity surface.")
     selector_count: int = field(required=True, description="Total selectors requested by the run.")
+    estimated_seconds: float = field(required=False, description="History-based estimated execution time.")
+    estimated_low_seconds: float = field(required=False, description="Sum of recent observed minima for known tests.")
+    estimated_high_seconds: float = field(required=False, description="Sum of recent observed maxima for known tests.")
+    unknown_selector_count: int = field(required=False, description="Requested selectors without timing history.")
+    uncertain_selector_count: int = field(required=False, description="Selectors whose complete test-node inventory is not known.")
     resources: dict = field(required=True, description="Resource slots requested by this run.")
     requested_at: float = field(required=True, description="Unix timestamp of the first capacity request.")
     updated_at: float = field(required=True, description="Unix timestamp of the latest capacity request.")
@@ -160,7 +196,12 @@ class AgentTestQueueV1(SettingSchema):
             "organization", "session", "run_id", "repository", "selectors",
             "selector_count", "resources", "requested_at", "updated_at", "expires_at",
         }
-        extra = set(payload) - required
+        optional = {
+            "estimated_seconds", "estimated_low_seconds", "estimated_high_seconds",
+            "unknown_selector_count",
+            "uncertain_selector_count",
+        }
+        extra = set(payload) - required - optional
         missing = required - set(payload)
         if extra or missing:
             raise SchemaValidationError(

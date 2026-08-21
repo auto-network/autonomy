@@ -79,12 +79,30 @@ def _activity_context(body: dict[str, Any]) -> dict[str, Any]:
     except (TypeError, ValueError):
         requested_count = len(selectors)
     selector_count = max(len(selectors), requested_count)
-    return {
+    context = {
         "organization": str(body.get("organization") or "unknown")[:100],
         "repository": str(body.get("repository") or "unknown")[:1000],
         "selectors": selectors[:5],
         "selector_count": min(selector_count, 100_000),
     }
+    for name in ("estimated_seconds", "estimated_low_seconds", "estimated_high_seconds"):
+        try:
+            estimate = float(body.get(name) or 0)
+        except (TypeError, ValueError):
+            estimate = 0
+        if 0 < estimate <= 7 * 24 * 3600:
+            context[name] = estimate
+    try:
+        unknown_count = int(body.get("unknown_selector_count") or 0)
+    except (TypeError, ValueError):
+        unknown_count = 0
+    context["unknown_selector_count"] = max(0, min(unknown_count, 100_000))
+    try:
+        uncertain_count = int(body.get("uncertain_selector_count") or unknown_count)
+    except (TypeError, ValueError):
+        uncertain_count = unknown_count
+    context["uncertain_selector_count"] = max(0, min(uncertain_count, 100_000))
+    return context
 
 
 def transact(action: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -117,6 +135,9 @@ def transact(action: str, body: dict[str, Any]) -> dict[str, Any]:
                 for key in (
                     "session", "run_id", "resources", "acquired_at",
                     "organization", "repository", "selectors", "selector_count",
+                    "estimated_seconds",
+                    "estimated_low_seconds", "estimated_high_seconds", "unknown_selector_count",
+                    "uncertain_selector_count",
                 )
                 if key in existing
             }
@@ -227,6 +248,11 @@ def activity_snapshot(organization: str) -> dict[str, Any]:
                 "repository": item.get("repository") or "unknown",
                 "selectors": list(item.get("selectors") or [])[:5],
                 "selector_count": int(item.get("selector_count") or 0),
+                "estimated_seconds": item.get("estimated_seconds"),
+                "estimated_low_seconds": item.get("estimated_low_seconds"),
+                "estimated_high_seconds": item.get("estimated_high_seconds"),
+                "unknown_selector_count": int(item.get("unknown_selector_count") or 0),
+                "uncertain_selector_count": int(item.get("uncertain_selector_count") or 0),
                 "resources": dict(item["resources"]),
                 timestamp: float(item[timestamp]),
             }

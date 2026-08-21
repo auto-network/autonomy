@@ -1,6 +1,6 @@
 {
   "name": "autonomy/agent-test",
-  "version": 4,
+  "version": 5,
   "implements": [
     {"contract": "test_execution", "version": 1}
   ],

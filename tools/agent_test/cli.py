@@ -99,13 +99,30 @@ def _estimate_text(estimate: dict[str, Any]) -> str | None:
         return "Estimated test time: unknown; no retained timing history matches this selection."
     sampled = int(estimate.get("sampled_tests") or 0)
     samples = int(estimate.get("sample_count") or 0)
-    parallelism = int(estimate.get("parallelism") or 1)
+    parallelism = int(estimate.get("effective_parallelism") or estimate.get("parallelism") or 1)
     suffix = f" across {parallelism} workers" if parallelism > 1 else ""
     unknown = len(estimate.get("unknown_selectors") or [])
-    caveat = f"; {unknown} selector(s) have no history" if unknown else ""
+    open_ended = len(estimate.get("open_ended_selectors") or [])
+    low = estimate.get("estimated_low_seconds")
+    high = estimate.get("estimated_high_seconds")
+    range_text = (
+        f"; observed range ~{format_estimate(float(low))}–{format_estimate(float(high))}"
+        if isinstance(low, (int, float)) and isinstance(high, (int, float)) else ""
+    )
+    if unknown or open_ended:
+        incomplete = []
+        if unknown:
+            incomplete.append(f"{unknown} selector(s) have no history")
+        if open_ended:
+            incomplete.append(f"{open_ended} broad selector(s) may collect unseen tests")
+        return (
+            f"Known-history floor: ~{format_estimate(float(seconds))}{suffix}, "
+            f"from {samples} retained sample(s) across {sampled} test(s){range_text}; "
+            f"{' and '.join(incomplete)}, so total ETA is unknown."
+        )
     return (
         f"Estimated test time: ~{format_estimate(float(seconds))}{suffix}, "
-        f"from {samples} retained sample(s) across {sampled} test(s){caveat}."
+        f"from {samples} retained sample(s) across {sampled} test(s){range_text}."
     )
 
 
@@ -241,11 +258,19 @@ def cmd_run(args: argparse.Namespace) -> int:
                 key: estimate.get(key)
                 for key in (
                     "estimated_seconds",
+                    "estimated_low_seconds",
+                    "estimated_high_seconds",
                     "serial_seconds",
                     "parallelism",
+                    "effective_parallelism",
                     "sampled_tests",
                     "sample_count",
                     "unknown_selectors",
+                    "open_ended_selectors",
+                    "known_selector_count",
+                    "requested_selector_count",
+                    "selector_history_coverage",
+                    "estimate_complete",
                 )
                 if key in estimate
             },
@@ -567,8 +592,20 @@ def cmd_timings(args: argparse.Namespace) -> int:
     sample_limit = max(1, min(int(args.samples), 10))
     for item in tests:
         observations = (item.get("observations") or [])[:sample_limit]
+        durations = [
+            float(observation["duration_seconds"])
+            for observation in item.get("observations") or []
+        ]
+        minimum = float(item.get(
+            "minimum_seconds", min(durations) if durations else item["median_seconds"],
+        ))
+        maximum = float(item.get(
+            "maximum_seconds", max(durations) if durations else item["median_seconds"],
+        ))
         print(
             f"- {item['nodeid']} · median {format_estimate(float(item['median_seconds']))} "
+            f"· range {format_estimate(minimum)}–"
+            f"{format_estimate(maximum)} "
             f"· {len(item.get('observations') or [])} sample(s)"
         )
         recent = ", ".join(
@@ -621,7 +658,62 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 0
     print(_summary_line(manifest))
     if manifest.get("status") in {"starting", "queued", "running", "stopping"}:
-        print("The run is supervised in the background; completion will be delivered automatically.")
+        estimate_data = manifest.get("duration_estimate") or {}
+        estimate = estimate_data.get("estimated_seconds")
+        estimate_low = estimate_data.get("estimated_low_seconds")
+        estimate_high = estimate_data.get("estimated_high_seconds")
+        unknown = len(estimate_data.get("unknown_selectors") or [])
+        open_ended = len(estimate_data.get("open_ended_selectors") or [])
+        started_at = manifest.get("started_at")
+        if (unknown or open_ended) and isinstance(estimate, (int, float)) and estimate > 0:
+            floor = estimate_low if isinstance(estimate_low, (int, float)) else estimate
+            reasons = []
+            if unknown:
+                reasons.append(f"{unknown} selector(s) have no timing history")
+            if open_ended:
+                reasons.append(f"{open_ended} broad selector(s) may collect unseen tests")
+            print(
+                f"ETA unknown: observed known work is at least ~{format_estimate(float(floor))}; "
+                f"{' and '.join(reasons)}."
+            )
+        elif manifest.get("status") == "running" and isinstance(estimate, (int, float)) and estimate > 0 and started_at:
+            try:
+                from datetime import datetime, timezone
+                elapsed = max(
+                    0.0,
+                    (datetime.now(timezone.utc) - datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))).total_seconds(),
+                )
+            except (TypeError, ValueError):
+                elapsed = 0.0
+            remaining = float(estimate) - elapsed
+            if remaining > 0:
+                range_text = ""
+                if isinstance(estimate_low, (int, float)) and isinstance(estimate_high, (int, float)):
+                    low_remaining = max(0.0, float(estimate_low) - elapsed)
+                    high_remaining = max(0.0, float(estimate_high) - elapsed)
+                    range_text = (
+                        f" Observed remaining range: {format_estimate(low_remaining)}–"
+                        f"{format_estimate(high_remaining)}."
+                    )
+                print(
+                    f"ETA: about {format_estimate(remaining)} remaining "
+                    f"({format_estimate(elapsed)} elapsed of ~{format_estimate(float(estimate))})."
+                    f"{range_text}"
+                )
+            else:
+                print(
+                    f"ETA: original ~{format_estimate(float(estimate))} estimate exceeded; "
+                    f"{format_estimate(elapsed)} elapsed. Completion notification is still authoritative."
+                )
+        elif manifest.get("status") == "queued":
+            estimate_text = (
+                f" Estimated runtime after admission: ~{format_estimate(float(estimate))}."
+                if isinstance(estimate, (int, float)) and estimate > 0 else ""
+            )
+            print(f"Waiting for machine capacity.{estimate_text}")
+        else:
+            print("ETA unknown: matching timing history is not available yet.")
+        print("The run is supervised in the background; completion will be delivered automatically. Do not poll status again.")
     else:
         print(f"Evidence: {manifest['_directory']}")
     return 0

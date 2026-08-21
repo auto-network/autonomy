@@ -97,6 +97,10 @@
                   <div class="testing-live-run is-running">
                     <div class="testing-run-line"><code x-text="run.run_id"></code><b x-text="age(run.acquired_at) + ' active'"></b></div>
                     <p x-text="selectorText(run)" :title="(run.selectors || []).join('\n')"></p>
+                    <div class="testing-eta" :class="run.estimated_seconds ? '' : 'is-unknown'">
+                      <span :style="'width:' + etaProgress(run) + '%'" aria-hidden="true"></span>
+                      <small x-text="etaText(run)"></small>
+                    </div>
                     <small><span x-text="resourceText(run.resources)"></span><i>·</i><span x-text="shortRepository(run.repository)"></span></small>
                   </div>
                 </template>
@@ -181,6 +185,35 @@
               <code><b x-text="item.name"></b> <i x-text="item.count + ' sessions'"></i></code>
             </template>
           </div>
+          <div class="testing-estimate-quality" data-testid="testing-estimate-quality">
+            <article><strong x-text="summary.runs.estimate_quality.samples"></strong><span>complete ETA samples</span></article>
+            <article><strong x-text="percent(summary.runs.estimate_quality.within_factor_2)"></strong><span>within 2× actual</span></article>
+            <article><strong x-text="summary.runs.estimate_quality.underestimated"></strong><span>ran longer</span></article>
+            <article><strong x-text="summary.runs.estimate_quality.overestimated"></strong><span>finished sooner</span></article>
+          </div>
+          <div class="testing-pattern-strip" data-testid="testing-behavior-patterns">
+            <article><strong x-text="behaviorTotal('background_runs')"></strong><span>background runs</span></article>
+            <article><strong x-text="behaviorTotal('status_polls')"></strong><span>live status polls</span></article>
+            <article><strong x-text="behaviorTotal('failed_runs_inspected')"></strong><span>failures inspected</span></article>
+            <article><strong x-text="behaviorTotal('focused_recoveries')"></strong><span>focused recoveries</span></article>
+          </div>
+          <div class="testing-behavior-list">
+            <template x-for="session in behaviorSessions()" :key="session.session">
+              <article>
+                <header><div><strong x-text="session.session_title"></strong><code x-text="session.session"></code></div><time x-text="age(session.last_seen_at) + ' ago'"></time></header>
+                <div class="testing-behavior-signals">
+                  <span x-show="session.counts.background_runs" class="is-good"><b x-text="session.counts.background_runs"></b> left running</span>
+                  <span x-show="session.counts.status_polls" class="is-warn"><b x-text="session.counts.status_polls"></b> status polls</span>
+                  <span x-show="session.counts.failed_runs_inspected" class="is-good"><b x-text="session.counts.failed_runs_inspected"></b> failures inspected</span>
+                  <span x-show="session.counts.focused_recoveries" class="is-good"><b x-text="session.counts.focused_recoveries"></b> focused reruns</span>
+                  <span x-show="session.counts.repeat_refusals" class="is-bad"><b x-text="session.counts.repeat_refusals"></b> repeats stopped</span>
+                  <span x-show="session.counts.raw_pytest_refusals" class="is-bad"><b x-text="session.counts.raw_pytest_refusals"></b> raw pytest attempts</span>
+                </div>
+                <p class="testing-sequence" x-text="sequenceText(session.recent_sequence)"></p>
+              </article>
+            </template>
+            <p x-show="!behaviorSessions().length" class="testing-empty">Behavior sequences will appear as Agent Test 0.5 clients issue commands.</p>
+          </div>
           <div class="testing-event-stream">
             <template x-for="event in recentUsage()" :key="event.session + event.recorded_at + event.event">
               <div><span x-text="featureLabel(event.event)"></span><p x-text="event.session"></p><time x-text="age(event.recorded_at) + ' ago'"></time></div>
@@ -221,7 +254,11 @@
           <article><span>Passed runs</span><strong class="is-good" x-text="count('passed')"></strong></article>
           <article><span>Failed runs</span><strong class="is-bad" x-text="count('failed')"></strong></article>
           <article><span>Errors</span><strong class="is-warn" x-text="count('error')"></strong></article>
-          <article><span>Observed tests</span><strong x-text="summary.tests.observed"></strong></article>
+          <article>
+            <span>Timing history</span>
+            <strong x-text="summary.tests.observation_rows + ' samples'"></strong>
+            <small x-text="summary.tests.observed + ' tests · avg ' + summary.tests.average_samples_per_test.toFixed(1) + ' each'"></small>
+          </article>
         </div>
       </section>
 
@@ -247,7 +284,7 @@
           <div class="testing-section-head"><div><p>Instability</p><h2>Flaky tests</h2></div><span>Last 10 observations</span></div>
           <div class="testing-table-wrap">
             <table><thead><tr><th>Test</th><th>Failure rate</th><th>Samples</th></tr></thead>
-              <tbody><template x-for="test in summary.tests.flaky" :key="test.nodeid">
+              <tbody><template x-for="test in summary.tests.flaky" :key="test.repository + ':' + test.nodeid">
                 <tr><td data-label="Test" :title="test.nodeid" x-text="test.nodeid"></td><td data-label="Failure rate" class="is-bad" x-text="percent(test.failure_rate)"></td><td data-label="Samples" x-text="test.samples"></td></tr>
               </template></tbody></table>
             <p x-show="!summary.tests.flaky.length" class="testing-empty">No mixed pass/fail histories detected.</p>
@@ -258,7 +295,7 @@
           <div class="testing-section-head"><div><p>Latency</p><h2>Slowest tests</h2></div><span>Median wall time</span></div>
           <div class="testing-table-wrap">
             <table><thead><tr><th>Test</th><th>Median</th><th>Samples</th></tr></thead>
-              <tbody><template x-for="test in summary.tests.slow" :key="test.nodeid">
+              <tbody><template x-for="test in summary.tests.slow" :key="test.repository + ':' + test.nodeid">
                 <tr><td data-label="Test" :title="test.nodeid" x-text="test.nodeid"></td><td data-label="Median" class="is-warn" x-text="duration(test.median_seconds)"></td><td data-label="Samples" x-text="test.samples"></td></tr>
               </template></tbody></table>
             <p x-show="!summary.tests.slow.length" class="testing-empty">No per-test timings have been reported.</p>
