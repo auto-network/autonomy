@@ -2331,7 +2331,10 @@ def _session_put(endpoint_suffix: str, payload: dict):
         url,
         data=json.dumps(payload).encode(),
         method="PUT",
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {_resolve_crosstalk_token()}",
+        },
     )
     try:
         resp = urllib.request.urlopen(req, timeout=10, context=ctx)
@@ -2363,7 +2366,11 @@ def _session_delete(endpoint_suffix: str):
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
     url = f"{api_base}/api/session/{urllib.parse.quote(session_name)}/{endpoint_suffix}"
-    req = urllib.request.Request(url, method="DELETE")
+    req = urllib.request.Request(
+        url,
+        method="DELETE",
+        headers={"Authorization": f"Bearer {_resolve_crosstalk_token()}"},
+    )
     try:
         resp = urllib.request.urlopen(req, timeout=10, context=ctx)
         if resp.status != 200:
@@ -4021,6 +4028,7 @@ def cmd_ui_design(args):
         sys.exit(1)
 
     api_base = args.api.rstrip("/")
+    token = _resolve_crosstalk_token()
     # Skip TLS verification for self-signed certs
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
@@ -4031,7 +4039,10 @@ def cmd_ui_design(args):
         req = urllib.request.Request(
             f"{api_base}{endpoint}",
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {token}",
+            },
             method="POST",
         )
         resp = urllib.request.urlopen(req, context=ctx, timeout=30)
@@ -4070,7 +4081,11 @@ def cmd_ui_design(args):
             shown_endpoint += "?force=true"
         for endpoint, method in ((f"/api/presentations/deck/{did}", "GET"),
                                  (shown_endpoint, "POST")):
-            req = urllib.request.Request(f"{api_base}{endpoint}", method=method)
+            req = urllib.request.Request(
+                f"{api_base}{endpoint}",
+                method=method,
+                headers={"Authorization": f"Bearer {token}"},
+            )
             urllib.request.urlopen(req, context=ctx, timeout=10).read()
 
     def _scan_variants():
@@ -4932,7 +4947,11 @@ def cmd_crosstalk_broadcast(args):
 
     # Fetch active sessions
     url = f"{api_base}/api/dao/active_sessions"
-    req = urllib.request.Request(url, method="GET")
+    req = urllib.request.Request(
+        url,
+        method="GET",
+        headers={"Authorization": f"Bearer {token}"},
+    )
     try:
         resp = urllib.request.urlopen(req, timeout=30, context=ctx)
         sessions = json.loads(resp.read())
