@@ -31,6 +31,7 @@ FLEET_ENROLL_SAS_DOMAIN = b"autonomy.network.fleet-enroll-sas.v2\n"
 FLEET_MACHINE_ID_DOMAIN = b"autonomy.network.fleet-machine-id.v1\n"
 FLEET_APPROVAL_DOMAIN = b"autonomy.fleet.enrollment-approval.v1\n"
 FLEET_APPROVAL_VERSION = 1
+FLEET_REQUEST_ID_DOMAIN = b"autonomy.fleet.enrollment-request.v1\n"
 
 
 class FleetEnrollError(ValueError):
@@ -48,6 +49,31 @@ class EnrollmentRequest:
     enrollment_nonce: str
     personal_root_pub: str
     invite_id: str
+
+    def to_dict(self) -> dict:
+        return {
+            "enrollment_nonce": self.enrollment_nonce,
+            "personal_root_pub": self.personal_root_pub,
+            "invite_id": self.invite_id,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict) -> "EnrollmentRequest":
+        expected = {"enrollment_nonce", "personal_root_pub", "invite_id"}
+        if not isinstance(payload, dict) or set(payload) != expected:
+            raise FleetEnrollError(
+                "fleet enrollment request must carry exactly enrollment_nonce, "
+                "personal_root_pub, and invite_id"
+            )
+        return cls(
+            enrollment_nonce=_require_hex64(
+                payload["enrollment_nonce"], "enrollment_nonce"
+            ),
+            personal_root_pub=_require_hex64(
+                payload["personal_root_pub"], "personal_root_pub"
+            ),
+            invite_id=_require_hex64(payload["invite_id"], "invite_id"),
+        )
 
 
 @dataclass(frozen=True)
@@ -149,6 +175,14 @@ def verification_code(request: EnrollmentRequest) -> str:
     })
     digest = hashlib.sha256(FLEET_ENROLL_SAS_DOMAIN + body).hexdigest().upper()
     return " ".join(digest[i:i + 4] for i in range(0, 24, 4))
+
+
+def request_id(request: EnrollmentRequest) -> str:
+    """Content id for one complete, machine-neutral enrollment request."""
+    frozen = EnrollmentRequest.from_dict(request.to_dict())
+    return hashlib.sha256(
+        FLEET_REQUEST_ID_DOMAIN + canonical_json(frozen.to_dict())
+    ).hexdigest()
 
 
 def assigned_machine_id(

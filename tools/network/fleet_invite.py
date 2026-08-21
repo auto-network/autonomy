@@ -88,6 +88,45 @@ class FleetInvite:
     expires_at: int         # unix ms; 0 means no expiry
     signature: str = field(repr=False)  # personal-root sig over the body
 
+    def to_dict(self) -> dict:
+        return {
+            "personal_root_pub": self.personal_root_pub,
+            "rendezvous": self.rendezvous,
+            "invite_id": self.invite_id,
+            "expires_at": self.expires_at,
+            "signature": self.signature,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict) -> "FleetInvite":
+        expected = {
+            "personal_root_pub", "rendezvous", "invite_id", "expires_at",
+            "signature",
+        }
+        if not isinstance(payload, dict) or set(payload) != expected:
+            raise FleetInviteError(
+                "fleet invite must carry exactly its signed public fields"
+            )
+        signature = payload["signature"]
+        if not isinstance(signature, str) or not _HEX128.match(signature):
+            raise FleetInviteError("fleet invite signature is malformed")
+        expires_at = payload["expires_at"]
+        if (
+            not isinstance(expires_at, int)
+            or isinstance(expires_at, bool)
+            or expires_at < 0
+        ):
+            raise FleetInviteError("fleet invite expires_at is malformed")
+        return cls(
+            personal_root_pub=_require_hex64(
+                payload["personal_root_pub"], "personal_root_pub"
+            ),
+            rendezvous=_require_rendezvous(payload["rendezvous"]),
+            invite_id=_require_hex64(payload["invite_id"], "invite_id"),
+            expires_at=expires_at,
+            signature=signature,
+        )
+
 
 def _body(
     *, personal_root_pub: str, rendezvous: str, invite_id: str, expires_at: int
@@ -222,14 +261,13 @@ def decode(code: str) -> FleetInvite:
     expires = data.get("expires_at")
     if not isinstance(expires, int) or isinstance(expires, bool) or expires < 0:
         raise FleetInviteError("fleet invite expires_at is malformed")
-    return FleetInvite(
-        personal_root_pub=_require_hex64(data.get("personal_root_pub"),
-                                         "personal_root_pub"),
-        rendezvous=_require_rendezvous(data.get("rendezvous")),
-        invite_id=_require_hex64(data.get("invite_id"), "invite_id"),
-        expires_at=expires,
-        signature=sig,
-    )
+    return FleetInvite.from_dict({
+        "personal_root_pub": data.get("personal_root_pub"),
+        "rendezvous": data.get("rendezvous"),
+        "invite_id": data.get("invite_id"),
+        "expires_at": expires,
+        "signature": sig,
+    })
 
 
 def verify(invite: FleetInvite, *, expected_root_pub: str | None = None) -> None:

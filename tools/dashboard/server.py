@@ -127,6 +127,7 @@ from tools.dashboard import approvals_routes
 from tools.dashboard import mcp_relay_routes
 from tools.dashboard import jira_routes
 from tools.dashboard import identity_routes
+from tools.dashboard import fleet_enrollment_routes
 from tools.dashboard import unlock_routes
 from tools.dashboard import vault_routes
 from tools.dashboard import api_auth, route_policy
@@ -18408,6 +18409,7 @@ routes = [
 
     # Personal identity + passkey enrollment (Get started onboarding)
     *identity_routes.ROUTES,
+    *fleet_enrollment_routes.ROUTES,
     *vault_routes.ROUTES,
 
     # Invite bridge, local half (auto-1ihgz): display/consent shell only.

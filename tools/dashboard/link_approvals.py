@@ -82,6 +82,7 @@ _TYPE_LABELS = {
     "note": "Note",
     "file": "File",
     "org:join": "Invitation",
+    "fleet:join": "Fleet machine invitation",
 }
 
 
@@ -256,6 +257,15 @@ def _resolve_target(
                 "title": details["title"],
                 "error": None,
             }
+        if target_type == "fleet:join":
+            try:
+                uuid.UUID(str(target_uuid))
+            except (ValueError, AttributeError):
+                return {
+                    "title": None,
+                    "error": "fleet invitation target is not a UUID",
+                }
+            return {"title": "Fleet machine invitation", "error": None}
         if target_type in ("present", "design"):
             from agents.design_db import get_design
             design = get_design(target_uuid)
