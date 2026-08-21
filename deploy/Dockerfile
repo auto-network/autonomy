@@ -14,12 +14,16 @@
 
 ARG BASE_IMAGE=python:3.12-slim
 
-# ── Stage 1: assemble /app, read the version from .git, then drop .git ──────
+# ── Stage 1: assemble /app, stamp the version, strip the git REMOTE ─────────
 # The build context includes .git (see .dockerignore). This stage reads the
-# commit hash + commit date to stamp /app/VERSION and then removes .git, so the
-# runtime image below — and the autonomy-code volume it seeds — ship bare files
-# with no history and no remote. Both values come from the commit, so the build
-# is reproducible and no version arg is ever passed in.
+# commit hash + commit date to stamp /app/VERSION and then removes only the git
+# REMOTE — never the whole .git. The runtime image below, and the autonomy-code
+# volume it seeds, keep a working local repo, because the session launcher
+# `git clone`s this tree to build the read-only /workspace/repo snapshot every
+# session mounts (NODE-VOLUME-MODEL.md); a tree with no .git fails that clone and
+# silently strips /workspace/repo — and graph/bd/tools with it — from every
+# session. No remote means the node still never phones home. Both values come
+# from the commit, so the build is reproducible and no version arg is passed in.
 FROM ${BASE_IMAGE} AS appsrc
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git curl ca-certificates \
@@ -48,7 +52,9 @@ COPY . /app
 
 # Version stamp: read the commit hash + commit DATE from the checkout being
 # built. Both are deterministic per commit (reproducible image); the build
-# takes no version arg and nobody passes anything. Then drop .git.
+# takes no version arg and nobody passes anything. Then KEEP .git (the launcher
+# clones REPO_ROOT to build /workspace/repo — see NODE-VOLUME-MODEL.md), removing
+# only the remote so the node never phones home, and gc'ing to shrink the pack.
 RUN set -e; \
     if [ ! -d /app/.git ]; then \
         echo "ERROR: build context has no .git; the version stamp needs a git checkout (git clone, not a source tarball)." >&2; \
@@ -58,7 +64,8 @@ RUN set -e; \
         "$(git -C /app rev-parse HEAD)" \
         "$(git -C /app show -s --format=%cI HEAD)" \
         > /app/VERSION; \
-    rm -rf /app/.git
+    git -C /app remote remove origin 2>/dev/null || true; \
+    git -C /app gc --prune=now --quiet
 
 # Build the dashboard CSS once, at image build — no network at startup.
 RUN /usr/local/bin/tailwindcss --cwd /app/tools/dashboard \

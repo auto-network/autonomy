@@ -25,15 +25,28 @@ services:
         BASE_IMAGE: ${AUTONOMY_BASE_IMAGE:-python:3.12-slim}
         TAILWIND_URL: ${AUTONOMY_TAILWIND_URL:-}
         # No version build arg: the build reads the commit hash + date from the
-        # checkout's .git itself and stamps /app/VERSION, then drops .git (see
-        # deploy/Dockerfile). Plain `docker compose up` self-stamps; nobody passes
-        # a version, and the image ships no .git.
+        # checkout's .git itself and stamps /app/VERSION, then strips only the git
+        # REMOTE (see deploy/Dockerfile — the image keeps a working local repo so
+        # the launcher can clone /workspace/repo from it). Plain `docker compose up`
+        # self-stamps; nobody passes a version.
     # Published path: set AUTONOMY_IMAGE to the verified immutable reference
     # from image-lock.env (repo/image@sha256:...), then use
     # `docker compose pull && docker compose up -d --no-build`.
     # Unset remains the sovereign checkout build above; no registry required.
     image: ${AUTONOMY_IMAGE:-autonomy-node:local}
     restart: unless-stopped
+    # Every session the node launches joins THIS network (the launcher discovers
+    # it via `docker inspect` self — agents/mount_plan.discover_topology) and
+    # reaches the dashboard by the `dashboard` alias. That is the only path a
+    # sibling session has to a CONTAINERIZED dashboard: host.docker.internal
+    # resolves to the host gateway, where a container-published, tailscale-bound
+    # port does not answer. The compose service name already aliases here; this
+    # block pins it so the contract survives a service rename. External exposure
+    # is unchanged — this is the internal control-plane name only.
+    networks:
+      default:
+        aliases:
+          - dashboard
     ports:
       - "${DASHBOARD_PORT:-8080}:8080"
     environment:
@@ -49,7 +62,8 @@ services:
       #
       # autonomy-code -> /app : the platform code, as files. Seeded from the
       # image on first boot, then hot-reloaded in place (the entrypoint runs
-      # uvicorn --reload). No .git, no remote: the node never phones home. Code
+      # uvicorn --reload). Keeps a working local repo, remote removed: the node
+      # never phones home, but the launcher can clone /workspace/repo from it. Code
       # updates are a deliberate operator action into this volume, on the
       # operator's schedule — not an image rebuild and not an origin pull. (An
       # operator who prefers to edit a host checkout directly can bind-mount it
