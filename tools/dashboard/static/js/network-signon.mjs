@@ -542,6 +542,104 @@ var signRegistryRequestCore;
              notAfter: posted.notAfter };
   }
 
+  // The registry BINDING is a separate 30-day credential from the serving
+  // certificate, with its own renewal — and it is the one that was silently
+  // never wired to sign-on, so it drifted to expiry and the connector refused
+  // to come up ("no live binding for org"). Renew once under this many days
+  // remain, so a sign-on in the final stretch always refreshes it before it
+  // dies rather than after.
+  var BINDING_RENEW_BELOW_DAYS = 20;
+
+  // A ROOT-DIRECT request envelope: signed by the org ROOT, no cert. The
+  // registry accepts root-direct or a chain anchored at the org root; a
+  // persona-signed session cert does NOT anchor there (D19), so binding
+  // maintenance signs with the root the unlock already opens — never the
+  // session key. Same shape as network-identity's signRegistration.
+  async function _signRootRequest(rootKey, rootPubHex, method, path, payload) {
+    var ts = _nowS();
+    var signingInput = _domainBytes(REQUEST_DOMAIN, canonicalJson({
+      v: 1, method: method.toUpperCase(), path: path, ts: ts,
+      signer: rootPubHex, payload: payload,
+    }));
+    var sig = bytesToHex(await crypto.subtle.sign('Ed25519', rootKey, signingInput));
+    return { v: 1, signer: rootPubHex, ts: ts, payload: payload, sig: sig };
+  }
+
+  async function _postEnvelope(url, orgSlug, envelope) {
+    var headers = { 'Content-Type': 'application/json' };
+    if (orgSlug) headers['X-Graph-Org'] = orgSlug;
+    var resp = await _transport.fetch(url, {
+      method: 'POST', headers: headers,
+      body: JSON.stringify({ org: orgSlug || null, envelope: envelope }),
+    });
+    var result = await resp.json().catch(function () { return {}; });
+    if (!resp.ok || result.ok === false) {
+      var err = new Error(result.error || ('request refused (' + resp.status + ')'));
+      err.expired = !!result.expired;
+      throw err;
+    }
+    return result;
+  }
+
+  function _isoSeconds(s) {
+    var t = Date.parse(s);
+    return Number.isFinite(t) ? Math.floor(t / 1000) : null;
+  }
+
+  // Keep the org's registry binding alive across its route authorization
+  // window. A live-but-near-expiry binding is heartbeat-renewed (§4.2); an
+  // ALREADY-EXPIRED one cannot be — the registry 410s a dead binding — so it
+  // is reclaimed by a fresh root-direct registration (§4.1, atomic reclaim)
+  // carrying the recovery policy the binding already declared. Both sign with
+  // the org root this personal unlock already holds. Never disturbs sign-on:
+  // the caller reports the outcome rather than failing the session.
+  async function _maintainBinding(slug, binding, personalSeed) {
+    if (!(binding && binding.org_uuid && binding.root_pub && binding.registry_url)) {
+      return { checked: false, action: 'unregistered' };
+    }
+    var expiry = _isoSeconds(binding.binding_expires_at);
+    if (expiry === null) return { checked: true, action: 'no-expiry' };
+    var now = _nowS();
+    var expired = now >= expiry;
+    if (!expired && (expiry - now) >= BINDING_RENEW_BELOW_DAYS * 86400) {
+      return { checked: true, action: 'current',
+               daysRemaining: Math.round((expiry - now) / 86400) };
+    }
+    var orgQ = slug ? ('?org=' + encodeURIComponent(slug)) : '';
+    var orgKey = await _fetchJson('/api/network/org-key' + orgQ, slug);
+    if (!orgKey || !orgKey.sealed_root_key) {
+      return { checked: true, action: 'no-sealed-org-key' };
+    }
+    var rootSeed = await openSealedArmor(orgKey, personalSeed);
+    var rootKey;
+    try {
+      rootKey = await _importRootKey(rootSeed);
+    } finally {
+      rootSeed.fill(0);                    // I1: root seed gone at import
+    }
+    try {
+      if (expired) {
+        var policy = binding.recovery_policy || {};
+        var regPayload = {
+          org_uuid: binding.org_uuid, root_pub: binding.root_pub,
+          recovery_policy: policy.mode || 'none',
+        };
+        if (policy.recovery_pub) regPayload.recovery_pub = policy.recovery_pub;
+        var regEnv = await _signRootRequest(
+          rootKey, binding.root_pub, 'POST', '/v1/orgs', regPayload);
+        await _postEnvelope('/api/network/register' + orgQ, slug, regEnv);
+        return { checked: true, action: 'reclaimed', rootOpened: true };
+      }
+      var renewEnv = await _signRootRequest(
+        rootKey, binding.root_pub, 'POST',
+        '/v1/orgs/' + binding.org_uuid + '/renew', {});
+      await _postEnvelope('/api/network/renew' + orgQ, slug, renewEnv);
+      return { checked: true, action: 'renewed', rootOpened: true };
+    } finally {
+      rootKey = null;                      // I1: last root reference dropped
+    }
+  }
+
   // The ONE unlock. Sign-on is personal, so the only armor it opens is the
   // personal root armor — no organization's key is fetched, and none is
   // decrypted. Every persona below comes out of this single seed.
@@ -785,11 +883,27 @@ var signRegistryRequestCore;
           }
         }
 
+        // The registry binding lives on its own 30-day clock, and this is the
+        // same moment it can be kept alive: the org root is reachable and the
+        // binding coordinates are in hand. Like the serving cert, a registry
+        // that is down or an org whose binding cannot be signed must never cost
+        // the operator their session, so the outcome is reported per org.
+        var bindingMaint = { checked: false, action: 'skipped' };
+        if (bound) {
+          try {
+            bindingMaint = await _maintainBinding(slug, binding, opened.seed);
+            if (bindingMaint.rootOpened) orgRootsOpened += 1;
+          } catch (e) {
+            bindingMaint = { checked: true, action: 'failed',
+                             error: (e && e.message) || String(e) };
+          }
+        }
+
         reports.push({
           orgSlug: slug, genesisId: genesisId, org: orgId,
           personaPub: persona.publicHex, notAfter: certPayload.not_after,
           certWire: certWire, registryUrl: entry.registryUrl, rekey: rekey,
-          serveCert: serve,
+          serveCert: serve, binding: bindingMaint,
         });
       }
     } finally {
@@ -953,20 +1067,44 @@ var signRegistryRequestCore;
     var repaired = [];
     var failed = [];
     var ready = [];
-    for (var i = 0; i < slugs.length; i++) {
-      var slug = slugs[i];
-      try {
-        var result = await repairServeCredential(passphrase, { org: slug });
-        var label = result.daysRemaining === null ||
-                    result.daysRemaining === undefined
-          ? slug : (slug + ' (' + result.daysRemaining + 'd)');
-        if (result.repaired) repaired.push(label);
-        else ready.push(label);
-      } catch (e) {
-        failed.push({ org: slug, error: (e && e.message) || String(e) });
+    var bindings = [];
+    // The registry BINDING is maintained on this same password unlock, not
+    // only on a full auto.network sign-on — the gap that let it drift to
+    // expiry while serving certs stayed fresh. The org root each heartbeat or
+    // reclaim needs is sealed to the personal seed, so open it once here; the
+    // per-org check is cheap and opens nothing further when nothing is due.
+    var personal = null;
+    try { personal = await _openPersonalRoot(passphrase); }
+    catch (e) { personal = null; }
+    try {
+      for (var i = 0; i < slugs.length; i++) {
+        var slug = slugs[i];
+        try {
+          var result = await repairServeCredential(passphrase, { org: slug });
+          var label = result.daysRemaining === null ||
+                      result.daysRemaining === undefined
+            ? slug : (slug + ' (' + result.daysRemaining + 'd)');
+          if (result.repaired) repaired.push(label);
+          else ready.push(label);
+        } catch (e) {
+          failed.push({ org: slug, error: (e && e.message) || String(e) });
+        }
+        if (personal && personal.seed) {
+          try {
+            var binding = await _fetchJsonOrNull(
+              '/api/network/binding?org=' + encodeURIComponent(slug), slug);
+            var bm = await _maintainBinding(slug, binding, personal.seed);
+            bindings.push({ org: slug, action: bm.action });
+          } catch (e) {
+            bindings.push({ org: slug, action: 'failed',
+                            error: (e && e.message) || String(e) });
+          }
+        }
       }
+    } finally {
+      if (personal && personal.seed) { personal.seed.fill(0); personal.seed = null; }
     }
-    return { repaired: repaired, ready: ready, failed: failed };
+    return { repaired: repaired, ready: ready, failed: failed, bindings: bindings };
   }
 
   // Sign-out destroys the key and cert locally (spec §6.3): the store is

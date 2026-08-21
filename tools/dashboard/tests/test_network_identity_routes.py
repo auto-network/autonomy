@@ -252,6 +252,54 @@ def test_register_with_recovery_key_policy(env, root, registry_app):
         == recovery.public_hex
 
 
+def _renew_envelope(root: KeyPair, org_uuid=ORG_UUID):
+    """A root-direct binding-renewal heartbeat, signed exactly as the browser's
+    sign-in maintenance signs it (network-signon _signRootRequest)."""
+    return sign_request(root, "POST", f"/v1/orgs/{org_uuid}/renew", {},
+                        ts=int(time.time()))
+
+
+def test_renew_heartbeats_a_live_binding(env, root, registry_app):
+    """The dashboard renew proxy forwards a root-direct §4.2 heartbeat to the
+    registry and persists the authoritative new expiry locally — the path that
+    keeps the binding alive across its 30-day route authorization."""
+    _store_key(env, root)
+    reg = env.post("/api/network/register",
+                   json={"org": ORG, "envelope": _registration_envelope(root)})
+    assert reg.status_code == 200, reg.text
+
+    r = env.post("/api/network/renew",
+                 json={"org": ORG, "envelope": _renew_envelope(root)})
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True
+    # The registry — the security boundary — accepted the root-direct heartbeat
+    # and the org stays live.
+    assert registry_app.state.store.get_org(ORG_UUID) is not None
+    # The local binding row now reflects the registry's authoritative expiry.
+    served = env.get(f"/api/network/binding?org={ORG}").json()
+    assert served["binding_expires_at"] == r.json()["binding"]["binding_expires_at"]
+
+
+def test_renew_of_an_unregistered_org_is_404(env, root):
+    """A heartbeat needs an existing binding to name — an org that never
+    registered has nothing to renew (the expired case is reclaimed by a fresh
+    registration, not a heartbeat)."""
+    _store_key(env, root)
+    r = env.post("/api/network/renew",
+                 json={"org": ORG, "envelope": _renew_envelope(root)})
+    assert r.status_code == 404
+    assert "no binding to renew" in r.json()["error"]
+
+
+def test_renew_cannot_redirect_to_a_foreign_org(env, root):
+    """Renewal carries only {org, envelope}; the registry destination and UUID
+    come from the stored binding, so a caller cannot heartbeat a foreign org."""
+    _store_key(env, root)
+    r = env.post("/api/network/renew", json={
+        "org": ORG, "envelope": _renew_envelope(root), "registry": "evil"})
+    assert r.status_code == 400
+
+
 def test_register_without_stored_key_refused(env, root, registry_app):
     r = env.post("/api/network/register",
                  json={"org": ORG, "envelope": _registration_envelope(root)})
