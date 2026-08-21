@@ -129,7 +129,7 @@ from tools.dashboard import jira_routes
 from tools.dashboard import identity_routes
 from tools.dashboard import unlock_routes
 from tools.dashboard import vault_routes
-from tools.dashboard import api_auth
+from tools.dashboard import api_auth, route_policy
 from tools.dashboard import network_routes
 if os.environ.get("DASHBOARD_MOCK"):
     from tools.dashboard.dao import mock as dao_beads
@@ -18069,7 +18069,11 @@ def _build_plugin_routes() -> list:
             _make_plugin_fragment_handler(p.id, f"plugins/{p.id}/{p.template}"),
         ))
         if p.routes:
-            out.extend(p.routes)
+            # Plugin routes are authenticated by construction: the plugin
+            # infrastructure wraps them, plugins never add auth themselves.
+            # plugin=True refuses an unauthenticated caller unconditionally
+            # (an unenrolled dashboard exposes no plugin routes).
+            out.extend(route_policy.apply_default_deny(p.routes, plugin=True))
         out.append(Mount(
             f"/static/plugins/{p.id}",
             app=StaticFiles(directory=str(p.plugin_dir)),
@@ -18438,6 +18442,15 @@ if os.environ.get("DASHBOARD_MOCK"):
         Route("/api/test/toast", api_test_toast_get),
         Route("/api/test/toast", api_test_toast_post, methods=["POST"]),
     ]
+
+# Default-deny (auto-1wwpf.6): wrap every app /api route so a caller the
+# ApiIdentityMiddleware did not authenticate is refused. Plugin routes are
+# already wrapped unconditionally at the plugin mount (plugin=True) and carry
+# the idempotence marker, so this app-strength pass skips them. App routes use
+# the fail-open-then-enforce guard, which stands down while the human gate is
+# not enforced so a fresh install can bootstrap; the PUBLIC_EXCEPTIONS in
+# route_policy are the pre-enrolment routes served without a credential.
+routes = route_policy.apply_default_deny(routes)
 
 # Background task handles — captured during startup, cancelled during shutdown
 _dispatch_watcher_task: asyncio.Task | None = None

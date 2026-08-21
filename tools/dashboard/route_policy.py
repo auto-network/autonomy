@@ -105,6 +105,7 @@ def _guarded(endpoint, path: str, *, plugin: bool):
                 return refused
         return await endpoint(request)
 
+    guarded._route_policy_wrapped = True  # idempotence marker (see below)
     return guarded
 
 
@@ -120,7 +121,14 @@ def apply_default_deny(routes: list, *, plugin: bool = False) -> list:
     """
     out = []
     for r in routes:
-        if isinstance(r, Route) and r.path.startswith("/api/"):
+        already_wrapped = getattr(
+            getattr(r, "endpoint", None), "_route_policy_wrapped", False
+        )
+        if (
+            isinstance(r, Route)
+            and r.path.startswith("/api/")
+            and not already_wrapped
+        ):
             out.append(
                 Route(
                     r.path,
