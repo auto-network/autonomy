@@ -14,8 +14,11 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
 from pathlib import Path
+import re
 import sqlite3
+import time
 from typing import Iterable, Iterator
+from uuid import uuid4
 import zlib
 
 from .codec import (
@@ -40,6 +43,11 @@ JOURNAL_STORAGE_VERSION = 1
 MAX_TRANSACTION_OPERATIONS = 16_384
 MAX_TRANSACTION_FRAME_BYTES = 128 * 1024 * 1024
 _table_columns: dict[str, tuple[str, ...]] = {}
+_MUTATING_TABLE = re.compile(
+    r'^\s*(?:INSERT(?:\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|'
+    r'UPDATE(?:\s+OR\s+\w+)?|DELETE\s+FROM)\s+["`\[]?([A-Za-z_]\w*)',
+    re.IGNORECASE,
+)
 
 
 def _pack_journal(frame: bytes) -> bytes:
@@ -298,6 +306,73 @@ class MutationCatalog:
                 lambda tombstone, *values, table=table, columns=columns:
                     self._frame(table, bool(tombstone), columns, values),
             )
+
+    def before_statement(self, sql: object) -> bool:
+        """Enter one automatic authored context at the first replicated DML.
+
+        The returned flag tells :class:`FleetSyncConnection` that this hook
+        opened the SQLite transaction and therefore owns rollback if the
+        application statement itself fails.  A caller-owned transaction stays
+        caller-owned.
+        """
+        if self._context is not None or not isinstance(sql, str):
+            return False
+        match = _MUTATING_TABLE.match(sql)
+        if match is None:
+            return False
+        policy = TABLE_POLICIES.get(match.group(1).lower())
+        if policy is None or policy.kind in {PolicyKind.LOCAL, PolicyKind.DERIVED}:
+            return False
+
+        opened = not self.conn.in_transaction
+        if opened:
+            self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            timestamp_ns = time.time_ns()
+            floor, last = self.conn.execute(
+                "SELECT write_floor,last_timestamp FROM fleet_sync_state "
+                "WHERE singleton=1"
+            ).fetchone()
+            required = max(int(floor), int(last))
+            if timestamp_ns <= required:
+                raise WatermarkError(f"write refused before time {required + 1}")
+            transaction_id = f"local:{uuid4().hex}"
+            transaction_ref = self._ensure_transaction(
+                self.origin_incarnation, transaction_id, timestamp_ns
+            )
+            self._context = _WriteContext(
+                timestamp_ns,
+                self.origin_incarnation,
+                transaction_id,
+                transaction_ref,
+            )
+            return opened
+        except Exception:
+            if opened:
+                self.conn.rollback()
+            raise
+
+    def before_commit(self) -> None:
+        """Finalize an automatic context inside the application transaction."""
+        context = self._context
+        if context is None:
+            return
+        if context.operation_index == 0:
+            # An identity-only Settings statement is permitted but its trigger
+            # intentionally emits nothing. Do not retain an empty transaction.
+            self.conn.execute(
+                "DELETE FROM fleet_sync_transactions WHERE id=?",
+                (context.transaction_ref,),
+            )
+            return
+        self.conn.execute(
+            "UPDATE fleet_sync_state SET last_timestamp=? WHERE singleton=1",
+            (context.timestamp_ns,),
+        )
+
+    def after_transaction(self) -> None:
+        """Drop process-local authorship state after commit or rollback."""
+        self._context = None
 
     def _capture_enabled(self) -> int:
         return int(self._require_context().capture)
@@ -646,6 +721,31 @@ class MutationCatalog:
             live_rows += 1
         return live_rows, catalog_rows
 
+    def _rebuild_prepared_catalog(self) -> int:
+        """Re-snapshot a triggerless preparation under the activation lock.
+
+        Preparation intentionally permits legacy writers to continue. Even a
+        complete address inventory cannot detect an in-place value change, so
+        activation discards only bootstrap provenance and rebuilds it from the
+        locked current rows before installing triggers. Imported or authored
+        history is never silently reinterpreted as bootstrap state.
+        """
+        journal_rows = int(self.conn.execute(
+            "SELECT COUNT(*) FROM fleet_sync_journal"
+        ).fetchone()[0])
+        non_bootstrap = self.conn.execute(
+            "SELECT transaction_id FROM fleet_sync_transactions "
+            "WHERE transaction_id NOT LIKE 'bootstrap-v1:%' LIMIT 1"
+        ).fetchone()
+        if journal_rows or non_bootstrap is not None:
+            raise WatermarkError(
+                "triggerless fleet-sync catalog contains authored history"
+            )
+        self.conn.execute("DELETE FROM fleet_sync_catalog")
+        self.conn.execute("DELETE FROM fleet_sync_transactions")
+        self.conn.execute("DELETE FROM fleet_sync_origins")
+        return self._bootstrap_existing_rows()
+
     def migrate_existing(self) -> CatalogMigrationReport:
         """Atomically prepare an existing personal store for writer activation.
 
@@ -698,6 +798,49 @@ class MutationCatalog:
         except Exception:
             self.conn.rollback()
             raise
+
+    def activate_production_writers(self) -> bool:
+        """Enable fail-closed triggers and automatic transaction authorship.
+
+        Returns ``True`` only when this call installs the triggers.  Catalog
+        preparation and writer activation stay separate so an older writer can
+        never be trapped between those rollout steps.
+        """
+        from tools.network.fleet_sync_connection import FleetSyncConnection
+
+        if not isinstance(self.conn, FleetSyncConnection):
+            raise TypeError(
+                "production writer activation requires FleetSyncConnection"
+            )
+        if self.conn.in_transaction:
+            raise WatermarkError("writer activation requires an idle connection")
+        count = self._trigger_count()
+        if count and not self.triggers_active():
+            raise WatermarkError("fleet-sync capture triggers are only partially active")
+        if count:
+            identity = self.conn.execute(
+                "SELECT origin_incarnation FROM fleet_sync_state WHERE singleton=1"
+            ).fetchone()
+            if identity is None or str(identity[0]) != self.origin_incarnation:
+                raise WatermarkError("fleet-sync catalog identity/version mismatch")
+        if not count:
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                audit_schema(self.conn)
+                self._create_schema_objects()
+                self._ensure_state()
+                ensure_streaming_indexes(self.conn, manage_transaction=False)
+                self._rebuild_prepared_catalog()
+                self._verify_catalog_integrity()
+                self._install_triggers()
+                if not self.triggers_active():
+                    raise WatermarkError("fleet-sync capture trigger install incomplete")
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+        self.conn.install_fleet_sync_hook(self)
+        return count == 0
 
     @contextmanager
     def transaction(self, timestamp_ns: int, transaction_id: str) -> Iterator[None]:
@@ -1124,3 +1267,34 @@ class MutationCatalog:
             raise
         finally:
             self._context = None
+
+
+def attach_active_production_catalog(
+    conn: sqlite3.Connection,
+) -> MutationCatalog | None:
+    """Attach authorship to a newly opened connection when triggers are live.
+
+    A prepared-but-not-activated database returns ``None``.  Any partial
+    trigger set fails the open instead of leaving one writer able to bypass or
+    mis-execute the capture contract.
+    """
+    from tools.network.fleet_sync_connection import FleetSyncConnection
+
+    if not isinstance(conn, FleetSyncConnection):
+        raise TypeError("fleet-sync production stores require FleetSyncConnection")
+    trigger_count = int(conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' "
+        "AND name LIKE 'fleet_sync_%'"
+    ).fetchone()[0])
+    if not trigger_count:
+        return None
+    row = conn.execute(
+        "SELECT origin_incarnation FROM fleet_sync_state WHERE singleton=1"
+    ).fetchone()
+    if row is None:
+        raise WatermarkError("fleet-sync triggers exist without catalog identity")
+    catalog = MutationCatalog(conn, str(row[0]))
+    if not catalog.triggers_active():
+        raise WatermarkError("fleet-sync capture triggers are only partially active")
+    conn.install_fleet_sync_hook(catalog)
+    return catalog
