@@ -100,11 +100,11 @@ def test_repository_hook_refuses_python_module_pytest_for_agents(monkeypatch):
     assert events == ["raw_pytest_refused"]
 
 
-def test_shared_agent_primer_teaches_agent_test_not_raw_pytest():
-    guide = Path(__file__).resolve().parents[3] / "agents/shared/tool_guidelines.md"
-    text = guide.read_text()
+def test_capability_primer_teaches_agent_test_not_raw_pytest():
+    primer = Path(__file__).resolve().parents[3] / "agents/capabilities/agent_test/primer.md"
+    text = primer.read_text()
 
     assert "agent-test run --changed" in text
-    assert "Raw pytest is refused" in text
+    assert "only supported Python test entry point" in text
     assert "python3 -m pytest" not in text
     assert "ALWAYS pipe test output through `tee`" not in text

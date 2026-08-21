@@ -39,7 +39,7 @@ def test_run_estimates_before_launch_records_timings_and_history_query_is_bounde
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             requests.append({"path": self.path, **body})
-            if self.path == "/api/agent-test/durations" and body["action"] == "estimate":
+            if self.path == "/api/plugins/testing/durations" and body["action"] == "estimate":
                 response = {
                     "ok": True,
                     "estimated_seconds": 1.25,
@@ -49,7 +49,7 @@ def test_run_estimates_before_launch_records_timings_and_history_query_is_bounde
                     "sample_count": 10,
                     "unknown_selectors": [],
                 }
-            elif self.path == "/api/agent-test/durations" and body["action"] == "history":
+            elif self.path == "/api/plugins/testing/durations" and body["action"] == "history":
                 response = {
                     "ok": True,
                     "matched_tests": 1,
@@ -69,7 +69,7 @@ def test_run_estimates_before_launch_records_timings_and_history_query_is_bounde
                         ],
                     }],
                 }
-            elif self.path == "/api/agent-test/durations" and body["action"] == "record":
+            elif self.path == "/api/plugins/testing/durations" and body["action"] == "record":
                 response = {
                     "ok": True,
                     "appended": len(body["observations"]),
@@ -108,6 +108,17 @@ def test_run_estimates_before_launch_records_timings_and_history_query_is_bounde
             "appended": 1,
             "history_limit": 10,
         }
+        assert final["organization_history"] == {"state": "recorded"}
+        run_request = next(item for item in requests if item["path"] == "/api/plugins/testing/runs")
+        duration_request = next(
+            item for item in requests
+            if item["path"] == "/api/plugins/testing/durations" and item.get("action") == "record"
+        )
+        assert requests.index(run_request) < requests.index(duration_request)
+        assert run_request["run_id"] == final["run_id"]
+        assert run_request["run"]["repository"] == "local:project"
+        assert run_request["run"]["status"] == "passed"
+        assert run_request["run"]["passed"] == 1
 
         before = len(_manifests(env))
         timings = _cli(

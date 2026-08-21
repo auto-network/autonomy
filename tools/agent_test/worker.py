@@ -16,7 +16,12 @@ from pathlib import Path
 from typing import Any
 
 from .environment import project_config
-from .lease_client import duration_request, lease_request, telemetry_request
+from .lease_client import (
+    duration_request,
+    lease_request,
+    run_result_request,
+    telemetry_request,
+)
 from .store import atomic_write_json, read_json, update_manifest, utc_now
 from .timing import aggregate_test_durations
 
@@ -468,6 +473,38 @@ def run(directory: Path) -> int:
     else:
         status = "error"
 
+    finished_at = utc_now()
+    run_result = run_result_request(
+        run_id,
+        {
+            "repository": str(manifest.get("repository") or repo.name),
+            "session": os.environ.get("AUTONOMY_SESSION", "local")[:200],
+            "status": status,
+            "mode": mode,
+            "duration_seconds": duration,
+            "created_at": str(manifest.get("created_at") or finished_at),
+            "finished_at": finished_at,
+            "selectors": selectors,
+            "collected": int(summary.get("collected", 0)),
+            "passed": int(summary.get("passed", 0)),
+            "failed": int(summary.get("failed", 0)),
+            "errors": int(summary.get("errors", 0)),
+            "skipped": int(summary.get("skipped", 0)),
+            "new_failures": int(summary.get("new_failures", 0)),
+            "known_failures": int(summary.get("known_failures", 0)),
+            "quarantined_failures": int(summary.get("quarantined_failures", 0)),
+            "parallelism": int(manifest.get("parallelism") or 1),
+            "agent_test_version": str(manifest.get("agent_test_version") or "")[:100],
+            "fingerprint": str(manifest.get("fingerprint") or "")[:1000],
+            "rerun_of": str(manifest.get("rerun_of") or "")[:200],
+        },
+    )
+    run_history: dict[str, Any] = {
+        "state": "recorded" if run_result.get("ok") else "unavailable",
+    }
+    if not run_result.get("ok"):
+        run_history["detail"] = run_result.get("error")
+
     duration_history: dict[str, Any] = {"state": "no_completed_tests"}
     if duration_observations:
         duration_result = duration_request(
@@ -489,7 +526,7 @@ def run(directory: Path) -> int:
         directory,
         {
             "status": status,
-            "finished_at": utc_now(),
+            "finished_at": finished_at,
             "duration_seconds": duration,
             "exit_code": exit_code,
             "summary": summary,
@@ -499,6 +536,7 @@ def run(directory: Path) -> int:
             "collection_path": str(directory / "collection.json"),
             "coverage_path": str(directory / "coverage.json"),
             "duration_history": duration_history,
+            "organization_history": run_history,
         },
     )
     text = _notification_text(run_id, status, summary, duration)

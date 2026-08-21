@@ -28,14 +28,15 @@ def test_headers_omit_the_bearer_when_no_token(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "call",
+    ("call", "path"),
     [
-        lambda: lease_client.lease_request("status"),
-        lambda: lease_client.telemetry_request("status"),
-        lambda: lease_client.duration_request("estimate"),
+        (lambda: lease_client.lease_request("status"), "/api/agent-test/leases"),
+        (lambda: lease_client.telemetry_request("status"), "/api/plugins/testing/telemetry"),
+        (lambda: lease_client.duration_request("estimate"), "/api/plugins/testing/durations"),
+        (lambda: lease_client.run_result_request("run-1", {}), "/api/plugins/testing/runs"),
     ],
 )
-def test_every_request_site_sends_the_bearer(monkeypatch, call):
+def test_every_request_site_sends_the_bearer(monkeypatch, call, path):
     monkeypatch.setenv("CROSSTALK_TOKEN", "tok-xyz")
     seen = {}
 
@@ -46,8 +47,10 @@ def test_every_request_site_sends_the_bearer(monkeypatch, call):
 
     def _capture(request, timeout=None, context=None):
         seen["auth"] = request.headers.get("Authorization")
+        seen["path"] = request.full_url.removeprefix("https://localhost:8080")
         return _Resp()
 
     monkeypatch.setattr(lease_client.urllib.request, "urlopen", _capture)
     call()
     assert seen["auth"] == "Bearer tok-xyz"
+    assert seen["path"] == path

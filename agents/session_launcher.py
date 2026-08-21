@@ -112,8 +112,8 @@ def _capability_command_surface(
     ``AUTONOMY_CAPABILITY_BIN`` env var so the container image can prepend
     it to ``PATH``.
 
-    The surface also carries universal agent commands and safety gates, so it
-    is mounted even when no capability declares an ``expose_commands`` list.
+    The surface also carries the universal ``bd`` safety gate, so it is
+    mounted even when no capability declares an ``expose_commands`` list.
     """
     # Command names share one shim directory, so collisions are possible in
     # principle. First capability wins (input is contract-sorted, so the
@@ -135,17 +135,6 @@ def _capability_command_surface(
     shim_dir = run_dir / "cap-bin"
     shim_dir.mkdir(parents=True, exist_ok=True)
 
-    # Materialize the supported test entry point from the runtime-mounted
-    # repository. This makes Agent Test available to newly launched sessions
-    # immediately, including sessions whose base image predates its console
-    # script installation.
-    agent_test_path = shim_dir / "agent-test"
-    agent_test_path.write_text(
-        '#!/bin/sh\nexec python3 -m tools.agent_test "$@"\n',
-        encoding="utf-8",
-    )
-    agent_test_path.chmod(0o755)
-
     for cmd, exec_target in shims_to_emit.items():
         shim_path = shim_dir / cmd
         shim_path.write_text(
@@ -163,23 +152,6 @@ def _capability_command_surface(
         gate_path = shim_dir / "bd"
         gate_path.write_text(gate_src.read_text(encoding="utf-8"))
         gate_path.chmod(0o755)
-    # Agent sessions use Agent Test, whose detached supervisor, retained
-    # evidence, run fingerprinting, and machine-wide leases cannot be reached
-    # through the raw pytest console scripts. Keep both historical entry-point
-    # names on the same refusal contract. ``python -m pytest`` is covered by
-    # the repository's pytest_configure hook.
-    pytest_gate = (
-        Path(__file__).resolve().parents[1]
-        / "tools"
-        / "agent_test"
-        / "pytest_refusal.sh"
-    )
-    if pytest_gate.is_file():
-        refusal = pytest_gate.read_text(encoding="utf-8")
-        for command in ("pytest", "py.test"):
-            path = shim_dir / command
-            path.write_text(refusal, encoding="utf-8")
-            path.chmod(0o755)
     return (
         {str(shim_dir): f"{CAPABILITY_BIN_DIR}:ro"},
         {"AUTONOMY_CAPABILITY_BIN": CAPABILITY_BIN_DIR},

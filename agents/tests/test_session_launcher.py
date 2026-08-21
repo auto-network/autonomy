@@ -1779,17 +1779,39 @@ def test_every_session_gets_the_bd_close_gate(
     assert f"{run_dir / 'cap-bin'}:/etc/autonomy/cap-bin:ro" in mounts
 
 
-def test_every_session_exposes_agent_test_and_refuses_raw_pytest_commands(
+def _agent_test_capability() -> MaterializedCapability:
+    return MaterializedCapability(
+        contract="test_execution",
+        contract_version=1,
+        implementation="autonomy/agent-test",
+        implementation_version=1,
+        delivery_mode="mounted_tools",
+        package_root="agents/capabilities/agent_test",
+        mount_target=f"{CAPABILITIES_MOUNT_DIR}/autonomy-agent-test",
+        tool_paths=("agents/capabilities/agent_test/tools",),
+        primer_path="agents/capabilities/agent_test/primer.md",
+        skill_path="agents/capabilities/agent_test/SKILL.md",
+        tool_target=CapabilityToolTarget(
+            source="agents/capabilities/agent_test/tools",
+            target="/opt/agent-test-tools",
+            expose_commands=("agent-test", "pytest", "py.test"),
+        ),
+    )
+
+
+def test_agent_test_capability_exposes_cli_and_refuses_raw_pytest_commands(
     tmp_path, fake_creds, fake_crosstalk, captured_run,
 ):
     run_dir = tmp_path / "run"
-    _run(output_dir=str(run_dir), capabilities=())
+    _run(output_dir=str(run_dir), capabilities=(_agent_test_capability(),))
 
     agent_test = run_dir / "cap-bin" / "agent-test"
     assert agent_test.is_file()
     assert agent_test.stat().st_mode & 0o100
+    assert "/opt/agent-test-tools/agent-test" in agent_test.read_text()
+    source = Path(__file__).resolve().parents[2] / "agents/capabilities/agent_test/tools/agent-test"
     process = subprocess.Popen(
-        [str(agent_test), "--version"],
+        [str(source), "--version"],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -1806,9 +1828,13 @@ def test_every_session_exposes_agent_test_and_refuses_raw_pytest_commands(
         gate = run_dir / "cap-bin" / command
         assert gate.is_file()
         assert gate.stat().st_mode & 0o100
-        assert "agent-test run PATH_OR_NODEID" in gate.read_text()
+        assert f"/opt/agent-test-tools/{command}" in gate.read_text()
+        gate_source = Path(__file__).resolve().parents[2] / f"agents/capabilities/agent_test/tools/{command}"
+        if command == "py.test":
+            assert "exec /opt/agent-test-tools/pytest" in gate_source.read_text()
+            continue
         process = subprocess.Popen(
-            [str(gate)],
+            [str(gate_source)],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -1816,7 +1842,17 @@ def test_every_session_exposes_agent_test_and_refuses_raw_pytest_commands(
         )
         _stdout, stderr = process.communicate(timeout=10)
         assert process.returncode == 64
-        assert "Raw pytest is disabled" in stderr
+        assert "Direct pytest is disabled" in stderr
+
+
+def test_session_without_test_execution_capability_has_no_test_commands(
+    tmp_path, fake_creds, fake_crosstalk, captured_run,
+):
+    run_dir = tmp_path / "run"
+    _run(output_dir=str(run_dir), capabilities=())
+    assert not (run_dir / "cap-bin" / "agent-test").exists()
+    assert not (run_dir / "cap-bin" / "pytest").exists()
+    assert not (run_dir / "cap-bin" / "py.test").exists()
 
 
 def test_golden_mount_argv_is_byte_identical(

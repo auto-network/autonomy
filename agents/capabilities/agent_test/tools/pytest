@@ -1,0 +1,6 @@
+#!/bin/sh
+python3 -c 'from tools.agent_test.lease_client import telemetry_request; telemetry_request(event="raw_pytest_refused")' >/dev/null 2>&1 || true
+printf '%s\n' 'Direct pytest is disabled for agent sessions.' >&2
+printf '%s\n' 'Use: agent-test run PATH_OR_NODEID' >&2
+printf '%s\n' 'Inspect retained failures/output instead of rerunning.' >&2
+exit 64

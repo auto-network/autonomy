@@ -1,4 +1,4 @@
-"""HTTP client for the dashboard's machine-wide Agent Test lease broker."""
+"""HTTP client for Agent Test coordination and organization history."""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ def telemetry_request(action: str = "event", event: str | None = None) -> dict[s
         payload.update({"event": event, "session": session})
     data = json.dumps(payload).encode()
     request = urllib.request.Request(
-        f"{base}/api/agent-test/telemetry",
+        f"{base}/api/plugins/testing/telemetry",
         data=data,
         headers=_headers(),
         method="POST",
@@ -69,13 +69,34 @@ def telemetry_request(action: str = "event", event: str | None = None) -> dict[s
 
 
 def duration_request(action: str, **payload: Any) -> dict[str, Any]:
-    """Reach the machine-local capped duration-history service."""
+    """Reach the caller's organization-local capped duration history."""
     if not os.environ.get("AUTONOMY_SESSION") and "AGENT_TEST_DASHBOARD" not in os.environ:
         return {"ok": False, "unavailable": True, "error": "no machine coordinator"}
     base = os.environ.get("AGENT_TEST_DASHBOARD", "https://localhost:8080").rstrip("/")
     data = json.dumps({"action": action, **payload}).encode()
     request = urllib.request.Request(
-        f"{base}/api/agent-test/durations",
+        f"{base}/api/plugins/testing/durations",
+        data=data,
+        headers=_headers(),
+        method="POST",
+    )
+    context = ssl._create_unverified_context() if base.startswith("https://") else None
+    try:
+        with urllib.request.urlopen(request, timeout=3, context=context) as response:
+            value = json.loads(response.read().decode())
+            return value if isinstance(value, dict) else {"ok": False, "error": "invalid response"}
+    except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+        return {"ok": False, "error": str(exc)[:500], "unavailable": True}
+
+
+def run_result_request(run_id: str, run: dict[str, Any]) -> dict[str, Any]:
+    """Record one terminal run in the authenticated caller's organization."""
+    if not os.environ.get("AUTONOMY_SESSION") and "AGENT_TEST_DASHBOARD" not in os.environ:
+        return {"ok": False, "unavailable": True, "error": "no organization coordinator"}
+    base = os.environ.get("AGENT_TEST_DASHBOARD", "https://localhost:8080").rstrip("/")
+    data = json.dumps({"run_id": run_id, "run": run}).encode()
+    request = urllib.request.Request(
+        f"{base}/api/plugins/testing/runs",
         data=data,
         headers=_headers(),
         method="POST",

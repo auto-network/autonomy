@@ -1,0 +1,44 @@
+{
+  "name": "test_execution",
+  "version": 1,
+  "summary": "Run and inspect Python tests through a retained, asynchronous agent-safe interface.",
+  "ops": [
+    {
+      "name": "run",
+      "summary": "Start a bounded background test selection and return immediately.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "selectors": {"type": "array", "items": {"type": "string"}},
+          "changed": {"type": "boolean"}
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "run_id": {"type": "string"},
+          "status": {"type": "string"}
+        },
+        "required": ["run_id", "status"]
+      }
+    },
+    {
+      "name": "inspect",
+      "summary": "Read bounded retained results without executing tests again.",
+      "input_schema": {
+        "type": "object",
+        "properties": {"run_id": {"type": "string"}},
+        "required": ["run_id"]
+      },
+      "output_schema": {"type": "object"}
+    },
+    {
+      "name": "statistics",
+      "summary": "Estimate and inspect organization-local timing and outcome history.",
+      "input_schema": {"type": "object"},
+      "output_schema": {"type": "object"}
+    }
+  ],
+  "notes": "The deterministic projection is the Testing dashboard plugin. Machine capacity is coordinated separately because it describes one physical host; completed-run statistics are always owned by the authenticated caller's organization."
+}
