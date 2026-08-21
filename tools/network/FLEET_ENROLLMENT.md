@@ -131,6 +131,38 @@ decline on the operator's behalf.
 Personal armor, passkeys, root material, and machine-local state never enter
 the synchronization catalog. Vault ciphertext and signed key-control grants do.
 
+## Temporary tunnel-serving assignment
+
+The production registry currently accepts only one serving tunnel per
+organization. Until cooperative tunnel pools ship in ``auto-0rc9f``, one
+active Fleet roster member is selected to run this person's auto.network
+serving connectors. This is not a primary-machine role and it grants no Fleet
+authority.
+
+``autonomy.fleet.tunnel-server#1`` is a raw personal singleton containing the
+selected durable ``machine_id``. Personal synchronization carries the row to
+each Fleet Dashboard. The serving supervisor starts or retains connectors only
+when the selection resolves to an active root-signed roster entry and equals
+the machine-local ``autonomy.machine.identity`` row. A non-selected node stops
+its connectors. A multi-member roster with no valid selection fails closed and
+reports the assignment state instead of entering the registry's persistent
+``4409`` replacement cycle.
+
+A pre-Fleet installation with neither roster state nor machine identity keeps
+legacy single-node serving. One initialized active member may serve implicitly.
+Immediately before verified enrollment grows a one-member roster, the executor
+materializes that same member as the explicit selection; adding a machine does
+not accidentally turn off serving everywhere. Concurrent growth preserves the
+same singleton value. A roster that is already multi-member and unassigned
+remains failed closed rather than inventing a winner.
+Any local machine identity or synced selection without its roster is partial
+Fleet synchronization and fails closed; it is never treated as legacy.
+
+This compatibility setting and every reader, writer, status, and test for it
+are removed by ``auto-clune.7`` after real two-connector pool acceptance. At
+that point all healthy eligible tunnels coexist and no roster machine is
+designated to serve.
+
 ## Failure rules
 
 - A copied invitation may submit another request but cannot approve it.

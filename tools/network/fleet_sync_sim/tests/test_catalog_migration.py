@@ -162,6 +162,7 @@ def test_catalog_migration_excludes_identity_armor(tmp_path: Path) -> None:
     try:
         for row_id, set_id in (
             ("ordinary", "autonomy.example"),
+            ("tunnel-server", "autonomy.fleet.tunnel-server"),
             ("root", "autonomy.identity.personal"),
             ("passkey", "autonomy.identity.passkey"),
         ):
@@ -188,6 +189,7 @@ def test_catalog_migration_excludes_identity_armor(tmp_path: Path) -> None:
             if item.mutation.table == "settings"
         }
         assert "autonomy.example" in setting_sets
+        assert "autonomy.fleet.tunnel-server" in setting_sets
         assert "autonomy.identity.personal" not in setting_sets
         assert "autonomy.identity.passkey" not in setting_sets
     finally:

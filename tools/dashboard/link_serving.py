@@ -1389,6 +1389,26 @@ def main() -> None:
                              "disable live push; serving is unaffected either way.")
     args = parser.parse_args()
 
+    # Defense in depth for manual launches and alternate process managers.
+    # The normal production path has already checked this in
+    # link_serving_supervisor, but this directly runnable module must not be a
+    # bypass for the temporary Fleet-wide single-server assignment. Legacy
+    # installations that have not initialized Fleet remain allowed by the
+    # helper itself.
+    from tools.network import fleet_tunnel_server
+
+    tunnel_server = fleet_tunnel_server.state()
+    if not tunnel_server.allowed:
+        selected = (
+            f"; selected machine is {tunnel_server.selected_machine_id}"
+            if tunnel_server.selected_machine_id is not None
+            else ""
+        )
+        parser.error(
+            "this Fleet machine may not serve auto.network tunnels "
+            f"({tunnel_server.reason}{selected})"
+        )
+
     with open(args.key_file) as fh:
         key = KeyPair.from_private_hex(fh.read().strip())
     with open(args.cert_file) as fh:

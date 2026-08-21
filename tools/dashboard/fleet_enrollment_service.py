@@ -259,7 +259,7 @@ class FleetEnrollmentStore:
         now_ms: int | None = None,
     ) -> PendingEnrollment:
         """Verify, commit the roster, then mark this request deliverable."""
-        from tools.network import fleet_roster
+        from tools.network import fleet_roster, fleet_tunnel_server
 
         target = _require_uuid(target_uuid)
         rid = _require_hex64(request_id, "request_id")
@@ -308,6 +308,21 @@ class FleetEnrollmentStore:
         # ``approving`` freezes the exact evidence first, preventing two
         # concurrent operator requests from committing different authority.
         try:
+            # Verify before touching even temporary operational state. If the
+            # roster currently has one implicit tunnel server, materialize
+            # that same choice before this commit grows it to two members;
+            # otherwise both nodes would correctly fail closed as unassigned.
+            fleet_enroll.verify_approval(
+                approval,
+                pending.request,
+                invite=invite,
+                channel_binding=pending.channel_binding,
+                roster_entry=roster_entry,
+                anchor_root_pub=anchor_root_pub,
+            )
+            fleet_tunnel_server.preserve_single_member_selection(
+                anchor_root_pub=anchor_root_pub
+            )
             fleet_enroll.authorize_request(
                 approval,
                 pending.request,

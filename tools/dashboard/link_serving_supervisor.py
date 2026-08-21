@@ -524,6 +524,9 @@ class ServingSupervisor:
         interval it takes the publish to cache its grant. Idempotent."""
         with self._lock:
             self._managed.add(org)
+            eligibility = self._fleet_eligibility()
+            if not eligibility.allowed:
+                return self._stop_for_fleet_assignment(org, eligibility)
             proc = self._procs.get(org)
             if proc is not None and proc.alive():
                 state = serve_cert_state(org, now=self._now())
@@ -547,6 +550,9 @@ class ServingSupervisor:
 
     def _reconcile(self, org: str | None) -> dict:
         now = self._now()
+        eligibility = self._fleet_eligibility()
+        if not eligibility.allowed:
+            return self._stop_for_fleet_assignment(org, eligibility)
         state = serve_cert_state(org, now=now)
         proc = self._procs.get(org)
         should_run = state["status"] == "ok" and _has_live_grant(org, now)
@@ -598,6 +604,33 @@ class ServingSupervisor:
         self._procs.pop(org, None)
         self._credentials.pop(org, None)
         return self._launch(org, state)
+
+    @staticmethod
+    def _fleet_eligibility():
+        """Read the temporary personal Fleet assignment at reconciliation.
+
+        Kept behind one lazy import so deleting the compatibility mechanism in
+        ``auto-clune.7`` is a literal removal of this seam rather than a
+        permanent dependency hidden across the supervisor.
+        """
+        from tools.network import fleet_tunnel_server
+
+        return fleet_tunnel_server.state()
+
+    def _stop_for_fleet_assignment(self, org, eligibility) -> dict:
+        """Stop local ownership when another roster machine is selected."""
+        proc = self._procs.pop(org, None)
+        if proc is not None:
+            with contextlib.suppress(Exception):
+                proc.stop()
+        self._credentials.pop(org, None)
+        self._started_at.pop(org, None)
+        self._ever_served.discard(org)
+        self._release_lock(org)
+        result = {"running": False, "reason": eligibility.reason}
+        if eligibility.selected_machine_id is not None:
+            result["selected_machine_id"] = eligibility.selected_machine_id
+        return result
 
     def _live_process_state(self, org, proc) -> dict | None:
         """Classify an alive, correctly credentialed child.
