@@ -287,6 +287,10 @@ class VirtualAuthenticator {
         ),
         attestationObject: bytesToB64u(attestationObject),
         transports: ['internal'],
+        // WebAuthn L3 convenience (iOS 16+, all current browsers): the raw
+        // authenticatorData, so the ceremony reads the COSE key + sign-count
+        // without a CBOR decode of the attestationObject.
+        getAuthenticatorData: () => authenticatorData,
       },
     };
   }
