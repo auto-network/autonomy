@@ -1263,6 +1263,98 @@ async def post_register(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "registry": binding_key, "binding": binding})
 
 
+async def post_renew(request: Request) -> JSONResponse:
+    """Forward a signed binding-renewal heartbeat to the registry (§4.2).
+
+    Body: ``{org?, envelope}`` — the browser-signed renew envelope
+    ``{payload:{requested_ttl?}, signer, [cert], signature}``, signed over
+    POST and the registry's own renew path. Renewal is the weakest mutation:
+    it only extends the binding's liveness and never changes the bound root or
+    recovery policy. The registry destination and org UUID are taken from the
+    STORED binding, frozen server-side — a heartbeat cannot redirect itself to
+    a foreign registry or a UUID the caller names. An ALREADY-EXPIRED binding
+    cannot be renewed (the registry returns 410); reclaiming it is a fresh
+    root-direct registration, which the sign-in path does instead.
+
+    On the registry's 200 the local binding's expiry is advanced.
+    """
+    if _mock_mode():
+        return JSONResponse({"ok": False, "error": "mock dashboard has no registry"},
+                            status_code=502)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "body must be JSON"}, status_code=400)
+    if not isinstance(body, dict) or not isinstance(body.get("envelope"), dict):
+        return JSONResponse({"ok": False, "error": (
+            "body must carry the signed renewal 'envelope' as an object"
+        )}, status_code=400)
+    unknown = set(body) - {"org", "envelope"}
+    if unknown:
+        return JSONResponse({"ok": False, "error": (
+            f"unexpected keys {sorted(unknown)}: renewal carries only 'org' "
+            "and 'envelope' — the registry destination is fixed server-side"
+        )}, status_code=400)
+    org, refused = _scoped_org(body.get("org"), request=request)
+    if refused is not None:
+        return refused
+    try:
+        member = _first_member(NETWORK_BINDING_SET_ID, org)
+    except Exception as e:
+        return JSONResponse({"ok": False,
+                             "error": f"could not read the binding setting: {e}"},
+                            status_code=500)
+    if member is None:
+        return JSONResponse({"ok": False, "error": (
+            "this organization has no binding to renew — register it first"
+        )}, status_code=404)
+    binding = dict(member.payload)
+    org_uuid = binding.get("org_uuid")
+    registry_url = binding.get("registry_url")
+    if not org_uuid or not registry_url:
+        return JSONResponse({"ok": False, "error": "the org's binding row is malformed"},
+                            status_code=500)
+
+    try:
+        async with _registry_client(registry_url) as client:
+            resp = await client.post(f"/v1/orgs/{org_uuid}/renew", json=body["envelope"])
+    except httpx.HTTPError as e:
+        return JSONResponse({"ok": False, "error": (
+            f"could not reach the registry at {registry_url}: {e}"
+        )}, status_code=502)
+    if resp.status_code != 200:
+        try:
+            detail = resp.json().get("detail", resp.text)
+        except Exception:
+            detail = resp.text
+        # 410 is the registry saying the binding already died — the caller
+        # must reclaim it with a fresh registration, not a heartbeat.
+        return JSONResponse({"ok": False, "expired": resp.status_code == 410,
+                             "error": (
+            f"registry refused the renewal ({resp.status_code}): {detail}"
+        )}, status_code=502)
+
+    reg = resp.json()
+    expires_at = reg.get("expires_at")
+    if type(expires_at) is not int:
+        return JSONResponse({"ok": False, "error": (
+            "registry returned no expiry — renewal not persisted"
+        )}, status_code=502)
+    binding["binding_expires_at"] = time.strftime(
+        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(expires_at))
+    binding["last_renewed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    try:
+        settings_ops.upsert_by_key(
+            NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION, member.key,
+            binding, org=org,
+        )
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": (
+            f"registry renewed the binding but persisting it locally failed: {e}"
+        )}, status_code=500)
+    return JSONResponse({"ok": True, "registry": member.key, "binding": binding})
+
+
 def _write_serve_key(path: Path, private_key_hex: str) -> None:
     """Write the delegate key to *path* as a mode-0600 file, atomically.
 
@@ -1814,6 +1906,7 @@ ROUTES = [
     ),
     Route("/api/network/invite/email", post_invite_email, methods=["POST"]),
     Route("/api/network/register", post_register, methods=["POST"]),
+    Route("/api/network/renew", post_renew, methods=["POST"]),
     Route("/api/network/invite/resolve", post_invite_resolve, methods=["POST"]),
     Route("/api/network/serve-cert", get_serve_cert_status, methods=["GET"]),
     Route("/api/network/unlock-report", get_unlock_maintenance_report),
