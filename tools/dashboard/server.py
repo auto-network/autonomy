@@ -3514,6 +3514,34 @@ def authenticate_mcp_service(request) -> "api_auth.ApiPrincipal | None":
     )
 
 
+def _session_hidden_cross_org(request, session_row) -> bool:
+    """True when an organization-stamped API caller must not see this session
+    because it belongs to a different organization (or its org cannot be
+    resolved).
+
+    The caller then returns its OWN route-native "not found" so a cross-org
+    session is byte-indistinguishable from a nonexistent one: a 403 would confirm
+    the session exists in another org, an existence oracle the org boundary is
+    meant to deny. The guard must run BEFORE any reconcile, approval lookup,
+    UUID/path/fallback resolution, or file read, so none of those observe a
+    session the caller may not.
+
+    Global-authority callers (the operator cookie, a local host token) see every
+    session; a same-org org-bound caller passes. Compatibility traffic is
+    governed by the default-deny gate, not here, so it is never judged cross-org.
+    ``session_row`` is any payload ``session_org_slug`` understands (a
+    dashboard_db row or a monitor registry row); ``None`` means the session could
+    not be resolved, which an org-stamped caller may not distinguish from
+    cross-org and so is hidden.
+    """
+    principal = api_auth.principal_from_request(request)
+    if not principal.org_bound:
+        return False
+    from tools.dashboard.org_identity import session_org_slug
+    session_org = session_org_slug(session_row) if session_row else None
+    return not (session_org and principal.org and session_org == principal.org)
+
+
 async def api_resources(request):
     """GET /api/resources — per-session CPU/RAM/disk samples + collector health.
 
@@ -3924,6 +3952,12 @@ async def api_session_startup_trace(request):
     the terminal outcome (tracked / zombie_202 / prep error).
     """
     tmux_name = request.path_params["tmux_name"]
+    # Cross-org guard BEFORE reading the trace (auto-49esb): a cross-org session
+    # looks the same as one with no trace — an empty timeline, no existence leak.
+    if _session_hidden_cross_org(request, dashboard_db.get_session(tmux_name)):
+        return JSONResponse({
+            "tmux_name": tmux_name, "event_count": 0, "outcome": None, "events": [],
+        })
     events = session_trace.read_trace(tmux_name)
     outcome = next(
         (e.get("outcome") for e in reversed(events) if e.get("outcome")), None,
@@ -5484,6 +5518,19 @@ async def api_session_tail(request):
         if owner:
             db_row = session_monitor.get_one(owner)
 
+    # Cross-org guard BEFORE any jsonl path/fallback resolution, stat, or read
+    # (auto-49esb). Attribute the resolved session to its org via the canonical
+    # dashboard_db row and refuse a cross-org (or unresolvable) session as the
+    # SAME 404 an unknown session returns, so existence never leaks. An
+    # org-stamped caller therefore never triggers the fallback tree scan for a
+    # session outside its org.
+    org_row = dashboard_db.get_session(db_row["tmux_name"]) if db_row else None
+    if _session_hidden_cross_org(request, org_row):
+        return JSONResponse(
+            {"error": "Session not found", "session_id": session_id},
+            status_code=404,
+        )
+
     if db_row and db_row.get("jsonl_path"):
         candidate = Path(db_row["jsonl_path"])
         if candidate.exists():
@@ -6141,7 +6188,10 @@ async def api_session_get(request):
         })
 
     session = dashboard_db.get_session(tmux_name)
-    if not session:
+    # Cross-org guard BEFORE reconcile/approval lookup (auto-49esb): a cross-org
+    # session is refused as the same 404 a nonexistent one returns, so existence
+    # never leaks. A missing session and a hidden one are one branch on purpose.
+    if not session or _session_hidden_cross_org(request, session):
         return JSONResponse({"error": "not found"}, status_code=404)
     from tools.dashboard.org_identity import resolve_session_org
     # Read-side reconcile so a drifted/empty stored ID does not leak out
@@ -6217,6 +6267,12 @@ async def api_session_output(request):
     # directory so symlinks can't fan out either.
     if not rel_path or rel_path.startswith("/") or ".." in Path(rel_path).parts:
         return JSONResponse({"error": "invalid path"}, status_code=400)
+
+    # Cross-org guard BEFORE the run-dir glob/stat/read (auto-49esb): a cross-org
+    # session's files are refused as the same 404 a session with no run dir
+    # returns, so existence never leaks.
+    if _session_hidden_cross_org(request, dashboard_db.get_session(tmux_name)):
+        return JSONResponse({"error": "session run dir not found"}, status_code=404)
 
     # Candidate base dirs, newest-first. Container sessions resolve under
     # their data/agent-runs/<name>-<ts>/ run dir(s); host (terminal) sessions
@@ -6521,6 +6577,15 @@ async def api_session_turn_corrections_list(request):
             "session_uuid": session_id,
             "corrections": [_serialize_turn_correction(r) for r in rows],
         }, headers=headers)
+    # Cross-org guard BEFORE uuid resolution / correction read (auto-49esb): a
+    # cross-org session's corrections (which carry user message text) are refused
+    # as the same 404 an unknown session returns, so existence never leaks.
+    if _session_hidden_cross_org(request, dashboard_db.get_session(session_id)):
+        return JSONResponse(
+            {"error": "session not found", "session_id": session_id},
+            status_code=404,
+            headers=headers,
+        )
     session_uuid = _resolve_session_uuid(session_id)
     if not session_uuid:
         return JSONResponse(
