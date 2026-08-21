@@ -331,10 +331,13 @@ persists the no-more-before floor, establishes a WAL snapshot, and releases
 writers before streaming. Alpha installation is offline: it realizes into a
 new staging database, preserves the receiving machine's local `orgs` bootstrap
 row and excluded identity armor, validates and fsyncs the result, then replaces
-the target through a recoverable backup. Production online checkpoint handoff,
-fleet address discovery/enrollment, the browser-to-process derived-machine-key
-handoff, exact durable ACK floors, and exact-base round coordination remain
-outside this package.
+the target through a recoverable backup. The Dashboard handoff wraps that
+primitive in an explicit process-wide writer gate, merges authenticated local
+winners into staging, records a durable local checkpoint receipt, publishes
+atomically, recovers crashes on either side of the swap, and resumes reliable
+delta replay. Fleet address and checkpoint-offer discovery, the
+browser-to-process derived-machine-key handoff, exact remote ACK floors, and
+exact-base round coordination remain outside this package.
 
 Attachment graph metadata participates in the base. Attachment bytes are
 content-addressed artifacts fetched through the supplied blob-store adapter;

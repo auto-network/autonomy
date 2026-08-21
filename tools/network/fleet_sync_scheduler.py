@@ -268,6 +268,8 @@ class SQLiteFleetSyncStore:
         online: bool,
         bytes_sent: int = 0,
         bytes_received: int = 0,
+        checkpoints_received: int = 0,
+        deltas_received: int = 0,
         transactions_applied: int = 0,
         acknowledgements: int = 0,
         retries: int = 0,
@@ -281,9 +283,10 @@ class SQLiteFleetSyncStore:
             conn.execute(
                 "INSERT INTO fleet_sync_peer_state("
                 "machine_public_key,roster_epoch,online,last_success_ns,"
-                "peer_watermark,bytes_sent,bytes_received,transactions_applied,"
-                "acknowledgements,retries,last_error_code,updated_at_ns) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
+                "peer_watermark,bytes_sent,bytes_received,checkpoints_received,"
+                "deltas_received,transactions_applied,acknowledgements,retries,"
+                "last_error_code,updated_at_ns) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(machine_public_key,roster_epoch) DO UPDATE SET "
                 "online=excluded.online,"
                 "last_success_ns=CASE WHEN ? THEN excluded.updated_at_ns "
@@ -297,6 +300,10 @@ class SQLiteFleetSyncStore:
                 "ELSE fleet_sync_peer_state.peer_watermark END,"
                 "bytes_sent=fleet_sync_peer_state.bytes_sent+excluded.bytes_sent,"
                 "bytes_received=fleet_sync_peer_state.bytes_received+excluded.bytes_received,"
+                "checkpoints_received=fleet_sync_peer_state.checkpoints_received+"
+                "excluded.checkpoints_received,"
+                "deltas_received=fleet_sync_peer_state.deltas_received+"
+                "excluded.deltas_received,"
                 "transactions_applied=fleet_sync_peer_state.transactions_applied+"
                 "excluded.transactions_applied,"
                 "acknowledgements=fleet_sync_peer_state.acknowledgements+"
@@ -307,8 +314,8 @@ class SQLiteFleetSyncStore:
                 (
                     machine_pub, epoch, int(online), now if success else None,
                     peer_watermark, bytes_sent, bytes_received,
-                    transactions_applied, acknowledgements, retries, error, now,
-                    int(success),
+                    checkpoints_received, deltas_received, transactions_applied,
+                    acknowledgements, retries, error, now, int(success),
                 ),
             )
             conn.commit()
@@ -579,6 +586,7 @@ class FleetSyncScheduler:
                 online=False,
                 bytes_sent=sent,
                 bytes_received=received,
+                deltas_received=1,
                 acknowledgements=1,
                 peer_watermark=peer_watermark,
                 success=True,
@@ -636,6 +644,7 @@ class DashboardFleetSyncService:
         self._task: asyncio.Task | None = None
         self._changed = asyncio.Event()
         self._stopping = False
+        self._transition = asyncio.Lock()
 
     @property
     def scheduler(self) -> FleetSyncScheduler | None:
@@ -662,23 +671,93 @@ class DashboardFleetSyncService:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
+    async def install_checkpoint(
+        self, checkpoint_directory: Path, *, source_machine_pub: str
+    ):
+        """Pause this runtime, publish a received base, then resume deltas.
+
+        Closing the scheduler and pooled GraphDB handle is the cooperative
+        quiescence path. Any other live production store handle causes the
+        process-wide gate to refuse publication instead of swapping beneath
+        an unknown writer.
+        """
+        config = self._config
+        if config is None:
+            raise RuntimeError("fleet sync runtime is not configured")
+        from tools.graph.db import GraphDB
+        from tools.network.fleet_checkpoint_handoff import (
+            install_quiesced_checkpoint,
+        )
+        from tools.network.fleet_sync_connection import (
+            acquire_database_quiescence,
+        )
+
+        async with self._transition:
+            if self._scheduler is not None:
+                await self._scheduler.stop()
+                self._scheduler = None
+            token = None
+            installed = None
+            epoch = None
+            try:
+                await asyncio.to_thread(
+                    GraphDB.close_pooled_path, config.personal_db_path
+                )
+                token = await asyncio.to_thread(
+                    acquire_database_quiescence, config.personal_db_path
+                )
+                entries = await asyncio.to_thread(
+                    lambda: tuple(config.roster_entries())
+                )
+                active = tuple(sorted(resolve(
+                    entries, anchor_root_pub=config.personal_root_pub
+                )))
+                if (
+                    source_machine_pub not in active
+                    or source_machine_pub == config.machine_key.public_hex
+                ):
+                    raise RuntimeError(
+                        "checkpoint source is not an active remote fleet machine"
+                    )
+                epoch = roster_epoch(entries, config.personal_root_pub)
+                installed = await asyncio.to_thread(
+                    install_quiesced_checkpoint,
+                    checkpoint_directory,
+                    config.personal_db_path,
+                    quiescence=token,
+                    target_origin_incarnation=config.machine_key.public_hex,
+                    expected_roster_epoch=epoch,
+                    expected_active_roster=active,
+                    source_machine_pub=source_machine_pub,
+                )
+            finally:
+                if token is not None:
+                    token.release()
+                if not self._stopping and self._config is config:
+                    self._scheduler = FleetSyncScheduler(config)
+                    await self._scheduler.start()
+            assert installed is not None and epoch is not None
+            return installed
+
     async def _run(self) -> None:
         current: FleetSyncRuntimeConfig | None = None
         while not self._stopping:
             self._changed.clear()
             desired = self._config
             if desired is not current:
-                if self._scheduler is not None:
-                    await self._scheduler.stop()
-                    self._scheduler = None
-                current = desired
-                if desired is not None:
-                    self._scheduler = FleetSyncScheduler(desired)
-                    await self._scheduler.start()
+                async with self._transition:
+                    if self._scheduler is not None:
+                        await self._scheduler.stop()
+                        self._scheduler = None
+                    current = desired
+                    if desired is not None:
+                        self._scheduler = FleetSyncScheduler(desired)
+                        await self._scheduler.start()
             await self._changed.wait()
-        if self._scheduler is not None:
-            await self._scheduler.stop()
-            self._scheduler = None
+        async with self._transition:
+            if self._scheduler is not None:
+                await self._scheduler.stop()
+                self._scheduler = None
 
 
 dashboard_fleet_sync_service = DashboardFleetSyncService()
