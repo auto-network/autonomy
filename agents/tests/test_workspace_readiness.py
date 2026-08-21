@@ -214,6 +214,63 @@ def test_missing_capability_contract_is_one_specialized_factor(org):
     ]
 
 
+def test_a_shared_contract_does_not_pull_another_workspaces_broken_enable(org):
+    """Forward traversal must not reverse through a shared dependency."""
+    for workspace_id in ("healthy", "broken"):
+        _workspace(workspace_id)
+    settings_ops.add_setting(
+        "autonomy.capability.contract", 1, "test_execution",
+        {
+            "name": "test_execution",
+            "version": 1,
+            "summary": "Run tests",
+            "ops": [{
+                "name": "run",
+                "summary": "Run selected tests",
+                "input_schema": {},
+                "output_schema": {},
+            }],
+        },
+        org="anchore",
+    )
+    settings_ops.add_setting(
+        "autonomy.capability.impl", 1, "autonomy/agent-test",
+        {
+            "name": "autonomy/agent-test",
+            "version": 1,
+            "implements": [{"contract": "test_execution", "version": 1}],
+            "delivery_mode": "mounted_tools",
+            "package_root": "agents/capabilities/agent-test",
+            "probe": {"kind": "command", "entrypoint": "agent-test doctor"},
+        },
+        org="anchore",
+    )
+    settings_ops.add_setting(
+        "autonomy.org.capability.install", 1, "test_execution",
+        {
+            "contract": "test_execution",
+            "contract_version": 1,
+            "implementation": "autonomy/agent-test",
+            "implementation_version": 1,
+        },
+        org="anchore",
+    )
+    for workspace_id, version in (("healthy", 1), ("broken", 2)):
+        settings_ops.add_setting(
+            "autonomy.workspace.capability.enable", 1,
+            f"{workspace_id}:test_execution",
+            {"contract": "test_execution", "contract_version": version},
+            org="anchore",
+        )
+
+    healthy = workspace_readiness("healthy", org="anchore")
+    broken = workspace_readiness("broken", org="anchore")
+
+    assert healthy.ready
+    assert all(item.key != "broken:test_execution" for item in healthy.satisfied)
+    assert not broken.ready
+
+
 def _volume_mount(*, required=True):
     return {
         "subpath": "fixtures",
