@@ -635,7 +635,7 @@ class ServingSupervisor:
                 proc.stop()
         self._credentials.pop(org, None)
         self._started_at.pop(org, None)
-        self._ever_served.discard(org)
+        self._last_served.pop(org, None)
         self._release_lock(org)
         result = {"running": False, "reason": eligibility.reason}
         if eligibility.selected_machine_id is not None:
