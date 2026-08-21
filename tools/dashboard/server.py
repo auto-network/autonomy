@@ -12087,7 +12087,19 @@ async def api_events(request):
     Optional ``?client_id=`` correlates this SSE queue to the diag tab id —
     used by /api/diag/sessions so each per-client envelope can report its
     SSE connection_id and subscription age. Falls back to None when absent.
+
+    Global authority only. The stream is an UNFILTERED cross-org broadcast —
+    every topic (the whole fleet's session roster, worktrees, approvals) to
+    every subscriber — so its consumers are the naturally-cross-org ones: the
+    operator's browser (cookie) and local host tooling. An org-stamped agent
+    bearer has no business on the fleet stream and is refused (403); admitting
+    it would hand one org every other org's session metadata. A side-band
+    service that legitimately needs this stream (the Mission Control relay
+    connector) carries its own credential, not an agent session token.
     """
+    refused = api_auth.require_global_api_authority(request)
+    if refused is not None:
+        return refused
     client_id = request.query_params.get("client_id") or None
     queue = event_bus.subscribe(client_id=client_id)
 
@@ -12138,7 +12150,13 @@ async def api_events_replay(request):
     Returns {events: [...], complete: bool}.
     If complete=false, the buffer doesn't cover the range —
     caller should fall back to full re-fetch from disk.
+
+    Global authority only — this replays the same unfiltered cross-org
+    broadcast as /api/events, so it carries the same guard (see api_events).
     """
+    refused = api_auth.require_global_api_authority(request)
+    if refused is not None:
+        return refused
     from_seq = int(request.query_params.get("from", "0"))
     to_seq = int(request.query_params.get("to", "0"))
     if from_seq <= 0 or to_seq <= 0 or from_seq > to_seq:
