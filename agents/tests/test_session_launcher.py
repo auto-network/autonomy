@@ -1788,15 +1788,31 @@ def _agent_test_capability() -> MaterializedCapability:
         delivery_mode="mounted_tools",
         package_root="agents/capabilities/agent_test",
         mount_target=f"{CAPABILITIES_MOUNT_DIR}/autonomy-agent-test",
-        tool_paths=("agents/capabilities/agent_test/tools", "tools/agent_test"),
+        tool_paths=(),
         primer_path="agents/capabilities/agent_test/primer.md",
         skill_path="agents/capabilities/agent_test/SKILL.md",
         tool_target=CapabilityToolTarget(
-            source="agents/capabilities/agent_test/tools",
-            target="/opt/agent-test-tools",
+            source="tools/agent_test",
+            target="/opt/agent_test",
             expose_commands=("agent-test", "pytest", "py.test"),
         ),
     )
+
+
+def test_capability_mounts_refuses_external_tool_path_before_docker() -> None:
+    """Legacy invalid settings fail by name instead of reaching runc."""
+    cap = _agent_test_capability()
+    invalid = MaterializedCapability(
+        **{
+            **cap.__dict__,
+            "tool_paths": ("tools/agent_test",),
+        }
+    )
+    with pytest.raises(ValueError) as exc:
+        session_launcher._capability_mounts((invalid,))
+    message = str(exc.value)
+    assert "outside package_root" in message
+    assert "tool_target" in message
 
 
 def test_agent_test_capability_exposes_cli_and_refuses_raw_pytest_commands(
@@ -1808,15 +1824,22 @@ def test_agent_test_capability_exposes_cli_and_refuses_raw_pytest_commands(
     agent_test = run_dir / "cap-bin" / "agent-test"
     assert agent_test.is_file()
     assert agent_test.stat().st_mode & 0o100
-    assert "/opt/agent-test-tools/agent-test" in agent_test.read_text()
+    assert "/opt/agent_test/agent-test" in agent_test.read_text()
     mounts = _mounts(captured_run[0])
     runtime_source = Path(__file__).resolve().parents[2] / "tools/agent_test"
     assert (
-        f"{runtime_source}:{CAPABILITIES_MOUNT_DIR}/autonomy-agent-test/agent_test:ro"
+        f"{runtime_source}:/opt/agent_test:ro"
         in mounts
     )
-    source = Path(__file__).resolve().parents[2] / "agents/capabilities/agent_test/tools/agent-test"
-    assert "/opt/autonomy/capabilities/autonomy-agent-test" in source.read_text()
+    package_mount = (
+        Path(__file__).resolve().parents[2] / "agents/capabilities/agent_test"
+    )
+    assert (
+        f"{package_mount}:{CAPABILITIES_MOUNT_DIR}/autonomy-agent-test:ro"
+        in mounts
+    )
+    source = Path(__file__).resolve().parents[2] / "tools/agent_test/agent-test"
+    assert "/opt/agent_test" in source.read_text()
     process = subprocess.Popen(
         [str(source), "--version"],
         stdout=subprocess.PIPE,
@@ -1829,16 +1852,16 @@ def test_agent_test_capability_exposes_cli_and_refuses_raw_pytest_commands(
     )
     stdout, stderr = process.communicate(timeout=10)
     assert process.returncode == 0, stderr
-    assert stdout.strip() == "0.4.0"
+    assert stdout.strip() == "0.4.1"
 
     for command in ("pytest", "py.test"):
         gate = run_dir / "cap-bin" / command
         assert gate.is_file()
         assert gate.stat().st_mode & 0o100
-        assert f"/opt/agent-test-tools/{command}" in gate.read_text()
-        gate_source = Path(__file__).resolve().parents[2] / f"agents/capabilities/agent_test/tools/{command}"
+        assert f"/opt/agent_test/{command}" in gate.read_text()
+        gate_source = Path(__file__).resolve().parents[2] / f"tools/agent_test/{command}"
         if command == "py.test":
-            assert "exec /opt/agent-test-tools/pytest" in gate_source.read_text()
+            assert "exec /opt/agent_test/pytest" in gate_source.read_text()
             continue
         process = subprocess.Popen(
             [str(gate_source)],

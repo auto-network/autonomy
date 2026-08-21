@@ -468,6 +468,21 @@ def test_impl_tool_paths_rejects_absolute_entry():
     assert "tool_paths" in str(ei.value)
 
 
+def test_impl_tool_paths_rejects_entries_outside_package_root():
+    """An external path would become a child of the read-only package mount."""
+    payload = _autonomy_jira_v1()
+    payload["tool_paths"] = ["tools/shared_jira_runtime"]
+    with pytest.raises(SchemaValidationError) as ei:
+        validate_payload(
+            capability_impl.SET_ID,
+            capability_impl.SCHEMA_REVISION,
+            payload,
+        )
+    message = str(ei.value)
+    assert "package_root" in message
+    assert "tool_target" in message
+
+
 # ── tool_target / command-surface (auto-1webn.2) ────────────
 #
 # `tool_paths` only declares which repo-local subtrees the capability

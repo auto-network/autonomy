@@ -341,6 +341,10 @@ class CapabilityImplV1(SettingSchema):
     Optional: ``required_env``, ``required_secret_files``, ``tool_paths``,
     ``tool_target``, ``skill_path``, ``primer_path``, ``notes``.
 
+    ``tool_paths`` may only name paths within ``package_root`` because those
+    paths ride the package's read-only mount. External bundles must use
+    ``tool_target``, which supplies their independent absolute destination.
+
     ``tool_target`` (when present) is an object with required ``source``
     (repo-local path) and ``target`` (absolute container path) fields and
     an optional ``expose_commands`` list of bare command names. It lets a
@@ -504,14 +508,32 @@ class CapabilityImplV1(SettingSchema):
         _validate_str_list(payload, "required_secret_files", cls.__name__)
         _validate_str_list(payload, "tool_paths", cls.__name__)
 
-        # tool_paths — every entry must be a repo-local path.
+        # tool_paths — every entry must be a repo-local path already contained
+        # by package_root.  The package root is mounted read-only at one
+        # container destination.  An external tool_path cannot safely be
+        # projected below that destination: runc would have to create the
+        # child mountpoint inside the read-only parent before binding it.  Use
+        # tool_target for an external source because it carries its own
+        # explicit, non-nested absolute destination.
         if "tool_paths" in payload:
+            package_root = posixpath.normpath(payload["package_root"])
             for i, entry in enumerate(payload["tool_paths"]):
                 validate_repo_local_path(
                     entry,
                     field=f"tool_paths[{i}]",
                     cls_name=cls.__name__,
                 )
+                normalized = posixpath.normpath(entry)
+                if not (
+                    normalized == package_root
+                    or normalized.startswith(package_root + "/")
+                ):
+                    raise SchemaValidationError(
+                        f"{cls.__name__}: 'tool_paths[{i}]' must be within "
+                        f"package_root {payload['package_root']!r}; external "
+                        "tool bundles must use 'tool_target' with an explicit "
+                        "absolute container target"
+                    )
 
         # tool_target — optional command-surface declaration.
         if "tool_target" in payload:

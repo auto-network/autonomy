@@ -1,7 +1,7 @@
 #!/bin/sh
-runtime=/opt/autonomy/capabilities/autonomy-agent-test
-if [ -d "$runtime/agent_test" ]; then
-  PYTHONPATH="$runtime${PYTHONPATH:+:$PYTHONPATH}" python3 -c 'from agent_test.lease_client import telemetry_request; telemetry_request(event="raw_pytest_refused")' >/dev/null 2>&1 || true
+runtime=/opt/agent_test
+if [ -f "$runtime/__main__.py" ]; then
+  PYTHONPATH="/opt${PYTHONPATH:+:$PYTHONPATH}" python3 -c 'from agent_test.lease_client import telemetry_request; telemetry_request(event="raw_pytest_refused")' >/dev/null 2>&1 || true
 else
   python3 -c 'from tools.agent_test.lease_client import telemetry_request; telemetry_request(event="raw_pytest_refused")' >/dev/null 2>&1 || true
 fi
