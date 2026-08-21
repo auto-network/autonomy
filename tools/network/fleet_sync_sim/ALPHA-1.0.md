@@ -110,11 +110,12 @@ Not adopted:
 ## Production activation requirements
 
 GraphDB schema version 8 supplies the vault/key-control receiver tables but
-does not activate fleet synchronization. Activation requires a migration for the five tracking tables,
-logical-key/catalog indexes, and triggers; a one-time bootstrap that gives
-every existing logical row initial winner metadata; conversion of every
-personal-store writer, including vault/key-control writers, to the authored
-transaction adapter in the same rollout; the
-roster/RelayKit scheduler and ACK protocol; attachment-object transport; and
-an operational online handoff strategy. No new daemon or network service is
-required by the engine itself.
+does not activate fleet synchronization. The production preparation migration
+now installs the five tracking tables, one local peer-state table,
+logical-key/catalog indexes, and deterministic initial winner metadata for
+every existing logical row in one rollback-safe transaction. It leaves capture
+triggers disabled. Activation still requires conversion of every personal-store
+writer, including vault/key-control writers, to the authored transaction
+adapter before those triggers are enabled; the roster/RelayKit scheduler and
+ACK protocol; attachment-object transport; and an operational online handoff
+strategy. No new daemon or network service is required by the engine itself.

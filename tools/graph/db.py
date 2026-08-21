@@ -1,6 +1,7 @@
 """Database operations for the Autonomy Knowledge Graph."""
 
 from __future__ import annotations
+import hashlib
 import json
 import logging
 import math
@@ -70,6 +71,24 @@ _SQLITE_CONNECT_TIMEOUT_S = 5.0
 _RW_OPEN_BACKOFF_S = (0.05, 0.1, 0.2)
 
 VALID_ORG_TYPES = ("shared", "personal")
+
+
+def _fleet_sha256_text(value: object) -> str:
+    """Logical-key helper required by a prepared fleet-sync catalog.
+
+    The catalog's ``note_versions`` index is an SQLite expression index.  The
+    function therefore belongs to every GraphDB connection for the lifetime
+    of that index, not only to the one connection that created it.
+    """
+    if not isinstance(value, str):
+        raise ValueError("note version content must be text")
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _register_fleet_sync_sql_functions(conn: sqlite3.Connection) -> None:
+    conn.create_function(
+        "fleet_sha256_text", 1, _fleet_sha256_text, deterministic=True
+    )
 
 
 class GraphDBMissing(RuntimeError):
@@ -372,6 +391,7 @@ class GraphDB:
             timeout=_SQLITE_CONNECT_TIMEOUT_S,
         )
         self.conn.row_factory = sqlite3.Row
+        _register_fleet_sync_sql_functions(self.conn)
         self.conn.execute("PRAGMA journal_mode = WAL")
         self.conn.execute("PRAGMA foreign_keys = ON")
         self._init_schema()
@@ -426,6 +446,7 @@ class GraphDB:
                 timeout=_SQLITE_CONNECT_TIMEOUT_S,
             )
             self.conn.row_factory = sqlite3.Row
+            _register_fleet_sync_sql_functions(self.conn)
         except (sqlite3.OperationalError, OSError):
             self.conn = sqlite3.connect(
                 f"file:{self.db_path}?immutable=1",
@@ -434,6 +455,7 @@ class GraphDB:
                 timeout=_SQLITE_CONNECT_TIMEOUT_S,
             )
             self.conn.row_factory = sqlite3.Row
+            _register_fleet_sync_sql_functions(self.conn)
             self._immutable = True
         user_version = self.conn.execute("PRAGMA user_version").fetchone()[0]
         has_settings = self.conn.execute(
@@ -922,6 +944,22 @@ class GraphDB:
                 f"ON {table}(source_id, message_id) WHERE message_id IS NOT NULL"
             )
         self.conn.commit()
+
+    def migrate_fleet_sync_catalog(self, origin_incarnation: str):
+        """Prepare this personal store for production fleet synchronization.
+
+        The machine's roster-authorized public key is supplied explicitly;
+        it is not stored in ``personal.db`` as secret identity material.  The
+        migration creates and bootstraps local synchronization metadata but
+        deliberately leaves rejecting capture triggers disabled until every
+        writer is converted to the authored transaction adapter.
+        """
+        if self.read_only:
+            raise sqlite3.OperationalError(
+                "fleet-sync catalog migration requires a writable database"
+            )
+        from tools.network.fleet_sync_sim.catalog import MutationCatalog
+        return MutationCatalog(self.conn, origin_incarnation).migrate_existing()
 
     def close(self):
         """Close the underlying connection. Pool-managed instances are

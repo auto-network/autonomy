@@ -9,6 +9,7 @@ frozen WAL snapshot gives the serializer an immutable cut as writers continue.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
@@ -24,11 +25,17 @@ from .codec import (
 from .compaction import AuthoredMutation, WatermarkError
 from .materialize import materialize
 from .merge import mutation_wins
-from .policies import EXCLUDED_SETTING_SET_IDS, PolicyKind, TABLE_POLICIES
+from .policies import (
+    EXCLUDED_SETTING_SET_IDS,
+    PolicyKind,
+    TABLE_POLICIES,
+    audit_schema,
+)
 from .snapshot import _logical_address, _logical_values
+from .streaming import ensure_streaming_indexes, iter_indexed_snapshot_mutations
 
 
-CATALOG_SCHEMA_VERSION = 2
+CATALOG_SCHEMA_VERSION = 3
 JOURNAL_STORAGE_VERSION = 1
 MAX_TRANSACTION_OPERATIONS = 16_384
 MAX_TRANSACTION_FRAME_BYTES = 128 * 1024 * 1024
@@ -241,6 +248,18 @@ class WinnerMetadata:
     candidate_hash: bytes
 
 
+@dataclass(frozen=True)
+class CatalogMigrationReport:
+    """Observable result of one production personal-store migration."""
+
+    schema_created: bool
+    schema_upgraded: bool
+    bootstrapped_rows: int
+    live_rows: int
+    catalog_rows: int
+    triggers_active: bool
+
+
 class MutationCatalog:
     """Install and operate the simulation's fail-closed write adapter."""
 
@@ -355,18 +374,26 @@ class MutationCatalog:
             )
         return _pack_journal(frame)
 
-    def install(self) -> None:
-        if self.conn.in_transaction:
-            self.conn.commit()
-        self.conn.executescript("""
-            CREATE TABLE IF NOT EXISTS fleet_sync_state(
+    @staticmethod
+    def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+        return conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone() is not None
+
+    def _create_schema_objects(self) -> None:
+        """Create local catalog/state objects inside the caller transaction."""
+        statements = (
+            """CREATE TABLE IF NOT EXISTS fleet_sync_state(
                 singleton INTEGER PRIMARY KEY CHECK(singleton=1),
                 schema_version INTEGER NOT NULL,
                 origin_incarnation TEXT NOT NULL,
                 write_floor INTEGER NOT NULL,
-                last_timestamp INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS fleet_sync_catalog(
+                last_timestamp INTEGER NOT NULL,
+                bootstrap_generation INTEGER NOT NULL DEFAULT 0
+                    CHECK(bootstrap_generation>=0)
+            )""",
+            """CREATE TABLE IF NOT EXISTS fleet_sync_catalog(
                 address BLOB NOT NULL,
                 timestamp_ns INTEGER NOT NULL,
                 tombstone INTEGER NOT NULL CHECK(tombstone IN (0,1)),
@@ -374,40 +401,100 @@ class MutationCatalog:
                 operation_index INTEGER NOT NULL,
                 PRIMARY KEY(address),
                 FOREIGN KEY(transaction_ref) REFERENCES fleet_sync_transactions(id)
-            ) WITHOUT ROWID;
-            CREATE TABLE IF NOT EXISTS fleet_sync_origins(
+            ) WITHOUT ROWID""",
+            """CREATE TABLE IF NOT EXISTS fleet_sync_origins(
                 id INTEGER PRIMARY KEY,
                 incarnation TEXT NOT NULL UNIQUE
-            );
-            CREATE TABLE IF NOT EXISTS fleet_sync_transactions(
+            )""",
+            """CREATE TABLE IF NOT EXISTS fleet_sync_transactions(
                 id INTEGER PRIMARY KEY,
                 origin_id INTEGER NOT NULL,
                 transaction_id TEXT NOT NULL,
                 timestamp_ns INTEGER NOT NULL,
                 UNIQUE(origin_id,transaction_id),
                 FOREIGN KEY(origin_id) REFERENCES fleet_sync_origins(id)
-            );
-            CREATE TABLE IF NOT EXISTS fleet_sync_journal(
+            )""",
+            """CREATE TABLE IF NOT EXISTS fleet_sync_journal(
                 transaction_ref INTEGER NOT NULL,
                 operation_index INTEGER NOT NULL,
                 frame BLOB NOT NULL,
                 PRIMARY KEY(transaction_ref,operation_index),
                 FOREIGN KEY(transaction_ref) REFERENCES fleet_sync_transactions(id)
-            ) WITHOUT ROWID;
-            CREATE INDEX IF NOT EXISTS idx_fleet_sync_catalog_order
-                ON fleet_sync_catalog(timestamp_ns,transaction_ref,operation_index,address);
-        """)
+            ) WITHOUT ROWID""",
+            """CREATE TABLE IF NOT EXISTS fleet_sync_peer_state(
+                machine_public_key TEXT NOT NULL,
+                roster_epoch TEXT NOT NULL,
+                online INTEGER NOT NULL DEFAULT 0 CHECK(online IN (0,1)),
+                last_success_ns INTEGER,
+                peer_watermark INTEGER,
+                local_watermark INTEGER,
+                bytes_sent INTEGER NOT NULL DEFAULT 0 CHECK(bytes_sent>=0),
+                bytes_received INTEGER NOT NULL DEFAULT 0 CHECK(bytes_received>=0),
+                checkpoints_sent INTEGER NOT NULL DEFAULT 0 CHECK(checkpoints_sent>=0),
+                checkpoints_received INTEGER NOT NULL DEFAULT 0 CHECK(checkpoints_received>=0),
+                deltas_sent INTEGER NOT NULL DEFAULT 0 CHECK(deltas_sent>=0),
+                deltas_received INTEGER NOT NULL DEFAULT 0 CHECK(deltas_received>=0),
+                transactions_applied INTEGER NOT NULL DEFAULT 0
+                    CHECK(transactions_applied>=0),
+                acknowledgements INTEGER NOT NULL DEFAULT 0
+                    CHECK(acknowledgements>=0),
+                retries INTEGER NOT NULL DEFAULT 0 CHECK(retries>=0),
+                lag_ns INTEGER,
+                last_error_code TEXT,
+                updated_at_ns INTEGER NOT NULL DEFAULT 0 CHECK(updated_at_ns>=0),
+                PRIMARY KEY(machine_public_key,roster_epoch)
+            ) WITHOUT ROWID""",
+            """CREATE INDEX IF NOT EXISTS idx_fleet_sync_catalog_order
+                ON fleet_sync_catalog(
+                    timestamp_ns,transaction_ref,operation_index,address
+                )""",
+            """CREATE INDEX IF NOT EXISTS idx_fleet_sync_peer_state_online
+                ON fleet_sync_peer_state(roster_epoch,online,machine_public_key)""",
+        )
+        for statement in statements:
+            self.conn.execute(statement)
+
+    def _ensure_state(self) -> tuple[bool, bool]:
+        """Create or safely upgrade the singleton catalog identity row."""
+        columns = {
+            str(row[1])
+            for row in self.conn.execute("PRAGMA table_info(fleet_sync_state)")
+        }
+        added_generation = "bootstrap_generation" not in columns
+        if added_generation:
+            self.conn.execute(
+                "ALTER TABLE fleet_sync_state ADD COLUMN "
+                "bootstrap_generation INTEGER NOT NULL DEFAULT 0 "
+                "CHECK(bootstrap_generation>=0)"
+            )
         row = self.conn.execute(
             "SELECT schema_version,origin_incarnation FROM fleet_sync_state "
             "WHERE singleton=1"
         ).fetchone()
         if row is None:
             self.conn.execute(
-                "INSERT INTO fleet_sync_state VALUES(1,?,?,0,0)",
+                "INSERT INTO fleet_sync_state("
+                "singleton,schema_version,origin_incarnation,write_floor,"
+                "last_timestamp,bootstrap_generation) VALUES(1,?,?,0,0,0)",
                 (CATALOG_SCHEMA_VERSION, self.origin_incarnation),
             )
-        elif tuple(row) != (CATALOG_SCHEMA_VERSION, self.origin_incarnation):
+            return True, False
+        version, origin = int(row[0]), str(row[1])
+        if origin != self.origin_incarnation:
             raise WatermarkError("fleet-sync catalog identity/version mismatch")
+        if version == CATALOG_SCHEMA_VERSION:
+            return False, added_generation
+        if version == 2:
+            # Version 3 adds only the local peer-state table and index created
+            # above.  No replicated/catalog bytes need rewriting.
+            self.conn.execute(
+                "UPDATE fleet_sync_state SET schema_version=? WHERE singleton=1",
+                (CATALOG_SCHEMA_VERSION,),
+            )
+            return False, True
+        raise WatermarkError("fleet-sync catalog identity/version mismatch")
+
+    def _install_triggers(self) -> None:
         for table, policy in TABLE_POLICIES.items():
             if policy.kind in {PolicyKind.LOCAL, PolicyKind.DERIVED}:
                 continue
@@ -417,7 +504,200 @@ class MutationCatalog:
                 )
             for sql in _trigger_sql(table):
                 self.conn.execute(sql)
-        self.conn.commit()
+
+    def _trigger_count(self) -> int:
+        return int(self.conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' "
+            "AND name LIKE 'fleet_sync_%'"
+        ).fetchone()[0])
+
+    def triggers_active(self) -> bool:
+        replicated = sum(
+            policy.kind not in {PolicyKind.LOCAL, PolicyKind.DERIVED}
+            for policy in TABLE_POLICIES.values()
+        )
+        return self._trigger_count() == replicated * 3
+
+    def install(self) -> None:
+        """Install the Alpha schema and immediately activate capture hooks.
+
+        Production uses :meth:`migrate_existing` first and activates hooks only
+        when every personal-store writer has moved to the authored adapter.
+        Keeping this method eager preserves the executable Alpha contract.
+        """
+        if self.conn.in_transaction:
+            self.conn.commit()
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            self._create_schema_objects()
+            self._ensure_state()
+            self._install_triggers()
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def _bootstrap_existing_rows(self) -> int:
+        """Give each untracked live row deterministic legacy winner metadata."""
+        self.conn.execute(
+            "CREATE TEMP TABLE fleet_sync_bootstrap_progress("
+            "timestamp_ns INTEGER PRIMARY KEY,next_operation INTEGER NOT NULL)"
+        )
+        # A small LRU avoids repeated origin/transaction lookups for common
+        # timestamps without making memory proportional to timestamp variety.
+        transaction_refs: OrderedDict[tuple[int, int], int] = OrderedDict()
+        inserted = 0
+        maximum = 0
+        generation: int | None = None
+        try:
+            for mutation in iter_indexed_snapshot_mutations(self.conn):
+                address_blob = encode_value([
+                    mutation.table, list(mutation.address)
+                ])
+                existing = self.conn.execute(
+                    "SELECT tombstone FROM fleet_sync_catalog WHERE address=?",
+                    (address_blob,),
+                ).fetchone()
+                if existing is not None:
+                    if bool(existing[0]):
+                        raise WatermarkError(
+                            "live bootstrap row conflicts with catalog tombstone"
+                        )
+                    continue
+
+                if generation is None:
+                    generation = int(self.conn.execute(
+                        "SELECT bootstrap_generation FROM fleet_sync_state "
+                        "WHERE singleton=1"
+                    ).fetchone()[0]) + 1
+                    self.conn.execute(
+                        "UPDATE fleet_sync_state SET bootstrap_generation=? "
+                        "WHERE singleton=1",
+                        (generation,),
+                    )
+                timestamp = mutation.timestamp_ns
+                ordinal = int(self.conn.execute(
+                    "INSERT INTO fleet_sync_bootstrap_progress VALUES(?,1) "
+                    "ON CONFLICT(timestamp_ns) DO UPDATE SET "
+                    "next_operation=next_operation+1 "
+                    "RETURNING next_operation-1",
+                    (timestamp,),
+                ).fetchone()[0])
+                batch = ordinal // MAX_TRANSACTION_OPERATIONS
+                operation = ordinal % MAX_TRANSACTION_OPERATIONS
+                transaction_key = (timestamp, batch)
+                transaction_ref = transaction_refs.get(transaction_key)
+                if transaction_ref is None:
+                    transaction_ref = self._ensure_transaction(
+                        self.origin_incarnation,
+                        f"bootstrap-v1:{generation}:{timestamp}:{batch}",
+                        timestamp,
+                    )
+                    transaction_refs[transaction_key] = transaction_ref
+                    if len(transaction_refs) > 1024:
+                        transaction_refs.popitem(last=False)
+                else:
+                    transaction_refs.move_to_end(transaction_key)
+                self.conn.execute(
+                    "INSERT INTO fleet_sync_catalog VALUES(?,?,?,?,?)",
+                    (address_blob, timestamp, 0, transaction_ref, operation),
+                )
+                maximum = max(maximum, timestamp)
+                inserted += 1
+        finally:
+            self.conn.execute("DROP TABLE IF EXISTS fleet_sync_bootstrap_progress")
+
+        self.conn.execute(
+            "UPDATE fleet_sync_state SET last_timestamp="
+            "MAX(last_timestamp,?) WHERE singleton=1",
+            (maximum,),
+        )
+        return inserted
+
+    def _verify_catalog_integrity(self) -> tuple[int, int]:
+        """Validate bounded catalog decoding and complete live-row coverage."""
+        catalog_rows = 0
+        for raw in self.conn.execute(
+            "SELECT address,timestamp_ns,tombstone FROM fleet_sync_catalog"
+        ):
+            table, address = self._decode_address(bytes(raw[0]))
+            policy = TABLE_POLICIES.get(table)
+            if policy is None or policy.kind in {PolicyKind.LOCAL, PolicyKind.DERIVED}:
+                raise WatermarkError("catalog address names non-replicated table")
+            if not bool(raw[2]):
+                row = self._live_row(self.conn, table, address)
+                # Candidate hashing validates BLOB/JSON/canonical value shape
+                # without retaining the payload in migration memory.
+                Mutation(
+                    table, address, int(raw[1]), False,
+                    _logical_values(policy, row),
+                ).candidate_hash
+            catalog_rows += 1
+
+        live_rows = 0
+        for mutation in iter_indexed_snapshot_mutations(self.conn):
+            address_blob = encode_value([mutation.table, list(mutation.address)])
+            row = self.conn.execute(
+                "SELECT tombstone FROM fleet_sync_catalog WHERE address=?",
+                (address_blob,),
+            ).fetchone()
+            if row is None or bool(row[0]):
+                raise WatermarkError("live personal row lacks winner metadata")
+            live_rows += 1
+        return live_rows, catalog_rows
+
+    def migrate_existing(self) -> CatalogMigrationReport:
+        """Atomically prepare an existing personal store for writer activation.
+
+        This migration intentionally does *not* create capture triggers.  The
+        next rollout must first route GraphDB, vault, and key-control writers
+        through authored transactions, then activate the hooks in the same
+        deployment.  Until then ordinary writes remain valid and a repeated
+        migration bootstraps only rows that appeared since the previous pass.
+        """
+        if self.conn.in_transaction:
+            raise WatermarkError("catalog migration requires an idle connection")
+        if (
+            len(self.origin_incarnation) != 64
+            or any(ch not in "0123456789abcdef" for ch in self.origin_incarnation)
+        ):
+            raise WatermarkError(
+                "production origin must be a 64-character lowercase machine public key"
+            )
+        # Fail before the first DDL statement when a schema addition has no
+        # explicit replicate/rebuild/local policy.
+        audit_schema(self.conn)
+        required = {
+            "fleet_sync_state", "fleet_sync_catalog", "fleet_sync_origins",
+            "fleet_sync_transactions", "fleet_sync_journal",
+            "fleet_sync_peer_state",
+        }
+        schema_created = not all(
+            self._table_exists(self.conn, table) for table in required
+        )
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            self._create_schema_objects()
+            _, schema_upgraded = self._ensure_state()
+            ensure_streaming_indexes(self.conn, manage_transaction=False)
+            bootstrapped = self._bootstrap_existing_rows()
+            live_rows, catalog_rows = self._verify_catalog_integrity()
+            if self._trigger_count():
+                raise WatermarkError(
+                    "production catalog migration found capture triggers present"
+                )
+            self.conn.commit()
+            return CatalogMigrationReport(
+                schema_created=schema_created,
+                schema_upgraded=schema_upgraded,
+                bootstrapped_rows=bootstrapped,
+                live_rows=live_rows,
+                catalog_rows=catalog_rows,
+                triggers_active=False,
+            )
+        except Exception:
+            self.conn.rollback()
+            raise
 
     @contextmanager
     def transaction(self, timestamp_ns: int, transaction_id: str) -> Iterator[None]:

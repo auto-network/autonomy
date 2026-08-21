@@ -7,6 +7,7 @@ import pytest
 
 from tools.graph.db import GraphDB
 from tools.network.idkit import KeyPair
+from tools.network.storagekit import capability
 from tools.network.storagekit import bridge as bridge_mod
 from tools.network.storagekit.credentials import build as build_credential
 from tools.network.storagekit.keycontrol import KeyControlStore
@@ -22,6 +23,7 @@ from tools.network.fleet_sync_sim.codec import Mutation
 from tools.network.fleet_sync_sim.materialize import MaterializationError
 from tools.network.fleet_sync_sim.merge import MutationConflictError, MutationInbox
 from tools.network.fleet_sync_sim.policies import audit_schema
+from tools.vault.unlock import open_generation_keys
 
 
 def _insert_vault_and_keycontrol(conn: sqlite3.Connection) -> tuple:
@@ -29,8 +31,8 @@ def _insert_vault_and_keycontrol(conn: sqlite3.Connection) -> tuple:
     header = b'{"order":"is-exact","not":"decoded"}'
     digest = hashlib.sha256(ciphertext).hexdigest()
     world = World()
-    descriptor, _ = world.mint_initial_state(world.member(0))
-    credential, _ = build_credential(
+    descriptor, state_secret = world.mint_initial_state(world.member(0))
+    credential, kem_private = build_credential(
         world.member(0), world.gen, bytes(range(32)), [world.gen], HLC0
     )
     bridge = bridge_mod.create(
@@ -54,10 +56,24 @@ def _insert_vault_and_keycontrol(conn: sqlite3.Connection) -> tuple:
         "INSERT INTO keycontrol_state VALUES(?,?)",
         (descriptor.state_id, descriptor.to_json()),
     )
-    grant_wire = b"signed-capability-grant-wire"
+    grant = capability.issue(
+        world.member(0),
+        genesis_id=world.gen,
+        domain_id=world.dom,
+        storage_state_id=descriptor.state_id,
+        recipient_credential=credential,
+        state_secret=state_secret,
+        state_secret_commitment=descriptor.secret_commitment,
+        authority_heads=descriptor.authority_heads,
+    )
     conn.execute(
         "INSERT INTO keycontrol_grant VALUES(?,?,?,?)",
-        ("grant-1", descriptor.state_id, credential.kem_key_id, grant_wire),
+        (
+            grant.grant_id,
+            descriptor.state_id,
+            credential.kem_key_id,
+            grant.to_json(),
+        ),
     )
     conn.execute(
         "INSERT INTO keycontrol_credential VALUES(?,?,?)",
@@ -74,7 +90,16 @@ def _insert_vault_and_keycontrol(conn: sqlite3.Connection) -> tuple:
         "INSERT INTO vault_state_object_counts VALUES(?,?)",
         (descriptor.state_id, 999),
     )
-    return ciphertext, header, descriptor, credential, bridge, grant_wire
+    return (
+        ciphertext,
+        header,
+        descriptor,
+        credential,
+        bridge,
+        grant,
+        kem_private,
+        state_secret,
+    )
 
 
 def test_vault_and_keycontrol_round_trip_through_real_alpha_checkpoint(
@@ -84,9 +109,16 @@ def test_vault_and_keycontrol_round_trip_through_real_alpha_checkpoint(
     target_path = tmp_path / "target.db"
     with FleetSyncAlpha(origin_path, "machine-a") as origin:
         with origin.author(100, "vault-transaction"):
-                ciphertext, header, descriptor, credential, bridge, grant_wire = (
-                _insert_vault_and_keycontrol(origin.graph.conn)
-            )
+            (
+                ciphertext,
+                header,
+                descriptor,
+                credential,
+                bridge,
+                grant,
+                kem_private,
+                state_secret,
+            ) = _insert_vault_and_keycontrol(origin.graph.conn)
         checkpoint = origin.checkpoint(
             tmp_path / "checkpoint", roster_epoch=1,
             active_roster=("machine-a", "machine-b"), target_chunk_bytes=4096,
@@ -131,8 +163,9 @@ def test_vault_and_keycontrol_round_trip_through_real_alpha_checkpoint(
             "SELECT wire FROM keycontrol_state"
         ).fetchone()[0]) == descriptor.to_json()
         assert bytes(target.conn.execute(
-            "SELECT wire FROM keycontrol_grant WHERE grant_id='grant-1'"
-        ).fetchone()[0]) == grant_wire
+            "SELECT wire FROM keycontrol_grant WHERE grant_id=?",
+            (grant.grant_id,),
+        ).fetchone()[0]) == grant.to_json()
         assert bytes(target.conn.execute(
             "SELECT wire FROM keycontrol_credential"
         ).fetchone()[0]) == credential.to_json()
@@ -152,13 +185,18 @@ def test_vault_and_keycontrol_round_trip_through_real_alpha_checkpoint(
         ).fetchone()) == (1, 4)
     finally:
         target.close()
-    # Opening the production key-control store re-verifies each content
-    # address and signature. This is the fresh-machine usability proof, not
-    # merely a check that opaque BLOBs survived the codec.
+    # Database reload rechecks canonical structure and content addresses.
+    # Actually opening the synchronized grant below verifies its signature,
+    # recipient binding, descriptor context, and secret commitment.  This is
+    # the fresh-machine usability proof, not merely opaque-BLOB transport.
     with KeyControlStore(target_path) as reopened:
         assert reopened.get(descriptor.state_id) == descriptor
+        assert reopened.accepted_grants() == (grant,)
         assert reopened.get_credential(credential.kem_key_id) == credential
         assert reopened.get_bridge(record_id(bridge.to_json())) == bridge
+        assert open_generation_keys(
+            kem_private, reopened.accepted_grants(), reopened.states
+        ) == {descriptor.state_id: state_secret}
 
 
 def test_immutable_rows_reject_local_update_delete_and_remote_conflict(
