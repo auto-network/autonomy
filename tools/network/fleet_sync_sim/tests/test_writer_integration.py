@@ -310,3 +310,24 @@ def test_vault_and_keycontrol_connections_join_authored_boundary(
             "vault_content_bodies",
             "vault_content_objects",
         ]
+
+
+def test_production_activated_catalog_applies_remote_transaction(
+    tmp_path: Path,
+) -> None:
+    left = GraphDB(tmp_path / "left.db")
+    right = GraphDB(tmp_path / "right.db")
+    try:
+        left.activate_fleet_sync_writers("a" * 64)
+        right.activate_fleet_sync_writers("b" * 64)
+        left.insert_source(Source(id="crossed", type="note", title="from left"))
+
+        transaction = list(left._fleet_catalog.iter_journal())
+        assert right._fleet_catalog.apply_remote_batch(transaction) == (1, 0)
+        assert right.conn.execute(
+            "SELECT title FROM sources WHERE id='crossed'"
+        ).fetchone()[0] == "from left"
+        assert list(right._fleet_catalog.iter_journal()) == transaction
+    finally:
+        left.close()
+        right.close()

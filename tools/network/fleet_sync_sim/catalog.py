@@ -226,6 +226,7 @@ class _WriteContext:
     current_operation: int = -1
     frame_bytes: int = 0
     capture: bool = True
+    automatic: bool = False
 
 
 @dataclass
@@ -345,6 +346,7 @@ class MutationCatalog:
                 self.origin_incarnation,
                 transaction_id,
                 transaction_ref,
+                automatic=True,
             )
             return opened
         except Exception:
@@ -355,7 +357,7 @@ class MutationCatalog:
     def before_commit(self) -> None:
         """Finalize an automatic context inside the application transaction."""
         context = self._context
-        if context is None:
+        if context is None or not context.automatic:
             return
         if context.operation_index == 0:
             # An identity-only Settings statement is permitted but its trigger
