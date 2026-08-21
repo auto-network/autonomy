@@ -258,6 +258,37 @@ def test_journal_is_incremental_and_prunes_only_after_acknowledged_floor(
         db.close()
 
 
+def test_journal_pages_exact_transactions_without_skips_or_duplicates(
+    tmp_path: Path,
+) -> None:
+    db = GraphDB(tmp_path / "personal.db")
+    try:
+        catalog = MutationCatalog(db.conn, "machine-a")
+        catalog.install()
+        with catalog.transaction(10, "first"):
+            _insert_source(db.conn, "s1", "one")
+            _insert_source(db.conn, "s2", "two")
+        with catalog.transaction(20, "second"):
+            _insert_source(db.conn, "s3", "three")
+
+        cursor = None
+        pages: list[list[AuthoredMutation]] = []
+        while page := catalog.next_journal_transaction(cursor):
+            cursor, items = page
+            pages.append(items)
+
+        assert [[item.transaction_id for item in items] for items in pages] == [
+            ["first", "first"],
+            ["second"],
+        ]
+        assert [
+            item.operation_index for items in pages for item in items
+        ] == [0, 1, 0]
+        assert catalog.next_journal_transaction(cursor) is None
+    finally:
+        db.close()
+
+
 def test_multiple_operations_on_one_address_keep_transaction_final_state(
     tmp_path: Path,
 ) -> None:

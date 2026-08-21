@@ -2,8 +2,10 @@
 
 This package contains the executable 1.0-alpha synchronization engine against
 the real personal GraphDB schema. Its catalogue preparation and authored-write
-boundary are integrated into the production personal database stores; peer
-scheduling, transport, and online handoff remain outside production startup.
+boundary are integrated into the production personal database stores, and the
+Dashboard owns an idle authenticated peer scheduler. The unlock-time handoff
+of machine identity and discovered peer addresses is the remaining activation
+boundary.
 
 ## Replication boundary
 
@@ -295,14 +297,44 @@ outside the connection lifecycle; future schema upgrades require a coordinated
 writer-gated path. The Alpha refuses to checkpoint a populated database whose
 live-row count is not completely covered by its catalog.
 
+The Dashboard lifespan now owns one `DashboardFleetSyncService`. Before an
+unlocked fleet runtime is supplied it is an idle task: it opens no database,
+dials no address, and leaves zero-peer startup healthy. A runtime supplies the
+derived machine signing key, personal-root public pin, live roster reader,
+fixed local personal-database path, and discovered direct candidates. The
+scheduler intersects candidates with the currently resolved roster, mutually
+authenticates both machine keys over RelayKit's direct transport, and rechecks
+roster authorization before every application request and streamed response.
+Organization credentials and arbitrary presented roster rows are not accepted
+at this boundary.
+
+Each synchronization pass opens short worker-thread SQLite connections,
+reads and releases one complete authored transaction at a time, streams it
+through RelayKit's existing encrypted record layer, applies one transaction
+atomically, and stores bytes, retries,
+watermarks, completed pulls, and applied-transaction counts in local peer
+state. A reconnect currently replays the retained journal; deterministic merge
+makes already committed transactions inert. This deliberately avoids claiming
+an unsafe scalar cursor before exact peer ACK floors land. The stream carries
+a bounded message count and digest, and refuses malformed framing, incomplete
+transaction groups, an unauthorized machine, or an individual mutation that
+cannot fit the channel's message bound.
+
+`process_dashboard_sync.py` is the retained process-bound acceptance probe. It
+launches independent scheduler processes and databases, records a refused dial,
+crosses one graph note, restarts the receiver, crosses another, and reports the
+two machine ids, byte totals, retry count, applied transactions, completed
+pulls, final note-table digests, and post-shutdown connection count as JSON.
+
 Checkpoint creation is online: it briefly serializes an `IMMEDIATE` cut,
 persists the no-more-before floor, establishes a WAL snapshot, and releases
 writers before streaming. Alpha installation is offline: it realizes into a
 new staging database, preserves the receiving machine's local `orgs` bootstrap
 row and excluded identity armor, validates and fsyncs the result, then replaces
-the target through a recoverable backup. Production online handoff, scheduler,
-fleet discovery/enrollment, RelayKit channel establishment, durable ACK
-collection, and exact-base round coordination remain outside this package.
+the target through a recoverable backup. Production online checkpoint handoff,
+fleet address discovery/enrollment, the browser-to-process derived-machine-key
+handoff, exact durable ACK floors, and exact-base round coordination remain
+outside this package.
 
 Attachment graph metadata participates in the base. Attachment bytes are
 content-addressed artifacts fetched through the supplied blob-store adapter;

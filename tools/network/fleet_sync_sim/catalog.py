@@ -1094,6 +1094,51 @@ class MutationCatalog:
                 decode_mutation_frame(_unpack_journal(bytes(frame))),
             )
 
+    def next_journal_transaction(
+        self,
+        after: tuple[int, str, str] | None = None,
+    ) -> tuple[tuple[int, str, str], list[AuthoredMutation]] | None:
+        """Read the next retained authored transaction in bounded memory.
+
+        ``after`` is the exact total-order key returned by the prior call, not
+        a scalar watermark. The connection is short-lived at the scheduler
+        layer, so this gives a response iterator one transaction at a time
+        without holding a SQLite snapshot or collecting the journal.
+        """
+        where = ""
+        params: tuple[object, ...] = ()
+        if after is not None:
+            where = (
+                "AND (t.timestamp_ns,o.incarnation,t.transaction_id)>(?,?,?) "
+            )
+            params = after
+        row = self.conn.execute(
+            "SELECT t.id,t.timestamp_ns,o.incarnation,t.transaction_id "
+            "FROM fleet_sync_transactions t "
+            "JOIN fleet_sync_origins o ON o.id=t.origin_id "
+            "WHERE EXISTS(SELECT 1 FROM fleet_sync_journal j "
+            "WHERE j.transaction_ref=t.id) "
+            + where
+            + "ORDER BY t.timestamp_ns,o.incarnation,t.transaction_id LIMIT 1",
+            params,
+        ).fetchone()
+        if row is None:
+            return None
+        transaction_ref = int(row[0])
+        key = (int(row[1]), str(row[2]), str(row[3]))
+        items = [
+            AuthoredMutation(
+                key[1], key[2], int(operation),
+                decode_mutation_frame(_unpack_journal(bytes(frame))),
+            )
+            for operation, frame in self.conn.execute(
+                "SELECT operation_index,frame FROM fleet_sync_journal "
+                "WHERE transaction_ref=? ORDER BY operation_index",
+                (transaction_ref,),
+            )
+        ]
+        return key, items
+
     def prune_journal(self, through_watermark: int) -> int:
         """Retire transaction frames only after an exact base ACK covers them."""
         if self._context is not None or self.conn.in_transaction:

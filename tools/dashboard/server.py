@@ -18658,6 +18658,12 @@ async def _on_startup():
         except Exception:
             logger.exception("ensure_bootstrap_orgs() failed; continuing startup")
 
+    # Personal fleet synchronization owns one in-process scheduler. It starts
+    # idle before unlock/runtime credentials are available, so zero-peer,
+    # mock, and cold-vault Dashboards pay no database or network cost.
+    from tools.network.fleet_sync_scheduler import dashboard_fleet_sync_service
+    await dashboard_fleet_sync_service.start()
+
     # Restore EventBus sequence/buffer state from the prior process. restore()
     # advances the persisted epoch so clients show the existing reload banner
     # while still retaining gap-replay continuity.
@@ -18908,6 +18914,11 @@ async def _on_shutdown():
         _settings_ops.set_emit_hook(None)
     except Exception:
         logger.exception("settings_ops.set_emit_hook(None) failed; continuing")
+    try:
+        from tools.network.fleet_sync_scheduler import dashboard_fleet_sync_service
+        await dashboard_fleet_sync_service.stop()
+    except Exception:
+        logger.exception("error stopping the personal fleet sync scheduler")
     # Cancel a still-running background bootstrap FIRST, so it cannot spawn a
     # connector in the window between stop_all() and process exit.
     if _serving_bootstrap_task is not None and not _serving_bootstrap_task.done():

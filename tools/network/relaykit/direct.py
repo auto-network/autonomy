@@ -72,8 +72,9 @@ class DirectChannelServer:
     chain a request arrived over.
     """
 
-    def __init__(self, org: str, key: KeyPair, cert: DelegationCert,
-                 handler=echo_handler, *, host: str = "127.0.0.1", port: int = 0):
+    def __init__(self, org: str | None, key: KeyPair | None,
+                 cert: DelegationCert | None, handler=echo_handler, *,
+                 host: str = "127.0.0.1", port: int = 0, channel_server=None):
         self._org = org
         self._key = key
         self._cert = cert
@@ -81,6 +82,9 @@ class DirectChannelServer:
         self._host = host
         self._port = port
         self._server = None
+        self._channel_server = channel_server
+        if channel_server is None and (org is None or key is None or cert is None):
+            raise ValueError("org, key, and cert are required for org channels")
 
     @property
     def port(self) -> int:
@@ -131,10 +135,17 @@ class DirectChannelServer:
                     return bytes(message)
 
         try:
-            await serve_channel(
-                self._key, self._cert, org=self._org, token=data["session"],
-                recv=recv, send=ws.send, handler=self._handler,
-            )
+            if self._channel_server is None:
+                await serve_channel(
+                    self._key, self._cert, org=self._org,
+                    token=data["session"], recv=recv, send=ws.send,
+                    handler=self._handler,
+                )
+            else:
+                await self._channel_server(
+                    token=data["session"], recv=recv, send=ws.send,
+                    handler=self._handler,
+                )
         except Exception:  # HandshakeError, RecordError, transport failures
             pass
         finally:

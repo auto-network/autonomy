@@ -2,11 +2,12 @@
 
 ## Release claim
 
-This alpha is an executable, bounded-memory synchronization engine and
-simulation over the complete logical personal GraphDB schema. It proves the
-format and lifecycle before production dashboard integration. It is not a
-production deployment and does not modify a database unless a caller
-explicitly constructs `FleetSyncAlpha` for that path.
+This alpha is an executable, bounded-memory synchronization engine over the
+complete logical personal GraphDB schema. Production personal stores prepare
+its catalogue and can explicitly activate the authored-write boundary; the
+Dashboard owns its idle-safe authenticated delta scheduler. Checkpoint
+publication remains an offline acceptance path rather than a live Dashboard
+handoff.
 
 The exercised lifecycle is:
 
@@ -91,9 +92,8 @@ Deliberately deferred to production/native work:
 - native systematic-first RaptorQ with arbitrary repair ESI ranges;
 - record/key-aware stable chunk boundaries;
 - compression selection (including zstd) from a whole-chain benchmark;
-- online database handoff and dashboard writer migration;
-- fleet scheduling, durable ACK exchange, and RelayKit discovery/channel
-  lifecycle; and
+- online database checkpoint handoff;
+- durable ACK exchange and RelayKit address discovery; and
 - a startup write gate after an externally restored machine snapshot. The
   alpha persists and enforces its floor across ordinary restarts, but only the
   production lifecycle can distinguish a restored old image from a normal
@@ -119,6 +119,10 @@ coverage and rebuilds bootstrap provenance under the SQLite writer lock,
 installs all rejecting triggers, and binds GraphDB, encrypted-content, and
 key-control connection commits to automatic authored transactions. Raw or
 unrecognized writes fail closed, and ordinary startup never activates a
-prepared store implicitly. Remaining work is the roster/RelayKit scheduler and
-ACK protocol, attachment-object transport, and an operational online handoff
-strategy. No new daemon or network service is required by the engine itself.
+prepared store implicitly. The Dashboard now owns an idle-safe scheduler that
+uses the active personal-root roster, mutual machine-key proof, RelayKit direct
+channels, transaction-atomic journal replay, bounded retry, and durable local
+peer counters. Remaining work is the unlock-to-runtime machine-key handoff,
+address discovery, exact ACK floors, attachment-object transport, and an
+operational online checkpoint handoff strategy. No new daemon or network
+service is required by the engine itself.
