@@ -599,11 +599,8 @@ def _seal_vault_payload(
     sealer = _vault_sealer
     if sealer is None:
         raise VaultSealerMissing(
-            f"{set_id} is a vault set at the {tier!r} tier: its payload is "
-            f"stored as an encrypted object, and no vault sealer is "
-            f"registered in this process to produce one. Register one with "
-            f"settings_ops.set_vault_sealer() — writing the value in the "
-            f"clear is not the fallback."
+            "The vault is locked and must be warmed by the operator "
+            "(sign-in or warm client) before a secret can be written."
         )
     locator = sealer(
         set_id=set_id,
@@ -3975,17 +3972,20 @@ def _vault_key_control(org: str | None, set_id: str, cache: dict):
         return cache[org]
     holder = _vault_key_holder
     if holder is None:
-        answer = (None, "no vault key holder is registered in this process")
+        answer = (None, "The vault is locked in this process and only the "
+                        "operator can unlock it (sign-in or warm client).")
     else:
         try:
             control = holder(set_id=set_id, org=org)
         except Exception as exc:  # noqa: BLE001 — one refusal, whatever failed
-            answer = (None, f"the vault key holder failed: {exc}")
+            answer = (None, "The vault key holder failed while opening keys "
+                            f"and cannot be used ({exc}).")
         else:
             answer = (
                 (control, None) if control is not None
-                else (None, "the vault key holder holds no key control for this "
-                            "organization")
+                else (None, "The vault holds no keys for this scope and only "
+                            "the operator can unlock it (sign-in or warm "
+                            "client).")
             )
     cache[org] = answer
     return answer
@@ -4019,20 +4019,22 @@ def _unwrap_vault_locator(
     if not vault_storage_object.is_vault_locator(locator):
         return refuse(
             VAULT_NOT_A_LOCATOR,
-            "this set stores its payloads as encrypted objects and this row "
-            "does not hold a locator",
+            "This record presented an unexpected value and cannot be processed.",
         )
     try:
         reference = vault_storage_object.parse_locator(locator)
-    except VaultError as exc:
-        return refuse(VAULT_NOT_A_LOCATOR, str(exc))
+    except VaultError:
+        return refuse(
+            VAULT_NOT_A_LOCATOR,
+            "This record presented an unexpected value and cannot be processed.",
+        )
     if reference["tier"] != declared_tier:
         # The set says how its secrets are released; a row saying otherwise is
         # a downgrade sitting in the database, not a per-row preference.
         return refuse(
             VAULT_TIER_MISMATCH,
-            f"the set declares the {declared_tier!r} tier and this row's "
-            f"locator names {reference['tier']!r}",
+            "This record's release tier does not match the set's and cannot "
+            "be processed.",
         )
 
     control, missing = _vault_key_control(org, set_id, cache)
@@ -4043,20 +4045,36 @@ def _unwrap_vault_locator(
         opened = vault_storage_object.open_revision_for_member(
             locator, holdings=control.holdings, content_store=control.content_store,
         )
-    except SuiteError as exc:
-        return refuse(VAULT_UNKNOWN_SUITE, str(exc))
-    except StateUnreachableError as exc:
+    except SuiteError:
+        return refuse(
+            VAULT_UNKNOWN_SUITE,
+            "This record's encryption suite is unrecognized and cannot be "
+            "processed.",
+        )
+    except StateUnreachableError:
         # The storage layer refuses both the same way. Holding a generation
         # descended from this one means the backward recovery SHOULD have
         # worked, so the edge is what is missing.
         descended = vault_storage_object.holds_a_descendant_of(
             reference["storage_state_id"], control.holdings,
         )
+        if descended:
+            return refuse(
+                VAULT_MISSING_BRIDGE,
+                "This identity holds a newer generation but the link back to "
+                "this secret has not reached this machine — check the "
+                "synchronization frontier.",
+            )
         return refuse(
-            VAULT_MISSING_BRIDGE if descended else VAULT_NO_KEY_HELD, str(exc),
+            VAULT_NO_KEY_HELD,
+            "No key that opens this secret has reached this identity yet — "
+            "check the synchronization frontier.",
         )
-    except (StorageError, VaultError) as exc:
-        return refuse(VAULT_DECRYPTION_FAILED, f"{type(exc).__name__}: {exc}")
+    except (StorageError, VaultError):
+        return refuse(
+            VAULT_DECRYPTION_FAILED,
+            "This record could not be decrypted and cannot be processed.",
+        )
 
     if isinstance(opened, vault_storage_object.SealedContentKey):
         # A secured secret, opened as far as membership goes. The human factor
