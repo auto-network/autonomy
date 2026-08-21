@@ -14,3 +14,10 @@ nav:
 
 frontend:
   alpine_root: examplePage
+
+# Backend entrypoints are optional. When present, keep routes under
+# /api/plugins/<id>/ and enforce their authentication policy in the handler.
+entrypoints:
+  api: tools.dashboard.plugins._example.entrypoints.api:routes
+  schemas:
+    - tools.dashboard.plugins._example.entrypoints.schemas:ExamplePluginRecordV1
