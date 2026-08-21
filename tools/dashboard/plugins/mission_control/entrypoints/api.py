@@ -93,14 +93,6 @@ async def _publish_activity_event(
         )
 
 
-#: Cookie carrying the visitor's bearer TOKEN (never the display-safe
-#: participant_id -- see resolve_visitor()'s docstring for why that
-#: distinction is load-bearing, not cosmetic). HttpOnly: JS never needs
-#: to read it, only the browser needs to send it back automatically.
-VISITOR_COOKIE = "mc_visitor"
-VISITOR_COOKIE_MAX_AGE = 365 * 24 * 3600
-
-
 def _mission_payload(mission: dict) -> dict:
     return {
         "mission_id": mission["mission_id"],
@@ -774,14 +766,6 @@ _NO_STORE_HEADERS = {
 }
 
 
-def _set_visitor_cookie(response, token: str) -> None:
-    response.set_cookie(
-        VISITOR_COOKIE, token,
-        max_age=VISITOR_COOKIE_MAX_AGE, path="/", httponly=True,
-        samesite="lax", secure=True,
-    )
-
-
 async def serve_mission_site(request: Request):
     mission_id = request.path_params["mission_id"]
     if not db.get_mission(mission_id):
@@ -794,14 +778,7 @@ async def serve_mission_site(request: Request):
         return PlainTextResponse(
             "Mission has no site revision yet", status_code=404, headers=_NO_STORE_HEADERS
         )
-    response = HTMLResponse(document, headers=_NO_STORE_HEADERS)
-    # First visit carries ?as=<token> in the share link; resolve once and
-    # cookie it so every later visit (and every API call the site's own
-    # JS makes) is attributed without the token reappearing in the URL.
-    as_token = request.query_params.get("as")
-    if as_token and db.resolve_visitor(as_token):
-        _set_visitor_cookie(response, as_token)
-    return response
+    return HTMLResponse(document, headers=_NO_STORE_HEADERS)
 
 
 async def serve_pillar_site(request: Request):
@@ -820,11 +797,7 @@ async def serve_pillar_site(request: Request):
         return PlainTextResponse(
             "Pillar has no site revision yet", status_code=404, headers=_NO_STORE_HEADERS
         )
-    response = HTMLResponse(document, headers=_NO_STORE_HEADERS)
-    as_token = request.query_params.get("as")
-    if as_token and db.resolve_visitor(as_token):
-        _set_visitor_cookie(response, as_token)
-    return response
+    return HTMLResponse(document, headers=_NO_STORE_HEADERS)
 
 
 # ── Visitor identity shim (P2) ────────────────────────────────────
@@ -998,19 +971,21 @@ def _resolve_session_identity(request: Request) -> dict | None:
 
 
 def _resolve_visitor_identity(request: Request) -> dict | None:
-    """Cookie first (the TOKEN, never bare participant_id -- an
-    impersonation hole otherwise: participant_id is deliberately
-    display-safe and appears in GET .../questions, so authenticating by
-    it would let anyone copy an id they saw and post as that person).
-    Falls back to ?as=<token> for a same-request ask before the cookie
-    has been set."""
-    token = request.cookies.get(VISITOR_COOKIE) or request.query_params.get("as")
-    if not token:
-        # A coordinator acting on its own surface, before falling back to the
-        # operator: an agent presents a bearer and never a cookie, so the two
-        # cannot be confused for each other.
-        return _resolve_session_identity(request) or _operator_identity(request)
-    return db.resolve_visitor(token)
+    """Who is calling one of these routes: a coordinator, or the operator.
+
+    A GUEST IS NOT A CASE HERE AND CANNOT BE. Guests never reach the API:
+    they arrive over the relay connector, which resolves the participant
+    from the grant it holds and calls handle_relay_write directly -- so
+    identity on that path is settled before this module sees it, and is
+    never taken from anything the guest sent.
+
+    This used to accept a visitor token out of a cookie or ?as=, which was
+    a second way in that the design does not have. It was unreachable in
+    production and refused at the boundary, but it read as the guest path
+    to anyone opening this file, and for an hour it convinced two of us
+    that locking the API had cut guests off.
+    """
+    return _resolve_session_identity(request) or _operator_identity(request)
 
 
 def _viewer_id(request: Request) -> str | None:
@@ -1636,9 +1611,6 @@ async def _ask_question_impl(
         status_code=201,
         background=BackgroundTask(_relay_question, mission_id=mission_id, entry_id=entry["entry_id"]),
     )
-    as_token = request.query_params.get("as")
-    if as_token and not request.cookies.get(VISITOR_COOKIE):
-        _set_visitor_cookie(response, as_token)
     return response
 
 
