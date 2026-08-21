@@ -102,6 +102,7 @@ TARGET_TYPES = (
     "note",
     "present",
     "org:join",
+    "fleet:join",
 )  # §6.1 artifact + membership resolvers
 
 RECOVERY_MODES = ("none", "recovery-key", "org-vouch", "blindhash-escrow")

@@ -728,6 +728,11 @@ def resolve_target(grant: dict, *, org: str | None = None):
 #: and the BEARER TOKEN) is channel ciphertext end-to-end to this node.
 JOIN_OPS = ("context", "submit", "status")
 
+# Fleet enrollment is a separate authority domain from organization claims.
+# It shares RelayKit's established channel but has its own grant type and
+# operation vocabulary.
+FLEET_JOIN_OPS = ("fleet.request", "fleet.resume")
+
 
 def _claim_service():
     """The transport-agnostic claim service (auto-v3db2), imported lazily.
@@ -1029,7 +1034,26 @@ def make_grant_handler(org: str | None = None, *, now=None):
             return REFUSED  # a content token never serves the join protocol
         return _serve_join(grant, org, request)
 
-    async def handler(token: str, message: bytes) -> bytes:
+    def _fleet_join(token: str, request: dict, channel_state: dict) -> bytes:
+        grant = check_grant(token, org=org, now=clock())
+        if grant is None or grant["target_type"] != "fleet:join":
+            return REFUSED
+        try:
+            from tools.dashboard import fleet_enrollment_service
+
+            result = fleet_enrollment_service.handle_request(
+                grant,
+                request,
+                channel_state=channel_state,
+                now_ms=int(clock() * 1000),
+            )
+            return canonical_json(result) + b"\n"
+        except Exception:
+            return REFUSED
+
+    async def _handle(
+        token: str, message: bytes, channel_state: dict
+    ) -> bytes:
         try:
             request = json.loads(message)
         except ValueError:
@@ -1045,6 +1069,10 @@ def make_grant_handler(org: str | None = None, *, now=None):
         # tunnel's event loop so one slow lookup can't stall siblings.
         if op in JOIN_OPS:
             return await asyncio.to_thread(_join, token, request)
+        if op in FLEET_JOIN_OPS:
+            return await asyncio.to_thread(
+                _fleet_join, token, request, channel_state
+            )
         if op in WRITE_OPS:
             return await _serve_write(token, org, request, clock)
         if op in READ_OPS:
@@ -1072,6 +1100,19 @@ def make_grant_handler(org: str | None = None, *, now=None):
         if op not in ("fetch", "head") or set(request) != {"v", "op"}:
             return BAD_REQUEST
         return await asyncio.to_thread(_serve, token, op == "head")
+
+    async def handler(token: str, message: bytes) -> bytes:
+        return await _handle(token, message, {})
+
+    async def for_channel(_token: str):
+        channel_state: dict = {}
+
+        async def channel_handler(token: str, message: bytes) -> bytes:
+            return await _handle(token, message, channel_state)
+
+        return channel_handler
+
+    handler.for_channel = for_channel
 
     return handler
 

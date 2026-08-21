@@ -372,7 +372,7 @@ def store_entry(entry: RosterEntry, *, org=None) -> str:
     from tools.graph import settings_ops
     from tools.graph.schemas.fleet_roster import FLEET_ROSTER_REVISION
 
-    return settings_ops.add_setting(
+    return settings_ops.upsert_by_key(
         FLEET_ROSTER_SET_ID, FLEET_ROSTER_REVISION, entry.entry_id,
         _entry_payload(entry), org=org, state="raw",
     )

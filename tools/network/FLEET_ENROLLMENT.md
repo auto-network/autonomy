@@ -51,8 +51,9 @@ The server resolves the trusted root public key from
 ``autonomy.identity.personal`` rather than from either submitted record. It
 verifies both signatures and their cross-binding, commits the roster entry, and
 only then makes the existing armored personal root deliverable on the bound
-channel. The transient approval and comparison nonce are discarded after the
-ceremony; neither becomes roster identity.
+channel. The transient approval and comparison nonce remain only as retry state
+until the first roster-authorized handshake proves completion; they are then
+deleted and neither becomes roster identity.
 
 The joining machine derives its durable ID locally from the root and approved
 request, compares it with the public ID in the signed roster entry, and stores
@@ -72,6 +73,47 @@ the new machine to authenticate its first fleet connection. The invitation
 channel then ends. Synchronization is admitted only after the new machine
 proves possession of its derived authentication key on the separate fleet
 channel.
+
+## Invitation rendezvous wire
+
+Fleet invitations use a RelayKit grant whose target type is ``fleet:join``.
+They do not reuse ``org:join``: organization admission and personal fleet
+authorization are different authority domains. The browser-signed invitation
+names the exact ``https://.../l/<grant-token>`` rendezvous and is registered
+against the grant before requests are accepted.
+
+The first encrypted-channel message is:
+
+```json
+{"v":1,"op":"fleet.request","request":{"enrollment_nonce":"<hex>","personal_root_pub":"<hex>","invite_id":"<hex>"}}
+```
+
+The origin stores the complete request under a deterministic, domain-separated
+content id and returns ``request_id``, the shared ``verification_code``, and a
+random ``resume_token``. The raw resume token is returned only over the channel
+that first created the request; machine-local storage keeps only its
+domain-separated hash. Repeating the same request on that live channel is
+idempotent. Repeating it on another channel returns ``resume-required`` rather
+than minting another credential.
+
+A reconnect proves continuity with:
+
+```json
+{"v":1,"op":"fleet.resume","request_id":"<hex>","resume_token":"<hex>"}
+```
+
+Before approval it receives only pending public state. After approval it
+receives the transient signed approval, durable signed roster entry, and the
+byte-identical encrypted personal-root armor. Unknown requests, wrong resume
+tokens, unsupported versions, mismatched invitations, and expired grants fail
+closed. Several requests may use one invitation, but their content ids,
+channel bindings, operator comparisons, and approvals remain distinct.
+
+The invitation and pending-request tables live in ``machine.db``. They are
+local rendezvous state, not personal graph data, and therefore are excluded as
+a whole from fleet synchronization. The operator API requires the human
+Dashboard session: an authenticated agent bearer cannot register, approve, or
+decline on the operator's behalf.
 
 Personal armor, passkeys, root material, and machine-local state never enter
 the synchronization catalog. Vault ciphertext and signed key-control grants do.
