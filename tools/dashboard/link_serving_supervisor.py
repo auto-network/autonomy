@@ -73,6 +73,16 @@ from tools.graph.schemas.network_identity import (
 _PERSONA_PUB_RE = re.compile(r"^[0-9a-f]{64}$")
 CONNECTOR_STARTUP_TIMEOUT_S = 60.0
 
+#: How long a connector that HAS served may stay unreachable before the
+#: supervisor replaces it. A connector owns its own reconnect loop, so a
+#: brief gap is normal and restarting into it would fight that loop --
+#: hence a bound far longer than startup rather than the same one. But a
+#: child that served once and then wedged used to be trusted forever:
+#: the startup deadline only ever applied to one that had NEVER served,
+#: so the single failure that leaves a process alive and permanently
+#: unable to serve was the single failure nothing reaped.
+CONNECTOR_RECONNECT_TIMEOUT_S = 600.0
+
 
 # ── provisioning state (also the enrich precondition) ─────────
 
@@ -495,7 +505,7 @@ class ServingSupervisor:
         self._managed: set = set()   # orgs seen via ensure(), re-checked by the watchdog
         self._started_at: dict = {}  # org -> launch time; fresh-tunnel grace
         self._grace_s: float = CONNECTOR_STARTUP_TIMEOUT_S
-        self._ever_served: set = set() # orgs observed through a completed hello
+        self._last_served: dict = {}  # org -> last time observed serving
         self._locks: dict = {}       # org -> open file holding flock ownership
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -541,7 +551,7 @@ class ServingSupervisor:
                 proc.stop()
                 self._procs.pop(org, None)
                 self._credentials.pop(org, None)
-                self._ever_served.discard(org)
+                self._last_served.pop(org, None)
             self._procs.pop(org, None)
             state = serve_cert_state(org, now=self._now())
             if state["status"] != "ok":
@@ -571,7 +581,7 @@ class ServingSupervisor:
                 self._procs.pop(org, None)
                 self._credentials.pop(org, None)
             self._started_at.pop(org, None)
-            self._ever_served.discard(org)
+            self._last_served.pop(org, None)
             self._release_lock(org)
             reason = state["status"] if state["status"] != "ok" else "no-live-grants"
             return {"running": False, "reason": reason}
@@ -590,7 +600,7 @@ class ServingSupervisor:
                 proc.stop()
                 self._procs.pop(org, None)
                 self._credentials.pop(org, None)
-                self._ever_served.discard(org)
+                self._last_served.pop(org, None)
                 return self._launch(org, state)
             # Provisioning replaced this org's credential. Keeping the old
             # process alive would leave it presenting the superseded cert
@@ -599,7 +609,7 @@ class ServingSupervisor:
             proc.stop()
             self._procs.pop(org, None)
             self._credentials.pop(org, None)
-            self._ever_served.discard(org)
+            self._last_served.pop(org, None)
         # A dead handle: drop it and relaunch below.
         self._procs.pop(org, None)
         self._credentials.pop(org, None)
@@ -635,16 +645,27 @@ class ServingSupervisor:
     def _live_process_state(self, org, proc) -> dict | None:
         """Classify an alive, correctly credentialed child.
 
-        ``None`` means it has never served and exceeded the startup deadline,
-        so the caller must replace it.  A child observed serving once remains
-        responsible for ordinary relay reconnects instead of being restarted
-        by a second competing retry loop.
+        ``None`` means the caller must replace it, for either of the two ways
+        a live PID can be useless: it never served and is past the startup
+        deadline, or it served once and has now been unreachable past the
+        reconnect deadline.
+
+        Between those, a child that has served owns its own reconnect loop and
+        is left alone -- restarting into a reconnect would fight it with a
+        second competing retry loop. That deference is why the bound exists:
+        unbounded, it made "alive and permanently unable to serve" the one
+        state nothing recovered from.
         """
         if proc.serving():
-            self._ever_served.add(org)
+            self._last_served[org] = self._now()
             return {"running": True, "reason": "already-running"}
-        if org in self._ever_served:
-            return {"running": True, "reason": "reconnecting"}
+        last_served = self._last_served.get(org)
+        if last_served is not None:
+            if self._now() - last_served < CONNECTOR_RECONNECT_TIMEOUT_S:
+                return {"running": True, "reason": "reconnecting"}
+            # Served once, then stopped and stayed stopped past every window
+            # its own reconnect loop should have needed. Treat it as wedged.
+            return None
         if self._now() - self._started_at.get(org, 0.0) < self._grace_s:
             return {"running": True, "reason": "starting"}
         return None
@@ -694,7 +715,7 @@ class ServingSupervisor:
         self._credentials[org] = (
             state["cert"], state["viewer_cert"], state["key_path"])
         self._started_at[org] = self._now()
-        self._ever_served.discard(org)
+        self._last_served.pop(org, None)
         return {"running": True, "reason": "launched"}
 
     def _acquire_lock(self, org: str | None, key_path: str) -> bool:
@@ -752,7 +773,7 @@ class ServingSupervisor:
             self._credentials.clear()
             self._managed.clear()
             self._started_at.clear()
-            self._ever_served.clear()
+            self._last_served.clear()
             for org in list(self._locks):
                 self._release_lock(org)
         if watchdog is not None and watchdog is not threading.current_thread():

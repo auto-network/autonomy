@@ -463,6 +463,60 @@ def test_watchdog_leaves_reconnect_to_child_after_it_has_served(env):
     assert len(spawn.calls) == 1
 
 
+def test_a_connector_that_served_then_wedged_is_eventually_replaced(env):
+    """The gap the reconnect grace used to leave open.
+
+    A child that completes one handshake and then stops serving forever is
+    alive, correctly credentialed, and useless. Because it had served, it was
+    exempt from the startup deadline and no other path reaped it, so the
+    supervisor reported it running indefinitely and a guest reached nothing.
+    """
+    _provision_serve_cert(env)
+    _put_grant()
+    clock = [1000.0]
+    spawn = FakeSpawn()
+    s = sup.ServingSupervisor(spawn=spawn, now=lambda: clock[0])
+    assert s.ensure(ORG)["reason"] == "launched"
+    wedged = spawn.procs[0]
+    assert s.ensure(ORG)["reason"] == "already-running"
+
+    wedged.disconnect()
+
+    # Still inside the window its own reconnect loop owns: left alone.
+    clock[0] += sup.CONNECTOR_RECONNECT_TIMEOUT_S - 1
+    assert s.ensure(ORG) == {"running": True, "reason": "reconnecting"}
+    assert wedged.alive() is True
+    assert len(spawn.calls) == 1
+
+    # Past it, the process is wedged rather than reconnecting: replace it.
+    clock[0] += 2
+    assert s.ensure(ORG)["reason"] == "launched"
+    assert wedged.alive() is False
+    assert len(spawn.calls) == 2
+
+
+def test_reconnect_deadline_is_measured_from_last_serving_not_launch(env):
+    """A connector serving normally for a long time is never reaped for age.
+
+    Measuring from launch would replace every healthy long-lived connector
+    the moment it outlived the deadline, which is the opposite failure.
+    """
+    _provision_serve_cert(env)
+    _put_grant()
+    clock = [1000.0]
+    spawn = FakeSpawn()
+    s = sup.ServingSupervisor(spawn=spawn, now=lambda: clock[0])
+    assert s.ensure(ORG)["reason"] == "launched"
+    proc = spawn.procs[0]
+
+    for _ in range(5):
+        clock[0] += sup.CONNECTOR_RECONNECT_TIMEOUT_S / 2
+        assert s.ensure(ORG) == {"running": True, "reason": "already-running"}
+
+    assert proc.alive() is True
+    assert len(spawn.calls) == 1, "a serving connector must never be churned"
+
+
 def test_only_one_dashboard_process_owns_an_org_connector(env):
     """Independent dashboard supervisors share one process-wide file lock.
 
