@@ -10,7 +10,6 @@ this module.
 
 from __future__ import annotations
 
-import hashlib
 import hmac
 import json
 import os
@@ -27,7 +26,7 @@ from tools.network import fleet_enroll, fleet_invite
 
 
 FLEET_JOIN_TARGET_TYPE = "fleet:join"
-FLEET_CHANNEL_BINDING_DOMAIN = b"autonomy.fleet.channel-binding.v1\n"
+FLEET_CHANNEL_BINDING_DOMAIN = fleet_enroll.FLEET_CHANNEL_BINDING_DOMAIN
 FLEET_JOIN_OPS = ("fleet.request", "fleet.resume")
 
 _HEX32 = re.compile(r"^[0-9a-f]{32}$")
@@ -53,13 +52,10 @@ class PendingEnrollment:
 
 
 def channel_binding(resume_token: str) -> str:
-    if not isinstance(resume_token, str) or not _HEX64.fullmatch(resume_token):
-        raise FleetEnrollmentChannelError(
-            "fleet enrollment resume token must be 64 lowercase hex chars"
-        )
-    return hashlib.sha256(
-        FLEET_CHANNEL_BINDING_DOMAIN + bytes.fromhex(resume_token)
-    ).hexdigest()
+    try:
+        return fleet_enroll.resume_channel_binding(resume_token)
+    except ValueError as exc:
+        raise FleetEnrollmentChannelError(str(exc)) from exc
 
 
 class FleetEnrollmentStore:
