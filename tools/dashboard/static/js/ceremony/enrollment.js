@@ -97,6 +97,21 @@ async function evaluatePrf(createResults, getFn) {
   return prfOutputFromResults(await getFn());
 }
 
+/** The COSE public key and enrollment sign-count for the signed binding, sliced
+ *  from the WebAuthn authenticatorData (rpIdHash[32] ‖ flags[1] ‖ signCount[4] ‖
+ *  aaguid[16] ‖ credIdLen[2] ‖ credId ‖ COSE-key). The key is sent as the
+ *  authenticator emitted it; the server canonicalizes with py_webauthn for the
+ *  cross-check, so no CBOR encoder is needed here. (A normal registration has no
+ *  authData extensions, so the key is the tail; if one ever appended extensions,
+ *  the server's parse_cbor still reads exactly the key and the cross-check holds.) */
+function attestedCredential(authData) {
+  const d = new Uint8Array(authData);
+  const signCount = ((d[33] << 24) | (d[34] << 16) | (d[35] << 8) | d[36]) >>> 0;
+  const credIdLen = (d[53] << 8) | d[54];
+  const cose = d.slice(55 + credIdLen);
+  return { credentialPublicKeyHex: bytesToHex(cose), signCount };
+}
+
 /** Everything the signature covers, in the exact shape Python's binding_dict
  *  produces (canonicalJson sorts keys, so declaration order here is cosmetic). */
 function bindingDict({
@@ -157,4 +172,5 @@ export {
   prfOutputFromResults,
   deriveProvisioningKey,
   evaluatePrf,
+  attestedCredential,
 };
