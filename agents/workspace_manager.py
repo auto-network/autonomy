@@ -54,7 +54,6 @@ from agents.workspace_settings import (
     WorkspaceMountInvalidError,
     WorkspaceMountFrameError,
     WorkspaceMountMissingError,
-    WorkspaceCapabilityError,
 )
 from agents import mount_plan
 
@@ -790,9 +789,10 @@ def prepare_session_mounts(
     The returned dict maps host paths to ``container_path[:mode]`` strings,
     suitable for ``launch_session(mounts=...)``.
 
-    A broken enabled capability is refused before any clone, worktree or
-    mount side effect.  Composition keeps those issues on the affected
-    workspace so an unhealthy declaration does not hide healthy workspaces.
+    Broken enabled capabilities are omitted by composition and reported in
+    ``workspace.capability_issues``. They never block preparation of the base
+    workspace: an invalid optional integration must not lock the operator out
+    of starting a session that can repair it.
 
     ``progress_callback`` (auto-ja51w): optional ``(repo_index, total_repos,
     repo_name) -> None`` called once per repo as each completes. Used by
@@ -801,9 +801,12 @@ def prepare_session_mounts(
     are swallowed — progress reporting must never break the actual mount prep.
     """
     if workspace.capability_issues:
-        raise WorkspaceCapabilityError(
-            workspace_id=workspace.id,
-            issues=workspace.capability_issues,
+        logger.warning(
+            "workspace %s: continuing launch without %d invalid enabled "
+            "capability chain(s): %s",
+            workspace.id,
+            len(workspace.capability_issues),
+            "; ".join(issue.detail for issue in workspace.capability_issues),
         )
     mounts: dict[str, str] = {}
     total = len(workspace.repos)

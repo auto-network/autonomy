@@ -7,8 +7,9 @@ An enabled workspace capability is a four-row chain::
 Two of those edges carry versions in adjacent fields and one (enable ->
 install) is expressed by the shared contract key.  A plain ``references=``
 walk cannot validate either shape.  This module keeps the cross-row rules
-pure so the Settings readiness walker and the workspace launcher consume the
-same answer instead of independently deciding whether to omit a capability.
+pure so the Settings readiness walker and workspace launcher consume the
+same facts: readiness reports the broken chain, while launch omits only that
+capability and proceeds.
 """
 
 from __future__ import annotations
