@@ -23,7 +23,7 @@ from pathlib import Path
 
 from tools.graph.db import GraphDB
 from tools.graph.models import Source
-from tools.network.fleet_roster import EntryKind, RosterEntry, enroll
+from tools.network.fleet_roster import RosterEntry, enroll
 from tools.network.fleet_sync_scheduler import (
     FleetSyncRuntimeConfig,
     FleetSyncScheduler,
@@ -34,27 +34,11 @@ _MODULE = "tools.network.fleet_sync_sim.process_dashboard_sync"
 
 
 def _entry_dict(entry: RosterEntry) -> dict:
-    return {
-        "personal_root_pub": entry.personal_root_pub,
-        "machine_pub": entry.machine_pub,
-        "kind": entry.kind.value,
-        "seq": entry.seq,
-        "issued_at": entry.issued_at,
-        "supersedes": entry.supersedes,
-        "signature": entry.signature,
-    }
+    return entry.to_dict()
 
 
 def _entry(payload: dict) -> RosterEntry:
-    return RosterEntry(
-        personal_root_pub=payload["personal_root_pub"],
-        machine_pub=payload["machine_pub"],
-        kind=EntryKind(payload["kind"]),
-        seq=int(payload["seq"]),
-        issued_at=int(payload["issued_at"]),
-        supersedes=payload.get("supersedes"),
-        signature=payload["signature"],
-    )
+    return RosterEntry.from_dict(payload)
 
 
 def _peer_report(path: Path) -> dict:

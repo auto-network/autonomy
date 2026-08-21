@@ -80,8 +80,9 @@ def derive_machine_key(personal_root_seed: bytes, machine_id: str) -> KeyPair:
     which is correct: fleet machines are mutually trusted and a stolen machine is
     a root-rotation event regardless.
 
-    *machine_id* is the 64-lowercase-hex random identifier the machine minted at
-    first boot. Raises :class:`MalformedError` on anything else.
+    *machine_id* is the 64-lowercase-hex identifier assigned by the approving
+    dashboard after the one-time verification ceremony. Raises
+    :class:`MalformedError` on anything else.
     """
     if not isinstance(personal_root_seed, bytes) or len(personal_root_seed) != PERSONA_SEED_LEN:
         raise MalformedError(
@@ -98,6 +99,5 @@ def derive_machine_key(personal_root_seed: bytes, machine_id: str) -> KeyPair:
 
 
 def mint_machine_id() -> str:
-    """A fresh 256-bit random machine identifier, 64-lowercase-hex — what a
-    machine mints once at first boot as its durable public identity."""
+    """A fresh 256-bit durable machine identifier, 64-lowercase-hex."""
     return os.urandom(_MACHINE_ID_HEX_LEN // 2).hex()

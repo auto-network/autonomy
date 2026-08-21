@@ -1,16 +1,19 @@
-"""This machine's identity: its random machine ID (auto-b6fee).
+"""This enrolled machine's durable identity (auto-b6fee).
 
-The ONLY thing first boot persists at rest, in machine.db
-(``@home("machine")``, never leaves the machine). It is a PUBLIC identifier,
+The only machine credential input persisted at rest, in machine.db
+(``@home("machine")``, never leaves the machine). It is assigned only after
+the operator approves the one-time enrollment ceremony; the ceremony's
+``enrollment_nonce`` is never stored here. It is a PUBLIC identifier,
 not a secret — the machine's operating key is DERIVED from
 ``personal_root + machine_id`` (``idkit.derive_machine_key``) on demand and is
 never stored or sealed. So there is nothing here to protect at rest beyond the
 store's own locality: the id is safe in the clear, and the key that derives
 from it is safe because the personal root is (under the one boot factor).
 
-The id goes into the fleet roster alongside the derived key's public half at
-approval (auto-5ydhe); this row is the joining machine's local copy of its own
-id, minted here and never reassigned.
+The roster root-binds this public id, the derived key's public half, and the
+machine's fleet standing. This row is the joining machine's local copy of the
+id assigned at approval; it remains machine-local because it is the input used
+to select this installation's derived private key.
 """
 
 from __future__ import annotations
@@ -32,16 +35,16 @@ MACHINE_IDENTITY_KEY = "self"
 
 SYNOPSIS = {
     "summary": (
-        "This machine's random machine ID, minted at first boot and stored in "
+        "This enrolled machine's durable ID, assigned after approval and stored in "
         "machine.db (never synced). A public identifier — the machine's "
         "operating key derives from personal_root + machine_id and is never "
         "stored. See tools.network.machine_boot."
     ),
     "nouns": [
-        "machine identity", "machine id", "first boot", "fleet enrollment",
+        "machine identity", "machine id", "fleet enrollment",
         "derived machine key",
     ],
-    "related_set_ids": ["autonomy.fleet.roster#1"],
+    "related_set_ids": ["autonomy.fleet.roster#2"],
 }
 
 _HEX = "0123456789abcdef"
@@ -51,14 +54,14 @@ _HEX = "0123456789abcdef"
 @publication_band(max="raw")
 @keyed_per_entity(key_strategy="machine_self")
 class MachineIdentityV1(SettingSchema):
-    """The one row of this machine's identity (key ``self``): its machine id."""
+    """The one row of this enrolled machine's identity: its assigned id."""
 
     set_id = MACHINE_IDENTITY_SET_ID
     schema_revision = MACHINE_IDENTITY_REVISION
 
     machine_id: str = field(
         required=True,
-        description="64-hex random machine id (idkit.mint_machine_id). Public.",
+        description="64-hex machine id assigned after fleet approval. Public.",
     )
 
     @classmethod

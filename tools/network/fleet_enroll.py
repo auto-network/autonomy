@@ -1,148 +1,328 @@
-"""First boot on a fleet link: the machine key and the ask-to-join (auto-b6fee).
+"""One-time fleet-enrollment ceremony and roster authorization.
 
-Design ``graph://0c655045-ee4``, piece 2 of the fleet epic. An empty install,
-handed a fleet invite (:mod:`tools.network.fleet_invite`), generates its OWN
-keypair — the private half never leaves the machine, and nothing else ever
-produces it — renders a fingerprint for the operator to compare against what
-the primary shows, and sends an enrollment request back to the primary.
+The invitation is machine-neutral.  A joining installation contributes only
+an ephemeral ``enrollment_nonce`` so the two dashboards can display the same
+short authentication string (SAS).  That nonce is *not* a machine identity
+and is discarded when the ceremony completes.
 
-Three properties the design turns on:
-
-* **The machine generates its own key; the private half stays in the machine
-  store.** ``machine.db`` replicates nowhere — not even across the operator's
-  own fleet — because a machine key that synced would let any fleet machine
-  impersonate any other, inverting the property the roster provides. This
-  module produces the key and the request; the vault-sealed placement in the
-  machine store, always unlocked at first boot (crib §10, corrected: no
-  no-unlock disk variant), is wired by the caller and reviewed as crypto's
-  domain.
-
-* **The fingerprint is the operator's only defense against approving the
-  wrong machine.** The primary shows a fingerprint; the machine shows a
-  fingerprint; the operator compares them before approving. So both sides
-  MUST render the same key in the same form — a format difference silently
-  defeats the check. :func:`fingerprint` is that one shared rendering.
-
-* **Before approval the machine holds nothing of the fleet's.** The
-  enrollment request carries only the machine's PUBLIC key plus a
-  proof-of-possession and the invite correlation. It grants the holder
-  nothing: a stolen request lets an attacker be *offered* enrolment of a key
-  they cannot use (they lack its private half), which the operator then
-  declines. The machine adopts no personal root until the approval seals one
-  to it (auto-5ydhe).
+After the operator compares the SAS, trusted browser code opens the personal
+root, deterministically assigns the durable machine id, derives its key, and
+signs two domain-separated records.  The server receives no root secret: it
+verifies the durable roster entry and transient request/channel approval
+against the protected personal-root public anchor, commits the roster first,
+and only then enables delivery of the unchanged armor.
 """
 
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
+import hmac
+import os
+from dataclasses import dataclass
 
-from tools.network.idkit import KeyPair, canonical_json
-from tools.network.idkit.errors import IdkitError, SignatureError
-from tools.network.idkit.keys import verify_signature
+from tools.network import fleet_roster
 from tools.network.fleet_invite import FleetInvite
+from tools.network.idkit import KeyPair, canonical_json, derive_machine_key
+from tools.network.idkit.errors import IdkitError
+from tools.network.idkit.keys import verify_signature
 
-#: Domain separator for the enrollment request's proof of possession — a
-#: machine signature minted for anything else cannot verify as a join proof.
-FLEET_ENROLL_DOMAIN = b"autonomy.network.fleet-enroll.v1\n"
-FLEET_ENROLL_VERSION = 1
+FLEET_ENROLL_VERSION = 2
+FLEET_ENROLL_SAS_DOMAIN = b"autonomy.network.fleet-enroll-sas.v2\n"
+FLEET_MACHINE_ID_DOMAIN = b"autonomy.network.fleet-machine-id.v1\n"
+FLEET_APPROVAL_DOMAIN = b"autonomy.fleet.enrollment-approval.v1\n"
+FLEET_APPROVAL_VERSION = 1
 
 
 class FleetEnrollError(ValueError):
-    """An enrollment request is malformed or its proof does not verify."""
-
-
-def fingerprint(machine_pub: str) -> str:
-    """The ONE human-comparable rendering of a machine key, shared by the
-    primary and the joining machine. Both sides call this; a divergence would
-    defeat the operator's compare-before-approve check, so it is defined once.
-
-    Form: the SHA-256 of the raw public key, rendered as six space-separated
-    groups of four uppercase hex — short enough to read aloud and compare, and
-    over the HASH rather than the key itself so it is fixed-width regardless of
-    key encoding. Deterministic and pure.
-    """
-    _require_hex64(machine_pub, "machine_pub")
-    digest = hashlib.sha256(bytes.fromhex(machine_pub)).hexdigest().upper()
-    groups = [digest[i:i + 4] for i in range(0, 24, 4)]
-    return " ".join(groups)
+    """An enrollment request or approval is malformed or mismatched."""
 
 
 @dataclass(frozen=True)
 class EnrollmentRequest:
-    """A machine's ask-to-join, sent back to the primary through the invite's
-    rendezvous. Every field is PUBLIC; the value is the proof, not any bearer.
+    """A request carried by one encrypted invitation channel.
+
+    Every field is public.  ``enrollment_nonce`` exists only for this
+    ceremony; it neither authorizes the machine nor survives enrollment.
     """
 
-    machine_pub: str          # the machine's own authorization public key
-    personal_root_pub: str    # the fleet anchor, from the invite
-    invite_id: str            # correlates to the invite the primary minted
-    proof: str = field(repr=False)  # machine sig — proof of possession + consent
+    enrollment_nonce: str
+    personal_root_pub: str
+    invite_id: str
 
 
-def _proof_input(*, machine_pub: str, personal_root_pub: str, invite_id: str) -> bytes:
-    return FLEET_ENROLL_DOMAIN + canonical_json({
-        "v": FLEET_ENROLL_VERSION,
-        "machine_pub": machine_pub,
-        "personal_root_pub": personal_root_pub,
-        "invite_id": invite_id,
-    })
+@dataclass(frozen=True)
+class EnrollmentApproval:
+    """Transient browser-root-signed binding for one exact delivery channel."""
+
+    version: int
+    enrollment_nonce: str
+    personal_root_pub: str
+    invite_id: str
+    channel_binding: str
+    roster_entry_id: str
+    signature: str
+
+    def binding_dict(self) -> dict:
+        return {
+            "v": self.version,
+            "enrollment_nonce": self.enrollment_nonce,
+            "personal_root_pub": self.personal_root_pub,
+            "invite_id": self.invite_id,
+            "channel_binding": self.channel_binding,
+            "roster_entry_id": self.roster_entry_id,
+        }
+
+    def signing_input(self) -> bytes:
+        return FLEET_APPROVAL_DOMAIN + canonical_json(self.binding_dict())
+
+    def to_dict(self) -> dict:
+        return {**self.binding_dict(), "signature": self.signature}
+
+    @classmethod
+    def from_dict(cls, payload: dict) -> "EnrollmentApproval":
+        expected = {
+            "v", "enrollment_nonce", "personal_root_pub", "invite_id",
+            "channel_binding", "roster_entry_id", "signature",
+        }
+        if not isinstance(payload, dict) or set(payload) != expected:
+            raise FleetEnrollError(
+                "fleet enrollment approval must carry exactly the signed fields"
+            )
+        return cls(
+            version=payload["v"],
+            enrollment_nonce=payload["enrollment_nonce"],
+            personal_root_pub=payload["personal_root_pub"],
+            invite_id=payload["invite_id"],
+            channel_binding=payload["channel_binding"],
+            roster_entry_id=payload["roster_entry_id"],
+            signature=payload["signature"],
+        )
 
 
-def build_request(machine_key: KeyPair, *, invite: FleetInvite) -> EnrollmentRequest:
-    """The joining machine builds its request. Signs, with its OWN key, a
-    proof binding {this machine key, this fleet's anchor, this invite} — so
-    the primary learns the machine holds the private half (possession) and
-    consents to join THIS fleet via THIS invite. A request built for one fleet
-    or one invite does not verify for another."""
-    machine_pub = _require_hex64(machine_key.public_hex, "machine_pub")
-    root_pub = _require_hex64(invite.personal_root_pub, "personal_root_pub")
-    invite_id = _require_hex64(invite.invite_id, "invite_id")
-    proof = machine_key.sign_hex(
-        _proof_input(machine_pub=machine_pub, personal_root_pub=root_pub,
-                     invite_id=invite_id)
-    )
+@dataclass(frozen=True)
+class EnrollmentDelivery:
+    """Public signed evidence returned only after durable roster commit."""
+
+    approval: EnrollmentApproval
+    roster_entry: fleet_roster.RosterEntry
+
+
+def build_request(
+    *, invite: FleetInvite, enrollment_nonce: str | None = None
+) -> EnrollmentRequest:
+    """Create the ephemeral request for one invitation channel."""
+    nonce = enrollment_nonce or os.urandom(32).hex()
     return EnrollmentRequest(
-        machine_pub=machine_pub, personal_root_pub=root_pub,
-        invite_id=invite_id, proof=proof,
+        enrollment_nonce=_require_hex64(nonce, "enrollment_nonce"),
+        personal_root_pub=_require_hex64(
+            invite.personal_root_pub, "personal_root_pub"
+        ),
+        invite_id=_require_hex64(invite.invite_id, "invite_id"),
     )
 
 
 def verify_request(request: EnrollmentRequest, *, invite: FleetInvite) -> None:
-    """The primary verifies a returned request against the invite it minted.
-
-    Checks the request references THIS invite (id + anchor) and that its proof
-    verifies against the machine's OWN key — proof of possession. A request
-    that names another invite, another fleet, or whose proof does not verify
-    is refused, so a replayed or forged request cannot enrol a key its sender
-    does not hold. Raises :class:`FleetEnrollError` on any failure.
-    """
+    """Validate that a request belongs to the invitation carrying it."""
+    _require_hex64(request.enrollment_nonce, "enrollment_nonce")
     if request.invite_id != invite.invite_id:
         raise FleetEnrollError("enrollment request is for a different invite")
     if request.personal_root_pub != invite.personal_root_pub:
         raise FleetEnrollError("enrollment request names a different fleet anchor")
-    try:
-        verify_signature(
-            request.machine_pub,
-            request.proof,
-            _proof_input(
-                machine_pub=request.machine_pub,
-                personal_root_pub=request.personal_root_pub,
-                invite_id=request.invite_id,
-            ),
-        )
-    except SignatureError as exc:
+
+
+def verification_code(request: EnrollmentRequest) -> str:
+    """Return the shared SAS rendered on the old and new dashboards.
+
+    It covers the complete public request rather than only the nonce, so the
+    operator's comparison binds the fleet anchor and invitation correlation as
+    well as the exact joining channel's challenge.
+    """
+    body = canonical_json({
+        "v": FLEET_ENROLL_VERSION,
+        "enrollment_nonce": _require_hex64(
+            request.enrollment_nonce, "enrollment_nonce"
+        ),
+        "personal_root_pub": _require_hex64(
+            request.personal_root_pub, "personal_root_pub"
+        ),
+        "invite_id": _require_hex64(request.invite_id, "invite_id"),
+    })
+    digest = hashlib.sha256(FLEET_ENROLL_SAS_DOMAIN + body).hexdigest().upper()
+    return " ".join(digest[i:i + 4] for i in range(0, 24, 4))
+
+
+def assigned_machine_id(
+    personal_root_seed: bytes, request: EnrollmentRequest
+) -> str:
+    """Derive the durable id assigned *after* this request is approved.
+
+    The result is pseudorandom under the personal root and deterministic for
+    retries of the same approved request.  It is separate from the ephemeral
+    nonce used for the human comparison.
+    """
+    if not isinstance(personal_root_seed, bytes) or len(personal_root_seed) != 32:
+        raise FleetEnrollError("personal_root_seed must be exactly 32 raw bytes")
+    material = canonical_json({
+        "v": FLEET_ENROLL_VERSION,
+        "enrollment_nonce": _require_hex64(
+            request.enrollment_nonce, "enrollment_nonce"
+        ),
+        "personal_root_pub": _require_hex64(
+            request.personal_root_pub, "personal_root_pub"
+        ),
+        "invite_id": _require_hex64(request.invite_id, "invite_id"),
+    })
+    return hmac.new(
+        personal_root_seed, FLEET_MACHINE_ID_DOMAIN + material, hashlib.sha256
+    ).hexdigest()
+
+
+def approval_draft(
+    request: EnrollmentRequest,
+    *,
+    invite: FleetInvite,
+    channel_binding: str,
+    roster_entry: fleet_roster.RosterEntry,
+) -> EnrollmentApproval:
+    """Build the exact transient record the browser must root-sign.
+
+    This function handles public data only.  The browser signs
+    :meth:`EnrollmentApproval.signing_input`; the server never receives the
+    root key used to do so.
+    """
+    verify_request(request, invite=invite)
+    return EnrollmentApproval(
+        version=FLEET_APPROVAL_VERSION,
+        enrollment_nonce=request.enrollment_nonce,
+        personal_root_pub=request.personal_root_pub,
+        invite_id=request.invite_id,
+        channel_binding=_require_hex64(channel_binding, "channel_binding"),
+        roster_entry_id=_require_hex64(
+            roster_entry.entry_id, "roster_entry_id"
+        ),
+        signature="0" * 128,
+    )
+
+
+def authorize_request(
+    approval: EnrollmentApproval,
+    request: EnrollmentRequest,
+    *,
+    invite: FleetInvite,
+    channel_binding: str,
+    roster_entry: fleet_roster.RosterEntry,
+    anchor_root_pub: str,
+    org=None,
+) -> EnrollmentDelivery:
+    """Verify browser evidence and durably authorize before delivery.
+
+    ``anchor_root_pub`` must be resolved by the caller from the protected
+    ``autonomy.identity.personal`` row.  It is deliberately not inferred from
+    either submitted record.  Returning a delivery is the transport handoff,
+    so a failed store produces no deliverable result.
+    """
+    verify_approval(
+        approval,
+        request,
+        invite=invite,
+        channel_binding=channel_binding,
+        roster_entry=roster_entry,
+        anchor_root_pub=anchor_root_pub,
+    )
+    fleet_roster.store_entry(roster_entry, org=org)
+    return EnrollmentDelivery(approval=approval, roster_entry=roster_entry)
+
+
+def verify_approval(
+    approval: EnrollmentApproval,
+    request: EnrollmentRequest,
+    *,
+    invite: FleetInvite,
+    channel_binding: str,
+    roster_entry: fleet_roster.RosterEntry,
+    anchor_root_pub: str,
+) -> None:
+    """Verify one browser-signed approval against server-owned context."""
+    verify_request(request, invite=invite)
+    if isinstance(approval.version, bool) or not isinstance(approval.version, int) \
+            or approval.version != FLEET_APPROVAL_VERSION:
         raise FleetEnrollError(
-            "enrollment proof does not verify against the machine key "
-            "(the sender does not hold its private half)"
-        ) from exc
+            f"unsupported fleet enrollment approval version: {approval.version!r}"
+        )
+    if approval.enrollment_nonce != request.enrollment_nonce:
+        raise FleetEnrollError("approval is for a different enrollment ceremony")
+    if approval.personal_root_pub != request.personal_root_pub:
+        raise FleetEnrollError("approval is for a different fleet anchor")
+    if approval.invite_id != request.invite_id:
+        raise FleetEnrollError("approval is for a different invite")
+    expected_channel = _require_hex64(channel_binding, "channel_binding")
+    if approval.channel_binding != expected_channel:
+        raise FleetEnrollError("approval is for a different invitation channel")
+    anchor = _require_hex64(anchor_root_pub, "anchor_root_pub")
+    if request.personal_root_pub != anchor:
+        raise FleetEnrollError("request does not match the stored personal root")
+    if approval.roster_entry_id != roster_entry.entry_id:
+        raise FleetEnrollError("approval names a different roster entry")
+    fleet_roster.verify(roster_entry, anchor_root_pub=anchor)
+    if roster_entry.kind != fleet_roster.EntryKind.ENROLL:
+        raise FleetEnrollError("approval roster entry is not an enrollment")
+    if roster_entry.assignment != fleet_roster.FLEET_MEMBER_ASSIGNMENT:
+        raise FleetEnrollError("approval roster entry grants the wrong standing")
+    _require_hex128(approval.signature, "signature")
+    try:
+        verify_signature(anchor, approval.signature, approval.signing_input())
     except IdkitError as exc:
-        raise FleetEnrollError(f"enrollment request machine key is unusable: {exc}") from exc
+        raise FleetEnrollError(
+            "fleet enrollment approval does not verify against the personal root"
+        ) from exc
+
+
+def verify_delivery(
+    delivery: EnrollmentDelivery,
+    request: EnrollmentRequest,
+    *,
+    invite: FleetInvite,
+    channel_binding: str,
+    personal_root_seed: bytes,
+) -> tuple[str, KeyPair]:
+    """Verify delivered evidence and return the local id and operating key."""
+    if not isinstance(personal_root_seed, bytes) or len(personal_root_seed) != 32:
+        raise FleetEnrollError("personal_root_seed must be exactly 32 raw bytes")
+    root = KeyPair.from_private_hex(personal_root_seed.hex())
+    if root.public_hex != request.personal_root_pub:
+        raise FleetEnrollError("delivered root does not match the invited fleet")
+    verify_approval(
+        delivery.approval,
+        request,
+        invite=invite,
+        channel_binding=channel_binding,
+        roster_entry=delivery.roster_entry,
+        anchor_root_pub=root.public_hex,
+    )
+    machine_id = assigned_machine_id(personal_root_seed, request)
+    key = derive_machine_key(personal_root_seed, machine_id)
+    if delivery.roster_entry.machine_id != machine_id:
+        raise FleetEnrollError("approval carries the wrong durable machine id")
+    if delivery.roster_entry.machine_pub != key.public_hex:
+        raise FleetEnrollError("approval carries the wrong machine public key")
+    return machine_id, key
 
 
 def _require_hex64(value, what: str) -> str:
     import re
 
     if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
-        raise FleetEnrollError(f"fleet enroll {what} must be 64 lowercase hex chars")
+        raise FleetEnrollError(
+            f"fleet enroll {what} must be 64 lowercase hex chars"
+        )
+    return value
+
+
+def _require_hex128(value, what: str) -> str:
+    import re
+
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{128}", value):
+        raise FleetEnrollError(
+            f"fleet enroll {what} must be 128 lowercase hex chars"
+        )
     return value

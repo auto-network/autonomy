@@ -8,12 +8,17 @@ row is seen by every organization's read on the operator's machines, which
 would leak fleet topology into org surfaces. ``raw`` keeps it local, and the
 personal-store sync (``auto-q9ic5``) is what carries it across the fleet.
 
-The key is caller-supplied (``key_strategy="natural"``) and is the entry's
-content id, so every entry is its OWN member — enrol, kick and re-enrol about
-one machine all coexist, which is what the OR-set merge in
+The key is the deterministic ``roster_entry_id`` (the hash of the signed
+binding), so every entry is its OWN member — enrol, kick and re-enrol about one
+machine all coexist, which is what the OR-set merge in
 :mod:`tools.network.fleet_roster` resolves over. The signature and merge
 semantics live in that module; this schema only pins the stored shape and the
 band.
+
+Revision 2 deliberately has no revision-1 upconverter: the old signature did
+not cover ``machine_id`` or standing, so manufacturing those fields during a
+read would create unsigned authority. No live roster rows existed when this
+revision replaced the pre-enrollment shape.
 """
 
 from __future__ import annotations
@@ -30,7 +35,7 @@ from tools.graph.schemas.registry import (
 )
 
 FLEET_ROSTER_SET_ID = "autonomy.fleet.roster"
-FLEET_ROSTER_REVISION = 1
+FLEET_ROSTER_REVISION = 2
 
 #: ``graph set find`` synopsis. Personal-scoped, not an organization set.
 SYNOPSIS = {
@@ -66,7 +71,7 @@ def _hex(payload: dict, key: str, length: int, cls_name: str) -> str:
 @home("personal")
 @publication_band(max="raw")
 @keyed_per_entity(key_strategy="roster_entry_id")
-class FleetRosterEntryV1(SettingSchema):
+class FleetRosterEntryV2(SettingSchema):
     """One machine's roster statement, personal-root-signed.
 
     Key strategy ``roster_entry_id``: the key is the entry's own content id
@@ -85,12 +90,23 @@ class FleetRosterEntryV1(SettingSchema):
         required=True,
         description="64-hex personal root public key — the fleet anchor and signer.",
     )
+    machine_id: str = field(
+        required=True,
+        description="64-hex durable machine assignment made at fleet approval.",
+    )
     machine_pub: str = field(
         required=True,
         description=(
             "64-hex machine AUTHORIZATION (Ed25519 signing) public key. The "
             "machine's X25519 distribution address is a separate record "
             "(auto-pw9bs.6), never this."
+        ),
+    )
+    assignment: str = field(
+        required=True,
+        enum=["personal_root_holder"],
+        description=(
+            "Durable fleet standing root-bound with the machine id and public key."
         ),
     )
     kind: str = field(
@@ -123,12 +139,22 @@ class FleetRosterEntryV1(SettingSchema):
         if not isinstance(payload, dict):
             return
         _hex(payload, "personal_root_pub", 64, cls.__name__)
+        _hex(payload, "machine_id", 64, cls.__name__)
         _hex(payload, "machine_pub", 64, cls.__name__)
         _hex(payload, "signature", 128, cls.__name__)
         seq = payload.get("seq")
         if not isinstance(seq, int) or isinstance(seq, bool) or seq < 0:
             raise SchemaValidationError(
                 f"{cls.__name__}: 'seq' must be a non-negative int"
+            )
+        issued_at = payload.get("issued_at")
+        if (
+            not isinstance(issued_at, int)
+            or isinstance(issued_at, bool)
+            or issued_at < 0
+        ):
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'issued_at' must be a non-negative int"
             )
         supersedes = payload.get("supersedes")
         if supersedes is not None:
