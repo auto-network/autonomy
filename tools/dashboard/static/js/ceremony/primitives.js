@@ -666,6 +666,75 @@ async function decryptArmorWithPasskey(armorText, prfOutput) {
   return { seed, rootPub: data.root_pub };
 }
 
+// Remove THE password factor — an armor carries at most one, so this is a
+// single, unambiguous factor, not a bulk "every of a type" operation. Passkeys
+// are plural and removed one at a time by credential via removePasskeyFactor;
+// this never touches them. The last remaining factor can't be removed, so
+// dropping the password requires another factor (a passkey) to already exist.
+async function removePasswordFactor(armorText, passphrase) {
+  const data = parseArmor(armorText);
+  const remaining = data.factors.filter((f) => f.type !== 'password');
+  if (remaining.length === data.factors.length) {
+    throw new Error('this armor has no password factor to remove');
+  }
+  if (remaining.length === 0) {
+    throw new Error('refusing to remove the last factor — add a passkey first');
+  }
+  const masterKek = await v2MasterKekFromPassword(data, passphrase);
+  try {
+    const previousFactors = data.factors.slice();
+    data.factors = remaining;
+    await resealSeedToFactorSet(data, masterKek, previousFactors);
+    return emitV2(parseArmor(emitV2(data)));
+  } finally {
+    masterKek.fill(0);
+  }
+}
+
+// The re-arm signing domain — matches idkit's REARMOR_DOMAIN byte-for-byte, so
+// a signature the browser makes verifies against the root server-side.
+const REARMOR_DOMAIN = 'autonomy.identity.rearmor.v1\n';
+
+// Produce the signed body POST /api/identity/personal/armor expects: re-factor
+// the CURRENT armor per *action*, sign the result with the root (recovered from
+// the current armor, proving possession), and return {armored_private_key,
+// signature, require_pair?}. The password opens the current armor for both the
+// re-factoring and the signing seed; opening a passkey-only identity with a PRF
+// instead is a later addition.
+//
+//   action = {kind:'promote', credentialId, provisioningPub}
+//          | {kind:'demote',  credentialId}
+//          | {kind:'removePassword'}
+//          | {kind:'setAuthority'}   // policy-only; armor unchanged
+async function signArmorUpdate(currentArmor, password, action, requirePair) {
+  const opened = await decryptArmor(currentArmor, password);
+  const seed = opened.seed;
+  try {
+    let newArmor = currentArmor;
+    if (action.kind === 'promote') {
+      newArmor = await addPasskeyFactor(
+        currentArmor, password, action.credentialId, action.provisioningPub);
+    } else if (action.kind === 'demote') {
+      newArmor = await removePasskeyFactor(
+        currentArmor, password, action.credentialId);
+    } else if (action.kind === 'removePassword') {
+      newArmor = await removePasswordFactor(currentArmor, password);
+    } else if (action.kind !== 'setAuthority') {
+      throw new Error(`unknown re-arm action: ${action.kind}`);
+    }
+    const rootKey = await importEd25519RootSigningKey(seed);
+    const sig = bytesToHex(await webCrypto.subtle.sign(
+      'Ed25519', rootKey, textEncoder.encode(REARMOR_DOMAIN + newArmor)));
+    const body = { armored_private_key: newArmor, signature: sig };
+    if (requirePair !== undefined && requirePair !== null) {
+      body.require_pair = !!requirePair;
+    }
+    return body;
+  } finally {
+    seed.fill(0);
+  }
+}
+
 // One-shot v1 -> v2 upgrade. Opens the legacy v1 blob and re-seals it as v2. The
 // v1 reader is deleted with the rest of the v1 path once migration has run.
 function armorVersion(armorText) {
@@ -705,6 +774,9 @@ export {
   decryptArmorWithPasskey,
   addPasskeyFactor,
   removePasskeyFactor,
+  removePasswordFactor,
+  signArmorUpdate,
+  REARMOR_DOMAIN,
   PASSKEY_ARMOR_PURPOSE,
   armorVersion,
   encryptArmor,
