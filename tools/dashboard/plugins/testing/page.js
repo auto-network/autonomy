@@ -8,10 +8,15 @@
       summary: null,
       loading: false,
       error: '',
+      refreshedAt: null,
+      refreshTimer: null,
 
       async init() {
         await this.loadOrgs();
         await this.loadSummary();
+        this.refreshTimer = window.setInterval(() => {
+          if (!document.hidden && !this.loading) this.loadSummary(true);
+        }, 5000);
       },
 
       async loadOrgs() {
@@ -35,8 +40,8 @@
         await this.loadSummary();
       },
 
-      async loadSummary() {
-        this.loading = true;
+      async loadSummary(silent = false) {
+        if (!silent) this.loading = true;
         this.error = '';
         const query = new URLSearchParams({ recent_limit: '20', ranked_limit: '10' });
         if (this.selectedRepository) query.set('repository', this.selectedRepository);
@@ -45,9 +50,10 @@
             headers: { 'X-Graph-Org': this.selectedOrg },
           });
           const value = await response.json();
-          if (!response.ok) throw new Error(value.error || 'Testing statistics unavailable');
+          if (!response.ok) throw new Error(value.error || 'Testing activity unavailable');
           this.summary = value;
           this.repositories = value.repositories || [];
+          this.refreshedAt = new Date();
         } catch (error) {
           this.error = error.message || String(error);
         } finally {
@@ -63,11 +69,55 @@
         if (seconds < 3600) return (seconds / 60).toFixed(1) + 'm';
         return (seconds / 3600).toFixed(1) + 'h';
       },
+      age(value) {
+        const seconds = Math.max(0, Date.now() / 1000 - Number(value || 0));
+        if (seconds < 60) return Math.floor(seconds) + 's';
+        if (seconds < 3600) return Math.floor(seconds / 60) + 'm';
+        return (seconds / 3600).toFixed(1) + 'h';
+      },
       when(value) {
         const date = new Date(value);
         return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
       },
+      refreshed() {
+        return this.refreshedAt
+          ? this.refreshedAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })
+          : 'waiting';
+      },
       shortRepository(value) { return value.length > 48 ? '…' + value.slice(-47) : value; },
+      resourceText(resources) {
+        return Object.entries(resources || {})
+          .map(([name, amount]) => amount + ' ' + name + (name === 'tests' ? ' slots' : ''))
+          .join(' · ') || 'no slots';
+      },
+      selectorText(run) {
+        const selectors = run.selectors || run.selector_preview || [];
+        const preview = selectors.map(value => value.split('/').pop()).join(', ');
+        const omitted = Math.max(0, Number(run.selector_count || 0) - selectors.length);
+        return (preview || 'selectors unavailable') + (omitted ? ' +' + omitted + ' more' : '');
+      },
+      featureLabel(value) {
+        return String(value || 'unknown').replace(/^command_/, '').replaceAll('_', ' ');
+      },
+      featureEntries() {
+        return Object.entries((this.summary.telemetry || {}).feature_counts || {})
+          .map(([name, count]) => ({ name, count }))
+          .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+          .slice(0, 10);
+      },
+      versionEntries() {
+        return Object.entries((this.summary.telemetry || {}).versions || {})
+          .map(([name, count]) => ({ name, count }))
+          .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+      },
+      recentUsage() { return ((this.summary.telemetry || {}).recent_events || []).slice(0, 6); },
+      errorCounts() {
+        return Object.entries((this.summary.operational_errors || {}).counts || {})
+          .map(([name, count]) => ({ name, count }))
+          .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+          .slice(0, 6);
+      },
+      recentErrors() { return ((this.summary.operational_errors || {}).recent || []).slice(0, 6); },
       chronologicalRuns() { return [...(this.summary.recent_runs || [])].reverse(); },
       runHeight(run) {
         const maximum = Math.max(1, ...(this.summary.recent_runs || []).map(item => Number(item.duration_seconds || 0)));

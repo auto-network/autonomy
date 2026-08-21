@@ -1,3 +1,3 @@
-"""Agent-oriented pytest execution with durable, bounded evidence."""
+"""Agent-oriented pytest execution with temporary, bounded evidence."""
 
-__version__ = "0.4.1"
+__version__ = "0.5.0"

@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from tools.agent_test.store import state_root
+
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -156,3 +158,30 @@ def test_output_query_has_a_defaultable_hard_limit(project: Path, cli_env: dict[
     assert "line-29" in output.stdout
     assert "earlier lines retained" in output.stdout
     assert len(output.stdout.splitlines()) <= 6
+
+
+def test_default_run_state_is_private_temporary_storage(project: Path, monkeypatch, tmp_path: Path):
+    monkeypatch.delenv("AGENT_TEST_STATE_DIR", raising=False)
+    monkeypatch.setenv("AGENT_TEST_TMPDIR", str(tmp_path))
+    monkeypatch.setenv("AUTONOMY_SESSION", "auto-private-test")
+    root = state_root(project)
+    assert root.is_relative_to(tmp_path / ".agent-test" / "auto-private-test")
+    assert "/workspace/output" not in str(root)
+
+
+def test_retain_explicitly_copies_completed_run_to_workspace_output(
+    project: Path, cli_env: dict[str, str], tmp_path: Path,
+):
+    retain_root = tmp_path / "workspace-output" / "agent-test"
+    cli_env["AGENT_TEST_RETAIN_DIR"] = str(retain_root)
+    (project / "test_keep.py").write_text("def test_keep():\n    pass\n")
+    started = _cli(project, cli_env, "run", "test_keep.py")
+    assert started.returncode == 0, started.stderr
+    final = _wait_terminal(cli_env)
+
+    retained = _cli(project, cli_env, "retain", final["run_id"])
+    assert retained.returncode == 0, retained.stderr
+    destination = retain_root / Path(cli_env["AGENT_TEST_STATE_DIR"]).name / "runs" / final["run_id"]
+    retained_manifest = json.loads((destination / "run.json").read_text())
+    assert retained_manifest["evidence_lifecycle"] == "durable"
+    assert retained_manifest["retained_at"]

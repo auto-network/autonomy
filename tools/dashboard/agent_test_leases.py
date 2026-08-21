@@ -10,6 +10,7 @@ from tools.graph import settings_ops
 from tools.graph.schemas.agent_test_capacity import (
     CAPACITY_SET_ID,
     LEASE_SET_ID,
+    QUEUE_SET_ID,
     SCHEMA_REVISION,
 )
 
@@ -43,6 +44,49 @@ def _active(now: float) -> list[dict[str, Any]]:
     return active
 
 
+def _pending(now: float) -> list[dict[str, Any]]:
+    members = settings_ops.read_set(QUEUE_SET_ID, org="machine", peers=[]).members
+    pending: list[dict[str, Any]] = []
+    for member in members:
+        payload = dict(member.payload)
+        if float(payload.get("expires_at") or 0) <= now:
+            try:
+                settings_ops.remove_setting(member.id, org="machine")
+            except LookupError:
+                pass
+            continue
+        pending.append({"id": member.id, "key": member.key, **payload})
+    return pending
+
+
+def _remove_pending(item: dict[str, Any] | None) -> None:
+    if item is None:
+        return
+    try:
+        settings_ops.remove_setting(item["id"], org="machine")
+    except LookupError:
+        pass
+
+
+def _activity_context(body: dict[str, Any]) -> dict[str, Any]:
+    selectors = [
+        str(value).strip()[:1000]
+        for value in body.get("selectors") or []
+        if str(value).strip()
+    ]
+    try:
+        requested_count = int(body.get("selector_count") or len(selectors))
+    except (TypeError, ValueError):
+        requested_count = len(selectors)
+    selector_count = max(len(selectors), requested_count)
+    return {
+        "organization": str(body.get("organization") or "unknown")[:100],
+        "repository": str(body.get("repository") or "unknown")[:1000],
+        "selectors": selectors[:5],
+        "selector_count": min(selector_count, 100_000),
+    }
+
+
 def transact(action: str, body: dict[str, Any]) -> dict[str, Any]:
     """Serialize one admission transaction against the machine store."""
     with _LOCK:
@@ -51,21 +95,35 @@ def transact(action: str, body: dict[str, Any]) -> dict[str, Any]:
         limits = dict(capacity["limits"])
         ttl = int(capacity["lease_ttl_seconds"])
         leases = _active(now)
+        pending = _pending(now)
         if action == "status":
-            return _status(limits, leases)
+            return _status(limits, leases, pending)
 
         lease_id = str(body.get("lease_id") or "").strip()
         if not lease_id:
             return {"ok": False, "error": "lease_id is required"}
         existing = next((item for item in leases if item["key"] == lease_id), None)
+        waiting = next((item for item in pending if item["key"] == lease_id), None)
         if action == "release":
             if existing is not None:
                 settings_ops.remove_setting(existing["id"], org="machine")
+            _remove_pending(waiting)
             return {"ok": True, "state": "released", "lease_id": lease_id}
         if action == "renew":
             if existing is None:
                 return {"ok": False, "state": "expired", "error": "lease no longer exists"}
-            payload = {key: existing[key] for key in ("session", "run_id", "resources", "acquired_at")}
+            payload = {
+                key: existing[key]
+                for key in (
+                    "session", "run_id", "resources", "acquired_at",
+                    "organization", "repository", "selectors", "selector_count",
+                )
+                if key in existing
+            }
+            if body.get("organization"):
+                # A legacy lease can be upgraded in place on its next renewal
+                # after the authenticated route begins stamping org scope.
+                payload["organization"] = str(body["organization"])[:100]
             payload["expires_at"] = now + ttl
             settings_ops.upsert_by_key(LEASE_SET_ID, SCHEMA_REVISION, lease_id, payload, org="machine")
             return {"ok": True, "state": "granted", "lease_id": lease_id, "expires_at": payload["expires_at"]}
@@ -79,6 +137,7 @@ def transact(action: str, body: dict[str, Any]) -> dict[str, Any]:
         if unknown:
             return {"ok": False, "error": f"resources have no configured capacity: {', '.join(unknown)}"}
         if existing is not None:
+            _remove_pending(waiting)
             return {"ok": True, "state": "granted", "lease_id": lease_id, "expires_at": existing["expires_at"]}
         used = {name: 0 for name in limits}
         for lease in leases:
@@ -90,27 +149,95 @@ def transact(action: str, body: dict[str, Any]) -> dict[str, Any]:
             if used.get(name, 0) + int(amount) > limits[name]
         }
         if unavailable:
-            return {"ok": True, "state": "queued", "unavailable": unavailable, **_status(limits, leases)}
+            context = _activity_context(body)
+            queued_payload = {
+                **context,
+                "session": str(body.get("session") or "unknown")[:200],
+                "run_id": str(body.get("run_id") or lease_id)[:200],
+                "resources": {str(name): int(amount) for name, amount in resources.items()},
+                "requested_at": float(waiting.get("requested_at") if waiting else now),
+                "updated_at": now,
+                "expires_at": now + ttl,
+            }
+            settings_ops.upsert_by_key(
+                QUEUE_SET_ID, SCHEMA_REVISION, lease_id, queued_payload, org="machine",
+            )
+            current_pending = [item for item in pending if item["key"] != lease_id]
+            current_pending.append({"id": "", "key": lease_id, **queued_payload})
+            return {
+                "ok": True,
+                "state": "queued",
+                "unavailable": unavailable,
+                **_status(limits, leases, current_pending),
+            }
+        _remove_pending(waiting)
+        context = _activity_context(body)
         payload = {
             "session": str(body.get("session") or "unknown"),
             "run_id": str(body.get("run_id") or lease_id),
             "resources": {str(name): int(amount) for name, amount in resources.items()},
             "acquired_at": now,
             "expires_at": now + ttl,
+            **context,
         }
         settings_ops.upsert_by_key(LEASE_SET_ID, SCHEMA_REVISION, lease_id, payload, org="machine")
         return {"ok": True, "state": "granted", "lease_id": lease_id, "expires_at": payload["expires_at"]}
 
 
-def _status(limits: dict[str, int], leases: list[dict[str, Any]]) -> dict[str, Any]:
+def _status(
+    limits: dict[str, int],
+    leases: list[dict[str, Any]],
+    pending: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    pending = pending or []
     used = {name: 0 for name in limits}
+    queued = {name: 0 for name in limits}
     for lease in leases:
         for name, amount in lease["resources"].items():
             used[name] = used.get(name, 0) + int(amount)
+    for item in pending:
+        for name, amount in item["resources"].items():
+            queued[name] = queued.get(name, 0) + int(amount)
     return {
         "ok": True,
         "limits": limits,
         "used": used,
         "available": {name: max(0, limit - used.get(name, 0)) for name, limit in limits.items()},
         "active_leases": len(leases),
+        "queued_requests": len(pending),
+        "queued": queued,
     }
+
+
+def activity_snapshot(organization: str) -> dict[str, Any]:
+    """Return bounded machine activity owned by one organization."""
+    with _LOCK:
+        now = time.time()
+        capacity = _capacity()
+        limits = dict(capacity["limits"])
+        all_leases = _active(now)
+        all_pending = _pending(now)
+        leases = [item for item in all_leases if item.get("organization") == organization]
+        pending = [item for item in all_pending if item.get("organization") == organization]
+
+        def public(item: dict[str, Any], timestamp: str) -> dict[str, Any]:
+            return {
+                "session": item["session"],
+                "run_id": item["run_id"],
+                "repository": item.get("repository") or "unknown",
+                "selectors": list(item.get("selectors") or [])[:5],
+                "selector_count": int(item.get("selector_count") or 0),
+                "resources": dict(item["resources"]),
+                timestamp: float(item[timestamp]),
+            }
+
+        leases.sort(key=lambda item: (float(item["acquired_at"]), item["run_id"]))
+        pending.sort(key=lambda item: (float(item["requested_at"]), item["run_id"]))
+        return {
+            **_status(limits, leases, pending),
+            "running": [public(item, "acquired_at") for item in leases[:100]],
+            "queue": [public(item, "requested_at") for item in pending[:100]],
+            "global_active_leases": len(all_leases),
+            "global_queued_requests": len(all_pending),
+            "as_of": now,
+        }

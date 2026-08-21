@@ -1,6 +1,6 @@
 {
   "name": "autonomy/agent-test",
-  "version": 3,
+  "version": 4,
   "implements": [{"contract": "test_execution", "version": 1}],
   "delivery_mode": "mounted_tools",
   "package_root": "agents/capabilities/agent_test",
@@ -12,5 +12,5 @@
   "skill_path": "agents/capabilities/agent_test/SKILL.md",
   "primer_path": "agents/capabilities/agent_test/primer.md",
   "probe": {"kind": "command", "entrypoint": "agent-test --version"},
-  "notes": "Agent-oriented Python test execution with retained evidence, bounded output, background notifications, organization telemetry, and machine-wide capacity coordination."
+  "notes": "Agent-oriented Python test execution with private temporary evidence, explicit durable retention, bounded output, background notifications, organization telemetry, and machine-wide capacity coordination."
 }

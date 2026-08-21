@@ -2,9 +2,9 @@
 <div x-data="testingPage()" x-init="init()" class="testing-page" data-testid="testing-fragment-root">
   <header class="testing-toolbar">
     <div class="testing-titlelock">
-      <span class="testing-signal" aria-hidden="true"></span>
+      <span class="testing-signal" :class="summary && summary.activity.active_runs ? 'is-busy' : ''" aria-hidden="true"></span>
       <div>
-        <p class="testing-kicker">Agent Test network</p>
+        <p class="testing-kicker">Agent Test operations</p>
         <h1>Testing</h1>
       </div>
     </div>
@@ -24,26 +24,202 @@
           </template>
         </select>
       </label>
-      <button type="button" class="testing-refresh" @click="loadSummary()" :disabled="loading">Refresh</button>
+      <button type="button" class="testing-refresh" @click="loadSummary()" :disabled="loading">
+        <span :class="loading ? 'is-spinning' : ''">↻</span><span>Refresh</span>
+      </button>
     </div>
   </header>
 
   <div x-show="error" class="testing-error" data-testid="testing-error" x-text="error"></div>
   <div x-show="loading && !summary" class="testing-loading" data-testid="testing-loading">
-    <span></span><span></span><span></span> Reading retained test evidence
+    <span></span><span></span><span></span> Reading live test activity
   </div>
 
   <template x-if="summary">
     <main class="testing-console">
+      <section class="testing-live" data-testid="testing-live-activity">
+        <div class="testing-live-head">
+          <div>
+            <p class="testing-kicker">Live machine activity</p>
+            <h2>
+              <span x-text="summary.activity.active_runs"></span> running
+              <i>·</i>
+              <span x-text="summary.activity.queued_runs"></span> queued
+            </h2>
+          </div>
+          <p class="testing-freshness"><span></span> Auto-refreshing · <b x-text="refreshed()"></b></p>
+        </div>
+
+        <div class="testing-live-metrics">
+          <article class="is-live">
+            <span>Active runs</span>
+            <strong x-text="summary.activity.active_runs"></strong>
+            <small x-text="summary.activity.active_sessions + ' sessions'"></small>
+          </article>
+          <article>
+            <span>Test worker slots</span>
+            <strong><b x-text="summary.activity.used.tests || 0"></b><em>/</em><b x-text="summary.activity.limits.tests || 0"></b></strong>
+            <small>machine-wide capacity</small>
+          </article>
+          <article class="is-queue">
+            <span>Waiting</span>
+            <strong x-text="summary.activity.queued_runs"></strong>
+            <small x-text="(summary.activity.queued.tests || 0) + ' test slots requested'"></small>
+          </article>
+          <article>
+            <span x-text="'Tests finished · ' + summary.activity.recent_window_minutes + 'm'"></span>
+            <strong x-text="summary.activity.recent_tests"></strong>
+            <small x-text="summary.activity.recent_runs + ' runs · ' + summary.activity.recent_sessions + ' sessions'"></small>
+          </article>
+        </div>
+
+        <div x-show="!summary.activity.sessions.length" class="testing-idle">
+          <span class="testing-idle-mark">✓</span>
+          <div><strong>No Agent Test work is running or queued.</strong><small>The machine is available for new runs.</small></div>
+        </div>
+
+        <div x-show="summary.activity.unresolved_starts > summary.activity.active_runs + summary.activity.queued_runs"
+             class="testing-activity-warning" data-testid="testing-unresolved-starts">
+          <strong>Incomplete telemetry</strong>
+          <span><b x-text="summary.activity.unresolved_starts"></b> starts have no retained terminal event; this can indicate a stale client or interrupted worker.</span>
+        </div>
+
+        <div x-show="summary.activity.sessions.length" class="testing-session-stack" data-testid="testing-session-queue">
+          <template x-for="session in summary.activity.sessions" :key="session.session">
+            <article class="testing-session-card">
+              <header>
+                <div><h3 x-text="session.session_title"></h3><code x-text="session.session"></code></div>
+                <span x-show="session.running.length" class="testing-state is-running">Running</span>
+                <span x-show="!session.running.length && session.queue.length" class="testing-state is-queued">Queued</span>
+              </header>
+              <div class="testing-run-stack">
+                <template x-for="run in session.running" :key="'running-' + run.run_id">
+                  <div class="testing-live-run is-running">
+                    <div class="testing-run-line"><code x-text="run.run_id"></code><b x-text="age(run.acquired_at) + ' active'"></b></div>
+                    <p x-text="selectorText(run)" :title="(run.selectors || []).join('\n')"></p>
+                    <small><span x-text="resourceText(run.resources)"></span><i>·</i><span x-text="shortRepository(run.repository)"></span></small>
+                  </div>
+                </template>
+                <template x-for="run in session.queue" :key="'queued-' + run.run_id">
+                  <div class="testing-live-run is-queued">
+                    <div class="testing-run-line"><code x-text="run.run_id"></code><b x-text="age(run.requested_at) + ' waiting'"></b></div>
+                    <p x-text="selectorText(run)" :title="(run.selectors || []).join('\n')"></p>
+                    <small><span x-text="resourceText(run.resources)"></span><i>·</i><span x-text="shortRepository(run.repository)"></span></small>
+                  </div>
+                </template>
+              </div>
+            </article>
+          </template>
+        </div>
+      </section>
+
+      <section class="testing-finished" data-testid="testing-just-finished">
+        <div class="testing-section-head">
+          <div><p>Immediate history</p><h2 x-text="'Finished in the last ' + summary.activity.recent_window_minutes + ' minutes'"></h2></div>
+          <span x-text="summary.activity.recent_runs + ' runs'"></span>
+        </div>
+        <div x-show="!summary.activity.just_finished.length" class="testing-empty">Nothing finished in this window.</div>
+        <div class="testing-finished-strip">
+          <template x-for="run in summary.activity.just_finished" :key="run.run_id">
+            <article>
+              <span class="testing-status" :class="'is-' + run.status" x-text="run.status"></span>
+              <strong x-text="run.collected + ' tests'"></strong>
+              <p x-text="run.session_title"></p>
+              <small><code x-text="run.run_id"></code><b x-text="duration(run.duration_seconds)"></b></small>
+            </article>
+          </template>
+        </div>
+      </section>
+
+      <section class="testing-history" data-testid="testing-session-history">
+        <div class="testing-section-head">
+          <div><p>By agent</p><h2>Recent session test history</h2></div>
+          <span>20 most recent runs</span>
+        </div>
+        <div class="testing-history-grid">
+          <template x-for="session in summary.activity.session_history" :key="session.session">
+            <article class="testing-history-card">
+              <header>
+                <div><h3 x-text="session.session_title"></h3><code x-text="session.session"></code></div>
+                <strong x-text="session.tests + ' tests'"></strong>
+              </header>
+              <div class="testing-history-summary">
+                <span><b class="is-good" x-text="session.passed_runs"></b> passed</span>
+                <span><b class="is-bad" x-text="session.failed_runs"></b> failed</span>
+                <span><b x-text="session.runs.length"></b> runs</span>
+              </div>
+              <div class="testing-history-runs">
+                <template x-for="run in session.runs" :key="run.run_id">
+                  <div>
+                    <span class="testing-status" :class="'is-' + run.status" x-text="run.status"></span>
+                    <p><strong x-text="run.collected + ' tests'"></strong><small x-text="selectorText(run)"></small></p>
+                    <b x-text="duration(run.duration_seconds)"></b>
+                  </div>
+                </template>
+              </div>
+            </article>
+          </template>
+        </div>
+        <p x-show="!summary.activity.session_history.length" class="testing-empty">No session history has been retained yet.</p>
+      </section>
+
+      <div class="testing-grid testing-feedback" data-testid="testing-feedback-loop">
+        <section class="testing-panel">
+          <div class="testing-section-head">
+            <div><p>Product feedback</p><h2>How agents use Agent Test</h2></div>
+            <span x-text="summary.telemetry.sessions + ' sessions observed'"></span>
+          </div>
+          <div class="testing-feature-list">
+            <template x-for="item in featureEntries()" :key="item.name">
+              <div><span x-text="featureLabel(item.name)"></span><strong x-text="item.count"></strong></div>
+            </template>
+            <p x-show="!featureEntries().length" class="testing-empty">Feature-use events will appear as updated clients issue commands.</p>
+          </div>
+          <div class="testing-version-line">
+            <span>Client versions</span>
+            <template x-for="item in versionEntries()" :key="item.name">
+              <code><b x-text="item.name"></b> <i x-text="item.count + ' sessions'"></i></code>
+            </template>
+          </div>
+          <div class="testing-event-stream">
+            <template x-for="event in recentUsage()" :key="event.session + event.recorded_at + event.event">
+              <div><span x-text="featureLabel(event.event)"></span><p x-text="event.session"></p><time x-text="age(event.recorded_at) + ' ago'"></time></div>
+            </template>
+          </div>
+        </section>
+
+        <section class="testing-panel testing-errors" data-testid="testing-operational-errors">
+          <div class="testing-section-head">
+            <div><p>Operational health</p><h2>Errors that stopped progress</h2></div>
+            <span x-text="summary.operational_errors.total + ' retained'"></span>
+          </div>
+          <div class="testing-error-counts">
+            <template x-for="item in errorCounts()" :key="item.name">
+              <span><b x-text="item.count"></b><i x-text="featureLabel(item.name)"></i></span>
+            </template>
+          </div>
+          <div class="testing-error-stream">
+            <template x-for="event in recentErrors()" :key="event.session + event.recorded_at + event.category">
+              <article>
+                <header><strong x-text="featureLabel(event.category)"></strong><time x-text="age(event.recorded_at) + ' ago'"></time></header>
+                <p x-text="event.message"></p>
+                <small><span x-text="event.session_title"></span><i>·</i><code x-text="event.phase"></code></small>
+              </article>
+            </template>
+            <p x-show="!recentErrors().length" class="testing-empty">No Agent Test operational errors have been reported.</p>
+          </div>
+        </section>
+      </div>
+
       <section class="testing-overview">
         <div class="testing-ratio">
-          <p>Run pass ratio</p>
+          <p>Retained pass ratio</p>
           <strong x-text="percent(summary.runs.pass_ratio)"></strong>
           <span x-text="summary.runs.total + ' terminal runs retained'"></span>
         </div>
         <div class="testing-readouts">
-          <article><span>Passed</span><strong class="is-good" x-text="count('passed')"></strong></article>
-          <article><span>Failed</span><strong class="is-bad" x-text="count('failed')"></strong></article>
+          <article><span>Passed runs</span><strong class="is-good" x-text="count('passed')"></strong></article>
+          <article><span>Failed runs</span><strong class="is-bad" x-text="count('failed')"></strong></article>
           <article><span>Errors</span><strong class="is-warn" x-text="count('error')"></strong></article>
           <article><span>Observed tests</span><strong x-text="summary.tests.observed"></strong></article>
         </div>
@@ -51,7 +227,7 @@
 
       <section class="testing-trace" aria-label="Recent run outcomes">
         <div class="testing-section-head">
-          <div><p>Recent signal</p><h2>Run outcomes over time</h2></div>
+          <div><p>Retained signal</p><h2>Run duration and outcome</h2></div>
           <span>Newest at right · bounded to 20</span>
         </div>
         <div class="testing-bars" data-testid="testing-run-trace">
@@ -62,7 +238,7 @@
               <span></span>
             </button>
           </template>
-          <div x-show="!summary.recent_runs.length" class="testing-empty">No Agent Test runs have reported yet.</div>
+          <div x-show="!summary.recent_runs.length" class="testing-empty">No retained runs yet.</div>
         </div>
       </section>
 
@@ -72,7 +248,7 @@
           <div class="testing-table-wrap">
             <table><thead><tr><th>Test</th><th>Failure rate</th><th>Samples</th></tr></thead>
               <tbody><template x-for="test in summary.tests.flaky" :key="test.nodeid">
-                <tr><td :title="test.nodeid" x-text="test.nodeid"></td><td class="is-bad" x-text="percent(test.failure_rate)"></td><td x-text="test.samples"></td></tr>
+                <tr><td data-label="Test" :title="test.nodeid" x-text="test.nodeid"></td><td data-label="Failure rate" class="is-bad" x-text="percent(test.failure_rate)"></td><td data-label="Samples" x-text="test.samples"></td></tr>
               </template></tbody></table>
             <p x-show="!summary.tests.flaky.length" class="testing-empty">No mixed pass/fail histories detected.</p>
           </div>
@@ -83,7 +259,7 @@
           <div class="testing-table-wrap">
             <table><thead><tr><th>Test</th><th>Median</th><th>Samples</th></tr></thead>
               <tbody><template x-for="test in summary.tests.slow" :key="test.nodeid">
-                <tr><td :title="test.nodeid" x-text="test.nodeid"></td><td class="is-warn" x-text="duration(test.median_seconds)"></td><td x-text="test.samples"></td></tr>
+                <tr><td data-label="Test" :title="test.nodeid" x-text="test.nodeid"></td><td data-label="Median" class="is-warn" x-text="duration(test.median_seconds)"></td><td data-label="Samples" x-text="test.samples"></td></tr>
               </template></tbody></table>
             <p x-show="!summary.tests.slow.length" class="testing-empty">No per-test timings have been reported.</p>
           </div>
@@ -91,13 +267,15 @@
       </div>
 
       <section class="testing-panel testing-runs">
-        <div class="testing-section-head"><div><p>Evidence ledger</p><h2>Recent runs</h2></div><span x-text="summary.organization"></span></div>
-        <div class="testing-table-wrap"><table><thead><tr><th>Run</th><th>Status</th><th>Tests</th><th>Duration</th><th>Session</th><th>Finished</th></tr></thead>
-          <tbody><template x-for="run in summary.recent_runs" :key="run.run_id"><tr>
-            <td class="testing-run-id" x-text="run.run_id"></td><td><span class="testing-status" :class="'is-' + run.status" x-text="run.status"></span></td>
-            <td x-text="run.collected"></td><td x-text="duration(run.duration_seconds)"></td><td x-text="run.session"></td><td x-text="when(run.finished_at)"></td>
-          </tr></template></tbody>
-        </table><p x-show="!summary.recent_runs.length" class="testing-empty">The ledger is ready; the first completed run will appear here.</p></div>
+        <div class="testing-section-head"><div><p>Evidence ledger</p><h2>Recent retained runs</h2></div><span x-text="summary.organization"></span></div>
+        <div class="testing-run-cards">
+          <template x-for="run in summary.recent_runs" :key="run.run_id"><article>
+            <div><code x-text="run.run_id"></code><span class="testing-status" :class="'is-' + run.status" x-text="run.status"></span></div>
+            <strong x-text="run.collected + ' tests · ' + duration(run.duration_seconds)"></strong>
+            <p x-text="run.session_title"></p><small x-text="when(run.finished_at)"></small>
+          </article></template>
+        </div>
+        <p x-show="!summary.recent_runs.length" class="testing-empty">The ledger is ready; the first completed run will appear here.</p>
       </section>
     </main>
   </template>

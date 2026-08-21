@@ -1,6 +1,6 @@
 ---
 name: agent-test
-description: Run Python tests through Agent Test with retained evidence, bounded output, background completion notifications, test selection, changed-line coverage, timing estimates, and rerun-loop prevention.
+description: Run Python tests through Agent Test with private temporary evidence, bounded output, background completion notifications, test selection, changed-line coverage, timing estimates, explicit retention, and rerun-loop prevention.
 ---
 
 # Agent Test
@@ -27,6 +27,7 @@ agent-test failures <run-id>
 agent-test trace <run-id> 1
 agent-test output <run-id> --limit-lines 40
 agent-test coverage <run-id>
+agent-test retain <run-id>                   # only when durable raw evidence is useful
 agent-test timings path/to/test_file.py::test_name
 ```
 

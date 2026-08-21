@@ -57,13 +57,35 @@ async def telemetry(request: Request) -> JSONResponse:
     if action == "status":
         return _result(await asyncio.to_thread(store.telemetry_status, organization))
     session = str(body.get("session") or "")
-    event = str(body.get("event") or "")
     if not _SESSION_RE.fullmatch(session):
         return JSONResponse({"error": "valid session is required"}, status_code=400)
+    version = str(body.get("agent_test_version") or "")[:40]
+    if action == "error":
+        phase = str(body.get("phase") or "")
+        category = str(body.get("category") or "")
+        message = str(body.get("message") or "")
+        run_id = str(body.get("run_id") or "")
+        if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", phase):
+            return JSONResponse({"error": "valid error phase is required"}, status_code=400)
+        if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", category):
+            return JSONResponse({"error": "valid error category is required"}, status_code=400)
+        if not message or len(message) > 1000 or len(run_id) > 200:
+            return JSONResponse({"error": "bounded error message and run_id are required"}, status_code=400)
+        return _result(await asyncio.to_thread(
+            store.record_error,
+            organization,
+            session,
+            run_id=run_id,
+            phase=phase,
+            category=category,
+            message=message,
+            agent_test_version=version,
+        ))
+    event = str(body.get("event") or "")
     if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", event):
         return JSONResponse({"error": "valid event is required"}, status_code=400)
     return _result(await asyncio.to_thread(
-        store.record_event, organization, session, event,
+        store.record_event, organization, session, event, version,
     ))
 
 
