@@ -10,13 +10,29 @@ import urllib.request
 from typing import Any
 
 
+def _headers() -> dict[str, str]:
+    """JSON content type plus the session bearer, when this process holds one.
+
+    The dashboard's Agent Test routes require an authenticated caller
+    (invariant 4). An agent session carries its token in ``CROSSTALK_TOKEN``
+    and authenticates by ``Authorization: Bearer <token>`` — the same header
+    ``tools/graph/client.py`` sends. A host process without the token simply
+    omits the bearer and authenticates as a local caller by other means.
+    """
+    headers = {"Content-Type": "application/json"}
+    token = os.environ.get("CROSSTALK_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
 def lease_request(action: str, **payload: Any) -> dict[str, Any]:
     base = os.environ.get("AGENT_TEST_DASHBOARD", "https://localhost:8080").rstrip("/")
     data = json.dumps({"action": action, **payload}).encode()
     request = urllib.request.Request(
         f"{base}/api/agent-test/leases",
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers=_headers(),
         method="POST",
     )
     context = ssl._create_unverified_context() if base.startswith("https://") else None
@@ -40,7 +56,7 @@ def telemetry_request(action: str = "event", event: str | None = None) -> dict[s
     request = urllib.request.Request(
         f"{base}/api/agent-test/telemetry",
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers=_headers(),
         method="POST",
     )
     context = ssl._create_unverified_context() if base.startswith("https://") else None
@@ -61,7 +77,7 @@ def duration_request(action: str, **payload: Any) -> dict[str, Any]:
     request = urllib.request.Request(
         f"{base}/api/agent-test/durations",
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers=_headers(),
         method="POST",
     )
     context = ssl._create_unverified_context() if base.startswith("https://") else None
