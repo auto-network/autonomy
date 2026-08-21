@@ -21,7 +21,7 @@ from tools.dashboard import (
     link_serving,
     unlock_routes,
 )
-from tools.network import fleet_enroll, fleet_invite, fleet_roster
+from tools.network import fleet_invite
 
 
 def _operator_required(request: Request) -> JSONResponse | None:
@@ -107,6 +107,8 @@ async def pending_requests(request: Request) -> JSONResponse:
                 "channel_binding": row.channel_binding,
                 "verification_code": row.verification_code,
                 "status": row.status,
+                "source_approval_id": row.source_approval_id,
+                "last_error_code": row.last_error_code,
                 "created_at": row.created_at,
                 "updated_at": row.updated_at,
             }
@@ -115,79 +117,7 @@ async def pending_requests(request: Request) -> JSONResponse:
     })
 
 
-async def approve_request(request: Request) -> JSONResponse:
-    denied = _operator_required(request)
-    if denied is not None:
-        return denied
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"ok": False, "error": "body must be JSON"}, status_code=400)
-    expected = {"target_uuid", "approval", "roster_entry"}
-    if not isinstance(body, dict) or set(body) != expected:
-        return JSONResponse(
-            {"ok": False, "error": f"body must carry exactly {sorted(expected)}"},
-            status_code=400,
-        )
-    try:
-        approval = fleet_enroll.EnrollmentApproval.from_dict(body["approval"])
-        roster_entry = fleet_roster.RosterEntry.from_dict(body["roster_entry"])
-        personal = identity_routes._personal_member()
-        anchor = (personal.payload if personal is not None else {}).get("root_pub")
-        if not isinstance(anchor, str):
-            raise ValueError("stored personal identity has no public root anchor")
-        approved = fleet_enrollment_service.FleetEnrollmentStore().approve(
-            target_uuid=body["target_uuid"],
-            request_id=request.path_params["request_id"],
-            approval=approval,
-            roster_entry=roster_entry,
-            anchor_root_pub=anchor,
-            org=None,
-        )
-    except (ValueError, TypeError) as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
-    return JSONResponse({
-        "ok": True,
-        "request_id": approved.request_id,
-        "status": approved.status,
-        "roster_entry_id": roster_entry.entry_id,
-    })
-
-
-async def decline_request(request: Request) -> JSONResponse:
-    denied = _operator_required(request)
-    if denied is not None:
-        return denied
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"ok": False, "error": "body must be JSON"}, status_code=400)
-    if not isinstance(body, dict) or set(body) != {"target_uuid"}:
-        return JSONResponse(
-            {"ok": False, "error": "body must carry exactly target_uuid"},
-            status_code=400,
-        )
-    try:
-        fleet_enrollment_service.FleetEnrollmentStore().decline(
-            target_uuid=body["target_uuid"],
-            request_id=request.path_params["request_id"],
-        )
-    except (ValueError, TypeError) as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
-    return JSONResponse({"ok": True, "status": "declined"})
-
-
 ROUTES = [
     Route("/api/fleet/invitations/register", register_invite, methods=["POST"]),
     Route("/api/fleet/enrollment/requests", pending_requests, methods=["GET"]),
-    Route(
-        "/api/fleet/enrollment/requests/{request_id}/approve",
-        approve_request,
-        methods=["POST"],
-    ),
-    Route(
-        "/api/fleet/enrollment/requests/{request_id}/decline",
-        decline_request,
-        methods=["POST"],
-    ),
 ]

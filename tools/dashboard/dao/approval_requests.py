@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS approval_requests (
 );
 CREATE INDEX IF NOT EXISTS idx_approval_requests_pending
     ON approval_requests(session, created_at) WHERE result IS NULL;
+CREATE INDEX IF NOT EXISTS idx_approval_requests_decided_kind
+    ON approval_requests(kind, id) WHERE result IS NOT NULL;
 """
 
 def _conn(db_path: Path | str | None = None) -> sqlite3.Connection:
@@ -74,6 +76,82 @@ def create(*, kind: str, session: str, request: dict, created_at: float,
     finally:
         c.close()
     return rid
+
+
+def create_idempotent(
+    *,
+    request_id: str,
+    kind: str,
+    session: str,
+    request: dict,
+    created_at: float,
+    staged: dict | None = None,
+    db_path: Path | str | None = None,
+) -> bool:
+    """Create a request under a caller-derived stable id.
+
+    Returns ``True`` when this call inserted the row and ``False`` when the
+    exact row already existed.  Reusing an id for different bytes is refused.
+    This is the crash/retry seam for producers whose source object already has
+    a content id (Fleet admission is the first consumer).
+    """
+    if not isinstance(request_id, str) or not request_id or len(request_id) > 128:
+        raise ValueError("approval request_id must be a non-empty string up to 128 characters")
+    request_wire = json.dumps(request, sort_keys=True, separators=(",", ":"))
+    staged_wire = (
+        json.dumps(staged, sort_keys=True, separators=(",", ":"))
+        if staged is not None
+        else None
+    )
+    c = _conn(db_path)
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        row = c.execute(
+            "SELECT kind,session,request,staged,created_at "
+            "FROM approval_requests WHERE id=?",
+            (request_id,),
+        ).fetchone()
+        if row is not None:
+            existing_request = json.dumps(
+                json.loads(row["request"]), sort_keys=True, separators=(",", ":")
+            )
+            existing_staged = (
+                json.dumps(
+                    json.loads(row["staged"]),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                if row["staged"] is not None
+                else None
+            )
+            if (
+                row["kind"] != kind
+                or row["session"] != session
+                or existing_request != request_wire
+                or existing_staged != staged_wire
+                or float(row["created_at"]) != float(created_at)
+            ):
+                raise ValueError(
+                    "approval request id is already bound to different bytes"
+                )
+            return False
+        c.execute(
+            "INSERT INTO approval_requests "
+            "(id,kind,session,request,staged,result,created_at) "
+            "VALUES(?,?,?,?,?,NULL,?)",
+            (
+                request_id,
+                kind,
+                session,
+                request_wire,
+                staged_wire,
+                created_at,
+            ),
+        )
+        c.commit()
+        return True
+    finally:
+        c.close()
 
 
 def get(request_id: str, db_path: Path | str | None = None) -> dict | None:
@@ -137,5 +215,20 @@ def pending_for_session(session: str, db_path: Path | str | None = None) -> dict
             (session,),
         ).fetchone()
         return {"id": r["id"], "kind": r["kind"]} if r else None
+    finally:
+        c.close()
+
+
+def decided_ids_for_kind(
+    kind: str, db_path: Path | str | None = None
+) -> set[str]:
+    """Stable ids with a completed decision for one registered kind."""
+    c = _conn(db_path)
+    try:
+        rows = c.execute(
+            "SELECT id FROM approval_requests WHERE kind=? AND result IS NOT NULL",
+            (kind,),
+        ).fetchall()
+        return {str(row["id"]) for row in rows}
     finally:
         c.close()

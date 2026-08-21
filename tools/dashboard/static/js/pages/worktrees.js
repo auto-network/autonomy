@@ -366,6 +366,66 @@
     }
   }
 
+  // Fleet admission is personal-root authority. The browser opens the
+  // encrypted personal armor, mints the durable roster statement and the
+  // transient channel approval, and hands only those signed public records to
+  // the generic rendezvous. fleet-enrollment.js zeroes the root seed on every
+  // exit, including validation and signing failures.
+  async function _signFleetAdmissionDecision(self, req) {
+    if (!req.password) {
+      throw new Error('Enter your personal identity password to continue.');
+    }
+    const staged = req.fleet;
+    if (!staged || !staged.request || !staged.channelBinding ||
+        !Number.isSafeInteger(staged.issuedAt)) {
+      throw new Error('This machine request has no server-frozen enrollment context.');
+    }
+    const session = window.AutonomyNetworkSession;
+    if (!session || !session._internals ||
+        typeof session._internals.decryptArmor !== 'function') {
+      throw new Error('Personal approval is unavailable in this browser. Reload and try again.');
+    }
+    const personalResp = await fetch('/api/identity/personal');
+    const personal = await personalResp.json().catch(() => ({}));
+    if (!personalResp.ok || !personal.armored_private_key || !personal.root_pub) {
+      throw new Error(personal.error || 'No personal identity is available to approve this machine.');
+    }
+    if (personal.root_pub !== staged.personalRootPub) {
+      throw new Error('This request belongs to a different personal fleet.');
+    }
+    let opened = null;
+    try {
+      try {
+        opened = await session._internals.decryptArmor(
+          personal.armored_private_key, req.password);
+      } catch (error) {
+        throw new Error('That password did not open your personal identity.');
+      }
+      const ceremony = await import('../ceremony/fleet-enrollment.js');
+      const evidence = await ceremony.mintFleetEnrollmentEvidence({
+        personalRootSeed: opened.seed,
+        rootPub: personal.root_pub,
+        request: staged.request,
+        channelBinding: staged.channelBinding,
+        issuedAt: staged.issuedAt,
+        seq: 0,
+      });
+      // The ceremony zeroed the same Uint8Array. Drop our reference so the
+      // finally block cannot imply that a second live copy exists.
+      opened.seed = null;
+      req.password = '';
+      return {
+        approval: evidence.approval,
+        roster_entry: evidence.rosterEntry,
+      };
+    } finally {
+      if (opened && opened.seed) {
+        opened.seed.fill(0);
+        opened.seed = null;
+      }
+    }
+  }
+
   async function _jsonOrError(resp) {
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) {
@@ -2606,6 +2666,41 @@
             };
           },
           decision: (self, req) => _signDashboardAccessDecision(self, req),
+        },
+        fleet_machine_admission: {
+          open(self, r) {
+            const staged = r.staged;
+            if (!staged || staged.v !== 1 || !staged.request ||
+                !staged.channel_binding || !staged.verification_code ||
+                !Number.isSafeInteger(staged.issued_at)) {
+              throw new Error('fleet admission has no server-frozen request');
+            }
+            self.approvalBusy = false;
+            self.approvalRequest = {
+              id: r.id, kind: r.kind, session: 'Fleet invitation',
+              title: 'Add this machine?', actionLabel: 'Approve machine',
+              op: 'admit', target: 'New Dashboard',
+              bodyMarkdown: [
+                'Compare the code below with the code on the joining machine.',
+                'Approve only when every group matches.',
+              ].join('\n'),
+              fleet: {
+                verificationCode: staged.verification_code,
+                requestId: staged.source_request_id,
+                request: staged.request,
+                channelBinding: staged.channel_binding,
+                personalRootPub: staged.personal_root_pub,
+                issuedAt: staged.issued_at,
+              },
+              needsPassword: true,
+              passwordLabel: 'Personal identity password',
+              password: '',
+              showPassword: false,
+              awaitExecution: true,
+              error: '',
+            };
+          },
+          decision: (self, req) => _signFleetAdmissionDecision(self, req),
         },
         // Secure-setting provisioning: the agent described a small form
         // (staged.fields); the operator fills it and the values are HPKE-

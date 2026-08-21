@@ -28,6 +28,7 @@ from tools.network import fleet_enroll, fleet_invite
 FLEET_JOIN_TARGET_TYPE = "fleet:join"
 FLEET_CHANNEL_BINDING_DOMAIN = fleet_enroll.FLEET_CHANNEL_BINDING_DOMAIN
 FLEET_JOIN_OPS = ("fleet.request", "fleet.resume")
+MAX_PENDING_REQUESTS_PER_INVITE = 100
 
 _HEX32 = re.compile(r"^[0-9a-f]{32}$")
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -47,6 +48,8 @@ class PendingEnrollment:
     status: str
     created_at: int
     updated_at: int
+    source_approval_id: str | None = None
+    last_error_code: str | None = None
     approval: fleet_enroll.EnrollmentApproval | None = None
     roster_entry: object | None = None
 
@@ -93,6 +96,8 @@ class FleetEnrollmentStore:
                     status TEXT NOT NULL,
                     approval_json TEXT,
                     roster_entry_json TEXT,
+                    source_approval_id TEXT,
+                    last_error_code TEXT,
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL,
                     FOREIGN KEY(target_uuid)
@@ -117,6 +122,16 @@ class FleetEnrollmentStore:
                 conn.execute(
                     "ALTER TABLE fleet_enrollment_pending "
                     "ADD COLUMN roster_entry_json TEXT"
+                )
+            if "source_approval_id" not in columns:
+                conn.execute(
+                    "ALTER TABLE fleet_enrollment_pending "
+                    "ADD COLUMN source_approval_id TEXT"
+                )
+            if "last_error_code" not in columns:
+                conn.execute(
+                    "ALTER TABLE fleet_enrollment_pending "
+                    "ADD COLUMN last_error_code TEXT"
                 )
 
     def register_invite(
@@ -179,6 +194,7 @@ class FleetEnrollmentStore:
             request.to_dict(), sort_keys=True, separators=(",", ":")
         )
         code = fleet_enroll.verification_code(request)
+        terminal_approval_ids = self._terminal_approval_ids()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             invite = self._invite_row(conn, target, now)
@@ -194,6 +210,21 @@ class FleetEnrollmentStore:
                         "request content id is already bound to different bytes"
                     )
                 return pending, None
+            capacity_rows = conn.execute(
+                "SELECT source_approval_id FROM fleet_enrollment_pending "
+                "WHERE target_uuid=? AND status IN ('pending','approving')",
+                (target,),
+            ).fetchall()
+            pending_count = sum(
+                1
+                for capacity_row in capacity_rows
+                if capacity_row["source_approval_id"] is None
+                or capacity_row["source_approval_id"] not in terminal_approval_ids
+            )
+            if pending_count >= MAX_PENDING_REQUESTS_PER_INVITE:
+                raise FleetEnrollmentChannelError(
+                    "fleet invitation has reached its 100 pending-request limit"
+                )
             conn.execute(
                 "INSERT INTO fleet_enrollment_pending "
                 "(request_id,target_uuid,request_json,channel_binding,"
@@ -207,6 +238,29 @@ class FleetEnrollmentStore:
             ).fetchone()
             assert row is not None
             return _pending(row), resume_token
+
+    def _terminal_approval_ids(self) -> set[str]:
+        """Current generic decisions that no longer consume invite capacity.
+
+        Read before taking the machine.db write lock. Approval state only moves
+        from open to terminal, so a concurrent decision can make this snapshot
+        conservatively over-count capacity but can never let request 101 in.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT source_approval_id "
+                "FROM fleet_enrollment_pending "
+                "WHERE source_approval_id IS NOT NULL"
+            ).fetchall()
+        try:
+            from tools.dashboard import fleet_enrollment_approvals
+
+            known = {row["source_approval_id"] for row in rows}
+            return known & fleet_enrollment_approvals.terminal_approval_ids()
+        except Exception:
+            # Approval storage unavailable means fail closed: every unresolved
+            # transport row continues to consume a slot.
+            return set()
 
     def resume(
         self,
@@ -246,6 +300,73 @@ class FleetEnrollmentStore:
                 (target,),
             ).fetchall()
         return tuple(_pending(row) for row in rows)
+
+    def get_request(self, request_id: str) -> PendingEnrollment | None:
+        rid = _require_hex64(request_id, "request_id")
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM fleet_enrollment_pending WHERE request_id=?",
+                (rid,),
+            ).fetchone()
+        return _pending(row) if row is not None else None
+
+    def bind_approval(self, request_id: str, approval_id: str) -> None:
+        """Bind one source approval id to one request, first writer wins."""
+        rid = _require_hex64(request_id, "request_id")
+        if not isinstance(approval_id, str) or not approval_id:
+            raise FleetEnrollmentChannelError("source approval id is required")
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT source_approval_id FROM fleet_enrollment_pending "
+                "WHERE request_id=?",
+                (rid,),
+            ).fetchone()
+            if row is None:
+                raise FleetEnrollmentChannelError("unknown fleet enrollment request")
+            existing = row["source_approval_id"]
+            if existing is not None and existing != approval_id:
+                raise FleetEnrollmentChannelError(
+                    "fleet request is already bound to another approval"
+                )
+            conn.execute(
+                "UPDATE fleet_enrollment_pending SET source_approval_id=? "
+                "WHERE request_id=?",
+                (approval_id, rid),
+            )
+
+    def fail(
+        self,
+        *,
+        target_uuid: str,
+        request_id: str,
+        error_code: str,
+        now_ms: int | None = None,
+    ) -> None:
+        target = _require_uuid(target_uuid)
+        rid = _require_hex64(request_id, "request_id")
+        if not isinstance(error_code, str) or not error_code or len(error_code) > 96:
+            raise FleetEnrollmentChannelError("fleet failure code is invalid")
+        now = _now_ms(now_ms)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT status FROM fleet_enrollment_pending "
+                "WHERE request_id=? AND target_uuid=?",
+                (rid, target),
+            ).fetchone()
+            if row is None:
+                raise FleetEnrollmentChannelError("unknown fleet enrollment request")
+            if row["status"] == "approved":
+                raise FleetEnrollmentChannelError(
+                    "an approved enrollment cannot become failed"
+                )
+            conn.execute(
+                "UPDATE fleet_enrollment_pending SET status='failed', "
+                "last_error_code=?, updated_at=? "
+                "WHERE request_id=? AND target_uuid=?",
+                (error_code, now, rid, target),
+            )
 
     def approve(
         self,
@@ -294,7 +415,8 @@ class FleetEnrollmentStore:
             elif pending.status == "pending":
                 conn.execute(
                     "UPDATE fleet_enrollment_pending SET status='approving', "
-                    "approval_json=?, roster_entry_json=?, updated_at=? "
+                    "approval_json=?, roster_entry_json=?, last_error_code=NULL, "
+                    "updated_at=? "
                     "WHERE request_id=? AND target_uuid=?",
                     (approval_wire, roster_wire, now, rid, target),
                 )
@@ -382,37 +504,6 @@ class FleetEnrollmentStore:
         assert isinstance(approved.roster_entry, fleet_roster.RosterEntry)
         return approved
 
-    def decline(
-        self,
-        *,
-        target_uuid: str,
-        request_id: str,
-        now_ms: int | None = None,
-    ) -> None:
-        target = _require_uuid(target_uuid)
-        rid = _require_hex64(request_id, "request_id")
-        now = _now_ms(now_ms)
-        with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                "SELECT status FROM fleet_enrollment_pending "
-                "WHERE request_id=? AND target_uuid=?",
-                (rid, target),
-            ).fetchone()
-            if row is None:
-                raise FleetEnrollmentChannelError(
-                    "unknown fleet enrollment request"
-                )
-            if row["status"] != "pending":
-                raise FleetEnrollmentChannelError(
-                    f"a {row['status']} request cannot be declined"
-                )
-            conn.execute(
-                "UPDATE fleet_enrollment_pending SET status='declined', "
-                "updated_at=? WHERE request_id=? AND target_uuid=?",
-                (now, rid, target),
-            )
-
     def _invite_row(
         self, conn: sqlite3.Connection, target_uuid: str, now_ms: int
     ) -> fleet_invite.FleetInvite:
@@ -456,6 +547,9 @@ def handle_request(
         pending, issued = state.open_request(
             target_uuid, request, now_ms=now_ms
         )
+        from tools.dashboard import fleet_enrollment_approvals
+
+        fleet_enrollment_approvals.ensure_approval(pending, store=state)
         if issued is not None:
             channel_state["request_id"] = pending.request_id
             channel_state["resume_token"] = issued
@@ -485,6 +579,15 @@ def handle_request(
             "request_id": pending.request_id,
             "verification_code": pending.verification_code,
         }
+        from tools.dashboard import fleet_enrollment_approvals
+
+        if (
+            pending.status == "pending"
+            and fleet_enrollment_approvals.decision_status(
+                pending.source_approval_id
+            ) == "declined"
+        ):
+            reply["status"] = "declined"
         if pending.status == "approved":
             if pending.approval is None or pending.roster_entry is None:
                 raise FleetEnrollmentChannelError(
@@ -521,6 +624,8 @@ def _pending(row: sqlite3.Row) -> PendingEnrollment:
         status=row["status"],
         created_at=int(row["created_at"]),
         updated_at=int(row["updated_at"]),
+        source_approval_id=row["source_approval_id"],
+        last_error_code=row["last_error_code"],
         approval=(
             fleet_enroll.EnrollmentApproval.from_dict(json.loads(approval_wire))
             if approval_wire is not None

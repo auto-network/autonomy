@@ -789,6 +789,26 @@
           <pre class="mt-4 whitespace-pre-wrap rounded-2xl border border-white/10 bg-slate-900/60 p-4 font-sans text-sm leading-relaxed text-slate-200"
                data-testid="approval-body" x-text="approvalRequest.bodyMarkdown"></pre>
         </template>
+        <template x-if="approvalRequest.kind === 'fleet_machine_admission'">
+          <div class="mt-4 space-y-4" data-testid="approval-fleet-admission">
+            <div class="rounded-2xl border border-indigo-400/25 bg-indigo-500/10 px-5 py-5 text-center">
+              <div class="text-[10px] font-semibold uppercase tracking-[0.2em] text-indigo-300">
+                Machine comparison code
+              </div>
+              <div class="mt-3 break-words font-mono text-xl font-semibold tracking-[0.14em] text-white sm:text-2xl"
+                   data-testid="approval-fleet-pin"
+                   x-text="approvalRequest.fleet.verificationCode"></div>
+            </div>
+            <div class="grid grid-cols-[7rem_minmax(0,1fr)] gap-3 rounded-2xl border border-white/10 bg-slate-900/60 p-4 text-xs">
+              <span class="text-slate-500">Request</span>
+              <span class="truncate font-mono text-slate-300"
+                    x-text="approvalRequest.fleet.requestId"></span>
+              <span class="text-slate-500">Fleet anchor</span>
+              <span class="truncate font-mono text-slate-300"
+                    x-text="approvalRequest.fleet.personalRootPub"></span>
+            </div>
+          </div>
+        </template>
         <template x-if="approvalRequest.kind === 'mcp_peer_link'">
           <div class="mt-4 space-y-4" data-testid="approval-mcp-link">
             <div>
