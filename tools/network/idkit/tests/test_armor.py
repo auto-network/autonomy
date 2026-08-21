@@ -15,15 +15,21 @@ from tools.network.idkit.errors import MalformedError
 from tools.network.idkit.armor import (
     ARMOR_BEGIN,
     ARMOR_END,
+    PASSKEY_ARMOR_PURPOSE,
     ArmorError,
     ArmorPassphraseError,
+    add_passkey_factor,
+    armor_factor_types,
     armor_root_pub,
     armor_version,
     canonicalize_armor,
     decrypt_root_key,
+    decrypt_root_key_with_passkey,
     encrypt_root_key,
     parse_armor,
+    remove_passkey_factor,
 )
+from tools.network.idkit.sealing import derive_encapsulation_keypair
 
 
 @pytest.fixture(scope="module")
@@ -198,3 +204,90 @@ def test_armor_root_pub_version_agnostic(root):
     assert armor_root_pub(v2) == root.public_hex
     with pytest.raises(ArmorError):
         armor_root_pub("not an armor")
+
+
+# ── passkey factor (the root-armor half of a promotable passkey) ──────────
+#
+# A passkey factor seals the master KEK to a passkey's provisioning key — the
+# public half the enrollment ceremony publishes. A fresh PRF eval re-derives
+# the private half and opens the armor alone. These prove the round-trip and
+# the guardrails; the browser mirror + a cross-impl vector make it real for the
+# UI (that lands next, as the enrollment statement did).
+
+
+def _passkey_pub(prf_output: bytes) -> str:
+    """The public half a passkey publishes, from a PRF-output stand-in —
+    derived exactly as the enrollment ceremony derives the provisioning key."""
+    _, public_hex = derive_encapsulation_keypair(prf_output, PASSKEY_ARMOR_PURPOSE)
+    return public_hex
+
+
+def test_passkey_factor_opens_alone(root, armor):
+    prf = b"\x11" * 32
+    a = add_passkey_factor(armor, _PW, "cred-alpha", _passkey_pub(prf))
+    assert armor_factor_types(a) == ["password", "passkey"]
+    # both the password and the passkey open the SAME identity, independently
+    assert decrypt_root_key(a, _PW).private_hex == root.private_hex
+    assert decrypt_root_key_with_passkey(a, prf).private_hex == root.private_hex
+
+
+def test_two_passkeys_open_independently(root, armor):
+    prf1, prf2 = b"\x01" * 32, b"\x02" * 32
+    a = add_passkey_factor(armor, _PW, "cred-1", _passkey_pub(prf1))
+    a = add_passkey_factor(a, _PW, "cred-2", _passkey_pub(prf2))
+    assert armor_factor_types(a).count("passkey") == 2
+    assert decrypt_root_key_with_passkey(a, prf1).private_hex == root.private_hex
+    assert decrypt_root_key_with_passkey(a, prf2).private_hex == root.private_hex
+
+
+def test_wrong_prf_output_refused(armor):
+    a = add_passkey_factor(armor, _PW, "cred-1", _passkey_pub(b"\x03" * 32))
+    with pytest.raises(ArmorPassphraseError):
+        decrypt_root_key_with_passkey(a, b"\x04" * 32)
+
+
+def test_duplicate_credential_refused(armor):
+    a = add_passkey_factor(armor, _PW, "cred-dup", _passkey_pub(b"\x05" * 32))
+    with pytest.raises(ArmorError):
+        add_passkey_factor(a, _PW, "cred-dup", _passkey_pub(b"\x06" * 32))
+
+
+def test_remove_passkey_factor(root, armor):
+    prf = b"\x07" * 32
+    a = add_passkey_factor(armor, _PW, "cred-x", _passkey_pub(prf))
+    a = remove_passkey_factor(a, _PW, "cred-x")
+    assert armor_factor_types(a) == ["password"]
+    assert decrypt_root_key(a, _PW).private_hex == root.private_hex
+    with pytest.raises(ArmorPassphraseError):
+        decrypt_root_key_with_passkey(a, prf)
+
+
+def test_remove_unknown_credential_refused(armor):
+    a = add_passkey_factor(armor, _PW, "cred-real", _passkey_pub(b"\x08" * 32))
+    with pytest.raises(ArmorError):
+        remove_passkey_factor(a, _PW, "cred-ghost")
+
+
+def test_cannot_remove_the_last_factor(armor):
+    # An armor whose only factor is one passkey (built by adding then dropping
+    # the password) refuses to drop that last passkey.
+    from tools.network.idkit.armor import remove_factor
+    a = add_passkey_factor(armor, _PW, "cred-only", _passkey_pub(b"\x0a" * 32))
+    a = remove_factor(a, _PW, "password")
+    assert armor_factor_types(a) == ["passkey"]
+    with pytest.raises(ArmorError):
+        remove_passkey_factor(a, _PW, "cred-only")
+
+
+def test_stripping_a_passkey_factor_fails_closed(armor):
+    a = add_passkey_factor(armor, _PW, "cred-1", _passkey_pub(b"\x09" * 32))
+    data = parse_armor(a)
+    data["factors"] = [f for f in data["factors"] if f["type"] != "passkey"]
+    body = base64.b64encode(
+        json.dumps(data, separators=(",", ":"), sort_keys=True).encode()
+    ).decode()
+    tampered = "\n".join([ARMOR_BEGIN, body, ARMOR_END])
+    # Fails closed: the seal commits to the exact factor set, so a stripped
+    # factor mismatches the seal's AAD and the seed unseal fails its GCM tag.
+    with pytest.raises((ArmorError, ArmorPassphraseError, MalformedError)):
+        decrypt_root_key(tampered, _PW)
