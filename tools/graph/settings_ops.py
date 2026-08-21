@@ -1483,6 +1483,28 @@ class CheckFinding:
     field_description: str = ""
 
 
+@dataclass
+class CheckPassed:
+    """One readiness predicate that was actually answered and satisfied.
+
+    A clean findings list says only that no failure was emitted. Carrying
+    positive evidence separately lets API and CLI callers show what was
+    checked without weakening ``check_setting() == []`` or leaking values.
+    """
+
+    kind: str
+    detail: str
+    set_id: str
+    key: str
+    org: str
+    subject: str
+    field: str = ""
+    frame: str = ""
+    name: str = ""
+    description: str = ""
+    field_description: str = ""
+
+
 def _existence_frame(
     target: str, org: str, *, org_scoped: bool = False,
 ) -> tuple[str, list[str] | None, str]:
@@ -1598,18 +1620,19 @@ def check_setting(
     _org_scoped: bool = False,
     _via_field: str = "",
     _via_description: str = "",
+    _passed: list[CheckPassed] | None = None,
 ) -> list[CheckFinding]:
     """Is this row satisfied, and everything it declares it depends on?
 
-    Entirely metadata-driven. It follows fields that declare ``references``
-    to the rows they name, and asks fields that declare ``exists`` whether
-    what they name is present. It knows nothing about workspaces,
-    capabilities or credentials -- give it any address and it walks whatever
-    that row declares, which is why adding a set requires no code here.
+    Metadata-driven. It follows fields that declare ``references``, asks
+    fields that declare ``exists`` or ``names_host_env``, walks declared key
+    references, and invokes a schema's optional ``readiness_findings`` hook
+    for cross-field or cross-row constraints. The engine contains no
+    set-specific rule; each schema declares the edges it owns.
 
-    The traversal reaches exactly as far as the DECLARATIONS go. A
-    relationship carried only by a key convention is invisible to it, which
-    is the honest limit: it will not silently invent an edge nobody stated.
+    The traversal reaches exactly as far as those declarations go. An
+    undeclared relationship is invisible to it, which is the honest limit:
+    it will not silently invent an edge nobody stated.
 
     Every finding records the frame it was answered in, because "not found"
     from a process that cannot see a filesystem is a different fact from
@@ -1673,6 +1696,21 @@ def check_setting(
 
     schema = schemas.get_schema(set_id, int(row["schema_revision"]))
     payload = row.get("payload") or {}
+
+    if _passed is not None:
+        _passed.append(CheckPassed(
+            kind="resolved_setting",
+            detail=f"{set_id} key={key!r} resolves in {read_org!r}",
+            set_id=set_id,
+            key=key,
+            org=read_org,
+            subject=key,
+            field=_via_field,
+            frame="settings-store",
+            name=str(payload.get("name") or ""),
+            description=str(payload.get("description") or ""),
+            field_description=_via_description,
+        ))
 
     # A row may say, in its own payload, that it is optional. Where a schema
     # names that field, everything this row asks for degrades with it: an
@@ -1742,7 +1780,9 @@ def check_setting(
                         # what a missing row was for: the row that would have
                         # described it is the one that is not there.
                         _via_field=f"{path_prefix}{name}",
-                        _via_description=spec.get("description", "") or ""))
+                        _via_description=spec.get("description", "") or "",
+                        _passed=_passed,
+                    ))
                 kind = spec.get("exists")
                 if kind:
                     if (spec.get("exists_frame") == "platform-host"
@@ -1785,7 +1825,28 @@ def check_setting(
                             field_description=spec.get("description", "") or "",
                             **_row_meta(describes_subject=single),
                         ))
-                if spec.get("names_host_env") and one not in _os.environ:
+                    elif _passed is not None:
+                        _passed.append(CheckPassed(
+                            kind="present_path",
+                            detail=(f"{path_prefix}{name} resolves {kind} at "
+                                    f"{one!r}"),
+                            set_id=set_id,
+                            key=key,
+                            org=read_org,
+                            subject=one,
+                            field=f"{path_prefix}{name}",
+                            frame=("platform-host"
+                                   if spec.get("exists_frame") == "platform-host"
+                                   else "check-process-fs"),
+                            field_description=spec.get("description", "") or "",
+                        ))
+                fallback_field = spec.get("env_fallback_field")
+                fallback = value.get(fallback_field) if fallback_field else None
+                supplied_by_payload = (
+                    isinstance(fallback, dict) and one in fallback
+                )
+                if (spec.get("names_host_env") and one not in _os.environ
+                        and not supplied_by_payload):
                     # A launcher forwards the variables that are set and
                     # skips the rest without saying so, which is why this
                     # is worth reporting at all: the container starts, and
@@ -1805,16 +1866,117 @@ def check_setting(
                         field_description=spec.get("description", "") or "",
                         **_row_meta(describes_subject=single),
                     ))
+                elif spec.get("names_host_env") and _passed is not None:
+                    source = (
+                        f"fixed {fallback_field!r} workspace environment"
+                        if supplied_by_payload
+                        else "dashboard/launcher host environment"
+                    )
+                    _passed.append(CheckPassed(
+                        kind="available_env",
+                        detail=f"{one!r} is supplied by the {source}",
+                        set_id=set_id,
+                        key=key,
+                        org=read_org,
+                        subject=one,
+                        field=f"{path_prefix}{name}",
+                        frame="launcher-effective-env",
+                        field_description=spec.get("description", "") or "",
+                    ))
 
     if schema is not None:
         walk(schema, payload, "")
+
+        # Some schemas declare cross-row constraints that a single field's
+        # ``references=`` metadata cannot express: a version is carried in an
+        # adjacent field, or the edge lives in a shared key.  The schema owns
+        # discovery of those rows; its checker returns data-only issues.  The
+        # underlying rule remains shareable with runtime consumers.
+        declared_check = getattr(schema, "readiness_findings", None)
+        if callable(declared_check):
+            try:
+                declared_findings = declared_check(
+                    key=key, payload=payload, org=org, read=read_set_key,
+                )
+            except Exception as exc:
+                findings.append(CheckFinding(
+                    address, "unreadable", f"{type(exc).__name__}: {exc}"[:160],
+                    "the schema-declared readiness check",
+                    set_id=set_id, key=key, org=read_org, subject=key,
+                    frame="settings-store",
+                ))
+            else:
+                for issue in declared_findings or ():
+                    issue_field = str(issue.field)
+                    field_name = issue_field.split(".", 1)[0].split("[", 1)[0]
+                    field_spec = (
+                        getattr(schema, "_field_metadata", None) or {}
+                    ).get(field_name, {})
+                    issue_set = str(getattr(issue, "set_id", "") or set_id)
+                    issue_key = str(getattr(issue, "key", "") or key)
+                    # A specialized versioned-edge finding supersedes the
+                    # generic "row absent" result for the same target. Both
+                    # describe one repair; returning both makes an org health
+                    # view count one missing contract twice.
+                    findings[:] = [
+                        finding for finding in findings
+                        if not (
+                            finding.kind == "missing_reference"
+                            and finding.set_id == issue_set
+                            and finding.key == issue_key
+                            and str(issue.kind).startswith("missing_")
+                        )
+                    ]
+                    findings.append(CheckFinding(
+                        address,
+                        str(issue.kind),
+                        str(issue.detail),
+                        str(issue.looked_in),
+                        str(getattr(issue, "severity", "blocking")),
+                        set_id=issue_set,
+                        key=issue_key,
+                        org=read_org,
+                        field=issue_field,
+                        subject=str(issue.subject),
+                        frame=str(
+                            getattr(issue, "frame", "") or "settings-store"
+                        ),
+                        field_description=str(field_spec.get("description") or ""),
+                    ))
+                if _passed is not None and not declared_findings:
+                    _passed.append(CheckPassed(
+                        kind="valid_declared_constraints",
+                        detail=(f"{set_id} key={key!r} satisfies its "
+                                "schema-declared cross-row constraints"),
+                        set_id=set_id,
+                        key=key,
+                        org=read_org,
+                        subject=key,
+                        frame="settings-store",
+                        name=str(payload.get("name") or ""),
+                        description=str(payload.get("description") or ""),
+                    ))
 
     # Rows keyed by this one are part of whether it is fully installed: a
     # workspace's capability enables are found through the key segment that
     # names the workspace.
     for dep_set, dep_key, _segment in rows_keyed_by(set_id, key, org=org):
-        findings.extend(check_setting(dep_set, dep_key, org=org, _seen=seen))
+        findings.extend(check_setting(
+            dep_set, dep_key, org=org, _seen=seen, _passed=_passed,
+        ))
     return findings
+
+
+def inspect_setting(
+    set_id: str,
+    key: str,
+    *,
+    org: str,
+) -> tuple[list[CheckFinding], list[CheckPassed]]:
+    """Return failures and positive evidence from one recursive traversal."""
+    passed: list[CheckPassed] = []
+    findings = check_setting(set_id, key, org=org, _passed=passed)
+    return findings, passed
 
 
 def orphans_of(set_id: str, *, org: str) -> list[CheckFinding]:

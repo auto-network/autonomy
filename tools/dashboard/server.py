@@ -16109,6 +16109,28 @@ async def api_graph_settings_chain(request):
     return JSONResponse(chain)
 
 
+async def api_graph_settings_check(request):
+    """GET one row's schema-driven readiness findings in the server frame."""
+    from dataclasses import asdict
+    from tools.graph import settings_ops as _settings_ops
+
+    set_id = request.path_params["set_id"]
+    key = request.path_params["key"]
+    org = _settings_caller_org(request)
+    try:
+        findings, satisfied = _settings_ops.inspect_setting(
+            set_id, key, org=org,
+        )
+    except Exception as exc:
+        return JSONResponse(
+            {"error": f"{type(exc).__name__}: {exc}"}, status_code=502,
+        )
+    return JSONResponse({
+        "findings": [asdict(finding) for finding in findings],
+        "satisfied": [asdict(item) for item in satisfied],
+    })
+
+
 async def api_graph_settings_contested(request):
     """GET /api/graph/settings/<set_id>/contested — contended slot report.
 
@@ -17290,6 +17312,26 @@ def _things_missing(rows) -> list[dict]:
     return list(things.values())
 
 
+def _things_satisfied(rows) -> list[dict]:
+    """Distinct positive checks, without exposing any checked value."""
+    from dataclasses import asdict
+
+    things: dict[tuple, dict] = {}
+    for workspace in rows:
+        for item in workspace.satisfied:
+            data = asdict(item)
+            sig = (
+                data["kind"], data["subject"], data["frame"], data["detail"],
+            )
+            thing = things.get(sig)
+            if thing is None:
+                thing = things[sig] = {**data, "used_by": []}
+            label = workspace.name or workspace.workspace_id
+            if label not in thing["used_by"]:
+                thing["used_by"].append(label)
+    return list(things.values())
+
+
 async def api_org_workspace_health(request):
     """GET /api/orgs/<slug>/workspaces/health — what this machine still owes.
 
@@ -17323,6 +17365,10 @@ async def api_org_workspace_health(request):
         # for callers that read them, but they are the same facts multiplied
         # by the workspaces that happen to want them.
         "things": _things_missing(rows),
+        # Positive evidence travels beside failures so callers can show what
+        # was genuinely checked. Values never travel: environment evidence
+        # contains a name and source only.
+        "satisfied": _things_satisfied(rows),
         "workspaces": [
             {
                 "id": w.workspace_id,
@@ -17331,6 +17377,22 @@ async def api_org_workspace_health(request):
                 "blocking": [_finding_json(f) for f in w.blocking],
                 "advisory": [_finding_json(f) for f in w.advisory],
                 "unanswerable": [_finding_json(f) for f in w.unanswerable],
+                "satisfied": [
+                    {
+                        "kind": item.kind,
+                        "detail": item.detail,
+                        "set_id": item.set_id,
+                        "key": item.key,
+                        "org": item.org,
+                        "subject": item.subject,
+                        "field": item.field,
+                        "frame": item.frame,
+                        "name": item.name,
+                        "description": item.description,
+                        "field_description": item.field_description,
+                    }
+                    for item in w.satisfied
+                ],
             }
             for w in rows
         ],
@@ -18236,6 +18298,7 @@ routes = [
     Route("/api/graph/sets", api_graph_set_ids, methods=["GET"]),
     Route("/api/graph/setting-resolve/{value}", api_graph_setting_resolve, methods=["GET"]),
     Route("/api/graph/settings/{set_id}/{key}/chain", api_graph_settings_chain, methods=["GET"]),
+    Route("/api/graph/settings/{set_id}/{key}/check", api_graph_settings_check, methods=["GET"]),
     # Before {set_id}/{key}, or "contested" would be captured as a key.
     Route("/api/graph/settings/{set_id}/contested", api_graph_settings_contested, methods=["GET"]),
     Route("/api/graph/settings/{set_id}/{key}", api_graph_settings_get_by_key, methods=["GET"]),

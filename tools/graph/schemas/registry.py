@@ -150,6 +150,7 @@ class _FieldSpec:
     exists: str | None = None
     exists_frame: str | None = None
     names_host_env: bool = False
+    env_fallback_field: str | None = None
     severity: str | None = None
 
 
@@ -166,6 +167,7 @@ def field(
     exists: str | None = None,
     exists_frame: str | None = None,
     names_host_env: bool = False,
+    env_fallback_field: str | None = None,
     severity: str | None = None,
 ) -> Any:
     """Declare metadata for a SettingSchema field.
@@ -220,6 +222,12 @@ def field(
             the check say which name is unset, in the environment it
             looked in -- which is the process running the check, and is
             not the launcher's unless they are the same process.
+        env_fallback_field: sibling mapping whose keys are fixed environment
+            values applied before ``names_host_env`` forwarding. A named
+            variable already present there is satisfied even when the host
+            process does not override it. This mirrors the launcher's
+            effective-environment merge rather than checking one source in
+            isolation. Valid only with ``names_host_env``.
         severity: what an UNSATISFIED value here means. Blocking by
             default: whoever declares a requirement is saying it is
             needed. ``"advisory"`` says the thing degrades gracefully
@@ -245,6 +253,7 @@ def field(
         exists=exists,
         exists_frame=exists_frame,
         names_host_env=names_host_env,
+        env_fallback_field=env_fallback_field,
         severity=severity,
     )
 
@@ -303,6 +312,18 @@ def _build_metadata_from_spec(ann: Any, spec: _FieldSpec) -> dict:
         meta["exists_frame"] = spec.exists_frame
     if spec.names_host_env:
         meta["names_host_env"] = True
+    if spec.env_fallback_field is not None:
+        if not spec.names_host_env:
+            raise SchemaValidationError(
+                "env_fallback_field names the fixed environment used by a "
+                "host-env readiness check, but this field does not declare "
+                "names_host_env"
+            )
+        if not isinstance(spec.env_fallback_field, str) or not spec.env_fallback_field:
+            raise SchemaValidationError(
+                "env_fallback_field must be a non-empty sibling field name"
+            )
+        meta["env_fallback_field"] = spec.env_fallback_field
     if spec.severity is not None:
         if spec.severity not in VALID_SEVERITIES:
             raise SchemaValidationError(
@@ -1143,6 +1164,13 @@ class SettingSchema:
     type, required flag, enum choices, default value, and (for arrays)
     element shape. ``export_json_schema()`` synthesizes a json-schema
     dict from this metadata.
+
+    A schema whose integrity spans adjacent version fields or conventional
+    key joins may additionally declare ``readiness_findings(*, key, payload,
+    org, read)``.  The generic checker supplies its resolved-row reader and
+    converts the returned data-only issues into normal findings.  The hook is
+    evaluated on demand, never during a write, for the same reason as
+    ``field(exists=...)``.
     """
 
     set_id: str = ""

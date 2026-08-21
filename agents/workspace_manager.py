@@ -52,7 +52,9 @@ from agents.workspace_settings import (
     RepoMount,
     WorkspaceV1,
     WorkspaceMountInvalidError,
+    WorkspaceMountFrameError,
     WorkspaceMountMissingError,
+    WorkspaceCapabilityError,
 )
 from agents import mount_plan
 
@@ -788,12 +790,21 @@ def prepare_session_mounts(
     The returned dict maps host paths to ``container_path[:mode]`` strings,
     suitable for ``launch_session(mounts=...)``.
 
+    A broken enabled capability is refused before any clone, worktree or
+    mount side effect.  Composition keeps those issues on the affected
+    workspace so an unhealthy declaration does not hide healthy workspaces.
+
     ``progress_callback`` (auto-ja51w): optional ``(repo_index, total_repos,
     repo_name) -> None`` called once per repo as each completes. Used by
     ``api_session_create`` to broadcast per-repo progress to the SSE registry
     while this function runs inside ``asyncio.to_thread``. Callback exceptions
     are swallowed — progress reporting must never break the actual mount prep.
     """
+    if workspace.capability_issues:
+        raise WorkspaceCapabilityError(
+            workspace_id=workspace.id,
+            issues=workspace.capability_issues,
+        )
     mounts: dict[str, str] = {}
     total = len(workspace.repos)
     for idx, repo in enumerate(workspace.repos):
@@ -945,7 +956,7 @@ def _orgs_mount_context(topo) -> "tuple[str, str | None, bool] | None":
 
 
 def _resolve_org_mount(key, rs, orgs_ctx, org):
-    """Resolve one rev-2 workspace mount to ``(host_path, container_spec)``.
+    """Resolve one rev-2 mount to ``(host_path, container_spec, node_path)``.
 
     The hybrid resolver (graph b20f2468-b12): build
     ``orgs/<authenticated-org>/<subpath>`` in the node's own frame, realpath it
@@ -961,7 +972,7 @@ def _resolve_org_mount(key, rs, orgs_ctx, org):
     if orgs_ctx is None:
         # Containerized node without the autonomy-orgs volume: cannot resolve a
         # host path without fabricating one. Refuse loudly (deploy auto-m7vh7).
-        raise WorkspaceMountInvalidError(
+        raise WorkspaceMountFrameError(
             mount_key=key,
             reason=(
                 "autonomy-orgs volume is not mounted on this node; refusing to "
@@ -976,7 +987,7 @@ def _resolve_org_mount(key, rs, orgs_ctx, org):
     # would fabricate on the host. Refuse. Only host-process legitimately has no
     # host_source, and there the node view IS the host.
     if not is_host_process and (not host_source or not os.path.isabs(host_source)):
-        raise WorkspaceMountInvalidError(
+        raise WorkspaceMountFrameError(
             mount_key=key,
             reason=(
                 "autonomy-orgs host source is unknown or not absolute on this node; "
@@ -1058,7 +1069,94 @@ def _resolve_org_mount(key, rs, orgs_ctx, org):
     # daemon-host path in the node frame, which is the wrong-frame op this epic
     # removes.
     container_spec = mount_plan.BindRefuseMissing(f"{payload.container_path}:{payload.mode}")
-    return host_path, container_spec
+    return host_path, container_spec, resolved
+
+
+@dataclass(frozen=True)
+class VolumeMountReadinessIssue:
+    """A schema-hook finding produced by the launch mount resolver."""
+
+    kind: str
+    detail: str
+    field: str
+    subject: str
+    looked_in: str
+    severity: str = "blocking"
+    frame: str = "platform-host-volume"
+
+
+def check_org_mount_readiness(*, key: str, payload: dict, org: str):
+    """Check a VOLUME-origin mount through the exact launch resolver.
+
+    Presence and containment are blocking.  A present but empty target is
+    advisory: launch remains valid, but provisioning may not be complete.
+    A node that cannot see/translate ``autonomy-orgs`` reports an unanswered
+    question instead of guessing from the wrong filesystem.
+    """
+    from types import SimpleNamespace
+    from tools.graph.schemas.mount import WorkspaceMountV2
+
+    typed = WorkspaceMountV2.model_validate(payload)
+    if typed.subpath is None:
+        return ()
+    subject = f"orgs/{org}/{typed.subpath}"
+    rs = SimpleNamespace(payload=typed, org=org, state="")
+    try:
+        resolved_mount = _resolve_org_mount(
+            key, rs, _orgs_mount_context(mount_plan.discover_topology()), org,
+        )
+    except WorkspaceMountFrameError as exc:
+        return (VolumeMountReadinessIssue(
+            "unanswerable_here",
+            f"cannot answer whether {subject!r} is present: {exc.reason}",
+            "subpath",
+            subject,
+            "a process without a usable autonomy-orgs volume view",
+            frame="container-fs",
+        ),)
+    except WorkspaceMountMissingError:
+        return (VolumeMountReadinessIssue(
+            "missing_path",
+            f"subpath resolves to {subject!r}, which is not present",
+            "subpath",
+            subject,
+            "the node's autonomy-orgs volume",
+            "blocking" if typed.required else "advisory",
+        ),)
+    except WorkspaceMountInvalidError as exc:
+        return (VolumeMountReadinessIssue(
+            "invalid_mount",
+            exc.reason,
+            "subpath",
+            subject,
+            "the node's autonomy-orgs volume",
+        ),)
+    if resolved_mount is None:
+        return (VolumeMountReadinessIssue(
+            "missing_path",
+            f"optional subpath resolves to {subject!r}, which is not present",
+            "subpath",
+            subject,
+            "the node's autonomy-orgs volume",
+            "advisory",
+        ),)
+
+    _host_path, _container_spec, node_path = resolved_mount
+    if typed.kind == "file":
+        populated = os.path.getsize(node_path) > 0
+    else:
+        with os.scandir(node_path) as entries:
+            populated = next(entries, None) is not None
+    if not populated:
+        return (VolumeMountReadinessIssue(
+            "unpopulated_path",
+            f"{subject!r} is present but empty",
+            "subpath",
+            subject,
+            "the node's autonomy-orgs volume",
+            "advisory",
+        ),)
+    return ()
 
 
 def _apply_workspace_mount_settings(
@@ -1100,7 +1198,7 @@ def _apply_workspace_mount_settings(
             spec = _resolve_org_mount(key, rs, orgs_ctx, org)
             if spec is None:
                 continue
-            host_path, container_spec = spec
+            host_path, container_spec, _node_path = spec
             mounts[host_path] = container_spec
         else:
             # Deprecated host_path fallback (pre-fteke HOST behavior).

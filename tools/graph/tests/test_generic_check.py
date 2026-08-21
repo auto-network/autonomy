@@ -9,9 +9,9 @@ anyway.
 Two things it deliberately does not do. It does not run readiness checks at
 write — whether a file is present is a fact about the world, not the value,
 and enforcing it at write would make an organization's row refusable on one
-machine and acceptable on another. And it does not follow relationships
-carried only by key convention: it reaches exactly as far as the declarations
-go, and says so, rather than inventing an edge nobody stated.
+machine and acceptable on another. And it does not invent relationships:
+field references, key references, environment/path predicates and specialized
+schema hooks all have to be declared before the walk follows them.
 """
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ import pytest
 from tools.graph import settings_ops
 from tools.graph.db import GraphDB
 from tools.graph.schemas.registry import (
+    SchemaValidationError,
     SettingSchema,
     field,
     home,
@@ -719,6 +720,53 @@ def test_a_readiness_check_on_env_never_runs_at_write(env_org, monkeypatch):
     assert settings_ops.add_setting(
         "probe.check.env", 1, "w", {"wants": ["PROBE_AT_WRITE"]},
         org="acme", state="raw")
+
+
+def test_a_declared_fixed_environment_fallback_satisfies_the_name(
+    env_org, monkeypatch,
+):
+    @keyed_per_entity(key_strategy="probe_id")
+    class EffectiveEnv(SettingSchema):
+        set_id = "probe.check.effective-env"
+        schema_revision = 1
+        fixed: dict = field(required=True, description="fixed environment")
+        forwarded: list = field(
+            required=True,
+            description="host environment names",
+            element=str,
+            names_host_env=True,
+            env_fallback_field="fixed",
+        )
+
+    monkeypatch.delenv("PROBE_FIXED", raising=False)
+    settings_ops.add_setting(
+        "probe.check.effective-env", 1, "k",
+        {"fixed": {"PROBE_FIXED": "configured"}, "forwarded": ["PROBE_FIXED"]},
+        org="acme", state="raw",
+    )
+
+    findings, satisfied = settings_ops.inspect_setting(
+        "probe.check.effective-env", "k", org="acme",
+    )
+
+    assert findings == []
+    available = [item for item in satisfied if item.kind == "available_env"]
+    assert [item.subject for item in available] == ["PROBE_FIXED"]
+    assert "configured" not in available[0].detail
+    assert "fixed 'fixed' workspace environment" in available[0].detail
+
+
+def test_an_env_fallback_without_an_env_check_is_refused():
+    with pytest.raises(SchemaValidationError, match="does not declare names_host_env"):
+        @keyed_per_entity(key_strategy="probe_id")
+        class BadFallback(SettingSchema):
+            set_id = "probe.check.bad-env-fallback"
+            schema_revision = 1
+            value: str = field(
+                required=True,
+                description="not an environment variable name",
+                env_fallback_field="fixed",
+            )
 
 
 # ── a path whose filesystem is not this process's ────────────

@@ -7,9 +7,11 @@ mounted tool bundles, host proxy, hybrid), the package root holding the
 implementation's tools/skill/primer, and probe info that lets the runtime
 verify the capability is actually usable.
 
-This schema does **not** materialize anything into a workspace. Runtime
-materialization is the job of later beads — see graph://86e04207-a25
-§ "Runtime materialization and probe model".
+This schema does not materialize anything by itself. The workspace launcher
+resolves it through the enabled contract and organization installation,
+validates that versioned chain, and then projects its tools and primer into
+the workspace (see graph://86e04207-a25 § "Runtime materialization and probe
+model").
 
 Versioning semantics (mirrors the contract schema):
 

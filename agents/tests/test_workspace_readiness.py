@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import pytest
 
+from agents import mount_plan
+from agents import workspace_manager
 from agents.workspace_readiness import org_readiness, workspace_readiness
 from tools.graph import settings_ops
 from tools.graph.db import GraphDB
@@ -40,14 +42,16 @@ def test_a_workspace_needing_nothing_local_is_ready(org):
     assert workspace_readiness("docs", org="anchore").ready
 
 
-def test_a_credential_nobody_provisioned_stops_it(org):
+def test_a_repo_host_does_not_invent_a_secure_setting_dependency(org):
+    """Repository preparation consumes host SSH configuration, not a sealed
+    connector setting whose coincidental key resembles the remote host."""
     _workspace("eng", repos=[{"host": "github.com", "repo": "anchore/enterprise",
                               "mount": "/workspace/repo"}])
 
     result = workspace_readiness("eng", org="anchore")
 
-    assert not result.ready
-    assert any("secure.setting" in f.address for f in result.blocking)
+    assert result.ready
+    assert not any("secure.setting" in f.address for f in result.blocking)
 
 
 def test_an_unset_forwarded_variable_stops_it(org):
@@ -56,6 +60,20 @@ def test_an_unset_forwarded_variable_stops_it(org):
     result = workspace_readiness("eng", org="anchore")
 
     assert [f.kind for f in result.blocking] == ["missing_env"]
+
+
+def test_a_fixed_workspace_value_satisfies_a_forwarded_variable(org):
+    """Launch applies fixed env first and host env as an optional override."""
+    _workspace("eng", env={"GH_TOKEN": "configured"},
+               env_from_host=["GH_TOKEN"])
+
+    result = workspace_readiness("eng", org="anchore")
+
+    assert result.ready
+    assert any(
+        item.kind == "available_env" and item.subject == "GH_TOKEN"
+        for item in result.satisfied
+    )
 
 
 def test_a_local_clone_source_that_is_absent_does_not(org):
@@ -118,6 +136,138 @@ def test_every_workspace_the_org_declares_is_reported(org):
 
 def test_an_org_with_no_workspaces_reports_nothing_rather_than_failing(org):
     assert org_readiness("anchore") == []
+
+
+def test_absent_pinned_capability_implementation_version_blocks_workspace(org):
+    """An enabled install pinned to a vanished version is not launch-ready."""
+    _workspace("eng")
+    settings_ops.add_setting(
+        "autonomy.capability.contract", 1, "test_execution",
+        {
+            "name": "test_execution",
+            "version": 1,
+            "summary": "Run tests",
+            "ops": [{
+                "name": "run",
+                "summary": "Run selected tests",
+                "input_schema": {},
+                "output_schema": {},
+            }],
+        },
+        org="anchore",
+    )
+    settings_ops.add_setting(
+        "autonomy.capability.impl", 1, "autonomy/agent-test",
+        {
+            "name": "autonomy/agent-test",
+            "version": 5,
+            "implements": [{"contract": "test_execution", "version": 1}],
+            "delivery_mode": "mounted_tools",
+            "package_root": "agents/capabilities/agent-test",
+            "probe": {"kind": "command", "entrypoint": "agent-test doctor"},
+        },
+        org="anchore",
+    )
+    settings_ops.add_setting(
+        "autonomy.org.capability.install", 1, "test_execution",
+        {
+            "contract": "test_execution",
+            "contract_version": 1,
+            "implementation": "autonomy/agent-test",
+            "implementation_version": 3,
+        },
+        org="anchore",
+    )
+    settings_ops.add_setting(
+        "autonomy.workspace.capability.enable", 1,
+        "eng:test_execution",
+        {"contract": "test_execution", "contract_version": 1},
+        org="anchore",
+    )
+
+    result = workspace_readiness("eng", org="anchore")
+
+    assert not result.ready
+    broken = [
+        finding for finding in result.blocking
+        if finding.kind == "missing_capability_implementation_version"
+    ]
+    assert [finding.subject for finding in broken] == ["autonomy/agent-test@3"]
+
+
+def test_missing_capability_contract_is_one_specialized_factor(org):
+    _workspace("eng")
+    settings_ops.add_setting(
+        "autonomy.workspace.capability.enable", 1,
+        "eng:video_tooling",
+        {"contract": "video_tooling", "contract_version": 1},
+        org="anchore",
+    )
+
+    result = workspace_readiness("eng", org="anchore")
+
+    assert not result.ready
+    assert not any(f.kind == "missing_reference" for f in result.blocking)
+    assert [f.kind for f in result.blocking] == [
+        "missing_capability_install",
+        "missing_capability_contract_version",
+    ]
+
+
+def _volume_mount(*, required=True):
+    return {
+        "subpath": "fixtures",
+        "container_path": "/opt/fixtures",
+        "kind": "dir",
+        "required": required,
+    }
+
+
+def test_volume_mount_presence_is_blocking_and_empty_is_advisory(
+    org, monkeypatch,
+):
+    _workspace("eng")
+    monkeypatch.setattr(workspace_manager, "DATA_DIR", org)
+    monkeypatch.setattr(
+        mount_plan,
+        "discover_topology",
+        lambda: mount_plan.NodeTopology(is_host_process=True, volumes=()),
+    )
+    settings_ops.add_setting(
+        "autonomy.workspace.mount", 2, "eng:fixtures", _volume_mount(),
+        org="anchore",
+    )
+
+    absent = workspace_readiness("eng", org="anchore")
+    assert [f.kind for f in absent.blocking] == ["missing_path"]
+
+    target = org / "org-mounts" / "anchore" / "fixtures"
+    target.mkdir(parents=True)
+    empty = workspace_readiness("eng", org="anchore")
+    assert not empty.blocking
+    assert [f.kind for f in empty.advisory] == ["unpopulated_path"]
+
+    (target / "sentinel").write_text("ready")
+    assert workspace_readiness("eng", org="anchore").ready
+
+
+def test_volume_mount_is_unanswerable_without_volume_view(org, monkeypatch):
+    _workspace("eng")
+    monkeypatch.setattr(
+        mount_plan,
+        "discover_topology",
+        lambda: mount_plan.NodeTopology(is_host_process=False, volumes=()),
+    )
+    settings_ops.add_setting(
+        "autonomy.workspace.mount", 2, "eng:fixtures", _volume_mount(),
+        org="anchore",
+    )
+
+    result = workspace_readiness("eng", org="anchore")
+
+    assert not result.ready
+    assert [f.kind for f in result.unanswerable] == ["unanswerable_here"]
+    assert result.unanswerable[0].frame == "container-fs"
 
 
 def test_a_peers_workspace_is_not_this_operators_to_provision(org):

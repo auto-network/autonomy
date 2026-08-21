@@ -64,6 +64,10 @@ from tools.graph.schemas.capability_impl import (
     SET_ID as CAPABILITY_IMPL_SET_ID,
     SCHEMA_REVISION as CAPABILITY_IMPL_REVISION,
 )
+from tools.graph.schemas.capability_contract import (
+    SET_ID as CAPABILITY_CONTRACT_SET_ID,
+    SCHEMA_REVISION as CAPABILITY_CONTRACT_REVISION,
+)
 from tools.graph.schemas.org_capability_primer import (
     SET_ID as ORG_CAPABILITY_PRIMER_SET_ID,
     SCHEMA_REVISION as ORG_CAPABILITY_PRIMER_REVISION,
@@ -71,6 +75,10 @@ from tools.graph.schemas.org_capability_primer import (
     resolve_order as resolve_capability_primer_order,
 )
 from tools.graph.settings_ops import ResolvedSetting
+from tools.graph.capability_chain import (
+    CapabilityChainIssue,
+    validate_capability_chain,
+)
 from tools.data_paths import DATA_ROOT
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -109,6 +117,7 @@ _WORKSPACE_COMPOSITION_SET_IDS = frozenset({
     MOUNT_SET_ID,
     WORKSPACE_CAPABILITY_ENABLE_SET_ID,
     ORG_CAPABILITY_INSTALL_SET_ID,
+    CAPABILITY_CONTRACT_SET_ID,
     CAPABILITY_IMPL_SET_ID,
     ORG_CAPABILITY_PRIMER_SET_ID,
 })
@@ -197,6 +206,22 @@ class WorkspaceMountInvalidError(WorkspaceMountError):
         self.mount_key = mount_key
         self.reason = reason
         super().__init__(f"Invalid mount {mount_key!r}: {reason}")
+
+
+class WorkspaceMountFrameError(WorkspaceMountInvalidError):
+    """This process cannot see/translate the volume needed to answer."""
+
+
+class WorkspaceCapabilityError(WorkspaceSettingsError):
+    """An enabled capability has a broken contract/install/implementation edge."""
+
+    def __init__(self, *, workspace_id: str, issues: tuple[CapabilityChainIssue, ...]):
+        self.workspace_id = workspace_id
+        self.issues = issues
+        summary = "; ".join(issue.detail for issue in issues)
+        super().__init__(
+            f"Workspace {workspace_id!r} has an invalid enabled capability: {summary}"
+        )
 
 
 # ── Typed composition models ────────────────────────────────
@@ -410,6 +435,9 @@ class WorkspaceV1:
     the workspace-enable / org-install / impl chain (see
     :func:`resolve_capabilities`). Sorted by contract name for stable
     ordering across launches and primer renders.
+    ``capability_issues`` keeps broken enabled chains attached to their own
+    workspace so listing one unhealthy workspace does not hide every healthy
+    one; mount preparation refuses that workspace before creating anything.
     """
     id: str
     name: str
@@ -431,6 +459,7 @@ class WorkspaceV1:
     artifacts: tuple[ArtifactSpec, ...] = ()
     mounts: dict[str, ResolvedSetting] = field(default_factory=dict)
     capabilities: tuple[MaterializedCapability, ...] = ()
+    capability_issues: tuple[CapabilityChainIssue, ...] = ()
     #: Stated reason for mounting the LIVE host platform checkout (with its
     #: data/) instead of the default git snapshot. ``None`` = snapshot (the
     #: default for every workspace). Set only via the explicit
@@ -498,6 +527,7 @@ def _workspace_from_setting(
     artifacts: tuple[ArtifactSpec, ...],
     mounts: dict[str, ResolvedSetting],
     capabilities: tuple[MaterializedCapability, ...] = (),
+    capability_issues: tuple[CapabilityChainIssue, ...] = (),
 ) -> WorkspaceV1:
     """Compose a :class:`WorkspaceV1` from a resolved Setting payload.
 
@@ -577,6 +607,7 @@ def _workspace_from_setting(
         artifacts=artifacts,
         mounts=mounts,
         capabilities=capabilities,
+        capability_issues=capability_issues,
         host_root_mount_reason=host_root_mount_reason,
     )
 
@@ -717,8 +748,8 @@ def _impl_mount_target(name: str) -> str:
     return f"{CAPABILITIES_MOUNT_DIR}/{_impl_slug(name)}"
 
 
-def _read_capability_impls(*, org: str | None) -> dict[tuple[str, int], dict]:
-    """Return every visible ``autonomy.capability.impl#1`` keyed by ``(name, version)``.
+def _read_capability_impls(*, org: str | None) -> dict[str, dict]:
+    """Return every visible ``autonomy.capability.impl#1`` keyed by name.
 
     Implementations are typically published in a sharing org and consumed
     by every org that installs them, so peers stay enabled (the default
@@ -728,13 +759,22 @@ def _read_capability_impls(*, org: str | None) -> dict[tuple[str, int], dict]:
     if get_schema(CAPABILITY_IMPL_SET_ID, CAPABILITY_IMPL_REVISION) is None:
         return {}
     members = ops.read_set(CAPABILITY_IMPL_SET_ID, org=org).members
-    out: dict[tuple[str, int], dict] = {}
+    out: dict[str, dict] = {}
     for m in members:
         name = m.payload.get("name")
-        ver = m.payload.get("version")
-        if isinstance(name, str) and isinstance(ver, int):
-            out[(name, ver)] = m.payload
+        if isinstance(name, str):
+            out[name] = m.payload
     return out
+
+
+def _read_capability_contracts(*, org: str | None) -> dict[str, dict]:
+    """Return visible capability contracts keyed by their stable name."""
+    if get_schema(CAPABILITY_CONTRACT_SET_ID, CAPABILITY_CONTRACT_REVISION) is None:
+        return {}
+    return {
+        member.key: member.payload
+        for member in ops.read_set(CAPABILITY_CONTRACT_SET_ID, org=org).members
+    }
 
 
 def _materialize_tool_target(payload: Any) -> CapabilityToolTarget | None:
@@ -860,9 +900,9 @@ def resolve_capabilities(
     Returns a stable, contract-name-sorted tuple. An enable row with
     ``enabled: false`` is dropped — workspaces can opt out of an
     org-installed capability, which is the documented override behaviour
-    (graph://86e04207-a25). Schema-missing or chain-incomplete rows are
-    silently skipped so resolution stays best-effort: a deployment that
-    has only landed some of the four schemas keeps booting.
+    (graph://86e04207-a25). An enabled but incomplete or version-inconsistent
+    chain raises :class:`WorkspaceCapabilityError`; silently omitting it is a
+    false-successful launch, not a safe compatibility mode.
     """
     if get_schema(
         WORKSPACE_CAPABILITY_ENABLE_SET_ID,
@@ -876,34 +916,43 @@ def resolve_capabilities(
     if not enable_members:
         return ()
 
-    if get_schema(
-        ORG_CAPABILITY_INSTALL_SET_ID,
-        ORG_CAPABILITY_INSTALL_REVISION,
-    ) is None:
-        return ()
-    install_members = ops.read_set(
-        ORG_CAPABILITY_INSTALL_SET_ID, org=org, peers=[],
-    ).members
+    install_members = (
+        ops.read_set(
+            ORG_CAPABILITY_INSTALL_SET_ID, org=org, peers=[],
+        ).members
+        if get_schema(
+            ORG_CAPABILITY_INSTALL_SET_ID,
+            ORG_CAPABILITY_INSTALL_REVISION,
+        ) is not None
+        else ()
+    )
     install_by_contract: dict[str, dict] = {
         m.key: m.payload for m in install_members
     }
 
     impls = _read_capability_impls(org=org)
+    contracts = _read_capability_contracts(org=org)
     org_primers = _org_capability_primers(org=org)
-    return _resolve_capabilities_from_members(
-        workspace_id, enable_members, install_by_contract, impls, org_primers,
+    capabilities, issues = _resolve_capabilities_from_members(
+        workspace_id, enable_members, install_by_contract, contracts, impls,
+        org_primers,
     )
+    if issues:
+        raise WorkspaceCapabilityError(workspace_id=workspace_id, issues=issues)
+    return capabilities
 
 
 def _resolve_capabilities_from_members(
     workspace_id: str,
     enable_members: list[ResolvedSetting] | tuple[ResolvedSetting, ...],
     install_by_contract: dict[str, dict],
-    impls: dict[tuple[str, int], dict],
+    contracts: dict[str, dict],
+    impls: dict[str, dict],
     org_primers: dict[str, str] | None = None,
-) -> tuple[MaterializedCapability, ...]:
-    """Materialize one workspace from already-loaded capability Sets."""
+) -> tuple[tuple[MaterializedCapability, ...], tuple[CapabilityChainIssue, ...]]:
+    """Evaluate one workspace from already-loaded capability Sets."""
     out: list[MaterializedCapability] = []
+    broken: list[CapabilityChainIssue] = []
     prefix = f"{workspace_id}:"
     for em in enable_members:
         if not em.key.startswith(prefix):
@@ -915,29 +964,21 @@ def _resolve_capabilities_from_members(
         if enable_payload.get("enabled", True) is False:
             continue
         install = install_by_contract.get(contract_name)
-        if install is None:
+        impl_name = install.get("implementation") if install else None
+        chain, issues = validate_capability_chain(
+            contract_key=contract_name,
+            enable=enable_payload,
+            contract=contracts.get(contract_name),
+            install=install,
+            implementation=(impls.get(impl_name) if isinstance(impl_name, str) else None),
+        )
+        if issues:
+            broken.extend(issues)
             continue
-        contract_version = enable_payload.get("contract_version")
-        if contract_version is None:
-            contract_version = install.get("contract_version")
-        if contract_version is None:
+        if chain is None:
             continue
-        impl_name = install.get("implementation")
-        impl_version = install.get("implementation_version")
-        if not isinstance(impl_name, str) or not isinstance(impl_version, int):
-            continue
-        impl_payload = impls.get((impl_name, impl_version))
-        if impl_payload is None:
-            continue
-        # The implementation must declare it implements the resolved
-        # (contract, version). Without this guard the org could install
-        # an impl that has drifted to a different contract version.
-        declared = {
-            (r.get("contract"), r.get("version"))
-            for r in impl_payload.get("implements", [])
-        }
-        if (contract_name, contract_version) not in declared:
-            continue
+        install = dict(chain.install)
+        impl_payload = dict(chain.implementation)
         out.append(_materialize_capability(
             contract_name,
             enable_payload,
@@ -946,19 +987,22 @@ def _resolve_capabilities_from_members(
             (org_primers or {}).get(impl_name, ""),
         ))
     out.sort(key=lambda c: c.contract)
-    return tuple(out)
+    return tuple(out), tuple(broken)
 
 
 def _capabilities_by_workspace(
     workspace_ids: set[str], *, org: str | None,
-) -> dict[str, tuple[MaterializedCapability, ...]]:
+) -> tuple[
+    dict[str, tuple[MaterializedCapability, ...]],
+    dict[str, tuple[CapabilityChainIssue, ...]],
+]:
     """Resolve capability chains for many workspaces once per org."""
     empty = {workspace_id: () for workspace_id in workspace_ids}
     if get_schema(
         WORKSPACE_CAPABILITY_ENABLE_SET_ID,
         WORKSPACE_CAPABILITY_ENABLE_REVISION,
     ) is None:
-        return empty
+        return empty, dict(empty)
     enable_members = ops.read_set(
         WORKSPACE_CAPABILITY_ENABLE_SET_ID, org=org, peers=[],
     ).members
@@ -969,25 +1013,35 @@ def _capabilities_by_workspace(
         workspace_id, separator, _ = member.key.partition(":")
         if separator and workspace_id in grouped:
             grouped[workspace_id].append(member)
-    if not any(grouped.values()) or get_schema(
-        ORG_CAPABILITY_INSTALL_SET_ID,
-        ORG_CAPABILITY_INSTALL_REVISION,
-    ) is None:
-        return empty
-    install_by_contract = {
-        member.key: member.payload
-        for member in ops.read_set(
-            ORG_CAPABILITY_INSTALL_SET_ID, org=org, peers=[],
-        ).members
-    }
+    if not any(grouped.values()):
+        return empty, dict(empty)
+    install_by_contract = (
+        {
+            member.key: member.payload
+            for member in ops.read_set(
+                ORG_CAPABILITY_INSTALL_SET_ID, org=org, peers=[],
+            ).members
+        }
+        if get_schema(
+            ORG_CAPABILITY_INSTALL_SET_ID,
+            ORG_CAPABILITY_INSTALL_REVISION,
+        ) is not None
+        else {}
+    )
     impls = _read_capability_impls(org=org)
+    contracts = _read_capability_contracts(org=org)
     org_primers = _org_capability_primers(org=org)
-    return {
+    evaluated = {
         workspace_id: _resolve_capabilities_from_members(
-            workspace_id, members, install_by_contract, impls, org_primers,
+            workspace_id, members, install_by_contract, contracts, impls,
+            org_primers,
         )
         for workspace_id, members in grouped.items()
     }
+    return (
+        {workspace_id: result[0] for workspace_id, result in evaluated.items()},
+        {workspace_id: result[1] for workspace_id, result in evaluated.items()},
+    )
 
 
 def _compose_workspaces(
@@ -1002,7 +1056,9 @@ def _compose_workspaces(
     workspace_ids = {member.key for member in members}
     artifacts = _artifacts_by_workspace(workspace_ids, org=org)
     mounts = _mounts_by_workspace(workspace_ids, org=org)
-    capabilities = _capabilities_by_workspace(workspace_ids, org=org)
+    capabilities, capability_issues = _capabilities_by_workspace(
+        workspace_ids, org=org,
+    )
     return {
         member.key: _workspace_from_setting(
             member.payload,
@@ -1011,6 +1067,7 @@ def _compose_workspaces(
             artifacts=artifacts[member.key],
             mounts=mounts[member.key],
             capabilities=capabilities[member.key],
+            capability_issues=capability_issues[member.key],
         )
         for member in members
     }

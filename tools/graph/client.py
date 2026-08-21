@@ -884,6 +884,28 @@ class HttpClient:
         except LookupError:
             return None
 
+    def check_setting(self, set_id, key, *, org):
+        """Return schema-driven readiness findings for one Setting row."""
+        findings, _satisfied = self.inspect_setting(set_id, key, org=org)
+        return findings
+
+    def inspect_setting(self, set_id, key, *, org):
+        """Return failures and positive evidence from the dashboard check."""
+        from .settings_ops import CheckFinding
+        from .settings_ops import CheckPassed
+
+        org = _resolve_client_org_arg(org)
+        result = self._request(
+            "GET",
+            f"/api/graph/settings/{urllib.parse.quote(set_id, safe='')}/"
+            f"{urllib.parse.quote(key, safe='')}/check",
+            headers=_settings_headers(org),
+        )
+        return (
+            [CheckFinding(**item) for item in result.get("findings", [])],
+            [CheckPassed(**item) for item in result.get("satisfied", [])],
+        )
+
     def contested_keys(self, set_id, *, org):
         """Keys of *set_id* with more than one eligible signed slot at the
         winning rung and store — the organization is contesting the value.

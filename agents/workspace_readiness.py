@@ -45,6 +45,9 @@ class WorkspaceReadiness:
     #: as satisfied, and reported separately so a check run somewhere
     #: unhelpful cannot read as a clean result.
     unanswerable: list = _dc_field(default_factory=list)
+    #: Predicates answered and satisfied during the same traversal. Values
+    #: never travel; environment evidence contains names and source only.
+    satisfied: list = _dc_field(default_factory=list)
 
     @property
     def ready(self) -> bool:
@@ -73,7 +76,9 @@ def workspace_readiness(workspace_id: str, *, org: str) -> WorkspaceReadiness:
     """What one workspace still needs here."""
     row = settings_ops.read_set_key(WORKSPACE_SET_ID, workspace_id, org=org)
     payload = (row or {}).get("payload") or {}
-    findings = settings_ops.check_setting(WORKSPACE_SET_ID, workspace_id, org=org)
+    findings, satisfied = settings_ops.inspect_setting(
+        WORKSPACE_SET_ID, workspace_id, org=org,
+    )
     blocking, advisory, unanswerable = _classify(findings)
     return WorkspaceReadiness(
         workspace_id=workspace_id,
@@ -82,6 +87,7 @@ def workspace_readiness(workspace_id: str, *, org: str) -> WorkspaceReadiness:
         blocking=blocking,
         advisory=advisory,
         unanswerable=unanswerable,
+        satisfied=satisfied,
     )
 
 

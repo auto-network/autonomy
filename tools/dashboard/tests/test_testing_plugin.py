@@ -116,6 +116,10 @@ def test_manifest_links_testing_ui_to_agent_test_capability() -> None:
     assert json.loads((PLUGIN_DIR / "settings/capability_impl.json").read_text()) == json.loads(
         (capability_root / "manifest.json").read_text()
     )
+    install = json.loads((PLUGIN_DIR / "settings/capability_install.json").read_text())
+    implementation = json.loads((PLUGIN_DIR / "settings/capability_impl.json").read_text())
+    assert install["implementation"] == implementation["name"]
+    assert install["implementation_version"] == implementation["version"]
 
 
 def test_ui_has_pinned_org_picker_and_bounded_evidence_surfaces() -> None:

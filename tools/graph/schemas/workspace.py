@@ -68,16 +68,16 @@ class WorkspaceRepoV1(SettingSchema):
     repository that has no remote at all. The clone URL is composed from
     whichever form is present.
 
-    The host is stored rather than parsed back out of a clone URL, because
-    it is what a credential is keyed by: stating it makes the reference a
-    plain value and the check a plain lookup. A local-first repository
-    needs no credential, and says so by having no host rather than by
-    omitting a field.
+    The host is stored rather than parsed back out of a clone URL because it
+    is part of the remote's address and may be an SSH config alias.  It is
+    not a reference to ``autonomy.secure.setting``: repository preparation
+    uses the dashboard host's SSH configuration/agent, and pretending it
+    consumes an unrelated sealed connector secret makes a viable repository
+    fail readiness without changing what launch does.
 
     Declared rather than checked imperatively, so the entry's shape is
-    metadata: enforcement reads it, and so does the reference check that
-    reports an unprovisioned credential. A shape that lives only in a
-    validate() body is invisible to both.
+    metadata. A shape that lives only in a validate() body is invisible to
+    generic tooling.
     """
 
     internal = True
@@ -89,8 +89,6 @@ class WorkspaceRepoV1(SettingSchema):
             "config alias. Credentials are per host, so this is what "
             "selects one"
         ),
-        references="autonomy.secure.setting",
-        reference_scope="org",
     )
     repo: str = field(
         required=False,
@@ -307,6 +305,10 @@ class WorkspaceV1(SettingSchema):
         "env_from_host": {
             "type": "array",
             "names_host_env": True,
+            # Launch starts with ``env`` and then overlays host values that
+            # exist. A fixed value therefore satisfies the requirement even
+            # when the optional host override is absent.
+            "env_fallback_field": "env",
             "description": "Names of host env vars to forward into the container",
             "element": {"type": "string"},
         },

@@ -17,7 +17,7 @@ from __future__ import annotations
 import pytest
 
 from agents.workspace_readiness import org_readiness
-from tools.dashboard.server import _things_missing
+from tools.dashboard.server import _things_missing, _things_satisfied
 from tools.graph import settings_ops
 from tools.graph.db import GraphDB
 
@@ -63,6 +63,11 @@ def _things(kind=None):
     return [t for t in out if kind is None or t["kind"] == kind]
 
 
+def _satisfied(kind=None):
+    out = _things_satisfied(org_readiness("anchore"))
+    return [t for t in out if kind is None or t["kind"] == kind]
+
+
 # ── one fact, however many workspaces want it ────────────────
 
 
@@ -89,6 +94,22 @@ def test_one_missing_variable_wanted_by_two_workspaces_is_one_thing(org):
     assert len(things) == 1
     assert things[0]["subject"] == "GH_TOKEN"
     assert sorted(things[0]["needed_by"]) == ["Alpha", "Beta"]
+
+
+def test_positive_env_evidence_is_deduped_and_never_exposes_the_value(org):
+    for ws in ("alpha", "beta"):
+        _workspace(
+            ws,
+            env={"GH_TOKEN": "must-not-travel"},
+            env_from_host=["GH_TOKEN"],
+        )
+
+    things = _satisfied("available_env")
+
+    assert len(things) == 1
+    assert sorted(things[0]["used_by"]) == ["Alpha", "Beta"]
+    assert all(item["subject"] == "GH_TOKEN" for item in things)
+    assert "must-not-travel" not in str(things)
 
 
 def test_different_things_do_not_collapse_into_each_other(org):

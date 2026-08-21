@@ -12,10 +12,10 @@ defaults the runtime needs to materialize that implementation:
   time — e.g. the Jira base URL, account email, and token-file PATH; the
   secret itself stays in the host file, never in the graph)
 
-This schema does **not** materialize anything in a workspace. It only
-declares what the org *would* materialize when a workspace enables the
-contract. The actual materialization runs at workspace launch through a
-later bead (see graph://86e04207-a25 § Runtime materialization).
+This schema does not materialize anything by itself. It declares what the
+workspace launcher materializes when a workspace enables the contract; the
+launcher and readiness checker share the same versioned-chain validator (see
+graph://86e04207-a25 § Runtime materialization).
 
 Versioning semantics: identifiers in ``contract`` and ``implementation``
 are unpinned strings; the integer ``contract_version`` and
