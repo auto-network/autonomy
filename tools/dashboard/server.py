@@ -5854,6 +5854,9 @@ async def api_session_notify(request):
 
 async def api_agent_test_leases(request):
     """Acquire, renew, release, or inspect machine-wide Agent Test slots."""
+    auth_error = api_auth.require_authenticated_api_caller(request)
+    if auth_error is not None:
+        return auth_error
     body = await request.json()
     if not isinstance(body, dict):
         return JSONResponse({"ok": False, "error": "JSON object required"}, status_code=400)
@@ -5864,6 +5867,9 @@ async def api_agent_test_leases(request):
 
 
 async def api_agent_test_telemetry(request):
+    auth_error = api_auth.require_authenticated_api_caller(request)
+    if auth_error is not None:
+        return auth_error
     body = await request.json()
     if not isinstance(body, dict):
         return JSONResponse({"ok": False, "error": "JSON object required"}, status_code=400)
@@ -5883,6 +5889,9 @@ async def api_agent_test_telemetry(request):
 
 async def api_agent_test_durations(request):
     """Append, query, or estimate capped per-test duration history."""
+    auth_error = api_auth.require_authenticated_api_caller(request)
+    if auth_error is not None:
+        return auth_error
     body = await request.json()
     if not isinstance(body, dict):
         return JSONResponse({"ok": False, "error": "JSON object required"}, status_code=400)
@@ -8555,7 +8564,8 @@ async def api_session_create(request):
             harness_token=host_creds.get("harness_token"),
         )
         host_cmd = (
-            f"CLAUDE_CODE_OAUTH_TOKEN={shlex.quote(host_creds['token'])} "
+            _mint_host_session_token(tmux_name)
+            + f"CLAUDE_CODE_OAUTH_TOKEN={shlex.quote(host_creds['token'])} "
             f"BD_ACTOR=terminal:{tmux_name} AUTONOMY_SESSION={tmux_name} "
             f"claude --dangerously-skip-permissions --model {model}"
         )
@@ -8684,6 +8694,26 @@ async def api_session_create(request):
         return JSONResponse(resp, status_code=202)
 
 
+def _mint_host_session_token(tmux_name: str) -> str:
+    """Mint an org-less local-operator session token for a host session and
+    return the ``CROSSTALK_TOKEN=...`` shell prefix that delivers it.
+
+    A host session IS a local operator — its session row is type ``host``, so
+    :func:`_is_local_caller` classifies its token as ``LOCAL_SESSION`` with
+    full authority — but it reaches the dashboard over HTTP with no bearer, so
+    the authenticated-reader guards refuse it. Minting a bearer (org ``None``,
+    the deliberate local value :func:`authenticate_session_request` requires
+    for a host session) lets the host CLI authenticate exactly as a container
+    does, granting it no org's scope in the process.
+    """
+    import secrets
+
+    raw_token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+    auth_db.insert_token(token_hash, tmux_name, None)
+    return f"CROSSTALK_TOKEN={shlex.quote(raw_token)} "
+
+
 def _build_host_resume_cmd(
     *,
     tmux_name: str,
@@ -8692,7 +8722,10 @@ def _build_host_resume_cmd(
     session_uuid: str,
 ) -> str:
     """Shell command that relaunches a host session's own harness CLI."""
-    env_prefix = f"BD_ACTOR=terminal:{tmux_name} AUTONOMY_SESSION={tmux_name} "
+    env_prefix = (
+        _mint_host_session_token(tmux_name)
+        + f"BD_ACTOR=terminal:{tmux_name} AUTONOMY_SESSION={tmux_name} "
+    )
     if harness == "codex":
         # session_uuid is the rollout filename stem; codex resume needs
         # the canonical UUID tail (same extraction the launcher uses).
