@@ -185,10 +185,18 @@ def transact(action: str, body: dict[str, Any]) -> dict[str, Any]:
             )
             current_pending = [item for item in pending if item["key"] != lease_id]
             current_pending.append({"id": "", "key": lease_id, **queued_payload})
+            queue_position, wait_low, wait_high = _queue_estimate(
+                current_pending, leases, lease_id, now,
+            )
             return {
                 "ok": True,
                 "state": "queued",
                 "unavailable": unavailable,
+                "queue_position": queue_position,
+                "queue_depth": len(current_pending),
+                "estimated_wait_seconds": wait_high,
+                "estimated_wait_low_seconds": wait_low,
+                "estimated_wait_high_seconds": wait_high,
                 **_status(limits, leases, current_pending),
             }
         _remove_pending(waiting)
@@ -228,6 +236,40 @@ def _status(
         "queued_requests": len(pending),
         "queued": queued,
     }
+
+
+def _queue_estimate(
+    pending: list[dict[str, Any]],
+    leases: list[dict[str, Any]],
+    lease_id: str,
+    now: float,
+) -> tuple[int, int, int]:
+    """Return FIFO position and bounded wait range for one queued request.
+
+    Unknown runtimes deliberately fall back to the lease expiry window.  This
+    keeps the estimate honest while still surfacing a number that can reveal a
+    dead coordinator instead of leaving an agent in an apparently infinite wait.
+    """
+    ordered = sorted(pending, key=lambda item: (float(item.get("requested_at") or 0), item.get("run_id", "")))
+    try:
+        position = next(index for index, item in enumerate(ordered, 1) if item.get("key") == lease_id)
+    except StopIteration:
+        return 0, 0, 0
+    ahead = ordered[: position - 1]
+    low = high = 0.0
+    for item in leases + ahead:
+        elapsed = max(0.0, now - float(item.get("acquired_at") or now))
+        estimate = float(item.get("estimated_seconds") or 0)
+        low_estimate = float(item.get("estimated_low_seconds") or estimate or 0)
+        high_estimate = float(item.get("estimated_high_seconds") or estimate or 0)
+        if item in leases:
+            low_estimate = max(0.0, low_estimate - elapsed) if low_estimate else 0.0
+            high_estimate = max(0.0, high_estimate - elapsed) if high_estimate else 0.0
+            if not high_estimate:
+                high_estimate = max(0.0, float(item.get("expires_at") or now) - now)
+        low += low_estimate
+        high += high_estimate
+    return position, int(round(low)), int(round(high))
 
 
 def activity_snapshot(organization: str) -> dict[str, Any]:

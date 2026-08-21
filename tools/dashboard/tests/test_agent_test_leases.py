@@ -50,8 +50,14 @@ def test_machine_store_enforces_cross_container_resource_capacity(tmp_path, monk
 
     assert first["state"] == "granted"
     assert test_waiter["state"] == "queued"
+    assert test_waiter["queue_position"] == 1
+    assert test_waiter["queue_depth"] == 1
+    assert test_waiter["estimated_wait_low_seconds"] == 30
+    assert test_waiter["estimated_wait_high_seconds"] == 70
     assert test_waiter["unavailable"]["tests"] == {"requested": 7, "used": 10, "limit": 16}
     assert browser_waiter["state"] == "queued"
+    assert browser_waiter["queue_position"] == 2
+    assert browser_waiter["queue_depth"] == 2
     assert browser_waiter["unavailable"]["browsers"] == {"requested": 2, "used": 3, "limit": 4}
     status = agent_test_leases.transact("status", {})
     assert status["used"] == {"tests": 10, "browsers": 3}

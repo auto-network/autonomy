@@ -706,11 +706,22 @@ def cmd_status(args: argparse.Namespace) -> int:
                     f"{format_estimate(elapsed)} elapsed. Completion notification is still authoritative."
                 )
         elif manifest.get("status") == "queued":
+            lease = manifest.get("machine_lease") or {}
+            position = lease.get("queue_position")
+            depth = lease.get("queue_depth")
+            wait_low = lease.get("estimated_wait_low_seconds")
+            wait_high = lease.get("estimated_wait_high_seconds")
+            queue_text = f" Queue position {position} of {depth}." if position and depth else ""
+            wait_text = ""
+            if isinstance(wait_low, (int, float)) and isinstance(wait_high, (int, float)):
+                wait_text = f" Estimated wait: ~{format_estimate(float(wait_low))}–{format_estimate(float(wait_high))}."
+            elif isinstance(lease.get("estimated_wait_seconds"), (int, float)):
+                wait_text = f" Estimated wait: ~{format_estimate(float(lease['estimated_wait_seconds']))}."
             estimate_text = (
                 f" Estimated runtime after admission: ~{format_estimate(float(estimate))}."
                 if isinstance(estimate, (int, float)) and estimate > 0 else ""
             )
-            print(f"Waiting for machine capacity.{estimate_text}")
+            print(f"Waiting for machine capacity.{queue_text}{wait_text}{estimate_text}")
         else:
             print("ETA unknown: matching timing history is not available yet.")
         print("The run is supervised in the background; completion will be delivered automatically. Do not poll status again.")

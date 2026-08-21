@@ -23,6 +23,8 @@ from .lease_client import (
     run_result_request,
     telemetry_request,
 )
+
+DEFAULT_COORDINATOR_UNAVAILABLE_SECONDS = 90.0
 from .store import atomic_write_json, read_json, update_manifest, utc_now
 from .timing import aggregate_test_durations
 
@@ -47,6 +49,7 @@ def _acquire_machine_lease(directory: Path, manifest: dict[str, Any]) -> tuple[s
     estimate = manifest.get("duration_estimate") or {}
     queue_reported = False
     coordinator_error_reported = False
+    coordinator_unavailable_since: float | None = None
     while not _stop_requested:
         result = lease_request(
             "acquire",
@@ -92,12 +95,19 @@ def _acquire_machine_lease(directory: Path, manifest: dict[str, Any]) -> tuple[s
                         "lease_id": lease_id,
                         "resources": resources,
                         "unavailable": result.get("unavailable"),
+                        "queue_position": result.get("queue_position"),
+                        "queue_depth": result.get("queue_depth"),
+                        "estimated_wait_seconds": result.get("estimated_wait_seconds"),
+                        "estimated_wait_low_seconds": result.get("estimated_wait_low_seconds"),
+                        "estimated_wait_high_seconds": result.get("estimated_wait_high_seconds"),
                     },
                 },
             )
             time.sleep(2)
             continue
         if result.get("unavailable") and mode == "auto":
+            if coordinator_unavailable_since is None:
+                coordinator_unavailable_since = time.time()
             if not coordinator_error_reported:
                 error_request(
                     "admission",
@@ -106,6 +116,23 @@ def _acquire_machine_lease(directory: Path, manifest: dict[str, Any]) -> tuple[s
                     run_id=run_id,
                 )
                 coordinator_error_reported = True
+            if time.time() - coordinator_unavailable_since >= DEFAULT_COORDINATOR_UNAVAILABLE_SECONDS:
+                detail = str(result.get("error") or "machine capacity coordinator unavailable")
+                error_request("admission", "coordinator_timeout", detail, run_id=run_id)
+                update_manifest(
+                    directory,
+                    {
+                        "status": "error",
+                        "machine_lease": {
+                            "state": "coordinator_unavailable",
+                            "lease_id": lease_id,
+                            "resources": resources,
+                            "reason": detail,
+                        },
+                        "error": "machine capacity coordinator unavailable; admission stopped",
+                    },
+                )
+                return None, detail
             update_manifest(
                 directory,
                 {
