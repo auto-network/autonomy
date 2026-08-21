@@ -5,8 +5,20 @@
  * module free of DOM, storage, and transport dependencies.
  */
 
+import {
+  deriveEncapsulationKeypair,
+  openSealedArmor,
+  sealToEncapsulationKey,
+} from './sealing.js';
+
 const ARMOR_BEGIN = '-----BEGIN AUTONOMY NETWORK ROOT KEY-----';
 const ARMOR_END = '-----END AUTONOMY NETWORK ROOT KEY-----';
+
+// The one label a passkey factor is derived and sealed under — the SAME
+// vault-factor purpose the enrollment ceremony derives the provisioning key
+// under (one key, one label). Mirrors idkit.armor.PASSKEY_ARMOR_PURPOSE.
+const PASSKEY_ARMOR_PURPOSE = 'autonomy/vault-factor/v1';
+const CREDENTIAL_ID_RE = /^[A-Za-z0-9_-]{1,256}$/;
 
 // Raw 32-byte Ed25519 signing seed -> PKCS#8 (RFC 8410).
 const PKCS8_ED25519_PREFIX = [
@@ -223,6 +235,14 @@ const V2_FACTOR_COMMITMENTS = {
     iterations: f.kdf.iterations,
   }),
   recovery: (f) => ({ type: 'recovery', kem_pub: f.kem_pub }),
+  // Plural: one per full passkey, pinned by BOTH the credential and the
+  // encapsulation pub the master KEK is sealed to — so a factor cannot be
+  // swapped for one that opens under a different device's ceremony unnoticed.
+  passkey: (f) => ({
+    type: 'passkey',
+    credential_id: f.credential_id,
+    kem_pub: f.kem_pub,
+  }),
 };
 
 // A digest over the factor SET. Each factor's wrap is already bound to its own
@@ -241,7 +261,10 @@ async function v2FactorCommitment(factors) {
     }
     return contribute(f);
   });
-  items.sort((a, b) => (a.type < b.type ? -1 : a.type > b.type ? 1 : 0));
+  // Sorted by the whole canonical item, not just type: passkey factors repeat
+  // the type, so a type-only key would not be a total order over the set.
+  const keyOf = (x) => canonicalJson(x);
+  items.sort((a, b) => (keyOf(a) < keyOf(b) ? -1 : keyOf(a) > keyOf(b) ? 1 : 0));
   const digest = new Uint8Array(await webCrypto.subtle.digest(
     'SHA-256', textEncoder.encode(canonicalJson(items)),
   ));
@@ -282,7 +305,24 @@ function parseV2PasswordFactor(f) {
 // The registry IS the parser table: total dispatch by construction, so a type
 // cannot be accepted without a strict parser (F4 — otherwise I1 reopens when a
 // new lock type is added).
-const V2_FACTOR_PARSERS = { password: parseV2PasswordFactor };
+function parseV2PasskeyFactor(f) {
+  if (
+    !sameKeys(f, ['type', 'credential_id', 'kem_pub', 'sealed'])
+    || typeof f.credential_id !== 'string'
+    || !CREDENTIAL_ID_RE.test(f.credential_id)
+    || typeof f.kem_pub !== 'string'
+    || !/^[0-9a-f]{64}$/.test(f.kem_pub)
+    // suite(1) + X25519 enc(32) + ChaCha20-Poly1305 of a 32-byte KEK (32+16)
+    || canonicalBase64Length(f.sealed) !== 81
+  ) {
+    throw new Error('v2 passkey factor is malformed');
+  }
+}
+
+const V2_FACTOR_PARSERS = {
+  password: parseV2PasswordFactor,
+  passkey: parseV2PasskeyFactor,
+};
 
 function parseArmor(armorText) {
   if (typeof armorText !== 'string') throw new Error('armor must be text');
@@ -325,8 +365,10 @@ function parseArmor(armorText) {
     }
     const parser = V2_FACTOR_PARSERS[f.type];
     if (!parser) throw new Error(`v2 factor has unknown type ${f.type}`);
-    if (seen.has(f.type)) throw new Error(`v2 duplicate factor type ${f.type}`);
-    seen.add(f.type);
+    // Singular types dedupe on type; passkey is plural (one per credential).
+    const dedupKey = f.type === 'passkey' ? `passkey:${f.credential_id}` : f.type;
+    if (seen.has(dedupKey)) throw new Error(`v2 duplicate factor ${dedupKey}`);
+    seen.add(dedupKey);
     parser(f); // total dispatch — a known type always has a strict parser
   }
   return data;
@@ -447,6 +489,183 @@ async function encryptArmor(
   }
 }
 
+// ── passkey factor (the browser half of idkit.armor's passkey factor) ─────
+//
+// The ceremony runs here, where the master KEK lives: open the armor with the
+// password, seal the master KEK to a passkey's provisioning key (its public
+// half), reseal the seed to the new factor set, and hand the updated armor to
+// the server to store. Opening with a passkey is the passkey-only unlock. Byte-
+// identical to idkit.armor, guarded by test_passkey_armor_factor_crossimpl.
+
+async function v2MasterKekFromPassword(data, passphrase) {
+  const pw = data.factors.find((f) => f.type === 'password');
+  if (!pw) throw new Error('v2 armor has no password factor to open with a passphrase');
+  const material = await webCrypto.subtle.importKey(
+    'raw', textEncoder.encode(passphrase), 'PBKDF2', false, ['deriveKey'],
+  );
+  const pwKey = await webCrypto.subtle.deriveKey(
+    {
+      name: 'PBKDF2', salt: b64ToBytes(pw.kdf.salt),
+      iterations: pw.kdf.iterations, hash: 'SHA-256',
+    },
+    material, { name: 'AES-GCM', length: 256 }, false, ['decrypt'],
+  );
+  try {
+    return new Uint8Array(await webCrypto.subtle.decrypt(
+      {
+        name: 'AES-GCM', iv: b64ToBytes(pw.iv),
+        additionalData: v2FactorAad(data.root_pub, 'password'),
+      },
+      pwKey, b64ToBytes(pw.wrap),
+    ));
+  } catch {
+    throw new Error('wrong passphrase (the key blob did not open)');
+  }
+}
+
+function emitV2(data) {
+  const b64 = bytesToB64(textEncoder.encode(canonicalJson(data)));
+  return `${ARMOR_BEGIN}\n${b64.match(/.{1,64}/g).join('\n')}\n${ARMOR_END}`;
+}
+
+// Recover the seed under the CURRENT commitment, then commit to the new one —
+// the mutation these factor operations share. Needs the master KEK, which is
+// exactly the authority that separates an owner editing their own locks from
+// someone editing the file behind their back.
+async function resealSeedToFactorSet(data, masterKek, previousFactors) {
+  const kekKey = await webCrypto.subtle.importKey(
+    'raw', masterKek, { name: 'AES-GCM', length: 256 }, false, ['decrypt', 'encrypt'],
+  );
+  let seed;
+  try {
+    seed = new Uint8Array(await webCrypto.subtle.decrypt(
+      {
+        name: 'AES-GCM', iv: b64ToBytes(data.kek_seal.iv),
+        additionalData: await v2SealAad(data.root_pub, previousFactors),
+      },
+      kekKey, b64ToBytes(data.kek_seal.ct),
+    ));
+  } catch {
+    throw new Error('could not recover the seed to reseal the factor set');
+  }
+  const sealIv = webCrypto.getRandomValues(new Uint8Array(12));
+  const sealCt = new Uint8Array(await webCrypto.subtle.encrypt(
+    {
+      name: 'AES-GCM', iv: sealIv,
+      additionalData: await v2SealAad(data.root_pub, data.factors),
+    },
+    kekKey, seed,
+  ));
+  seed.fill(0);
+  data.kek_seal = {
+    cipher: 'AES-256-GCM', iv: bytesToB64(sealIv), ct: bytesToB64(sealCt),
+  };
+}
+
+async function addPasskeyFactor(armorText, passphrase, credentialId, passkeyKemPubHex) {
+  if (typeof credentialId !== 'string' || !CREDENTIAL_ID_RE.test(credentialId)) {
+    throw new Error('credential_id must be base64url (the WebAuthn rawId)');
+  }
+  if (typeof passkeyKemPubHex !== 'string' || !/^[0-9a-f]{64}$/.test(passkeyKemPubHex)) {
+    throw new Error('passkey_kem_pub must be 64 lowercase hex chars');
+  }
+  const data = parseArmor(armorText);
+  if (data.factors.some((f) => f.type === 'passkey' && f.credential_id === credentialId)) {
+    throw new Error('this armor already carries a factor for that passkey');
+  }
+  const masterKek = await v2MasterKekFromPassword(data, passphrase);
+  try {
+    const previousFactors = data.factors.slice();
+    const sealed = await sealToEncapsulationKey(
+      masterKek, passkeyKemPubHex, PASSKEY_ARMOR_PURPOSE,
+    );
+    data.factors = [...data.factors, {
+      type: 'passkey',
+      credential_id: credentialId,
+      kem_pub: passkeyKemPubHex,
+      sealed: bytesToB64(sealed),
+    }];
+    await resealSeedToFactorSet(data, masterKek, previousFactors);
+    return emitV2(parseArmor(emitV2(data)));
+  } finally {
+    masterKek.fill(0);
+  }
+}
+
+async function removePasskeyFactor(armorText, passphrase, credentialId) {
+  const data = parseArmor(armorText);
+  const remaining = data.factors.filter(
+    (f) => !(f.type === 'passkey' && f.credential_id === credentialId),
+  );
+  if (remaining.length === data.factors.length) {
+    throw new Error('this armor carries no passkey factor for that credential');
+  }
+  if (remaining.length === 0) {
+    throw new Error(
+      'refusing to remove the last factor: an armor nothing can open is a '
+      + 'destroyed identity, not a hardened one',
+    );
+  }
+  const masterKek = await v2MasterKekFromPassword(data, passphrase);
+  try {
+    const previousFactors = data.factors.slice();
+    data.factors = remaining;
+    await resealSeedToFactorSet(data, masterKek, previousFactors);
+    return emitV2(parseArmor(emitV2(data)));
+  } finally {
+    masterKek.fill(0);
+  }
+}
+
+async function decryptArmorWithPasskey(armorText, prfOutput) {
+  const data = parseArmor(armorText);
+  const prf = new Uint8Array(prfOutput);
+  const { publicKeyHex } = await deriveEncapsulationKeypair(prf, PASSKEY_ARMOR_PURPOSE);
+  const factor = data.factors.find(
+    (f) => f.type === 'passkey' && f.kem_pub === publicKeyHex,
+  );
+  if (!factor) {
+    throw new Error('no passkey factor on this armor opens with that ceremony output');
+  }
+  let masterKek;
+  try {
+    masterKek = await openSealedArmor(
+      {
+        sealed_root_key: bytesToHex(b64ToBytes(factor.sealed)),
+        seal_purpose: PASSKEY_ARMOR_PURPOSE,
+      },
+      prf,
+    );
+  } catch {
+    throw new Error('the passkey factor does not open with that ceremony output');
+  }
+  const kekKey = await webCrypto.subtle.importKey(
+    'raw', masterKek, { name: 'AES-GCM', length: 256 }, false, ['decrypt'],
+  );
+  let seed;
+  try {
+    seed = new Uint8Array(await webCrypto.subtle.decrypt(
+      {
+        name: 'AES-GCM', iv: b64ToBytes(data.kek_seal.iv),
+        additionalData: await v2SealAad(data.root_pub, data.factors),
+      },
+      kekKey, b64ToBytes(data.kek_seal.ct),
+    ));
+  } catch {
+    masterKek.fill(0);
+    throw new Error(
+      'v2 master key does not open the seed seal — the factor list may have '
+      + 'been altered',
+    );
+  }
+  masterKek.fill(0);
+  if (seed.length !== 32) {
+    seed.fill(0);
+    throw new Error('armor plaintext is not an Ed25519 signing seed');
+  }
+  return { seed, rootPub: data.root_pub };
+}
+
 // One-shot v1 -> v2 upgrade. Opens the legacy v1 blob and re-seals it as v2. The
 // v1 reader is deleted with the rest of the v1 path once migration has run.
 function armorVersion(armorText) {
@@ -483,6 +702,10 @@ export {
   b64ToBytes,
   domainBytes,
   decryptArmor,
+  decryptArmorWithPasskey,
+  addPasskeyFactor,
+  removePasskeyFactor,
+  PASSKEY_ARMOR_PURPOSE,
   armorVersion,
   encryptArmor,
   parseArmor,
