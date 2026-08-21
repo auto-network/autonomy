@@ -1105,6 +1105,23 @@ class GraphDB:
         _CONNECTION_POOL.clear()
 
     @classmethod
+    def close_pooled_path(cls, path: Path | str) -> int:
+        """Evict pooled handles for one database before an atomic handoff."""
+        resolved = Path(path).resolve()
+        matches = [
+            (key, db) for key, db in _CONNECTION_POOL.items()
+            if db.db_path.resolve() == resolved
+        ]
+        for key, db in matches:
+            _CONNECTION_POOL.pop(key, None)
+            db._pooled = False
+            try:
+                db.conn.close()
+            except (sqlite3.ProgrammingError, sqlite3.OperationalError):
+                pass
+        return len(matches)
+
+    @classmethod
     def pooled_slots(cls) -> list[tuple[str, str]]:
         """Return currently-cached ``(slug, mode)`` pool keys — test helper."""
         return list(_CONNECTION_POOL.keys())

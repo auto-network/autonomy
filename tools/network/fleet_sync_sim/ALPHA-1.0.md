@@ -92,7 +92,7 @@ Deliberately deferred to production/native work:
 - native systematic-first RaptorQ with arbitrary repair ESI ranges;
 - record/key-aware stable chunk boundaries;
 - compression selection (including zstd) from a whole-chain benchmark;
-- online database checkpoint handoff;
+- remote checkpoint offer and address negotiation;
 - durable ACK exchange and RelayKit address discovery; and
 - a startup write gate after an externally restored machine snapshot. The
   alpha persists and enforces its floor across ordinary restarts, but only the
@@ -122,7 +122,10 @@ unrecognized writes fail closed, and ordinary startup never activates a
 prepared store implicitly. The Dashboard now owns an idle-safe scheduler that
 uses the active personal-root roster, mutual machine-key proof, RelayKit direct
 channels, transaction-atomic journal replay, bounded retry, and durable local
-peer counters. Remaining work is the unlock-to-runtime machine-key handoff,
-address discovery, exact ACK floors, attachment-object transport, and an
-operational online checkpoint handoff strategy. No new daemon or network
-service is required by the engine itself.
+peer counters. The Dashboard service can now stop its scheduler, close its
+pooled personal store, prove that no production writer remains, merge a
+received checkpoint with locally authored winners in staging, publish it
+recoverably, record a durable local install receipt, and resume delta pulls.
+Remaining work is the unlock-to-runtime machine-key handoff, address and
+checkpoint-offer discovery, exact remote ACK floors, and attachment-object
+transport. No new daemon or network service is required by the engine itself.

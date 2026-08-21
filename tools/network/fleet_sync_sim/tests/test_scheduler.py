@@ -5,6 +5,8 @@ import hashlib
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from tools.graph.db import GraphDB
 from tools.graph.models import Source
 from tools.network.fleet_roster import enroll, kick, resolve
@@ -16,6 +18,11 @@ from tools.network.fleet_sync_scheduler import (
     roster_epoch,
 )
 from tools.network.fleet_sync_channel import FleetAuthenticator, FleetDirectServer
+from tools.network.fleet_sync_connection import FleetSyncQuiescenceError
+from tools.network.fleet_sync_sim.alpha import (
+    FleetSyncAlpha,
+    transport_checkpoint_via_raptorq,
+)
 from tools.network.idkit import KeyPair
 
 
@@ -392,5 +399,121 @@ def test_dashboard_service_owns_configured_scheduler_lifecycle(tmp_path: Path) -
         assert scheduler.running is False
         assert scheduler.server.connection_count == 0
         await service.stop()
+
+    asyncio.run(run())
+
+
+def test_dashboard_checkpoint_handoff_resumes_late_row_and_tombstone_deltas(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        root = KeyPair.generate()
+        left_key = KeyPair.generate()
+        right_key = KeyPair.generate()
+        left_path = tmp_path / "left.db"
+        right_path = tmp_path / "right.db"
+        checkpoint = tmp_path / "checkpoint"
+        received = tmp_path / "received"
+        entries = [
+            enroll(root, machine_pub=left_key.public_hex),
+            enroll(root, machine_pub=right_key.public_hex),
+        ]
+        epoch = roster_epoch(entries, root.public_hex)
+        active = tuple(sorted(resolve(entries, anchor_root_pub=root.public_hex)))
+
+        with FleetSyncAlpha(right_path, right_key.public_hex) as source:
+            with source.author(100, "checkpoint-seed"):
+                source.graph.conn.execute(
+                    "INSERT INTO sources(id,type,title,metadata,created_at,ingested_at) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (
+                        "gone-after-cut", "note", "temporary", "{}",
+                        "2026-08-21T00:00:00Z", "2026-08-21T00:00:00Z",
+                    ),
+                )
+            source.checkpoint(
+                checkpoint,
+                roster_epoch=epoch,
+                active_roster=active,
+                target_chunk_bytes=4096,
+            )
+            transport_checkpoint_via_raptorq(
+                checkpoint, received, symbol_size=256
+            )
+            with source.author(200, "after-cut"):
+                source.graph.conn.execute(
+                    "DELETE FROM sources WHERE id='gone-after-cut'"
+                )
+                source.graph.conn.execute(
+                    "INSERT INTO sources(id,type,title,metadata,created_at,ingested_at) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (
+                        "late-row", "note", "after checkpoint", "{}",
+                        "2026-08-21T00:00:01Z", "2026-08-21T00:00:01Z",
+                    ),
+                )
+
+        _prepare(left_path, left_key)
+        addresses: dict[str, list[str]] = {}
+        service = DashboardFleetSyncService()
+        service.configure(FleetSyncRuntimeConfig(
+            machine_key=left_key,
+            personal_root_pub=root.public_hex,
+            roster_entries=lambda: entries,
+            peer_addresses=lambda: addresses,
+            personal_db_path=left_path,
+            poll_interval=0.02,
+            min_backoff=0.01,
+            max_backoff=0.03,
+        ))
+        await service.start()
+        await _eventually(
+            lambda: service.scheduler is not None and service.scheduler.running
+        )
+        live_writer = GraphDB(left_path)
+        with pytest.raises(FleetSyncQuiescenceError, match="live production"):
+            await service.install_checkpoint(
+                received, source_machine_pub=right_key.public_hex
+            )
+        live_writer.close()
+        await _eventually(
+            lambda: service.scheduler is not None and service.scheduler.running
+        )
+        with pytest.raises(RuntimeError, match="not an active remote"):
+            await service.install_checkpoint(
+                received, source_machine_pub=KeyPair.generate().public_hex
+            )
+        await _eventually(
+            lambda: service.scheduler is not None and service.scheduler.running
+        )
+        await service.install_checkpoint(
+            received, source_machine_pub=right_key.public_hex
+        )
+        assert _title(left_path, "gone-after-cut") == "temporary"
+        with sqlite3.connect(left_path) as conn:
+            receipt = conn.execute(
+                "SELECT checkpoints_received,peer_watermark "
+                "FROM fleet_sync_peer_state WHERE machine_public_key=?",
+                (right_key.public_hex,),
+            ).fetchone()
+        assert tuple(receipt) == (1, 100)
+
+        right = FleetSyncScheduler(FleetSyncRuntimeConfig(
+            machine_key=right_key,
+            personal_root_pub=root.public_hex,
+            roster_entries=lambda: entries,
+            peer_addresses=lambda: {},
+            personal_db_path=right_path,
+            poll_interval=0.02,
+        ))
+        await right.start()
+        addresses[right_key.public_hex] = [f"ws://127.0.0.1:{right.port}"]
+        try:
+            await _eventually(lambda: _title(left_path, "late-row") == "after checkpoint")
+            await _eventually(lambda: _title(left_path, "gone-after-cut") is None)
+        finally:
+            await service.stop()
+            await right.stop()
+        assert right.server.connection_count == 0
 
     asyncio.run(run())
