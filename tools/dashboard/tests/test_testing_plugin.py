@@ -136,13 +136,18 @@ def test_ui_has_pinned_org_picker_and_bounded_evidence_surfaces() -> None:
     assert "summary.activity.queued_runs" in html
     assert "summary.tests.observation_rows" in html
     assert "summary.tests.average_samples_per_test" in html
+    assert "session.runs.slice(0, 5)" in html
+    assert "+' + (session.runs.length - 5)" in html
     assert "@media (max-width: 719px)" in css
+    assert "overflow-x: hidden" in css
+    assert ".testing-console * { min-width: 0; }" in css
     assert "min-height: 44px" in css
     assert "setInterval" in script
     assert "5000" in script
     assert "recent_limit: '20'" in script
     assert "ranked_limit: '10'" in script
     assert "X-Graph-Org" in script
+    assert "left === this.selectedOrg" in script
     assert "/api/plugins/testing/summary" in script
 
 
