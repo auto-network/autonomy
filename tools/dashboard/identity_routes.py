@@ -233,6 +233,11 @@ async def get_status(request: Request) -> JSONResponse:
         "rp_id": m.payload.get("rp_id"),
         "transports": m.payload.get("transports") or [],
         "created_at": m.payload.get("created_at"),
+        # The passkey's public vault-factor key, present only when the passkey
+        # was enrolled with PRF. Its presence is "promotable"; the factor UI
+        # uses it to seal the root to this passkey when promoting it.
+        "provisioning_public_key":
+            (m.payload.get("statement") or {}).get("provisioning_public_key"),
     } for m in passkeys]
     return JSONResponse({
         "personal_identity": identity,
