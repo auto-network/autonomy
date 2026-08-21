@@ -140,6 +140,10 @@ class _WorkspaceMountSchemaAdapter(SettingSchema):
             "required": True,
             "exists": "dir",
             "exists_frame": "platform-host",
+            "remediation": {
+                "id": "workspace.declared-path.v1",
+                "params": {},
+            },
             "description": "Absolute host path to the directory to mount",
         },
         "container_path": {
@@ -358,6 +362,10 @@ class _WorkspaceMountV2SchemaAdapter(SettingSchema):
         },
         "subpath": {
             "type": "string",
+            "remediation": {
+                "id": "workspace.declared-path.v1",
+                "params": {},
+            },
             "description": (
                 "Relative, org-free path under orgs/<org>/ in autonomy-orgs; "
                 "resolved and refused-if-escaping at launch (may be a file or dir)"

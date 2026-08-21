@@ -34,6 +34,7 @@ Spec: graph://0d3f750f-f9c (Setting Primitive).
 from __future__ import annotations
 
 from .registry import (
+    RemediationRef,
     publication_band,
     SettingSchema,
     field,
@@ -79,6 +80,7 @@ class CredentialFileV1(SettingSchema):
         required=True,
         exists="file",
         exists_frame="platform-host",
+        remediation=RemediationRef("workspace.declared-path.v1"),
         description=(
             "Absolute path on this machine to the file holding the "
             "credential. Read at the moment it is used and never retained; "

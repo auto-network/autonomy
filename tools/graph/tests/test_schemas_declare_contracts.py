@@ -121,6 +121,32 @@ def test_every_declared_field_has_a_description(registered_schemas):
     )
 
 
+def test_every_declared_remediation_resolves_to_a_registered_contract(
+    registered_schemas,
+):
+    """Semantic remediation lookup is a CI ratchet, never an import gate."""
+    from tools.graph.remediation import validate_registered_ref
+
+    bad: list[str] = []
+
+    def walk_spec(prefix: str, spec: dict) -> None:
+        remediation = spec.get("remediation")
+        if remediation is not None:
+            for error in validate_registered_ref(remediation):
+                bad.append(f"{prefix}: {error}")
+        element = spec.get("element")
+        if isinstance(element, dict):
+            for child, child_spec in element.items():
+                if isinstance(child_spec, dict):
+                    walk_spec(f"{prefix}.{child}", child_spec)
+
+    for set_id, revision, cls in registered_schemas:
+        for name, spec in (getattr(cls, "_field_metadata", None) or {}).items():
+            walk_spec(f"{set_id}#{revision} {name}", spec)
+
+    assert not bad, "invalid shipped remediation declaration(s):\n  " + "\n  ".join(bad)
+
+
 def test_every_schema_declares_its_cardinality(registered_schemas):
     """How many rows exist at once is the first thing a schema must answer.
 

@@ -29,7 +29,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from .registry import SchemaValidationError, SettingSchema, field, keyed_per_entity
+from .registry import (
+    RemediationRef,
+    SchemaValidationError,
+    SettingSchema,
+    field,
+    keyed_per_entity,
+)
 from .registry import home
 
 
@@ -140,6 +146,7 @@ class OrgCapabilityInstallV1(SettingSchema):
     env_bindings: dict = field(
         required=False,
         description="Env var bindings: env name -> source identifier",
+        remediation=RemediationRef("capability.env-binding.v1"),
     )
     secret_file_bindings: dict = field(
         required=False,

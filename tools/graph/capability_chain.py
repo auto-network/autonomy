@@ -13,7 +13,7 @@ same answer instead of independently deciding whether to omit a capability.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 
@@ -28,6 +28,8 @@ class CapabilityChainIssue:
     looked_in: str
     set_id: str = ""
     key: str = ""
+    remediation_id: str = "capability.install-chain.v1"
+    remediation_params: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

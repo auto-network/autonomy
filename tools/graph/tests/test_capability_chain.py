@@ -59,6 +59,8 @@ def test_absent_pinned_implementation_version_names_the_broken_edge():
         "missing_capability_implementation_version",
     ]
     assert issues[0].subject == "autonomy/agent-test@3"
+    assert issues[0].remediation_id == "capability.install-chain.v1"
+    assert issues[0].remediation_params == {}
 
 
 def test_contract_version_mismatch_is_explicit():

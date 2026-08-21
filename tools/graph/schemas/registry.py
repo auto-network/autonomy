@@ -64,9 +64,10 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, get_origin
 from uuid import uuid4
@@ -134,6 +135,95 @@ class SchemaValidationError(ValueError):
 _MISSING = object()
 
 
+REMEDIATION_ID_PATTERN = re.compile(
+    r"^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*\.v[1-9][0-9]*$"
+)
+_SECRET_BEARING_PARAM_NAMES = (
+    "value", "password", "private_key", "secret_value",
+)
+JSONScalar = str | int | float | bool | None
+
+
+@dataclass(frozen=True)
+class RemediationRef:
+    """A schema's data-only reference to trusted remediation behavior.
+
+    The reference deliberately contains no callable and no input value. The
+    code-owned remediation registry interprets the stable ID later; schema
+    construction validates only this portable structural envelope.
+    """
+
+    id: str
+    params: dict[str, JSONScalar] = dataclass_field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        normalized = _normalize_remediation_ref_data({
+            "id": self.id,
+            "params": self.params,
+        })
+        object.__setattr__(self, "id", normalized["id"])
+        object.__setattr__(self, "params", normalized["params"])
+
+
+def _normalize_remediation_ref_data(value: Any) -> dict[str, Any]:
+    """Return the canonical plain-data shape for one remediation reference.
+
+    Error messages name only the invalid field/key and its type. They never
+    interpolate a parameter value, because a structurally invalid declaration
+    is still not permission to disclose whatever an author put there.
+    """
+    if isinstance(value, RemediationRef):
+        value = {"id": value.id, "params": value.params}
+    if not isinstance(value, dict):
+        raise SchemaValidationError("remediation must be a RemediationRef or object")
+    unknown = set(value) - {"id", "params"}
+    if unknown:
+        raise SchemaValidationError(
+            f"remediation declares unknown field(s): {sorted(unknown)}"
+        )
+    remediation_id = value.get("id")
+    if not isinstance(remediation_id, str) or not REMEDIATION_ID_PATTERN.fullmatch(
+        remediation_id
+    ):
+        raise SchemaValidationError(
+            "remediation id must match "
+            "^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*\\.v[1-9][0-9]*$ exactly"
+        )
+    params = value.get("params", {})
+    if not isinstance(params, dict):
+        raise SchemaValidationError("remediation params must be an object")
+    normalized_params: dict[str, Any] = {}
+    for key, param_value in params.items():
+        if not isinstance(key, str) or not key:
+            raise SchemaValidationError(
+                "remediation parameter names must be non-empty strings"
+            )
+        lowered = key.lower()
+        if any(forbidden in lowered for forbidden in _SECRET_BEARING_PARAM_NAMES):
+            raise SchemaValidationError(
+                f"remediation parameter {key!r} has a secret-bearing name"
+            )
+        if not (
+            param_value is None
+            or isinstance(param_value, (str, int, float, bool))
+        ):
+            raise SchemaValidationError(
+                f"remediation parameter {key!r} must be a JSON scalar, got "
+                f"{type(param_value).__name__}"
+            )
+        if isinstance(param_value, float) and not math.isfinite(param_value):
+            raise SchemaValidationError(
+                f"remediation parameter {key!r} must be a finite JSON number"
+            )
+        normalized_params[key] = param_value
+    return {"id": remediation_id, "params": normalized_params}
+
+
+def normalize_remediation_ref(value: Any) -> dict[str, Any]:
+    """Public structural normalizer used by schemas and readiness hooks."""
+    return _normalize_remediation_ref_data(value)
+
+
 @dataclass(frozen=True)
 class _FieldSpec:
     """Field metadata produced by :func:`field`. Plucked by
@@ -152,6 +242,7 @@ class _FieldSpec:
     names_host_env: bool = False
     env_fallback_field: str | None = None
     severity: str | None = None
+    remediation: RemediationRef | dict[str, Any] | None = None
 
 
 def field(
@@ -169,6 +260,7 @@ def field(
     names_host_env: bool = False,
     env_fallback_field: str | None = None,
     severity: str | None = None,
+    remediation: RemediationRef | dict[str, Any] | None = None,
 ) -> Any:
     """Declare metadata for a SettingSchema field.
 
@@ -235,6 +327,10 @@ def field(
             costs a network fetch, not a launch. Declared and never
             inferred, because a checker that guesses advisory reports a
             broken install as ready, and nobody re-reads a clean result.
+        remediation: data-only reference to a trusted remediation contract.
+            It may name a registered action family but cannot select code or
+            contain an input value. Semantic registry validation happens in
+            the planner/CI audit rather than at schema import time.
 
     ``description`` is required of every field a SHIPPED schema declares,
     asserted over the live registry rather than here — a throwaway schema
@@ -255,6 +351,7 @@ def field(
         names_host_env=names_host_env,
         env_fallback_field=env_fallback_field,
         severity=severity,
+        remediation=remediation,
     )
 
 
@@ -331,6 +428,8 @@ def _build_metadata_from_spec(ann: Any, spec: _FieldSpec) -> dict:
                 f"got {spec.severity!r}"
             )
         meta["severity"] = spec.severity
+    if spec.remediation is not None:
+        meta["remediation"] = normalize_remediation_ref(spec.remediation)
     return meta
 
 
@@ -907,6 +1006,20 @@ def _extract_element_schemas(cls: type) -> None:
         cls._element_schemas = element_schemas
 
 
+def _normalize_declared_remediations(cls: type) -> None:
+    """Normalize legacy dict declarations as typed ``field()`` already does."""
+    meta = cls.__dict__.get("_field_metadata")
+    if not meta:
+        return
+    normalized: dict[str, dict] = {}
+    for name, raw_spec in meta.items():
+        spec = dict(raw_spec)
+        if spec.get("remediation") is not None:
+            spec["remediation"] = normalize_remediation_ref(spec["remediation"])
+        normalized[name] = spec
+    cls._field_metadata = normalized
+
+
 def _compose_set_id_from_suffix(cls: type) -> None:
     """Compose ``cls.set_id`` from ``cls.set_id_suffix`` plus an ancestor's
     namespace ``set_id``.
@@ -1260,6 +1373,8 @@ class SettingSchema:
                 merged = dict(inherited)
                 merged.update(explicit)
                 cls._field_metadata = merged
+            _normalize_declared_remediations(cls)
+            _extract_element_schemas(cls)
             _compose_set_id_from_suffix(cls)
             _register_variant(cls)
             _auto_register_schema(cls)
@@ -1310,6 +1425,7 @@ class SettingSchema:
             merged.update(explicit)
             merged.update(derived)
             cls._field_metadata = merged
+        _normalize_declared_remediations(cls)
         _extract_element_schemas(cls)
         _compose_set_id_from_suffix(cls)
         _register_variant(cls)
@@ -1339,7 +1455,8 @@ class SettingSchema:
         to that variant's payload).
 
         Per-field property dicts copy through ``description``, ``type``,
-        ``enum``, ``default``, and ``element`` (array element shape).
+        ``enum``, ``default``, ``element`` (array element shape), and the
+        data-only ``remediation`` reference.
 
         Variants recursively carry their own ``properties``,
         ``required``, and nested ``variants`` — variant payloads merge
@@ -1383,7 +1500,10 @@ class SettingSchema:
         required: list[str] = []
         for name, meta in cls._field_metadata.items():
             prop: dict[str, Any] = {}
-            for k in ("type", "description", "enum", "default", "element"):
+            for k in (
+                "type", "description", "enum", "default", "element",
+                "remediation",
+            ):
                 if k in meta:
                     prop[k] = meta[k]
             properties[name] = prop
