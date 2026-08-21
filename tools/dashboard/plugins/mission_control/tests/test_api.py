@@ -64,6 +64,19 @@ def _client() -> TestClient:
     return TestClient(app)
 
 
+def _anonymous_client() -> TestClient:
+    """A client the identity boundary has classified as nobody.
+
+    The default client stamps every request with an operator principal so
+    that tests about something else are not about authentication. A test
+    asserting that a caller WITHOUT identity is refused cannot use it: it
+    would be asserting the refusal of somebody the harness insists is the
+    operator. This mounts the same routes with no principal at all, which is
+    what an unidentified caller actually looks like.
+    """
+    return TestClient(Starlette(routes=mc_api.routes))
+
+
 def _https_client() -> TestClient:
     """Cookie-round-trip tests need an https:// base — the visitor
     cookie is set with secure=True (matches the unlock system's own
@@ -74,6 +87,28 @@ def _https_client() -> TestClient:
         middleware=[Middleware(_OperatorPrincipalMiddleware)],
     )
     return TestClient(app, base_url="https://testserver")
+
+
+
+def _request_as(kind, subject=None, *, query_string=b"", cookies=False):
+    """A request the identity boundary has already classified.
+
+    The middleware settles who a caller is once, before routing, and records
+    it on the request. These helpers read that answer rather than parsing the
+    credential again, so a test that patches the parsing is testing a path
+    the code no longer takes. This builds the state the boundary would have
+    left behind, which is the thing the code actually consumes.
+    """
+    from starlette.requests import Request
+    from tools.dashboard import api_auth
+
+    headers = [(b"cookie", b"autonomy_dashboard_session=whatever")] if cookies else []
+    scope = {
+        "type": "http", "method": "POST", "path": "/",
+        "query_string": query_string, "headers": headers,
+        "state": {"api_principal": api_auth.ApiPrincipal(kind, subject=subject)},
+    }
+    return Request(scope)
 
 
 def test_manifest_declares_skill_doc():
@@ -456,7 +491,7 @@ def test_ask_question_via_as_query_param(mock_send):
 
 
 def test_ask_question_requires_visitor_identity():
-    client = _client()
+    client = _anonymous_client()
     mission_id = _mission_with_site(client)
     resp = client.post(f"/api/missions/{mission_id}/questions", json={"question": "hi"})
     assert resp.status_code == 401
@@ -1050,7 +1085,7 @@ def test_mission_level_question_relay_unchanged_by_pillars_existing(mock_send):
 
 
 def test_ask_pillar_question_requires_visitor_identity():
-    client = _client()
+    client = _anonymous_client()
     mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
     pillar = _pillar_with_site(client, mission_id)
     resp = client.post(f"/api/pillars/{pillar['pillar_id']}/questions", json={"question": "hi"})
@@ -1306,7 +1341,7 @@ def test_reopen_question_requires_followup_text():
 
 
 def test_reopen_question_requires_visitor_identity():
-    client = _client()
+    client = _anonymous_client()
     mission_id = client.post(
         "/api/missions", json={"name": "A", "coordinator_session": "auto-coordinator"},
     ).json()["mission"]["mission_id"]
@@ -2097,12 +2132,18 @@ def test_operator_identity_comes_from_the_session_not_a_request_field():
         }
         return Request(scope)
 
-    with patch("tools.dashboard.unlock_routes.session_from_request", return_value=None):
-        assert mc_api._operator_identity(_req(session=True)) is None
+    from tools.dashboard.api_auth import ApiPrincipalKind
 
-    with patch("tools.dashboard.unlock_routes.session_from_request",
-               return_value={"sid": "s1", "method": "passkey"}):
-        who = mc_api._operator_identity(_req(session=True))
+    # A forged cookie the boundary did not accept leaves the caller
+    # unclassified, and an unclassified caller is nobody.
+    assert mc_api._operator_identity(
+        _request_as(ApiPrincipalKind.COMPATIBILITY)) is None
+    # An org-bound agent is positively somebody, and still not the operator.
+    assert mc_api._operator_identity(
+        _request_as(ApiPrincipalKind.ORG_SESSION, subject="auto-x")) is None
+
+    who = mc_api._operator_identity(
+        _request_as(ApiPrincipalKind.OPERATOR_COOKIE, subject="sid-1"))
     assert who["participant_id"] == "operator"
 
 
@@ -2209,7 +2250,9 @@ def test_rephrasing_records_who_changed_it():
     """
     mid = db.create_mission("M", "coord-session")["mission_id"]
     entry = db.ask_question(mid, "original", "guest:1", "Jamie")
-    _client().post(
+    # Nobody identified, so the edit falls back to the session the mission
+    # names. The default client would make this the operator's edit.
+    _anonymous_client().post(
         f"/api/missions/{mid}/questions/{entry['entry_id']}/rephrase",
         json={"question": "clearer"},
     )
@@ -2769,14 +2812,10 @@ def test_a_coordinator_session_is_a_participant_on_its_own_surface():
     mission_id = _mission_with_site(client)
     pillar = db.create_pillar(mission_id, "Infra", "auto-infra", "#4ade80")
 
-    req = MagicMock()
-    req.headers = {"authorization": "Bearer whatever"}
-    req.cookies = {}
-    req.query_params = {}
+    from tools.dashboard.api_auth import ApiPrincipalKind
 
-    with patch("tools.dashboard.server.authenticate_session_request",
-               return_value=(("auto-infra", "autonomy"), None)):
-        identity = mc_api._resolve_visitor_identity(req)
+    identity = mc_api._resolve_visitor_identity(
+        _request_as(ApiPrincipalKind.ORG_SESSION, subject="auto-infra"))
 
     assert identity["participant_id"] == f"pillar:{pillar['pillar_id']}"
     assert identity["participant_label"] == "Infra"
@@ -2788,15 +2827,10 @@ def test_a_session_that_coordinates_nothing_here_is_nobody_here():
     client = _client()
     _mission_with_site(client)
 
-    req = MagicMock()
-    req.headers = {"authorization": "Bearer whatever"}
-    req.cookies = {}
-    req.query_params = {}
+    from tools.dashboard.api_auth import ApiPrincipalKind
 
-    with patch("tools.dashboard.server.authenticate_session_request",
-               return_value=(("auto-a-stranger", "autonomy"), None)), \
-         patch.object(mc_api, "_operator_identity", return_value=None):
-        assert mc_api._resolve_visitor_identity(req) is None
+    assert mc_api._resolve_visitor_identity(
+        _request_as(ApiPrincipalKind.ORG_SESSION, subject="auto-a-stranger")) is None
 
 
 def test_a_visitor_token_still_wins_over_a_bearer():
@@ -2824,7 +2858,7 @@ def test_an_edited_question_says_it_was_edited_and_by_whom():
     remembers saying has to be able to see that it was edited. It was recorded
     from the start and never sent to anybody, which is the same as not
     recording it."""
-    client = _client()
+    client = _anonymous_client()
     mission_id = client.post(
         "/api/missions", json={"name": "A", "coordinator_session": "auto-coordinator"},
     ).json()["mission"]["mission_id"]

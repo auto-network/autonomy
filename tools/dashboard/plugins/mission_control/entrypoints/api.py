@@ -967,14 +967,19 @@ def _resolve_session_identity(request: Request) -> dict | None:
     already attributed to. A session that coordinates nothing here is nobody
     here, and is refused.
     """
-    from tools.dashboard.server import authenticate_session_request
-
-    if not request.headers.get("authorization", "").startswith("Bearer "):
+    # The identity boundary already classified this caller and bound its
+    # organization; this reads that answer instead of parsing the credential
+    # again. api_auth says so directly -- handlers must not re-parse bearers,
+    # cookies or caller-supplied organization selectors -- and a plugin that
+    # re-derives identity is a second authentication path that can disagree
+    # with the first.
+    principal = api_auth.principal_from_request(request)
+    if principal.kind not in (
+        api_auth.ApiPrincipalKind.ORG_SESSION,
+        api_auth.ApiPrincipalKind.LOCAL_SESSION,
+    ):
         return None
-    identity, err = authenticate_session_request(request)
-    if err is not None or not identity:
-        return None
-    session, _org = identity
+    session = principal.subject
     if not session:
         return None
     pillar = db.get_pillar_by_coordinator(session)
@@ -1061,13 +1066,12 @@ def _operator_identity(request: Request) -> dict | None:
     per-org persona derivation exists to prevent. Attribution onto persona
     keys is auto-dzsqd, and it needs missions to carry an org first (row 117).
     """
-    from tools.dashboard import unlock_routes
-
-    try:
-        session = unlock_routes.session_from_request(request)
-    except Exception:  # noqa: BLE001 — an unreadable session is not an identity
-        return None
-    if not session:
+    # Same as above: the boundary already verified the dashboard cookie and
+    # recorded that this caller is the operator. Reading the cookie a second
+    # time here would be a second answer to a question already settled.
+    if api_auth.principal_from_request(request).kind is not (
+        api_auth.ApiPrincipalKind.OPERATOR_COOKIE
+    ):
         return None
     return {
         "participant_id": OPERATOR_PARTICIPANT_ID,
