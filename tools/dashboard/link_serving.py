@@ -56,6 +56,7 @@ import binascii
 import calendar
 import contextlib
 import json
+import logging
 import mimetypes
 import re
 import secrets
@@ -886,6 +887,50 @@ def _app_json(payload: dict) -> bytes:
 #: the relay's origin; this is the channel path those reads take instead.
 #: Same discipline as the write side: the relay learns nothing about what
 #: is being read, only which module owns reads for this target_type.
+logger = logging.getLogger(__name__)
+
+#: The dashboard hands one of its own bus events to this connector over the
+#: loopback control listener it already drives. Not a registry control frame
+#: and never reaching the relay: it is local delivery of news that a consumer
+#: in THIS process then seals and fans out itself, because a guest's stream
+#: key lives here and a frame sealed anywhere else is undecryptable to them.
+#:
+#: The proxy carries an opaque (topic, data) to a named consumer and knows
+#: nothing else. What an event MEANS, which guests should see it and what a
+#: frame looks like all belong to the consumer, exactly as reads and writes
+#: already belong to the module that owns their target_type.
+EVENT_OP = "event"
+
+#: Consumers of that proxy, by name. Lazy in the same way and for the same
+#: reason as the read and write dispatches below: a consumer is imported
+#: only when an event is actually routed to it.
+EVENT_CONSUMERS = ("mission",)
+
+
+def _event_dispatch(consumer: str):
+    """consumer name -> the module owning that consumer's events, or None."""
+    if consumer not in EVENT_CONSUMERS:
+        return None
+    if consumer == "mission":
+        from tools.dashboard.plugins.mission_control import relay_publisher
+
+        return relay_publisher
+    return None
+
+
+def event_routes() -> dict:
+    """topic -> the consumers wanting it, for the dashboard-side proxy.
+
+    Asking each consumer what it subscribes to, rather than the proxy
+    holding a list, is what keeps the pipe ignorant of its traffic.
+    """
+    routes: dict = {}
+    for consumer in EVENT_CONSUMERS:
+        module = _event_dispatch(consumer)
+        for topic in getattr(module, "EVENT_TOPICS", ()):
+            routes.setdefault(topic, []).append(consumer)
+    return routes
+
 READ_OPS = ("read",)
 
 #: target_types allowed to serve reads at all. Default-off, same reason
@@ -1264,7 +1309,100 @@ def _make_ice_serving_connector(
     return connector
 
 
-async def _serve_control_listener(connector, ctl_path: str) -> None:
+
+# ── the dashboard-side half of the event proxy ────────────────
+
+
+async def proxy_events_to_connectors(bus, *, org=None, stop=None,
+                                     control=None, max_pending: int = 256) -> None:
+    """Carry this dashboard's own bus events to the connector holding the
+    guest channels, over the loopback control listener it already drives.
+
+    The dashboard cannot seal a frame: a guest's stream key lives in the
+    connector's process, so news has to cross one process boundary no
+    matter what. This crosses it privately. The alternative -- the
+    connector subscribing back to the dashboard's public event stream --
+    made a conversation between two processes on one machine the only part
+    of that conversation that had to pass the public gate, and it broke,
+    silently, the day that gate closed.
+
+    KNOWS NOTHING ABOUT ITS TRAFFIC. Which topics matter and what an event
+    means belong to the consumers; this asks them (``event_routes``) and
+    forwards an opaque payload, exactly as reads and writes are owned by
+    the module that owns their target_type.
+
+    NEVER BLOCKS THE PRODUCER. The bus gives us our own queue, so a slow or
+    absent connector cannot delay the request that emitted the event, and
+    the control call is synchronous with its own timeout so it is made off
+    the event loop entirely.
+    """
+    if control is None:
+        from tools.dashboard.link_serving_supervisor import control
+
+    routes = event_routes()
+    if not routes:
+        return
+    queue = bus.subscribe()
+    try:
+        while stop is None or not stop.is_set():
+            topic, data, _seq = await queue.get()
+            consumers = routes.get(topic)
+            if not consumers:
+                continue
+            if queue.qsize() > max_pending:
+                # A live update is best-effort by design: a guest recovers a
+                # gap by refetching on its own channel, which is
+                # authoritative. So drop rather than grow without bound
+                # behind a tunnel that may be down for hours.
+                logger.warning(
+                    "event proxy is behind by %d events; dropping this one",
+                    queue.qsize(),
+                )
+                continue
+            for consumer in consumers:
+                try:
+                    await asyncio.to_thread(
+                        control, org, EVENT_OP,
+                        {"consumer": consumer, "topic": topic,
+                         "data": data, "org": org},
+                    )
+                except Exception:
+                    # No connector, no tunnel, or it refused. The guest
+                    # simply does not get this frame. Debug, because with no
+                    # tunnel up this is every event and it is not news.
+                    logger.debug(
+                        "event proxy could not deliver to %s", consumer,
+                        exc_info=True,
+                    )
+    finally:
+        bus.unsubscribe(queue)
+
+async def _dispatch_event(publisher, args: dict) -> dict:
+    """Route one proxied bus event to its consumer.
+
+    Mirrors :func:`_serve_write`: resolve the owner, hand over the opaque
+    payload, interpret nothing. A consumer that faults serves nothing to
+    the guest and never takes the connector down with it.
+    """
+    if publisher is None:
+        return {"ok": False, "error": "this connector has no publisher"}
+    module = _event_dispatch(args.get("consumer"))
+    if module is None:
+        return {"ok": False, "error": "no such event consumer"}
+    data = args.get("data")
+    try:
+        sent = await module.publish_event(
+            publisher, args.get("topic"), data if isinstance(data, dict) else {},
+            org=args.get("org"),
+        )
+    except Exception:
+        logger.warning("event consumer %s faulted", args.get("consumer"), exc_info=True)
+        return {"ok": False, "error": "consumer faulted"}
+    return {"ok": True, "sent": sent}
+
+
+async def _serve_control_listener(connector, ctl_path: str,
+                                  publisher=None) -> None:
     """A loopback listener the dashboard drives to run D19 control ops on
     this connector's tunnel (register §3). One newline-delimited JSON
     request per connection — ``{auth, op, args}`` → the connector's reply
@@ -1288,6 +1426,9 @@ async def _serve_control_listener(connector, ctl_path: str) -> None:
             else:
                 if request.get("auth") != auth:
                     reply = {"ok": False, "error": "control auth rejected"}
+                elif request.get("op") == EVENT_OP:
+                    args = request.get("args") or {}
+                    reply = await _dispatch_event(publisher, args)
                 elif request.get("op") == "connector-status":
                     # Supervisor-local readiness probe.  This never becomes
                     # a registry control frame: it reports whether the
@@ -1325,30 +1466,12 @@ async def _serve_control_listener(connector, ctl_path: str) -> None:
             _os.remove(ctl_path)
 
 
-def _default_dashboard_url() -> str:
-    """Where this connector reaches its own dashboard's event stream.
-
-    Same resolution order as ``graph link publish``
-    (``link_cmd._dash_base``) so one convention covers both, and so the
-    supervisor -- which passes the whole environment through to the
-    subprocess -- needs no new argument to enable live push.
-    """
-    import os as _os
-
-    return (
-        _os.environ.get("AUTONOMY_DASHBOARD")
-        or _os.environ.get("GRAPH_API")
-        or "https://localhost:8080"
-    )
-
-
 async def _run_connector_with_control(connector, ctl_path: str | None,
-                                      publish_task_factory=None) -> None:
+                                      publisher=None) -> None:
     tasks = []
     if ctl_path is not None:
-        tasks.append(asyncio.create_task(_serve_control_listener(connector, ctl_path)))
-    if publish_task_factory is not None:
-        tasks.append(asyncio.create_task(publish_task_factory()))
+        tasks.append(asyncio.create_task(
+            _serve_control_listener(connector, ctl_path, publisher)))
     try:
         await connector.run()
     finally:
@@ -1380,13 +1503,6 @@ def main() -> None:
                              "(enables D19 publish/revoke over this tunnel)")
     parser.add_argument("--min-backoff", type=float, default=0.2)
     parser.add_argument("--max-backoff", type=float, default=5.0)
-    parser.add_argument("--dashboard-url", default=None,
-                        help="dashboard base URL whose event stream feeds live "
-                             "mission updates to open guest channels (auto-8npih). "
-                             "Defaults to AUTONOMY_DASHBOARD / GRAPH_API / "
-                             "https://localhost:8080 — the same resolution order "
-                             "graph link publish uses. Pass --dashboard-url '' to "
-                             "disable live push; serving is unaffected either way.")
     args = parser.parse_args()
 
     # Defense in depth for manual launches and alternate process managers.
@@ -1419,10 +1535,8 @@ def main() -> None:
     from tools.network.relaykit.connector import Publisher
 
     # One Publisher shared by both halves of live push: the connector
-    # reports channel attach/detach into it, and the Mission Control
-    # publish loop emits through it. Without --dashboard-url it is still
-    # constructed and still tracks listeners, it just has nothing
-    # publishing into it.
+    # reports channel attach/detach into it, and a mission event arriving
+    # over the control listener emits through it.
     publisher = Publisher()
 
     # The Registry already owns TURN credential issuance on this connector's
@@ -1438,29 +1552,16 @@ def main() -> None:
         publisher=publisher,
         min_backoff=args.min_backoff, max_backoff=args.max_backoff,
     )
-    # Live push is ON by default. It was opt-in behind an explicit
-    # --dashboard-url, which made it unreachable in production: the
-    # supervisor builds this argv itself (link_serving_supervisor.
-    # _connector_command) and never passed the flag, so no deployed
-    # connector could ever publish. Defaulting to the same resolution
-    # order `graph link publish` already uses means the supervisor gets
-    # it for free -- it passes the whole environment to the subprocess.
-    dashboard_url = (
-        args.dashboard_url
-        if args.dashboard_url is not None
-        else _default_dashboard_url()
-    )
-    publish_task_factory = None
-    if dashboard_url:
-        from tools.dashboard.plugins.mission_control import relay_publisher
-
-        def publish_task_factory():
-            return relay_publisher.run(
-                publisher, dashboard_url=dashboard_url, org=args.graph_org,
-            )
-
+    # Live push is ON by default and needs no configuration: the dashboard
+    # delivers each event over the control listener below, so there is no
+    # address to resolve, no stream to subscribe to and no credential to
+    # hold. This connector used to fetch the news back out of the
+    # dashboard's own public event stream, which made a private exchange
+    # between two processes on one machine the only part of that exchange
+    # that had to pass the public gate -- and it broke silently the day
+    # that gate closed.
     asyncio.run(_run_connector_with_control(
-        connector, args.control_file, publish_task_factory,
+        connector, args.control_file, publisher,
     ))
 
 

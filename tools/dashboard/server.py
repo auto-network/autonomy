@@ -18684,6 +18684,7 @@ _dispatch_watcher_task: asyncio.Task | None = None
 _mock_event_watcher_task: asyncio.Task | None = None
 _harness_usage_poller_task: asyncio.Task | None = None
 _serving_bootstrap_task: asyncio.Task | None = None
+_event_proxy_task: asyncio.Task | None = None
 _claude_credentials_refresh_task: asyncio.Task | None = None
 _codex_credentials_refresh_task: asyncio.Task | None = None
 _event_loop_watchdog_task: asyncio.Task | None = None
@@ -18836,6 +18837,7 @@ async def _on_startup():
     global _claude_credentials_refresh_task, _codex_credentials_refresh_task
     global _event_loop_watchdog_task
     global _recent_sessions_refresher_task, _serving_bootstrap_task
+    global _event_proxy_task
     # Re-arm the emit hook on every lifespan startup. Module import
     # already wires it (so ASGITransport-based tests that skip lifespan
     # still get function-level emits), but we re-arm here so that
@@ -19141,11 +19143,24 @@ async def _on_startup():
         )
         _serving_bootstrap_task.add_done_callback(_log_bootstrap_result)
 
+        # The dashboard half of the event proxy: carry our own bus events to
+        # the connector that holds the guest channels, over its loopback
+        # control listener. Runs for the life of the process and never
+        # blocks the requests that emit the events -- it drains a queue of
+        # its own. Independent of bootstrap above: if no connector is up,
+        # delivery simply fails per event and serving is untouched.
+        from tools.dashboard import link_serving
+
+        _event_proxy_task = asyncio.create_task(
+            link_serving.proxy_events_to_connectors(event_bus)
+        )
+
 async def _on_shutdown():
     global _dispatch_watcher_task, _mock_event_watcher_task
     global _harness_usage_poller_task, _claude_credentials_refresh_task
     global _codex_credentials_refresh_task
     global _settings_mediator_started, _serving_bootstrap_task
+    global _event_proxy_task
     global _vault_release_sweeper_task
     # Clear the emit hook so a subsequent process / test reload doesn't
     # leak a stale binding into a swapped module-level event_bus.
@@ -19168,6 +19183,13 @@ async def _on_shutdown():
         except (asyncio.CancelledError, Exception):
             pass
     _serving_bootstrap_task = None
+    if _event_proxy_task is not None and not _event_proxy_task.done():
+        _event_proxy_task.cancel()
+        try:
+            await _event_proxy_task
+        except (asyncio.CancelledError, Exception):
+            pass
+    _event_proxy_task = None
     # Stop the serving watchdog and terminate any connector subprocesses so a
     # reload cycle doesn't leak them (a fresh process re-establishes serving in
     # _on_startup).
