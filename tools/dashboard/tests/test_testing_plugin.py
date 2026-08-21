@@ -44,6 +44,11 @@ def _run(repository: str, *, session: str = "auto-test", status: str = "passed")
         "agent_test_version": "0.4.0",
         "fingerprint": "abc",
         "rerun_of": "",
+        "estimated_seconds": 2.0,
+        "estimated_low_seconds": 1.5,
+        "estimated_high_seconds": 3.0,
+        "estimate_complete": True,
+        "estimate_sampled_tests": 1,
     }
 
 
@@ -123,8 +128,14 @@ def test_ui_has_pinned_org_picker_and_bounded_evidence_surfaces() -> None:
     assert 'data-testid="testing-session-queue"' in html
     assert 'data-testid="testing-feedback-loop"' in html
     assert 'data-testid="testing-operational-errors"' in html
+    assert 'data-testid="testing-behavior-patterns"' in html
+    assert 'data-testid="testing-estimate-quality"' in html
+    assert "etaText(run)" in html
+    assert "etaProgress(run)" in script
     assert "summary.activity.active_runs" in html
     assert "summary.activity.queued_runs" in html
+    assert "summary.tests.observation_rows" in html
+    assert "summary.tests.average_samples_per_test" in html
     assert "@media (max-width: 719px)" in css
     assert "min-height: 44px" in css
     assert "setInterval" in script
@@ -185,8 +196,43 @@ def test_history_is_raw_org_owned_append_only_capped_and_isolated(tmp_path, monk
     history = store.duration_history("alpha", "github.test/acme/widget", [nodeid])
     assert len(history["tests"][0]["observations"]) == 10
     assert history["tests"][0]["median_seconds"] == 6.5
+    assert history["tests"][0]["minimum_seconds"] == 2.0
+    assert history["tests"][0]["maximum_seconds"] == 11.0
     estimate = store.estimate_duration("alpha", "github.test/acme/widget", [nodeid], parallelism=2)
-    assert estimate["estimated_seconds"] == 3.25
+    assert estimate["estimated_seconds"] == 6.5
+    assert estimate["estimated_low_seconds"] == 2.0
+    assert estimate["estimated_high_seconds"] == 11.0
+    assert estimate["parallelism"] == 2
+    assert estimate["effective_parallelism"] == 1
+    assert estimate["selector_history_coverage"] == 1.0
+    assert estimate["estimate_complete"] is True
+
+    partial = store.estimate_duration(
+        "alpha", "github.test/acme/widget", [nodeid, "tests/test_unseen.py"], parallelism=2,
+    )
+    assert partial["estimated_seconds"] == 6.5
+    assert partial["unknown_selectors"] == ["tests/test_unseen.py"]
+    assert partial["selector_history_coverage"] == 0.5
+    assert partial["estimate_complete"] is False
+
+    broad = store.estimate_duration(
+        "alpha", "github.test/acme/widget", ["tests/test_widget.py"], parallelism=1,
+    )
+    assert broad["unknown_selectors"] == []
+    assert broad["open_ended_selectors"] == ["tests/test_widget.py"]
+    assert broad["estimate_complete"] is False
+
+    summary = store.dashboard_summary("alpha", repository="github.test/acme/widget")
+    assert summary["tests"]["observation_rows"] == 10
+    assert summary["tests"]["maximum_rows_for_observed_tests"] == 10
+    assert summary["tests"]["average_samples_per_test"] == 10.0
+    assert summary["tests"]["sample_depths"] == {"10": 1}
+    assert summary["retention"] == {
+        "timing_observations_per_test": 10,
+        "terminal_runs_per_repository": 2_000,
+        "usage_events_per_organization": 5_000,
+        "operational_errors_per_organization": 2_000,
+    }
 
 
 def test_summary_reports_pass_ratio_flakes_slow_tests_and_telemetry(tmp_path, monkeypatch) -> None:
@@ -235,6 +281,8 @@ def test_summary_reports_pass_ratio_flakes_slow_tests_and_telemetry(tmp_path, mo
     assert summary["organization"] == "alpha"
     assert summary["runs"]["total"] == 2
     assert summary["runs"]["pass_ratio"] == 0.5
+    assert summary["runs"]["estimate_quality"]["samples"] == 2
+    assert summary["runs"]["estimate_quality"]["within_factor_2"] == 1.0
     assert summary["tests"]["flaky"][0]["nodeid"].endswith("::test_widget")
     assert summary["tests"]["slow"][0]["median_seconds"] == 5.0
     assert summary["telemetry"]["counts"] == {"run_started": 1}
@@ -287,3 +335,41 @@ def test_usage_and_operational_errors_are_capped_org_local_feedback(tmp_path, mo
     assert store.error_status("beta")["total"] == 0
     summary = store.dashboard_summary("alpha")
     assert summary["operational_errors"]["recent"][0]["session_title"] == "Title for auto-alpha"
+
+
+def test_usage_sequences_expose_effective_and_problematic_agent_patterns(tmp_path, monkeypatch) -> None:
+    _orgs(tmp_path, monkeypatch)
+    clock = [1_800_000_000.0]
+    monkeypatch.setattr(store.time, "time", lambda: clock[0])
+    events = (
+        "command_run_explicit", "run_started", "command_status", "command_status",
+        "run_failed", "command_failures", "command_output", "command_rerun_failures",
+        "run_started", "run_passed", "command_retain", "raw_pytest_refused",
+        "repeat_refused", "capacity_queued",
+    )
+    for event in events:
+        clock[0] += 10
+        assert store.record_event("alpha", "auto-pattern", event, "0.5.1")["ok"]
+
+    behavior = store.telemetry_status("alpha")["behavior"]
+    assert behavior["session_count"] == 1
+    assert behavior["totals"] == {
+        "completed_runs": 2,
+        "background_runs": 1,
+        "polled_runs": 1,
+        "status_polls": 2,
+        "status_poll_bursts": 1,
+        "repeated_commands": 1,
+        "failed_runs_inspected": 1,
+        "focused_recoveries": 1,
+        "broad_recovery_attempts": 0,
+        "repeat_refusals": 1,
+        "raw_pytest_refusals": 1,
+        "queue_waits": 1,
+        "output_reads": 1,
+        "retained_runs": 1,
+    }
+    row = behavior["sessions"][0]
+    assert row["session_title"] == "Title for auto-pattern"
+    assert row["agent_test_version"] == "0.5.1"
+    assert len(row["recent_sequence"]) == 10
