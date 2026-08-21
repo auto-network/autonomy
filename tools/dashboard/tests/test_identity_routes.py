@@ -310,21 +310,40 @@ def test_personal_scope_stays_consistent_when_graph_org_is_set(
     assert status["enforced"] is True
     assert len(settings_ops.read_set(PERSONAL_IDENTITY_SET_ID,
                                      org=None).members) == 1
-    assert settings_ops.read_set(PERSONAL_IDENTITY_SET_ID,
-                                 org=ORG).members == []
+    # The personal set is pinned to the personal store: a read naming the
+    # env org resolves to the SAME single identity, not a per-org copy —
+    # the "stays consistent when GRAPH_ORG is set" this test is named for.
+    via_env_org = settings_ops.read_set(PERSONAL_IDENTITY_SET_ID,
+                                        org=ORG).members
+    assert len(via_env_org) == 1
+    assert via_env_org[0].payload["display_name"] == "Personal Alex"
     GraphDB.close_all_pooled()
 
 
 def test_status_org_identity_does_not_satisfy_personal(env, root):
     """C1's ORG key is not a personal identity — an account with only
     the org root (the operator's real pre-existing state) still needs
-    onboarding."""
+    onboarding. The org root is the sealed revision-2 record (B4 Option B),
+    the only org-key shape the schema now knows."""
+    from tools.network.idkit.sealing import derive_encapsulation_keypair, seal
+    from tools.graph.schemas.network_identity import (
+        NETWORK_ORG_KEY_REVISION_2,
+        NETWORK_ORG_KEY_SET_ID,
+        ORG_ROOT_ARMOR_PURPOSE,
+    )
     org_root = KeyPair.generate()
+    # Seal the org seed to the owner's recipient key derived from THIS
+    # account's personal root — exactly as org_ops._seal_org_key does.
+    _, owner_kem_pub = derive_encapsulation_keypair(
+        bytes.fromhex(root.private_hex), ORG_ROOT_ARMOR_PURPOSE)
+    sealed = seal(bytes.fromhex(org_root.private_hex), owner_kem_pub,
+                  ORG_ROOT_ARMOR_PURPOSE)
     settings_ops.upsert_by_key(
-        "autonomy.network.org-key", 1, "default",
-        {"armored_private_key": encrypt_root_key(org_root, PASSWORD,
-                                                 iterations=10_000),
-         "root_pub": org_root.public_hex},
+        NETWORK_ORG_KEY_SET_ID, NETWORK_ORG_KEY_REVISION_2, "default",
+        {"root_pub": org_root.public_hex,
+         "sealed_root_key": sealed.hex(),
+         "owner_kem_pub": owner_kem_pub,
+         "seal_purpose": ORG_ROOT_ARMOR_PURPOSE},
         org="personal")
     body = env.get("/api/identity/status").json()
     assert body["personal_identity"] is None
