@@ -77,6 +77,24 @@ def principal_from_request(request: Request) -> ApiPrincipal:
     return getattr(request.state, "api_principal", COMPATIBILITY_PRINCIPAL)
 
 
+def organization_scope_from_request(request: Request) -> str | None:
+    """Return the middleware-approved organization for this API request.
+
+    This is the trusted scope to pass into organization-homed Settings calls.
+    For an organization session it always comes from the bearer, even when the
+    caller supplies a conflicting ``X-Graph-Org`` header.  For a dashboard
+    operator or local host session it is the explicit organization selection,
+    when one was supplied.  ``None`` means that no organization was selected;
+    handlers whose data requires an organization should reject that request.
+
+    Route handlers must use this helper instead of re-parsing headers, query
+    parameters, or request bodies.  Those values are inputs to the identity
+    middleware, not independent sources of authority.
+    """
+
+    return getattr(request.state, "api_organization", None)
+
+
 def require_authenticated_api_caller(request: Request) -> JSONResponse | None:
     """Refuse an API caller that presents no credential at all.
 
@@ -216,7 +234,9 @@ class ApiIdentityMiddleware:
         header_org = request.headers.get("x-graph-org") or None
         principal, effective_org = self._classify(request, header_org)
 
-        scope.setdefault("state", {})["api_principal"] = principal
+        request_state = scope.setdefault("state", {})
+        request_state["api_principal"] = principal
+        request_state["api_organization"] = effective_org
         token = graph_ops.set_caller_org(effective_org)
         try:
             await self.app(scope, receive, send)
