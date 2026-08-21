@@ -18,7 +18,7 @@
       <label>
         <span>Repository</span>
         <select x-model="selectedRepository" @change="loadSummary()" data-testid="testing-repository-picker">
-          <option value="">All repositories</option>
+          <option value="">All repos</option>
           <template x-for="repository in repositories" :key="repository">
             <option :value="repository" x-text="shortRepository(repository)"></option>
           </template>
@@ -153,13 +153,15 @@
                 <span><b x-text="session.runs.length"></b> runs</span>
               </div>
               <div class="testing-history-runs">
-                <template x-for="run in session.runs" :key="run.run_id">
+                <template x-for="run in session.runs.slice(0, 5)" :key="run.run_id">
                   <div>
                     <span class="testing-status" :class="'is-' + run.status" x-text="run.status"></span>
                     <p><strong x-text="run.collected + ' tests'"></strong><small x-text="selectorText(run)"></small></p>
                     <b x-text="duration(run.duration_seconds)"></b>
                   </div>
                 </template>
+                <p x-show="session.runs.length > 5" class="testing-history-more"
+                   x-text="'+' + (session.runs.length - 5) + ' more retained runs'"></p>
               </div>
             </article>
           </template>
@@ -256,8 +258,8 @@
           <article><span>Errors</span><strong class="is-warn" x-text="count('error')"></strong></article>
           <article>
             <span>Timing history</span>
-            <strong x-text="summary.tests.observation_rows + ' samples'"></strong>
-            <small x-text="summary.tests.observed + ' tests · avg ' + summary.tests.average_samples_per_test.toFixed(1) + ' each'"></small>
+            <strong x-text="summary.tests.observation_rows"></strong>
+            <small x-text="'samples · ' + summary.tests.observed + ' tests · avg ' + summary.tests.average_samples_per_test.toFixed(1) + ' each'"></small>
           </article>
         </div>
       </section>

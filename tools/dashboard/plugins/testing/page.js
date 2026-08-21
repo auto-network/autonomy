@@ -32,6 +32,11 @@
         }
         if (!this.orgs.length) this.orgs = ['autonomy'];
         if (!this.orgs.includes(this.selectedOrg)) this.selectedOrg = this.orgs[0];
+        this.orgs.sort((left, right) => {
+          if (left === this.selectedOrg) return -1;
+          if (right === this.selectedOrg) return 1;
+          return left.localeCompare(right);
+        });
       },
 
       async onOrgChange() {

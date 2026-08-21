@@ -21,7 +21,12 @@
     var(--test-bg);
   background-size: auto, 32px 32px, 32px 32px, auto;
   font-variant-numeric: tabular-nums;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: hidden;
 }
+.testing-page, .testing-page *, .testing-page *::before, .testing-page *::after { box-sizing: border-box; }
 
 .testing-toolbar {
   position: sticky;
@@ -90,7 +95,9 @@
 .testing-refresh:disabled { opacity: .45; }
 .testing-refresh .is-spinning { display: inline-block; animation: testingSpin .8s linear infinite; }
 
-.testing-console { max-width: 1500px; margin: 0 auto; display: grid; gap: .8rem; }
+.testing-console { width: 100%; max-width: 1500px; min-width: 0; margin: 0 auto; display: grid; gap: .8rem; }
+.testing-toolbar, .testing-toolbar *, .testing-console, .testing-console * { min-width: 0; }
+.testing-console > *, .testing-grid, .testing-grid > * { max-width: 100%; }
 .testing-live, .testing-finished, .testing-history, .testing-trace, .testing-panel, .testing-overview {
   border: 1px solid var(--test-line);
   background: var(--test-panel);
@@ -221,7 +228,7 @@
 .testing-live-run.is-running { box-shadow: inset 3px 0 var(--test-green); }
 .testing-live-run.is-queued { box-shadow: inset 3px 0 var(--test-amber); }
 .testing-run-line { display: flex; justify-content: space-between; gap: .6rem; }
-.testing-run-line code { color: var(--test-ink); }
+.testing-run-line code { min-width: 0; overflow: hidden; color: var(--test-ink); text-overflow: ellipsis; white-space: nowrap; }
 .testing-run-line b { color: var(--test-green); font: 700 .6rem ui-monospace, monospace; white-space: nowrap; }
 .testing-live-run.is-queued .testing-run-line b { color: var(--test-amber); }
 .testing-live-run p {
@@ -287,6 +294,7 @@
 .testing-history-runs p strong { font: 700 .68rem ui-monospace, monospace; }
 .testing-history-runs p small { margin-top: .18rem; overflow: hidden; color: var(--test-muted); font: .58rem ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; }
 .testing-history-runs > div > b { color: var(--test-muted); font: 700 .62rem ui-monospace, monospace; }
+.testing-history-more { margin: 0; padding: .65rem .8rem; color: var(--test-muted); font: italic .62rem Georgia, serif; }
 
 .testing-feature-list { display: grid; grid-template-columns: 1fr 1fr; gap: .45rem; }
 .testing-feature-list > div {
@@ -321,7 +329,7 @@
 .testing-behavior-list header strong { font: 700 .7rem Georgia, serif; }
 .testing-behavior-list header code, .testing-behavior-list time { margin-top: .15rem; color: var(--test-muted); font: .54rem ui-monospace, monospace; }
 .testing-behavior-signals { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .55rem; }
-.testing-behavior-signals span { padding: .28rem .4rem; border: 1px solid var(--test-line); background: #101d17; font: .54rem ui-monospace, monospace; }
+.testing-behavior-signals span { padding: .28rem .4rem; overflow-wrap: anywhere; border: 1px solid var(--test-line); background: #101d17; font: .54rem ui-monospace, monospace; }
 .testing-behavior-signals b { font-size: .66rem; }
 .testing-sequence { margin: .55rem 0 0; overflow: hidden; color: var(--test-muted); font: .54rem/1.45 ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; }
 .testing-event-stream { margin-top: .75rem; border-top: 1px solid var(--test-line); }
@@ -381,6 +389,13 @@
 .testing-error { border-color: rgba(255, 128, 111, .5); color: var(--test-coral); }
 
 @media (max-width: 719px) {
+  .testing-section-head { align-items: flex-start; flex-wrap: wrap; }
+  .testing-section-head > span { max-width: 45%; margin-left: auto; }
+  .testing-history-runs > div { grid-template-columns: auto minmax(0, 1fr) auto; gap: .45rem; padding: .6rem; }
+  .testing-history-card > header, .testing-session-card > header { padding: .7rem; }
+  .testing-history-card h3, .testing-session-card h3 { overflow-wrap: anywhere; }
+  .testing-idle { align-items: flex-start; }
+  .testing-idle strong, .testing-idle small { overflow-wrap: anywhere; }
   .testing-table-wrap { overflow: visible; }
   .testing-panel table, .testing-panel tbody, .testing-panel tr, .testing-panel td { display: block; width: 100%; }
   .testing-panel thead { display: none; }
