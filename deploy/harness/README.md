@@ -47,7 +47,7 @@ Useful options:
 
 ```bash
 python3 -m deploy.harness --nodes 5
-python3 -m deploy.harness --no-build --image autonomy-dashboard@sha256:...
+python3 -m deploy.harness --no-build --image autonomy-node@sha256:...
 python3 -m deploy.harness --project autonomy-harness-demo
 ```
 

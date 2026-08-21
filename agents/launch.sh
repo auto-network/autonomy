@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Launch an agent container to work on a bead.
 #
-# Usage: ./agents/launch.sh <bead-id> [--dry-run] [--image=autonomy-agent:TAG] [--detach] [--harness=claude|codex] [--org=SLUG] [--workspace-id=ID] [--model=NAME]
+# Usage: ./agents/launch.sh <bead-id> [--dry-run] [--image=autonomy-session-TAG] [--detach] [--harness=claude|codex] [--org=SLUG] [--workspace-id=ID] [--model=NAME]
 #
 # Lifecycle (foreground mode — default):
 # 1. Creates a git worktree on a bead-specific branch
@@ -19,10 +19,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
-IMAGE="autonomy-agent"
+IMAGE="autonomy-session"
 
 # ── Args ──────────────────────────────────────────────
-BEAD_ID="${1:?Usage: launch.sh <bead-id> [--dry-run] [--image=autonomy-agent:TAG] [--detach] [--harness=claude|codex] [--org=SLUG] [--graph-tags=a,b,c]}"
+BEAD_ID="${1:?Usage: launch.sh <bead-id> [--dry-run] [--image=autonomy-session-TAG] [--detach] [--harness=claude|codex] [--org=SLUG] [--graph-tags=a,b,c]}"
 shift
 DRY_RUN=false
 DETACH=false

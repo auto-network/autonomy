@@ -32,7 +32,7 @@ def _cfg(**overrides) -> WorkspaceV1:
         id="sample",
         name="Sample",
         description="Sample workspace",
-        image="autonomy-agent:sample",
+        image="autonomy-session-sample",
         graph_project="sample-org",
         repos=(),
         working_dir="/workspace/repo",

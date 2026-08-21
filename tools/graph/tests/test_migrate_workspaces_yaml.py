@@ -36,7 +36,7 @@ YAML_FIXTURE = textwrap.dedent(
       autonomy:
         name: "Autonomy Network"
         description: "Core platform"
-        image: "autonomy-agent:dashboard"
+        image: "autonomy-session-platform"
         working_dir: "/workspace/repo"
         graph_project: autonomy
         default_tags: []
@@ -46,7 +46,7 @@ YAML_FIXTURE = textwrap.dedent(
       enterprise:
         name: "Enterprise"
         description: "Anchore Widgets"
-        image: "autonomy-agent:enterprise"
+        image: "autonomy-session-widgets"
         repos:
           - url: "git@github.com:anchore/widgets.git"
             mount: "/workspace/widgets"
@@ -60,7 +60,7 @@ YAML_FIXTURE = textwrap.dedent(
       widgets-ng:
         name: "Widgets NG"
         description: "Anchore Widgets NG"
-        image: "autonomy-agent:widgets-ng"
+        image: "autonomy-session-widgets-ng"
         repos:
           - url: "git@github.com:anchore/widgets.git"
             mount: "/workspace/widgets"
@@ -182,7 +182,7 @@ def test_migration_payload_shape(yaml_path, orgs_dir):
     assert "artifacts" not in payload
     # Directly carried.
     assert payload["name"] == "Widgets NG"
-    assert payload["image"] == "autonomy-agent:widgets-ng"
+    assert payload["image"] == "autonomy-session-widgets-ng"
     assert payload["working_dir"] == "/workspace/widgets_ng"
     assert payload["dind"] is True
     assert payload["network_host"] is False

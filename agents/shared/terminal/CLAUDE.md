@@ -1,6 +1,6 @@
 # Terminal Agent — Environment Brief
 
-You are running interactively inside the `autonomy-agent:dashboard` container as Claude Opus 4.6.
+You are running interactively inside the `autonomy-session-platform` container as Claude Opus 4.6.
 This is an open-ended terminal session launched from the Autonomy Network dashboard.
 There is no bead, no task directive, and no `decision.json` to write.
 

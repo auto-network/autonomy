@@ -148,7 +148,7 @@ as DEPLOY.md documents:
 docker run \
   -e AUTONOMY_INVITE="$INVITATION" \
   --mount source=autonomy-data,destination=/app/data \
-  -p 8080:8080 autonomy-dashboard:local
+  -p 8080:8080 autonomy-node:local
 ```
 
 `AUTONOMY_FIRST_ORG` and `AUTONOMY_INVITE` are mutually exclusive. A join

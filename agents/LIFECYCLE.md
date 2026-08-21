@@ -59,8 +59,8 @@ The dispatcher queries `status=open AND label=readiness:approved` — a single c
 
 **Image Selection:** Dispatcher reads bead labels and routes to the container image declared by the matching workspace in `autonomy.workspace#1` settings (`dispatch_labels` → `image`, resolved by `dispatcher._build_label_image_map`). Beads with no matching project label fall through to the rig default from `.beads/config.yaml`. The same lookup also supplies `graph_project` and `default_tags`, which become `GRAPH_SCOPE` / `GRAPH_TAGS` in the agent container and are written into `.session_meta.json`.
 
-- `autonomy-agent` — base image for research/refinement
-- `autonomy-agent:dashboard` — adds starlette, uvicorn for dashboard work
+- `autonomy-session` — base image for research/refinement
+- `autonomy-session-platform` — adds starlette, uvicorn for dashboard work
 - More project images as needed
 
 **Prompt:** Generated dynamically from the graph by `agents/compose.py`:

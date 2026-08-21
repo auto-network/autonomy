@@ -68,7 +68,7 @@ def test_insert_full_decision():
         commit_hash="",
         branch="agent/auto-abc",
         branch_base="",
-        image="autonomy-agent",
+        image="autonomy-session",
         container_name="agent-auto-abc-9999",
         exit_code=0,
         output_dir="/tmp/test-run",
@@ -90,7 +90,7 @@ def test_insert_full_decision():
     assert row["time_research_pct"] == 20
     assert row["time_coding_pct"] == 60
     assert row["discovered_beads_count"] == 1
-    assert row["image"] == "autonomy-agent"
+    assert row["image"] == "autonomy-session"
 
 
 def test_insert_no_decision():
@@ -200,7 +200,7 @@ def test_insert_launch_run():
         started_at=1710000000.0,
         branch="agent/auto-live",
         branch_base="abc123",
-        image="autonomy-agent",
+        image="autonomy-session",
         container_name="agent-auto-live-1234",
         output_dir="/tmp/test-live",
     )
@@ -217,7 +217,7 @@ def test_insert_launch_run():
     assert row["completed_at"] is None
     assert row["exit_code"] is None
     assert row["branch"] == "agent/auto-live"
-    assert row["image"] == "autonomy-agent"
+    assert row["image"] == "autonomy-session"
     assert row["output_dir"] == "/tmp/test-live"
 
 
@@ -233,7 +233,7 @@ def test_launch_then_complete():
         started_at=1710000000.0,
         branch="agent/auto-lc",
         branch_base="",
-        image="autonomy-agent",
+        image="autonomy-session",
         container_name="agent-auto-lc-5678",
         output_dir="",
     )
@@ -255,7 +255,7 @@ def test_launch_then_complete():
         commit_hash="",
         branch="agent/auto-lc",
         branch_base="",
-        image="autonomy-agent",
+        image="autonomy-session",
         container_name="agent-auto-lc-5678",
         exit_code=0,
         output_dir="",
@@ -279,7 +279,7 @@ def test_get_currently_running():
         started_at=1710000000.0,
         branch="agent/auto-run",
         branch_base="",
-        image="autonomy-agent",
+        image="autonomy-session",
         container_name="agent-auto-run-1111",
         output_dir="",
     )

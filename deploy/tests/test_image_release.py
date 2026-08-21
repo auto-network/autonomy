@@ -252,7 +252,7 @@ def test_workflow_uses_project_key_not_keyless_identity():
 def test_compose_keeps_sovereign_source_build_and_digest_override():
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     assert "dockerfile: deploy/Dockerfile" in compose
-    assert "${AUTONOMY_IMAGE:-autonomy-dashboard:local}" in compose
+    assert "${AUTONOMY_IMAGE:-autonomy-node:local}" in compose
     assert "docker compose up -d --no-build" in compose
 
 

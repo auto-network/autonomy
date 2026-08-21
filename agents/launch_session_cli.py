@@ -12,7 +12,7 @@ Usage:
         --worktree /path/to/worktree \
         --git-dir /path/to/.git \
         --output-dir /path/to/output \
-        --image autonomy-agent \
+        --image autonomy-session \
         --org <org-slug> \
         [--detach]
         [--harness claude|codex]

@@ -237,7 +237,7 @@ def _seed_workspace(
     payload_overrides: dict[str, Any] | None = None,
 ) -> None:
     """Insert an ``autonomy.workspace#1`` row keyed on *workspace_id*."""
-    payload = {"name": workspace_id, "image": "autonomy-agent"}
+    payload = {"name": workspace_id, "image": "autonomy-session"}
     if payload_overrides:
         payload.update(payload_overrides)
     db = GraphDB(org_db)
@@ -403,7 +403,7 @@ def test_dispatch_refuses_wrong_org_after_location_before_action_lookup(
         "principal_from_request",
         lambda request: api_auth.ApiPrincipal(
             api_auth.ApiPrincipalKind.ORG_SESSION,
-            subject="autonomy-agent",
+            subject="autonomy-session",
             org="autonomy",
         ),
     )
@@ -593,7 +593,7 @@ def test_dispatch_uses_target_asset_workspace(
     # launch_session(session_type, name, prompt, mounts, metadata, detach,
     #                image, working_dir, harness, extra_env, output_dir, model)
     image = args[6] if len(args) >= 7 else call["kwargs"].get("image")
-    assert image == "autonomy-agent"  # both rigs share the image; routing
+    assert image == "autonomy-session"  # both rigs share the image; routing
     # is asserted by target_workspace=anchore-rig + target_org=anchore.
 
 

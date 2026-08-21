@@ -26,7 +26,7 @@ def _ws(
     *,
     name: str = "",
     org: str = "autonomy",
-    image: str = "autonomy-agent:test",
+    image: str = "autonomy-session-test",
     writable: bool = False,
 ) -> WorkspaceV1:
     """Build a :class:`WorkspaceV1` with the minimum fields the API uses."""
@@ -72,7 +72,7 @@ def test_list_workspaces_returns_loaded_set():
     assert set(by_id) == {"autonomy", "widgets-ng"}
     assert by_id["autonomy"]["org"] == "autonomy"
     assert by_id["autonomy"]["name"] == "Autonomy"
-    assert by_id["autonomy"]["image"] == "autonomy-agent:test"
+    assert by_id["autonomy"]["image"] == "autonomy-session-test"
     assert by_id["autonomy"]["writable"] is False
     assert by_id["widgets-ng"]["org"] == "anchore"
     assert by_id["widgets-ng"]["writable"] is True

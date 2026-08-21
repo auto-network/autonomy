@@ -82,7 +82,7 @@ See `agents/shared/dashboard/agent-browser-primer.md` for dashboard-specific pat
 ```bash
 agents/launch.sh <bead-id>            # launch agent container for a bead (foreground)
 agents/launch.sh <bead-id> --detach   # launch in background (dispatcher manages)
-agents/build.sh                       # rebuild the autonomy-agent image
+agents/build.sh                       # rebuild the autonomy-session image
 ```
 
 **Launch a workspace session from the host — model + harness per launch.** The

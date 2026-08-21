@@ -62,7 +62,7 @@ def _populate_running_row(dispatch_db, *, run_id, bead_id, last_activity_value):
         " VALUES (?, ?, ?, 'RUNNING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
         (
             run_id, bead_id, started_at, f"agent-{bead_id}-001",
-            f"agent/{bead_id}", "autonomy-agent:dashboard",
+            f"agent/{bead_id}", "autonomy-session-platform",
             f"/tmp/agent-runs/{run_id}",
             60000, 20,
             10.5, 1000000, 128,

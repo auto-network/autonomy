@@ -1,5 +1,5 @@
 # Autonomy Agent DinD (Docker-in-Docker) Intermediate Image
-# Extends autonomy-agent (Ubuntu 24.04 base) with Docker CE + docker-compose
+# Extends autonomy-session (Ubuntu 24.04 base) with Docker CE + docker-compose
 # for project images that need to run a nested docker daemon (e.g. Anchore
 # Enterprise compose stack).
 #
@@ -8,11 +8,11 @@
 # command. launch_session() passes the full claude command via exec "$@", so
 # no model strings or CLI args are hardcoded here.
 #
-# Build:  docker build -f agents/Dockerfile.dind -t autonomy-agent:dind agents/
+# Build:  docker build -f agents/Dockerfile.dind -t autonomy-session-dind agents/
 # Run:    project images FROM this one; invoked via
 #         launch_session(needs_nested_docker=True, runtime="privileged").
 
-FROM autonomy-agent
+FROM autonomy-session
 
 USER root
 

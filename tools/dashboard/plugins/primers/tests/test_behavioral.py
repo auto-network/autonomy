@@ -35,9 +35,9 @@ window.__primersStubData = window.__primersStubData || {
     orgs: ['autonomy', 'anchore', 'personal'],
     workspaces: [
         {id: 'autonomy',       name: 'Autonomy Network', org: 'autonomy',
-         image: 'autonomy-agent:dashboard',     writable: false},
+         image: 'autonomy-session-platform',     writable: false},
         {id: 'widgets-ng',  name: 'Widgets NG',    org: 'anchore',
-         image: 'autonomy-agent:widgets-ng', writable: true},
+         image: 'autonomy-session-widgets-ng', writable: true},
     ],
     primers: {
         'autonomy': {
@@ -45,7 +45,7 @@ window.__primersStubData = window.__primersStubData || {
             token_estimate: 420,
             workspace: {id: 'autonomy', name: 'Autonomy Network',
                         org: 'autonomy',
-                        image: 'autonomy-agent:dashboard',
+                        image: 'autonomy-session-platform',
                         writable: false},
         },
         'widgets-ng': {
@@ -56,7 +56,7 @@ window.__primersStubData = window.__primersStubData || {
             token_estimate: 1234,
             workspace: {id: 'widgets-ng', name: 'Widgets NG',
                         org: 'anchore',
-                        image: 'autonomy-agent:widgets-ng',
+                        image: 'autonomy-session-widgets-ng',
                         writable: true},
         },
     },
@@ -373,7 +373,7 @@ class TestPrimersPlugin:
         _install_stub({
             "workspaces": [
                 {"id": "broken", "name": "Broken", "org": "autonomy",
-                 "image": "autonomy-agent:broken", "writable": False},
+                 "image": "autonomy-session-broken", "writable": False},
             ],
             "primers": {},
             "primerErrors": {

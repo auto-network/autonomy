@@ -59,7 +59,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 LAUNCH_SCRIPT = Path(__file__).parent / "launch.sh"
 DISPATCH_STATE_PATH = DATA_ROOT / "dispatch.state"
 
-DEFAULT_IMAGE = "autonomy-agent"
+DEFAULT_IMAGE = "autonomy-session"
 # DEFAULT_OPUS_MODEL is imported from session_launcher — the single source of
 # truth that launch_session_cli also resolves against. Do NOT redefine it here;
 # a second copy silently drifts from the one the launcher actually applies.

@@ -587,7 +587,7 @@ def test_workspace_primer_renders_resolved_commit_policy(multi_org_env):
         id="autonomy",
         name="Autonomy",
         description="Autonomy platform",
-        image="autonomy-agent:dashboard",
+        image="autonomy-session-platform",
         graph_project="autonomy",
         repos=(RepoMount(host="example.com", repo="o/r", mount="/workspace/repo", writable=True),),
     )
@@ -611,7 +611,7 @@ def test_commit_policy_block_issue_linkage_uses_real_capability_context(graph_db
         id="no-linkage-ws",
         name="No Linkage",
         description="",
-        image="autonomy-agent:dashboard",
+        image="autonomy-session-platform",
         graph_project=ops.CALLER_ORG,
         repos=(RepoMount(host="example.com", repo="o/r", mount="/workspace/repo", writable=True),),
     )
@@ -629,7 +629,7 @@ def test_commit_policy_block_issue_linkage_uses_real_capability_context(graph_db
         id="enterprise-no-tracker-ws",
         name="Enterprise No Tracker",
         description="",
-        image="autonomy-agent:dashboard",
+        image="autonomy-session-platform",
         graph_project=ops.CALLER_ORG,
         repos=(RepoMount(host="example.com", repo="o/r", mount="/workspace/repo", writable=True),),
     )
@@ -642,7 +642,7 @@ def test_commit_policy_block_issue_linkage_uses_real_capability_context(graph_db
         id="enterprise-no-tracker-ws",
         name="Enterprise With Tracker",
         description="",
-        image="autonomy-agent:dashboard",
+        image="autonomy-session-platform",
         graph_project=ops.CALLER_ORG,
         repos=(RepoMount(host="example.com", repo="o/r", mount="/workspace/repo", writable=True),),
         capabilities=(
