@@ -105,7 +105,7 @@ def _legacy_mount_rs(*, key, host_path, container_path, mode="ro",
 def _workspace(mounts) -> WorkspaceV1:
     return WorkspaceV1(
         id="enterprise-ng", name="Enterprise NG", description="",
-        image="autonomy-session-enterprise-ng", graph_project=ORG,
+        image="session-enterprise-ng", graph_project=ORG,
         repos=(), mounts=mounts,
     )
 

@@ -96,7 +96,7 @@ projects:
   enterprise-v5:
     name: "Enterprise v5"
     description: "Anchore Enterprise v5 — lean v5-only patch workspace with DinD"
-    image: "autonomy-session-enterprise-v5"
+    image: "session-enterprise-v5"
     repos:
       - url: "git@github.com:anchore/enterprise.git"
         mount: "/workspace/enterprise"
@@ -111,7 +111,7 @@ projects:
   enterprise-ng:
     name: "Enterprise NG"
     description: "Anchore Enterprise NG — component_catalog development"
-    image: "autonomy-session-enterprise-ng"
+    image: "session-enterprise-ng"
     repos:
       - url: "git@github.com:anchore/enterprise.git"
         mount: "/workspace/enterprise"

@@ -63,7 +63,7 @@ def test_projects():
             id="enterprise",
             name="Enterprise",
             description="",
-            image="autonomy-session-enterprise",
+            image="session-enterprise",
             graph_project="anchore",
             harness="codex",
             default_tags=("enterprise",),
@@ -85,7 +85,7 @@ class TestLabelToImageRouting:
     def test_build_label_image_map_from_config(self, test_projects):
         mapping = dispatcher._build_label_image_map()
         assert mapping["dashboard"] == "autonomy-session-platform"
-        assert mapping["enterprise"] == "autonomy-session-enterprise"
+        assert mapping["enterprise"] == "session-enterprise"
 
     def test_project_for_bead_matches_on_dispatch_label(self, test_projects):
         bead = {"id": "auto-x", "labels": ["dashboard"]}

@@ -118,7 +118,7 @@ def _run(**kw):
         name="test-session",
         prompt=None,
         detach=True,
-        image="autonomy-session-enterprise",
+        image="session-enterprise",
         metadata={"org": "test-org"},
     )
     defaults.update(kw)
@@ -137,7 +137,7 @@ def test_nested_docker_defaults_to_privileged_runtime(
     assert "--privileged" in cmd
     assert not any(arg.startswith("--runtime=") for arg in cmd)
     # DinD keeps its wrapper entrypoint and receives the full harness argv.
-    image_index = cmd.index("autonomy-session-enterprise")
+    image_index = cmd.index("session-enterprise")
     assert cmd[image_index + 1] == "claude"
     assert "--entrypoint" not in cmd
     assert "/var/run/docker.sock" not in " ".join(cmd)
@@ -179,7 +179,7 @@ def test_nested_docker_honors_configured_runtime_without_privileged(
     else:
         assert expected_arg in cmd
     assert "--privileged" not in cmd
-    image_index = cmd.index("autonomy-session-enterprise")
+    image_index = cmd.index("session-enterprise")
     assert cmd[image_index + 1] == "claude"
     assert "/var/run/docker.sock" not in " ".join(cmd)
 
@@ -1914,7 +1914,7 @@ def test_golden_mount_argv_is_byte_identical(
 
     session_launcher.launch_session(
         session_type="dispatch", name="test-session", prompt=None, detach=True,
-        image="autonomy-session-enterprise", metadata={"org": "test-org"},
+        image="session-enterprise", metadata={"org": "test-org"},
         output_dir=str(run_dir), global_claude_md=str(gmd),
         startup_script=str(startup), mounts={str(ws_src): "/opt/data:ro"},
     )
@@ -1954,7 +1954,7 @@ def test_golden_mount_argv_is_byte_identical(
         "-v", "{TMP}/startup.sh:/startup.sh:ro",
         "-e", "AUTONOMY_CAPABILITY_BIN=/etc/autonomy/cap-bin",
         "-w", "/workspace/repo",
-        "autonomy-session-enterprise", "--dangerously-skip-permissions",
+        "session-enterprise", "--dangerously-skip-permissions",
         "--model", "claude-opus-4-8[1m]",
     ]
     assert got == expected

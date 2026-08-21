@@ -87,7 +87,7 @@ def isolated_orgs(tmp_path, monkeypatch):
         "name": "autonomy", "image": "autonomy-session-platform",
     })
     _set_workspace("anchore", "enterprise-ng", {
-        "name": "enterprise-ng", "image": "autonomy-session-enterprise-ng",
+        "name": "enterprise-ng", "image": "session-enterprise-ng",
     })
 
     def write(orgs: dict | None) -> None:

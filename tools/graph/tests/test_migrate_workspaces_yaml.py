@@ -46,7 +46,7 @@ YAML_FIXTURE = textwrap.dedent(
       enterprise:
         name: "Enterprise"
         description: "Anchore Enterprise"
-        image: "autonomy-session-enterprise"
+        image: "session-enterprise"
         repos:
           - url: "git@github.com:anchore/enterprise.git"
             mount: "/workspace/enterprise"
@@ -60,7 +60,7 @@ YAML_FIXTURE = textwrap.dedent(
       enterprise-ng:
         name: "Enterprise NG"
         description: "Anchore Enterprise NG"
-        image: "autonomy-session-enterprise-ng"
+        image: "session-enterprise-ng"
         repos:
           - url: "git@github.com:anchore/enterprise.git"
             mount: "/workspace/enterprise"
@@ -182,7 +182,7 @@ def test_migration_payload_shape(yaml_path, orgs_dir):
     assert "artifacts" not in payload
     # Directly carried.
     assert payload["name"] == "Enterprise NG"
-    assert payload["image"] == "autonomy-session-enterprise-ng"
+    assert payload["image"] == "session-enterprise-ng"
     assert payload["working_dir"] == "/workspace/enterprise_ng"
     assert payload["dind"] is True
     assert payload["network_host"] is False
