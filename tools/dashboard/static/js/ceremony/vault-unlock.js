@@ -205,7 +205,7 @@ export async function wakeVault({
     method: 'POST',
     headers: personalHeaders(),
     credentials: 'same-origin',
-    body: JSON.stringify({ org: 'personal', event: JSON.stringify(event) }),
+    body: JSON.stringify({ org: 'personal', event: canonicalJson(event) }),
   });
   if (!granted.ok) {
     return { ready: false, reason: `delegate-${granted.status}` };

@@ -164,6 +164,10 @@
     } catch (e) {
       throw new Error('that password does not open your identity — check it and try again');
     }
+    // The vault wake (below, after the session exists) needs the raw seed to
+    // derive its KEM credential + delegate. Keep ONE copy past the I1 zero and
+    // wipe it the instant the wake is done, so the seed never outlives it.
+    var wakeSeed = new Uint8Array(opened.seed);
     var key;
     try {
       key = await I.importSigningKey(opened.seed);
@@ -180,6 +184,23 @@
     await _postJson('/api/identity/unlock/password', {
       challenge: minted.challenge, signature: sig,
     });
+
+    // Wake the vault now that the session exists: publish the KEM credential
+    // and hand its private half so this sign-in warms the vault durably — the
+    // same ceremony warm_client runs. Best-effort: a wake that fails must never
+    // turn a successful unlock into a lockout.
+    try {
+      var wake = await S.wakeVault({ personalRootSeed: wakeSeed });
+      if (window.console && console.info) {
+        console.info('vault wake:', JSON.stringify(wake));
+      }
+    } catch (e) {
+      if (window.console && console.warn) {
+        console.warn('vault wake failed after unlock:', (e && e.message) || e);
+      }
+    } finally {
+      wakeSeed.fill(0);
+    }
 
     // Access authentication has succeeded.  Reuse this password-backed root
     // ceremony to maintain the unattended serving credential if necessary.
