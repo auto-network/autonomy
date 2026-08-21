@@ -87,3 +87,33 @@ def test_an_operator_override_still_wins(monkeypatch):
     creds = session_launcher._resolve_credentials(prefer_alias="ignored")
 
     assert creds == {"type": "token", "token": "operator-override"}
+
+
+def test_a_host_session_carries_a_local_operator_token(monkeypatch, tmp_path):
+    """A host session reaches the dashboard over HTTP with no bearer and so was
+    refused by the authenticated-reader guards. Its launch command must now
+    carry a minted CROSSTALK_TOKEN whose auth_db row is org-less — a local
+    operator, full authority, no org scope."""
+    import re as _re
+
+    from tools.dashboard import server
+    from tools.dashboard.dao import auth_db
+
+    auth_db.init_db(tmp_path / "auth.db")
+
+    cmd = server._build_host_resume_cmd(
+        tmux_name="host-0000-000000",
+        harness="claude",
+        model="opus",
+        session_uuid="feed",
+    )
+    m = _re.search(r"CROSSTALK_TOKEN=(\S+)", cmd)
+    assert m, f"host resume command carries no session token: {cmd}"
+
+    raw = m.group(1)
+    import hashlib
+    resolved = auth_db.resolve_token(hashlib.sha256(raw.encode()).hexdigest())
+    assert resolved is not None, "the minted token is not in auth_db"
+    session, org = resolved
+    assert session == "host-0000-000000"
+    assert org is None, "a host session token must be org-less (local operator)"
