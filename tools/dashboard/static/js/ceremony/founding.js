@@ -34,6 +34,7 @@ const ED25519_PKCS8_SEED_OFFSET = 16;
 const CREDENTIAL_DOMAIN = 'autonomy.storage.persona-kem-credential.v1\n';
 const KEM_DERIVE_INFO_PREFIX = 'autonomy.idkit.encap-key.v1\n';
 const KEM_PURPOSE_PREFIX = 'autonomy/persona-kem/v1/';
+const KEM_SEED_INFO_PREFIX = 'autonomy/persona-storage-kem-seed/v1/';
 const X25519_PKCS8_PREFIX = [
   0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06,
   0x03, 0x2b, 0x65, 0x6e, 0x04, 0x22, 0x04, 0x20,
@@ -98,6 +99,37 @@ async function sha256Hex(value) {
   return bytesToHex(await webCrypto.subtle.digest(
     'SHA-256',
     textEncoder.encode(value),
+  ));
+}
+
+// Mirror of tools/network/storagekit/credentials.derive_kem_seed: HKDF-SHA256
+// over the personal root seed. The seed is org-independent; counter 0 is the
+// initial publication (warm-up and the browser sign-in). Byte-identical to the
+// Python, so a credential built here opens under the same recovery path
+// warm_client's does -- guarded by test_vault_unlock_crossimpl.
+async function deriveKemSeed(rootSeed, counter = 0) {
+  const ikm = new Uint8Array(rootSeed);
+  if (ikm.length < 32) {
+    throw new Error('rootSeed must contain at least 32 bytes');
+  }
+  let material;
+  try {
+    material = await webCrypto.subtle.importKey(
+      'raw', ikm, 'HKDF', false, ['deriveBits'],
+    );
+  } finally {
+    ikm.fill(0);
+  }
+  return new Uint8Array(await webCrypto.subtle.deriveBits(
+    {
+      name: 'HKDF',
+      hash: 'SHA-256',
+      // cryptography HKDF(salt=None) uses an all-zero digest-sized salt.
+      salt: new Uint8Array(32),
+      info: textEncoder.encode(KEM_SEED_INFO_PREFIX + String(counter)),
+    },
+    material,
+    256,
   ));
 }
 
@@ -422,6 +454,7 @@ async function foundOrganization({
 export {
   buildFoundingBatch,
   buildPersonaKemCredential,
+  deriveKemSeed,
   foundOrganization,
   generateSealedOrgRoot,
   ORG_ROOT_ARMOR_PURPOSE,
