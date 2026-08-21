@@ -18151,12 +18151,8 @@ routes = [
     Route("/pages/session-view", page_session_view_fragment),
     Route("/test/input", page_test_input),
     Route("/_admin/voice-smoke", page_voice_smoke),
-    Route("/api/test/debug", api_test_debug_get),
-    Route("/api/test/debug", api_test_debug_post, methods=["POST"]),
-    Route("/api/test/version", api_test_version_get),
-    Route("/api/test/version", api_test_version_bump, methods=["POST"]),
-    Route("/api/test/toast", api_test_toast_get),
-    Route("/api/test/toast", api_test_toast_post, methods=["POST"]),
+    # /api/test/* dev-prototype routes are registered below, ONLY under
+    # DASHBOARD_MOCK — suppressed in production (auto-1wwpf.6).
 
     # WebSocket
     WebSocketRoute("/ws/terminal", ws_terminal),
@@ -18421,6 +18417,22 @@ routes = [
     # Static (catch-all — plugin static mounts above take precedence)
     Mount("/static", app=_VersionedStatic(directory=str(STATIC_DIR)), name="static"),
 ]
+
+# Dev-prototype routes (test_fixtures/input-prototype.html): in-memory debug/
+# toast/version scratch surfaces with no database and no production consumer.
+# Registered ONLY on an internal/mock dashboard (DASHBOARD_MOCK, which the mock
+# server sets for its temporary-fixture instances); absent in production, where
+# the paths simply do not exist. Suppressing them in prod, per operator
+# decision 2026-08-21 (auto-1wwpf.6).
+if os.environ.get("DASHBOARD_MOCK"):
+    routes += [
+        Route("/api/test/debug", api_test_debug_get),
+        Route("/api/test/debug", api_test_debug_post, methods=["POST"]),
+        Route("/api/test/version", api_test_version_get),
+        Route("/api/test/version", api_test_version_bump, methods=["POST"]),
+        Route("/api/test/toast", api_test_toast_get),
+        Route("/api/test/toast", api_test_toast_post, methods=["POST"]),
+    ]
 
 # Background task handles — captured during startup, cancelled during shutdown
 _dispatch_watcher_task: asyncio.Task | None = None
