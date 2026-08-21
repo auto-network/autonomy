@@ -67,6 +67,13 @@ def init_db(db_path: Path | None = None) -> None:
         "PRAGMA table_info(session_tokens)").fetchall()}
     if "org" not in cols:
         _conn.execute("ALTER TABLE session_tokens ADD COLUMN org TEXT")
+    # ``kind`` distinguishes an ordinary per-session token (NULL) from a
+    # machine-scoped service token (e.g. 'mcp_service'). Only ADDED here; a
+    # pre-existing token reads back kind=NULL and stays an ordinary session
+    # token, which is correct — a service token is only ever created by an
+    # explicit install-time insert_service_token call.
+    if "kind" not in cols:
+        _conn.execute("ALTER TABLE session_tokens ADD COLUMN kind TEXT")
     _conn.commit()
     logger.info("auth_db: initialised at %s", path)
 
@@ -100,21 +107,68 @@ def insert_token(token_hash: str, tmux_name: str, org: str | None) -> None:
 
 
 def resolve_token(token_hash: str) -> tuple[str, str | None] | None:
-    """Resolve a non-revoked token hash to ``(tmux_name, org)``.
+    """Resolve a non-revoked SESSION token hash to ``(tmux_name, org)``.
 
     ``org`` is the organization stamped at mint: a slug for a container token,
     ``None`` for a host/local token (or for a token minted before the org column
     existed). Returns ``None`` when the token is unknown or revoked. Callers that
     use ``org`` for authority must not treat ``None`` as local without first
     checking the session has no workspace — see the guard in server.py.
+
+    Machine-scoped service tokens (``kind`` set) are deliberately invisible here:
+    they are not session tokens and must never resolve through the session-token
+    path (a service token presented off its own routes then simply fails to
+    authenticate). Resolve one with :func:`resolve_service_token`.
     """
     conn = get_conn()
     row = conn.execute(
         "SELECT tmux_name, org FROM session_tokens"
-        " WHERE token_hash=? AND revoked_at IS NULL",
+        " WHERE token_hash=? AND revoked_at IS NULL AND kind IS NULL",
         (token_hash,),
     ).fetchone()
     return (row["tmux_name"], row["org"]) if row else None
+
+
+#: The only service-token kind that exists today: the ChatGPT MCP relay's
+#: machine-scoped credential. Its whole authority is reaching the ``/api/mcp/*``
+#: protocol routes — no organization, no dashboard authority (see the middleware
+#: in api_auth.py and the route-scoped principal it produces).
+MCP_SERVICE_KIND = "mcp_service"
+
+
+def insert_service_token(token_hash: str, name: str, kind: str = MCP_SERVICE_KIND) -> None:
+    """Store a hashed machine-scoped SERVICE token.
+
+    A service token has no organization (``org`` is NULL) and is marked with a
+    ``kind`` so it never resolves as an ordinary session token. It is created by
+    an explicit install-time act, not minted per session, and is machine-local:
+    auth.db is never mounted into containers and never synced across the fleet.
+    ``name`` is a stable identity label (e.g. ``mcp-relay-service``) used only
+    for display and revocation.
+    """
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO session_tokens (token_hash, tmux_name, created_at, org, kind)"
+        " VALUES (?, ?, ?, NULL, ?)",
+        (token_hash, name, time.time(), kind),
+    )
+    conn.commit()
+
+
+def resolve_service_token(token_hash: str, kind: str = MCP_SERVICE_KIND) -> str | None:
+    """Resolve a non-revoked service token of ``kind`` to its identity label.
+
+    Returns the stored ``name`` (tmux_name column) or ``None`` if unknown,
+    revoked, or of a different kind. This is the ONLY way a service token
+    authenticates; :func:`resolve_token` cannot see it.
+    """
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT tmux_name FROM session_tokens"
+        " WHERE token_hash=? AND revoked_at IS NULL AND kind=?",
+        (token_hash, kind),
+    ).fetchone()
+    return row["tmux_name"] if row else None
 
 
 def revoke_token(tmux_name: str) -> None:

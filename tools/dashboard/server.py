@@ -3479,6 +3479,41 @@ def _crosstalk_auth(request) -> tuple[str | None, JSONResponse | None]:
     return session, None
 
 
+#: The route prefix the MCP relay service token is scoped to. Its whole authority
+#: is reaching these protocol routes — resolving/binding a chat session and
+#: relaying crosstalk. Everything organization-scoped is decided downstream, per
+#: chat session, through the approval protocol; the token itself carries no org
+#: and no dashboard authority (see auth_db.insert_service_token).
+_MCP_SERVICE_ROUTE_PREFIX = "/api/mcp/"
+
+
+def authenticate_mcp_service(request) -> "api_auth.ApiPrincipal | None":
+    """Classify the machine-scoped MCP relay service token, ONLY on MCP routes.
+
+    Returns an ``MCP_SERVICE`` principal when the request targets an
+    ``/api/mcp/*`` route and carries a valid, non-revoked service token; ``None``
+    otherwise. The route scoping lives here: off these routes the function
+    returns None, so the token never authenticates anywhere else — and because a
+    service token is not a session token (``auth_db.resolve_token`` cannot see
+    it), the ordinary bearer path rejects it there too. The per-handler
+    ``_relay_auth`` check stays on the handlers as defense in depth.
+    """
+    path = request.url.path
+    if not path.startswith(_MCP_SERVICE_ROUTE_PREFIX):
+        return None
+    auth = request.headers.get("authorization", "")
+    parts = auth.split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1]:
+        return None
+    token_hash = hashlib.sha256(parts[1].encode()).hexdigest()
+    name = auth_db.resolve_service_token(token_hash)
+    if name is None:
+        return None
+    return api_auth.ApiPrincipal(
+        api_auth.ApiPrincipalKind.MCP_SERVICE, subject=name,
+    )
+
+
 async def api_resources(request):
     """GET /api/resources — per-session CPU/RAM/disk samples + collector health.
 
@@ -19213,6 +19248,7 @@ app = Starlette(
             authenticate_bearer=authenticate_session_request,
             verify_cookie=unlock_routes.verify_session_token,
             cookie_name=unlock_routes.SESSION_COOKIE,
+            authenticate_service=authenticate_mcp_service,
         ),
         Middleware(_CSPMiddleware),
         # Innermost: the human unlock gate (fail-open-then-enforce).
