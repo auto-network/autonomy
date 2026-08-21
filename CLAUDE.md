@@ -101,7 +101,7 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 | `graph set schema <set_id>` | Print the registered schema for a set_id | `graph set schema dashboard.agent-actions` |
 | `graph set example <set_id>` | Emit a stub JSON payload for a registered schema | `graph set example dashboard.agent-actions` |
 | `graph set add <set_id>#<rev> --key <key> --from <file>` | Create **or update** a base Setting — writes the whole payload, upserting in place when the key exists | `graph set add dashboard.agent-actions#2 --key bead.ask-question --from action.json` |
-| `graph set override <id> --inline '{...}'` | Patch selected fields of an existing Setting, leaving the rest alone | `graph set override 40d144a4-b5 --inline '{"image":"autonomy-agent:scale-harness"}'` |
+| `graph set override <id> --inline '{...}'` | Patch selected fields of an existing Setting, leaving the rest alone | `graph set override 40d144a4-b5 --inline '{"image":"autonomy-session-scale-harness"}'` |
 | `graph set exclude / deprecate / remove` | Lifecycle commands | `graph set --help` for full list |
 | `graph set find <noun>` | Search schemas by topic | `graph set find action` |
 | `graph set migrate <set_id> --target <rev>` | Rewrite stored rows up to a target schema revision | `graph set migrate dashboard.agent-actions --target 2` |

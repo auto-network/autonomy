@@ -76,7 +76,7 @@ def _baseline_run_kwargs(run_id: str, bead_id: str) -> dict:
         commit_hash="",
         branch=f"agent/{bead_id}",
         branch_base="",
-        image="autonomy-agent",
+        image="autonomy-session",
         container_name=f"agent-{bead_id}",
         exit_code=0,
         output_dir="",

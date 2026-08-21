@@ -122,7 +122,7 @@ def test_workspace_composition_reads_dependent_sets_once_for_many_workspaces(
 
 def test_workspace_from_setting_defaults_harness_to_claude():
     workspace = _workspace_from_setting(
-        {"name": "Autonomy", "image": "autonomy-agent:dashboard"},
+        {"name": "Autonomy", "image": "autonomy-session-platform"},
         workspace_id="autonomy",
         graph_project="autonomy",
         artifacts=(),
@@ -135,7 +135,7 @@ def test_workspace_from_setting_reads_codex_harness():
     workspace = _workspace_from_setting(
         {
             "name": "Autonomy Codex",
-            "image": "autonomy-agent:dashboard",
+            "image": "autonomy-session-platform",
             "harness": "codex",
         },
         workspace_id="autonomy-codex",
@@ -159,7 +159,7 @@ def test_load_workspaces_includes_raw_personal_owned_workspace(shipped_workspace
         key="idea-board",
         payload={
             "name": "Idea Board",
-            "image": "autonomy-agent:dashboard",
+            "image": "autonomy-session-platform",
             "harness": "codex",
             "working_dir": "/workspace/output",
         },
@@ -179,7 +179,7 @@ def test_legacy_dind_defaults_to_privileged_nested_docker():
     workspace = _workspace_from_setting(
         {
             "name": "Legacy DinD",
-            "image": "autonomy-agent:dind",
+            "image": "autonomy-session-dind",
             "dind": True,
         },
         workspace_id="legacy-dind",
@@ -196,7 +196,7 @@ def test_nested_docker_runtime_is_independently_configurable():
     workspace = _workspace_from_setting(
         {
             "name": "Sysbox DinD",
-            "image": "autonomy-agent:dind",
+            "image": "autonomy-session-dind",
             "needs_nested_docker": True,
             "session_runtime": "sysbox",
         },
@@ -215,7 +215,7 @@ def test_direct_nested_docker_model_defaults_to_privileged():
         id="direct",
         name="Direct",
         description="",
-        image="autonomy-agent:dind",
+        image="autonomy-session-dind",
         graph_project="autonomy",
         needs_nested_docker=True,
     )
@@ -274,7 +274,7 @@ def test_workspace_from_setting_propagates_repo_base_source():
     workspace = _workspace_from_setting(
         {
             "name": "Autonomy",
-            "image": "autonomy-agent:latest",
+            "image": "autonomy-session",
             "repos": [
                 {
                     "url": "git@github.com:foo/bar.git",
@@ -296,7 +296,7 @@ def test_workspace_from_setting_rejects_invalid_harness():
         _workspace_from_setting(
             {
                 "name": "Broken",
-                "image": "autonomy-agent:dashboard",
+                "image": "autonomy-session-platform",
                 "harness": "bogus",
             },
             workspace_id="broken",

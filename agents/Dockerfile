@@ -2,7 +2,7 @@
 # Bakes in all tools so agents start in <5s with zero downloads.
 # Includes bd, graph, claude, codex, agent-browser (headless Chrome), and tmux.
 #
-# Build:  docker build -t autonomy-agent agents/
+# Build:  docker build -t autonomy-session agents/
 # Run:    see agents/launch.sh
 
 FROM ubuntu:24.04

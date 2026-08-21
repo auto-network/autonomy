@@ -1,11 +1,11 @@
 # Dashboard Agent Container
-# Extends base autonomy-agent with Python deps for dashboard API contract tests.
+# Extends base autonomy-session with Python deps for dashboard API contract tests.
 # Chrome/agent-browser/tmux are already in the base image.
 #
 # Build:  ./agents/build.sh --dashboard
 # Run:    see agents/launch.sh (dispatcher routes dashboard-labeled beads here)
 
-FROM autonomy-agent
+FROM autonomy-session
 
 # ── Dashboard Python deps (Starlette TestClient / API contract tests) ──
 USER root

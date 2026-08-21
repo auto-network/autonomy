@@ -118,7 +118,7 @@ def _run(**kw):
         name="test-session",
         prompt=None,
         detach=True,
-        image="autonomy-agent:enterprise",
+        image="autonomy-session-enterprise",
         metadata={"org": "test-org"},
     )
     defaults.update(kw)
@@ -137,7 +137,7 @@ def test_nested_docker_defaults_to_privileged_runtime(
     assert "--privileged" in cmd
     assert not any(arg.startswith("--runtime=") for arg in cmd)
     # DinD keeps its wrapper entrypoint and receives the full harness argv.
-    image_index = cmd.index("autonomy-agent:enterprise")
+    image_index = cmd.index("autonomy-session-enterprise")
     assert cmd[image_index + 1] == "claude"
     assert "--entrypoint" not in cmd
     assert "/var/run/docker.sock" not in " ".join(cmd)
@@ -179,7 +179,7 @@ def test_nested_docker_honors_configured_runtime_without_privileged(
     else:
         assert expected_arg in cmd
     assert "--privileged" not in cmd
-    image_index = cmd.index("autonomy-agent:enterprise")
+    image_index = cmd.index("autonomy-session-enterprise")
     assert cmd[image_index + 1] == "claude"
     assert "/var/run/docker.sock" not in " ".join(cmd)
 
@@ -302,7 +302,7 @@ def test_codex_interactive_uses_codex_entrypoint(
     _run(
         output_dir=str(tmp_path / "run"),
         harness="codex",
-        image="autonomy-agent:dashboard",
+        image="autonomy-session-platform",
     )
     cmd = captured_run[0]
     assert "--entrypoint" in cmd
@@ -322,7 +322,7 @@ def test_launch_refuses_and_names_missing_inputs(
     from agents import launch_preflight
     from agents.launch_preflight import LaunchProblem
     monkeypatch.setattr(launch_preflight, "preflight", lambda **kw: [
-        LaunchProblem("image", "autonomy-agent:dashboard", "not built — run `agents/build.sh`."),
+        LaunchProblem("image", "autonomy-session-platform", "not built — run `agents/build.sh`."),
         LaunchProblem("mount", "/x/.beads", "source does not exist (would mount at /data/.beads)."),
     ])
     out = _run(output_dir=str(tmp_path / "run"))
@@ -330,7 +330,7 @@ def test_launch_refuses_and_names_missing_inputs(
     assert captured_run == []                # docker run never invoked
     err = capsys.readouterr().err
     assert "2 launch input(s) missing" in err
-    assert "[image] autonomy-agent:dashboard" in err  # the image is named
+    assert "[image] autonomy-session-platform" in err  # the image is named
     assert "[mount] /x/.beads" in err                 # and the mount, together
     assert "agents/build.sh" in err                   # with the fix
 
@@ -372,7 +372,7 @@ def test_codex_interactive_does_not_require_claude_credentials(
     out = _run(
         output_dir=str(tmp_path / "run"),
         harness="codex",
-        image="autonomy-agent:dashboard",
+        image="autonomy-session-platform",
     )
     assert out == "fake-container-id"
     cmd = captured_run[0]
@@ -430,7 +430,7 @@ def test_codex_noninteractive_uses_exec(
     _run(
         output_dir=str(tmp_path / "run"),
         harness="codex",
-        image="autonomy-agent:dashboard",
+        image="autonomy-session-platform",
         prompt="Write a summary.",
         model=None,
     )
@@ -450,7 +450,7 @@ def test_codex_noninteractive_does_not_require_claude_credentials(
     out = _run(
         output_dir=str(tmp_path / "run"),
         harness="codex",
-        image="autonomy-agent:dashboard",
+        image="autonomy-session-platform",
         prompt="Open the workspace and inspect files.",
         model=None,
     )
@@ -1914,7 +1914,7 @@ def test_golden_mount_argv_is_byte_identical(
 
     session_launcher.launch_session(
         session_type="dispatch", name="test-session", prompt=None, detach=True,
-        image="autonomy-agent:enterprise", metadata={"org": "test-org"},
+        image="autonomy-session-enterprise", metadata={"org": "test-org"},
         output_dir=str(run_dir), global_claude_md=str(gmd),
         startup_script=str(startup), mounts={str(ws_src): "/opt/data:ro"},
     )
@@ -1954,7 +1954,7 @@ def test_golden_mount_argv_is_byte_identical(
         "-v", "{TMP}/startup.sh:/startup.sh:ro",
         "-e", "AUTONOMY_CAPABILITY_BIN=/etc/autonomy/cap-bin",
         "-w", "/workspace/repo",
-        "autonomy-agent:enterprise", "--dangerously-skip-permissions",
+        "autonomy-session-enterprise", "--dangerously-skip-permissions",
         "--model", "claude-opus-4-8[1m]",
     ]
     assert got == expected

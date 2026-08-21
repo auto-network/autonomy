@@ -31,7 +31,7 @@ def _project():
         env_from_host=[],
         startup=None,
         working_dir="/workspace/repo",
-        image="autonomy-agent:dashboard",
+        image="autonomy-session-platform",
         harness="claude",
         model=None,
         needs_nested_docker=False,

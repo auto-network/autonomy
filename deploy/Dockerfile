@@ -7,7 +7,7 @@
 # check, no phone-home. See DEPLOY.md ("Sovereign distribution").
 #
 #   docker compose up                # from the repo root (preferred)
-#   docker build -f deploy/Dockerfile -t autonomy-dashboard .
+#   docker build -f deploy/Dockerfile -t autonomy-node .
 #
 # The agent containers (agents/Dockerfile*) are a separate, optional
 # image family — this image is just the always-on dashboard/graph core.

@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 from tools.data_paths import DATA_ROOT
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_IMAGE = "autonomy-agent:dashboard"
+DEFAULT_IMAGE = "autonomy-session-platform"
 
 DEFAULT_OPUS_MODEL = "claude-opus-4-8[1m]"
 

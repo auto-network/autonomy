@@ -37,7 +37,7 @@ def _make_agent(bead_id: str, **overrides) -> RunningAgent:
         worktree_path=f"/tmp/worktrees/{bead_id}",
         branch=f"agent/{bead_id}",
         branch_base="base111",
-        image="autonomy-agent",
+        image="autonomy-session",
         started_at=time.time(),
     )
     defaults.update(overrides)

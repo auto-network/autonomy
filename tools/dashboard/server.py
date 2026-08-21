@@ -3132,7 +3132,7 @@ async def api_workspace_local_create(request):
             payload = {
                 "name": str(body.get("name") or workspace_id),
                 "description": str(body.get("description") or ""),
-                "image": str(body.get("image") or "autonomy-agent:dashboard"),
+                "image": str(body.get("image") or "autonomy-session-platform"),
                 "harness": harness,
                 "working_dir": mount,
                 "repos": [repo_spec],
@@ -7868,7 +7868,7 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
                 name=tmux_name,
                 prompt=None,
                 detach=False,
-                image="autonomy-agent:dashboard",
+                image="autonomy-session-platform",
                 metadata={"tmux_session": tmux_name, "org": "autonomy"},
                 harness=cfg.get("harness"),
                 output_dir=str(run_dir),
@@ -7987,7 +7987,7 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
 
 def _run_simple_session_start(job: LifecycleJob, writer: SessionLifecycleStateWriter) -> None:
     """Worker-thread launch for the non-workspace creates: generic
-    ``autonomy-agent:dashboard`` containers and host sessions.
+    ``autonomy-session-platform`` containers and host sessions.
 
     No worktree prep and no startup script — the step list is launching →
     register → waiting_ready → injecting → running. The host first message
@@ -8022,7 +8022,7 @@ def _run_simple_session_start(job: LifecycleJob, writer: SessionLifecycleStateWr
                 name=tmux_name,
                 prompt=None,
                 detach=False,
-                image="autonomy-agent:dashboard",
+                image="autonomy-session-platform",
                 metadata={"tmux_session": tmux_name, "org": "autonomy"},
                 output_dir=str(run_dir),
                 global_claude_md=_REPO_ROOT / "agents/shared/terminal/CLAUDE.md",
@@ -8337,7 +8337,7 @@ async def api_session_create(request):
         the provisioning/container lifecycle worker job.
       • `type == "host"` → start `claude --dangerously-skip-permissions` on
         the host, then watch for its JSONL to appear.
-      • neither → default `autonomy-agent:dashboard` container session.
+      • neither → default `autonomy-session-platform` container session.
 
     Workspace project sessions return immediately after the lifecycle job is
     registered; progress is delivered via startup_state/SSE.  Non-workspace

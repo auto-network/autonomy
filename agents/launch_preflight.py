@@ -57,7 +57,7 @@ def _docker(args: list, timeout: int = 15):
 def image_present(image: str):
     """True/False if *image* is/ isn't present locally, or None if unknowable.
 
-    The launcher only ever runs locally-built ``autonomy-agent:*`` images —
+    The launcher only ever runs locally-built ``autonomy-session-*`` images —
     never pushed to a registry, so a tag absent locally is absent, full stop
     (docker cannot pull it). Absence is therefore a real, fatal, nameable
     problem, not a "docker will fetch it" situation."""

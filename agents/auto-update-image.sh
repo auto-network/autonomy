@@ -131,4 +131,4 @@ LAST_BUILT_CLAUDE='$CLAUDE_NEW'
 EOF
 
 log "Rebuilt successfully: ${REASONS[*]}"
-graph note "autonomy-agent image rebuilt: ${REASONS[*]}" --tags ops,image-update 2>/dev/null || true
+graph note "autonomy-session image rebuilt: ${REASONS[*]}" --tags ops,image-update 2>/dev/null || true

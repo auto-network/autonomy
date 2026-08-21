@@ -31,7 +31,7 @@ command -v docker >/dev/null || { echo "docker is required" >&2; exit 2; }
 base="$REGISTRY/$NAMESPACE"
 node_ref="$base/autonomy-node:$RELEASE_TAG"
 session_ref="$base/autonomy-session:$RELEASE_TAG"
-dashboard_ref="$base/autonomy-session-dashboard:$RELEASE_TAG"
+platform_ref="$base/autonomy-session-platform:$RELEASE_TAG"
 dind_ref="$base/autonomy-session-dind:$RELEASE_TAG"
 
 echo "==> Building node image from deploy/Dockerfile"
@@ -58,15 +58,15 @@ rm -rf "$node_src"
 
 echo "==> Building existing session image family"
 "$AGENT_BUILD" --pull --core-only
-docker tag autonomy-agent:latest "$session_ref"
-docker tag autonomy-agent:dashboard "$dashboard_ref"
-docker tag autonomy-agent:dind "$dind_ref"
+docker tag autonomy-session "$session_ref"
+docker tag autonomy-session-platform "$platform_ref"
+docker tag autonomy-session-dind "$dind_ref"
 
-refs=("$node_ref" "$session_ref" "$dashboard_ref" "$dind_ref")
+refs=("$node_ref" "$session_ref" "$platform_ref" "$dind_ref")
 names=(
     AUTONOMY_NODE_IMAGE
     AUTONOMY_SESSION_IMAGE
-    AUTONOMY_SESSION_DASHBOARD_IMAGE
+    AUTONOMY_SESSION_PLATFORM_IMAGE
     AUTONOMY_SESSION_DIND_IMAGE
 )
 

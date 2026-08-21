@@ -23,17 +23,17 @@ class _Completed:
 
 def test_image_present_true_when_inspect_succeeds(monkeypatch):
     monkeypatch.setattr(lp, "_docker", lambda args, timeout=15: _Completed(0))
-    assert lp.image_present("autonomy-agent:dashboard") is True
+    assert lp.image_present("autonomy-session-platform") is True
 
 
 def test_image_present_false_when_inspect_fails(monkeypatch):
     monkeypatch.setattr(lp, "_docker", lambda args, timeout=15: _Completed(1, stderr="No such image"))
-    assert lp.image_present("autonomy-agent:dashboard") is False
+    assert lp.image_present("autonomy-session-platform") is False
 
 
 def test_image_present_none_when_docker_unreachable(monkeypatch):
     monkeypatch.setattr(lp, "_docker", lambda args, timeout=15: None)
-    assert lp.image_present("autonomy-agent:dashboard") is None  # unknowable -> fail open
+    assert lp.image_present("autonomy-session-platform") is None  # unknowable -> fail open
 
 
 # ── runtime_name / runtime_available ─────────────────────────────────────────
@@ -120,7 +120,7 @@ def test_preflight_gathers_all_problems_at_once(monkeypatch):
                         lambda p, t: [("/x/.beads", "/data/.beads"), ("/ok", "/ok")])
     monkeypatch.setattr("agents.secret_ramfs.daemon_missing",
                         lambda paths: ["/x/.beads"])
-    problems = lp.preflight(image="autonomy-agent:dashboard",
+    problems = lp.preflight(image="autonomy-session-platform",
                             runtime_args=["--runtime=sysbox-runc"], plan=plan, topo=topo)
     kinds = {p.kind for p in problems}
     assert kinds == {"image", "runtime", "mount"}                 # every kind reported
@@ -135,7 +135,7 @@ def test_preflight_clean_when_everything_present(monkeypatch):
     monkeypatch.setattr("agents.mount_plan.preflight_sources",
                         lambda p, t: [("/ok", "/ok")])
     monkeypatch.setattr("agents.secret_ramfs.daemon_missing", lambda paths: [])
-    assert lp.preflight(image="autonomy-agent:dashboard",
+    assert lp.preflight(image="autonomy-session-platform",
                         runtime_args=[], plan=plan, topo=topo) == []
 
 
@@ -145,7 +145,7 @@ def test_preflight_names_cold_vault_when_credentials_needed(monkeypatch):
     monkeypatch.setattr("agents.mount_plan.preflight_sources", lambda p, t: [])
     monkeypatch.setattr("agents.secret_ramfs.daemon_missing", lambda paths: [])
     monkeypatch.setattr(lp, "vault_is_cold", lambda: True)
-    problems = lp.preflight(image="autonomy-agent:dashboard", runtime_args=[],
+    problems = lp.preflight(image="autonomy-session-platform", runtime_args=[],
                             plan=plan, topo=topo, credential_keys={"github.token"})
     assert len(problems) == 1 and problems[0].kind == "vault"
     assert "github.token" in problems[0].detail
@@ -179,5 +179,5 @@ def test_preflight_unknowable_checks_never_add_problems(monkeypatch):
     monkeypatch.setattr("agents.mount_plan.preflight_sources",
                         lambda p, t: [("/x", "/x")])
     monkeypatch.setattr("agents.secret_ramfs.daemon_missing", lambda paths: None)  # unknowable
-    assert lp.preflight(image="autonomy-agent:dashboard",
+    assert lp.preflight(image="autonomy-session-platform",
                         runtime_args=["--runtime=sysbox-runc"], plan=plan, topo=topo) == []

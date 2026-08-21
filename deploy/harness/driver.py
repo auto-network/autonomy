@@ -40,7 +40,7 @@ class HarnessConfig:
     nodes: int = 3
     relay_port: int = 18477
     node_port_base: int = 18880
-    image: str = "autonomy-dashboard:harness"
+    image: str = "autonomy-node:harness"
     artifacts_dir: Path = Path("harness-artifacts")
     build: bool = True
     timeout: float = 120.0
@@ -743,7 +743,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--nodes", type=int, default=3)
     parser.add_argument("--relay-port", type=int, default=18477)
     parser.add_argument("--node-port-base", type=int, default=18880)
-    parser.add_argument("--image", default="autonomy-dashboard:harness")
+    parser.add_argument("--image", default="autonomy-node:harness")
     parser.add_argument("--artifacts-dir", type=Path, default=Path("harness-artifacts"))
     parser.add_argument("--no-build", action="store_true")
     parser.add_argument("--timeout", type=float, default=120)

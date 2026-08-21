@@ -525,7 +525,7 @@ class TestWorkspacePrimerRendering:
         assert primer_path.exists(), f"primer not rendered at {primer_path}"
         content = primer_path.read_text()
         assert "Workspace Environment" in content
-        assert "autonomy-agent:dashboard" in content
+        assert "autonomy-session-platform" in content
 
 
 class TestWorkspaceHarnessPassthrough:
@@ -541,7 +541,7 @@ class TestWorkspaceHarnessPassthrough:
             id="autonomy",
             name="Autonomy Codex",
             description="",
-            image="autonomy-agent:dashboard",
+            image="autonomy-session-platform",
             graph_project="autonomy",
             harness="codex",
             repos=(RepoMount.from_url(url="git@example.com:autonomy.git", mount="/workspace/repo", writable=True),),
@@ -605,7 +605,7 @@ class TestWorkspaceHarnessPassthrough:
             id="autonomy",
             name="Autonomy Codex",
             description="",
-            image="autonomy-agent:dashboard",
+            image="autonomy-session-platform",
             graph_project="autonomy",
             harness="codex",
             repos=(RepoMount.from_url(url="git@example.com:autonomy.git", mount="/workspace/repo", writable=True),),
@@ -639,7 +639,7 @@ class TestWorkspaceHarnessPassthrough:
             id="autonomy",
             name="Autonomy Codex",
             description="",
-            image="autonomy-agent:dashboard",
+            image="autonomy-session-platform",
             graph_project="autonomy",
             harness="codex",
             repos=(RepoMount.from_url(url="git@example.com:autonomy.git", mount="/workspace/repo", writable=True),),
@@ -672,7 +672,7 @@ class TestWorkspaceHarnessPassthrough:
             id="autonomy",
             name="Autonomy Codex",
             description="",
-            image="autonomy-agent:dashboard",
+            image="autonomy-session-platform",
             graph_project="autonomy",
             harness="codex",
             repos=(RepoMount.from_url(url="git@example.com:autonomy.git", mount="/workspace/repo", writable=True),),
@@ -745,7 +745,7 @@ class TestWorkspaceCapabilityPassthrough:
             id="autonomy",
             name="Autonomy Jira",
             description="",
-            image="autonomy-agent:dashboard",
+            image="autonomy-session-platform",
             graph_project="autonomy",
             harness="claude",
             repos=(RepoMount.from_url(url="git@example.com:autonomy.git", mount="/workspace/repo", writable=True),),

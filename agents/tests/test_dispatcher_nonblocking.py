@@ -40,7 +40,7 @@ def _make_running_agent(**overrides):
         worktree_path="/tmp/test-worktree",
         branch="agent/auto-test",
         branch_base="aaa111",
-        image="autonomy-agent",
+        image="autonomy-session",
         started_at=time.time(),
     )
     defaults.update(overrides)
@@ -113,7 +113,7 @@ class TestStartAgent:
         )
         mock_run.return_value = _completed_process(stdout=stdout)
 
-        agent = start_agent("auto-xyz", image="autonomy-agent")
+        agent = start_agent("auto-xyz", image="autonomy-session")
         assert agent is not None
         assert agent.bead_id == "auto-xyz"
         assert agent.container_id == "abc123def456789"

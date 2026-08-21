@@ -11,7 +11,7 @@
 # Per-project fields:
 #   name              Display name (UI label).
 #   description       Short description for UI.
-#   image             Docker image name (required), e.g. autonomy-agent:dashboard.
+#   image             Docker image name (required), e.g. autonomy-session-platform.
 #   repos             List of git repos. Each entry:
 #                       url       Git remote URL. Autonomy clones into a managed
 #                                 location (data/repos/) — NOT a host path.
@@ -83,7 +83,7 @@ projects:
   autonomy:
     name: "Autonomy Network"
     description: "Core platform — graph, dashboard, dispatcher"
-    image: "autonomy-agent:dashboard"
+    image: "autonomy-session-platform"
     working_dir: "/workspace/repo"
     graph_project: autonomy
     default_tags: []
@@ -96,7 +96,7 @@ projects:
   enterprise-v5:
     name: "Enterprise v5"
     description: "Anchore Enterprise v5 — lean v5-only patch workspace with DinD"
-    image: "autonomy-agent:enterprise-v5"
+    image: "autonomy-session-enterprise-v5"
     repos:
       - url: "git@github.com:anchore/enterprise.git"
         mount: "/workspace/enterprise"
@@ -111,7 +111,7 @@ projects:
   enterprise-ng:
     name: "Enterprise NG"
     description: "Anchore Enterprise NG — component_catalog development"
-    image: "autonomy-agent:enterprise-ng"
+    image: "autonomy-session-enterprise-ng"
     repos:
       - url: "git@github.com:anchore/enterprise.git"
         mount: "/workspace/enterprise"

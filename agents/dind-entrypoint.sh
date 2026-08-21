@@ -1,5 +1,5 @@
 #!/bin/bash
-# Shared entrypoint for autonomy-agent:dind and its descendants.
+# Shared entrypoint for autonomy-session-dind and its descendants.
 #
 # Order of operations:
 #   1. Start an SSH agent and load the shared artifact key (if present)

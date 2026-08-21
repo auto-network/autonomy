@@ -79,7 +79,7 @@ def _make_graph_db(db_path, sources):
         ("workspace-autonomy", "autonomy.workspace", 1, "autonomy",
          json.dumps({
              "name": "Autonomy Network",
-             "image": "autonomy-agent:dashboard",
+             "image": "autonomy-session-platform",
              "working_dir": "/workspace/repo",
          }),
          "canonical"),

@@ -17,7 +17,7 @@ The payload's ``template`` is a Jinja2 string rendered against:
 
 - ``tmux_name``     — the freshly-allocated tmux session name
 - ``workspace_id``  — workspace.id (empty string for the default
-                       autonomy-agent:dashboard container path)
+                       autonomy-session-platform container path)
 - ``workspace_name``— workspace.name (or ``"default"``)
 - ``ts``            — ISO 8601 UTC, seconds precision
 - ``operator``      — empty string today (no host-side operator-

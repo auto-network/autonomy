@@ -117,7 +117,7 @@ def _ws_payload(**repo_overrides):
     repo.update(repo_overrides)
     return {
         "name": "autonomy",
-        "image": "autonomy-agent:latest",
+        "image": "autonomy-session",
         "repos": [repo],
     }
 

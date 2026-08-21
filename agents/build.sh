@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Build the autonomy-agent container images (base + dashboard).
+# Build the autonomy-session container images (base + dashboard).
 # Stages tool binaries into a temp dir, then builds.
 #
 # Usage: ./agents/build.sh [--no-cache] [--pull] [--core-only]
 #
-# Always builds both autonomy-agent:latest (base) and autonomy-agent:dashboard
+# Always builds both autonomy-session (base) and autonomy-session-platform
 # (base + Python deps). Docker layer cache makes repeat builds near-instant
 # when nothing has changed.
 set -euo pipefail
@@ -74,31 +74,31 @@ cp "$SCRIPT_DIR/commit_sign_shim.sh" context/
 
 CLAUDE_VERSION=$(bin/claude --version 2>/dev/null | awk '{print $1}')
 docker build $NO_CACHE $PULL --build-arg CLAUDE_VERSION="${CLAUDE_VERSION:-unknown}" \
-    -t autonomy-agent context/
-echo "==> Done. Image: autonomy-agent:latest"
-docker images autonomy-agent:latest --format "  Size: {{.Size}}"
+    -t autonomy-session context/
+echo "==> Done. Image: autonomy-session"
+docker images autonomy-session --format "  Size: {{.Size}}"
 
 # ── Dashboard variant (adds Python deps for API contract tests) ──
-# Always built: api_session_create launches autonomy-agent:dashboard for
+# Always built: api_session_create launches autonomy-session-platform for
 # terminal-container sessions. When the base is unchanged, this is a cached
 # no-op; otherwise it's one thin pip-install layer on top of the base.
 echo ""
 echo "==> Building dashboard variant (Python deps layered on base)..."
-docker build $NO_CACHE $PULL -f "$SCRIPT_DIR/Dockerfile.dashboard" -t autonomy-agent:dashboard context/
-echo "==> Done. Image: autonomy-agent:dashboard"
-docker images autonomy-agent:dashboard --format "  Size: {{.Size}}"
+docker build $NO_CACHE $PULL -f "$SCRIPT_DIR/Dockerfile.platform" -t autonomy-session-platform context/
+echo "==> Done. Image: autonomy-session-platform"
+docker images autonomy-session-platform --format "  Size: {{.Size}}"
 
 # ── DinD intermediate variant ─────────────────────────────────────
 # Adds Docker CE + the shared startup-wrapper entrypoint. Project images
 # that need Docker-in-Docker (enterprise, enterprise-ng) extend this.
 echo ""
 echo "==> Building dind variant (Docker CE + entrypoint wrapper)..."
-docker build $NO_CACHE $PULL -f "$SCRIPT_DIR/Dockerfile.dind" -t autonomy-agent:dind context/
-echo "==> Done. Image: autonomy-agent:dind"
-docker images autonomy-agent:dind --format "  Size: {{.Size}}"
+docker build $NO_CACHE $PULL -f "$SCRIPT_DIR/Dockerfile.dind" -t autonomy-session-dind context/
+echo "==> Done. Image: autonomy-session-dind"
+docker images autonomy-session-dind --format "  Size: {{.Size}}"
 
 # ── Per-project images (auto-discovered) ──────────────────────────
-# Each agents/projects/<name>/Dockerfile becomes autonomy-agent:<name>.
+# Each agents/projects/<name>/Dockerfile becomes autonomy-session-<name>.
 # Adding a new project image = drop a Dockerfile into agents/projects/<name>/
 # and re-run this script. Build context is the agents/ directory so
 # projects can reference files under agents/projects/<name>/ directly.
@@ -116,7 +116,7 @@ elif [[ -d "$PROJECTS_DIR" ]]; then
     for dockerfile in "$PROJECTS_DIR"/*/Dockerfile; do
         project_dir="$(dirname "$dockerfile")"
         project_name="$(basename "$project_dir")"
-        image_tag="autonomy-agent:$project_name"
+        image_tag="autonomy-session-$project_name"
         echo ""
         echo "==> Building $image_tag (from $dockerfile)..."
         docker build $NO_CACHE $PULL \

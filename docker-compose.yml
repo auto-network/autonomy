@@ -32,7 +32,7 @@ services:
     # from image-lock.env (repo/image@sha256:...), then use
     # `docker compose pull && docker compose up -d --no-build`.
     # Unset remains the sovereign checkout build above; no registry required.
-    image: ${AUTONOMY_IMAGE:-autonomy-dashboard:local}
+    image: ${AUTONOMY_IMAGE:-autonomy-node:local}
     restart: unless-stopped
     ports:
       - "${DASHBOARD_PORT:-8080}:8080"

@@ -24,7 +24,7 @@ class TopologyConfig:
     nodes: int = 3
     relay_port: int = 18477
     node_port_base: int = 18880
-    image: str = "autonomy-dashboard:harness"
+    image: str = "autonomy-node:harness"
     source_root: Path = REPO_ROOT
     from_source: bool = True
     secure_dashboard: bool = False

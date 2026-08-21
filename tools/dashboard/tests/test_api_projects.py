@@ -75,7 +75,7 @@ def test_local_workspace_api_attaches_repo_to_existing_personal_workspace(
         {
             "name": "Idea Board",
             "description": "Personal ideas",
-            "image": "autonomy-agent:dashboard",
+            "image": "autonomy-session-platform",
             "harness": "codex",
             "working_dir": "/workspace/repo",
             "repos": [{

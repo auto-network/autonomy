@@ -40,7 +40,7 @@ def _make_running_agent(**overrides):
         worktree_path="/tmp/test-worktree",
         branch="agent/auto-qjme3",
         branch_base="aaa111",
-        image="autonomy-agent",
+        image="autonomy-session",
         started_at=time.time(),
     )
     defaults.update(overrides)

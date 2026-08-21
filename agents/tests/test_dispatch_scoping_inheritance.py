@@ -53,7 +53,7 @@ def test_projects():
             id="autonomy",
             name="Autonomy Network",
             description="",
-            image="autonomy-agent:dashboard",
+            image="autonomy-session-platform",
             graph_project="autonomy",
             harness="claude",
             default_tags=("dashboard", "ui"),
@@ -63,7 +63,7 @@ def test_projects():
             id="enterprise",
             name="Enterprise",
             description="",
-            image="autonomy-agent:enterprise",
+            image="autonomy-session-enterprise",
             graph_project="anchore",
             harness="codex",
             default_tags=("enterprise",),
@@ -84,8 +84,8 @@ class TestLabelToImageRouting:
 
     def test_build_label_image_map_from_config(self, test_projects):
         mapping = dispatcher._build_label_image_map()
-        assert mapping["dashboard"] == "autonomy-agent:dashboard"
-        assert mapping["enterprise"] == "autonomy-agent:enterprise"
+        assert mapping["dashboard"] == "autonomy-session-platform"
+        assert mapping["enterprise"] == "autonomy-session-enterprise"
 
     def test_project_for_bead_matches_on_dispatch_label(self, test_projects):
         bead = {"id": "auto-x", "labels": ["dashboard"]}
@@ -94,7 +94,7 @@ class TestLabelToImageRouting:
         assert project.id == "autonomy"
         assert project.graph_project == "autonomy"
         assert project.default_tags == ("dashboard", "ui")
-        assert project.image == "autonomy-agent:dashboard"
+        assert project.image == "autonomy-session-platform"
 
     def test_project_for_bead_first_label_wins(self, test_projects):
         """Bead with multiple matching labels: first project in registry wins."""
@@ -107,7 +107,7 @@ class TestLabelToImageRouting:
 
     def test_image_for_bead_uses_project_image(self, test_projects):
         image = dispatcher.image_for_bead({"labels": ["dashboard"]})
-        assert image == "autonomy-agent:dashboard"
+        assert image == "autonomy-session-platform"
 
 
 class TestStartAgentForwardsScope:
@@ -128,7 +128,7 @@ class TestStartAgentForwardsScope:
 
         agent = dispatcher.start_agent(
             "auto-xyz",
-            image="autonomy-agent:dashboard",
+            image="autonomy-session-platform",
             harness="codex",
             graph_project="autonomy",
             graph_tags=("dashboard", "ui"),
@@ -139,7 +139,7 @@ class TestStartAgentForwardsScope:
         argv = mock_run.call_args[0][0]
         assert argv[0].endswith("launch.sh")
         assert argv[1] == "auto-xyz"
-        assert "--image=autonomy-agent:dashboard" in argv
+        assert "--image=autonomy-session-platform" in argv
         assert "--harness=codex" in argv
         assert "--detach" in argv
         assert "--graph-project=autonomy" in argv
@@ -154,7 +154,7 @@ class TestStartAgentForwardsScope:
                 "WORKTREE_DIR=/w\nBRANCH=agent/b\nBRANCH_BASE=base\n"
             ),
         )
-        dispatcher.start_agent("auto-abc", image="autonomy-agent")
+        dispatcher.start_agent("auto-abc", image="autonomy-session")
         argv = mock_run.call_args[0][0]
         assert "--harness=claude" in argv
         assert not any(a.startswith("--graph-project") for a in argv)
@@ -186,7 +186,7 @@ class TestStartLibrarianHarness:
             id="autonomy",
             name="Autonomy Network",
             description="",
-            image="autonomy-agent:dashboard",
+            image="autonomy-session-platform",
             graph_project="autonomy",
             harness="codex",
             default_tags=("dashboard", "ui"),
@@ -232,7 +232,7 @@ class TestLaunchSessionCliMetadata:
             "--prompt-file", str(prompt_file),
             "--bead-id", "auto-xyz",
             "--output-dir", str(output_dir),
-            "--image", "autonomy-agent:dashboard",
+            "--image", "autonomy-session-platform",
             "--harness", harness,
             "--detach",
             *argv_extra,
@@ -252,7 +252,7 @@ class TestLaunchSessionCliMetadata:
         assert meta["bead_id"] == "auto-xyz"
         assert meta["org"] == "autonomy"
         assert meta["graph_tags"] == ["dashboard", "ui"]
-        assert captured["image"] == "autonomy-agent:dashboard"
+        assert captured["image"] == "autonomy-session-platform"
         assert captured["detach"] is True
 
     def test_graph_project_alias_reaches_launch_session_as_org(self, tmp_path):
@@ -278,7 +278,7 @@ class TestLaunchSessionCliMetadata:
             "--prompt-file", str(prompt_file),
             "--bead-id", "auto-xyz",
             "--output-dir", str(output_dir),
-            "--image", "autonomy-agent:dashboard",
+            "--image", "autonomy-session-platform",
             "--harness", "claude",
             "--detach",
         ]
@@ -363,7 +363,7 @@ class TestLaunchSessionMetaAndEnv:
             name="agent-auto-xyz-1234",
             prompt=None,
             detach=True,
-            image="autonomy-agent:dashboard",
+            image="autonomy-session-platform",
             output_dir=str(run_dir),
             metadata={
                 "bead_id": "auto-xyz",
@@ -525,8 +525,8 @@ class TestUnlabeledBeadFallback:
 
     def test_image_for_bead_falls_back_to_rig_image(self, test_projects, monkeypatch):
         """With no matching project, image comes from the rig default."""
-        monkeypatch.setattr(dispatcher, "_rig_image", "autonomy-agent:rig-default")
-        assert dispatcher.image_for_bead({"labels": []}) == "autonomy-agent:rig-default"
+        monkeypatch.setattr(dispatcher, "_rig_image", "autonomy-session-rig-default")
+        assert dispatcher.image_for_bead({"labels": []}) == "autonomy-session-rig-default"
 
     @patch("agents.dispatcher.subprocess.run")
     def test_unlabeled_bead_launch_defaults_graph_project_to_autonomy(
@@ -537,7 +537,7 @@ class TestUnlabeledBeadFallback:
         this default, ingest cannot resolve a target org and (under the
         fail-closed policy) skips the session entirely — leaving live
         rig dispatches invisible to consumers."""
-        monkeypatch.setattr(dispatcher, "_rig_image", "autonomy-agent:rig-default")
+        monkeypatch.setattr(dispatcher, "_rig_image", "autonomy-session-rig-default")
         mock_run.return_value = _completed_process(
             stdout=(
                 "CONTAINER_ID=abc\nCONTAINER_NAME=n\nOUTPUT_DIR=/o\n"
@@ -562,7 +562,7 @@ class TestUnlabeledBeadFallback:
         )
 
         argv = mock_run.call_args[0][0]
-        assert "--image=autonomy-agent:rig-default" in argv
+        assert "--image=autonomy-session-rig-default" in argv
         assert "--graph-project=autonomy" in argv
         # No tags for an unlabeled bead — only the routing slug.
         assert not any(a.startswith("--graph-tags") for a in argv)

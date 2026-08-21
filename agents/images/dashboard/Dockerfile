@@ -1,10 +1,10 @@
 # Dashboard agent image — extends base with starlette/uvicorn
 # Agent can spin up the dashboard server, curl endpoints, validate work.
 #
-# Build:  docker build -t autonomy-agent:dashboard -f agents/images/dashboard/Dockerfile .
-# Depends: autonomy-agent (base) must be built first
+# Build:  docker build -t autonomy-session-platform -f agents/images/dashboard/Dockerfile .
+# Depends: autonomy-session (base) must be built first
 
-FROM autonomy-agent
+FROM autonomy-session
 
 USER root
 
