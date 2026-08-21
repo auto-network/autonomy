@@ -229,6 +229,29 @@ def cmd_run(args: argparse.Namespace) -> int:
                 print(f"Next: {next_command}", file=sys.stderr)
                 telemetry_request(event="repeat_refused")
                 return 4
+        if not getattr(args, "force", False):
+            failed_selection = next(
+                (
+                    item
+                    for item in list_manifests(root)
+                    if item.get("status") == "failed"
+                    and list(item.get("selectors") or []) == selectors
+                ),
+                None,
+            )
+            if failed_selection is not None:
+                print(
+                    "Agent Test: broad selection previously failed; refusing to rerun "
+                    f"the same {len(selectors)} selector(s) unchanged in scope.",
+                    file=sys.stderr,
+                )
+                print(
+                    f"Run only the failures: agent-test rerun-failures {failed_selection['run_id']}",
+                    file=sys.stderr,
+                )
+                print("To intentionally rerun the broad selection: add --force.", file=sys.stderr)
+                telemetry_request(event="broad_recovery_refused")
+                return 4
         run_id = new_run_id()
         estimate_text = _estimate_text(estimate)
         if estimate_text:
@@ -905,6 +928,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--notify",
         choices=("auto", "none", "crosstalk"),
         default=os.environ.get("AGENT_TEST_NOTIFY", "auto"),
+    )
+    run.add_argument(
+        "--force",
+        action="store_true",
+        help="allow a broad selection after a previous run with the same selectors failed",
     )
     run.add_argument("--profile")
     run.add_argument(
