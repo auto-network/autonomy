@@ -1,0 +1,104 @@
+<link rel="stylesheet" href="/static/plugins/testing/page.css">
+<div x-data="testingPage()" x-init="init()" class="testing-page" data-testid="testing-fragment-root">
+  <header class="testing-toolbar">
+    <div class="testing-titlelock">
+      <span class="testing-signal" aria-hidden="true"></span>
+      <div>
+        <p class="testing-kicker">Agent Test network</p>
+        <h1>Testing</h1>
+      </div>
+    </div>
+    <div class="testing-controls">
+      <label>
+        <span>Organization</span>
+        <select x-model="selectedOrg" @change="onOrgChange()" data-testid="testing-org-picker">
+          <template x-for="org in orgs" :key="org"><option :value="org" x-text="org"></option></template>
+        </select>
+      </label>
+      <label>
+        <span>Repository</span>
+        <select x-model="selectedRepository" @change="loadSummary()" data-testid="testing-repository-picker">
+          <option value="">All repositories</option>
+          <template x-for="repository in repositories" :key="repository">
+            <option :value="repository" x-text="shortRepository(repository)"></option>
+          </template>
+        </select>
+      </label>
+      <button type="button" class="testing-refresh" @click="loadSummary()" :disabled="loading">Refresh</button>
+    </div>
+  </header>
+
+  <div x-show="error" class="testing-error" data-testid="testing-error" x-text="error"></div>
+  <div x-show="loading && !summary" class="testing-loading" data-testid="testing-loading">
+    <span></span><span></span><span></span> Reading retained test evidence
+  </div>
+
+  <template x-if="summary">
+    <main class="testing-console">
+      <section class="testing-overview">
+        <div class="testing-ratio">
+          <p>Run pass ratio</p>
+          <strong x-text="percent(summary.runs.pass_ratio)"></strong>
+          <span x-text="summary.runs.total + ' terminal runs retained'"></span>
+        </div>
+        <div class="testing-readouts">
+          <article><span>Passed</span><strong class="is-good" x-text="count('passed')"></strong></article>
+          <article><span>Failed</span><strong class="is-bad" x-text="count('failed')"></strong></article>
+          <article><span>Errors</span><strong class="is-warn" x-text="count('error')"></strong></article>
+          <article><span>Observed tests</span><strong x-text="summary.tests.observed"></strong></article>
+        </div>
+      </section>
+
+      <section class="testing-trace" aria-label="Recent run outcomes">
+        <div class="testing-section-head">
+          <div><p>Recent signal</p><h2>Run outcomes over time</h2></div>
+          <span>Newest at right · bounded to 20</span>
+        </div>
+        <div class="testing-bars" data-testid="testing-run-trace">
+          <template x-for="run in chronologicalRuns()" :key="run.run_id">
+            <button type="button" class="testing-bar" :class="'is-' + run.status"
+                    :style="'height:' + runHeight(run) + '%'"
+                    :title="run.run_id + ' · ' + run.status + ' · ' + duration(run.duration_seconds)">
+              <span></span>
+            </button>
+          </template>
+          <div x-show="!summary.recent_runs.length" class="testing-empty">No Agent Test runs have reported yet.</div>
+        </div>
+      </section>
+
+      <div class="testing-grid">
+        <section class="testing-panel">
+          <div class="testing-section-head"><div><p>Instability</p><h2>Flaky tests</h2></div><span>Last 10 observations</span></div>
+          <div class="testing-table-wrap">
+            <table><thead><tr><th>Test</th><th>Failure rate</th><th>Samples</th></tr></thead>
+              <tbody><template x-for="test in summary.tests.flaky" :key="test.nodeid">
+                <tr><td :title="test.nodeid" x-text="test.nodeid"></td><td class="is-bad" x-text="percent(test.failure_rate)"></td><td x-text="test.samples"></td></tr>
+              </template></tbody></table>
+            <p x-show="!summary.tests.flaky.length" class="testing-empty">No mixed pass/fail histories detected.</p>
+          </div>
+        </section>
+
+        <section class="testing-panel">
+          <div class="testing-section-head"><div><p>Latency</p><h2>Slowest tests</h2></div><span>Median wall time</span></div>
+          <div class="testing-table-wrap">
+            <table><thead><tr><th>Test</th><th>Median</th><th>Samples</th></tr></thead>
+              <tbody><template x-for="test in summary.tests.slow" :key="test.nodeid">
+                <tr><td :title="test.nodeid" x-text="test.nodeid"></td><td class="is-warn" x-text="duration(test.median_seconds)"></td><td x-text="test.samples"></td></tr>
+              </template></tbody></table>
+            <p x-show="!summary.tests.slow.length" class="testing-empty">No per-test timings have been reported.</p>
+          </div>
+        </section>
+      </div>
+
+      <section class="testing-panel testing-runs">
+        <div class="testing-section-head"><div><p>Evidence ledger</p><h2>Recent runs</h2></div><span x-text="summary.organization"></span></div>
+        <div class="testing-table-wrap"><table><thead><tr><th>Run</th><th>Status</th><th>Tests</th><th>Duration</th><th>Session</th><th>Finished</th></tr></thead>
+          <tbody><template x-for="run in summary.recent_runs" :key="run.run_id"><tr>
+            <td class="testing-run-id" x-text="run.run_id"></td><td><span class="testing-status" :class="'is-' + run.status" x-text="run.status"></span></td>
+            <td x-text="run.collected"></td><td x-text="duration(run.duration_seconds)"></td><td x-text="run.session"></td><td x-text="when(run.finished_at)"></td>
+          </tr></template></tbody>
+        </table><p x-show="!summary.recent_runs.length" class="testing-empty">The ledger is ready; the first completed run will appear here.</p></div>
+      </section>
+    </main>
+  </template>
+</div>

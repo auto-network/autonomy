@@ -68,6 +68,19 @@ def _min_manifest_yaml(plugin_id: str = "foo", org: str = "autonomy") -> str:
     """).lstrip()
 
 
+def test_manifest_accepts_a_strict_capability_projection_link():
+    payload = {
+        **_MIN_MANIFEST_FIELDS,
+        "capability": {
+            "contract": "test_execution",
+            "implementation": "autonomy/agent-test",
+        },
+    }
+    manifest = PluginManifest.model_validate(payload)
+    assert manifest.capability.contract == "test_execution"
+    assert manifest.capability.implementation == "autonomy/agent-test"
+
+
 def _write_plugin(plugins_dir: Path, dir_name: str, manifest_yaml: str) -> Path:
     pdir = plugins_dir / dir_name
     pdir.mkdir(parents=True, exist_ok=True)

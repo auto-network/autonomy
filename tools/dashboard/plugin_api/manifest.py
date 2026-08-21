@@ -34,6 +34,14 @@ class PluginFrontend(BaseModel):
     alpine_root: str
 
 
+class PluginCapability(BaseModel):
+    """Capability implementation whose deterministic UI this plugin is."""
+
+    model_config = ConfigDict(extra="forbid")
+    contract: str = Field(min_length=1)
+    implementation: str = Field(min_length=1)
+
+
 class PluginEntrypoints(BaseModel):
     """All entrypoint fields are independent and optional."""
     model_config = ConfigDict(extra="forbid")
@@ -83,6 +91,9 @@ class PluginManifest(BaseModel):
     assets: PluginAssets
     nav: PluginNav
     frontend: PluginFrontend
+    # Optional direct link from a deterministic dashboard projection to the
+    # workspace capability that supplies its agent-facing tools and primer.
+    capability: Optional[PluginCapability] = None
     entrypoints: PluginEntrypoints = Field(default_factory=PluginEntrypoints)
     # Graph Settings installed/reconciled as part of plugin lifecycle.
     settings: List[PluginSettingDeclaration] = Field(default_factory=list)

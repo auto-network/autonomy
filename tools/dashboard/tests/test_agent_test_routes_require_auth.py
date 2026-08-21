@@ -1,4 +1,4 @@
-"""The machine-local Agent Test routes reject an unauthenticated caller.
+"""Every machine or organization Agent Test route rejects anonymous callers.
 
 leases/telemetry/durations mutate machine-wide coordination state (slot
 acquisition, telemetry, duration history). Under invariant 4 a registered
@@ -15,8 +15,9 @@ from starlette.testclient import TestClient
 
 AGENT_TEST_ROUTES = [
     "/api/agent-test/leases",
-    "/api/agent-test/telemetry",
-    "/api/agent-test/durations",
+    "/api/plugins/testing/telemetry",
+    "/api/plugins/testing/durations",
+    "/api/plugins/testing/runs",
 ]
 
 
@@ -37,5 +38,11 @@ def test_no_agent_test_route_accepts_a_caller_without_a_credential(
 
     assert response.status_code == 401, (
         f"{url} accepted an unauthenticated POST with {response.status_code}; "
-        f"these routes mutate machine-wide Agent Test state"
+        f"these routes mutate Agent Test state"
     )
+
+
+def test_testing_summary_rejects_an_unauthenticated_caller(gate_enforcing, test_app):
+    with TestClient(test_app) as client:
+        response = client.get("/api/plugins/testing/summary")
+    assert response.status_code == 401

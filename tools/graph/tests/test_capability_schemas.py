@@ -1067,6 +1067,30 @@ def test_impl_rev2_validates_the_landed_video_manifest():
     validate_payload(capability_impl.SET_ID, 2, manifest)
 
 
+def test_impl_rev2_validates_the_landed_agent_test_manifest():
+    """Agent Test's mounted command surface is a valid implementation."""
+    import json
+    from pathlib import Path
+
+    manifest = json.loads(
+        Path("agents/capabilities/agent_test/manifest.json").read_text()
+    )
+    validate_payload(capability_impl.SET_ID, 2, manifest)
+    assert manifest["implements"] == [
+        {"contract": "test_execution", "version": 1}
+    ]
+    assert manifest["tool_target"]["expose_commands"] == [
+        "agent-test", "pytest", "py.test",
+    ]
+    contract = json.loads(
+        Path("agents/capabilities/agent_test/contract.json").read_text()
+    )
+    validate_payload(capability_contract.SET_ID, 1, contract)
+    assert {op["name"] for op in contract["ops"]} == {
+        "run", "inspect", "statistics",
+    }
+
+
 def test_impl_rev2_minimal_host_install_validates():
     payload = _autonomy_video_v1()
     payload["host_install"] = {

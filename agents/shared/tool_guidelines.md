@@ -329,50 +329,6 @@ curl -sk https://localhost:8080/api/graph/threads
 
 Use `localhost:8080`, not the Tailnet IP.
 
-## Testing
-
-Agent sessions use `agent-test`, not `pytest` or `python -m pytest`. Agent Test
-owns the Python environment, background process, complete evidence, failure
-memory, and machine-wide test/browser capacity. Raw pytest is refused.
-
-```bash
-# Discover the bounded selection supported by the current Python diff.
-agent-test plan
-
-# Start that plan and return immediately. Keep working; completion is delivered
-# to the session as a system notification.
-agent-test run --changed
-
-# An explicit file, node, or configured project profile is also valid.
-agent-test run tools/graph/tests/test_settings_vault_read.py
-agent-test run --profile smoke
-```
-
-Never poll a live run, sleep for it, pipe through `tee`, or start a duplicate.
-Agent Test retains the complete output and refuses an unchanged rerun. Query
-the saved evidence without executing anything:
-
-```bash
-agent-test status
-agent-test failures <run-id>                 # five by default
-agent-test trace <run-id> 1                  # one retained traceback
-agent-test output <run-id> --limit-lines 40  # bounded retained stdout/stderr
-agent-test coverage <run-id>                 # coverage of changed lines
-agent-test rerun-failures <run-id>            # only failed nodes
-agent-test timings <node-id>                  # latest ten durations; read-only
-```
-
-Use `agent-test doctor` when dependencies or virtualenv selection are unclear;
-it invokes the chosen interpreter directly and never installs anything. Use
-`agent-test collect` plus `inventory`/`validate` to discover node ids without
-guessing. `run` and `plan` report median-based estimates from capped timing
-history. Use `agent-test capacity` to see machine-wide test and browser slots.
-
-Broad runs still require a reason. Put broad suites behind a named profile with
-honest resource weights; the machine lease ledger queues them when the shared
-limit is full. Publish an accepted run with `agent-test baseline <run-id>` when
-its known-failure set should become the durable comparison point.
-
 ### Visual testing with mock dashboard
 
 Start a self-daemonizing mock server that serves your worktree code with mock data:

@@ -1,0 +1,46 @@
+id: testing
+api_version: 1
+org: autonomy
+default_enabled: true
+
+paths:
+  - /testing
+
+assets:
+  template: page.html
+  script: page.js
+  style: page.css
+
+nav:
+  label: Testing
+
+frontend:
+  alpine_root: testingPage
+
+capability:
+  contract: test_execution
+  implementation: autonomy/agent-test
+
+settings:
+  - set_id: autonomy.capability.contract
+    schema_revision: 1
+    key: test_execution
+    state: raw
+    payload_file: settings/capability_contract.json
+  - set_id: autonomy.capability.impl
+    schema_revision: 2
+    key: autonomy/agent-test
+    state: raw
+    payload_file: settings/capability_impl.json
+  - set_id: autonomy.org.capability.install
+    schema_revision: 1
+    key: test_execution
+    state: raw
+    payload_file: settings/capability_install.json
+
+entrypoints:
+  api: tools.dashboard.plugins.testing.entrypoints.api:routes
+  schemas:
+    - tools.dashboard.plugins.testing.entrypoints.schemas:AgentTestRunV1
+    - tools.dashboard.plugins.testing.entrypoints.schemas:AgentTestObservationV1
+    - tools.dashboard.plugins.testing.entrypoints.schemas:AgentTestTelemetryV1
