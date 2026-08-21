@@ -153,41 +153,40 @@ async def _response_messages(response):
             await close()
 
 
-async def serve_channel(key: KeyPair, cert: DelegationCert, *, org: str, token: str,
-                        recv, send, handler) -> None:
-    """Serve one E2E channel from the org-key end, transport-agnostic.
+async def serve_established_channel(
+    crypto: ChannelCrypto, *, token: str, recv, send, handler
+) -> None:
+    """Serve request/response exchanges on an authenticated channel.
+
+    ``send`` is the raw transport sender; pairwise record tagging remains here
+    so org-delegated and fleet-authenticated handshakes share one record loop.
+    The caller has already authenticated its peer and derived ``crypto``.
+    """
+    _untagged_send = send
+
+    async def send(payload: bytes) -> None:
+        await _untagged_send(tag_viewer_message(VIEWER_KIND_RECORD, payload))
+
+    await _serve_channel_records(
+        crypto, token=token, recv=recv, send=send, handler=handler
+    )
+
+
+async def _serve_channel_records(
+    crypto: ChannelCrypto, *, token: str, recv, send, handler
+) -> None:
+    """Serve one established E2E channel; ``send`` is already tagged.
 
     *recv* returns the next incoming channel record (``None`` ends the
-    channel), *send* transmits one outgoing record. The tunnel path feeds
-    these from mux frames; the direct path (G1) feeds them from a dedicated
-    WebSocket. Handshake first, then request/response exchanges through
-    *handler*. A bytes-like handler response is one message; an async
-    iterator response is streamed as multiple bounded messages.
+    channel), *send* transmits one outgoing pairwise record. A bytes-like
+    handler response is one message; an async iterator response is streamed
+    as multiple bounded messages.
 
     Streaming consumers are responsible for the D1 memory bound: yield
     chunk/window-sized messages, never the whole file. The channel rejects any
     individual message above its symmetric ``MAX_MESSAGE_SIZE`` backstop, and
     the one-item final-boundary lookahead retains at most two yielded messages.
     """
-    # Everything this end sends a viewer is a pairwise channel record, and
-    # is tagged as one. Tagging here rather than in the registry keeps the
-    # relay forwarding payloads opaquely, and gives every transport --
-    # registry tunnel, peer relay, direct -- one place to get it from.
-    _untagged_send = send
-
-    async def send(payload: bytes) -> None:
-        await _untagged_send(tag_viewer_message(VIEWER_KIND_RECORD, payload))
-
-    first = await recv()
-    if first is None:
-        return
-    client_eph = parse_client_hello(first)
-    eph_priv, server_hello, transcript_hash = build_server_hello(
-        key, cert, org=org, token=token, client_eph=client_eph
-    )
-    await send(server_hello)
-    crypto = ChannelCrypto.server(eph_priv, client_eph, transcript_hash)
-
     # Most application handlers are stateless callables and remain byte-for-
     # byte compatible. Stateful channel capabilities (ICE signaling is the
     # first) expose ``for_channel(token)`` so each independently handshaken
@@ -253,6 +252,27 @@ async def serve_channel(key: KeyPair, cert: DelegationCert, *, org: str, token: 
             result = close()
             if inspect.isawaitable(result):
                 await result
+
+
+async def serve_channel(key: KeyPair, cert: DelegationCert, *, org: str, token: str,
+                        recv, send, handler) -> None:
+    """Authenticate an org-delegated peer, then serve its record exchanges."""
+    first = await recv()
+    if first is None:
+        return
+    client_eph = parse_client_hello(first)
+    eph_priv, server_hello, transcript_hash = build_server_hello(
+        key, cert, org=org, token=token, client_eph=client_eph
+    )
+    await send(tag_viewer_message(VIEWER_KIND_RECORD, server_hello))
+    crypto = ChannelCrypto.server(eph_priv, client_eph, transcript_hash)
+    await _serve_channel_records(
+        crypto,
+        token=token,
+        recv=recv,
+        send=lambda payload: send(tag_viewer_message(VIEWER_KIND_RECORD, payload)),
+        handler=handler,
+    )
 
 
 def file_handler(path: str, content_type: str):
