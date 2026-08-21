@@ -16,7 +16,6 @@ from agents.workspace_settings import (
     MaterializedCapability,
     RepoMount,
     WorkspaceSettingsError,
-    WorkspaceCapabilityError,
     _impl_mount_target,
     _parse_repo,
     _compose_workspaces,
@@ -536,12 +535,11 @@ def test_resolve_capabilities_drops_when_no_workspace_enable(graph_db_env):
     assert resolve_capabilities("ng") == ()
 
 
-def test_resolve_capabilities_refuses_when_install_missing(graph_db_env):
-    """An enabled chain cannot silently disappear when its install is absent."""
+def test_resolve_capabilities_omits_when_install_missing(graph_db_env):
+    """A missing install degrades the capability, never the base workspace."""
     _seed_contract("source_control")
     _enable_capability("dashboard", "source_control")
-    with pytest.raises(WorkspaceCapabilityError, match="no organization installation"):
-        resolve_capabilities("dashboard")
+    assert resolve_capabilities("dashboard") == ()
 
 
 def test_resolve_capabilities_filters_to_workspace_prefix(graph_db_env):
@@ -568,8 +566,8 @@ def test_resolve_capabilities_multiple_enabled_sorted_by_contract(graph_db_env):
     assert [c.contract for c in caps] == ["issue_tracker", "source_control"]
 
 
-def test_resolve_capabilities_refuses_impl_not_implementing_contract_version(graph_db_env):
-    """If the impl declares a different contract version, launch refuses."""
+def test_resolve_capabilities_omits_impl_not_implementing_contract_version(graph_db_env):
+    """An incompatible implementation is unavailable without blocking launch."""
     _seed_contract("source_control")
     drift_impl = dict(_GITHUB_IMPL)
     drift_impl["implements"] = [{"contract": "source_control", "version": 2}]
@@ -589,11 +587,10 @@ def test_resolve_capabilities_refuses_impl_not_implementing_contract_version(gra
      org=ops.CALLER_ORG)
     _enable_capability("dashboard", "source_control")
 
-    with pytest.raises(WorkspaceCapabilityError, match="does not declare"):
-        resolve_capabilities("dashboard")
+    assert resolve_capabilities("dashboard") == ()
 
 
-def test_resolve_capabilities_refuses_absent_pinned_implementation_version(graph_db_env):
+def test_resolve_capabilities_omits_absent_pinned_implementation_version(graph_db_env):
     """The incident case: install pins v3 while the one implementation row is v5."""
     _seed_contract("source_control")
     current = dict(_GITHUB_IMPL, version=5)
@@ -615,14 +612,13 @@ def test_resolve_capabilities_refuses_absent_pinned_implementation_version(graph
     )
     _enable_capability("dashboard", "source_control")
 
-    with pytest.raises(WorkspaceCapabilityError, match="pins autonomy/github@3"):
-        resolve_capabilities("dashboard")
+    assert resolve_capabilities("dashboard") == ()
 
 
-def test_broken_capability_stays_scoped_to_workspace_and_refuses_before_prepare(
+def test_broken_capability_stays_scoped_and_does_not_block_workspace_prepare(
     graph_db_env,
 ):
-    """One bad workspace remains listable and cannot poison healthy peers."""
+    """One bad capability remains diagnosable while its workspace can start."""
     _seed_contract("source_control")
     current = dict(_GITHUB_IMPL, version=5)
     ops.add_setting(
@@ -658,10 +654,9 @@ def test_broken_capability_stays_scoped_to_workspace_and_refuses_before_prepare(
     assert [issue.subject for issue in workspaces["broken"].capability_issues] == [
         "autonomy/github@3",
     ]
-    with pytest.raises(WorkspaceCapabilityError, match="pins autonomy/github@3"):
-        workspace_manager.prepare_session_mounts(
-            workspaces["broken"], "test-session",
-        )
+    assert workspace_manager.prepare_session_mounts(
+        workspaces["broken"], "test-session",
+    ) == {}
 
 
 def test_impl_mount_target_replaces_slash_with_dash():

@@ -7204,17 +7204,39 @@ def _resolve_primer_sync(primer: str) -> str | None:
     return text or None
 
 
+def _append_workspace_startup_notice(message: str | None, proj) -> str | None:
+    """Append one compact, actionable sentence for degraded workspace starts."""
+    issues = tuple(getattr(proj, "capability_issues", ()) or ())
+    if message is None or not issues:
+        return message
+
+    subjects = list(dict.fromkeys(
+        issue.subject for issue in issues if getattr(issue, "subject", "")
+    ))
+    shown = subjects[:3]
+    subject_text = ", ".join(shown)
+    if len(subjects) > len(shown):
+        subject_text += f", +{len(subjects) - len(shown)} more"
+    scope = f" ({subject_text})" if subject_text else ""
+    check_word = "check" if len(issues) == 1 else "checks"
+    notice = (
+        f"Startup degraded: {len(issues)} capability {check_word} failed{scope}; "
+        f"diagnose via `GET /api/orgs/{proj.graph_project}/workspaces/health`."
+    )
+    return f"{message.rstrip()}\n\n{notice}"
+
+
 def _render_worker_first_message(
     *,
     tmux_name: str,
     proj,
     primer_url: str | None,
-) -> tuple[str, bool]:
+) -> tuple[str | None, bool]:
     if primer_url:
         try:
             resolved = _resolve_primer_sync(primer_url)
             if resolved:
-                return resolved, True
+                return _append_workspace_startup_notice(resolved, proj), True
             logger.warning(
                 "session_lifecycle: primer unresolved tmux=%s primer=%r; falling back to orientation",
                 tmux_name,
@@ -7232,12 +7254,12 @@ def _render_worker_first_message(
 
     try:
         return (
-            render_orientation(
+            _append_workspace_startup_notice(render_orientation(
                 tmux_name=tmux_name,
                 workspace_id=proj.id,
                 workspace_name=proj.name,
                 org=proj.graph_project,
-            ),
+            ), proj),
             False,
         )
     except Exception:
@@ -7246,7 +7268,7 @@ def _render_worker_first_message(
             tmux_name,
             exc_info=True,
         )
-        return "Hello", False
+        return _append_workspace_startup_notice("Hello", proj), False
 
 
 def _echo_candidates(message: str) -> list[str]:

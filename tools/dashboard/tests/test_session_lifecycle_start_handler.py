@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tools.graph.capability_chain import CapabilityChainIssue
 from tools.dashboard.dao import dashboard_db
 from tools.dashboard.session_lifecycle_worker import LifecycleJob, SessionLifecycleStateWriter
 
@@ -38,7 +39,56 @@ def _project():
         session_runtime="standard",
         network_host=False,
         capabilities=("capability-one",),
+        capability_issues=(),
     )
+
+
+def test_worker_first_message_appends_one_sentence_for_degraded_workspace(monkeypatch):
+    from tools.dashboard import server
+
+    proj = _project()
+    proj.capability_issues = (
+        CapabilityChainIssue(
+            kind="missing_capability_install",
+            detail="enabled contract has no organization installation",
+            field="contract",
+            subject="video_tooling@1",
+            looked_in="organization installations",
+        ),
+        CapabilityChainIssue(
+            kind="missing_capability_implementation_version",
+            detail="pinned implementation version does not resolve",
+            field="implementation_version",
+            subject="autonomy/video@3",
+            looked_in="capability implementations",
+        ),
+    )
+    monkeypatch.setattr(server, "_resolve_primer_sync", lambda _primer: "# Task")
+
+    message, used_primer = server._render_worker_first_message(
+        tmux_name="auto-life",
+        proj=proj,
+        primer_url="graph://task",
+    )
+
+    assert used_primer is True
+    assert message == (
+        "# Task\n\nStartup degraded: 2 capability checks failed "
+        "(video_tooling@1, autonomy/video@3); diagnose via "
+        "`GET /api/orgs/blindhash/workspaces/health`."
+    )
+
+
+def test_worker_first_message_is_unchanged_without_startup_issues(monkeypatch):
+    from tools.dashboard import server
+
+    monkeypatch.setattr(server, "_resolve_primer_sync", lambda _primer: "# Task")
+
+    assert server._render_worker_first_message(
+        tmux_name="auto-life",
+        proj=_project(),
+        primer_url="graph://task",
+    ) == ("# Task", True)
 
 
 def test_project_start_handler_prepares_launches_registers_without_event_loop(monkeypatch, tmp_path):

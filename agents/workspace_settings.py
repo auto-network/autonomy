@@ -212,18 +212,6 @@ class WorkspaceMountFrameError(WorkspaceMountInvalidError):
     """This process cannot see/translate the volume needed to answer."""
 
 
-class WorkspaceCapabilityError(WorkspaceSettingsError):
-    """An enabled capability has a broken contract/install/implementation edge."""
-
-    def __init__(self, *, workspace_id: str, issues: tuple[CapabilityChainIssue, ...]):
-        self.workspace_id = workspace_id
-        self.issues = issues
-        summary = "; ".join(issue.detail for issue in issues)
-        super().__init__(
-            f"Workspace {workspace_id!r} has an invalid enabled capability: {summary}"
-        )
-
-
 # ── Typed composition models ────────────────────────────────
 
 
@@ -436,8 +424,9 @@ class WorkspaceV1:
     :func:`resolve_capabilities`). Sorted by contract name for stable
     ordering across launches and primer renders.
     ``capability_issues`` keeps broken enabled chains attached to their own
-    workspace so listing one unhealthy workspace does not hide every healthy
-    one; mount preparation refuses that workspace before creating anything.
+    workspace so readiness can report them without hiding healthy workspaces.
+    Launch is deliberately fail-open: invalid capabilities are omitted while
+    the base workspace remains available.
     """
     id: str
     name: str
@@ -901,8 +890,9 @@ def resolve_capabilities(
     ``enabled: false`` is dropped — workspaces can opt out of an
     org-installed capability, which is the documented override behaviour
     (graph://86e04207-a25). An enabled but incomplete or version-inconsistent
-    chain raises :class:`WorkspaceCapabilityError`; silently omitting it is a
-    false-successful launch, not a safe compatibility mode.
+    chain is omitted and logged. The shared validator still exposes the issue
+    to workspace readiness, but capability configuration must never make the
+    base workspace impossible to launch.
     """
     if get_schema(
         WORKSPACE_CAPABILITY_ENABLE_SET_ID,
@@ -938,7 +928,13 @@ def resolve_capabilities(
         org_primers,
     )
     if issues:
-        raise WorkspaceCapabilityError(workspace_id=workspace_id, issues=issues)
+        logger.warning(
+            "workspace %s: omitting %d invalid enabled capability chain(s); "
+            "base workspace launch remains available: %s",
+            workspace_id,
+            len(issues),
+            "; ".join(issue.detail for issue in issues),
+        )
     return capabilities
 
 
