@@ -26,14 +26,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import http.server
 import json
 import os
-import queue
 import socket
 import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
 
@@ -58,71 +55,62 @@ def _iso(ts: float) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
 
 
-class _FakeDashboardEvents:
-    """Stand-in for the dashboard's ``GET /api/events`` SSE endpoint.
+class _ControlPipe:
+    """Drives the connector's loopback control listener, as the dashboard does.
 
-    The connector subprocess is the real publisher: it subscribes to this
-    stream, and an event pushed here travels the WHOLE production path --
-    ``relay_publisher.publish_event`` -> real seal -> real ``Publisher``
-    -> real tunnel -> real registry fan-out -> the guest's WebSocket.
+    This is the production event path, not a stand-in for it: a bus event
+    reaches a connector by exactly this call. What is replaced here is the
+    dashboard that would make it, because the dashboard is not under test --
+    everything after the call is real. ``relay_publisher.publish_event`` ->
+    real seal -> real ``Publisher`` -> real tunnel -> real registry fan-out
+    -> the guest's WebSocket.
 
-    That path is the point. Every other test in this epic stubs some part
-    of it, which is how a feature that cannot deliver a single frame in
+    That path is the point. Every other test in this epic stubs some part of
+    it, which is how a feature that could not deliver a single frame in
     production shipped with 74 passing tests.
-
-    HTTP/1.0 deliberately: an SSE body has no Content-Length, so the
-    stream is framed by connection close, which ``BaseHTTPRequestHandler``
-    gives us for free without implementing chunked encoding.
     """
 
-    def __init__(self) -> None:
-        self._queue: queue.Queue = queue.Queue()
-        self.port = free_port()
-        self._server = http.server.ThreadingHTTPServer(
-            ("127.0.0.1", self.port), self._handler()
-        )
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
-        self._thread.start()
-
-    def _handler(self):
-        outer = self
-
-        class Handler(http.server.BaseHTTPRequestHandler):
-            protocol_version = "HTTP/1.0"
-
-            def do_GET(self):  # noqa: N802 - stdlib naming
-                if self.path != "/api/events":
-                    self.send_error(404)
-                    return
-                self.send_response(200)
-                self.send_header("Content-Type", "text/event-stream")
-                self.send_header("Cache-Control", "no-cache")
-                self.end_headers()
-                while True:
-                    try:
-                        topic, data = outer._queue.get(timeout=0.5)
-                        frame = f"event: {topic}\ndata: {json.dumps(data)}\n\n"
-                    except queue.Empty:
-                        frame = ": keepalive\n\n"   # also detects a dead peer
-                    try:
-                        self.wfile.write(frame.encode("utf-8"))
-                        self.wfile.flush()
-                    except Exception:
-                        return
-
-            def log_message(self, *_args):
-                pass
-
-        return Handler
+    def __init__(self, ctl_path) -> None:
+        self._ctl_path = str(ctl_path)
 
     def emit(self, topic: str, data: dict) -> None:
-        self._queue.put((topic, data))
+        import socket as _socket
+
+        from tools.dashboard import link_serving
+
+        for _ in range(100):
+            try:
+                with open(self._ctl_path) as fh:
+                    descriptor = json.load(fh)
+                break
+            except (OSError, ValueError):
+                time.sleep(0.1)
+        else:
+            raise AssertionError("the connector never wrote its control descriptor")
+
+        request = json.dumps({
+            "auth": descriptor["auth"],
+            "op": link_serving.EVENT_OP,
+            "args": {"consumer": "mission", "topic": topic,
+                     "data": data, "org": GRAPH_ORG},
+        }) + "\n"
+        with _socket.create_connection(
+            ("127.0.0.1", int(descriptor["port"])), timeout=10
+        ) as sock:
+            sock.sendall(request.encode("utf-8"))
+            sock.settimeout(10)
+            buf = b""
+            while b"\n" not in buf:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+        reply = json.loads(buf.split(b"\n", 1)[0].decode("utf-8"))
+        assert reply.get("ok") is True, reply
 
     def close(self) -> None:
-        with contextlib.suppress(Exception):
-            self._server.shutdown()
-        with contextlib.suppress(Exception):
-            self._server.server_close()
+        return None
+
 
 
 @pytest.fixture(scope="module")
@@ -298,19 +286,20 @@ def stack(tmp_path_factory):
     )
     channel_cert_file = tmp / "session.channel.cert"
     channel_cert_file.write_text(channel_cert.to_json().decode("ascii"))
-    # The connector's publish loop needs an event source. Without an
-    # explicit --dashboard-url it falls back to _default_dashboard_url(),
-    # which in a dev container resolves to the OPERATOR'S REAL DASHBOARD
-    # on localhost:8080 -- so the test connector would subscribe to live
-    # production events. Point it at our own stream instead.
-    events = _FakeDashboardEvents()
+    # The connector receives events over its own loopback control listener,
+    # so a test connector has no way to reach anything it was not handed.
+    # It used to subscribe to a dashboard URL that fell back to
+    # localhost:8080 -- the OPERATOR'S REAL DASHBOARD in a dev container --
+    # and a test connector would then consume live production events.
+    ctl_path = tmp / "connector.ctl"
+    events = _ControlPipe(ctl_path)
     connector = subprocess.Popen(
         [sys.executable, "-m", "tools.dashboard.link_serving",
          "--relay", f"ws://127.0.0.1:{registry_port}", "--org", ORG_UUID,
          "--key-file", str(key_file), "--cert-file", str(cert_file),
          "--channel-cert-file", str(channel_cert_file),
          "--graph-org", GRAPH_ORG,
-         "--dashboard-url", f"http://127.0.0.1:{events.port}",
+         "--control-file", str(ctl_path),
          "--min-backoff", "0.1", "--max-backoff", "1.0"],
         cwd=str(REPO), env=env,
         stdout=open(tmp / "connector.log", "ab"), stderr=subprocess.STDOUT,
@@ -595,9 +584,9 @@ def test_a_published_answer_reaches_the_guest_over_the_real_socket(stack):
     """THE loop the epic claimed: dashboard event -> connector publish ->
     tunnel -> registry fan-out -> guest WebSocket -> guest decodes it.
 
-    Nothing on this path is stubbed. The only test double is the event
-    SOURCE (an SSE endpoint standing in for the dashboard), because the
-    dashboard itself is not what is under test here.
+    Nothing on this path is stubbed. The only test double is the CALLER of
+    the connector's control listener, because the dashboard itself is not
+    what is under test here -- the call it makes is the real one.
     """
     from tools.network.relaykit.channel import open_stream_frame
 

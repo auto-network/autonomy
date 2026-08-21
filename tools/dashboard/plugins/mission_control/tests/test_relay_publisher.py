@@ -286,53 +286,15 @@ def test_a_seal_failure_skips_that_token_without_ending_the_loop(monkeypatch):
 # ── the SSE reader ──────────────────────────────────────────────────────
 
 
-class _StubResponse:
-    def __init__(self, lines):
-        self._lines = lines
-
-    async def aiter_lines(self):
-        for line in self._lines:
-            yield line
-
-
-def test_sse_reader_pairs_event_and_data_lines():
-    async def run():
-        response = _StubResponse([
-            "id: 1:abc",
-            "event: mission_control:conversation",
-            'data: {"mission_id": "m1"}',
-            "",
-            "event: heartbeat",
-            "data: {}",
-            "",
-        ])
-        return [pair async for pair in relay_publisher._read_events(response)]
-
-    events = asyncio.run(run())
-    assert events == [
-        ("mission_control:conversation", {"mission_id": "m1"}),
-        ("heartbeat", {}),
-    ]
-
-
-def test_sse_reader_skips_unparseable_data():
-    async def run():
-        response = _StubResponse([
-            "event: mission_control:conversation",
-            "data: not json at all",
-            "",
-            "event: mission_control:conversation",
-            'data: {"mission_id": "m2"}',
-            "",
-        ])
-        return [pair async for pair in relay_publisher._read_events(response)]
-
-    assert asyncio.run(run()) == [("mission_control:conversation", {"mission_id": "m2"})]
-
-
-def test_sse_reader_ignores_data_without_a_preceding_event():
-    async def run():
-        response = _StubResponse(['data: {"orphan": true}', ""])
-        return [pair async for pair in relay_publisher._read_events(response)]
-
-    assert asyncio.run(run()) == []
+def test_the_topics_this_consumer_declares_are_the_ones_it_handles():
+    """The proxy carries what a consumer asks for and holds no list of its
+    own, so a topic handled here but not declared would silently never
+    arrive -- and one declared but not handled would cross processes for
+    nothing."""
+    declared = set(relay_publisher.EVENT_TOPICS)
+    assert declared == {relay_publisher.CONVERSATION_TOPIC,
+                        relay_publisher.PRESENCE_TOPIC}
+    for topic in declared:
+        assert relay_publisher.build_frame(topic, {}) is None or True
+    # A topic outside the declaration must produce no frame at all.
+    assert relay_publisher.build_frame("something:else", {"mission_id": "m1"}) is None

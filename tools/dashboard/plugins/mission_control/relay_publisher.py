@@ -33,7 +33,6 @@ decision exists to prevent.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 
@@ -51,6 +50,10 @@ PRESENCE_TOPIC = "setting.changed"
 #: It reaches the bus as a Settings write, so it is recognised by the
 #: set_id its surface rows live under.
 PRESENCE_SET_ID = "dashboard.surface.presence"
+
+#: What the generic event proxy must carry for this consumer. It asks; the
+#: pipe holds no list of its own, which is what keeps it ignorant of us.
+EVENT_TOPICS = (CONVERSATION_TOPIC, PRESENCE_TOPIC)
 
 #: Wire version of the fan-out frame body, sealed under the link's stream
 #: key. The guest widget's transport layer parses this after opening the
@@ -171,65 +174,3 @@ async def publish_event(publisher, topic: str, data: dict, *, org: str | None = 
         if await publisher.publish(token, sealed):
             sent += 1
     return sent
-
-
-async def _read_events(response):
-    """Yield ``(topic, data)`` from an SSE response body.
-
-    Minimal by design: the dashboard's own stream emits ``event:`` and
-    ``data:`` lines with a blank-line terminator, plus ``id:`` lines this
-    ignores. A frame whose data is not JSON is skipped.
-    """
-    event = None
-    async for raw_line in response.aiter_lines():
-        line = raw_line.rstrip("\r")
-        if not line:
-            event = None
-            continue
-        if line.startswith("event:"):
-            event = line[6:].strip()
-        elif line.startswith("data:") and event is not None:
-            try:
-                yield event, json.loads(line[5:].strip())
-            except ValueError:
-                continue
-
-
-async def run(publisher, *, dashboard_url: str, org: str | None = None,
-              min_backoff: float = 0.5, max_backoff: float = 30.0,
-              stop: asyncio.Event | None = None) -> None:
-    """Consume the dashboard's event stream and publish forever.
-
-    Reconnects with backoff. Events missed while disconnected are NOT
-    replayed here: the live stream is best-effort by design and a guest
-    recovers a gap by refetching the conversation on its own channel,
-    which is authoritative.
-    """
-    import httpx
-
-    url = f"{dashboard_url.rstrip('/')}/api/events"
-    backoff = min_backoff
-    while stop is None or not stop.is_set():
-        try:
-            async with httpx.AsyncClient(verify=False, timeout=None) as client:
-                async with client.stream("GET", url) as response:
-                    response.raise_for_status()
-                    backoff = min_backoff
-                    async for topic, data in _read_events(response):
-                        if stop is not None and stop.is_set():
-                            return
-                        try:
-                            await publish_event(publisher, topic, data, org=org)
-                        except Exception:
-                            logger.warning(
-                                "mission_control relay publish failed", exc_info=True
-                            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.debug("mission_control event stream dropped", exc_info=True)
-        if stop is not None and stop.is_set():
-            return
-        with contextlib.suppress(asyncio.CancelledError):
-            await asyncio.sleep(backoff)
-        backoff = min(backoff * 2, max_backoff)
