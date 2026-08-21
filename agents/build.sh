@@ -116,7 +116,7 @@ elif [[ -d "$PROJECTS_DIR" ]]; then
     for dockerfile in "$PROJECTS_DIR"/*/Dockerfile; do
         project_dir="$(dirname "$dockerfile")"
         project_name="$(basename "$project_dir")"
-        image_tag="autonomy-session-$project_name"
+        image_tag="session-$project_name"
         echo ""
         echo "==> Building $image_tag (from $dockerfile)..."
         docker build $NO_CACHE $PULL \

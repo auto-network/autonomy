@@ -37,7 +37,7 @@ window.__primersStubData = window.__primersStubData || {
         {id: 'autonomy',       name: 'Autonomy Network', org: 'autonomy',
          image: 'autonomy-session-platform',     writable: false},
         {id: 'widgets-ng',  name: 'Widgets NG',    org: 'anchore',
-         image: 'autonomy-session-widgets-ng', writable: true},
+         image: 'session-widgets-ng', writable: true},
     ],
     primers: {
         'autonomy': {
@@ -56,7 +56,7 @@ window.__primersStubData = window.__primersStubData || {
             token_estimate: 1234,
             workspace: {id: 'widgets-ng', name: 'Widgets NG',
                         org: 'anchore',
-                        image: 'autonomy-session-widgets-ng',
+                        image: 'session-widgets-ng',
                         writable: true},
         },
     },
