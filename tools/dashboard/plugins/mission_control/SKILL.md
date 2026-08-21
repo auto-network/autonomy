@@ -14,6 +14,45 @@ what the platform adds. Read it first if you read nothing else.**
 Dashboard base URL: `https://localhost:8080` on host-network sessions,
 `https://host.docker.internal:8080` from bridge-network containers (`curl -sk`).
 
+**Every call you make carries your session's token.** The API refuses a request
+with no credential, so each example below sends:
+
+```bash
+  -H "Authorization: Bearer $CROSSTALK_TOKEN"
+```
+
+It is already in your environment; you only have to send it. It says which
+session is calling and which organization it belongs to — it is not a
+permission, and it does not make an operator-only route work.
+
+**Send the variable. Never write the value.** Inside a real command the shell
+expands it, which is the one place that should happen. Everywhere else — a
+message, a note, a bead, a commit, a handoff crib — the expanded value is a
+durable, searchable credential that lets anything holding it act as you.
+
+The trap is that writing ABOUT it expands it too:
+
+```bash
+graph crosstalk send X "... Bearer $CROSSTALK_TOKEN ..."   # EXPANDS — leaks it
+graph crosstalk send X '... Bearer $CROSSTALK_TOKEN ...'   # literal — safe
+graph crosstalk send X -c - <<'MSG'                        # literal — safe
+... Bearer $CROSSTALK_TOKEN ...
+MSG
+```
+
+Double quotes and an unquoted heredoc delimiter substitute; single quotes and a
+quoted delimiter do not. Two coordinators leaked their credential this way in
+one minute, both intending to type the name. When acknowledging or documenting,
+describe the header and never quote what it resolves to.
+
+Two kinds of call in this document deliberately do NOT send it, and that is not
+an oversight:
+
+- **Minting a way in** (§6). That is the operator's own act and refuses every
+  session, with or without a token. Ask for it as an approval instead.
+- **A guest's own ask**, which carries `?as=<token>` — a different credential
+  belonging to the person reading, not to you.
+
 Unlike Present, there is **one store, one obvious content route, and no
 separate publish step**. A push both stores the revision and makes it
 current, atomically.
@@ -22,6 +61,7 @@ current, atomically.
 
 ```bash
 curl -sk https://host.docker.internal:8080/api/missions \
+  -H "Authorization: Bearer $CROSSTALK_TOKEN" \
   -X POST -H 'Content-Type: application/json' \
   -d '{"name": "OSS Insights", "coordinator_session": "'$AUTONOMY_SESSION'"}'
 # → 201 {"mission": {"mission_id": "<uuid>", "name": "...", "coordinator_session": "...", "created_at": ..., "current_revision_id": null}}
@@ -37,6 +77,7 @@ session that is gone. Set it correctly at creation.
 
 ```bash
 curl -sk https://host.docker.internal:8080/api/missions/<mission_id>/site \
+  -H "Authorization: Bearer $CROSSTALK_TOKEN" \
   -X POST -H 'Content-Type: application/json' \
   -d '{"html": "<full self-contained HTML>", "note": "rev11: code-verification pass folded in"}'
 # → 201 {"revision": {"revision_id": "<uuid>", "mission_id": "...", "revision_seq": 11, "note": "...", "created_at": ..., "byte_size": ...}}
@@ -90,7 +131,8 @@ a new revision instead of recording what actually happened. Roll the
 current pointer back to any prior revision by id:
 
 ```bash
-curl -sk https://host.docker.internal:8080/api/missions/<mission_id>/site/revisions/<revision_id>/activate -X POST
+curl -sk https://host.docker.internal:8080/api/missions/<mission_id>/site/revisions/<revision_id>/activate -X POST \
+  -H "Authorization: Bearer $CROSSTALK_TOKEN"
 # → {"revision": {"revision_id": "<revision_id>", "revision_seq": N, ...}}
 ```
 
@@ -249,7 +291,8 @@ question is ALWAYS stored regardless of relay outcome, so poll
 just the CrossTalk ping.
 
 ```bash
-curl -sk https://host.docker.internal:8080/api/missions/<mission_id>/questions
+curl -sk https://host.docker.internal:8080/api/missions/<mission_id>/questions \
+  -H "Authorization: Bearer $CROSSTALK_TOKEN"
 # → {"questions": [{"entry_id", "question", "asked_by_label", "answer": null, "relay_status", "created_at", ...}]}
 ```
 
@@ -257,6 +300,7 @@ curl -sk https://host.docker.internal:8080/api/missions/<mission_id>/questions
 
 ```bash
 curl -sk https://host.docker.internal:8080/api/missions/<mission_id>/questions/<entry_id>/answer \
+  -H "Authorization: Bearer $CROSSTALK_TOKEN" \
   -X POST -H 'Content-Type: application/json' -d '{"answer": "Q3 2026."}'
 ```
 
@@ -322,13 +366,15 @@ consumes the delta for every other viewer. Revisit once real multi-viewer
 identity exists.
 
 ```bash
-curl -sk https://host.docker.internal:8080/api/missions/<mission_id>
+curl -sk https://host.docker.internal:8080/api/missions/<mission_id> \
+  -H "Authorization: Bearer $CROSSTALK_TOKEN"
 # → {"mission": {..., "since_last_visit": {
 #     "last_seen_at": <unix ts, or null if never marked seen>,
 #     "revisions": [...],   # pushed after last_seen_at
 #     "questions": [...]}}} # asked after last_seen_at
 
-curl -sk https://host.docker.internal:8080/api/missions/<mission_id>/seen -X POST
+curl -sk https://host.docker.internal:8080/api/missions/<mission_id>/seen -X POST \
+  -H "Authorization: Bearer $CROSSTALK_TOKEN"
 # → {"ok": true, "seen_at": <unix ts>}
 ```
 
@@ -364,6 +410,7 @@ need.
 
 ```bash
 curl -sk https://host.docker.internal:8080/api/missions/<mission_id>/pillars \
+  -H "Authorization: Bearer $CROSSTALK_TOKEN" \
   -X POST -H 'Content-Type: application/json' \
   -d '{"name": "Dataset & Schema", "coordinator_session": "auto-schema-abc", "color": "#34d399"}'
 # → 201 {"pillar": {"pillar_id": "<uuid>", "mission_id": "...", "name": "...", "coordinator_session": "...", "color": "...", "created_at": ..., "current_revision_id": null, "status": "active"}}
@@ -377,6 +424,7 @@ between the two — purely cosmetic, no validation.
 
 ```bash
 curl -sk https://host.docker.internal:8080/api/pillars/<pillar_id>/site \
+  -H "Authorization: Bearer $CROSSTALK_TOKEN" \
   -X POST -H 'Content-Type: application/json' \
   -d '{"html": "<full self-contained HTML>", "note": "rev3: resolver design finalized"}'
 # → 201 {"revision": {"revision_id", "revision_seq", "note", "created_at", "byte_size", "pillar_id"}}
@@ -451,6 +499,7 @@ want without closing the question out:
 
 ```bash
 curl -sk https://host.docker.internal:8080/api/pillars/<pillar_id>/questions/<entry_id>/update \
+  -H "Authorization: Bearer $CROSSTALK_TOKEN" \
   -X POST -H 'Content-Type: application/json' -d '{"text": "capturing the new screenshot now"}'
 ```
 
@@ -462,7 +511,8 @@ The top-level mission tracks every unit of work as it lands across every
 pillar — you don't maintain this yourself:
 
 ```bash
-curl -sk https://host.docker.internal:8080/api/missions/<mission_id>/decision-log
+curl -sk https://host.docker.internal:8080/api/missions/<mission_id>/decision-log \
+  -H "Authorization: Bearer $CROSSTALK_TOKEN"
 # → {"decision_log": [{"log_id", "mission_id", "pillar_id", "pillar_name",
 #     "kind": "revision"|"answer", "revision_seq", "text", "created_at"}, ...]}
 ```
@@ -604,6 +654,7 @@ it is the only thing on it a human cannot get any other way.
 
 ```bash
 curl -sk https://host.docker.internal:8080/api/pillars/<pillar_id>/last-done \
+  -H "Authorization: Bearer $CROSSTALK_TOKEN" \
   -X POST -H 'Content-Type: application/json' \
   -d '{"last_done": "Ran the prototype over a full batch and measured how fast it goes and how much disk it needs. Found and fixed two bugs in a library we depend on, which made it about a hundred times faster."}'
 # → 200 {"pillar": {..., "last_done": "...", "last_done_at": <unix ts>}}
@@ -793,7 +844,8 @@ about, and nothing tells you it happened.
 Check which of your anchors carry questions before you rewrite:
 
 ```bash
-curl -sk https://host.docker.internal:8080/api/pillars/<pillar_id>/questions
+curl -sk https://host.docker.internal:8080/api/pillars/<pillar_id>/questions \
+  -H "Authorization: Bearer $CROSSTALK_TOKEN"
 ```
 
 Then, for each one, either keep the anchor value on whichever element now
@@ -801,6 +853,7 @@ holds that subject, or move it:
 
 ```bash
 curl -sk https://host.docker.internal:8080/api/questions/<entry_id>/anchor \
+  -H "Authorization: Bearer $CROSSTALK_TOKEN" \
   -X POST -H 'Content-Type: application/json' -d '{"anchor": "table:throughput"}'
 # {"anchor": null} detaches it: it stays in the record and in the questions
 # list, it just no longer belongs beside any particular element.
@@ -810,6 +863,7 @@ Or retire it, when the subject itself stopped being relevant:
 
 ```bash
 curl -sk https://host.docker.internal:8080/api/questions/<entry_id>/retire \
+  -H "Authorization: Bearer $CROSSTALK_TOKEN" \
   -X POST -H 'Content-Type: application/json' \
   -d '{"note": "the batch view this asked about was replaced"}'
 ```

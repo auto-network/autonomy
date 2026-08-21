@@ -65,9 +65,17 @@ def _api_request(method: str, path: str, *, body: dict | None = None,
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE  # localhost self-signed, same as HttpClient
     data = json.dumps(body).encode() if body is not None else None
+    headers = {"Content-Type": "application/json"} if data else {}
+    # The dashboard API is default-deny: a request with no credential is
+    # refused, and this client's calls are ordinary /api reads. A session
+    # carries its own token in the environment and only has to send it.
+    # Absent (a bare shell, a test), the call goes out unauthenticated and
+    # the server's refusal is the honest answer rather than a silent skip.
+    token = os.environ.get("CROSSTALK_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(
-        f"{_dash_base()}{path}", data=data, method=method,
-        headers={"Content-Type": "application/json"} if data else {},
+        f"{_dash_base()}{path}", data=data, method=method, headers=headers,
     )
     with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
         raw = resp.read()
