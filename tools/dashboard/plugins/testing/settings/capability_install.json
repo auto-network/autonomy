@@ -2,6 +2,6 @@
   "contract": "test_execution",
   "contract_version": 1,
   "implementation": "autonomy/agent-test",
-  "implementation_version": 1,
+  "implementation_version": 2,
   "notes": "Installed with the Testing dashboard plugin; durable evidence is organization-owned and machine capacity remains host-local."
 }

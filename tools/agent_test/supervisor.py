@@ -52,7 +52,7 @@ def ensure_supervisor(root: Path, repo: Path) -> dict[str, Any]:
             [
                 sys.executable,
                 "-m",
-                "tools.agent_test.supervisor",
+                f"{__package__}.supervisor",
                 "--state-root",
                 str(root),
                 "--repo",
@@ -137,7 +137,7 @@ def serve(root: Path, repo: Path) -> int:
                         log = (directory / "worker.log").open("ab")
                         try:
                             child = subprocess.Popen(
-                                [sys.executable, "-m", "tools.agent_test.worker", "--run-dir", str(directory)],
+                                [sys.executable, "-m", f"{__package__}.worker", "--run-dir", str(directory)],
                                 cwd=repo,
                                 env=os.environ.copy(),
                                 stdin=subprocess.DEVNULL,

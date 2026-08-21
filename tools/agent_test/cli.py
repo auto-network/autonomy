@@ -259,7 +259,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 worker_log = (directory / "worker.log").open("ab")
                 try:
                     child = subprocess.Popen(
-                        [sys.executable, "-m", "tools.agent_test.worker", "--run-dir", str(directory)],
+                        [sys.executable, "-m", f"{__package__}.worker", "--run-dir", str(directory)],
                         cwd=repo,
                         env=os.environ.copy(),
                         stdin=subprocess.DEVNULL,

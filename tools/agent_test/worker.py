@@ -369,7 +369,11 @@ def run(directory: Path) -> int:
         {"status": "running", "started_at": utc_now(), "worker_pid": os.getpid()},
     )
 
-    package_root = Path(__file__).resolve().parents[2]
+    # Agent Test runs either from the repository as ``tools.agent_test`` or
+    # from the capability-owned mount as top-level ``agent_test``. Derive the
+    # import root from the active package name so workers and the pytest plugin
+    # stay on the exact same immutable capability bundle as the CLI.
+    package_root = Path(__file__).resolve().parents[len(__package__.split("."))]
     env = os.environ.copy()
     current_path = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = os.pathsep.join(
@@ -388,7 +392,7 @@ def run(directory: Path) -> int:
         "pytest",
         "-rP",
         "-p",
-        "tools.agent_test.pytest_plugin",
+        f"{__package__}.pytest_plugin",
         *pytest_args,
         *(["--collect-only"] if mode == "collect" else []),
         *selectors,
