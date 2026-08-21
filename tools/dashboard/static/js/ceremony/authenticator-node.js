@@ -211,6 +211,7 @@ class VirtualAuthenticator {
     challenge,
     credentialId,
     prf = false,
+    evalAtCreate = false,
   }) {
     if (!rpId || !origin || !challenge) {
       throw new Error('createCredential requires rpId, origin, and challenge');
@@ -259,12 +260,27 @@ class VirtualAuthenticator {
       rpId,
     });
 
+    // Model both kinds of real authenticator: one that only reports PRF support
+    // at registration (enabled, no output) and one that also evaluates PRF there
+    // (evalAtCreate). The ceremony's get() fallback exists for the first kind.
+    let clientExtensionResults = {};
+    if (prf) {
+      clientExtensionResults = { prf: { enabled: true } };
+      if (evalAtCreate) {
+        const hmacKey = await cryptoApi.subtle.importKey(
+          'raw', hmacSecret, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
+        );
+        const result = await cryptoApi.subtle.sign('HMAC', hmacKey, prfSalt(prf));
+        clientExtensionResults.prf.results = { first: bytesToB64u(result) };
+      }
+    }
+
     return {
       id: credentialIdB64u,
       rawId: credentialIdB64u,
       type: 'public-key',
       authenticatorAttachment: 'platform',
-      clientExtensionResults: prf ? { prf: { enabled: true } } : {},
+      clientExtensionResults,
       response: {
         clientDataJSON: bytesToB64u(
           clientData('webauthn.create', challenge, origin),
