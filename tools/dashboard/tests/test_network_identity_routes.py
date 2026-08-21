@@ -141,7 +141,7 @@ def test_registry_url_defaults_to_production(env, monkeypatch):
 # ── org-key storage (I1) ──────────────────────────────────────────────
 
 
-def test_cross_org_read_and_write_refused(env, root):
+def test_cross_org_read_and_write_refused(env, root, monkeypatch):
     """A caller must not read or write ANOTHER org's encrypted key /
     registry binding through a ``?org=`` / body ``org`` override — the
     org-key blob is offline-attackable, so a cross-org read is a real
@@ -149,6 +149,13 @@ def test_cross_org_read_and_write_refused(env, root):
     request naming a foreign org is refused 403, while the caller's own
     org still resolves.
     """
+    # Invariant 1 (auto-h4kzx): cross-org refusal keys off a TOKEN-stamped
+    # caller org, which a valid bearer carries. The env is that authenticated
+    # netorg dashboard — stamp it, so a foreign ``?org=`` is the refused
+    # cross-org attempt this test asserts, not a local operator's legitimate
+    # selection (which would open the missing foreign store and 500).
+    from tools.dashboard import server
+    monkeypatch.setattr(server, "_token_org_or_none", lambda request: ORG)
     _store_key(env, root)                     # netorg's own key exists
     FOREIGN = "victimorg"
 
@@ -751,6 +758,11 @@ def test_provision_requires_a_binding_first(env, root, tmp_path, monkeypatch):
 
 
 def test_provision_cross_org_refused(env, root, tmp_path, monkeypatch):
+    # The env is the authenticated netorg dashboard (invariant 1): stamp its
+    # token org so provisioning a serving credential for a FOREIGN org is the
+    # refused cross-org attempt, not a local selection of a missing store.
+    from tools.dashboard import server
+    monkeypatch.setattr(server, "_token_org_or_none", lambda request: ORG)
     _serve_key_dir(monkeypatch, tmp_path)
     _store_binding(root)
     delegate, cert = _mint_serve(root)
