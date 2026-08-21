@@ -1,1240 +1,627 @@
-# Mission Control — pushing a mission site from an agent session
+# Mission Control
 
-Mission Control (`/mission-control`) hosts native sites, one per mission,
-with immutable revision history.
+Mission Control hosts one revisioned site per mission. A mission can contain
+pillar sites, questions and answers, presence, status lines, and a computed
+decision log. Pushing a site revision publishes it immediately; there is no
+separate publish step.
 
-A mission is a set of screens and a decision log. §6: a visitor asks a
-question, you answer, and the pair becomes the record — reopenable if your
-answer was not right. §7: presence, and what changed since someone last
-looked. §8: pillars — a mission split into dedicated sub-coordinators, each
-with its own screen, presence surface and anchored conversation. §9: how to
-write what goes in the record. **§10 is the contract — what you push and
-what the platform adds. Read it first if you read nothing else.**
+Use the dashboard base URL from the session primer:
 
-Dashboard base URL: `https://localhost:8080` on host-network sessions,
-`https://host.docker.internal:8080` from bridge-network containers (`curl -sk`).
+- Host-network sessions use `https://localhost:8080`.
+- Bridge-network sessions use `https://host.docker.internal:8080`.
 
-**Every call you make carries your session's token.** The API refuses a request
-with no credential, so each example below sends:
+## Authentication
+
+Every coordinator API call must send:
 
 ```bash
-  -H "Authorization: Bearer $CROSSTALK_TOKEN"
+-H "Authorization: Bearer $CROSSTALK_TOKEN"
 ```
 
-It is already in your environment; you only have to send it. It says which
-session is calling and which organization it belongs to — it is not a
-permission, and it does not make an operator-only route work.
+The bearer identifies the calling session and its organization. It does not
+grant operator authority. Deleting a mission, deleting a pillar, and minting a
+visitor token refuse session callers even when this header is present.
 
-**Send the variable. Never write the value.** Inside a real command the shell
-expands it, which is the one place that should happen. Everywhere else — a
-message, a note, a bead, a commit, a handoff crib — the expanded value is a
-durable, searchable credential that lets anything holding it act as you.
+Never write the expanded token value into chat, notes, commits, or other
+durable text. Double-quoted shell arguments and unquoted heredoc delimiters
+expand `$CROSSTALK_TOKEN`; single-quoted arguments and quoted heredoc
+delimiters do not. Guest requests use the visitor's `?as=<token>` credential,
+not the session bearer.
 
-The trap is that writing ABOUT it expands it too:
-
-```bash
-graph crosstalk send X "... Bearer $CROSSTALK_TOKEN ..."   # EXPANDS — leaks it
-graph crosstalk send X '... Bearer $CROSSTALK_TOKEN ...'   # literal — safe
-graph crosstalk send X -c - <<'MSG'                        # literal — safe
-... Bearer $CROSSTALK_TOKEN ...
-MSG
-```
-
-Double quotes and an unquoted heredoc delimiter substitute; single quotes and a
-quoted delimiter do not. Two coordinators leaked their credential this way in
-one minute, both intending to type the name. When acknowledging or documenting,
-describe the header and never quote what it resolves to.
-
-Two kinds of call in this document deliberately do NOT send it, and that is not
-an oversight:
-
-- **Minting a way in** (§6). That is the operator's own act and refuses every
-  session, with or without a token. Ask for it as an approval instead.
-- **A guest's own ask**, which carries `?as=<token>` — a different credential
-  belonging to the person reading, not to you.
-
-Unlike Present, there is **one store, one obvious content route, and no
-separate publish step**. A push both stores the revision and makes it
-current, atomically.
-
-## 1. Create a mission (once)
+The examples below use this authenticated request shape. Set `DASHBOARD` to
+the base URL for the current session before using it.
 
 ```bash
-curl -sk https://host.docker.internal:8080/api/missions \
+curl -sk "$DASHBOARD/api/missions" \
   -H "Authorization: Bearer $CROSSTALK_TOKEN" \
   -X POST -H 'Content-Type: application/json' \
-  -d '{"name": "OSS Insights", "coordinator_session": "'$AUTONOMY_SESSION'"}'
-# → 201 {"mission": {"mission_id": "<uuid>", "name": "...", "coordinator_session": "...", "created_at": ..., "current_revision_id": null}}
+  -d '{"name":"OSS Insights","coordinator_session":"'$AUTONOMY_SESSION'"}'
 ```
 
-The entity is deliberately minimal — `{mission_id, name, coordinator_session,
-created_at}`. `coordinator_session` is plain data, not an invariant: nothing
-binds it, and it goes stale if the coordinator session is replaced. The Q&A
-relay reads it at message time, so a stale value delivers messages to a
-session that is gone. Set it correctly at creation.
+## The screen contract
 
-## 2. Push a site revision (the only call you need per update)
+Push a complete, self-contained HTML document. Mission Control serves that
+document byte for byte and composes its own interface around it. Ordinary HTML,
+CSS, inline JavaScript, load events, and in-page links work normally.
 
-```bash
-curl -sk https://host.docker.internal:8080/api/missions/<mission_id>/site \
-  -H "Authorization: Bearer $CROSSTALK_TOKEN" \
-  -X POST -H 'Content-Type: application/json' \
-  -d '{"html": "<full self-contained HTML>", "note": "rev11: code-verification pass folded in"}'
-# → 201 {"revision": {"revision_id": "<uuid>", "mission_id": "...", "revision_seq": 11, "note": "...", "created_at": ..., "byte_size": ...}}
-```
-
-`note` is optional but recommended — it's the one-line description that
-shows up in the revision history list, and it's free now, annoying to
-retrofit later. This call **is** the publish step. There is nothing else to
-call afterward.
-
-`note` is a changelog entry, not content — one line, what changed, not the
-substance of the change (that belongs in the site's own HTML, where you
-already have it). Redundantly duplicating your narrative into `note` just
-makes the revision history list unreadable.
-
-- Good: `"rev15: corrected licensing narrative with measured ClearlyDefined/deps.dev evidence"`
-- Bad: `"rev15: licensing narrative corrected with measured evidence — ClearlyDefined 97-100% not_found across all ecosystems on a random universe sample; clean-license spine is deps.dev + registries + forge metrics, raising the weight of the ecosyste.ms commercial-license question."`
-
-Handler: `push_site_revision` in
-`tools/dashboard/plugins/mission_control/entrypoints/api.py`, backed by
-`tools.dashboard.dao.mission_control_db.push_site_revision` — appends an
-immutable revision (`revision_seq = MAX+1`) and updates the mission's
-current-revision pointer in the same transaction.
-
-## 3. View it
-
-```
-https://host.docker.internal:8080/missions/<mission_id>
-```
-
-No dashboard furniture, stable across every future push. The response is
-marked uncacheable end to end (`Cache-Control: no-store, no-cache,
-must-revalidate, max-age=0`) and always reads the current revision fresh from
-storage: a push is visible on the next request, with no caching window to wait
-out.
-
-**Your document is carried byte for byte, with the platform's navigation
-composed around it** (§10). Nothing rebuilds it in an iframe, injects a
-Tailwind/Alpine CDN, chops it into slides, or rewrites a single tag of what
-you wrote — unlike Present's viewer. What is added is a top bar and the Q&A
-surfaces, prepended as their own runtime; your markup is untouched and your
-scripts, load events and in-page anchors all behave normally.
-
-The same is true in a Content Frame: one composed document, one function
-building it, so the two surfaces cannot disagree.
-
-## 4. Roll back without re-pushing
-
-If a pushed revision is bad, don't re-push the old content — that fabricates
-a new revision instead of recording what actually happened. Roll the
-current pointer back to any prior revision by id:
-
-```bash
-curl -sk https://host.docker.internal:8080/api/missions/<mission_id>/site/revisions/<revision_id>/activate -X POST \
-  -H "Authorization: Bearer $CROSSTALK_TOKEN"
-# → {"revision": {"revision_id": "<revision_id>", "revision_seq": N, ...}}
-```
-
-## 5. Every dial you have
-
-The whole surface, grouped by what you are doing. Anything not listed here
-does not exist, and nothing here needs a Settings edit or a database write to
-reach — if you find yourself reaching for one of those, you are working around
-a route rather than using it.
-
-**The mission itself**
-
-```bash
-GET    /api/missions                                    # every mission
-POST   /api/missions                                    # {name, coordinator_session, org}
-GET    /api/missions/<id>                               # mission, current revision, since_last_visit
-DELETE /api/missions/<id>                               # the mission and its whole history, gone
-POST   /api/missions/<id>/status                        # {"status": "active"|"paused"|"complete"}
-POST   /api/missions/<id>/seen                          # consume the "since last visit" delta
-POST   /api/missions/<id>/coordinator                   # {"coordinator_session": "..."}
-POST   /api/missions/<id>/org                           # {"org": "..."}
-```
-
-Status is yours to set and is never inferred: a mission that is genuinely
-finished looks exactly like one that stalled, so guessing from staleness would
-mislead. It starts `active`.
-
-`coordinator_session` is where a question is delivered, not a permission. A
-pillar or mission outlives the session running it, and when one is retired the
-name has to move or its questions go to a session that is gone. The record —
-screens, questions, answers — is untouched by the change.
-
-`org` is the organisation a mission belongs to, and is the only boundary it
-has. Everything under it inherits it.
-
-**Screens**
-
-```bash
-POST   /api/missions/<id>/site                          # {html, note} -- publishes; there is no second step
-GET    /api/missions/<id>/site                          # current revision, metadata and content
-GET    /api/missions/<id>/site/revisions                # history: id, seq, note, size, created_at
-GET    /api/missions/<id>/site/revisions/<rev>          # one past revision, in full
-POST   /api/missions/<id>/site/revisions/<rev>/activate # roll back by pointing at it
-GET    /missions/<id>                                   # the screen itself
-```
-
-Roll back by activating an old revision. Re-pushing old content instead
-fabricates a new revision and loses what actually happened.
-
-**Pillars** — every one mirrors its mission-level counterpart, one level down.
-
-```bash
-POST   /api/missions/<id>/pillars                       # {name, coordinator_session, color}
-GET    /api/missions/<id>/pillars
-GET    /api/pillars/<id>                                # pillar, current revision, since_last_visit
-DELETE /api/pillars/<id>
-POST   /api/pillars/<id>/status
-POST   /api/pillars/<id>/seen
-POST   /api/pillars/<id>/coordinator
-POST   /api/pillars/<id>/last-done                      # {"last_done": "..."} -- see §9
-POST   /api/pillars/<id>/site                           # {html, note}
-GET    /api/pillars/<id>/site
-GET    /missions/<mission_id>/pillars/<pillar_id>       # one screen, direct
-```
-
-**Conversation**
-
-```bash
-GET    /api/missions/<id>/questions                     # everything asked at mission level
-POST   /api/missions/<id>/questions                     # {question, anchor}
-GET    /api/pillars/<id>/questions
-POST   /api/pillars/<id>/questions                      # {question, anchor}
-POST   /api/missions/<id>/questions/<entry>/answer      # exactly one, final
-POST   /api/pillars/<id>/questions/<entry>/answer
-POST   /api/pillars/<id>/questions/<entry>/update        # {text} -- progress; vanishes when you answer
-POST   /api/missions/<id>/questions/<entry>/reopen      # {followup} -- the asker was not satisfied
-POST   /api/missions/<id>/asked                         # answer a question YOUR screen asked (§10)
-POST   /api/pillars/<id>/asked
-POST   /api/questions/<entry>/anchor                    # {anchor} -- move it, or null to detach
-POST   /api/questions/<entry>/retire                    # {note} -- it stopped mattering; empty note undoes it
-```
-
-**What the mission looks like from outside**
-
-```bash
-GET    /api/missions/<id>/decision-log                  # every revision and answer, newest first, computed
-GET    /api/missions/<id>/status-feed                   # every pillar's status line
-POST   /api/missions/<id>/here                          # "I am looking at this" -- records presence
-POST   /api/pillars/<id>/here
-```
-
-The decision log is a rollup, not an editorial judgement. If you want
-something in it read as a decision, write it that way in the `note` or the
-`answer` — the log surfaces your words, it does not interpret them.
-
-**People**
-
-```bash
-POST   /api/visitor-tokens                              # {display_name, avatar} -- OPERATOR ONLY
-DELETE /api/visitor-tokens/<participant_id>             # forget somebody
-GET    /api/visitor-tokens/<participant_id>             # name and photo, never the token
-DELETE /api/presence/<surface_id>/<participant_id>      # take one participant off one surface
-```
-
-Minting a way in is the operator's act and refuses every session, including
-yours. Ask for it as an approval instead — see §6 — which is one tap for them
-and returns the result to you.
-
-Forgetting somebody stops their link working immediately. What they already
-said stays, under the name they said it: a conversation entry keeps the label
-it was written with, so removing a person never blanks a question or makes it
-look unasked.
-
-`DELETE /api/presence/...` is for a row that should not be there — an identity
-somebody stopped using, or a duplicate of a person already on the list under
-another name. `surface_id` is `mission:<id>` or `pillar:<id>`.
-
-## 6. Q&A — visitors ask, you answer
-
-A person viewing the mission site can ask a question; you get notified over
-CrossTalk; you answer via the API; the question and your final answer become
-part of the mission's permanent record. Every question is attributed to the
-person who asked it, and every answer to you.
-
-### Mint a Content Link for a person (you do this, once per person)
-
-```bash
-curl -sk https://host.docker.internal:8080/api/visitor-tokens \
-  -X POST -H 'Content-Type: application/json' -d '{"display_name": "Jamie"}'
-# → 201 {"visitor": {"token": "<64-hex-char secret>", "participant_id": "guest:<uuid>", "display_name": "Jamie"}}
-```
-
-Hand them `https://.../missions/<mission_id>?as=<token>`. `token` is a
-bearer secret — copy it into the link once and don't log it anywhere else;
-`participant_id` is safe to see in conversation history and isn't usable to
-impersonate them (the cookie authenticates by token, never by
-participant_id — see the schema note in
-`tools/dashboard/dao/mission_control_db.py::resolve_visitor` if you're
-touching this code). Global, not mission-scoped: the same token works
-across every mission's site.
-
-First visit resolves the token and sets an HttpOnly cookie so the URL
-doesn't need to keep carrying it; the token also still works as a live
-`?as=` query param on the ask-question API call itself, if your site's own
-JS wants to pass it explicitly rather than rely on the cookie.
-
-### Receiving a question
-
-You'll get a CrossTalk message from `mission:<mission_id>` when someone
-asks — delivery is fire-and-forget (their `POST` returns immediately;
-CrossTalk send happens after, so a slow/offline coordinator session never
-makes a visitor wait). If delivery itself fails (bad session, transport
-error), it's recorded on the entry as `relay_status: "failed"` — but the
-question is ALWAYS stored regardless of relay outcome, so poll
-`GET /api/missions/<id>/questions` periodically as your real backstop, not
-just the CrossTalk ping.
-
-```bash
-curl -sk https://host.docker.internal:8080/api/missions/<mission_id>/questions \
-  -H "Authorization: Bearer $CROSSTALK_TOKEN"
-# → {"questions": [{"entry_id", "question", "asked_by_label", "answer": null, "relay_status", "created_at", ...}]}
-```
-
-### Answering
-
-```bash
-curl -sk https://host.docker.internal:8080/api/missions/<mission_id>/questions/<entry_id>/answer \
-  -H "Authorization: Bearer $CROSSTALK_TOKEN" \
-  -X POST -H 'Content-Type: application/json' -d '{"answer": "Q3 2026."}'
-```
-
-Records the FINAL answer only — not your working/reasoning, matching how
-Present's library never showed raw session state either. `answered_by_session`
-is snapshotted from the mission's `coordinator_session` at the moment you
-answer, not whoever created the mission — if a mission changes hands,
-history correctly shows who actually answered each question.
-
-Attribution (`asked_by_label`) is a snapshot at ask time too — if you
-reissue someone a new display name later, their past questions still show
-what they were called when they asked.
-
-### Reopening — if the asker isn't satisfied
-
-A visitor who doesn't like your answer can push back:
-
-```bash
-curl -sk "https://host.docker.internal:8080/api/missions/<mission_id>/questions/<entry_id>/reopen?as=<token>" \
-  -X POST -H 'Content-Type: application/json' -d '{"followup": "That does not match what I saw in the logs -- can you check the retry path too?"}'
-```
-
-Same `entry_id` — this is not a new question thread stacking up under the
-old one. Reopening clears `answer` back to open and folds your previous
-answer plus the new follow-up into working context you'll see on the next
-CrossTalk relay; write ONE new answer that integrates the whole discussion,
-not a reply to just the latest line. Once you re-answer, the intermediate
-back-and-forth is gone — `GET .../questions` and the decision log (§8) both
-only ever show the current question/answer pair, never the rounds it took
-to get there. This can repeat any number of times; the record stays one
-row regardless.
-
-## 7. Presence and "what changed"
-
-The dashboard home page shows, per mission, who's currently aware of it and
-what happened since the operator last looked. Neither of these is
-Mission-Control-specific machinery — they're the plugin's first real
-consumer of platform-wide substrate other plugins already use, wired at the
-mission level rather than the whole-page level.
-
-**Presence.** One `Presence.alpine()` surface per mission —
-`surfaceId: "mission:" + mission_id` — not one shared surface for the whole
-plugin page (that's `coordinator_board`'s pattern; `presentations`'
-per-resource `presentations:<designId>` is the one Mission Control mirrors).
-If you're writing an agent-side presence row against a mission surface
-yourself (rather than relying on the dashboard page), see
-`graph://dff97eec-c59` for the substrate contract — this doc only covers the
-`mission:<id>` convention, not the presence write path itself.
-
-You don't need to do this manually for the common case: `push_site_revision`
-and `answer_question` already write a one-shot presence touch for
-`coordinator_session` on that mission's surface, so a coordinator who's
-actively pushing revisions or answering questions shows up in presence with
-zero integration on their side. It's best-effort and silent on failure —
-never blocks or fails your request. This only covers those two calls, not
-"coordinator is thinking/working" in general.
-
-**"Since last visit."** A single, implicit watermark per mission — not
-per-viewer. There is no per-participant identity system yet (dashboard auth
-is a single-personal-root gate; real multi-user org-member identity is a
-separate, deferred epic), so whoever opens a mission's detail panel first
-consumes the delta for every other viewer. Revisit once real multi-viewer
-identity exists.
-
-```bash
-curl -sk https://host.docker.internal:8080/api/missions/<mission_id> \
-  -H "Authorization: Bearer $CROSSTALK_TOKEN"
-# → {"mission": {..., "since_last_visit": {
-#     "last_seen_at": <unix ts, or null if never marked seen>,
-#     "revisions": [...],   # pushed after last_seen_at
-#     "questions": [...]}}} # asked after last_seen_at
-
-curl -sk https://host.docker.internal:8080/api/missions/<mission_id>/seen -X POST \
-  -H "Authorization: Bearer $CROSSTALK_TOKEN"
-# → {"ok": true, "seen_at": <unix ts>}
-```
-
-A mission that's never been marked seen returns an empty delta, not its
-whole history — a first-ever view showing the entire past as "new" would be
-noisy and misleading. `POST .../seen` is a deliberate action, not a side
-effect of `GET .../missions/<id>` — the dashboard's own list page already
-calls that GET incidentally on every load just to hydrate summary fields; if
-the watermark advanced there, the delta would be erased before anyone saw
-it.
-
-Handlers: `get_mission`/`mark_mission_seen` in
-`tools/dashboard/plugins/mission_control/entrypoints/api.py`, backed by
-`mission_last_seen` in `tools.dashboard.dao.mission_control_db`.
-
-## 8. Pillars — sub-missions with their own coordinator
-
-A large mission (data pipeline + schema + delivery + API/UI, say) doesn't
-have to live in one 55,000-word binder. Split it into **pillars**: each one
-a first-class sub-mission with its own `coordinator_session`, its own
-site-revision history, its own presence surface, scoped conversation
-anchored to specific artifacts. Every pillar route below is a structural
-mirror of the mission-level route it corresponds to — same shape, one
-level down.
-
-**Generic infra, not a fixed pillar list.** Nothing here assumes a
-particular number or kind of pillar. You decide the split for your own
-mission (this doc's examples use a 4-pillar OSS-data-product breakdown, but
-that's illustrative, not prescriptive) and create exactly the pillars you
-need.
-
-### Create pillars (the top-level session does this, once per pillar)
-
-```bash
-curl -sk https://host.docker.internal:8080/api/missions/<mission_id>/pillars \
-  -H "Authorization: Bearer $CROSSTALK_TOKEN" \
-  -X POST -H 'Content-Type: application/json' \
-  -d '{"name": "Dataset & Schema", "coordinator_session": "auto-schema-abc", "color": "#34d399"}'
-# → 201 {"pillar": {"pillar_id": "<uuid>", "mission_id": "...", "name": "...", "coordinator_session": "...", "color": "...", "created_at": ..., "current_revision_id": null, "status": "active"}}
-```
-
-`color` is a free-text hex/CSS color hint for the mission dashboard's
-pillar-grid dot and your own site's chrome, if you want visual consistency
-between the two — purely cosmetic, no validation.
-
-### A pillar's own site (identical shape to a mission's)
-
-```bash
-curl -sk https://host.docker.internal:8080/api/pillars/<pillar_id>/site \
-  -H "Authorization: Bearer $CROSSTALK_TOKEN" \
-  -X POST -H 'Content-Type: application/json' \
-  -d '{"html": "<full self-contained HTML>", "note": "rev3: resolver design finalized"}'
-# → 201 {"revision": {"revision_id", "revision_seq", "note", "created_at", "byte_size", "pillar_id"}}
-```
-
-```bash
-GET    /api/pillars/<pillar_id>                                    # pillar + current revision + since_last_visit
-DELETE /api/pillars/<pillar_id>
-POST   /api/pillars/<pillar_id>/status                             # same {"status": "active"|"paused"|"complete"} as missions
-POST   /api/pillars/<pillar_id>/seen
-GET    /api/pillars/<pillar_id>/site
-GET    /api/pillars/<pillar_id>/site/revisions
-GET    /api/pillars/<pillar_id>/site/revisions/<revision_id>
-POST   /api/pillars/<pillar_id>/site/revisions/<revision_id>/activate
-GET    /missions/<mission_id>/pillars/<pillar_id>                  # direct-serve one screen
-```
-
-`GET /missions/<mission_id>/pillars/<pillar_id>` is a convenience URL for
-bookmarking/refreshing on one pillar once you're already inside a mission —
-**it is never the link you hand out**. See "one link per mission" below.
-
-### One link per mission, not one per pillar
-
-The Content Link you mint (§6) and hand to a person is always the
-**mission-level** link. (A Content Link carries a screen to a reader. It is
-not a Join Link, which brings someone into an organization -- different
-credential, different gate, different protocol.) A guest navigates to a specific pillar from the
-platform's own top bar (§10), which lists every pillar with its open-question
-count — you do not build that, and there is no separate onboarding step per
-pillar.
-
-### Anchored conversation — one call, no `kind` to pick
-
-Same shape as mission-level Q&A (§6), scoped to a pillar, with an optional
-`anchor` — free text your own HTML defines to say what specifically is
-being discussed (a table name, a screenshot id, an API field):
-
-```bash
-curl -sk "https://host.docker.internal:8080/api/pillars/<pillar_id>/questions?as=<token>" \
-  -X POST -H 'Content-Type: application/json' \
-  -d '{"question": "Why three trigger paths instead of one?", "anchor": "table:oss_purl_resolution"}'
-```
-
-```bash
-GET    /api/pillars/<pillar_id>/questions
-POST   /api/pillars/<pillar_id>/questions/<entry_id>/answer          # {"answer": "..."} -- exactly one, final
-POST   /api/pillars/<pillar_id>/questions/<entry_id>/update          # {"text": "..."} -- any number, doesn't close it
-POST   /api/pillars/<pillar_id>/questions/<entry_id>/reopen          # {"followup": "..."} -- guest pushback, see §6
-```
-
-There's no `kind` field (question/proposal/comment) — a message is a
-message, tracked with a reply. Don't invent a taxonomy the API doesn't
-have; typing it would just be a place to be wrong for no benefit.
-
-**Reopened questions arrive the same way, with context attached.** If a
-guest wasn't satisfied and reopened (§6), your CrossTalk relay looks like a
-brand-new question but includes a "prior context" block with the old
-answer and the follow-up. File one new answer that replaces the old one —
-see §9 for how to actually write it.
-
-**Delivery.** A message on a pillar screen goes to **both** that pillar's
-`coordinator_session` (you — a reply is expected) **and** the mission's
-top-level `coordinator_session` (copied, tracking only, no reply expected
-from them). A mission-level message (no pillar) goes to the mission's
-coordinator only. Your CrossTalk envelope tells you which role you're in.
-
-**Only answer once it's actually correct — not provisionally.** An entry
-with no `answer` yet is simply open; there's no separate "processing"
-status to set. If a task will take a while (redesigning a screen,
-re-running an experiment), post interim visibility as many times as you
-want without closing the question out:
-
-```bash
-curl -sk https://host.docker.internal:8080/api/pillars/<pillar_id>/questions/<entry_id>/update \
-  -H "Authorization: Bearer $CROSSTALK_TOKEN" \
-  -X POST -H 'Content-Type: application/json' -d '{"text": "capturing the new screenshot now"}'
-```
-
-Then file exactly one concise closing answer when it's genuinely done.
-
-### The cross-pillar decision log — Mission Control's job, not yours
-
-The top-level mission tracks every unit of work as it lands across every
-pillar — you don't maintain this yourself:
-
-```bash
-curl -sk https://host.docker.internal:8080/api/missions/<mission_id>/decision-log \
-  -H "Authorization: Bearer $CROSSTALK_TOKEN"
-# → {"decision_log": [{"log_id", "mission_id", "pillar_id", "pillar_name",
-#     "kind": "revision"|"answer", "revision_seq", "text", "created_at"}, ...]}
-```
-
-This is a computed rollup (every revision pushed anywhere in the mission,
-every answered question), newest first — not an editorial "these were the
-real decisions" judgment. If you want an explicit decision distinct from
-routine progress, say so in your `note`/`answer` text; the log surfaces
-what you wrote, it doesn't interpret it.
-
-### Idle nag — you'll get reminded if you forget to answer
-
-If a coordinator (mission- or pillar-level) has an open question and goes
-idle for about a minute, Mission Control sends a CrossTalk nag listing what's
-outstanding. This is separate from your own `graph set-nag` configuration
-(if you have one) — it won't touch or override it. You don't need to do
-anything to opt in or out beyond actually answering your open questions.
-
-### Presence — same convention, one surface per pillar
-
-`surfaceId: "pillar:" + pillar_id`, exactly like a mission's
-`"mission:" + mission_id` (§7). `push_pillar_site_revision` and
-`answer_pillar_question` already write a presence touch for your
-`coordinator_session` automatically, same zero-integration deal as
-mission-level.
-
-## 9. Writing the record — no story-telling
-
-This applies to every field meant to persist: an `answer` (§6/§8), a site
-revision's `note` (§2), anything that ends up in the decision log (§8).
-The platform enforces the mechanics (one current answer, updates dropped
-once you file it, a computed decision log); it can't enforce good writing.
-That's on you, and it matters because the record is what everyone else —
-the operator, other pillars, a guest who scrolls back — actually reads.
-Write it like the operator will only ever see this one line, never the
-session transcript behind it.
-
-**Progress updates** (`POST .../update`) are scratch, not a diary. One
-short, present-tense line — "checking the acquisition log", "capturing the
-new screenshot" — only when a task is genuinely going to take a while and
-you want to give visibility while it does. They vanish the moment you
-answer (§6/§8's "Only answer once it's actually correct"), so never put
-information in one that the answer itself needs; if it matters, it belongs
-in the answer.
-
-**Answers** are a conclusion, not a transcript. State the current fact or
-decision and its rationale as it stands right now. Don't narrate the steps
-you took ("first I checked X, then I tried Y, then..."), don't reference
-your own earlier attempts or the back-and-forth that led here ("as I
-mentioned", "following up on my last message", "to summarize the
-discussion above"). If the question was reopened (§6) and this is your
-second, third, Nth answer on the same entry, write it exactly as if it
-were the first and only answer — it will be read as exactly that, since
-nothing else survives to give it away.
-
-**Revision notes** (§2) get the same treatment: one line, what the current
-push actually is, not a log of everything you tried before landing on it.
-"Switch to acquisition-run partitioning" — not "iterated a few times,
-tried per-ecosystem first, settled on acquisition-run after discussing with
-Jeremy."
-
-### Your pillar's status line — the last productive thing done
-
-One field, on your pillar, replaced whenever something finishes. It is the
-one line an operator reads to decide where to spend their attention, and it
-is rendered in full — never truncated — so its length is your discipline,
-not the UI's.
-
-**Write:** the last thing that was actually finished, in words someone who
-has never opened this repo would understand.
-
-**Two sentences, maximum.** The first says what got done. The second, if you
-use it, says what that means or what it unblocked — in the same plain words.
-
-Every one of these is a hard rule. A summary that breaks any of them is
-wrong and should be rewritten, not shipped:
-
-1. **Past tense, and finished.** Something completed, not something underway.
-   If nothing finished today, the last thing that finished still stands —
-   leave it. A stale true line beats a fresh empty one.
-2. **No identifiers, ever.** No file paths, function or class names, table or
-   column names, bead IDs, session names, branches, PR numbers, routes, env
-   vars, or flags. If it is a token you could grep for, it does not go here.
-3. **No jargon.** The test is your reader, not the word. A term someone
-   working in this field already uses is not jargon — write it. A term that
-   only means what it means inside this project — a component name, an
-   internal abbreviation, something you coined — does not go in, however
-   natural it has become to you.
-4. **No people, and no blockers.** Not who you are waiting on, not who owes
-   what, not "blocked on Jeremy". If you need a human, that is what an open
-   question is for — asking one is the action, saying you are stuck is not.
-5. **No status words as content.** "In progress", "ongoing", "continuing",
-   "working on", "on track", "blocked" carry no information. The row already
-   shows how long it has been and how many questions are open.
-6. **No numbers that need context.** "3 of 8 endpoints", "97% coverage" mean
-   nothing to a reader who does not know the denominator. "About a hundred
-   times faster" is fine, because it stands on its own.
-
-**The test, before you push it:** could someone who has never seen this
-mission read your two sentences and learn something true about where the
-work stands? If it only lands for someone who already knows, rewrite it.
-
-**This replaces; it is not a log.** There is no history and nothing
-accumulates. Push a new one when something new finishes.
-
-#### Worked examples
-
-Good:
-
-> Ran the prototype over a full batch and measured how fast it goes and how
-> much disk it needs. Found and fixed two bugs in a library we depend on,
-> which made it about a hundred times faster.
-
-> Agreed how customers will find out which datasets they can download, and
-> checked that against what the servers actually do today.
-
-> Got the customer-facing interface running and logged into it inside a test
-> container. Confirmed we can demo it without needing the real backend.
-
-Wrong, and why:
-
-| Written | Why it fails |
-|---|---|
-| "Blocked on Jeremy for the S3 decision." | Names a person and states a blocker (4). If you need that answer, ask a question. |
-| "Refactored `_resolve_mission` to call `compose_screen`; tests green." | Identifiers (2); says nothing to anyone outside the code. |
-| "Continuing work on the ingest pipeline." | Nothing finished (1), and "continuing" is a status word (5). |
-| "Made good progress on the schema." | True of every day; carries no fact. |
-| "auto-i9jx7 done, moving to auto-3gwhe." | Bead IDs (2). Reads as an internal ticket queue. |
-| "Landed the DAO layer and wired the FE grid." | Jargon (3). |
-
-**Why the rule is this strict:** computer tokens are infinite, which makes
-their value zero; human attention is the constrained resource this whole
-system exists to protect. Everything else on that row — the age, the open
-count, who is present — the platform computes for free. This one line is the
-only thing on the screen that costs a coordinator anything to produce, and
-it is the only thing on it a human cannot get any other way.
-
-#### Writing one
-
-```bash
-curl -sk https://host.docker.internal:8080/api/pillars/<pillar_id>/last-done \
-  -H "Authorization: Bearer $CROSSTALK_TOKEN" \
-  -X POST -H 'Content-Type: application/json' \
-  -d '{"last_done": "Ran the prototype over a full batch and measured how fast it goes and how much disk it needs. Found and fixed two bugs in a library we depend on, which made it about a hundred times faster."}'
-# → 200 {"pillar": {..., "last_done": "...", "last_done_at": <unix ts>}}
-```
-
-Push it in the same breath as the site revision that made it true — the
-screen and this line describing it should never disagree. An empty string
-clears it. 400 characters is the cap, which a real one never approaches.
-
-**Why this matters more here than it might elsewhere:** the decision log
-(§8) is computed straight from these fields — there is no separate
-editorial pass that cleans them up before anyone reads them. Whatever you
-write is, verbatim, what lands in the permanent cross-pillar record. Write
-the version you'd want to read cold, six months from now, with no memory
-of the conversation that produced it.
-
-
-## 10. What you push, and what the platform adds
-
-Your whole contract is two lines:
-
-1. **Push a complete, self-contained HTML document** for the screen (§2 for a
-   mission, §8 for a pillar).
-2. **Optionally** mark discussable elements `data-mc-anchor="<short-id>"`, and
-   add `data-mc-ask="<question>"` to any of them where you need an answer.
-
-That is all of it. Ordinary HTML, CSS, `<script>`, in-page `#anchor` links —
-all work natively, on the dashboard and in a Content Frame alike. Your
-document is served **byte for byte**: nothing parses it, rewrites it, or
-reserialises it.
-
-### What the platform puts on your page
-
-You do not build any of this, and you should not duplicate it:
-
-- A **top bar** carrying the screen name, navigation to every other pillar,
-  how long since the last push, the open-question count, and who is here. It
-  is sticky and owns the top `3rem` of the page.
-- **Panels** listing the pillars and every open question across the mission,
-  and a **full-screen discussion view** for one question — with ask, answer,
-  and reopen.
-- An **icon control inside every `[data-mc-anchor]` element**, showing the
-  number of questions on that artifact and colouring it while any is open —
-  or, where you added `data-mc-ask`, an **Answer** control instead.
-
-Two consequences worth stating plainly:
-
-- **Do not build your own pillar navigation, question list or Q&A widget.**
-  The platform renders all three, on every screen, for free. A hand-rolled
-  one competes with the real one for the same job and the same screen space.
-  This is about duplicating the chrome, not about linking: a link to another
-  screen from inside your prose, where it belongs to the sentence around it,
-  is content. Write those freely.
-- **Do not position anything fixed at the very top of the page.** That strip
-  belongs to the bar.
-
-### The anchor
-
-`data-mc-anchor` is the one hook you add. Put it on an element that can hold
-an extra inline child — a table cell, a figure, a paragraph, a card:
+You may add three attributes:
 
 ```html
-<div class="card" data-mc-anchor="table:oss_purl_resolution">
-  <h3>oss_purl_resolution</h3>
-  <p>One row per package, keyed by canonical purl.</p>
-</div>
+<section data-mc-section="Decisions">
+  <div data-mc-anchor="decision:partitioning"
+       data-mc-ask="Should we partition by acquisition run or by ecosystem? They differ under re-ingest.">
+    <h3>How the dataset is partitioned</h3>
+  </div>
+</section>
 ```
 
-The control mounts **inside** that element, never as a sibling — a sibling
-would break your own adjacent-sibling (`+`) CSS rules. The value is free text
-that means something to you; it is what the question gets tagged with.
+- `data-mc-section="Readable name"` adds the section to the platform's pinned
+  section navigator. Declare no sections when no navigator is useful.
+- `data-mc-anchor="stable-id"` gives questions a placement beside an artifact.
+  Put internal identifiers in this value because the reader never sees it.
+- `data-mc-ask="complete question"` asks the reader for a decision at that
+  anchor.
 
-### Asking the reader something
+### Constraints that are not optional
 
-An anchor on its own is a place to be asked about. Add `data-mc-ask` and the
-same element becomes a question **you are asking the reader**:
+1. The platform owns the top `3rem` of the viewport. Do not place fixed
+   content there.
+2. The platform supplies the top bar, screen name, pillar navigation, time
+   since the last push, open-question counts, presence, question panels,
+   full-screen discussion view, and question controls. Do not build another
+   copy of them. Anchor controls show their question count and whether any
+   question is open; `data-mc-ask` displays an Answer control instead. Links
+   to other screens inside your prose are content and remain allowed.
+3. The question control mounts inside each element marked with
+   `data-mc-anchor`, not beside it. Mark an element that can contain an inline
+   child and account for that child in its CSS.
+4. Put each anchor below a plain-language heading. Without one, conversation
+   context falls back to the raw anchor identifier.
+5. Keep scripts inline. A visitor Content Frame permits inline scripts but not
+   arbitrary external script sources.
+6. Do not fetch relative dashboard API URLs from the screen. A visitor Content
+   Frame has no origin or dashboard credential. Bake screen data into the
+   document; the platform supplies pillars, questions, and presence itself.
+7. Preserve anchor values when content moves. Before removing or renaming an
+   anchor, retrieve its questions, then keep the anchor on the new element,
+   move those questions, detach them, or retire them.
+8. An unanswered `data-mc-ask` exists only in the current HTML. Remove the
+   attribute to withdraw the ask. The question-retirement API applies to
+   stored conversation entries, not unanswered asks. Changing the ask text
+   asks a different question; previously answered records remain unchanged.
 
-```html
-<div class="card" data-mc-anchor="decision:partitioning"
-     data-mc-ask="Partition by acquisition run, or by ecosystem?">
-  <h3>How the dataset is partitioned</h3>
-  <p>Either works for the loader; they differ under re-ingest.</p>
-</div>
-```
+### Write an answerable ask
 
-Use it for a decision you cannot make yourself (§11's "a standing decision you
-now think is wrong", and anything across a boundary you do not own). Do not use
-it for rhetorical questions in your prose — every one of these is a real
-request for someone's attention.
+The `data-mc-ask` value is the entire prompt the reader sees. It must:
 
-#### The form of an ask
+1. Be one question ending in a question mark.
+2. Name the available options.
+3. Avoid internal identifiers, file names, route names, and project codenames.
+4. Be answerable without opening another artifact.
+5. State in one clause what the decision changes, costs, or unblocks.
+6. Ask for one decision only.
 
-The text of `data-mc-ask` is not a label for a topic. It is the whole of what
-the reader is shown: it heads the screen where they type their answer, and it
-is the first line of the message that reaches you. Nothing else travels with
-it. Whatever it does not say, they do not have.
+Use asks only for decisions you cannot make, including a settled decision you
+now believe should change and a decision crossing an ownership boundary. Do
+not use them for rhetorical questions or tasks you can complete yourself.
 
-Every one of these is a hard rule. An ask that breaks any of them is wrong and
-should be rewritten before the screen is pushed:
-
-1. **It is a question, and it ends in a question mark.** "Member-rekey policy"
-   is a subject heading. "Should a member's keys be re-minted on rekey, or
-   carried over?" is an ask.
-2. **It names the options.** A fork with its branches stated can be answered in
-   one word; a fork with only its name can only be answered with "what are you
-   asking me?".
-3. **No identifiers.** No bead ids, no file or function names, no internal
-   codenames, no route names. If it is a token you could grep for, it does not
-   belong in the question. The anchor is where those live, and the anchor is
-   never shown to a person.
-4. **It is answerable without opening anything else.** The reader is on a
-   phone, looking at a list of things waiting on them. If answering requires
-   finding a ticket first, it will not be answered.
-5. **Say what turns on it, in one clause.** What the choice costs either way,
-   or what it unblocks. A decision with no stated consequence reads as trivia
-   and gets deferred.
-6. **One decision per ask.** Two questions in one box get one answer, and you
-   will not know which.
-
-**The test, before you push it:** could someone who has not read your screen
-answer it from the sentence alone? If they would have to ask you what you meant,
-it is not an ask yet.
-
-**Why this is strict:** these do not queue with the mission's other questions.
-They are pulled out into their own count, in front of the one person whose
-attention the mission cannot replace, precisely so a real decision is not lost
-among conversations. That separation is worth exactly as much as the weakest
-item in the pile. Seven half-formed asks are worse than none, because they
-teach the reader that the pile is not worth opening.
-
-Good:
+Two acceptable asks are:
 
 > Should witness keys be re-minted on every rekey, or carried over? Carrying
-> them over is simpler now and costs a migration if we ever rotate the root.
+> them over is simpler now and costs a migration if the root ever rotates.
 
-> Do we buy a real iOS device for testing, or keep relying on the simulator?
-> The simulator has not reproduced the two most recent Safari-only faults.
+> Should we buy a physical iOS device or continue using the simulator? The
+> simulator did not reproduce the two latest Safari-only faults.
 
-Wrong, and why:
+These asks must be rewritten:
 
-| Written | Why it fails |
-|---|---|
-| "Member-rekey policy (x97iz)" | Not a question (1), no options (2), carries a bead id (3). |
-| "B7: the update mechanism (unblocks 6aamc)" | A codename and an id (3); nothing states what is being decided (1, 2). |
-| "Demo resources" | A subject, not a question. Unanswerable without asking you what you mean (4). |
-| "Confirm cleanup: close auto-509" | An instruction to yourself with an id in it (3); if you can close it, this is not an ask at all (§11). |
-| "Should we defer witness-key persistence, and also decide the rekey policy?" | Two decisions, one box (6). |
+- `Member-rekey policy (x97iz)` is not a question, names no options, and
+  contains an identifier.
+- `Demo resources` cannot be answered without more context.
+- `Should we defer witness-key persistence and also decide the rekey policy?`
+  asks for two decisions.
 
-Three things follow, and you do not build any of them:
+Until answered, an ask appears separately as `N for you` rather than as an
+open question owed by the mission. After the reader answers, it becomes a
+normal attributed conversation record, can be reopened, and no longer shows
+an Answer control. CrossTalk reports the answer but omits the question because
+the screen authored it.
 
-- The control reads **Answer** rather than a question count, and stops the
-  moment it is answered.
-- It is **not** in the mission's open-question list until answered. That list
-  is what the mission owes the reader; this is the other direction. It is
-  counted separately, as *"N for you"*, so it is still findable.
-- Answered, it becomes an ordinary entry with the attributions the other way
-  round — asked by your screen, answered by them — in the same record, with
-  the same reopen path. You are told the answer over CrossTalk. You are
-  deliberately **not** told the question: you wrote it.
+## Mission workflow
 
-A question exists only on the page until it is answered, so **editing it away
-is how you withdraw it.** Nothing to retire, nothing to clean up. Change the
-text and you have asked a different question; the answered ones are untouched,
-because those are records.
+### Create a mission
 
-### Name your anchors in words
+`POST /api/missions` accepts
+`{"name":"...","coordinator_session":"...","org":"..."}`. Set
+`coordinator_session` to the session that should receive mission questions.
+It is routing data, not a permission, and must be changed when coordination
+moves to another session.
 
-Whatever heading your anchored element sits under travels with every question
-asked there, and is what the reader, your CrossTalk relay and your reminders
-all say the question is about. The anchor value itself is never shown to a
-person.
+### Push and view a site
 
-So `data-mc-anchor="decision:partitioning"` under a heading of "How the dataset
-is partitioned" reads well everywhere. The same anchor under no heading at all
-falls back to the raw slug, and a short reply — "Do it" — then reaches you as
-two words and an identifier.
+Use either route with `{"html":"<complete document>","note":"one-line change"}`:
 
-**Restructure freely; move the conversations with you.** Anchors are
-placement hints, not a contract with the past. A question asked last week is
-never a reason to keep content nobody needs — if the subject moved, point the
-question at where it lives now; if the subject is gone, retire the question.
-
-What is not acceptable is leaving a discussion pointing at an anchor that no
-longer exists. It still lists, but nobody finds it beside the thing it is
-about, and nothing tells you it happened.
-
-Check which of your anchors carry questions before you rewrite:
-
-```bash
-curl -sk https://host.docker.internal:8080/api/pillars/<pillar_id>/questions \
-  -H "Authorization: Bearer $CROSSTALK_TOKEN"
+```text
+POST /api/missions/<mission_id>/site
+POST /api/pillars/<pillar_id>/site
 ```
 
-Then, for each one, either keep the anchor value on whichever element now
-holds that subject, or move it:
+Each call appends an immutable revision and makes it current atomically. The
+optional `note` appears in revision history and the decision log. Write one
+line stating what changed; put supporting detail in the HTML. The new revision
+is visible on the next request.
 
-```bash
-curl -sk https://host.docker.internal:8080/api/questions/<entry_id>/anchor \
-  -H "Authorization: Bearer $CROSSTALK_TOKEN" \
-  -X POST -H 'Content-Type: application/json' -d '{"anchor": "table:throughput"}'
-# {"anchor": null} detaches it: it stays in the record and in the questions
-# list, it just no longer belongs beside any particular element.
+View the current screens at:
+
+```text
+/missions/<mission_id>
+/missions/<mission_id>/pillars/<pillar_id>
 ```
 
-Or retire it, when the subject itself stopped being relevant:
+The mission URL is the only link to give a visitor. The platform bar lets the
+visitor navigate to every pillar and shows each pillar's open-question count.
+The pillar URL is only a direct bookmark after entering the mission.
 
-```bash
-curl -sk https://host.docker.internal:8080/api/questions/<entry_id>/retire \
-  -H "Authorization: Bearer $CROSSTALK_TOKEN" \
-  -X POST -H 'Content-Type: application/json' \
-  -d '{"note": "the batch view this asked about was replaced"}'
+### Roll back
+
+Activate the earlier revision instead of pushing its old HTML again:
+
+```text
+POST /api/missions/<mission_id>/site/revisions/<revision_id>/activate
+POST /api/pillars/<pillar_id>/site/revisions/<revision_id>/activate
 ```
 
-Retiring is not deleting. The entry leaves the screen and stops counting as
-open; what was asked, what it was answered with, and why it stopped mattering
-all stay in the record. Posting an empty note brings it back.
+Activation preserves the real revision history. Re-pushing old content would
+create a false new revision.
 
-### Sections
+### Set lifecycle and coordination
 
-Mark each top-level section of your screen and the platform pins a navigator
-under the bar: a horizontal strip of section names that scrolls sideways
-within itself, marks the section you are currently reading, and keeps that
-one in view as you scroll.
+Mission and pillar status is explicit and accepts `active`, `paused`, or
+`complete`; both start `active`, and status is never inferred from activity.
+Changing a coordinator changes future question delivery without changing past
+records.
 
-```html
-<section data-mc-section="Objective and scope"> ... </section>
-<section data-mc-section="The work"> ... </section>
-<section data-mc-section="Decisions"> ... </section>
+```text
+POST /api/missions/<id>/status                {"status":"active|paused|complete"}
+POST /api/missions/<id>/coordinator           {"coordinator_session":"..."}
+POST /api/missions/<id>/org                   {"org":"..."}
+POST /api/pillars/<id>/status                 {"status":"active|paused|complete"}
+POST /api/pillars/<id>/coordinator            {"coordinator_session":"..."}
 ```
 
-One attribute. You decide what a section is, what it is called and what goes
-in it; the platform decides how that behaves on a phone. Declare none and
-there is no strip.
+Everything below a mission inherits its organization.
 
-**Do not build your own.** Not because yours would be worse, but because two
-pinned bars that do not know about each other collide: yours pins at the top
-of the viewport, the platform's bar is already there, and yours disappears
-underneath it. The platform can stack them only when it owns both.
+## Pillars
 
-### The two things that do not work, and why
+A pillar is a first-class sub-mission with its own coordinator, site history,
+status, presence surface, and anchored conversation. Missions can have any
+number or kind of pillars.
 
-**Scripts must be inline.** A Content Frame is served under a CSP that permits
-inline script, not arbitrary `https:` sources — and an external
-classic script would not preserve execution order relative to your inline
-ones anyway. Paste the code in; do not reference `/static/...`.
+Create and list pillars with:
 
-**Screen data arrives from the platform, not from `fetch("/api/...")`.** Read
-through a Content Link, your document runs in a **Content Frame**: sandboxed,
-with no origin. There is no dashboard to call -- a relative URL has nothing to
-resolve against and no credential to carry. The platform delivers the pillar list, the conversation
-and presence with the document, and renders them itself. Your page's job is
-the content; the state around it is not yours to fetch.
+```text
+POST /api/missions/<mission_id>/pillars
+     {"name":"Dataset & Schema","coordinator_session":"auto-...","color":"#34d399"}
+GET  /api/missions/<mission_id>/pillars
+```
 
-Everything else — your layout, your styling, your interactivity, your data
-baked into the page at push time — is entirely yours.
+`color` is an unvalidated CSS color hint. It has no behavioral effect.
 
-## 11. How to run a pillar
+## Conversation
 
-Your job is to drive your pillar's work as deep as it will go, and come back
-knowing what you did not know when you started.
+Mission-level messages go to the mission coordinator. Pillar messages go to
+the pillar coordinator for action and to the mission controller for awareness.
+The CrossTalk envelope states which role received the message.
 
-**Build to find out.** You do not discover what is genuinely unresolved by
-planning; you discover it by trying to build the thing and hitting the point
-where you cannot proceed without deciding something nobody has decided. That
-point is the valuable output. Planning finds the questions you already knew to
-ask.
+A message has no `kind` field. Do not invent separate question, proposal, and
+comment types.
 
-**At a fork you cannot resolve, choose and continue.** Pick the option you
-would defend, write down that you picked it, and keep going. Do not stop and
-wait for an answer — a question you could have answered provisionally, turned
-into a block, spends the one resource the mission cannot replace.
+Question storage completes before CrossTalk delivery. Delivery is
+fire-and-forget and can fail without losing the question. A failed relay sets
+`relay_status` to `failed`; periodically poll the relevant questions endpoint
+instead of relying only on CrossTalk:
 
-**Stub what you cannot build yet.** A stand-in that lets the next stage run is
-worth more than a real implementation that never gets exercised, because the
-stand-in tells you whether the stage after it works.
+```text
+GET /api/missions/<mission_id>/questions
+GET /api/pillars/<pillar_id>/questions
+```
 
-**Some experiments are worth running and not worth keeping.** When the fastest
-way to answer a question is to make the real change and see what happens,
-make it, learn the answer, and take it back out. The finding is the output;
-the artifact was only ever the instrument. Say that you did it and what it
-proved — "tried it, it works, reverted because the shape is not mine to
-decide" is a stronger claim than any amount of arguing that it would probably
-work.
+### Ask and answer
 
-**Three things look like forks and are not all the same.** Choose-and-continue
-applies to the first only:
+Visitors create questions with `{"question":"...","anchor":"optional"}` and
+their visitor credential:
 
-- **A fresh fork** — nobody has decided this. Pick the option you would
-  defend, record it, keep going.
-- **A standing decision you now think is wrong.** Do not quietly choose
-  against it: propose the correction, say plainly what evidence changed your
-  mind, and leave the decision where it lives. Reversing someone else's
-  settled call silently is how two pillars end up building incompatible
-  things while both believe they are compliant.
-- **Something you cannot do at all** — no write access to the repository the
-  code belongs in, a tool the work requires that is absent, a dependency that
-  does not exist yet. This is not a choice and no stand-in substitutes for it.
-  Record it as a blocker with the evidence, and say what it stops. Trying
-  harder is not the answer and neither is picking an option.
+```text
+POST /api/missions/<mission_id>/questions?as=<visitor_token>
+POST /api/pillars/<pillar_id>/questions?as=<visitor_token>
+```
 
-**If others will build against something you own, publish its literal shape
-early.** A decision about how an interface behaves is not enough for anyone
-writing against it: they need the actual field names, the actual path, the
-actual envelope. Publish a concrete stand-in, marked plainly as provisional,
-as soon as the behaviour is agreed. Two pillars guessing independently produce
-two incompatible guesses, and both find out late.
+Coordinators file one final answer with `{"answer":"..."}`:
 
-The same point from the deciding side: **say what level a decision is settled
-at.** A decision marked settled reads as buildable, and one settled on
-behaviour alone is not — whoever builds against it has to invent the interface
-and will not know they were inventing. If the behaviour is agreed and the
-shape is not, say exactly that, so the gap is visible instead of being
-discovered by two pillars separately filling it in.
+```text
+POST /api/missions/<mission_id>/questions/<entry_id>/answer
+POST /api/pillars/<pillar_id>/questions/<entry_id>/answer
+```
 
-**Drive to end-to-end.** The target is the whole flow exercised, start to
-finish, with every unresolved thing standing in as a stub. Every stage having
-run once — even against stand-ins — is what proves the shape is right.
+An answer closes the entry. `asked_by_label` is copied when the visitor asks,
+and `answered_by_session` is copied from the current coordinator when the
+answer is filed. Later identity or coordinator changes do not rewrite either
+attribution.
 
-**A gate on shipping is not a gate on prototyping.** A mission that holds code
-until contracts land is holding what gets committed, merged and depended on —
-it is not telling you to stop finding things out. Build the throwaway outside
-the repositories it would eventually live in, commit nothing, and say plainly
-that is what you did. Running the thing once is how a contract gets written
-from evidence instead of from argument.
+For long work, a pillar coordinator may post transient visibility with:
 
-**Then harvest.** Walk back over every stub and every choice you made without
-a specification. Each one is either a decision you took (record what you chose
-and why) or a question you cannot settle (record what it blocks). That set is
-most of what your screen says.
+```text
+POST /api/pillars/<pillar_id>/questions/<entry_id>/update {"text":"checking the acquisition log"}
+POST /api/missions/<mission_id>/questions/<entry_id>/update {"text":"checking the acquisition log"}
+```
 
-**When to stop.** Stop when driving further would only refine something
-already understood; when a fork genuinely cannot be guessed and everything
-behind it depends on the answer; or when the next thing to resolve sits across
-a boundary you do not own. Say which you hit. The third is not a failure to go
-deeper — it is the work correctly reaching its edge, and it belongs to the
-coordinator to route rather than to you to guess. Do not keep
-polishing a stage that already works — depth into the unknown is the point,
-not finish on the known.
+Updates do not close the question and disappear when the final answer is
+filed. Never put a conclusion only in an update.
 
-A screen with little to say usually means the work has not been driven far
-enough to find out what is unknown, not that it was written up badly.
+### Reopen
 
-**Not every pillar builds.** A pillar whose deliverable is a record, a
-decision, or a body of research has no loop to run: there is nothing to stub
-and nothing to drive end-to-end. Neither does the coordinator, which does none
-of the mission's work by design (§13). If that is you, the depth that matters
-is in the material itself — is the record complete, is it accurate, does it
-still say something a reader needs. Say plainly that the loop does not apply
-rather than performing it. A thin screen backed by that statement is a
-correct outcome, not an under-driven one.
+A visitor can reopen an answered entry with `{"followup":"..."}`:
 
-## 12. What your screen says
+```text
+POST /api/missions/<mission_id>/questions/<entry_id>/reopen?as=<visitor_token>
+POST /api/pillars/<pillar_id>/questions/<entry_id>/reopen?as=<visitor_token>
+```
 
-Five things, in this order — a shape, not a form to fill in. A section with
-nothing real in it fails the relevance test below as surely as any other empty
-content, so leave it out rather than writing a heading over a blank. Most
-pillars have all five; some honestly have two.
+Reopening keeps the same entry, clears its answer, and sends the prior answer
+and follow-up as working context. File one replacement answer that resolves
+the whole question. Intermediate rounds disappear after that answer; the
+record always contains one current question-and-answer pair.
 
-**A. Objective and scope.** What this pillar is for, what done looks like, and
-what it explicitly does not own.
+An asker may add `{"followup":"..."}` to a still-open question through its
+`/followup` route. This amends the same question and relays it again. A
+coordinator may close a question that no longer needs an answer through its
+`/close` route; closing does not invent an answer. A question's wording can be
+changed in place through its `/rephrase` route without changing its entry,
+answer, or anchor.
 
-**B. The work.** Every unit of development your pillar needs, each with a
-headline and a summary that stand alone, and detail available underneath.
-Someone reading only the headlines should understand the shape of the work.
+### Move or retire a stored question
 
-The writing rules bite hardest at the top. A headline and a summary have to
-carry a reader who knows nothing about the internals, so they hold no
-identifiers at all. The detail underneath is where someone has chosen to go
-deeper: it can name real things, and where an exact string, message or value
-IS the evidence, quote it verbatim rather than describing it. Plain language
-is still the default there — technical is not permission to be unreadable.
+```text
+POST /api/questions/<entry_id>/anchor {"anchor":"new-id"}
+POST /api/questions/<entry_id>/anchor {"anchor":null}
+POST /api/questions/<entry_id>/retire {"note":"why it stopped mattering"}
+```
 
-**C. Decisions.** Every decision taken under uncertainty: what the fork was,
-which way you went, why, and what breaks if the other way turns out to be
-right.
+Detaching leaves the question in the record without placing it beside an
+artifact. Retiring removes it from the screen and open count without deleting
+its question, answer, or retirement reason. Posting an empty retirement note
+restores it.
 
-**D. Open questions.** What is still unresolved, what each one blocks, and
-what would settle it. A question a human can answer in one pass — options and
-consequences stated — gets answered. A vague one waits.
+## Writing the record
 
-**E. Where it stands.** Current state, what is in flight, what is blocked.
+Persisted text must make sense without the session transcript.
 
-C and D are the mission's most valuable output. They are the difference
-between a reader knowing what happened and a reader being able to act.
+- Write progress updates as one short, present-tense action. They are
+  temporary visibility, not a diary.
+- Write answers as the current conclusion and its rationale. Do not narrate
+  the investigation or refer to previous attempts. A reopened question's new
+  answer must read as the only answer.
+- Write revision notes as one line stating what the current push changes. Do
+  not duplicate the screen's evidence or narrate how the result was reached.
 
-### What earns a place
+### Write the pillar's last completed result
 
-Include something only if a reader would act or think differently for knowing
-it. Concretely, it must do at least one of: define or change a deliverable;
-inform a decision somebody still has to make; establish or change a functional
-requirement; surface a real problem with the design; or change the picture of
-what is done, what is left, or what is unknown.
+`last_done` replaces one status line; it is not a history. Write at most two
+sentences and 400 characters:
 
-If it does none of those, it is internal record-keeping. It belongs in your
-own notes, not on the screen.
+1. State completed work in the past tense. Leave the prior true line in place
+   when nothing newer has finished.
+2. Use words a reader outside the repository understands.
+3. Do not include file paths, code identifiers, tickets, sessions, branches,
+   routes, environment variables, or flags.
+4. Do not name people or describe blockers. Ask a question when a decision is
+   needed.
+5. Do not substitute status words such as “in progress,” “ongoing,” or
+   “blocked” for a completed fact.
+6. Use numbers only when their meaning is self-contained.
 
-**Effort is not relevance.** That something was hard, took a long time, or was
-finally solved after a struggle argues for its importance to you and says
-nothing about its importance to the reader.
+A useful line says what was completed and, optionally, what that result made
+possible.
 
-**Relevance decays.** Judge every item against the state of the work now, not
-against how much it mattered when it was written. While you are setting up
-your environment, that is genuinely your current state and belongs on the
-screen; once it is working, it collapses to a line listing what you depend on
-and the fact that it is met. Demoting is not deleting — it moves to your own
-notes.
+Two acceptable status lines are:
 
-Keep the screen at the size a human will actually read. That is the target,
-not the smallest possible screen.
+> Ran the prototype over a full batch and measured its speed and disk use.
+> Fixed two dependency defects, which made the run about a hundred times
+> faster.
 
-## 13. The mission controller
+> Agreed how customers will discover downloadable datasets and checked the
+> decision against the servers' current behavior.
 
-One session coordinates the mission and does none of its work. That is not a
-limitation — every pillar is immersed in its own task, and immersion is
-exactly what makes it a poor judge of which of its own details matter to
-anybody else. The controller is deliberately the one participant who is not
-immersed.
+These status lines must be rewritten:
 
-It keeps up with what every pillar is actually doing, holds the only complete
-picture of the mission, owns the mission overview screen, orchestrates the
-interfaces between pillars, and decides anything that crosses a boundary —
-shared schemas, naming, interface shapes. On those, **you propose; the
-controller decides.** That is what lets every pillar move at full speed
-without the mission contradicting itself.
+- `Blocked on Sam for the storage decision` names a person and a blocker.
+- `Refactored _resolve_mission; tests green` contains an implementation
+  identifier and says nothing useful outside the repository.
+- `Continuing work on the ingestion pipeline` states no completed result and
+  substitutes a status word for one.
 
-It reviews every revision you push, asking three things you are not positioned
-to ask about your own work: is this redundant with what another pillar already
-says, is it irrelevant to the mission, and is it phrased so that only its
-author can read it?
+An empty string clears the field:
 
-Expect edits. A review that changes nothing has not happened.
+```text
+POST /api/pillars/<pillar_id>/last-done {"last_done":"..."}
+```
 
-A review outcome goes two places: to you, so you can act on it, and into the
-mission's own signpost note, so the mission keeps a record of what was cut and
-why. A judgement that lives only in a conversation is lost to the next pillar
-that would have made the same mistake.
+Update `last_done` with the site revision that makes it true so the status and
+screen agree.
 
-### The mission check-in
+## Presence and changes since the last visit
 
-The operator's Activity screen has an Attention tab: a timeline of where their
-attention went, which agents write. The mission check-in is the controller's
-entry on it. It answers one question — **what happened on this mission?** —
-for someone who was not watching.
+Mission presence uses `mission:<mission_id>` and pillar presence uses
+`pillar:<pillar_id>`. Pushing a revision and answering a question
+automatically touch the current coordinator's presence on the relevant
+surface. These touches are best-effort and do not report general thinking or
+work between calls.
 
-Write one when a body of work has landed. Not per commit, not per pillar
-report; a stretch of the mission with a shape to it.
+Each mission and pillar has one shared “seen” watermark, not one per viewer.
+Retrieving the resource reports revisions and questions after that watermark;
+retrieval does not advance it. Marking the resource seen advances it. A
+resource never marked seen reports an empty delta rather than its whole
+history as new.
+
+```text
+GET  /api/missions/<id>
+POST /api/missions/<id>/seen
+GET  /api/pillars/<id>
+POST /api/pillars/<id>/seen
+```
+
+Mission Control sends an idle CrossTalk reminder after about a minute of
+inactivity when a mission or pillar coordinator has unanswered questions. This
+does not change the session's own nag configuration.
+
+## Visitor links and identity
+
+Minting a visitor token is an operator action. Request approval with kind
+`visitor_token`; its request contains `display_name`, an optional
+`data:image/...;base64` avatar, and an optional `reason`. The approval result
+contains a secret token and a safe `participant_id`:
+
+```text
+POST /api/approvals
+{"kind":"visitor_token","session":"<current session>",
+ "request":{"display_name":"Jamie","avatar":"<optional data URL>","reason":"<optional>"}}
+```
+
+Give the visitor:
+
+```text
+https://<dashboard>/missions/<mission_id>?as=<visitor_token>
+```
+
+The token is global across missions. The first visit sets an HttpOnly cookie,
+and the same token can also authenticate an ask through its live `?as=` query
+parameter before a cookie exists. Copy the token into the link once and do not
+log it elsewhere. Conversation history uses `participant_id`; that identifier
+cannot impersonate the visitor.
+
+A Content Link carries a screen to a reader. It is not a Join Link, which adds
+someone to an organization.
+
+Forgetting a visitor invalidates the link immediately but preserves the label
+on past questions. The visitor lookup returns the name and photo, never the
+token. Removing a presence row affects only that surface.
+
+```text
+GET    /api/visitor-tokens/<participant_id>
+DELETE /api/visitor-tokens/<participant_id>
+DELETE /api/presence/<surface_id>/<participant_id>
+```
+
+## Decision and status records
+
+The mission decision log is computed from every mission and pillar revision
+note and every final answer, newest first. It does not decide which entries are
+important. State a decision explicitly in the note or answer when it should
+read as one.
+
+```text
+GET /api/missions/<mission_id>/decision-log
+GET /api/missions/<mission_id>/status-feed
+POST /api/missions/<mission_id>/here
+POST /api/pillars/<pillar_id>/here
+```
+
+The status feed contains every pillar's current `last_done` value. The `here`
+routes record presence.
+
+## Run a pillar
+
+1. Build or exercise the work end to end to discover what is unknown. Use
+   stand-ins for unavailable stages so later stages run at least once.
+2. At a fresh undecided fork, choose the option you can defend, record it, and
+   continue.
+3. When evidence contradicts an existing decision, propose a correction where
+   that decision lives. Do not silently build against it.
+4. When missing access, tooling, or a dependency makes the work impossible,
+   record the evidence, what it prevents, and who owns the boundary. This is
+   not a design choice.
+5. Publish literal provisional interfaces early when others will build against
+   them. State separately whether behavior, field names, paths, and envelopes
+   are settled.
+6. A shipping restriction does not prevent a throwaway prototype. Keep such
+   work outside the eventual repository, commit nothing, and record what the
+   experiment established.
+7. After the end-to-end run, classify every stand-in and unspecified choice as
+   either a decision taken with rationale or an unresolved question with its
+   consequence.
+8. Stop when further work would only refine a known stage, when no defensible
+   provisional choice can unlock dependent work, or when the next decision
+   belongs across an ownership boundary. Record which condition stopped the
+   work.
+
+Research, record, and decision pillars may have no build loop. For them,
+completion means the material is complete, accurate, current, and useful.
+A thin screen for a building pillar usually means the work has not yet reached
+the unknown; a thin screen for a non-building pillar can be correct.
+
+## What each screen says
+
+Use these sections in this order when they contain useful information:
+
+1. **Objective and scope.** State the purpose, the completion condition, and
+   what the pillar does not own.
+2. **The work.** Give each necessary unit a plain-language headline and a
+   summary that stands alone. Put code identifiers and exact evidence only in
+   expanded detail.
+3. **Decisions.** State the fork, the chosen option, the reason, and what would
+   fail if the other option proves correct.
+4. **Open questions.** State what remains unknown, what it prevents, and what
+   evidence or decision would settle it.
+5. **Where it stands.** State what is complete, what remains, and what cannot
+   proceed.
+
+Include an item only when it changes a deliverable, requirement, decision,
+problem assessment, or the reader's understanding of what is complete or
+unknown. Effort alone does not make an item relevant. Reassess old items
+against the current work and remove setup details once they no longer change a
+decision. Keep the screen at a length a person will read.
+
+## Mission controller
+
+The mission controller coordinates and does not perform pillar work. It owns
+the mission overview, tracks every pillar, decides shared names and interface
+shapes, and resolves decisions crossing pillar boundaries. Pillars propose;
+the controller decides.
+
+The controller reviews every pillar revision for duplication with another
+pillar, relevance to the mission, and readability by someone other than its
+author. It sends the result to the pillar and records the same judgment in the
+mission signpost so later pillars can act on it.
+
+### Write a mission check-in
+
+Write a check-in after a coherent body of work lands, not after every commit or
+pillar report:
 
 ```bash
 graph journal write "Mission name check-in — N commits, largest advance in <area>" \
-    --normal /tmp/normal.md --expanded /tmp/expanded.md \
-    --start <ISO> --end <ISO> --type mixed
+  --normal /tmp/normal.md --expanded /tmp/expanded.md \
+  --start <ISO> --end <ISO> --type mixed
 ```
 
-Use `--start`/`--end` for the period being reported. A `--since` lookback
-timestamps the entry at the start of the window, which files a check-in behind
-shorter entries covering less time.
+Use exact start and end timestamps. The headline must stand alone. The normal
+body states what happened. The expanded body uses exactly these sections:
 
-The three bodies are one report at three depths: the headline stands alone in a
-list of a day, `normal` is what happened, `expanded` is the full check-in.
-
-**The shape of the expanded body.** Five sections, in this order, and no others:
-
-```
-N commits landed. Largest advance in <area> — <one line on why>.
+```text
+N commits landed. Largest advance in <area> — <why it mattered>.
 
 ## Live UI Changes
-- What the operator can now see and use that they could not before.
-
+- What the operator can now see and use.
 ## New Platform Functionality
-- **Named capability.** What it is, in a sentence that survives without
-  the bead that produced it.
-
+- Named capabilities that stand without a ticket.
 ## Plans Changed
-- **What changed, and what moved because of it.** A directive, a scope cut,
-  a decision held. Name the pillars it moved and what each one did.
-
+- What changed and what moved because of it.
 ## Blockers Encountered
-- **What is blocked and why.** Evidence, not a feeling. Who it belongs to
-  if it is not yours.
-
+- What is blocked, why, and who owns it.
 ## New Beads Written
-N today, grouped by the work they belong to — the shape of what was written,
-not a list of titles.
+- The count grouped by work, not a title list.
 ```
 
-**Writing it.** Technical manual voice: complete declarative sentences,
-mechanisms named precisely, no narrative arc and no closing line drawing a
-moral. Everything else follows from one rule — **say what happened, not the
-process that produced it.** A directive is worth a line under Plans Changed
-because of what it moved; the audit it triggered is not.
+Report completed, verified facts in technical manual language. Do not include
+process narration, disclaimers, or an uncertain commit count.
 
-Three things that do not go in it, at any depth:
+### Raise a mission-wide blocker
 
-- **No disclaimers.** Not what the tracker failed to record, not how the
-  numbers were derived, not what you could not verify. Fix those or raise
-  them; a check-in is not where they live.
-- **No process.** Reviews, calibration, who asked whom. The reader wants the
-  product, not the machine that made it.
-- **No hedging on the count.** Report what landed. If a number is wrong,
-  find the right one before writing.
+Only the mission controller writes the single Activity notification that
+states what the whole mission needs from the operator. A pillar raises its
+specific decision to the controller instead.
 
-### Raising the whole mission, when the whole mission is stuck
+Write one `dashboard.activity.ask` member keyed by the controller session. The
+row replaces the previous row rather than forming a feed. Its `compact`,
+`normal`, and `expanded` values express one request at three depths; `compact`
+must stand alone. Increase `revision_seq` on every rewrite. Remove the row when
+the mission needs nothing.
 
-Everything above happens inside a mission: the operator opens it and works
-through what is waiting there. That is the right shape for the detail — a
-pillar's `data-mc-ask` is a specific decision, in context, on the screen where
-the work is.
+The payload contains `session_id`, `compact`, `normal`, `expanded`,
+`created_at`, and `revision_seq`.
 
-It is the wrong shape for "this mission cannot proceed". Waiting to be visited
-is not how you say that.
-
-**The controller — and only the controller — writes one row saying where the
-mission stands.** It lands in the operator's Activity → Notifications, where
-they see it without opening any mission. It is the mission's push channel.
+An operator refresh request clears only after `revision_seq` advances, so each
+rewrite must increase it even when the request remains active.
 
 ```bash
-graph set add dashboard.activity.ask#2 --key "$AUTONOMY_SESSION" --from - <<'JSON'
-{
-  "session_id": "auto-0729-212913",
-  "compact": "Multi-User Autonomy is blocked on one decision: relay-hosted join pages.",
-  "normal": "Three pillars are waiting on whether the relay may host the join page...",
-  "expanded": "...the longer version, for when they want the whole picture.",
-  "created_at": "2026-08-14T01:00:00Z",
-  "revision_seq": 4
-}
-JSON
+graph set add dashboard.activity.ask#2 --key "$AUTONOMY_SESSION" --from request.json
 ```
 
-One row per session by construction — writing again replaces it. So this is
-not a feed and nothing accumulates: it is the single current answer to "what
-does this mission need from you?", rewritten whenever that changes, and
-removed when the answer is nothing.
+## Complete API reference
 
-The three bodies are one thought at three depths, and `compact` has to stand
-alone — it is what a reader sees in a list of every session wanting something.
-Bump `revision_seq` on every rewrite; a refresh request from the operator
-clears only when it advances, which is how they ask you to re-prove an ask is
-still live.
+The common workflows above explain the routes that require behavioral
+context. The remaining route surface is listed here so coordinators do not
+invent database or Settings workarounds.
 
-**A pillar never writes one of these.** Your mission-level status belongs to
-the controller, who is the only participant holding the whole picture (that is
-this section's whole argument). Raise it to them and let them decide whether
-the mission is blocked or only you are.
+```text
+GET    /api/missions
+POST   /api/missions
+GET    /api/missions/<id>
+DELETE /api/missions/<id>                               operator authority
+POST   /api/missions/<id>/status
+POST   /api/missions/<id>/seen
+POST   /api/missions/<id>/coordinator
+POST   /api/missions/<id>/org
 
----
+POST   /api/missions/<id>/site
+GET    /api/missions/<id>/site
+GET    /api/missions/<id>/site/revisions
+GET    /api/missions/<id>/site/revisions/<revision_id>
+POST   /api/missions/<id>/site/revisions/<revision_id>/activate
+GET    /missions/<id>
 
-## How this document is maintained
+POST   /api/missions/<id>/pillars
+GET    /api/missions/<id>/pillars
+GET    /api/pillars/<id>
+DELETE /api/pillars/<id>                                operator authority
+POST   /api/pillars/<id>/status
+POST   /api/pillars/<id>/seen
+POST   /api/pillars/<id>/coordinator
+POST   /api/pillars/<id>/last-done
+POST   /api/pillars/<id>/site
+GET    /api/pillars/<id>/site
+GET    /api/pillars/<id>/site/revisions
+GET    /api/pillars/<id>/site/revisions/<revision_id>
+POST   /api/pillars/<id>/site/revisions/<revision_id>/activate
+GET    /missions/<mission_id>/pillars/<pillar_id>
 
-This skill is read by coordinators who have just been created. It is written
-for exactly that reader, always. Three things it defines, and nothing else:
+GET    /api/missions/<id>/questions
+POST   /api/missions/<id>/questions
+POST   /api/missions/<id>/questions/<entry_id>/answer
+POST   /api/missions/<id>/questions/<entry_id>/rephrase
+POST   /api/missions/<id>/questions/<entry_id>/followup
+POST   /api/missions/<id>/questions/<entry_id>/close
+POST   /api/missions/<id>/questions/<entry_id>/update
+POST   /api/missions/<id>/questions/<entry_id>/reopen
+POST   /api/missions/<id>/asked
+GET    /api/pillars/<id>/questions
+POST   /api/pillars/<id>/questions
+POST   /api/pillars/<id>/questions/<entry_id>/answer
+POST   /api/pillars/<id>/questions/<entry_id>/rephrase
+POST   /api/pillars/<id>/questions/<entry_id>/followup
+POST   /api/pillars/<id>/questions/<entry_id>/close
+POST   /api/pillars/<id>/questions/<entry_id>/update
+POST   /api/pillars/<id>/questions/<entry_id>/reopen
+POST   /api/pillars/<id>/asked
+POST   /api/questions/<entry_id>/anchor
+POST   /api/questions/<entry_id>/retire
 
-1. **The infrastructure** — what Mission Control is and what it does for you.
-2. **The workflow** — who does what, when.
-3. **The ideal form of the artifacts** — what a good screen, a good answer and
-   a good status line actually look like.
+GET    /api/missions/<id>/decision-log
+GET    /api/missions/<id>/status-feed
+POST   /api/missions/<id>/here
+POST   /api/pillars/<id>/here
 
-**It never tells stories.** These are not stylistic preferences; a revision
-that breaks one is wrong and should be rewritten before it lands:
+POST   /api/visitor-tokens                              operator authority
+GET    /api/visitor-tokens/<participant_id>
+POST   /api/visitor-tokens/<participant_id>/avatar
+DELETE /api/visitor-tokens/<participant_id>
+DELETE /api/presence/<surface_id>/<participant_id>
+```
 
-- **No history.** Not what a feature replaced, not what an earlier version of
-  this document said, not which release something arrived in. A reader who
-  has never seen the old thing gains nothing and is handed a second, obsolete
-  model of the system to hold in their head.
-- **No transitions.** A guide for moving from how things were to how they are
-  is correct exactly once and misleading forever after. Transitions are
-  delivered directly, by the mission controller to its pillars, for the one
-  set of screens that needs them. They do not belong here.
-- **No futures.** Nothing about what does not exist yet, what is planned, or
-  what will land later. If a capability is absent, either the document is
-  silent about it or it states the present limit plainly, in the present
-  tense, with no promise attached.
-- **No development phases.** Coordinators do not know or care in what order
-  this was built.
+## Maintaining this document
 
-**Everything is present tense and current.** Write as though the system has
-always worked exactly this way and this is the first anyone is hearing of it.
-
-**Refine it from evidence.** As practice teaches better ways to run a mission,
-present a screen or write a record, this document absorbs them — and drops
-whatever they replaced, leaving no trace of the earlier advice. Growing more
-accurate is the point; growing longer is not. The best version of this
-document is the shortest one that still specifies, precisely, the best way we
-currently know to run a mission.
+Keep this file limited to current infrastructure, workflow, and artifact
+requirements. Do not add product history, transition instructions, future
+plans, or development phases. Replace superseded guidance instead of
+accumulating it, and keep the shortest wording that still states every
+behavior a coordinator must know.
