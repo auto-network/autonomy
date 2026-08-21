@@ -72,10 +72,24 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONPATH=/app
 
 # git: graph ingest + worktree surfaces; sqlite3: operator debugging;
-# curl: healthcheck; openssl: first-run TLS keypair.
+# curl: healthcheck; openssl: first-run TLS keypair; openssh-client: workspace
+# preparation clones/fetches private repos over git+SSH (agents/workspace_manager),
+# so a containerized node with no ambient ssh binary cannot launch a session that
+# needs a private repo without it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git sqlite3 curl openssl ca-certificates tmux \
+        git sqlite3 curl openssl ca-certificates tmux openssh-client gosu \
     && rm -rf /var/lib/apt/lists/*
+
+# The dashboard runs as a non-root "autonomy" user (uid 1000) that MATCHES the
+# uid the session agents run as — so every worktree, artifact, and clone the
+# dashboard prepares is already owned by the identity the session needs, exactly
+# like a dev box where dashboard and agent are the same user. The container still
+# STARTS as root (the entrypoint migrates the data volume and fixes ownership),
+# then drops to this user via gosu before serving. A single uid removes the whole
+# class of root-vs-agent permission failures; a shared group would not (it needs
+# perfect group perms on every file forever).
+RUN groupadd -g 1000 autonomy \
+    && useradd -u 1000 -g 1000 -m -s /bin/bash autonomy
 
 # docker CLI (client only): a containerized node shells out to `docker` against
 # the host socket (provided via a compose override) to inspect its OWN mount
