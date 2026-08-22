@@ -6297,6 +6297,10 @@ def main():
     )
     p_tc_suggest.set_defaults(func=cmd_turn_correction_suggest)
 
+    # mission — structured Mission Control driving (tools/graph/mission_cmd.py)
+    from .mission_cmd import register as _register_mission
+    _register_mission(sub)
+
     # session-auth — one-stroke operator-approved dashboard UI session
     p_sauth = sub.add_parser(
         "session-auth",

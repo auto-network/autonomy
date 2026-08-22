@@ -1,0 +1,207 @@
+"""Structured style: the mission style toggle, the item CRUD routes, and
+the settings-rendered screen.
+
+Item writes go through the real Settings substrate against the hermetic
+per-test org databases the shared conftest provisions, so what these
+tests prove is the actual storage path, not a mock of it.
+"""
+from __future__ import annotations
+
+from unittest.mock import MagicMock, patch
+
+import pytest
+from starlette.applications import Starlette
+from starlette.middleware import Middleware
+from starlette.testclient import TestClient
+
+from tools.dashboard import api_auth
+from tools.dashboard.dao import mission_control_db as db
+from tools.dashboard.plugins.mission_control.entrypoints import api as mc_api
+# Importing the schemas module registers MissionItemV1 with the settings
+# schema registry — the same side effect the plugin loader relies on.
+from tools.dashboard.plugins.mission_control.entrypoints import schemas  # noqa: F401
+
+
+@pytest.fixture(autouse=True)
+def _isolated_db(tmp_path, monkeypatch):
+    path = tmp_path / "mission_control.db"
+    monkeypatch.setattr(db, "DB_PATH", path)
+    db.init_db(path)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_presence_writes():
+    with patch("tools.graph.surface.Presence", MagicMock()):
+        yield
+
+
+class _OperatorPrincipalMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        scope.setdefault("state", {})["api_principal"] = api_auth.ApiPrincipal(
+            api_auth.ApiPrincipalKind.OPERATOR_COOKIE,
+            subject="test-operator",
+        )
+        await self.app(scope, receive, send)
+
+
+def _client() -> TestClient:
+    app = Starlette(
+        routes=mc_api.routes,
+        middleware=[Middleware(_OperatorPrincipalMiddleware)],
+    )
+    return TestClient(app)
+
+
+def _structured_mission(client) -> dict:
+    mission = client.post("/api/missions", json={
+        "name": "Structured Test", "style": "structured",
+    }).json()["mission"]
+    # Pin to the hermetic org the conftest provisioned, so item writes and
+    # reads resolve against per-test settings storage.
+    db.set_mission_org(mission["mission_id"], "autonomy")
+    return db.get_mission(mission["mission_id"])
+
+
+# ── style ─────────────────────────────────────────────────────────
+
+
+def test_mission_style_defaults_to_freeform():
+    client = _client()
+    mission = client.post("/api/missions", json={"name": "M"}).json()["mission"]
+    assert mission["style"] == "freeform"
+
+
+def test_mission_style_set_at_creation_and_toggled():
+    client = _client()
+    mission = client.post("/api/missions", json={
+        "name": "M", "style": "structured"}).json()["mission"]
+    assert mission["style"] == "structured"
+    out = client.post(f"/api/missions/{mission['mission_id']}/style",
+                      json={"style": "freeform"})
+    assert out.status_code == 200
+    assert out.json()["mission"]["style"] == "freeform"
+
+
+def test_mission_style_rejects_unknown_value():
+    client = _client()
+    mission = client.post("/api/missions", json={"name": "M"}).json()["mission"]
+    out = client.post(f"/api/missions/{mission['mission_id']}/style",
+                      json={"style": "artisanal"})
+    assert out.status_code == 400
+    assert db.get_mission(mission["mission_id"])["style"] == "freeform"
+
+
+# ── items ─────────────────────────────────────────────────────────
+
+
+def test_item_put_and_read_back_on_pillar():
+    client = _client()
+    mission = _structured_mission(client)
+    pillar = client.post(
+        f"/api/missions/{mission['mission_id']}/pillars",
+        json={"name": "Relay"}).json()["pillar"]
+    put = client.put(
+        f"/api/pillars/{pillar['pillar_id']}/items/checkpoint-a",
+        json={"kind": "checkpoint", "title": "Checkpoint A", "state": "proven",
+              "order": 10, "refs": ["commit:a0cc1541"]})
+    assert put.status_code == 200, put.text
+    assert put.json()["key"] == f"{pillar['pillar_id']}:checkpoint-a"
+
+    mine = client.get(f"/api/pillars/{pillar['pillar_id']}/items").json()["items"]
+    assert [i["item_id"] for i in mine] == ["checkpoint-a"]
+    assert mine[0]["state"] == "proven"
+    assert mine[0]["refs"] == ["commit:a0cc1541"]
+
+    # The mission route aggregates the whole mission, pillars included.
+    whole = client.get(
+        f"/api/missions/{mission['mission_id']}/items").json()["items"]
+    assert {i["item_id"] for i in whole} == {"checkpoint-a"}
+
+
+def test_item_surface_id_cannot_be_spoofed():
+    client = _client()
+    mission = _structured_mission(client)
+    put = client.put(
+        f"/api/missions/{mission['mission_id']}/items/x",
+        json={"kind": "work", "title": "T", "surface_id": "somewhere-else",
+              "item_id": "not-x"})
+    assert put.status_code == 200
+    item = put.json()["item"]
+    assert item["surface_id"] == mission["mission_id"]
+    assert item["item_id"] == "x"
+
+
+def test_item_rejects_unknown_kind_and_state():
+    client = _client()
+    mission = _structured_mission(client)
+    bad_kind = client.put(
+        f"/api/missions/{mission['mission_id']}/items/x",
+        json={"kind": "vibe", "title": "T"})
+    assert bad_kind.status_code == 400
+    bad_state = client.put(
+        f"/api/missions/{mission['mission_id']}/items/x",
+        json={"kind": "work", "title": "T", "state": "sideways"})
+    assert bad_state.status_code == 400
+
+
+def test_item_state_transition_stamps_happened_at_and_appends_note():
+    client = _client()
+    mission = _structured_mission(client)
+    client.put(f"/api/missions/{mission['mission_id']}/items/w",
+               json={"kind": "work", "title": "W", "state": "active",
+                     "body": "Building."})
+    out = client.post(
+        f"/api/missions/{mission['mission_id']}/items/w/state",
+        json={"state": "proven", "note": "Watched it run live."})
+    assert out.status_code == 200, out.text
+    item = out.json()["item"]
+    assert item["state"] == "proven"
+    assert item["happened_at"].endswith("Z")
+    assert item["body"] == "Building.\n\nWatched it run live."
+
+
+def test_item_state_transition_on_missing_item_is_404():
+    client = _client()
+    mission = _structured_mission(client)
+    out = client.post(
+        f"/api/missions/{mission['mission_id']}/items/ghost/state",
+        json={"state": "done"})
+    assert out.status_code == 404
+
+
+# ── serving ───────────────────────────────────────────────────────
+
+
+def test_structured_mission_serves_viewer_without_any_revision():
+    client = _client()
+    mission = _structured_mission(client)
+    client.put(f"/api/missions/{mission['mission_id']}/items/hello",
+               json={"kind": "work", "title": "First item"})
+    page = client.get(f"/missions/{mission['mission_id']}")
+    assert page.status_code == 200
+    assert "mc-data" in page.text            # baked JSON block
+    assert "First item" in page.text
+    assert "__MC_STRUCTURED_DATA__" not in page.text
+
+
+def test_freeform_mission_without_revision_still_404s():
+    client = _client()
+    mission = client.post("/api/missions", json={"name": "F"}).json()["mission"]
+    page = client.get(f"/missions/{mission['mission_id']}")
+    assert page.status_code == 404
+
+
+def test_structured_pillar_url_serves_the_same_app_focused():
+    client = _client()
+    mission = _structured_mission(client)
+    pillar = client.post(
+        f"/api/missions/{mission['mission_id']}/pillars",
+        json={"name": "Relay"}).json()["pillar"]
+    page = client.get(
+        f"/missions/{mission['mission_id']}/pillars/{pillar['pillar_id']}")
+    assert page.status_code == 200
+    assert f'"focus": "{pillar["pillar_id"]}"' in page.text.replace(
+        '":"', '": "')

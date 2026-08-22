@@ -118,6 +118,7 @@ def _presence(surface_id: str, now: float) -> list[dict]:
     the screen.
     """
     from tools.graph import settings_ops
+    from tools.graph.db import GraphDBMissing
     from tools.graph.surface import SURFACE_PRESENCE_SET_ID
 
     prefix = f"{surface_id}:"
@@ -126,10 +127,14 @@ def _presence(surface_id: str, now: float) -> list[dict]:
         # and a bare `except Exception` here turned that into "nobody is ever
         # here" -- silently, forever, on every screen. Presence being
         # decoration is a reason to degrade, never a reason not to look.
+        # GraphDBMissing is in the tuple because a host without the presence
+        # org's database at all (a container worktree, a fresh node) is the
+        # "store genuinely unavailable" case in its purest form -- it used to
+        # escape as a RuntimeError and take the whole screen down with it.
         rows = settings_ops.read_set(
             SURFACE_PRESENCE_SET_ID, org=PRESENCE_ORG,
         )
-    except (LookupError, OSError, ValueError):
+    except (LookupError, OSError, ValueError, GraphDBMissing):
         return []          # store genuinely unavailable: render nobody
     here = []
     for member in rows.members:
@@ -385,12 +390,24 @@ def compose_screen(mission_id: str, pillar_id: str | None = None, *,
     Order matters: the state block and the bootstrap precede the author's
     HTML so the runtime is mounted before their scripts run.
     """
-    if pillar_id is None:
-        current = db.get_current_site(mission_id)
+    mission = db.get_mission(mission_id)
+    if mission is not None and dict(mission).get("style") == "structured":
+        # Structured style: the author-HTML half is the platform's standard
+        # viewer rendered from dashboard.mission.item Settings rows. The
+        # site-revision store is not consulted — and an empty mission still
+        # serves (the template's empty state IS the onboarding).
+        from tools.dashboard.plugins.mission_control import structured
+        author_html = structured.render_screen(
+            dict(mission), db.list_pillars(mission_id),
+            focus_pillar_id=pillar_id)
     else:
-        current = db.get_current_pillar_site(pillar_id)
-    if not current or not current.get("html"):
-        return None
+        if pillar_id is None:
+            current = db.get_current_site(mission_id)
+        else:
+            current = db.get_current_pillar_site(pillar_id)
+        if not current or not current.get("html"):
+            return None
+        author_html = current["html"]   # byte for byte, never parsed
     document = (
         _HEAD
         + (_SRCDOC_BASE if framed else "")
@@ -398,6 +415,6 @@ def compose_screen(mission_id: str, pillar_id: str | None = None, *,
                                           include_sessions=not framed),
                             may_write=may_write, me=viewer))
         + "<script>\n" + bootstrap_source() + "\n</script>\n"
-        + current["html"]          # byte for byte, never parsed
+        + author_html
     )
     return document.encode("utf-8")
