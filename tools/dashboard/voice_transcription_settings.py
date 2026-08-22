@@ -28,7 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from tools.graph import settings_ops
-from tools.graph.schemas.registry import SettingSchema, field, singleton
+from tools.graph.schemas.registry import SettingSchema, field, singleton, publication_band
 from tools.graph.schemas.registry import home
 
 from tools.dashboard import voice_whisperlive as _vw
@@ -44,6 +44,7 @@ SINGLETON_KEY = "default"
 #: enforced rather than agreed -- an undeclared home refuses
 #: nothing, and a plain read looks in the caller's own store and
 #: reports nothing for rows sitting one database over.
+@publication_band(min="raw", max="curated")
 @home("personal")
 @singleton(key=SINGLETON_KEY)
 class VoiceTranscriptionV1(SettingSchema):

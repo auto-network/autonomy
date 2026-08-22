@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from tools.graph.schemas.registry import (
+    publication_band,
     home,
     home,
     SchemaValidationError,
@@ -38,6 +39,7 @@ SYNOPSIS = {
 #: their database is the organizational home of their own
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
+@publication_band(min="raw", max="curated")
 @home("organization")
 @keyed_per_entity(key_strategy="design_id")
 class PresentationDeckV1(SettingSchema):

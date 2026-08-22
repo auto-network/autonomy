@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from tools.graph.schemas.registry import (
+    publication_band,
     home,
     home,
     home,
@@ -36,6 +37,7 @@ PLUGIN_OWNED_SETTING_SCHEMA_REVISION = 1
 #: their database is the organizational home of their own
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
+@publication_band(min="raw", max="curated")
 @home("organization")
 @keyed_per_entity(key_strategy="plugin_id")
 class DashboardPluginV1(SettingSchema):
@@ -97,6 +99,7 @@ class DashboardPluginV1(SettingSchema):
 #: their database is the organizational home of their own
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
+@publication_band(min="raw", max="curated")
 @home("organization")
 @keyed_per_entity(key_strategy="plugin_id:set_id:setting_key")
 class DashboardPluginOwnedSettingV1(SettingSchema):

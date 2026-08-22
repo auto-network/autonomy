@@ -8,6 +8,7 @@ import threading
 from typing import Any, Callable
 
 from tools.graph.schemas.registry import (
+    publication_band,
     home,
     SchemaValidationError,
     SettingSchema,
@@ -104,6 +105,7 @@ _VALID_SOURCES = ("oauth_usage", "transcript")
 #: enforced rather than agreed -- an undeclared home refuses
 #: nothing, and a plain read looks in the caller's own store and
 #: reports nothing for rows sitting one database over.
+@publication_band(min="raw", max="curated")
 @home("personal")
 @cache(ttl=HARNESS_USAGE_CACHE_TTL)
 @keyed_per_entity(key_strategy="harness:identity_id")

@@ -14,6 +14,7 @@ ratifies that convention so every mission renders it the same way.
 from __future__ import annotations
 
 from tools.graph.schemas.registry import (
+    publication_band,
     SettingSchema,
     field,
     home,
@@ -71,6 +72,7 @@ ITEM_STATES = (
 )
 
 
+@publication_band(min="raw", max="curated")
 @home("organization")
 @keyed_per_entity(key_strategy="surface_id:item_id")
 class MissionItemV1(SettingSchema):

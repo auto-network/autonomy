@@ -54,6 +54,7 @@ from __future__ import annotations
 from typing import Any
 
 from tools.graph.schemas.registry import (
+    publication_band,
     home,
     home,
     home,
@@ -144,6 +145,7 @@ SYNOPSIS = {
 #: their database is the organizational home of their own
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
+@publication_band(min="raw", max="curated")
 @home("organization")
 @keyed_per_entity(key_strategy="session_name")
 class SessionAskV1(SettingSchema):
@@ -242,6 +244,7 @@ class SessionAskV1(SettingSchema):
 # ── SessionAskV2 (current — compact / normal / expanded zoom) ────
 
 
+@publication_band(min="raw", max="curated")
 @keyed_per_entity(key_strategy="session_name")
 class SessionAskV2(SettingSchema):
     """One row per source session with an outstanding operator-ask.
@@ -400,6 +403,7 @@ class SessionAskV2(SettingSchema):
 #: their database is the organizational home of their own
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
+@publication_band(min="raw", max="curated")
 @home("organization")
 @keyed_per_entity(key_strategy="session_name:participant_id")
 class AskVoteV1(SettingSchema):
@@ -479,6 +483,7 @@ class AskVoteV1(SettingSchema):
 #: their database is the organizational home of their own
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
+@publication_band(min="raw", max="curated")
 @home("organization")
 @keyed_per_entity(key_strategy="session_name")
 class AskRefreshRequestV1(SettingSchema):
@@ -569,6 +574,7 @@ class AskRefreshRequestV1(SettingSchema):
 #: their database is the organizational home of their own
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
+@publication_band(min="raw", max="curated")
 @home("organization")
 @singleton(key="dismissed")
 class OperatorDismissedAsksV1(SettingSchema):
