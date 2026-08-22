@@ -342,6 +342,10 @@
               rootPub: runtimeContext.personal_root_pub,
               machineId: runtimeContext.machine_id,
               machinePub: runtimeContext.machine_pub,
+              // When the personal org is registered, the credential also carries
+              // the machine key + a node-scoped reachability cert for peer
+              // discovery; null org_uuid keeps it sync-only.
+              orgUuid: runtimeContext.org_uuid || null,
             });
           wakeSeed = null;  // the ceremony zeroed the shared Uint8Array
           await _postJson('/api/fleet/runtime', runtimeCredential);

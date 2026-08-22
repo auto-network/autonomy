@@ -351,6 +351,7 @@ def test_generic_approval_commits_exact_request(operator_api, monkeypatch):
         "personal_root_pub": root.public_hex,
         "machine_id": machine_id,
         "machine_pub": machine_key.public_hex,
+        "org_uuid": None,  # personal org not registered in this fixture
     }
     activated = client.post("/api/fleet/runtime", json=runtime_payload)
     assert activated.status_code == 200, activated.text

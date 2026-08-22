@@ -160,6 +160,7 @@ export async function mintFleetRuntimeCredential({
   rootPub,
   machineId,
   machinePub,
+  orgUuid = null,
 } = {}) {
   if (!(personalRootSeed instanceof Uint8Array) || personalRootSeed.length !== 32) {
     throw new Error('personalRootSeed must be a 32-byte Uint8Array');
@@ -179,17 +180,59 @@ export async function mintFleetRuntimeCredential({
       throw new Error('opened personal root does not derive this roster machine key');
     }
     machineSigningKey = await importEd25519RootSigningKey(machineSeed);
-    return await mintRuntimeCredential({
+    const credential = await mintRuntimeCredential({
       machineSigningKey,
       machineId: mid,
       machinePub: authorizedPub,
       personalRootPub: anchor,
     });
+    // When the personal org is registered, ALSO deliver the reachability
+    // material: the durable machine key (which signs node:announce/node:lookup,
+    // because the registry keys hints by the signer and discovery reads by
+    // roster machine_pub) plus a SEPARATE root-direct cert scoped to node
+    // discovery under the registered org_uuid. Omitted when unregistered, so the
+    // sync-only credential is byte-identical.
+    if (orgUuid) {
+      credential.machine_private_seed = bytesToHex(machineSeed);
+      credential.reachability_cert = await mintReachabilityCert(
+        seed, authorizedPub, mid, orgUuid);
+    }
+    return credential;
   } finally {
     seed.fill(0);
     if (machineSeed) machineSeed.fill(0);
     machineSigningKey = null;
   }
+}
+
+/** Mint the SEPARATE reachability cert: root-direct (root -> machine_pub, scope
+ *  node:announce+node:lookup, org=the registered org_uuid), byte-parity with
+ *  idkit.issue_cert. Signed by the root; delivered as a dict for
+ *  DelegationCert.from_dict. */
+export async function mintReachabilityCert(
+  personalRootSeed, machinePub, machineId, orgUuid,
+  { now = Math.floor(Date.now() / 1000), ttlS = 7 * 24 * 3600 } = {},
+) {
+  requireHex64(machinePub, 'machinePub');
+  requireHex64(machineId, 'machineId');
+  if (typeof orgUuid !== 'string' || !orgUuid) {
+    throw new Error('orgUuid must be the personal org uuid string');
+  }
+  const payload = {
+    v: 1,
+    child_pub: machinePub,
+    scope: ['node:announce', 'node:lookup'],   // sorted, as idkit requires
+    org: orgUuid,
+    subject: { kind: 'agent', id: machineId },
+    not_before: now - 60,
+    not_after: now + ttlS,
+  };
+  const rootKey = await importEd25519RootSigningKey(personalRootSeed);
+  return {
+    ...payload,
+    sig: await signHex(
+      rootKey, domainBytes(IDKIT_CERT_DOMAIN, canonicalJson(payload))),
+  };
 }
 
 async function verifyHex(publicHex, signatureHex, input) {

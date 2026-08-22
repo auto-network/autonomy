@@ -9,6 +9,8 @@ authenticate an API caller but cannot exercise personal-root authority.
 
 from __future__ import annotations
 
+import json
+import os
 import sqlite3
 import time
 
@@ -167,6 +169,85 @@ def _ensure_fleet_catalog(machine_pub: str) -> None:
         db.close()
 
 
+def _reachability_binding():
+    """The personal org's registry binding (registry_url + org_uuid), or None.
+
+    None until the personal org has published/registered on auto.network; then
+    reachability discovery is available and the browser mints a reachability cert.
+    """
+    try:
+        from tools.dashboard.link_approvals import _load_binding
+
+        binding, _err = _load_binding(None)
+        return binding
+    except Exception:
+        return None
+
+
+def _fleet_advertise_addrs():
+    """This machine's externally-reachable sync-listener URLs, from env.
+
+    ``AUTONOMY_FLEET_ADVERTISE_ADDRS`` is a comma-separated list of ws/wss URLs.
+    A machine on a public address advertises it so roster peers can dial it.
+    """
+    raw = os.environ.get("AUTONOMY_FLEET_ADVERTISE_ADDRS", "")
+    return [u.strip() for u in raw.split(",") if u.strip()]
+
+
+def _fleet_env_peers():
+    """Manual peer map from ``AUTONOMY_FLEET_PEERS`` (machine_pub -> ws urls).
+
+    Supplements/overrides registry discovery, so peers can be supplied before the
+    personal org registers and stay operator-overridable.
+    """
+    raw = os.environ.get("AUTONOMY_FLEET_PEERS")
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    for pub, urls in data.items():
+        if isinstance(pub, str) and isinstance(urls, (list, tuple)):
+            cand = [u for u in urls if isinstance(u, str) and u]
+            if cand:
+                out[pub] = cand
+    return out
+
+
+def _reachability_peer_addresses(credential, root_pub):
+    """Build the scheduler's peer_addresses: registry discovery + env override.
+
+    A throttled ReachabilityCache announces this machine and resolves roster
+    peers via node:announce/node:lookup (using the credential's machine key +
+    reachability cert). When those are absent (org unregistered) the cache yields
+    {}; AUTONOMY_FLEET_PEERS is unioned on top either way.
+    """
+    from tools.network import fleet_reachability
+
+    cache = fleet_reachability.ReachabilityCache(
+        binding_getter=_reachability_binding,
+        machine_key_getter=lambda: credential.machine_key,
+        cert_getter=lambda: credential.reachability_cert,
+        roster_getter=lambda: list(
+            fleet_roster.resolve(
+                fleet_roster.load_entries(org=None), anchor_root_pub=root_pub
+            ).keys()
+        ),
+        advertise_addrs=_fleet_advertise_addrs(),
+    )
+
+    def peers():
+        merged = dict(cache.peers())
+        merged.update(_fleet_env_peers())
+        return merged
+
+    return peers
+
+
 def _activate_runtime(
     payload: object,
     *,
@@ -183,10 +264,13 @@ def _activate_runtime(
         root_pub, expected_entry = context
     assert root_pub is not None and expected_entry is not None
     entries = tuple(fleet_roster.load_entries(org=None))
+    binding = _reachability_binding()
+    org_uuid = binding.get("org_uuid") if binding else None
     credential = fleet_runtime.FleetRuntimeCredential.from_browser_payload(
         payload,
         personal_root_pub=root_pub,
         roster_entries=entries,
+        org_uuid=org_uuid,
     )
     if credential.machine_id != expected_entry.machine_id:
         raise fleet_runtime.FleetRuntimeError(
@@ -201,12 +285,13 @@ def _activate_runtime(
             require_delegation=True,
             personal_root_pub=root_pub,
             roster_entries=lambda: fleet_roster.load_entries(org=None),
-            # Relay-discovered peer channels replace this empty direct-address
-            # map in the next transport slice. Starting the authenticated
-            # runtime now is still useful: it proves unlock custody and keeps
-            # the process credential lifecycle identical on first and later
-            # unlocks.
-            peer_addresses=lambda: {},
+            # Relay-discovered peer channels: a throttled ReachabilityCache
+            # announces this machine (its reachability cert + machine key) and
+            # resolves roster peers via node:announce/node:lookup. When the
+            # personal org is not registered the credential carries no
+            # reachability material, the cache yields {}, and this is byte-
+            # identical to the sync-only path.
+            peer_addresses=_reachability_peer_addresses(credential, root_pub),
             personal_db_path=_org_db_path("personal"),
         )
     )
@@ -366,12 +451,17 @@ async def local_runtime_context(request: Request) -> JSONResponse:
     if context is None:
         return JSONResponse({"ok": True, "enabled": False})
     root_pub, entry = context
+    binding = _reachability_binding()
     return JSONResponse({
         "ok": True,
         "enabled": True,
         "personal_root_pub": root_pub,
         "machine_id": entry.machine_id,
         "machine_pub": entry.machine_pub,
+        # Present once the personal org is registered on auto.network. The
+        # browser mints the reachability cert with org=org_uuid; null means
+        # discovery stays off and only the sync credential is delivered.
+        "org_uuid": binding.get("org_uuid") if binding else None,
     })
 
 

@@ -100,3 +100,66 @@ def test_runtime_activation_prepares_and_enables_personal_writer_capture(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' "
             "AND name LIKE 'fleet_sync_%'"
         ).fetchone()[0] > 0
+
+
+ORG_UUID = "6f1e2d3c-4b5a-4c6d-8e9f-0a1b2c3d4e5f"
+
+
+def _reach_payload():
+    root, machine, process, entry, payload = _fixture()
+    rcert = issue_cert(
+        root, machine.public_hex, scope=["node:announce", "node:lookup"],
+        org=ORG_UUID, subject=Subject(kind="agent", id=payload["machine_id"]),
+        not_before=NOW - 30, not_after=NOW + 3600)
+    payload["machine_private_seed"] = machine.private_hex
+    payload["reachability_cert"] = rcert.to_dict()
+    return root, machine, entry, payload
+
+
+def test_reachability_credential_accepted_when_org_registered():
+    root, machine, entry, payload = _reach_payload()
+    cred = fleet_runtime.FleetRuntimeCredential.from_browser_payload(
+        payload, personal_root_pub=root.public_hex, roster_entries=[entry],
+        org_uuid=ORG_UUID, now=NOW)
+    assert cred.machine_key.public_hex == machine.public_hex
+    assert set(cred.reachability_cert.scope) == {"node:announce", "node:lookup"}
+    # the sync path is untouched: process key + fleet:sync cert still there
+    assert cred.process_key.private_hex == payload["process_private_seed"]
+
+
+def test_reachability_omitted_leaves_sync_only_credential():
+    root, machine, process, entry, payload = _fixture()
+    cred = fleet_runtime.FleetRuntimeCredential.from_browser_payload(
+        payload, personal_root_pub=root.public_hex, roster_entries=[entry], now=NOW)
+    assert cred.machine_key is None and cred.reachability_cert is None
+
+
+def test_reachability_without_org_uuid_is_refused():
+    root, machine, entry, payload = _reach_payload()
+    with pytest.raises(fleet_runtime.FleetRuntimeError):
+        fleet_runtime.FleetRuntimeCredential.from_browser_payload(
+            payload, personal_root_pub=root.public_hex, roster_entries=[entry],
+            org_uuid=None, now=NOW)
+
+
+def test_reachability_cert_for_another_machine_is_refused():
+    root, machine, entry, payload = _reach_payload()
+    other = KeyPair.from_private_hex("99" * 32)
+    bad = issue_cert(
+        root, other.public_hex, scope=["node:announce", "node:lookup"],
+        org=ORG_UUID, subject=Subject(kind="agent", id=payload["machine_id"]),
+        not_before=NOW - 30, not_after=NOW + 3600)
+    payload["reachability_cert"] = bad.to_dict()
+    with pytest.raises(fleet_runtime.FleetRuntimeError):
+        fleet_runtime.FleetRuntimeCredential.from_browser_payload(
+            payload, personal_root_pub=root.public_hex, roster_entries=[entry],
+            org_uuid=ORG_UUID, now=NOW)
+
+
+def test_machine_seed_without_reachability_cert_is_refused():
+    root, machine, process, entry, payload = _fixture()
+    payload["machine_private_seed"] = machine.private_hex  # only one of the pair
+    with pytest.raises(fleet_runtime.FleetRuntimeError):
+        fleet_runtime.FleetRuntimeCredential.from_browser_payload(
+            payload, personal_root_pub=root.public_hex, roster_entries=[entry],
+            org_uuid=ORG_UUID, now=NOW)
