@@ -376,6 +376,15 @@
   document.addEventListener("mc:open-status", function () {
     show({panel: "pillars"});
   });
+
+  // The page's inline News view hands replies back to the chrome, which
+  // owns the post composer and the reply flow.
+  document.addEventListener("mc:open-post", function (e) {
+    var pid = e.detail && e.detail.post_id;
+    var post = (state.status_posts || []).filter(function (p) {
+      return p.post_id === pid; })[0];
+    if (post) show({post: post});
+  });
   // Backgrounding the app is the same situation: a stream nobody can see,
   // holding a connection the next navigation needs.
   addEventListener("visibilitychange", function () {
