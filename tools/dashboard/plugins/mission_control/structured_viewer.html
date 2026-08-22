@@ -207,6 +207,11 @@
   /* non-stateful kinds: no pill, neutral spine */
   .mc-item.k-scope,.mc-item.k-status{border-left-color:var(--line2)}
   .mc-item.k-scope .mc-pill,.mc-item.k-status .mc-pill{display:none}
+  /* An open question under an "Open questions" heading needs no OPEN badge;
+     the amber spine already carries the state. */
+  .mc-item.k-question.st-open .mc-pill{display:none}
+  .mc-item.k-question.st-open{cursor:pointer}
+  .mc-item.k-question.st-open:hover{border-color:var(--line2)}
 
   .mc-foot{color:var(--ink3);font-size:.72rem;margin-top:36px;text-align:center}
 
@@ -288,6 +293,13 @@
     return isNaN(d) ? null : d;
   }
   function live(it){ return it.state !== "retired"; }
+  function agoText(d){
+    var s = Math.max(0, (Date.now() - d.getTime()) / 1000);
+    if (s < 60) return "just now";
+    if (s < 3600) return Math.round(s/60) + "m ago";
+    if (s < 86400) return Math.round(s/3600) + "h ago";
+    return Math.round(s/86400) + "d ago";
+  }
 
   // ── tiny DOM helpers (no innerHTML for item text — coordinator
   //    prose is data, not markup; exhibits are the one trusted hole) ──
@@ -459,8 +471,19 @@
     }
     if (!opts.mirror){
       c.setAttribute("data-mc-anchor", it.key);
-      if (it.kind==="question" && it.state==="open" && it.ask)
+      if (it.kind==="question" && it.state==="open" && it.ask){
         c.setAttribute("data-mc-ask", it.ask);
+        // The chrome mounts its Answer control inside this card as a small
+        // chip. The card itself is the honest tap target — forward a tap
+        // anywhere on it to that control.
+        c.addEventListener("click", function (ev) {
+          if (ev.target.closest("a,summary")) return;
+          var ctl = c.querySelector("[data-mc-control] button")
+                 || c.querySelector("[data-mc-control]");
+          if (ctl && ctl.click && !ev.target.closest("[data-mc-control]"))
+            ctl.click();
+        });
+      }
     }
     c.dataset.state = it.state; c.dataset.kind = it.kind;
     c.dataset.search = (it.title+" "+it.body+" "+(it.evidence||[]).join(" ")).toLowerCase();
@@ -514,10 +537,12 @@
     }
     var d = when(it);
     var whenEl = null;
-    if (d) inner.appendChild(whenEl = el("div","mc-when",
-      (it.happened_at ? "" : "updated ") + d.toLocaleDateString(undefined,
-        {month:"short",day:"numeric"})));
-    if (whenEl) whenEl.setAttribute("data-mc-noexcerpt", "");
+    if (d) {
+      inner.appendChild(whenEl = el("div","mc-when",
+        (it.happened_at ? "" : "updated ") + agoText(d)));
+      whenEl.title = d.toLocaleString();
+      whenEl.setAttribute("data-mc-noexcerpt", "");
+    }
     return c;
   }
 
