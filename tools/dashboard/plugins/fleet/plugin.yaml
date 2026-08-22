@@ -11,7 +11,7 @@ assets:
   style: page.css
 
 nav:
-  label: Machines
+  label: Manage my machines
   sidebar: false
   identity_menu: true
   identity_detail: Personal fleet
