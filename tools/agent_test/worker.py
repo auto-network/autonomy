@@ -21,6 +21,7 @@ from .lease_client import (
     error_request,
     lease_request,
     run_result_request,
+    progress_request,
     telemetry_request,
 )
 
@@ -171,6 +172,22 @@ def _read_events(events_dir: Path) -> list[dict[str, Any]]:
             if isinstance(value, dict):
                 events.append(value)
     return events
+
+
+def _progress(events: list[dict[str, Any]]) -> tuple[int, int, int]:
+    """Return terminal node count, collected total, and bounded percentage."""
+    collected: set[str] = set()
+    terminal: set[str] = set()
+    for event in events:
+        if event.get("kind") == "collection":
+            collected.update(str(node) for node in event.get("nodes") or [])
+        elif event.get("kind") == "report" and event.get("phase") == "call":
+            nodeid = str(event.get("nodeid") or "")
+            if nodeid and event.get("outcome") in {"passed", "failed", "skipped"}:
+                terminal.add(nodeid)
+    total = max(len(collected), len(terminal))
+    percent = int((len(terminal) * 100) / total) if total else 0
+    return len(terminal), total, percent
 
 
 def _summarize(events: list[dict[str, Any]]) -> tuple[dict[str, int], list[dict[str, Any]]]:
@@ -432,6 +449,8 @@ def run(directory: Path) -> int:
         directory,
         {"status": "running", "started_at": utc_now(), "worker_pid": os.getpid()},
     )
+    # Live progress is intentionally coarse: never more than one update/sec.
+    progress_request(run_id, completed=0, total=0, percent=0)
 
     # Agent Test runs either from the repository as ``tools.agent_test`` or
     # from the capability-owned mount as top-level ``agent_test``. Derive the
@@ -477,13 +496,23 @@ def run(directory: Path) -> int:
             )
             update_manifest(directory, {"pytest_pid": child.pid})
             renew_failures = 0
+            last_progress_at = time.monotonic()
+            last_progress_percent = 0
+            last_renewal_at = time.monotonic()
             while True:
                 try:
-                    exit_code = child.wait(timeout=20)
+                    exit_code = child.wait(timeout=0.25)
                     break
                 except subprocess.TimeoutExpired:
-                    if lease_id:
+                    now = time.monotonic()
+                    completed, total, percent = _progress(_read_events(events_dir))
+                    if now - last_progress_at >= 1.0 and percent != last_progress_percent:
+                        progress_request(run_id, completed=completed, total=total, percent=percent)
+                        last_progress_at = now
+                        last_progress_percent = percent
+                    if lease_id and now - last_renewal_at >= 20.0:
                         renewed = lease_request("renew", lease_id=lease_id)
+                        last_renewal_at = now
                         renew_failures = 0 if renewed.get("ok") else renew_failures + 1
                         update_manifest(
                             directory,
@@ -518,6 +547,8 @@ def run(directory: Path) -> int:
                     }
                 },
             )
+
+    progress_request(run_id, completed=0, total=0, percent=0, status="idle")
 
     duration = time.monotonic() - started
     events = _read_events(events_dir)

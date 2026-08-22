@@ -428,6 +428,10 @@
         var s = Alpine.store('sessions')[this.sessionKey];
         return s ? s.contextTokens : 0;
       },
+      get agentTestProgress() {
+        var s = Alpine.store('sessions')[this.sessionKey];
+        return s ? s.agentTestProgress : null;
+      },
       get topics() {
         var s = Alpine.store('sessions')[this.sessionKey];
         return (s && s.topics) || [];

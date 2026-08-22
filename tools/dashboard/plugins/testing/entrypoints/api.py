@@ -14,6 +14,7 @@ from tools.dashboard.api_auth import (
     require_authenticated_api_caller,
 )
 from tools.dashboard.plugins.testing.entrypoints import store
+from tools.dashboard.event_bus import event_bus
 
 
 _SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$")
@@ -81,6 +82,25 @@ async def telemetry(request: Request) -> JSONResponse:
             message=message,
             agent_test_version=version,
         ))
+    if action == "progress":
+        run_id = str(body.get("run_id") or "")[:200]
+        if not run_id:
+            return JSONResponse({"error": "run_id is required"}, status_code=400)
+        try:
+            completed = max(0, int(body.get("completed", 0)))
+            total = max(0, int(body.get("total", 0)))
+            percent = max(0, min(100, int(body.get("percent", 0))))
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "progress counts must be integers"}, status_code=400)
+        await event_bus.broadcast("agent-test:progress", {
+            "session_id": session,
+            "run_id": run_id,
+            "completed": completed,
+            "total": total,
+            "percent": percent,
+            "status": str(body.get("status") or "running")[:32],
+        })
+        return JSONResponse({"ok": True})
     event = str(body.get("event") or "")
     if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", event):
         return JSONResponse({"error": "valid event is required"}, status_code=400)

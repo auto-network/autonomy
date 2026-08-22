@@ -453,6 +453,8 @@ window.getSessionStore = function(sessionId) {
       harnessState: {},
       // auto-ja51w: transient per-session sub-phase progress; null when none.
       phaseProgress: null,
+      // Ephemeral Agent Test run progress; cleared by the worker on exit.
+      agentTestProgress: null,
       // auto-16g9t canonical identity state. chain = ordered rollover
       // file stems (server-authoritative); committed = the span
       // high-water {file, off} advanced ONLY by contiguous spans/cursors
@@ -977,6 +979,25 @@ window.ensureSessionMessages = function() {
     if (!window.applyTurnCorrection(store, data && data.correction)) return;
     store._lastRenderTs = Date.now();
     _emitSessionStoreChanged('turn_correction');
+  });
+
+  window.registerHandler('agent-test:progress', function(data) {
+    var id = data && data.session_id;
+    if (!id) return;
+    var store = Alpine.store('sessions')[id] || window.getSessionStore(id);
+    if (data.status === 'idle') {
+      store.agentTestProgress = null;
+      return;
+    }
+    var percent = Number(data.percent);
+    if (!Number.isFinite(percent)) return;
+    store.agentTestProgress = {
+      runId: data.run_id || '',
+      completed: Number(data.completed) || 0,
+      total: Number(data.total) || 0,
+      percent: Math.max(0, Math.min(100, Math.round(percent))),
+      status: data.status || 'running',
+    };
   });
 
   window.registerHandler('session:registry', function(registrySessions) {
