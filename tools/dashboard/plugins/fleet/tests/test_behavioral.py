@@ -179,8 +179,8 @@ class TestFleetPluginL2B:
         assert "Adding machine" in result["text"]
         assert "Admission failed" in result["text"]
         assert result["tunnel"]["value"] is True, result
-        assert result["tunnel"]["text"] == "Serves auto.network", result
-        assert result["tunnel"]["display"] != "none", result
+        assert result["tunnel"]["text"] is None, result
+        assert result["tunnel"]["display"] is None, result
         assert not ({"Grant", "Decline", "Retry", "Remove machine"} & set(result["buttons"]))
 
     def test_invitation_and_unknown_presence_are_presented_truthfully(self):

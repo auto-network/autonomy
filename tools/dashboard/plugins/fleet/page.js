@@ -5,6 +5,7 @@ function fleetPage() {
     error: null,
     expandedId: null,
     copied: false,
+    bootstrapCopied: false,
     inviteBusy: false,
     invitePassword: '',
     invitationError: null,
@@ -50,7 +51,7 @@ function fleetPage() {
     get machines() { return (this.view && this.view.machines) || []; },
     get invitation() {
       return (this.view && this.view.invitation) || {
-        status: 'none', url: null, publishedAt: null, expiresAt: null,
+        status: 'none', url: null, bootstrapCode: null, publishedAt: null, expiresAt: null,
         publishingOrg: 'autonomy', error: null,
       };
     },
@@ -177,6 +178,13 @@ function fleetPage() {
       await navigator.clipboard.writeText(this.invitation.url);
       this.copied = true;
       setTimeout(() => { this.copied = false; }, 1400);
+    },
+
+    async copyBootstrapCode() {
+      if (!this.invitation.bootstrapCode || !navigator.clipboard) return;
+      await navigator.clipboard.writeText(this.invitation.bootstrapCode);
+      this.bootstrapCopied = true;
+      setTimeout(() => { this.bootstrapCopied = false; }, 1400);
     },
 
     async createInvitation() {

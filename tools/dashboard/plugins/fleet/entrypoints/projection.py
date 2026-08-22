@@ -338,7 +338,8 @@ def project(inputs: ProjectionInputs) -> dict:
     if invitation is not None:
         invitation_view = {
             "status": "active",
-            "url": "AUTONOMY_FLEET_INVITE=" + fleet_invite.encode(invitation.invite),
+            "url": invitation.invite.rendezvous,
+            "bootstrapCode": "AUTONOMY_FLEET_INVITE=" + fleet_invite.encode(invitation.invite),
             "publishedAt": invitation.created_at,
             "expiresAt": invitation.invite.expires_at or None,
             "publishingOrg": inputs.publishing_org,

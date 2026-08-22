@@ -176,7 +176,7 @@ def test_revocation_is_root_signed_history_and_never_removable():
     assert view["summary"]["authorizedMachines"] == 1
 
 
-def test_active_invitation_projects_the_actual_signed_bootstrap_value():
+def test_active_invitation_projects_short_link_and_signed_bootstrap_value():
     invite = fleet_invite.mint(
         ROOT,
         rendezvous="https://primary.example.test/links/token-1",
@@ -191,7 +191,8 @@ def test_active_invitation_projects_the_actual_signed_bootstrap_value():
     )
     value = project(_inputs(entries=(LOCAL_ENTRY,), invitation=stored))["invitation"]
     assert value["status"] == "active"
-    assert value["url"] == "AUTONOMY_FLEET_INVITE=" + fleet_invite.encode(invite)
+    assert value["url"] == invite.rendezvous
+    assert value["bootstrapCode"] == "AUTONOMY_FLEET_INVITE=" + fleet_invite.encode(invite)
     assert value["publishedAt"] == NOW - 10_000
     assert value["expiresAt"] == NOW + 86_400_000
 
