@@ -61,6 +61,11 @@ PUBLIC_EXCEPTIONS: dict[tuple[str, str], str] = {
     ("POST", "/api/identity/unlock/password"):
         "Proves the password unlock and mints the session cookie. Pre-session "
         "by construction.",
+    ("POST", "/api/identity/unlock/combined"):
+        "Proves the combined (MFA) unlock — password + passkey together — and "
+        "mints the session cookie. Pre-session by construction, exactly like the "
+        "password path it shares; an MFA identity has NO other unlock route, so "
+        "gating this locks the operator out.",
     ("POST", "/api/identity/unlock/passkey/options"):
         "Issues the one-use passkey assertion challenge. Pre-session.",
     ("POST", "/api/identity/unlock/passkey"):
