@@ -112,8 +112,16 @@ def _authorization(osession: str) -> dict:
     result = db.resolve_session(osession)
     if result.get("status") == db.APPROVED:
         row = db.get_session(osession)
-        if row and row.get("peer_bearer"):
-            result = {**result, "bearer": row["peer_bearer"]}
+        bearer = row.get("peer_bearer") if row else None
+        if row and not bearer:
+            # Self-heal: a session approved before mint-on-approval existed has no
+            # bearer. Mint one lazily on the first approved poll so pre-existing
+            # (and any future-gap) peers get a working general-API credential
+            # without a separate backfill.
+            bearer = kinds.mint_peer_bearer(
+                osession, result.get("autonomy_org"), (row or {}).get("handle"))
+        if bearer:
+            result = {**result, "bearer": bearer}
     return result
 
 

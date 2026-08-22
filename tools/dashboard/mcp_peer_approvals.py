@@ -115,6 +115,25 @@ def _require_operator(request: Request, _row: dict, _decision: dict) -> str | No
     return None
 
 
+def mint_peer_bearer(
+    openai_session: str, autonomy_org: str | None, handle: str | None,
+) -> str | None:
+    """Mint + persist a fresh ORG-SCOPED bearer for an approved chat, rotating any
+    prior token for its handle. Returns the raw token (also stored on the
+    mcp_sessions row via set_session_bearer), or None when there's no org/handle to
+    stamp it with. Called at approval AND lazily by the relay's resolve/status the
+    first time an approved row is found without a bearer — self-healing for a
+    session approved before this path existed."""
+    if not handle or not autonomy_org:
+        return None
+    auth_db.revoke_token(handle)
+    raw = secrets.token_urlsafe(32)
+    auth_db.insert_token(
+        hashlib.sha256(raw.encode()).hexdigest(), handle, org=autonomy_org)
+    mcp_relay_db.set_session_bearer(openai_session, raw)
+    return raw
+
+
 async def execute_link(row: dict, decision: dict) -> dict:
     """On approval, bind the session to the chosen org/level/TTL."""
     req = row.get("request") or {}
@@ -143,13 +162,9 @@ async def execute_link(row: dict, decision: dict) -> dict:
     # session row. Rotate: revoke any prior token for this handle first. The raw
     # is handed back to the relay via resolve_session/session_status; the reconcile
     # path revokes it the moment the binding stops being live-approved.
-    handle = bound.get("handle") or mcp_relay_db.ensure_handle(openai_session)
-    if handle:
-        auth_db.revoke_token(handle)
-        raw = secrets.token_urlsafe(32)
-        auth_db.insert_token(
-            hashlib.sha256(raw.encode()).hexdigest(), handle, org=autonomy_org)
-        mcp_relay_db.set_session_bearer(openai_session, raw)
+    mint_peer_bearer(
+        openai_session, autonomy_org,
+        bound.get("handle") or mcp_relay_db.ensure_handle(openai_session))
     return {"ok": True, "autonomy_org": autonomy_org, "level": level,
             "expires_at": bound.get("expires_at")}
 
