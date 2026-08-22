@@ -755,6 +755,7 @@ class TestActivityStateBroadcast:
             _, data = events[-1]
             assert data["activity_state"] == "tool_running"
             assert "toolu_1" in data["pending_tool_ids"]
+            assert data["entry_count"] == 1
         finally:
             await _stop_monitor(mon, patcher)
 
@@ -786,6 +787,7 @@ class TestActivityStateBroadcast:
             _, data = events[-1]
             assert data["activity_state"] == "thinking"
             assert data["pending_tool_ids"] == []
+            assert data["entry_count"] == 2
         finally:
             await _stop_monitor(mon, patcher)
 

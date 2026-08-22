@@ -384,8 +384,10 @@ function makeClient(fixture, opts = {}) {
     },
     emitDocument(n, ev) { for (const cb of (docListeners[n] || [])) cb(ev); },
     // Deliver one line's session:messages broadcast to THIS client only.
-    deliver(stem, idx, busSeq) {
-      FakeEventSource.instance.emit(busSeq, 'session:messages', fixture.payloadFor(stem, idx));
+    deliver(stem, idx, busSeq, entryCount) {
+      const payload = fixture.payloadFor(stem, idx);
+      if (entryCount !== undefined) payload.entry_count = entryCount;
+      FakeEventSource.instance.emit(busSeq, 'session:messages', payload);
     },
     diag() {
       return this.win._diagSnapshotSessions([SID])[SID];
@@ -430,6 +432,34 @@ function assertNoLies(client, label) {
   const d = client.diag();
   checkEqual(d.counters.conclusion_contradicted, 0,
     label + ': conclusion_contradicted stays zero');
+}
+
+// Live message metadata updates the count immediately. Because reconnect
+// replay can deliver older payloads, the cumulative value is monotonic.
+async function testN_liveEntryCount() {
+  console.log('\n── (n) live entry count ──');
+  const fixture = new FixtureSession();
+  fixture.appendLine('seed');
+
+  const client = makeClient(fixture);
+  const viewer = await mountViewer(client);
+  const store = client.win.getSessionStore(SID);
+  store.entryCount = 10;
+
+  const live = fixture.appendLine('live');
+  client.deliver(live.stem, live.idx, 1, 11);
+  checkEqual(store.entryCount, 11, 'live broadcast advances the cumulative count');
+
+  client.deliver(live.stem, live.idx, 2, 9);
+  checkEqual(store.entryCount, 11, 'stale replay cannot lower the cumulative count');
+
+  client.FakeEventSource.instance.emit(3, 'session:registry', [{
+    session_id: SID,
+    entry_count: 10,
+    is_live: true,
+  }]);
+  checkEqual(store.entryCount, 11, 'stale registry hydration cannot lower the live count');
+  viewer.destroy();
 }
 
 // (a) withheld broadcasts — gap detected on the fly, exactly-N fetched,
@@ -1098,6 +1128,7 @@ async function testM_sameToolGroupIntruder() {
     await testK_anchorRuleAgentTranscript();
     await testL_forcedDescriptorRace();
     await testM_sameToolGroupIntruder();
+    await testN_liveEntryCount();
   } catch (e) {
     console.error('HARNESS ERROR:', e);
     process.exit(2);
