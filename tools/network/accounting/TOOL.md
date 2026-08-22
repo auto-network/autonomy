@@ -76,4 +76,12 @@ sequence, highest observed sequence, and exact missing ranges. Public traffic
 never reads this ledger. Sink topology and measured migration gates are frozen
 in `graph://d1a27da5-679`.
 
+Idle intervals emit no zero-valued usage batch. A signed `UsageProgress`
+therefore advances one producer/organization stream's closed interval and last
+usage sequence after its spool drains. The ledger settles an organization only
+through the minimum progress of every enabled binding. Usage at or before an
+accepted closure is rejected, so delayed delivery cannot silently rewrite a
+settled or billed interval. Progress carries no member, session, token, address,
+or content identity.
+
 Decision: `graph://31ab60ae-647`.

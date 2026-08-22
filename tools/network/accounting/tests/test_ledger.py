@@ -13,6 +13,7 @@ from tools.network.accounting import (
     UsageLedgerConflict,
     UsageLedgerCorrupt,
     UsageLedgerLocked,
+    UsageProgress,
 )
 from tools.network.idkit import KeyPair
 
@@ -50,6 +51,22 @@ def _authorize(ledger: UsageLedger) -> None:
         organization_id=ORG_A,
         counter_families={"relay.egress_bytes", "relay.viewer_seconds"},
     )
+
+
+def _progress(
+    sequence: int,
+    closed_through: int,
+    *,
+    signer: KeyPair = SIGNER_A,
+    organization_id: str = ORG_A,
+) -> bytes:
+    return UsageProgress.create(
+        signer=signer,
+        organization_id=organization_id,
+        sequence=sequence,
+        closed_through=closed_through,
+        created_at=closed_through + 2,
+    ).to_json()
 
 
 def test_identical_retry_is_one_batch_and_receipt_is_exact(tmp_path):
@@ -145,6 +162,54 @@ def test_large_sequence_gap_is_compact_not_linear_in_gap_width(tmp_path):
         assert ledger.health().missing_sequences == largest - 1
 
 
+def test_idle_progress_settles_only_after_every_enabled_binding_closes(tmp_path):
+    path = tmp_path / "ledger.sqlite"
+    closed = START + BATCH_INTERVAL_SECONDS
+    with UsageLedger(path) as ledger:
+        _authorize(ledger)
+        ledger.authorize_producer(
+            producer=SIGNER_B.public_hex,
+            organization_id=ORG_A,
+            counter_families={"relay.egress_bytes"},
+        )
+        assert ledger.organization_closed_through(ORG_A) is None
+        first = ledger.accept_progress(_progress(0, closed))
+        assert first.organization_closed_through is None
+        second_wire = _progress(0, closed, signer=SIGNER_B)
+        second = ledger.accept_progress(second_wire)
+        assert second.organization_closed_through == closed
+        assert ledger.accept_progress(second_wire).accepted is False
+
+
+def test_progress_requires_accepted_sequences_and_freezes_closed_intervals(tmp_path):
+    path = tmp_path / "ledger.sqlite"
+    closed = START + BATCH_INTERVAL_SECONDS
+    with UsageLedger(path) as ledger:
+        _authorize(ledger)
+        with pytest.raises(UsageLedgerConflict, match="unaccepted"):
+            ledger.accept_progress(_progress(1, closed))
+        ledger.ingest(_wire(1))
+        ledger.accept_progress(_progress(1, closed))
+        assert ledger.ingest(_wire(1)).accepted is False
+        with pytest.raises(UsageLedgerConflict, match="closed watermark"):
+            ledger.ingest(_wire(2, interval_sequence=1))
+
+
+def test_progress_rejects_sequence_interval_disagreement_and_regression(tmp_path):
+    path = tmp_path / "ledger.sqlite"
+    with UsageLedger(path) as ledger:
+        _authorize(ledger)
+        ledger.ingest(_wire(1, interval_sequence=2))
+        with pytest.raises(UsageLedgerConflict, match="disagree"):
+            ledger.accept_progress(
+                _progress(1, START + BATCH_INTERVAL_SECONDS)
+            )
+        later = START + (2 * BATCH_INTERVAL_SECONDS)
+        ledger.accept_progress(_progress(1, later))
+        with pytest.raises(UsageLedgerConflict, match="monotonically"):
+            ledger.accept_progress(_progress(1, later - BATCH_INTERVAL_SECONDS))
+
+
 def test_two_organizations_are_isolated_and_state_survives_restart(tmp_path):
     path = tmp_path / "ledger.sqlite"
     with UsageLedger(path) as ledger:
@@ -212,6 +277,27 @@ def test_second_ledger_process_owner_is_rejected(tmp_path):
     with UsageLedger(path):
         with pytest.raises(UsageLedgerLocked):
             UsageLedger(path)
+
+
+def test_v1_ledger_migrates_progress_schema_atomically(tmp_path):
+    path = tmp_path / "ledger.sqlite"
+    with sqlite3.connect(path) as raw:
+        raw.execute(
+            "CREATE TABLE ledger_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        raw.execute("INSERT INTO ledger_meta VALUES('schema_version', '1')")
+    with UsageLedger(path) as ledger:
+        version = ledger._db.execute(
+            "SELECT value FROM ledger_meta WHERE key='schema_version'"
+        ).fetchone()[0]
+        tables = {
+            row[0]
+            for row in ledger._db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+    assert version == "2"
+    assert "producer_progress" in tables
 
 
 def test_audit_detects_retained_wire_corruption(tmp_path):
