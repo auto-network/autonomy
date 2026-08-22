@@ -450,6 +450,14 @@ def run(directory: Path) -> int:
         {"status": "running", "started_at": utc_now(), "worker_pid": os.getpid()},
     )
     # Live progress is intentionally coarse: never more than one update/sec.
+    initial_progress = {
+        "completed": 0,
+        "total": 0,
+        "percent": 0,
+        "status": "collecting",
+        "updated_at": utc_now(),
+    }
+    update_manifest(directory, {"progress": initial_progress})
     progress_request(run_id, completed=0, total=0, percent=0, status="collecting")
 
     # Agent Test runs either from the repository as ``tools.agent_test`` or
@@ -507,6 +515,14 @@ def run(directory: Path) -> int:
                     now = time.monotonic()
                     completed, total, percent = _progress(_read_events(events_dir))
                     if now - last_progress_at >= 1.0 and (percent != last_progress_percent or total == 0):
+                        progress = {
+                            "completed": completed,
+                            "total": total,
+                            "percent": percent,
+                            "status": "collecting" if total == 0 else "running",
+                            "updated_at": utc_now(),
+                        }
+                        update_manifest(directory, {"progress": progress})
                         progress_request(
                             run_id,
                             completed=completed,
@@ -554,6 +570,10 @@ def run(directory: Path) -> int:
                 },
             )
 
+    update_manifest(
+        directory,
+        {"progress": {"completed": 0, "total": 0, "percent": 0, "status": "idle", "updated_at": utc_now()}},
+    )
     progress_request(run_id, completed=0, total=0, percent=0, status="idle")
 
     duration = time.monotonic() - started
