@@ -16,10 +16,13 @@ note graph://eeb23208-257.
 
 from __future__ import annotations
 
+import hashlib
+import secrets
 import time
 
 from starlette.requests import Request
 
+from tools.dashboard.dao import auth_db
 from tools.dashboard.dao import mcp_relay_db
 
 KIND_LINK = "mcp_peer_link"
@@ -133,6 +136,20 @@ async def execute_link(row: dict, decision: dict) -> dict:
         return {"ok": False, "error": str(exc)}
     if bound is None:
         return {"ok": False, "error": "no pending session to approve (expired?)"}
+    # Mint the chat a real ORG-SCOPED session bearer so its graph-CLI-backed
+    # tools (search/read/tail/sessions) authenticate to the GENERAL API scoped to
+    # exactly this org — the service token only reaches /api/mcp/*. Identity is
+    # the minted handle; org is set, so it classifies as ORG_SESSION and needs no
+    # session row. Rotate: revoke any prior token for this handle first. The raw
+    # is handed back to the relay via resolve_session/session_status; the reconcile
+    # path revokes it the moment the binding stops being live-approved.
+    handle = bound.get("handle") or mcp_relay_db.ensure_handle(openai_session)
+    if handle:
+        auth_db.revoke_token(handle)
+        raw = secrets.token_urlsafe(32)
+        auth_db.insert_token(
+            hashlib.sha256(raw.encode()).hexdigest(), handle, org=autonomy_org)
+        mcp_relay_db.set_session_bearer(openai_session, raw)
     return {"ok": True, "autonomy_org": autonomy_org, "level": level,
             "expires_at": bound.get("expires_at")}
 
