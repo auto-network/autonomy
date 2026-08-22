@@ -80,7 +80,13 @@
    behind it, and the control you need after typing is the one you cannot
    reach. */
 .mc-panel { left: 0; right: 0; bottom: var(--mc-kb, 0px); top: var(--mc-below, 3rem); border-top: 1px solid #1e293b; }
-.mc-view { top: 0; left: 0; right: 0; bottom: var(--mc-kb, 0px); z-index: 2147483003; }
+.mc-view { top: 0; left: 0; right: 0; bottom: var(--mc-kb, 0px); z-index: 2147483003;
+  /* The one chrome surface pinned to the literal top of the screen — the
+     bar and panels handle the iPhone inset already (d25c99dd); without
+     this the thread view's Back header sits under the clock and its first
+     content lines ride up into the notch zone. Same ruling as the bar:
+     the surface absorbs the inset, content stays below the status bar. */
+  padding-top: env(safe-area-inset-top, 0px); }
 .mc-phead { display: flex; align-items: center; gap: .5rem; height: 3rem; padding: 0 .75rem;
             border-bottom: 1px solid #1e293b; flex: none; }
 /* The panel's own title. It names what you are choosing between, so it reads
