@@ -129,6 +129,12 @@
     background:var(--bg2);border:1px solid var(--line);border-radius:4px;padding:2px 6px}
   .mc-when{font-size:.7rem;color:var(--ink3);margin-top:7px}
 
+  /* a mirror card (cross-pillar views) is a door to its home item */
+  .mc-item.mc-mirror{cursor:pointer}
+  .mc-item.mc-mirror:hover{border-color:var(--line2);background:#181e29}
+  .mc-item.mc-flash{animation:mcflash 1.6s ease-out 1}
+  @keyframes mcflash{0%{box-shadow:0 0 0 2px var(--accent)}100%{box-shadow:0 0 0 0 transparent}}
+
   /* finished items fold away per section: the count stays honest, the
      scroll goes. */
   details.mc-finished{margin:2px 0 10px;border:1px dashed var(--line);
@@ -417,7 +423,28 @@
   // ── item card renderer ──────────────────────────────────────────
   function card(it, opts){
     opts = opts || {};
-    var c = el("article","mc-item st-"+it.state+" k-"+it.kind);
+    var c = el("article","mc-item st-"+it.state+" k-"+it.kind
+                 + (opts.mirror ? " mc-mirror" : ""));
+    if (opts.mirror){
+      // A mirror is a pointer, not the record: tapping it lands on the
+      // REAL item in its home view — where the chrome's anchor control
+      // (and for open asks, the Answer flow) is mounted.
+      c.title = "Open in " + surfName(it.surface_id);
+      c.addEventListener("click", function (ev) {
+        if (ev.target.closest("a,button,summary")) return;
+        show(it.surface_id === MID ? MID : it.surface_id);
+        var target = document.querySelector(
+          '.mc-view [data-mc-anchor="' + it.key + '"]');
+        if (target){
+          var fold = target.closest("details.mc-finished");
+          if (fold) fold.open = true;
+          target.scrollIntoView({behavior:"smooth", block:"center"});
+          target.classList.remove("mc-flash");
+          void target.offsetWidth;   // restart the animation
+          target.classList.add("mc-flash");
+        }
+      });
+    }
     if (!opts.mirror){
       c.setAttribute("data-mc-anchor", it.key);
       if (it.kind==="question" && it.state==="open" && it.ask)
