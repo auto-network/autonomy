@@ -461,7 +461,9 @@
   (function activity(){
     var DAYS = 14, MS = 86400000;
     var today = new Date(); today.setHours(0,0,0,0);
-    var hasMissionItems = ITEMS.some(function (it) { return it.surface_id===MID; });
+    // LIVE items decide the row: a mission surface holding only retired
+    // history is content-free, and its grid row retires with it.
+    var hasMissionItems = liveItems.some(function (it) { return it.surface_id===MID; });
     var surfaces = (hasMissionItems ? [{id:MID}] : [])
       .concat(PILLARS.map(function(p){return {id:p.pillar_id};}));
     var buckets = {};   // sid -> [count per day, oldest first]
