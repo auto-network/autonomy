@@ -87,6 +87,11 @@
   .mc-nav button.warns .n{color:var(--warn)}
   .mc-nav button.mc-dim{opacity:.45}
   .mc-glance .g.mc-dim{opacity:.5}
+  .mc-news-seg{margin:0 0 12px}
+  .mc-news .body{margin-top:2px}
+  .mc-news-foot{display:flex;justify-content:flex-end;margin-top:6px}
+  .mc-news-reply{background:none;border:0;cursor:pointer;font:600 .74rem/1 inherit;
+    color:var(--accent);padding:2px 4px}
   .mc-gout{display:none!important}
 
   /* ── views ── */
@@ -367,10 +372,6 @@
     var b = el("button", null, t.label);
     b.id = "tab-" + t.id;
     b.addEventListener("click", function () {
-      if (t.id === "news") {
-        document.dispatchEvent(new CustomEvent("mc:open-status"));
-        return;
-      }
       if (t.id === "overview") gotoSurface(null);
       else show(t.id);
     });
@@ -467,7 +468,7 @@
     document.querySelectorAll("#mc-views .mc-item, #mc-views .mc-feed-row")
       .forEach(function (n) {
         n.classList.toggle("mc-gout",
-          (!!key && n.dataset.glance !== key) ||
+          (!!key && ("glance" in n.dataset) && n.dataset.glance !== key) ||
           (!!pf && !!n.dataset.surface && n.dataset.surface !== pf));
       });
     document.querySelectorAll("#mc-views details.mc-finished").forEach(function (d) {
@@ -942,6 +943,83 @@
     function (it) { return it.kind==="question" && it.state==="open"; },
     "Nothing is waiting on an answer."));
   views.appendChild(feedView());
+  views.appendChild(newsView());
+
+  function newsView(){
+    var v = el("div","mc-view"); v.id = "view-news";
+    var posts = [];
+    try {
+      posts = JSON.parse(
+        document.getElementById("mc-state").textContent).status_posts || [];
+    } catch (e) {}
+    if (!posts.length){
+      var em = el("div","mc-empty");
+      em.textContent = "No pillar has reported anything yet.";
+      v.appendChild(em);
+      return v;
+    }
+    var mode = "time";
+    var seg = el("div","mc-seg mc-news-seg");
+    [["time","By time"],["pillar","By pillar"]].forEach(function (m) {
+      var b = el("button", mode === m[0] ? "mc-seg-on" : "", m[1]);
+      b.addEventListener("click", function () {
+        mode = m[0];
+        [].forEach.call(seg.children, function (c, i) {
+          c.className = (["time","pillar"][i] === mode) ? "mc-seg-on" : "";
+        });
+        draw();
+      });
+      seg.appendChild(b);
+    });
+    var host = el("div");
+    function postCard(p, inGroup){
+      var c = el("article","mc-item mc-news");
+      c.dataset.surface = p.pillar_id;
+      var top = el("div","top");
+      var wh = el("span","where");
+      if (!inGroup){
+        wh.appendChild(dot(p.color || "#8391a8"));
+        wh.appendChild(document.createTextNode(p.pillar_name || ""));
+      }
+      top.appendChild(wh);
+      top.appendChild(el("span","mc-when", p.ago || ""));
+      c.appendChild(top);
+      var b = el("div","body"); paras(b, p.text || ""); c.appendChild(b);
+      var foot = el("div","mc-news-foot");
+      var r = el("button","mc-news-reply","Reply");
+      r.addEventListener("click", function () {
+        document.dispatchEvent(new CustomEvent("mc:open-post",
+          {detail: {post_id: p.post_id}}));
+      });
+      foot.appendChild(r); c.appendChild(foot);
+      return c;
+    }
+    function draw(){
+      host.innerHTML = "";
+      if (mode === "time"){
+        posts.forEach(function (p) { host.appendChild(postCard(p, false)); });
+      } else {
+        var order = [], groups = {};
+        posts.forEach(function (p) {
+          if (!groups[p.pillar_id]){ groups[p.pillar_id] = []; order.push(p.pillar_id); }
+          groups[p.pillar_id].push(p);
+        });
+        order.forEach(function (pid) {
+          var sec = el("section","mc-sec");
+          var h = el("h2",null,"");
+          h.appendChild(dot(surfColor(pid)));
+          h.appendChild(document.createTextNode(" " + surfName(pid)));
+          sec.appendChild(h);
+          groups[pid].forEach(function (p) { sec.appendChild(postCard(p, true)); });
+          host.appendChild(sec);
+        });
+      }
+      applyGlance();
+    }
+    v.appendChild(seg); v.appendChild(host);
+    draw();
+    return v;
+  }
 
   var nav = document.getElementById("mc-nav");
   var NAVS = [];
@@ -1011,7 +1089,8 @@
     document.querySelectorAll(".mc-nav button").forEach(function (n) {
       n.classList.toggle("on", !!pillarFilter && n.id === "nav-"+pillarFilter);
     });
-    var named = {decisions:"Decisions", questions:"Questions", feed:"Feed"};
+    var named = {decisions:"Decisions", questions:"Questions",
+                 feed:"Feed", news:"News"};
     var fam = named[id] ? id : "overview";
     document.querySelectorAll(".mc-tabs button").forEach(function (b) {
       b.classList.toggle("on", b.id === "tab-" + fam);
@@ -1022,16 +1101,12 @@
   var ov = document.getElementById("view-"+MID);
   ov.insertBefore(document.querySelector(".mc-activity"), ov.firstChild);
 
-  var landing =
-    (DATA.focus && document.getElementById("view-"+DATA.focus)) ? DATA.focus
-       : MID;
-  if (landing !== MID &&
-      PILLARS.some(function (p) { return p.pillar_id === landing; })) {
-    pillarFilter = landing;
-    var fv0 = document.getElementById("view-feed");
-    if (fv0) fv0.dataset.filter = landing;
-  }
-  show(landing);
+  // LANDING IS THE OVERVIEW, from every door: the mission URL, a pillar
+  // URL out of the session viewer, a PWA restoring its last route. The
+  // baked focus stays in the data for anything that wants it, but the
+  // reader always starts at the summary and taps into a pillar from
+  // there — arriving somewhere unnameable was worse than one extra tap.
+  show(MID);
 
   var gen = new Date((DATA.generated_at||0)*1000);
   document.getElementById("mc-genat").textContent =
