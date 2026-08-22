@@ -670,6 +670,14 @@
     parts.push("items " + kb(itemsKB) + "/" + (DATA.items||[]).length);
     parts.push("render " + ms(T_DONE - T_SCRIPT));
     parts.push("interactive " + ms(T_DONE));
+    // Which serving path built this document. A srcdoc frame is the relay
+    // share-link viewer: its bootloader fetched the document over the
+    // tunnel BEFORE this page's clock started, so seconds of white screen
+    // with fast numbers here means the time went to that transport layer.
+    var framed = !!document.querySelector('base[href="about:srcdoc"]') ||
+                 location.protocol === "about:";
+    parts.push(framed ? "via relay srcdoc (transport not visible here)"
+                      : "direct");
     var line = el("div", null, "⏱ " + parts.join(" · "));
     line.id = "mc-diag";
     line.style.cssText = "font-family:var(--mono);font-size:.68rem;" +
