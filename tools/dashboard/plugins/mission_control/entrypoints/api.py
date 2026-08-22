@@ -1283,7 +1283,19 @@ def _viewer_id(request: Request) -> str | None:
     wrong viewer draws the wrong button and still cannot perform it.
     """
     identity = _resolve_visitor_identity(request)
-    return (identity or {}).get("participant_id")
+    if identity:
+        return identity.get("participant_id")
+    # Page routes sit OUTSIDE the /api principal boundary (api_auth
+    # classifies only /api/ paths), so the operator's cookie is invisible
+    # to _operator_identity here — and a screen drawn with viewer=None
+    # offered the operator an Answer control on his OWN question, whose
+    # send then overwrote the coordinator's answer with his reply. Same
+    # boundary, same fix as _identified_reader: verify the cookie against
+    # the durable session store directly.
+    from tools.dashboard import unlock_routes
+    if unlock_routes.session_from_request(request) is not None:
+        return OPERATOR_PARTICIPANT_ID
+    return None
 
 
 #: The node's own operator, as a participant. One node has one operator, so
