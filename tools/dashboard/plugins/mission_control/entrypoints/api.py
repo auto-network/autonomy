@@ -96,8 +96,10 @@ def session_contributions(session_ids: list[str], request: Request) -> dict[str,
             "href": f"/missions/{pillar['mission_id']}/pillars/{pillar['pillar_id']}",
             "icon_svg": _SESSION_ICON,
             "accent": str(pillar.get("color") or "#34d399"),
-            # Mission screens are server-rendered, not SPA routes.
-            "hard_reload": True,
+            # /missions/ is an SPA route hosting the server-rendered
+            # screen in a frame — in-app navigation is a push, not a
+            # document load.
+            "hard_reload": False,
         })
     return result
 
