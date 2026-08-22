@@ -1,0 +1,136 @@
+<div x-data="fleetPage()" class="fleet-page pb-safe" data-testid="fleet-fragment-root">
+  <div class="fleet-shell">
+    <header class="fleet-header">
+      <div class="min-w-0 flex-1">
+        <h1>Your fleet</h1>
+        <p x-text="headline"></p>
+      </div>
+      <button type="button" class="fleet-refresh" @click="load()" :disabled="loading" aria-label="Refresh fleet">
+        <span :class="loading ? 'animate-spin' : ''">↻</span>
+      </button>
+    </header>
+
+    <div x-show="loading && !view" class="fleet-state" data-testid="fleet-loading">Loading fleet…</div>
+    <div x-show="error && !view" class="fleet-state fleet-state-error" data-testid="fleet-error">
+      <strong>Fleet is unavailable</strong>
+      <span x-text="error"></span>
+      <button type="button" @click="load()">Try again</button>
+    </div>
+
+    <div x-show="view" class="fleet-body">
+      <div class="fleet-summary-grid">
+        <div class="fleet-summary-card">
+          <span>Authorized</span>
+          <strong x-text="summary.authorizedMachines"></strong>
+        </div>
+        <div class="fleet-summary-card">
+          <span>Connected</span>
+          <strong :class="summary.connectedMachines === null ? 'muted' : 'connected'"
+                  x-text="summary.connectedMachines === null ? '—' : summary.connectedMachines"></strong>
+          <small x-show="summary.connectedMachines === null">Not reported</small>
+        </div>
+        <div class="fleet-summary-card">
+          <span>Last sync</span>
+          <strong class="compact" x-text="timeLabel(summary.lastSuccessfulSyncAt, 'Never')"></strong>
+          <small>Observed here</small>
+        </div>
+        <div class="fleet-summary-card">
+          <span>Requests</span>
+          <strong :class="summary.joinRequests ? 'attention' : ''" x-text="summary.joinRequests"></strong>
+        </div>
+      </div>
+
+      <div class="fleet-content-grid">
+        <main class="min-w-0">
+          <div class="fleet-section-heading">
+            <h2>Machines</h2>
+            <span x-text="machines.length + ' shown'"></span>
+          </div>
+          <div class="fleet-machine-list" data-testid="fleet-machine-list">
+            <template x-for="machine in machines" :key="rowId(machine)">
+              <article class="fleet-machine"
+                       :class="machineClass(machine)"
+                       :data-row-kind="machine.rowKind"
+                       :data-standing="machine.standing">
+                <button type="button" class="fleet-machine-toggle"
+                        @click="toggle(rowId(machine))"
+                        :aria-expanded="expandedId === rowId(machine)">
+                  <span class="fleet-machine-identity">
+                    <span class="fleet-dot" :class="dotClass(machine)"></span>
+                    <span class="min-w-0">
+                      <span class="fleet-machine-title">
+                        <strong x-text="machine.displayLabel"></strong>
+                        <em x-text="machine.isLocalMachine ? 'This machine' : ''"
+                            :class="machine.isLocalMachine ? '' : 'fleet-empty-badge'"></em>
+                        <em class="tunnel" x-text="machine.isTunnelServer ? 'Serves auto.network' : ''"
+                            :class="machine.isTunnelServer ? '' : 'fleet-empty-badge'"></em>
+                      </span>
+                      <small :class="machine.machineId ? 'mono' : ''" x-text="detailLabel(machine)"></small>
+                    </span>
+                  </span>
+                  <span class="fleet-machine-status wide">
+                    <small>Status</small>
+                    <strong :class="statusTone(machine)" x-text="standingLabel(machine.standing)"></strong>
+                  </span>
+                  <span class="fleet-machine-status">
+                    <small x-text="machine.rowKind === 'pending_admission' ? 'Status' : 'Last sync'"></small>
+                    <strong :class="statusTone(machine)"
+                            x-text="machine.rowKind === 'pending_admission' ? standingLabel(machine.standing) : syncLabel(machine)"></strong>
+                  </span>
+                  <span class="fleet-chevron" :class="expandedId === rowId(machine) ? 'open' : ''">›</span>
+                </button>
+                <div x-show="expandedId === rowId(machine)" class="fleet-machine-detail">
+                  <dl>
+                    <div><dt>Standing</dt><dd x-text="standingLabel(machine.standing)"></dd></div>
+                    <div><dt>Assignment</dt><dd x-text="assignmentLabel(machine.assignment)"></dd></div>
+                    <div><dt>Tunnel serving</dt><dd x-text="machine.rowKind === 'pending_admission' ? 'Not enrolled' : machine.isTunnelServer ? 'Selected' : 'Not selected'"></dd></div>
+                    <div><dt x-text="machine.rowKind === 'pending_admission' ? 'Requested' : 'Authorized'"></dt><dd x-text="timeLabel(machine.standingChangedAt, 'Unknown')"></dd></div>
+                    <div><dt>Last result</dt><dd x-text="resultLabel(machine)"></dd></div>
+                    <div><dt>Applied here</dt><dd class="mono" x-text="machine.rowKind === 'pending_admission' ? '—' : numberLabel(machine.transactionsApplied)"></dd></div>
+                    <div><dt>Transferred here</dt><dd class="mono" x-text="machine.rowKind === 'pending_admission' ? '—' : bytesLabel(machine.bytesSent + machine.bytesReceived)"></dd></div>
+                    <div x-show="machine.lastErrorCode"><dt>Last error</dt><dd class="error-code" x-text="machine.lastErrorCode"></dd></div>
+                  </dl>
+                </div>
+              </article>
+            </template>
+            <div x-show="!machines.length" class="fleet-empty">No authorized machines or active admission requests.</div>
+          </div>
+        </main>
+
+        <aside class="fleet-aside">
+          <div class="fleet-side-card">
+            <div class="fleet-side-title">
+              <h2>Invitation</h2>
+              <span :class="invitation.status === 'active' ? 'active' : ''"
+                    x-text="invitation.status === 'active' ? 'Active' : 'Inactive'"></span>
+            </div>
+            <template x-if="invitation.status === 'active'">
+              <div>
+                <button type="button" class="fleet-invite-code" @click="copyInvitation()"
+                        x-text="invitation.url" aria-label="Copy fleet invitation"></button>
+                <div class="fleet-invite-meta">
+                  <span x-text="publishedLabel"></span>
+                  <span x-text="expiryLabel"></span>
+                </div>
+                <button type="button" class="fleet-primary-action" @click="copyInvitation()"
+                        x-text="copied ? 'Copied' : 'Copy invitation'"></button>
+              </div>
+            </template>
+            <template x-if="invitation.status !== 'active'">
+              <p class="fleet-no-invite">No machine can currently request access.</p>
+            </template>
+          </div>
+
+          <div class="fleet-side-card">
+            <h2>Observed here</h2>
+            <dl class="fleet-activity">
+              <div><dt>Applied</dt><dd x-text="numberLabel(activity.transactionsApplied)"></dd></div>
+              <div><dt>Transferred</dt><dd x-text="bytesLabel(activity.bytesSent + activity.bytesReceived)"></dd></div>
+            </dl>
+            <p>This Dashboard · current roster</p>
+          </div>
+        </aside>
+      </div>
+    </div>
+  </div>
+</div>

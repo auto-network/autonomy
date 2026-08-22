@@ -1,0 +1,200 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+from tools.dashboard.fleet_enrollment_service import StoredFleetInvitation
+from tools.dashboard.plugins.fleet.entrypoints.projection import (
+    ProjectionInputs,
+    project,
+)
+from tools.network import fleet_invite, fleet_roster
+from tools.network.idkit import KeyPair
+
+
+NOW = 1_777_000_000_000
+
+
+def _roster_entry(root: KeyPair, machine: KeyPair, machine_id: str, issued: int):
+    return fleet_roster.enroll(
+        root,
+        machine_id=machine_id,
+        machine_pub=machine.public_hex,
+        issued_at=issued,
+    )
+
+
+def _admission(approval_id: str, *, status="pending", error=None, offset=0):
+    return SimpleNamespace(
+        source_approval_id=approval_id,
+        status=status,
+        last_error_code=error,
+        created_at=NOW - 10_000 + offset,
+        updated_at=NOW - 5_000 + offset,
+    )
+
+
+def _inputs(*, entries=(), admissions=(), approvals=None, executing=(), invitation=None):
+    root = ROOT
+    return ProjectionInputs(
+        server_time=NOW,
+        root_pub=root.public_hex,
+        roster_entries=tuple(entries),
+        local_machine_id=LOCAL_ID,
+        selected_machine_id=LOCAL_ID,
+        peer_rows={
+            REMOTE.public_hex: {
+                "last_success_ns": (NOW - 2_000) * 1_000_000,
+                "transactions_applied": 12,
+                "bytes_sent": 100,
+                "bytes_received": 300,
+                "retries": 1,
+                "last_error_code": None,
+            },
+        },
+        admissions=tuple(admissions),
+        approvals=approvals or {},
+        executing_approval_ids=frozenset(executing),
+        invitation=invitation,
+    )
+
+
+ROOT = KeyPair.generate()
+LOCAL = KeyPair.generate()
+REMOTE = KeyPair.generate()
+LOCAL_ID = "11" * 32
+REMOTE_ID = "22" * 32
+LOCAL_ENTRY = _roster_entry(ROOT, LOCAL, LOCAL_ID, NOW - 60_000)
+REMOTE_ENTRY = _roster_entry(ROOT, REMOTE, REMOTE_ID, NOW - 30_000)
+
+
+def test_projection_joins_roster_local_tunnel_and_current_epoch_observations():
+    view = project(_inputs(entries=(LOCAL_ENTRY, REMOTE_ENTRY)))
+
+    assert view["summary"] == {
+        "authorizedMachines": 2,
+        "connectedMachines": None,
+        "lastSuccessfulSyncAt": NOW - 2_000,
+        "joinRequests": 0,
+    }
+    local, remote = view["machines"]
+    assert local["machineId"] == LOCAL_ID
+    assert local["isLocalMachine"] is True
+    assert local["isTunnelServer"] is True
+    assert local["presence"] == "unreported"
+    assert remote["machineId"] == REMOTE_ID
+    assert remote["transactionsApplied"] == 12
+    assert remote["bytesSent"] + remote["bytesReceived"] == 400
+    assert view["activity"]["transactionsApplied"] == 12
+    assert view["activity"]["scope"] == "this_dashboard_current_roster"
+
+
+def test_multiple_admissions_are_rows_not_a_fleet_approval_queue():
+    pending = _admission("fleet-pending")
+    executing = _admission("fleet-executing", offset=1)
+    failed = _admission(
+        "fleet-failed", status="failed", error="approval_execution_failed", offset=2
+    )
+    declined = _admission("fleet-declined", offset=3)
+    view = project(_inputs(
+        entries=(LOCAL_ENTRY,),
+        admissions=(pending, executing, failed, declined),
+        approvals={
+            "fleet-pending": {"result": None},
+            "fleet-executing": {"result": None},
+            "fleet-failed": {"result": {"approved": True, "execution": {"ok": False}}},
+            "fleet-declined": {"result": {"approved": False}},
+        },
+        executing=("fleet-executing",),
+    ))
+
+    candidates = [r for r in view["machines"] if r["rowKind"] == "pending_admission"]
+    assert [row["standing"] for row in candidates] == [
+        "pending_approval", "admission_in_progress", "admission_failed",
+    ]
+    assert view["summary"]["authorizedMachines"] == 1
+    assert view["summary"]["joinRequests"] == 3
+    assert all(row["machineId"] is None for row in candidates)
+    assert all(row["canRemove"] is False for row in candidates)
+
+
+def test_missing_correlated_approval_fails_visible_instead_of_claiming_review():
+    view = project(_inputs(
+        entries=(LOCAL_ENTRY,),
+        admissions=(_admission("fleet-missing"),),
+        approvals={"fleet-missing": None},
+    ))
+    candidate = view["machines"][1]
+    assert candidate["standing"] == "admission_failed"
+    assert candidate["lastErrorCode"] == "approval_record_missing"
+
+
+def test_roster_commit_replaces_candidate_with_only_signed_roster_truth():
+    before = project(_inputs(
+        entries=(LOCAL_ENTRY,),
+        admissions=(_admission("fleet-remote"),),
+        approvals={"fleet-remote": {"result": None}},
+    ))
+    after = project(_inputs(entries=(LOCAL_ENTRY, REMOTE_ENTRY)))
+
+    assert before["summary"]["authorizedMachines"] == 1
+    assert before["machines"][1]["sourceApprovalId"] == "fleet-remote"
+    assert before["machines"][1]["machinePublicKey"] is None
+    assert after["summary"]["authorizedMachines"] == 2
+    assert not any(row["rowKind"] == "pending_admission" for row in after["machines"])
+    assert any(row["entryId"] == REMOTE_ENTRY.entry_id for row in after["machines"])
+
+
+def test_revocation_is_root_signed_history_and_never_removable():
+    kicked = fleet_roster.kick(
+        ROOT, machine_id=REMOTE_ID, machine_pub=REMOTE.public_hex,
+        seq=1, issued_at=NOW,
+    )
+    view = project(_inputs(entries=(LOCAL_ENTRY, REMOTE_ENTRY, kicked)))
+    revoked = next(row for row in view["machines"] if row["standing"] == "revoked")
+    assert revoked["machineId"] == REMOTE_ID
+    assert revoked["presence"] == "blocked"
+    assert revoked["canRemove"] is False
+    assert view["summary"]["authorizedMachines"] == 1
+
+
+def test_active_invitation_projects_the_actual_signed_bootstrap_value():
+    invite = fleet_invite.mint(
+        ROOT,
+        rendezvous="https://primary.example.test/links/token-1",
+        invite_id="33" * 32,
+        expires_at=NOW + 86_400_000,
+    )
+    stored = StoredFleetInvitation(
+        target_uuid="11111111-1111-4111-8111-111111111111",
+        invite=invite,
+        active=True,
+        created_at=NOW - 10_000,
+    )
+    value = project(_inputs(entries=(LOCAL_ENTRY,), invitation=stored))["invitation"]
+    assert value["status"] == "active"
+    assert value["url"] == "AUTONOMY_FLEET_INVITE=" + fleet_invite.encode(invite)
+    assert value["publishedAt"] == NOW - 10_000
+    assert value["expiresAt"] == NOW + 86_400_000
+
+
+def test_projection_and_markup_expose_no_fleet_decision_surface():
+    view = project(_inputs(
+        entries=(LOCAL_ENTRY,),
+        admissions=(_admission("fleet-pending"),),
+        approvals={"fleet-pending": {"result": None}},
+    ))
+    wire = json.dumps(view)
+    assert "verification_code" not in wire
+    assert "channel_binding" not in wire
+    assert "approval_json" not in wire
+
+    plugin_dir = Path(__file__).resolve().parents[1]
+    markup = (plugin_dir / "page.html").read_text()
+    script = (plugin_dir / "page.js").read_text()
+    assert "/decision" not in markup + script
+    assert ">Grant<" not in markup
+    assert ">Decline<" not in markup
+    assert "verification_code" not in markup + script
+    assert "confirmRemove" not in markup + script

@@ -54,6 +54,14 @@ class PendingEnrollment:
     roster_entry: object | None = None
 
 
+@dataclass(frozen=True)
+class StoredFleetInvitation:
+    target_uuid: str
+    invite: fleet_invite.FleetInvite
+    active: bool
+    created_at: int
+
+
 def channel_binding(resume_token: str) -> str:
     try:
         return fleet_enroll.resume_channel_binding(resume_token)
@@ -300,6 +308,53 @@ class FleetEnrollmentStore:
                 (target,),
             ).fetchall()
         return tuple(_pending(row) for row in rows)
+
+    def list_admissions(self) -> tuple[PendingEnrollment, ...]:
+        """All non-delivered admission rows for the read-only Fleet view.
+
+        Approved rows are intentionally absent: once roster evidence commits,
+        only the signed roster may create a machine row. Declines remain
+        generic-approval truth and are filtered by the projection.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM fleet_enrollment_pending "
+                "WHERE status IN ('pending','approving','failed') "
+                "ORDER BY created_at, request_id"
+            ).fetchall()
+        return tuple(_pending(row) for row in rows)
+
+    def current_invitation(
+        self, *, now_ms: int | None = None
+    ) -> StoredFleetInvitation | None:
+        """Return the newest currently usable invitation, if one exists.
+
+        Storage predates the one-current-invitation command contract, so more
+        than one active row can exist. Until cancel/reissue lands, the newest
+        registered row is the deterministic presentation projection; this
+        method does not mutate or silently deactivate older transport grants.
+        """
+        now = _now_ms(now_ms)
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM fleet_enrollment_invites "
+                "WHERE active=1 AND (expires_at=0 OR expires_at>?) "
+                "ORDER BY created_at DESC, target_uuid DESC LIMIT 1",
+                (now,),
+            ).fetchone()
+        if row is None:
+            return None
+        invite = fleet_invite.FleetInvite.from_dict(
+            json.loads(row["invite_json"])
+        )
+        fleet_invite.verify(invite)
+        _require_rendezvous_token(invite.rendezvous, row["grant_token"])
+        return StoredFleetInvitation(
+            target_uuid=row["target_uuid"],
+            invite=invite,
+            active=bool(row["active"]),
+            created_at=int(row["created_at"]),
+        )
 
     def get_request(self, request_id: str) -> PendingEnrollment | None:
         rid = _require_hex64(request_id, "request_id")

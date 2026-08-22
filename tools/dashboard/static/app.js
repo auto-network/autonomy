@@ -1875,6 +1875,9 @@ window.Autonomy.refreshPlugins = async function () {
     if (pending.length) {
       await Promise.all(pending);
     }
+    window.dispatchEvent(new CustomEvent('autonomy:plugins-changed', {
+      detail: { plugins: window.Autonomy.plugins },
+    }));
     return window.Autonomy.plugins;
   } catch (e) {
     window.Autonomy.plugins = [];
@@ -1898,6 +1901,7 @@ function _renderSidebarPlugins() {
   if (!slot) return;
   slot.innerHTML = '';
   for (const p of window.Autonomy.plugins || []) {
+    if (p.sidebar === false) continue;
     const a = document.createElement('a');
     a.href = p.path;
     a.className = 'nav-link';

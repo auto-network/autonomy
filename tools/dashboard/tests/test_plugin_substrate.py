@@ -81,6 +81,28 @@ def test_manifest_accepts_a_strict_capability_projection_link():
     assert manifest.capability.implementation == "autonomy/agent-test"
 
 
+def test_manifest_supports_contextual_identity_menu_navigation():
+    manifest = PluginManifest.model_validate({
+        **_MIN_MANIFEST_FIELDS,
+        "nav": {
+            "label": "Machines",
+            "sidebar": False,
+            "identity_menu": True,
+            "identity_detail": "Personal fleet",
+        },
+    })
+    assert manifest.nav.sidebar is False
+    assert manifest.nav.identity_menu is True
+    assert manifest.nav.identity_detail == "Personal fleet"
+
+
+def test_manifest_navigation_defaults_to_sidebar_only():
+    manifest = PluginManifest.model_validate(_MIN_MANIFEST_FIELDS)
+    assert manifest.nav.sidebar is True
+    assert manifest.nav.identity_menu is False
+    assert manifest.nav.identity_detail is None
+
+
 def _write_plugin(plugins_dir: Path, dir_name: str, manifest_yaml: str) -> Path:
     pdir = plugins_dir / dir_name
     pdir.mkdir(parents=True, exist_ok=True)

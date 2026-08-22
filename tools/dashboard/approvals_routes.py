@@ -227,6 +227,17 @@ EXECUTORS: dict = {
 _executing: set[str] = set()
 
 
+def approval_is_executing(request_id: str) -> bool:
+    """Read-only lifecycle seam for application projections.
+
+    The generic rendezvous deliberately withholds its result while an
+    executor runs.  Consumers may use this bit to distinguish human review
+    from post-decision work without copying the decision or inventing their
+    own queue.
+    """
+    return request_id in _executing
+
+
 def _finalize_decision(rid: str, kind: str, session: str) -> None:
     """Wake held ?wait= calls and tell viewers the request is closed."""
     ev = _decision_waiters.pop(rid, None)
