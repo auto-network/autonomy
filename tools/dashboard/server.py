@@ -15699,6 +15699,24 @@ async def _emit_setting_changed(
     await event_bus.broadcast("setting.changed", payload, dedup=False)
 
 
+def _client_peers_if_global(request):
+    """Honour a caller-supplied ``?peers=`` ONLY for a global-authority caller.
+
+    An org-bound caller may not name its own peer set (invariant 1): it gets its
+    org's resolved peers, whose cross-org contribution is already clamped to the
+    published/canonical surface. Only the operator (global authority) may select
+    peers explicitly. Returns the parsed list, or ``None`` to use the resolved
+    default.
+    """
+    principal = api_auth.principal_from_request(request)
+    if not principal.global_authority:
+        return None
+    raw = request.query_params.get("peers")
+    if raw is None:
+        return None
+    return [p for p in raw.split(",") if p]
+
+
 async def api_graph_settings_list(request):
     """GET /api/graph/settings/<set_id> — resolved members of a SET."""
     auth_error = api_auth.require_authenticated_api_caller(request)
@@ -15709,8 +15727,11 @@ async def api_graph_settings_list(request):
     if err:
         return JSONResponse({"error": err}, status_code=400)
     org = _caller_org(request)
-    peers_param = request.query_params.get("peers")
-    peers = [p for p in peers_param.split(",") if p] if peers_param is not None else None
+    # A caller-supplied ``peers`` lets the caller choose which orgs compose into
+    # the read. Invariant 1: an org-bound caller does not select its own scope —
+    # it gets its org's resolved peers (their published/canonical surface only).
+    # Honour an explicit peers= only for a global-authority caller (the operator).
+    peers = _client_peers_if_global(request)
     if os.environ.get("DASHBOARD_MOCK"):
         from tools.dashboard.dao import mock as dao_mock
         return JSONResponse({
