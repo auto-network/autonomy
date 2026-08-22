@@ -269,12 +269,16 @@
                   <template x-if="resolveEntry(dEntry).direction === 'sent'">
                     <span class="sc-ct-sender" x-text="'→ ' + resolveEntry(dEntry).target"></span>
                   </template>
-                  <template x-if="resolveEntry(dEntry).direction !== 'sent' && resolveEntry(dEntry).source_id">
+                  {# Sender title destination, most-alive first: the envelope's
+                     own deep link (a mission question lands on its exact
+                     conversation), else the sender's LIVE session viewer,
+                     else the graph source archive. #}
+                  <template x-if="resolveEntry(dEntry).direction !== 'sent' && (resolveEntry(dEntry).href || resolveEntry(dEntry).source_id)">
                     <a class="sc-ct-sender"
-                       :href="'/graph/' + resolveEntry(dEntry).source_id"
+                       :href="resolveEntry(dEntry).href || ('/graph/' + resolveEntry(dEntry).source_id)"
                        x-text="resolveEntry(dEntry).sender_label || resolveEntry(dEntry).sender"></a>
                   </template>
-                  <template x-if="resolveEntry(dEntry).direction !== 'sent' && !resolveEntry(dEntry).source_id">
+                  <template x-if="resolveEntry(dEntry).direction !== 'sent' && !resolveEntry(dEntry).href && !resolveEntry(dEntry).source_id">
                     <span class="sc-ct-sender"
                           x-text="resolveEntry(dEntry).sender_label || resolveEntry(dEntry).sender"></span>
                   </template>
