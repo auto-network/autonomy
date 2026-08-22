@@ -243,6 +243,16 @@ const V2_FACTOR_COMMITMENTS = {
     credential_id: f.credential_id,
     kem_pub: f.kem_pub,
   }),
+  // A combined (MFA) factor requires BOTH a password AND a passkey PRF: a
+  // 2-of-2 XOR split of the master KEK. Pins the passkey it pairs with and the
+  // password half's KDF — all public, all committed.
+  combined: (f) => ({
+    type: 'combined',
+    credential_id: f.credential_id,
+    kem_pub: f.kem_pub,
+    salt: f.kdf.salt,
+    iterations: f.kdf.iterations,
+  }),
 };
 
 // A digest over the factor SET. Each factor's wrap is already bound to its own
@@ -319,9 +329,34 @@ function parseV2PasskeyFactor(f) {
   }
 }
 
+function parseV2CombinedFactor(f) {
+  if (
+    !sameKeys(f, ['type', 'credential_id', 'kem_pub', 'kdf', 'cipher', 'iv', 'wrap', 'sealed'])
+    || typeof f.credential_id !== 'string'
+    || !CREDENTIAL_ID_RE.test(f.credential_id)
+    || typeof f.kem_pub !== 'string'
+    || !/^[0-9a-f]{64}$/.test(f.kem_pub)
+    || !sameKeys(f.kdf, ['name', 'hash', 'iterations', 'salt'])
+    || f.kdf.name !== 'PBKDF2'
+    || f.kdf.hash !== 'SHA-256'
+    || !Number.isSafeInteger(f.kdf.iterations)
+    || f.kdf.iterations < V2_MIN_ITERATIONS
+    || f.kdf.iterations > V2_MAX_ITERATIONS
+    || f.cipher !== 'AES-256-GCM'
+    || canonicalBase64Length(f.kdf.salt) !== 16
+    || canonicalBase64Length(f.iv) !== 12
+    || canonicalBase64Length(f.wrap) !== 48
+    // suite(1) + X25519 enc(32) + ChaCha20-Poly1305 of a 32-byte share (32+16)
+    || canonicalBase64Length(f.sealed) !== 81
+  ) {
+    throw new Error('v2 combined factor is malformed');
+  }
+}
+
 const V2_FACTOR_PARSERS = {
   password: parseV2PasswordFactor,
   passkey: parseV2PasskeyFactor,
+  combined: parseV2CombinedFactor,
 };
 
 function parseArmor(armorText) {
@@ -365,8 +400,10 @@ function parseArmor(armorText) {
     }
     const parser = V2_FACTOR_PARSERS[f.type];
     if (!parser) throw new Error(`v2 factor has unknown type ${f.type}`);
-    // Singular types dedupe on type; passkey is plural (one per credential).
-    const dedupKey = f.type === 'passkey' ? `passkey:${f.credential_id}` : f.type;
+    // Singular types dedupe on type; passkey and combined are plural (one per
+    // credential).
+    const dedupKey = (f.type === 'passkey' || f.type === 'combined')
+      ? `${f.type}:${f.credential_id}` : f.type;
     if (seen.has(dedupKey)) throw new Error(`v2 duplicate factor ${dedupKey}`);
     seen.add(dedupKey);
     parser(f); // total dispatch — a known type always has a strict parser
@@ -691,6 +728,222 @@ async function removePasswordFactor(armorText, passphrase) {
   }
 }
 
+// ── combined (MFA) factor (the browser half of idkit.armor's combined) ────
+//
+// One factor requiring BOTH a password AND a passkey PRF: the master KEK is
+// 2-of-2 XOR-split into share_pw (random, wrapped under the password) and
+// share_pk = masterKek XOR share_pw (sealed to the passkey's public key).
+// Reconstruction needs both — neither half alone. Byte-identical to
+// idkit.armor, guarded by test_combined_armor_factor_crossimpl.
+
+function xor32(a, b) {
+  if (a.length !== 32 || b.length !== 32) {
+    throw new Error('combined-factor shares must both be 32 bytes');
+  }
+  const out = new Uint8Array(32);
+  for (let i = 0; i < 32; i += 1) out[i] = a[i] ^ b[i];
+  return out;
+}
+
+// Assemble ONE combined factor from a known master KEK. Only public material
+// and the passphrase are needed; the passkey PRF private half never enters.
+async function buildCombinedFactor(
+  rootPub, masterKek, passphrase, credentialId, passkeyKemPubHex, iterations,
+) {
+  if (typeof credentialId !== 'string' || !CREDENTIAL_ID_RE.test(credentialId)) {
+    throw new Error('credential_id must be base64url (the WebAuthn rawId)');
+  }
+  if (typeof passkeyKemPubHex !== 'string' || !/^[0-9a-f]{64}$/.test(passkeyKemPubHex)) {
+    throw new Error('passkey_kem_pub must be 64 lowercase hex chars');
+  }
+  const sharePw = webCrypto.getRandomValues(new Uint8Array(32));
+  const sharePk = xor32(masterKek, sharePw);
+  try {
+    const material = await webCrypto.subtle.importKey(
+      'raw', textEncoder.encode(passphrase), 'PBKDF2', false, ['deriveKey'],
+    );
+    const salt = webCrypto.getRandomValues(new Uint8Array(16));
+    const pwKey = await webCrypto.subtle.deriveKey(
+      { name: 'PBKDF2', salt, iterations, hash: 'SHA-256' },
+      material, { name: 'AES-GCM', length: 256 }, false, ['encrypt'],
+    );
+    const wrapIv = webCrypto.getRandomValues(new Uint8Array(12));
+    const wrap = new Uint8Array(await webCrypto.subtle.encrypt(
+      { name: 'AES-GCM', iv: wrapIv, additionalData: v2FactorAad(rootPub, 'combined') },
+      pwKey, sharePw,
+    ));
+    // Sealed to the SAME provisioning key + label as a standalone passkey
+    // factor; only a SHARE of the KEK is sealed, and the factor-set commitment
+    // binds it to the combined slot. Mirrors idkit.armor._build_combined_factor.
+    const sealed = await sealToEncapsulationKey(
+      sharePk, passkeyKemPubHex, PASSKEY_ARMOR_PURPOSE,
+    );
+    return {
+      type: 'combined',
+      credential_id: credentialId,
+      kem_pub: passkeyKemPubHex,
+      kdf: {
+        name: 'PBKDF2', hash: 'SHA-256', iterations, salt: bytesToB64(salt),
+      },
+      cipher: 'AES-256-GCM',
+      iv: bytesToB64(wrapIv),
+      wrap: bytesToB64(wrap),
+      sealed: bytesToB64(sealed),
+    };
+  } finally {
+    sharePw.fill(0);
+    sharePk.fill(0);
+  }
+}
+
+// Found a fresh identity STRAIGHT to a single combined factor — multi-factor
+// from birth, no intermediate single-factor state ever written. Mirrors
+// encryptArmor, swapping the lone password factor for a lone combined factor.
+async function encryptArmorCombined(
+  ed25519SigningSeed, rootPub, passphrase, credentialId, passkeyKemPubHex,
+  iterations = V2_DEFAULT_ITERATIONS,
+) {
+  if (
+    !Number.isSafeInteger(iterations)
+    || iterations < V2_MIN_ITERATIONS
+    || iterations > V2_MAX_ITERATIONS
+  ) {
+    throw new Error('iterations out of range');
+  }
+  const seed = new Uint8Array(ed25519SigningSeed);
+  const masterKek = webCrypto.getRandomValues(new Uint8Array(32));
+  try {
+    const factors = [await buildCombinedFactor(
+      rootPub, masterKek, passphrase, credentialId, passkeyKemPubHex, iterations,
+    )];
+    const kekKey = await webCrypto.subtle.importKey(
+      'raw', masterKek, { name: 'AES-GCM', length: 256 }, false, ['encrypt'],
+    );
+    const sealIv = webCrypto.getRandomValues(new Uint8Array(12));
+    const sealCt = new Uint8Array(await webCrypto.subtle.encrypt(
+      { name: 'AES-GCM', iv: sealIv, additionalData: await v2SealAad(rootPub, factors) },
+      kekKey, seed,
+    ));
+    const body = canonicalJson({
+      v: ARMOR_VERSION,
+      root_pub: rootPub,
+      kek_seal: {
+        cipher: 'AES-256-GCM', iv: bytesToB64(sealIv), ct: bytesToB64(sealCt),
+      },
+      factors,
+    });
+    const b64 = bytesToB64(textEncoder.encode(body));
+    return `${ARMOR_BEGIN}\n${b64.match(/.{1,64}/g).join('\n')}\n${ARMOR_END}`;
+  } finally {
+    seed.fill(0);
+    masterKek.fill(0);
+  }
+}
+
+// Combine an existing password + passkey into ONE MFA factor and CLEAR the
+// standalone openers. The recovery factor is deliberately preserved. After
+// this, neither the password nor the passkey ALONE opens the armor.
+async function enableMfa(
+  armorText, passphrase, credentialId, passkeyKemPubHex,
+  iterations = V2_DEFAULT_ITERATIONS,
+) {
+  if (typeof passkeyKemPubHex !== 'string' || !/^[0-9a-f]{64}$/.test(passkeyKemPubHex)) {
+    throw new Error('passkey_kem_pub must be 64 lowercase hex chars');
+  }
+  const data = parseArmor(armorText);
+  if (data.factors.some((f) => f.type === 'combined')) {
+    throw new Error('this armor is already multi-factor; enabling MFA again is a no-op');
+  }
+  const masterKek = await v2MasterKekFromPassword(data, passphrase);
+  try {
+    const previousFactors = data.factors.slice();
+    const combined = await buildCombinedFactor(
+      data.root_pub, masterKek, passphrase, credentialId, passkeyKemPubHex, iterations,
+    );
+    data.factors = [
+      combined,
+      ...data.factors.filter((f) => f.type !== 'password' && f.type !== 'passkey'),
+    ];
+    await resealSeedToFactorSet(data, masterKek, previousFactors);
+    return emitV2(parseArmor(emitV2(data)));
+  } finally {
+    masterKek.fill(0);
+  }
+}
+
+// Open a v2 armor with a combined factor: BOTH password AND passkey PRF. The
+// passphrase unwraps share_pw; the PRF re-derives the provisioning private key
+// and unseals share_pk; their XOR is the master KEK. One half alone fails.
+async function decryptArmorWithCombined(armorText, passphrase, prfOutput) {
+  const data = parseArmor(armorText);
+  const prf = new Uint8Array(prfOutput);
+  const { publicKeyHex } = await deriveEncapsulationKeypair(prf, PASSKEY_ARMOR_PURPOSE);
+  const factor = data.factors.find(
+    (f) => f.type === 'combined' && f.kem_pub === publicKeyHex,
+  );
+  if (!factor) {
+    throw new Error('no combined factor on this armor pairs with that ceremony output');
+  }
+  const material = await webCrypto.subtle.importKey(
+    'raw', textEncoder.encode(passphrase), 'PBKDF2', false, ['deriveKey'],
+  );
+  const pwKey = await webCrypto.subtle.deriveKey(
+    {
+      name: 'PBKDF2', salt: b64ToBytes(factor.kdf.salt),
+      iterations: factor.kdf.iterations, hash: 'SHA-256',
+    },
+    material, { name: 'AES-GCM', length: 256 }, false, ['decrypt'],
+  );
+  let sharePw;
+  try {
+    sharePw = new Uint8Array(await webCrypto.subtle.decrypt(
+      {
+        name: 'AES-GCM', iv: b64ToBytes(factor.iv),
+        additionalData: v2FactorAad(data.root_pub, 'combined'),
+      },
+      pwKey, b64ToBytes(factor.wrap),
+    ));
+  } catch {
+    throw new Error('the combined factor does not open with that passphrase');
+  }
+  let sharePk;
+  try {
+    sharePk = await openSealedArmor(
+      { sealed_root_key: bytesToHex(b64ToBytes(factor.sealed)), seal_purpose: PASSKEY_ARMOR_PURPOSE },
+      prf,
+    );
+  } catch {
+    sharePw.fill(0);
+    throw new Error('the combined factor does not open with that ceremony output');
+  }
+  const masterKek = xor32(sharePw, new Uint8Array(sharePk));
+  sharePw.fill(0);
+  const kekKey = await webCrypto.subtle.importKey(
+    'raw', masterKek, { name: 'AES-GCM', length: 256 }, false, ['decrypt'],
+  );
+  let seed;
+  try {
+    seed = new Uint8Array(await webCrypto.subtle.decrypt(
+      {
+        name: 'AES-GCM', iv: b64ToBytes(data.kek_seal.iv),
+        additionalData: await v2SealAad(data.root_pub, data.factors),
+      },
+      kekKey, b64ToBytes(data.kek_seal.ct),
+    ));
+  } catch {
+    masterKek.fill(0);
+    throw new Error(
+      'v2 master key does not open the seed seal — the factor list may have been altered',
+    );
+  }
+  masterKek.fill(0);
+  if (seed.length !== 32) {
+    seed.fill(0);
+    throw new Error('armor plaintext is not an Ed25519 signing seed');
+  }
+  return { seed, rootPub: data.root_pub };
+}
+
 // The re-arm signing domain — matches idkit's REARMOR_DOMAIN byte-for-byte, so
 // a signature the browser makes verifies against the root server-side.
 const REARMOR_DOMAIN = 'autonomy.identity.rearmor.v1\n';
@@ -705,6 +958,7 @@ const REARMOR_DOMAIN = 'autonomy.identity.rearmor.v1\n';
 //   action = {kind:'promote', credentialId, provisioningPub}
 //          | {kind:'demote',  credentialId}
 //          | {kind:'removePassword'}
+//          | {kind:'enableMfa', credentialId, provisioningPub}
 //          | {kind:'setAuthority'}   // policy-only; armor unchanged
 async function signArmorUpdate(currentArmor, password, action, requirePair) {
   const opened = await decryptArmor(currentArmor, password);
@@ -719,6 +973,9 @@ async function signArmorUpdate(currentArmor, password, action, requirePair) {
         currentArmor, password, action.credentialId);
     } else if (action.kind === 'removePassword') {
       newArmor = await removePasswordFactor(currentArmor, password);
+    } else if (action.kind === 'enableMfa') {
+      newArmor = await enableMfa(
+        currentArmor, password, action.credentialId, action.provisioningPub);
     } else if (action.kind !== 'setAuthority') {
       throw new Error(`unknown re-arm action: ${action.kind}`);
     }
@@ -772,9 +1029,12 @@ export {
   domainBytes,
   decryptArmor,
   decryptArmorWithPasskey,
+  decryptArmorWithCombined,
   addPasskeyFactor,
   removePasskeyFactor,
   removePasswordFactor,
+  enableMfa,
+  encryptArmorCombined,
   signArmorUpdate,
   REARMOR_DOMAIN,
   PASSKEY_ARMOR_PURPOSE,

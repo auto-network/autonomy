@@ -19,13 +19,17 @@ from tools.network.idkit.armor import (
     ArmorError,
     ArmorPassphraseError,
     add_passkey_factor,
+    add_recovery_factor,
     armor_factor_types,
     armor_root_pub,
     armor_version,
     canonicalize_armor,
     decrypt_root_key,
+    decrypt_root_key_with_combined,
     decrypt_root_key_with_passkey,
+    enable_mfa,
     encrypt_root_key,
+    encrypt_root_key_combined,
     parse_armor,
     remove_passkey_factor,
 )
@@ -291,3 +295,100 @@ def test_stripping_a_passkey_factor_fails_closed(armor):
     # factor mismatches the seal's AAD and the seed unseal fails its GCM tag.
     with pytest.raises((ArmorError, ArmorPassphraseError, MalformedError)):
         decrypt_root_key(tampered, _PW)
+
+
+# ---- combined (MFA) factor: require-both ----------------------------------
+#
+# A combined factor requires BOTH a password AND a passkey PRF together — a
+# 2-of-2 XOR split of the master KEK (share_pw wrapped under the password,
+# share_pk sealed to the passkey's provisioning key). Neither half alone opens
+# the armor. This is the linchpin the individual (OR) factors are NOT: enabling
+# MFA replaces the standalone openers with one that cannot be satisfied by a
+# single stolen factor.
+
+
+def _recovery_pub() -> str:
+    """A recovery factor's public half, from a code stand-in."""
+    _, public_hex = derive_encapsulation_keypair(
+        b"\x5a" * 32, "autonomy/recovery-armor/v1"
+    )
+    return public_hex
+
+
+def test_found_fresh_combined_requires_both(root):
+    prf = b"\x21" * 32
+    a = encrypt_root_key_combined(root, _PW, "cred-mfa", _passkey_pub(prf), iterations=10_000)
+    # only a combined factor exists — no standalone opener was ever written
+    assert armor_factor_types(a) == ["combined"]
+    # both together open the identity
+    assert decrypt_root_key_with_combined(a, _PW, prf).private_hex == root.private_hex
+
+
+def test_combined_neither_half_alone_opens(root):
+    prf = b"\x22" * 32
+    a = encrypt_root_key_combined(root, _PW, "cred-mfa", _passkey_pub(prf), iterations=10_000)
+    # password alone: there is no standalone password factor to open with
+    with pytest.raises(ArmorError):
+        decrypt_root_key(a, _PW)
+    # passkey alone: there is no standalone passkey factor to open with
+    with pytest.raises(ArmorError):
+        decrypt_root_key_with_passkey(a, prf)
+
+
+def test_combined_wrong_half_refused(root):
+    prf = b"\x23" * 32
+    a = encrypt_root_key_combined(root, _PW, "cred-mfa", _passkey_pub(prf), iterations=10_000)
+    with pytest.raises(ArmorPassphraseError):
+        decrypt_root_key_with_combined(a, "not the password", prf)
+    with pytest.raises(ArmorPassphraseError):
+        decrypt_root_key_with_combined(a, _PW, b"\x99" * 32)
+
+
+def test_enable_mfa_clears_individuals_keeps_recovery(root, armor):
+    prf = b"\x24" * 32
+    a = add_passkey_factor(armor, _PW, "cred-mfa", _passkey_pub(prf))
+    a = add_recovery_factor(a, _PW, _recovery_pub())
+    assert sorted(armor_factor_types(a)) == ["passkey", "password", "recovery"]
+    a = enable_mfa(a, _PW, "cred-mfa", _passkey_pub(prf), iterations=10_000)
+    # the standalone openers are gone; the combined factor and break-glass remain
+    assert sorted(armor_factor_types(a)) == ["combined", "recovery"]
+    # after upgrade: both-open works, and neither individual factor opens alone
+    assert decrypt_root_key_with_combined(a, _PW, prf).private_hex == root.private_hex
+    with pytest.raises(ArmorError):
+        decrypt_root_key(a, _PW)
+    with pytest.raises(ArmorError):
+        decrypt_root_key_with_passkey(a, prf)
+
+
+def test_enable_mfa_twice_refused(root, armor):
+    prf = b"\x25" * 32
+    a = add_passkey_factor(armor, _PW, "cred-mfa", _passkey_pub(prf))
+    a = enable_mfa(a, _PW, "cred-mfa", _passkey_pub(prf), iterations=10_000)
+    with pytest.raises(ArmorError):
+        enable_mfa(a, _PW, "cred-mfa", _passkey_pub(prf), iterations=10_000)
+
+
+def test_combined_factor_shape(root):
+    prf = b"\x26" * 32
+    a = encrypt_root_key_combined(root, _PW, "cred-mfa", _passkey_pub(prf), iterations=10_000)
+    f = parse_armor(a)["factors"][0]
+    assert set(f) == {"type", "credential_id", "kem_pub", "kdf", "cipher", "iv", "wrap", "sealed"}
+    assert f["type"] == "combined"
+    assert f["kem_pub"] == _passkey_pub(prf)
+
+
+def test_stripping_a_combined_factor_fails_closed(root):
+    prf = b"\x27" * 32
+    a = encrypt_root_key_combined(root, _PW, "cred-mfa", _passkey_pub(prf), iterations=10_000)
+    data = parse_armor(a)
+    # forge a second combined factor into the list; the seal commits to the set,
+    # so the tampered armor must fail to open rather than honour the edit
+    forged = dict(data["factors"][0])
+    forged["credential_id"] = "cred-forged"
+    data["factors"] = [*data["factors"], forged]
+    body = base64.b64encode(
+        json.dumps(data, separators=(",", ":"), sort_keys=True).encode()
+    ).decode()
+    tampered = "\n".join([ARMOR_BEGIN, body, ARMOR_END])
+    with pytest.raises((ArmorError, ArmorPassphraseError, MalformedError)):
+        decrypt_root_key_with_combined(tampered, _PW, prf)
