@@ -313,6 +313,7 @@ class AgentActionV2(SettingSchema):
 #: their database is the organizational home of their own
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
+@publication_band(min="raw", max="curated")
 @home("organization")
 @keyed_per_entity(key_strategy="action_name")
 class AgentActionV1(SettingSchema):
