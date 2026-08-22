@@ -1006,7 +1006,13 @@ async def serve_mission_site(request: Request):
     # The SAME compose function the relay resolver calls. Two surfaces, one
     # document: a screen served here and a screen served over the channel
     # cannot drift, because there is only one place that builds one.
-    document = compose.compose_screen(mission_id, viewer=_viewer_id(request))
+    # Session names and viewer links are dashboard furniture for an
+    # IDENTIFIED caller (operator cookie or session bearer). An anonymous
+    # or visitor-credentialed reader gets the screen without them — the
+    # same rule the relay path enforces by omitting sessions when framed.
+    document = compose.compose_screen(
+        mission_id, viewer=_viewer_id(request),
+        include_sessions=_resolve_visitor_identity(request) is not None)
     if document is None:
         return PlainTextResponse(
             "Mission has no site revision yet", status_code=404, headers=_NO_STORE_HEADERS
@@ -1025,7 +1031,8 @@ async def serve_pillar_site(request: Request):
     if not pillar or pillar["mission_id"] != mission_id:
         return PlainTextResponse("Not Found", status_code=404, headers=_NO_STORE_HEADERS)
     document = compose.compose_screen(
-        mission_id, pillar_id, viewer=_viewer_id(request))
+        mission_id, pillar_id, viewer=_viewer_id(request),
+        include_sessions=_resolve_visitor_identity(request) is not None)
     if document is None:
         return PlainTextResponse(
             "Pillar has no site revision yet", status_code=404, headers=_NO_STORE_HEADERS
