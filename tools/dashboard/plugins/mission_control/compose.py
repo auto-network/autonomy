@@ -356,6 +356,9 @@ def mission_state(mission_id: str, pillar_id: str | None = None, *,
         # The overview screen is not "Mission" -- it has a name, and the bar
         # is where a reader confirms which mission they are looking at.
         "mission": mission.get("name") or "",
+        # The bar is titleless; the chrome still needs to know WHICH bar to
+        # be — a structured screen's pillar panel is status, not navigation.
+        "style": mission.get("style") or "",
         "screen": pillar_id,
         "pillars": pillars,
         # Retired entries leave the screen. They stay in the record and in

@@ -43,13 +43,15 @@
 .mc-swatch { width: 4px; height: 1rem; border-radius: 2px; flex: none; }
 .mc-name { font-size: .9rem; color: #e2e8f0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mc-caret { color: #64748b; font-size: 10px; }
+/* Status rows: same card, no destination. */
+.mc-row-static, .mc-row-static:hover { cursor: default; border-color: #334155; background: #161a22; }
+.mc-who-term { width: 1.5rem; height: 1.5rem; border-radius: .375rem; background: #1e293b;
+  display: inline-flex; align-items: center; justify-content: center; color: #94a3b8; flex: none; }
 .mc-age { color: #475569; font-size: 11px; flex: none; }
 .mc-grow { flex: 1; }
 .mc-q { flex: none; display: inline-flex; align-items: center; gap: .35rem;
         border: 1px solid #1e293b; color: #64748b; border-radius: .35rem; padding: .2rem .5rem; font-size: 12px; }
 .mc-q-hot { border-color: #b4530999; background: #78350f33; color: #fcd34d; }
-.mc-session { text-decoration: none; padding: .2rem .45rem; }
-.mc-session:hover { color: #a5b4fc; border-color: #37415199; }
 .mc-faces { display: flex; flex: none; }
 .mc-face { width: 1.5rem; height: 1.5rem; border-radius: 50%; display: grid; place-items: center;
            font-size: 10px; font-weight: 600; box-shadow: 0 0 0 2px #111318; margin-left: -.35rem; }

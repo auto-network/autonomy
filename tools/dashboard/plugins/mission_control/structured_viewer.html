@@ -77,6 +77,8 @@
   .mc-nav button .n{font-weight:400;color:var(--ink3);font-size:.72rem}
   .mc-nav button.on{color:#fff;border-color:var(--accent-dim);background:#232345}
   .mc-nav button.warns .n{color:var(--warn)}
+  .mc-nav button.mc-dim{opacity:.45}
+  .mc-gout{display:none!important}
 
   /* ── views ── */
   .mc-view{display:none}
@@ -359,6 +361,14 @@
      match:function (it) { return it.kind==="question" && it.state==="open" && !!it.ask; },
      empty:"Nothing is waiting on you."},
   ];
+  // Every item wears the one glance bucket it belongs to (states are
+  // single-valued, so the buckets never overlap); the global filter and
+  // the nav counts both read it.
+  function glanceKeyOf(it){
+    for (var i = 0; i < GLANCE.length; i++)
+      if (GLANCE[i].match(it)) return GLANCE[i].key;
+    return "";
+  }
   var glance = document.getElementById("mc-glance");
   var glanceActive = null, glanceReturn = null;
   function chipTitle(g){ return {proven:"Proven / done", flight:"In flight",
@@ -368,17 +378,49 @@
       g.btn.classList.toggle("on", glanceActive === g.key);
       g.btn.setAttribute("aria-pressed", glanceActive === g.key ? "true" : "false");
     });
+    updateNavCounts();
+  }
+  // The active chip hides everything outside its bucket, in every view:
+  // items, feed rows, then the furniture that would otherwise sit empty
+  // (folds, sections). Day headers are the feed filter's problem — it
+  // already walks them, so it just has to also respect .mc-gout.
+  function applyGlance(){
+    var key = glanceActive;
+    document.querySelectorAll("#mc-views .mc-item, #mc-views .mc-feed-row")
+      .forEach(function (n) {
+        n.classList.toggle("mc-gout", !!key && n.dataset.glance !== key);
+      });
+    document.querySelectorAll("#mc-views details.mc-finished").forEach(function (d) {
+      var vis = d.querySelectorAll(".mc-item:not(.mc-gout):not(.mc-hidden)").length;
+      if (key) d.open = vis > 0;
+      d.classList.toggle("mc-gout", !!key && !vis);
+    });
+    document.querySelectorAll("#mc-views section.mc-sec").forEach(function (sec) {
+      if (!sec.querySelector(".mc-item")) return;
+      var vis = sec.querySelectorAll(".mc-item:not(.mc-gout):not(.mc-hidden)").length;
+      sec.classList.toggle("mc-gout", !!key && !vis);
+    });
+    applyFeedFilter();
   }
   function toggleGlance(key){
     if (glanceActive === key){
       glanceActive = null;
+      applyGlance();
       var back = glanceReturn; glanceReturn = null;
-      show(back || MID);
-      return;                       // show() calls updateChips()
+      if (currentView === "glance-" + key) show(back || MID);
+      else updateChips();
+      return;
     }
     if (glanceActive === null) glanceReturn = currentView;
     glanceActive = key;
-    show("glance-" + key);
+    applyGlance();
+    // FILTERS STACK. From the overview a chip opens the cross-pillar
+    // list it counts; from anywhere else it narrows the view you are
+    // already in — pick a pillar, then "proven", and you see that
+    // pillar's proven items, with every nav count recomputed to match.
+    if (currentView === MID || String(currentView).indexOf("glance-") === 0)
+      show("glance-" + key);
+    else updateChips();
   }
   GLANCE.forEach(function (g) {
     var c = el("button","g "+g.cls);
@@ -493,6 +535,7 @@
       }
     }
     c.dataset.state = it.state; c.dataset.kind = it.kind;
+    c.dataset.glance = glanceKeyOf(it);
     c.dataset.search = (it.title+" "+it.body+" "+(it.evidence||[]).join(" ")).toLowerCase();
 
     var inner = c;
@@ -731,6 +774,7 @@
       if (day !== lastDay){ v.appendChild(el("div","mc-feed-day",day)); lastDay = day; }
       var row = el("div","mc-feed-row");
       row.dataset.surface = x.it.surface_id;
+      row.dataset.glance = glanceKeyOf(x.it);
       row.appendChild(dot(surfColor(x.it.surface_id)));
       row.appendChild(el("span","k",shortName(x.it.surface_id)));
       row.appendChild(el("span","t",x.it.title));
@@ -757,14 +801,18 @@
     v.querySelectorAll(".mc-feed-row").forEach(function (r) {
       r.classList.toggle("mc-hidden", !!sid && r.dataset.surface !== sid);
     });
+    function rowShown(r){
+      return !r.classList.contains("mc-hidden")
+          && !r.classList.contains("mc-gout");
+    }
     var kids = [].slice.call(v.children);
     for (var i = 0; i < kids.length; i++){
       if (!kids[i].classList.contains("mc-feed-day")) continue;
       var any = false;
       for (var j = i + 1; j < kids.length
            && !kids[j].classList.contains("mc-feed-day"); j++){
-        if (kids[j].classList.contains("mc-feed-row")
-            && !kids[j].classList.contains("mc-hidden")) any = true;
+        if (kids[j].classList.contains("mc-feed-row") && rowShown(kids[j]))
+          any = true;
       }
       kids[i].classList.toggle("mc-hidden", !any);
     }
@@ -800,37 +848,50 @@
   views.appendChild(feedView());
 
   var nav = document.getElementById("mc-nav");
-  function navBtn(id,label,color,extra){
+  var NAVS = [];
+  function navBtn(id,label,color,base,warnWhen){
     var b = el("button",null,"");
     if (color) b.appendChild(dot(color));
     b.appendChild(document.createTextNode(label));
-    if (extra && extra.count){
-      b.appendChild(el("span","n",String(extra.count)));
-      if (extra.warn) b.classList.add("warns");
+    if (base){
+      var n = el("span","n","");
+      b.appendChild(n);
+      NAVS.push({base:base, el:n, btn:b, warn:warnWhen});
     }
     b.id = "nav-"+id;
     b.addEventListener("click",function(){ show(id); });
     nav.appendChild(b);
   }
+  // A count is a claim about what tapping the chip will show, so it obeys
+  // the active glance filter: "done" on plus a pillar chip reading 3 means
+  // three done items live there. A chip at 0 dims instead of vanishing —
+  // the destination still exists, it is just empty under this filter.
+  function updateNavCounts(){
+    NAVS.forEach(function (nv) {
+      var n = liveItems.filter(function (it) {
+        return nv.base(it) &&
+          (!glanceActive || glanceKeyOf(it) === glanceActive);
+      }).length;
+      nv.el.textContent = n ? String(n) : (glanceActive ? "0" : "");
+      nv.btn.classList.toggle("warns", !!nv.warn && n > 0 && !glanceActive);
+      nv.btn.classList.toggle("mc-dim", !!glanceActive && n === 0);
+    });
+  }
   navBtn(MID,"Overview","#8b85ff");
   PILLARS.forEach(function (p) {
-    var n = liveItems.filter(function (it) { return it.surface_id===p.pillar_id; }).length;
-    navBtn(p.pillar_id, shortName(p.pillar_id),
-      p.color || "#8391a8", {count:n});
+    navBtn(p.pillar_id, shortName(p.pillar_id), p.color || "#8391a8",
+      function (it) { return it.surface_id===p.pillar_id; });
   });
-  var decN = liveItems.filter(function (it) { return it.kind==="decision"; }).length;
-  var qN = liveItems.filter(function (it) {
-    return it.kind==="question" && it.state==="open"; }).length;
-  navBtn("decisions","Decisions",null,{count:decN});
-  navBtn("questions","Questions",null,{count:qN,warn:qN>0});
+  navBtn("decisions","Decisions",null,
+    function (it) { return it.kind==="decision"; });
+  navBtn("questions","Questions",null,
+    function (it) { return it.kind==="question" && it.state==="open"; }, true);
   navBtn("feed","Feed",null,null);
+  updateNavCounts();
 
   var currentView = null;
   function show(id){
     currentView = id;
-    if (glanceActive !== null && id !== "glance-" + glanceActive) {
-      glanceActive = null; glanceReturn = null;   // left the filter another way
-    }
     updateChips();
     document.querySelectorAll(".mc-view").forEach(function (n) {
       n.classList.toggle("on", n.id === "view-"+id);
