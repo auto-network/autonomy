@@ -34,3 +34,7 @@ agent-test timings path/to/test_file.py::test_name
 Use `agent-test doctor` when the Python environment is unclear. It diagnoses
 available environments but never installs dependencies. Use
 `agent-test collect` and `agent-test inventory` to discover node ids.
+
+For a non-executing investigation of expensive tests, read the bundled
+`skills/agent-test-slow-review/SKILL.md`. It uses retained organization
+statistics and source inspection only; it never reruns the candidate tests.
