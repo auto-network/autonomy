@@ -3041,6 +3041,9 @@ class SessionMonitor:
             ts.parse_ctx = window["parse_ctx_after"]
         await self._process_tail_entries(
             tmux_name, row, ts, window["entries"], source_path=Path(path),
+            projected_entry_count=(
+                int(row.get("entry_count") or 0) + int(window["raw_count"] or 0)
+            ),
             span={
                 "file": Path(path).stem,
                 "from": window["start_offset"],
@@ -3296,6 +3299,9 @@ class SessionMonitor:
             tmux_name, row, ts, window["entries"], span=span,
             observed_model=window["model_to_write"] or row.get("model"),
             model_changed=bool(window["model_to_write"]),
+            projected_entry_count=(
+                int(row.get("entry_count") or 0) + int(window["raw_count"] or 0)
+            ),
         )
         await self._graph_appender_tick(tmux_name, Path(window["path"]))
 
@@ -3676,6 +3682,7 @@ class SessionMonitor:
         span: dict | None = None,
         observed_model: str | None = None,
         model_changed: bool = False,
+        projected_entry_count: int | None = None,
     ) -> None:
         """Dedup, enrich, and broadcast parsed entries from a session tail read.
 
@@ -3688,6 +3695,11 @@ class SessionMonitor:
         ``{file, from, to}`` — the client's gap detector advances its
         committed high-water from contiguous spans, never from entry
         counts, so server-side dedup can never fake progress.
+
+        ``projected_entry_count`` is the cumulative raw-entry count after
+        this window persists. Publication intentionally precedes persistence,
+        so reading the DB again while building the broadcast would expose the
+        previous count and leave live cards stale.
         """
         if not new_entries and not model_changed:
             return
@@ -3819,6 +3831,10 @@ class SessionMonitor:
                     ),
                     "seq": ts.broadcast_seq,
                     "context_tokens": updated["context_tokens"] if updated else 0,
+                    **(
+                        {"entry_count": projected_entry_count}
+                        if projected_entry_count is not None else {}
+                    ),
                     # This tail window may carry a newer model than the DB row
                     # because broadcast intentionally precedes persistence.
                     "model": observed_model or (

@@ -56,6 +56,16 @@ window.applyTurnCorrection = function(store, correction) {
   return true;
 };
 
+/** Advance the cumulative raw-entry count without allowing stale delivery to regress it. */
+function _applySessionEntryCount(store, rawCount) {
+  if (!store || rawCount === undefined || rawCount === null) return;
+  var nextEntryCount = Number(rawCount);
+  var currentEntryCount = Number(store.entryCount) || 0;
+  if (Number.isFinite(nextEntryCount) && nextEntryCount > currentEntryCount) {
+    store.entryCount = nextEntryCount;
+  }
+}
+
 /** Collapse provider model ids into the tight label used on session cards. */
 window.compactSessionModel = function(model) {
   var raw = String(model || '').trim();
@@ -110,7 +120,7 @@ document.addEventListener('alpine:init', function() {
         store.startedAt = s.started_at || 0;
         if (s.last_activity) store.lastActivity = s.last_activity;
         if (s.last_input_at) store.lastInputAt = s.last_input_at;
-        if (s.entry_count) store.entryCount = s.entry_count;
+        _applySessionEntryCount(store, s.entry_count);
         if (s.context_tokens) store.contextTokens = s.context_tokens;
         // An EMPTY last_message never replaces a real one. A completed Codex
         // turn ends with codex_task_complete (internal, content null), so a
@@ -932,6 +942,7 @@ window.ensureSessionMessages = function() {
 
     // Update metadata
     if (data.context_tokens !== undefined) store.contextTokens = data.context_tokens;
+    _applySessionEntryCount(store, data.entry_count);
     var modelChanged = data.model !== undefined && store.model !== data.model;
     if (data.model !== undefined) store.model = data.model;
     if (data.size_bytes !== undefined) store.sizeMB = (data.size_bytes / 1048576).toFixed(1);
@@ -978,7 +989,7 @@ window.ensureSessionMessages = function() {
       store.sessionType = s.type || '';
       store.label = s.label || '';
       store.role = s.role || '';
-      store.entryCount = s.entry_count || 0;
+      _applySessionEntryCount(store, s.entry_count);
       if (s.context_tokens) store.contextTokens = s.context_tokens;
       if (s.topics) store.topics = s.topics;
       if (Array.isArray(s.todos)) store.todos = s.todos;
