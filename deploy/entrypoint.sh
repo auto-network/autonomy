@@ -28,13 +28,10 @@ for d in /app/data /app/orgs; do
     fi
 done
 
-# The code volume seeds root-owned; the server and the git clone that builds each
-# session's /workspace/repo run as autonomy, and git refuses a repo owned by
-# another user. Chown the code tree, pruning the data/orgs mounts nested under it
-# (chowned in the loop above): they share /app's device — all named volumes live
-# on one host filesystem — so -xdev would not stop at them.
-find /app -path /app/data -prune -o -path /app/orgs -prune -o -print0 \
-    | xargs -0 -r chown -h autonomy:autonomy 2>/dev/null || true
+# The code volume (/app) needs no chown here: the image bakes it autonomy-owned
+# at build time (deploy/Dockerfile, COPY --chown), so the volume seeds uid-1000.
+# Only the operator-copied data/orgs (ownership we don't control) and the runtime
+# keycache ramfs still need a runtime chown.
 
 # Grant autonomy the HOST Docker group: the node launches every session as a
 # host-level sibling container through this socket (see docker-compose.yml). The
