@@ -76,6 +76,7 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 | `graph dispatch runs --primer` | Rich per-run output: title, commit, diff, scores, merge state | `graph dispatch runs --primer --completed` |
 | `graph primer <bead-id>` | Dynamic context primer for a bead (description + pitfalls + provenance) | `graph primer auto-n9qa` |
 | `graph ui-design "title" <dir>` | Create Design Studio design from HTML files + live-watch for changes | `graph ui-design "Input redesign" /tmp/cards/` |
+| `graph session-auth` | Mint an operator-approved dashboard UI session (approval → wait → redeem → cookie jar; `--browser` injects into agent-browser) | `graph session-auth --browser` |
 | `graph set-label "text"` | Set a working title for the current session | `graph set-label "Passkey auth design"` |
 | `graph notes --since <dur>` | List notes by recency with duration filter | `graph notes --since 1h --tags pitfall` |
 | `graph crosstalk` | CrossTalk message log (default) | `graph crosstalk --since 1h --session auto-0323-022132` |
