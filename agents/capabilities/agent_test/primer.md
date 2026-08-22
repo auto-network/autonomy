@@ -26,3 +26,7 @@ Exact test-node selections receive a complete ETA when every node has history.
 File, class, and directory selections report only the known-history portion
 until collection proves the complete inventory; unseen work is never hidden
 inside a confident estimate.
+
+To investigate expensive tests without running them, read the bundled
+`skills/agent-test-slow-review/SKILL.md`; it ranks retained timings and source
+evidence by waste risk and test value.
