@@ -263,7 +263,27 @@ def _make_assertion(private_key, challenge_b64url: str, *, rp_id: str,
     }
 
 
-def _enroll_passkey(client, *, host=HOST, cred_id=b"test-credential-0001",
+def _statement_for(root, credential, opts):
+    """The root-signed enrollment statement the register route requires — the
+    test-side mirror of what the browser mints. The tests hold the identity's
+    root, so this verifies for real."""
+    from tools.network.idkit import enrollment
+    auth = cbor2.loads(_b64url_decode(
+        credential["response"]["attestationObject"]))["authData"]
+    cred_id_len = int.from_bytes(auth[53:55], "big")
+    return enrollment.mint(
+        root=root,
+        credential_id=credential["rawId"],
+        credential_public_key=auth[55 + cred_id_len:].hex(),
+        rp_id=opts["rp_id"],
+        origin=opts["origin"],
+        nonce=opts["nonce"],
+        created_hlc=(0, 0),
+        initial_sign_count=int.from_bytes(auth[33:37], "big"),
+    ).to_dict()
+
+
+def _enroll_passkey(client, root, *, host=HOST, cred_id=b"test-credential-0001",
                     sign_count: int = 0):
     """Register a credential; returns its P-256 key for later assertions."""
     private_key = ec.generate_private_key(ec.SECP256R1())
@@ -275,7 +295,9 @@ def _enroll_passkey(client, *, host=HOST, cred_id=b"test-credential-0001",
         private_key, body["options"]["challenge"], rp_id=body["rp_id"],
         origin=body["origin"], cred_id=cred_id, sign_count=sign_count)
     r = client.post("/api/identity/passkey/register",
-                    json={"credential": credential}, headers={"host": host})
+                    json={"credential": credential,
+                          "statement": _statement_for(root, credential, body)},
+                    headers={"host": host})
     assert r.status_code == 200, r.text
     return private_key
 
@@ -851,8 +873,8 @@ from tools.graph.schemas.personal_identity import (
 )
 
 
-def _valid_passkey_payload(cred_id="attacker-injected-cred1"):
-    return {
+def _valid_passkey_payload(cred_id="attacker-injected-cred1", *, root=None):
+    payload = {
         "credential_id": cred_id,
         "public_key": _b64url(b"\x01" * 64),
         "sign_count": 0,
@@ -862,6 +884,19 @@ def _valid_passkey_payload(cred_id="attacker-injected-cred1"):
         "transports": ["internal"],
         "created_at": "2026-07-19T00:00:00Z",
     }
+    # PasskeyCredentialV1 now requires a root-signed enrollment statement. The
+    # protection guard fires BEFORE schema validation, so the no-context
+    # injection tests need no statement; only a row created inside an
+    # authorised write context reaches the schema and must carry one.
+    if root is not None:
+        from tools.network.idkit import enrollment
+        payload["statement"] = enrollment.mint(
+            root=root, credential_id=cred_id,
+            credential_public_key=(b"\x02" * 64).hex(),
+            rp_id="localhost", origin=f"https://{HOST}", nonce="0" * 64,
+            created_hlc=(0, 0), initial_sign_count=0,
+        ).to_dict()
+    return payload
 
 
 def test_passkey_injection_via_generic_settings_is_refused(env, root):
@@ -1016,39 +1051,42 @@ def test_every_mutation_path_refuses_protected_identity_sets(env, root):
     the capability. Create the target rows WITH the capability first, so
     the id-based paths have something to aim at."""
     _store_identity(env, root)
+    # The identity sets are personal-scoped (org=None); an organization
+    # argument is refused, so every path is addressed at personal scope.
     with _sops.identity_write_context():
         pk_id = _sops.add_setting(_PASSKEY_SET, 1, "victim-cred",
-                                 _valid_passkey_payload("victim-cred"), org=ORG)
+                                 _valid_passkey_payload("victim-cred", root=root),
+                                 org=None)
         personal = identity_routes._personal_member()
     # Resolve the personal row's setting id for the id-based paths.
-    personal_rows = _sops.read_set(_PERSONAL_SET, org=ORG).members
+    personal_rows = _sops.read_set(_PERSONAL_SET, org=None).members
     personal_id = next(m.id for m in personal_rows if m.key == "default")
 
     # set_id-addressed paths
     for call in (
         lambda: _sops.add_setting(_PASSKEY_SET, 1, "x",
-                                  _valid_passkey_payload("x"), org=ORG),
-        lambda: _sops.upsert_by_key(_PERSONAL_SET, 1, "default", {}, org=ORG),
+                                  _valid_passkey_payload("x"), org=None),
+        lambda: _sops.upsert_by_key(_PERSONAL_SET, 1, "default", {}, org=None),
         lambda: _sops.remove_settings_by_key_prefix(_PASSKEY_SET, prefix="",
-                                                    org=ORG),
-        lambda: _sops.migrate_setting_revisions(_PASSKEY_SET, 1, org=ORG),
+                                                    org=None),
+        lambda: _sops.migrate_setting_revisions(_PASSKEY_SET, 1, org=None),
     ):
         with pytest.raises(_sops.ProtectedSettingError):
             call()
 
     # id-addressed paths (resolve the target's set_id, then refuse)
     for call in (
-        lambda: _sops.override_setting(pk_id, {"sign_count": 999}, org=ORG),
-        lambda: _sops.exclude_setting(personal_id, org=ORG),
-        lambda: _sops.promote_setting(pk_id, "published", org=ORG),
-        lambda: _sops.deprecate_setting(personal_id, org=ORG),
-        lambda: _sops.remove_setting(personal_id, org=ORG),
+        lambda: _sops.override_setting(pk_id, {"sign_count": 999}, org=None),
+        lambda: _sops.exclude_setting(personal_id, org=None),
+        lambda: _sops.promote_setting(pk_id, "published", org=None),
+        lambda: _sops.deprecate_setting(personal_id, org=None),
+        lambda: _sops.remove_setting(personal_id, org=None),
     ):
         with pytest.raises(_sops.ProtectedSettingError):
             call()
 
     # Nothing was mutated: the victim rows survive, the operator still unlocks.
-    assert len(_sops.read_set(_PASSKEY_SET, org=ORG).members) == 1
+    assert len(_sops.read_set(_PASSKEY_SET, org=None).members) == 1
     env.cookies.clear()
     assert _unlock_with_password(env, root).status_code == 200
 
@@ -1059,10 +1097,12 @@ def test_delete_of_enrollment_cannot_disable_the_gate(env, root):
     _store_identity(env, root)
     unlock_routes.bust_enforce_cache()
     assert unlock_routes.human_auth_enrolled() is True
-    personal_id = next(m.id for m in _sops.read_set(_PERSONAL_SET, org=ORG).members
+    # The identity sets are personal-scoped (org=None); they refuse an
+    # organization argument, which is exactly where the operator's row lives.
+    personal_id = next(m.id for m in _sops.read_set(_PERSONAL_SET, org=None).members
                        if m.key == "default")
     with pytest.raises(_sops.ProtectedSettingError):
-        _sops.remove_setting(personal_id, org=ORG)
+        _sops.remove_setting(personal_id, org=None)
     unlock_routes.bust_enforce_cache()
     assert unlock_routes.human_auth_enrolled() is True     # gate still on
 
@@ -1091,7 +1131,7 @@ def test_mock_mode_never_enforces(env, root, monkeypatch):
 
 def test_passkey_unlock_happy_path(env, root):
     _store_identity(env, root)
-    key = _enroll_passkey(env)
+    key = _enroll_passkey(env, root)
     env.cookies.clear()
     r = _unlock_with_passkey(env, key)
     assert r.status_code == 200, r.text
@@ -1106,8 +1146,8 @@ def test_passkey_unlock_happy_path(env, root):
 
 def test_assert_options_carry_only_this_hosts_credentials(env, root):
     _store_identity(env, root)
-    _enroll_passkey(env, cred_id=b"local-cred-000000001")
-    _enroll_passkey(env, host=TSNET_HOST, cred_id=b"tsnet-cred-000000001")
+    _enroll_passkey(env, root, cred_id=b"local-cred-000000001")
+    _enroll_passkey(env, root, host=TSNET_HOST, cred_id=b"tsnet-cred-000000001")
     minted = _assert_options(env)
     ids = {c["id"] for c in minted["options"]["allowCredentials"]}
     assert ids == {_b64url(b"local-cred-000000001")}
@@ -1123,7 +1163,7 @@ def test_assert_options_without_passkey_point_at_password(env, root):
 
 def test_assert_rejects_unknown_challenge(env, root):
     _store_identity(env, root)
-    key = _enroll_passkey(env)
+    key = _enroll_passkey(env, root)
     env.cookies.clear()
     minted = _assert_options(env)
     assertion = _make_assertion(key, _b64url(b"not-the-minted-challenge"),
@@ -1137,7 +1177,7 @@ def test_assert_rejects_unknown_challenge(env, root):
 
 def test_assert_challenge_is_single_use(env, root):
     _store_identity(env, root)
-    key = _enroll_passkey(env)
+    key = _enroll_passkey(env, root)
     env.cookies.clear()
     minted = _assert_options(env)
     assertion = _make_assertion(key, minted["options"]["challenge"],
@@ -1151,7 +1191,7 @@ def test_assert_challenge_is_single_use(env, root):
 
 def test_assert_rejects_expired_challenge(env, root, monkeypatch):
     _store_identity(env, root)
-    key = _enroll_passkey(env)
+    key = _enroll_passkey(env, root)
     env.cookies.clear()
     minted = _assert_options(env)
     for pending in unlock_routes._assert_pending.values():
@@ -1164,7 +1204,7 @@ def test_assert_rejects_expired_challenge(env, root, monkeypatch):
 
 def test_two_browsers_can_complete_concurrent_assert_options(env, root):
     _store_identity(env, root)
-    key = _enroll_passkey(env)
+    key = _enroll_passkey(env, root)
     env.cookies.clear()
     first = _assert_options(env)
     _assert_options(env)                 # another browser on the same host
@@ -1202,8 +1242,8 @@ def test_pending_fifo_reserves_exact_capacity(env, monkeypatch):
 
 def test_assert_cannot_complete_cross_host(env, root):
     _store_identity(env, root)
-    key_local = _enroll_passkey(env, cred_id=b"local-cred-000000001")
-    _enroll_passkey(env, host=TSNET_HOST, cred_id=b"tsnet-cred-000000001")
+    key_local = _enroll_passkey(env, root, cred_id=b"local-cred-000000001")
+    _enroll_passkey(env, root, host=TSNET_HOST, cred_id=b"tsnet-cred-000000001")
     env.cookies.clear()
     minted = _assert_options(env)        # minted on localhost
     assertion = _make_assertion(key_local, minted["options"]["challenge"],
@@ -1218,7 +1258,7 @@ def test_assert_cannot_complete_cross_host(env, root):
 
 def test_assert_rejects_unenrolled_credential(env, root):
     _store_identity(env, root)
-    _enroll_passkey(env)
+    _enroll_passkey(env, root)
     env.cookies.clear()
     minted = _assert_options(env)
     stranger = ec.generate_private_key(ec.SECP256R1())
@@ -1232,7 +1272,7 @@ def test_assert_rejects_unenrolled_credential(env, root):
 
 def test_assert_rejects_wrong_key_signature(env, root):
     _store_identity(env, root)
-    _enroll_passkey(env)                 # stored public key
+    _enroll_passkey(env, root)                 # stored public key
     env.cookies.clear()
     minted = _assert_options(env)
     imposter = ec.generate_private_key(ec.SECP256R1())
@@ -1245,7 +1285,7 @@ def test_assert_rejects_wrong_key_signature(env, root):
 
 def test_assert_requires_user_verification(env, root):
     _store_identity(env, root)
-    key = _enroll_passkey(env)
+    key = _enroll_passkey(env, root)
     env.cookies.clear()
     minted = _assert_options(env)
     assertion = _make_assertion(key, minted["options"]["challenge"],
@@ -1257,7 +1297,7 @@ def test_assert_requires_user_verification(env, root):
 
 def test_assert_rejects_create_type(env, root):
     _store_identity(env, root)
-    key = _enroll_passkey(env)
+    key = _enroll_passkey(env, root)
     env.cookies.clear()
     minted = _assert_options(env)
     assertion = _make_assertion(key, minted["options"]["challenge"],
@@ -1269,7 +1309,7 @@ def test_assert_rejects_create_type(env, root):
 
 def test_assert_rejects_sign_count_regression(env, root):
     _store_identity(env, root)
-    key = _enroll_passkey(env, sign_count=5)
+    key = _enroll_passkey(env, root, sign_count=5)
     env.cookies.clear()
     r = _unlock_with_passkey(env, key, sign_count=3)     # 3 ≤ stored 5
     assert r.status_code == 403
@@ -1278,7 +1318,7 @@ def test_assert_rejects_sign_count_regression(env, root):
 
 def test_assert_advances_stored_sign_count(env, root):
     _store_identity(env, root)
-    key = _enroll_passkey(env, sign_count=5)
+    key = _enroll_passkey(env, root, sign_count=5)
     env.cookies.clear()
     assert _unlock_with_passkey(env, key, sign_count=6).status_code == 200
     env.cookies.clear()
@@ -1453,3 +1493,56 @@ def test_garbage_cookie_does_not_pass(env, root):
     env.cookies.set(unlock_routes.SESSION_COOKIE, "forged.token")
     r = env.get("/beads", follow_redirects=False)
     assert r.status_code == 302
+
+
+# ── combined (MFA) unlock: BOTH factors, one session ──────────────────────
+#
+# An MFA identity carries only the combined factor, so neither the password
+# nor the passkey path can open it. The browser gathers both, decrypts locally
+# with decryptArmorWithCombined, and signs the challenge minted by the shared
+# password/options endpoint; the server verifies the root signature identically
+# and mints a 'combined' session. Without this an MFA user could never sign in.
+
+
+def _store_combined_identity(client, root: KeyPair, *, prf=b"\x21" * 32,
+                             name="Alex"):
+    from tools.network.idkit.armor import (
+        PASSKEY_ARMOR_PURPOSE, encrypt_root_key_combined,
+    )
+    from tools.network.idkit.sealing import derive_encapsulation_keypair
+    _, kem = derive_encapsulation_keypair(prf, PASSKEY_ARMOR_PURPOSE)
+    armor = encrypt_root_key_combined(root, PASSWORD, "cred-mfa", kem,
+                                      iterations=10_000)
+    r = client.post("/api/identity/personal",
+                    json={"display_name": name, "armored_private_key": armor})
+    assert r.status_code == 200, r.text
+    return r
+
+
+def test_combined_unlock_mints_a_session(env, root):
+    _store_combined_identity(env, root)
+    minted = env.post("/api/identity/unlock/password/options", json={},
+                      headers={"host": HOST})
+    assert minted.status_code == 200, minted.text
+    body = minted.json()
+    r = env.post("/api/identity/unlock/combined",
+                 json={"challenge": body["challenge"],
+                       "signature": _pw_sign(root, body["challenge"],
+                                             body["origin"])},
+                 headers={"host": HOST})
+    assert r.status_code == 200, r.text
+    assert r.json()["method"] == "combined"
+    assert unlock_routes.SESSION_COOKIE in r.headers.get("set-cookie", "")
+
+
+def test_combined_unlock_rejects_a_foreign_root(env, root):
+    _store_combined_identity(env, root)
+    other = KeyPair.generate()
+    minted = env.post("/api/identity/unlock/password/options", json={},
+                      headers={"host": HOST}).json()
+    r = env.post("/api/identity/unlock/combined",
+                 json={"challenge": minted["challenge"],
+                       "signature": _pw_sign(other, minted["challenge"],
+                                             minted["origin"])},
+                 headers={"host": HOST})
+    assert r.status_code == 403

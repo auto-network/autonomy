@@ -613,13 +613,16 @@ async def post_unlock_password_options(request: Request) -> JSONResponse:
                          "domain": UNLOCK_SIGNING_DOMAIN.decode("ascii")})
 
 
-async def post_unlock_password(request: Request) -> JSONResponse:
-    """Verify the root-key signature over the challenge → mint the session.
+async def _complete_challenge_unlock(request: Request, method: str) -> JSONResponse:
+    """Verify a root-key signature over a pending challenge → mint the session.
 
-    Body: ``{challenge, signature}`` where ``signature`` is hex
-    Ed25519 over ``UNLOCK_SIGNING_DOMAIN + canonical_json({v, challenge,
-    origin})``. Verified against the STORED ``root_pub`` — the client
-    never says which key it used.
+    Shared by every root-releasing unlock (``password`` and the combined MFA
+    ``password + passkey``). Body: ``{challenge, signature}`` where
+    ``signature`` is hex Ed25519 over ``UNLOCK_SIGNING_DOMAIN +
+    canonical_json({v, challenge, origin})``. The server verifies against the
+    STORED ``root_pub`` and never learns which factor(s) opened the armor —
+    the browser gathers the factor(s), decrypts locally (I1), and signs. The
+    ``method`` labels the resulting session.
     """
     if _mock_mode():
         return JSONResponse({"ok": False,
@@ -691,17 +694,42 @@ async def post_unlock_password(request: Request) -> JSONResponse:
             "this dashboard's personal root"
         )}, status_code=403)
 
-    response = JSONResponse({"ok": True, "method": "password",
+    response = JSONResponse({"ok": True, "method": method,
                              "display_name": personal.payload.get("display_name")})
     try:
-        token = mint_session_token("password", request=request)
+        token = mint_session_token(method, request=request)
     except (OSError, identity_sessions.SessionStoreError) as exc:
         return JSONResponse({"ok": False, "error": (
-            "the password proof verified, but the dashboard could not create "
+            "the unlock proof verified, but the dashboard could not create "
             f"a revocable session: {exc}"
         )}, status_code=503)
     attach_session_cookie(response, request, token)
     return response
+
+
+async def post_unlock_password(request: Request) -> JSONResponse:
+    """Verify the root-key signature over the challenge → mint the session.
+
+    The password floor: the browser decrypts the armor with the password
+    (locally — I1) and signs the challenge. Verified against the STORED
+    ``root_pub``; the client never says which key it used.
+    """
+    return await _complete_challenge_unlock(request, "password")
+
+
+async def post_unlock_combined(request: Request) -> JSONResponse:
+    """Verify the combined (MFA) unlock: BOTH password AND passkey.
+
+    An MFA identity has no standalone password or passkey factor — only the
+    combined factor — so neither the password path nor the passkey path can
+    open it. The browser gathers both, opens the armor with
+    ``decryptArmorWithCombined`` (locally — I1), and signs the challenge minted
+    by ``…/unlock/password/options`` (the challenge is factor-agnostic). The
+    server verifies the resulting root signature identically to the password
+    path and mints a ``combined`` session. Without a combined unlock an MFA
+    user could enable MFA and then never sign in.
+    """
+    return await _complete_challenge_unlock(request, "combined")
 
 
 # ── operator-approved headless unlock ─────────────────────────────────
@@ -1353,6 +1381,8 @@ ROUTES = [
     Route("/api/identity/unlock/passkey", post_unlock_passkey,
           methods=["POST"]),
     Route("/api/identity/unlock/password/options", post_unlock_password_options,
+          methods=["POST"]),
+    Route("/api/identity/unlock/combined", post_unlock_combined,
           methods=["POST"]),
     Route("/api/identity/unlock/password", post_unlock_password,
           methods=["POST"]),

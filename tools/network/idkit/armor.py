@@ -980,22 +980,19 @@ def enable_mfa(
     return _emit_v2(parse_armor(_emit_v2(data)))
 
 
-def decrypt_root_key_with_combined(
-    armor: str, passphrase: str, prf_output: bytes
-) -> KeyPair:
-    """Open a v2 armor with a combined (MFA) factor: BOTH password AND passkey.
+def _v2_master_kek_with_combined(
+    data: dict, passphrase: str, prf_output: bytes
+) -> bytes:
+    """The master KEK of a combined (MFA) factor, from BOTH halves.
 
     The passphrase unwraps ``share_pw``; the passkey PRF re-derives the
     provisioning private key (selecting the matching combined factor by its
-    public half) and unseals ``share_pk``; their XOR is the master KEK, which
-    unseals the identity. Supplying only one half fails — that is the whole
-    guarantee. Refused when no combined factor's public half matches the PRF
-    output.
+    public half) and unseals ``share_pk``; their XOR is the master KEK.
+    Supplying only one half fails — that is the whole guarantee.
     """
     from .sealing import derive_encapsulation_keypair
     from .sealing import open as seal_open
 
-    data = parse_armor(armor)
     root_pub = data["root_pub"]
     private_hex, public_hex = derive_encapsulation_keypair(
         bytes(prf_output), PASSKEY_ARMOR_PURPOSE
@@ -1017,8 +1014,6 @@ def decrypt_root_key_with_combined(
         wrap_iv = base64.b64decode(factor["iv"], validate=True)
         wrap = base64.b64decode(factor["wrap"], validate=True)
         sealed = base64.b64decode(factor["sealed"], validate=True)
-        seal_iv = base64.b64decode(data["kek_seal"]["iv"], validate=True)
-        seal_ct = base64.b64decode(data["kek_seal"]["ct"], validate=True)
     except (binascii.Error, ValueError) as exc:
         raise ArmorError(f"v2 armor fields do not base64-decode: {exc}") from exc
     pw_key = _derive_key(passphrase, salt, factor["kdf"]["iterations"])
@@ -1036,10 +1031,191 @@ def decrypt_root_key_with_combined(
         raise ArmorPassphraseError(
             "the combined factor does not open with that ceremony's output"
         ) from exc
-    master_kek = _xor32(share_pw, share_pk)
+    return _xor32(share_pw, share_pk)
+
+
+def decrypt_root_key_with_combined(
+    armor: str, passphrase: str, prf_output: bytes
+) -> KeyPair:
+    """Open a v2 armor with a combined (MFA) factor: BOTH password AND passkey.
+
+    Refused when no combined factor's public half matches the PRF output, or
+    when either half is wrong.
+    """
+    data = parse_armor(armor)
+    root_pub = data["root_pub"]
+    master_kek = _v2_master_kek_with_combined(data, passphrase, prf_output)
+    try:
+        seal_iv = base64.b64decode(data["kek_seal"]["iv"], validate=True)
+        seal_ct = base64.b64decode(data["kek_seal"]["ct"], validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ArmorError(f"v2 armor fields do not base64-decode: {exc}") from exc
     return _open_seed_under_master_kek(
         master_kek, seal_iv, seal_ct, root_pub, data["factors"]
     )
+
+
+def _v2_master_kek_with_passkey(data: dict, prf_output: bytes) -> bytes:
+    """The master KEK from a STANDALONE passkey factor (passkey-only open)."""
+    from .sealing import derive_encapsulation_keypair
+    from .sealing import open as seal_open
+
+    private_hex, public_hex = derive_encapsulation_keypair(
+        bytes(prf_output), PASSKEY_ARMOR_PURPOSE
+    )
+    factor = next(
+        (
+            f
+            for f in data["factors"]
+            if f["type"] == "passkey" and f["kem_pub"] == public_hex
+        ),
+        None,
+    )
+    if factor is None:
+        raise ArmorPassphraseError(
+            "no passkey factor on this armor opens with that ceremony's output"
+        )
+    try:
+        sealed = base64.b64decode(factor["sealed"], validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ArmorError(f"v2 armor fields do not base64-decode: {exc}") from exc
+    try:
+        return seal_open(sealed, private_hex, PASSKEY_ARMOR_PURPOSE)
+    except Exception as exc:
+        raise ArmorPassphraseError(
+            "the passkey factor does not open with that ceremony's output"
+        ) from exc
+
+
+def _build_password_factor(
+    root_pub: str, master_kek: bytes, passphrase: str, iterations: int
+) -> dict:
+    """A standalone password factor wrapping ``master_kek`` under
+    ``PBKDF2(passphrase)`` — the same shape :func:`encrypt_root_key` writes."""
+    salt = os.urandom(_SALT_LEN)
+    wrap_iv = os.urandom(_IV_LEN)
+    pw_key = _derive_key(passphrase, salt, iterations)
+    wrap = AESGCM(pw_key).encrypt(
+        wrap_iv, master_kek, _v2_factor_aad(root_pub, "password")
+    )
+    return {
+        "type": "password",
+        "kdf": {
+            "name": "PBKDF2",
+            "hash": "SHA-256",
+            "iterations": iterations,
+            "salt": base64.b64encode(salt).decode("ascii"),
+        },
+        "cipher": "AES-256-GCM",
+        "iv": base64.b64encode(wrap_iv).decode("ascii"),
+        "wrap": base64.b64encode(wrap).decode("ascii"),
+    }
+
+
+def _upsert_password_factor(
+    data: dict, master_kek: bytes, new_passphrase: str, iterations: int
+) -> None:
+    """Set (add or replace) the password factor to a fresh one over
+    ``master_kek``, then re-seal the seed to the new factor set."""
+    root_pub = data["root_pub"]
+    previous_factors = list(data["factors"])
+    pf = _build_password_factor(root_pub, master_kek, new_passphrase, iterations)
+    others = [f for f in data["factors"] if f["type"] != "password"]
+    data["factors"] = [pf, *others]
+    _reseal_to_factor_set(data, master_kek, previous_factors)
+
+
+def set_password_factor(
+    armor: str,
+    current_passphrase: str,
+    new_passphrase: str,
+    *,
+    iterations: int = DEFAULT_ITERATIONS,
+) -> str:
+    """Change the password: open with the current password, re-wrap the master
+    KEK under a new one. The seed and every other factor are untouched.
+
+    NOTE the forward-secrecy caveat of :func:`recover_and_reset_password`
+    applies — an old copy of the armor with the OLD password still opens this
+    identity; making an old copy worthless is a ROOT ROTATION, not a factor
+    change.
+    """
+    if not (_MIN_ITERATIONS <= iterations <= _MAX_ITERATIONS):
+        raise ArmorError(
+            f"iterations must be in [{_MIN_ITERATIONS}, {_MAX_ITERATIONS}]"
+        )
+    data = parse_armor(armor)
+    master_kek = _v2_master_kek(data, current_passphrase)
+    _upsert_password_factor(data, master_kek, new_passphrase, iterations)
+    return _emit_v2(parse_armor(_emit_v2(data)))
+
+
+def set_password_factor_with_passkey(
+    armor: str,
+    prf_output: bytes,
+    new_passphrase: str,
+    *,
+    iterations: int = DEFAULT_ITERATIONS,
+) -> str:
+    """Set a password factor, authorised by a PASSKEY rather than a password.
+
+    The path for a passkey-only identity gaining a password (the "add the other
+    factor" half of enabling MFA, or simply going from face-only to
+    face-or-password). Opens the master KEK with the passkey's PRF, then adds or
+    replaces the password factor.
+    """
+    if not (_MIN_ITERATIONS <= iterations <= _MAX_ITERATIONS):
+        raise ArmorError(
+            f"iterations must be in [{_MIN_ITERATIONS}, {_MAX_ITERATIONS}]"
+        )
+    data = parse_armor(armor)
+    master_kek = _v2_master_kek_with_passkey(data, prf_output)
+    _upsert_password_factor(data, master_kek, new_passphrase, iterations)
+    return _emit_v2(parse_armor(_emit_v2(data)))
+
+
+def disable_mfa(
+    armor: str,
+    passphrase: str,
+    prf_output: bytes,
+    *,
+    iterations: int = DEFAULT_ITERATIONS,
+) -> str:
+    """Split a combined (MFA) factor back into individual factors.
+
+    Opening requires BOTH the password and the passkey (you cannot leave MFA
+    with only one of the two you locked yourself into). The combined factor is
+    replaced by a standalone password factor and a standalone passkey factor
+    for the SAME device, so afterwards EITHER opens the root (the both-required
+    lock is gone). rootReachable is preserved — the result carries two openers.
+    """
+    if not (_MIN_ITERATIONS <= iterations <= _MAX_ITERATIONS):
+        raise ArmorError(
+            f"iterations must be in [{_MIN_ITERATIONS}, {_MAX_ITERATIONS}]"
+        )
+    from .sealing import seal
+
+    data = parse_armor(armor)
+    root_pub = data["root_pub"]
+    combined = next((f for f in data["factors"] if f["type"] == "combined"), None)
+    if combined is None:
+        raise ArmorError("this armor is not multi-factor; there is no MFA to disable")
+    master_kek = _v2_master_kek_with_combined(data, passphrase, prf_output)
+    previous_factors = list(data["factors"])
+    pf = _build_password_factor(root_pub, master_kek, passphrase, iterations)
+    sealed = seal(master_kek, combined["kem_pub"], PASSKEY_ARMOR_PURPOSE)
+    if len(sealed) != _RECOVERY_SEAL_LEN:
+        raise ArmorError("sealed passkey wrap is not the expected length")
+    pk_factor = {
+        "type": "passkey",
+        "credential_id": combined["credential_id"],
+        "kem_pub": combined["kem_pub"],
+        "sealed": base64.b64encode(sealed).decode("ascii"),
+    }
+    others = [f for f in data["factors"] if f["type"] != "combined"]
+    data["factors"] = [pf, pk_factor, *others]
+    _reseal_to_factor_set(data, master_kek, previous_factors)
+    return _emit_v2(parse_armor(_emit_v2(data)))
 
 
 def recover_and_reset_password(
