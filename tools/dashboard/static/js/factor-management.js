@@ -26,7 +26,9 @@ import {
 //    modal overlay so it cannot restyle the host page) ──────────────────────
 const STYLE = `
 .fui-overlay{position:fixed;inset:0;z-index:1000;overflow:auto;display:flex;
-  align-items:flex-start;justify-content:center;padding:32px 16px;background:#080a0f;
+  align-items:center;justify-content:center;background:#080a0f;
+  padding:max(32px,calc(env(safe-area-inset-top) + 24px)) max(16px,env(safe-area-inset-right))
+    max(32px,calc(env(safe-area-inset-bottom) + 24px)) max(16px,env(safe-area-inset-left));
   color:#e5e7eb;font:15px/1.55 ui-sans-serif,-apple-system,"Segoe UI",Roboto,sans-serif}
 *{box-sizing:border-box}
 .card{position:relative;max-width:360px;margin:0 auto;width:100%}
@@ -352,15 +354,19 @@ async function doRearm(opener, action, requirePair) {
   } catch (err) { S.warn = (err && err.message) || String(err); return false; }
 }
 
-// The opener a root-mutating ceremony must present IS the current state's root
-// factor: under MFA it is BOTH the password AND the passkey (the combined
-// factor); a standalone password otherwise; the passkey PRF for a passkey-only
-// identity. Hardcoding the password is what locked the operator out under MFA.
+// The opener a root-mutating ceremony must present is the one the re-arm
+// primitive actually unwraps with. Under MFA that is BOTH halves (the combined
+// factor). Off MFA, EVERY re-arm the panel issues — set/remove password, add a
+// passkey factor, enable MFA, promote/demote — unwraps the master KEK through
+// the PASSWORD when one exists (the passkey-native re-arms are only reachable on
+// a passkey-only armor); so prefer the password, and fall back to the passkey
+// only when there is no password. Preferring rootFactor() here (which is the
+// passkey on a password+passkey armor) handed the password primitives no
+// passphrase — the wiring gap behind "can't upgrade / can't add a password".
 function rootNeed() {
-  const rf = rootFactor();               // 'both' | 'face' | 'pass' | null
-  if (rf === 'both') return ['face', 'pass'];
-  if (rf) return [rf];
-  return M.pass.on ? ['pass'] : ['face'];
+  if (M.mfa) return ['face', 'pass'];
+  if (M.pass.on) return ['pass'];
+  return ['face'];
 }
 function rootOpener() {
   if (M.mfa) return { password: S.password, prf: S.prf };
@@ -587,14 +593,26 @@ function stepDone() {
 
 function finishUnlock() { S.screen = 'keys'; S.act = null; render(); }
 
+// The concise 2–3 word status for the current ceremony step, shown as a header
+// so the operator always knows which step is happening — especially the
+// two-prompt passkey enroll (Authorizing → Enrolling).
+function ceremonyPhase() {
+  if (S.sheet === 'create') return 'Enrolling';
+  if (S.sheet === 'present') return 'Confirming';
+  if (S.after === 'unlocked') return 'Unlocking';
+  return 'Authorizing';
+}
+
 function progScreen() {
   const s = el('div', 'screen');
+  s.appendChild(el('div', 'hd', ceremonyPhase()));
   S.need.forEach((k, i) => {
     const st = i < S.si ? 'done' : (i === S.si ? 'busy' : 'wait');
     const r = el('div', 'st ' + st, '<div class="sic">' + G[k] + '</div><div class="snm">' + NAME[k] + '</div>'
       + (st === 'done' ? TICK : st === 'busy' ? '<div class="spin"></div>' : ''));
     s.appendChild(r);
     if (k === 'pass' && st === 'busy' && !S.sheet) {
+      s.appendChild(el('label', 'olab', 'Enter your password'));
       const i2 = el('input', 'oin'); i2.type = 'password'; i2.autocomplete = 'current-password'; s.appendChild(i2);
       const b = el('div', 'btn flat', 'Continue');
       b.onclick = (e) => { e.stopPropagation(); if (!i2.value) { i2.focus(); return; } S.password = i2.value; stepDone(); };
@@ -607,6 +625,9 @@ function progScreen() {
 
 function setpwScreen() {
   const s = el('div', 'screen');
+  const title = M.mfa ? 'New password'
+    : (S.pwMode === 'changepw') ? 'Change password' : 'Set password';
+  s.appendChild(el('div', 'ttl', title));
   if (M.mfa) {
     s.appendChild(el('div', 'note', 'This password will open your identity on its own. '
       + 'Because a password that opens on its own is the opposite of require-both, saving it '
@@ -718,7 +739,12 @@ function keysScreen() {
     p.appendChild(add0);
   } else {
     const lv = level('pass');
-    const canTap = !M.mfa && hasAlternative();
+    // The authority editor (authScreen) is the single common control for every
+    // authority change, in EVERY state — including MFA, where the only legal
+    // move is dissolving the pair. Gating it off under MFA left the panel with
+    // no path back to password+passkey, so the badge stays tappable whenever an
+    // alternative authority state exists.
+    const canTap = hasAlternative();
     const ptag = '<span class="tag ' + lv + '"' + (canTap ? ' data-p="1" style="cursor:pointer"' : '') + '>'
       + ({ a: 'unlock only', b: 'full authority', off: 'disabled' })[lv] + '</span>';
     const weak = M.pw.mem < M.kdfNow.mem;
@@ -743,7 +769,14 @@ function keysScreen() {
       + (k.here ? '<span class="here">this device</span>' : '') + '</div><div class="kmeta">'
       + k.v + ' &middot; added ' + k.w + '</div></div>' + tag + '<div class="kx">&times;</div>');
     const kb = r.querySelector('[data-k]');
-    if (kb) kb.onclick = (e) => { e.stopPropagation(); changeKey(i); };
+    // Under MFA a passkey cannot be raised on its own — a full standalone
+    // passkey and require-both are contradictory — so tapping its authority
+    // opens the same authority editor (where dissolving the pair makes it full).
+    // Off MFA, the direct promote/demote path applies.
+    if (kb) kb.onclick = (e) => {
+      e.stopPropagation();
+      if (M.mfa) gatherThen('authorize', rootNeed()); else changeKey(i);
+    };
     r.querySelector('.kx').onclick = (e) => { e.stopPropagation(); gatherThen('removekey', rootNeed(), { keyIdx: i }); };
     p.appendChild(r);
   });
@@ -780,10 +813,15 @@ function applyKey() {
 
 function sheet() {
   const creating = S.sheet === 'create'; const presenting = S.sheet === 'present';
+  // 2–3 word phase label so a two-step enroll reads clearly: Authorizing (use)
+  // → Enrolling (create). Present = confirming the specific key being raised.
+  const title = creating ? 'Enrolling' : presenting ? 'Confirming' : 'Authorizing';
+  const sub = creating ? 'Create a passkey'
+    : presenting ? ('Present ' + M.keys[S.keyIdx].l)
+      : 'Use your passkey' + ((statusData && statusData.rp_id) ? ' for ' + statusData.rp_id : '');
   const s = el('div', 'sheet', '<div class="shdim"></div><div class="shbox">'
-    + '<div class="shic">' + G.face + '</div><div class="shttl">'
-    + (creating ? 'Create a passkey' : presenting ? ('Present ' + M.keys[S.keyIdx].l) : 'Use your passkey') + '</div>'
-    + '<div class="shsub">localhost</div><div class="shbtn">Continue</div>'
+    + '<div class="shic">' + G.face + '</div><div class="shttl">' + title + '</div>'
+    + '<div class="shsub">' + sub + '</div><div class="shbtn">Continue</div>'
     + '<div class="shcancel">Cancel</div>');
   s.querySelector('.shbtn').onclick = async (e) => {
     e.stopPropagation();
