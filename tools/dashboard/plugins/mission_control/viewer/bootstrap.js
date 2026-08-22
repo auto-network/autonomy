@@ -595,7 +595,10 @@
     // "who is behind this screen".
     var q = el("button", {class: n ? "mc-q mc-q-hot" : "mc-q",
                           title: "Questions — " + n + " open, " + done + " answered",
-                          onclick: function () { show(ui.panel === "questions" ? null : {panel: "questions"}); }},
+                          onclick: function () {
+          if (ui.panel === "questions" && qaMode === "mission") { show(null); return; }
+          qaMode = "mission"; show({panel: "questions"});
+        }},
                qKids);
     kids.push(q);
     // WAITING ON YOU, kept apart from the questions count. That list is what
@@ -613,7 +616,10 @@
         // only by scrolling the page hunting for Answer controls. The count
         // exists to make them findable; jumping to one of them is the single
         // thing it must not do.
-        onclick: function () { show(ui.panel === "foryou" ? null : {panel: "foryou"}); },
+        onclick: function () {
+          if (ui.panel === "questions" && qaMode === "you") { show(null); return; }
+          qaMode = "you"; show({panel: "questions"});
+        },
       }, [el("span", {text: forYou.length + " asks for you"})]));
     }
     if (ui.noChannel) {
@@ -1222,6 +1228,26 @@
   var PANEL_TITLE = {pillars: "Pillar status",
                      questions: "Questions", foryou: "Asks for you"};
 
+  // TWO DIRECTIONS, ONE PANEL. Questions FOR THE MISSION are conversations
+  // people opened that a coordinator owes or gave an answer; questions FOR
+  // YOU are what the screen's content asks the reader to decide. Push and
+  // pull of the same thing, so they share one panel behind a direction
+  // toggle. Each direction keeps its own filters beneath it.
+  var qaMode = "mission";
+
+  function qaToggle() {
+    var forYou = unanswered().length;
+    var open = openCount();
+    return [el("div", {class: "mc-seg"}, [
+      el("button", {class: qaMode === "mission" ? "mc-seg-on" : "",
+                    text: "For the mission" + (open ? " " + open : ""),
+                    onclick: function () { qaMode = "mission"; render(); }}),
+      el("button", {class: qaMode === "you" ? "mc-seg-on" : "",
+                    text: "For you" + (forYou ? " " + forYou : ""),
+                    onclick: function () { qaMode = "you"; render(); }}),
+    ])];
+  }
+
   // ONE LIST, TWO ORDERINGS. "By pillar" is the snapshot: one tile per
   // pillar, its latest report. "By time" is the history: every report,
   // newest first. Same tiles, same panel, one toggle -- they were two bar
@@ -1278,18 +1304,20 @@
     var body = ui.panel === "pillars"
                  ? (statusMode === "time" ? byTimeRows() : pillarRows())
              : ui.panel === "foryou" ? forYouRows()
-             : questionRows();
+             : qaMode === "you" ? forYouRows()
+             : [el("div", {class: "mc-qfilter"}, filterToggle())]
+                 .concat(questionRows());
     var kids = [
       el("div", {class: "mc-phead"}, [
         el("span", {class: "mc-ptitle", text: PANEL_TITLE[ui.panel] || "Questions"}),
-      ].concat(ui.panel === "questions" ? filterToggle() : [])
+      ].concat(ui.panel === "questions" ? qaToggle() : [])
        .concat(ui.panel === "pillars" ? statusToggle() : []).concat([
         el("span", {class: "mc-grow"}),
         el("button", {class: "mc-x", text: "\u00d7", onclick: function () { show(null); }}),
       ])),
       el("div", {class: "mc-pbody"}, body),
     ];
-    if (ui.panel === "questions") {
+    if (ui.panel === "questions" && qaMode !== "you") {
       // On the overview there is no pillar to name, and `(x || {}).name` is
       // undefined, not absent -- string concatenation renders that as the
       // word. Say where the question actually goes instead.
