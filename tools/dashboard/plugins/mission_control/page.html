@@ -9,6 +9,60 @@
        the fold: status filters and the presence-style picker. -->
   <div class="flex items-center justify-between gap-3 px-4 sm:px-6 py-2.5 border-b border-gray-800">
     <div class="flex items-center gap-1.5 overflow-x-auto" data-testid="mc-status-filters">
+      {# Standard org filter (same contract as Sessions): dropdown-toggle
+         chrome from the shared stylesheet, /api/orgs identities, persisted
+         selection. Hidden while every mission shares one org. #}
+      <div class="sort-wrap" x-show="missionOrgCount > 1 || selectedOrg" data-testid="mc-org-filter">
+        <button type="button" class="sort-toggle"
+                @click="orgFilterOpen = !orgFilterOpen"
+                data-testid="mc-org-filter-toggle">
+          <span class="sc-org" style="width:14px;height:14px"
+                :class="orgFilterPicked && orgFilterPicked.favicon ? 'sc-org-favicon' : ''"
+                :style="orgFilterPicked && !orgFilterPicked.favicon ? `background:${orgFilterPicked.color}` : (orgFilterPicked ? '' : 'background:#2a3441')">
+            <template x-if="orgFilterPicked && orgFilterPicked.favicon">
+              <img class="sc-org-img" :src="orgFilterPicked.favicon" :alt="orgFilterPicked.name">
+            </template>
+            <template x-if="!(orgFilterPicked && orgFilterPicked.favicon)">
+              <span class="sc-org-initial" style="font-size:9px;line-height:14px" x-text="orgFilterPicked ? orgFilterPicked.initial : '∞'"></span>
+            </template>
+          </span>
+          <span class="sort-toggle-value" x-text="orgFilterPicked ? orgFilterPicked.name : 'All Orgs'"></span>
+          <span class="sort-toggle-icon">▾</span>
+        </button>
+        <div class="sort-menu" x-show="orgFilterOpen" x-cloak
+             @click.away="orgFilterOpen = false" data-testid="mc-org-filter-menu">
+          <div class="sort-option" :class="!selectedOrg ? 'selected' : ''"
+               @click="pickOrgFilter('')" data-testid="mc-org-filter-option-all">
+            <span class="flex items-center gap-2">
+              <span class="sc-org" style="width:14px;height:14px;background:#2a3441">
+                <span class="sc-org-initial" style="font-size:9px;line-height:14px">∞</span>
+              </span>
+              <span>All Orgs</span>
+            </span>
+            <span class="sort-option-check">✓</span>
+          </div>
+          <template x-for="o in orgFilterList" :key="o.slug">
+            <div class="sort-option" :class="selectedOrg === o.slug ? 'selected' : ''"
+                 @click="pickOrgFilter(o.slug)"
+                 :data-testid="'mc-org-filter-option-' + o.slug">
+              <span class="flex items-center gap-2">
+                <span class="sc-org" style="width:14px;height:14px"
+                      :class="o.favicon ? 'sc-org-favicon' : ''"
+                      :style="o.favicon ? '' : `background:${o.color}`">
+                  <template x-if="o.favicon">
+                    <img class="sc-org-img" :src="o.favicon" :alt="o.name">
+                  </template>
+                  <template x-if="!o.favicon">
+                    <span class="sc-org-initial" style="font-size:9px;line-height:14px" x-text="o.initial"></span>
+                  </template>
+                </span>
+                <span x-text="o.name"></span>
+              </span>
+              <span class="sort-option-check">✓</span>
+            </div>
+          </template>
+        </div>
+      </div>
       <template x-for="f in statusFilters" :key="f.value">
         <button @click="statusFilter = f.value"
                 class="px-2.5 py-1 rounded-full text-xs font-medium whitespace-nowrap transition-colors"
@@ -53,6 +107,13 @@
           <div class="min-w-0">
             <div class="flex items-center gap-2">
               <span class="text-white font-semibold text-base" x-text="m.name"></span>
+              {# The org is the mission's entire access boundary — a reader
+                 who cannot see it is blind to a mis-homed mission, which
+                 happened. Always visible, never inferred. #}
+              <span class="px-1.5 py-0.5 rounded text-[10px] font-semibold tracking-wide bg-purple-900/30 text-purple-300"
+                    x-show="m.org"
+                    :data-testid="'mc-org-' + m.mission_id"
+                    x-text="m.org"></span>
               <span class="px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide"
                     x-show="m.status !== 'active'"
                     :class="m.status === 'paused' ? 'bg-amber-900/40 text-amber-300' : 'bg-gray-700/60 text-gray-400'"

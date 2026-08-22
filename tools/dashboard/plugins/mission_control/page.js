@@ -184,9 +184,55 @@ function missionControlPage() {
         { value: 'complete', label: 'Complete', count: counts.complete },
       ];
     },
+    // Standard org filter — same contract as the Sessions page: /api/orgs
+    // list, dropdown-toggle chrome, localStorage persistence. Shown only
+    // when the mission list spans more than one org.
+    selectedOrg: localStorage.getItem('missionControlOrgFilter') || '',
+    orgFilterList: [],
+    orgFilterOpen: false,
+    async _fetchOrgFilterList() {
+      try {
+        const data = await fetch('/api/orgs').then((r) => r.ok ? r.json() : { orgs: [] });
+        this.orgFilterList = (data.orgs || []).map(function (e) {
+          var org = (e && e.org) || {};
+          var ident = (e && e.identity_resolved) || {};
+          var slug = org.slug || ident.slug || '';
+          return {
+            slug: slug,
+            name: ident.name || slug,
+            color: ident.color || '#4b5563',
+            favicon: ident.favicon || null,
+            initial: ident.initial || (slug ? slug[0].toUpperCase() : '?'),
+          };
+        }).filter(function (o) { return o.slug; });
+      } catch (e) {
+        console.warn('[missionControlPage] orgs fetch error', e);
+        this.orgFilterList = [];
+      }
+    },
+    get missionOrgCount() {
+      return new Set(this.missions.map((m) => m.org || '').filter(Boolean)).size;
+    },
+    get orgFilterPicked() {
+      var self = this;
+      if (!this.selectedOrg) return null;
+      return (this.orgFilterList || []).find(function (o) { return o.slug === self.selectedOrg; }) || null;
+    },
+    pickOrgFilter(slug) {
+      this.orgFilterOpen = false;
+      slug = slug || '';
+      if (slug === this.selectedOrg) return;
+      this.selectedOrg = slug;
+      localStorage.setItem('missionControlOrgFilter', slug);
+    },
+    _matchesOrg(m) {
+      if (!this.selectedOrg) return true;
+      return (m.org || '') === this.selectedOrg;
+    },
     get filteredMissions() {
-      if (this.statusFilter === 'all') return this.missions;
-      return this.missions.filter((m) => m.status === this.statusFilter);
+      let rows = this.missions.filter((m) => this._matchesOrg(m));
+      if (this.statusFilter === 'all') return rows;
+      return rows.filter((m) => m.status === this.statusFilter);
     },
 
     presenceStyles: MC_PRESENCE_STYLES,
@@ -197,6 +243,7 @@ function missionControlPage() {
     },
 
     async init() {
+      this._fetchOrgFilterList();
       await this.refreshMissions();
     },
 
