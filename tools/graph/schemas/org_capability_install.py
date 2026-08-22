@@ -30,6 +30,7 @@ from __future__ import annotations
 from typing import Any
 
 from .registry import (
+    publication_band,
     RemediationRef,
     SchemaValidationError,
     SettingSchema,
@@ -102,6 +103,7 @@ def _validate_str_str_map(payload: dict, key: str, cls_name: str) -> None:
 #: their database is the organizational home of their own
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
+@publication_band(min="raw", max="curated")
 @home("organization")
 @keyed_per_entity(key_strategy="contract_name")
 class OrgCapabilityInstallV1(SettingSchema):

@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .registry import SchemaValidationError, SettingSchema, keyed_per_entity
+from .registry import SchemaValidationError, SettingSchema, keyed_per_entity, publication_band
 from .registry import home
 
 
@@ -68,6 +68,7 @@ _BOOL_FIELDS = (
 )
 
 
+@publication_band(min="raw", max="curated")
 @keyed_per_entity(
     key_strategy="workspace_id:contract_name",
     # Each key segment identifies a row in another set: the first is a

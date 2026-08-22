@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .registry import SettingSchema, SchemaValidationError, keyed_per_entity
+from .registry import SettingSchema, SchemaValidationError, keyed_per_entity, publication_band
 from .registry import home
 
 
@@ -55,6 +55,7 @@ SYNOPSIS = {
 #: their database is the organizational home of their own
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
+@publication_band(min="raw", max="canonical")
 @home("organization")
 @keyed_per_entity(key_strategy="org_slug")
 class OrgV1(SettingSchema):

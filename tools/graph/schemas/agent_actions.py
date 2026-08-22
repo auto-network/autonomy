@@ -20,7 +20,7 @@ from __future__ import annotations
 import string
 from typing import Any
 
-from .registry import SchemaValidationError, SettingSchema, keyed_per_entity
+from .registry import SchemaValidationError, SettingSchema, keyed_per_entity, publication_band
 from .registry import home
 
 
@@ -100,6 +100,7 @@ def validate_prompt_template(template: str) -> None:
         )
 
 
+@publication_band(min="raw", max="curated")
 @keyed_per_entity(key_strategy="action_name")
 class AgentActionV2(SettingSchema):
     """Shape of a ``dashboard.agent-actions#2`` member payload.

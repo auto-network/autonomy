@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import Any
 
 from .registry import (
+    publication_band,
     SchemaValidationError,
     SettingSchema,
     field,
@@ -51,6 +52,7 @@ SYNOPSIS = {
 }
 
 
+@publication_band(min="raw", max="canonical")
 @keyed_per_entity(key_strategy="flag_name")
 class FeatureFlagV1(SettingSchema):
     """Per-flag boolean toggle.

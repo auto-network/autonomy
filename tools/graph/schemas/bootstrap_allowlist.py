@@ -24,6 +24,7 @@ graph://8cf067e3-ca3. First-run init design: graph://dc310166-911.
 from __future__ import annotations
 
 from .registry import (
+    publication_band,
     home,
     keyed_per_entity,
     SchemaValidationError,
@@ -62,6 +63,7 @@ _LIST_FIELDS = ("canonical", "published")
 #: their database is the organizational home of their own
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
+@publication_band(min="raw", max="curated")
 @home("organization")
 @keyed_per_entity(key_strategy="org_slug")
 class OrgBootstrapAllowlistV1(SettingSchema):

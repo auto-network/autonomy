@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Any
 
 from .registry import (
+    publication_band,
     SchemaValidationError,
     SettingSchema,
     field,
@@ -45,6 +46,7 @@ SYNOPSIS = {
 }
 
 
+@publication_band(min="raw", max="curated")
 @keyed_per_entity(key_strategy="session_name:repo")
 class WorktreeWatchV1(SettingSchema):
     """Persisted watch configuration for one Worktrees row."""

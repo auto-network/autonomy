@@ -39,7 +39,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .registry import SchemaValidationError, SettingSchema, field, keyed_per_entity
+from .registry import SchemaValidationError, SettingSchema, field, keyed_per_entity, publication_band
 from .registry import home
 
 
@@ -128,6 +128,7 @@ def _validate_op(op: Any, idx: int, cls_name: str) -> str:
 #: their database is the organizational home of their own
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
+@publication_band(min="raw", max="canonical")
 @home("organization")
 @keyed_per_entity(key_strategy="contract_name")
 class CapabilityContractV1(SettingSchema):

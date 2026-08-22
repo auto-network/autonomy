@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .registry import SchemaValidationError, SettingSchema, field, keyed_per_entity
+from .registry import SchemaValidationError, SettingSchema, field, keyed_per_entity, publication_band
 from .registry import home
 
 
@@ -172,6 +172,7 @@ def _validate_object(payload: dict, key: str, cls_name: str) -> None:
 #: their database is the organizational home of their own
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
+@publication_band(min="raw", max="curated")
 @home("organization")
 @keyed_per_entity(key_strategy="policy_scope_key")
 class CommitPolicyV1(SettingSchema):
@@ -299,6 +300,7 @@ class CommitPolicyV1(SettingSchema):
 #: their database is the organizational home of their own
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
+@publication_band(min="raw", max="canonical")
 @home("organization")
 @keyed_per_entity(key_strategy="contract_operation")
 class OperationPolicyV1(SettingSchema):

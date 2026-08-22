@@ -30,6 +30,7 @@ import re
 from typing import Any
 
 from .registry import (
+    publication_band,
     SchemaValidationError,
     SettingSchema,
     field,
@@ -140,6 +141,7 @@ def _require_heads(value: Any, cls_name: str, what: str = "heads") -> list:
 # ── autonomy.network.ledger-state ─────────────────────────────
 
 
+@publication_band(min="raw", max="raw")
 @keyed_per_entity(key_strategy="genesis_id")
 class NetworkLedgerStateV1(SettingSchema):
     """One replica's view of one org ledger — hashes and cursors only.
@@ -232,6 +234,7 @@ class NetworkLedgerStateV1(SettingSchema):
 # ── autonomy.network.ledger-projection ────────────────────────
 
 
+@publication_band(min="raw", max="raw")
 @keyed_per_entity(key_strategy="genesis_id:projection")
 class NetworkLedgerProjectionV1(SettingSchema):
     """A fold-derived read model — a rebuildable cache, never the truth.
