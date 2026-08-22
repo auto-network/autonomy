@@ -288,6 +288,33 @@ def _question_state(entry: dict) -> dict:
     }
 
 
+def _live_session_hrefs() -> dict[str, str]:
+    """tmux name → dashboard session-viewer URL, for live sessions only.
+
+    The path's project segment is load-bearing (the viewer derives its tail
+    API URL from it), so it comes from the session registry rather than a
+    guess. Failure degrades to no links — the bar icon simply not existing
+    — never to a screen that fails to compose.
+    """
+    from urllib.parse import quote
+    try:
+        from tools.dashboard.dao import sessions as dao_sessions
+        rows = dao_sessions.get_active_sessions()
+    except Exception:
+        return {}
+    hrefs: dict[str, str] = {}
+    for row in rows:
+        tmux = row.get("tmux_session") or ""
+        sid = row.get("session_id") or tmux
+        project = row.get("project") or "session"
+        if not tmux:
+            continue
+        hrefs[tmux] = (
+            f"/session/{quote(str(project), safe='')}/{quote(str(sid), safe='')}"
+            f"?tmux={quote(tmux, safe='')}")
+    return hrefs
+
+
 def mission_state(mission_id: str, pillar_id: str | None = None, *,
                   include_sessions: bool = False) -> dict:
     """The whole state block for one screen.
@@ -307,15 +334,22 @@ def mission_state(mission_id: str, pillar_id: str | None = None, *,
     # cannot reach the upload endpoint anyway, and should not be handed the
     # internal name of a machine session to go with the screen they were
     # invited to read.
+    live = _live_session_hrefs() if include_sessions else {}
     if include_sessions:
         by_id = {p["pillar_id"]: p for p in pillar_rows}
         for entry in pillars:
-            entry["coordinator_session"] = (
+            coordinator = (
                 by_id.get(entry["pillar_id"], {}).get("coordinator_session") or "")
+            entry["coordinator_session"] = coordinator
+            # The bar's way back to the session running this pillar. Only a
+            # LIVE session earns one: a link to a dead session is a broken
+            # door, and the icon not appearing is the honest rendering.
+            entry["session_href"] = live.get(coordinator, "")
     return {
         "mission_id": mission_id,
         "coordinator_session": (
             mission.get("coordinator_session") or "" if include_sessions else ""),
+        "session_href": live.get(mission.get("coordinator_session") or "", ""),
         # The overview screen is not "Mission" -- it has a name, and the bar
         # is where a reader confirms which mission they are looking at.
         "mission": mission.get("name") or "",
