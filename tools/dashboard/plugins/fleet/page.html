@@ -86,6 +86,11 @@
                     <div><dt>Transferred here</dt><dd class="mono" x-text="machine.rowKind === 'pending_admission' ? '—' : bytesLabel(machine.bytesSent + machine.bytesReceived)"></dd></div>
                     <div x-show="machine.lastErrorCode"><dt>Last error</dt><dd class="error-code" x-text="machine.lastErrorCode"></dd></div>
                   </dl>
+                  <button x-show="machine.rowKind === 'pending_admission' && machine.standing === 'pending_approval' && machine.sourceApprovalId"
+                          type="button" class="fleet-primary-action fleet-review-approval"
+                          @click="reviewApproval(machine)">
+                    Review approval
+                  </button>
                 </div>
               </article>
             </template>

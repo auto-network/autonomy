@@ -88,6 +88,18 @@ function fleetPage() {
 
     toggle(id) { this.expandedId = this.expandedId === id ? null : id; },
 
+    reviewApproval(machine) {
+      const id = machine && machine.sourceApprovalId;
+      if (!id) return;
+      if (typeof window.openApprovalOverlay === 'function') {
+        window.openApprovalOverlay(id);
+        return;
+      }
+      // The shared activity screen will open the same central approval when
+      // the overlay bundle is not present yet (for example on a cold PWA).
+      window.location.assign('/activity?focus=approval&id=' + encodeURIComponent(id));
+    },
+
     machineClass(machine) {
       if (machine.standing === 'revoked' || machine.standing === 'admission_failed') return 'failed';
       if (machine.rowKind === 'pending_admission') return 'pending';
