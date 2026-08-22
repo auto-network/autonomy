@@ -15,6 +15,28 @@
     return m ? m[1] : '';
   }
 
+  function _linkedViewportRect() {
+    var vv = window.visualViewport || null;
+    var scrollX = Number(window.scrollX) || 0;
+    var scrollY = Number(window.scrollY) || 0;
+    var offsetLeft = vv && Number(vv.offsetLeft) || 0;
+    var offsetTop = vv && Number(vv.offsetTop) || 0;
+    var pageLeft = vv && Number.isFinite(Number(vv.pageLeft))
+      ? Number(vv.pageLeft)
+      : scrollX + offsetLeft;
+    var pageTop = vv && Number.isFinite(Number(vv.pageTop))
+      ? Number(vv.pageTop)
+      : scrollY + offsetTop;
+    var width = vv && Number(vv.width) > 0 ? Number(vv.width) : Number(window.innerWidth) || 0;
+    var height = vv && Number(vv.height) > 0 ? Number(vv.height) : Number(window.innerHeight) || 0;
+    return {
+      left: Math.max(0, pageLeft),
+      top: Math.max(0, pageTop),
+      width: Math.max(0, width),
+      height: Math.max(0, height),
+    };
+  }
+
   // ── State picker HTML generator (for multi-state fixtures) ────────────────
   function _buildStatePickerHtml(stateKeys) {
     var pills = stateKeys.map(function (key, i) {
@@ -119,6 +141,7 @@
           this._loadGen = 0;   // invalidates in-flight fetches on nav/destroy
           this.linkedSessionId = _linkedSessionFromQuery();
           document.body.classList.toggle('route-design-linked', this.linkedSessionMode);
+          if (this.linkedSessionMode) this._bindLinkedViewport();
           this.revisionId = _revisionIdFromPath();
           this._load();
           var self = this;
@@ -167,9 +190,63 @@
             window.removeEventListener('popstate', this._popstateHandler);
             this._popstateHandler = null;
           }
+          this._unbindLinkedViewport();
           this._tmuxSession = null;
           this.chatConnected = false;
           this.isLive = false;
+        },
+
+        // iOS can move the visual viewport after status-bar, keyboard, or app
+        // transitions without moving the layout viewport with it. Anchor this
+        // full-bleed shell to the live visual rectangle so the whole surface
+        // cannot drift upward and leave an equal gutter at the bottom.
+        _syncLinkedViewport: function () {
+          if (!this.linkedSessionMode || !this.$root || !this.$root.style) return;
+          var rect = _linkedViewportRect();
+          this.$root.style.setProperty('--design-viewport-left', rect.left + 'px');
+          this.$root.style.setProperty('--design-viewport-top', rect.top + 'px');
+          this.$root.style.setProperty('--design-viewport-width', rect.width + 'px');
+          this.$root.style.setProperty('--design-viewport-height', rect.height + 'px');
+        },
+
+        _bindLinkedViewport: function () {
+          if (this._linkedViewportHandler) return;
+          var self = this;
+          this._linkedViewportHandler = function () {
+            if (self._linkedViewportFrame) window.cancelAnimationFrame(self._linkedViewportFrame);
+            self._linkedViewportFrame = window.requestAnimationFrame(function () {
+              self._linkedViewportFrame = null;
+              self._syncLinkedViewport();
+            });
+          };
+          var vv = window.visualViewport;
+          if (vv && vv.addEventListener) {
+            vv.addEventListener('resize', this._linkedViewportHandler);
+            vv.addEventListener('scroll', this._linkedViewportHandler);
+          }
+          window.addEventListener('resize', this._linkedViewportHandler);
+          window.addEventListener('orientationchange', this._linkedViewportHandler);
+          window.addEventListener('pageshow', this._linkedViewportHandler);
+          window.addEventListener('scroll', this._linkedViewportHandler);
+          this._syncLinkedViewport();
+        },
+
+        _unbindLinkedViewport: function () {
+          if (this._linkedViewportFrame) {
+            window.cancelAnimationFrame(this._linkedViewportFrame);
+            this._linkedViewportFrame = null;
+          }
+          if (!this._linkedViewportHandler) return;
+          var vv = window.visualViewport;
+          if (vv && vv.removeEventListener) {
+            vv.removeEventListener('resize', this._linkedViewportHandler);
+            vv.removeEventListener('scroll', this._linkedViewportHandler);
+          }
+          window.removeEventListener('resize', this._linkedViewportHandler);
+          window.removeEventListener('orientationchange', this._linkedViewportHandler);
+          window.removeEventListener('pageshow', this._linkedViewportHandler);
+          window.removeEventListener('scroll', this._linkedViewportHandler);
+          this._linkedViewportHandler = null;
         },
 
         // ── Data loading ──────────────────────────────────────────────────

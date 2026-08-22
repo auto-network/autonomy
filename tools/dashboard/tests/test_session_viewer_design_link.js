@@ -105,16 +105,28 @@ function makeHarness() {
   };
 }
 
-function makeLinkedDesignHarness(search = '?from_session=auto-linked') {
+function makeLinkedDesignHarness(search = '?from_session=auto-linked', viewport = {}) {
   const components = {};
   const bodyClasses = new Set();
   const storage = new Map();
+  const rootStyles = new Map();
+  const viewportListeners = {};
   const sessions = {
     'auto-linked': {isLive: true, label: 'Linked session'},
     'auto-other': {isLive: true, label: 'Other session'},
   };
   let navigatedTo = '';
   let historyPath = '';
+  const visualViewport = {
+    width: viewport.width || 390,
+    height: viewport.height || 844,
+    offsetLeft: viewport.offsetLeft || 0,
+    offsetTop: viewport.offsetTop || 0,
+    ...(viewport.pageLeft === undefined ? {} : {pageLeft: viewport.pageLeft}),
+    ...(viewport.pageTop === undefined ? {} : {pageTop: viewport.pageTop}),
+    addEventListener(name, callback) { (viewportListeners[name] ||= new Set()).add(callback); },
+    removeEventListener(name, callback) { viewportListeners[name]?.delete(callback); },
+  };
   const document = {
     body: {
       classList: {
@@ -166,6 +178,13 @@ function makeLinkedDesignHarness(search = '?from_session=auto-linked') {
       removeItem(key) { storage.delete(key); },
     },
     location: {pathname: '/design/revision-1', search},
+    visualViewport,
+    innerWidth: 390,
+    innerHeight: 844,
+    scrollX: viewport.scrollX || 0,
+    scrollY: viewport.scrollY || 0,
+    requestAnimationFrame(callback) { callback(); return 0; },
+    cancelAnimationFrame() {},
     addEventListener() {},
     removeEventListener() {},
     fetch: async () => ({ok: true, json: async () => fullDesign}),
@@ -176,10 +195,16 @@ function makeLinkedDesignHarness(search = '?from_session=auto-linked') {
   const page = components.designPage();
   page.$watch = () => {};
   page.$nextTick = (callback) => callback();
+  page.$root = {
+    style: {setProperty(name, value) { rootStyles.set(name, value); }},
+  };
   return {
     page,
     bodyClasses,
     storage,
+    rootStyles,
+    visualViewport,
+    viewportListeners,
     get navigatedTo() { return navigatedTo; },
     get historyPath() { return historyPath; },
   };
@@ -245,6 +270,31 @@ describe('linked Design Studio viewer mode', () => {
     assert.equal(h.historyPath, '/design/revision-2?from_session=auto-linked');
   });
 
+  it('tracks an iOS visual viewport shift without leaving a gutter', () => {
+    const h = makeLinkedDesignHarness('?from_session=auto-linked', {
+      width: 390,
+      height: 804,
+      pageLeft: 0,
+      pageTop: 40,
+    });
+    h.page.init();
+
+    assert.equal(h.rootStyles.get('--design-viewport-top'), '40px');
+    assert.equal(h.rootStyles.get('--design-viewport-height'), '804px');
+    assert.equal(h.rootStyles.get('--design-viewport-width'), '390px');
+    assert.equal(40 + Number.parseInt(h.rootStyles.get('--design-viewport-height'), 10), 844);
+
+    h.visualViewport.pageTop = 0;
+    h.visualViewport.height = 844;
+    for (const callback of h.viewportListeners.resize) callback();
+    assert.equal(h.rootStyles.get('--design-viewport-top'), '0px');
+    assert.equal(h.rootStyles.get('--design-viewport-height'), '844px');
+
+    h.page.destroy();
+    assert.equal(h.viewportListeners.resize.size, 0);
+    assert.equal(h.viewportListeners.scroll.size, 0);
+  });
+
   it('renders only the linked rail and iframe while focused', () => {
     const html = fs.readFileSync(DESIGN_PAGE_HTML, 'utf8');
     const css = fs.readFileSync(DESIGN_PAGE_CSS, 'utf8');
@@ -255,6 +305,8 @@ describe('linked Design Studio viewer mode', () => {
     assert.match(css, /body\.route-design-linked #sidebar/);
     assert.match(css, /body\.route-design-linked \.voice-capsule/);
     assert.match(css, /body\.route-design-linked \.design-surface/);
+    assert.match(css, /--design-viewport-top/);
+    assert.match(css, /env\(safe-area-inset-top/);
     assert.match(css, /flex: 1 1 0%/);
   });
 });
