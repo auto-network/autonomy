@@ -89,6 +89,22 @@ def test_reconcile_revokes_the_bearer_when_no_longer_approved(dbs):
     assert auth_db.resolve_token(token_hash) is None
 
 
+def test_lazy_backfill_mints_a_bearer_for_a_preexisting_approval(dbs):
+    # A session approved BEFORE mint-on-approval existed: approved, no bearer.
+    handle = _pending("chat-old")
+    mcp_relay_db.approve_session(
+        "chat-old", autonomy_org="autonomy", level="readwrite", expires_at=None)
+    assert mcp_relay_db.get_session("chat-old")["peer_bearer"] is None
+
+    # The first approved poll self-heals: mints + returns + persists the bearer.
+    auth = mcp_relay_routes._authorization("chat-old")
+    raw = auth.get("bearer")
+    assert raw, "resolve/status must lazily mint a bearer for a pre-existing approval"
+    assert mcp_relay_db.get_session("chat-old")["peer_bearer"] == raw
+    resolved = auth_db.resolve_token(hashlib.sha256(raw.encode()).hexdigest())
+    assert resolved == (handle, "autonomy")
+
+
 def _collect_request(osession, service_token):
     body = f'{{"openai_session": "{osession}"}}'.encode()
     return Request({
