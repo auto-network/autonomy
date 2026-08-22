@@ -381,7 +381,10 @@
   // the rest are the cross-pillar views. Replaces the "6 pillars · 187
   // items" caption, which named the same things without being tappable.
   var TABS = [
-    {id: "overview",  label: PILLARS.length + " pillars"},
+    // The landing screen — the activity grid and one card per pillar —
+    // IS the status screen, and its tab says so. It stays home: tapping
+    // it clears any pillar filter and returns to the summary.
+    {id: "overview",  label: "Status"},
     {id: "decisions", label: "Decisions"},
     {id: "questions", label: "Questions"},
     {id: "news",      label: "News"},
