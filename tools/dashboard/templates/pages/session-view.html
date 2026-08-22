@@ -112,12 +112,21 @@
                   x-show="role"
                   x-text="role ? role.charAt(0).toUpperCase() + role.slice(1) : ''"
                   data-testid="session-role"></span>
+            <!-- A live session has a short interval before the agent knows
+                 enough to name its work and choose a role. Keep that state
+                 composed like the finished header instead of leaving an
+                 orphaned status dot beside a blank row. This is presentation
+                 only; it disappears as soon as a real role arrives. Host
+                 sessions already have the HOST type badge in this slot. -->
+            <span class="sc-role sv-identity-placeholder"
+                  x-show="isLive && sessionType !== 'host' && !role"
+                  data-testid="session-role-placeholder">New Session</span>
             <div style="flex:1"></div>
             <!-- Right cluster: entries count + ⌥ / ESC / >_ / chevron.
                  Wrapped in its own flex with a wider gap so the icons
                  breathe; the parent row's 12px stays for the left
                  badges. -->
-            <div style="display:flex;align-items:center;gap:16px;">
+            <div class="sv-header-actions">
               <template x-if="!isLive && !resumeStarting">
                 <span class="text-xs text-gray-500" x-text="entries.length + ' entries'"></span>
               </template>
@@ -147,6 +156,25 @@
                       data-testid="session-worktree-review-button"
                       aria-label="Open worktree review"
                       style="display:none;"><span class="sv-term-glyph">⌥</span></button>
+              <button type="button"
+                      class="sv-term-toggle sv-term-design-link"
+                      @click.stop="openLinkedDesign()"
+                      x-show="!!linkedDesign"
+                      :title="linkedDesignTooltip"
+                      aria-label="Open linked Design Studio experiment"
+                      data-testid="session-design-link"
+                      style="display:none;">
+                <svg viewBox="0 0 20 20"
+                     fill="none"
+                     stroke="currentColor"
+                     stroke-width="1.7"
+                     stroke-linecap="round"
+                     stroke-linejoin="round"
+                     aria-hidden="true">
+                  <path d="M7 3.75H3.75V7M13 3.75h3.25V7M16.25 13v3.25H13M7 16.25H3.75V13"></path>
+                  <circle cx="10" cy="10" r="2.15"></circle>
+                </svg>
+              </button>
               <template x-if="_tmuxSession && isLive">
                 <button class="sv-term-toggle sv-term-escape"
                         @click.stop="interrupt()"

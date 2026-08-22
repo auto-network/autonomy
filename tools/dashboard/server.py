@@ -10657,6 +10657,17 @@ async def api_design_create(request):
             "design_id": design_data["design_id"],
             "revision_seq": design_data["revision_seq"],
         })
+        # Design Studio already exposes the creator-session presence edge.
+        # Publish its inverse too so an open full-page session viewer can
+        # reveal a return control as soon as a design is linked or revised.
+        linked_session = design_data.get("linked_session") or creator_session_id
+        if linked_session:
+            await event_bus.broadcast(f"session-design:{linked_session}", {
+                "revision_id": rev_id,
+                "latest_revision_id": rev_id,
+                "design_id": design_data["design_id"],
+                "title": design_data.get("title") or "Untitled Design",
+            })
 
     return JSONResponse({"id": rev_id}, status_code=201)
 
