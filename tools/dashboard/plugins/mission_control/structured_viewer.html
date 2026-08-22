@@ -34,12 +34,19 @@
   #mc-app .mc-sub{color:var(--ink3);font-size:.82rem;margin:0 0 14px}
 
   /* glance chips */
-  .mc-glance{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 16px}
+  .mc-glance{display:flex;gap:8px;flex-wrap:nowrap;align-items:stretch;
+    margin:0 0 16px;overflow-x:auto;scrollbar-width:none}
+  .mc-glance::-webkit-scrollbar{display:none}
   .mc-glance .g{
-    display:flex;align-items:baseline;gap:6px;background:var(--card);
-    border:1px solid var(--line);border-radius:8px;padding:6px 11px;
-    cursor:pointer;font:inherit;color:inherit;
+    flex:none;display:flex;align-items:baseline;gap:5px;background:var(--card);
+    border:1px solid var(--line);border-radius:8px;padding:6px 9px;
+    cursor:pointer;font:inherit;color:inherit;white-space:nowrap;
   }
+  .mc-gset{flex:none;display:inline-flex;background:var(--card);
+    border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .mc-gset .g{border:0;border-radius:0;border-left:1px solid var(--line)}
+  .mc-gset .g:first-child{border-left:0}
+  .mc-gset .g.on{box-shadow:inset 0 0 0 1px var(--accent-dim)}
   .mc-glance .g:hover{border-color:var(--line2)}
   .mc-glance .g.on{border-color:var(--accent-dim);background:#232345}
   .mc-glance .g.on span{color:var(--ink2)}
@@ -402,18 +409,18 @@
   // back the way it was. Selecting a chip while another is on switches to
   // it — never two at once.
   var GLANCE = [
-    {key:"proven",  cls:"gd", n:counts.proven,   label:"proven / done",
-     match:function (it) { return it.state==="proven"||it.state==="done"||it.state==="settled"; },
-     empty:"Nothing proven or done yet."},
-    {key:"flight",  cls:"gw", n:counts.activeish, label:"in flight",
-     match:function (it) { return it.state==="active"||it.state==="code_only"; },
-     empty:"Nothing in flight."},
+    {key:"asks",    cls:"ga", n:counts.asks,     label:"asks",
+     match:function (it) { return it.kind==="question" && it.state==="open" && !!it.ask; },
+     empty:"Nothing is waiting on you."},
     {key:"blocked", cls:"gc", n:counts.blocked,  label:"blocked",
      match:function (it) { return it.state==="blocked"; },
      empty:"Nothing is blocked."},
-    {key:"asks",    cls:"ga", n:counts.asks,     label:"asks for you",
-     match:function (it) { return it.kind==="question" && it.state==="open" && !!it.ask; },
-     empty:"Nothing is waiting on you."},
+    {key:"flight",  cls:"gw", n:counts.activeish, label:"in flight",
+     match:function (it) { return it.state==="active"||it.state==="code_only"; },
+     empty:"Nothing in flight."},
+    {key:"proven",  cls:"gd", n:counts.proven,   label:"done",
+     match:function (it) { return it.state==="proven"||it.state==="done"||it.state==="settled"; },
+     empty:"Nothing proven or done yet."},
   ];
   // Every item wears the one glance bucket it belongs to (states are
   // single-valued, so the buckets never overlap); the global filter and
@@ -516,6 +523,7 @@
       show("glance-" + key);
     else updateChips();
   }
+  var glanceCluster = el("div","mc-gset");
   GLANCE.forEach(function (g) {
     var c = el("button","g "+g.cls);
     g.numEl = el("b",null,String(g.n));
@@ -524,8 +532,9 @@
     c.setAttribute("aria-pressed","false");
     c.addEventListener("click",function(){ toggleGlance(g.key); });
     g.btn = c;
-    glance.appendChild(c);
+    (g.key === "asks" ? glance : glanceCluster).appendChild(c);
   });
+  glance.appendChild(glanceCluster);
 
   // ── activity grid: surfaces × days from item timestamps ─────────
   (function activity(){
