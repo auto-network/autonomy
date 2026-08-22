@@ -95,14 +95,27 @@ def test_authorize_pending_session_denied():
 
 def test_authorize_read_tool_allowed_and_scoped():
     a = gateway_mod.authorize(_TRUSTED, "search", {},
+        poster=_poster({"status": "approved", "autonomy_org": "autonomy",
+                        "level": "read", "bearer": "tok-read"}))
+    assert a["allowed"] is True and a["org"] == "autonomy" and a["bearer"] == "tok-read"
+
+
+def test_authorize_approved_without_bearer_denied():
+    # The dashboard mints/attaches "bearer" exactly while the grant is live and
+    # drops it the instant the grant lapses (deny/revoke/expire/re-link) — an
+    # "approved" status with no bearer means the grant just lapsed between
+    # polls. Must refuse rather than let the graph CLI run with no credential.
+    a = gateway_mod.authorize(_TRUSTED, "search", {},
         poster=_poster({"status": "approved", "autonomy_org": "autonomy", "level": "read"}))
-    assert a["allowed"] is True and a["org"] == "autonomy"
+    assert a["allowed"] is False
 
 
 def test_authorize_write_requires_readwrite():
-    read_only = _poster({"status": "approved", "autonomy_org": "autonomy", "level": "read"})
+    read_only = _poster({"status": "approved", "autonomy_org": "autonomy",
+                         "level": "read", "bearer": "tok-read"})
     assert gateway_mod.authorize(_TRUSTED, "note", {}, poster=read_only)["allowed"] is False
-    rw = _poster({"status": "approved", "autonomy_org": "autonomy", "level": "readwrite"})
+    rw = _poster({"status": "approved", "autonomy_org": "autonomy",
+                  "level": "readwrite", "bearer": "tok-rw"})
     assert gateway_mod.authorize(_TRUSTED, "note", {}, poster=rw)["allowed"] is True
 
 
@@ -110,10 +123,55 @@ def test_authorize_does_not_gate_crosstalk_send():
     # crosstalk_send is dispatched straight to /api/mcp/crosstalk/relay, which
     # enforces the per-target grant; it never reaches authorize(). The per-target
     # decision is covered by the crosstalk_send_dashboard tests above.
-    linked = {"status": "approved", "autonomy_org": "autonomy", "level": "readwrite"}
+    linked = {"status": "approved", "autonomy_org": "autonomy",
+              "level": "readwrite", "bearer": "tok-rw"}
     a = gateway_mod.authorize(_TRUSTED, "crosstalk_send", {"session": "auto-x"},
                               poster=_poster(linked))
     assert a["allowed"] is True  # gating happens in the relay endpoint, not here
+
+
+def test_run_graph_passes_org_and_bearer_from_req_ctx(monkeypatch):
+    captured = {}
+
+    def fake_run(argv, capture_output, text, timeout, env):
+        captured["argv"] = argv
+        captured["env"] = env
+        class R:
+            returncode = 0
+            stdout = "ok"
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr(gateway_mod.subprocess, "run", fake_run)
+    gateway_mod._req_ctx.org = "autonomy"
+    gateway_mod._req_ctx.token = "tok-rw"
+    try:
+        ok, out = gateway_mod.run_graph(["search", "x"])
+    finally:
+        gateway_mod._req_ctx.org = None
+        gateway_mod._req_ctx.token = None
+    assert ok is True
+    assert captured["env"]["GRAPH_ORG"] == "autonomy"
+    assert captured["env"]["CROSSTALK_TOKEN"] == "tok-rw"
+
+
+def test_run_graph_no_bearer_means_no_crosstalk_token(monkeypatch):
+    captured = {}
+
+    def fake_run(argv, capture_output, text, timeout, env):
+        captured["env"] = env
+        class R:
+            returncode = 0
+            stdout = "ok"
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr(gateway_mod.subprocess, "run", fake_run)
+    gateway_mod._req_ctx.org = None
+    gateway_mod._req_ctx.token = None
+    ok, out = gateway_mod.run_graph(["search", "x"])
+    assert ok is True
+    assert captured["env"] is None or "CROSSTALK_TOKEN" not in captured["env"]
 
 
 def test_hello_dashboard_pending_is_not_error():

@@ -170,13 +170,22 @@ def authorize(identity: dict, tool: str, args: dict, *, poster=dashboard_post) -
         return {"allowed": False, "status": resolved.get("status"),
                 "reason": f"session {resolved.get('status')}"}
     org, level = resolved.get("autonomy_org"), resolved.get("level")
+    bearer = resolved.get("bearer")
+    if not bearer:
+        # The dashboard mints/attaches this per-peer org-scoped token exactly
+        # while the grant is live and drops it the moment the grant lapses
+        # (deny/revoke/expire/re-link) — its absence on an "approved" status
+        # means the grant just lapsed between polls. Treat as unlinked rather
+        # than calling the graph CLI with no credential at all.
+        return {"allowed": False, "status": "peer_not_linked",
+                "reason": "session approved but no credential minted yet"}
     scope = TOOL_SCOPES.get(tool)
     if scope == "write" and level != "readwrite":
         return {"allowed": False, "reason": "peer is read-only in this org"}
     # crosstalk_send does NOT pass through here — it is dispatched to the
     # dashboard's /api/mcp/crosstalk/relay endpoint, which enforces the per-target
     # grant itself. authorize() gates only the read/write graph tools.
-    return {"allowed": True, "org": org, "level": level}
+    return {"allowed": True, "org": org, "level": level, "bearer": bearer}
 
 
 def peer_label(identity: dict) -> str:
@@ -404,10 +413,19 @@ class PeerRegistry:
 
 def run_graph(argv: list) -> tuple:
     """Run a graph CLI command. Returns (ok, output). In dashboard mode the
-    request's bound org (threadlocal) is applied via GRAPH_ORG so every call is
-    scoped to exactly the org the peer was approved for."""
+    request's bound org and per-peer bearer (both threadlocal) are applied via
+    GRAPH_ORG/CROSSTALK_TOKEN so every call is scoped to, and authenticated as,
+    exactly the peer that was approved — the CLI's general-API calls need this
+    the same way an agent container's CROSSTALK_TOKEN authenticates it."""
     org = getattr(_req_ctx, "org", None)
-    env = {**os.environ, "GRAPH_ORG": org} if org else None
+    token = getattr(_req_ctx, "token", None)
+    env = None
+    if org or token:
+        env = dict(os.environ)
+        if org:
+            env["GRAPH_ORG"] = org
+        if token:
+            env["CROSSTALK_TOKEN"] = token
     try:
         proc = subprocess.run(
             [GRAPH_BIN] + argv,
@@ -902,6 +920,7 @@ def handle_message(state: RelayState, msg: dict, headers) -> dict | None:
                     msg_id, {"error": "not_authorized", "status": authz.get("status")},
                     authz_denial_text(name, authz), is_error=True)
             _req_ctx.org = authz.get("org")
+            _req_ctx.token = authz.get("bearer")
             dpeer = {"name": peer_label(identity), "scopes": []}
             try:
                 structured, text = TOOL_HANDLERS[name](state.registry, args, dpeer)
@@ -917,6 +936,7 @@ def handle_message(state: RelayState, msg: dict, headers) -> dict | None:
                                         f"Internal relay error: {e}", is_error=True)
             finally:
                 _req_ctx.org = None
+                _req_ctx.token = None
 
         # --- REGISTRY mode (legacy peer_token + file registry)
         scope = TOOL_SCOPES[name]
