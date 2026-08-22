@@ -427,3 +427,38 @@ test('password-only → enroll a passkey (two-step: Authorizing then Enrolling)'
   assert.ok(SERVER.createdCredId, 'a credential was enrolled; warn=' + warnText());
   assert.equal(SERVER.passkeys.length, 1, 'the new credential is registered');
 });
+
+test('MFA → dual full-authority factors, no MFA (UI shows BOTH full)', async () => {
+  // The operator's flagged case: leave Multi-Factor so the password AND the
+  // passkey each hold FULL authority on their own. Assert both the crypto (each
+  // opens alone) AND the rendered authority badges (both read "full authority",
+  // no error banner) — a passkey left showing "unlock only" here is the failure.
+  const root = await mintRoot(); const cred = 'cred-dual';
+  const armor = await aMfa(root, 'pw', cred);
+  SERVER = makeServer({ armor, rootPub: root.rootPub, passkeys: [await pkRow(cred)] });
+  await openPanel();
+  q('.krow [data-p]').click();                 // authority editor
+  await gather('pw');
+  const both = qa('.pick').find((r) => r.textContent.includes('Multi-Factor'));
+  both.click();                                 // turn OFF require-both
+  // ensure both individual factors are set to full authority in the editor
+  for (const name of ['Passkey', 'Password']) {
+    const row = qa('.pick').find((r) => r.querySelector('.pn') && r.querySelector('.pn').textContent === name);
+    if (row && !row.classList.contains('on')) row.click();
+  }
+  qa('.btn').pop().click();                      // Save
+  await until(() => SERVER.posts.length > 0, 120);
+  assert.ok(SERVER.posts.length, 'a re-arm was posted; warn=' + warnText());
+  await until(() => q('.krow'));                 // back on the Factors panel
+  const out = SERVER.armor;
+  assert.deepEqual(factorTypes(out), ['passkey', 'password']);
+  assert.ok(await opensWithPassword(out, 'pw'), 'password opens alone');
+  assert.ok(await opensWithPasskey(out, cred), 'passkey opens alone');
+  // the rendered authority badges must BOTH say full authority
+  assert.equal(warnText(), '', 'no invalid-state error');
+  const pwBadge = q('.krow .tag');
+  assert.match(pwBadge.textContent, /full authority/i, 'password badge full');
+  const keyBadge = qa('.krow [data-k]').pop();
+  assert.ok(keyBadge, 'passkey authority badge present');
+  assert.match(keyBadge.textContent, /full authority/i, 'passkey badge full authority (not unlock only)');
+});
