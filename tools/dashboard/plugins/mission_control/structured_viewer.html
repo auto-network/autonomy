@@ -380,14 +380,13 @@
   // pillar is a number about somewhere else. Mission-wide views count
   // mission-wide.
   function viewScope(){
-    var v = currentView;
-    if (v === "feed"){
-      var fv = document.getElementById("view-feed");
-      v = (fv && fv.dataset.filter) || "";
+    var v = pillarFilter || "";
+    if (!v){
+      var cv = currentView;
+      if (cv && cv !== MID &&
+          PILLARS.some(function (p) { return p.pillar_id === cv; })) v = cv;
     }
-    if (!v || v === MID) return null;
-    var isSurface = PILLARS.some(function (p) { return p.pillar_id === v; });
-    if (!isSurface) return null;
+    if (!v) return null;
     return function (it) { return it.surface_id === v; };
   }
   function updateChips(){
@@ -408,10 +407,12 @@
   // (folds, sections). Day headers are the feed filter's problem — it
   // already walks them, so it just has to also respect .mc-gout.
   function applyGlance(){
-    var key = glanceActive;
+    var key = glanceActive, pf = pillarFilter;
     document.querySelectorAll("#mc-views .mc-item, #mc-views .mc-feed-row")
       .forEach(function (n) {
-        n.classList.toggle("mc-gout", !!key && n.dataset.glance !== key);
+        n.classList.toggle("mc-gout",
+          (!!key && n.dataset.glance !== key) ||
+          (!!pf && !!n.dataset.surface && n.dataset.surface !== pf));
       });
     document.querySelectorAll("#mc-views details.mc-finished").forEach(function (d) {
       var vis = d.querySelectorAll(".mc-item:not(.mc-gout):not(.mc-hidden)").length;
@@ -460,7 +461,9 @@
   (function activity(){
     var DAYS = 14, MS = 86400000;
     var today = new Date(); today.setHours(0,0,0,0);
-    var surfaces = [{id:MID}].concat(PILLARS.map(function(p){return {id:p.pillar_id};}));
+    var hasMissionItems = ITEMS.some(function (it) { return it.surface_id===MID; });
+    var surfaces = (hasMissionItems ? [{id:MID}] : [])
+      .concat(PILLARS.map(function(p){return {id:p.pillar_id};}));
     var buckets = {};   // sid -> [count per day, oldest first]
     surfaces.forEach(function (s) { buckets[s.id] = new Array(DAYS).fill(0); });
     ITEMS.forEach(function (it) {
@@ -518,7 +521,7 @@
       c.title = "Open in " + surfName(it.surface_id);
       c.addEventListener("click", function (ev) {
         if (ev.target.closest("a,button,summary")) return;
-        show(it.surface_id === MID ? MID : it.surface_id);
+        gotoSurface(it.surface_id);
         var target = document.querySelector(
           '.mc-view [data-mc-anchor="' + it.key + '"]');
         if (target){
@@ -560,6 +563,7 @@
     }
     c.dataset.state = it.state; c.dataset.kind = it.kind;
     c.dataset.glance = glanceKeyOf(it);
+    c.dataset.surface = it.surface_id;
     c.dataset.search = (it.title+" "+it.body+" "+(it.evidence||[]).join(" ")).toLowerCase();
 
     var inner = c;
@@ -733,7 +737,7 @@
     sec.appendChild(el("h2",null,"Pillars"));
     PILLARS.forEach(function (p) {
       var pc = el("div","mc-psum");
-      pc.addEventListener("click",function(){ show(p.pillar_id); });
+      pc.addEventListener("click",function(){ gotoSurface(p.pillar_id); });
       var hd = el("div","hd");
       hd.appendChild(dot(p.color || "#8391a8"));
       hd.appendChild(el("b",null,p.name));
@@ -763,7 +767,14 @@
     if (missionItems.length){
       var own = surfaceView(MID);   // reuse the section builder
       own.classList.add("on"); own.id = "";
-      v.appendChild(own);
+      var fold = document.createElement("details");
+      fold.className = "mc-finished";
+      var sum = document.createElement("summary");
+      sum.textContent = "Mission-level items (" + missionItems.length
+        + ") \u2014 legacy; new content belongs on a pillar";
+      fold.appendChild(sum);
+      fold.appendChild(own);
+      v.appendChild(fold);
     }
     return v;
   }
@@ -850,8 +861,10 @@
     }
   }
   function showFeedFor(sid){
+    pillarFilter = sid || null;
     var v = document.getElementById("view-feed");
     if (v){ v.dataset.filter = sid || ""; }
+    applyGlance();
     show("feed");
     applyFeedFilter();
     updateChips();
@@ -884,7 +897,7 @@
       NAVS.push({base:base, el:n, btn:b, warn:warnWhen});
     }
     b.id = "nav-"+id;
-    b.addEventListener("click",function(){ show(id); });
+    b.addEventListener("click",function(){ togglePillar(id); });
     nav.appendChild(b);
   }
   // A count is a claim about what tapping the chip will show, so it obeys
@@ -902,17 +915,33 @@
       nv.btn.classList.toggle("mc-dim", !!glanceActive && n === 0);
     });
   }
-  navBtn(MID,"Overview","#8b85ff");
   PILLARS.forEach(function (p) {
     navBtn(p.pillar_id, shortName(p.pillar_id), p.color || "#8391a8",
       function (it) { return it.surface_id===p.pillar_id; });
   });
-  navBtn("decisions","Decisions",null,
-    function (it) { return it.kind==="decision"; });
-  navBtn("questions","Questions",null,
-    function (it) { return it.kind==="question" && it.state==="open"; }, true);
-  navBtn("feed","Feed",null,null);
   updateNavCounts();
+
+  var pillarFilter = null;
+  function gotoSurface(sid){
+    pillarFilter = (sid && sid !== MID) ? sid : null;
+    var fv = document.getElementById("view-feed");
+    if (fv) fv.dataset.filter = pillarFilter || "";
+    applyGlance();
+    show(pillarFilter || MID);
+  }
+  function togglePillar(pid){
+    var next = (pillarFilter === pid) ? null : pid;
+    if (isOverviewFamily(currentView)) { gotoSurface(next); return; }
+    pillarFilter = next;
+    var fv = document.getElementById("view-feed");
+    if (fv) fv.dataset.filter = pillarFilter || "";
+    applyGlance();
+    updateChips();
+  }
+  function isOverviewFamily(id){
+    return !id || id === MID ||
+      PILLARS.some(function (p) { return p.pillar_id === id; });
+  }
 
   var currentView = null;
   function show(id){
@@ -922,8 +951,11 @@
       n.classList.toggle("on", n.id === "view-"+id);
     });
     document.querySelectorAll(".mc-nav button").forEach(function (n) {
-      n.classList.toggle("on", n.id === "nav-"+id);
+      n.classList.toggle("on", !!pillarFilter && n.id === "nav-"+pillarFilter);
     });
+    var named = {decisions:"Decisions", questions:"Questions", feed:"Feed"};
+    document.body.dataset.mcView = named[id] ? id : "overview";
+    document.body.dataset.mcViewLabel = named[id] || "Overview";
     try { history.replaceState(null,"","#"+id); } catch (e) {}
   }
   // The activity panel is mission-wide chrome, but it belongs to the
@@ -931,10 +963,30 @@
   var ov = document.getElementById("view-"+MID);
   ov.insertBefore(document.querySelector(".mc-activity"), ov.firstChild);
 
+  document.body.dataset.mcViews = JSON.stringify([
+    {id: "overview",  label: "Overview"},
+    {id: "decisions", label: "Decisions"},
+    {id: "questions", label: "Questions"},
+    {id: "feed",      label: "Feed"},
+  ]);
+  document.addEventListener("mc:goto-view", function (e) {
+    var id = e.detail && e.detail.id;
+    if (id === "overview") show(pillarFilter || MID);
+    else if (id === "decisions" || id === "questions" || id === "feed") show(id);
+  });
+
   var boot = (location.hash||"").slice(1);
-  show(boot && document.getElementById("view-"+boot) ? boot
+  var landing = boot && document.getElementById("view-"+boot) ? boot
        : (DATA.focus && document.getElementById("view-"+DATA.focus)) ? DATA.focus
-       : MID);
+       : MID;
+  if (landing !== MID &&
+      PILLARS.some(function (p) { return p.pillar_id === landing; })) {
+    pillarFilter = landing;
+    var fv0 = document.getElementById("view-feed");
+    if (fv0) fv0.dataset.filter = landing;
+  }
+  show(landing);
+  document.dispatchEvent(new CustomEvent("mc:views-changed"));
 
   var gen = new Date((DATA.generated_at||0)*1000);
   document.getElementById("mc-genat").textContent =
