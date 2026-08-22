@@ -368,10 +368,20 @@
         actions.appendChild(actionButton(
           'plugin-' + plugin.id, plugin.label, plugin.identity_detail || '', function () {
             closePanel();
-            if (typeof root.navigateTo === 'function') {
-              root.navigateTo(plugin.path);
+            // Let the panel's close render commit before the SPA navigation
+            // replaces the page.  Without this frame the detached identity
+            // menu can remain visually latched over plug-in pages.
+            var go = function () {
+              if (typeof root.navigateTo === 'function') {
+                root.navigateTo(plugin.path);
+              } else {
+                root.location.assign(plugin.path);
+              }
+            };
+            if (typeof root.requestAnimationFrame === 'function') {
+              root.requestAnimationFrame(go);
             } else {
-              root.location.assign(plugin.path);
+              root.setTimeout(go, 0);
             }
           }
         ));
