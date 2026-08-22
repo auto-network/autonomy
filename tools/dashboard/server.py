@@ -19352,11 +19352,30 @@ async def _on_startup():
         # blocks the requests that emit the events -- it drains a queue of
         # its own. Independent of bootstrap above: if no connector is up,
         # delivery simply fails per event and serving is untouched.
+        #
+        # proxy_events_to_connectors() is self-supervising (retries its own
+        # startup/loop failures with backoff — see its docstring), so this
+        # done-callback is a backstop for visibility, not the retry itself:
+        # if the task ever DOES end with an exception, that's not a
+        # transient failure it already recovered from, it's worth a loud log.
         from tools.dashboard import link_serving
+
+        def _log_event_proxy_result(task: asyncio.Task) -> None:
+            if task.cancelled():
+                return
+            exc = task.exception()
+            if exc is not None:
+                logger.error(
+                    "link_serving.proxy_events_to_connectors() ended "
+                    "unexpectedly; live guest delivery is down until the "
+                    "next reload",
+                    exc_info=exc,
+                )
 
         _event_proxy_task = asyncio.create_task(
             link_serving.proxy_events_to_connectors(event_bus)
         )
+        _event_proxy_task.add_done_callback(_log_event_proxy_result)
 
 async def _on_shutdown():
     global _dispatch_watcher_task, _mock_event_watcher_task

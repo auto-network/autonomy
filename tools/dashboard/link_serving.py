@@ -907,6 +907,12 @@ EVENT_OP = "event"
 #: only when an event is actually routed to it.
 EVENT_CONSUMERS = ("mission",)
 
+#: Backoff for proxy_events_to_connectors()'s own retry loop. Module-level
+#: so a test can shrink it instead of eating real wall-clock time waiting
+#: out a production-sized backoff.
+EVENT_PROXY_INITIAL_BACKOFF_S = 1.0
+EVENT_PROXY_MAX_BACKOFF_S = 60.0
+
 
 def _event_dispatch(consumer: str):
     """consumer name -> the module owning that consumer's events, or None."""
@@ -1350,10 +1356,44 @@ async def proxy_events_to_connectors(bus, *, org=None, stop=None,
     absent connector cannot delay the request that emitted the event, and
     the control call is synchronous with its own timeout so it is made off
     the event loop entirely.
+
+    SELF-SUPERVISING: this runs for the life of the process as a single
+    fire-and-forget task (server.py has no retry of its own), so a failure
+    here used to be permanent — one lost race between a hot reload and
+    ``event_routes()``'s dynamic consumer import (observed live: the
+    module's file mid-write by a concurrent commit) killed live guest
+    delivery for the rest of the process's life, silently, while HTTP
+    writes kept working untouched. Any failure — including that one — is
+    now caught and retried with capped exponential backoff instead of
+    ending the task. ``CancelledError`` is a ``BaseException``, not caught
+    here, so shutdown's ``task.cancel()`` still stops this promptly.
     """
     if control is None:
         from tools.dashboard.link_serving_supervisor import control
 
+    backoff = EVENT_PROXY_INITIAL_BACKOFF_S
+    while stop is None or not stop.is_set():
+        try:
+            await _run_event_proxy_once(bus, org, stop, control, max_pending)
+        except Exception:
+            logger.error(
+                "event proxy: attempt failed, retrying in %.1fs",
+                backoff, exc_info=True,
+            )
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, EVENT_PROXY_MAX_BACKOFF_S)
+            continue
+        # A clean return means either routes is permanently empty (no
+        # consumers registered at all) or stop was set — neither is a
+        # failure, so don't retry.
+        return
+
+
+async def _run_event_proxy_once(bus, org, stop, control, max_pending: int) -> None:
+    """One attempt at :func:`proxy_events_to_connectors` — no retry of its
+    own. Split out so the supervising loop above can restart a fresh
+    subscription (a fresh ``event_routes()`` call, a fresh queue) rather
+    than trying to resume whatever state a failed attempt left behind."""
     routes = event_routes()
     if not routes:
         return

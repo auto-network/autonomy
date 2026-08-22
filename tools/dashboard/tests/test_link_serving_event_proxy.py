@@ -139,3 +139,114 @@ def test_a_consumer_that_faults_never_takes_the_connector_down():
         link_serving._event_dispatch = real
     assert reply["ok"] is False
     assert "faulted" in reply["error"]
+
+
+async def _drain_after_recovery(bus, calls, attempts, *, min_attempts=2, control=None):
+    """Like _drain, but waits for the flaky event_routes() to actually
+    recover (attempts reaching min_attempts) before stopping -- _drain's
+    own poll loop stops on the first sign the queue looks empty, which
+    fires before a still-backing-off retry ever gets a second attempt."""
+    stop = asyncio.Event()
+
+    def _control(org, op, args, **kw):
+        calls.append((org, op, args))
+
+    task = asyncio.create_task(link_serving.proxy_events_to_connectors(
+        bus, org="autonomy", stop=stop, control=control or _control,
+    ))
+    for _ in range(500):
+        await asyncio.sleep(0.005)
+        if attempts["n"] >= min_attempts and bus.queue.empty():
+            break
+    stop.set()
+    await bus.queue.put(("wake", {}, 0))
+    with __import__("contextlib").suppress(asyncio.TimeoutError):
+        await asyncio.wait_for(task, timeout=2)
+    task.cancel()
+    return calls
+
+
+def test_a_startup_failure_is_retried_instead_of_ending_the_proxy(monkeypatch):
+    """Live regression: a hot reload racing event_routes()'s dynamic
+    consumer import (observed as an ImportError reading a module mid-write
+    by a concurrent commit) used to kill live guest delivery for the rest
+    of the process's life -- proxy_events_to_connectors() was a bare
+    fire-and-forget task with nothing to restart it. It must now retry."""
+    monkeypatch.setattr(link_serving, "EVENT_PROXY_INITIAL_BACKOFF_S", 0.01)
+    monkeypatch.setattr(link_serving, "EVENT_PROXY_MAX_BACKOFF_S", 0.01)
+
+    bus = _Bus()
+    real_routes = link_serving.event_routes()
+    topic = next(iter(real_routes))
+    attempts = {"n": 0}
+
+    def _flaky_routes():
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise ImportError("simulated: module mid-write during hot reload")
+        return real_routes
+
+    real = link_serving.event_routes
+    link_serving.event_routes = _flaky_routes
+    try:
+        bus.queue.put_nowait((topic, {"mission_id": "m1"}, 1))
+        calls = asyncio.run(_drain_after_recovery(bus, [], attempts))
+    finally:
+        link_serving.event_routes = real
+
+    assert attempts["n"] >= 2, "a failed event_routes() call must be retried, not fatal"
+    assert calls, "once recovered, the event already queued must still be delivered"
+
+
+def test_recovery_after_a_startup_failure_still_releases_its_subscription(monkeypatch):
+    """The retry loop subscribes fresh on every attempt (a fresh queue, not
+    whatever a failed attempt left behind) -- confirm the final, successful
+    attempt still unsubscribes cleanly on stop, same as any other run."""
+    monkeypatch.setattr(link_serving, "EVENT_PROXY_INITIAL_BACKOFF_S", 0.01)
+    monkeypatch.setattr(link_serving, "EVENT_PROXY_MAX_BACKOFF_S", 0.01)
+
+    bus = _Bus()
+    real_routes = link_serving.event_routes()
+    attempts = {"n": 0}
+
+    def _flaky_routes():
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise ImportError("simulated: module mid-write during hot reload")
+        return real_routes
+
+    real = link_serving.event_routes
+    link_serving.event_routes = _flaky_routes
+    try:
+        asyncio.run(_drain_after_recovery(bus, [], attempts))
+    finally:
+        link_serving.event_routes = real
+    assert attempts["n"] >= 2
+    assert bus.unsubscribed is True
+
+
+def test_cancellation_during_backoff_stops_promptly_not_after_the_wait():
+    """Shutdown does task.cancel() + await; that must not be stuck sitting
+    through a retry's backoff sleep -- CancelledError is a BaseException,
+    the retry loop's `except Exception` must not swallow it."""
+    bus = _Bus()
+
+    def _always_fails():
+        raise ImportError("simulated: still racing the reload")
+
+    real = link_serving.event_routes
+    link_serving.event_routes = _always_fails
+    try:
+        cancelled = asyncio.run(_cancel_during_backoff(bus))
+    finally:
+        link_serving.event_routes = real
+    assert cancelled is True
+
+
+async def _cancel_during_backoff(bus):
+    task = asyncio.create_task(link_serving.proxy_events_to_connectors(bus))
+    await asyncio.sleep(0)  # let it reach the first failure and start its backoff sleep
+    task.cancel()
+    with __import__("contextlib").suppress(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=2)
+    return task.cancelled()
