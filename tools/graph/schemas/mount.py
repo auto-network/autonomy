@@ -340,6 +340,7 @@ class WorkspaceMountV2(BaseModel):
     key_strategy="workspace_id:mount_name",
     key_references={"workspace_id": "autonomy.workspace"},
 )
+@publication_band(min="raw", max="curated")
 @home("organization")
 @readiness_gated_by("required")
 class _WorkspaceMountV2SchemaAdapter(SettingSchema):

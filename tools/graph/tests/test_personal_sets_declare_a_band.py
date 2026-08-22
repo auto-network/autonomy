@@ -58,40 +58,45 @@ def _personal_sets():
     return found
 
 
-def _shipped_sets():
-    """EVERY shipped set, whatever its home, with its declared band (or None).
+def _shipped_classes():
+    """EVERY shipped schema CLASS, keyed ``set_id#revision``, with its band.
 
-    The personal-only gate below was scoped too narrowly: `autonomy.workspace`
-    is organization-homed, declared no band, defaulted to the full range, and
-    federated its rows to every subscriber — a private config read cross-org.
-    An org-homed set's exposure is a cross-ORG disclosure, strictly wider than a
-    personal set's. So the declaration requirement is universal: undeclared =
-    unconstrained, on any home.
+    Per-CLASS, not per-set. Two independent scope holes let a leak through
+    before:
+
+    * Personal-only. The earlier gate skipped `declared_home != "personal"`, so
+      organization-homed `autonomy.workspace` — a private config that federated
+      to every subscriber — was never checked. An org-homed exposure is a
+      cross-ORG disclosure, strictly wider than a personal one.
+    * Per-set, not per-revision. A set banded at rev 1 still leaks at rev 2 if
+      rev 2's class declares no band: the decorator is per class and `read_set`
+      looks the band up per the ROW's revision. `autonomy.workspace.mount#2`
+      leaked exactly this way after #1 was banded.
+
+    So the requirement is universal AND per revision: undeclared = unconstrained,
+    on any home, at any revision.
     """
     found: dict[str, object] = {}
     for key, cls in SCHEMAS.items():
-        set_id = getattr(cls, "set_id", None) or key.split("#")[0]
         if not getattr(cls, "__module__", "").startswith(_SHIPPED):
             continue
-        band = getattr(cls, "_publication_band", None)
-        if band is not None or set_id not in found:
-            found[set_id] = band
+        found[key] = getattr(cls, "_publication_band", None)
     return found
 
 
 def test_every_shipped_set_declares_a_publication_band():
-    """THE ONE THAT MATTERS, for every home — not just personal.
+    """THE ONE THAT MATTERS — every home, every revision.
 
-    A set that declares no band resolves to the full range and opens peer
+    A class that declares no band resolves to the full range and opens peer
     databases, so a private organization config leaks to every subscriber. The
-    fix is a declaration on every set; the value is the set's decision, this
+    fix is a declaration on every class; the value is the set's decision, this
     test only demands that the decision was made.
     """
-    undeclared = sorted(sid for sid, band in _shipped_sets().items() if band is None)
+    undeclared = sorted(k for k, band in _shipped_classes().items() if band is None)
     assert not undeclared, (
-        "these shipped sets declare no publication band, so they resolve to the "
-        "full range and peer databases are opened for them (a cross-org "
-        f"disclosure for an org-homed set): {undeclared}. Declare "
+        "these shipped schema classes declare no publication band, so they "
+        "resolve to the full range and peer databases are opened for them (a "
+        f"cross-org disclosure for an org-homed set): {undeclared}. Declare "
         "@publication_band explicitly — max='raw'/'curated' to keep it owner-"
         "local, or a wider band if the set is genuinely meant to federate."
     )
