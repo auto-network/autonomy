@@ -205,3 +205,64 @@ def test_structured_pillar_url_serves_the_same_app_focused():
     assert page.status_code == 200
     assert f'"focus": "{pillar["pillar_id"]}"' in page.text.replace(
         '":"', '": "')
+
+
+# ── org boundary ──────────────────────────────────────────────────
+
+
+def _org_client(org: str) -> TestClient:
+    """A client the boundary classified as an org-bound session bearer."""
+    class _OrgPrincipalMiddleware:
+        def __init__(self, app):
+            self.app = app
+
+        async def __call__(self, scope, receive, send):
+            scope.setdefault("state", {})["api_principal"] = api_auth.ApiPrincipal(
+                api_auth.ApiPrincipalKind.ORG_SESSION,
+                subject="test-session", org=org,
+            )
+            await self.app(scope, receive, send)
+
+    return TestClient(Starlette(
+        routes=mc_api.routes,
+        middleware=[Middleware(_OrgPrincipalMiddleware)],
+    ))
+
+
+def test_cross_org_caller_cannot_see_or_write_items():
+    operator = _client()
+    mission = _structured_mission(operator)          # org: autonomy
+    operator.put(f"/api/missions/{mission['mission_id']}/items/x",
+                 json={"kind": "work", "title": "T"})
+
+    stranger = _org_client("someother")
+    mid = mission["mission_id"]
+    # Reads and writes both render as not-found — indistinguishable from
+    # a mission that does not exist.
+    assert stranger.get(f"/api/missions/{mid}/items").status_code == 404
+    assert stranger.put(f"/api/missions/{mid}/items/y",
+                        json={"kind": "work", "title": "Y"}).status_code == 404
+    assert stranger.post(f"/api/missions/{mid}/items/x/state",
+                         json={"state": "done"}).status_code == 404
+    assert stranger.post(f"/api/missions/{mid}/style",
+                         json={"style": "freeform"}).status_code == 404
+    # And the list simply omits it.
+    listed = stranger.get("/api/missions").json()["missions"]
+    assert all(m["mission_id"] != mid for m in listed)
+
+    # The mission's own org sees and writes normally.
+    member = _org_client("autonomy")
+    assert member.get(f"/api/missions/{mid}/items").status_code == 200
+    assert member.put(f"/api/missions/{mid}/items/z",
+                      json={"kind": "work", "title": "Z"}).status_code == 200
+    assert any(m["mission_id"] == mid
+               for m in member.get("/api/missions").json()["missions"])
+
+
+def test_create_mission_defaults_to_caller_org():
+    session = _org_client("autonomy")
+    mission = session.post("/api/missions", json={"name": "Mine"}).json()["mission"]
+    assert mission["org"] == "autonomy"
+    explicit = session.post("/api/missions", json={
+        "name": "Named", "org": "elsewhere"}).json()["mission"]
+    assert explicit["org"] == "elsewhere"

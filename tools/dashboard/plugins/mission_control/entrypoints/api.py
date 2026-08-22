@@ -193,7 +193,12 @@ def _revision_payload(revision: dict, *, include_html: bool) -> dict:
 
 
 async def list_missions(request: Request) -> JSONResponse:
-    missions = [_mission_payload(m) for m in db.list_missions()]
+    # An org-bound caller's list contains only its own org's missions —
+    # same predicate, list shape. Global authority (the operator) sees all.
+    missions = [
+        _mission_payload(m) for m in db.list_missions()
+        if not api_auth.caller_org_scope_hides(request, dict(m).get("org"))
+    ]
     return JSONResponse({"missions": missions})
 
 
@@ -209,7 +214,14 @@ async def create_mission(request: Request) -> JSONResponse:
             {"error": f"style must be one of {db.VALID_MISSION_STYLES}"},
             status_code=400,
         )
-    mission = db.create_mission(name, coordinator_session)
+    # The DAO docstring has always promised "omitting org takes the caller's
+    # own organization" — but nothing here ever derived it, so the shell
+    # default filled the blank (which is how a preview mission landed in
+    # anchore from an autonomy session). Explicit body org wins; an
+    # org-bound caller's scope is next; the shell default remains only for
+    # global-authority callers that named nothing.
+    org = (body.get("org") or "").strip()         or api_auth.organization_scope_from_request(request)
+    mission = db.create_mission(name, coordinator_session, org=org or None)
     if style and style != "freeform":
         db.set_mission_style(mission["mission_id"], style)
         mission = db.get_mission(mission["mission_id"])
@@ -282,6 +294,10 @@ async def set_mission_style(request: Request) -> JSONResponse:
     screens for a mission. Reversible at any time; neither store is
     touched by the switch."""
     mission_id = request.path_params["mission_id"]
+    mission = db.get_mission(mission_id)
+    if mission and api_auth.caller_org_scope_hides(
+            request, dict(mission).get("org")):
+        return JSONResponse({"error": "mission not found"}, status_code=404)
     body = await request.json()
     style = body.get("style")
     if style not in db.VALID_MISSION_STYLES:
@@ -304,14 +320,28 @@ async def set_mission_style(request: Request) -> JSONResponse:
 
 def _surface_of(request: Request) -> tuple[dict | None, str | None, str | None]:
     """Resolve (mission, surface_id, error) for a mission- or pillar-scoped
-    item route."""
+    item route.
+
+    Applies the canonical org gate: an org-bound caller reaches only its own
+    org's missions (the DAO's contract — the org column is what "who may
+    touch this" means, in full). Refusal is the route-native not-found, so a
+    cross-org mission is indistinguishable from a nonexistent one. Proven
+    necessary the hard way: an autonomy-scoped bearer wrote 187 items into
+    an anchore-homed mission through these routes before this gate existed.
+    """
     if "pillar_id" in request.path_params:
         pillar = db.get_pillar(request.path_params["pillar_id"])
         if not pillar:
             return None, None, "pillar not found"
-        return db.get_mission(pillar["mission_id"]), pillar["pillar_id"], None
+        mission = db.get_mission(pillar["mission_id"])
+        if mission and api_auth.caller_org_scope_hides(
+                request, dict(mission).get("org")):
+            return None, None, "pillar not found"
+        return mission, pillar["pillar_id"], None
     mission = db.get_mission(request.path_params["mission_id"])
     if not mission:
+        return None, None, "mission not found"
+    if api_auth.caller_org_scope_hides(request, dict(mission).get("org")):
         return None, None, "mission not found"
     return mission, mission["mission_id"], None
 
