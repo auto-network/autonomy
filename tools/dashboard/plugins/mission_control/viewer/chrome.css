@@ -45,8 +45,12 @@
 .mc-swatch { width: 4px; height: 1rem; border-radius: 2px; flex: none; }
 .mc-name { font-size: .9rem; color: #e2e8f0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mc-caret { color: #64748b; font-size: 10px; }
-/* Status rows: same card, no destination. */
-.mc-row-static, .mc-row-static:hover { cursor: default; border-color: #334155; background: #161a22; }
+/* Status rows: flat, no destination — a hairline between entries instead
+   of a card outline per pillar. */
+.mc-row-static, .mc-row-static:hover { cursor: default; border: 0; border-radius: 0;
+  background: transparent; border-bottom: 1px solid #1e293b; }
+.mc-row-static:last-child { border-bottom: 0; }
+.mc-last-none { color: #475569; font-style: italic; }
 .mc-qfilter { display: flex; justify-content: flex-end; margin: 0 0 .6rem; }
 .mc-seg { display: inline-flex; gap: .15rem; background: #0d1117; border: 1px solid #1e293b;
           border-radius: .5rem; padding: .15rem; flex: none; }
