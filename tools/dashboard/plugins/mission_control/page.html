@@ -138,6 +138,37 @@
                x-show="m.current_revision_id || m.style === 'structured'"
                class="px-3 py-1 rounded bg-indigo-700 hover:bg-indigo-600 text-white text-xs font-medium whitespace-nowrap"
                :data-testid="'mc-view-site-' + m.mission_id">View site &rarr;</a>
+
+            <!-- One control, holding every transition. Three buttons per row
+                 turns a list of six missions into eighteen controls, which is
+                 unreadable at exactly the moment the list is meant to help. -->
+            <div class="relative shrink-0">
+              <button @click="toggleMenu(m.mission_id)"
+                      class="w-7 h-7 rounded flex items-center justify-center text-gray-600 hover:text-gray-200 hover:bg-gray-800"
+                      :data-testid="'mc-menu-' + m.mission_id"
+                      aria-label="Mission actions">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+                  <circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/>
+                </svg>
+              </button>
+              <div x-show="menuFor === m.mission_id" @click.outside="menuFor = ''"
+                   class="absolute right-0 mt-1 w-44 rounded-md border border-gray-700 bg-gray-900 shadow-xl py-1 z-20"
+                   :data-testid="'mc-menu-open-' + m.mission_id">
+                <template x-for="s in ['active', 'paused', 'complete']" :key="s">
+                  <button x-show="m.status !== s"
+                          @click="setStatus(m.mission_id, s)"
+                          class="w-full text-left px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800"
+                          :data-testid="'mc-set-' + s + '-' + m.mission_id"
+                          x-text="s === 'active' ? 'Reactivate' : s === 'paused' ? 'Pause' : 'Mark complete'"></button>
+                </template>
+                <div class="my-1 border-t border-gray-800"></div>
+                <button @click="removeMission(m.mission_id)"
+                        class="w-full text-left px-3 py-1.5 text-xs hover:bg-rose-950/50 hover:text-rose-300"
+                        :class="deleteArmed === m.mission_id ? 'text-rose-300' : 'text-gray-500'"
+                        :data-testid="'mc-remove-' + m.mission_id"
+                        x-text="deleteArmed === m.mission_id ? 'Delete everything?' : 'Remove'"></button>
+              </div>
+            </div>
           </div>
         </div>
 

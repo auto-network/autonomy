@@ -1,11 +1,13 @@
 // Mission Control plugin — frontend Alpine factory.
 //
-// Read-only monitoring surface. Missions and site revisions are created
-// and pushed by agent sessions calling the API directly (POST
-// /api/missions, POST /api/missions/<id>/site) — the same way the
-// coordinator session pushes OSS Insights updates. This page has no
-// create/push/delete/activate controls; it only lists what agents have
-// already published.
+// Monitoring surface, plus the mission's own lifecycle. Content is still
+// authored elsewhere: missions and site revisions are created and pushed
+// by agent sessions calling the API directly (POST /api/missions, POST
+// /api/missions/<id>/site), and this page has no create or push controls.
+//
+// It DOES own status and removal, because those are the operator's calls
+// and nobody else's. Leaving them to the API meant the person looking at
+// a finished mission could not say it was finished.
 //
 // IIFE wrapper: plugin pages load as classic scripts in alphabetical
 // order sharing one global lexical environment, so every plugin factory
@@ -171,17 +173,27 @@ function missionControlPage() {
     expanded: '',
     relativeTime: relativeTime,
 
-    statusFilter: 'all',
+    // "Current" by default, not "All". Marking a mission complete has to
+    // make it leave the page, or the status is a label rather than the way
+    // to clear finished and abandoned work off the screen -- which is the
+    // whole reason the control exists. Complete and All are one chip away
+    // and carry their own counts, so nothing is hidden irretrievably.
+    statusFilter: 'current',
     get statusFilters() {
+      // Counted over the ORG-filtered set, not every mission: the chips sit
+      // above a list that is already org-scoped, so counting the whole
+      // fleet would state a number the list below visibly contradicts.
+      const scoped = this.missions.filter((m) => this._matchesOrg(m));
       const counts = { active: 0, paused: 0, complete: 0 };
-      for (const m of this.missions) {
+      for (const m of scoped) {
         if (Object.prototype.hasOwnProperty.call(counts, m.status)) counts[m.status] += 1;
       }
       return [
-        { value: 'all', label: 'All', count: this.missions.length },
+        { value: 'current', label: 'Current', count: counts.active + counts.paused },
         { value: 'active', label: 'Active', count: counts.active },
         { value: 'paused', label: 'Paused', count: counts.paused },
         { value: 'complete', label: 'Complete', count: counts.complete },
+        { value: 'all', label: 'All', count: scoped.length },
       ];
     },
     // Standard org filter — same contract as the Sessions page: /api/orgs
@@ -230,9 +242,71 @@ function missionControlPage() {
       return (m.org || '') === this.selectedOrg;
     },
     get filteredMissions() {
-      let rows = this.missions.filter((m) => this._matchesOrg(m));
+      // Org first, then status: the org filter says which missions are
+      // yours to see at all, and the status chips narrow within that.
+      const rows = this.missions.filter((m) => this._matchesOrg(m));
       if (this.statusFilter === 'all') return rows;
+      if (this.statusFilter === 'current') {
+        return rows.filter((m) => m.status !== 'complete');
+      }
       return rows.filter((m) => m.status === this.statusFilter);
+    },
+
+    // ── lifecycle ──────────────────────────────────────────────
+    //
+    // Status was readable on this page and settable only by an agent
+    // calling the API, so the one person who can see that a mission is
+    // finished was the one person with no way to say so.
+    //
+    // One control per row, holding every transition. Not three buttons:
+    // the row is a list item, and a list of six missions carrying eighteen
+    // buttons is unreadable at exactly the moment it is meant to help.
+    menuFor: '',
+    deleteArmed: '',
+    toggleMenu(missionId) {
+      this.menuFor = this.menuFor === missionId ? '' : missionId;
+      this.deleteArmed = '';
+    },
+    async setStatus(missionId, status) {
+      this.menuFor = '';
+      try {
+        const res = await fetch('/api/missions/' + encodeURIComponent(missionId) + '/status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: status }),
+        });
+        if (!res.ok) return;
+        const body = await res.json();
+        const updated = body && body.mission;
+        if (updated) {
+          this.missions = this.missions.map((m) => (m.mission_id === missionId ? updated : m));
+        }
+      } catch (_) {
+        // the row keeps its old status; the next refresh reconciles it
+      }
+    },
+
+    // Removal takes the mission and every revision, question and answer
+    // with it. Two clicks, and the second one says what it destroys --
+    // armed in place rather than in a dialog, because a confirmation that
+    // looks identical for every mission is how the wrong one goes.
+    async removeMission(missionId) {
+      if (this.deleteArmed !== missionId) {
+        this.deleteArmed = missionId;
+        return;
+      }
+      try {
+        const res = await fetch('/api/missions/' + encodeURIComponent(missionId), {
+          method: 'DELETE',
+        });
+        if (!res.ok) return;
+        this.missions = this.missions.filter((m) => m.mission_id !== missionId);
+      } catch (_) {
+        return;
+      } finally {
+        this.deleteArmed = '';
+        this.menuFor = '';
+      }
     },
 
     presenceStyles: MC_PRESENCE_STYLES,
