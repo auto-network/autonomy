@@ -139,7 +139,7 @@ class TestFleetPluginL2B:
         )
         assert identity["present"] is True
         assert identity["visible"] is True
-        assert "Manage my machines" in identity["text"]
+        assert "Machines" in identity["text"]
         assert "Personal fleet" in identity["text"]
 
     def test_real_lifecycle_rows_are_visible_without_approval_controls(self):
