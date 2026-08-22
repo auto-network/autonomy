@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+
+# Resolve host-installed video binaries from either the checked-out package or
+# its canonical read-only capability mount. tool_target mounts only tools/ at
+# /opt/video-tools, so ../bin alone is insufficient inside a workspace.
+video_binary() {
+  local name=${1:?video_binary requires ffmpeg or ffprobe}
+  local tools_dir package_bin mounted_bin
+
+  case "$name" in
+    ffmpeg|ffprobe) ;;
+    *) echo "unsupported video binary: $name" >&2; return 2 ;;
+  esac
+
+  tools_dir="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+  package_bin="$(cd "$tools_dir/.." && pwd)/bin/$name"
+  mounted_bin="/opt/autonomy/capabilities/autonomy-video/bin/$name"
+
+  if [ -x "$package_bin" ]; then
+    printf '%s\n' "$package_bin"
+    return 0
+  fi
+  if [ -x "$mounted_bin" ]; then
+    printf '%s\n' "$mounted_bin"
+    return 0
+  fi
+
+  echo "video capability not provisioned: $name missing (host-install pending)" >&2
+  return 3
+}
+
+video_exec() {
+  local name=${1:?video_exec requires ffmpeg or ffprobe}
+  shift
+  local binary
+  binary=$(video_binary "$name") || return $?
+  exec "$binary" "$@"
+}

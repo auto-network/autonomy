@@ -1080,6 +1080,10 @@ def test_impl_rev2_validates_the_landed_video_manifest():
         Path("agents/capabilities/video/manifest.json").read_text()
     )
     validate_payload(capability_impl.SET_ID, 2, manifest)
+    assert manifest["tool_target"]["expose_commands"] == [
+        "video-probe", "video-contact-sheet", "video-scene-detect",
+        "video-convert", "ffmpeg", "ffprobe",
+    ]
 
 
 def test_impl_rev2_validates_the_landed_agent_test_manifest():

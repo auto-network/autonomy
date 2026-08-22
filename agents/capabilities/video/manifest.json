@@ -1,6 +1,6 @@
 {
     "name": "autonomy/video",
-    "version": 1,
+    "version": 2,
     "implements": [
         {"contract": "video_tooling", "version": 1}
     ],
@@ -16,7 +16,9 @@
             "video-probe",
             "video-contact-sheet",
             "video-scene-detect",
-            "video-convert"
+            "video-convert",
+            "ffmpeg",
+            "ffprobe"
         ]
     },
     "skill_path": "agents/capabilities/video/SKILL.md",
@@ -32,5 +34,5 @@
         "timeout_seconds": 600,
         "success_marker": "bin/ffmpeg"
     },
-    "notes": "Static ffmpeg/ffprobe (johnvansickle build, sha256-pinned in install/ffmpeg.pin) populated into bin/ by host-install; bin/ is resolved state, gitignored. Tools are bash wrappers over the pinned binaries. First consumers: the evidence-capture pipeline's gallery-to-animation compilation (auto-vztz5) and analysis of operator screen recordings. Verified against the exemplar recording (graph attachment a7318303-93d): probe, 4x3 contact sheet, scene detection (7 cuts at threshold 0.05), gif conversion, and compiling the row-56 evidence gallery into an mp4."
+    "notes": "Static ffmpeg/ffprobe (johnvansickle build, sha256-pinned in install/ffmpeg.pin) populated into bin/ by host-install; bin/ is resolved state, gitignored. Tools are bash wrappers over the pinned binaries. ffmpeg and ffprobe are also exposed on PATH so agent-browser can finalize browser recordings without a per-session install. First consumers: browser-animation verification, the evidence-capture pipeline's gallery-to-animation compilation (auto-vztz5), and analysis of operator screen recordings."
 }

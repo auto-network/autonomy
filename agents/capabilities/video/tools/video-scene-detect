@@ -3,8 +3,10 @@
 # Usage: video-scene-detect <in-video> [--threshold 0.3] [--frames-dir DIR]
 # With --frames-dir, also saves one PNG per detected scene into DIR.
 set -euo pipefail
-BIN="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)/bin"
-[ -x "$BIN/ffmpeg" ] || { echo "video capability not provisioned: $BIN/ffmpeg missing (host-install pending)" >&2; exit 3; }
+TOOLS_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+# shellcheck source=_video-common
+source "$TOOLS_DIR/_video-common"
+FFMPEG=$(video_binary ffmpeg)
 
 IN=${1:?usage: video-scene-detect <in-video> [--threshold T] [--frames-dir DIR]}
 shift
@@ -19,11 +21,11 @@ done
 
 if [ -n "$FRAMES_DIR" ]; then
   mkdir -p "$FRAMES_DIR"
-  "$BIN/ffmpeg" -y -loglevel error -i "$IN" \
+  "$FFMPEG" -y -loglevel error -i "$IN" \
     -vf "select='gt(scene,$THRESH)'" -vsync vfr "$FRAMES_DIR/scene-%03d.png"
 fi
 
-"$BIN/ffmpeg" -loglevel info -i "$IN" \
+"$FFMPEG" -loglevel info -i "$IN" \
   -vf "select='gt(scene,$THRESH)',metadata=print" -f null - 2>&1 |
   awk '/pts_time/ { for (i=1;i<=NF;i++) if ($i ~ /pts_time:/) { split($i,a,":"); t=a[2] } }
        /scene_score/ { for (i=1;i<=NF;i++) if ($i ~ /scene_score=/) { split($i,b,"="); print t, b[2] } }'
