@@ -909,3 +909,23 @@ def test_onboarding_stores_a_combined_armor(env, root):
     assert r.status_code == 200, r.text
     served = env.get("/api/identity/personal").json()
     assert armor_factor_types(served["armored_private_key"]) == ["combined"]
+
+
+def test_delete_refused_while_combined_member(env, root):
+    """Enabling MFA folds the passkey into the combined factor; the credential
+    is still needed to unlock, so removing its device row must refuse — deleting
+    it strands the unlock path (the real lockout that shipped)."""
+    from tools.network.idkit.armor import PASSKEY_ARMOR_PURPOSE, enable_mfa
+    from tools.network.idkit.sealing import derive_encapsulation_keypair
+    _store_identity(env, root)
+    assert _enroll(env, root).status_code == 200
+    cred = env.get("/api/identity/status").json()["passkeys"][0]["credential_id"]
+    prf = b"\x55" * 32
+    _, kem = derive_encapsulation_keypair(prf, PASSKEY_ARMOR_PURPOSE)
+    mfa = enable_mfa(_passkey_armor(root, cred=cred, prf=prf), PASSWORD, cred, kem,
+                     iterations=10_000)
+    assert env.post("/api/identity/personal/armor",
+                    json=_rearmor_body(root, mfa, require_pair=True)).status_code == 200
+    r = env.delete(f"/api/identity/passkey/{cred}")
+    assert r.status_code == 409
+    assert "Multi-Factor" in r.json()["error"]

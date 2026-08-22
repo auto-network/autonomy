@@ -823,8 +823,11 @@ async def post_register(request: Request) -> JSONResponse:
 async def delete_passkey(request: Request) -> JSONResponse:
     """Remove an enrolled passkey (removeKey). The password floor keeps access
     open, so this never locks anyone out. Refused while the passkey is still a
-    ROOT-ARMOR factor: demote it first (re-armor without it) so the credential
-    list and the armor's factor set never disagree.
+    ROOT-ARMOR factor — a standalone passkey factor OR the passkey half of a
+    combined (MFA) factor: demote it (or turn MFA off) first, so the credential
+    list and the armor's factor set never disagree. Deleting the combined
+    factor's member strands the unlock UI (it stops offering the passkey) while
+    the armor still requires that passkey — the exact lockout this refuses.
     """
     if _mock_mode():
         return JSONResponse({"ok": False,
@@ -844,8 +847,10 @@ async def delete_passkey(request: Request) -> JSONResponse:
             "no enrolled passkey has that credential id"
         )}, status_code=404)
 
-    # If this passkey still wraps the root (a full factor), removing the row
-    # alone would strand that factor — refuse until it is demoted.
+    # If this passkey still wraps the root — as a standalone passkey factor OR
+    # as the passkey half of a combined (MFA) factor — removing the row alone
+    # would strand that factor and the unlock UI. Refuse until it is demoted or
+    # MFA is turned off.
     try:
         personal = _personal_member()
     except Exception:
@@ -861,6 +866,13 @@ async def delete_passkey(request: Request) -> JSONResponse:
             return JSONResponse({"ok": False, "error": (
                 "this passkey still unlocks your key — remove it as a factor "
                 "(demote it) before removing the device"
+            )}, status_code=409)
+        if any(f.get("type") == "combined" and f.get("credential_id") == credential_id
+               for f in factors):
+            return JSONResponse({"ok": False, "error": (
+                "this passkey is half of your Multi-Factor lock — turn "
+                "Multi-Factor off before removing the device, or you would be "
+                "left unable to unlock"
             )}, status_code=409)
 
     try:
