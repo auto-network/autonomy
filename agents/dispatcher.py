@@ -2229,6 +2229,7 @@ def start_librarian(job: dict) -> RunningLibrarian | None:
             "job_id": job_id,
             "job_type": job_type,
             "graph_project": "autonomy",
+            "org": "autonomy",
         },
         detach=True,
         image=_rig_image,
