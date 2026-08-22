@@ -90,10 +90,14 @@ def test_design_create_broadcasts_reverse_link_to_creator_session(monkeypatch):
     assert [call.args[0] for call in broadcast.await_args_list] == [
         "design:design-1",
         "session-design:auto-designer",
+        "session-contributions",
     ]
     assert broadcast.await_args_list[1].args[1] == {
         "revision_id": "revision-3",
         "latest_revision_id": "revision-3",
         "design_id": "design-1",
         "title": "Session header polish",
+    }
+    assert broadcast.await_args_list[2].args[1] == {
+        "session_id": "auto-designer",
     }

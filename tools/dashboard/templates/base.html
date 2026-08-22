@@ -1634,18 +1634,22 @@
       .sv-term-toggle:hover { color: #d1d5db; background: rgba(55, 65, 81, 0.4); }
     }
     .sv-term-toggle.active { color: #a5b4fc; background: rgba(99, 102, 241, 0.15); }
-    /* Linked Design Studio jump: a crop-frame glyph reads as a design
-       surface at toolbar size, while the indigo tone distinguishes
-       navigation from the runtime controls beside it. */
-    .sv-term-design-link { color: #818cf8; }
-    .sv-term-design-link svg {
+    /* Plugin-owned icon actions share the runtime rail without teaching the
+       session viewer which products contributed them. */
+    .sv-session-contribution-action {
+      color: var(--session-contribution-accent, #94a3b8);
+    }
+    .sv-session-contribution-action__icon {
+      display: inline-flex;
       width: 17px;
       height: 17px;
     }
+    .sv-session-contribution-action__icon svg { width: 100%; height: 100%; }
+    .sv-session-contribution-badge { max-width: 112px; }
     @media (hover: hover) and (pointer: fine) {
-      .sv-term-design-link:hover {
-        color: #c7d2fe;
-        background: rgba(99, 102, 241, 0.14);
+      .sv-session-contribution-action:hover {
+        color: color-mix(in srgb, var(--session-contribution-accent, #94a3b8) 72%, white);
+        background: color-mix(in srgb, var(--session-contribution-accent, #94a3b8) 14%, transparent);
       }
     }
     /* Lit modifier — ``hasCommitsAhead`` flips this on the worktree-review
@@ -2492,6 +2496,7 @@
   <script src="/static/js/surface-presence.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/style-picker.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/lib/session-store.js?v=__STATIC_VERSION__"></script>
+  <script src="/static/js/lib/session-contributions.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/lib/feature-flags.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/lib/haptics.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/lib/voice-store.js?v=__STATIC_VERSION__"></script>

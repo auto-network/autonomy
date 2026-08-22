@@ -23,5 +23,6 @@ skill: SKILL.md
 
 entrypoints:
   api: tools.dashboard.plugins.mission_control.entrypoints.api:routes
+  session_contributions: tools.dashboard.plugins.mission_control.entrypoints.api:session_contributions
   schemas:
     - tools.dashboard.plugins.mission_control.entrypoints.schemas:MissionItemV1

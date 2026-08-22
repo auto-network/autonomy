@@ -1,0 +1,20 @@
+{# Plugin-owned session chrome. The shared service returns [] until the
+   batched lookup completes, so this partial remains inert on surfaces that
+   have not requested contributions yet. #}
+<template x-for="item in (window.Autonomy && window.Autonomy.sessionContributions) ? window.Autonomy.sessionContributions.forSession(s.session_id || s.tmux_session || s.id) : []"
+          :key="item.id">
+  <a class="sc-session-contribution"
+     :class="item.kind === 'badge' ? 'sc-session-contribution--badge' : 'sc-session-contribution--action'"
+     :href="item.href"
+     :title="item.title"
+     :aria-label="item.title || item.label"
+     :style="window.Autonomy.sessionContributions.style(item)"
+     :data-plugin-id="item.plugin_id"
+     @click.prevent.stop="window.Autonomy.sessionContributions.open(item)"
+     data-testid="session-card-contribution">
+    <span class="sc-session-contribution__icon" x-html="item.icon_svg"></span>
+    <span class="sc-session-contribution__label"
+          x-show="item.kind === 'badge'"
+          x-text="item.label"></span>
+  </a>
+</template>

@@ -26,6 +26,9 @@ from tools.dashboard import api_auth
 from tools.dashboard.dao import mission_control_db as db
 from tools.dashboard.plugins.mission_control import compose
 from tools.dashboard.event_bus import event_bus
+from tools.dashboard.plugin_api.session_contributions import (
+    SESSION_CONTRIBUTIONS_TOPIC,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +45,59 @@ MISSION_CONVERSATION_TOPIC = "mission_control:conversation"
 #: a pillar's claim about its own work from a question someone asked, without
 #: inspecting the payload to find out which arrived.
 MISSION_ACTIVITY_TOPIC = "mission_control:activity"
+
+_SESSION_ICON = (
+    '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" '
+    'stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" '
+    'aria-hidden="true">'
+    '<circle cx="10" cy="10" r="6.25"></circle>'
+    '<circle cx="10" cy="10" r="2.15"></circle>'
+    '<path d="M10 3.75V1.8M16.25 10h1.95M10 16.25v1.95M3.75 10H1.8"></path>'
+    '</svg>'
+)
+
+
+async def _publish_session_contribution_change(*session_ids: str) -> None:
+    """Tell open shared session surfaces to re-run plugin callbacks."""
+    for session_id in {str(value or "").strip() for value in session_ids}:
+        if not session_id:
+            continue
+        try:
+            await event_bus.broadcast(
+                SESSION_CONTRIBUTIONS_TOPIC,
+                {"session_id": session_id},
+                dedup=False,
+            )
+        except Exception:
+            logger.warning(
+                "mission_control session contribution publish failed for %s",
+                session_id,
+                exc_info=True,
+            )
+
+
+def session_contributions(session_ids: list[str], request: Request) -> dict[str, list[dict]]:
+    """Contribute a named Mission Control badge for coordinated pillars."""
+    result: dict[str, list[dict]] = {session_id: [] for session_id in session_ids}
+    for session_id in session_ids:
+        pillar = db.get_pillar_by_coordinator(session_id)
+        if not pillar:
+            continue
+        mission = db.get_mission(pillar["mission_id"])
+        if not mission or api_auth.caller_org_scope_hides(request, mission.get("org")):
+            continue
+        pillar_name = str(pillar.get("name") or "Mission pillar")
+        mission_name = str(mission.get("name") or "Mission Control")
+        result[session_id].append({
+            "id": f"pillar:{pillar['pillar_id']}",
+            "kind": "badge",
+            "label": pillar_name,
+            "title": f"Open {mission_name} / {pillar_name} in Mission Control",
+            "href": f"/missions/{pillar['mission_id']}/pillars/{pillar['pillar_id']}",
+            "icon_svg": _SESSION_ICON,
+            "accent": str(pillar.get("color") or "#34d399"),
+        })
+    return result
 
 
 async def _publish_conversation_event(
@@ -349,9 +405,14 @@ async def delete_mission(request: Request) -> JSONResponse:
         return auth_error
 
     mission_id = request.path_params["mission_id"]
+    coordinators = [
+        pillar.get("coordinator_session") or ""
+        for pillar in db.list_pillars(mission_id)
+    ] if db.get_mission(mission_id) else []
     deleted = db.delete_mission(mission_id)
     if not deleted:
         return JSONResponse({"error": "mission not found"}, status_code=404)
+    await _publish_session_contribution_change(*coordinators)
     return JSONResponse({"ok": True})
 
 
@@ -522,6 +583,7 @@ async def create_pillar(request: Request) -> JSONResponse:
     coordinator_session = (body.get("coordinator_session") or "").strip()
     color = (body.get("color") or "").strip()
     pillar = db.create_pillar(mission_id, name, coordinator_session, color)
+    await _publish_session_contribution_change(coordinator_session)
     return JSONResponse({"pillar": _pillar_payload(pillar)}, status_code=201)
 
 
@@ -614,11 +676,16 @@ async def set_pillar_coordinator(request: Request) -> JSONResponse:
     exists to keep.
     """
     pillar_id = request.path_params["pillar_id"]
+    previous = db.get_pillar(pillar_id)
     session, err = _coordinator_from(await request.json())
     if err is not None:
         return err
     if not db.set_pillar_coordinator(pillar_id, session):
         return JSONResponse({"error": "pillar not found"}, status_code=404)
+    await _publish_session_contribution_change(
+        previous.get("coordinator_session") if previous else "",
+        session,
+    )
     return JSONResponse({"pillar": _pillar_payload(db.get_pillar(pillar_id))})
 
 
@@ -773,9 +840,13 @@ async def delete_pillar(request: Request) -> JSONResponse:
         return auth_error
 
     pillar_id = request.path_params["pillar_id"]
+    pillar = db.get_pillar(pillar_id)
     deleted = db.delete_pillar(pillar_id)
     if not deleted:
         return JSONResponse({"error": "pillar not found"}, status_code=404)
+    await _publish_session_contribution_change(
+        pillar.get("coordinator_session") if pillar else "",
+    )
     return JSONResponse({"ok": True})
 
 

@@ -84,6 +84,7 @@
             x-effect="harness = s.harness; model = s.model">
         {% include 'partials/session-harness-badge.html' %}
       </span>
+      {% include 'partials/session-contributions.html' %}
       <!-- Startup-phase chip (auto-yfcoc; design rev 63542418). Visible
            whenever the lifecycle derivation has a chip label for this
            session — covers every active startup state plus the ready/
@@ -203,6 +204,7 @@
             x-effect="harness = s.harness; model = s.model">
         {% include 'partials/session-harness-badge.html' %}
       </span>
+      {% include 'partials/session-contributions.html' %}
       <!-- Startup-phase chip mirrored on the stats row (auto-yfcoc).
            Same chrome + derivation as the compact-row chip; both rows
            render it so the chip survives zoom modes via the existing

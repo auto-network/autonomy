@@ -18,6 +18,8 @@ the pieces required to swap the chat body for a full-screen xterm view
 Uses the test_client fixture from tests/conftest.py.
 """
 
+from pathlib import Path
+
 
 def test_toggle_button_rendered_when_tmux_present(test_client):
     """Header row1 contains the ESC action and terminal toggle when tmux is set."""
@@ -50,23 +52,31 @@ def test_header_background_button_rendered_for_claude_harness(test_client):
         "Header Ctrl-B button must be gated on isClaudeHarness"
 
 
-def test_header_links_back_to_linked_design_studio_experiment(test_client):
-    """A linked design gets one compact return control before ESC."""
+def test_header_renders_plugin_contributions_before_escape(test_client):
+    """Plugin icon actions occupy the compact return-control slot before ESC."""
     page = test_client.get("/pages/session-view")
     assert page.status_code == 200
     html = page.text
-    assert 'data-testid="session-design-link"' in html
-    assert 'x-show="!!linkedDesign"' in html
-    assert 'openLinkedDesign()' in html
-    assert html.index('session-design-link') < html.index('sv-term-escape')
+    assert 'data-testid="session-viewer-contribution-action"' in html
+    assert 'sessionContributionActions' in html
+    assert 'openSessionContribution(item)' in html
+    assert html.index('session-viewer-contribution-action') < html.index('sv-term-escape')
 
     script = test_client.get("/static/js/pages/session-viewer.js")
     assert script.status_code == 200
     body = script.text
-    assert "'session-design:' + sessionId" in body
-    assert '/api/design-studio/designs?' in body
-    assert "design.creator_session_id === sessionId" in body
-    assert "'/design/' + encodeURIComponent(revisionId)" in body
+    assert "service.forSession(this.sessionKey, 'action')" in body
+    assert "service.forSession(this.sessionKey, 'badge')" in body
+    assert "service.load([key])" in body
+
+
+def test_shared_session_card_renders_plugin_badges_and_actions(test_client):
+    templates = Path(__file__).parents[2] / "templates"
+    card = (templates / "partials/session-card.html").read_text()
+    assert 'include "partials/session-contributions.html"' in card
+    html = (templates / "partials/session-contributions.html").read_text()
+    assert 'data-testid="session-card-contribution"' in html
+    assert "forSession(s.session_id || s.tmux_session || s.id)" in html
 
 
 def test_tile_background_button_rendered_for_claude_harness(test_client):

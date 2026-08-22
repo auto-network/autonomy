@@ -44,3 +44,41 @@ The example backend returns this bounded shape:
 
 `record` is `null` when the organization has not written one. Replace the
 example set and response with the real application's contract.
+
+## Optional session chrome
+
+A plugin can decorate shared session cards and the session viewer without
+adding product-specific relationship logic to either surface. Declare a
+batched callback in `plugin.yaml`:
+
+```yaml
+entrypoints:
+  session_contributions: your_package.entrypoints.api:session_contributions
+```
+
+The callback receives `(session_ids, request)`. Use the authenticated request
+to enforce the plugin's organization scope, then return a mapping from every
+requested session ID to zero or more descriptors. `kind: action` renders an
+icon-only navigation affordance; `kind: badge` renders the icon and label.
+
+```python
+def session_contributions(session_ids, request):
+    return {
+        session_id: [{
+            "id": "stable-plugin-owned-id",
+            "kind": "badge",
+            "label": "Short visible label",
+            "title": "Accessible action description",
+            "href": "/internal/plugin/path",
+            "icon_svg": "<svg ...>...</svg>",
+            "accent": "#34d399",
+        }]
+        for session_id in session_ids
+    }
+```
+
+Keep the callback read-only and batch the underlying lookup. The substrate
+namespaces IDs, rejects external links or malformed descriptors, and renders
+the result. When a relationship changes, broadcast the shared
+`session-contributions` topic with `{"session_id": "..."}` so open surfaces
+refresh that session.

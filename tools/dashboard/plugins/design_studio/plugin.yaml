@@ -27,3 +27,4 @@ frontend:
 entrypoints:
   api: tools.dashboard.plugins.design_studio.entrypoints.api:routes
   badge_counter: tools.dashboard.plugins.design_studio.entrypoints.api:badge_counter
+  session_contributions: tools.dashboard.plugins.design_studio.entrypoints.api:session_contributions

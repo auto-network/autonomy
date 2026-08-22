@@ -121,6 +121,18 @@
             <span class="sc-role sv-identity-placeholder"
                   x-show="isLive && sessionType !== 'host' && !role"
                   data-testid="session-role-placeholder">New Session</span>
+            <template x-for="item in sessionContributionBadges" :key="item.id">
+              <a class="sc-session-contribution sc-session-contribution--badge sv-session-contribution-badge"
+                 :href="item.href"
+                 :title="item.title"
+                 :aria-label="item.title || item.label"
+                 :style="window.Autonomy.sessionContributions.style(item)"
+                 @click.prevent.stop="openSessionContribution(item)"
+                 data-testid="session-viewer-contribution-badge">
+                <span class="sc-session-contribution__icon" x-html="item.icon_svg"></span>
+                <span class="sc-session-contribution__label" x-text="item.label"></span>
+              </a>
+            </template>
             <div style="flex:1"></div>
             <!-- Right cluster: entries count + ⌥ / ESC / >_ / chevron.
                  Wrapped in its own flex with a wider gap so the icons
@@ -156,25 +168,18 @@
                       data-testid="session-worktree-review-button"
                       aria-label="Open worktree review"
                       style="display:none;"><span class="sv-term-glyph">⌥</span></button>
-              <button type="button"
-                      class="sv-term-toggle sv-term-design-link"
-                      @click.stop="openLinkedDesign()"
-                      x-show="!!linkedDesign"
-                      :title="linkedDesignTooltip"
-                      aria-label="Open linked Design Studio experiment"
-                      data-testid="session-design-link"
-                      style="display:none;">
-                <svg viewBox="0 0 20 20"
-                     fill="none"
-                     stroke="currentColor"
-                     stroke-width="1.7"
-                     stroke-linecap="round"
-                     stroke-linejoin="round"
-                     aria-hidden="true">
-                  <path d="M7 3.75H3.75V7M13 3.75h3.25V7M16.25 13v3.25H13M7 16.25H3.75V13"></path>
-                  <circle cx="10" cy="10" r="2.15"></circle>
-                </svg>
-              </button>
+              <template x-for="item in sessionContributionActions" :key="item.id">
+                <button type="button"
+                        class="sv-term-toggle sv-session-contribution-action"
+                        @click.stop="openSessionContribution(item)"
+                        :title="item.title"
+                        :aria-label="item.title || item.label"
+                        :style="window.Autonomy.sessionContributions.style(item)"
+                        :data-plugin-id="item.plugin_id"
+                        data-testid="session-viewer-contribution-action">
+                  <span class="sv-session-contribution-action__icon" x-html="item.icon_svg"></span>
+                </button>
+              </template>
               <template x-if="_tmuxSession && isLive">
                 <button class="sv-term-toggle sv-term-escape"
                         @click.stop="interrupt()"

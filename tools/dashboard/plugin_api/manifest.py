@@ -53,6 +53,11 @@ class PluginEntrypoints(BaseModel):
     model_config = ConfigDict(extra="forbid")
     api: Optional[str] = None
     badge_counter: Optional[str] = None
+    # Optional batched callback for session-card / session-viewer chrome.
+    # Signature: ``(session_ids: list[str], request: Request) ->
+    # dict[str, list[descriptor]]``. The plugin owns relationship lookup and
+    # authorization; the substrate only normalizes and renders descriptors.
+    session_contributions: Optional[str] = None
     schemas: Optional[List[str]] = None
     # Each entry is a bare module path — the loader imports it for the
     # ``register_action(...)`` side effect at module top-level. No attribute
