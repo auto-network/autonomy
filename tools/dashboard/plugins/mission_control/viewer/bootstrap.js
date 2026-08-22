@@ -439,6 +439,10 @@
   // A terminal: the session behind this screen. One path, same stroke
   // grammar as CHAT so the two bar icons render as siblings.
   var TERM = "M3 5h18v14H3zM7 9.5l3 2.5-3 2.5M13 15h4";
+  // A hamburger: the way back out of the mission frame into the app.
+  var MENU = "M4 6h16M4 12h16M4 18h16";
+  // A pulse line: "latest" — what has been happening, not a clock reading.
+  var PULSE = "M3 12h4l3-8 4 16 3-8h4";
 
   function face(p, small) {
     var cls = small ? "mc-face mc-face-sm" : "mc-face";
@@ -542,54 +546,56 @@
     var here = presentHere();
     var swatch = el("span", {class: "mc-swatch"});
     swatch.style.background = p.color || "#475569";
-    var kids = [
-      el("button", {class: "mc-pill", onclick: function () { show(ui.panel === "pillars" ? null : {panel: "pillars"}); }},
-         [swatch, el("span", {class: "mc-name", text: p.name || state.mission || "Mission"}), el("span", {class: "mc-caret", text: "\u25be"})]),
-      // The age was the only thing on the bar already answering "when did
-      // anything last happen", so it is where "what happened" belongs. A
-      // span that now opens a surface has to look like a control, or it is a
-      // secret.
-      el("button", {class: "mc-age mc-age-btn", text: p.age || "",
-                    title: "What every pillar has been reporting",
-                    onclick: function () { show(ui.view === "feed" ? null : {view: "feed"}); }}),
-      el("span", {class: "mc-grow"}),
-    ];
-    var n = openCount(), done = answeredCount();
-    // The bubble says what this is; the numbers say how much of it there is.
-    // Open is the count that wants a human, so it is the only coloured one.
-    var qKids = [svg(CHAT)];
-    if (n || done) {
-      qKids.push(el("span", {class: n ? "mc-count mc-count-open" : "mc-count",
-                             title: n + " open", text: String(n)}));
-      qKids.push(el("span", {class: "mc-count mc-count-done",
-                             title: done + " answered", text: String(done)}));
-    }
-    // THE WAY BACK. The dashboard's session viewer links here through the
-    // pillar badge; this is the return edge, and it exists only where the
-    // state block carries a session href — the dashboard surface. A guest's
-    // screen never receives one (compose omits sessions over the relay), so
-    // a share link never grows a door to an internal session.
-    var sessHref = (p && p.session_href) || state.session_href || "";
-    if (sessHref) {
-      kids.push(el("a", {class: "mc-q mc-session", href: sessHref,
-                         title: "Open the coordinating session",
-                         onclick: function (e) {
-        // Inside the SPA's mission frame, navigate the PARENT app —
-        // a push, not a document load, so the PWA never reboots. The
-        // same-origin check is the try: a sandboxed guest frame throws
-        // and falls through to the plain navigation (which its state
-        // never triggers anyway — no session_href crosses the relay).
+    var kids = [];
+    // THE WAY OUT. Inside the dashboard SPA the mission frame covers the
+    // whole app, so without a door the only exit is the browser back-swipe
+    // \u2014 once per internal navigation, counted out loud by the operator. A
+    // guest share frame has no app behind it, so it gets no door.
+    if (!RELAY_FRAME) {
+      kids.push(el("button", {class: "mc-q mc-menu", title: "Back to Mission Control",
+                              onclick: function () {
         try {
           if (window.parent !== window &&
               typeof window.parent.navigateTo === "function") {
-            e.preventDefault();
-            window.parent.navigateTo(sessHref);
+            window.parent.navigateTo("/mission-control");
             return;
           }
-        } catch (_) {}
-      }}, [svg(TERM)]));
+        } catch (_e) {}
+        location.assign("/mission-control");
+      }}, [svg(MENU)]));
     }
-    var q = el("button", {class: n ? "mc-q mc-q-hot" : "mc-q", title: "Questions",
+    // TITLELESS BAR. The screen carries its own title; the bar is a
+    // toolbar. The swatch keeps the pillar's colour as the remaining
+    // "where am I" cue and opens the pillar status panel.
+    kids.push(
+      el("button", {class: "mc-pill", title: "Pillar status",
+                    onclick: function () { show(ui.panel === "pillars" ? null : {panel: "pillars"}); }},
+         [swatch, el("span", {class: "mc-caret", text: "\u25be"})]));
+    // LATEST, not a clock. This wore the current pillar's age ("32m") as
+    // its label, which read as a timestamp about the visible screen \u2014 but
+    // it opens the cross-pillar feed, and on a structured screen the view
+    // is cross-pillar anyway. An icon says "what's new"; the ages live in
+    // the status panel rows where they describe something specific.
+    kids.push(
+      el("button", {class: "mc-q mc-latest", title: "Latest from every pillar",
+                    onclick: function () { show(ui.view === "feed" ? null : {view: "feed"}); }},
+         [svg(PULSE)]));
+    kids.push(el("span", {class: "mc-grow"}));
+    var n = openCount(), done = answeredCount();
+    // ONE NUMBER. The bubble used to carry open AND answered, which made
+    // it unreadable next to "N for you" \u2014 three counters, two of them
+    // grey. Open is the only count that wants a human; the panel itself
+    // breaks out answered.
+    var qKids = [svg(CHAT)];
+    if (n) {
+      qKids.push(el("span", {class: "mc-count mc-count-open",
+                             title: n + " open", text: String(n)}));
+    }
+    // The coordinating-session door moved into the presence panel — the
+    // bar had no horizontal room left for it, and presence already answers
+    // "who is behind this screen".
+    var q = el("button", {class: n ? "mc-q mc-q-hot" : "mc-q",
+                          title: "Questions — " + n + " open, " + done + " answered",
                           onclick: function () { show(ui.panel === "questions" ? null : {panel: "questions"}); }},
                qKids);
     kids.push(q);
@@ -707,15 +713,50 @@
     return id ? "/session/" + encodeURIComponent(id) : null;
   }
 
+  // Links out of the mission frame ride the PARENT app's router when one
+  // is there — a push, not a document load, so the PWA never reboots. A
+  // sandboxed guest frame throws on the parent touch and falls through to
+  // the plain href (which its state never carries anyway).
+  function spaNav(href) {
+    return function (e) {
+      try {
+        if (window.parent !== window &&
+            typeof window.parent.navigateTo === "function") {
+          e.preventDefault();
+          window.parent.navigateTo(href);
+        }
+      } catch (_e) {}
+    };
+  }
+
   function whoList() {
     var here = presentHere();
-    return el("div", {class: "mc-who"},
-      [el("p", {class: "mc-label", text: here.length + " here"})].concat(
+    var rows = [el("p", {class: "mc-label", text: here.length + " here"})];
+    // THE COORDINATING SESSION LIVES HERE NOW. It wore a bar icon of its
+    // own, but bar room is spent one icon at a time and presence was
+    // already the "who is behind this screen" surface — the session is
+    // exactly that. Dashboard only: compose omits session hrefs over the
+    // relay, so a guest's panel never grows a door to an internal session.
+    var p = currentPillar() || {};
+    var sessHref = (p && p.session_href) || state.session_href || "";
+    if (sessHref) {
+      var sname = (p && p.coordinator_session)
+               || state.coordinator_session || "coordinating session";
+      rows.push(el("div", {class: "mc-who-row"}, [
+        el("span", {class: "mc-who-term"}, [svg(TERM)]),
+        el("a", {class: "mc-who-name mc-who-link", href: sessHref,
+                 title: "Open the coordinating session",
+                 onclick: spaNav(sessHref)}, [el("span", {text: sname})]),
+        el("span", {class: "mc-who-seen", text: "coordinating"}),
+      ]));
+    }
+    return el("div", {class: "mc-who"}, rows.concat(
         here.map(function (h) {
           var href = sessionHref(h);
           var name = href
             ? el("a", {class: "mc-who-name mc-who-link", href: href,
-                       title: "Open this session"}, [el("span", {text: h.label || ""})])
+                       title: "Open this session",
+                       onclick: spaNav(href)}, [el("span", {text: h.label || ""})])
             : el("span", {class: "mc-who-name", text: h.label || ""});
           return el("div", {class: "mc-who-row"}, [face(h), name,
             el("span", {class: "mc-who-seen", text: h.seen || ""})]);
@@ -723,36 +764,54 @@
   }
 
   function pillarRows() {
+    // STATUS, NOT NAVIGATION, on a structured mission. A structured screen
+    // is one dynamic app showing cross-pillar content — routing the reader
+    // to a per-pillar URL from here would reload the world to show them a
+    // subset of what they already have. The panel is a toggle: the latest
+    // status of every pillar, opened and closed from the bar. Freeform
+    // missions keep the rows as destinations, because there each pillar
+    // really is a separate document.
+    var structured = state.style === "structured";
     var onOverview = !(ui.screenId || state.screen);
     // The overview needs a colour tab like every pillar row has. Without one
     // it reads as a heading above the list rather than as a destination in it.
     var overviewSwatch = el("span", {class: "mc-swatch"});
     overviewSwatch.style.background = "#e2e8f0";
-    var rows = [el("button", {
-      class: onOverview ? "mc-row mc-row-on" : "mc-row",
-      onclick: function () { show(null); if (!onOverview) goto(null); },
-    }, [
-      el("div", {class: "mc-row-top"}, [
-        overviewSwatch,
-        el("span", {class: "mc-name", text: state.mission || "Mission overview"}),
-      ]),
-      el("p", {class: "mc-last", text: "Mission overview and current status."}),
-    ])];
+    var rows = [structured
+      ? el("div", {class: "mc-row mc-row-static"}, [
+          el("div", {class: "mc-row-top"}, [
+            overviewSwatch,
+            el("span", {class: "mc-name", text: state.mission || "Mission overview"}),
+          ]),
+          el("p", {class: "mc-last", text: "Latest status from every pillar."}),
+        ])
+      : el("button", {
+          class: onOverview ? "mc-row mc-row-on" : "mc-row",
+          onclick: function () { show(null); if (!onOverview) goto(null); },
+        }, [
+          el("div", {class: "mc-row-top"}, [
+            overviewSwatch,
+            el("span", {class: "mc-name", text: state.mission || "Mission overview"}),
+          ]),
+          el("p", {class: "mc-last", text: "Mission overview and current status."}),
+        ])];
     return rows.concat(state.pillars.map(function (p) {
       var sw = el("span", {class: "mc-swatch"}); sw.style.background = p.color || "#475569";
       var faces = el("span", {class: "mc-faces"}, (p.here || []).map(function (h) { return face(h, true); }));
       var meta = [el("span", {class: "mc-age", text: p.age || ""})];
       if (p.open) meta.push(el("span", {class: "mc-open", text: p.open + " open"}));
       if (!(p.here || []).length) meta.push(el("span", {class: "mc-nobody", text: "nobody here"}));
-      return el("button", {
-        class: p.pillar_id === (ui.screenId || state.screen) ? "mc-row mc-row-on" : "mc-row",
-        onclick: function () { goto(p.pillar_id); },
-      }, [
+      var content = [
         el("div", {class: "mc-row-top"}, [sw, el("span", {class: "mc-name", text: p.name || ""}), faces]),
         // at most two sentences, no jargon: the last productive thing done
         el("p", {class: "mc-last", text: p.last_done || ""}),
         el("div", {class: "mc-row-meta"}, meta),
-      ]);
+      ];
+      if (structured) return el("div", {class: "mc-row mc-row-static"}, content);
+      return el("button", {
+        class: p.pillar_id === (ui.screenId || state.screen) ? "mc-row mc-row-on" : "mc-row",
+        onclick: function () { goto(p.pillar_id); },
+      }, content);
     }));
   }
 
@@ -1775,7 +1834,12 @@
     // leaves every control silently dead -- which is what the dashboard did.
     if (!RELAY_FRAME) {
       var base = "/missions/" + (state.mission_id || "");
-      location.assign(pillarId ? base + "/pillars/" + pillarId : base);
+      var url = pillarId ? base + "/pillars/" + pillarId : base;
+      // Inside the SPA's frame an assign() adds a JOINT history entry the
+      // app never pushed — the operator swipe-counted their way out of a
+      // stack of them. The frame's internal moves must leave no trail.
+      if (window.parent !== window) location.replace(url);
+      else location.assign(url);
       return;
     }
     var body = pillarId
