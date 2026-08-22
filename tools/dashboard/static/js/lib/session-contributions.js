@@ -80,8 +80,21 @@
     open(item) {
       var href = item && item.href;
       if (!href) return;
-      if (typeof window.navigateTo === 'function') window.navigateTo(href);
-      else window.location.assign(href);
+      // A hard_reload contribution targets a server-rendered page the SPA
+      // router does not own (a mission screen); routing it through
+      // navigateTo renders the SPA's not-found over a URL that serves fine.
+      if (item.hard_reload || typeof window.navigateTo !== 'function') {
+        window.location.assign(href);
+        return;
+      }
+      window.navigateTo(href);
+    },
+
+    click(event, item) {
+      if (!item || !item.href) { if (event) event.preventDefault(); return; }
+      if (item.hard_reload) return;   // native anchor navigation
+      if (event) event.preventDefault();
+      this.open(item);
     },
   };
 

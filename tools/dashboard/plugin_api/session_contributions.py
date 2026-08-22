@@ -50,4 +50,9 @@ def normalize_descriptor(
         "href": href,
         "icon_svg": icon_svg,
         "accent": str(raw.get("accent") or "").strip()[:64],
+        # True when href is a server-rendered page (a mission screen, a
+        # download) rather than an SPA route: the renderer must let the
+        # browser navigate natively instead of handing the path to the SPA
+        # router, which answers not-found for pages it does not own.
+        "hard_reload": bool(raw.get("hard_reload")),
     }

@@ -10,7 +10,11 @@
      :aria-label="item.title || item.label"
      :style="window.Autonomy.sessionContributions.style(item)"
      :data-plugin-id="item.plugin_id"
-     @click.prevent.stop="window.Autonomy.sessionContributions.open(item)"
+     :data-hard-reload="item.hard_reload ? '' : false"
+     {# .stop keeps the card's own open-session click out of it; default
+        stays allowed so hard_reload hrefs navigate natively — the service
+        preventDefaults only for SPA-routable items. #}
+     @click.stop="window.Autonomy.sessionContributions.click($event, item)"
      data-testid="session-card-contribution">
     <span class="sc-session-contribution__icon" x-html="item.icon_svg"></span>
     <span class="sc-session-contribution__label"

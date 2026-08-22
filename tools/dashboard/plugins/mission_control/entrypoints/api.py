@@ -96,6 +96,8 @@ def session_contributions(session_ids: list[str], request: Request) -> dict[str,
             "href": f"/missions/{pillar['mission_id']}/pillars/{pillar['pillar_id']}",
             "icon_svg": _SESSION_ICON,
             "accent": str(pillar.get("color") or "#34d399"),
+            # Mission screens are server-rendered, not SPA routes.
+            "hard_reload": True,
         })
     return result
 
@@ -975,6 +977,26 @@ _NO_STORE_HEADERS = {
 }
 
 
+def _screen_response(document: bytes, request: Request) -> HTMLResponse:
+    """A mission screen, gzipped when the client accepts it.
+
+    A composed screen is ~270-450 KB of HTML+inline JSON/JS that compresses
+    roughly 5x, and nothing paints until it has all arrived — on a phone
+    reaching the dashboard over a tunnel, uncompressed transfer WAS the
+    measured multi-second white screen (diag strip: render 29 ms,
+    chrome+parse 5.3 s). no-store already forbids caching, so compressing
+    per-request costs one gzip call and breaks no freshness promise.
+    """
+    import gzip as _gzip
+    headers = dict(_NO_STORE_HEADERS)
+    accepts = (request.headers.get("accept-encoding") or "").lower()
+    if "gzip" in accepts:
+        document = _gzip.compress(document, compresslevel=6)
+        headers["Content-Encoding"] = "gzip"
+        headers["Vary"] = "Accept-Encoding"
+    return HTMLResponse(document, headers=headers)
+
+
 async def serve_mission_site(request: Request):
     mission_id = request.path_params["mission_id"]
     if not db.get_mission(mission_id):
@@ -987,7 +1009,7 @@ async def serve_mission_site(request: Request):
         return PlainTextResponse(
             "Mission has no site revision yet", status_code=404, headers=_NO_STORE_HEADERS
         )
-    return HTMLResponse(document, headers=_NO_STORE_HEADERS)
+    return _screen_response(document, request)
 
 
 async def serve_pillar_site(request: Request):
@@ -1006,7 +1028,7 @@ async def serve_pillar_site(request: Request):
         return PlainTextResponse(
             "Pillar has no site revision yet", status_code=404, headers=_NO_STORE_HEADERS
         )
-    return HTMLResponse(document, headers=_NO_STORE_HEADERS)
+    return _screen_response(document, request)
 
 
 # ── Visitor identity shim (P2) ────────────────────────────────────
