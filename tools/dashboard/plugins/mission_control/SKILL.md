@@ -168,6 +168,12 @@ States: `proven done settled active code_only next specified open blocked
 deferred retired` — `proven` means exercised on the real system and
 witnessed; `code_only` means tests pass, never run for real.
 
+Attach every item to a pillar, never to the mission surface. The
+overview is a computed summary view, not a content surface — mission-level
+items render folded as legacy and their grid row disappears once they are
+gone. Cross-pillar decisions belong to the pillar that owns the boundary,
+with `refs` pointing at the others.
+
 Two platform surfaces still read fields you must feed: keep posting
 `last_done` (`POST /api/pillars/<id>/last-done`) when work completes — the
 pillar chooser and status feed render it and nothing substitutes for it —

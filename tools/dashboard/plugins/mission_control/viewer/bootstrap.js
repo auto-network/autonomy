@@ -363,6 +363,10 @@
   // subscribeLive refuses to open a second.
   addEventListener("pagehide", releaseLive);
   addEventListener("pageshow", subscribeLive);
+
+  // The bar renders before the author's script declares its views; when
+  // the declaration lands, draw the view menu.
+  document.addEventListener("mc:views-changed", function () { render(); });
   // Backgrounding the app is the same situation: a stream nobody can see,
   // holding a connection the next navigation needs.
   addEventListener("visibilitychange", function () {
@@ -581,6 +585,15 @@
                     onclick: function () { show(ui.panel === "pillars" ? null : {panel: "pillars"}); }},
            [band, el("span", {text: "Pillars"})]);
       })());
+    var viewsDecl = null;
+    try { viewsDecl = JSON.parse(document.body.dataset.mcViews || "null"); }
+    catch (_e) { viewsDecl = null; }
+    if (viewsDecl && viewsDecl.length) {
+      kids.push(el("button", {class: "mc-pill mc-menu-word", title: "Switch view",
+                    onclick: function () { show(ui.panel === "views" ? null : {panel: "views"}); }},
+         [el("span", {text: document.body.dataset.mcViewLabel || viewsDecl[0].label || "View"}),
+          el("span", {class: "mc-caret", text: "\u25be"})]));
+    }
     kids.push(el("span", {class: "mc-grow"}));
     var n = openCount(), done = answeredCount();
     // ONE NUMBER. The bubble used to carry open AND answered, which made
@@ -1223,8 +1236,26 @@
     });
   }
 
-  var PANEL_TITLE = {pillars: "",
+  var PANEL_TITLE = {pillars: "", views: "View",
                      questions: "Questions", foryou: "Asks for you"};
+
+  function viewRows() {
+    var decl = [];
+    try { decl = JSON.parse(document.body.dataset.mcViews || "[]"); }
+    catch (_e) { decl = []; }
+    var cur = document.body.dataset.mcView || "";
+    return decl.map(function (vw) {
+      return el("button", {
+        class: vw.id === cur ? "mc-row mc-row-on" : "mc-row",
+        onclick: function () {
+          document.dispatchEvent(new CustomEvent("mc:goto-view", {detail: {id: vw.id}}));
+          show(null);
+        },
+      }, [el("div", {class: "mc-row-top"}, [
+        el("span", {class: "mc-name", text: vw.label || vw.id}),
+      ])]);
+    });
+  }
 
   // TWO DIRECTIONS, ONE PANEL. Questions FOR THE MISSION are conversations
   // people opened that a coordinator owes or gave an answer; questions FOR
@@ -1301,6 +1332,7 @@
     if (!ui.panel) return null;
     var body = ui.panel === "pillars"
                  ? (statusMode === "time" ? byTimeRows() : pillarRows())
+             : ui.panel === "views" ? viewRows()
              : ui.panel === "foryou" ? forYouRows()
              : qaMode === "you" ? forYouRows()
              : [el("div", {class: "mc-qfilter"}, filterToggle())]
