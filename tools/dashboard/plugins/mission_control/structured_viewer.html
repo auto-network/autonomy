@@ -67,8 +67,9 @@
     scrollbar-width:thin}
   .mc-act-table{border-collapse:separate;border-spacing:2px}
   .mc-act-table td,.mc-act-table th{padding:0}
-  .mc-act-table th{font:400 .72rem/1.2 inherit;color:var(--ink2);text-align:left;
-    padding-right:10px;white-space:nowrap;max-width:150px;overflow:hidden;text-overflow:ellipsis}
+  .mc-act-table th{font:400 .74rem/1.2 inherit;color:var(--ink2);text-align:left;
+    padding-right:10px;white-space:nowrap;max-width:230px;overflow:hidden;text-overflow:ellipsis;
+    cursor:pointer}
   .mc-act-table th .dot{display:inline-block;width:7px;height:7px;border-radius:50%;
     margin-right:6px;vertical-align:1px}
   .mc-act-cell{width:13px;height:13px;border-radius:3px;background:var(--card2)}
@@ -290,7 +291,7 @@
 
   <div class="mc-activity">
     <div class="hd">
-      <span class="t">Activity — last 14 days</span>
+      <span class="t">Activity</span>
       <span class="legend">less
         <i style="background:var(--card2)"></i><i style="background:#2b2f52"></i>
         <i style="background:#46448c"></i><i style="background:#6a63c8"></i>
@@ -552,21 +553,35 @@
 
   // ── activity grid: surfaces × days from item timestamps ─────────
   (function activity(){
-    var DAYS = 14, MS = 86400000;
-    var today = new Date(); today.setHours(0,0,0,0);
+    // WHAT'S BEEN HAPPENING LATELY, not a calendar. The last ~100 item
+    // events (real happened_at/updated_at stamps) sliced into eight
+    // recency columns ending at now — a dense mission's grid spans hours,
+    // a sparse one's spans weeks, and either way the right edge is
+    // "lately", which is the only thing a reader wants from it. Day
+    // labels meant nothing at that variable scale and are gone; the
+    // narrow graphic gives the pillar names their room back.
+    var COLS = 8, LAST = 100;
     // LIVE items decide the row: a mission surface holding only retired
     // history is content-free, and its grid row retires with it.
     var hasMissionItems = liveItems.some(function (it) { return it.surface_id===MID; });
     var surfaces = (hasMissionItems ? [{id:MID}] : [])
       .concat(PILLARS.map(function(p){return {id:p.pillar_id};}));
-    var buckets = {};   // sid -> [count per day, oldest first]
-    surfaces.forEach(function (s) { buckets[s.id] = new Array(DAYS).fill(0); });
+    var events = [];
     ITEMS.forEach(function (it) {
       var d = when(it); if (!d) return;
-      var day = new Date(d); day.setHours(0,0,0,0);
-      var idx = DAYS - 1 - Math.round((today - day) / MS);
-      if (idx >= 0 && idx < DAYS && buckets[it.surface_id]) buckets[it.surface_id][idx]++;
+      events.push({t: d.getTime(), sid: it.surface_id});
     });
+    events.sort(function (a,b){ return a.t - b.t; });
+    if (events.length > LAST) events = events.slice(events.length - LAST);
+    var buckets = {};   // sid -> [count per recency column, oldest first]
+    surfaces.forEach(function (s) { buckets[s.id] = new Array(COLS).fill(0); });
+    if (events.length){
+      var t0 = events[0].t, span = Math.max(1, Date.now() - t0);
+      events.forEach(function (e) {
+        var idx = Math.min(COLS - 1, Math.floor((e.t - t0) / span * COLS));
+        if (buckets[e.sid]) buckets[e.sid][idx]++;
+      });
+    }
     var max = 1;
     surfaces.forEach(function (s) { buckets[s.id].forEach(function (n) { if (n>max) max=n; }); });
     var lvl = function (n) {
@@ -583,25 +598,14 @@
       th.title = "Show " + surfName(s.id) + "'s updates over time";
       th.addEventListener("click", function () { showFeedFor(s.id); });
       tr.appendChild(th);
-      buckets[s.id].forEach(function (n, i) {
+      buckets[s.id].forEach(function (n) {
         var td = document.createElement("td");
         var cell = el("div","mc-act-cell " + lvl(n));
-        var day = new Date(today - (DAYS-1-i)*MS);
-        cell.title = surfName(s.id) + " — " + day.toLocaleDateString() + ": " +
-          n + " item change" + (n===1?"":"s");
+        cell.title = surfName(s.id) + ": " + n + " item change" + (n===1?"":"s");
         td.appendChild(cell); tr.appendChild(td);
       });
       table.appendChild(tr);
     });
-    var lab = document.createElement("tr"); lab.className="dayrow";
-    lab.appendChild(document.createElement("th"));
-    for (var i=0;i<DAYS;i++){
-      var td = document.createElement("td"); td.className="daylab";
-      var day = new Date(today - (DAYS-1-i)*MS);
-      td.textContent = (i===0 || day.getDay()===1) ? String(day.getDate()) : "";
-      lab.appendChild(td);
-    }
-    table.appendChild(lab);
   })();
 
   // ── item card renderer ──────────────────────────────────────────
