@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS designs (
   revision_seq INTEGER,
   creator_session_id TEXT,
   creator_session_label TEXT,
+  org TEXT,
   created_at DATETIME DEFAULT (datetime('now'))
 )
 """
@@ -99,6 +100,35 @@ def _get_conn() -> sqlite3.Connection:
     return conn
 
 
+#: The org a NULL-org design is backfilled to when it was modified recently.
+#: Per operator direction: recently-active designs in this deployment are almost
+#: all this org, and they must stay reachable by an org-scoped caller. Older
+#: NULL-org designs are left NULL (unattributable → hidden from org callers, still
+#: visible to the operator), matching the token h4kzx rule.
+_OBVIOUS_ORG = "autonomy"
+
+
+def _ensure_org_column(conn: sqlite3.Connection) -> None:
+    """Add the ``org`` column (idempotent) and, once, backfill recently-modified
+    designs to the obvious org so agents can reach their own recent work.
+
+    The backfill runs only when the column is first created (the ALTER succeeds).
+    A design with any revision created in the last ~2 days is stamped in full
+    (every revision of that design shares one org). Older designs stay NULL.
+    """
+    try:
+        conn.execute("ALTER TABLE designs ADD COLUMN org TEXT")
+    except sqlite3.OperationalError:
+        return  # column already present → already migrated and backfilled once
+    conn.execute(
+        "UPDATE designs SET org = ? WHERE org IS NULL AND design_id IN ("
+        "  SELECT design_id FROM designs"
+        "  WHERE created_at >= datetime('now', '-2 days')"
+        ")",
+        (_OBVIOUS_ORG,),
+    )
+
+
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
@@ -168,6 +198,8 @@ def init_db() -> None:
         # Check if legacy tables exist and need migration
         if _table_exists(conn, "experiments"):
             _migrate_from_experiments(conn)
+            _ensure_org_column(conn)
+            conn.commit()
             return
 
         # Fresh install — create new schema directly
@@ -190,6 +222,7 @@ def init_db() -> None:
         conn.execute(
             "UPDATE designs SET design_id = id, revision_seq = 1 WHERE design_id IS NULL"
         )
+        _ensure_org_column(conn)
         conn.commit()
     finally:
         conn.close()
@@ -205,6 +238,7 @@ def create_design(
     alpine: bool = False,
     creator_session_id: str | None = None,
     creator_session_label: str | None = None,
+    org: str | None = None,
     force: bool = False,
 ) -> str:
     """Create a design revision with variants. Returns the revision UUID.
@@ -222,12 +256,24 @@ def create_design(
         # transaction, two concurrent publishers could both observe no match
         # and create the same accidental duplicate.
         conn.execute("BEGIN IMMEDIATE")
+        effective_org = org
         if design_id:
             row = conn.execute(
                 "SELECT MAX(revision_seq) FROM designs WHERE design_id = ?",
                 (design_id,),
             ).fetchone()
             revision_seq = (row[0] or 0) + 1
+            # A design's revisions share one org: a new revision inherits the
+            # design's existing org rather than re-taking the caller's, so the
+            # owning org is stable across the revision history. (Whether THIS
+            # caller may append is a write-authz check the route makes upstream.)
+            existing = conn.execute(
+                "SELECT org FROM designs WHERE design_id = ? AND org IS NOT NULL"
+                " ORDER BY revision_seq DESC LIMIT 1",
+                (design_id,),
+            ).fetchone()
+            if existing is not None and existing[0]:
+                effective_org = existing[0]
         else:
             if not force:
                 rows = conn.execute(
@@ -257,11 +303,12 @@ def create_design(
             revision_seq = 1
         conn.execute(
             "INSERT INTO designs (id, title, description, fixture, design_id, revision_seq, alpine, "
-            "creator_session_id, creator_session_label)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "creator_session_id, creator_session_label, org)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 rev_id, title, description, fixture, design_id, revision_seq,
                 int(alpine), creator_session_id, creator_session_label,
+                effective_org,
             ),
         )
         for v in variants:
@@ -404,7 +451,7 @@ def list_pending() -> list[dict]:
     conn = _get_conn()
     try:
         rows = conn.execute(
-            "SELECT id, title, description, status, created_at, design_id, revision_seq"
+            "SELECT id, title, description, status, created_at, design_id, revision_seq, org"
             " FROM designs WHERE status = 'pending' ORDER BY revision_seq DESC, created_at DESC"
         ).fetchall()
         # Group by design_id; first row encountered per design is the latest (highest seq)
@@ -420,6 +467,7 @@ def list_pending() -> list[dict]:
                     "description": r_dict["description"],
                     "status": r_dict["status"],
                     "created_at": r_dict["created_at"],
+                    "org": r_dict.get("org"),
                     "iteration_count": 0,
                 }
             design_map[did]["iteration_count"] += 1

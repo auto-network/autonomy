@@ -101,6 +101,32 @@ def organization_scope_from_request(request: Request) -> str | None:
     return getattr(request.state, "api_organization", None)
 
 
+def caller_org_scope_hides(request: Request, resource_org: str | None) -> bool:
+    """Standard org-scoped-resource visibility check: True when this caller must
+    NOT see a resource owned by ``resource_org``.
+
+    The canonical predicate for any ``/api`` resource that carries an owning org
+    (a design, a session, …). Invariant 1: the token's org is authoritative and
+    un-widenable, so an org-bound caller (an org session bearer) sees only its
+    own org; a resource whose org is unresolvable (``None``) is hidden from it,
+    since an org caller cannot distinguish that from cross-org. A global-authority
+    caller (the operator cookie or a local host token) sees every org.
+
+    Authentication is a separate gate (:func:`require_authenticated_api_caller`
+    or the default-deny wrap); this only decides org visibility for an already
+    authenticated caller, and never judges compatibility traffic (which the gate
+    governs) — a compatibility principal is not org-bound, so this returns False.
+
+    Callers return their route-native not-found (404) when this is True, so a
+    cross-org resource is byte-indistinguishable from a nonexistent one — a 403
+    would confirm the resource exists in another org.
+    """
+    principal = principal_from_request(request)
+    if not principal.org_bound:
+        return False
+    return not (resource_org and principal.org and resource_org == principal.org)
+
+
 def require_authenticated_api_caller(request: Request) -> JSONResponse | None:
     """Refuse an API caller that presents no credential at all.
 
