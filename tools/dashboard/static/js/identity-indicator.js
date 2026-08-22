@@ -381,6 +381,16 @@
         'Finish setup', function () { openOnboarding(2); }));
     }
     if (status && status.signed_in === true && status.gate_disabled !== true) {
+      actions.appendChild(actionButton('manage-factors', 'Manage my factors',
+        'Change your password, add or remove a device', function () {
+          closePanel();
+          import('./factor-management.js')
+            .then(function (m) { m.open({ onClose: refresh }); })
+            .catch(function (err) {
+              loadError = 'Factor management unavailable: ' + ((err && err.message) || err);
+              render();
+            });
+        }));
       actions.appendChild(actionButton('add-passkey', 'Add a passkey',
         'Enroll this device', function () { openOnboarding(2); }));
       actions.appendChild(actionButton('lock', lockBusy ? 'Locking...' : 'Lock dashboard',
