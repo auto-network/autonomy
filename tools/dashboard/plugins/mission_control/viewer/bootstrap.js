@@ -1740,13 +1740,25 @@
       r.innerHTML = "<style>" + CSS + "</style>";
       var btn = el("button", {
         class: "mc-anchor-btn", title: asks ? "Answer this" : "Discuss",
-        onclick: function () { show({anchor: ref}); },
+        // stopPropagation: a real tap on the chip must not ALSO reach the
+        // host forwarder below (re-entry) or an author's own card-level
+        // tap handler (double open).
+        onclick: function (ev) { ev.stopPropagation(); show({anchor: ref}); },
       });
       var control = {ref: ref, btn: btn, asks: asks, about: about,
                      excerpt: excerpt};
       anchorControls.push(control);
       paintAnchor(control);
       r.appendChild(btn);
+      // THE HOST FORWARDS INWARD. The root is closed on purpose (author
+      // code must not reach the control's internals) — but that also made
+      // the control unpressable from outside: an author surface that wants
+      // its whole card to act as the tap target can only click the host
+      // span, whose listeners-inside-shadow never hear it. Clicks landing
+      // on the host (author forwarding, or synthetic clicks retargeted to
+      // it) now press the real button; real chip taps never re-enter
+      // because the button stops propagation.
+      holder.addEventListener("click", function () { btn.click(); });
       target.appendChild(holder);
       n++;
     });
