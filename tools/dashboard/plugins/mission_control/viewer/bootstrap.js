@@ -605,15 +605,8 @@
     // TITLELESS BAR. The screen carries its own title; the bar is a
     // toolbar. The swatch keeps the pillar's colour as the remaining
     // "where am I" cue and opens the pillar status panel.
-    kids.push(
-      (function () {
-        var band = el("span", {class: "mc-swatch"});
-        band.style.background = "#e2e8f0";
-        return el("button", {class: "mc-pill mc-menu-word",
-                    title: "Pillar status \u2014 latest by pillar or by time",
-                    onclick: function () { show(ui.panel === "pillars" ? null : {panel: "pillars"}); }},
-           [band, el("span", {text: "Pillars"})]);
-      })());
+    kids.push(el("span", {class: "mc-bartitle",
+                          text: (p && p.name) || state.mission || ""}));
     var viewsDecl = null;
     try { viewsDecl = JSON.parse(document.body.dataset.mcViews || "null"); }
     catch (_e) { viewsDecl = null; }
@@ -1788,6 +1781,17 @@
     }
     measureBar();
     syncStrip();
+    // The bar title takes the full free width: shrink a step at a time
+    // before ellipsizing.
+    var bt = root.querySelector(".mc-bartitle");
+    if (bt) {
+      var size = 0.95;
+      bt.style.fontSize = "";
+      while (bt.scrollWidth > bt.clientWidth && size > 0.72) {
+        size -= 0.03;
+        bt.style.fontSize = size.toFixed(2) + "rem";
+      }
+    }
   }
 
   // ---- anchored controls --------------------------------------------------
