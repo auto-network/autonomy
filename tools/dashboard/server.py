@@ -738,6 +738,39 @@ def _get_pause_reasons() -> dict:
     return reasons
 
 
+async def api_librarian_enqueue(request):
+    """POST /api/librarians/jobs {job_type, payload} -> {job_id}.
+
+    The API door onto the librarian queue. The prompt is built HERE, at
+    enqueue time, purely for validation — a typo'd mission id or a missing
+    report_to fails this request loudly instead of launching a container
+    aimed at nothing. The dispatcher rebuilds it at launch from the stored
+    payload, so what runs reflects the payload, not this preview.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "body must be JSON"}, status_code=400)
+    job_type = body.get("job_type")
+    payload = body.get("payload") or {}
+    if not isinstance(job_type, str) or not job_type or not isinstance(payload, dict):
+        return JSONResponse(
+            {"error": "job_type (string) and payload (object) are required"},
+            status_code=400)
+    try:
+        from agents.dispatcher import _build_librarian_prompt
+        _build_librarian_prompt(job_type, payload)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception:
+        logger.warning("librarian enqueue preflight failed; enqueueing anyway",
+                       exc_info=True)
+    from agents.librarian_db import enqueue as _enqueue_librarian_job
+    job_id = _enqueue_librarian_job(job_type, payload=json.dumps(payload))
+    return JSONResponse({"job_id": job_id, "job_type": job_type,
+                         "status": "pending"}, status_code=201)
+
+
 async def api_dispatch_pause_get(request):
     """GET /api/dispatch/pause — return current pause state for all label queues."""
     if os.environ.get("DASHBOARD_MOCK"):
@@ -18640,6 +18673,7 @@ routes = [
     Route("/api/bead/{id}/deps", api_bead_deps),
     Route("/api/bead/{id}/approve", api_bead_approve, methods=["POST"]),
     Route("/api/pinned", api_pinned_beads),
+    Route("/api/librarians/jobs", api_librarian_enqueue, methods=["POST"]),
     Route("/api/dispatch/pause", api_dispatch_pause_get),
     Route("/api/dispatch/pause", api_dispatch_pause_post, methods=["POST"]),
     Route("/api/dispatch/resume", api_dispatch_resume, methods=["POST"]),

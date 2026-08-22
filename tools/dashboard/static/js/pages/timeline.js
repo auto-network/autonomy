@@ -55,12 +55,25 @@
   // Map librarian job_type to a human-readable display name.
   const _LIB_NAMES = {
     'review_report': 'Experience Review',
+    'mission_curate': 'Mission Curation',
   };
 
   // Build collapsed review label from librarian_review payload.
   function _reviewCollapsedLabel(review) {
     if (!review) return null;
     if (review.status === 'running') return null; // shown separately
+    // Mission curator shape: verdict tallies + per-write actions.
+    if (review.verdicts && typeof review.verdicts === 'object') {
+      const v = review.verdicts;
+      const parts = [];
+      if (v.rewrite) parts.push(v.rewrite + ' rewritten');
+      if (v.retire) parts.push(v.retire + ' retired');
+      if (!parts.length) parts.push('nothing to change');
+      if (v.keep != null) parts.push(v.keep + ' kept');
+      let label = parts.join(', ');
+      if (review.dry_run) label += ' (dry run)';
+      return label;
+    }
     // Structured extracted/skipped arrays from experience_reviewer
     if (Array.isArray(review.extracted) || Array.isArray(review.skipped)) {
       const counts = {};
@@ -232,6 +245,15 @@
         ...(rev.extracted || []).map(item => ({ ...item, _cls: 'tl-lib-dot-' + (item.type || 'skip') })),
         ...(rev.skipped || []).map(item => ({ ...item, type: 'skip', _cls: 'tl-lib-dot-skip' })),
       ];
+    } else if (rev && Array.isArray(rev.actions)) {
+      // Mission curator: each write (or would-be write) is one trace line.
+      reviewItems = rev.actions.map(a => ({
+        type: a.action,
+        description: (a.surface ? a.surface + ' / ' : '') + (a.item_id || '')
+          + ' — ' + (a.reason || '')
+          + (rev.dry_run && a.command ? '  [would run: ' + a.command + ']' : ''),
+        _cls: a.action === 'retire' ? 'tl-lib-dot-skip' : 'tl-lib-dot-work',
+      }));
     }
 
     return {
