@@ -132,6 +132,7 @@ from tools.dashboard import unlock_routes
 from tools.dashboard import vault_routes
 from tools.dashboard import api_auth, route_policy
 from tools.dashboard import network_routes
+from tools.dashboard import web_push_proof
 if os.environ.get("DASHBOARD_MOCK"):
     from tools.dashboard.dao import mock as dao_beads
     from tools.dashboard.dao import mock as dao_dispatch
@@ -10839,6 +10840,10 @@ def _load_template(name: str, **context) -> str:
 async def api_version(request):
     return JSONResponse({"version": _static_version()})
 
+
+async def page_web_push_proof(request):
+    return HTMLResponse(_load_template("web-push-proof.html"))
+
 def _bootstrap_gate_open() -> bool:
     """True when Layer-0 harness bootstrap is still required.
 
@@ -18587,6 +18592,8 @@ routes = [
     Route("/pages/session-view", page_session_view_fragment),
     Route("/test/input", page_test_input),
     Route("/_admin/voice-smoke", page_voice_smoke),
+    Route("/web-push-proof", page_web_push_proof),
+    Route("/service-worker.js", web_push_proof.service_worker),
     # /api/test/* dev-prototype routes are registered below, ONLY under
     # DASHBOARD_MOCK — suppressed in production (auto-1wwpf.6).
 
@@ -18597,6 +18604,8 @@ routes = [
     # Events (SSE)
     Route("/api/events", api_events),
     Route("/api/events/replay", api_events_replay),
+    Route("/api/web-push/proof/config", web_push_proof.api_config),
+    Route("/api/web-push/proof/send", web_push_proof.api_send, methods=["POST"]),
 
     # Diag round-trip — file/server/bus/client alignment
     Route("/api/diag/sessions", api_diag_sessions),

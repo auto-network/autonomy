@@ -1,8 +1,8 @@
 {
-  "name": "Autonomy Dashboard",
-  "short_name": "Autonomy",
-  "id": "/",
-  "start_url": "/",
+  "id": "/web-push-proof",
+  "name": "Autonomy Push Proof",
+  "short_name": "Push Proof",
+  "start_url": "/web-push-proof",
   "scope": "/",
   "display": "standalone",
   "orientation": "any",

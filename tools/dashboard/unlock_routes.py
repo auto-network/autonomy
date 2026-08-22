@@ -882,7 +882,7 @@ _OPEN_PREFIXES = ("/api/", "/static/", "/missions/")
 def _path_is_gated(path: str) -> bool:
     if path in _GATED_API_PATHS:
         return True
-    if path == "/unlock":
+    if path in {"/unlock", "/service-worker.js"}:
         return False
     return not path.startswith(_OPEN_PREFIXES)
 

@@ -114,6 +114,9 @@ STORE_MANIFEST: tuple = (
     Store("repl_login_key", "repl-login.key", "REPL_LOGIN_KEY_FILE", "file",
           "mode-0600 X25519 private key — the HPKE recipient for "
           "browser-sealed secure-setting provisioning"),
+    Store("web_push_proof_vapid", "web-push-proof-vapid.pem",
+          "WEB_PUSH_PROOF_VAPID_KEY", "file",
+          "mode-0600 VAPID sender key for the isolated Web Push proof"),
     Store("tls_cert", "tls.crt", "AUTONOMY_TLS_CERT", "file",
           "TLS certificate (self-signed by default)"),
     Store("tls_key", "tls.key", "AUTONOMY_TLS_KEY", "file",
