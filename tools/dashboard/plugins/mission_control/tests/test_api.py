@@ -1154,6 +1154,33 @@ def test_add_question_update_mission_level():
     assert listed[0]["answer"] is None
 
 
+def test_a_reply_is_a_discussion_round_not_an_answer():
+    """Replying is not answering. A message round carries its author and
+    kind, the entry's answer stays empty, and the reply rides back with the
+    refreshed question so an open screen repaints. The answer remains the
+    coordinator's explicit act."""
+    client = _client()
+    mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
+    visitor = _visitor(client)
+    with patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock):
+        asked = client.post(
+            f"/api/missions/{mission_id}/questions?as={visitor['token']}",
+            json={"question": "hi"},
+        ).json()["question"]
+
+    resp = client.post(
+        f"/api/missions/{mission_id}/questions/{asked['entry_id']}/update",
+        json={"text": "my two cents", "kind": "message"},
+    )
+    assert resp.status_code == 201
+    assert resp.json()["update"]["kind"] == "message"
+    assert resp.json()["question"]["answer"] is None
+
+    listed = client.get(f"/api/missions/{mission_id}/questions").json()["questions"]
+    assert listed[0]["answer"] is None
+    assert listed[0]["updates"][0]["kind"] == "message"
+
+
 def test_add_question_update_pillar_level():
     client = _client()
     mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
