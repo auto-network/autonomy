@@ -1,9 +1,9 @@
-"""Official physical-usage accounting primitives for auto.network services.
+"""Official physical-usage accounting for auto.network services.
 
-The package is deliberately independent of relay, TURN, storage, pricing, and
-sink implementations.  Producers emit one immutable :class:`UsageBatch` and
-persist its exact wire bytes before attempting delivery.  Pricing consumes
-settled batches later; it is never part of this contract.
+The batch and spool are independent of relay, TURN, and storage implementations.
+Producers persist exact immutable bytes before delivery to the selected v1
+ledger. Pricing consumes settled usage later; it is never part of the physical
+usage contract.
 """
 
 from .batch import (
@@ -31,6 +31,19 @@ from .spool import (
     UsageSpoolLocked,
     UsageSpoolSequenceError,
 )
+from .ledger import (
+    LEDGER_SCHEMA_VERSION,
+    IngestReceipt,
+    LedgerHealth,
+    StreamReconciliation,
+    UsageLedger,
+    UsageLedgerAuthorizationError,
+    UsageLedgerConflict,
+    UsageLedgerCorrupt,
+    UsageLedgerError,
+    UsageLedgerIOError,
+    UsageLedgerLocked,
+)
 
 __all__ = [
     "BATCH_INTERVAL_SECONDS",
@@ -54,4 +67,15 @@ __all__ = [
     "UsageSpoolIOError",
     "UsageSpoolLocked",
     "UsageSpoolSequenceError",
+    "LEDGER_SCHEMA_VERSION",
+    "IngestReceipt",
+    "LedgerHealth",
+    "StreamReconciliation",
+    "UsageLedger",
+    "UsageLedgerAuthorizationError",
+    "UsageLedgerConflict",
+    "UsageLedgerCorrupt",
+    "UsageLedgerError",
+    "UsageLedgerIOError",
+    "UsageLedgerLocked",
 ]

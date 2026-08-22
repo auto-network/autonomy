@@ -58,4 +58,22 @@ interval age bounds, and stream count. Normal delivery reads `pending()`;
 clean-sink recovery reads `recoverable()` so acknowledged-but-not-yet-pruned
 bytes can be replayed idempotently.
 
+## Authoritative ledger
+
+`UsageLedger` is the selected v1 single-writer SQLite ingest boundary. A
+control-plane authorization binds one Ed25519 producer key to one canonical
+organization and a fixed set of counter families. A service producer may hold
+separate narrow bindings for several organizations. Ingest verifies the batch
+before its exact producer/organization binding, commits new bytes with
+`synchronous=FULL`, returns the exact ID/checksum receipt, and treats an
+identical retry as unchanged.
+Same-ID mutations and reuse of a producer sequence for another interval fail
+closed.
+
+Out-of-order batches are accepted because reconnects and recovery replays can
+reorder delivery. Per-stream reconciliation reports the highest contiguous
+sequence, highest observed sequence, and exact missing ranges. Public traffic
+never reads this ledger. Sink topology and measured migration gates are frozen
+in `graph://d1a27da5-679`.
+
 Decision: `graph://31ab60ae-647`.
