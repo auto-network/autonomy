@@ -1719,6 +1719,22 @@ async def handle_relay_write(participant_id: str, mission_id: str, body: dict) -
             anchor_excerpt=anchor_excerpt,
         )
         event = "asked"
+    elif kind == "reply":
+        entry_id = body.get("entry_id")
+        text = body.get("text")
+        if not isinstance(entry_id, str) or not entry_id:
+            return None
+        if not isinstance(text, str) or not text.strip():
+            return None
+        if not db.get_question(mission_id, entry_id):
+            return None
+        db.add_conversation_message(
+            entry_id, text.strip(), kind="message",
+            author_participant_id=participant_id,
+            author_label=participant_label,
+        )
+        entry = db.get_question(mission_id, entry_id)
+        event = "update"
     elif kind == "reopen":
         entry_id = body.get("entry_id")
         followup = body.get("followup")
@@ -2434,8 +2450,11 @@ async def _add_update_impl(
     if not existing:
         return JSONResponse({"error": "question not found"}, status_code=404)
     who = _resolve_visitor_identity(request) or {}
+    # Two round kinds share this route: a coordinator's progress note
+    # (status) and a person's reply in the discussion (message).
+    round_kind = "message" if body.get("kind") == "message" else "status"
     update = db.add_conversation_message(
-        entry_id, text, kind="status",
+        entry_id, text, kind=round_kind,
         author_participant_id=who.get("participant_id"),
         author_label=who.get("participant_label"),
     )
@@ -2451,7 +2470,10 @@ async def _add_update_impl(
         update=update_payload,
         question=_question_payload(entry) if entry else None,
     )
-    return JSONResponse({"update": update_payload}, status_code=201)
+    return JSONResponse(
+        {"update": update_payload,
+         "question": _question_payload(entry) if entry else None},
+        status_code=201)
 
 
 async def add_question_update(request: Request) -> JSONResponse:

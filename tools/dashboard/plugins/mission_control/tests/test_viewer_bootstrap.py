@@ -298,15 +298,15 @@ def test_the_way_out_of_a_panel_cannot_be_squeezed_off_screen():
     )
 
 
-def test_the_questions_filter_is_one_control_not_three():
-    """Same row, same fixed width. Filtering is worth header space; three
-    labels spelling out every state it could be in is not."""
+def test_the_questions_filter_is_three_labeled_controls():
+    """This WAS one chip that cycled on tap -- and the operator reported
+    nobody knew it was tappable. Reversed: every state is its own visible
+    control with its count, in the same segmented style as every other
+    panel toggle."""
     src = _viewer("bootstrap.js")
-    assert "function filterToggle()" in src
-    assert "filterChips" not in src, "the three-button filter is back in the header"
-    # It still says how many, because a filter whose size you cannot see has
-    # to be tried to find out whether it was worth trying.
-    assert "text: cur.label + \" \" + counts[cur.key]" in src
+    assert 'FILTERS.map(function (f) {' in src
+    assert 'text: f.label + " " + counts[f.key]' in src
+    assert "tap for" not in src, "the cycling control is back"
 
 
 def test_questions_are_listed_newest_first():
@@ -389,10 +389,13 @@ def test_unanswered_screen_questions_stay_out_of_the_questions_count():
     on inside a number that mostly means conversations."""
     src = _viewer("bootstrap.js")
     assert "function unanswered(" in src
-    assert "mc-foryou" in src
-    # Self-describing: "4 for you" said four of nothing; the pill wears the
-    # same words as the hero chip so the two surfaces read as one number.
-    assert '" asks for you"' in src
+    # The for-you direction lives on the one questions control as its own
+    # badge, never folded into the open-questions number.
+    assert "mc-count-you" in src
+    # One bar control carries both directions as badges; the panel's tabs
+    # name them. The separate pill is gone.
+    assert "mc-count-you" in src
+    assert '" asks for you"' not in src
 
 
 def test_open_is_defined_once_and_means_not_closed():
@@ -401,7 +404,11 @@ def test_open_is_defined_once_and_means_not_closed():
     because it stopped mattering still counted as open, still sat under
     Unanswered, and still showed as waiting on somebody."""
     src = _viewer("bootstrap.js")
-    assert "function isOpen(q) { return !q.closed_at; }" in src
+    # Open means WAITING ON SOMEBODY: closed is done, and answered-but-not-
+    # closed is also done (answering deliberately does not close; the
+    # exchange can continue, but nobody is owed anything). The original bug
+    # -- closed-without-answer counting as open -- stays covered.
+    assert "function isOpen(q) { return !q.closed_at && !q.answer; }" in src
     for gone in ('return !q.answer; }).length',
                  'if (qFilter === "open") return !q.answer;'):
         assert gone not in src, f"a count still infers open from the answer: {gone}"
@@ -440,9 +447,10 @@ def test_the_for_you_count_opens_all_of_them_not_the_first():
     assert 'show({anchor: forYou[0].ref})' not in src, (
         "the count still jumps to the first item"
     )
-    # The pill opens the shared questions panel on its For-you side —
-    # still the whole list, never a single item.
-    assert 'qaMode = "you"; show({panel: "questions"});' in src
+    # The for-you direction is a tab of the one questions panel; the bar
+    # carries it as a badge on the single questions control.
+    assert '"For you"' in src
+    assert "mc-count-you" in src
     # And a way back out of one of them to the rest.
     assert '"\\u2039 For you"' in src or "For you" in src
 

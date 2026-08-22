@@ -197,6 +197,9 @@
     } else if (op === "write" && kind === "reopen") {
       url = ownerPath(body.entry_id) + "/questions/" + body.entry_id + "/reopen";
       payload = {followup: body.followup};
+    } else if (op === "write" && kind === "reply") {
+      url = ownerPath(body.entry_id) + "/questions/" + body.entry_id + "/update";
+      payload = {text: body.text, kind: "message"};
     } else if (op === "write" && kind === "followup") {
       url = ownerPath(body.entry_id) + "/questions/" + body.entry_id + "/followup";
       payload = {followup: body.followup};
@@ -420,7 +423,7 @@
   // counted as open, still sat under Unanswered, and still showed as waiting
   // on somebody -- the old model surviving in every place that was not
   // touched when it changed.
-  function isOpen(q) { return !q.closed_at; }
+  function isOpen(q) { return !q.closed_at && !q.answer; }
   function openCount() {
     return questionsHere().filter(isOpen).length;
   }
@@ -596,14 +599,19 @@
     }
     kids.push(el("span", {class: "mc-grow"}));
     var n = openCount(), done = answeredCount();
-    // ONE NUMBER. The bubble used to carry open AND answered, which made
-    // it unreadable next to "N for you" \u2014 three counters, two of them
-    // grey. Open is the only count that wants a human; the panel itself
-    // breaks out answered.
+    // ONE CONTROL for both directions of question. Amber is what the
+    // mission owes an answer; indigo is what is waiting on YOU. The panel
+    // behind it carries the same two numbers on its tabs.
+    var forYou = unanswered();
     var qKids = [svg(CHAT)];
     if (n) {
       qKids.push(el("span", {class: "mc-count mc-count-open",
                              title: n + " open", text: String(n)}));
+    }
+    if (forYou.length) {
+      qKids.push(el("span", {class: "mc-count mc-count-you",
+                             title: forYou.length + " waiting on you",
+                             text: String(forYou.length)}));
     }
     // The coordinating-session door moved into the presence panel — the
     // bar had no horizontal room left for it, and presence already answers
@@ -616,27 +624,6 @@
         }},
                qKids);
     kids.push(q);
-    // WAITING ON YOU, kept apart from the questions count. That list is what
-    // the mission owes you; this is the other direction, and folding them
-    // together would bury a decision somebody is blocked on inside a number
-    // that mostly means "conversations". These exist only on the page until
-    // they are answered, so this is the one place they can be found without
-    // scrolling the whole screen looking for a marked paragraph.
-    var forYou = unanswered();
-    if (forYou.length) {
-      kids.push(el("button", {
-        class: "mc-foryou", title: forYou.length + " waiting on you",
-        // A LIST, NOT THE FIRST ONE. This opened forYou[0] -- so the bar
-        // counted six and the tap showed one, with the other five reachable
-        // only by scrolling the page hunting for Answer controls. The count
-        // exists to make them findable; jumping to one of them is the single
-        // thing it must not do.
-        onclick: function () {
-          if (ui.panel === "questions" && qaMode === "you") { show(null); return; }
-          qaMode = "you"; show({panel: "questions"});
-        },
-      }, [el("span", {text: forYou.length + " asks for you"})]));
-    }
     if (ui.noChannel) {
       kids.push(el("span", {class: "mc-nobody", title:
         "This page cannot reach the mission. Navigation and questions are unavailable.",
@@ -891,18 +878,23 @@
         : "No questions yet."})];
     }
     return sorted.map(function (q) {
+      var stripe = el("span", {class: "mc-swatch"});
+      stripe.style.background = pillarColor(q.pillar_id);
       return el("button", {class: "mc-row", onclick: function () {
         show({entry: q.entry_id, from: {panel: "questions"}});
       }}, [
         el("div", {class: "mc-row-top"}, [
+          stripe,
+          el("span", {class: "mc-qpillar", text: pillarName(q.pillar_id)}),
+          el("span", {class: "mc-grow"}),
           // Three states, not two. "Open" covered a question being actively
           // worked on and one that never reached anybody, which are the two
           // things a reader most needs told apart.
-          el("span", {class: rowChipClass(q), text: rowChipText(q)}),
-          el("span", {class: "mc-sub", text: pillarName(q.pillar_id)}),
+          el("span", {class: rowChipClass(q) + " mc-chip-sm", text: rowChipText(q)}),
         ]),
         el("p", {class: "mc-qtext", text: q.question || ""}),
-        el("p", {class: "mc-sub", text: q.asked_by_label || ""}),
+        el("p", {class: "mc-sub", text: (q.asked_by_label || "")
+          + (q.created_at ? " \u00b7 " + ago(q.created_at) : "")}),
         // An answer you cannot see is one you do not know arrived. The row
         // showed only the question, so the whole visible change on being
         // answered was a colour going away -- which reads as nothing having
@@ -1193,26 +1185,24 @@
   // cannot see has to be tried to find out whether it was worth trying.
   var FILTERS = [
     {key: "all", label: "All"},
-    {key: "open", label: "Unanswered"},
+    {key: "open", label: "Open"},
     {key: "done", label: "Answered"},
   ];
 
+  // Three labeled tabs with counts. This was ONE chip that cycled on tap,
+  // and nobody knew it was tappable; there is room now, so every state is
+  // its own visible control.
   function filterToggle() {
     var all = questionsHere();
     var open = all.filter(isOpen).length;
     var counts = {all: all.length, open: open, done: all.length - open};
-    var i = FILTERS.findIndex(function (f) { return f.key === qFilter; });
-    if (i === -1) i = 0;
-    var cur = FILTERS[i];
-    var next = FILTERS[(i + 1) % FILTERS.length];
-    return [el("button", {
-      class: qFilter === "all" ? "mc-chip" : "mc-chip mc-chip-on",
-      // Says what one more tap does, because a control that cycles gives no
-      // hint of its other states from looking at it.
-      title: "Showing " + cur.label.toLowerCase() + " — tap for " + next.label.toLowerCase(),
-      text: cur.label + " " + counts[cur.key],
-      onclick: function () { qFilter = next.key; render(); },
-    })];
+    return [el("div", {class: "mc-seg"}, FILTERS.map(function (f) {
+      return el("button", {
+        class: qFilter === f.key ? "mc-seg-on" : "",
+        text: f.label + " " + counts[f.key],
+        onclick: function () { qFilter = f.key; render(); },
+      });
+    }))];
   }
 
   //: Everything on this screen waiting on the reader, in the order it appears
@@ -1237,7 +1227,7 @@
   }
 
   var PANEL_TITLE = {pillars: "", views: "View",
-                     questions: "Questions", foryou: "Asks for you"};
+                     questions: "", foryou: "Asks for you"};
 
   function viewRows() {
     var decl = [];
@@ -1269,7 +1259,7 @@
     var open = openCount();
     return [el("div", {class: "mc-seg"}, [
       el("button", {class: qaMode === "mission" ? "mc-seg-on" : "",
-                    text: "For the mission" + (open ? " " + open : ""),
+                    text: "Q&A" + (open ? " " + open : ""),
                     onclick: function () { qaMode = "mission"; render(); }}),
       el("button", {class: qaMode === "you" ? "mc-seg-on" : "",
                     text: "For you" + (forYou ? " " + forYou : ""),
@@ -1338,8 +1328,8 @@
              : [el("div", {class: "mc-qfilter"}, filterToggle())]
                  .concat(questionRows());
     var kids = [
-      el("div", {class: "mc-phead"}, (ui.panel === "pillars" ? [] : [
-        el("span", {class: "mc-ptitle", text: PANEL_TITLE[ui.panel] || "Questions"}),
+      el("div", {class: "mc-phead"}, ((PANEL_TITLE[ui.panel] || "") === "" ? [] : [
+        el("span", {class: "mc-ptitle", text: PANEL_TITLE[ui.panel]}),
       ]).concat(ui.panel === "questions" ? qaToggle() : [])
        .concat(ui.panel === "pillars" ? statusToggle() : []).concat([
         el("span", {class: "mc-grow"}),
@@ -1381,6 +1371,21 @@
   // them through precisely because canonical_json refuses floats). Printed as
   // they arrive, a question was stamped "1786651692.626123": the stored number
   // reaching the screen with nothing between it and the reader.
+  function pillarColor(pid) {
+    var p = (state.pillars || []).filter(function (x) { return x.pillar_id === pid; })[0];
+    return (p && p.color) || "#64748b";
+  }
+
+  function ago(ts) {
+    var n = typeof ts === "number" ? ts : parseFloat(ts);
+    if (!isFinite(n)) return "";
+    var sec = Math.max(0, Date.now() / 1000 - n);
+    if (sec < 60) return "just now";
+    if (sec < 3600) return Math.round(sec / 60) + "m ago";
+    if (sec < 86400) return Math.round(sec / 3600) + "h ago";
+    return Math.round(sec / 86400) + "d ago";
+  }
+
   function when(ts) {
     var n = typeof ts === "number" ? ts : parseFloat(ts);
     if (!isFinite(n)) return typeof ts === "string" ? ts : "";
@@ -1402,14 +1407,23 @@
     if (!ui.entry) return null;
     var q = state.questions.filter(function (x) { return x.entry_id === ui.entry; })[0];
     if (!q) return null;
-    var body = [el("p", {class: "mc-label", text: "Question"})];
+    // WHERE THIS LIVES. The list shows the pillar; losing it on tap-through
+    // strands the reader mid-conversation with no context.
+    var ctxStripe = el("span", {class: "mc-swatch"});
+    ctxStripe.style.background = pillarColor(q.pillar_id);
+    var body = [
+      el("div", {class: "mc-qctx"}, [ctxStripe,
+        el("span", {class: "mc-qpillar",
+                    text: pillarName(q.pillar_id) || state.mission || ""})]),
+      el("p", {class: "mc-label", text: "Question"}),
+    ];
     paras(q.question, "mc-qbig").forEach(function (n) { body.push(n); });
     body.push(el("p", {class: "mc-sub",
-                       text: (q.asked_by_label || "") + (q.created_at ? " \u00b7 " + when(q.created_at) : "")}));
-    // The slug is a name for the code. Show what the screen's author called
-    // it; keep the slug only when there is nothing better.
-    if (q.anchor_title || q.anchor) {
-      body.push(el("p", {class: "mc-sub", text: q.anchor_title || q.anchor}));
+                       text: (q.asked_by_label || "") + (q.created_at ? " \u00b7 " + ago(q.created_at) : "")}));
+    // Only what the screen's author CALLED the anchor. The raw slug is a
+    // name for code, and rendered here it read as a stray UUID.
+    if (q.anchor_title) {
+      body.push(el("p", {class: "mc-sub", text: q.anchor_title}));
     }
     // AND WHAT IT SAID. A question read back without the thing it replies to
     // is half a conversation -- the reader has to go and find the screen, and
@@ -1426,7 +1440,7 @@
     // conversation tells you, and it was the one thing not on the screen.
     var rounds = q.updates || [];
     if (rounds.length) {
-      body.push(el("p", {class: "mc-label mc-mt", text: "Since then"}));
+      body.push(el("p", {class: "mc-label mc-mt", text: "Discussion"}));
       rounds.forEach(function (u, i) {
         var kind = u.kind || "status";
         var live = isOpen(q) && !q.answer && i === rounds.length - 1
@@ -1439,7 +1453,7 @@
                        text: u.text || ""}),
             el("div", {class: "mc-step-at",
                        text: (u.author_label ? u.author_label + " · " : "")
-                             + when(u.created_at) + (live ? " · now" : "")}),
+                             + ago(u.created_at) + (live ? " · now" : "")}),
           ]),
         ]));
       });
@@ -1453,7 +1467,10 @@
                                : "Sending…"}));
     }
     if (q.answer) {
-      body.push(el("p", {class: "mc-label mc-mt", text: "Answer"}));
+      // The byline sits ON the answer, not floating between blocks where
+      // it reads as the question's.
+      body.push(el("p", {class: "mc-label mc-mt",
+        text: "Answer" + (q.answered_at ? " \u00b7 " + ago(q.answered_at) : "")}));
       // The answer gets its own block, not another paragraph in the same
       // column of grey. Question and answer reading as one undifferentiated
       // pile is the difference between a record and a wall of text.
@@ -1472,7 +1489,7 @@
                           title: "Close this without an answer",
                           onclick: function () { closeEntry(q.entry_id); }})
           : el("span", {}),
-        el("span", {class: rowChipClass(q), text: rowChipText(q)}),
+        el("span", {class: rowChipClass(q) + " mc-chip-sm", text: rowChipText(q)}),
       ]),
       el("div", {class: "mc-pbody"}, body),
       composer(COMPOSE[replyKind(q)].hint, "", COMPOSE[replyKind(q)].label,
@@ -1484,6 +1501,7 @@
   //: not "Answer" on your own question is the whole point: the wrong word
   //: there is what made answering yourself look like the thing to do.
   var COMPOSE = {
+    reply:    {hint: "Reply\u2026",                    label: "Reply"},
     answer:   {hint: "Answer\u2026",                   label: "Answer"},
     followup: {hint: "Add to your question\u2026",     label: "Add"},
     reopen:   {hint: "Reopen with a follow-up\u2026",  label: "Reopen"},
@@ -1636,7 +1654,7 @@
 
   function replyKind(q) {
     if (q.closed_at) return "reopen";     // finished with; say more and it reopens
-    return mine(q) ? "followup" : "answer";
+    return mine(q) ? "followup" : "reply";
   }
 
   function closeEntry(entryId) {
@@ -1670,7 +1688,7 @@
 
   function reply(entryId, text, kind) {
     var body = {kind: kind, entry_id: entryId};
-    body[kind === "answer" ? "answer" : "followup"] = text;
+    body[kind === "reply" ? "text" : kind === "answer" ? "answer" : "followup"] = text;
     return request("write", body).then(function (r) {
       var q = r && r.question;
       if (q && q.entry_id) {
@@ -1747,6 +1765,7 @@
     // act; leaving the current pillar's own section names showing behind the
     // chooser makes it unclear which screen you are even looking at.
     var covered = ui.panel || ui.entry || ui.anchor || ui.view || ui.post;
+    document.documentElement.style.overflow = covered ? "hidden" : "";
     var strip = covered ? null : stripNode();
     if (strip) chrome.appendChild(strip);
     if (ui.who) chrome.appendChild(whoList());

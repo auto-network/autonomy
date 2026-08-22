@@ -271,7 +271,12 @@ def _question_state(entry: dict) -> dict:
         []
         if entry["answer"] is not None
         else [
-            {"update_id": u["update_id"], "text": u["text"]}
+            # Kind and author ride along: a discussion read back without
+            # them is a list of sentences with no speakers.
+            {"update_id": u["update_id"], "text": u["text"],
+             "kind": u.get("kind") or "status",
+             "author_label": u.get("author_label"),
+             "created_at": u.get("created_at")}
             for u in db.list_conversation_updates(entry["entry_id"])
         ]
     )
@@ -283,6 +288,11 @@ def _question_state(entry: dict) -> dict:
         "asked_by_label": entry["asked_by_label"],
         "answer": entry["answer"],
         "answered_at": entry["answered_at"],
+        # Without this the chrome cannot tell a closed exchange from a live
+        # one: every entry read as open forever, so the bar counted answered
+        # questions as waiting and the Unanswered filter listed entries
+        # wearing an "answered" badge.
+        "closed_at": entry.get("closed_at"),
         "created_at": entry["created_at"],
         "updates": updates,
     }
