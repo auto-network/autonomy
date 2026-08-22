@@ -443,6 +443,17 @@
           target.classList.remove("mc-flash");
           void target.offsetWidth;   // restart the animation
           target.classList.add("mc-flash");
+          // An OPEN ASK's tap should finish the job: the platform chrome
+          // mounts its Answer control inside the real item — press it, so
+          // one tap on the mirror lands in the answer flow instead of at
+          // a card with a small chip still to find.
+          if (it.kind === "question" && it.state === "open" && it.ask){
+            setTimeout(function () {
+              var ctl = target.querySelector("[data-mc-control] button")
+                     || target.querySelector("[data-mc-control]");
+              if (ctl && ctl.click) ctl.click();
+            }, 350);
+          }
         }
       });
     }
