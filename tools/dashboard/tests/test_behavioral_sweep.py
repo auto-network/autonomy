@@ -5517,6 +5517,52 @@ WORKTREES_REBASE_STATUS_CHECKS = """(async () => {
 })()"""
 
 
+MCP_LINK_APPROVAL_CHECKS = """(async () => {
+    var r = {};
+    var sleep = function(ms) { return new Promise(resolve => setTimeout(resolve, ms)); };
+    var tick = async function() { await Alpine.nextTick(); await sleep(80); };
+    var q = function(id) { return document.querySelector('[data-testid="' + id + '"]'); };
+    var data = window._worktreeReviewOverlay;
+    if (!data) { r.error = 'no review-overlay component'; return JSON.stringify(r); }
+
+    await data._approvalKinds.mcp_peer_link.open(data, {
+        id: 'apr-mcp-defaults', kind: 'mcp_peer_link',
+        session: 'ChatGPT-test', result: null,
+        orgs: ['anchore', 'autonomy'], default_org: 'autonomy',
+        request: {
+            handle: 'ChatGPT-test', intent: 'Create the requested graph note.',
+            requested_level: 'readwrite',
+        },
+    });
+    await tick();
+    r.default_org = data.approvalRequest.autonomyOrg;
+    r.default_level = data.approvalRequest.level;
+    r.default_ttl = data.approvalRequest.ttl;
+    r.org_control = q('approval-mcp-org') ? q('approval-mcp-org').value : null;
+    r.level_control = q('approval-mcp-level') ? q('approval-mcp-level').value : null;
+    r.ttl_control = q('approval-mcp-ttl') ? q('approval-mcp-ttl').value : null;
+    r.decision = data._approvalKinds.mcp_peer_link.decision(
+        data, data.approvalRequest);
+
+    await data._approvalKinds.mcp_peer_link.open(data, {
+        id: 'apr-mcp-requested', kind: 'mcp_peer_link',
+        session: 'ChatGPT-test', result: null,
+        orgs: ['anchore', 'autonomy'], default_org: 'autonomy',
+        request: {
+            handle: 'ChatGPT-test', intent: 'Read prior research.',
+            requested_org: 'anchore', requested_level: 'read',
+        },
+    });
+    await tick();
+    r.requested_org = data.approvalRequest.autonomyOrg;
+    r.requested_level = data.approvalRequest.level;
+
+    data.approvalRequest = null;
+    await tick();
+    return JSON.stringify(r);
+})()"""
+
+
 JIRA_CREATE_APPROVAL_CHECKS = """(async () => {
     var r = {};
     var q = function(id) { return document.querySelector('[data-testid="' + id + '"]'); };
@@ -6121,6 +6167,32 @@ class TestDashboardAccessApproval:
         assert c["duplicate_fetch_count"] == 1
         assert c["duplicate_sheet_open"] is True
         assert c["duplicate_kind"] == "jira_write"
+
+
+class TestMcpLinkApprovalDefaults:
+    """MCP link prompts honor request suggestions and the shell default."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    @classmethod
+    def checks(cls, browser, request):
+        request.cls._checks = _navigate_and_eval_async(
+            "/worktrees", MCP_LINK_APPROVAL_CHECKS, wait_ms=1200)
+
+    def test_write_request_defaults_to_autonomy_for_one_day(self):
+        c = self._checks
+        assert not c.get("error"), c
+        assert c["default_org"] == c["org_control"] == "autonomy"
+        assert c["default_level"] == c["level_control"] == "readwrite"
+        assert c["default_ttl"] == c["ttl_control"] == "86400"
+        assert c["decision"] == {
+            "autonomy_org": "autonomy",
+            "level": "readwrite",
+            "ttl_seconds": 86400,
+        }
+
+    def test_explicit_request_overrides_the_shell_default(self):
+        assert self._checks["requested_org"] == "anchore"
+        assert self._checks["requested_level"] == "read"
 
 
 ORG_JOIN_APPROVAL_CHECKS = """(async () => {

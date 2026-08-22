@@ -2339,6 +2339,14 @@
               } catch (e) { /* typed fallback in the template */ }
             }
             const handle = req.handle || r.session || 'unknown';
+            const requestedOrg = String(req.requested_org || '').trim();
+            const defaultOrg = String(r.default_org || '').trim();
+            const autonomyOrg = orgs.includes(requestedOrg) ? requestedOrg
+              : orgs.includes(defaultOrg) ? defaultOrg
+              : orgs.includes('autonomy') ? 'autonomy'
+              : (orgs[0] || requestedOrg || defaultOrg);
+            const requestedLevel = ['read', 'readwrite'].includes(req.requested_level)
+              ? req.requested_level : 'read';
             self.approvalBusy = false;
             self.approvalRequest = {
               id: r.id, kind: r.kind, session: handle,
@@ -2347,9 +2355,10 @@
               // Lead with the reason — it's the whole basis for the decision.
               bodyMarkdown: 'This ChatGPT chat wants to:\n\n' + (req.intent || '(no reason given)'),
               orgs,
-              autonomyOrg: '',  // NO default — a reflexive approve must not silently bind an org
-              level: 'read',
-              ttl: '2592000',
+              // Suggestions only: all three remain visible and operator-editable.
+              autonomyOrg,
+              level: requestedLevel,
+              ttl: '86400',
               awaitExecution: true,
               error: '',
             };

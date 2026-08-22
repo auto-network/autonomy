@@ -211,17 +211,28 @@ def hello_dashboard(identity: dict, args: dict, *, poster=dashboard_post) -> dic
         return {"structured": {"status": "needs_intent"}, "is_error": True,
                 "text": "Call hello again WITH an 'intent' — one specific sentence on what you "
                         "want to do and why. The operator can't approve access without a reason."}
+    requested_level = str(args.get("access") or "").strip()
+    if requested_level and requested_level not in ("read", "readwrite"):
+        return {"structured": {"status": "invalid_access"}, "is_error": True,
+                "text": "Access must be either 'read' or 'readwrite'."}
     resolved = poster("/api/mcp/session/resolve", {
         "openai_session": identity["openai_session"],
         "openai_subject": identity.get("openai_subject") or "",
         "openai_org": identity.get("openai_org") or "",
         "intent": str(args.get("intent") or ""),
+        "requested_org": str(args.get("org") or "").strip(),
+        "requested_level": requested_level,
     })
     if resolved is None:
         return {"structured": {"status": "error"}, "is_error": True,
                 "text": "The Autonomy dashboard is unreachable; try again shortly."}
     status = resolved.get("status")
-    if status == "approved":
+    if status == "approved" and resolved.get("request_status") == "pending":
+        text = (f"The current grant for org '{resolved.get('autonomy_org')}' "
+                f"({resolved.get('level')}) remains usable, but the requested "
+                "scope change is pending operator approval. Do not call hello "
+                "again; retry the newly requested capability after approval.")
+    elif status == "approved":
         text = (f"Approved for org '{resolved.get('autonomy_org')}' "
                 f"({resolved.get('level')}). The tools are usable now.")
     elif status == "pending":
@@ -612,15 +623,15 @@ TOOL_DEFS = [
         "name": "hello",
         "description": (
             "Request access to Autonomy for this chat. State your intent in plain "
-            "language; the human operator approves this specific chat in the "
-            "Autonomy dashboard and chooses which of THEIR orgs to grant, at "
-            "read-only or read/write. You never choose or name an org — that is "
-            "the operator's decision. After calling hello, just try the tools: "
+            "language and request the least access that supports it: 'read' for "
+            "search/read/tail/sessions/crosstalk_log, or 'readwrite' when you will "
+            "write a note. You may suggest an org; the human operator sees and may "
+            "change both suggestions before approving this specific chat. After "
+            "calling hello, just try the tools: "
             "they work once approved (and return a clear 'pending approval' "
-            "message before that). Call hello AGAIN only when you need different "
-            "or additional access (e.g. a tool was denied) — each call asks the "
-            "operator to approve. Your identity is established automatically; no "
-            "name or token is needed."
+            "message before that). Repeating the same request reuses a live grant; "
+            "a new approval is requested only for a different org or broader access. "
+            "Your identity is established automatically; no name or token is needed."
         ),
         "inputSchema": {
             "type": "object",
@@ -631,11 +642,29 @@ TOOL_DEFS = [
                                    "is the ONLY thing that tells the operator why they're being asked "
                                    "to approve, so it must be specific and non-empty.",
                 },
+                "access": {
+                    "type": "string",
+                    "enum": ["read", "readwrite"],
+                    "description": (
+                        "REQUIRED. Least access needed: 'read' for read-only graph "
+                        "tools, or 'readwrite' when the task will create graph notes."
+                    ),
+                },
+                "org": {
+                    "type": "string",
+                    "description": (
+                        "Optional preferred Autonomy organization slug. The operator "
+                        "may change it before approving; their configured dashboard "
+                        "default is used when omitted."
+                    ),
+                },
                 "peer_name": {
                     "type": "string",
                     "description": "Legacy only (registry mode); ignored when the dashboard authorizes.",
                 },
             },
+            # Dashboard mode adds ``access`` to required in _advertised_tools;
+            # legacy registry mode has no org/level approval concept.
             "required": ["intent"],
         },
         "annotations": {"readOnlyHint": True},
@@ -789,6 +818,8 @@ def _advertised_tools() -> list:
         if schema.get("required"):
             schema["required"] = [r for r in schema["required"]
                                   if r not in _REGISTRY_ONLY_ARGS]
+        if tool.get("name") == "hello" and "access" not in schema.get("required", []):
+            schema.setdefault("required", []).append("access")
         out.append(tool)
     return out
 

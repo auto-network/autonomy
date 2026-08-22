@@ -10,8 +10,9 @@ generalized approval rendezvous (see approvals_routes.py), not a parallel system
 
 The stored request carries the OpenAI identity the relay extracted from the
 mTLS-verified transport — the operator sees it but it is not operator-editable.
-The operator's decision supplies the Autonomy org, level, and TTL. See design
-note graph://eeb23208-257.
+The request may suggest the Autonomy org and level; the operator's decision
+supplies the authoritative org, level, and TTL. See design note
+graph://eeb23208-257.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ KIND_LINK = "mcp_peer_link"
 KIND_CROSSTALK = "mcp_crosstalk"
 
 _LINK_REQUIRED = {"openai_session", "openai_subject", "openai_org", "intent"}
+_LINK_OPTIONAL = ("handle", "requested_org", "requested_level")
 _CROSSTALK_REQUIRED = {"openai_session", "target_session", "message"}
 _CROSSTALK_OPTIONAL = ("target_org", "handle", "intent")
 
@@ -51,15 +53,18 @@ def prepare_create_link(session: str, request: dict) -> tuple[dict, dict]:
     if not str(request.get("intent") or "").strip():
         raise ValueError("mcp_peer_link requires a non-empty intent")
     frozen = {k: str(request.get(k, "")) for k in _LINK_REQUIRED}
-    if request.get("handle"):  # short display handle (sess_tag), not the raw session
-        frozen["handle"] = str(request["handle"])
+    for k in _LINK_OPTIONAL:
+        if request.get(k):
+            frozen[k] = str(request[k])
     return frozen, {}
 
 
 def enrich_link(row: dict) -> dict:
     """Attach the operator's org list for the popup dropdown, at GET time so it's
-    always current. The org list is DASHBOARD-side only — the requester never sees
-    or names orgs; the operator picks. This is what makes the org <select> render."""
+    always current, plus this node's configured shell org as a UI default. A
+    request may suggest a slug, but only this dashboard-owned list populates the
+    choices and the operator remains the authority. This is what makes the org
+    ``<select>`` render without granting scope implicitly."""
     try:
         from tools.graph import org_ops
         orgs = []
@@ -69,7 +74,12 @@ def enrich_link(row: dict) -> dict:
                 orgs.append(slug)
     except Exception:
         orgs = []
-    return {"orgs": orgs}
+    try:
+        from tools.graph.schemas.dashboard_shell import shell_default_org
+        default_org = shell_default_org()
+    except Exception:
+        default_org = ""
+    return {"orgs": orgs, "default_org": default_org}
 
 
 def prepare_create_crosstalk(session: str, request: dict) -> tuple[dict, dict]:

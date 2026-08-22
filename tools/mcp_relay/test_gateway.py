@@ -181,6 +181,36 @@ def test_hello_dashboard_pending_is_not_error():
     assert "approve" in res["text"].lower()
 
 
+def test_hello_dashboard_forwards_scope_suggestions():
+    seen = {}
+
+    def poster(path, body):
+        seen.update({"path": path, "body": body})
+        return {"status": "pending"}
+
+    gateway_mod.hello_dashboard(
+        _TRUSTED,
+        {"intent": "write the requested design note", "access": "readwrite",
+         "org": "autonomy"},
+        poster=poster,
+    )
+    assert seen["path"] == "/api/mcp/session/resolve"
+    assert seen["body"]["requested_org"] == "autonomy"
+    assert seen["body"]["requested_level"] == "readwrite"
+
+
+def test_hello_dashboard_reports_pending_upgrade_without_rehello_loop():
+    res = gateway_mod.hello_dashboard(
+        _TRUSTED,
+        {"intent": "write a note", "access": "readwrite"},
+        poster=_poster({"status": "approved", "autonomy_org": "autonomy",
+                        "level": "read", "request_status": "pending"}),
+    )
+    assert res["is_error"] is False
+    assert "pending operator approval" in res["text"]
+    assert "do not call hello again" in res["text"].lower()
+
+
 def test_hello_dashboard_untrusted_is_error():
     res = gateway_mod.hello_dashboard({"openai_session": None}, {},
                                       poster=_poster({"status": "pending"}))
@@ -282,10 +312,14 @@ def test_dashboard_mode_strips_peer_token_from_the_advertised_schema(monkeypatch
             assert arg not in req, f"{name} still requires {arg}"
     # the real args survive the strip
     assert "intent" in tools["crosstalk_send"]["inputSchema"]["required"]
+    assert tools["hello"]["inputSchema"]["required"] == ["intent", "access"]
+    assert tools["hello"]["inputSchema"]["properties"]["access"]["enum"] == [
+        "read", "readwrite"]
     # registry mode is untouched (peer_token still there)
     monkeypatch.setattr(gateway_mod, "DASHBOARD_MODE", False)
     reg = {t["name"]: t for t in gateway_mod._advertised_tools()}
     assert "peer_token" in reg["crosstalk_send"]["inputSchema"]["properties"]
+    assert reg["hello"]["inputSchema"]["required"] == ["intent"]
 
 
 def test_stdio_transport_is_its_own_trust_boundary(monkeypatch):
