@@ -13,6 +13,8 @@
     --neut:#8391a8;
     --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
   }
+  html{background:#0c0f14}
+  body{background:#0c0f14;margin:0}
   #mc-app,#mc-app *{box-sizing:border-box}
   #mc-app{
     max-width:1060px;margin:0 auto;padding:14px 14px 80px;
@@ -358,9 +360,11 @@
   function card(it, opts){
     opts = opts || {};
     var c = el("article","mc-item st-"+it.state+" k-"+it.kind);
-    c.setAttribute("data-mc-anchor", it.key);
-    if (it.kind==="question" && it.state==="open" && it.ask)
-      c.setAttribute("data-mc-ask", it.ask);
+    if (!opts.mirror){
+      c.setAttribute("data-mc-anchor", it.key);
+      if (it.kind==="question" && it.state==="open" && it.ask)
+        c.setAttribute("data-mc-ask", it.ask);
+    }
     c.dataset.state = it.state; c.dataset.kind = it.kind;
     c.dataset.search = (it.title+" "+it.body+" "+(it.evidence||[]).join(" ")).toLowerCase();
 
@@ -549,7 +553,8 @@
     v.appendChild(filterBar(v));
     var host = el("section","mc-sec");
     host.appendChild(el("h2",null,title+" — every pillar"));
-    all.forEach(function (it) { host.appendChild(card(it,{showSurface:true})); });
+    all.forEach(function (it) {
+      host.appendChild(card(it,{showSurface:true, mirror:true})); });
     v.appendChild(host);
     return v;
   }
