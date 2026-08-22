@@ -379,6 +379,17 @@
 
   // The page's inline News view hands replies back to the chrome, which
   // owns the post composer and the reply flow.
+  // The page's Questions tab hands conversations back to the chrome: a
+  // row opens the entry view, Ask opens the questions panel (composer).
+  document.addEventListener("mc:open-entry", function (e) {
+    var id = e.detail && e.detail.entry_id;
+    if (id) show({entry: id});
+  });
+  document.addEventListener("mc:open-ask", function () {
+    qaMode = "mission";
+    show({panel: "questions"});
+  });
+
   document.addEventListener("mc:open-post", function (e) {
     var pid = e.detail && e.detail.post_id;
     var post = (state.status_posts || []).filter(function (p) {
@@ -613,32 +624,9 @@
           el("span", {class: "mc-caret", text: "\u25be"})]));
     }
     kids.push(el("span", {class: "mc-grow"}));
-    var n = openCount(), done = answeredCount();
-    // ONE CONTROL for both directions of question. Amber is what the
-    // mission owes an answer; indigo is what is waiting on YOU. The panel
-    // behind it carries the same two numbers on its tabs.
-    var forYou = unanswered();
-    var qKids = [svg(CHAT)];
-    if (n) {
-      qKids.push(el("span", {class: "mc-count mc-count-open",
-                             title: n + " open", text: String(n)}));
-    }
-    if (forYou.length) {
-      qKids.push(el("span", {class: "mc-count mc-count-you",
-                             title: forYou.length + " waiting on you",
-                             text: String(forYou.length)}));
-    }
-    // The coordinating-session door moved into the presence panel — the
-    // bar had no horizontal room left for it, and presence already answers
-    // "who is behind this screen".
-    var q = el("button", {class: n ? "mc-q mc-q-hot" : "mc-q",
-                          title: "Questions — " + n + " open, " + done + " answered",
-                          onclick: function () {
-          if (ui.panel === "questions" && qaMode === "mission") { show(null); return; }
-          qaMode = "mission"; show({panel: "questions"});
-        }},
-               qKids);
-    kids.push(q);
+    // THE BUBBLE IS GONE. Asks-for-you render better on the page itself,
+    // and the Q&A conversations moved into the page's Questions tab — the
+    // panel and entry views stay, summoned by the page over events.
     if (ui.noChannel) {
       kids.push(el("span", {class: "mc-nobody", title:
         "This page cannot reach the mission. Navigation and questions are unavailable.",
