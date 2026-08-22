@@ -1,0 +1,1 @@
+"""Official accounting protocol tests."""

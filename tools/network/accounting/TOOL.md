@@ -1,0 +1,56 @@
+# Official accounting primitives
+
+`tools.network.accounting` is the provider- and service-neutral physical usage
+boundary for auto.network. It does not calculate allowances, prices, margin,
+contribution credit, balances, or charges.
+
+## V1 batch
+
+A `UsageBatch` contains one Ed25519 producer's counters for one canonical
+organization UUID and one epoch-aligned five-minute interval. The counter map is
+wide and contains integer physical units such as:
+
+- `relay.egress_bytes`
+- `turn.egress_bytes`
+- `mailbox.stored_byte_seconds`
+- `artifact_cache.egress_bytes`
+- `shared_volume.stored_byte_seconds`
+
+Producer adapters freeze the exact names they emit. Counter names never encode
+an object, link, member, session, token, source, allocation, or path.
+
+The `batch_id` derives only from version, producer key, organization, sequence,
+and interval. The checksum covers that identity plus creation time and counters.
+Therefore an identical retry is one logical batch, while the same identity with
+different content has the same ID and a different checksum and must be rejected
+as a conflict by the sink.
+
+The producer's public key is its stable ID and verifies the batch signature.
+The sink must additionally authorize that key for the organization and counter
+families; a valid signature alone is not authorization.
+
+## Producer rule
+
+Create a batch once, append `batch.to_json()` to the crash-safe spool, and retry
+those exact bytes until the sink acknowledges the exact `(batch_id, checksum)`.
+Never recreate a retry with a new `created_at`.
+
+Accounting performs no remote I/O on a relay, TURN, or storage data path.
+Prometheus may report spool and sink health but is never official usage.
+
+## Durable spool
+
+`UsageSpool` is the service-neutral, single-process durable handoff. It uses
+full-synchronous SQLite transactions and an exclusive process lock. Append
+validates and commits the exact canonical bytes before returning. Per
+producer/organization sequence continuity rejects gaps and stale replay.
+
+Delivery reads records in durable append order and may remove bytes only after
+an acknowledgement names the exact batch ID and checksum. Acknowledgement
+leaves a small tombstone until `prune_acked`; pruning retains the stream's
+sequence high-water so old batches cannot be reintroduced. Record and byte
+limits apply backpressure without deleting official usage. `health()` exposes
+pending count, pending bytes, interval age bounds, acknowledged tombstones, and
+stream count.
+
+Decision: `graph://31ab60ae-647`.
