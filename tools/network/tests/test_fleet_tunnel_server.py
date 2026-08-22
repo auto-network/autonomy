@@ -206,3 +206,29 @@ def test_initialized_roster_without_local_machine_identity_fails_closed(fleet):
     assert state.allowed is False
     assert state.reason == "machine-identity-missing"
     assert state.selected_machine_id == selected
+
+
+def test_joining_marker_fails_closed_before_roster(fleet):
+    """A machine that began joining fails closed before its roster arrives.
+
+    The durable ``fleet-joining`` marker (written at invite presentation, before
+    any machine_id or roster exists) must keep a partially-enrolled or copied
+    node from mistaking itself for a legacy single-node install and serving.
+    """
+    from tools.network import machine_boot
+    from tools.network.fleet_invite import FleetInvite
+
+    machine_boot.mark_joining(
+        FleetInvite(
+            personal_root_pub="ab" * 32,
+            rendezvous="https://relay.example/l/" + "cd" * 16,
+            invite_id="ef" * 32,
+            expires_at=0,
+            signature="00" * 64,
+        ),
+        org="machine",
+    )
+    state = fleet_tunnel_server.state()
+    assert state.allowed is False
+    assert state.managed is True
+    assert state.reason == "fleet-member-provisioning"

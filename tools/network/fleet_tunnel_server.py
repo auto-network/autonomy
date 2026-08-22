@@ -144,6 +144,23 @@ def state() -> TunnelServerState:
                 selected_machine_id=selected,
                 local_machine_id=local,
             )
+        # A machine handed a fleet invite has begun joining; its enrollment
+        # ceremony may not have written a machine_id yet (or ever, if it
+        # restarts first, or if it is a copied data volume). Fail closed on the
+        # durable joining marker so it never serves as a second primary before
+        # its roster arrives. Only a genuine standalone install — which never
+        # presents a fleet invite — falls through to legacy-unmanaged.
+        try:
+            joining = machine_boot.is_joining(org="machine")
+        except Exception:
+            joining = True  # an unreadable machine store must fail closed
+        if joining:
+            return TunnelServerState(
+                False,
+                True,
+                "fleet-member-provisioning",
+                local_machine_id=local,
+            )
         return TunnelServerState(True, False, "legacy-unmanaged")
 
     root_pub = _personal_root_pub()

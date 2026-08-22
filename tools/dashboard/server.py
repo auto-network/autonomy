@@ -19170,6 +19170,19 @@ async def _on_startup():
                 "Web Push approval reconciliation failed; periodic sends remain active"
             )
 
+    # A node booted with AUTONOMY_FLEET_INVITE is a Fleet member from first
+    # boot: mark it joining now, before the serving supervisor can evaluate
+    # eligibility, so it fails CLOSED on tunnel serving during the window before
+    # its enrollment ceremony runs (machine_boot.mark_joining_from_env).
+    # Best-effort and non-fatal — a marker failure must not down startup.
+    try:
+        from tools.network import machine_boot
+        if machine_boot.mark_joining_from_env():
+            logger.info("fleet invite present: marked machine fleet-joining "
+                        "(fails closed on tunnel serving until enrolled)")
+    except Exception:
+        logger.exception("marking machine fleet-joining from AUTONOMY_FLEET_INVITE failed")
+
     # Personal fleet synchronization owns one in-process scheduler. It starts
     # idle before unlock/runtime credentials are available, so zero-peer,
     # mock, and cold-vault Dashboards pay no database or network cost.

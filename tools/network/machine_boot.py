@@ -44,11 +44,17 @@ def machine_id(*, org="machine") -> str | None:
 
 
 def first_boot(invite: FleetInvite, *, org="machine") -> tuple[EnrollmentRequest, str]:
-    """Start a one-time ceremony without writing durable machine state."""
+    """Start a one-time ceremony, marking this machine as joining a fleet.
+
+    Writes no durable machine *identity* — that is assigned only after approval
+    — but does record the durable ``fleet-joining`` marker, so the machine fails
+    CLOSED on tunnel serving from this instant (see ``mark_joining``).
+    """
     if has_identity(org=org):
         raise MachineBootError(
             "this machine is already enrolled; do not start another first boot"
         )
+    mark_joining(invite, org=org)
     request = fleet_enroll.build_request(invite=invite)
     return request, fleet_enroll.verification_code(request)
 
@@ -214,3 +220,79 @@ def _read_row(*, org) -> dict | None:
     ).to_dict()
     member = members.get(_KEY)
     return member.payload if member is not None else None
+
+
+_JOINING_SET_ID = "autonomy.machine.fleet-joining"
+_JOINING_KEY = "self"
+
+
+def mark_joining(invite: FleetInvite, *, org="machine") -> None:
+    """Record that this machine has begun joining a fleet.
+
+    Written at invite presentation, before any network round-trip, so the
+    machine fails CLOSED on tunnel serving from that instant even if the
+    ceremony never finishes or the process restarts mid-flight.
+
+    upsert, not add: first_boot may run more than once (a declined or expired
+    ceremony is retried), so re-presenting an invite must rewrite the marker
+    rather than violate the settings uniqueness constraint.
+    """
+    from datetime import datetime, timezone
+
+    from tools.graph import settings_ops
+    from tools.graph.schemas.fleet_joining import FLEET_JOINING_REVISION
+
+    settings_ops.upsert_by_key(
+        _JOINING_SET_ID,
+        FLEET_JOINING_REVISION,
+        _JOINING_KEY,
+        {
+            "invite_id": invite.invite_id,
+            "since": datetime.now(timezone.utc).isoformat(),
+        },
+        org=org,
+        state="raw",
+    )
+
+
+def is_joining(*, org="machine") -> bool:
+    """Whether this machine has begun a fleet-join ceremony."""
+    from tools.graph import settings_ops
+    from tools.graph.schemas.fleet_joining import FLEET_JOINING_REVISION
+
+    members = settings_ops.read_owned_set(
+        _JOINING_SET_ID, org=org, target_revision=FLEET_JOINING_REVISION
+    ).to_dict()
+    return members.get(_JOINING_KEY) is not None
+
+
+def mark_joining_from_env(*, org="machine") -> bool:
+    """Mark this machine as fleet-joining if it was booted with a fleet invite.
+
+    Reads ``AUTONOMY_FLEET_INVITE``. When it is set and this machine is not yet
+    enrolled, write the joining marker so the node fails CLOSED on tunnel
+    serving from the first moment it comes up — before the enrollment ceremony
+    runs and before any ``machine_id`` exists. A no-op when the variable is
+    unset or the machine is already enrolled. Returns whether a marker landed.
+
+    A malformed code still marks joining (under a sentinel id): a node booted to
+    join a fleet must never sit serving as a legacy primary because its invite
+    failed to parse; the parse failure surfaces separately at enrollment.
+    """
+    import os
+
+    code = os.environ.get("AUTONOMY_FLEET_INVITE")
+    if not code or has_identity(org=org):
+        return False
+
+    from tools.network import fleet_invite
+
+    try:
+        invite = fleet_invite.decode(code)
+    except Exception:
+        invite = FleetInvite(
+            personal_root_pub="", rendezvous="",
+            invite_id="unparsed-fleet-invite", expires_at=0, signature="",
+        )
+    mark_joining(invite, org=org)
+    return True
