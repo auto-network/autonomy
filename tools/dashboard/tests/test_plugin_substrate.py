@@ -319,8 +319,8 @@ def test_loader_resolves_session_contribution_callback(tmp_path, monkeypatch):
 
     # Compare the import target rather than object identity: xdist can import
     # the test module twice under different module objects.
-    assert plugin.session_contributions.__module__ == _fake_session_contributions.__module__
     assert plugin.session_contributions.__name__ == _fake_session_contributions.__name__
+    assert plugin.session_contributions(["auto-1"], None) == {"auto-1": []}
 
 
 def test_loader_handles_entrypoint_import_error(tmp_path, monkeypatch, caplog):
