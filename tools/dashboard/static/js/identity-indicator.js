@@ -371,18 +371,11 @@
             // Let the panel's close render commit before the SPA navigation
             // replaces the page.  Without this frame the detached identity
             // menu can remain visually latched over plug-in pages.
-            var go = function () {
-              if (typeof root.navigateTo === 'function') {
-                root.navigateTo(plugin.path);
-              } else {
-                root.location.assign(plugin.path);
-              }
-            };
-            if (typeof root.requestAnimationFrame === 'function') {
-              root.requestAnimationFrame(go);
-            } else {
-              root.setTimeout(go, 0);
-            }
+            // A full navigation is intentional for plug-in pages: the SPA
+            // router can preserve the identity-menu host over the new view.
+            root.setTimeout(function () {
+              root.location.assign(plugin.path);
+            }, 0);
           }
         ));
       });
