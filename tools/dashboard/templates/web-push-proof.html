@@ -134,7 +134,13 @@
         body: JSON.stringify({subscription: subscription.toJSON()})
       });
       const sent = await sendResponse.json();
-      if (!sendResponse.ok) throw new Error(sent.error || 'The push service refused the message.');
+      if (!sendResponse.ok) {
+        const diagnostic = [sent.push_service_status, sent.push_service_reason]
+          .filter((value) => value !== undefined && value !== null)
+          .join(' ');
+        throw new Error((sent.error || 'The push service refused the message.') +
+          (diagnostic ? ' (' + diagnostic + ')' : ''));
+      }
       status('Accepted by the push service. Leave the app and watch for the OS notification.', 'ok');
     } catch (error) {
       status(error && error.message ? error.message : String(error), 'error');
