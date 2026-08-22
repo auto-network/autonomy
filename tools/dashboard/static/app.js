@@ -2056,7 +2056,7 @@ function renderMissionScreenFragment() {
   _replaceFragment(content,
     '<iframe id="mission-screen-frame" title="Mission screen"'
     + ' style="position:fixed;inset:0;width:100%;height:100%;border:0;'
-    + 'z-index:40;background:#0c0f14"></iframe>');
+    + 'z-index:50;background:#0c0f14"></iframe>');
   const frame = document.getElementById('mission-screen-frame');
   if (frame) frame.src = src;
 }
