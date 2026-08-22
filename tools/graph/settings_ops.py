@@ -2030,6 +2030,68 @@ def inspect_setting(
     return findings, passed
 
 
+def audit_publication_bands(*, org: str | None = None) -> list[dict]:
+    """Every stored settings row whose ``publication_state`` falls outside its
+    schema's declared band.
+
+    The compliance sweep for the publication-band lockdown: a row above its
+    band ``max`` is readable by peer organizations that should not see it (a
+    cross-org disclosure — the ``autonomy.workspace`` class); a row below its
+    band ``min`` cannot be read by peers that need it (the capability-contract
+    outage class). A set with no declared band is reported too, though the
+    completeness gate now refuses to ship one.
+
+    Host-run estate scan: opens each store's database DIRECTLY (every
+    ``data/orgs/<slug>.db`` plus the local personal/machine stores) rather than
+    the composed read-through surface, which resolves one winner per key and so
+    masks a second store holding the same key in a worse state. Pass ``org`` to
+    scan a single store; default scans every store on the machine.
+
+    Each finding: ``{store, set_id, key, revision, state, band, reason}``.
+    """
+    from .cross_org import all_store_slugs
+    from .db import GraphDB
+    from .schemas.registry import declared_band, PUBLICATION_ORDER
+
+    order = {s: i for i, s in enumerate(PUBLICATION_ORDER)}
+    slugs = [org] if org else all_store_slugs()
+    findings: list[dict] = []
+    for slug in slugs:
+        try:
+            db = GraphDB.for_org(slug, mode="ro")
+        except Exception:
+            continue  # store absent on this machine
+        try:
+            rows = db.conn.execute(
+                "SELECT set_id, key, schema_revision, publication_state "
+                "FROM settings WHERE deprecated = 0"
+            ).fetchall()
+        except Exception:
+            continue
+        for r in rows:
+            set_id = r["set_id"]
+            rev = int(r["schema_revision"])
+            state = r["publication_state"]
+            si = order.get(state)
+            if si is None:
+                continue
+            band = declared_band(set_id, rev)
+            base = {"store": slug, "set_id": set_id, "key": r["key"],
+                    "revision": rev, "state": state}
+            if band is None:
+                findings.append({**base, "band": None,
+                                 "reason": "no band declared (defaults to full range)"})
+                continue
+            lo, hi = band
+            if si > order[hi]:
+                findings.append({**base, "band": f"{lo}..{hi}",
+                                 "reason": "above max — readable by peer orgs"})
+            elif si < order[lo]:
+                findings.append({**base, "band": f"{lo}..{hi}",
+                                 "reason": "below min — unreadable by peer orgs"})
+    return findings
+
+
 def orphans_of(set_id: str, *, org: str) -> list[CheckFinding]:
     """Rows whose key names an entity that no longer exists.
 
