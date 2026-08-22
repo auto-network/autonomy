@@ -174,9 +174,10 @@ const STYLE = `
 `;
 
 // ── module state ───────────────────────────────────────────────────────────
-let host = null;        // the overlay element
+let host = null;        // the overlay element (null when mounted inside a host drawer)
 let cardEl = null;      // the #card the design renders into
 let onClosed = null;
+let onBackFn = null;    // when set (drawer mode), "Back" returns instead of closing
 let M, S;               // M = the backend model (design shape); S = UI state
 let armorText = null;   // the current armor, as fetched
 let statusData = null;  // /api/identity/status
@@ -828,7 +829,7 @@ function keysScreen() {
   add.onclick = (e) => { e.stopPropagation(); gatherThen('create', rootNeed()); };
   p.appendChild(add);
   const back = el('div', 'back', '&lsaquo; Back');
-  back.onclick = (e) => { e.stopPropagation(); close(); };
+  back.onclick = (e) => { e.stopPropagation(); if (onBackFn) onBackFn(); else close(); };
   p.appendChild(back);
   return p;
 }
@@ -917,20 +918,32 @@ function injectStyles() {
 function close() {
   if (S) S.password = null;
   if (host && host.parentNode) host.parentNode.removeChild(host);
-  host = null; cardEl = null;
+  if (cardEl && cardEl.parentNode) cardEl.parentNode.removeChild(cardEl);
+  host = null; cardEl = null; onBackFn = null;
   if (typeof onClosed === 'function') onClosed();
 }
+// open({onClose}) → full-screen overlay (default). open({mount, onBack, onClose})
+// → render the SAME designed screens inside `mount` (e.g. the profile-settings
+//   drawer), filling its width; "Back" calls onBack instead of closing.
 async function open(opts) {
   onClosed = (opts && opts.onClose) || null;
+  onBackFn = (opts && opts.onBack) || null;
   injectStyles();
   M = null; S = null;
-  host = document.createElement('div');
-  host.className = 'fui-overlay';
-  host.setAttribute('data-testid', 'factor-management');
-  host.addEventListener('click', (e) => { if (e.target === host) close(); });
+  const mount = opts && opts.mount;
   cardEl = document.createElement('div'); cardEl.className = 'card';
-  host.appendChild(cardEl);
-  document.body.appendChild(host);
+  if (mount) {
+    host = null;
+    cardEl.style.maxWidth = 'none';   // the drawer is wider than the modal card
+    mount.appendChild(cardEl);
+  } else {
+    host = document.createElement('div');
+    host.className = 'fui-overlay';
+    host.setAttribute('data-testid', 'factor-management');
+    host.addEventListener('click', (e) => { if (e.target === host) close(); });
+    host.appendChild(cardEl);
+    document.body.appendChild(host);
+  }
   if (!trayWired) {
     trayWired = true;
     document.addEventListener('click', () => {

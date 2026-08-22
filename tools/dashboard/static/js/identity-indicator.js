@@ -21,6 +21,11 @@
   var orgs = null;
   var orgsError = null;
   var panelOpen = false;
+  // Credentials management renders INSIDE this drawer (a sub-view), not a
+  // separate full-screen frame. credentialsMounted guards against the drawer's
+  // own re-renders (status refresh, org load) tearing the mounted view down.
+  var credentialsOpen = false;
+  var credentialsMounted = false;
   var lockBusy = false;
   var initialized = false;
 
@@ -124,6 +129,21 @@
   function closePanel() {
     if (!panelOpen) return;
     panelOpen = false;
+    credentialsOpen = false;
+    credentialsMounted = false;
+    render();
+  }
+
+  // Open the credentials manager as a sub-view of THIS drawer.
+  function openCredentials() {
+    credentialsOpen = true;
+    credentialsMounted = false;
+    render();
+  }
+  // Return from the credentials sub-view to the drawer's main (org list).
+  function closeCredentials() {
+    credentialsOpen = false;
+    credentialsMounted = false;
     render();
   }
 
@@ -347,6 +367,14 @@
     header.appendChild(person);
     panel.appendChild(header);
 
+    // Credentials sub-view: the SAME designed Factors screens render right here
+    // in the drawer (wider than the old modal), with their own "Back" returning
+    // to this org list. No separate frame.
+    if (credentialsOpen && status && status.signed_in === true) {
+      panel.appendChild(el('div', 'identity-credentials-mount'));
+      return panel;
+    }
+
     if (state === 'gate-off') {
       panel.appendChild(el('div', 'identity-panel-notice',
         'This dashboard is open because authentication is disabled.'));
@@ -384,18 +412,8 @@
         'Finish setup', function () { openOnboarding(2); }));
     }
     if (status && status.signed_in === true && status.gate_disabled !== true) {
-      actions.appendChild(actionButton('manage-factors', 'Manage my factors',
-        'Change your password, add or remove a device', function () {
-          closePanel();
-          import('./factor-management.js')
-            .then(function (m) { m.open({ onClose: refresh }); })
-            .catch(function (err) {
-              loadError = 'Factor management unavailable: ' + ((err && err.message) || err);
-              render();
-            });
-        }));
-      actions.appendChild(actionButton('add-passkey', 'Add a passkey',
-        'Enroll this device', function () { openOnboarding(2); }));
+      actions.appendChild(actionButton('manage-factors', 'Manage credentials',
+        'Your password and passkeys', function () { openCredentials(); }));
       actions.appendChild(actionButton('lock', lockBusy ? 'Locking...' : 'Lock dashboard',
         'This session only', lockDashboard));
     }
@@ -414,6 +432,9 @@
     if (!root || !root.document) return;
     var host = root.document.getElementById('identity-indicator');
     if (!host) return;
+    // While the credentials sub-view is mounted, external re-renders (status
+    // refresh, org load) must not rebuild the drawer and tear it down.
+    if (credentialsOpen && credentialsMounted) return;
     var state = loadError && !status ? 'error' : deriveIdentityState(status);
     if (state === 'bootstrap' || state === 'locked' || state === 'error') {
       panelOpen = false;
@@ -432,6 +453,21 @@
       backdrop.addEventListener('click', closePanel);
       host.appendChild(backdrop);
       host.appendChild(panelForState(state));
+      if (credentialsOpen && !credentialsMounted) {
+        var mount = host.querySelector('.identity-credentials-mount');
+        if (mount) {
+          credentialsMounted = true;
+          import('./factor-management.js')
+            .then(function (m) {
+              m.open({ mount: mount, onBack: closeCredentials, onClose: closeCredentials });
+            })
+            .catch(function (err) {
+              credentialsMounted = false; credentialsOpen = false;
+              loadError = 'Credential management unavailable: ' + ((err && err.message) || err);
+              render();
+            });
+        }
+      }
     }
   }
 
