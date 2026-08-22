@@ -67,6 +67,7 @@ class SpoolRecord:
     ordinal: int
     batch: UsageBatch
     wire: bytes
+    acknowledged: bool
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,8 @@ class SpoolHealth:
     pending_records: int
     pending_bytes: int
     acknowledged_records: int
+    acknowledged_bytes: int
+    retained_bytes: int
     stream_count: int
     oldest_interval_end: int | None
     newest_interval_end: int | None
@@ -298,28 +301,48 @@ class UsageSpool:
 
     def pending(self, *, limit: int = 100) -> Iterator[SpoolRecord]:
         """Yield pending records in durable append order, validating every row."""
+        yield from self._records(limit=limit, include_acknowledged=False)
+
+    def recoverable(self, *, limit: int = 100) -> Iterator[SpoolRecord]:
+        """Yield pending and retained acknowledged bytes for sink recovery replay."""
+        yield from self._records(limit=limit, include_acknowledged=True)
+
+    def _records(
+        self, *, limit: int, include_acknowledged: bool
+    ) -> Iterator[SpoolRecord]:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit must be a positive integer")
         with self._mutex:
             self._require_open()
             try:
+                where = "" if include_acknowledged else "WHERE state=0 "
                 rows = self._db.execute(
                     "SELECT ordinal, batch_id, checksum, producer, organization_id, "
-                    "sequence, interval_end, wire FROM batches "
-                    "WHERE state=0 ORDER BY ordinal LIMIT ?",
+                    "sequence, interval_end, wire, state FROM batches "
+                    f"{where}ORDER BY ordinal LIMIT ?",
                     (limit,),
                 ).fetchall()
             except sqlite3.Error as exc:
                 _raise_sqlite(exc)
         for row in rows:
-            ordinal, batch_id, checksum, producer, org, sequence, interval_end, wire = row
+            (
+                ordinal,
+                batch_id,
+                checksum,
+                producer,
+                org,
+                sequence,
+                interval_end,
+                wire,
+                state,
+            ) = row
             if not isinstance(wire, bytes):
-                raise UsageSpoolCorrupt(f"pending spool row {ordinal} has no wire bytes")
+                raise UsageSpoolCorrupt(f"retained spool row {ordinal} has no wire bytes")
             try:
                 batch = UsageBatch.from_json(wire)
             except UsageBatchError as exc:
                 raise UsageSpoolCorrupt(
-                    f"pending spool row {ordinal} contains an invalid batch"
+                    f"retained spool row {ordinal} contains an invalid batch"
                 ) from exc
             stored = (batch_id, checksum, producer, org, sequence, interval_end)
             parsed = (
@@ -332,9 +355,14 @@ class UsageSpool:
             )
             if stored != parsed or batch.to_json() != wire:
                 raise UsageSpoolCorrupt(
-                    f"pending spool row {ordinal} metadata does not match its batch"
+                    f"retained spool row {ordinal} metadata does not match its batch"
                 )
-            yield SpoolRecord(ordinal=ordinal, batch=batch, wire=wire)
+            yield SpoolRecord(
+                ordinal=ordinal,
+                batch=batch,
+                wire=wire,
+                acknowledged=state == 1,
+            )
 
     def acknowledge(self, batch_id: str, checksum: str) -> bool:
         """Mark only an exact accepted id/checksum durable; false means already acked."""
@@ -351,14 +379,34 @@ class UsageSpool:
                 if row[1] == 1:
                     return False
                 self._db.execute(
-                    "UPDATE batches SET state=1, wire=NULL, wire_bytes=0, "
+                    "UPDATE batches SET state=1, "
                     "acknowledged_at=? WHERE batch_id=?",
                     (int(time.time()), batch_id),
                 )
         return True
 
-    def prune_acked(self, *, limit: int = 1_000) -> int:
-        """Delete oldest acknowledgement tombstones while retaining stream high-water."""
+    def prune_acked(
+        self,
+        *,
+        producer: str,
+        organization_id: str,
+        through_sequence: int,
+        limit: int = 1_000,
+    ) -> int:
+        """Delete bytes covered by one stream's sink recovery watermark.
+
+        An ingest acknowledgement is not proof of an off-host backup.  The
+        caller supplies the exact producer/organization sequence known to be
+        covered by the sink's durable recovery watermark.  Until then,
+        acknowledged wire remains locally recoverable and counts against spool
+        capacity.  A sequence watermark avoids unsafe wall-clock comparisons.
+        """
+        if (
+            isinstance(through_sequence, bool)
+            or not isinstance(through_sequence, int)
+            or through_sequence < 1
+        ):
+            raise ValueError("through_sequence must be a positive integer")
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit must be a positive integer")
         with self._mutex:
@@ -366,8 +414,10 @@ class UsageSpool:
             with self._transaction():
                 cursor = self._db.execute(
                     "DELETE FROM batches WHERE ordinal IN ("
-                    "SELECT ordinal FROM batches WHERE state=1 ORDER BY ordinal LIMIT ?)",
-                    (limit,),
+                    "SELECT ordinal FROM batches WHERE state=1 "
+                    "AND producer=? AND organization_id=? AND sequence<=? "
+                    "ORDER BY ordinal LIMIT ?)",
+                    (producer, organization_id, through_sequence, limit),
                 )
                 return cursor.rowcount
 
@@ -394,15 +444,18 @@ class UsageSpool:
                     "MIN(interval_end), MAX(interval_end) FROM batches WHERE state=0"
                 ).fetchone()
                 acked = self._db.execute(
-                    "SELECT COUNT(*) FROM batches WHERE state=1"
-                ).fetchone()[0]
+                    "SELECT COUNT(*), COALESCE(SUM(wire_bytes), 0) "
+                    "FROM batches WHERE state=1"
+                ).fetchone()
                 streams = self._db.execute("SELECT COUNT(*) FROM streams").fetchone()[0]
             except sqlite3.Error as exc:
                 _raise_sqlite(exc)
         return SpoolHealth(
             pending_records=int(pending[0]),
             pending_bytes=int(pending[1]),
-            acknowledged_records=int(acked),
+            acknowledged_records=int(acked[0]),
+            acknowledged_bytes=int(acked[1]),
+            retained_bytes=int(pending[1]) + int(acked[1]),
             stream_count=int(streams),
             oldest_interval_end=pending[2],
             newest_interval_end=pending[3],

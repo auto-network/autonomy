@@ -47,10 +47,15 @@ producer/organization sequence continuity rejects gaps and stale replay.
 
 Delivery reads records in durable append order and may remove bytes only after
 an acknowledgement names the exact batch ID and checksum. Acknowledgement
-leaves a small tombstone until `prune_acked`; pruning retains the stream's
-sequence high-water so old batches cannot be reintroduced. Record and byte
-limits apply backpressure without deleting official usage. `health()` exposes
-pending count, pending bytes, interval age bounds, acknowledged tombstones, and
-stream count.
+retains the exact bytes because ingest success alone does not prove that an
+off-host backup contains them. `prune_acked(...)` accepts one
+producer/organization sequence watermark that the caller knows is covered by
+the sink's recovery point; it never compares clocks. Pruning retains the local
+stream high-water so old batches cannot be reintroduced. Record and
+retained-byte limits apply backpressure without deleting official usage.
+`health()` exposes pending and acknowledged counts/bytes, total retained bytes,
+interval age bounds, and stream count. Normal delivery reads `pending()`;
+clean-sink recovery reads `recoverable()` so acknowledged-but-not-yet-pruned
+bytes can be replayed idempotently.
 
 Decision: `graph://31ab60ae-647`.
