@@ -48,8 +48,11 @@ from __future__ import annotations
 import base64
 import ipaddress
 import json
+import logging
 import secrets
 import time
+
+_LOG = logging.getLogger("autonomy.dashboard.identity")
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -887,6 +890,95 @@ async def delete_passkey(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "credential_id": credential_id})
 
 
+_CEREMONY_ERR_STACK_MAX = 4000
+# Bounded like the Agent Test telemetry so the log cannot grow without limit.
+MAX_CLIENT_ERRORS = 500
+
+
+def _clip(value, limit=400):
+    return "" if value is None else str(value)[:limit]
+
+
+async def post_ceremony_error(request: Request) -> JSONResponse:
+    """Capture a client-side ceremony failure so it survives past the browser.
+
+    The factor and unlock ceremonies run their crypto in the BROWSER — the root
+    never leaves the page (I1) — so their exceptions never reach the server on
+    their own; before this they lived only in a red banner an operator on a phone
+    cannot inspect (the same blind spot the network unlock-report closed). The
+    failure is written to the dashboard log AND to a capped, personal-scoped
+    append-only Settings log (``autonomy.identity.client-error``), trimmed to the
+    most recent ``MAX_CLIENT_ERRORS`` exactly as the Agent Test telemetry bounds
+    itself. DIAGNOSTIC ONLY: an error name/message/stack plus non-secret context
+    (which transition, which factors are present). The client must never send —
+    and this must never store — a password, PRF output, root seed, CEK, or armor
+    plaintext; only failure descriptions and code locations belong here.
+    """
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - diagnostics must never 500
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+
+    ctx = body.get("context")
+    entry = {
+        "ceremony": _clip(body.get("ceremony"), 80) or "unknown",
+        "action": _clip(body.get("action"), 80),
+        "name": _clip(body.get("name"), 120),
+        "message": _clip(body.get("message"), 600),
+        "stack": _clip(body.get("stack"), _CEREMONY_ERR_STACK_MAX),
+        "context": _clip(
+            json.dumps(ctx, sort_keys=True) if isinstance(ctx, (dict, list)) else ctx, 600,
+        ),
+        "recorded_at": time.time(),
+    }
+    _LOG.warning(
+        "client ceremony error: ceremony=%s action=%s name=%s message=%s "
+        "context=%s\n%s",
+        entry["ceremony"], entry["action"] or "-", entry["name"] or "-",
+        entry["message"] or "-", entry["context"] or "-", entry["stack"],
+    )
+    if not _mock_mode():
+        try:
+            from tools.graph.schemas.client_error import (
+                CLIENT_ERROR_REVISION, CLIENT_ERROR_SET_ID,
+            )
+            with settings_ops.identity_write_context():
+                settings_ops.append_log_entries(
+                    CLIENT_ERROR_SET_ID, CLIENT_ERROR_REVISION,
+                    [(secrets.token_hex(16), entry)], org=None,
+                )
+                members = list(settings_ops.read_owned_set(
+                    CLIENT_ERROR_SET_ID, org=None).members)
+                members.sort(
+                    key=lambda m: (float(m.payload.get("recorded_at") or 0),
+                                   m.created_at, m.id),
+                    reverse=True,
+                )
+                stale = [m.id for m in members[MAX_CLIENT_ERRORS:]]
+                if stale:
+                    settings_ops.remove_raw_settings(stale, org=None)
+        except Exception as exc:  # noqa: BLE001 - diagnostics must never 500
+            _LOG.warning("client ceremony error not persisted: %s", exc)
+    return JSONResponse({"ok": True})
+
+
+async def get_ceremony_errors(request: Request) -> JSONResponse:
+    """The most recent client ceremony failures, newest first (bounded)."""
+    try:
+        limit = min(int(request.query_params.get("limit", "50")), MAX_CLIENT_ERRORS)
+    except (TypeError, ValueError):
+        limit = 50
+    from tools.graph.schemas.client_error import CLIENT_ERROR_SET_ID
+    members = list(settings_ops.read_owned_set(CLIENT_ERROR_SET_ID, org=None).members)
+    members.sort(
+        key=lambda m: (float(m.payload.get("recorded_at") or 0), m.created_at, m.id),
+        reverse=True,
+    )
+    return JSONResponse({"errors": [m.payload for m in members[:limit]]})
+
+
 ROUTES = [
     Route("/api/identity/status", get_status, methods=["GET"]),
     Route("/api/identity/personal", get_personal, methods=["GET"]),
@@ -897,4 +989,6 @@ ROUTES = [
     Route("/api/identity/passkey/register", post_register, methods=["POST"]),
     Route("/api/identity/passkey/{credential_id}", delete_passkey,
           methods=["DELETE"]),
+    Route("/api/identity/ceremony-error", post_ceremony_error, methods=["POST"]),
+    Route("/api/identity/ceremony-error", get_ceremony_errors, methods=["GET"]),
 ]

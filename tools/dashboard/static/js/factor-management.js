@@ -341,6 +341,32 @@ async function loadModel() {
 }
 
 // ── real ceremony layer (replaces the mock commit()) ─────────────────────
+// Report a client-side ceremony failure to the server so it survives past the
+// browser (the crypto runs here, so these never reach the dashboard log on their
+// own). DIAGNOSTIC ONLY — error text + non-secret context; NEVER a password,
+// PRF, seed, or armor. Best-effort: telemetry must never break a ceremony.
+function reportCeremonyError(ceremony, action, err) {
+  try {
+    fetch('/api/identity/ceremony-error', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ceremony,
+        action: action || '',
+        name: (err && err.name) || '',
+        message: (err && err.message) || String(err),
+        stack: (err && err.stack) || '',
+        context: {
+          mfa: !!(M && M.mfa),
+          passwordOn: !!(M && M.pass && M.pass.on),
+          passkeys: (M && M.keys) ? M.keys.length : 0,
+          screen: (S && S.screen) || null,
+        },
+      }),
+    }).catch(() => {});
+  } catch (e) { /* diagnostics must never throw */ }
+}
+
 async function doRearm(opener, action, requirePair) {
   try {
     const body = await primitives.signArmorUpdate(armorText, opener, action, requirePair);
@@ -351,7 +377,11 @@ async function doRearm(opener, action, requirePair) {
     const j = await r.json().catch(() => ({}));
     if (!r.ok || j.ok === false) throw new Error(j.error || ('re-arm failed (' + r.status + ')'));
     return true;
-  } catch (err) { S.warn = (err && err.message) || String(err); return false; }
+  } catch (err) {
+    S.warn = (err && err.message) || String(err);
+    reportCeremonyError('rearm', action && action.kind, err);
+    return false;
+  }
 }
 
 // The opener a root-mutating ceremony must present is the one the re-arm
@@ -451,7 +481,11 @@ async function removeDeviceReal(idx) {
     const j = await r.json().catch(() => ({}));
     if (!r.ok || j.ok === false) throw new Error(j.error || ('remove failed (' + r.status + ')'));
     return true;
-  } catch (err) { S.warn = (err && err.message) || String(err); return false; }
+  } catch (err) {
+    S.warn = (err && err.message) || String(err);
+    reportCeremonyError('removeDevice', 'delete', err);
+    return false;
+  }
 }
 async function addDeviceReal() {
   let opened;
@@ -464,13 +498,21 @@ async function addDeviceReal() {
       : S.password
         ? await primitives.decryptArmor(armorText, S.password)
         : await primitives.decryptArmorWithPasskey(armorText, S.prf);
-  } catch (e) { S.warn = 'that root proof did not open your identity — try again'; return false; }
+  } catch (e) {
+    S.warn = 'that root proof did not open your identity — try again';
+    reportCeremonyError('enroll', 'open', e);
+    return false;
+  }
   const seed = opened.seed;
   try {
     const signingKey = await primitives.importEd25519RootSigningKey(seed);
     await enrollPasskey({ root: { signingKey, publicHex: opened.rootPub } });
     return true;
-  } catch (err) { S.warn = (err && err.message) || String(err); return false; }
+  } catch (err) {
+    S.warn = (err && err.message) || String(err);
+    reportCeremonyError('enroll', 'create', err);
+    return false;
+  }
   finally { seed.fill(0); }
 }
 
@@ -834,7 +876,11 @@ function sheet() {
     // 'use' (a passkey root step) or 'present' (the key being promoted): real PRF.
     try {
       S.prf = await getPrf(presenting ? M.keys[S.keyIdx].credentialId : null);
-    } catch (err) { S.warn = (err && err.message) || String(err); S.sheet = null; render(); return; }
+    } catch (err) {
+      S.warn = (err && err.message) || String(err);
+      reportCeremonyError('prf', presenting ? 'present' : 'authorize', err);
+      S.sheet = null; render(); return;
+    }
     if (presenting) { S.sheet = null; applyKey(); return; }
     S.sheet = null; stepDone();
   };

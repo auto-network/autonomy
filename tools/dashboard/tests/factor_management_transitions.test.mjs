@@ -121,6 +121,10 @@ async function router(url, opts = {}) {
     });
     return jsonResponse({ ok: true });
   }
+  if (url === '/api/identity/ceremony-error' && method === 'POST') {
+    (S.errors = S.errors || []).push(JSON.parse(opts.body));
+    return jsonResponse({ ok: true });
+  }
   if (url.startsWith('/api/identity/passkey/') && method === 'DELETE') {
     const id = decodeURIComponent(url.split('/').pop());
     S.passkeys = S.passkeys.filter((p) => p.credential_id !== id);
@@ -461,4 +465,31 @@ test('MFA → dual full-authority factors, no MFA (UI shows BOTH full)', async (
   const keyBadge = qa('.krow [data-k]').pop();
   assert.ok(keyBadge, 'passkey authority badge present');
   assert.match(keyBadge.textContent, /full authority/i, 'passkey badge full authority (not unlock only)');
+});
+
+test('a failed ceremony reports diagnostics to the server with NO secrets', async () => {
+  const root = await mintRoot();
+  const armor = await aPassword(root, 'realpw');
+  SERVER = makeServer({ armor, rootPub: root.rootPub, passkeys: [] });
+  await openPanel();
+  q('.krow .chg').click();
+  await gather('WRONGpw');                       // wrong current password → re-arm fails
+  const [a, b] = qa('input.oin'); a.value = 'newsecret'; b.value = 'newsecret';
+  qa('.btn').filter((x) => !x.classList.contains('flat')).pop().click();
+  await until(() => (SERVER.errors || []).length > 0, 120);
+  assert.equal(SERVER.posts.length, 0, 're-arm did not succeed');
+  assert.ok((SERVER.errors || []).length, 'a ceremony-error was reported');
+  const rep = SERVER.errors[0];
+  assert.equal(rep.ceremony, 'rearm');
+  assert.equal(rep.action, 'setPassword');
+  assert.ok(rep.message && rep.message.length, 'has an error message');
+  assert.equal(typeof rep.context.mfa, 'boolean', 'carries non-secret context');
+  // the report must never carry secret material
+  const blob = JSON.stringify(rep);
+  for (const secret of ['WRONGpw', 'newsecret', 'realpw']) {
+    assert.ok(!blob.includes(secret), `report must not contain the secret "${secret}"`);
+  }
+  for (const key of ['password', 'newPassword', 'prf', 'seed', 'armored_private_key']) {
+    assert.ok(!(key in rep), `report must not carry a "${key}" field`);
+  }
 });

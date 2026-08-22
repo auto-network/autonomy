@@ -71,6 +71,11 @@ PUBLIC_EXCEPTIONS: dict[tuple[str, str], str] = {
     ("POST", "/api/identity/unlock/passkey"):
         "Completes the passkey unlock and mints the session cookie. "
         "Pre-session by construction.",
+    ("POST", "/api/identity/ceremony-error"):
+        "Diagnostic-only report of a client-side ceremony failure (no secrets). "
+        "Unlock ceremonies fail BEFORE a session exists, so their failures must "
+        "be reportable pre-session or the very lockouts we most need to see "
+        "would be the ones we never log.",
     ("POST", "/api/fleet/enrollment/local-resume"):
         "Resumes only the Fleet request and invitation credential already "
         "stored by first run. It must remain reachable after encrypted root "
