@@ -64,7 +64,7 @@ def telemetry_request(
     }
     if event is not None:
         payload.update({"event": event, "session": session})
-    elif action == "error":
+    elif action in {"error", "progress"}:
         payload["session"] = session
     data = json.dumps(payload).encode()
     request = urllib.request.Request(
