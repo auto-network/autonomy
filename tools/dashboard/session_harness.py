@@ -586,6 +586,46 @@ def _graph_db_path() -> str | None:
     return os.environ.get("GRAPH_DB") or None
 
 
+#: tmux name -> live session-viewer path, refreshed at most every few
+#: seconds. The tail parser runs per entry; the registry read is per burst.
+_SENDER_HREF_CACHE: dict = {"at": 0.0, "map": {}}
+
+
+def _sender_href(ct: dict) -> str:
+    """Where a crosstalk card's sender name should take the reader.
+
+    The envelope's own href wins (a mission question knows its exact
+    conversation). Otherwise a sender that is a LIVE local session links to
+    the session viewer — the room where they are — never the graph source
+    viewer, which is the archive about them. A sender that is neither (a
+    dead session, or one running on another fleet machine) gets no href
+    here and the renderer falls back to the graph source when it has one.
+    """
+    if ct.get("href"):
+        return ct["href"]
+    tmux = ct.get("from") or ""
+    if not tmux or ":" in tmux:
+        return ""
+    import time as _t
+    from urllib.parse import quote as _q
+    now = _t.time()
+    if now - _SENDER_HREF_CACHE["at"] > 5:
+        try:
+            from tools.dashboard.dao import sessions as _dao
+            rows = _dao.get_active_sessions()
+        except Exception:
+            rows = []
+        _SENDER_HREF_CACHE["map"] = {
+            r["tmux_session"]: (
+                f"/session/{_q(str(r.get('project') or 'session'), safe='')}"
+                f"/{_q(r['tmux_session'], safe='')}"
+                f"?tmux={_q(r['tmux_session'], safe='')}")
+            for r in rows if r.get("tmux_session")
+        }
+        _SENDER_HREF_CACHE["at"] = now
+    return _SENDER_HREF_CACHE["map"].get(tmux, "")
+
+
 def _classify_crosstalk(text: str) -> dict | None:
     stripped = text.strip()
     m = _CROSSTALK_RE.fullmatch(stripped)
@@ -608,6 +648,10 @@ def _classify_crosstalk(text: str) -> dict | None:
         "harness": attrs.get("harness", ""),
         "model": attrs.get("model", ""),
         "kind": attrs.get("kind", ""),
+        # An envelope may carry its own destination — a mission question
+        # deep-links to the exact conversation it opened. Data, not trust:
+        # the renderer treats it as an ordinary same-origin path.
+        "href": attrs.get("href", ""),
         "message": body,
     }
 
@@ -974,6 +1018,8 @@ def parse_claude_log_line(line: str) -> dict | list[dict] | None:
                     "sender_label": ct["label"],
                     "source_id": ct["source"],
                     "turn": ct["turn"],
+                    "kind": ct.get("kind", ""),
+                    "href": _sender_href(ct),
                     "timestamp": timestamp,
                     "queued": True,
                 }
@@ -1049,6 +1095,8 @@ def parse_claude_log_line(line: str) -> dict | list[dict] | None:
                     "sender_label": ct["label"],
                     "source_id": ct["source"],
                     "turn": ct["turn"],
+                    "kind": ct.get("kind", ""),
+                    "href": _sender_href(ct),
                     "timestamp": timestamp,
                 })
             elif (sys_info := _classify_system_message(text)):

@@ -1482,10 +1482,21 @@ async def _relay_question(*, mission_id: str, entry_id: str) -> None:
         f"\n\nIn reply to:\n> {entry['anchor_excerpt']}"
         if entry.get("anchor_excerpt") else ""
     )
+    # The card a session viewer renders from this envelope: label is its
+    # title, href is where tapping that title lands — the exact conversation
+    # on the mission screen (?question= opens the thread; the reader then
+    # watches updates and the answer arrive live).
+    screen_path = (
+        f"/missions/{mission_id}/pillars/{pillar['pillar_id']}"
+        if pillar else f"/missions/{mission_id}"
+    )
+    deep_link = f"{screen_path}?question={entry_id}"
     primary_envelope = build_envelope(
         from_id=primary_from_id,
         kind="mission-question",
         extra={
+            "label": f"Question · {primary_label}",
+            "href": deep_link,
             "mission": mission_id,
             "pillar": pillar["pillar_id"] if pillar else None,
             "entry_id": entry_id,
@@ -1521,6 +1532,8 @@ async def _relay_question(*, mission_id: str, entry_id: str) -> None:
             from_id=primary_from_id,
             kind="mission-question-cc",
             extra={
+                "label": f"Question (cc) · {primary_label}",
+                "href": deep_link,
                 "mission": mission_id,
                 "pillar": pillar["pillar_id"] if pillar else None,
                 "entry_id": entry_id,

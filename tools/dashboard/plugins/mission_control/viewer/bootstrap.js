@@ -1753,6 +1753,18 @@
     mountAnchors();
     collectSections();
     render();
+    // Deep link: ?question=<entry_id> opens that conversation's thread on
+    // arrival, so a link in a session transcript lands the reader on the
+    // question being answered — and live events then play the updates and
+    // the answer into the open thread. Real-URL surfaces only: a srcdoc
+    // frame has no query string of its own.
+    if (!RELAY_FRAME) {
+      try {
+        var qid = new URLSearchParams(location.search).get("question");
+        if (qid && state.questions.some(function (x) { return x.entry_id === qid; }))
+          show({entry: qid});
+      } catch (_e) {}
+    }
     announceHere();
     subscribeLive();
     // Presence is a claim with a shelf life, so it is re-stated rather than

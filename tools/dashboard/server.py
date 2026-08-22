@@ -4117,6 +4117,10 @@ def _classify_crosstalk(text: str) -> dict | None:
         "harness": attrs.get("harness", ""),
         "model": attrs.get("model", ""),
         "kind": attrs.get("kind", ""),
+        # An envelope may carry its own destination — a mission question
+        # deep-links to the exact conversation it opened. Data, not trust:
+        # the renderer treats it as an ordinary same-origin path.
+        "href": attrs.get("href", ""),
         "message": body,
     }
 
