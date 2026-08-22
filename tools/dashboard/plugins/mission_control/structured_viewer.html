@@ -231,10 +231,19 @@
     padding:13px 15px;margin:0 0 10px;cursor:pointer;
   }
   .mc-psum:hover{border-color:var(--line2)}
-  .mc-psum .hd{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+  .mc-psum .hd{display:flex;align-items:flex-start;gap:8px}
+  .mc-psum .hd b{flex:1;min-width:0}
   .mc-psum .hd .dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;align-self:center}
   .mc-psum .hd b{color:#fff;font-size:.95rem}
-  .mc-psum .hd .counts{margin-left:auto;display:flex;gap:5px;flex-wrap:wrap}
+  .mc-mini{flex:none;display:inline-flex;align-items:center;margin-left:auto;
+    border:1px solid var(--line);border-radius:6px;overflow:hidden;
+    font-size:.66rem;line-height:1;background:var(--bg2);margin-top:1px}
+  .mc-mini i{font-style:normal;font-weight:700;padding:3px 6px;
+    border-left:1px solid var(--line)}
+  .mc-mini i:first-child{border-left:0}
+  .mc-mini .m-a{color:var(--accent)} .mc-mini .m-c{color:var(--crit)}
+  .mc-mini .m-w{color:var(--warn)} .mc-mini .m-g{color:var(--good)}
+  .mc-mini .m-z{opacity:.35}
   .mc-psum .last{font-size:.83rem;color:var(--ink2);margin:6px 0 0}
   .mc-psum .stat{font-size:.8rem;color:var(--ink3);margin:6px 0 0;font-style:italic}
 
@@ -879,20 +888,24 @@
       var hd = el("div","hd");
       hd.appendChild(dot(p.color || "#8391a8"));
       hd.appendChild(el("b",null,p.name));
-      var cts = el("span","counts");
       var mine = liveItems.filter(function (it) { return it.surface_id===p.pillar_id; });
       var n = {};
       mine.forEach(function (it) { n[it.state]=(n[it.state]||0)+1; });
-      [["proven","p-good"],["active","p-warn"],["blocked","p-crit"]].forEach(function (s) {
-        if (n[s[0]]) {
-          var pl = el("span","mc-pill "+s[1], n[s[0]]+" "+STATE_LABEL[s[0]].toLowerCase());
-          cts.appendChild(pl);
-        }
-      });
+      var blocked = n.blocked || 0;
+      var flight = (n.active || 0) + (n.code_only || 0);
+      var done = (n.proven || 0) + (n.done || 0) + (n.settled || 0);
       var asks = mine.filter(function (it) {
         return it.kind==="question" && it.state==="open" && it.ask; }).length;
-      if (asks) cts.appendChild(el("span","mc-pill p-warn",asks+" ask"+(asks>1?"s":"")));
-      hd.appendChild(cts); pc.appendChild(hd);
+      var mini = el("span","mc-mini");
+      mini.title = blocked + " blocked \u00b7 " + flight + " in flight \u00b7 "
+        + done + " done" + (asks ? " \u00b7 " + asks + " asks for you" : "");
+      if (asks) mini.appendChild(el("i","m-a",String(asks)));
+      [[blocked,"m-c"],[flight,"m-w"],[done,"m-g"]].forEach(function (seg) {
+        var cell = el("i",seg[1],String(seg[0]));
+        if (!seg[0]) cell.className += " m-z";
+        mini.appendChild(cell);
+      });
+      hd.appendChild(mini); pc.appendChild(hd);
       var status = mine.filter(function (it) { return it.kind==="status"; })[0];
       if (status) pc.appendChild(el("div","last",
         String(status.body||status.title).split(/\n\s*\n/)[0]));
