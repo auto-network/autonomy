@@ -204,6 +204,12 @@
     var heartbeatMs         = (typeof opts.heartbeatMs === 'number')
                               ? opts.heartbeatMs : DEFAULT_HEARTBEAT_MS;
     var acceptsPings        = (opts.acceptsPings === false) ? false : true;
+    // A LIST IS NOT A VISIT. An index page rendering presence rows for
+    // many surfaces must never claim the operator is present on all of
+    // them -- and must not start one heartbeat per card, which is a
+    // permanent write stream that starves every other request. Observe-
+    // only components read and subscribe; they write nothing.
+    var observeOnly         = opts.observeOnly === true;
 
     // Reactive surface state — Alpine will pick these up because
     // Alpine reads property descriptors at component-construction
@@ -236,7 +242,7 @@
           await this._presenceLoadParticipants();
           this._presenceSubscribe();
           var participantId = _resolveOperatorId(opts);
-          if (participantId) {
+          if (participantId && !observeOnly) {
             this._presenceParticipantId = participantId;
             this._presenceParticipantLabel = _resolveOperatorLabel(opts, participantId);
             await this._presenceWriteRow('present');
