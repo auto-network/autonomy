@@ -180,6 +180,25 @@ class TestStartLibrarianHarness:
         assert captured["harness"] == "claude"
         assert captured["model"] == dispatcher.DEFAULT_SONNET_MODEL
 
+    def test_librarian_metadata_carries_org_for_token_stamping(self, test_projects):
+        """Live regression (2026-08-22): start_librarian's metadata carried
+        graph_project but not org, and session_launcher.launch_session()
+        refuses to mint a container token without metadata['org'] — every
+        librarian launch failed with 'refusing to launch session ... without
+        a canonical metadata[\'org\']' the moment that guard applied to it."""
+        job = {"id": "lib-9999", "job_type": "review_report", "payload": "{}"}
+        captured: dict = {}
+
+        def fake_launch_session(**kwargs):
+            captured.update(kwargs)
+            return "fake-container-id"
+
+        with patch.object(dispatcher, "_build_librarian_prompt", return_value="prompt"):
+            with patch.object(dispatcher, "launch_session", fake_launch_session):
+                dispatcher.start_librarian(job)
+
+        assert captured["metadata"]["org"] == "autonomy"
+
     def test_librarian_omits_claude_model_for_codex_harness(self, test_projects):
         codex_projects = dict(test_projects)
         codex_projects["autonomy"] = ProjectConfig(
