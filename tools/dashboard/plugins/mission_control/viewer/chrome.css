@@ -26,7 +26,13 @@
      side. The bar takes the width its host has and any gutter the author
      set stays visible, which costs a few pixels and no scroll axis. */
   width: 100%;
-  height: 3rem; display: flex; align-items: center; gap: .5rem; padding: 0 .6rem;
+  /* The iPhone status bar owns the top inset. The BAR absorbs it — same
+     ruling as the linked Design Studio toolbar (07ca0945): controls pad
+     down inside, content stays full-bleed. Everything below follows for
+     free because barHeight()/measureBar() read the real rect, never 3rem. */
+  height: calc(3rem + env(safe-area-inset-top, 0px));
+  display: flex; align-items: center; gap: .5rem;
+  padding: env(safe-area-inset-top, 0px) .6rem 0 .6rem;
   background: #111318; border-bottom: 1px solid #1e293b;
   font: 15px/1.5 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
   color: #cbd5e1;
@@ -53,7 +59,7 @@
 .mc-face-photo { object-fit: cover; background: #1e293b; }
 .mc-nobody { color: #475569; font-size: 11px; flex: none; }
 
-.mc-who { position: fixed; top: 3rem; right: .5rem; z-index: 2147483001; width: 16rem;
+.mc-who { position: fixed; top: var(--mc-bar-only, 3rem); right: .5rem; z-index: 2147483001; width: 16rem;
           background: #141418; border: 1px solid #334155; border-radius: .5rem; padding: .5rem;
           font: 13px/1.5 -apple-system, system-ui, sans-serif; color: #cbd5e1; }
 .mc-who-row { display: flex; align-items: center; gap: .5rem; padding: .2rem .25rem; }
