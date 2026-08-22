@@ -320,6 +320,7 @@
 .sc-footer-item { display: flex; flex-direction: column; gap: 1px; }
 .sc-footer-label { color: #334155; font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em; }
 .sc-footer-value { color: #64748b; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.sc-footer-value.warn { color: #f59e0b; }
 
 /* Second stats row — design d2250266 v58. Live cards only (template-gated),
    expanded zoom only (here). CPU/RAM labels carry their series colour so
