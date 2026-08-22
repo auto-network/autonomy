@@ -450,7 +450,7 @@ def run(directory: Path) -> int:
         {"status": "running", "started_at": utc_now(), "worker_pid": os.getpid()},
     )
     # Live progress is intentionally coarse: never more than one update/sec.
-    progress_request(run_id, completed=0, total=0, percent=0)
+    progress_request(run_id, completed=0, total=0, percent=0, status="collecting")
 
     # Agent Test runs either from the repository as ``tools.agent_test`` or
     # from the capability-owned mount as top-level ``agent_test``. Derive the
@@ -506,8 +506,14 @@ def run(directory: Path) -> int:
                 except subprocess.TimeoutExpired:
                     now = time.monotonic()
                     completed, total, percent = _progress(_read_events(events_dir))
-                    if now - last_progress_at >= 1.0 and percent != last_progress_percent:
-                        progress_request(run_id, completed=completed, total=total, percent=percent)
+                    if now - last_progress_at >= 1.0 and (percent != last_progress_percent or total == 0):
+                        progress_request(
+                            run_id,
+                            completed=completed,
+                            total=total,
+                            percent=percent,
+                            status="collecting" if total == 0 else "running",
+                        )
                         last_progress_at = now
                         last_progress_percent = percent
                     if lease_id and now - last_renewal_at >= 20.0:
