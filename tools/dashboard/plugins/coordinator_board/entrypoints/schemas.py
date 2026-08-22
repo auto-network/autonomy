@@ -62,6 +62,7 @@ from __future__ import annotations
 from typing import Any
 
 from tools.graph.schemas.registry import (
+    publication_band,
     home,
     home,
     home,
@@ -164,6 +165,7 @@ SYNOPSIS = {
 #: their database is the organizational home of their own
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
+@publication_band(min="raw", max="curated")
 @home("organization")
 @singleton(key="default")
 class CoordinatorV1(SettingSchema):
@@ -208,6 +210,7 @@ class CoordinatorV1(SettingSchema):
 #: their database is the organizational home of their own
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
+@publication_band(min="raw", max="curated")
 @home("organization")
 @keyed_per_entity(key_strategy="session_name")
 class CoordinatorCanvasV1(SettingSchema):
@@ -289,6 +292,7 @@ class CoordinatorCanvasV1(SettingSchema):
 # ── Operator message ─────────────────────────────────────────────────
 
 
+@publication_band(min="raw", max="curated")
 @singleton(key="default")
 class OperatorMessageToCoordinatorV1(SettingSchema):
     """``{text, sentAt}`` — operator's latest message back to coordinator."""
@@ -373,6 +377,7 @@ def _validate_tile_common(cls, payload: Any) -> None:
 #: their database is the organizational home of their own
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
+@publication_band(min="raw", max="curated")
 @home("organization")
 @keyed_per_entity(key_strategy="session_name[:tile_id]")
 class CoordinatorTileV1(SettingSchema):
@@ -416,6 +421,7 @@ class CoordinatorTileV1(SettingSchema):
 # ── Tile (v2 — peer-session keyshape, structured detail) ─────────────
 
 
+@publication_band(min="raw", max="curated")
 @keyed_per_entity(key_strategy="session_name[:tile_id]")
 class CoordinatorTileV2(SettingSchema):
     """Per-peer-session tile. Key: ``<peer-session>``.
@@ -505,6 +511,7 @@ class CoordinatorTileV2(SettingSchema):
 # ── Tile (v3 — drops ``ageMin``; relative time derived from member.updated_at) ──
 
 
+@publication_band(min="raw", max="curated")
 @keyed_per_entity(key_strategy="session_name[:tile_id]")
 class CoordinatorTileV3(SettingSchema):
     """Per-peer-session tile, ``ageMin``-free. Key: ``<peer-session>``.
@@ -646,6 +653,7 @@ def _validate_thread_common(cls, payload: Any) -> None:
 #: their database is the organizational home of their own
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
+@publication_band(min="raw", max="curated")
 @home("organization")
 @keyed_per_entity(key_strategy="session_name")
 class CoordinatorThreadV1(SettingSchema):
@@ -693,6 +701,7 @@ class CoordinatorThreadV1(SettingSchema):
             )
 
 
+@publication_band(min="raw", max="curated")
 @keyed_per_entity(key_strategy="session_name")
 class CoordinatorThreadV2(SettingSchema):
     """Per-peer-session thread. Key: ``<peer-session>``.
@@ -752,6 +761,7 @@ class CoordinatorThreadV2(SettingSchema):
 # ── Thread (v3 — drops ``ageMin``) ───────────────────────────────────
 
 
+@publication_band(min="raw", max="curated")
 @keyed_per_entity(key_strategy="session_name")
 class CoordinatorThreadV3(SettingSchema):
     """Per-peer-session thread, ``ageMin``-free. Key: ``<peer-session>``.
@@ -846,6 +856,7 @@ class CoordinatorThreadV3(SettingSchema):
 #: their database is the organizational home of their own
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
+@publication_band(min="raw", max="curated")
 @home("organization")
 @append_only_log(key="uuid_v4")
 class CoordinatorDecisionV1(SettingSchema):
@@ -985,6 +996,7 @@ class Custom(CoordinatorDecisionV1):
 #: their database is the organizational home of their own
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
+@publication_band(min="raw", max="curated")
 @home("organization")
 @keyed_per_entity(key_strategy="sprint_id")
 class CoordinatorSprintV1(SettingSchema):
@@ -1087,6 +1099,7 @@ class CoordinatorSprintV1(SettingSchema):
 # ── Sprint (v2 — drops ``ageMin``) ───────────────────────────────────
 
 
+@publication_band(min="raw", max="curated")
 @keyed_per_entity(key_strategy="sprint_id")
 class CoordinatorSprintV2(SettingSchema):
     """Per-sprint-id editorial card, ``ageMin``-free. Key: ``<sprint-id>``.
@@ -1199,6 +1212,7 @@ class CoordinatorSprintV2(SettingSchema):
 #: their database is the organizational home of their own
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
+@publication_band(min="raw", max="curated")
 @home("organization")
 @keyed_per_entity(key_strategy="bead_id")
 class CoordinatorBeadV1(SettingSchema):
@@ -1263,6 +1277,7 @@ class CoordinatorBeadV1(SettingSchema):
 #: their database is the organizational home of their own
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
+@publication_band(min="raw", max="curated")
 @home("organization")
 @keyed_per_entity(key_strategy="decision_id")
 class CoordinatorConvergentDecisionV1(SettingSchema):
@@ -1316,6 +1331,7 @@ class CoordinatorConvergentDecisionV1(SettingSchema):
 #: their database is the organizational home of their own
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
+@publication_band(min="raw", max="curated")
 @home("organization")
 @keyed_per_entity(key_strategy="followup_id")
 class CoordinatorOpenFollowupV1(SettingSchema):
@@ -1363,6 +1379,7 @@ class CoordinatorOpenFollowupV1(SettingSchema):
 #: their database is the organizational home of their own
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
+@publication_band(min="raw", max="curated")
 @home("organization")
 @singleton(key="default")
 class CoordinatorDocsV1(SettingSchema):

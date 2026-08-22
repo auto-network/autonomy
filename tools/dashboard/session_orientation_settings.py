@@ -36,6 +36,7 @@ already carries its prior context and must not be re-oriented as a new one.
 from __future__ import annotations
 
 from tools.graph.schemas.registry import (
+    publication_band,
     home,
     SettingSchema,
     field,
@@ -68,6 +69,7 @@ DEFAULT_RESUME_TEMPLATE = (
 #: their database is the organizational home of their own
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
+@publication_band(min="raw", max="curated")
 @home("organization")
 @keyed_per_entity(key_strategy="workspace_id_or_session_kind")
 class SessionOrientationV1(SettingSchema):

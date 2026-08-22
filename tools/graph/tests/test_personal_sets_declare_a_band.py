@@ -29,17 +29,53 @@ it refuses is arriving at federation by not having written anything down.
 
 from __future__ import annotations
 
+import glob as _glob
+import importlib as _importlib
+import os as _os
+
 import tools.graph.schemas as schemas
 from tools.graph.schemas.registry import SCHEMAS
 
+# A SettingSchema registers into ``SCHEMAS`` only when its module imports. The
+# dashboard/plugin loaders do that at startup; this test runs without them, so it
+# discovers and imports EVERY shipped schema module itself — under tools/graph,
+# tools/dashboard (incl. plugins), tools/network, anywhere. A schema hides in
+# whatever module defines it (dashboard.presentation.deck in a plugin,
+# dashboard.voice.transcription in a loose dashboard module), and a set that
+# federates private content by declaring no band is exactly the hole this covers,
+# wherever it lives.
+_REPO_ROOT = _os.path.dirname(
+    _os.path.dirname(_os.path.dirname(_os.path.dirname(__file__)))
+)
 
-#: Schemas ship from this package. ``SettingSchema`` registers every subclass
-#: into the global ``SCHEMAS``, so any test that declares a probe schema leaks
-#: one in for the rest of the session — and whether this file sees it depends
-#: on which other tests ran first. Scoping by module keeps the rule about sets
-#: that actually ship, and keeps a SECURITY gate from being flaky, which is how
-#: a security gate ends up deleted for being noisy.
-_SHIPPED = "tools.graph.schemas."
+
+def _is_test_module(module: str) -> bool:
+    return ".tests." in module or module.rsplit(".", 1)[-1].startswith("test_")
+
+
+for _f in _glob.glob(_os.path.join(_REPO_ROOT, "tools/**/*.py"), recursive=True):
+    _rel = _os.path.relpath(_f, _REPO_ROOT)
+    if "/tests/" in _rel or _os.path.basename(_rel).startswith("test_"):
+        continue
+    try:
+        if "SettingSchema" not in open(_f, encoding="utf-8").read():
+            continue
+    except OSError:
+        continue
+    try:
+        _importlib.import_module(_rel[:-3].replace(_os.sep, "."))
+    except Exception:
+        pass
+
+
+#: A shipped schema is any registered ``SettingSchema`` under ``tools.`` that is
+#: not test-defined. ``SettingSchema`` registers every subclass into the global
+#: ``SCHEMAS``, so a probe schema declared in a test would leak in; excluding test
+#: modules keeps the rule about sets that actually ship and keeps this SECURITY
+#: gate from going flaky (which is how a security gate ends up deleted for noise).
+#: Every shipped set — core, plugin, or loose dashboard module — is equally able
+#: to leak, so all are in scope.
+_SHIPPED = "tools."
 
 
 def _personal_sets():
@@ -47,7 +83,8 @@ def _personal_sets():
     found: dict[str, object] = {}
     for key, cls in SCHEMAS.items():
         set_id = getattr(cls, "set_id", None) or key.split("#")[0]
-        if not getattr(cls, "__module__", "").startswith(_SHIPPED):
+        module = getattr(cls, "__module__", "")
+        if not module.startswith(_SHIPPED) or _is_test_module(module):
             continue
         if schemas.declared_home(set_id) != "personal":
             continue
@@ -78,7 +115,8 @@ def _shipped_classes():
     """
     found: dict[str, object] = {}
     for key, cls in SCHEMAS.items():
-        if not getattr(cls, "__module__", "").startswith(_SHIPPED):
+        module = getattr(cls, "__module__", "")
+        if not module.startswith(_SHIPPED) or _is_test_module(module):
             continue
         found[key] = getattr(cls, "_publication_band", None)
     return found

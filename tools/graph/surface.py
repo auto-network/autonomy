@@ -40,6 +40,7 @@ from typing import Any, Optional
 from uuid import uuid4
 
 from tools.graph.schemas.registry import (
+    publication_band,
     home,
     home,
     SchemaValidationError,
@@ -110,6 +111,7 @@ SYNOPSIS = {
 #: organization databases and never in the operator's. Declaring
 #: it refuses a write into the personal or machine store, which
 #: would be invisible to every member who needs the value.
+@publication_band(min="raw", max="curated")
 @home("organization")
 @keyed_per_entity(key_strategy="surface_id:participant_id")
 class SurfacePresenceV1(SettingSchema):
@@ -255,6 +257,7 @@ class SurfacePresenceV1(SettingSchema):
 # ── SurfacePing ──────────────────────────────────────────────
 
 
+@publication_band(min="raw", max="curated")
 @append_only_log(key="uuid_v4")
 class SurfacePingV1(SettingSchema):
     """Directed summons. Append-only event log.
@@ -347,6 +350,7 @@ class SurfacePingV1(SettingSchema):
 #: enforced rather than agreed -- an undeclared home refuses
 #: nothing, and a plain read looks in the caller's own store and
 #: reports nothing for rows sitting one database over.
+@publication_band(min="raw", max="curated")
 @home("personal")
 @singleton(key="operator")
 class OperatorActivityV1(SettingSchema):

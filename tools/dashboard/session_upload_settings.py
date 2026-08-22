@@ -19,6 +19,7 @@ event with a UUID key — no collision concerns even if the same
 filename gets uploaded twice in the same session.
 """
 from tools.graph.schemas.registry import (
+    publication_band,
     home,
     SettingSchema,
     append_only_log,
@@ -39,6 +40,7 @@ SCHEMA_REVISION = 1
 #: their database is the organizational home of their own
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
+@publication_band(min="raw", max="curated")
 @home("organization")
 @append_only_log
 class SessionUploadV1(SettingSchema):

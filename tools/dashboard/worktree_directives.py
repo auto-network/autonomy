@@ -31,6 +31,7 @@ from agents.workspace_manager import WorkspaceError, get_session_worktree_rebase
 from tools.dashboard.crosstalk_directive import CrosstalkDirective
 from tools.graph import settings_ops
 from tools.graph.schemas.registry import (
+    publication_band,
     home,
     home,
     home,
@@ -110,6 +111,7 @@ class WorktreeDirective(CrosstalkDirective):
 #: their database is the organizational home of their own
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
+@publication_band(min="raw", max="curated")
 @home("organization")
 class RebaseDirectiveV1(WorktreeDirective):
     """Operator-issued request asking a session to rebase one worktree."""
@@ -169,6 +171,7 @@ class WorktreeStatusSchema(SettingSchema):
 #: their database is the organizational home of their own
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
+@publication_band(min="raw", max="curated")
 @home("organization")
 @keyed_per_entity(key_strategy="session_name/repo_name")
 class WorktreeRebaseStatusV1(WorktreeStatusSchema):
