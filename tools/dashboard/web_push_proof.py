@@ -36,6 +36,24 @@ logger = logging.getLogger(__name__)
 _MAX_BODY_BYTES = 8 * 1024
 _MAX_ENDPOINT_CHARS = 4096
 _B64URL = re.compile(r"^[A-Za-z0-9_-]+$")
+_APPLE_WEB_PUSH_REASONS = frozenset({
+    "BadTtl",
+    "BadUrgency",
+    "BadWebPushRequest",
+    "BadWebPushTopic",
+    "VapidPkHashMismatch",
+    "IdleTimeout",
+    "BadAuthorizationHeader",
+    "BadJwtToken",
+    "BadVapidPublicKey",
+    "BadPath",
+    "MethodNotAllowed",
+    "PayloadTooLarge",
+    "TooManyRequests",
+    "InternalServerError",
+    "ServiceUnavailable",
+    "Shutdown",
+})
 _VAPID_PATH = resolve_store("web_push_proof_vapid")
 _vapid_lock = threading.Lock()
 _vapid = None
@@ -159,6 +177,27 @@ def _same_origin_post(request: Request) -> bool:
     )
 
 
+def _safe_push_failure(exc: Exception) -> tuple[int | None, str | None]:
+    """Extract only Apple's documented status/reason from a send failure.
+
+    A WebPushException string and response body can contain the opaque endpoint
+    or vendor diagnostics.  Neither belongs in the browser or ordinary logs.
+    """
+
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if not isinstance(status, int) or not 100 <= status <= 599:
+        status = None
+    try:
+        payload = response.json() if response is not None else None
+    except Exception:
+        payload = None
+    reason = payload.get("reason") if isinstance(payload, dict) else None
+    if reason not in _APPLE_WEB_PUSH_REASONS:
+        reason = None
+    return status, reason
+
+
 def _send_push(subscription: dict, *, contact: str) -> int:
     try:
         import requests
@@ -251,10 +290,11 @@ async def api_send(request: Request) -> JSONResponse:
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=422)
 
-    # py-vapid currently requires the contact form to be mailto even though
-    # RFC 8292 also permits an https URI. This non-routable address is scoped
-    # to the structural proof; production must configure a real contact.
-    contact = "mailto:webpush-proof@autonomy.invalid"
+    # Use a real HTTPS contact URI. The prior intentionally non-routable mail
+    # domain was useful for a local crypto smoke but is not an acceptable VAPID
+    # subject for a real push service. Keep the URL pathless because py-vapid's
+    # strict subject validator accepts an HTTPS origin, not a resource path.
+    contact = "https://desktop-noft5ms.tail35c24e.ts.net"
     try:
         status = await asyncio.to_thread(
             _send_push, subscription, contact=contact,
@@ -262,14 +302,21 @@ async def api_send(request: Request) -> JSONResponse:
     except Exception as exc:
         # The library's exception text may contain the endpoint or push-service
         # response body. Keep both out of the browser and ordinary logs.
+        push_status, push_reason = _safe_push_failure(exc)
         logger.warning(
-            "web_push_proof_send_failed error_type=%s", type(exc).__name__,
+            "web_push_proof_send_failed error_type=%s status=%s reason=%s",
+            type(exc).__name__, push_status, push_reason,
         )
-        return JSONResponse({
+        error = {
             "ok": False,
             "error": "the push service did not accept the proof message",
             "error_type": type(exc).__name__,
-        }, status_code=502)
+        }
+        if push_status is not None:
+            error["push_service_status"] = push_status
+        if push_reason is not None:
+            error["push_service_reason"] = push_reason
+        return JSONResponse(error, status_code=502)
     return JSONResponse({
         "ok": True,
         "push_service_status": status,

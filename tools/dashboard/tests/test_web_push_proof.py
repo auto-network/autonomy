@@ -125,7 +125,7 @@ def test_same_origin_apple_subscription_sends_once(monkeypatch):
     assert response.json()["push_service_status"] == 201
     assert len(seen) == 1
     assert seen[0][0]["endpoint"].startswith("https://web.push.apple.com/")
-    assert seen[0][1] == "mailto:webpush-proof@autonomy.invalid"
+    assert seen[0][1] == "https://desktop-noft5ms.tail35c24e.ts.net"
 
 
 def test_send_refuses_cross_origin_and_non_apple_endpoints(monkeypatch):
@@ -151,3 +151,38 @@ def test_send_refuses_cross_origin_and_non_apple_endpoints(monkeypatch):
     assert non_apple.status_code == 422
     assert "Apple" in non_apple.json()["error"]
     assert called == []
+
+
+def test_send_exposes_only_allowlisted_apple_failure_diagnostics(monkeypatch):
+    class Response:
+        status_code = 403
+
+        @staticmethod
+        def json():
+            return {
+                "reason": "BadJwtToken",
+                "endpoint": "must-never-reach-the-browser",
+            }
+
+    class Failure(Exception):
+        response = Response()
+
+    monkeypatch.setattr(api_auth, "require_global_api_authority", lambda _r: None)
+
+    def refuse(*_args, **_kwargs):
+        raise Failure("contains opaque endpoint and vendor response")
+
+    monkeypatch.setattr(web_push_proof, "_send_push", refuse)
+    response = _client().post(
+        "/api/web-push/proof/send",
+        headers={"Origin": "https://testserver"},
+        json={"subscription": _subscription()},
+    )
+    assert response.status_code == 502
+    assert response.json() == {
+        "ok": False,
+        "error": "the push service did not accept the proof message",
+        "error_type": "Failure",
+        "push_service_status": 403,
+        "push_service_reason": "BadJwtToken",
+    }
