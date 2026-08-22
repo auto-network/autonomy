@@ -77,7 +77,10 @@
     <!-- Common control, knows nothing about missions:
          tools/dashboard/static/js/style-picker.js. Chooses how every
          mission's presence area renders below. -->
-    <div class="picker-zone shrink-0 hidden sm:block" x-show="missions.length">
+    <!-- Wrapper carries the breakpoint: .picker-zone's own display rule
+         (style-picker.css, loaded later) outranks Tailwind's `hidden`. -->
+    <div class="hidden sm:block shrink-0">
+    <div class="picker-zone" x-show="missions.length">
       <div x-data="StylePicker.alpine(presenceStyles)">
         <div class="picker" x-ref="picker" :class="expanded ? 'expanded' : 'idle'"
              :style="'width:' + pickerWidth + 'px'"
@@ -94,6 +97,7 @@
           <div class="stem"></div>
         </div>
       </div>
+    </div>
     </div>
   </div>
 
