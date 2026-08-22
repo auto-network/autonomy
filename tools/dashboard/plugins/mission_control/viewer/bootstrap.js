@@ -576,11 +576,11 @@
     // it opens the cross-pillar feed, and on a structured screen the view
     // is cross-pillar anyway. An icon says "what's new"; the ages live in
     // the status panel rows where they describe something specific.
+    kids.push(el("span", {class: "mc-grow"}));
     kids.push(
       el("button", {class: "mc-q mc-latest", title: "Latest from every pillar",
                     onclick: function () { show(ui.view === "feed" ? null : {view: "feed"}); }},
          [svg(PULSE)]));
-    kids.push(el("span", {class: "mc-grow"}));
     var n = openCount(), done = answeredCount();
     // ONE NUMBER. The bubble used to carry open AND answered, which made
     // it unreadable next to "N for you" \u2014 three counters, two of them
@@ -739,27 +739,38 @@
     // relay, so a guest's panel never grows a door to an internal session.
     var p = currentPillar() || {};
     var sessHref = (p && p.session_href) || state.session_href || "";
-    if (sessHref) {
-      var sname = (p && p.coordinator_session)
-               || state.coordinator_session || "coordinating session";
+    var coordName = (p && p.coordinator_session)
+                 || state.coordinator_session || "";
+    var coordPresent = here.some(function (h) {
+      return h && h.kind === "agent" && h.participant_id === coordName;
+    });
+    if (sessHref && !coordPresent) {
       rows.push(el("div", {class: "mc-who-row"}, [
         el("span", {class: "mc-who-term"}, [svg(TERM)]),
         el("a", {class: "mc-who-name mc-who-link", href: sessHref,
                  title: "Open the coordinating session",
-                 onclick: spaNav(sessHref)}, [el("span", {text: sname})]),
+                 onclick: spaNav(sessHref)},
+           [el("span", {text: coordName || "coordinating session"})]),
         el("span", {class: "mc-who-seen", text: "coordinating"}),
       ]));
     }
     return el("div", {class: "mc-who"}, rows.concat(
         here.map(function (h) {
-          var href = sessionHref(h);
+          var isCoord = coordName && h.kind === "agent"
+                     && h.participant_id === coordName;
+          var href = isCoord ? sessHref : sessionHref(h);
           var name = href
             ? el("a", {class: "mc-who-name mc-who-link", href: href,
-                       title: "Open this session",
+                       title: isCoord ? "Open the coordinating session"
+                                      : "Open this session",
                        onclick: spaNav(href)}, [el("span", {text: h.label || ""})])
             : el("span", {class: "mc-who-name", text: h.label || ""});
-          return el("div", {class: "mc-who-row"}, [face(h), name,
-            el("span", {class: "mc-who-seen", text: h.seen || ""})]);
+          return el("div", {class: "mc-who-row"}, [
+            isCoord ? el("span", {class: "mc-who-term"}, [svg(TERM)]) : face(h),
+            name,
+            el("span", {class: "mc-who-seen",
+                        text: isCoord ? "coordinating" : (h.seen || "")}),
+          ]);
         })));
   }
 
