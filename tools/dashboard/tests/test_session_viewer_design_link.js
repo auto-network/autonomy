@@ -254,5 +254,7 @@ describe('linked Design Studio viewer mode', () => {
     assert.equal((html.match(/x-if="!linkedSessionMode"/g) || []).length, 2);
     assert.match(css, /body\.route-design-linked #sidebar/);
     assert.match(css, /body\.route-design-linked \.voice-capsule/);
+    assert.match(css, /body\.route-design-linked \.design-surface/);
+    assert.match(css, /flex: 1 1 0%/);
   });
 });
