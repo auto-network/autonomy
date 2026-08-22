@@ -54,7 +54,7 @@ _HEAD = (
     # scales it down, which is why an author who forgets it gets a document
     # that pans sideways. Emitted by the platform so no coordinator has to
     # remember, and harmless when they declare their own -- first one wins.
-    '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+    '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">\n'
     # One oversized element -- a screenshot, a wide table -- otherwise widens
     # the whole DOCUMENT, and then everything pans sideways together: the
     # prose, the gutters, and any bar positioned within the document. These
