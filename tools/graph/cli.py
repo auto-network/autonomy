@@ -5198,6 +5198,157 @@ def cmd_turn_correction_suggest(args):
     )
 
 
+_SESSION_AUTH_COOKIE = "autonomy_dashboard_session"
+_SESSION_AUTH_DEFAULT_JAR = "/tmp/dashboard-session.cookies"
+
+
+def cmd_session_auth(args):
+    """Mint an operator-approved dashboard UI session in one stroke.
+
+    Automates the full ``dashboard_access`` approval rendezvous: generate an
+    ephemeral Ed25519 keypair, post the approval request, wait for the
+    operator's decision, redeem the signed grant with an ephemeral-key proof,
+    and store the resulting session cookie in a Netscape jar (0600). The
+    cookie value is never printed; stdout carries only a receipt.
+    """
+    import ssl
+    import urllib.error
+    import urllib.request
+
+    try:
+        from tools.network.idkit.canonical import canonical_json
+        from tools.network.idkit.keys import KeyPair
+    except ImportError as exc:
+        print(f"session-auth: idkit unavailable in this environment: {exc}",
+              file=sys.stderr)
+        sys.exit(1)
+
+    # Protocol constants mirrored from
+    # tools/dashboard/dashboard_access_approvals.py (not imported: that module
+    # pulls in the dashboard server stack, which graph CLI hosts may lack).
+    ACCESS_KIND = "dashboard_access"
+    REDEEM_SIGNING_DOMAIN = b"autonomy.identity.dashboard-access-redeem.v1\n"
+
+    token = _resolve_crosstalk_token()
+    session_name = _get_session_name()
+    api_base = os.environ.get("GRAPH_API", "https://localhost:8080")
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+
+    def _call(path: str, body: dict | None = None) -> tuple[dict, object]:
+        req = urllib.request.Request(
+            f"{api_base}{path}",
+            data=None if body is None else json.dumps(body).encode(),
+            method="GET" if body is None else "POST",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {token}",
+            },
+        )
+        resp = urllib.request.urlopen(req, timeout=90, context=ctx)
+        return json.loads(resp.read()), resp
+
+    keypair = KeyPair.generate()
+    try:
+        created, _ = _call("/api/approvals", {
+            "kind": ACCESS_KIND,
+            "session": session_name,
+            "request": {"ephemeral_pub": keypair.public_hex},
+        })
+    except urllib.error.URLError as exc:
+        print(f"session-auth: cannot reach dashboard: {exc}", file=sys.stderr)
+        sys.exit(1)
+    approval_id = created.get("id")
+    if not approval_id:
+        print(f"session-auth: unexpected approval response: {created}",
+              file=sys.stderr)
+        sys.exit(1)
+    print(f"  approval {approval_id} pending — waiting for the operator "
+          f"(up to {args.wait}s)...", file=sys.stderr)
+
+    deadline = time.time() + args.wait
+    result = None
+    while time.time() < deadline:
+        chunk = max(5, min(60, int(deadline - time.time())))
+        try:
+            row, _ = _call(f"/api/approvals/{approval_id}?wait={chunk}")
+        except urllib.error.URLError as exc:
+            print(f"session-auth: lost the dashboard while waiting: {exc}",
+                  file=sys.stderr)
+            sys.exit(1)
+        result = row.get("result")
+        if result is not None:
+            break
+    if result is None:
+        print(f"session-auth: no decision after {args.wait}s — the request "
+              f"({approval_id}) stays pending; re-run to keep waiting",
+              file=sys.stderr)
+        sys.exit(3)
+    if not result.get("approved"):
+        print("session-auth: the operator declined the request", file=sys.stderr)
+        sys.exit(2)
+
+    nonce = (result.get("grant") or {}).get("nonce")
+    if not nonce:
+        print(f"session-auth: approval carried no grant nonce: {result}",
+              file=sys.stderr)
+        sys.exit(1)
+    proof = keypair.sign_hex(
+        REDEEM_SIGNING_DOMAIN + canonical_json({"v": 1, "nonce": nonce}))
+    try:
+        redeemed, resp = _call("/api/identity/unlock/approval",
+                               {"nonce": nonce, "proof": proof})
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = json.loads(exc.read()).get("error", str(exc))
+        except Exception:
+            detail = str(exc)
+        print(f"session-auth: redemption refused: {detail}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as exc:
+        print(f"session-auth: cannot reach dashboard: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    set_cookie = resp.headers.get("Set-Cookie") or ""
+    prefix = f"{_SESSION_AUTH_COOKIE}="
+    if not set_cookie.startswith(prefix):
+        print(f"session-auth: redemption succeeded but no session cookie "
+              f"arrived: {redeemed}", file=sys.stderr)
+        sys.exit(1)
+    cookie_value = set_cookie.split(";", 1)[0][len(prefix):]
+    expires_at = int(redeemed.get("expires_at") or 0)
+    host = api_base.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0]
+
+    jar_path = Path(args.jar)
+    jar_line = (f"#HttpOnly_{host}\tFALSE\t/\tTRUE\t{expires_at}"
+                f"\t{_SESSION_AUTH_COOKIE}\t{cookie_value}\n")
+    fd = os.open(jar_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write("# Netscape HTTP Cookie File\n" + jar_line)
+
+    if args.browser:
+        set_cmd = ["agent-browser", "cookies", "set", _SESSION_AUTH_COOKIE,
+                   cookie_value, "--url", f"{api_base}/", "--httpOnly",
+                   "--secure", "--sameSite", "Lax"]
+        injected = subprocess.run(set_cmd, capture_output=True, text=True)
+        if injected.returncode != 0:
+            print("session-auth: cookie jar written, but agent-browser "
+                  f"injection failed: {injected.stderr.strip()}",
+                  file=sys.stderr)
+            sys.exit(1)
+
+    remaining = max(0, expires_at - int(time.time()))
+    print(f"  ✓ dashboard session granted to {session_name} "
+          f"(scope dashboard:ui, expires in {remaining // 60}m)")
+    print(f"  cookie jar: {jar_path} (curl -b {jar_path})")
+    if args.browser:
+        print("  agent-browser: cookie injected into the active browser session")
+    else:
+        print("  for agent-browser: re-run with --browser, or set cookie "
+              f"{_SESSION_AUTH_COOKIE} from the jar")
+
+
 _SHARE_OUTPUT_ROOT = Path("/workspace/output")
 _SHARE_ATTACHMENTS_DIR = ".attachments"
 
@@ -6145,6 +6296,26 @@ def main():
         help=argparse.SUPPRESS,
     )
     p_tc_suggest.set_defaults(func=cmd_turn_correction_suggest)
+
+    # session-auth — one-stroke operator-approved dashboard UI session
+    p_sauth = sub.add_parser(
+        "session-auth",
+        help="Mint an operator-approved dashboard UI session "
+             "(approval → wait → redeem → cookie jar)",
+    )
+    p_sauth.add_argument(
+        "--wait", type=int, default=600,
+        help="Seconds to wait for the operator's decision (default 600)",
+    )
+    p_sauth.add_argument(
+        "--jar", default=_SESSION_AUTH_DEFAULT_JAR,
+        help=f"Netscape cookie jar to write (default {_SESSION_AUTH_DEFAULT_JAR})",
+    )
+    p_sauth.add_argument(
+        "--browser", action="store_true",
+        help="Also inject the cookie into the active agent-browser session",
+    )
+    p_sauth.set_defaults(func=cmd_session_auth)
 
     # share — copy a file to /workspace/output/.attachments/<ts>-<sha8>/ and
     # emit a viewer_attachment tile bound to the current turn.

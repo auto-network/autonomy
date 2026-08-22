@@ -176,6 +176,7 @@ graph set-topics "Line 1" "Line 2"    # set card status lines
 graph set-role researcher             # set session role
 graph set-nag --interval 10           # enable idle nag (--off to disable)
 graph share <file> --alt "..." --caption "..."  # render a file as an inline tile in the session viewer
+graph session-auth [--browser]        # mint an operator-approved dashboard UI session (cookie jar; --browser injects into agent-browser)
 ```
 Run `graph --help` for full reference.
 
