@@ -887,11 +887,16 @@
     var slot = pendingKey();
     if (!pendingFiles[slot]) pendingFiles[slot] = [];
     var picked = pendingFiles[slot];
-    var strip = el("div", {class: "mc-strip"});
+    // NOT .mc-strip: that class is the SECTION NAVIGATOR, position:fixed
+    // under the bar — reusing it pinned this (usually empty) thumbnail row
+    // as an 11px dead band below every composer view's header, and sent
+    // picked thumbnails to the top of the screen instead of the composer.
+    var strip = el("div", {class: "mc-files"});
     var target = uploadTarget();
 
     function drawStrip() {
       strip.textContent = "";
+      strip.style.display = picked.length ? "flex" : "none";
       picked.forEach(function (item, i) {
         var tile = el("div", {class: item.path ? "mc-thumb" : "mc-thumb mc-thumb-busy"});
         if (item.dataUrl) {
@@ -1612,6 +1617,17 @@
   function textOf(target) {
     var clone = target.cloneNode(true);
     clone.querySelectorAll("[data-mc-control]").forEach(function (n) { n.remove(); });
+    // Decoration is not what the screen SAID: an author can mark badges,
+    // timestamps and ref chips out of the excerpt.
+    clone.querySelectorAll("[data-mc-noexcerpt]").forEach(function (n) { n.remove(); });
+    // textContent joins element boundaries with NOTHING, which is fine for
+    // authored HTML (inter-tag whitespace survives) and garbage for
+    // DOM-built screens (no whitespace nodes at all): "BlockedThree things
+    // wait...me...at.updated Aug 22" was one real excerpt. A space after
+    // every element makes boundaries survive; the collapse below dedupes.
+    clone.querySelectorAll("*").forEach(function (n) {
+      try { n.insertAdjacentText("afterend", " "); } catch (_e) {}
+    });
     var text = (clone.textContent || "").replace(/\s+/g, " ").trim();
     return text.length > 600 ? text.slice(0, 597) + "\u2026" : text;
   }

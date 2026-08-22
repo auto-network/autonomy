@@ -334,6 +334,10 @@
 /* The thing a question replies to, quoted where the reply is written and
    again in the question itself. A reply read back without it is half a
    conversation. */
+/* Attachment thumbnails picked for the composer: an ordinary row above
+   the input, in flow — never fixed. */
+.mc-files { display: flex; gap: .4rem; flex-wrap: wrap; padding: .35rem 0; }
+
 .mc-quote { margin: .4rem 0 0; padding: .35rem 0 .35rem .7rem; border-left: 2px solid #334155;
             color: #94a3b8; font-size: .88rem; line-height: 1.5; white-space: pre-wrap; }
 

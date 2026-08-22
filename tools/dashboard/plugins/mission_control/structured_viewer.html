@@ -304,6 +304,7 @@
   }
   function pill(state){
     var s = el("span", "mc-pill " + (PILL[state]||"p-neut"), STATE_LABEL[state]||state);
+    s.setAttribute("data-mc-noexcerpt", "");
     return s;
   }
   function dot(color){
@@ -460,6 +461,7 @@
       c.appendChild(wrap); inner = wrap;
     }
     var top = el("div","top");
+    top.setAttribute("data-mc-noexcerpt", "");
     var where = el("span","where");
     if (opts.showSurface){
       where.appendChild(dot(surfColor(it.surface_id)));
@@ -495,13 +497,16 @@
     }
     if ((it.refs||[]).length){
       var refs = el("div","mc-refs");
+      refs.setAttribute("data-mc-noexcerpt", "");
       it.refs.forEach(function (r) { refs.appendChild(el("span",null,r)); });
       inner.appendChild(refs);
     }
     var d = when(it);
-    if (d) inner.appendChild(el("div","mc-when",
+    var whenEl = null;
+    if (d) inner.appendChild(whenEl = el("div","mc-when",
       (it.happened_at ? "" : "updated ") + d.toLocaleDateString(undefined,
         {month:"short",day:"numeric"})));
+    if (whenEl) whenEl.setAttribute("data-mc-noexcerpt", "");
     return c;
   }
 
