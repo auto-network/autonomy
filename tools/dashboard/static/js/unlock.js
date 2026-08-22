@@ -130,6 +130,43 @@
 
   // ── ceremonies ─────────────────────────────────────────────────────
 
+  // Complete a pending Fleet join, else mint the Fleet runtime (+reachability)
+  // credential. Shared by BOTH root-releasing unlock paths — password AND
+  // passkey — so they can never diverge; that divergence is exactly what left a
+  // passkey-only unlock unable to activate fleet sync. Best-effort; the caller
+  // owns the seed's outer lifecycle (the ceremonies zero the array passed here).
+  async function _fleetCompleteOrMint(seed) {
+    var completion = await _fetchJson('/api/fleet/enrollment/local-completion');
+    if (completion.pending) {
+      var fc = await import('./ceremony/fleet-enrollment.js');
+      var proof = await fc.completeFleetEnrollment({
+        personalRootSeed: seed,
+        requestId: completion.request_id,
+        request: completion.request,
+        channelBinding: completion.channel_binding,
+        approval: completion.approval,
+        rosterEntry: completion.roster_entry,
+      });
+      await _postJson('/api/fleet/enrollment/local-completion', proof);
+    } else {
+      var rc = await _fetchJson('/api/fleet/runtime');
+      if (rc.enabled) {
+        var frc = await import('./ceremony/fleet-enrollment.js');
+        var cred = await frc.mintFleetRuntimeCredential({
+          personalRootSeed: seed,
+          rootPub: rc.personal_root_pub,
+          machineId: rc.machine_id,
+          machinePub: rc.machine_pub,
+          // When the personal org is registered, the credential also carries the
+          // machine key + a node-scoped reachability cert for discovery; a null
+          // org_uuid keeps it sync-only.
+          orgUuid: rc.org_uuid || null,
+        });
+        await _postJson('/api/fleet/runtime', cred);
+      }
+    }
+  }
+
   async function _unlockWithPasskey() {
     if (!window.PublicKeyCredential || !navigator.credentials) {
       throw new Error('this browser does not support passkeys — use your password instead');
@@ -187,17 +224,33 @@
         if (prf) {
           var Pp = await import('./ceremony/primitives.js');
           var opened = await Pp.decryptArmorWithPasskey(U.armorText, prf);
-          var seed = new Uint8Array(opened.seed);
+          var rootSeed = new Uint8Array(opened.seed);
           opened.seed.fill(0);
           try {
-            await _signonI().wakeVault({ personalRootSeed: seed });
+            // Warm the vault, then mint the Fleet runtime + reachability
+            // credential — the SAME root release the password path runs (shared
+            // via _fleetCompleteOrMint), so a passkey-only unlock activates fleet
+            // sync + discovery too. Fresh copies: each ceremony zeroes its own.
+            try {
+              await _signonI().wakeVault({ personalRootSeed: new Uint8Array(rootSeed) });
+            } catch (e) {
+              if (window.console && console.warn) console.warn('vault wake failed:', (e && e.message) || e);
+            }
+            try {
+              await _fleetCompleteOrMint(new Uint8Array(rootSeed));
+            } catch (e) {
+              if (window.console && console.warn) {
+                console.warn('fleet runtime after passkey unlock failed:', (e && e.message) || e);
+              }
+              if (U.fleetRootRequired) throw e;
+            }
           } finally {
-            seed.fill(0);
+            rootSeed.fill(0);
           }
         }
       } catch (e) {
         if (window.console && console.warn) {
-          console.warn('passkey root release (vault wake) failed:', (e && e.message) || e);
+          console.warn('passkey root release failed:', (e && e.message) || e);
         }
       }
     }
@@ -308,49 +361,12 @@
       }
     }
 
-    // A Fleet-linked install may have received its root-signed roster entry
-    // while this Dashboard was waiting. Complete it in this same password
-    // ceremony: the browser verifies the delivery, derives the machine key,
-    // and sends only a machine-key possession proof. The ceremony zeroes the
-    // root seed on every exit; no server route receives it.
+    // Complete a pending Fleet join, else mint the Fleet runtime + reachability
+    // credential — the SAME block the passkey-root path runs, shared via
+    // _fleetCompleteOrMint so the two root-releasing paths can never diverge.
     try {
-      var completion = await _fetchJson(
-        '/api/fleet/enrollment/local-completion');
-      if (completion.pending) {
-        var fleetCeremony = await import('./ceremony/fleet-enrollment.js');
-        var proof = await fleetCeremony.completeFleetEnrollment({
-          personalRootSeed: wakeSeed,
-          requestId: completion.request_id,
-          request: completion.request,
-          channelBinding: completion.channel_binding,
-          approval: completion.approval,
-          rosterEntry: completion.roster_entry,
-        });
-        wakeSeed = null;  // the ceremony zeroed the shared Uint8Array
-        await _postJson('/api/fleet/enrollment/local-completion', proof);
-      } else {
-        // Every process restart loses the ephemeral Fleet sync key by design.
-        // Re-mint it during an ordinary later root unlock from the durable
-        // machine id and public roster entry; no root or machine seed crosses
-        // this browser boundary.
-        var runtimeContext = await _fetchJson('/api/fleet/runtime');
-        if (runtimeContext.enabled) {
-          var fleetRuntimeCeremony = await import('./ceremony/fleet-enrollment.js');
-          var runtimeCredential =
-            await fleetRuntimeCeremony.mintFleetRuntimeCredential({
-              personalRootSeed: wakeSeed,
-              rootPub: runtimeContext.personal_root_pub,
-              machineId: runtimeContext.machine_id,
-              machinePub: runtimeContext.machine_pub,
-              // When the personal org is registered, the credential also carries
-              // the machine key + a node-scoped reachability cert for peer
-              // discovery; null org_uuid keeps it sync-only.
-              orgUuid: runtimeContext.org_uuid || null,
-            });
-          wakeSeed = null;  // the ceremony zeroed the shared Uint8Array
-          await _postJson('/api/fleet/runtime', runtimeCredential);
-        }
-      }
+      await _fleetCompleteOrMint(wakeSeed);
+      wakeSeed = null;  // the ceremony zeroed the shared Uint8Array
     } catch (e) {
       if (window.console && console.warn) {
         console.warn('fleet enrollment completion failed after unlock:',
