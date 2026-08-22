@@ -871,11 +871,10 @@ async function enableMfa(
   }
 }
 
-// Open a v2 armor with a combined factor: BOTH password AND passkey PRF. The
-// passphrase unwraps share_pw; the PRF re-derives the provisioning private key
-// and unseals share_pk; their XOR is the master KEK. One half alone fails.
-async function decryptArmorWithCombined(armorText, passphrase, prfOutput) {
-  const data = parseArmor(armorText);
+// The master KEK of a combined factor, from BOTH halves: the passphrase unwraps
+// share_pw; the PRF re-derives the provisioning private key and unseals
+// share_pk; their XOR is the master KEK. One half alone fails.
+async function v2MasterKekFromCombined(data, passphrase, prfOutput) {
   const prf = new Uint8Array(prfOutput);
   const { publicKeyHex } = await deriveEncapsulationKeypair(prf, PASSKEY_ARMOR_PURPOSE);
   const factor = data.factors.find(
@@ -918,6 +917,10 @@ async function decryptArmorWithCombined(armorText, passphrase, prfOutput) {
   }
   const masterKek = xor32(sharePw, new Uint8Array(sharePk));
   sharePw.fill(0);
+  return masterKek;
+}
+
+async function seedFromMasterKek(data, masterKek) {
   const kekKey = await webCrypto.subtle.importKey(
     'raw', masterKek, { name: 'AES-GCM', length: 256 }, false, ['decrypt'],
   );
@@ -931,51 +934,193 @@ async function decryptArmorWithCombined(armorText, passphrase, prfOutput) {
       kekKey, b64ToBytes(data.kek_seal.ct),
     ));
   } catch {
-    masterKek.fill(0);
     throw new Error(
       'v2 master key does not open the seed seal — the factor list may have been altered',
     );
   }
-  masterKek.fill(0);
   if (seed.length !== 32) {
     seed.fill(0);
     throw new Error('armor plaintext is not an Ed25519 signing seed');
   }
-  return { seed, rootPub: data.root_pub };
+  return seed;
+}
+
+// Open a v2 armor with a combined factor: BOTH password AND passkey PRF.
+async function decryptArmorWithCombined(armorText, passphrase, prfOutput) {
+  const data = parseArmor(armorText);
+  const masterKek = await v2MasterKekFromCombined(data, passphrase, prfOutput);
+  try {
+    return { seed: await seedFromMasterKek(data, masterKek), rootPub: data.root_pub };
+  } finally {
+    masterKek.fill(0);
+  }
+}
+
+// The master KEK from a STANDALONE passkey factor (passkey-only open).
+async function v2MasterKekFromPasskey(data, prfOutput) {
+  const prf = new Uint8Array(prfOutput);
+  const { publicKeyHex } = await deriveEncapsulationKeypair(prf, PASSKEY_ARMOR_PURPOSE);
+  const factor = data.factors.find(
+    (f) => f.type === 'passkey' && f.kem_pub === publicKeyHex,
+  );
+  if (!factor) {
+    throw new Error('no passkey factor on this armor opens with that ceremony output');
+  }
+  try {
+    return await openSealedArmor(
+      { sealed_root_key: bytesToHex(b64ToBytes(factor.sealed)), seal_purpose: PASSKEY_ARMOR_PURPOSE },
+      prf,
+    );
+  } catch {
+    throw new Error('the passkey factor does not open with that ceremony output');
+  }
+}
+
+// A standalone password factor wrapping the master KEK under PBKDF2(passphrase).
+async function buildPasswordFactor(rootPub, masterKek, passphrase, iterations) {
+  const material = await webCrypto.subtle.importKey(
+    'raw', textEncoder.encode(passphrase), 'PBKDF2', false, ['deriveKey'],
+  );
+  const salt = webCrypto.getRandomValues(new Uint8Array(16));
+  const pwKey = await webCrypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt, iterations, hash: 'SHA-256' },
+    material, { name: 'AES-GCM', length: 256 }, false, ['encrypt'],
+  );
+  const wrapIv = webCrypto.getRandomValues(new Uint8Array(12));
+  const wrap = new Uint8Array(await webCrypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: wrapIv, additionalData: v2FactorAad(rootPub, 'password') },
+    pwKey, masterKek,
+  ));
+  return {
+    type: 'password',
+    kdf: { name: 'PBKDF2', hash: 'SHA-256', iterations, salt: bytesToB64(salt) },
+    cipher: 'AES-256-GCM', iv: bytesToB64(wrapIv), wrap: bytesToB64(wrap),
+  };
+}
+
+// Set (add or replace) the password factor over an already-recovered master KEK.
+async function upsertPasswordFactor(data, masterKek, newPassword, iterations) {
+  const previousFactors = data.factors.slice();
+  const pf = await buildPasswordFactor(data.root_pub, masterKek, newPassword, iterations);
+  data.factors = [pf, ...data.factors.filter((f) => f.type !== 'password')];
+  await resealSeedToFactorSet(data, masterKek, previousFactors);
+}
+
+// Change the password: open with the current password, re-wrap under a new one.
+async function setPasswordFactor(
+  armorText, currentPassword, newPassword, iterations = V2_DEFAULT_ITERATIONS,
+) {
+  const data = parseArmor(armorText);
+  const masterKek = await v2MasterKekFromPassword(data, currentPassword);
+  try {
+    await upsertPasswordFactor(data, masterKek, newPassword, iterations);
+    return emitV2(parseArmor(emitV2(data)));
+  } finally {
+    masterKek.fill(0);
+  }
+}
+
+// Set a password factor authorised by a PASSKEY — the passkey-only identity
+// gaining a password (the "add the other factor" half of enabling MFA).
+async function setPasswordFactorWithPasskey(
+  armorText, prfOutput, newPassword, iterations = V2_DEFAULT_ITERATIONS,
+) {
+  const data = parseArmor(armorText);
+  const masterKek = await v2MasterKekFromPasskey(data, prfOutput);
+  try {
+    await upsertPasswordFactor(data, masterKek, newPassword, iterations);
+    return emitV2(parseArmor(emitV2(data)));
+  } finally {
+    masterKek.fill(0);
+  }
+}
+
+// Split a combined (MFA) factor back into individual factors. Opening needs
+// BOTH; the result is a standalone password factor and a standalone passkey
+// factor for the same device, so afterwards EITHER opens the root.
+async function disableMfa(
+  armorText, password, prfOutput, iterations = V2_DEFAULT_ITERATIONS,
+) {
+  const data = parseArmor(armorText);
+  const combined = data.factors.find((f) => f.type === 'combined');
+  if (!combined) throw new Error('this armor is not multi-factor; there is no MFA to disable');
+  const masterKek = await v2MasterKekFromCombined(data, password, prfOutput);
+  try {
+    const previousFactors = data.factors.slice();
+    const pf = await buildPasswordFactor(data.root_pub, masterKek, password, iterations);
+    const sealed = await sealToEncapsulationKey(masterKek, combined.kem_pub, PASSKEY_ARMOR_PURPOSE);
+    const pkFactor = {
+      type: 'passkey',
+      credential_id: combined.credential_id,
+      kem_pub: combined.kem_pub,
+      sealed: bytesToB64(sealed),
+    };
+    data.factors = [pf, pkFactor, ...data.factors.filter((f) => f.type !== 'combined')];
+    await resealSeedToFactorSet(data, masterKek, previousFactors);
+    return emitV2(parseArmor(emitV2(data)));
+  } finally {
+    masterKek.fill(0);
+  }
 }
 
 // The re-arm signing domain — matches idkit's REARMOR_DOMAIN byte-for-byte, so
 // a signature the browser makes verifies against the root server-side.
 const REARMOR_DOMAIN = 'autonomy.identity.rearmor.v1\n';
 
+// Open the current armor with whatever opener the state allows, returning the
+// signing seed. opener: a password string (back-compat) | {password} | {prf} |
+// {password, prf} (combined). The seed proves possession for the re-arm
+// signature; the same opener re-factors below.
+async function openArmorWithOpener(currentArmor, opener) {
+  const o = (typeof opener === 'string') ? { password: opener } : (opener || {});
+  if (o.password != null && o.prf != null) {
+    return (await decryptArmorWithCombined(currentArmor, o.password, o.prf)).seed;
+  }
+  if (o.prf != null) {
+    return (await decryptArmorWithPasskey(currentArmor, o.prf)).seed;
+  }
+  if (o.password != null) {
+    return (await decryptArmor(currentArmor, o.password)).seed;
+  }
+  throw new Error('re-arm needs an opener: a password, a passkey PRF, or both');
+}
+
 // Produce the signed body POST /api/identity/personal/armor expects: re-factor
 // the CURRENT armor per *action*, sign the result with the root (recovered from
 // the current armor, proving possession), and return {armored_private_key,
-// signature, require_pair?}. The password opens the current armor for both the
-// re-factoring and the signing seed; opening a passkey-only identity with a PRF
-// instead is a later addition.
+// signature, require_pair?}.
 //
-//   action = {kind:'promote', credentialId, provisioningPub}
-//          | {kind:'demote',  credentialId}
-//          | {kind:'removePassword'}
-//          | {kind:'enableMfa', credentialId, provisioningPub}
+//   opener = password string | {password} | {prf} | {password, prf}
+//   action = {kind:'promote',        credentialId, provisioningPub}   // password
+//          | {kind:'demote',         credentialId}                    // password
+//          | {kind:'removePassword'}                                  // password
+//          | {kind:'setPassword',    newPassword}                     // password
+//          | {kind:'addPassword',    newPassword}                     // prf
+//          | {kind:'enableMfa',      credentialId, provisioningPub}   // password
+//          | {kind:'disableMfa',     credentialId}                    // password+prf
 //          | {kind:'setAuthority'}   // policy-only; armor unchanged
-async function signArmorUpdate(currentArmor, password, action, requirePair) {
-  const opened = await decryptArmor(currentArmor, password);
-  const seed = opened.seed;
+async function signArmorUpdate(currentArmor, opener, action, requirePair) {
+  const o = (typeof opener === 'string') ? { password: opener } : (opener || {});
+  const seed = await openArmorWithOpener(currentArmor, o);
   try {
     let newArmor = currentArmor;
     if (action.kind === 'promote') {
       newArmor = await addPasskeyFactor(
-        currentArmor, password, action.credentialId, action.provisioningPub);
+        currentArmor, o.password, action.credentialId, action.provisioningPub);
     } else if (action.kind === 'demote') {
       newArmor = await removePasskeyFactor(
-        currentArmor, password, action.credentialId);
+        currentArmor, o.password, action.credentialId);
     } else if (action.kind === 'removePassword') {
-      newArmor = await removePasswordFactor(currentArmor, password);
+      newArmor = await removePasswordFactor(currentArmor, o.password);
+    } else if (action.kind === 'setPassword') {
+      newArmor = await setPasswordFactor(currentArmor, o.password, action.newPassword);
+    } else if (action.kind === 'addPassword') {
+      newArmor = await setPasswordFactorWithPasskey(currentArmor, o.prf, action.newPassword);
     } else if (action.kind === 'enableMfa') {
       newArmor = await enableMfa(
-        currentArmor, password, action.credentialId, action.provisioningPub);
+        currentArmor, o.password, action.credentialId, action.provisioningPub);
+    } else if (action.kind === 'disableMfa') {
+      newArmor = await disableMfa(currentArmor, o.password, o.prf);
     } else if (action.kind !== 'setAuthority') {
       throw new Error(`unknown re-arm action: ${action.kind}`);
     }
@@ -1033,7 +1178,10 @@ export {
   addPasskeyFactor,
   removePasskeyFactor,
   removePasswordFactor,
+  setPasswordFactor,
+  setPasswordFactorWithPasskey,
   enableMfa,
+  disableMfa,
   encryptArmorCombined,
   signArmorUpdate,
   REARMOR_DOMAIN,

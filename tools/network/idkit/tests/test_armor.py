@@ -32,6 +32,8 @@ from tools.network.idkit.armor import (
     encrypt_root_key_combined,
     parse_armor,
     remove_passkey_factor,
+    set_password_factor,
+    set_password_factor_with_passkey,
 )
 from tools.network.idkit.sealing import derive_encapsulation_keypair
 
@@ -392,3 +394,57 @@ def test_stripping_a_combined_factor_fails_closed(root):
     tampered = "\n".join([ARMOR_BEGIN, body, ARMOR_END])
     with pytest.raises((ArmorError, ArmorPassphraseError, MalformedError)):
         decrypt_root_key_with_combined(tampered, _PW, prf)
+
+
+# ---- set/change password + disable MFA ------------------------------------
+
+
+def test_set_password_factor_changes_the_password(root, armor):
+    a = set_password_factor(armor, _PW, "a-new-password", iterations=10_000)
+    assert decrypt_root_key(a, "a-new-password").private_hex == root.private_hex
+    with pytest.raises(ArmorPassphraseError):
+        decrypt_root_key(a, _PW)
+
+
+def test_set_password_factor_with_passkey_adds_to_passkey_only(root, armor):
+    from tools.network.idkit.armor import remove_factor
+    prf = b"\x31" * 32
+    a = add_passkey_factor(armor, _PW, "cred-pw", _passkey_pub(prf))
+    a = remove_factor(a, _PW, "password")
+    assert armor_factor_types(a) == ["passkey"]
+    a = set_password_factor_with_passkey(a, prf, "fresh-pass", iterations=10_000)
+    assert sorted(armor_factor_types(a)) == ["passkey", "password"]
+    # both individual openers now work
+    assert decrypt_root_key(a, "fresh-pass").private_hex == root.private_hex
+    assert decrypt_root_key_with_passkey(a, prf).private_hex == root.private_hex
+
+
+def test_disable_mfa_splits_combined_into_individuals(root):
+    from tools.network.idkit import KeyPair
+    from tools.network.idkit.armor import disable_mfa
+    r = KeyPair.generate()
+    prf = b"\x32" * 32
+    a = encrypt_root_key_combined(r, _PW, "cred-mfa", _passkey_pub(prf), iterations=10_000)
+    a = disable_mfa(a, _PW, prf, iterations=10_000)
+    assert sorted(armor_factor_types(a)) == ["passkey", "password"]
+    # after disabling, EITHER factor opens the root alone
+    assert decrypt_root_key(a, _PW).private_hex == r.private_hex
+    assert decrypt_root_key_with_passkey(a, prf).private_hex == r.private_hex
+
+
+def test_disable_mfa_needs_both_halves(root):
+    from tools.network.idkit import KeyPair
+    from tools.network.idkit.armor import disable_mfa
+    r = KeyPair.generate()
+    prf = b"\x33" * 32
+    a = encrypt_root_key_combined(r, _PW, "cred-mfa", _passkey_pub(prf), iterations=10_000)
+    with pytest.raises(ArmorPassphraseError):
+        disable_mfa(a, "wrong", prf, iterations=10_000)
+    with pytest.raises(ArmorPassphraseError):
+        disable_mfa(a, _PW, b"\x99" * 32, iterations=10_000)
+
+
+def test_disable_mfa_refused_when_not_mfa(root, armor):
+    from tools.network.idkit.armor import disable_mfa
+    with pytest.raises(ArmorError):
+        disable_mfa(armor, _PW, b"\x34" * 32, iterations=10_000)

@@ -31,8 +31,9 @@ _CEREMONY = os.path.join(
 
 _JS = r"""
 import {
-  encryptArmorCombined, enableMfa, decryptArmorWithCombined, decryptArmor,
-  decryptArmorWithPasskey, PASSKEY_ARMOR_PURPOSE,
+  encryptArmorCombined, enableMfa, disableMfa, decryptArmorWithCombined,
+  decryptArmor, decryptArmorWithPasskey, setPasswordFactor,
+  PASSKEY_ARMOR_PURPOSE,
 } from 'file://__CEREMONY__/primitives.js';
 import { deriveEncapsulationKeypair } from 'file://__CEREMONY__/sealing.js';
 
@@ -48,6 +49,16 @@ if (a.op === 'kem_pub') {
   );
 } else if (a.op === 'enable_mfa') {
   out.armor = await enableMfa(a.armor, a.password, a.credential_id, a.kem_pub, 10000);
+} else if (a.op === 'disable_mfa') {
+  out.armor = await disableMfa(a.armor, a.password, prf(), 10000);
+} else if (a.op === 'set_password') {
+  out.armor = await setPasswordFactor(a.armor, a.password, a.new_password, 10000);
+} else if (a.op === 'open_password') {
+  const r = await decryptArmor(a.armor, a.password);
+  out.seed_hex = Buffer.from(r.seed).toString('hex');
+} else if (a.op === 'open_passkey') {
+  const r = await decryptArmorWithPasskey(a.armor, prf());
+  out.seed_hex = Buffer.from(r.seed).toString('hex');
 } else if (a.op === 'open_combined') {
   const r = await decryptArmorWithCombined(a.armor, a.password, prf());
   out.seed_hex = Buffer.from(r.seed).toString('hex');
@@ -157,3 +168,44 @@ def test_browser_enable_mfa_python_opens_and_neither_half_alone():
         decrypt_root_key(armor, _PW)
     with pytest.raises(ArmorError):
         decrypt_root_key_with_passkey(armor, prf)
+
+
+def test_python_disable_mfa_browser_opens_either_half():
+    from tools.network.idkit import KeyPair
+    from tools.network.idkit.armor import disable_mfa, encrypt_root_key_combined
+    root = KeyPair.generate()
+    prf = bytes([0x71]) * 32
+    armor = encrypt_root_key_combined(root, _PW, "cred-mfa", _kem_pub(prf), iterations=10_000)
+    armor = disable_mfa(armor, _PW, prf, iterations=10_000)
+    # browser opens the python-split armor with EITHER individual factor
+    assert _js({"op": "open_password", "armor": armor, "password": _PW})["seed_hex"] == root.private_hex
+    assert _js({"op": "open_passkey", "armor": armor, "prf_hex": prf.hex()})["seed_hex"] == root.private_hex
+
+
+def test_browser_disable_mfa_python_opens_either_half():
+    from tools.network.idkit import KeyPair
+    from tools.network.idkit.armor import (
+        decrypt_root_key, decrypt_root_key_with_passkey, encrypt_root_key_combined,
+    )
+    root = KeyPair.generate()
+    prf = bytes([0x72]) * 32
+    armor = encrypt_root_key_combined(root, _PW, "cred-mfa", _kem_pub(prf), iterations=10_000)
+    armor = _js({"op": "disable_mfa", "armor": armor, "password": _PW, "prf_hex": prf.hex()})["armor"]
+    assert decrypt_root_key(armor, _PW).private_hex == root.private_hex
+    assert decrypt_root_key_with_passkey(armor, prf).private_hex == root.private_hex
+
+
+def test_change_password_agrees_across_impls():
+    from tools.network.idkit import KeyPair
+    from tools.network.idkit.armor import (
+        decrypt_root_key, encrypt_root_key, set_password_factor,
+    )
+    root = KeyPair.generate()
+    # python changes; browser opens with the new password
+    a = set_password_factor(encrypt_root_key(root, _PW, iterations=10_000), _PW,
+                            "next-pass", iterations=10_000)
+    assert _js({"op": "open_password", "armor": a, "password": "next-pass"})["seed_hex"] == root.private_hex
+    # browser changes; python opens with the new password
+    b = _js({"op": "set_password", "armor": encrypt_root_key(root, _PW, iterations=10_000),
+             "password": _PW, "new_password": "browser-pass"})["armor"]
+    assert decrypt_root_key(b, "browser-pass").private_hex == root.private_hex

@@ -839,3 +839,73 @@ def test_delete_refused_while_a_root_factor(env, root):
     r = env.delete(f"/api/identity/passkey/{cred}")
     assert r.status_code == 409
     assert "demote" in r.json()["error"]
+
+
+# ── re-arm: demote / enable-MFA / change-password, and MFA onboarding ──────
+
+
+def _kem_for(prf: bytes) -> str:
+    from tools.network.idkit.armor import PASSKEY_ARMOR_PURPOSE
+    from tools.network.idkit.sealing import derive_encapsulation_keypair
+    return derive_encapsulation_keypair(prf, PASSKEY_ARMOR_PURPOSE)[1]
+
+
+def test_rearmor_demotes_a_passkey(env, root):
+    from tools.network.idkit.armor import armor_factor_types, remove_passkey_factor
+    _store_identity(env, root)
+    demoted = remove_passkey_factor(_passkey_armor(root), PASSWORD, "cred-a")
+    r = env.post("/api/identity/personal/armor", json=_rearmor_body(root, demoted))
+    assert r.status_code == 200, r.text
+    served = env.get("/api/identity/personal").json()
+    assert armor_factor_types(served["armored_private_key"]) == ["password"]
+
+
+def test_rearmor_changes_the_password(env, root):
+    from tools.network.idkit.armor import decrypt_root_key, set_password_factor
+    _store_identity(env, root)
+    changed = set_password_factor(_armor(root), PASSWORD, "brand-new-pass",
+                                  iterations=10_000)
+    r = env.post("/api/identity/personal/armor", json=_rearmor_body(root, changed))
+    assert r.status_code == 200, r.text
+    served = env.get("/api/identity/personal").json()
+    assert decrypt_root_key(
+        served["armored_private_key"], "brand-new-pass").private_hex == root.private_hex
+
+
+def test_rearmor_enables_mfa(env, root):
+    from tools.network.idkit.armor import armor_factor_types, enable_mfa
+    _store_identity(env, root)
+    prf = b"\x21" * 32
+    mfa = enable_mfa(_passkey_armor(root), PASSWORD, "cred-a", _kem_for(prf),
+                     iterations=10_000)
+    r = env.post("/api/identity/personal/armor",
+                 json=_rearmor_body(root, mfa, require_pair=True))
+    assert r.status_code == 200, r.text
+    served = env.get("/api/identity/personal").json()
+    assert armor_factor_types(served["armored_private_key"]) == ["combined"]
+    assert served["require_pair"] is True
+
+
+def test_rearmor_enable_mfa_satisfies_require_pair(env, root):
+    # the combined factor alone must satisfy require_pair (it IS the pair)
+    from tools.network.idkit.armor import enable_mfa
+    _store_identity(env, root)
+    prf = b"\x21" * 32
+    mfa = enable_mfa(_passkey_armor(root), PASSWORD, "cred-a", _kem_for(prf),
+                     iterations=10_000)
+    assert env.post("/api/identity/personal/armor",
+                    json=_rearmor_body(root, mfa, require_pair=True)).status_code == 200
+
+
+def test_onboarding_stores_a_combined_armor(env, root):
+    from tools.network.idkit.armor import (
+        armor_factor_types, encrypt_root_key_combined,
+    )
+    prf = b"\x21" * 32
+    mfa = encrypt_root_key_combined(root, PASSWORD, "cred-a", _kem_for(prf),
+                                    iterations=10_000)
+    r = env.post("/api/identity/personal",
+                 json={"display_name": "Alex", "armored_private_key": mfa})
+    assert r.status_code == 200, r.text
+    served = env.get("/api/identity/personal").json()
+    assert armor_factor_types(served["armored_private_key"]) == ["combined"]
