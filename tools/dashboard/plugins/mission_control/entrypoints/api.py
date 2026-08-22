@@ -105,6 +105,9 @@ def _mission_payload(mission: dict) -> dict:
         # which organization a mission is in cannot tell a mission it is
         # bounded by from one it merely happens to be looking at.
         "org": mission["org"] if "org" in mission.keys() else "",
+        # How the mission's screens render (VALID_MISSION_STYLES).
+        "style": (mission["style"] if "style" in mission.keys()
+                  else "freeform") or "freeform",
     }
 
 
@@ -140,7 +143,16 @@ async def create_mission(request: Request) -> JSONResponse:
     if not name:
         return JSONResponse({"error": "name is required"}, status_code=400)
     coordinator_session = (body.get("coordinator_session") or "").strip()
+    style = (body.get("style") or "").strip()
+    if style and style not in db.VALID_MISSION_STYLES:
+        return JSONResponse(
+            {"error": f"style must be one of {db.VALID_MISSION_STYLES}"},
+            status_code=400,
+        )
     mission = db.create_mission(name, coordinator_session)
+    if style and style != "freeform":
+        db.set_mission_style(mission["mission_id"], style)
+        mission = db.get_mission(mission["mission_id"])
     return JSONResponse({"mission": _mission_payload(mission)}, status_code=201)
 
 
@@ -203,6 +215,132 @@ async def set_mission_status(request: Request) -> JSONResponse:
     if not ok:
         return JSONResponse({"error": "mission not found"}, status_code=404)
     return JSONResponse({"mission": _mission_payload(db.get_mission(mission_id))})
+
+
+async def set_mission_style(request: Request) -> JSONResponse:
+    """Choose freeform (pushed HTML) or structured (Settings-rendered)
+    screens for a mission. Reversible at any time; neither store is
+    touched by the switch."""
+    mission_id = request.path_params["mission_id"]
+    body = await request.json()
+    style = body.get("style")
+    if style not in db.VALID_MISSION_STYLES:
+        return JSONResponse(
+            {"error": f"style must be one of {db.VALID_MISSION_STYLES}"},
+            status_code=400,
+        )
+    ok = db.set_mission_style(mission_id, style)
+    if not ok:
+        return JSONResponse({"error": "mission not found"}, status_code=404)
+    return JSONResponse({"mission": _mission_payload(db.get_mission(mission_id))})
+
+
+# ── structured items ──────────────────────────────────────────────
+#
+# A structured mission's content is dashboard.mission.item Settings rows in
+# the mission's org. These routes are the coordinator-facing CRUD so a
+# session can drive a mission without knowing the settings substrate; the
+# viewer itself gets its data baked at compose time, not from here.
+
+def _surface_of(request: Request) -> tuple[dict | None, str | None, str | None]:
+    """Resolve (mission, surface_id, error) for a mission- or pillar-scoped
+    item route."""
+    if "pillar_id" in request.path_params:
+        pillar = db.get_pillar(request.path_params["pillar_id"])
+        if not pillar:
+            return None, None, "pillar not found"
+        return db.get_mission(pillar["mission_id"]), pillar["pillar_id"], None
+    mission = db.get_mission(request.path_params["mission_id"])
+    if not mission:
+        return None, None, "mission not found"
+    return mission, mission["mission_id"], None
+
+
+async def get_surface_items(request: Request) -> JSONResponse:
+    """Every item for the surface; on the mission route, the whole mission
+    (overview + all pillars) so one call feeds cross-pillar tooling."""
+    from tools.dashboard.plugins.mission_control import structured
+    mission, surface_id, err = _surface_of(request)
+    if err:
+        return JSONResponse({"error": err}, status_code=404)
+    surfaces = [surface_id]
+    if surface_id == mission["mission_id"]:
+        surfaces += [p["pillar_id"] for p in db.list_pillars(mission["mission_id"])]
+    items = structured.load_items(dict(mission).get("org") or "", surfaces)
+    return JSONResponse({"items": items})
+
+
+async def put_surface_item(request: Request) -> JSONResponse:
+    """Create or fully update one item. The payload is the schema shape
+    minus surface_id/item_id, which the route supplies — a caller can
+    therefore never write an item onto a surface it did not name."""
+    from tools.graph import settings_ops
+    from tools.dashboard.plugins.mission_control.entrypoints import schemas
+    mission, surface_id, err = _surface_of(request)
+    if err:
+        return JSONResponse({"error": err}, status_code=404)
+    item_id = request.path_params["item_id"]
+    body = await request.json()
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body must be a JSON object"},
+                            status_code=400)
+    payload = dict(body)
+    payload["surface_id"] = surface_id
+    payload["item_id"] = item_id
+    key = f"{surface_id}:{item_id}"
+    try:
+        settings_ops.upsert_by_key(
+            schemas.MISSION_ITEM_SET_ID, schemas.SCHEMA_REVISION, key, payload,
+            org=dict(mission).get("org") or None)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse({"ok": True, "key": key, "item": payload})
+
+
+async def post_item_state(request: Request) -> JSONResponse:
+    """Transition one item's state without resending the whole payload.
+
+    Stamps ``happened_at`` with the transition moment unless the caller
+    supplies one — the state was just earned, and the feed and activity
+    grid are built from exactly this timestamp.
+    """
+    import datetime as _dt
+    from tools.graph import settings_ops
+    from tools.dashboard.plugins.mission_control.entrypoints import schemas
+    from tools.dashboard.plugins.mission_control.entrypoints.schemas import (
+        ITEM_STATES,
+    )
+    mission, surface_id, err = _surface_of(request)
+    if err:
+        return JSONResponse({"error": err}, status_code=404)
+    item_id = request.path_params["item_id"]
+    body = await request.json()
+    state = body.get("state")
+    if state not in ITEM_STATES:
+        return JSONResponse({"error": f"state must be one of {ITEM_STATES}"},
+                            status_code=400)
+    key = f"{surface_id}:{item_id}"
+    org = dict(mission).get("org") or None
+    row = settings_ops.read_set_key(
+        schemas.MISSION_ITEM_SET_ID, key, org=org, peers=[])
+    if row is None:
+        return JSONResponse({"error": f"no item {key}"}, status_code=404)
+    payload = dict(row["payload"])
+    payload["state"] = state
+    payload["happened_at"] = (body.get("happened_at") or "").strip() or (
+        _dt.datetime.now(_dt.timezone.utc)
+        .replace(microsecond=0).isoformat().replace("+00:00", "Z"))
+    if body.get("note"):
+        note = str(body["note"]).strip()
+        payload["body"] = (payload.get("body", "").rstrip()
+                           + ("\n\n" if payload.get("body") else "") + note)
+    try:
+        settings_ops.upsert_by_key(
+            schemas.MISSION_ITEM_SET_ID, schemas.SCHEMA_REVISION, key, payload,
+            org=org)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse({"ok": True, "key": key, "item": payload})
 
 
 async def delete_mission(request: Request) -> JSONResponse:
@@ -2127,6 +2265,17 @@ routes: list[Route] = [
     Route("/api/missions/{mission_id}", delete_mission, methods=["DELETE"]),
     Route("/api/missions/{mission_id}/seen", mark_mission_seen, methods=["POST"]),
     Route("/api/missions/{mission_id}/status", set_mission_status, methods=["POST"]),
+    Route("/api/missions/{mission_id}/style", set_mission_style, methods=["POST"]),
+    Route("/api/missions/{mission_id}/items", get_surface_items, methods=["GET"]),
+    Route("/api/missions/{mission_id}/items/{item_id}", put_surface_item,
+          methods=["PUT"]),
+    Route("/api/missions/{mission_id}/items/{item_id}/state", post_item_state,
+          methods=["POST"]),
+    Route("/api/pillars/{pillar_id}/items", get_surface_items, methods=["GET"]),
+    Route("/api/pillars/{pillar_id}/items/{item_id}", put_surface_item,
+          methods=["PUT"]),
+    Route("/api/pillars/{pillar_id}/items/{item_id}/state", post_item_state,
+          methods=["POST"]),
     Route("/api/missions/{mission_id}/site", push_site_revision, methods=["POST"]),
     Route("/api/missions/{mission_id}/site", get_current_site, methods=["GET"]),
     Route(

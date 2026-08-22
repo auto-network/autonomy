@@ -1,0 +1,645 @@
+<!-- Structured mission viewer — the platform's standard template.
+     Served by structured.render_screen() with __MC_STRUCTURED_DATA__
+     replaced by the mission's baked item JSON. Everything renders
+     client-side, once, into the DOM; view switching is CSS-only so the
+     platform chrome's anchor/ask discovery sees every item at load. -->
+<style>
+  :root{
+    --bg:#0c0f14; --bg2:#11151d; --card:#151a23; --card2:#1a2029;
+    --line:#262d3a; --line2:#303948;
+    --ink:#e6e9f0; --ink2:#aab3c4; --ink3:#7c8698;
+    --accent:#8b85ff; --accent-dim:#46448c;
+    --good:#0ca30c; --warn:#fab219; --crit:#d03b3b; --serious:#ec835a;
+    --neut:#8391a8;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  }
+  #mc-app,#mc-app *{box-sizing:border-box}
+  #mc-app{
+    max-width:1060px;margin:0 auto;padding:14px 14px 80px;
+    color:var(--ink);
+    font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  }
+  #mc-app a{color:var(--accent)}
+  #mc-app h1{font-size:1.35rem;line-height:1.25;margin:10px 0 2px;color:#fff}
+  #mc-app .mc-sub{color:var(--ink3);font-size:.82rem;margin:0 0 14px}
+
+  /* glance chips */
+  .mc-glance{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 16px}
+  .mc-glance .g{
+    display:flex;align-items:baseline;gap:6px;background:var(--card);
+    border:1px solid var(--line);border-radius:8px;padding:6px 11px;
+  }
+  .mc-glance .g b{font-size:1.05rem;color:#fff}
+  .mc-glance .g span{font-size:.72rem;color:var(--ink3);text-transform:uppercase;letter-spacing:.04em}
+  .mc-glance .g.gd b{color:var(--good)} .mc-glance .g.gw b{color:var(--warn)}
+  .mc-glance .g.gc b{color:var(--crit)} .mc-glance .g.ga b{color:var(--accent)}
+
+  /* ── activity grid ── */
+  .mc-activity{background:var(--card);border:1px solid var(--line);border-radius:12px;
+    padding:12px 14px;margin:0 0 16px}
+  .mc-activity .hd{display:flex;justify-content:space-between;align-items:baseline;
+    gap:8px;margin-bottom:8px}
+  .mc-activity .hd .t{font-size:.78rem;color:var(--ink2);text-transform:uppercase;letter-spacing:.06em}
+  .mc-activity .legend{display:flex;align-items:center;gap:3px;font-size:.68rem;color:var(--ink3)}
+  .mc-activity .legend i{width:9px;height:9px;border-radius:2px;display:inline-block}
+  .mc-act-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:2px;
+    scrollbar-width:thin}
+  .mc-act-table{border-collapse:separate;border-spacing:2px}
+  .mc-act-table td,.mc-act-table th{padding:0}
+  .mc-act-table th{font:400 .72rem/1.2 inherit;color:var(--ink2);text-align:left;
+    padding-right:10px;white-space:nowrap;max-width:150px;overflow:hidden;text-overflow:ellipsis}
+  .mc-act-table th .dot{display:inline-block;width:7px;height:7px;border-radius:50%;
+    margin-right:6px;vertical-align:1px}
+  .mc-act-cell{width:13px;height:13px;border-radius:3px;background:var(--card2)}
+  .mc-act-cell.a1{background:#2b2f52}.mc-act-cell.a2{background:#46448c}
+  .mc-act-cell.a3{background:#6a63c8}.mc-act-cell.a4{background:#8f87ff}
+  .mc-act-table .dayrow td{padding-top:3px}
+  .mc-act-table .daylab{font-size:.6rem;color:var(--ink3);text-align:center;padding:0 1px}
+
+  /* ── nav ── */
+  .mc-nav{display:flex;gap:6px;overflow-x:auto;padding:2px 0 10px;margin-bottom:6px;
+    border-bottom:1px solid var(--line);-webkit-overflow-scrolling:touch;
+    position:sticky;top:3rem;background:var(--bg);z-index:5;
+    scrollbar-width:none}
+  .mc-nav::-webkit-scrollbar{display:none}
+  .mc-nav button{
+    flex-shrink:0;font:600 .78rem/1 inherit;color:var(--ink2);background:var(--bg2);
+    border:1px solid var(--line);border-radius:16px;padding:7px 13px;cursor:pointer;
+    white-space:nowrap;display:flex;align-items:center;gap:6px;
+  }
+  .mc-nav button .dot{width:7px;height:7px;border-radius:50%;display:inline-block}
+  .mc-nav button .n{font-weight:400;color:var(--ink3);font-size:.72rem}
+  .mc-nav button.on{color:#fff;border-color:var(--accent-dim);background:#232345}
+  .mc-nav button.warns .n{color:var(--warn)}
+
+  /* ── views ── */
+  .mc-view{display:none}
+  .mc-view.on{display:block}
+  .mc-sec{margin:22px 0 8px}
+  .mc-sec h2{font-size:.78rem;letter-spacing:.09em;text-transform:uppercase;
+    color:var(--ink3);margin:0 0 10px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+  .mc-empty{color:var(--ink3);font-size:.86rem;padding:14px;background:var(--bg2);
+    border:1px dashed var(--line);border-radius:10px}
+  .mc-empty code{font-family:var(--mono);font-size:.8em;color:var(--ink2)}
+
+  /* filter bar */
+  .mc-filters{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:0 0 12px}
+  .mc-filters input{
+    flex:1 1 150px;min-width:130px;background:var(--bg2);border:1px solid var(--line);
+    border-radius:8px;color:var(--ink);padding:7px 10px;font:inherit;font-size:.84rem;
+  }
+  .mc-filters input::placeholder{color:var(--ink3)}
+  .mc-filters .f{
+    font:600 .7rem/1 inherit;color:var(--ink2);background:var(--bg2);cursor:pointer;
+    border:1px solid var(--line);border-radius:14px;padding:6px 10px;white-space:nowrap;
+  }
+  .mc-filters .f.on{color:#fff;border-color:var(--accent-dim);background:#232345}
+
+  /* ── item cards ── */
+  .mc-item{
+    background:var(--card);border:1px solid var(--line);border-left:3px solid var(--line2);
+    border-radius:0 10px 10px 0;padding:12px 14px;margin:0 0 10px;
+  }
+  .mc-item.st-proven,.mc-item.st-done,.mc-item.st-settled{border-left-color:var(--good)}
+  .mc-item.st-active,.mc-item.st-code_only,.mc-item.st-open{border-left-color:var(--warn)}
+  .mc-item.st-blocked{border-left-color:var(--crit)}
+  .mc-item.k-incident{border-left-color:var(--serious)}
+  .mc-item.mc-hidden,.mc-hidden{display:none !important}
+  .mc-item .top{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+  .mc-item .top .where{font-size:.7rem;color:var(--ink3);display:flex;gap:6px;align-items:center}
+  .mc-item .top .where .dot{width:6px;height:6px;border-radius:50%;display:inline-block}
+  .mc-item h3{font-size:.95rem;line-height:1.35;margin:4px 0 2px;color:var(--ink);font-weight:600}
+  .mc-item .body{font-size:.86rem;color:var(--ink2);margin:4px 0 0}
+  .mc-item .body p{margin:5px 0}
+  .mc-item details{margin:7px 0 0}
+  .mc-item summary{cursor:pointer;font-size:.78rem;color:var(--accent);list-style:none;user-select:none}
+  .mc-item summary::before{content:"▸ ";color:var(--ink3)}
+  .mc-item details[open] summary::before{content:"▾ "}
+  .mc-item .ev{font-size:.8rem;color:var(--ink2);border-left:1px solid var(--line);
+    margin:6px 0 0 3px;padding:2px 0 2px 11px}
+  .mc-item .ev p{margin:4px 0}
+  .mc-refs{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px}
+  .mc-refs span{font-family:var(--mono);font-size:.68rem;color:var(--ink3);
+    background:var(--bg2);border:1px solid var(--line);border-radius:4px;padding:2px 6px}
+  .mc-when{font-size:.7rem;color:var(--ink3);margin-top:7px}
+
+  /* pills */
+  .mc-pill{display:inline-block;flex-shrink:0;font:700 .64rem/1 inherit;letter-spacing:.05em;
+    text-transform:uppercase;padding:4px 8px;border-radius:12px;white-space:nowrap}
+  .p-good{color:var(--good);background:rgba(12,163,12,.13);border:1px solid rgba(12,163,12,.3)}
+  .p-warn{color:var(--warn);background:rgba(250,178,25,.12);border:1px solid rgba(250,178,25,.3)}
+  .p-crit{color:#ff7b7b;background:rgba(208,59,59,.15);border:1px solid rgba(208,59,59,.4)}
+  .p-neut{color:var(--neut);background:rgba(131,145,168,.1);border:1px solid rgba(131,145,168,.28)}
+
+  /* decision fields */
+  .mc-dec{font-size:.84rem;color:var(--ink2);margin-top:6px}
+  .mc-dec b{color:var(--ink3);font-size:.7rem;text-transform:uppercase;letter-spacing:.05em;
+    display:block;margin:7px 0 1px}
+  .mc-dec p{margin:0}
+  .mc-dec .ifw{color:#e8b8ac}
+
+  /* checkpoints (ordered arc) */
+  .mc-arc{position:relative}
+  .mc-arc .mc-item{display:grid;grid-template-columns:34px 1fr;gap:12px}
+  .mc-arc .stepno{
+    width:34px;height:34px;display:grid;place-items:center;border:1px solid var(--line2);
+    border-radius:8px;background:var(--bg2);color:var(--accent);
+    font:600 .78rem var(--mono);
+  }
+  .mc-arc .mc-item > div:last-child{min-width:0}
+  .mc-arc .mc-item .top{margin-top:2px}
+
+  /* metric tiles */
+  .mc-metrics{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));
+    gap:8px;margin:0 0 10px}
+  .mc-metric{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:11px 13px}
+  .mc-metric b{display:block;font-size:1.05rem;color:#fff}
+  .mc-metric span{display:block;font-size:.72rem;color:var(--ink3);margin-top:3px;line-height:1.35}
+
+  /* pillar summary cards (overview) */
+  .mc-psum{
+    background:var(--card);border:1px solid var(--line);border-radius:12px;
+    padding:13px 15px;margin:0 0 10px;cursor:pointer;
+  }
+  .mc-psum:hover{border-color:var(--line2)}
+  .mc-psum .hd{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+  .mc-psum .hd .dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;align-self:center}
+  .mc-psum .hd b{color:#fff;font-size:.95rem}
+  .mc-psum .hd .counts{margin-left:auto;display:flex;gap:5px;flex-wrap:wrap}
+  .mc-psum .last{font-size:.83rem;color:var(--ink2);margin:6px 0 0}
+  .mc-psum .stat{font-size:.8rem;color:var(--ink3);margin:6px 0 0;font-style:italic}
+
+  /* feed */
+  .mc-feed-day{font-size:.72rem;color:var(--ink3);text-transform:uppercase;
+    letter-spacing:.06em;margin:18px 0 8px}
+  .mc-feed-row{display:flex;gap:9px;align-items:baseline;background:var(--card);
+    border:1px solid var(--line);border-radius:8px;padding:8px 12px;margin:0 0 6px;
+    font-size:.84rem}
+  .mc-feed-row .dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;align-self:center}
+  .mc-feed-row .t{color:var(--ink);flex:1 1 auto;min-width:0}
+  .mc-feed-row .k{color:var(--ink3);font-size:.7rem;flex-shrink:0;max-width:88px;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .mc-feed-row .mc-pill{margin-left:auto;align-self:center}
+
+  /* non-stateful kinds: no pill, neutral spine */
+  .mc-item.k-scope,.mc-item.k-status{border-left-color:var(--line2)}
+  .mc-item.k-scope .mc-pill,.mc-item.k-status .mc-pill{display:none}
+
+  .mc-foot{color:var(--ink3);font-size:.72rem;margin-top:36px;text-align:center}
+
+  @media(min-width:680px){
+    #mc-app{padding:18px 24px 90px}
+    #mc-app h1{font-size:1.55rem}
+    .mc-two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    .mc-two .mc-item{margin:0}
+  }
+</style>
+
+<div id="mc-app">
+  <h1 id="mc-title"></h1>
+  <p class="mc-sub" id="mc-subtitle"></p>
+  <div class="mc-glance" id="mc-glance"></div>
+
+  <div class="mc-activity">
+    <div class="hd">
+      <span class="t">Activity — last 14 days</span>
+      <span class="legend">less
+        <i style="background:var(--card2)"></i><i style="background:#2b2f52"></i>
+        <i style="background:#46448c"></i><i style="background:#6a63c8"></i>
+        <i style="background:#8f87ff"></i> more</span>
+    </div>
+    <div class="mc-act-scroll"><table class="mc-act-table" id="mc-act"></table></div>
+  </div>
+
+  <nav class="mc-nav" id="mc-nav"></nav>
+  <div id="mc-views"></div>
+
+  <div class="mc-foot">Structured mission · rendered by the platform from
+    <code>dashboard.mission.item</code> · <span id="mc-genat"></span></div>
+</div>
+
+<script id="mc-data" type="application/json">__MC_STRUCTURED_DATA__</script>
+<script>
+(function () {
+  "use strict";
+  var DATA = JSON.parse(document.getElementById("mc-data").textContent);
+  var ITEMS = DATA.items || [];
+  var PILLARS = DATA.pillars || [];
+  var MID = DATA.mission.mission_id;
+
+  // ── vocab ───────────────────────────────────────────────────────
+  var PILL = {
+    proven:"p-good", done:"p-good", settled:"p-good",
+    active:"p-warn", code_only:"p-warn", open:"p-warn",
+    blocked:"p-crit",
+    next:"p-neut", specified:"p-neut", deferred:"p-neut", retired:"p-neut"
+  };
+  var STATE_LABEL = {
+    proven:"Proven", done:"Done", settled:"Settled", active:"Active",
+    code_only:"Code only", open:"Open", blocked:"Blocked", next:"Next",
+    specified:"Specified", deferred:"Deferred", retired:"Retired"
+  };
+  var SECTION_OF = {scope:"Objective and scope", work:"The work",
+    checkpoint:"The work", metric:"The work", incident:"The work",
+    exhibit:"The work", decision:"Decisions", question:"Open questions",
+    status:"Where it stands"};
+  var SECTION_ORDER = ["Objective and scope","The work","Decisions",
+    "Open questions","Where it stands"];
+
+  var byId = {};
+  PILLARS.forEach(function (p) { byId[p.pillar_id] = p; });
+  function surfName(sid){ return sid===MID ? "Overview" : (byId[sid]||{}).name || sid; }
+  function shortName(sid){
+    var words = surfName(sid).split(" ");
+    var n = words[0].replace(/[^\w-]/g,"");
+    if (/^(Mission|The|A|An|Core)$/i.test(n) && words[1])
+      n += " " + words[1].replace(/[^\w-]/g,"");
+    return n || surfName(sid);
+  }
+  function surfColor(sid){ return sid===MID ? "#8b85ff" : (byId[sid]||{}).color || "#8391a8"; }
+  function when(it){
+    var t = it.happened_at || it.updated_at || it.created_at || "";
+    var d = new Date(t);
+    return isNaN(d) ? null : d;
+  }
+  function live(it){ return it.state !== "retired"; }
+
+  // ── tiny DOM helpers (no innerHTML for item text — coordinator
+  //    prose is data, not markup; exhibits are the one trusted hole) ──
+  function el(tag, cls, text){
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    return e;
+  }
+  function paras(container, text, cls){
+    String(text||"").split(/\n\s*\n/).forEach(function (p) {
+      if (p.trim()) container.appendChild(el("p", cls||null, p.trim()));
+    });
+  }
+  function pill(state){
+    var s = el("span", "mc-pill " + (PILL[state]||"p-neut"), STATE_LABEL[state]||state);
+    return s;
+  }
+  function dot(color){
+    var d = el("span","dot"); d.style.background = color; return d;
+  }
+
+  // ── header ──────────────────────────────────────────────────────
+  document.getElementById("mc-title").textContent = DATA.mission.name;
+  var liveItems = ITEMS.filter(live);
+  document.getElementById("mc-subtitle").textContent =
+    PILLARS.length + " pillars · " + liveItems.length + " items · mission " +
+    DATA.mission.status;
+  var counts = {proven:0, activeish:0, blocked:0, asks:0};
+  liveItems.forEach(function (it) {
+    if (it.state==="proven"||it.state==="done"||it.state==="settled") counts.proven++;
+    if (it.state==="active"||it.state==="code_only") counts.activeish++;
+    if (it.state==="blocked") counts.blocked++;
+    if (it.kind==="question" && it.state==="open" && it.ask) counts.asks++;
+  });
+  var glance = document.getElementById("mc-glance");
+  [["gd",counts.proven,"proven / done"],["gw",counts.activeish,"in flight"],
+   ["gc",counts.blocked,"blocked"],["ga",counts.asks,"asks for you"]]
+  .forEach(function (g) {
+    var c = el("div","g "+g[0]); c.appendChild(el("b",null,String(g[1])));
+    c.appendChild(el("span",null,g[2])); glance.appendChild(c);
+  });
+
+  // ── activity grid: surfaces × days from item timestamps ─────────
+  (function activity(){
+    var DAYS = 14, MS = 86400000;
+    var today = new Date(); today.setHours(0,0,0,0);
+    var surfaces = [{id:MID}].concat(PILLARS.map(function(p){return {id:p.pillar_id};}));
+    var buckets = {};   // sid -> [count per day, oldest first]
+    surfaces.forEach(function (s) { buckets[s.id] = new Array(DAYS).fill(0); });
+    ITEMS.forEach(function (it) {
+      var d = when(it); if (!d) return;
+      var day = new Date(d); day.setHours(0,0,0,0);
+      var idx = DAYS - 1 - Math.round((today - day) / MS);
+      if (idx >= 0 && idx < DAYS && buckets[it.surface_id]) buckets[it.surface_id][idx]++;
+    });
+    var max = 1;
+    surfaces.forEach(function (s) { buckets[s.id].forEach(function (n) { if (n>max) max=n; }); });
+    var lvl = function (n) {
+      if (!n) return "";
+      var r = n / max;
+      return r > .75 ? "a4" : r > .5 ? "a3" : r > .25 ? "a2" : "a1";
+    };
+    var table = document.getElementById("mc-act");
+    surfaces.forEach(function (s) {
+      var tr = document.createElement("tr");
+      var th = document.createElement("th");
+      th.appendChild(dot(surfColor(s.id)));
+      th.appendChild(document.createTextNode(surfName(s.id)));
+      tr.appendChild(th);
+      buckets[s.id].forEach(function (n, i) {
+        var td = document.createElement("td");
+        var cell = el("div","mc-act-cell " + lvl(n));
+        var day = new Date(today - (DAYS-1-i)*MS);
+        cell.title = surfName(s.id) + " — " + day.toLocaleDateString() + ": " +
+          n + " item change" + (n===1?"":"s");
+        td.appendChild(cell); tr.appendChild(td);
+      });
+      table.appendChild(tr);
+    });
+    var lab = document.createElement("tr"); lab.className="dayrow";
+    lab.appendChild(document.createElement("th"));
+    for (var i=0;i<DAYS;i++){
+      var td = document.createElement("td"); td.className="daylab";
+      var day = new Date(today - (DAYS-1-i)*MS);
+      td.textContent = (i===0 || day.getDay()===1) ? String(day.getDate()) : "";
+      lab.appendChild(td);
+    }
+    table.appendChild(lab);
+  })();
+
+  // ── item card renderer ──────────────────────────────────────────
+  function card(it, opts){
+    opts = opts || {};
+    var c = el("article","mc-item st-"+it.state+" k-"+it.kind);
+    c.setAttribute("data-mc-anchor", it.key);
+    if (it.kind==="question" && it.state==="open" && it.ask)
+      c.setAttribute("data-mc-ask", it.ask);
+    c.dataset.state = it.state; c.dataset.kind = it.kind;
+    c.dataset.search = (it.title+" "+it.body+" "+(it.evidence||[]).join(" ")).toLowerCase();
+
+    var inner = c;
+    if (opts.stepno != null){
+      var wrap = el("div");
+      c.appendChild(el("div","stepno", String(opts.stepno)));
+      c.appendChild(wrap); inner = wrap;
+    }
+    var top = el("div","top");
+    var where = el("span","where");
+    if (opts.showSurface){
+      where.appendChild(dot(surfColor(it.surface_id)));
+      where.appendChild(document.createTextNode(shortName(it.surface_id)));
+    }
+    if (it.owner) where.appendChild(document.createTextNode(
+      (opts.showSurface ? " · " : "") + "owner: " + it.owner));
+    top.appendChild(where);
+    top.appendChild(pill(it.state));
+    inner.appendChild(top);
+    inner.appendChild(el("h3",null,it.title));
+
+    if (it.kind==="decision" && (it.fork || it.chosen || it.if_wrong)){
+      var dv = el("div","mc-dec");
+      if (it.fork){ dv.appendChild(el("b",null,"Fork")); paras(dv,it.fork); }
+      if (it.chosen){ dv.appendChild(el("b",null,"Chosen")); paras(dv,it.chosen); }
+      if (it.if_wrong){ dv.appendChild(el("b",null,"If wrong")); paras(dv,it.if_wrong,"ifw"); }
+      inner.appendChild(dv);
+      if (it.body){ var b0 = el("div","body"); paras(b0,it.body); inner.appendChild(b0); }
+    } else if (it.body){
+      var b = el("div","body"); paras(b,it.body); inner.appendChild(b);
+    }
+    if (it.kind==="exhibit" && it.html){
+      var ex = el("div","body"); ex.innerHTML = it.html;   // trusted, same as freeform
+      inner.appendChild(ex);
+    }
+    if ((it.evidence||[]).length){
+      var det = document.createElement("details");
+      det.appendChild(el("summary",null,"Evidence ("+it.evidence.length+")"));
+      var ev = el("div","ev");
+      it.evidence.forEach(function (e) { ev.appendChild(el("p",null,e)); });
+      det.appendChild(ev); inner.appendChild(det);
+    }
+    if ((it.refs||[]).length){
+      var refs = el("div","mc-refs");
+      it.refs.forEach(function (r) { refs.appendChild(el("span",null,r)); });
+      inner.appendChild(refs);
+    }
+    var d = when(it);
+    if (d) inner.appendChild(el("div","mc-when",
+      (it.happened_at ? "" : "updated ") + d.toLocaleDateString(undefined,
+        {month:"short",day:"numeric"})));
+    return c;
+  }
+
+  // ── filter bar ──────────────────────────────────────────────────
+  var FSTATES = ["proven","done","active","code_only","next","specified",
+                 "blocked","open","settled","deferred"];
+  function filterBar(scopeEl){
+    var bar = el("div","mc-filters");
+    var input = document.createElement("input");
+    input.type = "search"; input.placeholder = "Filter items…";
+    bar.appendChild(input);
+    var on = {};
+    function apply(){
+      var q = input.value.trim().toLowerCase();
+      var states = Object.keys(on).filter(function (s) { return on[s]; });
+      scopeEl.querySelectorAll(".mc-item").forEach(function (n) {
+        var okS = !states.length || states.indexOf(n.dataset.state) >= 0;
+        var okQ = !q || (n.dataset.search||"").indexOf(q) >= 0;
+        n.classList.toggle("mc-hidden", !(okS && okQ));
+      });
+    }
+    input.addEventListener("input", apply);
+    FSTATES.forEach(function (s) {
+      if (!scopeEl.querySelector('.mc-item[data-state="'+s+'"]')) return;
+      var b = el("button","f",STATE_LABEL[s]);
+      b.addEventListener("click",function(){ on[s]=!on[s]; b.classList.toggle("on",on[s]); apply(); });
+      bar.appendChild(b);
+    });
+    return bar;
+  }
+
+  // ── per-surface view builder ────────────────────────────────────
+  function surfaceView(sid){
+    var v = el("div","mc-view"); v.id = "view-"+sid;
+    var mine = liveItems.filter(function (it) { return it.surface_id===sid; })
+      .sort(function (a,b){ return (a.order||0)-(b.order||0) ||
+        String(a.title).localeCompare(String(b.title)); });
+    if (!mine.length){
+      var em = el("div","mc-empty");
+      em.appendChild(document.createTextNode("No items yet. Add the first: "));
+      var code = el("code",null,'graph mission add '+surfName(sid).toLowerCase()+
+        ' <item-id> --kind work --title "…"');
+      em.appendChild(code); v.appendChild(em);
+      return v;
+    }
+    var sections = {};
+    mine.forEach(function (it) {
+      var sec = it.section || SECTION_OF[it.kind] || "The work";
+      (sections[sec] = sections[sec] || []).push(it);
+    });
+    var names = SECTION_ORDER.filter(function (s) { return sections[s]; })
+      .concat(Object.keys(sections).filter(function (s) {
+        return SECTION_ORDER.indexOf(s) < 0; }).sort());
+    var host = el("div"); v.appendChild(filterBar(v)); v.appendChild(host);
+    names.forEach(function (name) {
+      var sec = el("section","mc-sec");
+      sec.appendChild(el("h2",null,name));
+      var list = sections[name];
+      var metrics = list.filter(function (it) { return it.kind==="metric"; });
+      if (metrics.length){
+        var mrow = el("div","mc-metrics");
+        metrics.forEach(function (m) {
+          var t = el("div","mc-metric");
+          t.setAttribute("data-mc-anchor", m.key);
+          t.appendChild(el("b",null,m.value||"—"));
+          t.appendChild(el("span",null,m.title));
+          mrow.appendChild(t);
+        });
+        sec.appendChild(mrow);
+      }
+      var steps = list.filter(function (it) { return it.kind==="checkpoint"; });
+      var rest = list.filter(function (it) { return it.kind!=="metric" && it.kind!=="checkpoint"; });
+      if (steps.length){
+        var arc = el("div","mc-arc");
+        steps.forEach(function (s,i){ arc.appendChild(card(s,{stepno:i+1})); });
+        sec.appendChild(arc);
+      }
+      rest.forEach(function (it) { sec.appendChild(card(it)); });
+      host.appendChild(sec);
+    });
+    return v;
+  }
+
+  // ── overview view (mission surface + pillar summaries) ──────────
+  function overviewView(){
+    var v = el("div","mc-view"); v.id = "view-"+MID;
+    var sec = el("section","mc-sec");
+    sec.appendChild(el("h2",null,"Pillars"));
+    PILLARS.forEach(function (p) {
+      var pc = el("div","mc-psum");
+      pc.addEventListener("click",function(){ show(p.pillar_id); });
+      var hd = el("div","hd");
+      hd.appendChild(dot(p.color || "#8391a8"));
+      hd.appendChild(el("b",null,p.name));
+      var cts = el("span","counts");
+      var mine = liveItems.filter(function (it) { return it.surface_id===p.pillar_id; });
+      var n = {};
+      mine.forEach(function (it) { n[it.state]=(n[it.state]||0)+1; });
+      [["proven","p-good"],["active","p-warn"],["blocked","p-crit"]].forEach(function (s) {
+        if (n[s[0]]) {
+          var pl = el("span","mc-pill "+s[1], n[s[0]]+" "+STATE_LABEL[s[0]].toLowerCase());
+          cts.appendChild(pl);
+        }
+      });
+      var asks = mine.filter(function (it) {
+        return it.kind==="question" && it.state==="open" && it.ask; }).length;
+      if (asks) cts.appendChild(el("span","mc-pill p-warn",asks+" ask"+(asks>1?"s":"")));
+      hd.appendChild(cts); pc.appendChild(hd);
+      var status = mine.filter(function (it) { return it.kind==="status"; })[0];
+      if (status) pc.appendChild(el("div","last",
+        String(status.body||status.title).split(/\n\s*\n/)[0]));
+      else if (p.last_done) pc.appendChild(el("div","last",p.last_done));
+      pc.appendChild(el("div","stat", mine.length + " items"));
+      sec.appendChild(pc);
+    });
+    v.appendChild(sec);
+    var missionItems = liveItems.filter(function (it) { return it.surface_id===MID; });
+    if (missionItems.length){
+      var own = surfaceView(MID);   // reuse the section builder
+      own.classList.add("on"); own.id = "";
+      v.appendChild(own);
+    }
+    return v;
+  }
+
+  // ── cross-pillar views ──────────────────────────────────────────
+  function collectionView(id, title, filter, empty){
+    var v = el("div","mc-view"); v.id = "view-"+id;
+    var all = liveItems.filter(filter).sort(function (a,b){
+      var da = when(a), db_ = when(b);
+      return (db_?db_.getTime():0) - (da?da.getTime():0);
+    });
+    if (!all.length){ v.appendChild(el("div","mc-empty",empty)); return v; }
+    v.appendChild(filterBar(v));
+    var host = el("section","mc-sec");
+    host.appendChild(el("h2",null,title+" — every pillar"));
+    all.forEach(function (it) { host.appendChild(card(it,{showSurface:true})); });
+    v.appendChild(host);
+    return v;
+  }
+
+  function feedView(){
+    var v = el("div","mc-view"); v.id = "view-feed";
+    var dated = liveItems.map(function (it) { return {it:it, d:when(it)}; })
+      .filter(function (x) { return x.d; })
+      .sort(function (a,b){ return b.d - a.d; });
+    if (!dated.length){ v.appendChild(el("div","mc-empty",
+      "No dated items yet — the feed builds itself from item timestamps.")); return v; }
+    var lastDay = "";
+    dated.forEach(function (x) {
+      var day = x.d.toLocaleDateString(undefined,{weekday:"short",month:"short",day:"numeric"});
+      if (day !== lastDay){ v.appendChild(el("div","mc-feed-day",day)); lastDay = day; }
+      var row = el("div","mc-feed-row");
+      row.appendChild(dot(surfColor(x.it.surface_id)));
+      row.appendChild(el("span","k",shortName(x.it.surface_id)));
+      row.appendChild(el("span","t",x.it.title));
+      row.appendChild(pill(x.it.state));
+      row.style.cursor = "pointer";
+      row.addEventListener("click",function(){
+        show(x.it.surface_id===MID ? MID : x.it.surface_id);
+        var target = document.querySelector('[data-mc-anchor="'+x.it.key+'"]');
+        if (target) target.scrollIntoView({behavior:"smooth",block:"center"});
+      });
+      v.appendChild(row);
+    });
+    return v;
+  }
+
+  // ── assemble views + nav ────────────────────────────────────────
+  var views = document.getElementById("mc-views");
+  views.appendChild(overviewView());
+  PILLARS.forEach(function (p) { views.appendChild(surfaceView(p.pillar_id)); });
+  views.appendChild(collectionView("decisions","Decisions",
+    function (it) { return it.kind==="decision"; },
+    "No decisions recorded yet."));
+  views.appendChild(collectionView("questions","Open questions",
+    function (it) { return it.kind==="question" && it.state==="open"; },
+    "Nothing is waiting on an answer."));
+  views.appendChild(feedView());
+
+  var nav = document.getElementById("mc-nav");
+  function navBtn(id,label,color,extra){
+    var b = el("button",null,"");
+    if (color) b.appendChild(dot(color));
+    b.appendChild(document.createTextNode(label));
+    if (extra && extra.count){
+      b.appendChild(el("span","n",String(extra.count)));
+      if (extra.warn) b.classList.add("warns");
+    }
+    b.id = "nav-"+id;
+    b.addEventListener("click",function(){ show(id); });
+    nav.appendChild(b);
+  }
+  navBtn(MID,"Overview","#8b85ff");
+  PILLARS.forEach(function (p) {
+    var n = liveItems.filter(function (it) { return it.surface_id===p.pillar_id; }).length;
+    navBtn(p.pillar_id, shortName(p.pillar_id),
+      p.color || "#8391a8", {count:n});
+  });
+  var decN = liveItems.filter(function (it) { return it.kind==="decision"; }).length;
+  var qN = liveItems.filter(function (it) {
+    return it.kind==="question" && it.state==="open"; }).length;
+  navBtn("decisions","Decisions",null,{count:decN});
+  navBtn("questions","Questions",null,{count:qN,warn:qN>0});
+  navBtn("feed","Feed",null,null);
+
+  function show(id){
+    document.querySelectorAll(".mc-view").forEach(function (n) {
+      n.classList.toggle("on", n.id === "view-"+id);
+    });
+    document.querySelectorAll(".mc-nav button").forEach(function (n) {
+      n.classList.toggle("on", n.id === "nav-"+id);
+    });
+    try { history.replaceState(null,"","#"+id); } catch (e) {}
+  }
+  // The activity panel is mission-wide chrome, but it belongs to the
+  // overview: pillar views get their vertical room back.
+  var ov = document.getElementById("view-"+MID);
+  ov.insertBefore(document.querySelector(".mc-activity"), ov.firstChild);
+
+  var boot = (location.hash||"").slice(1);
+  show(boot && document.getElementById("view-"+boot) ? boot
+       : (DATA.focus && document.getElementById("view-"+DATA.focus)) ? DATA.focus
+       : MID);
+
+  var gen = new Date((DATA.generated_at||0)*1000);
+  document.getElementById("mc-genat").textContent =
+    isNaN(gen) ? "" : "generated " + gen.toLocaleString();
+})();
+</script>

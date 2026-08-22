@@ -203,6 +203,14 @@ CREATE TABLE IF NOT EXISTS coordinator_nag_state (
 #: creation.
 VALID_MISSION_STATUSES = ("active", "paused", "complete")
 
+#: How a mission's screens get their content. ``freeform`` is the original
+#: contract — coordinators push whole HTML documents as site revisions.
+#: ``structured`` renders the platform's standard viewer from
+#: ``dashboard.mission.item`` Settings rows; site revisions are ignored for
+#: rendering (the store and every route stay live for history and rollback
+#: back to freeform). Chosen per mission, never inferred.
+VALID_MISSION_STYLES = ("freeform", "structured")
+
 
 def _default_org() -> str:
     """The organization a mission belongs to when the caller did not say.
@@ -296,6 +304,15 @@ def _get_conn(db_path: Path | str | None = None) -> sqlite3.Connection:
         conn.execute("SELECT avatar_attachment_id FROM visitor_tokens LIMIT 0")
     except sqlite3.OperationalError:
         conn.execute("ALTER TABLE visitor_tokens ADD COLUMN avatar_attachment_id TEXT")
+        conn.commit()
+    # Migrate: the mission's rendering style (see VALID_MISSION_STYLES).
+    # Every pre-existing mission is freeform, which is exactly what the
+    # default says; structured is opted into per mission, never inferred.
+    try:
+        conn.execute("SELECT style FROM missions LIMIT 0")
+    except sqlite3.OperationalError:
+        conn.execute(
+            "ALTER TABLE missions ADD COLUMN style TEXT NOT NULL DEFAULT 'freeform'")
         conn.commit()
     # CLOSED IS A FACT, NOT AN INFERENCE. It used to be read off the answer:
     # an entry with text in `answer` was closed and one without was open. That
@@ -648,6 +665,28 @@ def set_mission_org(
     try:
         cur = conn.execute(
             "UPDATE missions SET org = ? WHERE mission_id = ?", (org, mission_id))
+        conn.commit()
+    finally:
+        conn.close()
+    return cur.rowcount > 0
+
+
+def set_mission_style(
+    mission_id: str, style: str, *, db_path: Path | str | None = None,
+) -> bool:
+    """Choose how a mission's screens render (VALID_MISSION_STYLES).
+
+    Switching to ``structured`` does not touch the site-revision store;
+    switching back to ``freeform`` resumes serving the current revision
+    exactly as it was. The two stores are independent, so the choice is
+    reversible at any time without data loss on either side.
+    """
+    assert style in VALID_MISSION_STYLES, style
+    conn = _get_conn(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE missions SET style = ? WHERE mission_id = ?",
+            (style, mission_id))
         conn.commit()
     finally:
         conn.close()

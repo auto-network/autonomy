@@ -127,6 +127,66 @@ normal attributed conversation record, can be reopened, and no longer shows
 an Answer control. CrossTalk reports the answer but omits the question because
 the screen authored it.
 
+## Structured style
+
+A mission chooses one of two rendering styles. `freeform` is everything the
+sections above and below describe: coordinators push whole HTML documents.
+`structured` replaces only the page's content layer: items live as
+`dashboard.mission.item` Settings rows in the mission's organization, and
+the platform renders every screen from them with one standard viewer — a
+single app covering the overview and all pillars, with cross-pillar
+Decisions, Questions and Feed views plus an activity grid computed from
+item timestamps. Chrome, questions, presence, and the revision store are
+identical in both styles, and the choice is reversible at any time:
+
+```bash
+graph mission style <mission> structured    # or freeform
+```
+
+In structured mode, drive everything through `graph mission` — never curl,
+never a site push:
+
+```bash
+graph mission list                          # missions with style + status
+graph mission status <mission|pillar> [-v]  # item counts by state, open asks
+graph mission items <surface> [--kind decision] [--state open] [--json]
+graph mission add <surface> <item-id> --kind work --title "…" \
+    [--state proven] [--body -] [--evidence "…"] [--ref commit:abc1234]
+graph mission update <surface> <item-id> [--title …] [--body -] [...]
+graph mission state <surface> <item-id> proven [--note "what was seen"]
+graph mission retire <surface> <item-id>
+```
+
+`<surface>` is a mission or pillar — id, id prefix, or name substring.
+`--body -` and `--note -` read stdin for multiline prose. Item kinds:
+`scope` (one per surface: purpose + "Does not own:"), `work`, `checkpoint`
+(ordered arc steps, use `--order`), `decision` (`--fork/--chosen/--if-wrong`),
+`question` (`--ask` for an operator-answerable ask), `status` (one per
+surface: where it stands), `metric` (`--value "15.2 MiB/s"`), `incident`
+(corrections and negative results), `exhibit` (trusted HTML, sparingly).
+States: `proven done settled active code_only next specified open blocked
+deferred retired` — `proven` means exercised on the real system and
+witnessed; `code_only` means tests pass, never run for real.
+
+Rules that carry over from the screen contract: an item's `item-id` is its
+anchor — questions bind to it, so never rename one whose subject survives;
+ask text must be one answerable question naming its options and consequence;
+`graph mission state` stamps the moment the state was earned, which is what
+the feed and activity grid render — transition items when things actually
+happen, not in batches.
+
+The raw HTTP surface behind the CLI (same bearer rules as everything else):
+
+```text
+POST /api/missions/<id>/style                 {"style":"structured|freeform"}
+GET  /api/missions/<id>/items                 whole mission, pillars included
+GET  /api/pillars/<id>/items
+PUT  /api/missions/<id>/items/<item_id>       full item payload
+PUT  /api/pillars/<id>/items/<item_id>
+POST /api/missions/<id>/items/<item_id>/state {"state":"…","note":"…"}
+POST /api/pillars/<id>/items/<item_id>/state
+```
+
 ## Mission workflow
 
 ### Create a mission
@@ -562,6 +622,14 @@ POST   /api/missions/<id>/status
 POST   /api/missions/<id>/seen
 POST   /api/missions/<id>/coordinator
 POST   /api/missions/<id>/org
+
+POST   /api/missions/<id>/style
+GET    /api/missions/<id>/items
+PUT    /api/missions/<id>/items/<item_id>
+POST   /api/missions/<id>/items/<item_id>/state
+GET    /api/pillars/<id>/items
+PUT    /api/pillars/<id>/items/<item_id>
+POST   /api/pillars/<id>/items/<item_id>/state
 
 POST   /api/missions/<id>/site
 GET    /api/missions/<id>/site
