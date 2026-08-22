@@ -701,6 +701,33 @@ def cmd_set_orphans(args) -> None:
     sys.exit(1)
 
 
+def cmd_set_band_audit(args) -> None:
+    """Report every stored settings row whose publication_state is outside its
+    schema's declared band — the estate-wide compliance sweep.
+
+    Run on the HOST (it opens every org DB plus the local stores directly). A
+    finding above the band max is a cross-org disclosure; below the min is a
+    federation outage. Exit 1 when anything is noncompliant, so CI/cron can gate.
+    """
+    from tools.graph import settings_ops
+
+    only = getattr(args, "org", None)
+    findings = settings_ops.audit_publication_bands(org=only)
+    if getattr(args, "json", False):
+        print(json.dumps(findings, indent=2))
+        sys.exit(1 if findings else 0)
+    if not findings:
+        scope = f"store {only}" if only else "every store"
+        print(f"  ✓ {scope}: every settings row is within its declared publication band")
+        return
+    print(f"  {len(findings)} row(s) outside the declared band:\n")
+    for f in findings:
+        band = f["band"] if f["band"] is not None else "(none declared)"
+        print(f"      {f['store']} · {f['set_id']}#{f['revision']} · key={f['key']}")
+        print(f"        state={f['state']}  band={band}  — {f['reason']}")
+    sys.exit(1)
+
+
 def cmd_set_check(args) -> None:
     """Is this row satisfied, and everything it declares it depends on?
 
@@ -1408,6 +1435,21 @@ def attach_set_subparser(sub) -> None:
     p_orphans.add_argument("set_at_rev", metavar="set_id[#rev]")
     p_orphans.add_argument("--org", default=None, help="Organization to read as")
     p_orphans.set_defaults(func=cmd_set_orphans)
+
+    # band-audit — estate-wide publication-band compliance sweep
+    p_band = set_sub.add_parser(
+        "band-audit",
+        help="Report settings rows whose publication_state is outside the "
+             "schema's declared band (host-run; scans every store)",
+    )
+    p_band.add_argument(
+        "--org", default=None,
+        help="Scan a single store slug instead of every store on the machine",
+    )
+    p_band.add_argument(
+        "--json", action="store_true", help="Emit findings as JSON",
+    )
+    p_band.set_defaults(func=cmd_set_band_audit)
 
     p_layers = set_sub.add_parser(
         "layers",
