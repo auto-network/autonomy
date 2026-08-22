@@ -84,12 +84,37 @@ def _reconcile(osession: str) -> None:
     (a declined re-request must never revoke access the chat already has). Run by
     both resolve (hello) and status (per-request) so either sees a fresh verdict."""
     row = db.get_session(osession)
-    if not row or not row.get("approval_id"):
+    if not row:
         return
-    appr = ar.get(row["approval_id"])
-    if appr and appr.get("result") is not None and not appr["result"].get("approved"):
-        if db.resolve_session(osession)["status"] != db.APPROVED:
-            db.set_session_status(osession, db.DENIED)
+    # Decline reconciliation (needs the approval to read its verdict).
+    if row.get("approval_id"):
+        appr = ar.get(row["approval_id"])
+        if appr and appr.get("result") is not None and not appr["result"].get("approved"):
+            if db.resolve_session(osession)["status"] != db.APPROVED:
+                db.set_session_status(osession, db.DENIED)
+    # The peer's general-API bearer exists only while the binding is live-approved.
+    # Any state that is not live-approved (denied, expired, revoked) revokes it
+    # here — the relay calls this on every hello and every per-request status, so
+    # a lapsed grant loses its token on the next touch. Independent of the
+    # approval_id branch above: a revoked/expired grant must lose its token even
+    # if there is no decline verdict to read.
+    fresh = db.get_session(osession)
+    if fresh and fresh.get("peer_bearer") and (
+            db.resolve_session(osession)["status"] != db.APPROVED):
+        auth_db.revoke_token(fresh.get("handle") or "")
+        db.set_session_bearer(osession, None)
+
+
+def _authorization(osession: str) -> dict:
+    """The relay's authorization view, plus the org-scoped bearer while approved.
+    The relay caches ``bearer`` per peer and passes it as CROSSTALK_TOKEN when it
+    shells out to the graph CLI, so those calls are scoped to the approved org."""
+    result = db.resolve_session(osession)
+    if result.get("status") == db.APPROVED:
+        row = db.get_session(osession)
+        if row and row.get("peer_bearer"):
+            result = {**result, "bearer": row["peer_bearer"]}
+    return result
 
 
 async def resolve_session(request: Request) -> JSONResponse:
@@ -128,7 +153,7 @@ async def resolve_session(request: Request) -> JSONResponse:
             "openai_session": osession, "openai_subject": subject,
             "openai_org": oorg, "intent": intent, "handle": handle})
         db.set_session_approval_id(osession, rid)
-    return JSONResponse(db.resolve_session(osession))
+    return JSONResponse(_authorization(osession))
 
 
 async def session_status(request: Request) -> JSONResponse:
@@ -145,7 +170,7 @@ async def session_status(request: Request) -> JSONResponse:
     if not osession:
         return JSONResponse({"error": "openai_session required"}, status_code=400)
     _reconcile(osession)
-    return JSONResponse(db.resolve_session(osession))
+    return JSONResponse(_authorization(osession))
 
 
 async def resolve_crosstalk(request: Request) -> JSONResponse:
@@ -305,6 +330,12 @@ async def collect_crosstalk(request: Request) -> JSONResponse:
         limit = 100
     if not osession:
         return JSONResponse({"error": "openai_session required"}, status_code=400)
+    # A handle is minted on the FIRST hello, before any approval, so without this
+    # an unapproved/pending/denied chat could drain its own outbox. Match the
+    # sibling routes (resolve_crosstalk, relay_crosstalk): no drain until linked.
+    _reconcile(osession)
+    if db.resolve_session(osession)["status"] != db.APPROVED:
+        return JSONResponse({"status": "peer_not_linked"})
     handle = db.ensure_handle(osession)
     if handle is None:
         return JSONResponse({"messages": []})

@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS mcp_sessions (
     expires_at       REAL,
     approved_by      TEXT,
     handle           TEXT,
+    peer_bearer      TEXT,
     created_at       REAL NOT NULL,
     updated_at       REAL NOT NULL
 );
@@ -92,6 +93,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(mcp_sessions)")}
     if "handle" not in cols:
         conn.execute("ALTER TABLE mcp_sessions ADD COLUMN handle TEXT")
+    # peer_bearer: the raw org-scoped session token minted for this chat at
+    # approval, handed back to the relay so its `graph` CLI calls authenticate to
+    # the general API scoped to the approved org. Stored raw because it is
+    # returned on every poll; machine-local (this DB is never synced) and only
+    # ever present while the binding is live-approved (revoked otherwise).
+    if "peer_bearer" not in cols:
+        conn.execute("ALTER TABLE mcp_sessions ADD COLUMN peer_bearer TEXT")
     # Idempotent for both a fresh DB (column created inline by CREATE_TABLES) and a
     # migrated one; the column is guaranteed present by the time this runs.
     conn.execute(
@@ -270,6 +278,24 @@ def set_session_status(
             "UPDATE mcp_sessions SET status=?, autonomy_org=NULL, level=NULL,"
             " expires_at=NULL, updated_at=? WHERE openai_session=?",
             (status, now, openai_session),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def set_session_bearer(
+    openai_session: str, bearer: str | None, *, db_path: Path | str | None = None
+) -> bool:
+    """Store (or clear, with None) the raw org-scoped bearer minted for this chat.
+    Present only while the binding is live-approved; the route layer mints it on
+    approval and clears it (and revokes the token) once it is no longer live."""
+    conn = _get_conn(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE mcp_sessions SET peer_bearer=?, updated_at=? WHERE openai_session=?",
+            (bearer, time.time(), openai_session),
         )
         conn.commit()
         return cur.rowcount > 0
