@@ -1,0 +1,22 @@
+{
+  "name": "relay_two_counters",
+  "private_key_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+  "input": {
+    "organization_id": "11111111-1111-4111-8111-111111111111",
+    "sequence": 7,
+    "interval_start": 1755999900,
+    "interval_end": 1756000200,
+    "created_at": 1756000204,
+    "counters": {
+      "relay.egress_bytes": 12345,
+      "relay.viewer_seconds": 300
+    }
+  },
+  "expected": {
+    "producer": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+    "batch_id": "0d4e29e2186f5c6b5b0d092592b1b70533bdfe7229f2aaef592f3160033889a8",
+    "checksum": "0702afe3db966596895f3ae3821b6b22fa023e9224bb70b1a0d10ef0b06c4a98",
+    "signature": "bc2543eacfa6dd74aa9e0c46ed437746f13c61f0742cc58b27a7b3a4427ca9910e0bad087297987b3852532289ef710236909c0ed7ddc4f772a61b4b45903e01",
+    "wire": "{\"batch_id\":\"0d4e29e2186f5c6b5b0d092592b1b70533bdfe7229f2aaef592f3160033889a8\",\"checksum\":\"0702afe3db966596895f3ae3821b6b22fa023e9224bb70b1a0d10ef0b06c4a98\",\"counters\":{\"relay.egress_bytes\":12345,\"relay.viewer_seconds\":300},\"created_at\":1756000204,\"interval_end\":1756000200,\"interval_start\":1755999900,\"organization_id\":\"11111111-1111-4111-8111-111111111111\",\"producer\":\"8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c\",\"sequence\":7,\"signature\":\"bc2543eacfa6dd74aa9e0c46ed437746f13c61f0742cc58b27a7b3a4427ca9910e0bad087297987b3852532289ef710236909c0ed7ddc4f772a61b4b45903e01\",\"v\":1}"
+  }
+}
