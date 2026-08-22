@@ -808,7 +808,7 @@ def test_create_pillar():
     assert pillar["status"] == "active"
 
 
-def test_pillar_coordinator_gets_named_session_badge():
+def test_pillar_coordinator_gets_icon_only_session_action():
     mission = db.create_mission("OSS Insights", "auto-controller")
     pillar = db.create_pillar(
         mission["mission_id"],
@@ -822,13 +822,13 @@ def test_pillar_coordinator_gets_named_session_badge():
         _request_as(api_auth.ApiPrincipalKind.OPERATOR_COOKIE, "operator"),
     )
 
-    [badge] = rows["auto-schema"]
-    assert badge["kind"] == "badge"
-    assert badge["label"] == "Dataset & Schema"
-    assert badge["href"] == (
+    [action] = rows["auto-schema"]
+    assert action["kind"] == "action"
+    assert action["label"] == "Dataset & Schema"
+    assert action["href"] == (
         f"/missions/{mission['mission_id']}/pillars/{pillar['pillar_id']}"
     )
-    assert "OSS Insights / Dataset & Schema" in badge["title"]
+    assert "OSS Insights / Dataset & Schema" in action["title"]
     assert rows["auto-unassigned"] == []
 
 
