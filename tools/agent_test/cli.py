@@ -82,6 +82,21 @@ def _summary_line(manifest: dict[str, Any]) -> str:
     return f"{manifest['run_id']} · {manifest.get('status', 'unknown')} · {counts}{suffix}"
 
 
+def _progress_line(manifest: dict[str, Any]) -> str | None:
+    if manifest.get("status") not in {"starting", "queued", "running", "stopping"}:
+        return None
+    progress = manifest.get("progress") or {}
+    if not isinstance(progress, dict):
+        return None
+    status = str(progress.get("status") or "")
+    if status == "collecting" or not int(progress.get("total") or 0):
+        return "Progress: —% (test inventory not complete)."
+    completed = int(progress.get("completed") or 0)
+    total = int(progress.get("total") or 0)
+    percent = max(0, min(100, int(progress.get("percent") or 0)))
+    return f"Progress: {percent}% ({completed}/{total} test nodes)."
+
+
 def _duration_estimate(repository: str, selectors: list[str], parallelism: int = 1) -> dict[str, Any]:
     return duration_request(
         "estimate",
@@ -681,6 +696,9 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 0
     print(_summary_line(manifest))
     if manifest.get("status") in {"starting", "queued", "running", "stopping"}:
+        progress_line = _progress_line(manifest)
+        if progress_line:
+            print(progress_line)
         estimate_data = manifest.get("duration_estimate") or {}
         estimate = estimate_data.get("estimated_seconds")
         estimate_low = estimate_data.get("estimated_low_seconds")
