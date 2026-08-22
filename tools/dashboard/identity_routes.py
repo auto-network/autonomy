@@ -406,19 +406,25 @@ REARMOR_DOMAIN = b"autonomy.identity.rearmor.v1\n"
 
 def _root_reachable(factor_types: list, require_pair: bool) -> bool:
     """The backend copy of the sign-on machine's invariant (note 464c7021):
-    the identity must keep a DAY-TO-DAY opener, and a required pair keeps two.
+    the identity must keep a DAY-TO-DAY opener, and a required pair keeps a
+    both-required opener.
 
-    A passkey armor factor and the password factor are the daily openers; the
-    recovery factor is the emergency floor, never a day-to-day unlock, so an
-    armor left with only recovery is refused. ``require_pair`` (the MFA policy)
-    additionally demands both a password AND a passkey. This is enforcement,
-    not a UX courtesy — the browser check is a courtesy; this is the gate.
+    The daily openers are the password factor, a passkey armor factor, and the
+    COMBINED (MFA) factor — the last one reaches the root only with BOTH the
+    password and a passkey together, which is exactly the "require both" it
+    embodies. The recovery factor is the emergency floor, never a day-to-day
+    unlock, so an armor left with only recovery is refused. ``require_pair``
+    (the MFA policy) demands a both-required opener: the combined factor is one
+    (the current model), and the legacy two-standalone-factors form also
+    satisfies it. This is enforcement, not a UX courtesy — the browser check is
+    a courtesy; this is the gate.
     """
     has_password = "password" in factor_types
     has_passkey = "passkey" in factor_types
+    has_combined = "combined" in factor_types
     if require_pair:
-        return has_password and has_passkey
-    return has_password or has_passkey
+        return has_combined or (has_password and has_passkey)
+    return has_password or has_passkey or has_combined
 
 
 async def post_rearmor(request: Request) -> JSONResponse:

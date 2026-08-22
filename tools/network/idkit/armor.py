@@ -200,6 +200,19 @@ _FACTOR_COMMITMENTS = {
         "credential_id": f["credential_id"],
         "kem_pub": f["kem_pub"],
     },
+    # A combined (MFA) factor requires BOTH a password AND a passkey PRF to
+    # reconstruct the master KEK (a 2-of-2 XOR split, neither half alone). It
+    # pins the passkey it pairs with (credential_id + kem_pub) and the password
+    # half's KDF (salt + iterations) — all public, all committed, so a combined
+    # factor cannot be swapped for one that pairs a different device or a weaker
+    # KDF unnoticed.
+    "combined": lambda f: {
+        "type": "combined",
+        "credential_id": f["credential_id"],
+        "kem_pub": f["kem_pub"],
+        "salt": f["kdf"]["salt"],
+        "iterations": f["kdf"]["iterations"],
+    },
 }
 
 
@@ -387,15 +400,55 @@ def _parse_password_factor(f: dict, index: int) -> None:
     _b64_field(f, "wrap", length=_WRAP_LEN, what="factor.wrap")
 
 
+def _parse_combined_factor(f: dict, index: int) -> None:
+    """A combined (MFA) factor: {type, credential_id, kem_pub, kdf, cipher, iv,
+    wrap, sealed}. ``wrap`` is the password-wrapped share; ``sealed`` is the
+    passkey-sealed share; XOR of the two is the master KEK."""
+    if set(f) != {"type", "credential_id", "kem_pub", "kdf", "cipher", "iv", "wrap", "sealed"}:
+        raise ArmorError(
+            f"v2 combined factor[{index}] must carry exactly "
+            "{type, credential_id, kem_pub, kdf, cipher, iv, wrap, sealed}"
+        )
+    if not isinstance(f["credential_id"], str) or not _CREDENTIAL_ID_RE.match(
+        f["credential_id"]
+    ):
+        raise ArmorError(
+            "v2 combined factor credential_id must be base64url (the WebAuthn rawId)"
+        )
+    if not isinstance(f["kem_pub"], str) or not _ROOT_PUB_RE.match(f["kem_pub"]):
+        raise ArmorError("v2 combined factor kem_pub must be 64 lowercase hex chars")
+    kdf = f["kdf"]
+    if (
+        not isinstance(kdf, dict)
+        or set(kdf) != {"name", "hash", "iterations", "salt"}
+        or kdf["name"] != "PBKDF2"
+        or kdf["hash"] != "SHA-256"
+        or type(kdf["iterations"]) is not int
+        or not (_MIN_ITERATIONS <= kdf["iterations"] <= _MAX_ITERATIONS)
+    ):
+        raise ArmorError(
+            "v2 combined factor kdf must be exactly {name: PBKDF2, hash: "
+            "SHA-256, iterations, salt} with sane iterations"
+        )
+    if f["cipher"] != "AES-256-GCM":
+        raise ArmorError("v2 combined factor cipher must be AES-256-GCM")
+    _b64_field(kdf, "salt", length=_SALT_LEN, what="combined.kdf.salt")
+    _b64_field(f, "iv", length=_IV_LEN, what="combined.iv")
+    _b64_field(f, "wrap", length=_WRAP_LEN, what="combined.wrap")
+    _b64_field(f, "sealed", length=_RECOVERY_SEAL_LEN, what="combined.sealed")
+
+
 # Factor-type dispatch is TOTAL BY CONSTRUCTION: the registry IS the parser
 # table, so a type cannot be "known" without a strict parser. Adding a factor
-# type (recovery, passkey) means adding its parser here — there is no path where
-# a registered type clears the membership check yet hits no field-closure, which
-# would reopen I1 at the exact growth point this envelope exists for.
+# type (recovery, passkey, combined) means adding its parser here — there is no
+# path where a registered type clears the membership check yet hits no
+# field-closure, which would reopen I1 at the exact growth point this envelope
+# exists for.
 _FACTOR_PARSERS = {
     "password": _parse_password_factor,
     "recovery": _parse_recovery_factor,
     "passkey": _parse_passkey_factor,
+    "combined": _parse_combined_factor,
 }
 #: Closed registry of factor types (unit 1); derived so it cannot drift from the
 #: parsers. recovery/passkey add a (type -> strict parser) entry above.
@@ -442,13 +495,15 @@ def parse_armor(armor: str) -> dict:
                 f"v2 factor[{i}] has unknown type {ftype!r}; the registry is "
                 f"closed to {sorted(_FACTOR_PARSERS)}"
             )
-        # Singular types (password, recovery) dedupe on type; passkey is plural,
-        # one per credential, so it dedupes on (type, credential_id).
-        dedup_key = (ftype, f.get("credential_id")) if ftype == "passkey" else ftype
+        # Singular types (password, recovery) dedupe on type; passkey and
+        # combined are plural, one per credential, so they dedupe on
+        # (type, credential_id).
+        plural = ftype in ("passkey", "combined")
+        dedup_key = (ftype, f.get("credential_id")) if plural else ftype
         if dedup_key in seen:
             raise ArmorError(
                 f"v2 has a duplicate factor {dedup_key!r}"
-                if ftype == "passkey"
+                if plural
                 else f"v2 has a duplicate factor type {ftype!r}"
             )
         seen.add(dedup_key)
@@ -759,6 +814,229 @@ def decrypt_root_key_with_passkey(armor: str, prf_output: bytes) -> KeyPair:
         raise ArmorPassphraseError(
             "the passkey factor does not open with that ceremony's output"
         ) from exc
+    return _open_seed_under_master_kek(
+        master_kek, seal_iv, seal_ct, root_pub, data["factors"]
+    )
+
+
+def _xor32(a: bytes, b: bytes) -> bytes:
+    if len(a) != _MASTER_KEK_LEN or len(b) != _MASTER_KEK_LEN:
+        raise ArmorError("combined-factor shares must both be 32 bytes")
+    return bytes(x ^ y for x, y in zip(a, b))
+
+
+def _build_combined_factor(
+    root_pub: str,
+    master_kek: bytes,
+    passphrase: str,
+    credential_id: str,
+    passkey_kem_pub: str,
+    iterations: int,
+) -> dict:
+    """Assemble ONE combined (MFA) factor from a known master KEK.
+
+    The master KEK is 2-of-2 XOR-split into ``share_pw`` (random) and
+    ``share_pk = master_kek XOR share_pw``. ``share_pw`` is AES-GCM-wrapped
+    under ``KDF(passphrase)``; ``share_pk`` is sealed to the passkey's PUBLIC
+    provisioning key. Reconstructing the master KEK needs BOTH — neither the
+    password nor the passkey alone yields it. Only public material and the
+    passphrase are needed here; the passkey PRF private half never enters.
+    """
+    from .sealing import seal
+
+    if not isinstance(credential_id, str) or not _CREDENTIAL_ID_RE.match(credential_id):
+        raise ArmorError("credential_id must be base64url (the WebAuthn rawId)")
+    if not isinstance(passkey_kem_pub, str) or not _ROOT_PUB_RE.match(passkey_kem_pub):
+        raise ArmorError("passkey_kem_pub must be 64 lowercase hex chars")
+    share_pw = os.urandom(_MASTER_KEK_LEN)
+    share_pk = _xor32(master_kek, share_pw)
+    salt = os.urandom(_SALT_LEN)
+    pw_key = _derive_key(passphrase, salt, iterations)
+    wrap_iv = os.urandom(_IV_LEN)
+    wrap = AESGCM(pw_key).encrypt(
+        wrap_iv, share_pw, _v2_factor_aad(root_pub, "combined")
+    )
+    # The passkey share is sealed to the SAME provisioning key and label as a
+    # standalone passkey factor (the published kem_pub is derived under that
+    # label, and there is no PRF at build time to derive another). What is
+    # sealed here is only a SHARE of the master KEK, never the KEK; the factor
+    # SET commitment (the seed seal's AAD) is what binds this share to the
+    # combined slot, so it cannot be spliced into a standalone passkey factor.
+    sealed = seal(share_pk, passkey_kem_pub, PASSKEY_ARMOR_PURPOSE)
+    if len(sealed) != _RECOVERY_SEAL_LEN:
+        raise ArmorError("sealed combined-factor share is not the expected length")
+    return {
+        "type": "combined",
+        "credential_id": credential_id,
+        "kem_pub": passkey_kem_pub,
+        "kdf": {
+            "name": "PBKDF2",
+            "hash": "SHA-256",
+            "iterations": iterations,
+            "salt": base64.b64encode(salt).decode("ascii"),
+        },
+        "cipher": "AES-256-GCM",
+        "iv": base64.b64encode(wrap_iv).decode("ascii"),
+        "wrap": base64.b64encode(wrap).decode("ascii"),
+        "sealed": base64.b64encode(sealed).decode("ascii"),
+    }
+
+
+def encrypt_root_key_combined(
+    key: KeyPair,
+    passphrase: str,
+    credential_id: str,
+    passkey_kem_pub: str,
+    *,
+    iterations: int = DEFAULT_ITERATIONS,
+) -> str:
+    """Armor *key* under a SINGLE combined (MFA) factor from nothing.
+
+    The founding path for a fresh identity that is multi-factor from birth:
+    there is no intermediate password-only or passkey-only state and no
+    standalone factor is ever written, so the armor requires BOTH the password
+    and a passkey PRF from its first byte. Mirrors :func:`encrypt_root_key`,
+    swapping the lone password factor for a lone combined factor.
+    """
+    if not (_MIN_ITERATIONS <= iterations <= _MAX_ITERATIONS):
+        raise ArmorError(
+            f"iterations must be in [{_MIN_ITERATIONS}, {_MAX_ITERATIONS}]"
+        )
+    root_pub = key.public_hex
+    seed = bytes.fromhex(key.private_hex)
+    master_kek = os.urandom(_MASTER_KEK_LEN)
+    factors = [
+        _build_combined_factor(
+            root_pub, master_kek, passphrase, credential_id, passkey_kem_pub, iterations
+        )
+    ]
+    seal_iv = os.urandom(_IV_LEN)
+    seal_ct = AESGCM(master_kek).encrypt(
+        seal_iv, seed, _v2_seal_aad(root_pub, factors)
+    )
+    body = canonical_json(
+        {
+            "v": ARMOR_VERSION,
+            "root_pub": root_pub,
+            "kek_seal": {
+                "cipher": "AES-256-GCM",
+                "iv": base64.b64encode(seal_iv).decode("ascii"),
+                "ct": base64.b64encode(seal_ct).decode("ascii"),
+            },
+            "factors": factors,
+        }
+    )
+    b64 = base64.b64encode(body).decode("ascii")
+    return "\n".join([ARMOR_BEGIN, *textwrap.wrap(b64, 64), ARMOR_END])
+
+
+def enable_mfa(
+    armor: str,
+    passphrase: str,
+    credential_id: str,
+    passkey_kem_pub: str,
+    *,
+    iterations: int = DEFAULT_ITERATIONS,
+) -> str:
+    """Combine an existing password + a passkey into ONE MFA factor and CLEAR
+    the individual factors.
+
+    The upgrade path: you already hold both materials (the passphrase opens the
+    current armor; ``passkey_kem_pub`` is the device's published provisioning
+    key). This writes a combined factor requiring both together and then
+    DELETES every standalone ``password`` and ``passkey`` factor — because a
+    standalone opener sitting beside the pair would defeat the point of the
+    pair. The recovery factor (break-glass) is deliberately preserved: MFA
+    hardens your daily factors, it does not throw away the code you reach for
+    when a device is gone. After this, neither the password nor the passkey
+    ALONE opens the armor.
+    """
+    if not (_MIN_ITERATIONS <= iterations <= _MAX_ITERATIONS):
+        raise ArmorError(
+            f"iterations must be in [{_MIN_ITERATIONS}, {_MAX_ITERATIONS}]"
+        )
+    if not isinstance(passkey_kem_pub, str) or not _ROOT_PUB_RE.match(passkey_kem_pub):
+        raise ArmorError("passkey_kem_pub must be 64 lowercase hex chars")
+    data = parse_armor(armor)
+    root_pub = data["root_pub"]
+    if any(f["type"] == "combined" for f in data["factors"]):
+        raise ArmorError(
+            "this armor is already multi-factor; enabling MFA again is a "
+            "no-op, not an addition"
+        )
+    # Authorise with the password (which also proves you hold the standalone
+    # factor being combined), and recover the master KEK to re-split it.
+    master_kek = _v2_master_kek(data, passphrase)
+    previous_factors = list(data["factors"])
+    combined = _build_combined_factor(
+        root_pub, master_kek, passphrase, credential_id, passkey_kem_pub, iterations
+    )
+    # Clear the individual openers; keep everything else (e.g. recovery).
+    data["factors"] = [
+        combined,
+        *(f for f in data["factors"] if f["type"] not in ("password", "passkey")),
+    ]
+    _reseal_to_factor_set(data, master_kek, previous_factors)
+    return _emit_v2(parse_armor(_emit_v2(data)))
+
+
+def decrypt_root_key_with_combined(
+    armor: str, passphrase: str, prf_output: bytes
+) -> KeyPair:
+    """Open a v2 armor with a combined (MFA) factor: BOTH password AND passkey.
+
+    The passphrase unwraps ``share_pw``; the passkey PRF re-derives the
+    provisioning private key (selecting the matching combined factor by its
+    public half) and unseals ``share_pk``; their XOR is the master KEK, which
+    unseals the identity. Supplying only one half fails — that is the whole
+    guarantee. Refused when no combined factor's public half matches the PRF
+    output.
+    """
+    from .sealing import derive_encapsulation_keypair
+    from .sealing import open as seal_open
+
+    data = parse_armor(armor)
+    root_pub = data["root_pub"]
+    private_hex, public_hex = derive_encapsulation_keypair(
+        bytes(prf_output), PASSKEY_ARMOR_PURPOSE
+    )
+    factor = next(
+        (
+            f
+            for f in data["factors"]
+            if f["type"] == "combined" and f["kem_pub"] == public_hex
+        ),
+        None,
+    )
+    if factor is None:
+        raise ArmorPassphraseError(
+            "no combined factor on this armor pairs with that ceremony's output"
+        )
+    try:
+        salt = base64.b64decode(factor["kdf"]["salt"], validate=True)
+        wrap_iv = base64.b64decode(factor["iv"], validate=True)
+        wrap = base64.b64decode(factor["wrap"], validate=True)
+        sealed = base64.b64decode(factor["sealed"], validate=True)
+        seal_iv = base64.b64decode(data["kek_seal"]["iv"], validate=True)
+        seal_ct = base64.b64decode(data["kek_seal"]["ct"], validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ArmorError(f"v2 armor fields do not base64-decode: {exc}") from exc
+    pw_key = _derive_key(passphrase, salt, factor["kdf"]["iterations"])
+    try:
+        share_pw = AESGCM(pw_key).decrypt(
+            wrap_iv, wrap, _v2_factor_aad(root_pub, "combined")
+        )
+    except InvalidTag as exc:
+        raise ArmorPassphraseError(
+            "the combined factor does not open with that passphrase"
+        ) from exc
+    try:
+        share_pk = seal_open(sealed, private_hex, PASSKEY_ARMOR_PURPOSE)
+    except Exception as exc:
+        raise ArmorPassphraseError(
+            "the combined factor does not open with that ceremony's output"
+        ) from exc
+    master_kek = _xor32(share_pw, share_pk)
     return _open_seed_under_master_kek(
         master_kek, seal_iv, seal_ct, root_pub, data["factors"]
     )
