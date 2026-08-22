@@ -78,6 +78,7 @@
   .mc-nav button.on{color:#fff;border-color:var(--accent-dim);background:#232345}
   .mc-nav button.warns .n{color:var(--warn)}
   .mc-nav button.mc-dim{opacity:.45}
+  .mc-glance .g.mc-dim{opacity:.5}
   .mc-gout{display:none!important}
 
   /* ── views ── */
@@ -373,8 +374,30 @@
   var glanceActive = null, glanceReturn = null;
   function chipTitle(g){ return {proven:"Proven / done", flight:"In flight",
     blocked:"Blocked", asks:"Asks for you"}[g.key]; }
+  // EVERY NUMBER DESCRIBES WHAT IS ON SCREEN. When a pillar (or a
+  // pillar-narrowed feed) is the view, the hero chips count that pillar's
+  // items, not the mission's — a "94 proven" over a screen showing one
+  // pillar is a number about somewhere else. Mission-wide views count
+  // mission-wide.
+  function viewScope(){
+    var v = currentView;
+    if (v === "feed"){
+      var fv = document.getElementById("view-feed");
+      v = (fv && fv.dataset.filter) || "";
+    }
+    if (!v || v === MID) return null;
+    var isSurface = PILLARS.some(function (p) { return p.pillar_id === v; });
+    if (!isSurface) return null;
+    return function (it) { return it.surface_id === v; };
+  }
   function updateChips(){
+    var base = viewScope();
     GLANCE.forEach(function (g) {
+      var n = liveItems.filter(function (it) {
+        return g.match(it) && (!base || base(it));
+      }).length;
+      g.numEl.textContent = String(n);
+      g.btn.classList.toggle("mc-dim", n === 0 && glanceActive !== g.key);
       g.btn.classList.toggle("on", glanceActive === g.key);
       g.btn.setAttribute("aria-pressed", glanceActive === g.key ? "true" : "false");
     });
@@ -424,7 +447,8 @@
   }
   GLANCE.forEach(function (g) {
     var c = el("button","g "+g.cls);
-    c.appendChild(el("b",null,String(g.n)));
+    g.numEl = el("b",null,String(g.n));
+    c.appendChild(g.numEl);
     c.appendChild(el("span",null,g.label));
     c.setAttribute("aria-pressed","false");
     c.addEventListener("click",function(){ toggleGlance(g.key); });
@@ -820,7 +844,7 @@
       var chip = el("button","mc-feed-note",
         "Showing " + surfName(sid) + " only — show all");
       chip.addEventListener("click", function () {
-        v.dataset.filter = ""; applyFeedFilter();
+        v.dataset.filter = ""; applyFeedFilter(); updateChips();
       });
       v.insertBefore(chip, v.firstChild);
     }
@@ -830,6 +854,7 @@
     if (v){ v.dataset.filter = sid || ""; }
     show("feed");
     applyFeedFilter();
+    updateChips();
   }
 
   // ── assemble views + nav ────────────────────────────────────────
