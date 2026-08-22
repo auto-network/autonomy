@@ -88,6 +88,7 @@
       key: ['M15 7a5 5 0 1 1-4.4 7.4L3 22v-4h4v-4h3.6A5 5 0 0 1 15 7z',
             'M16.5 10.5h.01'],
       retry: ['M20 11a8 8 0 1 0-2.3 5.7', 'M20 4v7h-7'],
+      machines: ['M4 5h16v11H4z', 'M8 20h8', 'M12 16v4'],
     };
     (paths[kind] || []).forEach(function (d) {
       var path = root.document.createElementNS(ns, 'path');
@@ -186,7 +187,11 @@
     button.disabled = lockBusy;
     button.setAttribute('data-testid', 'identity-action-' + kind);
     var iconHost = el('span', 'identity-panel-action-icon');
-    iconHost.appendChild(icon(kind === 'add-passkey' ? 'key' : 'lock'));
+    iconHost.appendChild(icon(
+      kind === 'add-passkey' ? 'key'
+        : kind.indexOf('plugin-') === 0 ? 'machines'
+          : 'lock'
+    ));
     button.appendChild(iconHost);
     var copy = el('span', 'identity-panel-action-copy');
     copy.appendChild(el('span', 'identity-panel-action-label', label));
@@ -358,6 +363,19 @@
     }
 
     var actions = el('div', 'identity-panel-actions');
+    identityMenuPlugins(root && root.Autonomy && root.Autonomy.plugins)
+      .forEach(function (plugin) {
+        actions.appendChild(actionButton(
+          'plugin-' + plugin.id, plugin.label, plugin.identity_detail || '', function () {
+            closePanel();
+            if (typeof root.navigateTo === 'function') {
+              root.navigateTo(plugin.path);
+            } else {
+              root.location.assign(plugin.path);
+            }
+          }
+        ));
+      });
     if (state === 'setup') {
       actions.appendChild(actionButton('add-passkey', 'Add a passkey',
         'Finish setup', function () { openOnboarding(2); }));
@@ -469,7 +487,20 @@
       if (root.document.visibilityState === 'visible') refresh();
     });
     root.addEventListener('autonomy:identity-changed', refresh);
+    root.addEventListener('autonomy:plugins-changed', function () {
+      if (panelOpen) render();
+    });
     refresh();
+  }
+
+  function identityMenuPlugins(plugins) {
+    if (!Array.isArray(plugins)) return [];
+    return plugins.filter(function (plugin) {
+      return plugin && plugin.identity_menu === true
+        && typeof plugin.id === 'string' && plugin.id
+        && typeof plugin.path === 'string' && plugin.path
+        && typeof plugin.label === 'string' && plugin.label;
+    });
   }
 
   if (root && root.document) {
@@ -489,6 +520,7 @@
     identityInitial: identityInitial,
     methodLabel: methodLabel,
     statusLabel: statusLabel,
+    identityMenuPlugins: identityMenuPlugins,
     _state: function () {
       return { status: status, error: loadError, panelOpen: panelOpen, lockBusy: lockBusy };
     },

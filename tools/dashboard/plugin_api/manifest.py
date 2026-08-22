@@ -27,6 +27,12 @@ class PluginAssets(BaseModel):
 class PluginNav(BaseModel):
     model_config = ConfigDict(extra="forbid")
     label: str
+    # A plugin may belong in a contextual shell launcher instead of the
+    # always-visible sidebar.  The shell consumes these generic hints; it
+    # never needs to know which product plugin supplied them.
+    sidebar: bool = True
+    identity_menu: bool = False
+    identity_detail: Optional[str] = None
 
 
 class PluginFrontend(BaseModel):

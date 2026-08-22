@@ -75,4 +75,15 @@ describe('identity indicator state matrix', () => {
     assert.equal(indicator.identityName(value), 'Your identity');
     assert.equal(indicator.identityInitial(value), '?');
   });
+
+  it('selects only well-formed plugins assigned to the identity menu', () => {
+    assert.deepEqual(indicator.identityMenuPlugins([
+      { id: 'fleet', label: 'Machines', path: '/fleet', identity_menu: true },
+      { id: 'testing', label: 'Testing', path: '/testing', identity_menu: false },
+      { id: 'broken', label: '', path: '/broken', identity_menu: true },
+      { id: 'no-path', label: 'No path', identity_menu: true },
+    ]), [
+      { id: 'fleet', label: 'Machines', path: '/fleet', identity_menu: true },
+    ]);
+  });
 });

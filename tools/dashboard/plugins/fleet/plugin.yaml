@@ -1,0 +1,23 @@
+id: fleet
+api_version: 1
+org: autonomy
+
+paths:
+  - /fleet
+
+assets:
+  template: page.html
+  script: page.js
+  style: page.css
+
+nav:
+  label: Machines
+  sidebar: false
+  identity_menu: true
+  identity_detail: Personal fleet
+
+frontend:
+  alpine_root: fleetPage
+
+entrypoints:
+  api: tools.dashboard.plugins.fleet.entrypoints.api:routes

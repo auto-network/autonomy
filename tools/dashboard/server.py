@@ -18253,7 +18253,8 @@ def _make_plugin_fragment_handler(plugin_id: str, template_name: str):
 async def api_plugins(request):
     """Return enabled plugins with sidebar metadata + their effective org.
 
-    Shape: ``{plugins: [{id, label, path, paths, badge_color, alpine_root, org, asset_rev, has_style}]}``
+    Shape: ``{plugins: [{id, label, path, paths, badge_color, alpine_root, org,
+    asset_rev, has_style, sidebar, identity_menu, identity_detail}]}``
     — one entry per currently-enabled plugin. Each plugin's toggle row
     is read from *its own* ``manifest.org``'s DB, so unscoped browser
     requests still see the canonical state (substrate v1.1 fix). The
@@ -18301,6 +18302,9 @@ async def api_plugins(request):
             "org": effective_org,
             "asset_rev": _plugin_asset_rev(p),
             "has_style": bool(p.style),
+            "sidebar": p.manifest.nav.sidebar,
+            "identity_menu": p.manifest.nav.identity_menu,
+            "identity_detail": p.manifest.nav.identity_detail,
             "capability": (
                 p.manifest.capability.model_dump()
                 if p.manifest.capability is not None else None
