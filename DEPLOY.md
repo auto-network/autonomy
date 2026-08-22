@@ -290,6 +290,7 @@ live one.
 | `vault_releases.db` | `VAULT_RELEASES_DB` | durable record of secret releases (paths + deadlines, never plaintext) |
 | `network`/ | `AUTONOMY_NETWORK_KEY_DIR` | mode-0600 auto.network tunnel-serving delegate keys |
 | `repl-login.key` | `REPL_LOGIN_KEY_FILE` | mode-0600 X25519 private key — the HPKE recipient for browser-sealed secure-setting provisioning |
+| `web-push-proof-vapid.pem` | `WEB_PUSH_PROOF_VAPID_KEY` | mode-0600 VAPID sender key for the isolated Web Push proof |
 | `tls.crt` | `AUTONOMY_TLS_CERT` | TLS certificate (self-signed by default) |
 | `tls.key` | `AUTONOMY_TLS_KEY` | TLS private key |
 | `agent-runs`/ | `DASHBOARD_AGENT_RUNS_DIR` | session artifacts |
