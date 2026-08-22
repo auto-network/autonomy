@@ -2,8 +2,11 @@
 # Render a tiled contact sheet of evenly spaced frames from a video.
 # Usage: video-contact-sheet <in-video> <out-image> [--tiles COLSxROWS] [--width PX]
 set -euo pipefail
-BIN="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)/bin"
-[ -x "$BIN/ffmpeg" ] || { echo "video capability not provisioned: $BIN/ffmpeg missing (host-install pending)" >&2; exit 3; }
+TOOLS_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+# shellcheck source=_video-common
+source "$TOOLS_DIR/_video-common"
+FFMPEG=$(video_binary ffmpeg)
+FFPROBE=$(video_binary ffprobe)
 
 IN=${1:?usage: video-contact-sheet <in-video> <out-image> [--tiles COLSxROWS] [--width PX]}
 OUT=${2:?missing output image path}
@@ -18,10 +21,10 @@ while [ $# -gt 0 ]; do
 done
 COLS=${TILES%x*}; ROWS=${TILES#*x}
 N=$((COLS * ROWS))
-DUR=$("$BIN/ffprobe" -v error -show_entries format=duration -of csv=p=0 "$IN")
+DUR=$("$FFPROBE" -v error -show_entries format=duration -of csv=p=0 "$IN")
 # One frame per evenly spaced slice: sample at N/duration frames per second.
 FPS=$(python3 -c "print($N / float('$DUR'))")
-"$BIN/ffmpeg" -y -loglevel error -i "$IN" \
+"$FFMPEG" -y -loglevel error -i "$IN" \
   -vf "fps=$FPS,scale=$WIDTH:-1,tile=${COLS}x${ROWS}" \
   -frames:v 1 -update 1 "$OUT"
 echo "$OUT"

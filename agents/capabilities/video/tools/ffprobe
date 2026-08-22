@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# PATH surface for consumers that need the capability's pinned ffprobe.
+set -euo pipefail
+TOOLS_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+# shellcheck source=_video-common
+source "$TOOLS_DIR/_video-common"
+video_exec ffprobe "$@"

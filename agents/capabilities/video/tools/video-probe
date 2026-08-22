@@ -2,6 +2,8 @@
 # Print a video's format and stream facts as JSON.
 # Usage: video-probe <file>
 set -euo pipefail
-BIN="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)/bin"
-[ -x "$BIN/ffprobe" ] || { echo "video capability not provisioned: $BIN/ffprobe missing (host-install pending)" >&2; exit 3; }
-exec "$BIN/ffprobe" -v error -print_format json -show_format -show_streams "$@"
+TOOLS_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+# shellcheck source=_video-common
+source "$TOOLS_DIR/_video-common"
+FFPROBE=$(video_binary ffprobe)
+exec "$FFPROBE" -v error -print_format json -show_format -show_streams "$@"

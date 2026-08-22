@@ -1,14 +1,37 @@
 ---
 name: video
-description: Video tooling capability. Probe, contact-sheet, scene-detect and convert video files, and compile an image sequence into an animation, using a sha256-pinned static ffmpeg/ffprobe mounted read-only.
+description: Video tooling capability. Capture agent-browser sessions, probe, contact-sheet, scene-detect and convert video files, and compile an image sequence into an animation, using a sha256-pinned static ffmpeg/ffprobe mounted read-only.
 ---
 
 # Video Tooling
 
-Probe, contact-sheet, scene-detect, and convert video files — including
-compiling an image sequence (an evidence step gallery) into an animation —
-with zero per-session installs. The binaries are a sha256-pinned static
-ffmpeg/ffprobe, installed once per host and mounted read-only.
+Capture rendered agent-browser output; probe, contact-sheet, scene-detect, and
+convert video files; and compile an image sequence (an evidence step gallery)
+into an animation with zero per-session installs. The binaries are a
+sha256-pinned static ffmpeg/ffprobe, installed once per host and mounted
+read-only.
+
+## Capture browser motion
+
+Use agent-browser's recorder around the exact interaction being evaluated. It
+creates a fresh browser context while preserving the active session's cookies
+and local storage. Set the viewport before recording and write lasting evidence
+to `/workspace/output/`:
+
+```bash
+agent-browser set viewport 390 844
+agent-browser open https://localhost:8080/sessions
+agent-browser record start /workspace/output/nav-open.webm
+agent-browser click '#nav-toggle'
+agent-browser wait 700
+agent-browser record stop
+```
+
+The recorder calls `ffmpeg` when it stops; this capability exposes its pinned
+binary on `PATH` for that purpose. Always run `record stop`, including after a
+failed interaction, or the output is not finalized. Prefer a short recording
+of one transition over a long browsing session, then inspect it with
+`video-contact-sheet` and `video-scene-detect`.
 
 ## Commands
 
@@ -36,9 +59,11 @@ video-convert --frames '<glob>' <out.{mp4,gif}> [--fps N]
 
 ## If the tools refuse to run
 
-Exit code 3 with "not provisioned" means the host-install has not run on
-this host yet — the pinned ffmpeg is populated by the Capability
-Host-Install Runner (protocol graph://149705db-a39), never by sessions.
+Exit code 3 with "not provisioned", or `agent-browser record stop` reporting
+that ffmpeg is unavailable, means the host-install has not run on this host or
+the workspace did not enable `video_tooling`. The pinned ffmpeg is populated by
+the Capability Host-Install Runner (protocol graph://149705db-a39), never by
+sessions.
 Report it; do not install ffmpeg yourself. On the host, an operator runs
 the runner on demand with `graph capability host-install autonomy/video`
 (idempotent: it fingerprints `install/ffmpeg.pin` and skips when current).

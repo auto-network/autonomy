@@ -1,10 +1,16 @@
 # Video Tooling — primer
 
-You have `video-probe`, `video-contact-sheet`, `video-scene-detect`, and
-`video-convert` on PATH, backed by a host-installed, hash-pinned static
-ffmpeg. No installs are needed or permitted in-session.
+You have `video-probe`, `video-contact-sheet`, `video-scene-detect`,
+`video-convert`, `ffmpeg`, and `ffprobe` on PATH, backed by a host-installed,
+hash-pinned static ffmpeg. No installs are needed or permitted in-session.
 
 Typical uses:
+
+- **Verify browser animation**: set the viewport, run
+  `agent-browser record start /workspace/output/transition.webm`, perform one
+  interaction, and run `agent-browser record stop`. The recorder preserves the
+  active browser session's cookies and storage. Always stop it so ffmpeg can
+  finalize the file; then make a contact sheet from that short recording.
 
 - **Understand a recording before watching it**: `video-probe` for
   duration/dimensions, then `video-contact-sheet rec.mp4 sheet.png` and read
