@@ -219,6 +219,22 @@ def pending_for_session(session: str, db_path: Path | str | None = None) -> dict
         c.close()
 
 
+def pending_all(
+    *, limit: int = 500, db_path: Path | str | None = None,
+) -> list[dict]:
+    """Bounded pending truth for transport/source-cursor reconciliation."""
+    c = _conn(db_path)
+    try:
+        rows = c.execute(
+            "SELECT id,kind,session,created_at FROM approval_requests "
+            "WHERE result IS NULL ORDER BY created_at DESC LIMIT ?",
+            (max(1, min(int(limit), 5000)),),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        c.close()
+
+
 def decided_ids_for_kind(
     kind: str, db_path: Path | str | None = None
 ) -> set[str]:

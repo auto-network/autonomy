@@ -375,6 +375,9 @@
       _dispatchHandler: null,
       _pauseHandler: null,
       _dispatcherStateHandler: null,
+      deviceAlerts: { state: 'loading', label: 'Checking this installed app…' },
+      deviceAlertsBusy: false,
+      deviceAlertsMessage: '',
 
       rangeToParam(range) {
         if (range === '6h') return '6h';
@@ -924,6 +927,70 @@
         }
       },
 
+      async initDeviceAlerts() {
+        if (!window.AutonomyWebPush) {
+          this.deviceAlerts = { state: 'unsupported', label: 'Not supported by this browser' };
+          return;
+        }
+        try {
+          this.deviceAlerts = await window.AutonomyWebPush.state();
+        } catch (err) {
+          this.deviceAlerts = { state: 'error', label: (err && err.message) || String(err) };
+        }
+      },
+
+      async enableDeviceAlerts() {
+        this.deviceAlertsBusy = true;
+        this.deviceAlertsMessage = '';
+        try {
+          this.deviceAlerts = await window.AutonomyWebPush.enroll();
+          await window.AutonomyWebPush.sendTest();
+          this.deviceAlertsMessage = 'Test queued. Leave the app; the OS alert should arrive shortly.';
+        } catch (err) {
+          this.deviceAlertsMessage = (err && err.message) || String(err);
+        } finally {
+          this.deviceAlertsBusy = false;
+        }
+      },
+
+      async testDeviceAlerts() {
+        this.deviceAlertsBusy = true;
+        this.deviceAlertsMessage = '';
+        try {
+          await window.AutonomyWebPush.sendTest();
+          this.deviceAlertsMessage = 'Test queued. Leave the app; the OS alert should arrive shortly.';
+        } catch (err) {
+          this.deviceAlertsMessage = (err && err.message) || String(err);
+        } finally {
+          this.deviceAlertsBusy = false;
+        }
+      },
+
+      async disableDeviceAlerts() {
+        this.deviceAlertsBusy = true;
+        this.deviceAlertsMessage = '';
+        try {
+          this.deviceAlerts = await window.AutonomyWebPush.disable();
+          this.deviceAlertsMessage = 'Device alerts are off on this installed app.';
+        } catch (err) {
+          this.deviceAlertsMessage = (err && err.message) || String(err);
+        } finally {
+          this.deviceAlertsBusy = false;
+        }
+      },
+
+      openFocusedApproval() {
+        const params = new URLSearchParams(window.location.search || '');
+        const id = params.get('id');
+        if (params.get('focus') !== 'approval' ||
+            !id || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) return;
+        this.$nextTick(() => {
+          if (typeof window.openApprovalOverlay === 'function') {
+            window.openApprovalOverlay(id);
+          }
+        });
+      },
+
       init() {
         if (window._sseCache && window._sseCache.dispatch) {
           this.applyDispatch(window._sseCache.dispatch);
@@ -953,6 +1020,8 @@
         window.addEventListener('hashchange', this._hashHandler);
         this._intervalId = setInterval(() => this.refreshTimeline(), 15000);
         this._initAsks();
+        this.initDeviceAlerts();
+        this.openFocusedApproval();
       },
 
       destroy() {

@@ -282,6 +282,7 @@ live one.
 | `auth.db` | `AUTH_DB` | dashboard auth store |
 | `dispatch.db` | `DISPATCH_DB` | dispatch operational store |
 | `approval_requests.db` | `APPROVAL_REQUESTS_DB` | approval-request store |
+| `web-push.db` | `WEB_PUSH_DB` | Web Push subscriptions and bounded transport outbox (never inbox truth) |
 | `commit_workflow.db` | `COMMIT_WORKFLOW_DB` | commit-workflow store |
 | `mission_control.db` | `MISSION_CONTROL_DB` | Mission Control store (missions + site revisions) |
 | `mcp_relay.db` | `MCP_RELAY_DB` | MCP-relay peer store (per-openai-session org bindings + crosstalk grants) |
@@ -291,6 +292,7 @@ live one.
 | `network`/ | `AUTONOMY_NETWORK_KEY_DIR` | mode-0600 auto.network tunnel-serving delegate keys |
 | `repl-login.key` | `REPL_LOGIN_KEY_FILE` | mode-0600 X25519 private key — the HPKE recipient for browser-sealed secure-setting provisioning |
 | `web-push-proof-vapid.pem` | `WEB_PUSH_PROOF_VAPID_KEY` | mode-0600 VAPID sender key for the isolated Web Push proof |
+| `web-push-vapid.pem` | `WEB_PUSH_VAPID_KEY` | mode-0600 stable VAPID sender key for Dashboard Web Push |
 | `tls.crt` | `AUTONOMY_TLS_CERT` | TLS certificate (self-signed by default) |
 | `tls.key` | `AUTONOMY_TLS_KEY` | TLS private key |
 | `agent-runs`/ | `DASHBOARD_AGENT_RUNS_DIR` | session artifacts |

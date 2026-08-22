@@ -2843,6 +2843,12 @@
           const kind = this._approvalKinds[r.kind];
           if (!kind) throw new Error('unknown approval kind: ' + r.kind);
           await kind.open(this, r);
+          // This is the transport-neutral applied/rendered acknowledgment.
+          // A visible client may cancel the delayed OS fallback only after the
+          // exact approval has been fetched and its kind-specific UI applied.
+          if (document.visibilityState === 'visible' && window.AutonomyWebPush) {
+            window.AutonomyWebPush.acknowledgeApproval(r.id).catch(() => {});
+          }
         } catch (e) {
           _toast('Could not load the approval request: ' + (e.message || e), 'error');
         } finally {

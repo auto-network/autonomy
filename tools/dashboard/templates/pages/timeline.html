@@ -720,6 +720,44 @@
 
   <!-- Notifications tab body -->
   <div x-show="tab === 'notifications'" data-testid="activity-notifications" style="display:none">
+    <div class="rounded-xl border border-gray-700 bg-gray-900/70 p-4 mb-5"
+         data-testid="device-alerts-card">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <div class="text-sm font-semibold text-gray-100">Device alerts</div>
+          <div class="text-sm text-gray-400 mt-1" x-text="deviceAlerts.label"></div>
+          <div class="text-xs mt-2"
+               :class="deviceAlertsMessage.indexOf('queued') >= 0 || deviceAlertsMessage.indexOf('off') >= 0
+                 ? 'text-emerald-300' : 'text-amber-300'"
+               x-show="deviceAlertsMessage" x-text="deviceAlertsMessage"></div>
+        </div>
+        <span class="inline-flex rounded-full px-2.5 py-1 text-xs"
+              :class="deviceAlerts.state === 'subscribed'
+                ? 'bg-emerald-500/15 text-emerald-300'
+                : 'bg-gray-800 text-gray-400'"
+              x-text="deviceAlerts.state === 'subscribed' ? 'On' : 'Off'"></span>
+      </div>
+      <div class="flex flex-wrap gap-2 mt-4">
+        <button type="button"
+                x-show="deviceAlerts.state !== 'subscribed'"
+                :disabled="deviceAlertsBusy || deviceAlerts.state === 'unsupported' || deviceAlerts.state === 'needs_install' || deviceAlerts.state === 'denied'"
+                @click="enableDeviceAlerts()"
+                class="rounded-lg bg-indigo-500 text-gray-950 font-semibold px-4 py-2 text-sm disabled:opacity-40"
+                data-testid="device-alerts-enable"
+                x-text="deviceAlertsBusy ? 'Working…' : 'Enable and send test'"></button>
+        <button type="button" x-show="deviceAlerts.state === 'subscribed'"
+                :disabled="deviceAlertsBusy" @click="testDeviceAlerts()"
+                class="rounded-lg bg-indigo-500 text-gray-950 font-semibold px-4 py-2 text-sm disabled:opacity-40"
+                data-testid="device-alerts-test">Send test</button>
+        <button type="button" x-show="deviceAlerts.state === 'subscribed'"
+                :disabled="deviceAlertsBusy" @click="disableDeviceAlerts()"
+                class="rounded-lg bg-gray-800 text-gray-200 font-semibold px-4 py-2 text-sm disabled:opacity-40"
+                data-testid="device-alerts-disable">Turn off on this app</button>
+      </div>
+      <p class="text-xs text-gray-500 mt-3">
+        Alerts are generic on the lock screen. Closing one never marks an item seen or makes a decision.
+      </p>
+    </div>
     <!-- Zoom toolbar (compact / normal / expanded) — mirrors Attention -->
     <template x-if="visibleAskCards().length > 0">
       <div class="mb-4" data-testid="activity-notifications-zoom" role="toolbar" aria-label="Notifications zoom">

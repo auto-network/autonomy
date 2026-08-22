@@ -132,7 +132,7 @@ from tools.dashboard import unlock_routes
 from tools.dashboard import vault_routes
 from tools.dashboard import api_auth, route_policy
 from tools.dashboard import network_routes
-from tools.dashboard import web_push_proof
+from tools.dashboard import web_push, web_push_proof
 if os.environ.get("DASHBOARD_MOCK"):
     from tools.dashboard.dao import mock as dao_beads
     from tools.dashboard.dao import mock as dao_dispatch
@@ -18653,6 +18653,7 @@ routes = [
     Route("/api/events/replay", api_events_replay),
     Route("/api/web-push/proof/config", web_push_proof.api_config),
     Route("/api/web-push/proof/send", web_push_proof.api_send, methods=["POST"]),
+    *web_push.ROUTES,
 
     # Diag round-trip — file/server/bus/client alignment
     Route("/api/diag/sessions", api_diag_sessions),
@@ -19159,6 +19160,15 @@ async def _on_startup():
             raise
         except Exception:
             logger.exception("ensure_bootstrap_orgs() failed; continuing startup")
+        await web_push.start_worker()
+        try:
+            await web_push.reconcile_approval_attention(
+                approvals_routes.push_eligible_kind,
+            )
+        except Exception:
+            logger.exception(
+                "Web Push approval reconciliation failed; periodic sends remain active"
+            )
 
     # Personal fleet synchronization owns one in-process scheduler. It starts
     # idle before unlock/runtime credentials are available, so zero-peer,
@@ -19441,6 +19451,10 @@ async def _on_shutdown():
     global _settings_mediator_started, _serving_bootstrap_task
     global _event_proxy_task
     global _vault_release_sweeper_task
+    try:
+        await web_push.stop_worker()
+    except Exception:
+        logger.exception("error stopping the Web Push worker")
     # Clear the emit hook so a subsequent process / test reload doesn't
     # leak a stale binding into a swapped module-level event_bus.
     try:
