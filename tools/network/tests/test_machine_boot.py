@@ -215,3 +215,40 @@ def test_root_holder_bootstrap_refuses_after_roster_exists(machine):
         machine_boot.accept_local_bootstrap(
             second, anchor_root_pub=root.public_hex
         )
+
+
+def test_first_boot_marks_joining(machine):
+    """Presenting a fleet invite marks the machine joining, before any id."""
+    _root, invite = _invite()
+    assert machine_boot.is_joining() is False
+    machine_boot.first_boot(invite)
+    assert machine_boot.is_joining() is True
+    assert machine_boot.has_identity() is False  # no durable id yet
+
+
+def test_mark_joining_from_env_present(machine, monkeypatch):
+    """A node booted with AUTONOMY_FLEET_INVITE is marked joining at startup."""
+    _root, invite = _invite()
+    monkeypatch.setenv("AUTONOMY_FLEET_INVITE", fleet_invite.encode(invite))
+    assert machine_boot.mark_joining_from_env() is True
+    assert machine_boot.is_joining() is True
+
+
+def test_mark_joining_from_env_absent_is_noop(machine, monkeypatch):
+    monkeypatch.delenv("AUTONOMY_FLEET_INVITE", raising=False)
+    assert machine_boot.mark_joining_from_env() is False
+    assert machine_boot.is_joining() is False
+
+
+def test_mark_joining_from_env_skips_when_enrolled(machine, monkeypatch):
+    """An already-enrolled machine ignores a stale invite in the environment."""
+    root, invite = _invite()
+    request, _code = machine_boot.first_boot(invite)
+    delivery = _approved(root, invite, request)
+    machine_boot.complete_enrollment(
+        delivery, request, bytes.fromhex(root.private_hex),
+        invite=invite, channel_binding=CHANNEL,
+    )
+    assert machine_boot.has_identity() is True
+    monkeypatch.setenv("AUTONOMY_FLEET_INVITE", fleet_invite.encode(invite))
+    assert machine_boot.mark_joining_from_env() is False
