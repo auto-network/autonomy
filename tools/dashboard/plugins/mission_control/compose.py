@@ -408,7 +408,8 @@ _SRCDOC_BASE = '<base href="about:srcdoc">\n'
 
 def compose_screen(mission_id: str, pillar_id: str | None = None, *,
                    framed: bool = False, may_write: bool = True,
-                   viewer: str | None = None) -> bytes | None:
+                   viewer: str | None = None,
+                   include_sessions: bool | None = None) -> bytes | None:
     """One screen as a complete document, or None if there is nothing to serve.
 
     *framed* is True when this document will be handed to a sandboxed frame as
@@ -449,7 +450,10 @@ def compose_screen(mission_id: str, pillar_id: str | None = None, *,
         _HEAD
         + (_SRCDOC_BASE if framed else "")
         + _state_block(dict(mission_state(mission_id, pillar_id,
-                                          include_sessions=not framed),
+                                          include_sessions=(
+                                              include_sessions
+                                              if include_sessions is not None
+                                              else not framed)),
                             may_write=may_write, me=viewer))
         + "<script>\n" + bootstrap_source() + "\n</script>\n"
         + author_html
