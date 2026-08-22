@@ -568,14 +568,18 @@ CODEX_HARNESS = CodexSessionHarness()
 # auto-ngis4: harness + model are optional (additive) so legacy envelopes
 # without those attrs continue to parse and pre-existing callers see the
 # same group set. Named groups insulate consumers from positional shifts.
+# ANY well-formed envelope, not one attribute inventory. The old pattern
+# hardcoded the operator-send attribute set in order, so every envelope a
+# substrate feature minted with its own attributes (mission-question's
+# kind/mission/entry_id, surface pings) failed the fullmatch and rendered
+# as raw XML in a user bubble. The attributes are data; the parser's only
+# job is the envelope shape.
 _CROSSTALK_RE = re.compile(
-    r'<crosstalk\s+from="(?P<from_>[^"]+)"\s+label="(?P<label>[^"]*)"'
-    r'\s+source="(?P<source>[^"]*)"\s+turn="(?P<turn>[^"]*)"'
-    r'(?:\s+harness="(?P<harness>[^"]*)")?'
-    r'(?:\s+model="(?P<model>[^"]*)")?'
-    r'\s+timestamp="(?P<timestamp>[^"]+)">\n(?P<body>.*)\n</crosstalk>',
+    r'<crosstalk\s+(?P<attrs>[\w-]+="[^"]*"(?:\s+[\w-]+="[^"]*")*)\s*>\n'
+    r'(?P<body>.*)\n</crosstalk>',
     re.DOTALL,
 )
+_CROSSTALK_ATTR_RE = re.compile(r'([\w-]+)="([^"]*)"')
 
 
 def _graph_db_path() -> str | None:
@@ -590,14 +594,20 @@ def _classify_crosstalk(text: str) -> dict | None:
     body = m.group("body")
     if "</crosstalk>" in body:
         return None
+    attrs = dict(_CROSSTALK_ATTR_RE.findall(m.group("attrs")))
+    sender = attrs.get("from", "")
+    if not sender:
+        return None
     return {
-        "from": m.group("from_"),
-        "label": m.group("label"),
-        "source": m.group("source"),
-        "turn": m.group("turn"),
-        "timestamp": m.group("timestamp"),
-        "harness": m.group("harness") or "",
-        "model": m.group("model") or "",
+        "from": sender,
+        # A substrate envelope has no label; its kind is the honest one.
+        "label": attrs.get("label") or attrs.get("kind") or sender,
+        "source": attrs.get("source", ""),
+        "turn": attrs.get("turn", ""),
+        "timestamp": attrs.get("timestamp", ""),
+        "harness": attrs.get("harness", ""),
+        "model": attrs.get("model", ""),
+        "kind": attrs.get("kind", ""),
         "message": body,
     }
 
