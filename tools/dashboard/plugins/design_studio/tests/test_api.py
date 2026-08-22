@@ -203,6 +203,31 @@ def test_list_designs_filters_by_status_and_query():
     assert data["designs"][0]["design_id"] == "series-a"
 
 
+def test_catalog_preserves_latest_nonempty_creator_link():
+    rows = _rows() + [{
+        "id": "rev-a3",
+        "design_id": "series-a",
+        "title": "Session card final",
+        "description": "Latest pass without repeated creator metadata",
+        "status": "pending",
+        "revision_seq": 3,
+        "created_at": "2026-03-01 12:00:00",
+        "creator_session_id": "",
+        "creator_session_label": "",
+        "variant_count": 1,
+        "has_fixture": False,
+    }]
+
+    with patch.object(design_api, "_design_rows", return_value=rows):
+        resp = _client().get("/api/design-studio/designs?q=auto-designer")
+
+    assert resp.status_code == 200
+    design = resp.json()["designs"][0]
+    assert design["latest_revision_id"] == "rev-a3"
+    assert design["creator_session_id"] == "auto-designer"
+    assert design["creator_session_label"] == "Designer"
+
+
 def test_list_designs_uses_older_revision_thumbnail_when_latest_has_none():
     def thumbnail_url(rev_id: str) -> str:
         return "/thumb/rev-a1" if rev_id == "rev-a1" else ""

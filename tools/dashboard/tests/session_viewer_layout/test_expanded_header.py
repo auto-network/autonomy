@@ -33,6 +33,20 @@ def test_title_not_contenteditable(test_client):
         )
 
 
+def test_live_unset_identity_balances_badge_with_session_id(test_client):
+    """A new live session should look intentional before metadata arrives."""
+    resp = test_client.get("/pages/session-view")
+    assert resp.status_code == 200
+    html = resp.text
+
+    assert 'data-testid="session-role-placeholder"' in html
+    assert "x-show=\"isLive && sessionType !== 'host' && !role\"" in html
+    assert '>New Session</span>' in html
+    # Both live and ended untitled sessions keep their stable machine
+    # identifier beneath the badge/title row.
+    assert html.count('x-text="_label || _tmuxSession"') == 2
+
+
 def test_expanded_block_references_required_getters(test_client):
     """Expanded block must reference the data it renders in the drawer."""
     resp = test_client.get("/pages/session-view")

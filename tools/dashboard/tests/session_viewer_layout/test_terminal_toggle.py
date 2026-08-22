@@ -50,6 +50,25 @@ def test_header_background_button_rendered_for_claude_harness(test_client):
         "Header Ctrl-B button must be gated on isClaudeHarness"
 
 
+def test_header_links_back_to_linked_design_studio_experiment(test_client):
+    """A linked design gets one compact return control before ESC."""
+    page = test_client.get("/pages/session-view")
+    assert page.status_code == 200
+    html = page.text
+    assert 'data-testid="session-design-link"' in html
+    assert 'x-show="!!linkedDesign"' in html
+    assert 'openLinkedDesign()' in html
+    assert html.index('session-design-link') < html.index('sv-term-escape')
+
+    script = test_client.get("/static/js/pages/session-viewer.js")
+    assert script.status_code == 200
+    body = script.text
+    assert "'session-design:' + sessionId" in body
+    assert '/api/design-studio/designs?' in body
+    assert "design.creator_session_id === sessionId" in body
+    assert "'/design/' + encodeURIComponent(revisionId)" in body
+
+
 def test_tile_background_button_rendered_for_claude_harness(test_client):
     """Running tool tiles in Claude harness sessions get a Ctrl-B button next
     to the existing Esc interrupt button."""

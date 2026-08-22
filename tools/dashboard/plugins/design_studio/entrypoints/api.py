@@ -327,6 +327,14 @@ def _series_from_rows(rows: list[dict]) -> list[dict]:
             for r in revisions
             if r.get("creator_session_id")
         ]
+        # A revision may omit creator metadata when it was appended through a
+        # direct API client. Preserve the design's most recent real session
+        # link, matching agents.design_db.get_design(), instead of making the
+        # catalog presence and session-viewer return path disappear.
+        linked_revision = next(
+            (r for r in reversed(revisions) if r.get("creator_session_id")),
+            {},
+        )
         created_values = [str(r.get("created_at") or "") for r in revisions if r.get("created_at")]
         first_created = min(created_values) if created_values else ""
         latest_created = max(created_values) if created_values else ""
@@ -349,8 +357,8 @@ def _series_from_rows(rows: list[dict]) -> list[dict]:
             "has_fixture": any(bool(r.get("has_fixture")) for r in revisions),
             "first_created_at": first_created,
             "latest_created_at": latest_created,
-            "creator_session_id": latest.get("creator_session_id") or "",
-            "creator_session_label": latest.get("creator_session_label") or "",
+            "creator_session_id": linked_revision.get("creator_session_id") or "",
+            "creator_session_label": linked_revision.get("creator_session_label") or "",
             "creator_session_count": len(set(creators)),
             "thumbnail_url": thumbnail_url,
         })
@@ -376,7 +384,10 @@ async def list_designs(request: Request) -> JSONResponse:
     direction = request.query_params.get("direction") or "desc"
     limit = max(1, min(_coerce_int(request.query_params.get("limit"), 250), 500))
 
-    all_series = _all_series()
+    # Queries are also the lightweight reverse-lookup path used by the
+    # session viewer. Bypass the ten-second gallery cache so navigating from a
+    # freshly linked design cannot briefly lose its return control.
+    all_series = _series_from_rows(_design_rows()) if query else _all_series()
     filtered = [
         row for row in all_series
         if (statuses is None or row.get("status") in statuses)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
@@ -60,3 +62,38 @@ def test_design_create_returns_conflict_and_requires_boolean_force(monkeypatch):
     assert forced.status_code == 201
     assert forced.json() == {"id": "forced-revision"}
     assert [call["force"] for call in calls] == [False, False, True]
+
+
+def test_design_create_broadcasts_reverse_link_to_creator_session(monkeypatch):
+    monkeypatch.setattr(server, "create_design", lambda **_kwargs: "revision-3")
+    monkeypatch.setattr(server, "get_design", lambda _revision_id: {
+        "design_id": "design-1",
+        "revision_seq": 3,
+        "title": "Session header polish",
+        "linked_session": "auto-designer",
+    })
+    broadcast = AsyncMock()
+    monkeypatch.setattr(server.event_bus, "broadcast", broadcast)
+    app = Starlette(routes=[Route("/api/design", server.api_design_create, methods=["POST"])])
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/design",
+            json={
+                "title": "Session header polish",
+                "creator_session_id": "auto-designer",
+                "variants": [{"id": "main", "html": "<main/>"}],
+            },
+        )
+
+    assert response.status_code == 201
+    assert [call.args[0] for call in broadcast.await_args_list] == [
+        "design:design-1",
+        "session-design:auto-designer",
+    ]
+    assert broadcast.await_args_list[1].args[1] == {
+        "revision_id": "revision-3",
+        "latest_revision_id": "revision-3",
+        "design_id": "design-1",
+        "title": "Session header polish",
+    }
