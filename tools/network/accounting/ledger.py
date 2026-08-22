@@ -23,8 +23,9 @@ from tools.network.idkit import canonical_json, load_public_key
 from tools.network.idkit.errors import IdkitError
 
 from .batch import UsageBatch, UsageBatchError
+from .progress import UsageProgress, UsageProgressError
 
-LEDGER_SCHEMA_VERSION = 1
+LEDGER_SCHEMA_VERSION = 2
 
 
 class UsageLedgerError(RuntimeError):
@@ -78,6 +79,14 @@ class LedgerHealth:
     streams: int
     streams_with_gaps: int
     missing_sequences: int
+
+
+@dataclass(frozen=True)
+class ProgressReceipt:
+    progress_id: str
+    checksum: str
+    accepted: bool
+    organization_closed_through: int | None
 
 
 def _raise_sqlite(exc: sqlite3.Error) -> None:
@@ -193,12 +202,25 @@ class UsageLedger:
                 "highest_sequence INTEGER NOT NULL, "
                 "PRIMARY KEY(producer, organization_id))"
             )
+            self._db.execute(
+                "CREATE TABLE IF NOT EXISTS producer_progress ("
+                "producer TEXT NOT NULL, organization_id TEXT NOT NULL, "
+                "sequence INTEGER NOT NULL, closed_through INTEGER NOT NULL, "
+                "progress_id TEXT NOT NULL UNIQUE, checksum TEXT NOT NULL, "
+                "wire BLOB NOT NULL, accepted_at INTEGER NOT NULL, "
+                "PRIMARY KEY(producer, organization_id))"
+            )
             row = self._db.execute(
                 "SELECT value FROM ledger_meta WHERE key='schema_version'"
             ).fetchone()
             if row is None:
                 self._db.execute(
                     "INSERT INTO ledger_meta(key, value) VALUES('schema_version', ?)",
+                    (str(LEDGER_SCHEMA_VERSION),),
+                )
+            elif row == ("1",):
+                self._db.execute(
+                    "UPDATE ledger_meta SET value=? WHERE key='schema_version'",
                     (str(LEDGER_SCHEMA_VERSION),),
                 )
             elif row != (str(LEDGER_SCHEMA_VERSION),):
@@ -315,6 +337,16 @@ class UsageLedger:
                         )
                     return self._receipt(batch, accepted=False)
 
+                progress = self._db.execute(
+                    "SELECT sequence, closed_through FROM producer_progress "
+                    "WHERE producer=? AND organization_id=?",
+                    (batch.producer, batch.organization_id),
+                ).fetchone()
+                if progress is not None and batch.interval_end <= int(progress[1]):
+                    raise UsageLedgerConflict(
+                        "usage arrived at or before the producer's closed watermark"
+                    )
+
                 same_sequence = self._db.execute(
                     "SELECT batch_id, checksum FROM accepted_batches "
                     "WHERE producer=? AND organization_id=? AND sequence=?",
@@ -323,6 +355,27 @@ class UsageLedger:
                 if same_sequence is not None:
                     raise UsageLedgerConflict(
                         "producer sequence already names a different batch"
+                    )
+
+                previous = self._db.execute(
+                    "SELECT interval_end FROM accepted_batches WHERE producer=? "
+                    "AND organization_id=? AND sequence<? "
+                    "ORDER BY sequence DESC LIMIT 1",
+                    (batch.producer, batch.organization_id, batch.sequence),
+                ).fetchone()
+                following = self._db.execute(
+                    "SELECT interval_end FROM accepted_batches WHERE producer=? "
+                    "AND organization_id=? AND sequence>? "
+                    "ORDER BY sequence LIMIT 1",
+                    (batch.producer, batch.organization_id, batch.sequence),
+                ).fetchone()
+                if previous is not None and int(previous[0]) >= batch.interval_end:
+                    raise UsageLedgerConflict(
+                        "producer sequences must follow increasing intervals"
+                    )
+                if following is not None and int(following[0]) <= batch.interval_end:
+                    raise UsageLedgerConflict(
+                        "producer sequences must follow increasing intervals"
                     )
 
                 self._db.execute(
@@ -346,6 +399,122 @@ class UsageLedger:
                 )
                 self._advance_stream(batch)
                 return self._receipt(batch, accepted=True)
+
+    def accept_progress(self, wire: bytes | str) -> ProgressReceipt:
+        """Commit a signed idle-inclusive producer closure watermark."""
+        try:
+            progress = UsageProgress.from_json(wire)
+        except UsageProgressError as exc:
+            raise UsageLedgerCorrupt("invalid signed usage progress") from exc
+        encoded = progress.to_json()
+        with self._mutex:
+            self._require_open()
+            with self._transaction():
+                authorization = self._db.execute(
+                    "SELECT enabled FROM producer_authorizations "
+                    "WHERE producer=? AND organization_id=?",
+                    (progress.producer, progress.organization_id),
+                ).fetchone()
+                if authorization is None or authorization[0] != 1:
+                    raise UsageLedgerAuthorizationError(
+                        "producer is not enabled for this organization"
+                    )
+                current = self._db.execute(
+                    "SELECT sequence, closed_through, progress_id, checksum, wire "
+                    "FROM producer_progress WHERE producer=? AND organization_id=?",
+                    (progress.producer, progress.organization_id),
+                ).fetchone()
+                if current is not None and current[2] == progress.progress_id:
+                    if current[3] != progress.checksum or bytes(current[4]) != encoded:
+                        raise UsageLedgerConflict(
+                            "usage progress identity has different content"
+                        )
+                    return self._progress_receipt(progress, accepted=False)
+                if current is not None and (
+                    progress.sequence < int(current[0])
+                    or progress.closed_through <= int(current[1])
+                ):
+                    raise UsageLedgerConflict("usage progress must advance monotonically")
+
+                state = self._db.execute(
+                    "SELECT contiguous_sequence FROM stream_state "
+                    "WHERE producer=? AND organization_id=?",
+                    (progress.producer, progress.organization_id),
+                ).fetchone()
+                contiguous = 0 if state is None else int(state[0])
+                if progress.sequence > contiguous:
+                    raise UsageLedgerConflict(
+                        "usage progress cannot pass an unaccepted producer sequence"
+                    )
+                outside = self._db.execute(
+                    "SELECT 1 FROM accepted_batches WHERE producer=? "
+                    "AND organization_id=? AND ((sequence<=? AND interval_end>?) "
+                    "OR (sequence>? AND interval_end<=?)) LIMIT 1",
+                    (
+                        progress.producer,
+                        progress.organization_id,
+                        progress.sequence,
+                        progress.closed_through,
+                        progress.sequence,
+                        progress.closed_through,
+                    ),
+                ).fetchone()
+                if outside is not None:
+                    raise UsageLedgerConflict(
+                        "usage progress sequence and interval closure disagree"
+                    )
+                self._db.execute(
+                    "INSERT INTO producer_progress("
+                    "producer, organization_id, sequence, closed_through, "
+                    "progress_id, checksum, wire, accepted_at"
+                    ") VALUES(?, ?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(producer, organization_id) DO UPDATE SET "
+                    "sequence=excluded.sequence, closed_through=excluded.closed_through, "
+                    "progress_id=excluded.progress_id, checksum=excluded.checksum, "
+                    "wire=excluded.wire, accepted_at=excluded.accepted_at",
+                    (
+                        progress.producer,
+                        progress.organization_id,
+                        progress.sequence,
+                        progress.closed_through,
+                        progress.progress_id,
+                        progress.checksum,
+                        encoded,
+                        int(time.time()),
+                    ),
+                )
+                return self._progress_receipt(progress, accepted=True)
+
+    def _progress_receipt(
+        self, progress: UsageProgress, *, accepted: bool
+    ) -> ProgressReceipt:
+        return ProgressReceipt(
+            progress_id=progress.progress_id,
+            checksum=progress.checksum,
+            accepted=accepted,
+            organization_closed_through=self.organization_closed_through(
+                progress.organization_id
+            ),
+        )
+
+    def organization_closed_through(self, organization_id: str) -> int | None:
+        """Return the minimum closure across every currently enabled binding."""
+        with self._mutex:
+            self._require_open()
+            try:
+                row = self._db.execute(
+                    "SELECT COUNT(*), COUNT(p.closed_through), MIN(p.closed_through) "
+                    "FROM producer_authorizations a LEFT JOIN producer_progress p "
+                    "ON p.producer=a.producer "
+                    "AND p.organization_id=a.organization_id "
+                    "WHERE a.organization_id=? AND a.enabled=1",
+                    (organization_id,),
+                ).fetchone()
+            except sqlite3.Error as exc:
+                _raise_sqlite(exc)
+        if row[0] == 0 or row[0] != row[1]:
+            return None
+        return int(row[2])
 
     def _advance_stream(self, batch: UsageBatch) -> None:
         state = self._db.execute(

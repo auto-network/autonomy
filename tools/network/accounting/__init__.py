@@ -35,6 +35,7 @@ from .ledger import (
     LEDGER_SCHEMA_VERSION,
     IngestReceipt,
     LedgerHealth,
+    ProgressReceipt,
     StreamReconciliation,
     UsageLedger,
     UsageLedgerAuthorizationError,
@@ -43,6 +44,13 @@ from .ledger import (
     UsageLedgerError,
     UsageLedgerIOError,
     UsageLedgerLocked,
+)
+from .progress import (
+    USAGE_PROGRESS_VERSION,
+    UsageProgress,
+    UsageProgressError,
+    UsageProgressMalformed,
+    UsageProgressSignatureError,
 )
 
 __all__ = [
@@ -70,6 +78,7 @@ __all__ = [
     "LEDGER_SCHEMA_VERSION",
     "IngestReceipt",
     "LedgerHealth",
+    "ProgressReceipt",
     "StreamReconciliation",
     "UsageLedger",
     "UsageLedgerAuthorizationError",
@@ -78,4 +87,9 @@ __all__ = [
     "UsageLedgerError",
     "UsageLedgerIOError",
     "UsageLedgerLocked",
+    "USAGE_PROGRESS_VERSION",
+    "UsageProgress",
+    "UsageProgressError",
+    "UsageProgressMalformed",
+    "UsageProgressSignatureError",
 ]
