@@ -108,6 +108,16 @@
   .mc-qa-state{font-size:.68rem;color:var(--ink3);text-transform:uppercase;
     letter-spacing:.05em;margin-top:7px}
   .mc-qa-ask{display:flex;justify-content:flex-start;margin:4px 0 0}
+  .mc-subtabs{display:flex;gap:14px;margin:0 0 12px;border-bottom:1px solid var(--line);
+    overflow-x:auto;scrollbar-width:none}
+  .mc-subtabs::-webkit-scrollbar{display:none}
+  .mc-subtabs button{background:none;border:0;cursor:pointer;font:inherit;
+    font-size:.78rem;color:var(--ink3);padding:7px 2px;flex:none;
+    border-bottom:2px solid transparent;margin-bottom:-1px;white-space:nowrap}
+  .mc-subtabs button .n{font-size:.68rem;color:var(--ink3);opacity:.8}
+  .mc-subtabs button.on{color:var(--ink);border-color:var(--line2)}
+  .mc-group{font-size:.72rem;color:var(--ink3);letter-spacing:.06em;
+    text-transform:uppercase;margin:16px 0 8px}
   .mc-news .body{margin-top:2px}
   .mc-news-foot{display:flex;justify-content:flex-end;margin-top:6px}
   .mc-news-reply{background:none;border:0;cursor:pointer;font:600 .74rem/1 inherit;
@@ -385,6 +395,7 @@
     // IS the status screen, and its tab says so. It stays home: tapping
     // it clears any pillar filter and returns to the summary.
     {id: "overview",  label: "Status"},
+    {id: "pillars",   label: "Pillars"},
     {id: "decisions", label: "Decisions"},
     {id: "questions", label: "Questions"},
     {id: "news",      label: "News"},
@@ -395,8 +406,7 @@
     var b = el("button", null, t.label);
     b.id = "tab-" + t.id;
     b.addEventListener("click", function () {
-      if (t.id === "overview") gotoSurface(null);
-      else show(t.id);
+      show(t.id === "overview" ? MID : t.id);
     });
     tabsHost.appendChild(b);
   });
@@ -444,11 +454,6 @@
   // mission-wide.
   function viewScope(){
     var v = pillarFilter || "";
-    if (!v){
-      var cv = currentView;
-      if (cv && cv !== MID &&
-          PILLARS.some(function (p) { return p.pillar_id === cv; })) v = cv;
-    }
     if (!v) return null;
     return function (it) { return it.surface_id === v; };
   }
@@ -461,10 +466,7 @@
     note.appendChild(dot(surfColor(pillarFilter)));
     note.appendChild(document.createTextNode(
       " Filtered to " + surfName(pillarFilter) + " \u2014 show all"));
-    note.addEventListener("click", function () {
-      if (isOverviewFamily(currentView)) gotoSurface(null);
-      else togglePillar(pillarFilter);
-    });
+    note.addEventListener("click", function () { togglePillar(pillarFilter); });
     var nav = document.getElementById("mc-nav");
     nav.parentNode.insertBefore(note, nav.nextSibling);
   }
@@ -605,10 +607,20 @@
       c.title = "Open in " + surfName(it.surface_id);
       c.addEventListener("click", function (ev) {
         if (ev.target.closest("a,button,summary")) return;
-        show(it.surface_id === MID ? MID : it.surface_id);
+        if (pillarFilter && pillarFilter !== it.surface_id) {
+          pillarFilter = it.surface_id;
+          var fv = document.getElementById("view-feed");
+          if (fv) fv.dataset.filter = pillarFilter;
+          applyGlance();
+        }
+        show("pillars");
         var target = document.querySelector(
           '.mc-view [data-mc-anchor="' + it.key + '"]');
         if (target){
+          var pv = document.getElementById("view-pillars");
+          var secEl = target.closest("section.mc-sec");
+          if (pv && pv._showSection && secEl && secEl.dataset.sec)
+            pv._showSection(secEl.dataset.sec);
           var fold = target.closest("details.mc-finished");
           if (fold) fold.open = true;
           target.scrollIntoView({behavior:"smooth", block:"center"});
@@ -745,31 +757,57 @@
 
   // ── per-surface view builder ────────────────────────────────────
   function surfaceView(sid){
-    var v = el("div","mc-view"); v.id = "view-"+sid;
-    var mine = liveItems.filter(function (it) { return it.surface_id===sid; })
+    var v = el("div","mc-view"); v.id = "view-"+(sid || "pillars");
+    var mine = (sid ? liveItems.filter(function (it) { return it.surface_id===sid; })
+                    : liveItems.slice())
       .sort(function (a,b){ return (a.order||0)-(b.order||0) ||
         String(a.title).localeCompare(String(b.title)); });
     if (!mine.length){
       var em = el("div","mc-empty");
       em.appendChild(document.createTextNode("No items yet. Add the first: "));
-      var code = el("code",null,'graph mission add '+surfName(sid).toLowerCase()+
+      var code = el("code",null,'graph mission add '+
+        (sid ? surfName(sid).toLowerCase() : "<pillar>")+
         ' <item-id> --kind work --title "…"');
       em.appendChild(code); v.appendChild(em);
       return v;
     }
+    var showSurf = !sid;
     var sections = {};
     mine.forEach(function (it) {
-      var sec = it.section || SECTION_OF[it.kind] || "The work";
-      (sections[sec] = sections[sec] || []).push(it);
+      var canon = (it.section && SECTION_ORDER.indexOf(it.section) >= 0)
+        ? it.section : (SECTION_OF[it.kind] || "The work");
+      (sections[canon] = sections[canon] || []).push(it);
     });
-    var names = SECTION_ORDER.filter(function (s) { return sections[s]; })
-      .concat(Object.keys(sections).filter(function (s) {
-        return SECTION_ORDER.indexOf(s) < 0; }).sort());
+    var names = SECTION_ORDER.filter(function (s) { return sections[s]; });
     var host = el("div"); v.appendChild(host);
+    var secEls = {};
+    var subs = el("div","mc-subtabs");
+    function showSection(name){
+      names.forEach(function (n) {
+        if (secEls[n]) secEls[n].style.display = (n === name) ? "" : "none";
+      });
+      [].forEach.call(subs.children, function (b) {
+        b.classList.toggle("on", b.dataset.sec === name);
+      });
+    }
+    v._showSection = showSection;
+    names.forEach(function (name) {
+      var b = el("button", null, name);
+      b.dataset.sec = name;
+      b.appendChild(el("span","n"," " + sections[name].length));
+      b.addEventListener("click", function () { showSection(name); });
+      subs.appendChild(b);
+    });
     names.forEach(function (name) {
       var sec = el("section","mc-sec");
-      sec.appendChild(el("h2",null,name));
-      var list = sections[name];
+      sec.dataset.sec = name;
+      secEls[name] = sec;
+      var list = sections[name].slice().sort(function (a, b) {
+        var ga = (a.section && a.section !== name) ? a.section : "";
+        var gb = (b.section && b.section !== name) ? b.section : "";
+        return ga.localeCompare(gb) || (a.order||0)-(b.order||0) ||
+          String(a.title).localeCompare(String(b.title));
+      });
       var metrics = list.filter(function (it) { return it.kind==="metric"; });
       if (metrics.length){
         var mrow = el("div","mc-metrics");
@@ -798,19 +836,29 @@
       var TERMINAL = {proven:1, done:1, settled:1, deferred:1};
       var live_ = rest.filter(function (it) { return !(FOLDS[it.kind] && TERMINAL[it.state]); });
       var finished = rest.filter(function (it) { return FOLDS[it.kind] && TERMINAL[it.state]; });
-      live_.forEach(function (it) { sec.appendChild(card(it)); });
+      var lastGroup = null;
+      live_.forEach(function (it) {
+        var g = (it.section && it.section !== name) ? it.section : "";
+        if (g !== lastGroup){
+          if (g) sec.appendChild(el("h3","mc-group",g));
+          lastGroup = g;
+        }
+        sec.appendChild(card(it, {showSurface: showSurf}));
+      });
       if (finished.length){
         var fold = document.createElement("details");
         fold.className = "mc-finished";
         fold.appendChild(el("summary",null,
           finished.length + " finished item" + (finished.length>1?"s":"") +
           " — proven, done, settled, deferred"));
-        finished.forEach(function (it) { fold.appendChild(card(it)); });
+        finished.forEach(function (it) { fold.appendChild(card(it, {showSurface: showSurf})); });
         sec.appendChild(fold);
       }
       host.appendChild(sec);
     });
     v.insertBefore(filterBar(v), host);
+    if (names.length > 1) v.insertBefore(subs, v.firstChild);
+    showSection(names[0]);
     return v;
   }
 
@@ -821,7 +869,13 @@
     sec.appendChild(el("h2",null,"Pillars"));
     PILLARS.forEach(function (p) {
       var pc = el("div","mc-psum");
-      pc.addEventListener("click",function(){ show(p.pillar_id); });
+      pc.addEventListener("click",function(){
+        pillarFilter = p.pillar_id;
+        var fv = document.getElementById("view-feed");
+        if (fv) fv.dataset.filter = p.pillar_id;
+        applyGlance();
+        show("pillars");
+      });
       var hd = el("div","hd");
       hd.appendChild(dot(p.color || "#8391a8"));
       hd.appendChild(el("b",null,p.name));
@@ -847,19 +901,6 @@
       sec.appendChild(pc);
     });
     v.appendChild(sec);
-    var missionItems = liveItems.filter(function (it) { return it.surface_id===MID; });
-    if (missionItems.length){
-      var own = surfaceView(MID);   // reuse the section builder
-      own.classList.add("on"); own.id = "";
-      var fold = document.createElement("details");
-      fold.className = "mc-finished";
-      var sum = document.createElement("summary");
-      sum.textContent = "Mission-level items (" + missionItems.length
-        + ") \u2014 legacy; new content belongs on a pillar";
-      fold.appendChild(sum);
-      fold.appendChild(own);
-      v.appendChild(fold);
-    }
     return v;
   }
 
@@ -957,7 +998,7 @@
   // ── assemble views + nav ────────────────────────────────────────
   var views = document.getElementById("mc-views");
   views.appendChild(overviewView());
-  PILLARS.forEach(function (p) { views.appendChild(surfaceView(p.pillar_id)); });
+  views.appendChild(surfaceView(null));
   GLANCE.forEach(function (g) {
     views.appendChild(collectionView("glance-"+g.key, chipTitle(g), g.match, g.empty));
   });
@@ -1168,25 +1209,13 @@
   updateNavCounts();
 
   var pillarFilter = null;
-  function gotoSurface(sid){
-    pillarFilter = (sid && sid !== MID) ? sid : null;
-    var fv = document.getElementById("view-feed");
-    if (fv) fv.dataset.filter = pillarFilter || "";
-    applyGlance();
-    show(pillarFilter || MID);
-  }
   function togglePillar(pid){
-    var next = (pillarFilter === pid) ? null : pid;
-    if (isOverviewFamily(currentView)) { gotoSurface(next); return; }
-    pillarFilter = next;
+    pillarFilter = (pillarFilter === pid) ? null : pid;
     var fv = document.getElementById("view-feed");
     if (fv) fv.dataset.filter = pillarFilter || "";
     applyGlance();
+    if (currentView === "feed") applyFeedFilter();
     updateChips();
-  }
-  function isOverviewFamily(id){
-    return !id || id === MID ||
-      PILLARS.some(function (p) { return p.pillar_id === id; });
   }
 
   var currentView = null;
@@ -1199,12 +1228,16 @@
     document.querySelectorAll(".mc-nav button").forEach(function (n) {
       n.classList.toggle("on", !!pillarFilter && n.id === "nav-"+pillarFilter);
     });
-    var named = {decisions:"Decisions", questions:"Questions",
-                 feed:"Feed", news:"News"};
+    var named = {pillars:"Pillars", decisions:"Decisions",
+                 questions:"Questions", feed:"Feed", news:"News"};
     var fam = named[id] ? id : "overview";
     document.querySelectorAll(".mc-tabs button").forEach(function (b) {
       b.classList.toggle("on", b.id === "tab-" + fam);
     });
+    var strip = document.getElementById("mc-nav");
+    if (strip) strip.style.display = (fam === "overview") ? "none" : "";
+    var pfn = document.getElementById("mc-pfnote");
+    if (pfn) pfn.style.display = (fam === "overview") ? "none" : "";
   }
   // The activity panel is mission-wide chrome, but it belongs to the
   // overview: pillar views get their vertical room back.
