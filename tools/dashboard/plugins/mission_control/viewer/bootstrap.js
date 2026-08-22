@@ -575,19 +575,11 @@
     // toolbar. The swatch keeps the pillar's colour as the remaining
     // "where am I" cue and opens the pillar status panel.
     kids.push(
-      el("button", {class: "mc-pill", title: "Pillar status",
+      el("button", {class: "mc-pill",
+                    title: "Pillar status \u2014 latest by pillar or by time",
                     onclick: function () { show(ui.panel === "pillars" ? null : {panel: "pillars"}); }},
          [swatch, el("span", {class: "mc-caret", text: "\u25be"})]));
-    // LATEST, not a clock. This wore the current pillar's age ("32m") as
-    // its label, which read as a timestamp about the visible screen \u2014 but
-    // it opens the cross-pillar feed, and on a structured screen the view
-    // is cross-pillar anyway. An icon says "what's new"; the ages live in
-    // the status panel rows where they describe something specific.
     kids.push(el("span", {class: "mc-grow"}));
-    kids.push(
-      el("button", {class: "mc-q mc-latest", title: "Latest from every pillar",
-                    onclick: function () { show(ui.view === "feed" ? null : {view: "feed"}); }},
-         [svg(PULSE)]));
     var n = openCount(), done = answeredCount();
     // ONE NUMBER. The bubble used to carry open AND answered, which made
     // it unreadable next to "N for you" \u2014 three counters, two of them
@@ -1227,18 +1219,71 @@
     });
   }
 
-  var PANEL_TITLE = {pillars: "Where each pillar stands",
+  var PANEL_TITLE = {pillars: "Pillar status",
                      questions: "Questions", foryou: "Asks for you"};
+
+  // ONE LIST, TWO ORDERINGS. "By pillar" is the snapshot: one tile per
+  // pillar, its latest report. "By time" is the history: every report,
+  // newest first. Same tiles, same panel, one toggle -- they were two bar
+  // buttons opening two differently-shaped surfaces of the same posts,
+  // and nobody could say how they differed.
+  var statusMode = "pillar";
+
+  function statusToggle() {
+    return [el("div", {class: "mc-seg"}, ["pillar", "time"].map(function (m) {
+      return el("button", {
+        class: statusMode === m ? "mc-seg-on" : "",
+        text: m === "pillar" ? "By pillar" : "By time",
+        onclick: function () { statusMode = m; render(); },
+      });
+    }))];
+  }
+
+  function byTimeRows() {
+    var posts = state.status_posts || [];
+    if (!posts.length)
+      return [el("p", {class: "mc-empty",
+                       text: "No pillar has reported anything yet."})];
+    return posts.map(function (post) {
+      var dot = el("span", {class: "mc-swatch"});
+      dot.style.background = post.color || "#475569";
+      var replies = atAnchor(postAnchor(post)).map(function (q) {
+        return el("button", {class: "mc-post-reply", onclick: function () {
+          show({entry: q.entry_id, from: {panel: "pillars"}});
+        }}, [
+          el("p", {class: "mc-post-q", text: q.question || ""}),
+          q.answer
+            ? el("p", {class: "mc-post-a", text: firstLine(q.answer)})
+            : el("span", {class: "mc-chip mc-chip-open", text: rowChipText(q)}),
+        ]);
+      });
+      return el("div", {class: "mc-row mc-row-static"}, [
+        el("div", {class: "mc-row-top"}, [
+          dot,
+          el("span", {class: "mc-name", text: post.pillar_name || ""}),
+          el("span", {class: "mc-grow"}),
+          el("span", {class: "mc-age", text: post.ago || ""}),
+        ]),
+        el("p", {class: "mc-last", text: post.text || ""}),
+        el("div", {class: "mc-post-foot"}, [
+          el("button", {class: "mc-post-act", text: "Reply",
+                        onclick: function () { show({post: post}); }}),
+        ]),
+      ].concat(replies));
+    });
+  }
 
   function panelNode() {
     if (!ui.panel) return null;
-    var body = ui.panel === "pillars" ? pillarRows()
+    var body = ui.panel === "pillars"
+                 ? (statusMode === "time" ? byTimeRows() : pillarRows())
              : ui.panel === "foryou" ? forYouRows()
              : questionRows();
     var kids = [
       el("div", {class: "mc-phead"}, [
         el("span", {class: "mc-ptitle", text: PANEL_TITLE[ui.panel] || "Questions"}),
-      ].concat(ui.panel === "questions" ? filterToggle() : []).concat([
+      ].concat(ui.panel === "questions" ? filterToggle() : [])
+       .concat(ui.panel === "pillars" ? statusToggle() : []).concat([
         el("span", {class: "mc-grow"}),
         el("button", {class: "mc-x", text: "\u00d7", onclick: function () { show(null); }}),
       ])),
