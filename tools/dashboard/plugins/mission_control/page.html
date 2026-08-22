@@ -61,7 +61,11 @@
             </div>
             <div class="text-xs text-gray-500 mt-0.5">
               <span x-show="m.current_revision" x-text="'Updated ' + relativeTime(m.current_revision && m.current_revision.created_at)"></span>
-              <span x-show="!m.current_revision" class="text-amber-400">No site yet</span>
+              <!-- A structured mission renders from settings items, not pushed
+                   revisions -- it always has a site, even before its first item. -->
+              <span x-show="!m.current_revision && m.style === 'structured'"
+                    class="text-indigo-300">Structured</span>
+              <span x-show="!m.current_revision && m.style !== 'structured'" class="text-amber-400">No site yet</span>
             </div>
           </div>
           <div class="flex items-center gap-2 shrink-0">
@@ -70,7 +74,7 @@
                   :data-testid="'mc-open-questions-' + m.mission_id"
                   x-text="m.open_question_count + (m.open_question_count === 1 ? ' open question' : ' open questions')"></span>
             <a :href="'/missions/' + m.mission_id" target="_blank" data-hard-reload
-               x-show="m.current_revision_id"
+               x-show="m.current_revision_id || m.style === 'structured'"
                class="px-3 py-1 rounded bg-indigo-700 hover:bg-indigo-600 text-white text-xs font-medium whitespace-nowrap"
                :data-testid="'mc-view-site-' + m.mission_id">View site &rarr;</a>
           </div>
