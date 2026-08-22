@@ -208,7 +208,7 @@ async function until(fn, n = 60) { for (let i = 0; i < n && !fn(); i += 1) await
 function overlay() { const o = document.querySelectorAll('.fui-overlay'); return o[o.length - 1] || null; }
 function q(sel) { const r = overlay(); return r ? r.querySelector(sel) : null; }
 function qa(sel) { const r = overlay(); return r ? [...r.querySelectorAll(sel)] : []; }
-function warnText() { const w = q('.warn'); return w ? w.textContent : ''; }
+function warnText() { const w = q('.fui-warn'); return w ? w.textContent : ''; }
 function clickPactByText(text) {
   const row = qa('.pact').find((e) => e.textContent.includes(text));
   assert.ok(row, `pact "${text}" present`); row.click();
@@ -257,6 +257,23 @@ async function opensWithCombined(armor, pw, cred) {
 function factorTypes(armor) { return parseArmor(armor).factors.map((f) => f.type).sort(); }
 
 // ═══════════════════════════════ transitions ═══════════════════════════════
+
+test('factor warning styles do not leak onto dashboard warning classes', async () => {
+  const outsideWarning = document.createElement('span');
+  outsideWarning.className = 'warn';
+  outsideWarning.textContent = '875K';
+  document.body.appendChild(outsideWarning);
+
+  // Style injection precedes model loading, so a deliberately unavailable
+  // backing model is enough to exercise the stylesheet boundary.
+  SERVER = null;
+  await panel.open({});
+  const outsideStyle = getComputedStyle(outsideWarning);
+  assert.notEqual(outsideStyle.backgroundColor, 'rgb(43, 22, 22)');
+  assert.notEqual(outsideStyle.paddingTop, '10px');
+  assert.ok(document.getElementById('factor-ui-styles').textContent.includes('.fui-warn{'));
+  outsideWarning.remove();
+});
 
 test('MFA → password + passkey (Change password: the operator bug)', async () => {
   const root = await mintRoot(); const cred = 'cred-mfa-a';

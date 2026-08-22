@@ -153,8 +153,8 @@ const STYLE = `
   color:#fbbf24;background:#3a2708;padding:3px 5px;border-radius:3px;margin-left:6px}
 .here{font:600 8px/1 ui-monospace,monospace;letter-spacing:.06em;text-transform:uppercase;
   color:#34d399;background:#0d2f22;padding:3px 5px;border-radius:3px}
-#s-auth .warn,.screen .warn{margin-top:10px;border-radius:9px;border:1px solid #4b2222}
-.warn{font-size:11.5px;color:#fca5a5;background:#2b1616;border-top:1px solid #4b2222;
+#s-auth .fui-warn,.screen .fui-warn{margin-top:10px;border-radius:9px;border:1px solid #4b2222}
+.fui-warn{font-size:11.5px;color:#fca5a5;background:#2b1616;border-top:1px solid #4b2222;
   padding:10px 12px;line-height:1.5}
 .back{font-size:12px;color:#8b93a3;padding:10px 12px;cursor:pointer;
   border-top:1px solid #374151}
@@ -691,7 +691,7 @@ function setpwScreen() {
     S.pwMode = null; await afterCommit('keys');
   };
   s.appendChild(go);
-  if (S.warn) s.appendChild(el('div', 'warn', S.warn));
+  if (S.warn) s.appendChild(el('div', 'fui-warn', S.warn));
   return s;
 }
 
@@ -742,7 +742,7 @@ function authScreen() {
       : S.pick.face ? 'Only your passkey will grant full authority.' : 'Only your password will grant full authority.';
   }
   s.appendChild(el('div', 'note', note));
-  if (S.warn) s.appendChild(el('div', 'warn', S.warn));
+  if (S.warn) s.appendChild(el('div', 'fui-warn', S.warn));
   const save = el('div', 'btn', 'Save');
   save.onclick = async (e) => {
     e.stopPropagation();
@@ -822,7 +822,7 @@ function keysScreen() {
     r.querySelector('.kx').onclick = (e) => { e.stopPropagation(); gatherThen('removekey', rootNeed(), { keyIdx: i }); };
     p.appendChild(r);
   });
-  if (S.warn) p.appendChild(el('div', 'warn', S.warn));
+  if (S.warn) p.appendChild(el('div', 'fui-warn', S.warn));
   const add = el('div', 'pact', '<div class="pico plus"></div><div><div class="pl">Add a passkey</div>'
     + '<div class="pd">This device, or scan from a phone</div></div>');
   add.onclick = (e) => { e.stopPropagation(); gatherThen('create', rootNeed()); };
