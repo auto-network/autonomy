@@ -36,6 +36,11 @@
     mfa: false,
     rpId: null,
     passkeys: [],
+    // Reach: does the current method OPEN THE ROOT (release signing material)
+    // or only grant dashboard access? Derived from the armor at init.
+    passkeyOpensRoot: false,
+    pwOpensRoot: false,
+    armorText: null,
     troubleOpen: false,
     techOpen: false,
     busy: false,
@@ -133,6 +138,14 @@
     var pk = minted.options;
     pk.challenge = b64uToBytes(pk.challenge);
     (pk.allowCredentials || []).forEach(function (c) { c.id = b64uToBytes(c.id); });
+    // Ask for the PRF eval in the SAME gesture: when this passkey is a root
+    // factor, its PRF output re-derives the key that opens the armor, so one
+    // Face ID both proves access AND releases the root — no second prompt.
+    var enroll = null;
+    try {
+      enroll = await import('./ceremony/enrollment.js');
+      pk.extensions = Object.assign({}, pk.extensions, enroll.prfEvalExtension());
+    } catch (e) { /* PRF is an optional enhancement; access unlock proceeds */ }
     var cred;
     try {
       cred = await navigator.credentials.get({ publicKey: pk });
@@ -160,6 +173,34 @@
         },
       },
     });
+
+    // Access is granted. If this passkey is a ROOT factor, use the PRF output
+    // from the same gesture to open the armor and warm the vault — this is what
+    // makes "Face ID opens your keys" true after a promotion. Strictly
+    // best-effort: a failure here never turns a successful access unlock into a
+    // lockout, and never runs for an access-only passkey or an MFA identity
+    // (where the passkey alone cannot reach the root).
+    if (U.passkeyOpensRoot && enroll && U.armorText) {
+      try {
+        var prf = enroll.prfOutputFromResults(
+          (cred.getClientExtensionResults && cred.getClientExtensionResults()) || {});
+        if (prf) {
+          var Pp = await import('./ceremony/primitives.js');
+          var opened = await Pp.decryptArmorWithPasskey(U.armorText, prf);
+          var seed = new Uint8Array(opened.seed);
+          opened.seed.fill(0);
+          try {
+            await _signonI().wakeVault({ personalRootSeed: seed });
+          } finally {
+            seed.fill(0);
+          }
+        }
+      } catch (e) {
+        if (window.console && console.warn) {
+          console.warn('passkey root release (vault wake) failed:', (e && e.message) || e);
+        }
+      }
+    }
   }
 
   // A WebAuthn PRF assertion on an enrolled passkey, for the passkey half of a
@@ -484,6 +525,15 @@
     var primary = passkey ? 'Unlock with Face ID'
       : (U.mfa ? 'Unlock with password + Face ID' : 'Unlock');
 
+    // Reach pill: amber when this method releases the root, sky when it only
+    // opens the dashboard. Two colours, one meaning — from the design.
+    var opensRoot = passkey ? U.passkeyOpensRoot : (U.mfa || U.pwOpensRoot);
+    var reachPill = '<div class="flex justify-center mt-3"><span data-testid="unlock-reach" '
+      + 'class="text-[11px] rounded-full px-2.5 py-0.5 border '
+      + (opensRoot
+          ? 'text-amber-300 border-amber-400/30 bg-amber-400/10">opens the dashboard and your keys'
+          : 'text-sky-300 border-sky-400/30 bg-sky-400/10">opens the dashboard')
+      + '</span></div>';
     card.innerHTML =
       '<div class="flex flex-col items-center flex-1 md:flex-none justify-center md:justify-start">' +
       '<h1 class="text-2xl md:text-xl font-semibold">Unlock dashboard</h1>' +
@@ -495,6 +545,7 @@
       '<div class="md:mt-7 pt-7 md:pt-0">' +
       '<button id="unlock-primary" data-testid="unlock-primary" class="w-full bg-indigo-600 hover:bg-indigo-500 ' +
       'text-white font-semibold rounded-xl py-4 md:py-3 text-lg md:text-base">' + primary + '</button>' +
+      reachPill +
       '<div class="flex justify-center gap-6 mt-4 text-sm">' +
       '<button id="unlock-trouble-toggle" data-testid="unlock-trouble-toggle" class="text-indigo-400 hover:underline">Trouble signing in?</button>' +
       '<button id="unlock-tech-toggle" data-testid="unlock-tech-toggle" class="text-indigo-400 hover:underline">Technical detail</button>' +
@@ -625,6 +676,24 @@
     U.rpId = status.rp_id || null;
     U.passkeys = status.passkeys || [];
     U.mfa = !!(status.personal_identity && status.personal_identity.require_pair);
+    // Reach: which method OPENS THE ROOT vs only grants access. Derived from the
+    // armor's own factors via the tested policy model, best-effort — if the
+    // armor can't be read, reach stays unknown and unlock proceeds unchanged.
+    U.passkeyOpensRoot = false;
+    U.pwOpensRoot = !U.mfa && U.hasIdentity;   // a standalone password opens the root
+    U.armorText = null;
+    if (U.hasIdentity) {
+      try {
+        var personal = await _fetchJson('/api/identity/personal');
+        U.armorText = personal.armored_private_key;
+        var Pm = await import('./ceremony/primitives.js');
+        var Pol = await import('./ceremony/factor-policy.js');
+        var m = Pol.buildModel(status, Pm.parseArmor(U.armorText));
+        U.mfa = m.mfa;
+        U.pwOpensRoot = Pol.level(m, 'pass') === 'b';
+        U.passkeyOpensRoot = Pol.level(m, 'face') === 'b';   // a full-authority passkey
+      } catch (e) { /* reach unknown; the ceremonies still work */ }
+    }
     if (!U.fleetRootRequired && U.passkeysForHost > 0 && U.webauthnOk) {
       U.mode = 'passkey';
     } else if (U.hasIdentity) {
