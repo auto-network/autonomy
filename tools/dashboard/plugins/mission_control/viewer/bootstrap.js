@@ -557,8 +557,22 @@
     var sessHref = (p && p.session_href) || state.session_href || "";
     if (sessHref) {
       kids.push(el("a", {class: "mc-q mc-session", href: sessHref,
-                         title: "Open the coordinating session"},
-                   [svg(TERM)]));
+                         title: "Open the coordinating session",
+                         onclick: function (e) {
+        // Inside the SPA's mission frame, navigate the PARENT app —
+        // a push, not a document load, so the PWA never reboots. The
+        // same-origin check is the try: a sandboxed guest frame throws
+        // and falls through to the plain navigation (which its state
+        // never triggers anyway — no session_href crosses the relay).
+        try {
+          if (window.parent !== window &&
+              typeof window.parent.navigateTo === "function") {
+            e.preventDefault();
+            window.parent.navigateTo(sessHref);
+            return;
+          }
+        } catch (_) {}
+      }}, [svg(TERM)]));
     }
     var q = el("button", {class: n ? "mc-q mc-q-hot" : "mc-q", title: "Questions",
                           onclick: function () { show(ui.panel === "questions" ? null : {panel: "questions"}); }},

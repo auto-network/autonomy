@@ -2041,6 +2041,26 @@ function navigateTo(path) {
   route();
 }
 
+function renderMissionScreenFragment() {
+  // Mission screens are deliberately standalone documents — one
+  // self-contained artifact serves the dashboard AND the credential-less
+  // guest relay frame, so they can never become SPA fragments without
+  // forking those two renders. Hosting the same document in a same-origin
+  // iframe keeps that contract AND keeps the SPA loaded: entering a
+  // mission is a history push, leaving is a pop, and the app never
+  // tears down (the teardown was the measured white screen + hung
+  // back-swipe on the phone; SSE holds the SPA out of bfcache, so a hard
+  // exit always meant a cold reboot on return).
+  const src = window.location.pathname + window.location.search
+    + window.location.hash;
+  _replaceFragment(content,
+    '<iframe id="mission-screen-frame" title="Mission screen"'
+    + ' style="position:fixed;inset:0;width:100%;height:100%;border:0;'
+    + 'z-index:40;background:#0c0f14"></iframe>');
+  const frame = document.getElementById('mission-screen-frame');
+  if (frame) frame.src = src;
+}
+
 async function route() {
   // Drop any plugin-org context from the previous render so non-plugin
   // routes (and plugin pages whose load_enabled state changed) don't
@@ -2175,6 +2195,8 @@ async function route() {
     renderTerminal(null, sessionId);
   } else if (path === '/search') {
     renderSearchFragment();
+  } else if (path.startsWith('/missions/')) {
+    renderMissionScreenFragment();
   } else {
     _replaceFragment(content, '<div class="text-gray-400">Page not found</div>');
   }
