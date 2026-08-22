@@ -544,8 +544,6 @@
   function barRow() {
     var p = currentPillar() || {};
     var here = presentHere();
-    var swatch = el("span", {class: "mc-swatch"});
-    swatch.style.background = p.color || "#475569";
     var kids = [];
     // THE WAY OUT. Inside the dashboard SPA the mission frame covers the
     // whole app, so without a door the only exit is the browser back-swipe
@@ -575,10 +573,9 @@
     // toolbar. The swatch keeps the pillar's colour as the remaining
     // "where am I" cue and opens the pillar status panel.
     kids.push(
-      el("button", {class: "mc-pill",
+      el("button", {class: "mc-pill mc-menu-word", text: "Pillars",
                     title: "Pillar status \u2014 latest by pillar or by time",
-                    onclick: function () { show(ui.panel === "pillars" ? null : {panel: "pillars"}); }},
-         [swatch, el("span", {class: "mc-caret", text: "\u25be"})]));
+                    onclick: function () { show(ui.panel === "pillars" ? null : {panel: "pillars"}); }}));
     kids.push(el("span", {class: "mc-grow"}));
     var n = openCount(), done = answeredCount();
     // ONE NUMBER. The bubble used to carry open AND answered, which made
