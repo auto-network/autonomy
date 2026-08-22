@@ -2020,6 +2020,19 @@ async function _maybeRestoreLastSession() {
   navigateTo(stored);                          // pushState — back returns home
 }
 
+// Open the real nav drawer over a covering fragment (the mission screen
+// iframe). Only the phone drawer can rise above the frame -- the desktop
+// sidebar is static-positioned and z-index cannot lift it -- so the caller
+// gets an honest false there and picks its own fallback.
+window.Autonomy = window.Autonomy || {};
+window.Autonomy.openNav = function () {
+  const sb = document.getElementById('sidebar');
+  if (!sb || window.innerWidth >= 768) return false;
+  document.body.classList.add('nav-above-mission');
+  sb.classList.remove('-translate-x-full');
+  return true;
+};
+
 function navigateTo(path) {
   if (path === window.location.pathname + window.location.search) return;
   _recordOperatorActivity();
