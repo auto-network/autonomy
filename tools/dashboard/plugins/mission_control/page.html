@@ -265,8 +265,10 @@
                 <span class="text-[10px] text-amber-300" x-show="p.open_question_count > 0"
                       x-text="p.open_question_count + (p.open_question_count === 1 ? ' q' : ' qs')"></span>
               </div>
+              <!-- Structured missions serve every pillar view from items,
+                   revision or none — same rule as the mission card above. -->
               <a :href="'/missions/' + m.mission_id + '/pillars/' + p.pillar_id" target="_blank" data-hard-reload
-                 x-show="p.current_revision_id"
+                 x-show="p.current_revision_id || m.style === 'structured'"
                  class="block mt-1.5 text-[10px] text-indigo-400 hover:text-indigo-300"
                  :data-testid="'mc-pillar-view-' + p.pillar_id">View site &rarr;</a>
             </div>
