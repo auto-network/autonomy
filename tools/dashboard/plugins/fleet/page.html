@@ -121,13 +121,9 @@
                 </template>
                 <template x-if="invitation.status === 'awaiting_signature'">
                   <div>
-                    <p class="fleet-no-invite">The route is published. Sign the Fleet invitation with your personal identity to activate it.</p>
-                    <label class="fleet-field-label" for="fleet-invite-password">Personal identity password</label>
-                    <input id="fleet-invite-password" class="fleet-field" type="password"
-                           x-model="invitePassword" autocomplete="current-password"
-                           @keydown.enter.prevent="finishInvitation()">
+                    <p class="fleet-no-invite">The route is published. Sign the Fleet invitation with your personal identity to activate it — you'll be asked to unlock your root with whichever factor it accepts (password, passkey, or both).</p>
                     <button type="button" class="fleet-primary-action"
-                            :disabled="inviteBusy || !invitePassword"
+                            :disabled="inviteBusy"
                             @click="finishInvitation()"
                             x-text="inviteBusy ? 'Signing…' : 'Activate invitation'"></button>
                   </div>

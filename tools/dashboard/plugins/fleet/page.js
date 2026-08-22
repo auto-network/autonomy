@@ -220,37 +220,22 @@ function fleetPage() {
 
     async finishInvitation() {
       if (this.inviteBusy) return;
-      if (!this.invitePassword) {
-        this.invitationError = 'Enter your personal identity password.';
-        return;
-      }
       this.inviteBusy = true;
       this.invitationError = null;
       let opened = null;
       try {
-        const session = window.AutonomyNetworkSession;
-        if (!session || !session._internals ||
-            typeof session._internals.decryptArmor !== 'function') {
-          throw new Error('Personal signing is unavailable. Reload and try again.');
-        }
-        const personalResponse = await fetch('/api/identity/personal', {
-          credentials: 'same-origin', cache: 'no-store',
+        // ONE common factor-aware unlock — password, passkey, or both, chosen
+        // per the armor's own factors. No password field lives here anymore.
+        const { openRoot } = await import('/static/js/ceremony/open-root.js');
+        opened = await openRoot({
+          title: 'Create fleet invitation',
+          detail: 'Unlock your personal root to sign this invitation.',
         });
-        const personal = await personalResponse.json().catch(() => ({}));
-        if (!personalResponse.ok || !personal.armored_private_key || !personal.root_pub) {
-          throw new Error(personal.error || 'No personal identity is available.');
-        }
-        try {
-          opened = await session._internals.decryptArmor(
-            personal.armored_private_key, this.invitePassword,
-          );
-        } catch (error) {
-          throw new Error('That password did not open your personal identity.');
-        }
+        if (!opened) { this.inviteBusy = false; return; }
         const ceremony = await import('/static/js/ceremony/fleet-enrollment.js');
         const minted = await ceremony.mintFleetInvite({
           personalRootSeed: opened.seed,
-          rootPub: personal.root_pub,
+          rootPub: opened.rootPub,
           rendezvous: this.invitation.rendezvous,
           expiresAt: this.invitation.expiresAt || 0,
         });

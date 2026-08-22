@@ -19,15 +19,16 @@ pytestmark = pytest.mark.skipif(
     shutil.which("node") is None, reason="node is not on PATH"
 )
 
-_TEST = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+@pytest.mark.parametrize("mjs", [
     "factor_management_transitions.test.mjs",
-)
-
-
-def test_factor_management_transitions_jsdom():
+    "open_root.test.mjs",
+])
+def test_ui_ceremony_jsdom(mjs):
     result = subprocess.run(
-        ["node", "--test", _TEST],
+        ["node", "--test", os.path.join(_HERE, mjs)],
         capture_output=True, text=True, timeout=120,
     )
     assert result.returncode == 0, result.stdout + "\n" + result.stderr

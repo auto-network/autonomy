@@ -317,42 +317,28 @@
   // carries only the grant and detached signature; the password never leaves
   // the browser.
   async function _signDashboardAccessDecision(self, req) {
-    if (!req.password) throw new Error('Enter your personal identity password to continue.');
     if (!req.grant || typeof req.grant !== 'object') {
       throw new Error('This access request has no server-frozen grant. Decline it and request a new one.');
     }
     const session = window.AutonomyNetworkSession;
-    const identity = window.AutonomyNetworkIdentity;
-    if (!session || !session._internals || !identity || !identity._internals ||
-        typeof session._internals.decryptArmor !== 'function' ||
+    if (!session || !session._internals ||
         typeof session._internals.canonicalJson !== 'function' ||
-        typeof session._internals.bytesToHex !== 'function' ||
-        typeof identity._internals.importSigningKey !== 'function') {
+        typeof session._internals.bytesToHex !== 'function') {
       throw new Error('Personal approval is unavailable in this browser. Reload and try again.');
     }
-
-    const personalResp = await fetch('/api/identity/personal');
-    const personal = await personalResp.json().catch(() => ({}));
-    if (!personalResp.ok || !personal.armored_private_key) {
-      throw new Error(personal.error || 'No personal identity is available to sign this approval.');
-    }
-
-    let opened = null;
-    let signingKey = null;
+    // ONE common factor-aware unlock — password, passkey, or both, chosen per
+    // the armor's own factors. No password field on this approval card anymore.
+    const { openRoot } = await import('../ceremony/open-root.js');
+    const opened = await openRoot({
+      title: 'Approve dashboard access',
+      detail: 'Unlock your personal root to sign this access grant.',
+    });
+    if (!opened) throw new Error('Approval cancelled.');
     try {
-      try {
-        opened = await session._internals.decryptArmor(
-          personal.armored_private_key, req.password);
-      } catch (error) {
-        throw new Error('That password did not open your personal identity.');
-      }
-      signingKey = await identity._internals.importSigningKey(opened.seed);
-      opened.seed.fill(0);
-      opened.seed = null;
       const input = new TextEncoder().encode(
         _DASHBOARD_ACCESS_GRANT_DOMAIN +
         session._internals.canonicalJson(req.grant));
-      const signature = await crypto.subtle.sign('Ed25519', signingKey, input);
+      const signature = await crypto.subtle.sign('Ed25519', opened.signingKey, input);
       return {
         grant: req.grant,
         signature: session._internals.bytesToHex(new Uint8Array(signature)),
@@ -362,7 +348,6 @@
         opened.seed.fill(0);
         opened.seed = null;
       }
-      signingKey = null;
     }
   }
 
@@ -380,39 +365,27 @@
     if (Array.from(machineName).length > 80 || /[\x00-\x1f\x7f]/.test(machineName)) {
       throw new Error('Machine name must be 1–80 characters without ASCII controls.');
     }
-    if (!req.password) {
-      throw new Error('Enter your personal identity password to continue.');
-    }
     const staged = req.fleet;
     if (!staged || !staged.request || !staged.channelBinding ||
         !Number.isSafeInteger(staged.issuedAt)) {
       throw new Error('This machine request has no server-frozen enrollment context.');
     }
-    const session = window.AutonomyNetworkSession;
-    if (!session || !session._internals ||
-        typeof session._internals.decryptArmor !== 'function') {
-      throw new Error('Personal approval is unavailable in this browser. Reload and try again.');
-    }
-    const personalResp = await fetch('/api/identity/personal');
-    const personal = await personalResp.json().catch(() => ({}));
-    if (!personalResp.ok || !personal.armored_private_key || !personal.root_pub) {
-      throw new Error(personal.error || 'No personal identity is available to approve this machine.');
-    }
-    if (personal.root_pub !== staged.personalRootPub) {
-      throw new Error('This request belongs to a different personal fleet.');
-    }
-    let opened = null;
+    // ONE common factor-aware unlock — password, passkey, or both, chosen per
+    // the armor's own factors. No password field on this approval card anymore.
+    const { openRoot } = await import('../ceremony/open-root.js');
+    const opened = await openRoot({
+      title: 'Add this machine?',
+      detail: 'Unlock your personal root to approve this machine.',
+    });
+    if (!opened) throw new Error('Approval cancelled.');
     try {
-      try {
-        opened = await session._internals.decryptArmor(
-          personal.armored_private_key, req.password);
-      } catch (error) {
-        throw new Error('That password did not open your personal identity.');
+      if (opened.rootPub !== staged.personalRootPub) {
+        throw new Error('This request belongs to a different personal fleet.');
       }
       const ceremony = await import('../ceremony/fleet-enrollment.js');
       const evidence = await ceremony.mintFleetEnrollmentEvidence({
         personalRootSeed: opened.seed,
-        rootPub: personal.root_pub,
+        rootPub: opened.rootPub,
         request: staged.request,
         channelBinding: staged.channelBinding,
         localBootstrapMachineId: staged.localBootstrapMachineId || null,
@@ -2681,9 +2654,7 @@
                 'Expires: ' + expiry,
                 'Requester key: ' + fingerprint,
               ].join('\n'),
-              needsPassword: true,
-              passwordLabel: 'Personal identity password',
-              password: '',
+              needsPassword: false,
               grant,
               awaitExecution: true,
               error: '',
@@ -2718,10 +2689,7 @@
                 issuedAt: staged.issued_at,
               },
               machineName: '',
-              needsPassword: true,
-              passwordLabel: 'Personal identity password',
-              password: '',
-              showPassword: false,
+              needsPassword: false,
               awaitExecution: true,
               error: '',
             };
