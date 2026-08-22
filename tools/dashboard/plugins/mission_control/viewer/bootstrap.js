@@ -61,6 +61,16 @@
   // the ask closed the panel and cleared the box, and nothing was written:
   // a tap that looked like it worked. Only the application knows that
   // status is the answer.
+  // THE TRANSPORT DISCRIMINATOR. True only in the relay's srcdoc frame —
+  // the one context with no real URL (compose injects base=about:srcdoc
+  // only on that path) and therefore no HTTP; everything it needs arrives
+  // over a MessagePort. The SPA also frames this document, but at its real
+  // URL with full credentials, where HTTP and EventSource work exactly as
+  // at top level. Testing window.parent for transport choices conflated
+  // those two and left every control dead in the SPA frame.
+  var RELAY_FRAME = window.parent !== window
+    && /^about:/.test(document.baseURI || location.href || "");
+
   function settle(p, body) {
     var status = body && body.status;
     if (status && status !== "ok") {
@@ -97,13 +107,18 @@
   // promise that resolves for nobody. Say so on the bar rather than looking
   // fine and doing nothing -- a silent dead control costs more to diagnose
   // than any amount of visible degradation.
-  // ONLY IN A FRAME. At a real URL no port is ever transferred and none is
-  // wanted -- the transport is HTTP. Arming this timer everywhere meant the
-  // dashboard told the operator "Not connected. Posting is disabled." six
-  // seconds after every load, hid the composer, and flagged the bar "no link",
-  // while the HTTP path underneath worked perfectly. The transport was fixed
-  // and the question "is there a transport?" went on asking about the old one.
-  if (window.parent !== window) {
+  // ONLY IN A RELAY FRAME. At a real URL no port is ever transferred and
+  // none is wanted -- the transport is HTTP. Arming this timer everywhere
+  // meant the dashboard told the operator "Not connected. Posting is
+  // disabled." six seconds after every load, hid the composer, and flagged
+  // the bar "no link", while the HTTP path underneath worked perfectly. The
+  // transport was fixed and the question "is there a transport?" went on
+  // asking about the old one. Being framed is NOT the discriminator either:
+  // the SPA hosts this document in a same-origin frame at its real URL,
+  // where HTTP works exactly as at top level. What actually needs a port is
+  // the relay's srcdoc frame -- the only context whose base is about:srcdoc,
+  // because compose injects that base only on the framed path.
+  if (RELAY_FRAME) {
     setTimeout(function () {
       if (!port) { ui.noChannel = true; render(); }
     }, 6000);
@@ -139,7 +154,7 @@
   // forever, with no error anywhere. goto() was taught this split and request()
   // was not, which is the whole of that bug.
   function request(op, body) {
-    if (window.parent === window) return httpRequest(op, body);
+    if (!RELAY_FRAME) return httpRequest(op, body);
     return havePort.then(function (p) {
       return new Promise(function (resolve, reject) {
         var id = "r" + (++nextId);
@@ -303,7 +318,7 @@
 
   function subscribeLive() {
     if (live) return;                          // one stream, never a stack
-    if (window.parent !== window) return;      // framed: the host feeds us
+    if (RELAY_FRAME) return;                   // relay: the host feeds us
     if (typeof EventSource !== "function") return;
     if (!state.mission_id) return;
     var source;
@@ -686,7 +701,7 @@
   // origin is opaque and a dashboard-relative path resolves to nothing, so
   // the row stays plain text rather than becoming a link that fails.
   function sessionHref(h) {
-    if (window.parent !== window) return null;
+    if (RELAY_FRAME) return null;
     if (!h || h.kind !== "agent") return null;          // a person is not a session
     var id = h.participant_id;
     return id ? "/session/" + encodeURIComponent(id) : null;
@@ -1691,7 +1706,7 @@
     // to, so a screen is fetched over the channel and written in place. Served
     // at a real URL there IS one, and asking a channel that does not exist
     // leaves every control silently dead -- which is what the dashboard did.
-    if (window.parent === window) {
+    if (!RELAY_FRAME) {
       var base = "/missions/" + (state.mission_id || "");
       location.assign(pillarId ? base + "/pillars/" + pillarId : base);
       return;
