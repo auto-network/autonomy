@@ -34,6 +34,14 @@ class FleetRuntimeCredential:
     machine_pub: str
     process_key: KeyPair
     delegation_cert: DelegationCert
+    # Present only when the personal org is registered (has an org_uuid) and the
+    # browser therefore minted a reachability cert. Both together or neither: the
+    # derived machine key signs node:announce/node:lookup, and the cert (scope
+    # node:announce+node:lookup, org=org_uuid) authorizes it. None keeps the
+    # credential byte-identical to the sync-only path, so the green sync chain is
+    # untouched on an unregistered org.
+    machine_key: "KeyPair | None" = None
+    reachability_cert: "DelegationCert | None" = None
 
     @classmethod
     def from_browser_payload(
@@ -42,17 +50,26 @@ class FleetRuntimeCredential:
         *,
         personal_root_pub: str,
         roster_entries: Iterable[fleet_roster.RosterEntry],
+        org_uuid: "str | None" = None,
         now: int | None = None,
     ) -> "FleetRuntimeCredential":
-        expected = {
+        required = {
             "machine_id",
             "machine_pub",
             "process_private_seed",
             "delegation_cert",
         }
-        if not isinstance(payload, dict) or set(payload) != expected:
+        optional = {"machine_private_seed", "reachability_cert"}
+        keys = set(payload) if isinstance(payload, dict) else set()
+        if not isinstance(payload, dict) or not required <= keys <= (required | optional):
             raise FleetRuntimeError(
-                f"fleet runtime credential must carry exactly {sorted(expected)}"
+                f"fleet runtime credential must carry {sorted(required)} "
+                f"(optional {sorted(optional)})"
+            )
+        if bool("machine_private_seed" in keys) != bool("reachability_cert" in keys):
+            raise FleetRuntimeError(
+                "reachability requires both machine_private_seed and "
+                "reachability_cert, or neither"
             )
         machine_id = _hex(payload["machine_id"], "machine_id")
         machine_pub = _hex(payload["machine_pub"], "machine_pub")
@@ -104,7 +121,55 @@ class FleetRuntimeCredential:
             > FLEET_RUNTIME_DELEGATION_TTL_SECONDS + 60
         ):
             raise FleetRuntimeError("fleet runtime delegation exceeds its TTL bound")
-        return cls(machine_id, machine_pub, process_key, cert)
+
+        machine_key = None
+        reachability_cert = None
+        if "reachability_cert" in keys:
+            # Reachability rides a SEPARATE cert (root-direct, org=the registered
+            # org_uuid, node scopes) with the roster machine key as its signer —
+            # the registry keys hints by the envelope signer and discovery reads
+            # by roster machine_pub, so the announce must be the machine key, not
+            # the ephemeral process key. Verified against the personal root, not
+            # the sync cert's "personal:<rootpub>" anchor.
+            if org_uuid is None:
+                raise FleetRuntimeError(
+                    "reachability credential delivered without a registered org_uuid"
+                )
+            try:
+                machine_key = KeyPair.from_private_hex(
+                    _hex(payload["machine_private_seed"], "machine_private_seed")
+                )
+                reachability_cert = DelegationCert.from_dict(payload["reachability_cert"])
+            except (IdkitError, ValueError, TypeError) as exc:
+                raise FleetRuntimeError(
+                    f"invalid reachability credential: {exc}"
+                ) from exc
+            if machine_key.public_hex != machine_pub:
+                raise FleetRuntimeError(
+                    "reachability machine key is not this roster machine"
+                )
+            if reachability_cert.child_pub != machine_pub:
+                raise FleetRuntimeError("reachability cert names another machine")
+            if reachability_cert.parent_cert is not None:
+                raise FleetRuntimeError("reachability cert must be root-direct")
+            try:
+                for required_node_scope in ("node:announce", "node:lookup"):
+                    verify_chain(
+                        reachability_cert,
+                        anchor,
+                        org=org_uuid,
+                        now=current,
+                        required_scope=required_node_scope,
+                    )
+            except IdkitError as exc:
+                raise FleetRuntimeError(
+                    f"reachability cert does not verify: {exc}"
+                ) from exc
+
+        return cls(
+            machine_id, machine_pub, process_key, cert,
+            machine_key, reachability_cert,
+        )
 
 
 def _hex(value: object, what: str) -> str:
