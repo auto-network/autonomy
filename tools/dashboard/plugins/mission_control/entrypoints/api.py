@@ -999,6 +999,26 @@ def _screen_response(document: bytes, request: Request) -> HTMLResponse:
     return HTMLResponse(document, headers=headers)
 
 
+def _identified_reader(request: Request) -> bool:
+    """May this reader see session names and viewer links on the screen?
+
+    Session hrefs are dashboard furniture for the operator and coordinator
+    sessions; a guest or anonymous reader gets the screen without them (the
+    relay path enforces the same by omitting sessions when framed). Page
+    routes sit OUTSIDE the /api/ principal boundary — api_auth classifies
+    only /api/ paths — so the operator cookie is verified here directly
+    against the durable session store, the same fail-closed primitive the
+    unlock system itself uses. A dashboard with the gate disabled has no
+    cookie to present and exactly one local reader: the operator.
+    """
+    if _resolve_session_identity(request) is not None:
+        return True
+    from tools.dashboard import unlock_routes
+    if unlock_routes.gate_disabled():
+        return True
+    return unlock_routes.session_from_request(request) is not None
+
+
 async def serve_mission_site(request: Request):
     mission_id = request.path_params["mission_id"]
     if not db.get_mission(mission_id):
@@ -1006,13 +1026,9 @@ async def serve_mission_site(request: Request):
     # The SAME compose function the relay resolver calls. Two surfaces, one
     # document: a screen served here and a screen served over the channel
     # cannot drift, because there is only one place that builds one.
-    # Session names and viewer links are dashboard furniture for an
-    # IDENTIFIED caller (operator cookie or session bearer). An anonymous
-    # or visitor-credentialed reader gets the screen without them — the
-    # same rule the relay path enforces by omitting sessions when framed.
     document = compose.compose_screen(
         mission_id, viewer=_viewer_id(request),
-        include_sessions=_resolve_visitor_identity(request) is not None)
+        include_sessions=_identified_reader(request))
     if document is None:
         return PlainTextResponse(
             "Mission has no site revision yet", status_code=404, headers=_NO_STORE_HEADERS
@@ -1032,7 +1048,7 @@ async def serve_pillar_site(request: Request):
         return PlainTextResponse("Not Found", status_code=404, headers=_NO_STORE_HEADERS)
     document = compose.compose_screen(
         mission_id, pillar_id, viewer=_viewer_id(request),
-        include_sessions=_resolve_visitor_identity(request) is not None)
+        include_sessions=_identified_reader(request))
     if document is None:
         return PlainTextResponse(
             "Pillar has no site revision yet", status_code=404, headers=_NO_STORE_HEADERS
