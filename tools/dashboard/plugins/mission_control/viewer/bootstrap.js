@@ -795,15 +795,7 @@
     // it reads as a heading above the list rather than as a destination in it.
     var overviewSwatch = el("span", {class: "mc-swatch"});
     overviewSwatch.style.background = "#e2e8f0";
-    var rows = [structured
-      ? el("div", {class: "mc-row mc-row-static"}, [
-          el("div", {class: "mc-row-top"}, [
-            overviewSwatch,
-            el("span", {class: "mc-name", text: state.mission || "Mission overview"}),
-          ]),
-          el("p", {class: "mc-last", text: "Latest status from every pillar."}),
-        ])
-      : el("button", {
+    var rows = structured ? [] : [el("button", {
           class: onOverview ? "mc-row mc-row-on" : "mc-row",
           onclick: function () { show(null); if (!onOverview) goto(null); },
         }, [
@@ -821,8 +813,12 @@
       if (!(p.here || []).length) meta.push(el("span", {class: "mc-nobody", text: "nobody here"}));
       var content = [
         el("div", {class: "mc-row-top"}, [sw, el("span", {class: "mc-name", text: p.name || ""}), faces]),
-        // at most two sentences, no jargon: the last productive thing done
-        el("p", {class: "mc-last", text: p.last_done || ""}),
+        // at most two sentences, no jargon: the last productive thing done.
+        // An empty field renders as a stated absence, never a blank card.
+        p.last_done
+          ? el("p", {class: "mc-last", text: p.last_done})
+          : el("p", {class: "mc-last mc-last-none",
+                     text: "No completed result reported yet."}),
         el("div", {class: "mc-row-meta"}, meta),
       ];
       if (structured) return el("div", {class: "mc-row mc-row-static"}, content);
@@ -1227,7 +1223,7 @@
     });
   }
 
-  var PANEL_TITLE = {pillars: "Pillar status",
+  var PANEL_TITLE = {pillars: "",
                      questions: "Questions", foryou: "Asks for you"};
 
   // TWO DIRECTIONS, ONE PANEL. Questions FOR THE MISSION are conversations
@@ -1261,7 +1257,7 @@
     return [el("div", {class: "mc-seg"}, ["pillar", "time"].map(function (m) {
       return el("button", {
         class: statusMode === m ? "mc-seg-on" : "",
-        text: m === "pillar" ? "By pillar" : "By time",
+        text: m === "pillar" ? "By Pillar" : "Mission",
         onclick: function () { statusMode = m; render(); },
       });
     }))];
@@ -1310,9 +1306,9 @@
              : [el("div", {class: "mc-qfilter"}, filterToggle())]
                  .concat(questionRows());
     var kids = [
-      el("div", {class: "mc-phead"}, [
+      el("div", {class: "mc-phead"}, (ui.panel === "pillars" ? [] : [
         el("span", {class: "mc-ptitle", text: PANEL_TITLE[ui.panel] || "Questions"}),
-      ].concat(ui.panel === "questions" ? qaToggle() : [])
+      ]).concat(ui.panel === "questions" ? qaToggle() : [])
        .concat(ui.panel === "pillars" ? statusToggle() : []).concat([
         el("span", {class: "mc-grow"}),
         el("button", {class: "mc-x", text: "\u00d7", onclick: function () { show(null); }}),
