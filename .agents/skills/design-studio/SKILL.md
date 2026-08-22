@@ -5,6 +5,8 @@ description: Create, publish, watch, revise, pull down, and implement Autonomy D
 
 # Design Studio
 
+**Prime directive:** A Design Studio experiment is the production UI verbatim—simulate production inputs and view-state transitions behind the scenes, but include no non-production chrome, borders, annotations, labels, controls, or explanatory elements, and make every visible control fully functional against the same state shape the production API will provide.
+
 Use the stable `design_id` for the whole design and a `revision_id` for one
 saved iteration. Creating without `--design` starts a new design; every later
 iteration must pass the stable ID.
@@ -33,10 +35,18 @@ The command publishes immediately and then watches by default. Keep that one
 process alive while editing; every save becomes another revision of the new
 stable design. Do not relaunch the watcher. Use `--once` for a one-shot push.
 
-Current Studio renders only the last `.html` file. Use one HTML file plus a
-fixture with short named `states` instead of multiple variant files. Bind the
-root with `x-data="window.FIXTURE"`; keep all shared fixture data inside every
-state. Build responsive behavior with Tailwind's `md:` breakpoint.
+Current Studio renders only the last `.html` file. Use one HTML file and bind
+the root with `x-data="window.FIXTURE"`. Prefer one production-shaped fixture
+whose invisible script drives state transitions through the same data shape
+the real API will provide. Use named fixture `states` only to select divergent
+starting conditions that one production participant cannot naturally reach
+from another, such as the opposite sides of one exchange, different accounts,
+or incompatible device/permission conditions. The harness picker is never a
+scene selector or a substitute for navigation: from each starting condition,
+the user must reach every possible state through the production controls and
+normal asynchronous transitions. Never add an in-design state switcher,
+timer, simulator button, annotation, or status label. Build responsive
+behavior with Tailwind's `md:` breakpoint.
 
 ## Pull down and revise an existing design
 
@@ -74,4 +84,6 @@ the matching stable IDs. Boolean `"force": true` bypasses the guard.
 
 Fetch `/api/design/<revision_id>/full`, use the selected variant when one is
 selected (otherwise the last variant), and integrate its HTML/CSS directly.
-Replace fixture data with real component state; do not redesign from prose.
+Replace only the simulated input source with the real API; the visible DOM,
+styles, interactions, transitions, responsive behavior, and state shape must
+already be production-final and must not be redesigned from prose.
