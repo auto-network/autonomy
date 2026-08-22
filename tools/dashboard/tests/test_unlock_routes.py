@@ -1460,3 +1460,18 @@ def test_combined_unlock_rejects_a_foreign_root(env, root):
                                              minted["origin"])},
                  headers={"host": HOST})
     assert r.status_code == 403
+
+
+def test_root_releasing_unlock_routes_are_public_exceptions():
+    """Every pre-session unlock route must be servable without a session —
+    otherwise an operator at the locked screen gets 401. The combined (MFA)
+    route was missed once and locked the operator out; assert the whole set."""
+    from tools.dashboard import route_policy
+    for path in (
+        "/api/identity/unlock/password/options",
+        "/api/identity/unlock/password",
+        "/api/identity/unlock/passkey/options",
+        "/api/identity/unlock/passkey",
+        "/api/identity/unlock/combined",
+    ):
+        assert ("POST", path) in route_policy.PUBLIC_EXCEPTIONS, path
