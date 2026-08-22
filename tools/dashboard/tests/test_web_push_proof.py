@@ -111,6 +111,7 @@ def test_config_returns_uncompressed_vapid_public_key(monkeypatch):
 def test_same_origin_apple_subscription_sends_once(monkeypatch):
     seen = []
     monkeypatch.setattr(api_auth, "require_global_api_authority", lambda _r: None)
+    monkeypatch.setenv("DASHBOARD_DOMAIN", "node.example.test")
     monkeypatch.setattr(
         web_push_proof,
         "_send_push",
@@ -125,7 +126,13 @@ def test_same_origin_apple_subscription_sends_once(monkeypatch):
     assert response.json()["push_service_status"] == 201
     assert len(seen) == 1
     assert seen[0][0]["endpoint"].startswith("https://web.push.apple.com/")
-    assert seen[0][1] == "https://desktop-noft5ms.tail35c24e.ts.net"
+    assert seen[0][1] == "https://node.example.test"
+
+
+def test_vapid_contact_falls_back_to_validated_request_origin(monkeypatch):
+    monkeypatch.delenv("DASHBOARD_DOMAIN", raising=False)
+    request = type("Request", (), {"headers": {"origin": "https://testserver"}})()
+    assert web_push_proof._vapid_contact(request) == "https://testserver"
 
 
 def test_send_refuses_cross_origin_and_non_apple_endpoints(monkeypatch):

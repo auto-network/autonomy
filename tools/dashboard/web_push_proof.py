@@ -198,6 +198,30 @@ def _safe_push_failure(exc: Exception) -> tuple[int | None, str | None]:
     return status, reason
 
 
+def _vapid_contact(request: Request) -> str:
+    """Return this node's configured HTTPS contact without a repo hostname.
+
+    ``DASHBOARD_DOMAIN`` is the existing machine-local deployment declaration
+    used for the node certificate. Older bare-host installs may not export it,
+    so the already-validated same-origin request is the proof-only fallback.
+    The durable system must move this declaration into the Fleet's designated
+    external-services-host contract rather than invent another hostname source.
+    """
+
+    configured = os.environ.get("DASHBOARD_DOMAIN", "").strip().rstrip(".")
+    candidate = f"https://{configured}" if configured else request.headers["origin"]
+    try:
+        parsed = urlsplit(candidate)
+        port = parsed.port
+    except ValueError as exc:
+        raise RuntimeError("the Dashboard HTTPS contact is invalid") from exc
+    if parsed.scheme != "https" or not parsed.hostname \
+            or parsed.username or parsed.password or parsed.path \
+            or parsed.query or parsed.fragment or port not in (None, 443):
+        raise RuntimeError("the Dashboard HTTPS contact is invalid")
+    return f"https://{parsed.hostname.rstrip('.').lower()}"
+
+
 def _send_push(subscription: dict, *, contact: str) -> int:
     try:
         import requests
@@ -290,12 +314,8 @@ async def api_send(request: Request) -> JSONResponse:
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=422)
 
-    # Use a real HTTPS contact URI. The prior intentionally non-routable mail
-    # domain was useful for a local crypto smoke but is not an acceptable VAPID
-    # subject for a real push service. Keep the URL pathless because py-vapid's
-    # strict subject validator accepts an HTTPS origin, not a resource path.
-    contact = "https://desktop-noft5ms.tail35c24e.ts.net"
     try:
+        contact = _vapid_contact(request)
         status = await asyncio.to_thread(
             _send_push, subscription, contact=contact,
         )
