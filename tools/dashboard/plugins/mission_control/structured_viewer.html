@@ -593,7 +593,7 @@
       c.title = "Open in " + surfName(it.surface_id);
       c.addEventListener("click", function (ev) {
         if (ev.target.closest("a,button,summary")) return;
-        gotoSurface(it.surface_id);
+        show(it.surface_id === MID ? MID : it.surface_id);
         var target = document.querySelector(
           '.mc-view [data-mc-anchor="' + it.key + '"]');
         if (target){
@@ -809,7 +809,7 @@
     sec.appendChild(el("h2",null,"Pillars"));
     PILLARS.forEach(function (p) {
       var pc = el("div","mc-psum");
-      pc.addEventListener("click",function(){ gotoSurface(p.pillar_id); });
+      pc.addEventListener("click",function(){ show(p.pillar_id); });
       var hd = el("div","hd");
       hd.appendChild(dot(p.color || "#8391a8"));
       hd.appendChild(el("b",null,p.name));
