@@ -45,12 +45,12 @@ from datetime import datetime
 from typing import Any
 
 from .registry import (
+    publication_band,
     SchemaValidationError,
     SettingSchema,
     field,
     home,
     keyed_per_entity,
-    publication_band,
     singleton,
 )
 
@@ -279,6 +279,7 @@ class NetworkOrgKeyV2(SettingSchema):
 #: their database is the organizational home of their own
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
+@publication_band(min="raw", max="raw")
 @home("organization")
 @keyed_per_entity(key_strategy="registry_host")
 class NetworkBindingV1(SettingSchema):
@@ -414,6 +415,7 @@ class NetworkBindingV1(SettingSchema):
 #: their database is the organizational home of their own
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
+@publication_band(min="raw", max="raw")
 @home("organization")
 @keyed_per_entity(key_strategy="grant_token")
 class NetworkLinkGrantV1(SettingSchema):
@@ -676,6 +678,7 @@ class NetworkLinkGrantV3(NetworkLinkGrantV2):
 #: their database is the organizational home of their own
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
+@publication_band(min="raw", max="raw")
 @home("organization")
 @singleton(key="default")
 class NetworkServeCertV2(SettingSchema):

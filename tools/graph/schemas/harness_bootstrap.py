@@ -31,6 +31,7 @@ from __future__ import annotations
 from typing import Any
 
 from .registry import (
+    publication_band,
     home,
     RemediationRef,
     SchemaValidationError,
@@ -73,6 +74,7 @@ SYNOPSIS = {
 }
 
 
+@publication_band(min="raw", max="raw")
 @home("machine")
 @keyed_per_entity(key_strategy="harness_name")
 class HarnessBootstrapV1(SettingSchema):

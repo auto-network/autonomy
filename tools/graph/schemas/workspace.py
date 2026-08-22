@@ -26,6 +26,7 @@ import re
 from typing import Any
 
 from .registry import (
+    publication_band,
     RemediationRef,
     SettingSchema,
     SchemaValidationError,
@@ -173,6 +174,7 @@ def _validate_repo(repo: Any, idx: int) -> None:
 # ── WorkspaceV1 ─────────────────────────────────────────────
 
 
+@publication_band(min="raw", max="curated")
 @keyed_per_entity(key_strategy="workspace_id")
 #: A workspace is one value correct for every member of the org that owns it —
 #: its image, harness, repos, tags and container paths do not differ per

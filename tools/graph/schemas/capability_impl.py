@@ -40,7 +40,7 @@ from __future__ import annotations
 import posixpath
 from typing import Any
 
-from .registry import SchemaValidationError, SettingSchema, field, keyed_per_entity
+from .registry import SchemaValidationError, SettingSchema, field, keyed_per_entity, publication_band
 from .registry import home
 
 
@@ -330,6 +330,7 @@ def _validate_str_list(payload: dict, key: str, cls_name: str) -> None:
 #: their database is the organizational home of their own
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
+@publication_band(min="raw", max="canonical")
 @home("organization")
 @keyed_per_entity(key_strategy="implementation_name")
 class CapabilityImplV1(SettingSchema):

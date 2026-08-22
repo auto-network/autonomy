@@ -14,6 +14,7 @@ and therefore dropped from the payload.
 from __future__ import annotations
 
 from .registry import (
+    publication_band,
     home,
     home,
     keyed_per_entity,
@@ -50,6 +51,7 @@ SYNOPSIS = {
 }
 
 
+@publication_band(min="raw", max="curated")
 @keyed_per_entity(
     key_strategy="workspace_id:artifact_name",
     # The first segment identifies the workspace that declares this

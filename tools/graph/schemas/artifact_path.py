@@ -22,6 +22,7 @@ Spec: graph://0d3f750f-f9c (Setting Primitive), graph://bc0dda40-f56
 from __future__ import annotations
 
 from .registry import (
+    publication_band,
     home,
     keyed_per_entity,
     SchemaValidationError,
@@ -47,6 +48,7 @@ SYNOPSIS = {
 }
 
 
+@publication_band(min="raw", max="raw")
 @home("machine")
 @keyed_per_entity(key_strategy="artifact_name")
 class ArtifactPathV1(SettingSchema):

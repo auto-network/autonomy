@@ -20,6 +20,7 @@ from datetime import timedelta
 from typing import Any
 
 from .registry import (
+    publication_band,
     home,
     home,
     keyed_per_entity,
@@ -96,6 +97,7 @@ def _validate_check(entry: Any, idx: int, cls_name: str) -> None:
 #: their database is the organizational home of their own
 #: things; reading this as "anywhere but personal" refuses
 #: writes that are correct.
+@publication_band(min="raw", max="curated")
 @home("organization")
 @cache(ttl=timedelta(days=30))
 @keyed_per_entity(key_strategy="repo_slug:review_id")
