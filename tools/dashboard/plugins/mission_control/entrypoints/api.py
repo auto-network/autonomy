@@ -90,7 +90,7 @@ def session_contributions(session_ids: list[str], request: Request) -> dict[str,
         mission_name = str(mission.get("name") or "Mission Control")
         result[session_id].append({
             "id": f"pillar:{pillar['pillar_id']}",
-            "kind": "badge",
+            "kind": "action",
             "label": pillar_name,
             "title": f"Open {mission_name} / {pillar_name} in Mission Control",
             "href": f"/missions/{pillar['mission_id']}/pillars/{pillar['pillar_id']}",
