@@ -170,6 +170,10 @@ LIBRARIAN_TYPES: dict[str, dict] = {
         "prompt_path": LIBRARIAN_DIR / "experience_reviewer" / "prompt.md",
         "primer_module": "agents.librarians.experience_reviewer.primer",
     },
+    "mission_curate": {
+        "prompt_path": LIBRARIAN_DIR / "mission_curator" / "prompt.md",
+        "primer_module": "agents.librarians.mission_curator.primer",
+    },
 }
 
 
