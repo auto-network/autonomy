@@ -389,12 +389,11 @@ def test_unanswered_screen_questions_stay_out_of_the_questions_count():
     on inside a number that mostly means conversations."""
     src = _viewer("bootstrap.js")
     assert "function unanswered(" in src
-    # The for-you direction lives on the one questions control as its own
-    # badge, never folded into the open-questions number.
-    assert "mc-count-you" in src
-    # One bar control carries both directions as badges; the panel's tabs
-    # name them. The separate pill is gone.
-    assert "mc-count-you" in src
+    # The two directions stay separate tabs of the questions panel; the
+    # bar carries no counter at all (the page renders both directions).
+    assert '"For you"' in src
+    assert "openCount()" in src
+    # No separate pill, no bar badge — the page renders the asks inline.
     assert '" asks for you"' not in src
 
 
@@ -447,10 +446,11 @@ def test_the_for_you_count_opens_all_of_them_not_the_first():
     assert 'show({anchor: forYou[0].ref})' not in src, (
         "the count still jumps to the first item"
     )
-    # The for-you direction is a tab of the one questions panel; the bar
-    # carries it as a badge on the single questions control.
+    # The for-you direction is a tab of the one questions panel, reached
+    # from the page (which renders the asks inline) — never a jump to a
+    # single item.
     assert '"For you"' in src
-    assert "mc-count-you" in src
+    assert "forYouRows()" in src
     # And a way back out of one of them to the rest.
     assert '"\\u2039 For you"' in src or "For you" in src
 

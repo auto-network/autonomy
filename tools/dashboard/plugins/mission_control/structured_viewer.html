@@ -93,6 +93,14 @@
     color:var(--ink3);border-radius:6px;padding:5px 10px}
   .mc-seg .mc-seg-on{background:#232345;color:#fff}
   .mc-news-seg{margin:0 0 12px}
+  .mc-qa-seg{margin:0 0 12px}
+  .mc-qa{cursor:pointer}
+  .mc-qa:hover{border-color:var(--line2)}
+  .mc-qa-peek{font-size:.8rem;color:var(--ink3);margin-top:6px;
+    border-left:2px solid var(--line2);padding-left:9px;font-style:italic}
+  .mc-qa-state{font-size:.68rem;color:var(--ink3);text-transform:uppercase;
+    letter-spacing:.05em;margin-top:7px}
+  .mc-qa-ask{display:flex;justify-content:flex-start;margin:4px 0 0}
   .mc-news .body{margin-top:2px}
   .mc-news-foot{display:flex;justify-content:flex-end;margin-top:6px}
   .mc-news-reply{background:none;border:0;cursor:pointer;font:600 .74rem/1 inherit;
@@ -944,9 +952,94 @@
   views.appendChild(collectionView("decisions","Decisions",
     function (it) { return it.kind==="decision"; },
     "No decisions recorded yet."));
-  views.appendChild(collectionView("questions","Open questions",
+  var qView = collectionView("questions","Open questions",
     function (it) { return it.kind==="question" && it.state==="open"; },
-    "Nothing is waiting on an answer."));
+    "Nothing is waiting on an answer.");
+  qView.appendChild(qaSection());
+  views.appendChild(qView);
+
+  // ── Q&A conversations, inline under the Questions tab. This was the
+  // one thing only the bar's chat bubble showed; the bubble is gone, so
+  // the record lives here — filterable, tappable through to the chrome's
+  // entry view, with Ask summoning the chrome's composer. ──
+  function qaSection(){
+    var entries = [];
+    try {
+      entries = JSON.parse(
+        document.getElementById("mc-state").textContent).questions || [];
+    } catch (e) {}
+    var sec = el("section","mc-sec");
+    var hd = el("h2",null,"Q&A");
+    sec.appendChild(hd);
+    var openQ = function (q) { return !q.closed_at && !q.answer; };
+    var mode = "all";
+    var seg = el("div","mc-seg mc-qa-seg");
+    var host = el("div");
+    function draw(){
+      var counts = {all: entries.length,
+                    open: entries.filter(openQ).length};
+      counts.done = counts.all - counts.open;
+      seg.innerHTML = "";
+      [["all","All"],["open","Open"],["done","Answered"]].forEach(function (m) {
+        var b = el("button", mode === m[0] ? "mc-seg-on" : "",
+                   m[1] + " " + counts[m[0]]);
+        b.addEventListener("click", function () { mode = m[0]; draw(); });
+        seg.appendChild(b);
+      });
+      host.innerHTML = "";
+      var shown = entries.filter(function (q) {
+        if (mode === "open") return openQ(q);
+        if (mode === "done") return !openQ(q);
+        return true;
+      }).sort(function (a, b) {
+        return (parseFloat(b.created_at)||0) - (parseFloat(a.created_at)||0);
+      });
+      if (!shown.length){
+        var em = el("div","mc-empty");
+        em.textContent = "No conversations here yet.";
+        host.appendChild(em);
+      }
+      shown.forEach(function (q) {
+        var c = el("article","mc-item mc-qa");
+        c.dataset.surface = q.pillar_id || MID;
+        var top = el("div","top");
+        var wh = el("span","where");
+        wh.appendChild(dot(q.pillar_id ? surfColor(q.pillar_id) : "#8391a8"));
+        wh.appendChild(document.createTextNode(
+          (q.pillar_id ? surfName(q.pillar_id) : "Mission")
+          + (q.asked_by_label ? " \u00b7 " + q.asked_by_label : "")));
+        top.appendChild(wh);
+        top.appendChild(el("span","mc-when",
+          agoText(new Date((parseFloat(q.created_at)||0)*1000))));
+        c.appendChild(top);
+        var b = el("div","body"); paras(b, q.question || ""); c.appendChild(b);
+        if (q.answer){
+          var pk = el("div","mc-qa-peek");
+          pk.textContent = String(q.answer).split(/\n/)[0].slice(0, 140);
+          c.appendChild(pk);
+        }
+        c.appendChild(el("div","mc-qa-state",
+          openQ(q) ? "open" : (q.answer ? "answered" : "closed")));
+        c.addEventListener("click", function () {
+          document.dispatchEvent(new CustomEvent("mc:open-entry",
+            {detail: {entry_id: q.entry_id}}));
+        });
+        host.appendChild(c);
+      });
+      var askRow = el("div","mc-qa-ask");
+      var ask = el("button","mc-news-reply","Ask a question");
+      ask.addEventListener("click", function (ev) {
+        ev.stopPropagation();
+        document.dispatchEvent(new CustomEvent("mc:open-ask"));
+      });
+      askRow.appendChild(ask);
+      host.appendChild(askRow);
+    }
+    draw();
+    sec.appendChild(seg);
+    sec.appendChild(host);
+    return sec;
+  }
   views.appendChild(feedView());
   views.appendChild(newsView());
 
