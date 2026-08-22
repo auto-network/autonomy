@@ -143,15 +143,19 @@ RUN pip install --no-cache-dir -r /app/deploy/requirements.txt
 # the builder already fetched instead of downloading it again.
 COPY --from=appsrc /usr/local/bin/tailwindcss /usr/local/bin/tailwindcss
 
-# The assembled source tree: code + /app/VERSION + built CSS, and NO .git
-# (dropped in the builder stage). This is exactly what seeds the autonomy-code
-# volume on a containerized node.
-COPY --from=appsrc /app /app
+# The assembled source tree: code + /app/VERSION + built CSS + .git (remote
+# stripped in the builder stage). Owned by autonomy AT BUILD TIME (--chown) so
+# the autonomy-code volume it seeds is already uid-1000-owned. The server,
+# tailwind --watch, __pycache__, and the /workspace/repo git clone all run as
+# autonomy — baking ownership here means the entrypoint never has to chown the
+# code volume at runtime. (--chown copies + owns in one layer, no bloat.)
+COPY --chown=autonomy:autonomy --from=appsrc /app /app
 
 # graph CLI convenience wrapper (same shape as the agent images).
 RUN printf '#!/bin/sh\nexec python3 -m tools.graph "$@"\n' > /usr/local/bin/graph \
     && chmod +x /usr/local/bin/graph \
-    && chmod +x /app/deploy/entrypoint.sh
+    && chmod +x /app/deploy/entrypoint.sh \
+    && chown autonomy:autonomy /app
 
 # Persistent state: per-org DBs (identity + credential Settings — the
 # secret store), graph.db, auth.db, TLS keypair. Its own volume, mounted at
