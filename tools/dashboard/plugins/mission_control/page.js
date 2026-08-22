@@ -80,7 +80,10 @@ function missionPresenceRow(id, kind = 'mission') {
   // class Mission Control renders through, not an assumed size.
   const AVATAR_STEP = 20, AVATAR_SIZE = 24, NAME_SHIFT = 96;
   return Presence.alpine(
-    { surfaceId: kind + ':' + id },
+    // The index shows who is where; being ON the index is not being on
+    // six missions at once. Reads and live updates only — the mission
+    // screen itself is what records a visit.
+    { surfaceId: kind + ':' + id, observeOnly: true },
     {
       openId: null,
       identityTimer: null,
@@ -322,27 +325,19 @@ function missionControlPage() {
     },
 
     async refreshMissions() {
+      // ONE REQUEST. This was 1 + N mission details + N pillar lists —
+      // thirteen fetches for six missions, which saturated the browser's
+      // per-origin connection cap over a phone tunnel and queued every
+      // navigation fetch behind them. The server assembles the same data
+      // in one pass.
       try {
-        const res = await fetch('/api/missions');
+        const res = await fetch('/api/missions?full=1');
         const data = await res.json();
         const list = (data && data.missions) || [];
-        // The list endpoint doesn't include current_revision/open_question_count
-        // — fetch each mission's detail for the summary line. Small N
-        // (missions are a rare, coarse-grained entity), so no pagination/
-        // batching needed.
-        this.missions = await Promise.all(list.map(async (m) => {
-          try {
-            const detail = await fetch('/api/missions/' + encodeURIComponent(m.mission_id));
-            const body = await detail.json();
-            return (body && body.mission) || m;
-          } catch (_) {
-            return m;
-          }
-        }));
-        // Pillars, same small-N no-pagination posture as mission detail
-        // above -- a mission with zero pillars costs one cheap empty-list
-        // fetch and renders exactly as it did before pillars existed.
-        await Promise.all(this.missions.map((m) => this.refreshPillars(m.mission_id)));
+        this.missions = list;
+        const pillars = {};
+        list.forEach((m) => { pillars[m.mission_id] = m.pillars || []; });
+        this.pillars = pillars;
       } catch (_) {
         this.missions = [];
       }

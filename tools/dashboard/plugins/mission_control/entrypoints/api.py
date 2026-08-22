@@ -192,13 +192,62 @@ def _revision_payload(revision: dict, *, include_html: bool) -> dict:
     return payload
 
 
+def _mission_detail_payload(mission: dict) -> dict:
+    """The full card payload: what GET /api/missions/<id> returns, shared
+    with the enriched list so the home page needs ONE request."""
+    mission_id = mission["mission_id"]
+    payload = _mission_payload(mission)
+    if mission["current_revision_id"]:
+        current = db.get_current_site(mission_id)
+        if current:
+            payload["current_revision"] = _revision_payload(current, include_html=False)
+    payload["open_question_count"] = db.count_open_questions(mission_id)
+    last_seen = db.get_last_seen(mission_id)
+    if last_seen is None:
+        # Never seen before: baseline is established by the first POST
+        # .../seen, not "dump the whole history as new" -- that would be
+        # noisy and misleading on a mission's very first view.
+        payload["since_last_visit"] = {"last_seen_at": None, "revisions": [], "questions": []}
+    else:
+        payload["since_last_visit"] = {
+            "last_seen_at": last_seen,
+            "revisions": [
+                _revision_payload(r, include_html=False)
+                for r in db.list_site_revisions_since(mission_id, last_seen)
+            ],
+            "questions": [
+                _question_payload(q)
+                for q in db.list_conversation_since(mission_id, last_seen)
+            ],
+        }
+    return payload
+
+
 async def list_missions(request: Request) -> JSONResponse:
     # An org-bound caller's list contains only its own org's missions —
     # same predicate, list shape. Global authority (the operator) sees all.
-    missions = [
-        _mission_payload(m) for m in db.list_missions()
-        if not api_auth.caller_org_scope_hides(request, dict(m).get("org"))
-    ]
+    #
+    # ?full=1 returns each mission's complete card payload plus its
+    # pillars. The home page used to fetch 1 + N details + N pillar
+    # lists; over a phone's tunnel those thirteen requests saturated the
+    # browser's per-origin connection cap and navigation's own fetches
+    # queued behind them for seconds. Server-side the whole loop is a few
+    # dozen milliseconds.
+    full = request.query_params.get("full") in ("1", "true")
+    rows = [m for m in db.list_missions()
+            if not api_auth.caller_org_scope_hides(request, dict(m).get("org"))]
+    if not full:
+        return JSONResponse({"missions": [_mission_payload(m) for m in rows]})
+    missions = []
+    for m in rows:
+        payload = _mission_detail_payload(m)
+        pillars = []
+        for pr in db.list_pillars(m["mission_id"]):
+            pp = _pillar_payload(pr)
+            pp["open_question_count"] = db.count_open_pillar_questions(pr["pillar_id"])
+            pillars.append(pp)
+        payload["pillars"] = pillars
+        missions.append(payload)
     return JSONResponse({"missions": missions})
 
 
@@ -233,31 +282,7 @@ async def get_mission(request: Request) -> JSONResponse:
     mission = db.get_mission(mission_id)
     if not mission:
         return JSONResponse({"error": "mission not found"}, status_code=404)
-    payload = _mission_payload(mission)
-    if mission["current_revision_id"]:
-        current = db.get_current_site(mission_id)
-        if current:
-            payload["current_revision"] = _revision_payload(current, include_html=False)
-    payload["open_question_count"] = db.count_open_questions(mission_id)
-    last_seen = db.get_last_seen(mission_id)
-    if last_seen is None:
-        # Never seen before: baseline is established by the first POST
-        # .../seen, not "dump the whole history as new" -- that would be
-        # noisy and misleading on a mission's very first view.
-        payload["since_last_visit"] = {"last_seen_at": None, "revisions": [], "questions": []}
-    else:
-        payload["since_last_visit"] = {
-            "last_seen_at": last_seen,
-            "revisions": [
-                _revision_payload(r, include_html=False)
-                for r in db.list_site_revisions_since(mission_id, last_seen)
-            ],
-            "questions": [
-                _question_payload(q)
-                for q in db.list_conversation_since(mission_id, last_seen)
-            ],
-        }
-    return JSONResponse({"mission": payload})
+    return JSONResponse({"mission": _mission_detail_payload(mission)})
 
 
 async def mark_mission_seen(request: Request) -> JSONResponse:

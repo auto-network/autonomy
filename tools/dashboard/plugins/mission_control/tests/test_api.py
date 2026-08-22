@@ -2311,8 +2311,10 @@ def test_the_viewer_speaks_the_relay_handlers_field_names():
     assert '{kind: "question", question: text}' in _BOOTSTRAP, (
         "the viewer no longer sends the `question` field handle_relay_write reads"
     )
-    assert 'body[kind === "answer" ? "answer" : "followup"] = text;' in _BOOTSTRAP, (
-        "the viewer no longer sends the `followup`/`answer` fields the server reads"
+    assert ('body[kind === "reply" ? "text" : kind === "answer" ? "answer"'
+            ' : "followup"] = text;') in _BOOTSTRAP, (
+        "the viewer no longer sends the `text`/`followup`/`answer` fields "
+        "the server reads"
     )
     assert "body: text" not in _BOOTSTRAP, (
         "a generic `body` key is exactly the mismatch this seam already shipped once"
