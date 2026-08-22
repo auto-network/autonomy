@@ -10608,6 +10608,12 @@ async def api_design_create(request):
     creator_session_label = body.get("creator_session_label")
     force = body.get("force") is True
 
+    # Stamp the design with the caller's middleware-approved org (invariant 1):
+    # the token's org for an agent (authoritative, un-widenable), the operator's
+    # selection otherwise. The design is then only visible to that org (and the
+    # operator). A body/query org is never trusted for this.
+    creator_org = api_auth.organization_scope_from_request(request)
+
     if not variants:
         return JSONResponse({"error": "At least one variant required"}, status_code=400)
 
@@ -10626,6 +10632,7 @@ async def api_design_create(request):
             alpine=alpine,
             creator_session_id=creator_session_id,
             creator_session_label=creator_session_label,
+            org=creator_org,
             force=force,
         )
     except DuplicateDesignTitleError as exc:
@@ -10660,7 +10667,8 @@ async def api_design_poll(request):
     if err:
         return err
     design = await asyncio.to_thread(get_design, rev_id)
-    if not design:
+    # Org-scope (invariant 1): cross-org/unattributable → the same 404 as absent.
+    if not design or api_auth.caller_org_scope_hides(request, design.get("org")):
         return JSONResponse({"error": "not found"}, status_code=404)
 
     if design["status"] == "pending":
@@ -10685,7 +10693,9 @@ async def api_design_get(request):
     if err:
         return err
     design = await asyncio.to_thread(get_design, rev_id)
-    if not design:
+    # Org-scope (invariant 1): a cross-org — or unattributable — design is the
+    # same 404 a nonexistent one returns, so existence never leaks across orgs.
+    if not design or api_auth.caller_org_scope_hides(request, design.get("org")):
         return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse(design)
 
@@ -10695,6 +10705,9 @@ async def api_design_submit(request):
     rev_id, err = _resolve_design_id_or_error(request.path_params["id"])
     if err:
         return err
+    design = await asyncio.to_thread(get_design, rev_id)
+    if not design or api_auth.caller_org_scope_hides(request, design.get("org")):
+        return JSONResponse({"error": "design not found"}, status_code=404)
     body = await request.json()
     selections = body.get("selections", [])
     ok = await asyncio.to_thread(submit_results, rev_id, selections)
@@ -10706,6 +10719,12 @@ async def api_design_submit(request):
 async def api_design_pending(request):
     """List pending designs (for toast notifications)."""
     pending = await asyncio.to_thread(list_pending_designs)
+    # Org-scope the list (invariant 1): an org caller sees only its own org's
+    # pending designs; the operator sees all.
+    pending = [
+        d for d in pending
+        if not api_auth.caller_org_scope_hides(request, d.get("org"))
+    ]
     return JSONResponse(pending)
 
 
@@ -10714,6 +10733,9 @@ async def api_design_dismiss(request):
     rev_id, err = _resolve_design_id_or_error(request.path_params["id"])
     if err:
         return err
+    design = await asyncio.to_thread(get_design, rev_id)
+    if not design or api_auth.caller_org_scope_hides(request, design.get("org")):
+        return JSONResponse({"error": "design not found"}, status_code=404)
     ok = await asyncio.to_thread(dismiss_design, rev_id)
     if not ok:
         return JSONResponse({"error": "design not found"}, status_code=404)
@@ -10741,7 +10763,7 @@ async def api_design_screenshot(request):
         return JSONResponse({"error": "content-type must be image/*"}, status_code=400)
 
     design = await asyncio.to_thread(get_design, rev_id)
-    if not design:
+    if not design or api_auth.caller_org_scope_hides(request, design.get("org")):
         return JSONResponse({"error": "not found"}, status_code=404)
 
     screenshot_dir = DATA_ROOT / "experiments" / rev_id
