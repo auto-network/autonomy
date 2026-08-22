@@ -80,6 +80,27 @@ def _has_open_approval(approval_id: str | None) -> bool:
     return bool(row) and row.get("result") is None
 
 
+def _needs_link_approval(
+    current: dict | None, requested_org: str, requested_level: str,
+) -> bool:
+    """Whether ``hello`` asks for authority the peer does not already hold.
+
+    An omitted suggestion accepts any live binding, an existing read/write grant
+    satisfies a read request, and only an org change or privilege upgrade reopens
+    the operator rendezvous.  The expiry check stays centralized in
+    ``resolve_session`` so an expired row never passes as live here.
+    """
+    status = (
+        db.resolve_session(current["openai_session"])["status"]
+        if current else "unknown"
+    )
+    if status != db.APPROVED:
+        return True
+    if requested_org and requested_org != (current.get("autonomy_org") or ""):
+        return True
+    return requested_level == "readwrite" and current.get("level") != "readwrite"
+
+
 def _reconcile(osession: str) -> None:
     """Reflect a decided approval into the binding. Approvals are applied by the
     executor; a DECLINE denies the session unless it already holds a live binding
@@ -141,29 +162,44 @@ async def resolve_session(request: Request) -> JSONResponse:
     subject = str(body.get("openai_subject") or "")
     oorg = str(body.get("openai_org") or "")
     intent = str(body.get("intent") or "")
+    requested_org = str(body.get("requested_org") or "").strip()
+    requested_level = str(body.get("requested_level") or "").strip()
+    if requested_level not in ("", "read", "readwrite"):
+        return JSONResponse(
+            {"error": "requested_level must be 'read' or 'readwrite'"},
+            status_code=400,
+        )
 
     _reconcile(osession)
 
-    # A hello is always a request. There is no org here — the operator chooses.
-    # (Re)establish a pending record when there's no live binding, then ensure
-    # exactly one open approval popup (deduped while undecided). A live (approved)
-    # session KEEPS its binding; the popup is a re-request the operator can grant
-    # (to change org/level) or ignore.
+    # Establish a pending record when there is no live binding.  A repeated hello
+    # is otherwise just a status check: it reuses a live grant unless the caller
+    # explicitly asks for a different org or a privilege upgrade.
     status = db.resolve_session(osession)["status"]
     if status in ("unknown", "denied", "expired"):
         db.upsert_pending_session(osession, openai_subject=subject,
-                                  openai_org=oorg, intent=intent)
+                                  openai_org=oorg, intent=intent,
+                                  requested_org=requested_org)
     current = db.get_session(osession)
     handle = db.ensure_handle(osession) or _handle(osession)
-    if not _has_open_approval(current.get("approval_id")):
+    needs_approval = _needs_link_approval(current, requested_org, requested_level)
+    if (needs_approval and not _has_open_approval(current.get("approval_id"))):
         # The approval's `session` field is the MINTED HANDLE (ChatGPT-<datetime>,
         # what the popup shows); the raw openai_session travels in the request for
         # the executor to bind.
         rid = await _open_approval(kinds.KIND_LINK, handle, {
             "openai_session": osession, "openai_subject": subject,
-            "openai_org": oorg, "intent": intent, "handle": handle})
+            "openai_org": oorg, "intent": intent, "handle": handle,
+            "requested_org": requested_org,
+            "requested_level": requested_level})
         db.set_session_approval_id(osession, rid)
-    return JSONResponse(_authorization(osession))
+    authorization = _authorization(osession)
+    if needs_approval and authorization.get("status") == db.APPROVED:
+        # The current narrower binding remains usable while an upgrade/org
+        # change waits.  Tell hello about both facts so it does not claim the
+        # requested scope is already available or ask the model to re-request.
+        authorization["request_status"] = db.PENDING
+    return JSONResponse(authorization)
 
 
 async def session_status(request: Request) -> JSONResponse:

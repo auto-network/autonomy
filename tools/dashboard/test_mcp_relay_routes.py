@@ -75,14 +75,16 @@ def test_missing_token_env_is_fail_closed(client, monkeypatch):
 
 def test_new_session_goes_pending_and_opens_one_approval(client):
     body = {"openai_session": "v1/chatA", "openai_subject": "v1/subj",
-            "openai_org": "v1/oorg", "intent": "tunnel help"}
+            "openai_org": "v1/oorg", "intent": "tunnel help",
+            "requested_org": "autonomy", "requested_level": "readwrite"}
     r = client.post("/api/mcp/session/resolve", headers=AUTH, json=body)
     assert r.status_code == 200 and r.json()["status"] == "pending"
     assert len(client.ar.rows) == 1  # one approval opened
     appr = next(iter(client.ar.rows.values()))
     assert appr["kind"] == "mcp_peer_link"
     assert appr["request"]["intent"] == "tunnel help"
-    assert "requested_org" not in appr["request"]  # model never names an org
+    assert appr["request"]["requested_org"] == "autonomy"
+    assert appr["request"]["requested_level"] == "readwrite"
     # polling again must NOT spawn a second popup while the first is undecided
     client.post("/api/mcp/session/resolve", headers=AUTH, json=body)
     assert len(client.ar.rows) == 1
@@ -99,11 +101,14 @@ def test_approval_uses_a_minted_handle_not_the_raw_session(client):
     assert appr["request"]["openai_session"] == "v1/secretbearersession"  # raw kept for executor
 
 
-def test_enrich_link_attaches_the_org_list():
+def test_enrich_link_attaches_org_list_and_configured_default(monkeypatch):
     from tools.dashboard import mcp_peer_approvals as kinds
+    from tools.graph.schemas import dashboard_shell
+    monkeypatch.setattr(dashboard_shell, "shell_default_org", lambda: "autonomy")
     assert "mcp_peer_link" in kinds.ENRICH
     out = kinds.ENRICH["mcp_peer_link"]({"request": {}})
     assert "orgs" in out and isinstance(out["orgs"], list)  # dropdown source (empty in test env)
+    assert out["default_org"] == "autonomy"
 
 
 def test_session_status_is_read_only_never_pops(client):
@@ -132,18 +137,50 @@ def test_approved_binding_resolves_with_org_and_level(client):
     assert j["status"] == "approved"
     assert j["autonomy_org"] == "autonomy" and j["level"] == "readwrite"
 
+    # A read/write grant already satisfies a later read-only request; asking for
+    # less authority must not renew the TTL or open another approval.
+    r = client.post("/api/mcp/session/resolve", headers=AUTH,
+                    json={"openai_session": "v1/chatC", "intent": "read now",
+                          "requested_org": "autonomy", "requested_level": "read"})
+    assert r.json()["status"] == "approved"
+    assert len(client.ar.rows) == 1
 
-def test_rehello_reopens_a_fresh_approval_and_keeps_binding(client):
+
+def test_rehello_reuses_a_live_binding_until_scope_changes(client):
     body = {"openai_session": "v1/chatR", "intent": "read please"}
     client.post("/api/mcp/session/resolve", headers=AUTH, json=body)
     rid = next(iter(client.ar.rows))
     client.ar.decide(rid, {"approved": True})
     db.approve_session("v1/chatR", autonomy_org="autonomy", level="read", expires_at=None)
-    # re-hello (needs different access) pops a NEW approval, keeps the live binding
+    # Repeating hello without a scope change is a status check, not a fresh popup.
     r = client.post("/api/mcp/session/resolve", headers=AUTH,
-                    json={"openai_session": "v1/chatR", "intent": "now I need write"})
+                    json={"openai_session": "v1/chatR", "intent": "read again",
+                          "requested_org": "autonomy", "requested_level": "read"})
     assert r.json()["status"] == "approved"  # existing access preserved
+    assert len([a for a in client.ar.rows.values() if a["kind"] == "mcp_peer_link"]) == 1
+
+    # A real privilege upgrade opens one new approval while preserving the
+    # existing read grant until the operator decides it.
+    r = client.post("/api/mcp/session/resolve", headers=AUTH,
+                    json={"openai_session": "v1/chatR", "intent": "now I need write",
+                          "requested_org": "autonomy", "requested_level": "readwrite"})
+    assert r.json()["status"] == "approved"
+    assert r.json()["request_status"] == "pending"
     assert len([a for a in client.ar.rows.values() if a["kind"] == "mcp_peer_link"]) == 2
+
+    # Polling the same upgrade while its approval is open remains deduplicated.
+    client.post("/api/mcp/session/resolve", headers=AUTH,
+                json={"openai_session": "v1/chatR", "intent": "now I need write",
+                      "requested_org": "autonomy", "requested_level": "readwrite"})
+    assert len([a for a in client.ar.rows.values() if a["kind"] == "mcp_peer_link"]) == 2
+
+
+def test_invalid_requested_level_is_rejected_before_opening_approval(client):
+    r = client.post("/api/mcp/session/resolve", headers=AUTH,
+                    json={"openai_session": "v1/chat-invalid", "intent": "help",
+                          "requested_level": "admin"})
+    assert r.status_code == 400
+    assert not client.ar.rows
 
 
 def test_declined_approval_becomes_denied(client):

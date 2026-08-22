@@ -1073,6 +1073,15 @@ class TestWorktreePage:
         assert "const withPrs = matches.find((r) => this.rowPrs(r).length > 0);" in js
         assert "await this.openReviewDefault(withPrs);" in js
 
+    def test_mcp_approval_uses_request_and_dashboard_defaults(self):
+        js = (JS_DIR / "pages" / "worktrees.js").read_text()
+        assert "const requestedOrg = String(req.requested_org || '').trim();" in js
+        assert "const defaultOrg = String(r.default_org || '').trim();" in js
+        assert "orgs.includes('autonomy') ? 'autonomy'" in js
+        assert "req.requested_level : 'read'" in js
+        assert "ttl: '86400'" in js
+        assert "autonomyOrg: ''" not in js
+
     def test_spa_router_knows_worktrees_route(self):
         app_js = (JS_DIR.parent / "app.js").read_text()
         assert "renderWorktreesFragment" in app_js

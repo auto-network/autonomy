@@ -827,7 +827,9 @@
                         class="mt-2 w-full rounded-2xl border border-slate-600 bg-slate-900/60 px-4 py-3 text-sm text-slate-100 focus:border-indigo-400 focus:outline-none">
                   <option value="" disabled>Choose an org…</option>
                   <template x-for="o in approvalRequest.orgs" :key="o">
-                    <option :value="o" x-text="o"></option>
+                    <option :value="o"
+                            :selected="approvalRequest.autonomyOrg === o"
+                            x-text="o"></option>
                   </template>
                 </select>
               </template>
