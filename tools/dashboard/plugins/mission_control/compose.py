@@ -429,15 +429,28 @@ def compose_screen(mission_id: str, pillar_id: str | None = None, *,
     HTML so the runtime is mounted before their scripts run.
     """
     mission = db.get_mission(mission_id)
+    state = dict(mission_state(mission_id, pillar_id,
+                               include_sessions=(
+                                   include_sessions
+                                   if include_sessions is not None
+                                   else not framed)),
+                 may_write=may_write, me=viewer)
     if mission is not None and dict(mission).get("style") == "structured":
         # Structured style: the author-HTML half is the platform's standard
         # viewer rendered from dashboard.mission.item Settings rows. The
         # site-revision store is not consulted — and an empty mission still
         # serves (the template's empty state IS the onboarding).
         from tools.dashboard.plugins.mission_control import structured
+        m = dict(mission)
+        pillar_rows = db.list_pillars(mission_id)
+        items = structured.load_items(
+            m.get("org") or "",
+            [mission_id] + [p["pillar_id"] for p in pillar_rows])
         author_html = structured.render_screen(
-            dict(mission), db.list_pillars(mission_id),
-            focus_pillar_id=pillar_id)
+            m, pillar_rows, focus_pillar_id=pillar_id, items=items)
+        # The chrome's pillar chooser derives ages from site pushes, which
+        # structured missions never make — fill blanks from item activity.
+        structured.backfill_pillar_ages(state, items)
     else:
         if pillar_id is None:
             current = db.get_current_site(mission_id)
@@ -449,12 +462,7 @@ def compose_screen(mission_id: str, pillar_id: str | None = None, *,
     document = (
         _HEAD
         + (_SRCDOC_BASE if framed else "")
-        + _state_block(dict(mission_state(mission_id, pillar_id,
-                                          include_sessions=(
-                                              include_sessions
-                                              if include_sessions is not None
-                                              else not framed)),
-                            may_write=may_write, me=viewer))
+        + _state_block(state)
         + "<script>\n" + bootstrap_source() + "\n</script>\n"
         + author_html
     )

@@ -1241,6 +1241,31 @@ def _resolve_session_identity(request: Request) -> dict | None:
     session = principal.subject
     if not session:
         return None
+    # THE ROUTE'S SURFACE WINS. One session may coordinate a mission and
+    # several of its pillars; "a pillar this session coordinates" is then
+    # ambiguous, and the old any-match lookup attributed updates posted on
+    # one pillar's route to a DIFFERENT pillar (observed live: last-created
+    # match won). When the request names a surface and the caller
+    # coordinates it, that IS the identity it is acting as here.
+    pillar_id = request.path_params.get("pillar_id")
+    if pillar_id:
+        routed = db.get_pillar(pillar_id)
+        if routed and (routed.get("coordinator_session") or "") == session:
+            return {
+                "participant_id": f"pillar:{routed['pillar_id']}",
+                "participant_label": routed["name"],
+            }
+    mission_id = request.path_params.get("mission_id")
+    if mission_id:
+        routed_m = db.get_mission(mission_id)
+        if routed_m and (dict(routed_m).get("coordinator_session") or "") == session:
+            return {
+                "participant_id": f"mission:{routed_m['mission_id']}",
+                "participant_label": routed_m["name"],
+            }
+    # Routes without a surface in the path (entry-level anchor/retire) fall
+    # back to any coordinated surface — still ambiguous for multi-surface
+    # sessions, but those routes do not attribute authorship.
     pillar = db.get_pillar_by_coordinator(session)
     if pillar:
         return {

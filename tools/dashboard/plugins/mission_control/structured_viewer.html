@@ -203,6 +203,11 @@
   .mc-feed-row .k{color:var(--ink3);font-size:.7rem;flex-shrink:0;max-width:88px;
     overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .mc-feed-row .mc-pill{margin-left:auto;align-self:center}
+  .mc-feed-note{display:inline-flex;align-items:center;gap:6px;font:600 .74rem/1 inherit;
+    color:#fff;background:#232345;border:1px solid var(--accent-dim);border-radius:14px;
+    padding:6px 11px;margin:0 0 10px;cursor:pointer}
+  .mc-act-table th{cursor:pointer}
+  .mc-act-table th:hover{color:var(--ink)}
 
   /* non-stateful kinds: no pill, neutral spine */
   .mc-item.k-scope,.mc-item.k-status{border-left-color:var(--line2)}
@@ -411,6 +416,8 @@
       var th = document.createElement("th");
       th.appendChild(dot(surfColor(s.id)));
       th.appendChild(document.createTextNode(surfName(s.id)));
+      th.title = "Show " + surfName(s.id) + "'s updates over time";
+      th.addEventListener("click", function () { showFeedFor(s.id); });
       tr.appendChild(th);
       buckets[s.id].forEach(function (n, i) {
         var td = document.createElement("td");
@@ -723,6 +730,7 @@
       var day = x.d.toLocaleDateString(undefined,{weekday:"short",month:"short",day:"numeric"});
       if (day !== lastDay){ v.appendChild(el("div","mc-feed-day",day)); lastDay = day; }
       var row = el("div","mc-feed-row");
+      row.dataset.surface = x.it.surface_id;
       row.appendChild(dot(surfColor(x.it.surface_id)));
       row.appendChild(el("span","k",shortName(x.it.surface_id)));
       row.appendChild(el("span","t",x.it.title));
@@ -736,6 +744,44 @@
       v.appendChild(row);
     });
     return v;
+  }
+
+  // A pillar's own timeline: the feed, narrowed to one surface. Reached
+  // by tapping the pillar's row in the activity grid; one chip clears it.
+  function applyFeedFilter(){
+    var v = document.getElementById("view-feed");
+    if (!v) return;
+    var sid = v.dataset.filter || "";
+    var old = v.querySelector(".mc-feed-note");
+    if (old) old.remove();
+    v.querySelectorAll(".mc-feed-row").forEach(function (r) {
+      r.classList.toggle("mc-hidden", !!sid && r.dataset.surface !== sid);
+    });
+    var kids = [].slice.call(v.children);
+    for (var i = 0; i < kids.length; i++){
+      if (!kids[i].classList.contains("mc-feed-day")) continue;
+      var any = false;
+      for (var j = i + 1; j < kids.length
+           && !kids[j].classList.contains("mc-feed-day"); j++){
+        if (kids[j].classList.contains("mc-feed-row")
+            && !kids[j].classList.contains("mc-hidden")) any = true;
+      }
+      kids[i].classList.toggle("mc-hidden", !any);
+    }
+    if (sid){
+      var chip = el("button","mc-feed-note",
+        "Showing " + surfName(sid) + " only — show all");
+      chip.addEventListener("click", function () {
+        v.dataset.filter = ""; applyFeedFilter();
+      });
+      v.insertBefore(chip, v.firstChild);
+    }
+  }
+  function showFeedFor(sid){
+    var v = document.getElementById("view-feed");
+    if (v){ v.dataset.filter = sid || ""; }
+    show("feed");
+    applyFeedFilter();
   }
 
   // ── assemble views + nav ────────────────────────────────────────
