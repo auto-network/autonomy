@@ -71,9 +71,22 @@ def test_exact_ack_and_prune_survive_restart_without_permitting_replay(tmp_path)
 
     with UsageSpool(path) as spool:
         assert list(spool.pending()) == []
+        retained = list(spool.recoverable())
+        assert [record.wire for record in retained] == [batch.to_json()]
+        assert retained[0].acknowledged is True
         assert spool.health().acknowledged_records == 1
+        assert spool.health().acknowledged_bytes == len(batch.to_json())
         assert spool.next_sequence(SIGNER.public_hex, ORG) == 2
-        assert spool.prune_acked() == 1
+        assert spool.prune_acked(
+            producer="0" * 64,
+            organization_id=ORG,
+            through_sequence=1,
+        ) == 0
+        assert spool.prune_acked(
+            producer=SIGNER.public_hex,
+            organization_id=ORG,
+            through_sequence=1,
+        ) == 1
 
     with UsageSpool(path) as spool:
         assert spool.health().acknowledged_records == 0
@@ -145,7 +158,11 @@ def test_record_and_byte_capacity_backpressure_is_bounded_and_recoverable(tmp_pa
         spool.acknowledge(first.batch_id, first.checksum)
         with pytest.raises(UsageSpoolCapacity):
             spool.append(third.to_json())
-        assert spool.prune_acked() == 1
+        assert spool.prune_acked(
+            producer=SIGNER.public_hex,
+            organization_id=ORG,
+            through_sequence=1,
+        ) == 1
         spool.append(third.to_json())
         assert spool.health().pending_records == 2
 
