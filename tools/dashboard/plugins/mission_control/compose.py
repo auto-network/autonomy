@@ -305,12 +305,15 @@ def _live_session_hrefs() -> dict[str, str]:
     hrefs: dict[str, str] = {}
     for row in rows:
         tmux = row.get("tmux_session") or ""
-        sid = row.get("session_id") or tmux
         project = row.get("project") or "session"
         if not tmux:
             continue
+        # The path key must be the TMUX NAME. The viewer's live-attach path
+        # is addressed by it; the session UUID resolves to the historical
+        # transcript source instead — a read-only "200 entries" view titled
+        # by the raw id, which is exactly the wrong room to send someone to.
         hrefs[tmux] = (
-            f"/session/{quote(str(project), safe='')}/{quote(str(sid), safe='')}"
+            f"/session/{quote(str(project), safe='')}/{quote(tmux, safe='')}"
             f"?tmux={quote(tmux, safe='')}")
     return hrefs
 
