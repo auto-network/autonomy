@@ -30,6 +30,7 @@ from starlette.routing import Route
 
 from tools.dashboard import crosstalk_delivery
 from tools.dashboard import mcp_peer_approvals as kinds
+from tools.dashboard import web_push
 from tools.dashboard.dao import approval_requests as ar
 from tools.dashboard.dao import auth_db
 from tools.dashboard.dao import mcp_relay_db as db
@@ -58,6 +59,7 @@ async def _open_approval(kind: str, session: str, request_payload: dict) -> str:
     req, staged = prepare(session, request_payload) if prepare else (request_payload, None)
     rid = ar.create(kind=kind, session=session, request=req, staged=staged,
                     created_at=time.time())
+    await web_push.register_approval_pending(rid, kind)
     await event_bus.broadcast("approval:pending",
                               {"id": rid, "kind": kind, "session": session})
     return rid

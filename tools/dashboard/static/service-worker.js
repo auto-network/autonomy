@@ -10,20 +10,37 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(self.clients.claim());
 });
 
-function proofNotification(event) {
+function safeRoute(value) {
+  if (value === '/web-push-proof' || value === '/activity') return value;
+  if (typeof value !== 'string' || value.length > 320) return '/activity';
+  try {
+    const url = new URL(value, self.location.origin);
+    if (url.origin !== self.location.origin || url.pathname !== '/activity') {
+      return '/activity';
+    }
+    const keys = Array.from(url.searchParams.keys());
+    if (keys.some(key => key !== 'focus' && key !== 'id')) return '/activity';
+    if (url.searchParams.get('focus') !== 'approval') return '/activity';
+    const id = url.searchParams.get('id');
+    if (!id || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) return '/activity';
+    return url.pathname + url.search;
+  } catch (_error) {
+    return '/activity';
+  }
+}
+
+function pushNotification(event) {
   const fallback = {
     title: 'Autonomy needs your attention',
     body: 'Open the dashboard to review.',
-    route: '/web-push-proof',
-    tag: 'autonomy-web-push-proof'
+    route: '/activity',
+    tag: 'autonomy-attention'
   };
   if (!event.data) return fallback;
   try {
     const value = event.data.json();
     if (!value || value.v !== 1) return fallback;
-    const route = typeof value.route === 'string' &&
-      (value.route === '/web-push-proof' || value.route === '/activity')
-      ? value.route : fallback.route;
+    const route = safeRoute(value.route);
     return {
       title: typeof value.title === 'string' ? value.title.slice(0, 80) : fallback.title,
       body: typeof value.body === 'string' ? value.body.slice(0, 160) : fallback.body,
@@ -36,7 +53,7 @@ function proofNotification(event) {
 }
 
 self.addEventListener('push', (event) => {
-  const message = proofNotification(event);
+  const message = pushNotification(event);
   event.waitUntil(self.registration.showNotification(message.title, {
     body: message.body,
     tag: message.tag,
@@ -52,8 +69,7 @@ self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   const requested = event.notification && event.notification.data
     ? event.notification.data.route : null;
-  const route = requested === '/web-push-proof' || requested === '/activity'
-    ? requested : '/';
+  const route = safeRoute(requested);
   event.waitUntil((async () => {
     const windows = await self.clients.matchAll({
       type: 'window',

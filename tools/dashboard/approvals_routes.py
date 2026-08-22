@@ -29,6 +29,7 @@ from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
 
 from tools.dashboard import api_auth
+from tools.dashboard import web_push
 from tools.dashboard.dao import approval_requests as ar
 from tools.dashboard.event_bus import event_bus
 
@@ -221,6 +222,16 @@ EXECUTORS: dict = {
     **_fleet_enrollment.EXECUTORS,
 }
 
+
+def push_eligible_kind(kind: str) -> bool:
+    """Whether this registered approval kind may mint an OS interruption."""
+    return (
+        kind == "commit_sign"
+        or kind in PREPARE_CREATE
+        or kind in AUTHORIZE_DECISION
+        or kind in ENRICH
+    )
+
 # Requests whose executor is running: the verdict is committed but the result
 # row is written only on completion, so further decisions must be refused here
 # rather than by the result-row first-writer-wins check.
@@ -240,6 +251,13 @@ def approval_is_executing(request_id: str) -> bool:
 
 def _finalize_decision(rid: str, kind: str, session: str) -> None:
     """Wake held ?wait= calls and tell viewers the request is closed."""
+    try:
+        web_push.cancel_approval(rid)
+    except Exception:
+        # Approval truth is already committed and must never be rolled back by
+        # a transport cleanup failure. The worker's final source guard still
+        # prevents a later semantic decision from being inferred from Push.
+        pass
     ev = _decision_waiters.pop(rid, None)
     if ev:
         ev.set()
@@ -278,6 +296,10 @@ async def create_approval(request: Request) -> JSONResponse:
             return JSONResponse({"error": str(exc)}, status_code=400)
     rid = ar.create(kind=kind, session=session, request=req, staged=staged,
                     created_at=time.time())
+    # The first registered background-attention producer. Unknown generic
+    # approval kinds retain the rendezvous but cannot mint OS interruptions.
+    if push_eligible_kind(kind):
+        await web_push.register_approval_pending(rid, kind)
     # Push-notify the operator's open viewer(s); pending_approval on the
     # session detail stays the durable fallback for a viewer that (re)connects.
     await event_bus.broadcast("approval:pending",
@@ -364,6 +386,13 @@ async def decide_approval(request: Request) -> JSONResponse:
     executor = EXECUTORS.get(r["kind"])
     if body["approved"] and executor:
         _executing.add(rid)
+        # Human attention ended when the first decision was accepted, not when
+        # potentially long post-approval execution later writes its outcome.
+        # Cancel unsent OS delivery at that boundary.
+        try:
+            web_push.cancel_approval(rid, reason="approval_decision_started")
+        except Exception:
+            pass
 
         async def run_and_record():
             try:

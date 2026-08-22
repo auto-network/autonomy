@@ -16,6 +16,7 @@ from starlette.requests import Request
 
 from tools.dashboard import identity_routes, unlock_routes
 from tools.dashboard.dao import approval_requests as ar
+from tools.dashboard import web_push
 from tools.dashboard.event_bus import event_bus
 from tools.network import (
     fleet_enroll,
@@ -106,6 +107,7 @@ def ensure_approval(pending, *, store, db_path=None) -> str:
     )
     store.bind_approval(pending.request_id, approval_id)
     if created:
+        web_push.register_approval_pending_sync(approval_id, KIND)
         event_bus.broadcast_sync(
             "approval:pending",
             {"id": approval_id, "kind": KIND, "session": f"fleet:{pending.target_uuid}"},
