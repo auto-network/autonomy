@@ -416,8 +416,17 @@ function render() {
   backdrop.onclick = close;
   host.appendChild(backdrop);
   if (!M) {
-    host.appendChild(el('div', 'fm-panel', '<div class="fm-head"><div class="fm-h1">Factors</div>'
-      + '<div class="fm-h2">Loading…</div></div>'));
+    // No model yet: either still loading, or the load failed (warn set). A
+    // failure must surface as an error with a way out, never a stuck "Loading…".
+    const p = el('div', 'fm-panel', '<div class="fm-head"><div class="fm-h1">Factors</div>'
+      + `<div class="fm-h2">${warn ? 'Could not load your factors' : 'Loading…'}</div></div>`);
+    if (warn) {
+      p.appendChild(el('div', 'fm-warn', warn));
+      const back = el('button', 'fm-back', '&lsaquo; Close');
+      back.onclick = close;
+      p.appendChild(back);
+    }
+    host.appendChild(p);
     return;
   }
   host.appendChild(factorsScreen());
