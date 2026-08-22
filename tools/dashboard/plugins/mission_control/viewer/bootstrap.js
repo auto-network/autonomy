@@ -370,6 +370,12 @@
   // The bar renders before the author's script declares its views; when
   // the declaration lands, draw the view menu.
   document.addEventListener("mc:views-changed", function () { render(); });
+
+  // The page can summon the pillar-status panel (its News tab) without
+  // owning it — same surface the bar's Pillars button opens.
+  document.addEventListener("mc:open-status", function () {
+    show({panel: "pillars"});
+  });
   // Backgrounding the app is the same situation: a stream nobody can see,
   // holding a connection the next navigation needs.
   addEventListener("visibilitychange", function () {

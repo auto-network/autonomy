@@ -359,6 +359,7 @@
     {id: "overview",  label: PILLARS.length + " pillars"},
     {id: "decisions", label: "Decisions"},
     {id: "questions", label: "Questions"},
+    {id: "news",      label: "News"},
     {id: "feed",      label: "Feed"},
   ];
   var tabsHost = document.getElementById("mc-tabs");
@@ -366,6 +367,10 @@
     var b = el("button", null, t.label);
     b.id = "tab-" + t.id;
     b.addEventListener("click", function () {
+      if (t.id === "news") {
+        document.dispatchEvent(new CustomEvent("mc:open-status"));
+        return;
+      }
       if (t.id === "overview") show(pillarFilter || MID);
       else show(t.id);
     });
