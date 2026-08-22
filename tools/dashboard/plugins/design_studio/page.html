@@ -428,7 +428,8 @@
       </template>
 
       <!-- Design surface (State 1: visible when chat closed) -->
-      <div :class="linkedSessionMode || !chatOpen ? 'flex-1 relative overflow-hidden min-h-0' : 'absolute invisible h-0 overflow-hidden'">
+      <div class="design-surface"
+           :class="linkedSessionMode || !chatOpen ? 'flex-1 relative overflow-hidden min-h-0' : 'absolute invisible h-0 overflow-hidden'">
         <iframe id="design-iframe" style="width:100%;height:100%;border:none;background:#0f1623"></iframe>
       </div>
 
