@@ -440,7 +440,9 @@ def test_the_for_you_count_opens_all_of_them_not_the_first():
     assert 'show({anchor: forYou[0].ref})' not in src, (
         "the count still jumps to the first item"
     )
-    assert 'show(ui.panel === "foryou" ? null : {panel: "foryou"})' in src
+    # The pill opens the shared questions panel on its For-you side —
+    # still the whole list, never a single item.
+    assert 'qaMode = "you"; show({panel: "questions"});' in src
     # And a way back out of one of them to the rest.
     assert '"\\u2039 For you"' in src or "For you" in src
 
