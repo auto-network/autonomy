@@ -573,9 +573,14 @@
     // toolbar. The swatch keeps the pillar's colour as the remaining
     // "where am I" cue and opens the pillar status panel.
     kids.push(
-      el("button", {class: "mc-pill mc-menu-word", text: "Pillars",
+      (function () {
+        var band = el("span", {class: "mc-swatch"});
+        band.style.background = "#e2e8f0";
+        return el("button", {class: "mc-pill mc-menu-word",
                     title: "Pillar status \u2014 latest by pillar or by time",
-                    onclick: function () { show(ui.panel === "pillars" ? null : {panel: "pillars"}); }}));
+                    onclick: function () { show(ui.panel === "pillars" ? null : {panel: "pillars"}); }},
+           [band, el("span", {text: "Pillars"})]);
+      })());
     kids.push(el("span", {class: "mc-grow"}));
     var n = openCount(), done = answeredCount();
     // ONE NUMBER. The bubble used to carry open AND answered, which made
