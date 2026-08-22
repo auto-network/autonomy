@@ -519,6 +519,60 @@ class TestStatsRow:
 class TestStableActiveOrdering:
     """Active cards move only at an explicit ordering boundary."""
 
+    def test_launching_card_enters_active_at_top_and_stays_while_visible(self, h):
+        transition = ab_eval("""
+            var root = document.querySelector('[x-data="sessionsPage()"]');
+            var d = root && root._x_dataStack && root._x_dataStack[0];
+            if (!d) return null;
+            window.__launchOrderTest = {
+              interactive: d.interactive,
+              activeOrder: d._activeOrder,
+              launchingIds: d._launchingSessionIds,
+              activeSortDirection: d.activeSortDirection,
+            };
+            d.activeSortDirection = 'desc';
+            var launched = {
+              session_id: 'auto-just-launched',
+              type: 'container',
+              created_at: Date.now() / 1000 + 100,
+              last_activity: 0,
+              last_input_at: 0,
+              entry_count: -1,
+              context_tokens: -1,
+              _launching: true,
+            };
+            d.interactive = d.interactive.concat([launched]);
+            d.refreshActiveOrder();
+            var whileLaunching = d.sortedInteractive.map(function(s) { return s.session_id; });
+            launched._launching = false;
+            d._reconcileActiveOrder();
+            var afterLaunch = d.sortedInteractive.map(function(s) { return s.session_id; });
+            d._reconcileActiveOrder();
+            var whileVisible = d.sortedInteractive.map(function(s) { return s.session_id; });
+            return {
+              whileLaunching: whileLaunching,
+              afterLaunch: afterLaunch,
+              whileVisible: whileVisible,
+            };
+        """)
+        try:
+            assert transition is not None
+            assert "auto-just-launched" not in transition["whileLaunching"]
+            assert transition["afterLaunch"][0] == "auto-just-launched"
+            assert transition["whileVisible"] == transition["afterLaunch"]
+        finally:
+            ab_eval("""
+                var root = document.querySelector('[x-data="sessionsPage()"]');
+                var d = root._x_dataStack[0];
+                var saved = window.__launchOrderTest;
+                d.interactive = saved.interactive;
+                d._activeOrder = saved.activeOrder;
+                d._launchingSessionIds = saved.launchingIds;
+                d.activeSortDirection = saved.activeSortDirection;
+                delete window.__launchOrderTest;
+                return true;
+            """)
+
     def test_live_activity_does_not_move_cards_until_foreground(self, h):
         before = ab_eval("""
             var root = document.querySelector('[x-data="sessionsPage()"]');

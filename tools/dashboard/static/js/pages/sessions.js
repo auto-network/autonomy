@@ -519,6 +519,11 @@
       _activeOrder: [],
       _activeOrderReady: false,
       _activeOrderNeedsInitialData: true,
+      // Snapshot of the cards currently rendered in Launching. It lets the
+      // frozen Active order distinguish a launch completion (insert at the
+      // top) from an unrelated membership arrival (append without disturbing
+      // the cards the operator is already scanning).
+      _launchingSessionIds: {},
 
       // Booting sessions: optimistic pending tiles + any live session the
       // lifecycle derivation still marks as starting up (startupVisible).
@@ -546,6 +551,16 @@
       get activeInteractive() {
         var self = this;
         return this.interactive.filter(function(s) { return !self._isLaunching(s) && self._matchesOrg(s); });
+      },
+
+      _currentLaunchingSessionIds() {
+        var self = this;
+        var ids = {};
+        for (var i = 0; i < this.interactive.length; i++) {
+          var session = this.interactive[i];
+          if (self._isLaunching(session)) ids[session.session_id] = true;
+        }
+        return ids;
       },
 
       get sortedInteractive() {
@@ -606,6 +621,7 @@
           return (b.created_at || 0) - (a.created_at || 0);
         });
         this._activeOrder = arr.map(function(s) { return s.session_id; });
+        this._launchingSessionIds = this._currentLaunchingSessionIds();
         this._activeOrderReady = true;
         if (arr.length > 0) this._activeOrderNeedsInitialData = false;
       },
@@ -619,11 +635,22 @@
         var next = this._activeOrder.filter(function(id) { return !!current[id]; });
         var seen = {};
         for (var j = 0; j < next.length; j++) seen[next[j]] = true;
+        var promoted = [];
+        var appended = [];
         // Membership changes are allowed to appear immediately, but never
         // disturb the relative positions of cards the operator is watching.
+        // A card the operator just watched finish Launching is the one
+        // intentional exception: carry it across the section boundary at the
+        // top, where it was already visually anchored.
         for (var k = 0; k < active.length; k++) {
-          if (!seen[active[k].session_id]) next.push(active[k].session_id);
+          var id = active[k].session_id;
+          if (!seen[id]) {
+            if (this._launchingSessionIds[id]) promoted.push(id);
+            else appended.push(id);
+          }
         }
+        next = promoted.concat(next, appended);
+        this._launchingSessionIds = this._currentLaunchingSessionIds();
         var changed = next.length !== this._activeOrder.length;
         for (var n = 0; !changed && n < next.length; n++) {
           if (next[n] !== this._activeOrder[n]) changed = true;
