@@ -41,3 +41,48 @@ def test_an_undeclared_app_route_refuses_anonymous(gate_enforcing, test_app):
     with TestClient(test_app) as client:
         r = client.get("/api/graph/settings/autonomy.workspace")
     assert r.status_code == 401
+
+
+import re as _re
+from starlette.routing import Route as _Route
+
+
+def _api_routes(app):
+    """Every ``/api`` Route on the app, as (path, method). Plugin routes are
+    extended into the app route list (not mounted), so they appear here too."""
+    for r in getattr(app, "routes", []):
+        if isinstance(r, _Route) and r.path.startswith("/api/"):
+            for m in sorted(r.methods or ["GET"]):
+                if m not in ("HEAD", "OPTIONS"):
+                    yield r.path, m
+
+
+def _concrete(path: str) -> str:
+    # Fill {param} and {param:path} with a dummy segment. A default-deny route
+    # refuses before the handler, so param validity is irrelevant to the refusal.
+    return _re.sub(r"\{[^}]+\}", "x", path)
+
+
+def test_no_api_route_serves_a_no_credential_caller(gate_enforcing, test_app):
+    """auto-so9hi, invariant 'no unauth endpoint': with the human gate enforced,
+    every ``/api`` route refuses an anonymous caller unless its ``(method, path)``
+    is a named public exception. A 2xx to a no-credential client is a leak — the
+    handler ran without authentication. Non-2xx (401/403/400/404/405/5xx) all
+    mean 'not served'. This sweeps the whole live route table, so a new route is
+    covered the moment it is added.
+    """
+    from tools.dashboard.route_policy import PUBLIC_EXCEPTIONS
+    exceptions = set(PUBLIC_EXCEPTIONS)
+    leaks = []
+    with TestClient(test_app) as client:
+        for path, method in _api_routes(test_app):
+            if (method, path) in exceptions:
+                continue
+            resp = client.request(method, _concrete(path))
+            if resp.status_code < 400:
+                leaks.append(f"{method} {path} -> {resp.status_code}")
+    assert not leaks, (
+        "these /api routes served a NO-CREDENTIAL caller (leak, or a genuinely "
+        "public route missing from route_policy.PUBLIC_EXCEPTIONS — classify and "
+        "add it there with a reason):\n  " + "\n  ".join(sorted(leaks))
+    )
