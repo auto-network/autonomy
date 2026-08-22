@@ -520,81 +520,19 @@
         }
       },
 
-      get linkedDesignTooltip() {
-        if (!this.linkedDesign) return 'Open linked Design Studio experiment';
-        return 'Open Design Studio: ' + (this.linkedDesign.title || 'linked experiment');
+      get sessionContributionActions() {
+        var service = window.Autonomy && window.Autonomy.sessionContributions;
+        return service ? service.forSession(this.sessionKey, 'action') : [];
       },
 
-      _clearLinkedDesignSubscription() {
-        if (this._linkedDesignTopic && this._linkedDesignHandler &&
-            typeof window.unregisterHandler === 'function') {
-          window.unregisterHandler(this._linkedDesignTopic, this._linkedDesignHandler);
-        }
-        this._linkedDesignTopic = '';
-        this._linkedDesignHandler = null;
+      get sessionContributionBadges() {
+        var service = window.Autonomy && window.Autonomy.sessionContributions;
+        return service ? service.forSession(this.sessionKey, 'badge') : [];
       },
 
-      _applyLinkedDesign(data) {
-        if (!data) return;
-        var revisionId = data.latest_revision_id || data.revision_id || '';
-        if (!revisionId) return;
-        this.linkedDesign = {
-          design_id: data.design_id || '',
-          latest_revision_id: revisionId,
-          title: data.title || 'Untitled Design',
-        };
-      },
-
-      async _syncLinkedDesign(sessionId) {
-        var token = ++this._linkedDesignLookupToken;
-        this._clearLinkedDesignSubscription();
-        this.linkedDesign = null;
-        if (this._mode !== 'page' || !sessionId) return;
-
-        // Listen before fetching so a revision pushed during the initial
-        // lookup cannot fall through the gap. registerHandler also replays a
-        // cached topic payload when one exists.
-        var self = this;
-        var receivedLiveRevision = false;
-        this._linkedDesignTopic = 'session-design:' + sessionId;
-        this._linkedDesignHandler = function(data) {
-          if (token !== self._linkedDesignLookupToken || self.sessionKey !== sessionId) return;
-          receivedLiveRevision = true;
-          self._applyLinkedDesign(data);
-        };
-        if (typeof window.registerHandler === 'function') {
-          window.registerHandler(this._linkedDesignTopic, this._linkedDesignHandler);
-        }
-
-        try {
-          var fetcher = (window.Autonomy && window.Autonomy.fetch) || window.fetch;
-          var params = new URLSearchParams({
-            q: sessionId,
-            sort: 'updated',
-            direction: 'desc',
-            limit: '50',
-          });
-          var res = await fetcher('/api/design-studio/designs?' + params.toString());
-          if (!res.ok) return;
-          var body = await res.json();
-          var designs = Array.isArray(body.designs) ? body.designs : [];
-          var exact = designs.find(function(design) {
-            return design && design.creator_session_id === sessionId;
-          });
-          if (token !== this._linkedDesignLookupToken || this.sessionKey !== sessionId) return;
-          if (exact && !receivedLiveRevision) this._applyLinkedDesign(exact);
-        } catch (_) {
-          // Design Studio is an optional plugin; a missing route leaves the
-          // ordinary session viewer unchanged.
-        }
-      },
-
-      openLinkedDesign() {
-        var revisionId = this.linkedDesign && this.linkedDesign.latest_revision_id;
-        if (!revisionId) return;
-        var path = '/design/' + encodeURIComponent(revisionId);
-        if (typeof navigateTo === 'function') navigateTo(path);
-        else window.location.assign(path);
+      openSessionContribution(item) {
+        var service = window.Autonomy && window.Autonomy.sessionContributions;
+        if (service) service.open(item);
       },
 
       // ── View-only state ─────────────────────────────────────────
@@ -610,12 +548,6 @@
       // review overlay finishes hydrating (or the fetch fails) — drives
       // the spin affordance on the button so a slow fetch isn't silent.
       workspaceReviewLoading: false,
-      // Design Studio reverse link. A design revision stamped with this
-      // session id makes the compact header expose a direct return path.
-      linkedDesign: null,
-      _linkedDesignLookupToken: 0,
-      _linkedDesignTopic: '',
-      _linkedDesignHandler: null,
       _storeCleanups: [],
       _expanded: {},
       _expandView: {},
@@ -1425,7 +1357,8 @@
         this.$watch('sessionKey', (key) => {
           this._lastApprovalPendingId = null;
           if (key) this._checkPendingApproval();
-          this._syncLinkedDesign(key);
+          var service = window.Autonomy && window.Autonomy.sessionContributions;
+          if (key && service) service.load([key]);
         });
         var approvalSelf = this;
         this._approvalPendingHandler = function (d) {
@@ -1628,8 +1561,6 @@
           if (typeof this._storeCleanups[i] === 'function') this._storeCleanups[i]();
         }
         this._storeCleanups = [];
-        this._linkedDesignLookupToken++;
-        this._clearLinkedDesignSubscription();
         // Drop the composer-active body signal if it's ours, so the voice side
         // doesn't keep suppressing the caption / branching its send path after
         // we've left the viewer (stale-flag bug those branches must avoid).
@@ -2834,9 +2765,6 @@
           this._tickInterval = null;
         }
         this._disposeTerminal();
-        this._linkedDesignLookupToken++;
-        this._clearLinkedDesignSubscription();
-        this.linkedDesign = null;
         // Reset view state
         this._lcSetState('loading', '_reset: viewer dismounted/recycled');
         this.sessionKey = '';

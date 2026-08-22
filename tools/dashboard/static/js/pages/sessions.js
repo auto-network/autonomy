@@ -1189,6 +1189,11 @@
           this.interactive = all.filter(s =>
             s.session_id && interactiveTypes.indexOf(s.type) !== -1
           );
+          if (window.Autonomy && window.Autonomy.sessionContributions) {
+            window.Autonomy.sessionContributions.load(
+              this.interactive.map(function(s) { return s.session_id; })
+            );
+          }
           if (this._activeOrderNeedsInitialData) this.refreshActiveOrder();
           else this._reconcileActiveOrder();
           this.loading = false;
@@ -1367,6 +1372,11 @@
               resolved: true,
             };
           }).filter(function(x) { return x !== null; });
+          if (window.Autonomy && window.Autonomy.sessionContributions) {
+            window.Autonomy.sessionContributions.load(
+              this.recent.map(function(s) { return s.session_id; })
+            );
+          }
         } catch (e) {
           console.warn('[sessionsPage] recent fetch error', e);
         }

@@ -161,6 +161,10 @@ templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
 # See bead auto-a79f6 + design note graph://f77a5415-04f.
 
 from tools.dashboard.plugin_api import loader as plugin_loader  # noqa: E402
+from tools.dashboard.plugin_api.session_contributions import (  # noqa: E402
+    SESSION_CONTRIBUTIONS_TOPIC,
+    normalize_descriptor as normalize_session_contribution,
+)
 
 # Settings-mediator substrate (bead auto-f93wj) — imported eagerly so
 # its cursor + state schemas are in the registry before
@@ -10668,6 +10672,11 @@ async def api_design_create(request):
                 "design_id": design_data["design_id"],
                 "title": design_data.get("title") or "Untitled Design",
             })
+            await event_bus.broadcast(
+                SESSION_CONTRIBUTIONS_TOPIC,
+                {"session_id": linked_session},
+                dedup=False,
+            )
 
     return JSONResponse({"id": rev_id}, status_code=201)
 
@@ -18371,6 +18380,66 @@ async def api_plugins(request):
     return JSONResponse({"plugins": out})
 
 
+async def api_session_contributions(request):
+    """Aggregate enabled plugin chrome for a batch of session ids.
+
+    Core never asks how a session relates to a design, mission, or future
+    plugin. Each declared callback receives the full batch plus the already
+    authenticated request, and returns only the descriptors it owns.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    raw_ids = body.get("session_ids")
+    if not isinstance(raw_ids, list):
+        return JSONResponse({"error": "session_ids must be a list"}, status_code=400)
+    session_ids: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_ids:
+        session_id = str(raw or "").strip()
+        if not session_id or len(session_id) > 256 or session_id in seen:
+            continue
+        seen.add(session_id)
+        session_ids.append(session_id)
+        if len(session_ids) == 100:
+            break
+
+    contributions: dict[str, list[dict[str, str]]] = {
+        session_id: [] for session_id in session_ids
+    }
+    enabled = _plugin_enabled_map()
+    for plugin in PLUGIN_REGISTRY:
+        callback = plugin.session_contributions
+        if callback is None or not enabled.get(plugin.id):
+            continue
+        try:
+            plugin_result = await asyncio.to_thread(callback, session_ids, request)
+        except Exception:
+            logger.exception("[plugin %s] session_contributions raised", plugin.id)
+            continue
+        if not isinstance(plugin_result, dict):
+            logger.warning(
+                "[plugin %s] session_contributions returned %s, expected dict",
+                plugin.id,
+                type(plugin_result).__name__,
+            )
+            continue
+        for session_id in session_ids:
+            rows = plugin_result.get(session_id) or []
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                normalized = normalize_session_contribution(
+                    plugin.id,
+                    session_id,
+                    row,
+                )
+                if normalized is not None:
+                    contributions[session_id].append(normalized)
+    return JSONResponse({"sessions": contributions})
+
+
 async def api_plugin_skill(request):
     """GET /api/plugins/{plugin_id}/skill — a plugin's agent-facing doc, if any.
 
@@ -18729,6 +18798,7 @@ routes = [
 
     # Plugin substrate
     Route("/api/plugins", api_plugins),
+    Route("/api/session-contributions", api_session_contributions, methods=["POST"]),
     Route("/api/plugins/{plugin_id}/skill", api_plugin_skill),
     *_build_plugin_routes(),
 

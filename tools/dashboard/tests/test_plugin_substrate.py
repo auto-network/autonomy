@@ -37,6 +37,10 @@ def _fake_badge_counter() -> int:  # pragma: no cover — never called
     return 0
 
 
+def _fake_session_contributions(session_ids, request):  # pragma: no cover
+    return {session_id: [] for session_id in session_ids}
+
+
 # ── Helpers ──────────────────────────────────────────────────────────
 
 
@@ -210,6 +214,10 @@ def test_manifest_entrypoints_all_optional():
     })
     PluginManifest.model_validate({
         **_MIN_MANIFEST_FIELDS,
+        "entrypoints": {"session_contributions": "x.y:contribute"},
+    })
+    PluginManifest.model_validate({
+        **_MIN_MANIFEST_FIELDS,
         "entrypoints": {"schemas": ["x.y:S1", "x.y:S2"]},
     })
 
@@ -294,6 +302,25 @@ def test_loader_resolves_entrypoints(tmp_path, monkeypatch):
     routes = by_id["withapi"].routes
     assert len(routes) == 1
     assert routes[0].path == "/api/_test_plugin/ping"
+
+
+def test_loader_resolves_session_contribution_callback(tmp_path, monkeypatch):
+    plugins_dir = tmp_path / "plugins"
+    plugins_dir.mkdir()
+    yaml = _min_manifest_yaml("sessionplug") + (
+        "entrypoints:\n"
+        "  session_contributions: "
+        "tools.dashboard.tests.test_plugin_substrate:_fake_session_contributions\n"
+    )
+    _write_plugin(plugins_dir, "sessionplug", yaml)
+
+    monkeypatch.setattr(loader, "_read_plugin_settings", lambda org=None: {})
+    [plugin] = loader.load_enabled(plugins_dir=plugins_dir)
+
+    # Compare the import target rather than object identity: xdist can import
+    # the test module twice under different module objects.
+    assert plugin.session_contributions.__module__ == _fake_session_contributions.__module__
+    assert plugin.session_contributions.__name__ == _fake_session_contributions.__name__
 
 
 def test_loader_handles_entrypoint_import_error(tmp_path, monkeypatch, caplog):
@@ -414,6 +441,7 @@ def test_pure_frontend_plugin_loads(tmp_path, monkeypatch):
     assert "pure" in by_id
     assert by_id["pure"].routes == []
     assert by_id["pure"].badge_counter is None
+    assert by_id["pure"].session_contributions is None
     assert by_id["pure"].schemas == []
 
 

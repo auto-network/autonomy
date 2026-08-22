@@ -55,7 +55,8 @@ class DiscoveredPlugin:
 class LoadedPlugin:
     """A plugin that survived enable filtering + entrypoint resolution.
 
-    ``routes`` / ``badge_counter`` / ``schemas`` are populated only when
+    ``routes`` / ``badge_counter`` / ``session_contributions`` / ``schemas``
+    are populated only when
     the corresponding entrypoint is declared and imported successfully.
 
     ``effective_org`` is the org slug the substrate uses to scope this
@@ -76,6 +77,7 @@ class LoadedPlugin:
     effective_org: str = ""
     routes: list = field(default_factory=list)
     badge_counter: Callable[[], Any] | None = None
+    session_contributions: Callable[[list[str], Any], Any] | None = None
     schemas: list = field(default_factory=list)
     actions: list[str] = field(default_factory=list)
 
@@ -266,6 +268,7 @@ def _resolve_entrypoints(
 
     routes: list = []
     badge_counter: Callable[[], Any] | None = None
+    session_contributions: Callable[[list[str], Any], Any] | None = None
     schemas: list = []
     actions: list[str] = []
 
@@ -280,6 +283,13 @@ def _resolve_entrypoints(
             routes = resolved
         if ep.badge_counter:
             badge_counter = _resolve_attr(ep.badge_counter)
+        if ep.session_contributions:
+            session_contributions = _resolve_attr(ep.session_contributions)
+            if not callable(session_contributions):
+                raise TypeError(
+                    f"entrypoints.session_contributions "
+                    f"({ep.session_contributions!r}) must resolve to a callable"
+                )
         if ep.schemas:
             schemas = [_resolve_attr(s) for s in ep.schemas]
         if ep.actions:
@@ -324,6 +334,7 @@ def _resolve_entrypoints(
         effective_org=resolved_org,
         routes=routes,
         badge_counter=badge_counter,
+        session_contributions=session_contributions,
         schemas=schemas,
         actions=actions,
     )

@@ -808,6 +808,30 @@ def test_create_pillar():
     assert pillar["status"] == "active"
 
 
+def test_pillar_coordinator_gets_named_session_badge():
+    mission = db.create_mission("OSS Insights", "auto-controller")
+    pillar = db.create_pillar(
+        mission["mission_id"],
+        "Dataset & Schema",
+        "auto-schema",
+        "#34d399",
+    )
+
+    rows = mc_api.session_contributions(
+        ["auto-schema", "auto-unassigned"],
+        _request_as(api_auth.ApiPrincipalKind.OPERATOR_COOKIE, "operator"),
+    )
+
+    [badge] = rows["auto-schema"]
+    assert badge["kind"] == "badge"
+    assert badge["label"] == "Dataset & Schema"
+    assert badge["href"] == (
+        f"/missions/{mission['mission_id']}/pillars/{pillar['pillar_id']}"
+    )
+    assert "OSS Insights / Dataset & Schema" in badge["title"]
+    assert rows["auto-unassigned"] == []
+
+
 def test_create_pillar_requires_name():
     client = _client()
     mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]

@@ -12,6 +12,8 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Route
 
+from tools.dashboard import api_auth
+
 _CATALOG_CACHE_TTL_SECONDS = 10
 _SCREENSHOT_CACHE_TTL_SECONDS = 10
 logger = logging.getLogger(__name__)
@@ -121,6 +123,7 @@ def _mock_design_rows() -> list[dict]:
             "created_at": design.get("created_at") or "",
             "creator_session_id": design.get("creator_session_id") or "",
             "creator_session_label": design.get("creator_session_label") or "",
+            "org": design.get("org"),
             "variant_count": len(variants),
             "has_fixture": bool(design.get("fixture")),
             "thumbnail_url": design.get("thumbnail_url") or "",
@@ -148,6 +151,7 @@ def _sqlite_design_rows() -> list[dict]:
               d.created_at,
               d.creator_session_id,
               d.creator_session_label,
+              d.org,
               CASE WHEN d.fixture IS NOT NULL AND d.fixture != '' THEN 1 ELSE 0 END AS has_fixture
             FROM designs d
         """).fetchall()
@@ -359,6 +363,7 @@ def _series_from_rows(rows: list[dict]) -> list[dict]:
             "latest_created_at": latest_created,
             "creator_session_id": linked_revision.get("creator_session_id") or "",
             "creator_session_label": linked_revision.get("creator_session_label") or "",
+            "org": latest.get("org"),
             "creator_session_count": len(set(creators)),
             "thumbnail_url": thumbnail_url,
         })
@@ -523,6 +528,53 @@ def badge_counter() -> int:
         return _summarize(_all_series()).get("pending_series", 0)
     except Exception:
         return 0
+
+
+_SESSION_ICON = (
+    '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" '
+    'stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" '
+    'aria-hidden="true">'
+    '<path d="M7 3.75H3.75V7M13 3.75h3.25V7M16.25 13v3.25H13M7 16.25H3.75V13"></path>'
+    '<circle cx="10" cy="10" r="2.15"></circle>'
+    '</svg>'
+)
+
+
+def session_contributions(session_ids: list[str], request: Request) -> dict[str, list[dict]]:
+    """Contribute one latest linked-design action per requested session."""
+    requested = set(session_ids)
+    result: dict[str, list[dict]] = {session_id: [] for session_id in session_ids}
+    if not requested:
+        return result
+    designs = sorted(
+        _series_from_rows(_design_rows()),
+        key=lambda row: (row.get("latest_created_at") or "", row.get("design_id") or ""),
+        reverse=True,
+    )
+    claimed: set[str] = set()
+    for design in designs:
+        session_id = str(design.get("creator_session_id") or "")
+        if (
+            session_id not in requested
+            or session_id in claimed
+            or api_auth.caller_org_scope_hides(request, design.get("org"))
+        ):
+            continue
+        revision_id = str(design.get("latest_revision_id") or "")
+        if not revision_id:
+            continue
+        title = str(design.get("title") or "Untitled Design")
+        result[session_id].append({
+            "id": f"design:{design.get('design_id') or revision_id}",
+            "kind": "action",
+            "label": "Design Studio",
+            "title": f"Open Design Studio: {title}",
+            "href": f"/design/{revision_id}",
+            "icon_svg": _SESSION_ICON,
+            "accent": "#818cf8",
+        })
+        claimed.add(session_id)
+    return result
 
 
 routes: list[Route] = [

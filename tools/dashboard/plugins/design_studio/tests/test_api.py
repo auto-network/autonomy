@@ -6,8 +6,10 @@ import json
 import yaml
 
 from starlette.applications import Starlette
+from starlette.requests import Request
 from starlette.testclient import TestClient
 
+from tools.dashboard import api_auth
 from tools.dashboard.plugin_api.manifest import PluginManifest
 from tools.dashboard.plugins.design_studio.entrypoints import api as design_api
 
@@ -226,6 +228,33 @@ def test_catalog_preserves_latest_nonempty_creator_link():
     assert design["latest_revision_id"] == "rev-a3"
     assert design["creator_session_id"] == "auto-designer"
     assert design["creator_session_label"] == "Designer"
+
+
+def test_session_contribution_links_latest_design_for_exact_creator():
+    request = Request({
+        "type": "http",
+        "method": "POST",
+        "path": "/api/session-contributions",
+        "headers": [],
+        "state": {
+            "api_principal": api_auth.ApiPrincipal(
+                api_auth.ApiPrincipalKind.OPERATOR_COOKIE,
+                subject="operator",
+            ),
+        },
+    })
+    with patch.object(design_api, "_design_rows", return_value=_rows()):
+        rows = design_api.session_contributions(
+            ["auto-designer", "auto-unlinked"],
+            request,
+        )
+
+    [linked] = rows["auto-designer"]
+    assert linked["kind"] == "action"
+    assert linked["label"] == "Design Studio"
+    assert linked["href"] == "/design/rev-a2"
+    assert "Session card refined" in linked["title"]
+    assert rows["auto-unlinked"] == []
 
 
 def test_list_designs_uses_older_revision_thumbnail_when_latest_has_none():
