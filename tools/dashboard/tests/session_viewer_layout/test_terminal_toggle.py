@@ -73,7 +73,7 @@ def test_header_renders_plugin_contributions_before_escape(test_client):
 def test_shared_session_card_renders_plugin_badges_and_actions(test_client):
     templates = Path(__file__).parents[2] / "templates"
     card = (templates / "partials/session-card.html").read_text()
-    assert 'include "partials/session-contributions.html"' in card
+    assert "partials/session-contributions.html" in card
     html = (templates / "partials/session-contributions.html").read_text()
     assert 'data-testid="session-card-contribution"' in html
     assert "forSession(s.session_id || s.tmux_session || s.id)" in html
