@@ -62,7 +62,10 @@ bytes can be replayed idempotently.
 
 `UsageLedger` is the selected v1 single-writer SQLite ingest boundary. A
 control-plane authorization binds one Ed25519 producer key to one canonical
-organization and a fixed set of counter families. A service producer may hold
+organization, one immutable meter-class catalogue ID, and a fixed set of
+counter families. The sink—not the producer—therefore supplies economically
+relevant provider, region, service, and route classification without putting a
+price or customer identity in the signed wire. A service producer may hold
 separate narrow bindings for several organizations. Ingest verifies the batch
 before its exact producer/organization binding, commits new bytes with
 `synchronous=FULL`, returns the exact ID/checksum receipt, and treats an
@@ -79,9 +82,31 @@ in `graph://d1a27da5-679`.
 Idle intervals emit no zero-valued usage batch. A signed `UsageProgress`
 therefore advances one producer/organization stream's closed interval and last
 usage sequence after its spool drains. The ledger settles an organization only
-through the minimum progress of every enabled binding. Usage at or before an
+after every producer whose explicit authorization lifetime overlaps that
+interval has closed it. Authorization start and retirement boundaries are
+immutable and aligned; a retired key cannot be reused. Usage at or before an
 accepted closure is rejected, so delayed delivery cannot silently rewrite a
-settled or billed interval. Progress carries no member, session, token, address,
-or content identity.
+settled or billed interval. Progress carries no member, session, token,
+address, or content identity.
+
+## Settled rollups and retention
+
+`UsageRollups` writes one immutable organization row for every settled
+five-minute interval, including idle intervals. Its sparse wide payload retains
+`meter_class -> counter -> quantity`, so unlike provider and service classes
+never collapse while time-row cardinality stays fixed. It then derives complete
+UTC hours, UTC days, and calendar UTC months only from those lower-resolution
+rows. Every row commits its exact source count and a deterministic digest.
+Rerunning an unchanged range is a no-op; any different result for an existing
+identity fails closed.
+
+Retention keeps five-minute rows for seven days, hourly rows for 30 days,
+daily rows for three calendar years, and monthly rows indefinitely. A child
+range is deleted only in a transaction that first recomputes and verifies its
+complete parent. Raw accepted producer batches are not pruned by this job;
+their deletion remains coupled to the separately chosen recovery policy. The
+non-leap three-year sizing reference is 3,867 aggregate rows per organization:
+2,016 five-minute, 720 hourly, 1,095 daily, and 36 monthly rows. Additional
+meter classes increase the sparse row payload rather than multiplying time rows.
 
 Decision: `graph://31ab60ae-647`.

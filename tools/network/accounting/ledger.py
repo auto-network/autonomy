@@ -10,6 +10,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -22,10 +23,11 @@ from typing import Iterator
 from tools.network.idkit import canonical_json, load_public_key
 from tools.network.idkit.errors import IdkitError
 
-from .batch import UsageBatch, UsageBatchError
+from .batch import BATCH_INTERVAL_SECONDS, UsageBatch, UsageBatchError
 from .progress import UsageProgress, UsageProgressError
 
-LEDGER_SCHEMA_VERSION = 2
+LEDGER_SCHEMA_VERSION = 3
+_METER_CLASS_RE = re.compile(r"[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*")
 
 
 class UsageLedgerError(RuntimeError):
@@ -132,6 +134,18 @@ def _counter_families(values: set[str] | frozenset[str]) -> tuple[str, ...]:
     return result
 
 
+def _meter_class(value: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) > 160
+        or _METER_CLASS_RE.fullmatch(value) is None
+    ):
+        raise UsageLedgerAuthorizationError(
+            "meter_class must be a lowercase stable catalogue identifier"
+        )
+    return value
+
+
 class UsageLedger:
     """Single-process authoritative ingest ledger."""
 
@@ -180,6 +194,8 @@ class UsageLedger:
                 "producer TEXT NOT NULL, organization_id TEXT NOT NULL, "
                 "counter_families BLOB NOT NULL, enabled INTEGER NOT NULL "
                 "CHECK(enabled IN (0, 1)), updated_at INTEGER NOT NULL, "
+                "active_from INTEGER NOT NULL DEFAULT 0, active_through INTEGER, "
+                "meter_class TEXT NOT NULL DEFAULT 'default', "
                 "PRIMARY KEY(producer, organization_id))"
             )
             self._db.execute(
@@ -196,6 +212,10 @@ class UsageLedger:
                 "ON accepted_batches(organization_id, interval_end)"
             )
             self._db.execute(
+                "CREATE INDEX IF NOT EXISTS accepted_org_interval_start "
+                "ON accepted_batches(organization_id, interval_start)"
+            )
+            self._db.execute(
                 "CREATE TABLE IF NOT EXISTS stream_state ("
                 "producer TEXT NOT NULL, organization_id TEXT NOT NULL, "
                 "contiguous_sequence INTEGER NOT NULL, "
@@ -210,6 +230,40 @@ class UsageLedger:
                 "wire BLOB NOT NULL, accepted_at INTEGER NOT NULL, "
                 "PRIMARY KEY(producer, organization_id))"
             )
+            self._db.execute(
+                "CREATE TABLE IF NOT EXISTS usage_rollups ("
+                "tier TEXT NOT NULL, organization_id TEXT NOT NULL, "
+                "interval_start INTEGER NOT NULL, interval_end INTEGER NOT NULL, "
+                "meters BLOB NOT NULL, source_tier TEXT NOT NULL, "
+                "source_rows INTEGER NOT NULL, source_digest TEXT NOT NULL, "
+                "settled_at INTEGER NOT NULL, "
+                "PRIMARY KEY(tier, organization_id, interval_start))"
+            )
+            self._db.execute(
+                "CREATE INDEX IF NOT EXISTS rollup_retention "
+                "ON usage_rollups(tier, organization_id, interval_end)"
+            )
+            authorization_columns = {
+                column[1]
+                for column in self._db.execute(
+                    "PRAGMA table_info(producer_authorizations)"
+                ).fetchall()
+            }
+            if "active_from" not in authorization_columns:
+                self._db.execute(
+                    "ALTER TABLE producer_authorizations "
+                    "ADD COLUMN active_from INTEGER NOT NULL DEFAULT 0"
+                )
+            if "active_through" not in authorization_columns:
+                self._db.execute(
+                    "ALTER TABLE producer_authorizations "
+                    "ADD COLUMN active_through INTEGER"
+                )
+            if "meter_class" not in authorization_columns:
+                self._db.execute(
+                    "ALTER TABLE producer_authorizations "
+                    "ADD COLUMN meter_class TEXT NOT NULL DEFAULT 'default'"
+                )
             row = self._db.execute(
                 "SELECT value FROM ledger_meta WHERE key='schema_version'"
             ).fetchone()
@@ -218,7 +272,7 @@ class UsageLedger:
                     "INSERT INTO ledger_meta(key, value) VALUES('schema_version', ?)",
                     (str(LEDGER_SCHEMA_VERSION),),
                 )
-            elif row == ("1",):
+            elif row in (("1",), ("2",)):
                 self._db.execute(
                     "UPDATE ledger_meta SET value=? WHERE key='schema_version'",
                     (str(LEDGER_SCHEMA_VERSION),),
@@ -273,25 +327,107 @@ class UsageLedger:
         organization_id: str,
         counter_families: set[str] | frozenset[str],
         enabled: bool = True,
+        active_from: int = 0,
+        active_through: int | None = None,
+        meter_class: str = "default",
     ) -> None:
-        """Create or replace one producer/organization authorization binding."""
+        """Create or update one non-reusable producer/organization binding."""
         producer = _producer_key(producer)
         organization_id = _canonical_org(organization_id)
         families = _counter_families(counter_families)
+        meter_class = _meter_class(meter_class)
         if not isinstance(enabled, bool):
             raise UsageLedgerAuthorizationError("enabled must be boolean")
+        for value, name in (
+            (active_from, "active_from"),
+            (active_through, "active_through"),
+        ):
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 0
+                or value % BATCH_INTERVAL_SECONDS
+            ):
+                raise UsageLedgerAuthorizationError(
+                    f"{name} must be a non-negative aligned interval boundary"
+                )
+        if active_through is not None and active_through <= active_from:
+            raise UsageLedgerAuthorizationError(
+                "active_through must be later than active_from"
+            )
+        if enabled and active_through is not None:
+            raise UsageLedgerAuthorizationError(
+                "an enabled authorization cannot have active_through"
+            )
+        if not enabled and active_through is None:
+            raise UsageLedgerAuthorizationError(
+                "a disabled authorization requires active_through"
+            )
         encoded = canonical_json(list(families))
         with self._mutex:
             self._require_open()
             with self._transaction():
+                existing = self._db.execute(
+                    "SELECT enabled, active_from, active_through, meter_class "
+                    "FROM producer_authorizations WHERE producer=? "
+                    "AND organization_id=?",
+                    (producer, organization_id),
+                ).fetchone()
+                if existing is not None:
+                    prior_enabled = bool(existing[0])
+                    prior_from = int(existing[1])
+                    prior_through = (
+                        None if existing[2] is None else int(existing[2])
+                    )
+                    if active_from != prior_from:
+                        raise UsageLedgerAuthorizationError(
+                            "an authorization's active_from boundary is immutable"
+                        )
+                    if not prior_enabled and enabled:
+                        raise UsageLedgerAuthorizationError(
+                            "a retired producer binding cannot be re-enabled; "
+                            "authorize a new producer key"
+                        )
+                    if not prior_enabled and active_through != prior_through:
+                        raise UsageLedgerAuthorizationError(
+                            "an authorization's active_through boundary is immutable"
+                        )
+                    if meter_class != existing[3]:
+                        raise UsageLedgerAuthorizationError(
+                            "an authorization's meter_class is immutable"
+                        )
+                if not enabled:
+                    progress = self._db.execute(
+                        "SELECT closed_through FROM producer_progress "
+                        "WHERE producer=? AND organization_id=?",
+                        (producer, organization_id),
+                    ).fetchone()
+                    if progress is None or int(progress[0]) < active_through:
+                        raise UsageLedgerAuthorizationError(
+                            "a disabled authorization must first close through "
+                            "active_through"
+                        )
                 self._db.execute(
                     "INSERT INTO producer_authorizations("
-                    "producer, organization_id, counter_families, enabled, updated_at"
-                    ") VALUES(?, ?, ?, ?, ?) "
+                    "producer, organization_id, counter_families, enabled, updated_at, "
+                    "active_from, active_through, meter_class"
+                    ") VALUES(?, ?, ?, ?, ?, ?, ?, ?) "
                     "ON CONFLICT(producer, organization_id) DO UPDATE SET "
                     "counter_families=excluded.counter_families, "
-                    "enabled=excluded.enabled, updated_at=excluded.updated_at",
-                    (producer, organization_id, encoded, int(enabled), int(time.time())),
+                    "enabled=excluded.enabled, updated_at=excluded.updated_at, "
+                    "active_from=excluded.active_from, "
+                    "active_through=excluded.active_through, "
+                    "meter_class=excluded.meter_class",
+                    (
+                        producer,
+                        organization_id,
+                        encoded,
+                        int(enabled),
+                        int(time.time()),
+                        active_from,
+                        active_through,
+                        meter_class,
+                    ),
                 )
 
     def ingest(self, wire: bytes | str) -> IngestReceipt:
@@ -304,8 +440,19 @@ class UsageLedger:
         with self._mutex:
             self._require_open()
             with self._transaction():
+                known = self._db.execute(
+                    "SELECT checksum, wire FROM accepted_batches WHERE batch_id=?",
+                    (batch.batch_id,),
+                ).fetchone()
+                if known is not None:
+                    if known[0] != batch.checksum or bytes(known[1]) != encoded:
+                        raise UsageLedgerConflict(
+                            "accepted batch identity has different content"
+                        )
+                    return self._receipt(batch, accepted=False)
+
                 authorization = self._db.execute(
-                    "SELECT organization_id, counter_families, enabled "
+                    "SELECT organization_id, counter_families, enabled, active_from "
                     "FROM producer_authorizations "
                     "WHERE producer=? AND organization_id=?",
                     (batch.producer, batch.organization_id),
@@ -313,6 +460,10 @@ class UsageLedger:
                 if authorization is None or authorization[2] != 1:
                     raise UsageLedgerAuthorizationError(
                         "producer is not enabled for official accounting"
+                    )
+                if batch.interval_start < int(authorization[3]):
+                    raise UsageLedgerAuthorizationError(
+                        "usage precedes the producer authorization lifetime"
                     )
                 try:
                     allowed = frozenset(json.loads(bytes(authorization[1])))
@@ -325,17 +476,6 @@ class UsageLedger:
                     raise UsageLedgerAuthorizationError(
                         f"producer is not authorized for counter families: {unknown}"
                     )
-
-                known = self._db.execute(
-                    "SELECT checksum, wire FROM accepted_batches WHERE batch_id=?",
-                    (batch.batch_id,),
-                ).fetchone()
-                if known is not None:
-                    if known[0] != batch.checksum or bytes(known[1]) != encoded:
-                        raise UsageLedgerConflict(
-                            "accepted batch identity has different content"
-                        )
-                    return self._receipt(batch, accepted=False)
 
                 progress = self._db.execute(
                     "SELECT sequence, closed_through FROM producer_progress "
@@ -410,15 +550,6 @@ class UsageLedger:
         with self._mutex:
             self._require_open()
             with self._transaction():
-                authorization = self._db.execute(
-                    "SELECT enabled FROM producer_authorizations "
-                    "WHERE producer=? AND organization_id=?",
-                    (progress.producer, progress.organization_id),
-                ).fetchone()
-                if authorization is None or authorization[0] != 1:
-                    raise UsageLedgerAuthorizationError(
-                        "producer is not enabled for this organization"
-                    )
                 current = self._db.execute(
                     "SELECT sequence, closed_through, progress_id, checksum, wire "
                     "FROM producer_progress WHERE producer=? AND organization_id=?",
@@ -430,6 +561,20 @@ class UsageLedger:
                             "usage progress identity has different content"
                         )
                     return self._progress_receipt(progress, accepted=False)
+
+                authorization = self._db.execute(
+                    "SELECT enabled, active_from FROM producer_authorizations "
+                    "WHERE producer=? AND organization_id=?",
+                    (progress.producer, progress.organization_id),
+                ).fetchone()
+                if authorization is None or authorization[0] != 1:
+                    raise UsageLedgerAuthorizationError(
+                        "producer is not enabled for this organization"
+                    )
+                if progress.closed_through < int(authorization[1]):
+                    raise UsageLedgerAuthorizationError(
+                        "usage progress precedes the producer authorization lifetime"
+                    )
                 if current is not None and (
                     progress.sequence < int(current[0])
                     or progress.closed_through <= int(current[1])
@@ -515,6 +660,43 @@ class UsageLedger:
         if row[0] == 0 or row[0] != row[1]:
             return None
         return int(row[2])
+
+    def interval_is_settled(
+        self, organization_id: str, interval_start: int, interval_end: int
+    ) -> bool:
+        """Return whether every producer active in an interval has closed it."""
+        organization_id = _canonical_org(organization_id)
+        if (
+            isinstance(interval_start, bool)
+            or not isinstance(interval_start, int)
+            or isinstance(interval_end, bool)
+            or not isinstance(interval_end, int)
+            or interval_start < 0
+            or interval_end != interval_start + BATCH_INTERVAL_SECONDS
+            or interval_start % BATCH_INTERVAL_SECONDS
+        ):
+            raise ValueError("interval must be one aligned five-minute window")
+        with self._mutex:
+            self._require_open()
+            try:
+                row = self._db.execute(
+                    "SELECT COUNT(*), "
+                    "COALESCE(SUM(p.closed_through>=?), 0) "
+                    "FROM producer_authorizations a "
+                    "LEFT JOIN producer_progress p ON p.producer=a.producer "
+                    "AND p.organization_id=a.organization_id "
+                    "WHERE a.organization_id=? AND a.active_from<? "
+                    "AND (a.active_through IS NULL OR a.active_through>?)",
+                    (
+                        interval_end,
+                        organization_id,
+                        interval_end,
+                        interval_start,
+                    ),
+                ).fetchone()
+            except sqlite3.Error as exc:
+                _raise_sqlite(exc)
+        return int(row[0]) > 0 and int(row[0]) == int(row[1])
 
     def _advance_stream(self, batch: UsageBatch) -> None:
         state = self._db.execute(
