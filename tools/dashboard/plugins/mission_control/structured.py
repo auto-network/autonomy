@@ -53,12 +53,17 @@ def load_items(org: str, surface_ids: list[str]) -> list[dict]:
         payload = m.payload if isinstance(m.payload, dict) else {}
         if payload.get("surface_id") not in wanted:
             continue
-        items.append({
+        item = {
             "key": m.key,
             "created_at": m.created_at,
             "updated_at": m.updated_at,
             **payload,
-        })
+        }
+        # Empty strings, empty lists and zero orders are schema defaults the
+        # viewer reapplies with `||`; shipping them roughly doubles the baked
+        # JSON (most items carry a dozen blank optional fields). Measured on
+        # the 187-item preview mission: 161 KB -> ~90 KB.
+        items.append({k: v for k, v in item.items() if v not in ("", [], 0, 0.0)})
     return items
 
 

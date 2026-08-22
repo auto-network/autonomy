@@ -224,7 +224,9 @@
 <script>
 (function () {
   "use strict";
+  var T_SCRIPT = performance.now();   // chrome boot + HTML parse end at our turn
   var DATA = JSON.parse(document.getElementById("mc-data").textContent);
+  var T_PARSED = performance.now();
   var ITEMS = DATA.items || [];
   var PILLARS = DATA.pillars || [];
   var MID = DATA.mission.mission_id;
@@ -646,5 +648,45 @@
   var gen = new Date((DATA.generated_at||0)*1000);
   document.getElementById("mc-genat").textContent =
     isNaN(gen) ? "" : "generated " + gen.toLocaleString();
+
+  // ── load diagnostics — visible, so a slow open can be read off the
+  //    screen instead of guessed at. All times are ms since navigation
+  //    start (the moment the link was tapped, srcdoc paths excepted). ──
+  (function diag(){
+    var T_DONE = performance.now();
+    var kb = function (n) { return (n/1024).toFixed(0) + " KB"; };
+    var ms = function (n) { return n >= 2500 ? (n/1000).toFixed(1) + " s"
+                                             : Math.round(n) + " ms"; };
+    var itemsKB = document.getElementById("mc-data").textContent.length;
+    var nav = (performance.getEntriesByType &&
+               performance.getEntriesByType("navigation")[0]) || null;
+    var parts = [];
+    if (nav && nav.decodedBodySize)
+      parts.push("doc " + kb(nav.decodedBodySize) +
+                 (nav.transferSize ? " (wire " + kb(nav.transferSize) + ")" : ""));
+    if (nav && nav.responseEnd)
+      parts.push("net " + ms(nav.responseEnd - nav.startTime));
+    parts.push("chrome+parse " + ms(T_SCRIPT));
+    parts.push("items " + kb(itemsKB) + "/" + (DATA.items||[]).length);
+    parts.push("render " + ms(T_DONE - T_SCRIPT));
+    parts.push("interactive " + ms(T_DONE));
+    var line = el("div", null, "⏱ " + parts.join(" · "));
+    line.id = "mc-diag";
+    line.style.cssText = "font-family:var(--mono);font-size:.68rem;" +
+      "color:var(--ink3);background:var(--bg2);border:1px solid var(--line);" +
+      "border-radius:7px;padding:5px 9px;margin:0 0 12px;overflow-x:auto;" +
+      "white-space:nowrap";
+    var glance = document.getElementById("mc-glance");
+    glance.parentNode.insertBefore(line, glance.nextSibling);
+    // Late chrome/network work shows up as the page staying busy after we
+    // finish; stamp the load event too so the gap is attributable.
+    window.addEventListener("load", function () {
+      line.textContent += " · window.load " + ms(performance.now());
+    });
+    if (window.console && console.log)
+      console.log("mc-structured diag", {script_at: T_SCRIPT,
+        json_parse: T_PARSED - T_SCRIPT, render: T_DONE - T_PARSED,
+        items_bytes: itemsKB, nav: nav});
+  })();
 })();
 </script>
