@@ -376,13 +376,27 @@ def test_live_updates_are_subscribed_only_at_a_real_url():
              if "subscribeLive()" in ln and "function" not in ln]
     assert calls, "subscribeLive is defined but never called"
 
+    # The guard is a NAMED constant, not an inline window.parent test, and
+    # that is deliberate: being in a frame and being on an about: URL are
+    # different facts, and conflating them left every control dead in the
+    # dashboard's own SPA frame. So this asserts the guard by its name and
+    # separately asserts the name still means both halves -- pinning the raw
+    # expression here would fail the next time it is correctly refactored,
+    # which is exactly what it did.
     body = src[src.index("function subscribeLive"):]
     body = body[: body.index("// ---- chrome")]
-    guard = body.index("window.parent !== window")
+    guard = body.index("if (RELAY_FRAME) return;")
     opened = body.index("new EventSource")
     assert guard < opened, (
         "EventSource must be constructed only at top level; a framed screen "
         "is fed by its host and must not open a second source"
+    )
+    decl = src[src.index("var RELAY_FRAME"):]
+    decl = decl[: decl.index(";")]
+    assert "window.parent !== window" in decl and "about:" in decl, (
+        "RELAY_FRAME must still mean 'framed AND on an about: URL'; if it "
+        "loses either half this guard stops meaning what the assertion above "
+        "claims it means"
     )
     assert "mission_control:conversation" in body
     assert "data.mission_id !== state.mission_id" in body, (
