@@ -124,14 +124,44 @@ def test_item_put_and_read_back_on_pillar():
 def test_item_surface_id_cannot_be_spoofed():
     client = _client()
     mission = _structured_mission(client)
+    pillar = client.post(
+        f"/api/missions/{mission['mission_id']}/pillars",
+        json={"name": "Relay"}).json()["pillar"]
     put = client.put(
-        f"/api/missions/{mission['mission_id']}/items/x",
+        f"/api/pillars/{pillar['pillar_id']}/items/x",
         json={"kind": "work", "title": "T", "surface_id": "somewhere-else",
               "item_id": "not-x"})
     assert put.status_code == 200
     item = put.json()["item"]
-    assert item["surface_id"] == mission["mission_id"]
+    assert item["surface_id"] == pillar["pillar_id"]
     assert item["item_id"] == "x"
+
+
+def test_new_items_refuse_the_mission_surface_but_legacy_stays_writable():
+    """The overview is a computed summary, not a content surface. New items
+    must name a pillar; items that predate the ruling stay writable so they
+    can be revised, re-homed, or retired -- refusing those would make the
+    migration itself impossible."""
+    client = _client()
+    mission = _structured_mission(client)
+    mid = mission["mission_id"]
+    put = client.put(f"/api/missions/{mid}/items/scope",
+                     json={"kind": "scope", "title": "Mission scope"})
+    assert put.status_code == 400, put.text
+    assert "pillar" in put.json()["error"]
+
+    from tools.graph import settings_ops
+    from tools.dashboard.plugins.mission_control.entrypoints import schemas
+    settings_ops.upsert_by_key(
+        schemas.MISSION_ITEM_SET_ID, schemas.SCHEMA_REVISION,
+        f"{mid}:legacy",
+        {"surface_id": mid, "item_id": "legacy",
+         "kind": "work", "title": "Old", "state": "active"},
+        org=dict(mission).get("org") or None)
+    upd = client.put(f"/api/missions/{mid}/items/legacy",
+                     json={"kind": "work", "title": "Old", "state": "retired"})
+    assert upd.status_code == 200, upd.text
+    assert upd.json()["item"]["state"] == "retired"
 
 
 def test_item_rejects_unknown_kind_and_state():
@@ -150,11 +180,14 @@ def test_item_rejects_unknown_kind_and_state():
 def test_item_state_transition_stamps_happened_at_and_appends_note():
     client = _client()
     mission = _structured_mission(client)
-    client.put(f"/api/missions/{mission['mission_id']}/items/w",
+    pillar = client.post(
+        f"/api/missions/{mission['mission_id']}/pillars",
+        json={"name": "Relay"}).json()["pillar"]
+    client.put(f"/api/pillars/{pillar['pillar_id']}/items/w",
                json={"kind": "work", "title": "W", "state": "active",
                      "body": "Building."})
     out = client.post(
-        f"/api/missions/{mission['mission_id']}/items/w/state",
+        f"/api/pillars/{pillar['pillar_id']}/items/w/state",
         json={"state": "proven", "note": "Watched it run live."})
     assert out.status_code == 200, out.text
     item = out.json()["item"]
@@ -178,7 +211,10 @@ def test_item_state_transition_on_missing_item_is_404():
 def test_structured_mission_serves_viewer_without_any_revision():
     client = _client()
     mission = _structured_mission(client)
-    client.put(f"/api/missions/{mission['mission_id']}/items/hello",
+    pillar = client.post(
+        f"/api/missions/{mission['mission_id']}/pillars",
+        json={"name": "Relay"}).json()["pillar"]
+    client.put(f"/api/pillars/{pillar['pillar_id']}/items/hello",
                json={"kind": "work", "title": "First item"})
     page = client.get(f"/missions/{mission['mission_id']}")
     assert page.status_code == 200
@@ -232,7 +268,10 @@ def _org_client(org: str) -> TestClient:
 def test_cross_org_caller_cannot_see_or_write_items():
     operator = _client()
     mission = _structured_mission(operator)          # org: autonomy
-    operator.put(f"/api/missions/{mission['mission_id']}/items/x",
+    pillar = operator.post(
+        f"/api/missions/{mission['mission_id']}/pillars",
+        json={"name": "Relay"}).json()["pillar"]
+    operator.put(f"/api/pillars/{pillar['pillar_id']}/items/x",
                  json={"kind": "work", "title": "T"})
 
     stranger = _org_client("someother")
@@ -253,7 +292,7 @@ def test_cross_org_caller_cannot_see_or_write_items():
     # The mission's own org sees and writes normally.
     member = _org_client("autonomy")
     assert member.get(f"/api/missions/{mid}/items").status_code == 200
-    assert member.put(f"/api/missions/{mid}/items/z",
+    assert member.put(f"/api/pillars/{pillar['pillar_id']}/items/z",
                       json={"kind": "work", "title": "Z"}).status_code == 200
     assert any(m["mission_id"] == mid
                for m in member.get("/api/missions").json()["missions"])

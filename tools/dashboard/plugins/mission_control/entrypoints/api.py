@@ -370,6 +370,19 @@ async def put_surface_item(request: Request) -> JSONResponse:
     if err:
         return JSONResponse({"error": err}, status_code=404)
     item_id = request.path_params["item_id"]
+    if surface_id == mission["mission_id"]:
+        # The overview is a computed summary, not a content surface: new
+        # items attach to pillars. Existing mission-surface items stay
+        # writable so legacy content can be revised, re-homed, or retired —
+        # refusing those would make the migration itself impossible.
+        existing = settings_ops.read_set_key(
+            schemas.MISSION_ITEM_SET_ID, f"{surface_id}:{item_id}",
+            org=dict(mission).get("org") or None, peers=[])
+        if existing is None:
+            return JSONResponse(
+                {"error": "items attach to pillars; the mission overview is "
+                          "a computed summary — name a pillar surface"},
+                status_code=400)
     body = await request.json()
     if not isinstance(body, dict):
         return JSONResponse({"error": "body must be a JSON object"},
