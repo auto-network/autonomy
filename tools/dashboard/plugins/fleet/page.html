@@ -60,10 +60,6 @@
                     <span class="min-w-0">
                       <span class="fleet-machine-title">
                         <strong x-text="machine.displayLabel"></strong>
-                        <em x-text="machine.isLocalMachine ? 'This machine' : ''"
-                            :class="machine.isLocalMachine ? '' : 'fleet-empty-badge'"></em>
-                        <em class="tunnel" x-text="machine.isTunnelServer ? 'Serves auto.network' : ''"
-                            :class="machine.isTunnelServer ? '' : 'fleet-empty-badge'"></em>
                       </span>
                       <small :class="machine.machineId ? 'mono' : ''" x-text="detailLabel(machine)"></small>
                     </span>
@@ -72,7 +68,7 @@
                     <small>Status</small>
                     <strong :class="statusTone(machine)" x-text="standingLabel(machine.standing)"></strong>
                   </span>
-                  <span class="fleet-machine-status">
+                  <span class="fleet-machine-status compact-status">
                     <small x-text="machine.rowKind === 'pending_admission' ? 'Status' : 'Last sync'"></small>
                     <strong :class="statusTone(machine)"
                             x-text="machine.rowKind === 'pending_admission' ? standingLabel(machine.standing) : syncLabel(machine)"></strong>
@@ -107,13 +103,15 @@
             <template x-if="invitation.status === 'active'">
               <div>
                 <button type="button" class="fleet-invite-code" @click="copyInvitation()"
-                        x-text="invitation.url" aria-label="Copy fleet invitation"></button>
+                        x-text="invitation.url" aria-label="Copy fleet invitation link"></button>
                 <div class="fleet-invite-meta">
                   <span x-text="publishedLabel"></span>
                   <span x-text="expiryLabel"></span>
                 </div>
                 <button type="button" class="fleet-primary-action" @click="copyInvitation()"
-                        x-text="copied ? 'Copied' : 'Copy invitation'"></button>
+                        x-text="copied ? 'Link copied' : 'Copy invitation link'"></button>
+                <button type="button" class="fleet-secondary-action" @click="copyBootstrapCode()"
+                        x-text="bootstrapCopied ? 'Install code copied' : 'Copy install code'"></button>
               </div>
             </template>
             <template x-if="invitation.status !== 'active'">
