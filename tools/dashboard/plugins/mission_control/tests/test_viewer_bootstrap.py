@@ -511,8 +511,28 @@ def test_what_was_typed_outlives_a_redraw_and_a_refusal():
     # backgrounded page on a phone can be evicted outright.
     assert "function draftGet(" in src and "function draftSet(" in src
     assert "ta.value = draftGet(pendingKey());" in src
-    # Discarded only by a confirmed success.
-    assert 'ta.value = ""; draftSet(slot, "");' in src
+    # Discarded only by a confirmed success -- BOTH the visible box and the
+    # stored draft. Asserted as two facts rather than one source line: they
+    # are now separated by the comment explaining why clearing the box is not
+    # redundant with the redraw, and pinning them to one line failed for
+    # formatting rather than for behaviour.
+    success = src[src.index("Only a confirmed success"):]
+    success = success[: success.index("}, function (err)")]
+    assert 'ta.value = "";' in success
+    assert 'draftSet(slot, "");' in success
     # And the refusal itself survives the next redraw.
     assert "var sendErrors" in src
     assert "sendErrors[pendingKey()]" in src
+    # SO DOES A SEND STILL IN FLIGHT. It resolved against captured nodes, so
+    # a redraw mid-send -- routine during an event storm -- detached the
+    # elements the callback wrote to and left a delivered message showing
+    # "Sending...". In flight is state now, and the status and the disabled
+    # button are both drawn from it.
+    assert "var sendPending" in src
+    assert "sendPending[slot] = true;" in src
+    assert "if (sendPending[slot]) return;" in src, (
+        "a second tap during an in-flight send must not post twice"
+    )
+    assert "if (why || sendPending[slot]) send.disabled = true;" in src, (
+        "a redraw mid-send must not draw a fresh enabled button"
+    )

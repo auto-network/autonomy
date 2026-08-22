@@ -869,6 +869,19 @@
   //: nothing at all about why their message did not go.
   var sendErrors = Object.create(null);
 
+  //: AND SO DOES A SEND THAT IS STILL GOING. render() empties the chrome and
+  //: rebuilds it on every live event, so a send that resolved against
+  //: CAPTURED NODES wrote its outcome into elements that had already been
+  //: thrown away: the reader was left on "Sending..." for a message that had
+  //: in fact arrived, and the text was never cleared from a box that no
+  //: longer existed. Observed live during an event storm -- 34 questions
+  //: relaying at once -- where redraws land continuously and an in-flight
+  //: send almost never survives to its own callback.
+  //:
+  //: In flight is state, keyed like every other per-slot fact here, so a
+  //: rebuild renders it faithfully instead of losing it.
+  var sendPending = Object.create(null);
+
   function pendingKey() {
     return (ui.entry ? "e:" + ui.entry
             : ui.anchor ? "a:" + ui.anchor
@@ -987,8 +1000,11 @@
     // while leaving an inviting text box is worse than either: it opens the
     // keyboard, asks you to compose something, and then refuses to send it.
     if (why) return el("div", {class: "mc-foot"}, [el("p", {class: "mc-readonly", text: why})]);
+    // Drawn FROM state every time, so a rebuild mid-send shows the send is
+    // still going instead of quietly reverting to the idle hint.
     var status = el("span", {class: sendErrors[pendingKey()] ? "mc-sub mc-sub-bad" : "mc-sub",
-                             text: sendErrors[pendingKey()] || why || note});
+                             text: sendPending[slot] ? "Sending\u2026"
+                                   : (sendErrors[pendingKey()] || why || note)});
     var send = el("button", {
       class: "mc-send", text: label,
       onclick: function () {
@@ -1005,23 +1021,46 @@
         var body = picked.length
           ? picked.map(function (x) { return x.path; }).join("\n") + "\n\n" + text
           : text;
-        status.textContent = "Sending\u2026";
+        // One send at a time per slot. A second tap while the first is
+        // still going would post the same message twice.
+        if (sendPending[slot]) return;
+        sendPending[slot] = true;
         delete sendErrors[slot];
+        status.textContent = "Sending\u2026";
+        send.disabled = true;
+        // EVERY OUTCOME IS WRITTEN TO STATE FIRST, THEN DRAWN. The nodes
+        // captured by this closure may already be detached by the time the
+        // request settles -- that is the defect this shape exists to remove
+        // -- so nothing here depends on them still being on screen.
         Promise.resolve(onSend(body)).then(function () {
           // Only a confirmed success discards what was written.
-          ta.value = ""; draftSet(slot, "");
+          //
+          // BOTH the box and the stored draft, and the box is not optional
+          // even though the redraw below rebuilds it: render() preserves
+          // whatever is in the FOCUSED textarea across a rebuild, so a box
+          // left populated here has its contents faithfully restored and the
+          // message the reader just sent successfully reappears unsent.
+          ta.value = "";
+          draftSet(slot, "");
           picked.length = 0; delete pendingFiles[slot];
-          drawStrip(); grow(); status.textContent = note;
         }, function (err) {
           sendErrors[slot] = "Not sent: " + ((err && err.message) || "refused")
             + " \u2014 your message is still here.";
-          // Never silent, and never lost: the text stays in the box, the
-          // draft stays in storage, and the reason survives the next redraw.
-          status.textContent = sendErrors[slot];
+          // Never silent, and never lost: the text stays in the draft, and
+          // the reason survives the next redraw.
+        }).then(function () {
+          delete sendPending[slot];
+          // Redraw from state. This is what puts the outcome on the screen
+          // the reader is actually looking at, whether or not it is the one
+          // this closure was built against.
+          render();
         });
       },
     });
-    if (why) send.disabled = true;
+    // Disabled from STATE, not just from the click handler: a rebuild during
+    // an in-flight send would otherwise draw a fresh, inviting button for a
+    // message that is already on its way.
+    if (why || sendPending[slot]) send.disabled = true;
     var picker = el("input", {class: "mc-file", type: "file", multiple: "multiple"});
     picker.addEventListener("change", function (e) {
       addFiles(e.target.files); e.target.value = "";
