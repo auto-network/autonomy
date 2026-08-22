@@ -371,7 +371,7 @@
         document.dispatchEvent(new CustomEvent("mc:open-status"));
         return;
       }
-      if (t.id === "overview") show(pillarFilter || MID);
+      if (t.id === "overview") gotoSurface(null);
       else show(t.id);
     });
     tabsHost.appendChild(b);
@@ -1016,16 +1016,14 @@
     document.querySelectorAll(".mc-tabs button").forEach(function (b) {
       b.classList.toggle("on", b.id === "tab-" + fam);
     });
-    try { history.replaceState(null,"","#"+id); } catch (e) {}
   }
   // The activity panel is mission-wide chrome, but it belongs to the
   // overview: pillar views get their vertical room back.
   var ov = document.getElementById("view-"+MID);
   ov.insertBefore(document.querySelector(".mc-activity"), ov.firstChild);
 
-  var boot = (location.hash||"").slice(1);
-  var landing = boot && document.getElementById("view-"+boot) ? boot
-       : (DATA.focus && document.getElementById("view-"+DATA.focus)) ? DATA.focus
+  var landing =
+    (DATA.focus && document.getElementById("view-"+DATA.focus)) ? DATA.focus
        : MID;
   if (landing !== MID &&
       PILLARS.some(function (p) { return p.pillar_id === landing; })) {
