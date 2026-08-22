@@ -390,7 +390,9 @@ def test_unanswered_screen_questions_stay_out_of_the_questions_count():
     src = _viewer("bootstrap.js")
     assert "function unanswered(" in src
     assert "mc-foryou" in src
-    assert '" for you"' in src
+    # Self-describing: "4 for you" said four of nothing; the pill wears the
+    # same words as the hero chip so the two surfaces read as one number.
+    assert '" asks for you"' in src
 
 
 def test_open_is_defined_once_and_means_not_closed():

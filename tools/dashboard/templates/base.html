@@ -501,6 +501,11 @@
     .live-pulse { width: 0.5rem; height: 0.5rem; border-radius: 50%; background: #22c55e; animation: pulse 2s infinite; }
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
     /* Nav indicator toolbar */
+    /* The mission screen iframe sits fixed at z-50. When its chrome asks
+       for the nav, this raises the drawer and its overlay above the frame;
+       the observer below removes it as soon as the drawer closes. */
+    body.nav-above-mission #sidebar { z-index: 60; }
+    body.nav-above-mission #sidebar-overlay { z-index: 55; display: block; }
     #nav-indicators { display: none; align-items: center; justify-content: flex-end; gap: 0.5rem; margin-bottom: 0.25rem; }
     #nav-indicators.active { display: flex; }
     .nav-indicator {
@@ -1970,6 +1975,7 @@
         overlay.classList.remove('hidden');
       } else {
         overlay.classList.add('hidden');
+        document.body.classList.remove('nav-above-mission');
       }
     });
     observer.observe(sidebar, { attributes: true, attributeFilter: ['class'] });

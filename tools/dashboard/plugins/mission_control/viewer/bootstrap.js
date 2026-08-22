@@ -520,7 +520,7 @@
                   text: "No pillar has reported anything yet."})];
     return el("section", {class: "mc-view"}, [
       el("div", {class: "mc-phead"}, [
-        el("span", {class: "mc-ptitle", text: "What is happening"}),
+        el("span", {class: "mc-ptitle", text: "What's been happening"}),
         el("span", {class: "mc-grow"}),
         el("button", {class: "mc-x", text: "\u00d7", onclick: function () { show(null); }}),
       ]),
@@ -554,11 +554,18 @@
     if (!RELAY_FRAME) {
       kids.push(el("button", {class: "mc-q mc-menu", title: "Back to Mission Control",
                               onclick: function () {
+        // The REAL nav, not a page: the parent app opens its own drawer
+        // over this frame when it can (the phone). Where it cannot -- the
+        // desktop's sidebar is static and cannot rise -- fall back to the
+        // Mission Control home, where the full app chrome is visible.
         try {
-          if (window.parent !== window &&
-              typeof window.parent.navigateTo === "function") {
-            window.parent.navigateTo("/mission-control");
-            return;
+          if (window.parent !== window) {
+            var A = window.parent.Autonomy;
+            if (A && typeof A.openNav === "function" && A.openNav()) return;
+            if (typeof window.parent.navigateTo === "function") {
+              window.parent.navigateTo("/mission-control");
+              return;
+            }
           }
         } catch (_e) {}
         location.assign("/mission-control");
@@ -615,7 +622,7 @@
         // exists to make them findable; jumping to one of them is the single
         // thing it must not do.
         onclick: function () { show(ui.panel === "foryou" ? null : {panel: "foryou"}); },
-      }, [el("span", {text: forYou.length + " for you"})]));
+      }, [el("span", {text: forYou.length + " asks for you"})]));
     }
     if (ui.noChannel) {
       kids.push(el("span", {class: "mc-nobody", title:
@@ -1220,7 +1227,8 @@
     });
   }
 
-  var PANEL_TITLE = {pillars: "Pillars", questions: "Questions", foryou: "For you"};
+  var PANEL_TITLE = {pillars: "Where each pillar stands",
+                     questions: "Questions", foryou: "Asks for you"};
 
   function panelNode() {
     if (!ui.panel) return null;
