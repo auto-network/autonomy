@@ -432,6 +432,24 @@ def test_disable_mfa_splits_combined_into_individuals(root):
     assert decrypt_root_key_with_passkey(a, prf).private_hex == r.private_hex
 
 
+def test_disable_mfa_with_new_passphrase_sets_standalone_password(root):
+    # The "add a password I can use on its own" path from a combined armor:
+    # dissolving the require-both pair and choosing the standalone password are
+    # ONE act. Afterwards the NEW password opens alone, the passkey opens alone,
+    # and the OLD combined passphrase is no longer what the password factor uses.
+    from tools.network.idkit import KeyPair
+    from tools.network.idkit.armor import disable_mfa
+    r = KeyPair.generate()
+    prf = b"\x37" * 32
+    a = encrypt_root_key_combined(r, _PW, "cred-mfa", _passkey_pub(prf), iterations=10_000)
+    a = disable_mfa(a, _PW, prf, new_passphrase="brand-new-pw", iterations=10_000)
+    assert sorted(armor_factor_types(a)) == ["passkey", "password"]
+    assert decrypt_root_key(a, "brand-new-pw").private_hex == r.private_hex
+    assert decrypt_root_key_with_passkey(a, prf).private_hex == r.private_hex
+    with pytest.raises(ArmorPassphraseError):
+        decrypt_root_key(a, _PW)
+
+
 def test_disable_mfa_needs_both_halves(root):
     from tools.network.idkit import KeyPair
     from tools.network.idkit.armor import disable_mfa

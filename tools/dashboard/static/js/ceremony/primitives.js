@@ -1037,9 +1037,12 @@ async function setPasswordFactorWithPasskey(
 
 // Split a combined (MFA) factor back into individual factors. Opening needs
 // BOTH; the result is a standalone password factor and a standalone passkey
-// factor for the same device, so afterwards EITHER opens the root.
+// factor for the same device, so afterwards EITHER opens the root. `newPassword`
+// (optional) re-establishes the standalone password under a fresh passphrase in
+// the same act — the "give me a password I can use on its own" path, since a
+// standalone password only exists once the require-both pair is dissolved.
 async function disableMfa(
-  armorText, password, prfOutput, iterations = V2_DEFAULT_ITERATIONS,
+  armorText, password, prfOutput, newPassword = null, iterations = V2_DEFAULT_ITERATIONS,
 ) {
   const data = parseArmor(armorText);
   const combined = data.factors.find((f) => f.type === 'combined');
@@ -1047,7 +1050,8 @@ async function disableMfa(
   const masterKek = await v2MasterKekFromCombined(data, password, prfOutput);
   try {
     const previousFactors = data.factors.slice();
-    const pf = await buildPasswordFactor(data.root_pub, masterKek, password, iterations);
+    const pf = await buildPasswordFactor(
+      data.root_pub, masterKek, newPassword || password, iterations);
     const sealed = await sealToEncapsulationKey(masterKek, combined.kem_pub, PASSKEY_ARMOR_PURPOSE);
     const pkFactor = {
       type: 'passkey',
@@ -1097,7 +1101,7 @@ async function openArmorWithOpener(currentArmor, opener) {
 //          | {kind:'setPassword',    newPassword}                     // password
 //          | {kind:'addPassword',    newPassword}                     // prf
 //          | {kind:'enableMfa',      credentialId, provisioningPub}   // password
-//          | {kind:'disableMfa',     credentialId}                    // password+prf
+//          | {kind:'disableMfa',     credentialId, newPassword?}      // password+prf
 //          | {kind:'setAuthority'}   // policy-only; armor unchanged
 async function signArmorUpdate(currentArmor, opener, action, requirePair) {
   const o = (typeof opener === 'string') ? { password: opener } : (opener || {});
@@ -1120,7 +1124,7 @@ async function signArmorUpdate(currentArmor, opener, action, requirePair) {
       newArmor = await enableMfa(
         currentArmor, o.password, action.credentialId, action.provisioningPub);
     } else if (action.kind === 'disableMfa') {
-      newArmor = await disableMfa(currentArmor, o.password, o.prf);
+      newArmor = await disableMfa(currentArmor, o.password, o.prf, action.newPassword || null);
     } else if (action.kind !== 'setAuthority') {
       throw new Error(`unknown re-arm action: ${action.kind}`);
     }
