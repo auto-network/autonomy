@@ -7,6 +7,7 @@ import time
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse
@@ -569,7 +570,10 @@ def session_contributions(session_ids: list[str], request: Request) -> dict[str,
             "kind": "action",
             "label": "Design Studio",
             "title": f"Open Design Studio: {title}",
-            "href": f"/design/{revision_id}",
+            "href": (
+                f"/design/{revision_id}?from_session="
+                f"{quote(session_id, safe='')}"
+            ),
             "icon_svg": _SESSION_ICON,
             "accent": "#818cf8",
         })

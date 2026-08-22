@@ -240,10 +240,51 @@
   <template x-if="state === 'ready'">
     <div style="display:flex;flex-direction:column;flex:1;min-height:0">
 
+      <!-- Focused shell used only when a linked session opens its design. -->
+      <div class="design-linked-toolbar"
+           data-testid="design-linked-toolbar"
+           x-show="linkedSessionMode">
+        <a class="design-linked-return"
+           data-testid="design-linked-return"
+           :href="linkedSessionHref"
+           :title="'Back to ' + linkedSessionLabel"
+           :aria-label="'Back to session ' + linkedSessionLabel"
+           @click.prevent="returnToSession()">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M10.5 3.25 5.75 8l4.75 4.75"></path>
+          </svg>
+          <span>Session</span>
+        </a>
+        <div class="design-linked-identity">
+          <span class="design-linked-presence"
+                :class="linkedSessionLive ? 'is-live' : ''"
+                :title="linkedSessionLive ? linkedSessionLabel + ' is active' : linkedSessionLabel + ' is not active'"
+                :aria-label="linkedSessionLive ? linkedSessionLabel + ' is active' : linkedSessionLabel + ' is not active'"
+                role="status"></span>
+          <span class="design-linked-title"
+                data-testid="design-linked-title"
+                x-text="design?.title || 'Design'"></span>
+        </div>
+        <button class="design-linked-capture"
+                data-testid="design-linked-capture"
+                type="button"
+                @click="captureScreenshot()"
+                :disabled="captureState === 'working'"
+                :class="'capture-' + captureState"
+                :title="captureState === 'working' ? 'Capturing screenshot' : 'Capture screenshot'"
+                aria-label="Capture screenshot">
+          <template x-if="captureState === 'idle'"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3.5" width="14" height="11" rx="1.5"></rect><circle cx="9" cy="9" r="3"></circle></svg></template>
+          <template x-if="captureState === 'working'"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="9" cy="9" r="7" stroke-dasharray="34 12"></circle></svg></template>
+          <template x-if="captureState === 'success'"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 9l4 4 6-7"></path></svg></template>
+          <template x-if="captureState === 'error'"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 5l8 8M13 5l-8 8"></path></svg></template>
+        </button>
+      </div>
+
       <!-- ═══ UNIFIED TOOLBAR — from Design Studio experiment a8ee8212 ═══ -->
-      <div data-testid="exp-toolbar"
-           class="flex flex-wrap items-center px-3 bg-[#1a2332] border-b border-[#1e293b] min-h-[48px] select-none"
-           style="flex-shrink:0;z-index:10">
+      <template x-if="!linkedSessionMode">
+        <div data-testid="exp-toolbar"
+             class="flex flex-wrap items-center px-3 bg-[#1a2332] border-b border-[#1e293b] min-h-[48px] select-none"
+             style="flex-shrink:0;z-index:10">
 
         <!-- Row 1 -->
         <div class="flex items-center gap-2 w-full h-12">
@@ -383,15 +424,17 @@
           </div>
         </template>
 
-      </div>
+        </div>
+      </template>
 
       <!-- Design surface (State 1: visible when chat closed) -->
-      <div :class="chatOpen ? 'absolute invisible h-0 overflow-hidden' : 'flex-1 relative overflow-hidden min-h-0'">
+      <div :class="linkedSessionMode || !chatOpen ? 'flex-1 relative overflow-hidden min-h-0' : 'absolute invisible h-0 overflow-hidden'">
         <iframe id="design-iframe" style="width:100%;height:100%;border:none;background:#0f1623"></iframe>
       </div>
 
       <!-- Chat overlay (State 2: visible when chat open) -->
-      <div :class="chatOpen ? 'flex flex-1 flex-col bg-[#1a2332] overflow-hidden min-h-0' : 'absolute invisible h-0 overflow-hidden'">
+      <template x-if="!linkedSessionMode">
+        <div :class="chatOpen ? 'flex flex-1 flex-col bg-[#1a2332] overflow-hidden min-h-0' : 'absolute invisible h-0 overflow-hidden'">
 
         <!-- Picker (when not connected) — from Design Studio experiment 3b9d8d82 -->
         <template x-if="!chatConnected">
@@ -500,7 +543,8 @@
           </div>
         </template>
 
-      </div>
+        </div>
+      </template>
 
 
     </div>

@@ -4,6 +4,12 @@
 
 (function () {
 
+  function _linkedSessionFromQuery() {
+    var value = new URLSearchParams(window.location.search || '').get('from_session') || '';
+    value = value.trim();
+    return /^[A-Za-z0-9._-]{1,160}$/.test(value) ? value : '';
+  }
+
   function _revisionIdFromPath() {
     var m = window.location.pathname.match(/^\/design\/(.+)$/);
     return m ? m[1] : '';
@@ -64,6 +70,7 @@
         designId: '',       // stable design ID (shared across revisions)
         iterCount: 0,
         iterIndex: 0,
+        linkedSessionId: '',
 
         // Chat toggle
         chatOpen: false,
@@ -86,6 +93,23 @@
         get toolbar() { return toolbarElements(this.toolbarState); },
         get canGoBack() { return this.iterIndex > 0; },
         get canGoForward() { return this.iterIndex < this.iterCount - 1; },
+        get linkedSessionMode() { return !!this.linkedSessionId; },
+        get linkedSessionHref() {
+          var org = (this.design && this.design.org) || 'autonomy';
+          return '/session/' + encodeURIComponent(org) + '/' + encodeURIComponent(this.linkedSessionId);
+        },
+        get linkedSessionStore() {
+          if (!this.linkedSessionId || !Alpine.store) return null;
+          var sessions = Alpine.store('sessions') || {};
+          return sessions[this.linkedSessionId] || null;
+        },
+        get linkedSessionLive() {
+          return !!(this.linkedSessionStore && this.linkedSessionStore.isLive);
+        },
+        get linkedSessionLabel() {
+          var store = this.linkedSessionStore;
+          return (store && store.label) || this.linkedSessionId;
+        },
 
         // ── Lifecycle ─────────────────────────────────────────────────────
 
@@ -93,6 +117,8 @@
           window._designPage = this;
           this._destroyed = false;
           this._loadGen = 0;   // invalidates in-flight fetches on nav/destroy
+          this.linkedSessionId = _linkedSessionFromQuery();
+          document.body.classList.toggle('route-design-linked', this.linkedSessionMode);
           this.revisionId = _revisionIdFromPath();
           this._load();
           var self = this;
@@ -104,6 +130,7 @@
           window.addEventListener('popstate', this._popstateHandler);
 
           this.$watch('chatOpen', function (open) {
+            if (self.linkedSessionMode) return;
             localStorage.setItem('design-chatOpen-' + self.designId, open ? 'true' : 'false');
             // Mirror chat-open into the panel viewer so it switches between the
             // active composer + pending/dictation tile (open) and the passive
@@ -130,6 +157,7 @@
 
         destroy: function () {
           this._destroyed = true;
+          document.body.classList.remove('route-design-linked');
           if (window._designPage === this) window._designPage = null;
           if (this._designSeriesCleanup) {
             this._designSeriesCleanup();
@@ -169,8 +197,11 @@
             // Migrate localStorage from revision-scoped to design-scoped
             this._migrateLocalStorage();
 
-            // Restore chat state from design-scoped key
-            this.chatOpen = localStorage.getItem('design-chatOpen-' + this.designId) === 'true';
+            // Session-linked entry is a focused canvas, not a chat workspace.
+            // Direct/library entry retains the existing design-scoped state.
+            this.chatOpen = this.linkedSessionMode
+              ? false
+              : localStorage.getItem('design-chatOpen-' + this.designId) === 'true';
 
             // Post-render: inject iframe content. Guard at EXECUTION time —
             // $nextTick callbacks are not canceled by destroy/supersede, and
@@ -180,8 +211,9 @@
               this._injectIframe(data);
             }.bind(this));
 
-            // Auto-reconnect Chat With if session was previously selected
-            this._checkChatWith();
+            // Auto-reconnect Chat With only in the full workspace. The linked
+            // viewer deliberately never mounts the picker/chat state machine.
+            if (!this.linkedSessionMode) this._checkChatWith();
 
             // SSE subscription for new design iterations
             this._subscribeToDesign();
@@ -274,7 +306,10 @@
           this.captureState = 'working';
           var self = this;
           try {
-            await manualCaptureScreenshot(this.revisionId, this._tmuxSession || '');
+            var targetSession = this.linkedSessionLive
+              ? this.linkedSessionId
+              : (this._tmuxSession || '');
+            await manualCaptureScreenshot(this.revisionId, targetSession);
             self.captureState = 'success';
           } catch (e) {
             self.captureState = 'error';
@@ -346,7 +381,11 @@
             }.bind(this));
 
             // Update URL without navigation
-            history.pushState({}, '', '/design/' + newRevisionId);
+            var nextPath = '/design/' + newRevisionId;
+            if (this.linkedSessionMode) {
+              nextPath += '?from_session=' + encodeURIComponent(this.linkedSessionId);
+            }
+            history.pushState({}, '', nextPath);
           } catch (e) {
             console.error('[designPage] revision swap failed', e);
           }
@@ -368,6 +407,11 @@
           var revisions = this.design && this.design.revisions;
           if (!revisions || revisions.length === 0) return;
           this._swapRevision(revisions[revisions.length - 1]);
+        },
+
+        returnToSession: function () {
+          if (!this.linkedSessionId) return;
+          navigateTo(this.linkedSessionHref);
         },
 
         // ── Chat With session management ──────────────────────────────────
