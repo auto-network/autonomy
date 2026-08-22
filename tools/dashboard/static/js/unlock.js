@@ -34,6 +34,11 @@
     techOpen: false,
     busy: false,
     error: null,
+    // Fleet completion needs the personal root, not merely an access
+    // assertion. Keep the visible action factor-neutral while forcing the
+    // password-backed, root-releasing ceremony until a passkey ceremony can
+    // release equivalent root material.
+    fleetRootRequired: new URLSearchParams(location.search).get('fleet') === '1',
     // Monotonic ceremony id: bumped on every _run and every mode switch,
     // so an abandoned ceremony's late resolve/reject is discarded instead
     // of stamping a stale error or navigating away from the new screen.
@@ -198,8 +203,59 @@
       if (window.console && console.warn) {
         console.warn('vault wake failed after unlock:', (e && e.message) || e);
       }
+    }
+
+    // A Fleet-linked install may have received its root-signed roster entry
+    // while this Dashboard was waiting. Complete it in this same password
+    // ceremony: the browser verifies the delivery, derives the machine key,
+    // and sends only a machine-key possession proof. The ceremony zeroes the
+    // root seed on every exit; no server route receives it.
+    try {
+      var completion = await _fetchJson(
+        '/api/fleet/enrollment/local-completion');
+      if (completion.pending) {
+        var fleetCeremony = await import('./ceremony/fleet-enrollment.js');
+        var proof = await fleetCeremony.completeFleetEnrollment({
+          personalRootSeed: wakeSeed,
+          requestId: completion.request_id,
+          request: completion.request,
+          channelBinding: completion.channel_binding,
+          approval: completion.approval,
+          rosterEntry: completion.roster_entry,
+        });
+        wakeSeed = null;  // the ceremony zeroed the shared Uint8Array
+        await _postJson('/api/fleet/enrollment/local-completion', proof);
+      } else {
+        // Every process restart loses the ephemeral Fleet sync key by design.
+        // Re-mint it during an ordinary later root unlock from the durable
+        // machine id and public roster entry; no root or machine seed crosses
+        // this browser boundary.
+        var runtimeContext = await _fetchJson('/api/fleet/runtime');
+        if (runtimeContext.enabled) {
+          var fleetRuntimeCeremony = await import('./ceremony/fleet-enrollment.js');
+          var runtimeCredential =
+            await fleetRuntimeCeremony.mintFleetRuntimeCredential({
+              personalRootSeed: wakeSeed,
+              rootPub: runtimeContext.personal_root_pub,
+              machineId: runtimeContext.machine_id,
+              machinePub: runtimeContext.machine_pub,
+            });
+          wakeSeed = null;  // the ceremony zeroed the shared Uint8Array
+          await _postJson('/api/fleet/runtime', runtimeCredential);
+        }
+      }
+    } catch (e) {
+      if (window.console && console.warn) {
+        console.warn('fleet enrollment completion failed after unlock:',
+                     (e && e.message) || e);
+      }
+      // A Fleet-linked unlock is the enrollment boundary, not a best-effort
+      // side effect.  Do not navigate to the synchronization screen unless
+      // this machine has verified and acknowledged its delivered evidence.
+      if (U.fleetRootRequired) throw e;
     } finally {
-      wakeSeed.fill(0);
+      if (wakeSeed) wakeSeed.fill(0);
+      wakeSeed = null;
     }
 
     // Access authentication has succeeded.  Reuse this password-backed root
@@ -267,13 +323,13 @@
 
   function _troubleHtml() {
     var rows = '';
-    if (U.hasIdentity && U.mode === 'passkey') {
+    if (U.hasIdentity && U.mode === 'passkey' && !U.fleetRootRequired) {
       rows +=
         '<button id="unlock-use-password" data-testid="unlock-use-password" class="' + _ROW_CLS + '">' +
         '<svg class="w-4.5 h-4.5 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="1.7" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>' +
         'Use your password instead</button>';
     }
-    if (U.passkeysForHost > 0) {
+    if (U.passkeysForHost > 0 && !U.fleetRootRequired) {
       rows +=
         '<button id="unlock-other-device" class="' + _ROW_CLS + '">' +
         '<svg class="w-4.5 h-4.5 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="1.7" viewBox="0 0 24 24"><rect x="5" y="2" width="14" height="20" rx="2"/><path stroke-linecap="round" d="M12 18h.01"/></svg>' +
@@ -368,7 +424,8 @@
       '<h1 class="text-2xl md:text-xl font-semibold">Unlock dashboard</h1>' +
       '<p class="text-gray-400 mt-2">' + sub + '</p>' +
       _avatarHtml() +
-      (passkey ? '' : _passwordFormHtml(U.passkeysForHost === 0)) +
+      (passkey ? '' : _passwordFormHtml(
+        U.passkeysForHost === 0 || U.fleetRootRequired)) +
       '</div>' +
       '<div class="md:mt-7 pt-7 md:pt-0">' +
       '<button id="unlock-primary" data-testid="unlock-primary" class="w-full bg-indigo-600 hover:bg-indigo-500 ' +
@@ -500,7 +557,7 @@
     U.initial = (U.name || '?').trim().charAt(0).toUpperCase();
     U.hasIdentity = !!status.personal_identity;
     U.passkeysForHost = status.passkeys_for_host || 0;
-    if (U.passkeysForHost > 0 && U.webauthnOk) {
+    if (!U.fleetRootRequired && U.passkeysForHost > 0 && U.webauthnOk) {
       U.mode = 'passkey';
     } else if (U.hasIdentity) {
       U.mode = 'password';        // the always-available floor

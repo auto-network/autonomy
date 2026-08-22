@@ -335,9 +335,12 @@ the target through a recoverable backup. The Dashboard handoff wraps that
 primitive in an explicit process-wide writer gate, merges authenticated local
 winners into staging, records a durable local checkpoint receipt, publishes
 atomically, recovers crashes on either side of the swap, and resumes reliable
-delta replay. Fleet address and checkpoint-offer discovery, the
-browser-to-process derived-machine-key handoff, exact remote ACK floors, and
-exact-base round coordination remain outside this package.
+delta replay. Production now supplies the browser-to-process handoff as a
+short-lived machine-signed idkit delegation and uses the enrolled machine's
+local RelayKit route for the first roster-authenticated checkpoint pull. Exact
+remote ACK floors, dedicated post-enrollment route rotation, continuous
+multi-peer discovery, and exact-base round coordination remain outside this
+package.
 
 Attachment graph metadata participates in the base. Attachment bytes are
 content-addressed artifacts fetched through the supplied blob-store adapter;

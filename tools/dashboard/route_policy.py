@@ -66,6 +66,11 @@ PUBLIC_EXCEPTIONS: dict[tuple[str, str], str] = {
     ("POST", "/api/identity/unlock/passkey"):
         "Completes the passkey unlock and mints the session cookie. "
         "Pre-session by construction.",
+    ("POST", "/api/fleet/enrollment/local-resume"):
+        "Resumes only the Fleet request and invitation credential already "
+        "stored by first run. It must remain reachable after encrypted root "
+        "delivery turns on the human gate but before the joining browser can "
+        "unlock and obtain its first session.",
 }
 
 

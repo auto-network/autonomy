@@ -170,6 +170,29 @@ def test_stable_source_id_is_idempotent_and_byte_bound(tmp_path):
         ar.create_idempotent(**{**fields, "staged": {"v": 2}})
 
 
+def test_recent_for_kind_returns_parsed_newest_records(tmp_path):
+    db = tmp_path / "approval_requests.db"
+    first = ar.create(
+        kind="link_publish", session="one", request={"target_type": "fleet:join"},
+        staged={"frozen": 1}, created_at=1, db_path=db,
+    )
+    ar.create(
+        kind="other", session="other", request={"value": 1},
+        created_at=2, db_path=db,
+    )
+    second = ar.create(
+        kind="link_publish", session="two", request={"target_type": "fleet:join"},
+        created_at=3, db_path=db,
+    )
+    ar.set_result(second, {"approved": False}, db)
+
+    rows = ar.recent_for_kind("link_publish", db_path=db)
+    assert [row["id"] for row in rows] == [second, first]
+    assert rows[0]["request"] == {"target_type": "fleet:join"}
+    assert rows[0]["result"] == {"approved": False}
+    assert rows[1]["staged"] == {"frozen": 1}
+
+
 def test_commit_sign_diff_from_parent_and_tree(tmp_path):
     """The live diff-tree of a not-yet-committed change (parent + tree), the way
     the commit_sign enricher renders a pending request for the overlay."""

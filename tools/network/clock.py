@@ -143,6 +143,12 @@ MAX_ATTESTATION_TTL = 365 * 86_400
 #: session, short enough that a leaked credential dies on its own.
 TURN_CREDENTIAL_TTL_SECONDS = 15 * 60
 
+#: Hard ceiling on the browser-minted, machine-signed Fleet process
+#: delegation. It is re-minted after an unlock and never survives a process
+#: restart, so twelve hours covers one working session without turning the
+#: ephemeral key into durable machine authority.
+FLEET_RUNTIME_DELEGATION_TTL_SECONDS = 12 * 60 * 60
+
 #: Default lifetime of a storage delegate grant, milliseconds (the
 #: key-control plane is HLC/millisecond-based).
 DEFAULT_DELEGATE_TTL_MS = 12 * 60 * 60 * 1000

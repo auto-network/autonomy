@@ -55,7 +55,7 @@ def rendezvous(tmp_path, monkeypatch):
     }
     request = fleet_enroll.build_request(
         invite=invite,
-        enrollment_nonce="78" * 32,
+        machine_id="78" * 32,
     )
     yield root, invite, store, grant, request
     GraphDB.close_all_pooled()
@@ -76,7 +76,7 @@ def test_new_request_gets_one_ephemeral_resume_token(rendezvous):
     assert reply["verification_code"] == fleet_enroll.verification_code(request)
     assert len(reply["resume_token"]) == 64
     assert set(request.to_dict()) == {
-        "enrollment_nonce", "personal_root_pub", "invite_id"
+        "machine_id", "personal_root_pub", "invite_id"
     }
     approval_id = fleet_enrollment_approvals.approval_id_for(reply["request_id"])
     approval = ar.get(approval_id)
@@ -148,7 +148,7 @@ def test_multiple_requests_stay_distinct_and_wrong_channel_fails(rendezvous):
     )
     second_request = fleet_enroll.build_request(
         invite=invite,
-        enrollment_nonce="9a" * 32,
+        machine_id="9a" * 32,
     )
     second = fleet_enrollment_service.handle_request(
         grant,
@@ -181,7 +181,7 @@ def test_invitation_caps_unresolved_requests_at_one_hundred(rendezvous):
     ):
         request = fleet_enroll.build_request(
             invite=invite,
-            enrollment_nonce=f"{index:064x}",
+            machine_id=f"{index:064x}",
         )
         pending, token = store.open_request(
             grant["target_uuid"], request, now_ms=NOW_MS
@@ -191,7 +191,7 @@ def test_invitation_caps_unresolved_requests_at_one_hundred(rendezvous):
 
     overflow = fleet_enroll.build_request(
         invite=invite,
-        enrollment_nonce=f"{len(rows):064x}",
+        machine_id=f"{len(rows):064x}",
     )
     with pytest.raises(
         fleet_enrollment_service.FleetEnrollmentChannelError,
@@ -232,7 +232,18 @@ def test_approval_commits_roster_before_resume_delivers_unchanged_armor(
     )
     pending = store.list_pending(grant["target_uuid"])[0]
     root_seed = bytes.fromhex(root.private_hex)
-    machine_id = fleet_enroll.assigned_machine_id(root_seed, request)
+    origin_machine_id = "01" * 32
+    origin_key = fleet_enroll.derive_machine_key(
+        root_seed, origin_machine_id
+    )
+    origin_entry = fleet_roster.enroll(
+        root,
+        machine_id=origin_machine_id,
+        machine_pub=origin_key.public_hex,
+        issued_at=NOW_MS - 1,
+    )
+    fleet_roster.store_entry(origin_entry, org=None)
+    machine_id = fleet_enroll.assigned_machine_id(request)
     machine_key = fleet_enroll.derive_machine_key(root_seed, machine_id)
     roster_entry = fleet_roster.enroll(
         root,
@@ -262,9 +273,10 @@ def test_approval_commits_roster_before_resume_delivers_unchanged_armor(
         now_ms=NOW_MS + 1,
     )
     assert approved.status == "approved"
-    assert [entry.entry_id for entry in fleet_roster.load_entries(org=None)] == [
-        roster_entry.entry_id
-    ]
+    assert {entry.entry_id for entry in fleet_roster.load_entries(org=None)} == {
+        origin_entry.entry_id,
+        roster_entry.entry_id,
+    }
 
     armor = "UNCHANGED-PASSWORD-ENCRYPTED-ARMOR"
     delivered = fleet_enrollment_service.handle_request(
@@ -283,6 +295,10 @@ def test_approval_commits_roster_before_resume_delivers_unchanged_armor(
     assert delivered["status"] == "approved"
     assert delivered["approval"] == approval.to_dict()
     assert delivered["roster_entry"] == roster_entry.to_dict()
+    assert {entry["machine_id"] for entry in delivered["roster_entries"]} == {
+        origin_machine_id,
+        machine_id,
+    }
     assert delivered["personal_root_armor"] == armor
 
     # Retrying approval is idempotent: the content-addressed roster key is
@@ -296,7 +312,7 @@ def test_approval_commits_roster_before_resume_delivers_unchanged_armor(
         org=None,
         now_ms=NOW_MS + 3,
     )
-    assert len(fleet_roster.load_entries(org=None)) == 1
+    assert len(fleet_roster.load_entries(org=None)) == 2
 
     competing_entry = fleet_roster.enroll(
         root,
@@ -330,7 +346,7 @@ def test_approval_commits_roster_before_resume_delivers_unchanged_armor(
             org=None,
             now_ms=NOW_MS + 5,
         )
-    assert len(fleet_roster.load_entries(org=None)) == 1
+    assert len(fleet_roster.load_entries(org=None)) == 2
 
 
 def test_expired_or_rebound_invite_refuses(rendezvous):

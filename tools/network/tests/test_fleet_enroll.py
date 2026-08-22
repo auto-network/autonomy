@@ -25,7 +25,7 @@ def _invite(root=None, *, invite_id="ab" * 32):
 
 def _signed_evidence(root, invite, request, *, channel=CHANNEL, issued_at=123):
     seed = bytes.fromhex(root.private_hex)
-    machine_id = fleet_enroll.assigned_machine_id(seed, request)
+    machine_id = fleet_enroll.assigned_machine_id(request)
     machine_key = derive_machine_key(seed, machine_id)
     entry = fleet_roster.enroll(
         root,
@@ -61,23 +61,23 @@ def _delivery(root, invite, request, *, channel=CHANNEL, org=None):
     )
 
 
-def test_request_is_ephemeral_and_contains_no_machine_identity_or_key():
+def test_request_carries_public_machine_identity_but_no_key():
     _, invite = _invite()
     request = fleet_enroll.build_request(
-        invite=invite, enrollment_nonce="11" * 32
+        invite=invite, machine_id="11" * 32
     )
 
-    assert request.enrollment_nonce == "11" * 32
+    assert request.machine_id == "11" * 32
     assert request.invite_id == invite.invite_id
     assert request.personal_root_pub == invite.personal_root_pub
-    for forbidden in ("machine_id", "machine_pub", "proof", "signature"):
+    for forbidden in ("machine_pub", "proof", "signature"):
         assert not hasattr(request, forbidden)
 
 
 def test_both_dashboards_render_the_same_complete_request_code():
     _, invite = _invite()
     request = fleet_enroll.build_request(
-        invite=invite, enrollment_nonce="22" * 32
+        invite=invite, machine_id="22" * 32
     )
     joining_dashboard = fleet_enroll.verification_code(request)
     original_dashboard = fleet_enroll.verification_code(request)
@@ -86,7 +86,7 @@ def test_both_dashboards_render_the_same_complete_request_code():
     groups = joining_dashboard.split(" ")
     assert len(groups) == 6
     assert all(len(group) == 4 and group == group.upper() for group in groups)
-    changed = replace(request, enrollment_nonce="23" * 32)
+    changed = replace(request, machine_id="23" * 32)
     assert fleet_enroll.verification_code(changed) != joining_dashboard
 
 
@@ -112,14 +112,12 @@ def test_request_is_bound_to_invite_and_fleet_anchor():
 def test_browser_evidence_binds_durable_authority_and_transient_channel():
     root, invite = _invite()
     request = fleet_enroll.build_request(
-        invite=invite, enrollment_nonce="33" * 32
+        invite=invite, machine_id="33" * 32
     )
     approval, entry = _signed_evidence(root, invite, request)
 
-    machine_id = fleet_enroll.assigned_machine_id(
-        bytes.fromhex(root.private_hex), request
-    )
-    assert machine_id != request.enrollment_nonce
+    machine_id = fleet_enroll.assigned_machine_id(request)
+    assert machine_id == request.machine_id
     assert entry.machine_id == machine_id
     assert entry.assignment == fleet_roster.FLEET_MEMBER_ASSIGNMENT
     assert approval.roster_entry_id == entry.entry_id
@@ -137,7 +135,7 @@ def test_browser_evidence_binds_durable_authority_and_transient_channel():
 def test_evidence_is_deterministic_for_safe_post_commit_retry():
     root, invite = _invite()
     request = fleet_enroll.build_request(
-        invite=invite, enrollment_nonce="44" * 32
+        invite=invite, machine_id="44" * 32
     )
     first_approval, first_entry = _signed_evidence(root, invite, request)
     retry_approval, retry_entry = _signed_evidence(root, invite, request)
@@ -193,16 +191,16 @@ def test_storage_failure_yields_no_deliverable_approval(monkeypatch):
 def test_distinct_ceremonies_receive_distinct_machine_assignments():
     root, invite = _invite()
     first = fleet_enroll.build_request(
-        invite=invite, enrollment_nonce="55" * 32
+        invite=invite, machine_id="55" * 32
     )
     second = fleet_enroll.build_request(
-        invite=invite, enrollment_nonce="56" * 32
+        invite=invite, machine_id="56" * 32
     )
 
-    root_seed = bytes.fromhex(root.private_hex)
-    assert fleet_enroll.assigned_machine_id(
-        root_seed, first
-    ) != fleet_enroll.assigned_machine_id(root_seed, second)
+    assert (
+        fleet_enroll.assigned_machine_id(first)
+        != fleet_enroll.assigned_machine_id(second)
+    )
 
 
 def test_joiner_verifies_assignment_and_derives_authorized_key():
@@ -210,6 +208,19 @@ def test_joiner_verifies_assignment_and_derives_authorized_key():
     request = fleet_enroll.build_request(invite=invite)
     delivery = _delivery(root, invite, request)
     root_seed = bytes.fromhex(root.private_hex)
+    origin_id = "01" * 32
+    origin_key = derive_machine_key(root_seed, origin_id)
+    origin_entry = fleet_roster.enroll(
+        root,
+        machine_id=origin_id,
+        machine_pub=origin_key.public_hex,
+        assignment=fleet_roster.FLEET_MEMBER_ASSIGNMENT,
+        issued_at=122,
+    )
+    delivery = replace(
+        delivery,
+        roster_entries=(origin_entry, delivery.roster_entry),
+    )
 
     machine_id, key = fleet_enroll.verify_delivery(
         delivery,
@@ -218,14 +229,14 @@ def test_joiner_verifies_assignment_and_derives_authorized_key():
         channel_binding=CHANNEL,
         personal_root_seed=root_seed,
     )
-    assert machine_id == fleet_enroll.assigned_machine_id(root_seed, request)
+    assert machine_id == fleet_enroll.assigned_machine_id(request)
     assert key.public_hex == delivery.roster_entry.machine_pub
 
 
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
-        ("enrollment_nonce", "66" * 32, "different enrollment ceremony"),
+        ("machine_id", "66" * 32, "different enrollment ceremony"),
         ("invite_id", "67" * 32, "different invite"),
         ("channel_binding", "68" * 32, "different invitation channel"),
         ("roster_entry_id", "69" * 32, "different roster entry"),

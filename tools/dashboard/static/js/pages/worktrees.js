@@ -372,6 +372,14 @@
   // the generic rendezvous. fleet-enrollment.js zeroes the root seed on every
   // exit, including validation and signing failures.
   async function _signFleetAdmissionDecision(self, req) {
+    const machineName = typeof req.machineName === 'string'
+      ? req.machineName.trim() : '';
+    if (!machineName) {
+      throw new Error('Enter a name for this machine.');
+    }
+    if (Array.from(machineName).length > 80 || /[\x00-\x1f\x7f]/.test(machineName)) {
+      throw new Error('Machine name must be 1–80 characters without ASCII controls.');
+    }
     if (!req.password) {
       throw new Error('Enter your personal identity password to continue.');
     }
@@ -407,6 +415,7 @@
         rootPub: personal.root_pub,
         request: staged.request,
         channelBinding: staged.channelBinding,
+        localBootstrapMachineId: staged.localBootstrapMachineId || null,
         issuedAt: staged.issuedAt,
         seq: 0,
       });
@@ -414,10 +423,16 @@
       // finally block cannot imply that a second live copy exists.
       opened.seed = null;
       req.password = '';
-      return {
+      const decision = {
+        machine_name: machineName,
         approval: evidence.approval,
         roster_entry: evidence.rosterEntry,
       };
+      if (evidence.localRosterEntry) {
+        decision.local_roster_entry = evidence.localRosterEntry;
+        decision.local_runtime = evidence.localRuntime;
+      }
+      return decision;
     } finally {
       if (opened && opened.seed) {
         opened.seed.fill(0);
@@ -2690,8 +2705,10 @@
                 request: staged.request,
                 channelBinding: staged.channel_binding,
                 personalRootPub: staged.personal_root_pub,
+                localBootstrapMachineId: staged.local_bootstrap_machine_id || null,
                 issuedAt: staged.issued_at,
               },
+              machineName: '',
               needsPassword: true,
               passwordLabel: 'Personal identity password',
               password: '',

@@ -3,8 +3,8 @@
 The invitation authenticates the exact public RelayKit URL. The registry
 envelope supplies the serving organization pin for the ordinary RelayKit
 handshake; the encrypted application channel then carries only ``fleet.request``
-and ``fleet.resume``. Before approval, the joining machine persists only
-recovery state in ``machine.db`` -- never a durable machine id or key.
+and ``fleet.resume``. Before approval, the joining machine persists only its
+public machine id and retry state in ``machine.db`` -- never a machine key.
 """
 
 from __future__ import annotations
@@ -32,6 +32,10 @@ _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 class FleetEnrollmentClientError(RuntimeError):
     """The invitation channel or its authenticated reply was invalid."""
+
+
+class FleetInvitationExpired(FleetEnrollmentClientError):
+    """The signed invitation reached its terminal expiry."""
 
 
 @dataclass(frozen=True)
@@ -102,8 +106,19 @@ class FleetJoinStateStore:
                 "CREATE TABLE IF NOT EXISTS fleet_enrollment_join_state ("
                 "request_id TEXT PRIMARY KEY, invite_id TEXT NOT NULL, "
                 "recovery_json TEXT NOT NULL, created_at INTEGER NOT NULL, "
-                "updated_at INTEGER NOT NULL)"
+                "updated_at INTEGER NOT NULL, delivery_json TEXT)"
             )
+            columns = {
+                str(row[1])
+                for row in conn.execute(
+                    "PRAGMA table_info(fleet_enrollment_join_state)"
+                )
+            }
+            if "delivery_json" not in columns:
+                conn.execute(
+                    "ALTER TABLE fleet_enrollment_join_state "
+                    "ADD COLUMN delivery_json TEXT"
+                )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS fleet_enrollment_join_invite "
                 "ON fleet_enrollment_join_state(invite_id, updated_at)"
@@ -170,6 +185,86 @@ class FleetJoinStateStore:
             else None
         )
 
+    def latest_any(self) -> EnrollmentRecovery | None:
+        """Newest unfinished enrollment, for the local first-render shell."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT recovery_json FROM fleet_enrollment_join_state "
+                "ORDER BY updated_at DESC, request_id DESC LIMIT 1"
+            ).fetchone()
+        return (
+            EnrollmentRecovery.from_dict(json.loads(row["recovery_json"]))
+            if row is not None
+            else None
+        )
+
+    def save_delivery(
+        self,
+        request_id: str,
+        delivery: fleet_enroll.EnrollmentDelivery,
+        *,
+        now_ms: int | None = None,
+    ) -> None:
+        rid = _require_hex64(request_id, "request_id")
+        frozen = fleet_enroll.EnrollmentDelivery(
+            fleet_enroll.EnrollmentApproval.from_dict(
+                delivery.approval.to_dict()
+            ),
+            fleet_roster.RosterEntry.from_dict(
+                delivery.roster_entry.to_dict()
+            ),
+            tuple(
+                fleet_roster.RosterEntry.from_dict(entry.to_dict())
+                for entry in delivery.roster_entries
+            ),
+        )
+        wire = json.dumps({
+            "approval": frozen.approval.to_dict(),
+            "roster_entry": frozen.roster_entry.to_dict(),
+            "roster_entries": [
+                entry.to_dict() for entry in frozen.roster_entries
+            ],
+        }, sort_keys=True, separators=(",", ":"))
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            changed = conn.execute(
+                "UPDATE fleet_enrollment_join_state "
+                "SET delivery_json=?, updated_at=? WHERE request_id=?",
+                (wire, _now_ms(now_ms), rid),
+            ).rowcount
+            if changed != 1:
+                raise FleetEnrollmentClientError(
+                    "cannot save fleet delivery without its recovery state"
+                )
+
+    def load_delivery(
+        self, request_id: str
+    ) -> fleet_enroll.EnrollmentDelivery | None:
+        rid = _require_hex64(request_id, "request_id")
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT delivery_json FROM fleet_enrollment_join_state "
+                "WHERE request_id=?",
+                (rid,),
+            ).fetchone()
+        if row is None or row["delivery_json"] is None:
+            return None
+        payload = json.loads(row["delivery_json"])
+        if not isinstance(payload, dict) or set(payload) != {
+            "approval", "roster_entry", "roster_entries"
+        }:
+            raise FleetEnrollmentClientError(
+                "saved fleet delivery has unknown or missing fields"
+            )
+        return fleet_enroll.EnrollmentDelivery(
+            fleet_enroll.EnrollmentApproval.from_dict(payload["approval"]),
+            fleet_roster.RosterEntry.from_dict(payload["roster_entry"]),
+            tuple(
+                fleet_roster.RosterEntry.from_dict(entry)
+                for entry in payload["roster_entries"]
+            ),
+        )
+
     def delete(self, request_id: str) -> None:
         rid = _require_hex64(request_id, "request_id")
         with self._connect() as conn:
@@ -200,28 +295,34 @@ class FleetEnrollmentClient:
         self,
         invite: fleet_invite.FleetInvite,
         *,
-        enrollment_nonce: str | None = None,
+        machine_id: str | None = None,
     ) -> EnrollmentRecovery:
         """Reuse durable retry state before creating another pending request."""
-        self._verify_live_invite(invite)
         existing = self.state_store.latest(invite.invite_id)
+        try:
+            self._verify_live_invite(invite)
+        except FleetInvitationExpired:
+            if existing is not None and existing.invite == invite:
+                self.state_store.delete(existing.request_id)
+            raise
         if existing is not None:
             if existing.invite != invite:
                 raise FleetEnrollmentClientError(
                     "saved fleet recovery belongs to different invitation bytes"
                 )
             return existing
-        return await self.start(invite, enrollment_nonce=enrollment_nonce)
+        return await self.start(invite, machine_id=machine_id)
 
     async def start(
         self,
         invite: fleet_invite.FleetInvite,
         *,
-        enrollment_nonce: str | None = None,
+        machine_id: str | None = None,
     ) -> EnrollmentRecovery:
         self._verify_live_invite(invite)
         request = fleet_enroll.build_request(
-            invite=invite, enrollment_nonce=enrollment_nonce
+            invite=invite,
+            machine_id=machine_id,
         )
         reply = await self._exchange(invite, {
             "v": 1,
@@ -248,7 +349,11 @@ class FleetEnrollmentClient:
 
     async def resume(self, recovery: EnrollmentRecovery) -> EnrollmentResult:
         frozen = EnrollmentRecovery.from_dict(recovery.to_dict())
-        self._verify_live_invite(frozen.invite)
+        try:
+            self._verify_live_invite(frozen.invite)
+        except FleetInvitationExpired:
+            self.state_store.delete(frozen.request_id)
+            return EnrollmentResult(status="expired", recovery=frozen)
         reply = await self._exchange(frozen.invite, {
             "v": 1,
             "op": "fleet.resume",
@@ -269,7 +374,8 @@ class FleetEnrollmentClient:
         if status in {"pending", "declined"} and set(reply) == base:
             return EnrollmentResult(status=status, recovery=frozen)
         approved_fields = base | {
-            "approval", "roster_entry", "personal_root_armor"
+            "approval", "roster_entry", "roster_entries",
+            "personal_root_armor"
         }
         if status != "approved" or set(reply) != approved_fields:
             raise FleetEnrollmentClientError(
@@ -282,6 +388,19 @@ class FleetEnrollmentClient:
             )
         approval = fleet_enroll.EnrollmentApproval.from_dict(reply["approval"])
         roster_entry = fleet_roster.RosterEntry.from_dict(reply["roster_entry"])
+        roster_payload = reply["roster_entries"]
+        if not isinstance(roster_payload, list):
+            raise FleetEnrollmentClientError(
+                "fleet delivery roster must be a list"
+            )
+        roster_entries = tuple(
+            fleet_roster.RosterEntry.from_dict(item)
+            for item in roster_payload
+        )
+        for entry in roster_entries:
+            fleet_roster.verify(
+                entry, anchor_root_pub=frozen.invite.personal_root_pub
+            )
         fleet_enroll.verify_approval(
             approval,
             frozen.request,
@@ -290,10 +409,20 @@ class FleetEnrollmentClient:
             roster_entry=roster_entry,
             anchor_root_pub=frozen.invite.personal_root_pub,
         )
+        active = fleet_roster.resolve(
+            roster_entries,
+            anchor_root_pub=frozen.invite.personal_root_pub,
+        )
+        if roster_entry.machine_pub not in active or len(active) < 2:
+            raise FleetEnrollmentClientError(
+                "fleet delivery lacks origin and joiner roster evidence"
+            )
         return EnrollmentResult(
             status="approved",
             recovery=frozen,
-            delivery=fleet_enroll.EnrollmentDelivery(approval, roster_entry),
+            delivery=fleet_enroll.EnrollmentDelivery(
+                approval, roster_entry, roster_entries
+            ),
             personal_root_armor=armor,
         )
 
@@ -328,7 +457,7 @@ class FleetEnrollmentClient:
         fleet_invite.verify(invite)
         now = _now_ms(self.now_ms())
         if invite.expires_at and now >= invite.expires_at:
-            raise FleetEnrollmentClientError("fleet invitation has expired")
+            raise FleetInvitationExpired("fleet invitation has expired")
 
 
 @dataclass(frozen=True)

@@ -90,7 +90,7 @@ SERVE_CERT_SCOPE = "tunnel:serve"
 # Duplicated (not imported) so tools.graph never pulls the `cryptography`
 # dependency at import time; a test asserts these match idkit's exports.
 
-SUBJECT_KINDS_NETWORK = ("agent", "operator", "persona")
+SUBJECT_KINDS_NETWORK = ("agent", "machine", "operator", "persona")
 RESERVED_SUBJECT_KINDS = ("persona",)  # rung 2: session linking (Track E)
 NETWORK_TOKEN_HEX_LEN = 32  # 128-bit CSPRNG token, lowercase hex (I2)
 NETWORK_PUB_HEX_LEN = 64  # raw Ed25519 public key, lowercase hex (= key id)
@@ -103,6 +103,7 @@ TARGET_TYPES = (
     "present",
     "org:join",
     "fleet:join",
+    "fleet:sync",
 )  # §6.1 artifact + membership resolvers
 
 RECOVERY_MODES = ("none", "recovery-key", "org-vouch", "blindhash-escrow")

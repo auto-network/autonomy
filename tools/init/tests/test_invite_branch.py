@@ -7,6 +7,8 @@ import pytest
 from tools.data_paths import REFUSE_REAL_DATA_FALLBACK_ENV, STORE_MANIFEST
 from tools.init.first_run import CREATED, FAILED, PENDING, InitConflict, initialize
 from tools.network.invitation import Invitation, InvitationError, encode_invitation
+from tools.network import fleet_invite
+from tools.network.idkit import KeyPair
 
 ORG = "018f6b2a-7c4d-7e11-8a3b-9d5c1e2f4a6b"
 ROOT_PUB = "ab" * 32
@@ -25,6 +27,16 @@ def code() -> str:
             claim_token=CLAIM_TOKEN,
         )
     )
+
+
+def fleet_code() -> str:
+    root = KeyPair.from_private_hex("34" * 32)
+    return fleet_invite.encode(fleet_invite.mint(
+        root,
+        rendezvous=f"https://relay.auto.network/l/{GRANT_TOKEN}",
+        invite_id="78" * 32,
+        expires_at=4_102_444_800_000,
+    ))
 
 
 @pytest.fixture
@@ -46,6 +58,7 @@ def volume(tmp_path, monkeypatch):
     monkeypatch.setenv(DATA_ROOT_ENV, str(tmp_path / "data"))
     monkeypatch.delenv("AUTONOMY_FIRST_ORG", raising=False)
     monkeypatch.delenv("AUTONOMY_INVITE", raising=False)
+    monkeypatch.delenv("AUTONOMY_FLEET_INVITE", raising=False)
     return tmp_path
 
 
@@ -79,6 +92,18 @@ def test_found_and_join_together_is_a_hard_error(volume):
     """Silently preferring one would strand state under the other."""
     with pytest.raises(InitConflict):
         initialize(volume, first_org="acme", invite=code(), tls=False)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"first_org": "acme", "fleet_invite": "fleet"},
+        {"invite": "org", "fleet_invite": "fleet"},
+    ],
+)
+def test_fleet_invite_is_an_exclusive_bootstrap_mode(volume, kwargs):
+    with pytest.raises(InitConflict, match="exactly one first-run bootstrap"):
+        initialize(volume, tls=False, **kwargs)
 
 
 def test_a_bad_code_fails_first_run_before_any_network_call(volume):
@@ -122,3 +147,41 @@ def test_first_run_runs_the_join_ceremony_when_a_transport_is_given(volume, tmp_
     assert staged is not None, [s.name for s in report.steps]
     assert GRANT_TOKEN not in repr(report)
     assert CLAIM_TOKEN not in repr(report)
+
+
+def test_fleet_invite_submits_one_public_machine_request(volume):
+    class Recovery:
+        verification_code = "A1B2 C3D4 E5F6 0718 192A 3B4C"
+
+    class FakeFleetClient:
+        def __init__(self):
+            self.invites = []
+
+        async def start_or_recover(self, invitation):
+            self.invites.append(invitation)
+            return Recovery()
+
+        async def resume(self, recovery):
+            assert recovery.verification_code == Recovery.verification_code
+            return type("Result", (), {"status": "pending"})()
+
+    client = FakeFleetClient()
+    encoded = fleet_code()
+    report = initialize(
+        volume,
+        fleet_invite="AUTONOMY_FLEET_INVITE=" + encoded,
+        fleet_client=client,
+        tls=False,
+    )
+
+    assert len(client.invites) == 1
+    assert client.invites[0] == fleet_invite.decode(encoded)
+    assert not list((volume / "data" / "orgs").glob("*.db"))
+    assert (volume / "data" / "personal.db").exists()
+    pending = _step(report, "fleet-enrollment:pending")
+    assert pending.action == PENDING
+    assert Recovery.verification_code in pending.detail
+    rendered = repr(report)
+    assert GRANT_TOKEN not in rendered
+    assert "machine_id" not in rendered
+    assert "machine_pub" not in rendered

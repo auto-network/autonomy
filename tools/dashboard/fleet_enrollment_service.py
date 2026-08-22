@@ -559,6 +559,47 @@ class FleetEnrollmentStore:
         assert isinstance(approved.roster_entry, fleet_roster.RosterEntry)
         return approved
 
+    def verify_pending_approval_evidence(
+        self,
+        *,
+        target_uuid: str,
+        request_id: str,
+        approval: fleet_enroll.EnrollmentApproval,
+        roster_entry,
+        anchor_root_pub: str,
+        now_ms: int | None = None,
+    ) -> None:
+        """Verify frozen remote evidence without making a durable write.
+
+        The first-member bootstrap uses this before it writes the origin's
+        own roster row.  ``approve`` verifies again at commit time; this
+        preflight exists solely to make malformed joiner evidence incapable
+        of causing a partial local bootstrap.
+        """
+        target = _require_uuid(target_uuid)
+        rid = _require_hex64(request_id, "request_id")
+        now = _now_ms(now_ms)
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM fleet_enrollment_pending WHERE request_id=? "
+                "AND target_uuid=?",
+                (rid, target),
+            ).fetchone()
+            if row is None:
+                raise FleetEnrollmentChannelError(
+                    "unknown fleet enrollment request"
+                )
+            pending = _pending(row)
+            invite = self._invite_row(conn, target, now)
+        fleet_enroll.verify_approval(
+            approval,
+            pending.request,
+            invite=invite,
+            channel_binding=pending.channel_binding,
+            roster_entry=roster_entry,
+            anchor_root_pub=anchor_root_pub,
+        )
+
     def _invite_row(
         self, conn: sqlite3.Connection, target_uuid: str, now_ms: int
     ) -> fleet_invite.FleetInvite:
@@ -654,9 +695,31 @@ def handle_request(
                 raise FleetEnrollmentChannelError(
                     "stored personal identity no longer matches this invitation"
                 )
+            # Bootstrap peer authentication from public, individually
+            # root-signed evidence. This set is sufficient to connect the
+            # origin and joiner; ongoing roster sync, not this snapshot,
+            # supplies revocation freshness and completeness afterward.
+            from tools.network import fleet_roster
+
+            bootstrap_roster = tuple(fleet_roster.load_entries(org=None))
+            for entry in bootstrap_roster:
+                fleet_roster.verify(entry, anchor_root_pub=anchor)
+            active = fleet_roster.resolve(
+                bootstrap_roster, anchor_root_pub=anchor
+            )
+            if (
+                pending.roster_entry.machine_pub not in active
+                or len(active) < 2
+            ):
+                raise FleetEnrollmentChannelError(
+                    "fleet delivery lacks origin and joiner roster evidence"
+                )
             reply.update({
                 "approval": pending.approval.to_dict(),
                 "roster_entry": pending.roster_entry.to_dict(),
+                "roster_entries": [
+                    entry.to_dict() for entry in bootstrap_roster
+                ],
                 "personal_root_armor": armor,
             })
         return reply

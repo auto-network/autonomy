@@ -52,6 +52,7 @@ services:
     environment:
       AUTONOMY_FIRST_ORG: ${AUTONOMY_FIRST_ORG:-}
       AUTONOMY_FIRST_ORG_NAME: ${AUTONOMY_FIRST_ORG_NAME:-}
+      AUTONOMY_FLEET_INVITE: ${AUTONOMY_FLEET_INVITE:-}
       DASHBOARD_DOMAIN: ${DASHBOARD_DOMAIN:-}
       DASHBOARD_TLS: ${DASHBOARD_TLS:-}
       # Points at the optional `beads` profile service; unreachable is a

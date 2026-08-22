@@ -45,6 +45,7 @@ from tools.network.fleet_sync_sim.codec import (
     encode_mutation_frame,
 )
 from tools.network.idkit import KeyPair, canonical_json
+from tools.network.idkit import DelegationCert
 from tools.network.relaykit.channel import MAX_MESSAGE_SIZE
 from tools.network.relaykit.direct import new_session_id
 
@@ -77,6 +78,9 @@ class FleetSyncRuntimeConfig:
     roster_entries: Callable[[], Iterable[RosterEntry]]
     peer_addresses: Callable[[], Mapping[str, Sequence[str]]]
     personal_db_path: Path
+    roster_machine_pub: str | None = None
+    delegation_cert: DelegationCert | None = None
+    require_delegation: bool = False
     listen_host: str = "127.0.0.1"
     listen_port: int = 0
     poll_interval: float = 1.0
@@ -341,6 +345,9 @@ class FleetSyncScheduler:
             config.machine_key,
             root_pub=config.personal_root_pub,
             roster_entries=lambda: self._roster_snapshot,
+            roster_machine_pub=config.roster_machine_pub,
+            delegation_cert=config.delegation_cert,
+            require_delegation=config.require_delegation,
         )
         self.store = SQLiteFleetSyncStore(config.personal_db_path)
         self.server = FleetDirectServer(
@@ -369,7 +376,7 @@ class FleetSyncScheduler:
         self._roster_snapshot = await asyncio.to_thread(
             lambda: tuple(self.config.roster_entries())
         )
-        self.authenticator.authorize(self.config.machine_key.public_hex)
+        self.authenticator.authorize(self.authenticator.machine_pub)
         await self.server.start()
         self._stopping.clear()
         self._roster_task = asyncio.create_task(
@@ -456,7 +463,7 @@ class FleetSyncScheduler:
             peers = [
                 (machine_pub, tuple(addresses.get(machine_pub, ())))
                 for machine_pub in sorted(active)
-                if machine_pub != self.config.machine_key.public_hex
+                if machine_pub != self.authenticator.machine_pub
                 and addresses.get(machine_pub)
                 and now >= self._next_attempt.get(machine_pub, 0.0)
             ]
@@ -714,7 +721,9 @@ class DashboardFleetSyncService:
                 )))
                 if (
                     source_machine_pub not in active
-                    or source_machine_pub == config.machine_key.public_hex
+                    or source_machine_pub == (
+                        config.roster_machine_pub or config.machine_key.public_hex
+                    )
                 ):
                     raise RuntimeError(
                         "checkpoint source is not an active remote fleet machine"
@@ -725,7 +734,9 @@ class DashboardFleetSyncService:
                     checkpoint_directory,
                     config.personal_db_path,
                     quiescence=token,
-                    target_origin_incarnation=config.machine_key.public_hex,
+                    target_origin_incarnation=(
+                        config.roster_machine_pub or config.machine_key.public_hex
+                    ),
                     expected_roster_epoch=epoch,
                     expected_active_roster=active,
                     source_machine_pub=source_machine_pub,

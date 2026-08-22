@@ -86,6 +86,21 @@ async def test_declared_public_exception_passes_unauthenticated(gate_enforced):
     assert resp.status_code == 200
 
 
+@pytest.mark.asyncio
+async def test_fleet_resume_stays_reachable_during_pre_session_handoff(
+    gate_enforced,
+):
+    route = _wrap(
+        "/api/fleet/enrollment/local-resume", method="POST"
+    )
+    compat = api_auth.COMPATIBILITY_PRINCIPAL
+    resp = await _call(
+        route,
+        _req("POST", "/api/fleet/enrollment/local-resume", compat),
+    )
+    assert resp.status_code == 200
+
+
 def test_every_exception_carries_a_justification():
     for key, reason in route_policy.PUBLIC_EXCEPTIONS.items():
         assert isinstance(reason, str) and len(reason.strip()) >= 20, key

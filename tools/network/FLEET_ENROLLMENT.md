@@ -10,7 +10,7 @@ The ceremony/machine identity split is recorded at `graph://341a1761-a1f`.
 
 ```text
 published invitation (no machine)
-  -> pending request (invitation + exact channel + enrollment nonce)
+  -> pending request (invitation + exact channel + joiner-minted machine id)
   -> approved authorization (root-signed roster record committed)
   -> delivered identity (existing armor + signed bootstrap on that channel)
   -> active fleet member (first roster-authorized proof-of-possession)
@@ -18,20 +18,20 @@ published invitation (no machine)
 
 The invitation is a bearer capability to request, never to enroll. It is
 root-signed and carried by a temporary auto.network RelayKit channel, but names
-no machine. A joining installation contributes only a one-ceremony
-``enrollment_nonce`` through that channel.
+no machine. A joining installation mints a random public ``machine_id`` at
+first boot and contributes it through that channel.
 
 Both the installation and original Dashboard render a shared verification code
 over the full request. Operator comparison of those displays selects the exact
-request and channel being authorized. The enrollment nonce is discarded after
-approval or decline; it is not a machine identity and never enters the roster.
+machine id, request, and channel being authorized. A declined or expired
+request never promotes that id into the durable machine-identity row or roster.
 
 After the comparison succeeds, trusted browser code opens the personal-root
-armor, deterministically assigns the durable ``machine_id`` from the personal
-root and approved request, derives the machine authorization key, and signs the
+armor, accepts the request's frozen ``machine_id``, derives the machine
+authorization key from ``root + machine_id``, and signs the
 authorization evidence. The root seed is zeroed before the browser ceremony
 returns; it never enters Dashboard's Python process. The roster stores the
-derived public key; the new machine stores the assigned id so it can re-derive
+derived public key; the new machine commits its approved id so it can re-derive
 the private half whenever the root is unlocked.
 
 The personal root derives purpose-separated machine authentication and
@@ -41,7 +41,7 @@ stored independently.
 
 The browser produces two root-signed, domain-separated records in one ceremony:
 
-* a durable ``RosterEntry`` binding the assigned ``machine_id``, derived
+* a durable ``RosterEntry`` binding the approved ``machine_id``, derived
   machine authorization public key, and its ``personal_root_holder`` standing;
   and
 * a transient enrollment approval binding the server-frozen request, exact
@@ -51,16 +51,17 @@ The server resolves the trusted root public key from
 ``autonomy.identity.personal`` rather than from either submitted record. It
 verifies both signatures and their cross-binding, commits the roster entry, and
 only then makes the existing armored personal root deliverable on the bound
-channel. The transient approval and comparison nonce remain only as retry state
+channel. The transient approval and frozen request remain only as retry state
 until the first roster-authorized handshake proves completion; they are then
 deleted and neither becomes roster identity.
 
-The joining machine derives its durable ID locally from the root and approved
-request, compares it with the public ID in the signed roster entry, and stores
-it. The roster copy is evidence, not a secret credential; no private machine
-key is delivered. Root delivery before authorization is forbidden. The
-assignment is deterministic, so a post-commit disconnect is retryable without
-creating another machine identity or requiring another operator decision.
+The joining machine compares its frozen public ID with the ID in the signed
+roster entry, derives the corresponding key after local root unlock, and only
+then promotes the ID into its durable machine-identity row. The roster copy is
+evidence, not a secret credential; no private machine key is delivered. Root
+delivery before authorization is forbidden. A post-commit disconnect retries
+the same frozen request without creating another identity or requiring another
+operator decision.
 
 The production ``authorize_request`` handoff accepts browser-minted signed
 evidence, never a personal root or seed. It verifies that evidence against the
@@ -69,10 +70,30 @@ only after that write succeeds. Seed-taking functions are confined to the
 joining side, after unchanged armor delivery and local browser unlock.
 
 The approval response also carries enough signed roster/bootstrap material for
-the new machine to authenticate its first fleet connection. The invitation
-channel then ends. Synchronization is admitted only after the new machine
-proves possession of its derived authentication key on the separate fleet
-channel.
+the new machine to authenticate its first fleet connection. Enrollment
+operations then end. For the first alpha, the joining installation retains the
+already-published RelayKit link as its machine-local route to the origin; the
+bearer can open the outer encrypted channel but cannot read Fleet data without
+the inner roster-authorized machine proof. A later dedicated-route rotation can
+replace that bearer without changing the Fleet protocol or roster authority.
+
+At unlock, the browser derives the durable machine key, mints a fresh process
+key, and signs a bounded idkit delegation with exact scope ``fleet:sync`` and
+subject ``machine:<machine_id>``. Python receives only the process seed and
+public certificate, never the personal root or durable machine seed. The same
+short-lived handoff is reminted after every process restart. If this machine is
+the selected auto.network tunnel server, the Dashboard passes that handoff to
+the connector over its authenticated loopback control pipe; it is never
+persisted.
+
+The first synchronization request travels inside the ordinary auto.network
+ViewerChannel. Client and server each prove their process delegation against
+the current personal-root-signed roster. The serving peer streams a roster-
+epoch-bound logical checkpoint as bounded path-safe, SHA-256-checked files.
+The joining Dashboard publishes the checkpoint only through the quiesced,
+recoverable handoff and records a successful remote checkpoint receipt. That
+receipt—not an HTTP response or an empty delta—is the onboarding screen's
+``Synchronization complete`` frontier.
 
 ## Invitation rendezvous wire
 
@@ -88,7 +109,7 @@ installation code, and zeroes the seed on success or failure.
 The first encrypted-channel message is:
 
 ```json
-{"v":1,"op":"fleet.request","request":{"enrollment_nonce":"<hex>","personal_root_pub":"<hex>","invite_id":"<hex>"}}
+{"v":1,"op":"fleet.request","request":{"machine_id":"<hex>","personal_root_pub":"<hex>","invite_id":"<hex>"}}
 ```
 
 The origin stores the complete request under a deterministic, domain-separated
@@ -96,8 +117,8 @@ content id and returns ``request_id``, the shared ``verification_code``, and a
 random ``resume_token``. The raw resume token is returned only over the channel
 that first created the request; origin storage keeps only its domain-separated
 hash. The joining installation keeps the raw token in its own ``machine.db``
-until enrollment completes, alongside the public request and invitation but no
-machine id, machine key, or root armor. Repeating the same request on that live
+until enrollment completes, alongside the public machine id, request, and
+invitation but no machine key or root armor. Repeating the same request on that live
 channel is idempotent. Repeating it on another channel returns
 ``resume-required`` rather than minting another credential.
 
@@ -127,6 +148,13 @@ local rendezvous state, not personal graph data, and therefore are excluded as
 a whole from fleet synchronization. The operator API requires the human
 Dashboard session: an authenticated agent bearer cannot register, approve, or
 decline on the operator's behalf.
+
+After completion, ``autonomy.machine.identity#1`` stores the public durable
+``machine_id`` under key ``self`` and ``autonomy.machine.fleet-route#1`` stores
+the local origin route under key ``origin``. Both schemas are
+``@home("machine")`` and never synchronize. The route is committed before the
+identity row, so an interrupted write can be retried without leaving a machine
+that claims enrollment but cannot locate a peer.
 
 Personal armor, passkeys, root material, and machine-local state never enter
 the synchronization catalog. Vault ciphertext and signed key-control grants do.
@@ -166,6 +194,8 @@ designated to serve.
 ## Failure rules
 
 - A copied invitation may submit another request but cannot approve it.
+- One invitation accepts at most 100 unresolved requests; further requests
+  are refused until pending work resolves.
 - A decline or expiry writes no roster record and delivers no armor.
 - Approval cannot be redirected to another channel using the same invitation.
 - A roster entry alone is authorization, not live-peer authentication.

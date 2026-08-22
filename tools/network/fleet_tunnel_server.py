@@ -222,7 +222,7 @@ def state() -> TunnelServerState:
     )
 
 
-def select(machine_id: str) -> str:
+def select(machine_id: str, *, anchor_root_pub: str | None = None) -> str:
     """Select an active roster machine and return the stored Setting id."""
     if not isinstance(machine_id, str) or _HEX64.fullmatch(machine_id) is None:
         raise FleetTunnelServerError(
@@ -232,9 +232,11 @@ def select(machine_id: str) -> str:
         entries = fleet_roster.load_entries(org=None)
     except Exception as exc:
         raise FleetTunnelServerError("fleet roster is unreadable") from exc
-    root_pub = _personal_root_pub()
+    root_pub = anchor_root_pub or _personal_root_pub()
     if root_pub is None:
         raise FleetTunnelServerError("personal root is unavailable")
+    if not isinstance(root_pub, str) or _HEX64.fullmatch(root_pub) is None:
+        raise FleetTunnelServerError("personal root is invalid")
     roster = fleet_roster.resolve(entries, anchor_root_pub=root_pub)
     active_ids = {entry.machine_id for entry in roster.values()}
     if len(active_ids) != len(roster):

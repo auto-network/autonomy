@@ -7,6 +7,7 @@ graph://dc310166-911).
 ```bash
 python -m tools.init                              # defaults: first org 'autonomy'
 python -m tools.init --org acme --org-name "Acme Corp"
+python -m tools.init --fleet-invite "$AUTONOMY_FLEET_INVITE"
 python -m tools.init --json                       # machine-readable report
 ```
 
@@ -39,6 +40,17 @@ Display name: `--org-name` → `AUTONOMY_FIRST_ORG_NAME` → title-cased slug.
 The dashboard's startup bootstrap (`org_ops.ensure_bootstrap_orgs`) honors
 the same env vars, so setting them before first launch is equivalent to
 running the CLI.
+
+## Joining an existing personal Fleet
+
+Set `AUTONOMY_FLEET_INVITE` (or pass `--fleet-invite`) on a fresh install.
+First run initializes only the personal and machine stores, opens the signed
+invitation channel, and persists public recovery state while it waits for the
+parent Dashboard. The first Dashboard render shows the comparison code and
+“Waiting for approval.” After approval, the browser opens the delivered
+personal armor and proves the assigned machine key before the durable machine
+identity is stored. `AUTONOMY_FIRST_ORG`, `AUTONOMY_INVITE`, and
+`AUTONOMY_FLEET_INVITE` are mutually exclusive.
 
 ## TLS
 

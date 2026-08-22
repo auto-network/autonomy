@@ -29,6 +29,7 @@ Library entry point is :func:`initialize`; the CLI wrapper lives in
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -103,6 +104,8 @@ def initialize(
     first_org_name: str | None = None,
     invite: str | None = None,
     join_transport=None,
+    fleet_invite: str | None = None,
+    fleet_client=None,
     tls: bool = True,
     tls_domain: str | None = None,
 ) -> InitReport:
@@ -113,18 +116,20 @@ def initialize(
     shared org (falls back to ``AUTONOMY_FIRST_ORG`` env, then
     ``autonomy``); ``first_org_name`` sets its display name.
 
-    ``invite`` (``AUTONOMY_INVITE``) selects the JOIN path instead: the
+    ``invite`` (``AUTONOMY_INVITE``) selects the organization JOIN path.
+    ``fleet_invite`` (``AUTONOMY_FLEET_INVITE``) selects the personal Fleet
+    enrollment path. Either path means the node does not found a shared org;
     node founds no org of its own and instead claims membership in the
-    inviting one (auto-8v5ri). A node either founds or joins — passing
-    both is a configuration error rather than a silent precedence,
+    inviting identity (auto-8v5ri / auto-b6fee). A node has exactly one
+    bootstrap mode — passing more than one is a configuration error,
     because the two produce different identities and quietly picking one
     would strand state under the other.
     """
-    if invite and first_org:
-        raise InitConflict(
-            "a node either founds its own org or joins an existing one: "
-            "AUTONOMY_FIRST_ORG and AUTONOMY_INVITE cannot both be set"
-        )
+    _validate_bootstrap_choice(
+        first_org=first_org,
+        invite=invite,
+        fleet_invite=fleet_invite,
+    )
     root = Path(root).resolve() if root is not None else REPO_ROOT
     data = root / "data"
     return _initialize_data_root(
@@ -134,6 +139,8 @@ def initialize(
         first_org_name=first_org_name,
         invite=invite,
         join_transport=join_transport,
+        fleet_invite=fleet_invite,
+        fleet_client=fleet_client,
         tls=tls,
         tls_domain=tls_domain,
     )
@@ -146,6 +153,8 @@ def initialize_data_root(
     first_org_name: str | None = None,
     invite: str | None = None,
     join_transport=None,
+    fleet_invite: str | None = None,
+    fleet_client=None,
     tls: bool = True,
     tls_domain: str | None = None,
 ) -> InitReport:
@@ -154,11 +163,11 @@ def initialize_data_root(
     Unlike :func:`initialize`, *data* is the volume itself rather than a
     checkout/deployment root whose ``data/`` child is the volume.
     """
-    if invite and (first_org or os.environ.get("AUTONOMY_FIRST_ORG")):
-        raise InitConflict(
-            "a node either founds its own org or joins an existing one: "
-            "AUTONOMY_FIRST_ORG and AUTONOMY_INVITE cannot both be set"
-        )
+    _validate_bootstrap_choice(
+        first_org=first_org or os.environ.get("AUTONOMY_FIRST_ORG"),
+        invite=invite,
+        fleet_invite=fleet_invite,
+    )
     data = Path(data).resolve()
     return _initialize_data_root(
         data,
@@ -167,6 +176,8 @@ def initialize_data_root(
         first_org_name=first_org_name,
         invite=invite,
         join_transport=join_transport,
+        fleet_invite=fleet_invite,
+        fleet_client=fleet_client,
         production_join_transport=True,
         tls=tls,
         tls_domain=tls_domain,
@@ -181,14 +192,21 @@ def _initialize_data_root(
     first_org_name: str | None,
     invite: str | None,
     join_transport,
+    fleet_invite: str | None,
+    fleet_client,
     production_join_transport: bool = False,
     tls: bool,
     tls_domain: str | None,
 ) -> InitReport:
     report = InitReport(root=str(report_root))
     _init_data_dirs(data, report)
+    fleet_invitation = None
     if invite:
         invitation = _init_join(data, report, invite=invite)
+    elif fleet_invite:
+        fleet_invitation = _init_fleet_join(
+            data, report, invite=fleet_invite
+        )
     else:
         _init_orgs(data, report, first_org=first_org, first_org_name=first_org_name)
     _migrate_all_org_dbs(data)
@@ -206,7 +224,26 @@ def _initialize_data_root(
         from tools.init.join import production_transport
 
         _run_join(report, invitation, production_transport(invitation))
+    if fleet_invitation is not None:
+        _run_fleet_join(report, fleet_invitation, client=fleet_client)
     return report
+
+
+def _validate_bootstrap_choice(
+    *, first_org: str | None, invite: str | None, fleet_invite: str | None
+) -> None:
+    selected = [
+        name for name, value in (
+            ("AUTONOMY_FIRST_ORG", first_org),
+            ("AUTONOMY_INVITE", invite),
+            ("AUTONOMY_FLEET_INVITE", fleet_invite),
+        ) if value
+    ]
+    if len(selected) > 1:
+        raise InitConflict(
+            "a node has exactly one first-run bootstrap mode; conflicting "
+            f"inputs: {', '.join(selected)}"
+        )
 
 
 def _run_join(report: InitReport, invitation, transport) -> None:
@@ -246,6 +283,110 @@ def _run_join(report: InitReport, invitation, transport) -> None:
         report.add("join", FAILED, str(exc))
         raise
     report.add(f"join:{outcome.state}", CREATED, outcome.detail)
+
+
+def _run_fleet_join(report: InitReport, invitation, *, client=None) -> None:
+    """Submit or recover one Fleet enrollment request for this installation.
+
+    This is deliberately the pre-authorization half of enrollment. The retry
+    record carries the installation's public random ``machine_id``, but the
+    durable local identity row, root armor, derived machine key, and roster
+    authority do not exist on the joining node until verified completion.
+    """
+    from tools.network.fleet_enrollment_client import (
+        FleetEnrollmentClient,
+        FleetEnrollmentClientError,
+    )
+
+    enrollment_client = client or FleetEnrollmentClient()
+    try:
+        recovery = asyncio.run(enrollment_client.start_or_recover(invitation))
+        result = asyncio.run(enrollment_client.resume(recovery))
+    except FleetEnrollmentClientError as exc:
+        report.add("fleet-enrollment", FAILED, str(exc))
+        raise
+    if result.status == "declined":
+        enrollment_client.state_store.delete(recovery.request_id)
+        report.add(
+            "fleet-enrollment:declined",
+            FAILED,
+            "the parent Dashboard declined this machine request",
+        )
+        return
+    if result.status == "expired":
+        report.add(
+            "fleet-enrollment:expired",
+            FAILED,
+            "the Fleet invitation expired before this machine was approved",
+        )
+        return
+    if result.status == "approved":
+        if result.delivery is None or result.personal_root_armor is None:
+            raise FleetEnrollmentClientError(
+                "approved fleet enrollment returned incomplete delivery"
+            )
+        _store_fleet_personal_armor(
+            result.personal_root_armor,
+            expected_root_pub=invitation.personal_root_pub,
+        )
+        enrollment_client.state_store.save_delivery(
+            recovery.request_id,
+            result.delivery,
+        )
+        report.add(
+            "fleet-enrollment:approved",
+            PENDING,
+            "approved; unlock this Dashboard with the personal password "
+            "to finish machine enrollment",
+        )
+        return
+    report.add(
+        "fleet-enrollment:pending", PENDING,
+        "compare this code on both Dashboards: "
+        f"{recovery.verification_code}",
+    )
+
+
+def _store_fleet_personal_armor(
+    armor: str, *, expected_root_pub: str
+) -> None:
+    """Store only the canonical encrypted root delivered after approval."""
+    import time
+
+    from tools.dashboard import identity_routes
+    from tools.graph import settings_ops
+    from tools.graph.schemas.personal_identity import (
+        PERSONAL_IDENTITY_REVISION,
+        PERSONAL_IDENTITY_SET_ID,
+    )
+    from tools.network.idkit.armor import armor_root_pub, canonicalize_armor
+
+    canonical = canonicalize_armor(armor)
+    root_pub = armor_root_pub(canonical)
+    if root_pub != expected_root_pub:
+        raise ValueError("delivered personal armor has a different root anchor")
+    existing = identity_routes._personal_member()
+    if existing is not None:
+        if existing.payload.get("root_pub") != root_pub:
+            raise ValueError(
+                "this machine already carries a different personal identity"
+            )
+        return
+    with settings_ops.identity_write_context():
+        settings_ops.upsert_by_key(
+            PERSONAL_IDENTITY_SET_ID,
+            PERSONAL_IDENTITY_REVISION,
+            identity_routes.PERSONAL_CANONICAL_LABEL,
+            {
+                "armored_private_key": canonical,
+                "root_pub": root_pub,
+                "display_name": "Fleet member",
+                "created_at": time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                ),
+            },
+            org=None,
+        )
 
 
 # ── Steps ────────────────────────────────────────────────────
@@ -324,6 +465,43 @@ def _init_join(data: Path, report: InitReport, *, invite: str) -> None:
         PENDING,
         f"org {invitation.org} invite {invitation.invite_ref[:12]}… "
         f"root {invitation.root_pub[:12]}…",
+    )
+    return invitation
+
+
+def _init_fleet_join(data: Path, report: InitReport, *, invite: str):
+    """Prepare a Fleet-linked install without creating a shared org.
+
+    The copied installer value may be either the bare encoded invitation or
+    the literal shell assignment rendered by Fleet Machines. Only public
+    invitation metadata is reported; the rendezvous bearer stays out of logs.
+    """
+    from tools.graph import org_ops
+    from tools.graph.db import _local_store_db_path
+    from tools.network import fleet_invite
+
+    orgs_root = resolve_store("orgs", root=data)
+    personal_path = _local_store_db_path("personal", orgs_root)
+    existed = personal_path.exists()
+    org_ops.ensure_bootstrap_orgs(
+        root=orgs_root, first_org=None, personal_only=True
+    )
+    report.add(
+        "org:personal",
+        EXISTS if existed else CREATED,
+        str(personal_path),
+    )
+    code = invite.strip()
+    prefix = "AUTONOMY_FLEET_INVITE="
+    if code.startswith(prefix):
+        code = code[len(prefix):]
+    invitation = fleet_invite.decode(code)
+    fleet_invite.verify(invitation)
+    report.add(
+        "fleet-invitation",
+        PENDING,
+        f"invite {invitation.invite_id[:12]}… "
+        f"root {invitation.personal_root_pub[:12]}…",
     )
     return invitation
 

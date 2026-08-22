@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
@@ -10,7 +11,7 @@ from tools.network.fleet_sync_channel import (
     FleetDirectServer,
     fleet_direct_connect,
 )
-from tools.network.idkit import KeyPair
+from tools.network.idkit import KeyPair, Subject, issue_cert
 from tools.network.relaykit.channel import HandshakeError
 from tools.network.relaykit.direct import new_session_id
 
@@ -132,3 +133,96 @@ def test_kick_closes_an_already_authenticated_fleet_channel() -> None:
         assert server.connection_count == 0
 
     asyncio.run(run())
+
+
+def test_fleet_channel_uses_machine_signed_process_delegations() -> None:
+    async def run() -> None:
+        root = KeyPair.generate()
+        left_machine = KeyPair.generate()
+        right_machine = KeyPair.generate()
+        left_entry = enroll(root, machine_pub=left_machine.public_hex)
+        right_entry = enroll(root, machine_pub=right_machine.public_hex)
+        entries = [left_entry, right_entry]
+        now = int(time.time())
+        org = f"personal:{root.public_hex}"
+
+        def runtime(machine, entry):
+            process = KeyPair.generate()
+            cert = issue_cert(
+                machine,
+                process.public_hex,
+                scope=["fleet:sync"],
+                org=org,
+                subject=Subject(kind="machine", id=entry.machine_id),
+                not_before=now - 30,
+                not_after=now + 300,
+            )
+            return FleetAuthenticator(
+                process,
+                root_pub=root.public_hex,
+                roster_entries=lambda: entries,
+                roster_machine_pub=machine.public_hex,
+                delegation_cert=cert,
+                require_delegation=True,
+            )
+
+        async def echo(_token: str, message: bytes, peer_pub: str) -> bytes:
+            assert peer_pub == left_machine.public_hex
+            return message
+
+        server = FleetDirectServer(runtime(right_machine, right_entry), echo)
+        port = await server.start()
+        try:
+            channel = await fleet_direct_connect(
+                f"ws://127.0.0.1:{port}",
+                authenticator=runtime(left_machine, left_entry),
+                expected_machine_pub=right_machine.public_hex,
+                session=new_session_id(),
+            )
+            async with channel:
+                await channel.send_message(b"delegated")
+                assert await channel.recv_message() == b"delegated"
+
+            with pytest.raises(Exception):
+                await fleet_direct_connect(
+                    f"ws://127.0.0.1:{port}",
+                    authenticator=FleetAuthenticator(
+                        left_machine,
+                        root_pub=root.public_hex,
+                        roster_entries=lambda: entries,
+                    ),
+                    expected_machine_pub=right_machine.public_hex,
+                    session=new_session_id(),
+                )
+        finally:
+            await server.stop()
+
+    asyncio.run(run())
+
+
+def test_fleet_channel_refuses_overlong_process_delegation() -> None:
+    root = KeyPair.generate()
+    machine = KeyPair.generate()
+    entry = enroll(root, machine_pub=machine.public_hex)
+    process = KeyPair.generate()
+    now = int(time.time())
+    cert = issue_cert(
+        machine,
+        process.public_hex,
+        scope=["fleet:sync"],
+        org=f"personal:{root.public_hex}",
+        subject=Subject(kind="machine", id=entry.machine_id),
+        not_before=now - 30,
+        not_after=now + (13 * 60 * 60),
+    )
+    auth = FleetAuthenticator(
+        process,
+        root_pub=root.public_hex,
+        roster_entries=lambda: [entry],
+        roster_machine_pub=machine.public_hex,
+        delegation_cert=cert,
+        require_delegation=True,
+    )
+
+    with pytest.raises(HandshakeError, match="TTL bound"):
+        auth.build_client_hello(new_session_id())

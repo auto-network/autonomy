@@ -30,6 +30,15 @@
   .step .body { flex:1; min-width:0; }
   button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:.6rem 1.3rem; font-size:.95rem; font-weight:600; cursor:pointer; }
   button.secondary { background:#262b38; }
+  .fleet-success { min-height:calc(100svh - 7.5rem); display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; }
+  .fleet-success-mark { width:5rem; height:5rem; border-radius:50%; display:grid; place-items:center; margin-bottom:1.35rem; color:#07150f; background:var(--ok); box-shadow:0 0 0 .65rem rgba(52,211,153,.10); font-size:2.8rem; font-weight:800; }
+  .fleet-success h1 { margin:0 0 1.6rem; font-size:clamp(1.9rem,7vw,2.6rem); }
+  .fleet-success button { min-width:12rem; min-height:3rem; }
+  .fleet-sync-row { height:3rem; display:flex; align-items:center; gap:.65rem; color:var(--dim); font-size:.95rem; font-weight:650; }
+  .fleet-sync-row.complete { color:#6ee7b7; }
+  .fleet-sync-indicator { width:.72rem; height:.72rem; border:2px solid #4b5563; border-top-color:#a5b4fc; border-radius:50%; animation:fleet-spin .85s linear infinite; }
+  .fleet-sync-row.complete .fleet-sync-indicator { border:0; border-radius:0; width:auto; height:auto; animation:none; color:var(--ok); }
+  @keyframes fleet-spin { to { transform:rotate(360deg); } }
   .actions { display:flex; flex-direction:column; gap:.5rem; }
   .invite-org { display:flex; align-items:center; gap:.6rem; margin:.15rem 0 .1rem; }
   .invite-org .mark { width:1.6rem; height:1.6rem; border-radius:6px; background:#262b38; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:.8rem; }
@@ -41,6 +50,8 @@
   // "Begin" opens the ceremony deliberately (design shows the rail
   // first, not an overlay on load).
   window.__AUTONOMY_WELCOME_SHELL__ = true;
+  window.__AUTONOMY_FLEET_ENROLLMENT__ = {{ fleet_enrollment|default(none)|tojson }};
+  window.__AUTONOMY_FLEET_SYNC__ = {{ fleet_sync|default(false)|tojson }};
 </script>
 <script type="importmap">{"imports": {"/static/js/ceremony/primitives.js": "/static/js/ceremony/primitives.js?v=__STATIC_VERSION__"}}</script>
 <script type="module" src="/static/js/network-signon.mjs?v=__STATIC_VERSION__"></script>
@@ -56,8 +67,62 @@
     <p class="sub" style="margin-top:4rem">One moment&hellip;</p>
   </template>
 
+  <!-- Fleet-linked install · the request exists, authority does not. -->
+  <template x-if="ready && fleetEnrollment">
+    <div data-testid="welcome-fleet-pending">
+      <div x-show="fleetEnrollment.status === 'approved'" class="fleet-success" data-testid="welcome-fleet-approved">
+        <div class="fleet-success-mark" aria-hidden="true">&#10003;</div>
+        <h1>Machine approved</h1>
+        <button @click="location.assign('/unlock?fleet=1&amp;next=%2Fwelcome%3Ffleet_sync%3D1')">Unlock to continue</button>
+      </div>
+      <div x-show="fleetEnrollment.status !== 'approved'">
+      <div style="display:flex;align-items:center;gap:.65rem;margin-bottom:.45rem">
+        <span class="n" style="background:rgba(99,102,241,.16);color:#a5b4fc">&#8644;</span>
+        <span style="font-size:.78rem;letter-spacing:.08em;text-transform:uppercase;color:#a5b4fc;font-weight:700">Fleet enrollment</span>
+      </div>
+      <h1 x-text="fleetEnrollment.status === 'declined' ? 'Request declined' : fleetEnrollment.status === 'expired' ? 'Invitation expired' : 'Confirm this machine'"></h1>
+      <p class="sub" x-text="fleetEnrollment.status === 'declined' ? 'The other Dashboard declined this enrollment request.' : fleetEnrollment.status === 'expired' ? 'Ask for a new Fleet invitation on your other Dashboard.' : 'Compare this code with the approval on your other Dashboard.'"></p>
+      <div class="step current" style="display:block;padding:1.45rem">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;margin-bottom:1rem">
+          <h2 style="margin:0">Comparison code</h2>
+          <span style="display:inline-flex;align-items:center;gap:.45rem;border-radius:999px;padding:.25rem .65rem;font-size:.72rem;font-weight:700;white-space:nowrap"
+                :style="(fleetEnrollment.status === 'declined' || fleetEnrollment.status === 'expired') ? 'color:#fca5a5;background:rgba(248,113,113,.09);border:1px solid rgba(248,113,113,.25)' : 'color:#fbbf24;background:rgba(251,191,36,.09);border:1px solid rgba(251,191,36,.25)'">
+            <span style="width:.45rem;height:.45rem;border-radius:50%"
+                  :style="(fleetEnrollment.status === 'declined' || fleetEnrollment.status === 'expired') ? 'background:#f87171' : 'background:#fbbf24;box-shadow:0 0 0 .22rem rgba(251,191,36,.12)'"></span>
+            <span x-text="fleetEnrollment.status === 'declined' ? 'Declined' : fleetEnrollment.status === 'expired' ? 'Expired' : 'Waiting for approval'"></span>
+          </span>
+        </div>
+        <div data-testid="fleet-comparison-code" x-text="fleetEnrollment.code"
+             style="font:700 clamp(1.18rem,4.6vw,1.65rem)/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.075em;color:#f3f4f6;background:#0f1117;border:1px solid #343a4b;border-radius:10px;padding:1rem;text-align:center;overflow-wrap:anywhere"></div>
+        <p style="margin:1rem 0 0;color:var(--dim);font-size:.86rem">The codes must match exactly. Approving the request authorizes this machine; this temporary code is discarded afterward.</p>
+      </div>
+      <div class="step" style="align-items:flex-start">
+        <div class="n" style="color:#9ca3af">1</div>
+        <div class="body"><h2>Request sent</h2><p>This machine has no Fleet identity or access yet.</p></div>
+      </div>
+      <div class="step locked" style="opacity:.72">
+        <div class="n">2</div>
+        <div class="body"><h2>Continue after approval</h2><p>You can leave this screen open. Setup will continue here when the other Dashboard approves the request.</p></div>
+      </div>
+      <p x-show="fleetEnrollment.error" style="color:#fca5a5;font-size:.78rem" x-text="fleetEnrollment.error"></p>
+      <p style="text-align:center;color:#6b7280;font-size:.72rem;margin-top:1.1rem">Request <span x-text="fleetEnrollment.request_id_prefix"></span>&hellip;</p>
+      </div>
+    </div>
+  </template>
+
+  <template x-if="ready && !fleetEnrollment && fleetSync">
+    <div class="fleet-success" data-testid="welcome-fleet-sync">
+      <div class="fleet-success-mark" aria-hidden="true">&#10003;</div>
+      <h1>Machine approved</h1>
+      <div class="fleet-sync-row" :class="fleetSyncStatus === 'complete' ? 'complete' : ''">
+        <span class="fleet-sync-indicator" aria-hidden="true" x-text="fleetSyncStatus === 'complete' ? '✓' : ''"></span>
+        <span x-text="fleetSyncStatus === 'complete' ? 'Synchronization complete' : 'Synchronizing with fleet'"></span>
+      </div>
+    </div>
+  </template>
+
   <!-- ── FRESH · no identity (design variant 0) ─────────────────── -->
-  <template x-if="ready && step === 1">
+  <template x-if="ready && !fleetEnrollment && !fleetSync && step === 1">
     <div>
       <h1>Welcome</h1>
       <p class="sub">Three steps and this machine is yours.</p>
@@ -75,7 +140,7 @@
   </template>
 
   <!-- ── MID · identity done, organization current (variant 1) ──── -->
-  <template x-if="ready && step === 2">
+  <template x-if="ready && !fleetEnrollment && !fleetSync && step === 2">
     <div>
       <h1 x-text="userName ? ('Welcome, ' + userName) : 'Welcome'"></h1>
       <p class="sub">Two to go.</p>
@@ -113,7 +178,7 @@
   </template>
 
   <!-- ── READY · identity + organization done (design variant 2) ── -->
-  <template x-if="ready && step === 3">
+  <template x-if="ready && !fleetEnrollment && !fleetSync && step === 3">
     <div>
       <h1>You&rsquo;re set</h1>
       <p class="sub">Identity, organization, workspace &mdash; all yours.</p>
@@ -143,6 +208,12 @@ function welcomeApp() {
     invited: false,
     inviteName: '',
     inviteInitial: '?',
+    fleetEnrollment: window.__AUTONOMY_FLEET_ENROLLMENT__ || null,
+    fleetSync: !!window.__AUTONOMY_FLEET_SYNC__,
+    fleetSyncStatus: 'synchronizing',
+    fleetSyncTimer: null,
+    fleetResumeTimer: null,
+    fleetResumeBusy: false,
 
     get step() {
       if (!this.hasIdentity) return 1;
@@ -157,6 +228,14 @@ function welcomeApp() {
       this.inviteName = org;
       this.inviteInitial = (org.charAt(0) || '?').toUpperCase();
       await this.refresh();
+      if (this.fleetEnrollment) {
+        await this.resumeFleetEnrollment();
+        this.fleetResumeTimer = setInterval(
+          () => this.resumeFleetEnrollment(), 3000);
+      } else if (this.fleetSync) {
+        await this.refreshFleetSync();
+        this.fleetSyncTimer = setInterval(() => this.refreshFleetSync(), 1000);
+      }
       // Completing a step elsewhere (the ceremony overlay, the create-org
       // screen) fires these — the rail re-reads and advances live.
       window.addEventListener('autonomy:identity-changed', () => this.refresh());
@@ -186,6 +265,50 @@ function welcomeApp() {
         this.orgName = orgs.length ? (orgs[0].name || orgs[0].slug) : '';
       } catch (e) { /* org list unreadable → stay on the org step */ }
       this.ready = true;
+    },
+
+    async resumeFleetEnrollment() {
+      if (!this.fleetEnrollment || this.fleetEnrollment.status !== 'pending' ||
+          this.fleetResumeBusy) return;
+      this.fleetResumeBusy = true;
+      try {
+        var response = await fetch('/api/fleet/enrollment/local-resume', {
+          method: 'POST', cache: 'no-store',
+        });
+        var body = await response.json().catch(function () { return {}; });
+        if (!response.ok || body.ok === false) {
+          throw new Error(body.error || ('Enrollment check failed (' + response.status + ').'));
+        }
+        if (body.status === 'approved' || body.status === 'declined' ||
+            body.status === 'expired') {
+          this.fleetEnrollment.status = body.status;
+          if (this.fleetResumeTimer) clearInterval(this.fleetResumeTimer);
+          this.fleetResumeTimer = null;
+        }
+      } catch (error) {
+        // A transient relay outage does not discard the request. Keep the
+        // waiting state and expose the last check failure without spinning.
+        this.fleetEnrollment.error = (error && error.message) || String(error);
+      } finally {
+        this.fleetResumeBusy = false;
+      }
+    },
+
+    async refreshFleetSync() {
+      if (!this.fleetSync || this.fleetSyncStatus === 'complete') return;
+      try {
+        var response = await fetch('/api/fleet/enrollment/local-sync-status', {
+          cache: 'no-store', credentials: 'same-origin',
+        });
+        var body = await response.json().catch(function () { return {}; });
+        if (!response.ok || body.ok === false) return;
+        if (body.status === 'complete') {
+          this.fleetSyncStatus = 'complete';
+          if (this.fleetSyncTimer) clearInterval(this.fleetSyncTimer);
+          this.fleetSyncTimer = null;
+          setTimeout(() => location.replace('/'), 1400);
+        }
+      } catch (e) { /* the compact row stays synchronizing */ }
     },
 
     // Step 1 → the delivered identity ceremony (network-onboarding.js).

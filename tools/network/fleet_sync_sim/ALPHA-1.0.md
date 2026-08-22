@@ -126,6 +126,10 @@ peer counters. The Dashboard service can now stop its scheduler, close its
 pooled personal store, prove that no production writer remains, merge a
 received checkpoint with locally authored winners in staging, publish it
 recoverably, record a durable local install receipt, and resume delta pulls.
-Remaining work is the unlock-to-runtime machine-key handoff, address and
-checkpoint-offer discovery, exact remote ACK floors, and attachment-object
-transport. No new daemon or network service is required by the engine itself.
+The unlock boundary now hands Python only a short-lived process key plus a
+machine-signed ``fleet:sync`` delegation, and an enrolled machine can use its
+machine-local RelayKit route for a roster-authenticated remote checkpoint.
+Remaining work is exact remote ACK floors, dedicated route rotation and
+continuous multi-peer discovery, attachment-object transport, and the live
+multi-node acceptance. No new daemon or network service is required by the
+engine itself.

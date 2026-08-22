@@ -38,7 +38,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--invite", metavar="CODE",
         help="join an EXISTING org with this invitation code "
-             "(default: $AUTONOMY_INVITE); mutually exclusive with --org",
+             "(default: $AUTONOMY_INVITE); mutually exclusive with --org and --fleet-invite",
+    )
+    parser.add_argument(
+        "--fleet-invite", metavar="CODE",
+        help="join an EXISTING personal Fleet with this invitation code "
+             "(default: $AUTONOMY_FLEET_INVITE); mutually exclusive with --org and --invite",
     )
     parser.add_argument(
         "--root", metavar="PATH",
@@ -62,6 +67,9 @@ def main(argv: list[str] | None = None) -> int:
         first_org=args.org,
         first_org_name=args.org_name,
         invite=args.invite or os.environ.get("AUTONOMY_INVITE"),
+        fleet_invite=(
+            args.fleet_invite or os.environ.get("AUTONOMY_FLEET_INVITE")
+        ),
         tls=not args.no_tls,
         tls_domain=args.tls_domain,
     )
