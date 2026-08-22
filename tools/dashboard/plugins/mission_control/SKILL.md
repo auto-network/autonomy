@@ -168,6 +168,13 @@ States: `proven done settled active code_only next specified open blocked
 deferred retired` — `proven` means exercised on the real system and
 witnessed; `code_only` means tests pass, never run for real.
 
+Two platform surfaces still read fields you must feed: keep posting
+`last_done` (`POST /api/pillars/<id>/last-done`) when work completes — the
+pillar chooser and status feed render it and nothing substitutes for it —
+and let `graph mission state` stamp `happened_at` (or pass `--happened-at`)
+so the activity grid, feed, and pillar ages reflect when things really
+landed.
+
 Rules that carry over from the screen contract: an item's `item-id` is its
 anchor — questions bind to it, so never rename one whose subject survives;
 ask text must be one answerable question naming its options and consequence;

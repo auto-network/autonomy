@@ -67,8 +67,43 @@ def load_items(org: str, surface_ids: list[str]) -> list[dict]:
     return items
 
 
+def _iso_epoch(value: str) -> float | None:
+    if not value:
+        return None
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
+
+
+def backfill_pillar_ages(state: dict, items: list[dict]) -> None:
+    """Give the chrome real ages on structured missions.
+
+    The chrome derives a pillar's age from its last site push — a signal a
+    structured mission never emits, so its pillar chooser showed blank ages
+    forever. The honest equivalent exists: the newest item change on that
+    surface. Only fills blanks; a fresher last_done-driven age stays.
+    """
+    latest: dict[str, float] = {}
+    for it in items:
+        ts = _iso_epoch(it.get("happened_at") or "") or _iso_epoch(
+            it.get("updated_at") or "")
+        sid = it.get("surface_id")
+        if sid and ts and ts > latest.get(sid, 0):
+            latest[sid] = ts
+    if not latest:
+        return
+    from tools.dashboard.plugins.mission_control.compose import _ago
+    now = time.time()
+    for p in state.get("pillars", []):
+        if not p.get("age") and p.get("pillar_id") in latest:
+            p["age"] = _ago(latest[p["pillar_id"]], now)
+
+
 def render_screen(mission: dict, pillars: list[dict],
-                  focus_pillar_id: str | None = None) -> str:
+                  focus_pillar_id: str | None = None,
+                  items: list[dict] | None = None) -> str:
     """The author-HTML half of a structured screen, as a string.
 
     *focus_pillar_id* records which surface the reader navigated to; the
@@ -97,7 +132,8 @@ def render_screen(mission: dict, pillars: list[dict],
             }
             for p in pillars
         ],
-        "items": load_items(mission.get("org") or "", surface_ids),
+        "items": (items if items is not None
+                  else load_items(mission.get("org") or "", surface_ids)),
     }
     blob = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
     return _template_source().replace(_DATA_MARK, blob)

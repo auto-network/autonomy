@@ -266,3 +266,45 @@ def test_create_mission_defaults_to_caller_org():
     explicit = session.post("/api/missions", json={
         "name": "Named", "org": "elsewhere"}).json()["mission"]
     assert explicit["org"] == "elsewhere"
+
+
+def test_update_attribution_follows_the_routes_pillar():
+    """One session coordinating the mission and several pillars must be
+    attributed to the pillar in the REQUEST PATH, not to whichever
+    coordinated pillar a lookup happens to return first (observed live:
+    updates posted on one pillar's route labeled as a sibling pillar)."""
+    operator = _client()
+    mission = operator.post("/api/missions", json={"name": "Attrib"}).json()["mission"]
+    db.set_mission_org(mission["mission_id"], "autonomy")
+    db.set_mission_coordinator(mission["mission_id"], "multi-sess")
+    p1 = operator.post(f"/api/missions/{mission['mission_id']}/pillars",
+                       json={"name": "First", "coordinator_session": "multi-sess"}
+                       ).json()["pillar"]
+    operator.post(f"/api/missions/{mission['mission_id']}/pillars",
+                  json={"name": "Second", "coordinator_session": "multi-sess"})
+
+    entry = operator.post(f"/api/pillars/{p1['pillar_id']}/questions",
+                          json={"question": "attribution probe"}).json()["question"]
+
+    session = _org_client("autonomy")  # ORG_SESSION principal, subject test-session
+    # Rebind the subject to the coordinating session name.
+    class _Mw:
+        def __init__(self, app): self.app = app
+        async def __call__(self, scope, receive, send):
+            scope.setdefault("state", {})["api_principal"] = api_auth.ApiPrincipal(
+                api_auth.ApiPrincipalKind.ORG_SESSION,
+                subject="multi-sess", org="autonomy")
+            await self.app(scope, receive, send)
+    session = TestClient(Starlette(routes=mc_api.routes,
+                                   middleware=[Middleware(_Mw)]))
+
+    out = session.post(
+        f"/api/pillars/{p1['pillar_id']}/questions/{entry['entry_id']}/update",
+        json={"text": "working on it"})
+    assert out.status_code == 201, out.text
+    rows = operator.get(f"/api/pillars/{p1['pillar_id']}/questions").json()["questions"]
+    ups = [u for q in rows if q["entry_id"] == entry["entry_id"]
+           for u in q.get("updates", []) if u.get("kind") != "echo"]
+    assert ups, "update row missing"
+    assert ups[-1]["author_participant_id"] == f"pillar:{p1['pillar_id']}", ups[-1]
+    assert ups[-1]["author_label"] == "First"
