@@ -30,6 +30,12 @@
     passkeysForHost: 0,
     hasIdentity: false,
     webauthnOk: false,
+    // MFA (combined factor): the root opens only with BOTH password AND a
+    // passkey PRF together. Detected from require_pair, confirmed against the
+    // armor's factors at ceremony time.
+    mfa: false,
+    rpId: null,
+    passkeys: [],
     troubleOpen: false,
     techOpen: false,
     busy: false,
@@ -156,6 +162,41 @@
     });
   }
 
+  // A WebAuthn PRF assertion on an enrolled passkey, for the passkey half of a
+  // combined (MFA) unlock. Reuses the enrollment ceremony's fixed PRF salt so
+  // the derived key matches what promotion published. Returns the 32-byte PRF
+  // output, never sent anywhere — it only re-derives the armor-opening key.
+  async function _prfAssert() {
+    if (!window.PublicKeyCredential || !navigator.credentials) {
+      throw new Error('this browser cannot use Face ID — open your dashboard where you enrolled it');
+    }
+    var enroll = await import('./ceremony/enrollment.js');
+    var allow = (U.passkeys || [])
+      .filter(function (p) { return p.credential_id && (!U.rpId || p.rp_id === U.rpId); })
+      .map(function (p) { return { type: 'public-key', id: b64uToBytes(p.credential_id) }; });
+    var asrt;
+    try {
+      asrt = await navigator.credentials.get({ publicKey: {
+        challenge: crypto.getRandomValues(new Uint8Array(32)),
+        rpId: U.rpId || undefined,
+        allowCredentials: allow,
+        userVerification: 'required',
+        extensions: enroll.prfEvalExtension(),
+      } });
+    } catch (e) {
+      if (e && e.name === 'NotAllowedError') {
+        throw new Error('Face ID was cancelled or timed out — try again');
+      }
+      throw e;
+    }
+    if (!asrt) throw new Error('Face ID was cancelled — try again');
+    var prf = enroll.prfOutputFromResults(asrt.getClientExtensionResults());
+    if (!prf) {
+      throw new Error('this passkey cannot unlock your key (no PRF) — use a device enrolled for it');
+    }
+    return prf;
+  }
+
   // The plaintext seed exists only inside this function — zeroed the
   // moment the signing key is imported (I1).
   async function _unlockWithPassword(password) {
@@ -163,11 +204,32 @@
     var S = _signonI();
     var I = _identityI();
     var stored = await _fetchJson('/api/identity/personal');
-    var opened;
+    // An MFA identity's armor carries a combined factor and opens only with
+    // BOTH the password AND a passkey PRF. Branch on the armor itself (the
+    // source of truth), not merely the require_pair hint.
+    var P = null;
+    var isCombined = false;
     try {
-      opened = await S.decryptArmor(stored.armored_private_key, password);
-    } catch (e) {
-      throw new Error('that password does not open your identity — check it and try again');
+      P = await import('./ceremony/primitives.js');
+      isCombined = (P.parseArmor(stored.armored_private_key).factors || [])
+        .some(function (f) { return f.type === 'combined'; });
+    } catch (e) { /* fall through to the password path, which will error clearly */ }
+    var opened;
+    var unlockRoute = '/api/identity/unlock/password';
+    if (isCombined) {
+      var prf = await _prfAssert();
+      unlockRoute = '/api/identity/unlock/combined';
+      try {
+        opened = await P.decryptArmorWithCombined(stored.armored_private_key, password, prf);
+      } catch (e) {
+        throw new Error('that password and passkey did not open your identity — check them and try again');
+      }
+    } else {
+      try {
+        opened = await S.decryptArmor(stored.armored_private_key, password);
+      } catch (e) {
+        throw new Error('that password does not open your identity — check it and try again');
+      }
     }
     // The vault wake (below, after the session exists) needs the raw seed to
     // derive its KEM credential + delegate. Keep ONE copy past the I1 zero and
@@ -186,7 +248,7 @@
         v: 1, challenge: minted.challenge, origin: minted.origin,
       }));
     var sig = S.bytesToHex(await crypto.subtle.sign('Ed25519', key, message));
-    await _postJson('/api/identity/unlock/password', {
+    await _postJson(unlockRoute, {
       challenge: minted.challenge, signature: sig,
     });
 
@@ -416,8 +478,11 @@
 
     var passkey = U.mode === 'passkey';
     var sub = passkey ? 'Use Face ID to open your dashboard.'
-      : 'Enter your password to open your dashboard.';
-    var primary = passkey ? 'Unlock with Face ID' : 'Unlock';
+      : (U.mfa
+          ? 'Enter your password, then confirm with Face ID — both together open your dashboard.'
+          : 'Enter your password to open your dashboard.');
+    var primary = passkey ? 'Unlock with Face ID'
+      : (U.mfa ? 'Unlock with password + Face ID' : 'Unlock');
 
     card.innerHTML =
       '<div class="flex flex-col items-center flex-1 md:flex-none justify-center md:justify-start">' +
@@ -557,6 +622,9 @@
     U.initial = (U.name || '?').trim().charAt(0).toUpperCase();
     U.hasIdentity = !!status.personal_identity;
     U.passkeysForHost = status.passkeys_for_host || 0;
+    U.rpId = status.rp_id || null;
+    U.passkeys = status.passkeys || [];
+    U.mfa = !!(status.personal_identity && status.personal_identity.require_pair);
     if (!U.fleetRootRequired && U.passkeysForHost > 0 && U.webauthnOk) {
       U.mode = 'passkey';
     } else if (U.hasIdentity) {
