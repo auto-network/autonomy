@@ -99,6 +99,28 @@ def error_request(
     )
 
 
+def progress_request(
+    run_id: str,
+    *,
+    completed: int,
+    total: int,
+    percent: int,
+    status: str = "running",
+) -> dict[str, Any]:
+    """Publish ephemeral per-session progress to the live dashboard stream."""
+    session = os.environ.get("AUTONOMY_SESSION", "").strip()
+    if not session:
+        return {"ok": False, "unavailable": True, "error": "no session identity"}
+    return telemetry_request(
+        action="progress",
+        run_id=str(run_id)[:200],
+        completed=max(0, int(completed)),
+        total=max(0, int(total)),
+        percent=max(0, min(100, int(percent))),
+        status=str(status)[:32],
+    )
+
+
 def duration_request(action: str, **payload: Any) -> dict[str, Any]:
     """Reach the caller's organization-local capped duration history."""
     if not os.environ.get("AUTONOMY_SESSION") and "AGENT_TEST_DASHBOARD" not in os.environ:
