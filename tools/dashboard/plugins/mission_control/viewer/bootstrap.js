@@ -421,6 +421,9 @@
     d.setAttribute("d", path); n.appendChild(d); return n;
   }
   var CHAT = "M21 11.5a8.4 8.4 0 0 1-9 8.4 8.5 8.5 0 0 1-3.8-.9L3 21l1.9-5.1A8.4 8.4 0 0 1 12 3a8.4 8.4 0 0 1 9 8.5z";
+  // A terminal: the session behind this screen. One path, same stroke
+  // grammar as CHAT so the two bar icons render as siblings.
+  var TERM = "M3 5h18v14H3zM7 9.5l3 2.5-3 2.5M13 15h4";
 
   function face(p, small) {
     var cls = small ? "mc-face mc-face-sm" : "mc-face";
@@ -545,6 +548,17 @@
                              title: n + " open", text: String(n)}));
       qKids.push(el("span", {class: "mc-count mc-count-done",
                              title: done + " answered", text: String(done)}));
+    }
+    // THE WAY BACK. The dashboard's session viewer links here through the
+    // pillar badge; this is the return edge, and it exists only where the
+    // state block carries a session href — the dashboard surface. A guest's
+    // screen never receives one (compose omits sessions over the relay), so
+    // a share link never grows a door to an internal session.
+    var sessHref = (p && p.session_href) || state.session_href || "";
+    if (sessHref) {
+      kids.push(el("a", {class: "mc-q mc-session", href: sessHref,
+                         title: "Open the coordinating session"},
+                   [svg(TERM)]));
     }
     var q = el("button", {class: n ? "mc-q mc-q-hot" : "mc-q", title: "Questions",
                           onclick: function () { show(ui.panel === "questions" ? null : {panel: "questions"}); }},

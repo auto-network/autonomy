@@ -42,6 +42,8 @@
 .mc-q { flex: none; display: inline-flex; align-items: center; gap: .35rem;
         border: 1px solid #1e293b; color: #64748b; border-radius: .35rem; padding: .2rem .5rem; font-size: 12px; }
 .mc-q-hot { border-color: #b4530999; background: #78350f33; color: #fcd34d; }
+.mc-session { text-decoration: none; padding: .2rem .45rem; }
+.mc-session:hover { color: #a5b4fc; border-color: #37415199; }
 .mc-faces { display: flex; flex: none; }
 .mc-face { width: 1.5rem; height: 1.5rem; border-radius: 50%; display: grid; place-items: center;
            font-size: 10px; font-weight: 600; box-shadow: 0 0 0 2px #111318; margin-left: -.35rem; }
