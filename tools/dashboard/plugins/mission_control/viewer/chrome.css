@@ -38,7 +38,8 @@
   color: #cbd5e1;
 }
 .mc-bar button, .mc-panel button, .mc-view button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
-.mc-pill { display: flex; align-items: center; gap: .45rem; min-width: 0; padding: .25rem .4rem; border-radius: .35rem; }
+.mc-pill { display: flex; align-items: center; gap: .45rem; min-width: 0; height: 2.1rem;
+           padding: 0 .55rem; border: 1px solid #1e293b; border-radius: .5rem; }
 .mc-pill:hover { background: #1e293b66; }
 .mc-swatch { width: 4px; height: 1rem; border-radius: 2px; flex: none; }
 .mc-name { font-size: .9rem; color: #e2e8f0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -49,8 +50,12 @@
   display: inline-flex; align-items: center; justify-content: center; color: #94a3b8; flex: none; }
 .mc-age { color: #475569; font-size: 11px; flex: none; }
 .mc-grow { flex: 1; }
-.mc-q { flex: none; display: inline-flex; align-items: center; gap: .35rem;
-        border: 1px solid #1e293b; color: #64748b; border-radius: .35rem; padding: .2rem .5rem; font-size: 12px; }
+.mc-q { flex: none; display: inline-flex; align-items: center; justify-content: center; gap: .4rem;
+        border: 1px solid #1e293b; color: #64748b; border-radius: .5rem;
+        min-width: 2.1rem; height: 2.1rem; padding: 0 .55rem; font-size: 13px; }
+.mc-bar .mc-q svg { width: 17px; height: 17px; }
+.mc-menu { border-color: transparent; }
+.mc-menu svg { width: 20px; height: 20px; }
 .mc-q-hot { border-color: #b4530999; background: #78350f33; color: #fcd34d; }
 .mc-faces { display: flex; flex: none; }
 .mc-face { width: 1.5rem; height: 1.5rem; border-radius: 50%; display: grid; place-items: center;
