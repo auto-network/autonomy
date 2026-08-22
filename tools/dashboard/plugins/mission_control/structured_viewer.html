@@ -129,6 +129,17 @@
     background:var(--bg2);border:1px solid var(--line);border-radius:4px;padding:2px 6px}
   .mc-when{font-size:.7rem;color:var(--ink3);margin-top:7px}
 
+  /* finished items fold away per section: the count stays honest, the
+     scroll goes. */
+  details.mc-finished{margin:2px 0 10px;border:1px dashed var(--line);
+    border-radius:10px;padding:0}
+  details.mc-finished > summary{cursor:pointer;list-style:none;user-select:none;
+    color:var(--ink3);font-size:.8rem;padding:9px 13px}
+  details.mc-finished > summary::before{content:"▸ ";color:var(--ink3)}
+  details.mc-finished[open] > summary::before{content:"▾ "}
+  details.mc-finished > .mc-item{margin-left:10px;margin-right:10px}
+  details.mc-finished[open]{padding-bottom:8px}
+
   /* pills */
   .mc-pill{display:inline-block;flex-shrink:0;font:700 .64rem/1 inherit;letter-spacing:.05em;
     text-transform:uppercase;padding:4px 8px;border-radius:12px;white-space:nowrap}
@@ -484,6 +495,13 @@
         var okQ = !q || (n.dataset.search||"").indexOf(q) >= 0;
         n.classList.toggle("mc-hidden", !(okS && okQ));
       });
+      // A filter that matches folded items should show them, not hide them
+      // behind a closed fold; back to closed when the filter clears.
+      scopeEl.querySelectorAll("details.mc-finished").forEach(function (d) {
+        var visible = d.querySelectorAll(".mc-item:not(.mc-hidden)").length;
+        d.open = !!(states.length || q) && visible > 0;
+        d.classList.toggle("mc-hidden", (states.length || q) && !visible);
+      });
     }
     input.addEventListener("input", apply);
     FSTATES.forEach(function (s) {
@@ -517,7 +535,7 @@
     var names = SECTION_ORDER.filter(function (s) { return sections[s]; })
       .concat(Object.keys(sections).filter(function (s) {
         return SECTION_ORDER.indexOf(s) < 0; }).sort());
-    var host = el("div"); v.appendChild(filterBar(v)); v.appendChild(host);
+    var host = el("div"); v.appendChild(host);
     names.forEach(function (name) {
       var sec = el("section","mc-sec");
       sec.appendChild(el("h2",null,name));
@@ -541,9 +559,28 @@
         steps.forEach(function (s,i){ arc.appendChild(card(s,{stepno:i+1})); });
         sec.appendChild(arc);
       }
-      rest.forEach(function (it) { sec.appendChild(card(it)); });
+      // FINISHED WORK FOLDS AWAY. The record stays (count on the fold, cards
+      // one tap away, anchors still in the DOM for the chrome), but a reader
+      // scrolling a pillar sees what is ALIVE. Checkpoints stay unfolded —
+      // an arc's completed gates are its narrative, not clutter — and
+      // decisions/scope/status are their own sections with their own logic.
+      var FOLDS = {work:1, incident:1, question:1};
+      var TERMINAL = {proven:1, done:1, settled:1, deferred:1};
+      var live_ = rest.filter(function (it) { return !(FOLDS[it.kind] && TERMINAL[it.state]); });
+      var finished = rest.filter(function (it) { return FOLDS[it.kind] && TERMINAL[it.state]; });
+      live_.forEach(function (it) { sec.appendChild(card(it)); });
+      if (finished.length){
+        var fold = document.createElement("details");
+        fold.className = "mc-finished";
+        fold.appendChild(el("summary",null,
+          finished.length + " finished item" + (finished.length>1?"s":"") +
+          " — proven, done, settled, deferred"));
+        finished.forEach(function (it) { fold.appendChild(card(it)); });
+        sec.appendChild(fold);
+      }
       host.appendChild(sec);
     });
+    v.insertBefore(filterBar(v), host);
     return v;
   }
 
@@ -597,12 +634,12 @@
       return (db_?db_.getTime():0) - (da?da.getTime():0);
     });
     if (!all.length){ v.appendChild(el("div","mc-empty",empty)); return v; }
-    v.appendChild(filterBar(v));
     var host = el("section","mc-sec");
     host.appendChild(el("h2",null,title+" — every pillar"));
     all.forEach(function (it) {
       host.appendChild(card(it,{showSurface:true, mirror:true})); });
     v.appendChild(host);
+    v.insertBefore(filterBar(v), host);
     return v;
   }
 
