@@ -47,9 +47,9 @@
 .mc-caret { color: #64748b; font-size: 10px; }
 /* Status rows: flat, no destination — a hairline between entries instead
    of a card outline per pillar. */
-.mc-row-static, .mc-row-static:hover { cursor: default; border: 0; border-radius: 0;
-  background: transparent; border-bottom: 1px solid #1e293b; }
-.mc-row-static:last-child { border-bottom: 0; }
+.mc-row.mc-row-static, .mc-row.mc-row-static:hover { cursor: default; border: 0;
+  border-radius: 0; background: transparent; border-bottom: 1px solid #1e293b; }
+.mc-row.mc-row-static:last-child { border-bottom: 0; }
 .mc-last-none { color: #475569; font-style: italic; }
 .mc-qfilter { display: flex; justify-content: flex-end; margin: 0 0 .6rem; }
 .mc-seg { display: inline-flex; gap: .15rem; background: #0d1117; border: 1px solid #1e293b;
