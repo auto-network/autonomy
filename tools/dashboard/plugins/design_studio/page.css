@@ -335,6 +335,11 @@
   min-height: 100dvh;
 }
 
+.design-viewer-root {
+  box-sizing: border-box;
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
 /* A design opened from its linked session is a focused inspection surface.
    The plugin owns the entire viewport: one compact rail, then the iframe. */
 body.route-design-linked {
@@ -342,6 +347,24 @@ body.route-design-linked {
   height: 100dvh;
   margin: 0;
   overflow: hidden;
+}
+
+body.route-design-linked .design-studio-page,
+body.route-design-linked .design-studio-viewer-shell {
+  height: 100%;
+  min-height: 0;
+  padding-bottom: 0;
+}
+
+body.route-design-linked .design-viewer-root {
+  position: absolute;
+  z-index: 1;
+  top: var(--design-viewport-top, 0px);
+  left: var(--design-viewport-left, 0px);
+  width: var(--design-viewport-width, 100%);
+  height: var(--design-viewport-height, 100dvh) !important;
+  box-sizing: border-box;
+  padding-top: 0;
 }
 
 body.route-design-linked > .flex-1 {
@@ -390,14 +413,15 @@ body.route-design-linked .design-surface {
 
 .design-linked-toolbar {
   display: flex;
-  min-height: 2.5rem;
+  min-height: calc(2.5rem + env(safe-area-inset-top, 0px));
   align-items: center;
   gap: 0.5rem;
-  flex: 0 0 2.5rem;
+  flex: 0 0 calc(2.5rem + env(safe-area-inset-top, 0px));
+  box-sizing: border-box;
   border-bottom: 1px solid #1e293b;
   background: #111927;
   color: #cbd5e1;
-  padding: 0 0.375rem;
+  padding: env(safe-area-inset-top, 0px) 0.375rem 0;
   user-select: none;
 }
 

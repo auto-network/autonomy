@@ -224,7 +224,7 @@
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 </style>
-<div x-data="designPage()" style="display:flex;flex-direction:column;height:100vh;height:100dvh;overflow:hidden;padding-top:env(safe-area-inset-top, 0px)">
+<div x-data="designPage()" class="design-viewer-root" style="display:flex;flex-direction:column;height:100vh;height:100dvh;overflow:hidden">
 
   <!-- Loading state -->
   <template x-if="state === 'loading'">
