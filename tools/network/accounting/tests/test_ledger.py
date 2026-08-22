@@ -108,11 +108,13 @@ def test_authorization_blocks_cross_org_unknown_counter_and_revoked_key(tmp_path
             ledger.ingest(_wire(1, organization_id=ORG_B))
         with pytest.raises(UsageLedgerAuthorizationError, match="counter families"):
             ledger.ingest(_wire(1, counters={"turn.egress_bytes": 1}))
+        ledger.accept_progress(_progress(0, START))
         ledger.authorize_producer(
             producer=SIGNER_A.public_hex,
             organization_id=ORG_A,
             counter_families={"relay.egress_bytes"},
             enabled=False,
+            active_through=START,
         )
         with pytest.raises(UsageLedgerAuthorizationError, match="not enabled"):
             ledger.ingest(_wire(1))
@@ -279,7 +281,7 @@ def test_second_ledger_process_owner_is_rejected(tmp_path):
             UsageLedger(path)
 
 
-def test_v1_ledger_migrates_progress_schema_atomically(tmp_path):
+def test_v1_ledger_migrates_progress_and_lifecycle_schema_atomically(tmp_path):
     path = tmp_path / "ledger.sqlite"
     with sqlite3.connect(path) as raw:
         raw.execute(
@@ -296,8 +298,114 @@ def test_v1_ledger_migrates_progress_schema_atomically(tmp_path):
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()
         }
-    assert version == "2"
+    assert version == "3"
     assert "producer_progress" in tables
+    with sqlite3.connect(path) as raw:
+        columns = {
+            row[1]
+            for row in raw.execute(
+                "PRAGMA table_info(producer_authorizations)"
+            ).fetchall()
+        }
+    assert {"active_from", "active_through", "meter_class"}.issubset(columns)
+
+
+def test_authorization_lifecycle_boundaries_are_explicit_and_aligned(tmp_path):
+    path = tmp_path / "ledger.sqlite"
+    with UsageLedger(path) as ledger:
+        with pytest.raises(UsageLedgerAuthorizationError, match="aligned"):
+            ledger.authorize_producer(
+                producer=SIGNER_A.public_hex,
+                organization_id=ORG_A,
+                counter_families={"relay.egress_bytes"},
+                active_from=START + 1,
+            )
+        with pytest.raises(UsageLedgerAuthorizationError, match="requires"):
+            ledger.authorize_producer(
+                producer=SIGNER_A.public_hex,
+                organization_id=ORG_A,
+                counter_families={"relay.egress_bytes"},
+                enabled=False,
+            )
+
+
+def test_authorization_lifetime_is_immutable_and_rejects_earlier_usage(tmp_path):
+    path = tmp_path / "ledger.sqlite"
+    active_from = START + BATCH_INTERVAL_SECONDS
+    with UsageLedger(path) as ledger:
+        ledger.authorize_producer(
+            producer=SIGNER_A.public_hex,
+            organization_id=ORG_A,
+            counter_families={"relay.egress_bytes"},
+            active_from=active_from,
+        )
+        with pytest.raises(UsageLedgerAuthorizationError, match="precedes"):
+            ledger.ingest(_wire(1))
+        ledger.accept_progress(_progress(0, active_from))
+        ledger.accept_progress(_progress(0, active_from + BATCH_INTERVAL_SECONDS))
+        ledger.authorize_producer(
+            producer=SIGNER_A.public_hex,
+            organization_id=ORG_A,
+            counter_families={"relay.egress_bytes"},
+            enabled=False,
+            active_from=active_from,
+            active_through=active_from + BATCH_INTERVAL_SECONDS,
+        )
+
+        with pytest.raises(UsageLedgerAuthorizationError, match="re-enabled"):
+            ledger.authorize_producer(
+                producer=SIGNER_A.public_hex,
+                organization_id=ORG_A,
+                counter_families={"relay.egress_bytes"},
+                active_from=active_from,
+            )
+
+
+def test_retired_binding_acknowledges_exact_recovery_retries_only(tmp_path):
+    path = tmp_path / "ledger.sqlite"
+    wire = _wire(1)
+    progress = _progress(1, START + BATCH_INTERVAL_SECONDS)
+    with UsageLedger(path) as ledger:
+        _authorize(ledger)
+        ledger.ingest(wire)
+        ledger.accept_progress(progress)
+        ledger.authorize_producer(
+            producer=SIGNER_A.public_hex,
+            organization_id=ORG_A,
+            counter_families={"relay.egress_bytes"},
+            enabled=False,
+            active_through=START + BATCH_INTERVAL_SECONDS,
+        )
+
+        assert ledger.ingest(wire).accepted is False
+        assert ledger.accept_progress(progress).accepted is False
+        with pytest.raises(UsageLedgerAuthorizationError, match="not enabled"):
+            ledger.ingest(_wire(2))
+
+
+def test_meter_class_is_validated_and_immutable(tmp_path):
+    path = tmp_path / "ledger.sqlite"
+    with UsageLedger(path) as ledger:
+        with pytest.raises(UsageLedgerAuthorizationError, match="meter_class"):
+            ledger.authorize_producer(
+                producer=SIGNER_A.public_hex,
+                organization_id=ORG_A,
+                counter_families={"relay.egress_bytes"},
+                meter_class="AWS us-east-1",
+            )
+        ledger.authorize_producer(
+            producer=SIGNER_A.public_hex,
+            organization_id=ORG_A,
+            counter_families={"relay.egress_bytes"},
+            meter_class="aws.use1.relay.public",
+        )
+        with pytest.raises(UsageLedgerAuthorizationError, match="immutable"):
+            ledger.authorize_producer(
+                producer=SIGNER_A.public_hex,
+                organization_id=ORG_A,
+                counter_families={"relay.egress_bytes"},
+                meter_class="hetzner.fsn1.relay.public",
+            )
 
 
 def test_audit_detects_retained_wire_corruption(tmp_path):

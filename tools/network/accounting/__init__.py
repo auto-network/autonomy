@@ -52,6 +52,20 @@ from .progress import (
     UsageProgressMalformed,
     UsageProgressSignatureError,
 )
+from .rollups import (
+    DAY,
+    FIVE_MINUTE,
+    HOUR,
+    MONTH,
+    PruneRun,
+    ROLLUP_TIERS,
+    RollupRow,
+    RollupRun,
+    UsageRollupError,
+    UsageRollupIncomplete,
+    UsageRollups,
+    steady_state_rows,
+)
 
 __all__ = [
     "BATCH_INTERVAL_SECONDS",
@@ -92,4 +106,16 @@ __all__ = [
     "UsageProgressError",
     "UsageProgressMalformed",
     "UsageProgressSignatureError",
+    "DAY",
+    "FIVE_MINUTE",
+    "HOUR",
+    "MONTH",
+    "PruneRun",
+    "ROLLUP_TIERS",
+    "RollupRow",
+    "RollupRun",
+    "UsageRollupError",
+    "UsageRollupIncomplete",
+    "UsageRollups",
+    "steady_state_rows",
 ]
