@@ -89,7 +89,11 @@ migrate-on-mount initializer and then uvicorn, serving HTTPS when the
 init-generated keypair is present (`DASHBOARD_TLS=off` for plain HTTP behind
 your own proxy). `AUTONOMY_FIRST_ORG` founds a new organization. Supplying
 `AUTONOMY_INVITE` instead joins the existing organization named by that
-user-carried invitation; the two settings are mutually exclusive. For an
+user-carried invitation. `AUTONOMY_FLEET_INVITE` instead joins the operator's
+existing personal Fleet: first run creates no shared organization, displays
+the comparison code while the request waits, and stores the machine identity
+only after browser-local completion of the approved delivery. All three
+first-run modes are mutually exclusive. For an
 `org:join` link, `graph link publish` prints the version-2 invitation code.
 It keeps the registry's URL-path channel token distinct from the
 fragment-carried ledger claim token; version-1 one-token codes are refused.

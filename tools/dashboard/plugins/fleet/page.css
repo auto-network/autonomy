@@ -63,7 +63,12 @@
 .fleet-invite-meta { display: flex; justify-content: space-between; gap: .5rem; margin-top: .45rem; color: #6b7280; font-size: .57rem; }
 .fleet-primary-action { width: 100%; min-height: 2.75rem; margin-top: .7rem; border: 0; border-radius: .38rem; color: white; background: #4f46e5; font-size: .68rem; font-weight: 650; }
 .fleet-primary-action:hover { background: #6366f1; }
+.fleet-primary-action:disabled { cursor: wait; opacity: .5; }
 .fleet-no-invite { margin: .75rem 0 0; color: #9ca3af; font-size: .68rem; line-height: 1.25rem; }
+.fleet-field-label { display: block; margin-top: .75rem; color: #d1d5db; font-size: .62rem; font-weight: 650; }
+.fleet-field { width: 100%; min-height: 2.7rem; margin-top: .35rem; padding: .55rem .65rem; border: 1px solid #4b5563; border-radius: .38rem; color: #f3f4f6; background: rgba(3,7,18,.7); font-size: .72rem; }
+.fleet-field:focus { border-color: #818cf8; outline: none; }
+.fleet-inline-error { margin: .6rem 0 0; color: #fca5a5; font-size: .62rem; line-height: 1rem; }
 .fleet-activity { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: .75rem; margin-top: .7rem; }
 .fleet-activity dt { color: #6b7280; font-size: .57rem; }
 .fleet-activity dd { margin: .2rem 0 0; color: #e5e7eb; font: .75rem ui-monospace,SFMono-Regular,Menlo,monospace; }

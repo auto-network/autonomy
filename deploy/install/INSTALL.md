@@ -160,6 +160,22 @@ invitation, but must not mint an identity or membership claim. The separately
 guarded file input used by the multi-node test harness is test automation only
 and is not an installation interface.
 
+**Joining an existing personal Fleet instead** (the operator copied the Fleet
+invitation from their Dashboard): start the fresh node with that value. The
+same Docker volume survives the asynchronous approval and completion:
+
+```bash
+AUTONOMY_FLEET_INVITE="$FLEET_INVITATION" docker compose up -d
+# → first render shows the machine comparison code and “Waiting for approval”
+```
+
+The parent Dashboard receives the machine request in its ordinary approval
+inbox. The operator compares the code, names the machine, and approves it.
+The joining browser then opens the delivered personal identity and proves its
+assigned machine key; no personal root seed is sent to either server.
+`AUTONOMY_FIRST_ORG`, `AUTONOMY_INVITE`, and `AUTONOMY_FLEET_INVITE` are
+mutually exclusive.
+
 **What will NOT happen, on either path:** no account creation, no license
 check, no telemetry, no CDN at runtime. The only external fetches are
 anonymous build-time ones (base image, PyPI wheels, the tailwind binary),

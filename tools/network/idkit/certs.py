@@ -43,7 +43,7 @@ CERT_VERSION = 1
 #: hostile blob cannot make the verifier recurse or loop unboundedly.
 MAX_CHAIN_DEPTH = 16
 
-SUBJECT_KINDS = frozenset({"operator", "agent", "persona"})
+SUBJECT_KINDS = frozenset({"operator", "agent", "persona", "machine"})
 
 _MAX_TS = 2**63 - 1
 _MAX_SCOPE_ENTRIES = 64

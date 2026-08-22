@@ -35,7 +35,11 @@ def _admission(approval_id: str, *, status="pending", error=None, offset=0):
     )
 
 
-def _inputs(*, entries=(), admissions=(), approvals=None, executing=(), invitation=None):
+def _inputs(
+    *, entries=(), admissions=(), approvals=None, executing=(),
+    invitation=None, machine_names=None, invitation_publication=None,
+    publishing_org="autonomy",
+):
     root = ROOT
     return ProjectionInputs(
         server_time=NOW,
@@ -57,6 +61,9 @@ def _inputs(*, entries=(), admissions=(), approvals=None, executing=(), invitati
         approvals=approvals or {},
         executing_approval_ids=frozenset(executing),
         invitation=invitation,
+        machine_names=machine_names or {},
+        invitation_publication=invitation_publication,
+        publishing_org=publishing_org,
     )
 
 
@@ -84,10 +91,20 @@ def test_projection_joins_roster_local_tunnel_and_current_epoch_observations():
     assert local["isTunnelServer"] is True
     assert local["presence"] == "unreported"
     assert remote["machineId"] == REMOTE_ID
+    assert remote["displayLabel"] == "Untitled machine"
     assert remote["transactionsApplied"] == 12
     assert remote["bytesSent"] + remote["bytesReceived"] == 400
     assert view["activity"]["transactionsApplied"] == 12
     assert view["activity"]["scope"] == "this_dashboard_current_roster"
+
+
+def test_human_machine_name_overrides_unsigned_fallback_label():
+    view = project(_inputs(
+        entries=(LOCAL_ENTRY, REMOTE_ENTRY),
+        machine_names={REMOTE_ID: "SJC dashboard"},
+    ))
+    remote = next(row for row in view["machines"] if row["machineId"] == REMOTE_ID)
+    assert remote["displayLabel"] == "SJC dashboard"
 
 
 def test_multiple_admissions_are_rows_not_a_fleet_approval_queue():
@@ -177,6 +194,61 @@ def test_active_invitation_projects_the_actual_signed_bootstrap_value():
     assert value["url"] == "AUTONOMY_FLEET_INVITE=" + fleet_invite.encode(invite)
     assert value["publishedAt"] == NOW - 10_000
     assert value["expiresAt"] == NOW + 86_400_000
+
+
+def test_published_route_waits_for_browser_personal_signature():
+    publication = {
+        "id": "publish-one",
+        "created_at": (NOW - 10_000) / 1000,
+        "request": {
+            "org": "autonomy",
+            "target_uuid": "11111111-1111-4111-8111-111111111111",
+            "target_type": "fleet:join",
+            "meta": {"ttl": 604800},
+        },
+        "result": {
+            "approved": True,
+            "execution": {
+                "ok": True,
+                "url": "https://relay.auto.network/l/" + "45" * 16,
+                "token": "45" * 16,
+            },
+        },
+    }
+    value = project(_inputs(
+        entries=(LOCAL_ENTRY,), invitation_publication=publication,
+    ))["invitation"]
+
+    assert value == {
+        "status": "awaiting_signature",
+        "url": None,
+        "publishedAt": NOW - 10_000,
+        "expiresAt": NOW - 10_000 + 604_800_000,
+        "publishingOrg": "autonomy",
+        "targetUuid": "11111111-1111-4111-8111-111111111111",
+        "error": None,
+        "rendezvous": "https://relay.auto.network/l/" + "45" * 16,
+        "grantToken": "45" * 16,
+    }
+
+
+def test_pending_publication_is_not_presented_as_an_active_invite():
+    value = project(_inputs(
+        entries=(LOCAL_ENTRY,),
+        invitation_publication={
+            "id": "publish-one",
+            "created_at": NOW / 1000,
+            "request": {
+                "org": "autonomy",
+                "target_uuid": "11111111-1111-4111-8111-111111111111",
+                "target_type": "fleet:join",
+                "meta": {"ttl": 604800},
+            },
+            "result": None,
+        },
+    ))["invitation"]
+    assert value["status"] == "publishing"
+    assert value["url"] is None
 
 
 def test_projection_and_markup_expose_no_fleet_decision_surface():

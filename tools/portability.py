@@ -687,6 +687,7 @@ def migrate_on_mount(
             root,
             invite=os.environ.get("AUTONOMY_INVITE"),
             join_transport=join_transport,
+            fleet_invite=os.environ.get("AUTONOMY_FLEET_INVITE"),
             tls=tls,
         )
 

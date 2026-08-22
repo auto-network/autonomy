@@ -1,9 +1,9 @@
 """This enrolled machine's durable identity (auto-b6fee).
 
 The only machine credential input persisted at rest, in machine.db
-(``@home("machine")``, never leaves the machine). It is assigned only after
-the operator approves the one-time enrollment ceremony; the ceremony's
-``enrollment_nonce`` is never stored here. It is a PUBLIC identifier,
+(``@home("machine")``, never leaves the machine). It is committed only after
+the operator approves the one-time enrollment ceremony; it is the same
+joiner-minted ``machine_id`` frozen into that request. It is a PUBLIC identifier,
 not a secret — the machine's operating key is DERIVED from
 ``personal_root + machine_id`` (``idkit.derive_machine_key``) on demand and is
 never stored or sealed. So there is nothing here to protect at rest beyond the
@@ -11,8 +11,8 @@ store's own locality: the id is safe in the clear, and the key that derives
 from it is safe because the personal root is (under the one boot factor).
 
 The roster root-binds this public id, the derived key's public half, and the
-machine's fleet standing. This row is the joining machine's local copy of the
-id assigned at approval; it remains machine-local because it is the input used
+machine's fleet standing. This row is the joining machine's approved local
+copy; it remains machine-local because it is the input used
 to select this installation's derived private key.
 """
 
@@ -35,7 +35,7 @@ MACHINE_IDENTITY_KEY = "self"
 
 SYNOPSIS = {
     "summary": (
-        "This enrolled machine's durable ID, assigned after approval and stored in "
+        "This enrolled machine's durable ID, committed after approval and stored in "
         "machine.db (never synced). A public identifier — the machine's "
         "operating key derives from personal_root + machine_id and is never "
         "stored. See tools.network.machine_boot."
@@ -54,14 +54,14 @@ _HEX = "0123456789abcdef"
 @publication_band(max="raw")
 @keyed_per_entity(key_strategy="machine_self")
 class MachineIdentityV1(SettingSchema):
-    """The one row of this enrolled machine's identity: its assigned id."""
+    """The one row of this enrolled machine's identity: its approved id."""
 
     set_id = MACHINE_IDENTITY_SET_ID
     schema_revision = MACHINE_IDENTITY_REVISION
 
     machine_id: str = field(
         required=True,
-        description="64-hex machine id assigned after fleet approval. Public.",
+        description="64-hex machine id committed after fleet approval. Public.",
     )
 
     @classmethod

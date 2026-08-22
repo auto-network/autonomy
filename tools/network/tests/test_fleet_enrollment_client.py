@@ -45,8 +45,22 @@ def path(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
     monkeypatch.delenv("GRAPH_DB", raising=False)
     GraphDB.close_all_pooled()
+    GraphDB.create_org_db("personal", type_="personal").close()
     monkeypatch.setattr(ar, "DB_PATH", tmp_path / "approvals.db")
     root = KeyPair.from_private_hex("34" * 32)
+    origin_machine_id = "01" * 32
+    origin_key = fleet_enroll.derive_machine_key(
+        bytes.fromhex(root.private_hex), origin_machine_id
+    )
+    fleet_roster.store_entry(
+        fleet_roster.enroll(
+            root,
+            machine_id=origin_machine_id,
+            machine_pub=origin_key.public_hex,
+            issued_at=NOW_MS - 1,
+        ),
+        org=None,
+    )
     serving = KeyPair.from_private_hex("56" * 32)
     invite = fleet_invite.mint(
         root,
@@ -115,40 +129,42 @@ def path(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_start_persists_only_machine_local_recovery(path):
     _root, invite, origin, join_store, client, channels = path
-    recovery = await client.start(invite, enrollment_nonce="9a" * 32)
+    recovery = await client.start(invite, machine_id="9a" * 32)
     assert recovery.verification_code == fleet_enroll.verification_code(
         recovery.request
     )
     assert join_store.load(recovery.request_id) == recovery
     assert join_store.latest(invite.invite_id) == recovery
+    assert join_store.latest_any() == recovery
     assert origin.list_pending(TARGET_UUID)[0].channel_binding == (
         recovery.channel_binding
     )
     assert channels[0].closed is True
     recovered = await client.start_or_recover(
-        invite, enrollment_nonce="ff" * 32
+        invite, machine_id="ff" * 32
     )
     assert recovered == recovery
     assert len(origin.list_pending(TARGET_UUID)) == 1
     assert len(channels) == 1
     raw = join_store.path.read_bytes()
-    assert b"machine_id" not in raw
+    assert b"machine_id" in raw
     assert b"machine_pub" not in raw
     assert b"personal_root_armor" not in raw
     join_store.delete(recovery.request_id)
     assert join_store.load(recovery.request_id) is None
+    assert join_store.latest_any() is None
 
 
 @pytest.mark.asyncio
 async def test_resume_verifies_public_approval_and_returns_unchanged_armor(path):
-    root, invite, origin, _join_store, client, _channels = path
-    recovery = await client.start(invite, enrollment_nonce="9a" * 32)
+    root, invite, origin, join_store, client, _channels = path
+    recovery = await client.start(invite, machine_id="9a" * 32)
     pending = await client.resume(recovery)
     assert pending.status == "pending"
     assert pending.delivery is None
 
     root_seed = bytes.fromhex(root.private_hex)
-    machine_id = fleet_enroll.assigned_machine_id(root_seed, recovery.request)
+    machine_id = fleet_enroll.assigned_machine_id(recovery.request)
     machine_key = fleet_enroll.derive_machine_key(root_seed, machine_id)
     roster_entry = fleet_roster.enroll(
         root,
@@ -180,18 +196,23 @@ async def test_resume_verifies_public_approval_and_returns_unchanged_armor(path)
 
     approved = await client.resume(recovery)
     assert approved.status == "approved"
-    assert approved.delivery == fleet_enroll.EnrollmentDelivery(
-        approval, roster_entry
-    )
+    assert approved.delivery.approval == approval
+    assert approved.delivery.roster_entry == roster_entry
+    assert len(approved.delivery.roster_entries) == 2
+    assert roster_entry in approved.delivery.roster_entries
     assert approved.personal_root_armor == (
         "UNCHANGED-PASSWORD-ENCRYPTED-ARMOR"
     )
+    join_store.save_delivery(recovery.request_id, approved.delivery)
+    assert join_store.load_delivery(recovery.request_id) == approved.delivery
+    raw = join_store.path.read_bytes()
+    assert b"UNCHANGED-PASSWORD-ENCRYPTED-ARMOR" not in raw
 
 
 @pytest.mark.asyncio
 async def test_wrong_envelope_type_and_tampered_recovery_fail_closed(path):
     _root, invite, _origin, join_store, client, _channels = path
-    recovery = await client.start(invite, enrollment_nonce="9a" * 32)
+    recovery = await client.start(invite, machine_id="9a" * 32)
     bad = recovery.to_dict()
     bad["request_id"] = "ff" * 32
     with pytest.raises(
@@ -219,3 +240,22 @@ async def test_wrong_envelope_type_and_tampered_recovery_fail_closed(path):
         match="not a fleet invitation",
     ):
         await refused.resume(recovery)
+
+
+@pytest.mark.asyncio
+async def test_expired_invite_discards_retry_state_without_reopening_channel(path):
+    _root, invite, _origin, join_store, client, channels = path
+    recovery = await client.start(invite, machine_id="9a" * 32)
+    before = len(channels)
+    expired_client = fleet_enrollment_client.FleetEnrollmentClient(
+        envelope_fetcher=client.envelope_fetcher,
+        channel_connector=client.channel_connector,
+        state_store=join_store,
+        now_ms=lambda: invite.expires_at,
+    )
+
+    result = await expired_client.resume(recovery)
+
+    assert result.status == "expired"
+    assert join_store.load(recovery.request_id) is None
+    assert len(channels) == before

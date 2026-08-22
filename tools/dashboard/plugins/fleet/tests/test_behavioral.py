@@ -65,6 +65,8 @@ VIEW = {
         "url": "AUTONOMY_FLEET_INVITE=signed-fixture.checksum",
         "publishedAt": 1_776_999_000_000,
         "expiresAt": 1_777_086_400_000,
+        "publishingOrg": "autonomy",
+        "error": None,
     },
     "activity": {
         "transactionsApplied": 0, "bytesSent": 0, "bytesReceived": 0,

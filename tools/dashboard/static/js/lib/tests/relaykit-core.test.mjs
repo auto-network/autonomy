@@ -8,6 +8,7 @@ assert.deepEqual(Object.keys(relaykit).sort(), [
   'openSocket',
   'performHandshake',
   'sendOp',
+  'verifyDelegationCert',
 ]);
 
 assert.equal(

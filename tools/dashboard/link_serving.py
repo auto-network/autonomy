@@ -733,6 +733,7 @@ JOIN_OPS = ("context", "submit", "status")
 # It shares RelayKit's established channel but has its own grant type and
 # operation vocabulary.
 FLEET_JOIN_OPS = ("fleet.request", "fleet.resume")
+FLEET_SYNC_OPS = ("fleet.sync.pull",)
 
 
 def _claim_service():
@@ -1096,6 +1097,18 @@ def make_grant_handler(org: str | None = None, *, now=None):
         except Exception:
             return REFUSED
 
+    async def _fleet_sync(token: str, request: dict):
+        grant = await asyncio.to_thread(check_grant, token, org=org, now=clock())
+        if grant is None or grant["target_type"] != "fleet:join":
+            return REFUSED
+        try:
+            from tools.network.fleet_relay_sync import connector_runtime
+
+            return await connector_runtime.handle(token, request)
+        except Exception:
+            logger.warning("fleet relay sync request refused", exc_info=True)
+            return REFUSED
+
     async def _handle(
         token: str, message: bytes, channel_state: dict
     ) -> bytes:
@@ -1118,6 +1131,8 @@ def make_grant_handler(org: str | None = None, *, now=None):
             return await asyncio.to_thread(
                 _fleet_join, token, request, channel_state
             )
+        if op in FLEET_SYNC_OPS:
+            return await _fleet_sync(token, request)
         if op in WRITE_OPS:
             return await _serve_write(token, org, request, clock)
         if op in READ_OPS:
@@ -1437,6 +1452,12 @@ async def _serve_control_listener(connector, ctl_path: str,
                         "ok": True,
                         "serving": connector.connected.is_set(),
                     }
+                elif request.get("op") == "fleet-runtime":
+                    from tools.network.fleet_relay_sync import connector_runtime
+
+                    reply = await asyncio.to_thread(
+                        connector_runtime.configure, request.get("args") or {}
+                    )
                 else:
                     try:
                         reply = await connector.control(

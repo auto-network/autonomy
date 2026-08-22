@@ -7,7 +7,7 @@ internal correlation seam only; this module never exposes decision controls.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import sqlite3
 import time
 from typing import Mapping
@@ -19,8 +19,10 @@ from tools.dashboard.fleet_enrollment_service import (
     StoredFleetInvitation,
 )
 from tools.graph.db import _org_db_path
+from tools.graph import org_ops
 from tools.network import (
     fleet_invite,
+    fleet_machine_profile,
     fleet_roster,
     fleet_sync_scheduler,
     fleet_tunnel_server,
@@ -40,6 +42,9 @@ class ProjectionInputs:
     approvals: Mapping[str, Mapping | None]
     executing_approval_ids: frozenset[str]
     invitation: StoredFleetInvitation | None
+    machine_names: Mapping[str, str] = field(default_factory=dict)
+    invitation_publication: Mapping | None = None
+    publishing_org: str = "autonomy"
 
 
 def _peer_rows(epoch: str | None) -> dict[str, dict]:
@@ -96,6 +101,14 @@ def _load_inputs(*, now_ms: int) -> ProjectionInputs:
         approval_id for approval_id in approvals
         if approvals_routes.approval_is_executing(approval_id)
     )
+    invitation_publication = next(
+        (
+            row
+            for row in approval_requests.recent_for_kind("link_publish")
+            if (row.get("request") or {}).get("target_type") == "fleet:join"
+        ),
+        None,
+    )
     return ProjectionInputs(
         server_time=now_ms,
         root_pub=root_pub,
@@ -107,6 +120,9 @@ def _load_inputs(*, now_ms: int) -> ProjectionInputs:
         approvals=approvals,
         executing_approval_ids=executing,
         invitation=store.current_invitation(now_ms=now_ms),
+        machine_names=fleet_machine_profile.names(org=None),
+        invitation_publication=invitation_publication,
+        publishing_org=org_ops.resolve_first_org_slug(),
     )
 
 
@@ -140,6 +156,7 @@ def _machine_row(
     local_machine_id: str | None,
     selected_machine_id: str | None,
     peer: Mapping | None,
+    display_name: str | None,
 ) -> dict:
     local = entry.machine_id == local_machine_id
     return {
@@ -148,8 +165,8 @@ def _machine_row(
         "entryId": entry.entry_id,
         "machineId": entry.machine_id,
         "machinePublicKey": entry.machine_pub,
-        "displayLabel": (
-            "This dashboard" if local else f"Machine {_display_id(entry.machine_id)}"
+        "displayLabel": display_name or (
+            "This dashboard" if local else "Untitled machine"
         ),
         "isLocalMachine": local,
         "isTunnelServer": entry.machine_id == selected_machine_id,
@@ -266,6 +283,7 @@ def project(inputs: ProjectionInputs) -> dict:
             local_machine_id=inputs.local_machine_id,
             selected_machine_id=inputs.selected_machine_id,
             peer=inputs.peer_rows.get(machine_pub),
+            display_name=inputs.machine_names.get(entry.machine_id),
         )
         for machine_pub, entry in active.items()
     ]
@@ -281,6 +299,7 @@ def project(inputs: ProjectionInputs) -> dict:
                 local_machine_id=inputs.local_machine_id,
                 selected_machine_id=inputs.selected_machine_id,
                 peer=None,
+                display_name=inputs.machine_names.get(entry.machine_id),
             )
             for entry in _revoked_entries(
                 inputs.roster_entries,
@@ -313,6 +332,8 @@ def project(inputs: ProjectionInputs) -> dict:
         "url": None,
         "publishedAt": None,
         "expiresAt": None,
+        "publishingOrg": inputs.publishing_org,
+        "error": None,
     }
     if invitation is not None:
         invitation_view = {
@@ -320,7 +341,53 @@ def project(inputs: ProjectionInputs) -> dict:
             "url": "AUTONOMY_FLEET_INVITE=" + fleet_invite.encode(invitation.invite),
             "publishedAt": invitation.created_at,
             "expiresAt": invitation.invite.expires_at or None,
+            "publishingOrg": inputs.publishing_org,
+            "error": None,
         }
+    elif inputs.invitation_publication is not None:
+        publication = inputs.invitation_publication
+        request = publication.get("request") or {}
+        result = publication.get("result")
+        created_at = int(float(publication.get("created_at") or 0) * 1000)
+        ttl = (request.get("meta") or {}).get("ttl")
+        if isinstance(result, Mapping) and "ttl" in result:
+            ttl = result.get("ttl")
+        expires_at = created_at + ttl * 1000 if type(ttl) is int else None
+        common = {
+            "url": None,
+            "publishedAt": created_at or None,
+            "expiresAt": expires_at,
+            "publishingOrg": request.get("org") or inputs.publishing_org,
+            "targetUuid": request.get("target_uuid"),
+            "error": None,
+        }
+        if result is None:
+            invitation_view = {**common, "status": "publishing"}
+        elif result.get("approved") is not True:
+            invitation_view = {
+                **common,
+                "status": "failed",
+                "error": "Invitation publication was declined.",
+            }
+        else:
+            execution = result.get("execution")
+            if isinstance(execution, Mapping) and execution.get("ok") is True:
+                invitation_view = {
+                    **common,
+                    "status": "awaiting_signature",
+                    "rendezvous": execution.get("url"),
+                    "grantToken": execution.get("token"),
+                }
+            else:
+                invitation_view = {
+                    **common,
+                    "status": "failed",
+                    "error": (
+                        execution.get("error")
+                        if isinstance(execution, Mapping)
+                        else "Invitation publication did not complete."
+                    ),
+                }
     return {
         "serverTime": inputs.server_time,
         "summary": {

@@ -9,6 +9,7 @@
 # Environment (all optional — see DEPLOY.md):
 #   AUTONOMY_FIRST_ORG / AUTONOMY_FIRST_ORG_NAME  first org naming
 #   AUTONOMY_INVITE                               join an existing org
+#   AUTONOMY_FLEET_INVITE                         join an existing personal fleet
 #   DASHBOARD_HOST / DASHBOARD_PORT               bind address (default 0.0.0.0:8080)
 #   DASHBOARD_TLS=off                             skip TLS keypair + serve plain HTTP
 #   DASHBOARD_DOMAIN                              CN/SAN for the self-signed cert

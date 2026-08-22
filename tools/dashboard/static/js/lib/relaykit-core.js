@@ -7,6 +7,7 @@
  */
 
 const CERT_DOMAIN = 'autonomy.idkit.cert.v1\n';
+const CERT_SUBJECT_KINDS = new Set(['agent', 'machine', 'operator', 'persona']);
 const HANDSHAKE_DOMAIN = 'autonomy.network.channel.handshake.v1\n';
 const KEYS_INFO = 'autonomy.network.channel.keys.v1';
 const DIR_C2S = 'c2s\x00';
@@ -148,7 +149,7 @@ function validateCertificateShape(cert) {
     || typeof cert.org !== 'string'
     || !cert.org
     || !hasExactFields(cert.subject, ['kind', 'id'])
-    || typeof cert.subject.kind !== 'string'
+    || !CERT_SUBJECT_KINDS.has(cert.subject.kind)
     || typeof cert.subject.id !== 'string'
     || !Number.isSafeInteger(cert.not_before)
     || !Number.isSafeInteger(cert.not_after)
@@ -264,6 +265,10 @@ async function verifyChain(certWire, rootPublicHex, org, now) {
   }
   return chain[chain.length - 1];
 }
+
+// Generic cross-language certificate verifier. Transport handshakes apply
+// their own narrower subject/scope policy after this structural chain check.
+export { verifyChain as verifyDelegationCert };
 
 function requireNeutralViewerCertificate(leaf) {
   if (

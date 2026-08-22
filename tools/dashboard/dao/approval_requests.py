@@ -232,3 +232,46 @@ def decided_ids_for_kind(
         return {str(row["id"]) for row in rows}
     finally:
         c.close()
+
+
+def recent_for_kind(
+    kind: str,
+    *,
+    limit: int = 50,
+    db_path: Path | str | None = None,
+) -> list[dict]:
+    """Newest approval records for one registered kind.
+
+    Application projections use this to correlate their own producer records
+    without creating a second approval queue.  Decision controls and lifecycle
+    remain exclusively in the generic approval rendezvous.
+    """
+    if not isinstance(kind, str) or not kind:
+        raise ValueError("approval kind must be a non-empty string")
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > 500:
+        raise ValueError("approval limit must be an integer from 1 to 500")
+    c = _conn(db_path)
+    try:
+        rows = c.execute(
+            "SELECT * FROM approval_requests WHERE kind=? "
+            "ORDER BY created_at DESC, id DESC LIMIT ?",
+            (kind, limit),
+        ).fetchall()
+    finally:
+        c.close()
+    out = []
+    for row in rows:
+        item = dict(row)
+        item["request"] = json.loads(item["request"])
+        item["staged"] = (
+            json.loads(item["staged"])
+            if item.get("staged") is not None
+            else None
+        )
+        item["result"] = (
+            json.loads(item["result"])
+            if item.get("result") is not None
+            else None
+        )
+        out.append(item)
+    return out

@@ -5,6 +5,9 @@ function fleetPage() {
     error: null,
     expandedId: null,
     copied: false,
+    inviteBusy: false,
+    invitePassword: '',
+    invitationError: null,
     refreshTimer: null,
 
     async init() {
@@ -48,6 +51,7 @@ function fleetPage() {
     get invitation() {
       return (this.view && this.view.invitation) || {
         status: 'none', url: null, publishedAt: null, expiresAt: null,
+        publishingOrg: 'autonomy', error: null,
       };
     },
     get activity() {
@@ -173,6 +177,101 @@ function fleetPage() {
       await navigator.clipboard.writeText(this.invitation.url);
       this.copied = true;
       setTimeout(() => { this.copied = false; }, 1400);
+    },
+
+    async createInvitation() {
+      if (this.inviteBusy) return;
+      this.inviteBusy = true;
+      this.invitationError = null;
+      try {
+        const org = this.invitation.publishingOrg || 'autonomy';
+        const response = await fetch('/api/approvals', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({
+            kind: 'link_publish',
+            session: 'Fleet invitation',
+            request: {
+              org,
+              target_uuid: crypto.randomUUID(),
+              target_type: 'fleet:join',
+              meta: { ttl: 604800, label: 'Fleet machine invitation' },
+            },
+          }),
+        });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+        await this.load({ quiet: true });
+      } catch (error) {
+        this.invitationError = (error && error.message) || String(error);
+      } finally {
+        this.inviteBusy = false;
+      }
+    },
+
+    async finishInvitation() {
+      if (this.inviteBusy) return;
+      if (!this.invitePassword) {
+        this.invitationError = 'Enter your personal identity password.';
+        return;
+      }
+      this.inviteBusy = true;
+      this.invitationError = null;
+      let opened = null;
+      try {
+        const session = window.AutonomyNetworkSession;
+        if (!session || !session._internals ||
+            typeof session._internals.decryptArmor !== 'function') {
+          throw new Error('Personal signing is unavailable. Reload and try again.');
+        }
+        const personalResponse = await fetch('/api/identity/personal', {
+          credentials: 'same-origin', cache: 'no-store',
+        });
+        const personal = await personalResponse.json().catch(() => ({}));
+        if (!personalResponse.ok || !personal.armored_private_key || !personal.root_pub) {
+          throw new Error(personal.error || 'No personal identity is available.');
+        }
+        try {
+          opened = await session._internals.decryptArmor(
+            personal.armored_private_key, this.invitePassword,
+          );
+        } catch (error) {
+          throw new Error('That password did not open your personal identity.');
+        }
+        const ceremony = await import('/static/js/ceremony/fleet-enrollment.js');
+        const minted = await ceremony.mintFleetInvite({
+          personalRootSeed: opened.seed,
+          rootPub: personal.root_pub,
+          rendezvous: this.invitation.rendezvous,
+          expiresAt: this.invitation.expiresAt || 0,
+        });
+        opened.seed = null;
+        const registered = await fetch('/api/fleet/invitations/register', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({
+            org: this.invitation.publishingOrg,
+            target_uuid: this.invitation.targetUuid,
+            grant_token: this.invitation.grantToken,
+            invite: minted.invite,
+          }),
+        });
+        const body = await registered.json().catch(() => ({}));
+        if (!registered.ok) throw new Error(body.error || `HTTP ${registered.status}`);
+        this.invitePassword = '';
+        await this.load({ quiet: true });
+      } catch (error) {
+        this.invitationError = (error && error.message) || String(error);
+      } finally {
+        if (opened && opened.seed) {
+          opened.seed.fill(0);
+          opened.seed = null;
+        }
+        this.invitePassword = '';
+        this.inviteBusy = false;
+      }
     },
   };
 }

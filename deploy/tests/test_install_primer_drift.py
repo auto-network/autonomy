@@ -47,6 +47,9 @@ def test_env_names_exist_where_the_primer_says_they_do():
     # (compose does not pass AUTONOMY_INVITE through — auto-1orut tracks it).
     assert "AUTONOMY_INVITE" in PRIMER
     assert "AUTONOMY_INVITE" in DEPLOY_MD
+    assert "AUTONOMY_FLEET_INVITE" in PRIMER
+    assert "AUTONOMY_FLEET_INVITE" in DEPLOY_MD
+    assert "AUTONOMY_FLEET_INVITE" in COMPOSE
     assert "AUTONOMY_PERSONAL_PASSWORD_FILE" not in PRIMER
     assert "AUTONOMY_PERSONAL_PASSWORD_FILE" not in DEPLOY_MD
 

@@ -10814,7 +10814,7 @@ async def page_experiments_redirect(request):
 
 # ── HTML Pages ────────────────────────────────────────────────
 
-def _load_template(name: str) -> str:
+def _load_template(name: str, **context) -> str:
     # Render via Jinja so {% include %} partials are expanded; the static
     # version token stays a literal marker Jinja leaves untouched.
     # ``shell_org`` flows into ``base.html`` as the deployment's
@@ -10822,6 +10822,7 @@ def _load_template(name: str) -> str:
     # fetches (auto-t0auy).
     content = templates.env.get_template(name).render(
         shell_org=_dashboard_default_org(),
+        **context,
     )
     return content.replace("__STATIC_VERSION__", _static_version())
 
@@ -10895,18 +10896,62 @@ def _has_collaborative_org() -> bool:
     return any(ref.slug != "personal" for ref in org_ops.list_orgs())
 
 
+def _fleet_enrollment_first_render() -> dict | None:
+    """Public, non-authoritative state for an install awaiting approval.
+
+    The comparison code is designed to be shown on both machines. No invite
+    bearer, resume credential, root armor, machine identity, or signing
+    material enters the page.
+    """
+    try:
+        from tools.network.fleet_enrollment_client import FleetJoinStateStore
+
+        state = FleetJoinStateStore()
+        recovery = state.latest_any()
+    except Exception:
+        logger.exception("could not read local fleet enrollment state")
+        return None
+    if recovery is None:
+        return None
+    return {
+        # Delivery is durable in machine.db. Rendering this fact directly
+        # makes a process death after root delivery recover to the approved
+        # unlock screen without depending on one more anonymous relay poll.
+        "status": (
+            "approved"
+            if state.load_delivery(recovery.request_id) is not None
+            else "pending"
+        ),
+        "code": recovery.verification_code,
+        "request_id_prefix": recovery.request_id[:12],
+    }
+
+
+def _welcome_page(*, fleet_sync: bool = False) -> HTMLResponse:
+    return HTMLResponse(_load_template(
+        "welcome.html",
+        fleet_enrollment=_fleet_enrollment_first_render(),
+        fleet_sync=fleet_sync,
+    ))
+
+
 async def page_index(request):
     # First-launch gate: with no verified harness recorded, render the
     # deterministic bootstrap walkthrough rather than the session UI. This is
     # a server-side decision (not a client redirect) so a clean machine lands
     # on setup, not on a session-create board it cannot use yet.
+    # A Fleet install already made its first network request. Show the exact
+    # comparison state first, even when the generic harness/identity gates
+    # would otherwise own a clean machine's initial page.
+    if _fleet_enrollment_first_render() is not None:
+        return _welcome_page()
     if _bootstrap_gate_open():
         return HTMLResponse(_load_template("bootstrap.html"))
     # Empty-state gate (bead auto-inpkd): once the harness is set up but the
     # machine still lacks an identity or an organization, the Welcome shell
     # renders — same server-side-decision pattern, one layer up.
     if _welcome_gate_open():
-        return HTMLResponse(_load_template("welcome.html"))
+        return _welcome_page()
     return RedirectResponse(url="/beads")
 
 
@@ -10918,7 +10963,9 @@ async def page_welcome(request):
     invited operator can land here org-attached, and so setup can be revisited
     even after the gate has closed.
     """
-    return HTMLResponse(_load_template("welcome.html"))
+    return _welcome_page(
+        fleet_sync=request.query_params.get("fleet_sync") == "1"
+    )
 
 
 async def page_bootstrap(request):

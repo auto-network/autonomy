@@ -134,6 +134,55 @@ def test_complete_state_falls_through(test_client, monkeypatch):
     assert r.headers["location"] == "/beads"
 
 
+def test_pending_fleet_enrollment_owns_first_render(test_client, monkeypatch):
+    """The install's live request is shown before generic setup gates."""
+    from tools.dashboard import server
+
+    monkeypatch.setattr(hb, "has_verified_harness", lambda: False)
+    monkeypatch.setattr(
+        server,
+        "_fleet_enrollment_first_render",
+        lambda: {
+            "status": "pending",
+            "code": "A1B2 C3D4 E5F6 0718 192A 3B4C",
+            "request_id_prefix": "123456789abc",
+        },
+    )
+    r = test_client.get("/", follow_redirects=False)
+    assert r.status_code == 200
+    assert "Confirm this machine" in r.text
+    assert "Waiting for approval" in r.text
+    assert "A1B2 C3D4 E5F6 0718 192A 3B4C" in r.text
+    assert "Set up your assistant" not in r.text
+
+
+def test_saved_fleet_delivery_renders_approved_after_restart(monkeypatch):
+    """Root-delivery recovery does not require another anonymous API poll."""
+    from tools.dashboard import server
+
+    recovery = SimpleNamespace(
+        request_id="12" * 32,
+        verification_code="A1B2 C3D4 E5F6 0718 192A 3B4C",
+    )
+
+    class State:
+        def latest_any(self):
+            return recovery
+
+        def load_delivery(self, request_id):
+            assert request_id == recovery.request_id
+            return object()
+
+    from tools.network import fleet_enrollment_client
+    monkeypatch.setattr(fleet_enrollment_client, "FleetJoinStateStore", State)
+
+    assert server._fleet_enrollment_first_render() == {
+        "status": "approved",
+        "code": recovery.verification_code,
+        "request_id_prefix": recovery.request_id[:12],
+    }
+
+
 def test_bootstrap_gate_precedes_welcome(test_client, monkeypatch):
     """An unverified harness still wins — bootstrap is Layer 0."""
     from tools.dashboard import server
@@ -180,8 +229,10 @@ def test_shell_carries_no_ceremony_code():
                    "publickeycredential", "/api/identity/personal",
                    "/api/identity/passkey", "deriveorgslug"):
         assert banned not in lowered, banned
-    # No create-org / join / session POST is issued from the shell itself.
-    assert "method: 'post'" not in lowered
+    # The only POST advances an already-persisted Fleet request. Identity,
+    # organization, session, and signing ceremonies remain composed flows.
+    assert lowered.count("method: 'post'") == 1
+    assert "/api/fleet/enrollment/local-resume" in lowered
     assert '"post"' not in lowered
 
 
@@ -198,6 +249,18 @@ def test_shell_composes_the_delivered_flows():
     # and it reads the same status the profile menu reads (one source of truth)
     assert "/api/identity/status" in TEMPLATE
     assert "/api/orgs" in TEMPLATE
+    assert "/unlock?fleet=1&amp;next=%2Fwelcome%3Ffleet_sync%3D1" in TEMPLATE
+
+
+def test_post_enrollment_sync_state_is_one_compact_binary_row(test_client):
+    r = test_client.get("/welcome?fleet_sync=1")
+    assert r.status_code == 200
+    assert "Synchronizing with fleet" in r.text
+    assert "Synchronization complete" in r.text
+    assert "/api/fleet/enrollment/local-sync-status" in r.text
+    assert 'ready && !fleetEnrollment && !fleetSync && step === 1' in r.text
+    assert 'ready && !fleetEnrollment && !fleetSync && step === 2' in r.text
+    assert 'ready && !fleetEnrollment && !fleetSync && step === 3' in r.text
 
 
 def test_invitation_context_detected_and_carried():

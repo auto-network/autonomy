@@ -102,7 +102,7 @@
             <div class="fleet-side-title">
               <h2>Invitation</h2>
               <span :class="invitation.status === 'active' ? 'active' : ''"
-                    x-text="invitation.status === 'active' ? 'Active' : 'Inactive'"></span>
+                    x-text="invitation.status === 'active' ? 'Active' : invitation.status === 'publishing' ? 'Waiting' : invitation.status === 'awaiting_signature' ? 'Finish' : 'Inactive'"></span>
             </div>
             <template x-if="invitation.status === 'active'">
               <div>
@@ -117,7 +117,34 @@
               </div>
             </template>
             <template x-if="invitation.status !== 'active'">
-              <p class="fleet-no-invite">No machine can currently request access.</p>
+              <div>
+                <template x-if="invitation.status === 'publishing'">
+                  <p class="fleet-no-invite">Publication is waiting in the approval inbox. No machine can request access yet.</p>
+                </template>
+                <template x-if="invitation.status === 'awaiting_signature'">
+                  <div>
+                    <p class="fleet-no-invite">The route is published. Sign the Fleet invitation with your personal identity to activate it.</p>
+                    <label class="fleet-field-label" for="fleet-invite-password">Personal identity password</label>
+                    <input id="fleet-invite-password" class="fleet-field" type="password"
+                           x-model="invitePassword" autocomplete="current-password"
+                           @keydown.enter.prevent="finishInvitation()">
+                    <button type="button" class="fleet-primary-action"
+                            :disabled="inviteBusy || !invitePassword"
+                            @click="finishInvitation()"
+                            x-text="inviteBusy ? 'Signing…' : 'Activate invitation'"></button>
+                  </div>
+                </template>
+                <template x-if="invitation.status === 'none' || invitation.status === 'failed'">
+                  <div>
+                    <p class="fleet-no-invite">No machine can currently request access.</p>
+                    <button type="button" class="fleet-primary-action"
+                            :disabled="inviteBusy" @click="createInvitation()"
+                            x-text="inviteBusy ? 'Requesting…' : 'Create invitation'"></button>
+                  </div>
+                </template>
+                <p x-show="invitation.error || invitationError" class="fleet-inline-error"
+                   x-text="invitationError || invitation.error"></p>
+              </div>
             </template>
           </div>
 
