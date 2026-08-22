@@ -616,7 +616,6 @@
          [el("span", {text: document.body.dataset.mcViewLabel || viewsDecl[0].label || "View"}),
           el("span", {class: "mc-caret", text: "\u25be"})]));
     }
-    kids.push(el("span", {class: "mc-grow"}));
     // THE BUBBLE IS GONE. Asks-for-you render better on the page itself,
     // and the Q&A conversations moved into the page's Questions tab — the
     // panel and entry views stay, summoned by the page over events.
