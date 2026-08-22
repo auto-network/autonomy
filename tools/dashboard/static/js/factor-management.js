@@ -429,6 +429,12 @@ async function changeKeyReal(idx, to) {
 }
 async function setPasswordReal(next) { return doRearm(rootOpener(), { kind: 'setPassword', newPassword: next }, false); }
 async function addPasswordReal(next) { return doRearm(rootOpener(), { kind: 'addPassword', newPassword: next }, false); }
+// On a combined (MFA) armor there is no standalone password to set or change —
+// the password lives INSIDE the require-both pair. A password that opens on its
+// own is the opposite of require-both, so establishing one dissolves the pair:
+// disable_mfa yields a standalone password (this new value) AND a standalone
+// passkey, either of which then opens the root.
+async function disableMfaSetPasswordReal(next) { return doRearm(rootOpener(), { kind: 'disableMfa', newPassword: next }, false); }
 async function removePasswordReal() { return doRearm(rootOpener(), { kind: 'removePassword' }, false); }
 async function removeDeviceReal(idx) {
   const k = M.keys[idx];
@@ -601,16 +607,23 @@ function progScreen() {
 
 function setpwScreen() {
   const s = el('div', 'screen');
+  if (M.mfa) {
+    s.appendChild(el('div', 'note', 'This password will open your identity on its own. '
+      + 'Because a password that opens on its own is the opposite of require-both, saving it '
+      + 'turns off Multi-Factor — your passkey will then also open on its own.'));
+  }
   s.appendChild(el('label', 'olab', 'Choose a password'));
   const a = el('input', 'oin'); a.type = 'password'; a.autocomplete = 'new-password'; s.appendChild(a);
   s.appendChild(el('label', 'olab', 'Confirm password'));
   const b = el('input', 'oin'); b.type = 'password'; b.autocomplete = 'new-password'; s.appendChild(b);
-  const go = el('div', 'btn', 'Continue');
+  const go = el('div', 'btn', M.mfa ? 'Save & turn off Multi-Factor' : 'Continue');
   go.onclick = async (e) => {
     e.stopPropagation();
     if (!a.value) { a.focus(); return; }
     if (a.value !== b.value) { S.warn = 'Passwords do not match.'; render(); return; }
-    const ok = (S.pwMode === 'changepw') ? await setPasswordReal(a.value) : await addPasswordReal(a.value);
+    const ok = M.mfa
+      ? await disableMfaSetPasswordReal(a.value)
+      : (S.pwMode === 'changepw') ? await setPasswordReal(a.value) : await addPasswordReal(a.value);
     if (!ok) { render(); return; }
     S.pwMode = null; await afterCommit('keys');
   };

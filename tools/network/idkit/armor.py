@@ -1179,9 +1179,17 @@ def disable_mfa(
     passphrase: str,
     prf_output: bytes,
     *,
+    new_passphrase: str | None = None,
     iterations: int = DEFAULT_ITERATIONS,
 ) -> str:
     """Split a combined (MFA) factor back into individual factors.
+
+    ``new_passphrase`` re-establishes the standalone password under a fresh
+    passphrase in the same act. This is the "give me a password I can use on its
+    own" path from a combined armor: a standalone password only exists once the
+    require-both pair is dissolved, so choosing that password and dissolving the
+    pair are ONE operation. Omitted (``None``), the standalone password carries
+    over the passphrase that opened the combined factor.
 
     Opening requires BOTH the password and the passkey (you cannot leave MFA
     with only one of the two you locked yourself into). The combined factor is
@@ -1202,7 +1210,9 @@ def disable_mfa(
         raise ArmorError("this armor is not multi-factor; there is no MFA to disable")
     master_kek = _v2_master_kek_with_combined(data, passphrase, prf_output)
     previous_factors = list(data["factors"])
-    pf = _build_password_factor(root_pub, master_kek, passphrase, iterations)
+    pf = _build_password_factor(
+        root_pub, master_kek, new_passphrase or passphrase, iterations
+    )
     sealed = seal(master_kek, combined["kem_pub"], PASSKEY_ARMOR_PURPOSE)
     if len(sealed) != _RECOVERY_SEAL_LEN:
         raise ArmorError("sealed passkey wrap is not the expected length")

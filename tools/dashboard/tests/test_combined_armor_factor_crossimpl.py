@@ -50,7 +50,7 @@ if (a.op === 'kem_pub') {
 } else if (a.op === 'enable_mfa') {
   out.armor = await enableMfa(a.armor, a.password, a.credential_id, a.kem_pub, 10000);
 } else if (a.op === 'disable_mfa') {
-  out.armor = await disableMfa(a.armor, a.password, prf(), 10000);
+  out.armor = await disableMfa(a.armor, a.password, prf(), a.new_password || null, 10000);
 } else if (a.op === 'set_password') {
   out.armor = await setPasswordFactor(a.armor, a.password, a.new_password, 10000);
 } else if (a.op === 'open_password') {
@@ -193,6 +193,38 @@ def test_browser_disable_mfa_python_opens_either_half():
     armor = _js({"op": "disable_mfa", "armor": armor, "password": _PW, "prf_hex": prf.hex()})["armor"]
     assert decrypt_root_key(armor, _PW).private_hex == root.private_hex
     assert decrypt_root_key_with_passkey(armor, prf).private_hex == root.private_hex
+
+
+def test_python_disable_mfa_new_password_browser_opens_new_and_passkey():
+    # "Add a usable password" from a combined armor: python dissolves the pair
+    # while setting a NEW standalone password; the browser opens with that new
+    # password and with the passkey, but NOT with the old combined passphrase.
+    from tools.network.idkit import KeyPair
+    from tools.network.idkit.armor import disable_mfa, encrypt_root_key_combined
+    root = KeyPair.generate()
+    prf = bytes([0x73]) * 32
+    armor = encrypt_root_key_combined(root, _PW, "cred-mfa", _kem_pub(prf), iterations=10_000)
+    armor = disable_mfa(armor, _PW, prf, new_passphrase="fresh-pw", iterations=10_000)
+    assert _js({"op": "open_password", "armor": armor, "password": "fresh-pw"})["seed_hex"] == root.private_hex
+    assert _js({"op": "open_passkey", "armor": armor, "prf_hex": prf.hex()})["seed_hex"] == root.private_hex
+    assert _js({"op": "open_password_should_fail", "armor": armor, "password": _PW})["opened"] is False
+
+
+def test_browser_disable_mfa_new_password_python_opens_new_and_passkey():
+    from tools.network.idkit import KeyPair
+    from tools.network.idkit.armor import (
+        ArmorPassphraseError, decrypt_root_key, decrypt_root_key_with_passkey,
+        encrypt_root_key_combined,
+    )
+    root = KeyPair.generate()
+    prf = bytes([0x74]) * 32
+    armor = encrypt_root_key_combined(root, _PW, "cred-mfa", _kem_pub(prf), iterations=10_000)
+    armor = _js({"op": "disable_mfa", "armor": armor, "password": _PW,
+                 "prf_hex": prf.hex(), "new_password": "fresh-pw"})["armor"]
+    assert decrypt_root_key(armor, "fresh-pw").private_hex == root.private_hex
+    assert decrypt_root_key_with_passkey(armor, prf).private_hex == root.private_hex
+    with pytest.raises(ArmorPassphraseError):
+        decrypt_root_key(armor, _PW)
 
 
 def test_change_password_agrees_across_impls():
