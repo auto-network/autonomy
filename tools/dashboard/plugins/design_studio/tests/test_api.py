@@ -252,7 +252,7 @@ def test_session_contribution_links_latest_design_for_exact_creator():
     [linked] = rows["auto-designer"]
     assert linked["kind"] == "action"
     assert linked["label"] == "Design Studio"
-    assert linked["href"] == "/design/rev-a2"
+    assert linked["href"] == "/design/rev-a2?from_session=auto-designer"
     assert "Session card refined" in linked["title"]
     assert rows["auto-unlinked"] == []
 
