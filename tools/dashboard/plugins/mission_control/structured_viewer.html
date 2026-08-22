@@ -30,7 +30,11 @@
   .mc-glance .g{
     display:flex;align-items:baseline;gap:6px;background:var(--card);
     border:1px solid var(--line);border-radius:8px;padding:6px 11px;
+    cursor:pointer;font:inherit;color:inherit;
   }
+  .mc-glance .g:hover{border-color:var(--line2)}
+  .mc-glance .g.on{border-color:var(--accent-dim);background:#232345}
+  .mc-glance .g.on span{color:var(--ink2)}
   .mc-glance .g b{font-size:1.05rem;color:#fff}
   .mc-glance .g span{font-size:.72rem;color:var(--ink3);text-transform:uppercase;letter-spacing:.04em}
   .mc-glance .g.gd b{color:var(--good)} .mc-glance .g.gw b{color:var(--warn)}
@@ -302,12 +306,53 @@
     if (it.state==="blocked") counts.blocked++;
     if (it.kind==="question" && it.state==="open" && it.ask) counts.asks++;
   });
+  // The hero numbers are single-select filters: tap one to see exactly the
+  // items it counts, across every pillar; tap it again to put the screen
+  // back the way it was. Selecting a chip while another is on switches to
+  // it — never two at once.
+  var GLANCE = [
+    {key:"proven",  cls:"gd", n:counts.proven,   label:"proven / done",
+     match:function (it) { return it.state==="proven"||it.state==="done"||it.state==="settled"; },
+     empty:"Nothing proven or done yet."},
+    {key:"flight",  cls:"gw", n:counts.activeish, label:"in flight",
+     match:function (it) { return it.state==="active"||it.state==="code_only"; },
+     empty:"Nothing in flight."},
+    {key:"blocked", cls:"gc", n:counts.blocked,  label:"blocked",
+     match:function (it) { return it.state==="blocked"; },
+     empty:"Nothing is blocked."},
+    {key:"asks",    cls:"ga", n:counts.asks,     label:"asks for you",
+     match:function (it) { return it.kind==="question" && it.state==="open" && !!it.ask; },
+     empty:"Nothing is waiting on you."},
+  ];
   var glance = document.getElementById("mc-glance");
-  [["gd",counts.proven,"proven / done"],["gw",counts.activeish,"in flight"],
-   ["gc",counts.blocked,"blocked"],["ga",counts.asks,"asks for you"]]
-  .forEach(function (g) {
-    var c = el("div","g "+g[0]); c.appendChild(el("b",null,String(g[1])));
-    c.appendChild(el("span",null,g[2])); glance.appendChild(c);
+  var glanceActive = null, glanceReturn = null;
+  function chipTitle(g){ return {proven:"Proven / done", flight:"In flight",
+    blocked:"Blocked", asks:"Asks for you"}[g.key]; }
+  function updateChips(){
+    GLANCE.forEach(function (g) {
+      g.btn.classList.toggle("on", glanceActive === g.key);
+      g.btn.setAttribute("aria-pressed", glanceActive === g.key ? "true" : "false");
+    });
+  }
+  function toggleGlance(key){
+    if (glanceActive === key){
+      glanceActive = null;
+      var back = glanceReturn; glanceReturn = null;
+      show(back || MID);
+      return;                       // show() calls updateChips()
+    }
+    if (glanceActive === null) glanceReturn = currentView;
+    glanceActive = key;
+    show("glance-" + key);
+  }
+  GLANCE.forEach(function (g) {
+    var c = el("button","g "+g.cls);
+    c.appendChild(el("b",null,String(g.n)));
+    c.appendChild(el("span",null,g.label));
+    c.setAttribute("aria-pressed","false");
+    c.addEventListener("click",function(){ toggleGlance(g.key); });
+    g.btn = c;
+    glance.appendChild(c);
   });
 
   // ── activity grid: surfaces × days from item timestamps ─────────
@@ -592,6 +637,9 @@
   var views = document.getElementById("mc-views");
   views.appendChild(overviewView());
   PILLARS.forEach(function (p) { views.appendChild(surfaceView(p.pillar_id)); });
+  GLANCE.forEach(function (g) {
+    views.appendChild(collectionView("glance-"+g.key, chipTitle(g), g.match, g.empty));
+  });
   views.appendChild(collectionView("decisions","Decisions",
     function (it) { return it.kind==="decision"; },
     "No decisions recorded yet."));
@@ -626,7 +674,13 @@
   navBtn("questions","Questions",null,{count:qN,warn:qN>0});
   navBtn("feed","Feed",null,null);
 
+  var currentView = null;
   function show(id){
+    currentView = id;
+    if (glanceActive !== null && id !== "glance-" + glanceActive) {
+      glanceActive = null; glanceReturn = null;   // left the filter another way
+    }
+    updateChips();
     document.querySelectorAll(".mc-view").forEach(function (n) {
       n.classList.toggle("on", n.id === "view-"+id);
     });
