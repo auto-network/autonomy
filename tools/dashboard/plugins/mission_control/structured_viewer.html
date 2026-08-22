@@ -707,6 +707,10 @@
   //    screen instead of guessed at. All times are ms since navigation
   //    start (the moment the link was tapped, srcdoc paths excepted). ──
   (function diag(){
+    // Mission accomplished (5.3 s -> tens of ms) and retired from the
+    // screen. The instrumentation stays: add ?diag=1 to any mission URL
+    // to bring the strip back, and the console.log below always fires.
+    var DIAG_ON = /[?&]diag=1/.test(location.search);
     var T_DONE = performance.now();
     var kb = function (n) { return (n/1024).toFixed(0) + " KB"; };
     var ms = function (n) { return n >= 2500 ? (n/1000).toFixed(1) + " s"
@@ -738,8 +742,10 @@
       "color:var(--ink3);background:var(--bg2);border:1px solid var(--line);" +
       "border-radius:7px;padding:5px 9px;margin:0 0 12px;overflow-x:auto;" +
       "white-space:nowrap";
-    var glance = document.getElementById("mc-glance");
-    glance.parentNode.insertBefore(line, glance.nextSibling);
+    if (DIAG_ON) {
+      var glance = document.getElementById("mc-glance");
+      glance.parentNode.insertBefore(line, glance.nextSibling);
+    }
     // Late chrome/network work shows up as the page staying busy after we
     // finish; stamp the load event too so the gap is attributable.
     window.addEventListener("load", function () {
