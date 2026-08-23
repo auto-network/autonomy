@@ -95,7 +95,7 @@ def operator_api(tmp_path, monkeypatch):
     monkeypatch.setattr(
         fleet_enrollment_routes.fleet_relay_sync,
         "publish_connector_runtime",
-        lambda _payload: None,
+        lambda _payload, org=None: None,
     )
     monkeypatch.setattr(
         fleet_enrollment_routes,

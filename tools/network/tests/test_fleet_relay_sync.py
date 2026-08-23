@@ -152,3 +152,29 @@ def test_checkpoint_file_frame_refuses_traversal_and_digest_tamper():
     valid = fleet_relay_sync._encode_file("base/one", b"body")
     with pytest.raises(fleet_relay_sync.FleetRelaySyncError):
         fleet_relay_sync._decode_file(valid[:-1] + b"x")
+
+
+def test_publish_connector_runtime_org_none_is_the_scopeless_target_not_unspecified(
+    monkeypatch,
+):
+    from tools.dashboard import link_serving_supervisor
+    from tools.graph.schemas import dashboard_shell
+
+    seen = []
+    monkeypatch.setattr(
+        link_serving_supervisor,
+        "control",
+        lambda org, op, args: seen.append(org) or {"ok": True},
+    )
+    monkeypatch.setattr(dashboard_shell, "shell_default_org", lambda: "anchore")
+
+    fleet_relay_sync.publish_connector_runtime({"x": 1}, org=None)
+    assert seen == [None], (
+        "org=None must reach control() as the scopeless target -- "
+        "'org or shell_default_org()' would silently replace it with the "
+        "cosmetic default org instead"
+    )
+
+    seen.clear()
+    fleet_relay_sync.publish_connector_runtime({"x": 1})
+    assert seen == ["anchore"], "an omitted org must still fall back to shell_default_org()"

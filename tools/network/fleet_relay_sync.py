@@ -503,12 +503,23 @@ def _has_checkpoint(machine_pub: str, root_pub: str) -> bool:
         return False
 
 
-def publish_connector_runtime(payload: object, *, org: str | None = None) -> None:
-    """Hand the serving subprocess the same short-lived process credential."""
+_ORG_UNSET = object()
+
+
+def publish_connector_runtime(payload: object, *, org=_ORG_UNSET) -> None:
+    """Hand the serving subprocess the same short-lived process credential.
+
+    ``org=None`` is a meaningful, valid target -- the scopeless/personal
+    serving connector -- not "unspecified". Only an omitted *org* falls back
+    to ``shell_default_org()``; ``org or shell_default_org()`` would silently
+    treat an explicit ``org=None`` the same as "not passed", which is
+    exactly the bug that misrouted this call to whatever org happened to be
+    cosmetically default instead of the scope the caller actually meant.
+    """
     from tools.dashboard import link_serving_supervisor
     from tools.graph.schemas.dashboard_shell import shell_default_org
 
-    target_org = org or shell_default_org()
+    target_org = shell_default_org() if org is _ORG_UNSET else org
     reply = link_serving_supervisor.control(target_org, CONTROL_OP, payload)
     if not isinstance(reply, dict) or reply.get("ok") is not True:
         raise FleetRelaySyncError(
