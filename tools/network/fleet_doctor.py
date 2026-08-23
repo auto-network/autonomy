@@ -336,8 +336,16 @@ def check_serving_readiness(report: dict) -> None:
                 _line(f"{label}: readiness check", f"FAILED to run: {exc!r}", fail=True)
                 continue
             should_run = cert_state["status"] == "ok" and has_grant
+            # org=None (settings_ops' "explicit scopeless write") and
+            # org="personal" resolve to the exact same underlying database
+            # (settings_ops(org=None) deterministically opens the personal
+            # org DB -- see commit 669cf592), so a connector launched under
+            # either name satisfies the other; they are not two independent
+            # scopes that both need their own running process.
+            aliases = {org} | ({"personal"} if org is None else set())
             is_running = any(
-                info.get("graph_org") == org or (org is None and info.get("graph_org") is None)
+                info.get("graph_org") in aliases
+                or (org is None and info.get("graph_org") is None)
                 for info in running.values()
             )
             if should_run and not is_running:
