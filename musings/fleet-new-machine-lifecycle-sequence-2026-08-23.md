@@ -252,6 +252,35 @@ membership gate serving) so the bootstrap link keeps routing.
 
 ---
 
+## Landing: joining → member — the completion flag that never flips
+
+The sync completing is **not** the end of onboarding as far as the UI is
+concerned, because **no signal the homepage router reads flips on first-sync
+completion.** The machine is a fully synced member (382 MB, 645k catalog rows,
+`checkpoints_received=1`), yet `page_index` (`tools/dashboard/server.py`) still
+routes it into the wrong flow, through two gates that both mis-model a
+personal-fleet member:
+
+1. **Harness / bootstrap gate** (`_bootstrap_gate_open`, true while no harness
+   row has `auth == "ok"`) → renders **"Set up your assistant"**
+   (`bootstrap.html`, "pick the coding assistant"). That is the **new-user
+   installation / harness-pick** flow — the wrong audience for a machine that
+   just joined a fleet and synced (`auto-d09u9`). A synced member should see its
+   dashboard and a fleet-aware "add an assistant when you want to run sessions"
+   prompt, not a fresh-machine setup that hides the completed sync.
+2. **Welcome gate** (`_welcome_gate_open`, requires personal identity **AND** a
+   **collaborative org**) → a personal-only machine has no collaborative org, so
+   the gate stays open **forever** and traps it on the Welcome shell, never
+   reaching `/beads` via the index (`auto-3my4s`). **Operator ruling: a personal
+   database alone must enter the dashboard; joining an org is not a gate.**
+
+Neither gate checks the real completion signal — "is the personal fleet synced."
+The fix is a durable **first-sync-done flag** (flipped when the first checkpoint
+installs) the router keys on: synced member → dashboard; genuinely fresh machine
+→ the install flow. This is the routing half of the fleet status-screen spec
+(`auto-p0tut`) and the seam where the fleet-**join** flow (this doc) and the
+new-user-**install** flow (the packaging roadmap) must be cleanly separated.
+
 ## The parties, and the state each one holds
 
 The workflow has **four** parties, not two. The relay is a stateful participant,
@@ -270,6 +299,53 @@ and most of the confusing failures live in *its* state, not the two dashboards'.
 2. **The relay's hub state** — whether home's tunnel-serve **WS is currently registered in `TunnelHub` for the org**. This is what actually routes a viewer.
 
 (1) can be true while (2) is false (the WS dropped, or was `4409`-replaced by a duplicate connector). A viewer only cares about (2). Diagnose the relay's hub, not home's flag.
+
+## Networking pipes — control plane, data plane, and which tunnel carries the sync
+
+Three distinct pipes, and the confusion is that two of them **share one channel**.
+
+**1. Registry (`registry.auto.network`) — out-of-band control / discovery only.**
+`node:announce` / `node:lookup` store and resolve `(org_uuid, machine_pub) →
+addresses`. This is the ~45s `reachability/query` in SJC's logs: pure peer
+discovery by stable identity, plus roster/binding/epoch metadata. **It never
+carries checkpoint bytes.**
+
+**2. Relay (`relay.auto.network`) — the rendezvous + NAT-traversal tunnel that
+carried THIS bring-up's sync.** Home holds a **tunnel-serve WebSocket** open to
+the relay; the relay's `TunnelHub` registers it **one-per-`org_uuid`**. SJC dials
+the relay **link token** (`/l/<token>`); the relay routes the dial through the
+hub to home's serve WS, opening a bidirectional **`ViewerChannel`**. **Control
+and data are MULTIPLEXED on this one channel:** `pull_checkpoint_once` sends
+`{op: PULL, hello, checkpoint: true}` (control), then `recv_message_stream()`
+yields `fleet.server-hello` (control) followed by `checkpoint.begin` → per-file
+frames (**the 382 MB of data**) → `checkpoint.end`. Same socket. That is exactly
+why the anti-abuse **byte limiter** (a data-plane concern) and the **`4404`
+close** (control-plane) both surfaced on one channel and were conflated. This
+path exists because **home is behind NAT** — the relay is the only way SJC
+reaches home's serving process today.
+
+**3. Direct tunnel (`fleet_direct_connect`) — the steady-state path that
+bypasses the relay.** Once pipe 1 resolves home's address + `machine_pub`, SJC
+can dial home **directly** (`fleet_sync_scheduler` / `peer_addresses`), same
+fleet protocol, no relay in the middle — the stable-identity route the invite
+link is meant to hand off to (see "Bootstrap → steady-state"). In this bring-up
+the sync rode **pipe 2**; direct-dial is the target once reachability is wired
+end to end.
+
+**Where the signal is vs where the data is:**
+- **Discovery / signal** → registry (pipe 1), out of band.
+- **Session control** (hello handshake, roster-epoch check, `PULL` op,
+  server-hello) → multiplexed on the sync channel (pipe 2 or 3).
+- **Bulk data** (the checkpoint) → the same sync channel, after the hello.
+- **Statistics** → **neither** a signal nor replicated data today. Each machine
+  writes its own transfer counters into the **local, non-replicated**
+  `fleet_sync_peer_state` as a **side effect** of a transfer and renders its
+  **own** copy — the card's "Observed here". Nothing about stats crosses the
+  wire, which is precisely why home and SJC disagree and why a dropped
+  connection loses the count (the Never / 0 B screenshot on a committed 382 MB
+  sync). The intended design moves stats **into the replicated data plane** as a
+  per-machine setting (`auto-eqcio`), so status is a pure **local query of
+  synced data** — no messaging, no side-channel accounting, no divergence.
 
 ## Failure-mode catalog
 
@@ -300,6 +376,32 @@ commit; "gap" is tracked work.
 | `AlphaError: checkpoint contains untracked logical rows` | `tracked_live != base.total_records` — 274 **deprecated duplicate settings base rows** streamed by the snapshot | fixed `f7c1996d` — skip `deprecated` base rows in the settings enumeration |
 | same AlphaError, off by exactly 1 | a settings row deprecated in **May** left a `tombstone=0` catalog orphan (deprecation never tombstoned the catalog) | tombstone the one orphan; **gap:** extend `reconcile_catalog` to tombstone orphaned-live entries |
 | catalog incomplete after activation | the SQLite < 3.38 `RETURNING`-on-upsert bug (host runs 3.37.2) dropped rows during the original bootstrap | fixed (split upsert + SELECT) + `reconcile_catalog` backfill (`4ba28a01`) |
+
+### Checkpoint install / materialize (SJC receiver)
+
+The whole second half of the bring-up lived here: the checkpoint transferred but
+**failed to install**, one distinct bug at a time, each found by reproducing the
+install **offline** against a copy of home's `personal.db` (no relay, no unlock)
+so every fix shipped tested in one shot. The governing principle that emerged:
+**any row the receiver cannot realize right now is skipped and quarantined in
+`fleet_sync_quarantine` (reason-coded), never aborting a multi-hundred-MB sync.**
+The quarantine `COUNT(*)` is the retained skip delta — a later canary reads it
+instead of re-scanning foreign keys.
+
+| Symptom | Root cause | Resolution |
+|---|---|---|
+| `AlphaError: checkpoint has unavailable attachment bytes` aborts the whole install | blob transfer is **unwired** in the live path (`blob_store=None` all the way down), so every attachment row is unrealizable (`file_path` is `NOT NULL`) | fixed `d4790cd7` — skip + quarantine attachments (reason `attachment_bytes_unavailable`); **gap:** wire the blob-fetch callback that drains them |
+| `sqlite3.IntegrityError: FOREIGN KEY constraint failed` aborts install | ~16.6k orphaned `thoughts` (+~40k transitive-orphan children) from the **April per-org migration** reference `sources` deleted without cascade; the strict receiver opens `foreign_keys=ON` and rejects them | fixed `41b7230a` — distinct `ForeignKeyOrphanError`, skip + quarantine (reason `fk_orphan`); the origin keeps its own copy, the fleet does not carry unrepresentable debris |
+| `WatermarkError: winner metadata/base hash mismatch at settings(...)` | `_live_row` resolved a settings **base** address with `supersedes IS NULL AND excludes IS NULL` but **no `deprecated = 0`** → `.fetchone()` returned an arbitrary deprecated sibling, so the winner-catalog hash (built through `_live_row`) disagreed with the materialized base (which the snapshot filters to `deprecated=0`) | fixed `3ac89f21` — `_live_row` selects the sole `deprecated=0` winner, the identical predicate the base stream uses; 14 such addresses live |
+| `WatermarkError: … missing live row at settings(supersedes:…)` | the override/exclusion `_upsert` DELETE was scoped to the shared `supersedes`/`excludes` **target**, not the row's own **id** → materializing sibling patches that share a target deleted one another; the winner catalog then referenced a wiped row | fixed `a6d591eb` — scope the delete by id; **this is silent override-history loss** on any sync with >1 patch per target, not just an install block |
+| `CodecError: settings.payload contains invalid JSON` (re-parsing the **materialized** row) | `_sql_value` only re-encoded `dict`/`list`; a **scalar** JSON value (a vault-sealed payload is a JSON **string literal**) fell through and was written to the column **unquoted**, failing the next `json.loads` | fixed `9a9d0215` — thread `policy.json_columns` so JSON columns `json.dumps` **any** value symmetric with the decode side (`None`↔`NULL` preserved); **this silently corrupts vault-sealed settings on every sync**, not just today's |
+| install succeeds but fleet status shows **Never / 0 B** | data commits atomically (graph present, `last_success` set), but the **byte counts, `local_watermark`, and the home-side serve record** are written on a **post-publish** step that a connection drop (the observed keepalive-timeout) erases | **gap:** `auto-eqcio` — commit transfer accounting durably **with** the atomic publish; record the serve side on home |
+
+*Stacking note:* these are ordered as hit live — each fix exposed the next. All
+three settings bugs are the same table class; the deprecated-sibling data itself
+is repaired on home (mark superseded rows `deprecated=1`) separately from the
+code, restoring the platform invariant of exactly one `deprecated=0` base row
+per key.
 
 ### Credential / cert
 | Symptom | Root cause | Resolution |
