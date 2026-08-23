@@ -1,5 +1,6 @@
 """Launch a visible stealth browser via Scrapling's StealthySession + HTTP REPL."""
 import json
+import os
 import shlex
 import threading
 import time
@@ -8,7 +9,9 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from scrapling.fetchers import StealthySession
 
-PORT = 8765
+# Port is env-configurable so it can be allocated cleanly on a crowded host
+# (host networking = shared port space). Defaults to 8765 for back-compat.
+PORT = int(os.environ.get("SCRAPER_REPL_PORT", "8765"))
 PROFILE_DIR = str(Path(__file__).parents[2] / ".browser_profile")
 
 # Global state
