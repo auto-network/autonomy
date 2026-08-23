@@ -1012,7 +1012,19 @@ class MutationCatalog:
             params = list(address[:4])
             role = str(address[4])
             if role == "base":
-                clauses.extend(["supersedes IS NULL", "excludes IS NULL"])
+                # The winner for a base address is the sole ``deprecated = 0``
+                # base row for this natural key; the deprecated siblings are
+                # superseded history the platform keeps but the base snapshot
+                # (iter_indexed_snapshot_mutations) already filters out with the
+                # same predicate. Without ``deprecated = 0`` here, a store that
+                # accumulated duplicate base rows makes this ``.fetchone()`` pick
+                # an arbitrary sibling, so the winner catalog's candidate hash
+                # (built through this resolver) disagrees with the materialized
+                # base row and the checkpoint fails install with a winner/base
+                # hash mismatch.
+                clauses.extend([
+                    "supersedes IS NULL", "excludes IS NULL", "deprecated = 0",
+                ])
             else:
                 row_id = role.rsplit(":", 1)[-1]
                 clauses.append("id=?")
