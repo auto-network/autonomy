@@ -33,6 +33,17 @@ def _thought(conn, identity: str, source_id: str) -> None:
     )
 
 
+def _attachment(conn, identity: str, source_id: str) -> None:
+    conn.execute(
+        "INSERT INTO attachments"
+        "(id,hash,filename,size_bytes,file_path,source_id,created_at) "
+        "VALUES(?,?,?,?,?,?,?)",
+        (identity, "hash-" + identity, identity + ".png", 10,
+         "data/attachments/xx/" + identity + ".png", source_id,
+         "2026-08-19T00:00:00Z"),
+    )
+
+
 def _identity(path: Path, marker: str) -> None:
     graph = GraphDB(path)
     try:
@@ -306,6 +317,57 @@ def test_checkpoint_install_skips_and_quarantines_foreign_key_orphans(
         )]
         assert quarantined == [
             ("thoughts", json.dumps(["t-orphan"]), "fk_orphan")
+        ]
+
+
+def test_checkpoint_install_quarantines_attachments_without_blob_bytes(
+    tmp_path: Path,
+) -> None:
+    """When blob transfer is not wired (blob_store is None), an attachment's
+    external bytes are unavailable and its NOT-NULL file_path cannot be filled.
+    The install must not abort: the attachment row is skipped and quarantined
+    for a later fetch, while the representable rows land and the catalog stays
+    consistent."""
+    origin_path = tmp_path / "origin.db"
+    target_path = tmp_path / "target.db"
+    _identity(origin_path, "origin-secret")
+    _identity(target_path, "target-secret")
+    with FleetSyncAlpha(origin_path, "machine-a") as origin:
+        conn = origin.graph.conn
+        with origin.author(100, "tx-1"):
+            _source(conn, "src", "kept")
+            _thought(conn, "t1", "src")
+            _attachment(conn, "att1", "src")
+        checkpoint = origin.checkpoint(
+            tmp_path / "checkpoint", roster_epoch=7,
+            active_roster=("machine-a", "machine-b"), target_chunk_bytes=4096,
+        )
+    assert checkpoint.winner_records == 3  # src, t1, att1
+
+    # No blob_store: attachment bytes are unavailable on the receiver.
+    install_checkpoint(
+        tmp_path / "checkpoint", target_path,
+        target_origin_incarnation="machine-b", expected_roster_epoch=7,
+        expected_active_roster=("machine-a", "machine-b"),
+    )
+    with FleetSyncAlpha(target_path, "machine-b") as target:
+        tconn = target.graph.conn
+        assert [r[0] for r in tconn.execute("SELECT id FROM sources")] == ["src"]
+        assert [r[0] for r in tconn.execute("SELECT id FROM thoughts")] == ["t1"]
+        # The attachment row was skipped (bytes unavailable), not installed.
+        assert tconn.execute(
+            "SELECT COUNT(*) FROM attachments"
+        ).fetchone()[0] == 0
+        # Catalog stays consistent with what landed: src + t1 live, att1 out.
+        assert tconn.execute(
+            "SELECT COUNT(*) FROM fleet_sync_catalog WHERE tombstone=0"
+        ).fetchone()[0] == 2
+        quarantined = [tuple(r) for r in tconn.execute(
+            "SELECT table_name,logical_address,reason FROM fleet_sync_quarantine"
+        )]
+        assert quarantined == [
+            ("attachments", json.dumps(["att1"]),
+             "attachment_bytes_unavailable")
         ]
 
 
