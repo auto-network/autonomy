@@ -209,7 +209,6 @@ def _initialize_data_root(
         )
     else:
         _init_orgs(data, report, first_org=first_org, first_org_name=first_org_name)
-    _migrate_all_org_dbs(data)
     _init_operational_dbs(data, report)
     _seed_bootstrap_allowlist(data, report)
     if tls:
@@ -504,25 +503,6 @@ def _init_fleet_join(data: Path, report: InitReport, *, invite: str):
         f"root {invitation.personal_root_pub[:12]}…",
     )
     return invitation
-
-
-def _migrate_all_org_dbs(data: Path) -> None:
-    """Run graph and co-located-ledger migrations for every existing org."""
-    import sqlite3
-
-    from tools.graph.db import GraphDB
-    from tools.network.ledger.store import LedgerStore
-
-    orgs_root = resolve_store("orgs", root=data)
-    for path in sorted(orgs_root.glob("*.db")):
-        GraphDB(path).close()
-        with sqlite3.connect(path) as conn:
-            has_ledger = conn.execute(
-                "SELECT 1 FROM sqlite_master "
-                "WHERE type='table' AND name='ledger_meta'"
-            ).fetchone() is not None
-        if has_ledger:
-            LedgerStore(path).close()
 
 
 def _init_operational_dbs(data: Path, report: InitReport) -> None:
