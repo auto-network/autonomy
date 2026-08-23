@@ -156,6 +156,79 @@ snapshot-replace**; every row carries its own timestamp (LWW). See ALPHA-1.0.md,
 
 ---
 
+## Bootstrap → steady-state: the invite link is not the fleet
+
+**The invite link is bootstrap only, and it is designed to die.** A joiner's
+`FleetRoute.rendezvous` is the `fleet:join` relay link (`.../l/<token>`). That
+grant is transient — a fixed TTL (7 days) and it is the *invitation*, not the
+fleet. A fleet that keeps synchronizing over the invite link stops the moment
+the grant lapses or the serving gate drops it: the relay returns
+`4404 CLOSE_UNKNOWN_LINK` (`relay.py:69`) because no tunnel is registered for the
+org, even though the link envelope still resolves.
+
+**Everything a fleet needs to find itself is stable and never changes:**
+
+- **`personal_org_uuid = uuid5(fixed_ns, personal_root_pub)`** — the fleet's own
+  org id, deterministic from the root.
+- **`machine_id` / `machine_pub`** — each member's durable identity.
+
+The reachability layer is built on exactly these: `node:announce` /
+`node:lookup` store `(personal_org_uuid, machine_pub) → {ws addrs, relay_url}`
+in the registry's `node_hints`, and `fleet_direct_connect(addr,
+expected_machine_pub=…)` dials a **specific machine** — no link token anywhere.
+
+So the intended lifecycle has two phases, and the transition is the load-bearing
+step:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant SJC as SJC (member)
+    participant Relay as Relay / registry
+    participant Home as Home (server)
+
+    Note over SJC,Home: BOOTSTRAP (once) — the invite link, transient
+    SJC->>Relay: pull over FleetRoute /l/<invite_token>
+    Relay->>Home: routes by the invite grant's org
+    Home-->>SJC: first checkpoint (bulk merge)
+
+    Note over SJC,Home: TRANSITION — move onto the stable identity
+    Home->>Relay: announce (personal_org_uuid, machine_pub) → addrs
+    Note right of Home: serve the personal_org_uuid tunnel whenever the<br/>fleet HAS MEMBERS, not while an invite grant lives<br/>(link_serving_supervisor: _has_live_grant OR fleet-has-members)
+    SJC->>Relay: node:lookup peers under personal_org_uuid
+    Relay-->>SJC: home's machine_pub → ws addrs / relay_url
+
+    Note over SJC,Home: STEADY STATE (forever) — no link token
+    loop every poll
+        SJC->>Home: fleet_direct_connect(addr, expected_machine_pub=home)
+        Home-->>SJC: deltas (or a fresh checkpoint), authed by machine_pub
+    end
+```
+
+**Two invariants this requires (both operator directives, 2026-08-23):**
+
+1. **The serving tunnel must stay online while the fleet has members.** Home
+   registers its tunnel under `personal_org_uuid` and keeps it up on
+   *membership*, not on a transient invite grant. Implemented in
+   `link_serving_supervisor._reconcile`: `should_run` is satisfied by
+   `_has_live_grant(org)` **OR** (the personal fleet has ≥2 active roster
+   members). A stable tunnel under the stable org id is what `node:lookup` finds.
+2. **Ongoing sync must route on `(personal_org_uuid, machine_id)`, not the invite
+   link.** The steady-state path (`fleet_sync_scheduler` → `peer_addresses` from
+   the `ReachabilityCache` → `fleet_direct_connect`) is machine-addressed and
+   link-independent, so it survives past any grant lifetime.
+
+**Current gap / remaining work:** a freshly bootstrapped member can stay stuck on
+the `fleet_relay_sync` invite-link path and never hand off to the reachability
+mesh — if home stops serving (invite grant gone) the member 4404s instead of
+re-finding home by `machine_pub`. Closing this = (a) invariant #1 (done — the
+membership serving gate), and (b) invariant #2: retire the `FleetRoute` invite
+rendezvous once reachability has resolved the origin's `machine_pub`, so the pull
+runs on the stable identity. Until (b) lands, keep the invite grant alive (or the
+membership gate serving) so the bootstrap link keeps routing.
+
+---
+
 ## Why the certificate expires, and who is supposed to refresh it
 
 The credential the sync loop signs its client-hello with is the **fleet process
