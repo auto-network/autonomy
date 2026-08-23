@@ -236,6 +236,24 @@ def check_local_store_migration(report: dict) -> None:
 
 # ── roster ───────────────────────────────────────────────────────────────
 
+def _roster_entry_setting_id(machine_pub: str) -> str | None:
+    """The Settings row id backing one roster entry -- what
+    --kick-roster-entry actually needs to target a removal. The row's
+    KEY is a hash of the entry's content, not machine_pub itself, so
+    this matches by scanning each row's payload directly."""
+    import sqlite3
+    from tools.graph.db import _org_db_path
+
+    conn = sqlite3.connect(_org_db_path("personal"))
+    rows = conn.execute(
+        "SELECT id, payload FROM settings WHERE set_id='autonomy.fleet.roster'"
+    ).fetchall()
+    for setting_id, payload in rows:
+        if machine_pub in payload:
+            return setting_id
+    return None
+
+
 def check_roster(report: dict) -> None:
     _section("Fleet roster (personal.db, org=None)")
     try:
@@ -253,9 +271,18 @@ def check_roster(report: dict) -> None:
         _line("active (resolved) members", len(active))
         # active is keyed by machine_pub (fleet_roster.resolve's own contract),
         # NOT machine_id -- compare against entry.machine_id, not the dict key.
+        report["roster_entries"] = []
         for machine_pub, entry in sorted(active.items()):
             marker = " <- this machine" if entry.machine_id == report.get("local_machine_id") else ""
-            _detail(f"        machine_id={entry.machine_id[:16]}...  seq={entry.seq}{marker}")
+            entry_id = _roster_entry_setting_id(machine_pub)
+            report["roster_entries"].append({
+                "machine_id": entry.machine_id, "machine_pub": machine_pub,
+                "setting_id": entry_id, "issued_at": entry.issued_at,
+            })
+            _detail(
+                f"        machine_id={entry.machine_id[:16]}...  seq={entry.seq}  "
+                f"kick-with: --kick-roster-entry {entry_id}{marker}"
+            )
         if len(entries) != len(active):
             _line(
                 "stale/kicked entries present",
@@ -702,6 +729,70 @@ def clear_stale_fleet_join(*, dry_run: bool = True) -> dict:
     return found
 
 
+def kick_roster_entry(setting_id: str, *, dry_run: bool = True) -> dict:
+    """Remove ONE named roster entry, by the Settings id check_roster
+    prints next to it (--kick-roster-entry <id>).
+
+    Deliberately narrow and explicit -- a machine_id/entry the operator
+    names, not an auto-detected "this looks stale" guess. Staleness
+    isn't decidable from the data alone (a disconnected-but-real machine
+    looks identical to a wiped-and-never-returning one), so this stays a
+    targeted tool, not a "clean everything" button. This is a raw
+    removal of the row (matching tonight's precedent), not a signed
+    root-authored KICK tombstone -- fine for clearing dead debris, but
+    not the cryptographically proper way to retire a still-real machine
+    from a fleet with other live members watching the roster.
+    """
+    import sqlite3
+    from tools.graph.db import _org_db_path
+
+    conn = sqlite3.connect(_org_db_path("personal"))
+    row = conn.execute(
+        "SELECT payload FROM settings WHERE set_id='autonomy.fleet.roster' AND id=?",
+        (setting_id,),
+    ).fetchone()
+    _section("Kick one roster entry")
+    if row is None:
+        _line("not found", f"no autonomy.fleet.roster row with id={setting_id}", fail=True)
+        return {"found": False}
+    _line(
+        "entry" + ("" if dry_run else " -- REMOVING"),
+        f"id={setting_id} payload={row[0][:200]}",
+    )
+    if dry_run:
+        _line("dry run", "not removed -- pass --yes to actually remove")
+        return {"found": True, "removed": False}
+    result = subprocess.run(
+        ["graph", "set", "remove", setting_id, "--org", "personal"],
+        check=False, capture_output=True, text=True,
+    )
+    ok = result.returncode == 0
+    _line("removed" if ok else "removal failed", result.stdout.strip() or result.stderr.strip(), fail=not ok)
+    return {"found": True, "removed": ok}
+
+
+def _run_remote(ssh_target: str, remote_cmd: str, forwarded_args: list[str]) -> int:
+    """Re-invoke this same script on a remote node over SSH and relay its
+    output, instead of duplicating any diagnostic logic for a second
+    environment.
+
+    ssh_target is a full destination string, whatever `ssh <that string>`
+    would accept verbatim (host, user@host, or -p/-i flags folded in --
+    e.g. "-i ~/.ssh/sjc -p 1226 jeremy@50.117.122.254"). remote_cmd is the
+    command prefix that runs Python in the right place on that node --
+    a bare venv host uses ".venv/bin/python3 -m tools.network.fleet_doctor";
+    a containerized node (SJC's actual shape tonight) needs
+    "docker exec autonomy-shipped-dashboard-1 python3 -m tools.network.fleet_doctor".
+    fleet_doctor does not guess this -- it's supplied by the caller, who
+    knows the target's actual deployment shape.
+    """
+    ssh_argv = ["ssh"] + ssh_target.split()
+    remote_argv = remote_cmd.split() + forwarded_args
+    full_cmd = ssh_argv + [subprocess.list2cmdline(remote_argv)]
+    result = subprocess.run(full_cmd)
+    return result.returncode
+
+
 def main() -> int:
     global _QUIET
     parser = argparse.ArgumentParser(description=__doc__)
@@ -711,12 +802,44 @@ def main() -> int:
         help="clear the stuck fleet:join invite/grant/publish-record chain "
              "(dry run unless --yes is also given)",
     )
-    parser.add_argument("--yes", action="store_true", help="actually delete with --clear-stale-invite (default is dry run)")
+    parser.add_argument(
+        "--kick-roster-entry", metavar="SETTING_ID",
+        help="remove one named roster entry by the Settings id check_roster "
+             "prints next to it (dry run unless --yes is also given)",
+    )
+    parser.add_argument("--yes", action="store_true", help="actually delete with --clear-stale-invite/--kick-roster-entry (default is dry run)")
+    parser.add_argument(
+        "--ssh", metavar="DESTINATION",
+        help="run this same diagnostic on a remote node instead of locally -- "
+             "everything else you pass still applies, just executed there. "
+             "e.g. --ssh '-i ~/.ssh/sjc -p 1226 jeremy@50.117.122.254'",
+    )
+    parser.add_argument(
+        "--remote-cmd", default=".venv/bin/python3 -m tools.network.fleet_doctor",
+        help="command prefix to run on the remote node with --ssh (default assumes "
+             "a bare venv host checkout; a containerized node needs something like "
+             "'docker exec <container> python3 -m tools.network.fleet_doctor')",
+    )
     args = parser.parse_args()
     _QUIET = args.json
 
+    if args.ssh:
+        forwarded = []
+        if args.json:
+            forwarded.append("--json")
+        if args.clear_stale_invite:
+            forwarded.append("--clear-stale-invite")
+        if args.kick_roster_entry:
+            forwarded += ["--kick-roster-entry", args.kick_roster_entry]
+        if args.yes:
+            forwarded.append("--yes")
+        return _run_remote(args.ssh, args.remote_cmd, forwarded)
+
     if args.clear_stale_invite:
         clear_stale_fleet_join(dry_run=not args.yes)
+        return 0
+    if args.kick_roster_entry:
+        kick_roster_entry(args.kick_roster_entry, dry_run=not args.yes)
         return 0
 
     report: dict = {}
