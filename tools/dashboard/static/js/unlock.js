@@ -158,7 +158,15 @@
         // is what gives a virgin system with zero collaborative orgs a tunnel
         // to serve the fleet on: its own. Idempotent and best-effort — a
         // failure here degrades to a sync-only credential, never a lockout.
-        if (!rc.org_uuid && rc.personal_org_uuid) {
+        // Run when the personal org isn't registered yet OR this machine is the
+        // tunnel server: provisionPersonalNetworkIdentity is idempotent (the
+        // registry returns the UUID for a same-root re-register, and the
+        // serve-cert is minted only when one isn't already provisioned), so a
+        // serving machine re-tries the serve-cert every unlock until it exists —
+        // gating on `!org_uuid` alone would permanently skip a serve-cert that
+        // failed on the registration unlock (registration lands, serving does
+        // not, and org_uuid is now set forever).
+        if (rc.personal_org_uuid && (!rc.org_uuid || rc.serves)) {
           try {
             await _signonI().provisionPersonalNetworkIdentity({
               personalRootSeed: new Uint8Array(seed),   // ceremony zeroes its copy

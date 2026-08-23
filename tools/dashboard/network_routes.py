@@ -1664,13 +1664,20 @@ async def post_serve_cert(request: Request) -> JSONResponse:
         )
         return JSONResponse({"ok": False, "error": f"could not write the serve key file: {e}"},
                             status_code=500)
+    # NetworkServeCertV2 is @home("organization") — same as the binding, an
+    # org-homed set refuses a scopeless (org=None) write. The personal org's
+    # serve-cert lives in the operator's own store ("personal"), which resolves
+    # to the same personal.db that serve_cert_state(None) reads. Without this the
+    # personal serve-cert POST 500s ("declares no single home"), the browser's
+    # best-effort provisioning swallows it, and the tunnel never comes up.
+    write_org = "personal" if settings_ops._resolve_org_arg(org) is None else org
     try:
         settings_ops.upsert_by_key(
             NETWORK_SERVE_CERT_SET_ID, NETWORK_SERVE_CERT_REVISION, "default",
             {"cert": body["cert"], "viewer_cert": body["viewer_cert"],
              "key_path": key_file,
              "root_pub": root_pub, "not_after": cert.not_after},
-            org=org,
+            org=write_org,
         )
     except Exception as e:
         logger.warning(
