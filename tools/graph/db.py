@@ -971,6 +971,23 @@ class GraphDB:
         from tools.network.fleet_sync_sim.catalog import MutationCatalog
         return MutationCatalog(self.conn, origin_incarnation).migrate_existing()
 
+    def reconcile_fleet_sync_catalog(self, origin_incarnation: str):
+        """Backfill untracked live rows into an already-activated catalog.
+
+        Repairs a production personal store whose catalog an earlier buggy
+        bootstrap left incomplete (the SQLite < 3.38 RETURNING-on-upsert gap),
+        which otherwise fails closed at checkpoint time and cannot self-heal
+        because migration early-skips once capture triggers exist. Additive
+        and trigger-safe: only synchronization metadata is written, never a
+        replicated table, so authored history is untouched.
+        """
+        if self.read_only:
+            raise sqlite3.OperationalError(
+                "fleet-sync catalog reconcile requires a writable database"
+            )
+        from tools.network.fleet_sync_sim.catalog import MutationCatalog
+        return MutationCatalog(self.conn, origin_incarnation).reconcile_catalog()
+
     def activate_fleet_sync_writers(self, origin_incarnation: str) -> bool:
         """Prepare, integrity-gate, and activate authored personal writes."""
         if self._fleet_catalog is not None:

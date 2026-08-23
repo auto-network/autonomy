@@ -303,3 +303,64 @@ def test_v2_catalog_upgrades_peer_state_without_rewriting_winners(
         assert "fleet_sync_peer_state" in _fleet_objects(db.conn)
     finally:
         db.close()
+
+
+def test_reconcile_backfills_untracked_rows_with_triggers_active(
+    tmp_path: Path,
+) -> None:
+    """A catalog left incomplete by a buggy bootstrap is repaired in place.
+
+    Reproduces the production failure: after writers are activated (capture
+    triggers installed), some live rows are missing winner metadata -- as the
+    SQLite < 3.38 RETURNING-on-upsert gap left them -- so a checkpoint fails
+    closed and migration can no longer help (it early-skips / rolls back once
+    triggers exist). reconcile_catalog() backfills exactly the missing rows,
+    additively and with triggers intact.
+    """
+    path = tmp_path / "personal.db"
+    db = GraphDB(path)
+    try:
+        for index in range(5):
+            _insert_source(db.conn, f"src-{index}")
+        db.conn.commit()
+        db.migrate_fleet_sync_catalog(ORIGIN)
+        db.activate_fleet_sync_writers(ORIGIN)
+
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' "
+            "AND name LIKE 'fleet_sync_%'"
+        ).fetchone()[0] > 0
+
+        full = db.conn.execute(
+            "SELECT COUNT(*) FROM fleet_sync_catalog WHERE tombstone=0"
+        ).fetchone()[0]
+        # Simulate the buggy bootstrap silently dropping live-row metadata:
+        # remove two catalog rows whose live rows still exist.
+        db.conn.execute(
+            "DELETE FROM fleet_sync_catalog WHERE address IN "
+            "(SELECT address FROM fleet_sync_catalog WHERE tombstone=0 LIMIT 2)"
+        )
+        db.conn.commit()
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM fleet_sync_catalog WHERE tombstone=0"
+        ).fetchone()[0] == full - 2
+
+        # Migration cannot repair a triggered catalog: it rolls back and raises.
+        with pytest.raises(WatermarkError):
+            db.migrate_fleet_sync_catalog(ORIGIN)
+
+        report = db.reconcile_fleet_sync_catalog(ORIGIN)
+        assert report.bootstrapped_rows == 2
+        assert report.live_rows == report.catalog_rows
+        assert report.triggers_active
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM fleet_sync_catalog WHERE tombstone=0"
+        ).fetchone()[0] == full
+
+        # Idempotent: a second pass finds nothing untracked.
+        again = db.reconcile_fleet_sync_catalog(ORIGIN)
+        assert again.bootstrapped_rows == 0
+        assert again.live_rows == again.catalog_rows
+        assert again.triggers_active
+    finally:
+        db.close()
