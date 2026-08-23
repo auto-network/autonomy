@@ -476,9 +476,9 @@
       c.title = "Open in " + surfName(it.surface_id);
       c.addEventListener("click", function (ev) {
         if (ev.target.closest("a,button,summary")) return;
-        if (!document.getElementById("view-" + it.surface_id)) return;
-        rememberPillar(it.surface_id);
-        show(it.surface_id);
+        if (!document.getElementById("view-" + viewIdFor(it.surface_id))) return;
+        rememberPillar(viewIdFor(it.surface_id));
+        show(viewIdFor(it.surface_id));
         var target = document.querySelector(
           '.mc-view [data-mc-anchor="' + it.key + '"]');
         if (target){
@@ -585,8 +585,9 @@
   }
 
   // ── per-surface view builder ────────────────────────────────────
+  function viewIdFor(sid){ return sid === MID ? "mission-legacy" : sid; }
   function surfaceView(sid){
-    var v = el("div","mc-view"); v.id = "view-"+(sid || "pillars");
+    var v = el("div","mc-view"); v.id = "view-"+viewIdFor(sid);
     var mine = (sid ? liveItems.filter(function (it) { return it.surface_id===sid; })
                     : liveItems.slice())
       .sort(function (a,b){ return (a.order||0)-(b.order||0) ||
@@ -914,7 +915,7 @@
   // The one way any reference reaches an item: its pillar's page, with
   // the section revealed and the card flashed.
   function gotoItem(it){
-    var vid = it.surface_id;
+    var vid = viewIdFor(it.surface_id);
     if (!document.getElementById("view-" + vid)) return;
     rememberPillar(vid);
     show(vid);
@@ -956,9 +957,8 @@
     var out = PILLARS.map(function (p) {
       return {id: p.pillar_id, name: p.name, color: p.color || "#8391a8"};
     });
-    if (document.getElementById("view-" + MID) && liveItems.some(function (it) {
-        return it.surface_id === MID; }))
-      out.push({id: MID, name: "Mission (legacy)", color: "#e2e8f0"});
+    if (document.getElementById("view-mission-legacy"))
+      out.push({id: "mission-legacy", name: "Mission (legacy)", color: "#e2e8f0"});
     return out;
   }
   function selectedPillar(){
