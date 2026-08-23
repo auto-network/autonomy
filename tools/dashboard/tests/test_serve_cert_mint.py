@@ -84,6 +84,70 @@ def test_browser_serve_cert_mint_is_idkit_compatible(mode):
     assert 29 * 86400 < span <= 30 * 86400 + 120
 
 
+PERSONAL_HARNESS = (
+    Path(__file__).resolve().parent / "personal_tunnel_provision_harness.js"
+)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_browser_personal_tunnel_provision_is_idkit_compatible():
+    """The REAL provisionPersonalNetworkIdentity brings the personal identity
+    online as its OWN org (the "personal tunnel"): it self-signs the registration
+    envelope AND mints the serving delegate, both with the personal root — no
+    org-key, no org-scoped persona. This runs it in Node and verifies both
+    artifacts with idkit."""
+    from tools.network import fleet_runtime
+    from tools.network.idkit import verify_signature
+    from tools.network.registry.signing import request_signing_input
+
+    personal = KeyPair.generate()
+    org_uuid = fleet_runtime.personal_org_uuid(personal.public_hex)
+
+    result = subprocess.run(
+        ["node", str(PERSONAL_HARNESS)],
+        env={**os.environ,
+             "AUTONOMY_SEED_HEX": personal.private_hex,
+             "AUTONOMY_ROOT_PUB": personal.public_hex,
+             "AUTONOMY_ORG_UUID": org_uuid},
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + "\n" + result.stderr
+    out = json.loads(result.stdout)
+
+    # 1. Registration envelope — self-signed by the personal root over the
+    #    registry path, binding the personal org to the personal root itself.
+    assert out["register"]["org"] is None            # personal scope (org=None)
+    env = out["register"]["envelope"]
+    assert env["signer"] == personal.public_hex
+    assert env["payload"] == {
+        "org_uuid": org_uuid,
+        "root_pub": personal.public_hex,
+        "recovery_policy": "none",
+    }
+    verify_signature(
+        personal.public_hex, env["sig"],
+        request_signing_input("POST", "/v1/orgs", env["ts"],
+                              env["signer"], env["payload"]),
+    )
+
+    # 2. Serving delegate — chains to the personal root, persona subject is the
+    #    personal root, viewer cert identity-neutral, key matches child_pub.
+    assert out["serve"]["org"] is None
+    cert = DelegationCert.from_json(out["serve"]["cert"])
+    viewer_cert = DelegationCert.from_json(out["serve"]["viewer_cert"])
+    now = (cert.not_before + cert.not_after) // 2
+    verify_chain(cert, personal.public_hex, org=org_uuid, now=now,
+                 required_scope="tunnel:serve")
+    verify_chain(viewer_cert, personal.public_hex, org=org_uuid, now=now,
+                 required_scope="tunnel:serve")
+    assert cert.subject.kind == "persona"
+    assert cert.subject.id == personal.public_hex
+    assert viewer_cert.subject.kind == "operator"
+    assert viewer_cert.subject.id == viewer_cert.child_pub
+    assert KeyPair.from_private_hex(out["serve"]["private_key"]).public_hex == \
+        cert.child_pub
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
 def test_sign_on_checks_serving_but_cannot_mint_from_a_legacy_org_armor():
     """Sign-on renews serving credentials, because the personal seed it holds

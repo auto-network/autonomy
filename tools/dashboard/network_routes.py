@@ -72,6 +72,7 @@ from tools.graph.schemas.network_identity import (  # noqa: F401
     NETWORK_SERVE_CERT_SET_ID,
     SERVE_CERT_SCOPE,
 )
+from tools.graph.schemas.personal_identity import PERSONAL_IDENTITY_SET_ID
 
 DEFAULT_REGISTRY_URL = "https://registry.auto.network"
 _PERSONA_PUB_RE = re.compile(r"^[0-9a-f]{64}\Z")
@@ -218,6 +219,36 @@ def _first_member(set_id: str, org: str | None):
         if isinstance(m.payload, dict):
             return m
     return None
+
+
+def _root_pub_has_stored_armor(org: str | None, root_pub: str) -> bool:
+    """True when ``root_pub``'s encrypted armor is already persisted, so a
+    registration binding it cannot strand the key when the page closes.
+
+    A normal org proves recoverability with its ``NetworkOrgKeyV2`` org-key.
+    The PERSONAL org (``org is None``) binds the personal root itself, whose
+    armor is the personal identity row (``autonomy.identity.personal``) — the
+    reachability cert the fleet mints is signed by that same personal root, so
+    the personal org must bind it, and the personal identity satisfies the
+    identical recoverability invariant without a redundant org-key.
+    """
+    org_key = _first_member(NETWORK_ORG_KEY_SET_ID, org)
+    if org_key is not None and org_key.payload.get("root_pub") == root_pub:
+        return True
+    # Personal org: the scope resolves to the personal store (the CALLER_ORG
+    # sentinel collapses to None when no org is stamped), the bound root IS the
+    # personal root, and its recoverable armor is the personal identity row —
+    # gate the fallback on true personal scope so a NAMED org still requires its
+    # own org-key.
+    if settings_ops._resolve_org_arg(org) is None:
+        personal = _first_member(PERSONAL_IDENTITY_SET_ID, None)
+        if (
+            personal is not None
+            and personal.payload.get("root_pub") == root_pub
+            and personal.payload.get("armored_private_key")
+        ):
+            return True
+    return False
 
 
 async def get_org_key(request: Request) -> JSONResponse:
@@ -1187,16 +1218,17 @@ async def post_register(request: Request) -> JSONResponse:
         )}, status_code=403)
 
     try:
-        stored = _first_member(NETWORK_ORG_KEY_SET_ID, org)
+        recoverable = _root_pub_has_stored_armor(org, payload["root_pub"])
     except Exception as e:
         return JSONResponse({"ok": False,
-                             "error": f"could not read the org key setting: {e}"},
+                             "error": f"could not read the stored key armor: {e}"},
                             status_code=500)
-    if stored is None or stored.payload.get("root_pub") != payload["root_pub"]:
+    if not recoverable:
         return JSONResponse({"ok": False, "error": (
-            "the registration's root_pub does not match a stored org key — "
-            "store the encrypted armor first, or the identity would be "
-            "unrecoverable the moment this page closes"
+            "the registration's root_pub matches no stored key armor — "
+            "store the encrypted armor first (an org-key for a normal org, or "
+            "the personal identity for the personal org), or the identity "
+            "would be unrecoverable the moment this page closes"
         )}, status_code=409)
 
     registry_url = _registry_url()
@@ -1251,10 +1283,16 @@ async def post_register(request: Request) -> JSONResponse:
         "last_renewed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     binding_key = urllib.parse.urlsplit(registry_url).netloc or registry_url
+    # NetworkBindingV1 is @home("organization"): an org-homed set refuses a
+    # scopeless (org=None) WRITE — it must name a store (operator ruling
+    # 2026-08-20, no default scope). The personal org's store is the operator's
+    # own — "personal" — which resolves to the same personal.db that the fleet
+    # reads back via _load_binding(None). A named org keeps its own slug.
+    write_org = "personal" if settings_ops._resolve_org_arg(org) is None else org
     try:
         settings_ops.upsert_by_key(
             NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION, binding_key,
-            binding, org=org,
+            binding, org=write_org,
         )
     except Exception as e:
         return JSONResponse({"ok": False, "error": (
@@ -1343,10 +1381,13 @@ async def post_renew(request: Request) -> JSONResponse:
     binding["binding_expires_at"] = time.strftime(
         "%Y-%m-%dT%H:%M:%SZ", time.gmtime(expires_at))
     binding["last_renewed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    # See post_register: an org-homed set refuses a scopeless write, so the
+    # personal binding is written under the operator's own store ("personal").
+    write_org = "personal" if settings_ops._resolve_org_arg(org) is None else org
     try:
         settings_ops.upsert_by_key(
             NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION, member.key,
-            binding, org=org,
+            binding, org=write_org,
         )
     except Exception as e:
         return JSONResponse({"ok": False, "error": (

@@ -315,14 +315,14 @@ def _activate_runtime(
             and tunnel.selected_machine_id == credential.machine_id
         )
     if publish_connector:
-        # This activation is always for the operator's own personal/
-        # scopeless Fleet sync scope, never a specific org -- pass org=None
-        # explicitly rather than leaving publish_connector_runtime to fall
-        # back to shell_default_org(), which is documented as a UI/
-        # attribution default only, never a request-scoping input. Left
-        # implicit, it notifies whatever org happens to be cosmetically
-        # "default" (e.g. alphabetically first) instead of the scope this
-        # credential is actually for.
+        # Serve the fleet connector on the PERSONAL tunnel (org=None →
+        # personal.db), never a shared org's: the fleet is anchored on the
+        # personal root — its roster, delegation cert, and this binding (loaded
+        # above via _reachability_binding → _load_binding(None)) all live in the
+        # personal store — so a virgin system with zero collaborative orgs still
+        # has exactly one tunnel to serve on, its own. Left implicit,
+        # publish_connector_runtime would fall back to shell_default_org() (a
+        # UI/attribution default) and notify whatever org is cosmetically first.
         try:
             fleet_relay_sync.publish_connector_runtime(payload, org=None)
         except (
@@ -489,6 +489,7 @@ async def local_runtime_context(request: Request) -> JSONResponse:
         return JSONResponse({"ok": True, "enabled": False})
     root_pub, entry = context
     binding = _reachability_binding()
+    tunnel = fleet_tunnel_server.state()
     return JSONResponse({
         "ok": True,
         "enabled": True,
@@ -499,6 +500,17 @@ async def local_runtime_context(request: Request) -> JSONResponse:
         # browser mints the reachability cert with org=org_uuid; null means
         # discovery stays off and only the sync credential is delivered.
         "org_uuid": binding.get("org_uuid") if binding else None,
+        # The deterministic org_uuid the personal identity registers itself
+        # under (the "personal tunnel"). Stable per personal root, so the browser
+        # can register it at unlock — idempotently — whenever org_uuid is still
+        # null, and every machine derives the same value.
+        "personal_org_uuid": fleet_runtime.personal_org_uuid(root_pub),
+        # True only for the machine currently selected to serve the tunnel: only
+        # it provisions a serving delegate. A joiner registers the org (so its
+        # reachability cert verifies) but never serves.
+        "serves": bool(
+            tunnel.allowed and tunnel.selected_machine_id == entry.machine_id
+        ),
     })
 
 

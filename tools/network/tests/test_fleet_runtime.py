@@ -163,3 +163,23 @@ def test_machine_seed_without_reachability_cert_is_refused():
         fleet_runtime.FleetRuntimeCredential.from_browser_payload(
             payload, personal_root_pub=root.public_hex, roster_entries=[entry],
             org_uuid=ORG_UUID, now=NOW)
+
+
+def test_personal_org_uuid_is_deterministic_and_root_scoped():
+    a = KeyPair.from_private_hex("12" * 32).public_hex
+    b = KeyPair.from_private_hex("34" * 32).public_hex
+    # Deterministic: the same personal root always yields the same org_uuid, so
+    # any machine can register the personal org idempotently with no
+    # coordination.
+    assert fleet_runtime.personal_org_uuid(a) == fleet_runtime.personal_org_uuid(a)
+    # A valid UUID string.
+    import uuid as _uuid
+    assert str(_uuid.UUID(fleet_runtime.personal_org_uuid(a))) == \
+        fleet_runtime.personal_org_uuid(a)
+    # Distinct roots get distinct org_uuids.
+    assert fleet_runtime.personal_org_uuid(a) != fleet_runtime.personal_org_uuid(b)
+
+
+def test_personal_org_uuid_rejects_non_pubkey():
+    with pytest.raises(fleet_runtime.FleetRuntimeError):
+        fleet_runtime.personal_org_uuid("not-a-pubkey")
