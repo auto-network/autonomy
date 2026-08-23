@@ -484,6 +484,8 @@
     rescueEmpties();
   }
   function rescueEmpties(){
+    var pv0 = document.getElementById("view-pillars");
+    if (pv0 && pv0._syncFilters) pv0._syncFilters();
     document.querySelectorAll("#mc-views .mc-view").forEach(function (v) {
       var old = v.querySelector(".mc-noresult");
       if (old) old.remove();
@@ -758,7 +760,9 @@
     var host = el("div"); v.appendChild(host);
     var secEls = {};
     var subs = el("div","mc-subtabs");
+    var activeName = names[0];
     function showSection(name){
+      activeName = name;
       names.forEach(function (n) {
         if (secEls[n]) secEls[n].style.display = (n === name) ? "" : "none";
       });
@@ -768,6 +772,30 @@
       if (typeof rescueEmpties === "function") rescueEmpties();
     }
     v._showSection = showSection;
+    // THE SECTION TABS OBEY THE FILTERS. With a filter on, each tab
+    // recounts what actually matches, tabs that can contain nothing
+    // disappear, and if the section on screen went empty the view jumps
+    // to the first one with matches — tapping "asks" lands the reader ON
+    // the asks, never on a sibling section insisting nothing exists.
+    v._syncFilters = function(){
+      var filtered = !!(glanceActive || pillarFilter);
+      var vis = {}, total = 0, firstWith = null;
+      names.forEach(function (n) {
+        var count = filtered
+          ? secEls[n].querySelectorAll(
+              ".mc-item:not(.mc-gout):not(.mc-hidden)").length
+          : sections[n].length;
+        vis[n] = count; total += count;
+        if (count && !firstWith) firstWith = n;
+      });
+      [].forEach.call(subs.children, function (b) {
+        var n2 = b.dataset.sec;
+        var cnt = b.querySelector(".n");
+        if (cnt) cnt.textContent = " " + vis[n2];
+        b.style.display = (filtered && total && !vis[n2]) ? "none" : "";
+      });
+      if (filtered && total && !vis[activeName]) showSection(firstWith);
+    };
     names.forEach(function (name) {
       var b = el("button", null, name);
       b.dataset.sec = name;
