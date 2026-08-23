@@ -182,6 +182,51 @@ def test_settings_override_tombstone_does_not_delete_base_slot(tmp_path: Path) -
         db.close()
 
 
+def test_settings_sibling_overrides_sharing_a_target_all_survive(
+    tmp_path: Path,
+) -> None:
+    """Two override patches on the same target are distinct logical rows, each
+    keyed by its own id. Materializing them must not delete one another: the
+    pre-insert delete is scoped by id, not just the shared supersedes target.
+    Without the id scope, override-b's upsert wipes override-a (same
+    supersedes=base-id), silently dropping real override history and leaving the
+    winner catalog pointing at a row the staged DB no longer holds.
+    """
+    db = GraphDB(tmp_path / "personal.db")
+    try:
+        common = (
+            ("created_at", "2026-08-19T10:00:00Z"), ("deprecated", 0),
+            ("key", "one"), ("payload", {"enabled": True}),
+            ("publication_state", "raw"), ("schema_revision", 1),
+            ("set_id", "example.sync"),
+            ("updated_at", "2026-08-19T10:00:00Z"),
+        )
+        base = Mutation(
+            "settings", ("example.sync", 1, "one", "raw", "base"), 1,
+            False, tuple(sorted(common + (("id", "base-id"),))),
+        )
+        override_a = Mutation(
+            "settings",
+            ("example.sync", 1, "one", "raw", "supersedes:base-id:override-a"),
+            2, False,
+            tuple(sorted(common + (("id", "override-a"),
+                                   ("supersedes", "base-id")))),
+        )
+        override_b = Mutation(
+            "settings",
+            ("example.sync", 1, "one", "raw", "supersedes:base-id:override-b"),
+            3, False,
+            tuple(sorted(common + (("id", "override-b"),
+                                   ("supersedes", "base-id")))),
+        )
+        materialize(db.conn, [base, override_a, override_b])
+        assert sorted(
+            row[0] for row in db.conn.execute("SELECT id FROM settings")
+        ) == ["base-id", "override-a", "override-b"]
+    finally:
+        db.close()
+
+
 def _seed_every_logical_table(db: GraphDB, blob: bytes, local_root: Path) -> str:
     digest = _seed_source_graph(db, blob, local_root)
     ciphertext = b"sealed personal secret"

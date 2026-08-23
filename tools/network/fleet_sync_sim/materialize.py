@@ -237,11 +237,21 @@ def _upsert(conn: sqlite3.Connection, mutation: Mutation, row: dict[str, object]
         if role == "base":
             clauses.extend(["supersedes IS NULL", "excludes IS NULL"])
         elif role.startswith("supersedes:"):
-            clauses.append("supersedes=?")
+            # Each override/exclusion patch is its OWN logical row, identified by
+            # its own id (the role suffix embeds it, as _live_row's non-base
+            # branch relies on). Scope the pre-insert delete to that id — without
+            # it, the delete matches every sibling patch sharing the same
+            # supersedes/excludes TARGET, so materializing one wipes out the
+            # others: only the last-processed survives, silently dropping real
+            # override history and leaving the winner catalog pointing at a row
+            # the staged DB no longer holds ("missing live row" at install).
+            clauses.extend(["supersedes=?", "id=?"])
             params.append(row["supersedes"])
+            params.append(row["id"])
         elif role.startswith("excludes:"):
-            clauses.append("excludes=?")
+            clauses.extend(["excludes=?", "id=?"])
             params.append(row["excludes"])
+            params.append(row["id"])
         else:
             raise MaterializationError(f"unknown settings row role: {role}")
         conn.execute("DELETE FROM settings WHERE " + " AND ".join(clauses), params)
