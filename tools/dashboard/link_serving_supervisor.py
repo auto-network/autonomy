@@ -244,6 +244,28 @@ def _has_live_grant(org: str | None, now: float) -> bool:
     return False
 
 
+def _is_personal_fleet_scope(org: str | None) -> bool:
+    """True when *org* is the personal fleet's own serving scope.
+
+    The personal fleet serves under the personal store (``org=None`` /
+    ``'personal'``) and, once the personal root is registered as its own org,
+    the deterministic ``personal_org_uuid`` (both stable, both never change).
+    A collaborative org — a real slug/uuid — is never matched, so its serving
+    still requires a genuine published grant.
+    """
+    from tools.graph import settings_ops
+
+    if settings_ops._resolve_org_arg(org) is None:
+        return True
+    try:
+        from tools.network import fleet_runtime, fleet_tunnel_server
+
+        root_pub = fleet_tunnel_server._personal_root_pub()
+        return bool(root_pub) and org == fleet_runtime.personal_org_uuid(root_pub)
+    except Exception:
+        return False
+
+
 # ── key/cert materialization for the subprocess ───────────────
 
 
@@ -565,7 +587,18 @@ class ServingSupervisor:
             return self._stop_for_fleet_assignment(org, eligibility)
         state = serve_cert_state(org, now=now)
         proc = self._procs.get(org)
-        should_run = state["status"] == "ok" and _has_live_grant(org, now)
+        # The personal fleet's tunnel must stay online whenever the fleet has
+        # members, independent of any transient invite grant: fleet sync rides
+        # the STABLE personal_org_uuid + machine_id, and the invite link is only
+        # the bootstrap (it expires and is torn down). Operator directive
+        # 2026-08-23 — a personal fleet with members always serves. Collaborative
+        # orgs are unaffected: _is_personal_fleet_scope excludes them, so they
+        # still require a genuine live grant.
+        fleet_has_members = (eligibility.active_machine_count or 0) >= 2
+        should_run = state["status"] == "ok" and (
+            _has_live_grant(org, now)
+            or (fleet_has_members and _is_personal_fleet_scope(org))
+        )
 
         if not should_run:
             # Fresh-tunnel grace: a connector just launched for a first publish
