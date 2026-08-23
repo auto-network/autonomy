@@ -223,7 +223,7 @@
   .mc-psum:hover{border-color:var(--line2)}
   .mc-psum .hd{display:flex;align-items:flex-start;gap:8px}
   .mc-psum .hd b{flex:1;min-width:0}
-  .mc-minirow{display:flex;align-items:center;margin:8px 0 2px}
+  .mc-minirow{display:flex;align-items:center;margin:0 0 6px}
   .mc-minirow .ago{font-size:.7rem;color:var(--ink3)}
   .mc-minirow .grow{flex:1}
   .mc-psum .hd .dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;align-self:center}
@@ -414,35 +414,30 @@
 
   // ── activity grid: surfaces × days from item timestamps ─────────
   (function activity(){
-    // WHAT'S BEEN HAPPENING LATELY, not a calendar. The last ~100 item
-    // events (real happened_at/updated_at stamps) sliced into eight
-    // recency columns ending at now — a dense mission's grid spans hours,
-    // a sparse one's spans weeks, and either way the right edge is
-    // "lately", which is the only thing a reader wants from it. Day
-    // labels meant nothing at that variable scale and are gone; the
-    // narrow graphic gives the pillar names their room back.
-    var COLS = 8, LAST = 100;
+    // Fixed hourly buckets over the last 48 hours, right edge = now, one
+    // column per clock hour regardless of how dense or sparse a pillar's
+    // activity is. Events older than the 48h window simply don't count —
+    // this is a calendar now, not the old adaptive-span "lately" view.
+    var COLS = 48, HOUR_MS = 3600000, WINDOW_MS = COLS * HOUR_MS;
     // LIVE items decide the row: a mission surface holding only retired
     // history is content-free, and its grid row retires with it.
     var hasMissionItems = liveItems.some(function (it) { return it.surface_id===MID; });
     var surfaces = (hasMissionItems ? [{id:MID}] : [])
       .concat(PILLARS.map(function(p){return {id:p.pillar_id};}));
+    var windowStart = Date.now() - WINDOW_MS;
     var events = [];
     ITEMS.forEach(function (it) {
       var d = when(it); if (!d) return;
-      events.push({t: d.getTime(), sid: it.surface_id});
+      var t = d.getTime();
+      if (t < windowStart) return;
+      events.push({t: t, sid: it.surface_id});
     });
-    events.sort(function (a,b){ return a.t - b.t; });
-    if (events.length > LAST) events = events.slice(events.length - LAST);
-    var buckets = {};   // sid -> [count per recency column, oldest first]
+    var buckets = {};   // sid -> [count per hour column, oldest first]
     surfaces.forEach(function (s) { buckets[s.id] = new Array(COLS).fill(0); });
-    if (events.length){
-      var t0 = events[0].t, span = Math.max(1, Date.now() - t0);
-      events.forEach(function (e) {
-        var idx = Math.min(COLS - 1, Math.floor((e.t - t0) / span * COLS));
-        if (buckets[e.sid]) buckets[e.sid][idx]++;
-      });
-    }
+    events.forEach(function (e) {
+      var idx = Math.min(COLS - 1, Math.floor((e.t - windowStart) / HOUR_MS));
+      if (buckets[e.sid]) buckets[e.sid][idx]++;
+    });
     var max = 1;
     surfaces.forEach(function (s) { buckets[s.id].forEach(function (n) { if (n>max) max=n; }); });
     var lvl = function (n) {
@@ -751,13 +746,9 @@
       var done = (n.proven || 0) + (n.done || 0) + (n.settled || 0);
       var asks = mine.filter(function (it) {
         return it.kind==="question" && it.state==="open" && it.ask; }).length;
-      pc.appendChild(hd);
-      var status = mine.filter(function (it) { return it.kind==="status"; })[0];
-      if (status) pc.appendChild(el("div","last",
-        String(status.body||status.title).split(/\n\s*\n/)[0]));
-      else if (p.last_done) pc.appendChild(el("div","last",p.last_done));
-      // Between the text and the colour bar: freshness left, the
-      // ask/blocked badges right — one row, full-width title untouched.
+      // Above the title, one slim row: freshness left, the ask/blocked
+      // badges right. Keeping this off the title's own row is what gives
+      // the (name-length-variable) title the card's full width.
       var freshest0 = mine.slice().sort(function (a,b) {
         return (when(b)||0) - (when(a)||0); })[0];
       var fw0 = freshest0 && when(freshest0);
@@ -776,6 +767,11 @@
         }
         pc.appendChild(miniRow);
       }
+      pc.appendChild(hd);
+      var status = mine.filter(function (it) { return it.kind==="status"; })[0];
+      if (status) pc.appendChild(el("div","last",
+        String(status.body||status.title).split(/\n\s*\n/)[0]));
+      else if (p.last_done) pc.appendChild(el("div","last",p.last_done));
       var st = {done:0, flight:0, blocked:0, rest:0};
       mine.forEach(function (it) {
         if (it.state==="proven"||it.state==="done"||it.state==="settled") st.done++;
