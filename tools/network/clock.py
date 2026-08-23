@@ -143,11 +143,16 @@ MAX_ATTESTATION_TTL = 365 * 86_400
 #: session, short enough that a leaked credential dies on its own.
 TURN_CREDENTIAL_TTL_SECONDS = 15 * 60
 
-#: Hard ceiling on the browser-minted, machine-signed Fleet process
-#: delegation. It is re-minted after an unlock and never survives a process
-#: restart, so twelve hours covers one working session without turning the
-#: ephemeral key into durable machine authority.
-FLEET_RUNTIME_DELEGATION_TTL_SECONDS = 12 * 60 * 60
+#: Lifetime of the browser-minted, machine-signed Fleet process delegation.
+#: Matched to the serve-cert at 30 days: the credential is PERSISTED (so it
+#: survives a process restart) and opportunistically re-minted at unlock once
+#: it is older than ~10 days, exactly like the tunnel serve-cert's renew path
+#: (SERVE_CERT_RENEW_BELOW_DAYS). The old 12h value only made sense while it
+#: lived solely in memory and died on every restart; persistence makes the
+#: 30-day TTL both safe and the correct cadence (one unlock every ~20 days
+#: keeps it fresh, and a restart re-loads the still-valid persisted cert
+#: instead of demanding a fresh unlock).
+FLEET_RUNTIME_DELEGATION_TTL_SECONDS = 30 * 24 * 60 * 60
 
 #: Default lifetime of a storage delegate grant, milliseconds (the
 #: key-control plane is HLC/millisecond-based).

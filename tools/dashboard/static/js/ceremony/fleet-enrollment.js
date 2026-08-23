@@ -22,7 +22,12 @@ export const FLEET_MEMBER_ASSIGNMENT = 'personal_root_holder';
 export const FLEET_COMPLETION_DOMAIN = 'autonomy.fleet.enrollment-completion.v1\n';
 export const IDKIT_CERT_DOMAIN = 'autonomy.idkit.cert.v1\n';
 export const FLEET_SYNC_SCOPE = 'fleet:sync';
-export const FLEET_RUNTIME_TTL_SECONDS = 12 * 60 * 60;
+// 30 days, matched to the serve-cert. The credential is persisted server-side
+// and re-minted at unlock when it is older than ~10 days (see the fleet runtime
+// renew path), so the long TTL is the correct cadence rather than a 12h memory-
+// only window that died on every restart. Must match
+// FLEET_RUNTIME_DELEGATION_TTL_SECONDS in tools/network/clock.py.
+export const FLEET_RUNTIME_TTL_SECONDS = 30 * 24 * 60 * 60;
 
 const PKCS8_ED25519_PREFIX = new Uint8Array([
   0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06,
