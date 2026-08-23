@@ -477,6 +477,20 @@ async def local_completion_context(request: Request) -> JSONResponse:
     })
 
 
+async def fleet_status(request: Request) -> JSONResponse:
+    """One decisive verdict for "is fleet-sync working, and if not, why" --
+    the HTTP face of fleet_doctor's top line (tools/network/fleet_verdict.py).
+    Same probes either way: an operator SSH'd into a box and a browser
+    hitting this endpoint see the same answer, no log-grepping required."""
+    denied = _operator_required(request)
+    if denied is not None:
+        return denied
+    from tools.network.fleet_verdict import compute_verdict
+
+    org = request.query_params.get("org")
+    return JSONResponse(compute_verdict(org))
+
+
 async def local_runtime_context(request: Request) -> JSONResponse:
     denied = _operator_required(request)
     if denied is not None:
@@ -610,4 +624,5 @@ ROUTES = [
         activate_local_runtime,
         methods=["POST"],
     ),
+    Route("/api/fleet/status", fleet_status, methods=["GET"]),
 ]

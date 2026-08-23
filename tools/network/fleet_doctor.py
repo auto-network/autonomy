@@ -54,6 +54,36 @@ def _detail(text: str) -> None:
         print(text)
 
 
+# ── decisive verdict (read this first) ──────────────────────────────────
+
+def check_verdict(report: dict, *, org: str | None = None) -> None:
+    """The one line to read before any of the sections below. Same probes,
+    same answer, as GET /api/fleet/status -- see fleet_verdict.py. Built
+    2026-08-23 specifically so "is it working, and if not why" stops
+    requiring an SSH-in-and-grep cycle; run this first, always."""
+    from tools.network.fleet_verdict import compute_verdict
+
+    verdict = compute_verdict(org)
+    report["verdict"] = verdict
+    if _QUIET:
+        return
+    top = verdict["top_line"]
+    print(f"\nVERDICT: {top}")
+    cv, dv = verdict["connector_version"], verdict["dashboard_version"]
+    if cv.get("status") == "stale":
+        print(f"  connector is running {cv.get('process_commit')}, disk has {cv.get('disk_commit')} -- reload it")
+    if dv.get("status") == "stale":
+        print(f"  this dashboard process is running {dv.get('process_commit')}, disk has {dv.get('disk_commit')} -- reload it")
+    lp = verdict["last_pull"]
+    if lp.get("outcome") == "failed":
+        print(f"  last pull: {lp.get('reason')} -- {lp.get('detail', '')}")
+    elif lp.get("outcome") == "success":
+        print("  last pull: succeeded")
+    counts = verdict["data"].get("counts")
+    if counts:
+        print(f"  local data: {counts}")
+
+
 # ── identity + designation ──────────────────────────────────────────────
 
 def _machine_identity_cross_check() -> tuple[str | None, list[str]]:
@@ -1030,6 +1060,7 @@ def main() -> int:
         print("Fleet diagnostic report")
         print("=" * 60)
 
+    check_verdict(report)
     check_identity(report)
     check_local_store_migration(report)
     check_roster(report)
