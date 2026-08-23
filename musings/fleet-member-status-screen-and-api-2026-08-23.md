@@ -191,7 +191,7 @@ Every one of these is a `fail`/`warn` we actually hit. Group = screen section.
 | `sync.last_error` | last pull outcome + **distinct** close code | surfaces the real cause (not an overloaded 4404): `throttled` (byte cap), `no_tunnel`, `unknown_link`, `tls`, `handshake` |
 | `sync.frontier` | earned watermark vs peers | how far behind |
 | `sync.transfer` | bytes / % of first checkpoint (machine-db `sync_progress` setting) | in-progress checkpoint (e.g. throttled at N MB of 574 MiB) |
-| `sync.install` | last `install_checkpoint`/materialize outcome | the transfer landed but **materialize aborted** — e.g. an **FK-orphan** (a `thoughts` row whose `sources` parent was deleted long ago without cascade — hit live: 16.6k orphans on home's personal.db) failing the whole checkpoint. A robust receiver **skips/quarantines** the offending rows and advances the frontier rather than aborting a multi-GB sync over origin-side referential debris. |
+| `sync.install` | `fleet_sync_quarantine` grouped by `reason` | rows the receiver could not realize and **skipped rather than aborting** the checkpoint — the count and the reason breakdown. Two reasons today: `fk_orphan` (a `thoughts` row whose `sources` parent was deleted long ago without cascade — hit live: ~16.6k on home's personal.db; permanent, the origin keeps its copy) and `attachment_bytes_unavailable` (external content-addressed bytes not yet fetched because blob transfer is unwired — hit live: 12 attachments; temporary, drains when the fetch feature lands). `warn` when any rows are quarantined (synced but degraded), `ok` when none. The quarantine `COUNT(*)` is the retained skip delta — no foreign-key rescan. |
 
 ### F. Checkpoint / catalog (server side of a pull)
 | Flag | Probe | Fail means |
