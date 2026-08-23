@@ -364,3 +364,66 @@ def test_reconcile_backfills_untracked_rows_with_triggers_active(
         assert again.triggers_active
     finally:
         db.close()
+
+
+def test_snapshot_skips_deprecated_duplicate_settings_base_rows(
+    tmp_path: Path,
+) -> None:
+    """Deprecated superseded base rows are not streamed as separate records.
+
+    A settings store that accumulated duplicate base rows keeps only the newest
+    live per natural key; the platform DEPRECATES the rest (GraphDB open heal +
+    partial unique indexes gated on ``deprecated = 0``). Those deprecated rows
+    share the single 'base' catalog address with the live winner, so the base
+    snapshot must skip them -- otherwise base.total_records exceeds the
+    catalog's one-per-address count and the checkpoint fails closed
+    (AlphaError: checkpoint contains untracked logical rows). Override and
+    exclusion rows keep their own per-id addresses and all stream.
+    """
+    from tools.network.fleet_sync_sim.streaming import (
+        iter_indexed_snapshot_mutations,
+    )
+
+    db = GraphDB(tmp_path / "personal.db")
+    try:
+        def _setting(ident: str, created_at: str, payload: str, *,
+                     supersedes: str | None = None, deprecated: int = 0) -> None:
+            db.conn.execute(
+                "INSERT INTO settings(id,set_id,schema_revision,key,payload,"
+                "publication_state,supersedes,deprecated,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (ident, "app.flags", 1, "voice", payload, "canonical",
+                 supersedes, deprecated, created_at, created_at),
+            )
+
+        # One live base row plus two DEPRECATED superseded base rows for the same
+        # natural key -- exactly the shape the open heal leaves behind. The
+        # partial unique index (WHERE deprecated = 0) permits the deprecated
+        # siblings; they share the live winner's 'base' address.
+        _setting("base-live", "2026-01-02T00:00:00Z", '{"on": true}')
+        _setting("base-old-a", "2026-01-01T00:00:00Z", '{"on": false}', deprecated=1)
+        _setting("base-old-c", "2026-01-01T12:00:00Z", '{"on": null}', deprecated=1)
+        # An override patch for the same key keeps its own per-id address.
+        _setting("ovr-1", "2026-01-03T00:00:00Z", '{"on": true}',
+                 supersedes="base-live")
+        db.conn.commit()
+
+        settings_muts = [
+            m for m in iter_indexed_snapshot_mutations(db.conn)
+            if m.table == "settings"
+        ]
+
+        # Only the live base + the override stream: 2, not 4.
+        assert len(settings_muts) == 2
+        # Every emitted address is unique -- the exact invariant the checkpoint
+        # asserts (base.total_records == one-per-address catalog count).
+        addresses = [m.address for m in settings_muts]
+        assert len(set(addresses)) == len(addresses)
+        assert sorted(a[-1] for a in addresses) == [
+            "base", "supersedes:base-live:ovr-1"
+        ]
+        # The surviving base row is the live one, not a deprecated sibling.
+        base = next(m for m in settings_muts if m.address[-1] == "base")
+        assert dict(base.values)["payload"] == {"on": True}
+    finally:
+        db.close()
