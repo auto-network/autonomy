@@ -808,6 +808,57 @@ class MutationCatalog:
             self.conn.rollback()
             raise
 
+    def reconcile_catalog(self) -> CatalogMigrationReport:
+        """Backfill untracked live rows into an ALREADY-ACTIVATED catalog.
+
+        Unlike :meth:`migrate_existing`, this tolerates capture triggers and
+        never rebuilds or deletes: it inserts winner metadata only for live
+        rows the catalog is currently missing, via the idempotent
+        skip-if-present path in :meth:`_bootstrap_existing_rows`.
+
+        It repairs a production catalog that an earlier buggy bootstrap left
+        incomplete -- e.g. the SQLite < 3.38 RETURNING-on-upsert gap that
+        silently dropped colliding-timestamp rows during the original
+        activation -- which otherwise fails closed forever at checkpoint time
+        (``AlphaError: checkpoint contains untracked logical rows``) with no
+        self-healing path, because migration early-skips once triggers exist.
+
+        Only ``fleet_sync_catalog``/``fleet_sync_transactions``/
+        ``fleet_sync_origins`` are written, never a replicated table, so no
+        capture trigger fires and authored history is left untouched. The
+        final integrity scan proves every live row now has winner metadata
+        before the single transaction commits; any shortfall rolls back.
+        """
+        if self.conn.in_transaction:
+            raise WatermarkError("catalog reconcile requires an idle connection")
+        if (
+            len(self.origin_incarnation) != 64
+            or any(ch not in "0123456789abcdef" for ch in self.origin_incarnation)
+        ):
+            raise WatermarkError(
+                "production origin must be a 64-character lowercase machine public key"
+            )
+        # Same fail-closed guard as migration: a schema addition with no
+        # explicit replicate/rebuild/local policy stops the repair up front.
+        audit_schema(self.conn)
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            self._ensure_state()
+            bootstrapped = self._bootstrap_existing_rows()
+            live_rows, catalog_rows = self._verify_catalog_integrity()
+            self.conn.commit()
+            return CatalogMigrationReport(
+                schema_created=False,
+                schema_upgraded=False,
+                bootstrapped_rows=bootstrapped,
+                live_rows=live_rows,
+                catalog_rows=catalog_rows,
+                triggers_active=self.triggers_active(),
+            )
+        except Exception:
+            self.conn.rollback()
+            raise
+
     def activate_production_writers(self) -> bool:
         """Enable fail-closed triggers and automatic transaction authorship.
 
