@@ -1070,9 +1070,18 @@ class MutationCatalog:
             )
 
     def install_winner_metadata(
-        self, entries: Iterable[WinnerMetadata]
+        self, entries: Iterable[WinnerMetadata],
+        *, skip_addresses: frozenset[bytes] = frozenset(),
     ) -> int:
-        """Verify a realized exact base and install its skinny winner state."""
+        """Verify a realized exact base and install its skinny winner state.
+
+        ``skip_addresses`` names rows the materializer could not represent —
+        foreign-key orphans whose parent is absent from the checkpoint (see
+        ``ForeignKeyOrphanError``). Their winner metadata is not verified,
+        installed, or counted, so the catalog stays exactly consistent with the
+        rows that actually landed. The count this returns therefore excludes
+        them, and the caller subtracts the same skip count from its base/winner
+        invariants."""
         if self._context is not None or self.conn.in_transaction:
             raise WatermarkError("cannot install winners inside another transaction")
         self.conn.execute("BEGIN IMMEDIATE")
@@ -1084,6 +1093,9 @@ class MutationCatalog:
             for item in entries:
                 if item.table not in TABLE_POLICIES:
                     raise WatermarkError("winner metadata names unknown table")
+                address_blob = encode_value([item.table, list(item.address)])
+                if address_blob in skip_addresses:
+                    continue
                 if item.tombstone:
                     mutation = Mutation(
                         item.table, item.address, item.timestamp_ns, True
@@ -1111,7 +1123,6 @@ class MutationCatalog:
                 if transaction_key != last_transaction:
                     transaction_ref = self._ensure_transaction(*transaction_key)
                     last_transaction = transaction_key
-                address_blob = encode_value([item.table, list(item.address)])
                 self.conn.execute(
                     "INSERT INTO fleet_sync_catalog VALUES(?,?,?,?,?)",
                     (address_blob, item.timestamp_ns, int(item.tombstone),
