@@ -540,12 +540,176 @@ def check_recent_errors(report: dict, *, tail_lines: int = 4000) -> None:
         _line("recent-errors check", f"FAILED to run: {exc!r}", fail=True)
 
 
+# ── reset: clear a stuck fleet:join invite chain ────────────────────────
+
+def _find_stale_fleet_join_state() -> dict:
+    """Locate every row tied to the current fleet:join invite target.
+
+    Three independent stores each cache a piece of "publish a Fleet
+    invite": the enrollment-invite record (machine.db,
+    fleet_enrollment_invites), the link-grant that makes the connector
+    eligible to serve it (settings, autonomy.network.link-grant, in
+    whichever local org last published it), and the approval-request
+    audit row the UI's "awaiting_signature" state resurfaces the newest
+    of (approval_requests.db, kind=link_publish). None of these expire
+    or get cleared on their own -- discovered live 2026-08-23 doing this
+    exact cleanup by hand three times in one session, because a stuck
+    target_uuid/token in any ONE of them silently reproduces the same
+    stale link on every subsequent publish attempt.
+
+    ``target_uuid`` for the generic fleet:join target is deterministic
+    (the same value every time, by design -- it names "the" public
+    join target, not a specific invite), so there is normally at most
+    one enrollment-invite row; this reports whatever exists rather than
+    assuming exactly one.
+    """
+    import sqlite3
+    from tools.graph.db import _org_db_path
+    from tools.graph import org_ops
+    from tools.dashboard.dao import approval_requests as ar
+
+    found = {"enrollment_invites": [], "link_grants": [], "approval_requests": []}
+
+    machine_path = _org_db_path("machine")
+    if machine_path.exists():
+        conn = sqlite3.connect(machine_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT target_uuid, active, created_at FROM fleet_enrollment_invites"
+            ).fetchall()
+            found["enrollment_invites"] = [
+                {"target_uuid": r["target_uuid"], "active": bool(r["active"]),
+                 "created_at": r["created_at"], "db_path": str(machine_path)}
+                for r in rows
+            ]
+        except sqlite3.OperationalError:
+            pass
+
+    org_slugs = ["autonomy"]  # scopeless local-store default publish target
+    try:
+        org_slugs.extend(ref.slug for ref in org_ops.list_orgs())
+    except Exception:
+        pass
+    for slug in dict.fromkeys(org_slugs):  # de-dup, keep order
+        path = _org_db_path(slug)
+        if not path.exists():
+            continue
+        conn = sqlite3.connect(path)
+        try:
+            rows = conn.execute(
+                "SELECT id, key, payload FROM settings "
+                "WHERE set_id='autonomy.network.link-grant'"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            continue
+        for row_id, key, payload in rows:
+            try:
+                p = json.loads(payload)
+            except Exception:
+                continue
+            if p.get("target_type") == "fleet:join":
+                found["link_grants"].append({
+                    "id": row_id, "key": key, "org": slug,
+                    "target_uuid": p.get("target_uuid"),
+                })
+
+    try:
+        for row in ar.recent_for_kind("link_publish", limit=50):
+            req = row.get("request") or {}
+            if req.get("target_type") == "fleet:join":
+                found["approval_requests"].append({
+                    "id": row["id"], "created_at": row["created_at"],
+                    "org": req.get("org"), "target_uuid": req.get("target_uuid"),
+                })
+    except Exception:
+        pass
+
+    return found
+
+
+def clear_stale_fleet_join(*, dry_run: bool = True) -> dict:
+    """Clear every stored piece of the current fleet:join invite chain.
+
+    Dry-run by default: reports what it would remove without touching
+    anything. Pass dry_run=False (the CLI's --yes) to actually delete.
+    Removes across all three stores found by _find_stale_fleet_join_state
+    -- clearing only one leaves the other two ready to resurface the
+    same stale link on the next publish attempt, which is exactly what
+    happened twice live before this existed.
+    """
+    import sqlite3
+    from tools.graph.db import _org_db_path
+
+    found = _find_stale_fleet_join_state()
+    total = sum(len(v) for v in found.values())
+    _section("Clear stale fleet:join invite state")
+    if total == 0:
+        _line("nothing found", "no enrollment-invite, link-grant, or approval-request "
+              "rows are tied to a fleet:join target -- nothing to clear")
+        return found
+
+    for item in found["enrollment_invites"]:
+        _line(
+            "enrollment invite" + ("" if dry_run else " -- REMOVING"),
+            f"target_uuid={item['target_uuid']} active={item['active']} "
+            f"(machine.db)",
+        )
+    for item in found["link_grants"]:
+        _line(
+            "link-grant" + ("" if dry_run else " -- REMOVING"),
+            f"org={item['org']} key={item['key']} target_uuid={item['target_uuid']}",
+        )
+    for item in found["approval_requests"]:
+        _line(
+            "approval_requests row" + ("" if dry_run else " -- REMOVING"),
+            f"id={item['id']} org={item['org']} target_uuid={item['target_uuid']}",
+        )
+
+    if dry_run:
+        _line("dry run", f"{total} row(s) found, none removed -- pass --yes to actually clear")
+        return found
+
+    machine_path = _org_db_path("machine")
+    conn = sqlite3.connect(machine_path)
+    conn.execute("DELETE FROM fleet_enrollment_invites")
+    conn.commit()
+    conn.close()
+
+    for item in found["link_grants"]:
+        subprocess.run(
+            ["graph", "set", "remove", item["id"], "--org", item["org"]],
+            check=False, capture_output=True, text=True,
+        )
+
+    if found["approval_requests"]:
+        from tools.dashboard.dao import approval_requests as ar
+        conn = sqlite3.connect(ar.DB_PATH)
+        for item in found["approval_requests"]:
+            conn.execute("DELETE FROM approval_requests WHERE id=?", (item["id"],))
+        conn.commit()
+        conn.close()
+
+    _line("cleared", f"{total} row(s) removed -- next publish will mint a genuinely fresh invite")
+    return found
+
+
 def main() -> int:
     global _QUIET
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="emit the collected report as JSON instead of text")
+    parser.add_argument(
+        "--clear-stale-invite", action="store_true",
+        help="clear the stuck fleet:join invite/grant/publish-record chain "
+             "(dry run unless --yes is also given)",
+    )
+    parser.add_argument("--yes", action="store_true", help="actually delete with --clear-stale-invite (default is dry run)")
     args = parser.parse_args()
     _QUIET = args.json
+
+    if args.clear_stale_invite:
+        clear_stale_fleet_join(dry_run=not args.yes)
+        return 0
 
     report: dict = {}
     if not args.json:
