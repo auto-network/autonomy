@@ -456,7 +456,7 @@
         return g.match(it) && (!base || base(it));
       }).length;
       g.numEl.textContent = String(n);
-      g.btn.classList.toggle("mc-dim", n === 0 && glanceActive !== g.key);
+      g.btn.style.display = (n === 0 && glanceActive !== g.key) ? "none" : "";
       g.btn.classList.toggle("on", glanceActive === g.key);
       g.btn.setAttribute("aria-pressed", glanceActive === g.key ? "true" : "false");
     });
@@ -895,16 +895,16 @@
       var done = (n.proven || 0) + (n.done || 0) + (n.settled || 0);
       var asks = mine.filter(function (it) {
         return it.kind==="question" && it.state==="open" && it.ask; }).length;
-      var mini = el("span","mc-mini");
-      mini.title = blocked + " blocked \u00b7 " + flight + " in flight \u00b7 "
-        + done + " done" + (asks ? " \u00b7 " + asks + " asks for you" : "");
-      if (asks) mini.appendChild(el("i","m-a",String(asks)));
-      [[blocked,"m-c"],[flight,"m-w"],[done,"m-g"]].forEach(function (seg) {
-        var cell = el("i",seg[1],String(seg[0]));
-        if (!seg[0]) cell.className += " m-z";
-        mini.appendChild(cell);
-      });
-      hd.appendChild(mini); pc.appendChild(hd);
+      if (asks || blocked) {
+        var mini = el("span","mc-mini");
+        mini.title = (asks ? asks + " waiting on you" : "")
+          + (asks && blocked ? " \u00b7 " : "")
+          + (blocked ? blocked + " blocked" : "");
+        if (asks) mini.appendChild(el("i","m-a",asks + " ask" + (asks>1?"s":"")));
+        if (blocked) mini.appendChild(el("i","m-c",blocked + " blocked"));
+        hd.appendChild(mini);
+      }
+      pc.appendChild(hd);
       var status = mine.filter(function (it) { return it.kind==="status"; })[0];
       if (status) pc.appendChild(el("div","last",
         String(status.body||status.title).split(/\n\s*\n/)[0]));
