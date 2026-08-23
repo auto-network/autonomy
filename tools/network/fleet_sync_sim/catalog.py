@@ -1115,7 +1115,12 @@ class MutationCatalog:
                         _logical_values(TABLE_POLICIES[item.table], row),
                     )
                 if mutation.candidate_hash != item.candidate_hash:
-                    raise WatermarkError("winner metadata/base hash mismatch")
+                    raise WatermarkError(
+                        "winner metadata/base hash mismatch at "
+                        f"{item.table} {tuple(item.address)!r}: "
+                        f"winner_hash={item.candidate_hash.hex()} "
+                        f"base_hash={mutation.candidate_hash.hex()}"
+                    )
                 transaction_key = (
                     item.origin_incarnation, item.transaction_id,
                     item.timestamp_ns,
