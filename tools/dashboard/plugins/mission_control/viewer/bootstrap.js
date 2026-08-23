@@ -605,8 +605,13 @@
     // TITLELESS BAR. The screen carries its own title; the bar is a
     // toolbar. The swatch keeps the pillar's colour as the remaining
     // "where am I" cue and opens the pillar status panel.
+    // On a structured mission the bar ALWAYS says the mission: the page
+    // is one app that lands on Status, so a pillar name from the URL's
+    // vestigial focus would label a screen the reader is not on.
     kids.push(el("span", {class: "mc-bartitle",
-                          text: (p && p.name) || state.mission || ""}));
+                          text: state.style === "structured"
+                            ? (state.mission || "")
+                            : ((p && p.name) || state.mission || "")}));
     var viewsDecl = null;
     try { viewsDecl = JSON.parse(document.body.dataset.mcViews || "null"); }
     catch (_e) { viewsDecl = null; }
