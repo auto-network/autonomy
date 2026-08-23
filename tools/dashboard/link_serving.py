@@ -1111,9 +1111,17 @@ def make_grant_handler(org: str | None = None, *, now=None):
             from tools.network.fleet_relay_sync import connector_runtime
 
             return await connector_runtime.handle(token, request)
-        except Exception:
+        except Exception as exc:
             logger.warning("fleet relay sync request refused", exc_info=True)
-            return REFUSED
+            # The caller here already proved it holds a valid fleet:join
+            # grant (checked above) -- unlike REFUSED elsewhere in this
+            # module, there is no anonymous-prober oracle risk in telling
+            # a roster-authenticated peer why the pull was refused (locked
+            # machine, expired delegation, etc.) instead of a bare
+            # "unavailable" it cannot distinguish from an unknown token.
+            return canonical_json({
+                "v": 1, "kind": "fleet.server-error", "error": str(exc),
+            }) + b"\n"
 
     async def _handle(
         token: str, message: bytes, channel_state: dict

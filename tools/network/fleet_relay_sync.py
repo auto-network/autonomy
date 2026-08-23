@@ -350,6 +350,10 @@ async def pull_checkpoint_once(
         async for raw, final in channel.recv_message_stream():
             if not saw_hello:
                 first = _json(raw, "fleet server hello envelope")
+                if first.get("kind") == "fleet.server-error":
+                    raise FleetRelaySyncError(
+                        f"fleet server refused: {first.get('error', 'unknown reason')}"
+                    )
                 if set(first) != {"v", "kind", "hello", "roster_epoch"} \
                         or first.get("v") != PROTOCOL_VERSION \
                         or first.get("kind") != "fleet.server-hello":

@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import ipaddress
+import logging
 import math
 import secrets
 import sys
@@ -24,6 +25,8 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Callable, Mapping
 
+
+logger = logging.getLogger(__name__)
 
 UINT32_MAX = (1 << 32) - 1
 
@@ -513,6 +516,7 @@ class RelayAbuseLimiter:
 
     def _deny(self, scope: str, reason: str) -> None:
         self._decisions[(scope, reason)] += 1
+        logger.warning("relay abuse limiter denied: scope=%s reason=%s", scope, reason)
 
 
 def _ticket_keys(ticket: ResolvedTicket) -> dict[str, bytes]:
