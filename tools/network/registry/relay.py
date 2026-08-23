@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import re
 from collections import deque
 from typing import Callable, Coroutine, Dict, List, NamedTuple, Optional, Tuple
@@ -80,6 +81,9 @@ CLOSE_LISTENER_FELL_BEHIND = 4416
 # load-bearing, see Stream._apply_retention.
 # Owned by tools.network.clock (an expiry sweep); re-exported here.
 from tools.network.clock import STREAM_EXPIRY_SECONDS
+
+logger = logging.getLogger(__name__)
+
 STREAM_BUFFER_CAP_BYTES = 1024 * 1024
 STREAM_MIN_RETAINED_FRAMES = 10
 
@@ -150,6 +154,11 @@ class _ViewerRelayChannel:
             # The public close remains deliberately uniform. Starting the
             # close here also makes stream fan-out drop the listener through
             # its existing failed-enqueue cleanup path.
+            logger.warning(
+                "relay dial closed mid-stream (4404): byte-rate lease exhausted, "
+                "token=%s payload_size=%d queued_bytes=%d",
+                self.stream_token, len(payload), self._queued_bytes,
+            )
             self.start_close(CLOSE_UNKNOWN_LINK)
             return False
         self._queued_bytes += len(payload)
@@ -834,6 +843,10 @@ async def viewer_endpoint(
             peer.host if peer is not None else "unknown"
         )
         if admission is None:
+            logger.warning(
+                "relay dial refused (4404): admission limiter denied source, "
+                "token=%s peer=%s", token, peer.host if peer is not None else "unknown",
+            )
             await _close_quietly(websocket, CLOSE_UNKNOWN_LINK)
             return
     link = _resolve_live_link(store, token, int(now_fn()))
@@ -841,6 +854,10 @@ async def viewer_endpoint(
     if link is not None and abuse_limiter is not None:
         resolved = abuse_limiter.resolve(admission, token, link.org_uuid)
         if resolved is None:
+            logger.warning(
+                "relay dial refused (4404): admission limiter denied link/org, "
+                "token=%s org=%s", token, link.org_uuid,
+            )
             await _close_quietly(websocket, CLOSE_UNKNOWN_LINK)
             return
     tunnel = hub.get(link.org_uuid) if link is not None else None
@@ -848,6 +865,16 @@ async def viewer_endpoint(
         # The WebSocket uses one close code; the bootloader has already
         # resolved the envelope, so it can distinguish an invalid token from
         # a valid link whose sharing dashboard is disconnected.
+        if link is None:
+            logger.warning(
+                "relay dial refused (4404): link not live (unknown/expired/"
+                "revoked/dead org binding), token=%s", token,
+            )
+        else:
+            logger.warning(
+                "relay dial refused (4404): no tunnel parked for org, "
+                "token=%s org=%s", token, link.org_uuid,
+            )
         await _close_quietly(websocket, CLOSE_UNKNOWN_LINK)
         return
 
@@ -855,6 +882,10 @@ async def viewer_endpoint(
     # cannot open unbounded attachment-streaming channels to exhaust relay
     # memory on the shared tunnel. Accounting is per this tunnel, not global.
     if len(tunnel.channels) >= MAX_VIEWER_CHANNELS_PER_TUNNEL:
+        logger.warning(
+            "relay dial refused (4404): tunnel at max viewer channels (%d), "
+            "token=%s org=%s", MAX_VIEWER_CHANNELS_PER_TUNNEL, token, link.org_uuid,
+        )
         await _close_quietly(websocket, CLOSE_UNKNOWN_LINK)
         return
 
@@ -862,6 +893,10 @@ async def viewer_endpoint(
     if abuse_limiter is not None:
         abuse_lease = abuse_limiter.acquire(resolved)
         if abuse_lease is None:
+            logger.warning(
+                "relay dial refused (4404): active-connection lease denied, "
+                "token=%s org=%s", token, link.org_uuid,
+            )
             await _close_quietly(websocket, CLOSE_UNKNOWN_LINK)
             return
     channel_id = new_channel_id()
@@ -887,6 +922,11 @@ async def viewer_endpoint(
     except Exception:
         tunnel.detach_viewer(channel_id, relay_channel)
         tunnel.detach_listener(token, channel_id)
+        logger.warning(
+            "relay dial refused (4404): failed to open channel on tunnel "
+            "(send/attach error), token=%s org=%s", token, link.org_uuid,
+            exc_info=True,
+        )
         await relay_channel.close(CLOSE_UNKNOWN_LINK)
         return
 
