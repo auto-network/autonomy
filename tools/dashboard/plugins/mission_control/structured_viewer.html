@@ -217,14 +217,16 @@
   /* pillar summary cards (overview) */
   .mc-psum{
     background:var(--card);border:1px solid var(--line);border-radius:12px;
-    padding:13px 15px;margin:0 0 10px;cursor:pointer;
+    padding:9px 13px 12px;margin:0 0 10px;cursor:pointer;
   }
   .mc-psum:hover{border-color:var(--line2)}
   .mc-psum .hd{display:flex;align-items:flex-start;gap:8px}
   .mc-psum .hd b{flex:1;min-width:0}
-  .mc-minirow{display:flex;justify-content:flex-end;margin:0 0 6px}
+  .mc-minirow{display:flex;align-items:center;margin:0 0 5px}
+  .mc-minirow .ago{font-size:.7rem;color:var(--ink3)}
+  .mc-minirow .grow{flex:1}
   .mc-psum .hd .dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;align-self:center}
-  .mc-psum .hd b{color:#fff;font-size:.95rem}
+  .mc-psum .hd b{color:#fff;font-size:.88rem}
   .mc-mini{flex:none;display:inline-flex;align-items:center;margin-left:auto;
     border:1px solid var(--line);border-radius:6px;overflow:hidden;
     font-size:.66rem;line-height:1;background:var(--bg2);margin-top:1px}
@@ -234,7 +236,7 @@
   .mc-mini .m-a{color:var(--accent)} .mc-mini .m-c{color:var(--crit)}
   .mc-mini .m-w{color:var(--warn)} .mc-mini .m-g{color:var(--good)}
   .mc-mini .m-z{opacity:.35}
-  .mc-psum .last{font-size:.83rem;color:var(--ink2);margin:6px 0 0}
+  .mc-psum .last{font-size:.79rem;color:var(--ink2);margin:5px 0 0}
   .mc-statbar{display:flex;height:4px;border-radius:3px;overflow:hidden;
     background:var(--card2);margin:10px 0 0}
   .mc-statbar i{height:100%}
@@ -748,17 +750,24 @@
       var done = (n.proven || 0) + (n.done || 0) + (n.settled || 0);
       var asks = mine.filter(function (it) {
         return it.kind==="question" && it.state==="open" && it.ask; }).length;
-      // ABOVE the title, never beside it: two badges next to a long
-      // pillar name wrapped the title around them and wrecked the card.
-      if (asks || blocked) {
+      // One tight top row above the title: freshness on the left,
+      // ask/blocked badges on the right. The title gets the full width.
+      var freshest0 = mine.slice().sort(function (a,b) {
+        return (when(b)||0) - (when(a)||0); })[0];
+      var fw0 = freshest0 && when(freshest0);
+      if (asks || blocked || fw0) {
         var miniRow = el("div","mc-minirow");
-        var mini = el("span","mc-mini");
-        mini.title = (asks ? asks + " waiting on you" : "")
-          + (asks && blocked ? " \u00b7 " : "")
-          + (blocked ? blocked + " blocked" : "");
-        if (asks) mini.appendChild(el("i","m-a",asks + " ask" + (asks>1?"s":"")));
-        if (blocked) mini.appendChild(el("i","m-c",blocked + " blocked"));
-        miniRow.appendChild(mini);
+        if (fw0) miniRow.appendChild(el("span","ago","active " + agoText(fw0)));
+        miniRow.appendChild(el("span","grow"));
+        if (asks || blocked) {
+          var mini = el("span","mc-mini");
+          mini.title = (asks ? asks + " waiting on you" : "")
+            + (asks && blocked ? " \u00b7 " : "")
+            + (blocked ? blocked + " blocked" : "");
+          if (asks) mini.appendChild(el("i","m-a",asks + " ask" + (asks>1?"s":"")));
+          if (blocked) mini.appendChild(el("i","m-c",blocked + " blocked"));
+          miniRow.appendChild(mini);
+        }
         pc.appendChild(miniRow);
       }
       pc.appendChild(hd);
@@ -786,10 +795,7 @@
           + st.blocked + " blocked \u00b7 " + st.rest + " not started";
         pc.appendChild(bar);
       }
-      var freshest = mine.slice().sort(function (a,b) {
-        return (when(b)||0) - (when(a)||0); })[0];
-      var fw = freshest && when(freshest);
-      if (fw) pc.appendChild(el("div","mc-statmeta","active " + agoText(fw)));
+
       sec.appendChild(pc);
     });
     v.appendChild(sec);
