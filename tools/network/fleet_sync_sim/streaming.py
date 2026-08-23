@@ -456,6 +456,7 @@ def materialize_catalog(
     applied = 0
     deleted = 0
     pending: set[str] = set()
+    skipped: list[tuple[str, tuple]] = []
 
     def flush() -> None:
         nonlocal applied, deleted
@@ -465,6 +466,7 @@ def materialize_catalog(
         applied += report.applied
         deleted += report.deleted
         pending.update(report.pending_attachments)
+        skipped.extend(report.skipped_orphans)
         batch.clear()
 
     for mutation in iter_catalog_mutations(directory, catalog):
@@ -476,4 +478,6 @@ def materialize_catalog(
             current_rank = rank
         batch.append(mutation)
     flush()
-    return MaterializationReport(applied, deleted, tuple(sorted(pending)))
+    return MaterializationReport(
+        applied, deleted, tuple(sorted(pending)), tuple(skipped)
+    )

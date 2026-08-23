@@ -26,11 +26,30 @@ class MaterializationError(ValueError):
     """The logical graph cannot be represented safely in the target DB."""
 
 
+class ForeignKeyOrphanError(MaterializationError):
+    """A NOT-NULL foreign key points at a parent absent from the whole
+    checkpoint — referentially-orphaned debris, not a fresh conflict.
+
+    The canonical example is a ``thoughts`` row whose ``sources`` conversation
+    was deleted long ago without cascading (SQLite ships with foreign keys
+    OFF, so such orphans accumulate silently in a source database and then
+    surface only when a strict receiver replays them). Because ``_TABLE_ORDER``
+    loads every parent table before its children, an insert that still fails a
+    foreign key means the parent is genuinely not in the checkpoint at all.
+    The receiver skips and quarantines the row rather than aborting the entire
+    checkpoint over origin-side referential debris."""
+
+
 @dataclass(frozen=True)
 class MaterializationReport:
     applied: int
     deleted: int
     pending_attachments: tuple[str, ...]
+    #: (table, address) of rows skipped as foreign-key orphans (see
+    #: ForeignKeyOrphanError). Excluded from ``applied``; the caller must also
+    #: exclude them from the winner-catalog install and the base/winner count
+    #: invariants, and quarantine them for later repair.
+    skipped_orphans: tuple[tuple[str, tuple], ...] = ()
 
 
 class ContentAddressedBlobStore:
@@ -238,6 +257,11 @@ def _upsert(conn: sqlite3.Connection, mutation: Mutation, row: dict[str, object]
         try:
             _insert(conn, mutation.table, row)
         except sqlite3.IntegrityError as exc:
+            if "FOREIGN KEY constraint failed" in str(exc):
+                raise ForeignKeyOrphanError(
+                    f"{mutation.table} row at {mutation.address!r} references a "
+                    f"parent absent from the checkpoint: {exc}"
+                ) from exc
             raise MaterializationError(
                 f"{mutation.table} has a secondary-identity conflict at "
                 f"{mutation.address!r}: {exc}"
@@ -348,6 +372,7 @@ def materialize(
     applied = 0
     deleted = 0
     pending: list[str] = []
+    skipped: list[tuple[str, tuple]] = []
     transaction = conn if manage_transaction else nullcontext()
     with transaction:
         for table in _TABLE_ORDER:
@@ -374,7 +399,18 @@ def materialize(
                         pending.append(str(row["id"]))
                         continue
                     row["file_path"] = str(path)
-                _upsert(conn, mutation, row)
+                try:
+                    _upsert(conn, mutation, row)
+                except ForeignKeyOrphanError:
+                    # A NOT-NULL parent is absent from the whole checkpoint:
+                    # skip the row, record it for the caller to exclude from
+                    # the winner catalog and to quarantine. A statement-level
+                    # constraint abort leaves the transaction usable, so the
+                    # rest of the batch still applies.
+                    skipped.append((mutation.table, tuple(mutation.address)))
+                    continue
                 applied += 1
         _finish_vault_materialization(conn)
-    return MaterializationReport(applied, deleted, tuple(sorted(pending)))
+    return MaterializationReport(
+        applied, deleted, tuple(sorted(pending)), tuple(skipped)
+    )
