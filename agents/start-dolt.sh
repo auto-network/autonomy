@@ -118,7 +118,14 @@ fi
 mkdir -p "$(dirname "$LOG_FILE")"
 
 echo "Starting dolt sql-server on port $PORT..."
-nohup dolt sql-server \
+# Memory-capped: a runaway dolt (44GB RSS observed 2026-08-21, swapped the
+# whole host to a crawl) needs a hard ceiling, not just a bigger box. Root
+# cause of the growth is still open — this is the stopgap. MemorySwapMax=0
+# so it can't work around the cap by ballooning into swap instead; hitting
+# the cap means reclaim/OOM inside this cgroup, not host-wide starvation.
+nohup systemd-run --user --scope --unit=dolt-sql-server \
+    -p MemoryMax="${DOLT_MEMORY_MAX:-1G}" -p MemorySwapMax=0 \
+    -- dolt sql-server \
     --host 0.0.0.0 \
     --port "$PORT" \
     --data-dir "$DOLT_DIR" \
