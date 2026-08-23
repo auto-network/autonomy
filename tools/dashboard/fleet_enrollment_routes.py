@@ -158,12 +158,22 @@ def _runtime_context() -> tuple[str, fleet_roster.RosterEntry] | None:
 def _ensure_fleet_catalog(machine_pub: str) -> None:
     """Activate authored personal-DB capture under the durable machine id."""
     from tools.graph.db import GraphDB
+    from tools.network.fleet_sync_sim.compaction import WatermarkError
 
     path = _org_db_path("personal")
     GraphDB.close_pooled_path(path)
     db = GraphDB(path, attach_fleet_sync=False)
     try:
-        db.migrate_fleet_sync_catalog(machine_pub)
+        already_active = db.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='trigger' "
+            "AND name LIKE 'fleet_sync_%' LIMIT 1"
+        ).fetchone() is not None
+        if not already_active:
+            try:
+                db.migrate_fleet_sync_catalog(machine_pub)
+            except WatermarkError as exc:
+                if "capture triggers present" not in str(exc):
+                    raise
         db.activate_fleet_sync_writers(machine_pub)
     finally:
         db.close()
