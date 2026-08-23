@@ -133,19 +133,6 @@
     border:1px dashed var(--line);border-radius:10px}
   .mc-empty code{font-family:var(--mono);font-size:.8em;color:var(--ink2)}
 
-  /* filter bar */
-  .mc-filters{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:0 0 12px}
-  .mc-filters input{
-    flex:1 1 150px;min-width:130px;background:var(--bg2);border:1px solid var(--line);
-    border-radius:8px;color:var(--ink);padding:7px 10px;font:inherit;font-size:.84rem;
-  }
-  .mc-filters input::placeholder{color:var(--ink3)}
-  .mc-filters .f{
-    font:600 .7rem/1 inherit;color:var(--ink2);background:var(--bg2);cursor:pointer;
-    border:1px solid var(--line);border-radius:14px;padding:6px 10px;white-space:nowrap;
-  }
-  .mc-filters .f.on{color:#fff;border-color:var(--accent-dim);background:#232345}
-
   /* ── item cards ── */
   .mc-item{
     background:var(--card);border:1px solid var(--line);border-left:3px solid var(--line2);
@@ -455,21 +442,10 @@
     if (!v) return null;
     return function (it) { return it.surface_id === v; };
   }
-  function updateFilterNote(){
-    var old = document.getElementById("mc-pfnote");
-    if (old) old.remove();
-    if (!pillarFilter) return;
-    var note = el("button","mc-feed-note","");
-    note.id = "mc-pfnote";
-    note.appendChild(dot(surfColor(pillarFilter)));
-    note.appendChild(document.createTextNode(
-      " Filtered to " + surfName(pillarFilter) + " \u2014 show all"));
-    note.addEventListener("click", function () { togglePillar(pillarFilter); });
-    var nav = document.getElementById("mc-nav");
-    nav.parentNode.insertBefore(note, nav.nextSibling);
-  }
   function updateChips(){
-    updateFilterNote();
+    document.querySelectorAll(".mc-nav button").forEach(function (n) {
+      n.classList.toggle("on", !!pillarFilter && n.id === "nav-"+pillarFilter);
+    });
     var base = viewScope();
     GLANCE.forEach(function (g) {
       var n = liveItems.filter(function (it) {
@@ -505,6 +481,40 @@
       sec.classList.toggle("mc-gout", !!key && !vis);
     });
     applyFeedFilter();
+    rescueEmpties();
+  }
+  function rescueEmpties(){
+    document.querySelectorAll("#mc-views .mc-view").forEach(function (v) {
+      var old = v.querySelector(".mc-noresult");
+      if (old) old.remove();
+      if (!glanceActive && !pillarFilter) return;
+      var scopeEl = v;
+      if (v.id === "view-pillars"){
+        var act = null;
+        v.querySelectorAll("section.mc-sec").forEach(function (sec) {
+          if (sec.style.display !== "none" && !act) act = sec;
+        });
+        if (act) scopeEl = act;
+      }
+      var cards = scopeEl.querySelectorAll(".mc-item");
+      if (!cards.length) return;
+      if (scopeEl.querySelectorAll(".mc-item:not(.mc-gout):not(.mc-hidden)").length) return;
+      var n = el("div","mc-empty mc-noresult");
+      n.appendChild(document.createTextNode(
+        "Nothing here matches the active filters. "));
+      var b = el("button","mc-news-reply","Show everything");
+      b.addEventListener("click", function () {
+        glanceActive = null; glanceReturn = null; pillarFilter = null;
+        var fv = document.getElementById("view-feed");
+        if (fv) fv.dataset.filter = "";
+        applyGlance();
+        updateChips();
+      });
+      n.appendChild(b);
+      (v.id === "view-pillars" ? v : scopeEl).insertBefore(
+        n, v.id === "view-pillars" ? v.firstChild : scopeEl.firstChild);
+      if (v.id === "view-pillars" && scopeEl.classList) scopeEl.classList.remove("mc-gout");
+    });
   }
   function toggleGlance(key){
     if (glanceActive === key){
@@ -721,41 +731,6 @@
     return c;
   }
 
-  // ── filter bar ──────────────────────────────────────────────────
-  var FSTATES = ["proven","done","active","code_only","next","specified",
-                 "blocked","open","settled","deferred"];
-  function filterBar(scopeEl){
-    var bar = el("div","mc-filters");
-    var input = document.createElement("input");
-    input.type = "search"; input.placeholder = "Filter items…";
-    bar.appendChild(input);
-    var on = {};
-    function apply(){
-      var q = input.value.trim().toLowerCase();
-      var states = Object.keys(on).filter(function (s) { return on[s]; });
-      scopeEl.querySelectorAll(".mc-item").forEach(function (n) {
-        var okS = !states.length || states.indexOf(n.dataset.state) >= 0;
-        var okQ = !q || (n.dataset.search||"").indexOf(q) >= 0;
-        n.classList.toggle("mc-hidden", !(okS && okQ));
-      });
-      // A filter that matches folded items should show them, not hide them
-      // behind a closed fold; back to closed when the filter clears.
-      scopeEl.querySelectorAll("details.mc-finished").forEach(function (d) {
-        var visible = d.querySelectorAll(".mc-item:not(.mc-hidden)").length;
-        d.open = !!(states.length || q) && visible > 0;
-        d.classList.toggle("mc-hidden", (states.length || q) && !visible);
-      });
-    }
-    input.addEventListener("input", apply);
-    FSTATES.forEach(function (s) {
-      if (!scopeEl.querySelector('.mc-item[data-state="'+s+'"]')) return;
-      var b = el("button","f",STATE_LABEL[s]);
-      b.addEventListener("click",function(){ on[s]=!on[s]; b.classList.toggle("on",on[s]); apply(); });
-      bar.appendChild(b);
-    });
-    return bar;
-  }
-
   // ── per-surface view builder ────────────────────────────────────
   function surfaceView(sid){
     var v = el("div","mc-view"); v.id = "view-"+(sid || "pillars");
@@ -790,6 +765,7 @@
       [].forEach.call(subs.children, function (b) {
         b.classList.toggle("on", b.dataset.sec === name);
       });
+      if (typeof rescueEmpties === "function") rescueEmpties();
     }
     v._showSection = showSection;
     names.forEach(function (name) {
@@ -857,7 +833,6 @@
       }
       host.appendChild(sec);
     });
-    v.insertBefore(filterBar(v), host);
     if (names.length > 1) v.insertBefore(subs, v.firstChild);
     showSection(names[0]);
     return v;
@@ -922,7 +897,6 @@
     all.forEach(function (it) {
       host.appendChild(card(it,{showSurface:true, mirror:true})); });
     v.appendChild(host);
-    v.insertBefore(filterBar(v), host);
     return v;
   }
 
@@ -1230,9 +1204,6 @@
     document.querySelectorAll(".mc-view").forEach(function (n) {
       n.classList.toggle("on", n.id === "view-"+id);
     });
-    document.querySelectorAll(".mc-nav button").forEach(function (n) {
-      n.classList.toggle("on", !!pillarFilter && n.id === "nav-"+pillarFilter);
-    });
     var named = {pillars:"Pillars", decisions:"Decisions",
                  questions:"Questions", feed:"Feed", news:"News"};
     var fam = named[id] ? id : "overview";
@@ -1241,8 +1212,6 @@
     });
     var strip = document.getElementById("mc-nav");
     if (strip) strip.style.display = (fam === "overview") ? "none" : "";
-    var pfn = document.getElementById("mc-pfnote");
-    if (pfn) pfn.style.display = (fam === "overview") ? "none" : "";
   }
   // The activity panel is mission-wide chrome, but it belongs to the
   // overview: pillar views get their vertical room back.
