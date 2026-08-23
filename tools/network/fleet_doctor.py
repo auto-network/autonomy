@@ -294,6 +294,73 @@ def _running_connectors() -> dict[str, dict]:
     return found
 
 
+def check_serving_readiness(report: dict) -> None:
+    """Should each scope's connector even be running -- not just 'is one
+    running right now'. check_connectors only ever sees what already
+    exists; a scope that has NEVER been provisioned (no serve-cert, no
+    binding) looks identical to one that's merely down, unless something
+    checks readiness directly.
+
+    Caught live 2026-08-22/23: the personal/scopeless sync scope (org=None)
+    -- the one SJC's fleet_relay_sync actually needs -- had zero
+    autonomy.network.serve-cert rows and zero autonomy.network.binding
+    rows in personal.db. Nothing was ever provisioned for it, so every
+    connector-status check kept reporting on the wrong scopes (autonomy,
+    dynbench) while the one that mattered was silently never attempted.
+
+    Deliberately does NOT call link_serving_supervisor.ensure() -- that
+    function has real side effects (it can stop a live connector as part
+    of reconciling it), which a diagnostic must never risk. This only
+    calls the read-only half: serve_cert_state() and the live-grant
+    check it gates on.
+    """
+    _section("Serving readiness per scope (should this be running at all)")
+    try:
+        import time
+        from tools.dashboard import link_serving_supervisor as sup
+        from tools.graph import org_ops
+
+        running = report.get("running_connectors", {})
+        now = time.time()
+        scopes: list[tuple[str, str | None]] = [("personal (scopeless)", None)]
+        try:
+            scopes.extend((ref.slug, ref.slug) for ref in org_ops.list_orgs())
+        except Exception:
+            pass
+
+        for label, org in scopes:
+            try:
+                cert_state = sup.serve_cert_state(org, now=now)
+                has_grant = sup._has_live_grant(org, now)
+            except Exception as exc:
+                _line(f"{label}: readiness check", f"FAILED to run: {exc!r}", fail=True)
+                continue
+            should_run = cert_state["status"] == "ok" and has_grant
+            is_running = any(
+                info.get("graph_org") == org or (org is None and info.get("graph_org") is None)
+                for info in running.values()
+            )
+            if should_run and not is_running:
+                _line(
+                    f"{label}: expected to be serving but isn't",
+                    f"cert={cert_state['status']} live_grant={has_grant} -- "
+                    "eligible per its own credentials, but no matching connector "
+                    "process is up; check the watchdog / restart timing",
+                    fail=True,
+                )
+            elif not should_run:
+                _line(
+                    f"{label}: not eligible to serve",
+                    f"cert={cert_state['status']} live_grant={has_grant}"
+                    + ("" if cert_state["status"] == "ok" else " -- never provisioned (no serve-cert)"),
+                    warn=(cert_state["status"] != "ok"),
+                )
+            else:
+                _line(f"{label}: serving readiness", "eligible and running")
+    except Exception as exc:
+        _line("serving readiness check", f"FAILED to run: {exc!r}", fail=True)
+
+
 def check_connectors(report: dict) -> None:
     _section("Serving connector subprocesses")
     connectors = _running_connectors()
@@ -436,6 +503,12 @@ def check_recent_errors(report: dict, *, tail_lines: int = 4000) -> None:
             _line("dashboard.log", "not found at this path (may be elsewhere in a container)", warn=True)
             return
         lines = log_path.read_text(errors="replace").splitlines()[-tail_lines:]
+        # NOTE some of these are one-sided: 'fleet server hello envelope is
+        # malformed' is raised by fleet_relay_sync's PULLING side (the
+        # machine dialing IN, e.g. a newly-enrolled member reaching for
+        # home) -- it will never appear in the log of the machine being
+        # dialed. Run this script on whichever side is actually failing,
+        # not just on 'home', or this pattern silently never matches.
         patterns = [
             "TunnelUnavailable", "WatermarkError", "FleetRelaySyncError",
             "fleet server hello envelope is malformed",
@@ -473,6 +546,7 @@ def main() -> int:
     check_local_store_migration(report)
     check_roster(report)
     check_connectors(report)
+    check_serving_readiness(report)
     check_org_resolution(report)
     check_sync_data(report)
     check_recent_errors(report)
