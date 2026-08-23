@@ -52,7 +52,7 @@ function fleetPage() {
     get invitation() {
       return (this.view && this.view.invitation) || {
         status: 'none', url: null, bootstrapCode: null, publishedAt: null, expiresAt: null,
-        publishingOrg: 'autonomy', error: null,
+        publishingOrg: 'personal', error: null,
       };
     },
     get activity() {
@@ -204,7 +204,7 @@ function fleetPage() {
       this.inviteBusy = true;
       this.invitationError = null;
       try {
-        const org = this.invitation.publishingOrg || 'autonomy';
+        const org = this.invitation.publishingOrg || 'personal';
         const response = await fetch('/api/approvals', {
           method: 'POST',
           credentials: 'same-origin',
