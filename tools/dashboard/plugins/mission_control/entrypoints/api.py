@@ -88,12 +88,19 @@ def session_contributions(session_ids: list[str], request: Request) -> dict[str,
             continue
         pillar_name = str(pillar.get("name") or "Mission pillar")
         mission_name = str(mission.get("name") or "Mission Control")
+        # A structured mission is ONE app that always lands on Status —
+        # a pillar URL there just mislabels the bar with a pillar the
+        # reader is not looking at. The badge goes to the mission root;
+        # freeform pillars keep their own documents and their own URL.
+        structured = (dict(mission).get("style") or "") == "structured"
         result[session_id].append({
             "id": f"pillar:{pillar['pillar_id']}",
             "kind": "action",
-            "label": pillar_name,
-            "title": f"Open {mission_name} / {pillar_name} in Mission Control",
-            "href": f"/missions/{pillar['mission_id']}/pillars/{pillar['pillar_id']}",
+            "label": mission_name if structured else pillar_name,
+            "title": f"Open {mission_name} in Mission Control" if structured
+                     else f"Open {mission_name} / {pillar_name} in Mission Control",
+            "href": f"/missions/{pillar['mission_id']}" if structured
+                    else f"/missions/{pillar['mission_id']}/pillars/{pillar['pillar_id']}",
             "icon_svg": _SESSION_ICON,
             "accent": str(pillar.get("color") or "#34d399"),
             # /missions/ is an SPA route hosting the server-rendered
