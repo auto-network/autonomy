@@ -223,7 +223,7 @@
   .mc-psum:hover{border-color:var(--line2)}
   .mc-psum .hd{display:flex;align-items:flex-start;gap:8px}
   .mc-psum .hd b{flex:1;min-width:0}
-  .mc-minirow{display:flex;align-items:center;margin:0 0 5px}
+  .mc-minirow{display:flex;align-items:center;margin:8px 0 2px}
   .mc-minirow .ago{font-size:.7rem;color:var(--ink3)}
   .mc-minirow .grow{flex:1}
   .mc-psum .hd .dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;align-self:center}
@@ -751,8 +751,13 @@
       var done = (n.proven || 0) + (n.done || 0) + (n.settled || 0);
       var asks = mine.filter(function (it) {
         return it.kind==="question" && it.state==="open" && it.ask; }).length;
-      // One tight top row above the title: freshness on the left,
-      // ask/blocked badges on the right. The title gets the full width.
+      pc.appendChild(hd);
+      var status = mine.filter(function (it) { return it.kind==="status"; })[0];
+      if (status) pc.appendChild(el("div","last",
+        String(status.body||status.title).split(/\n\s*\n/)[0]));
+      else if (p.last_done) pc.appendChild(el("div","last",p.last_done));
+      // Between the text and the colour bar: freshness left, the
+      // ask/blocked badges right — one row, full-width title untouched.
       var freshest0 = mine.slice().sort(function (a,b) {
         return (when(b)||0) - (when(a)||0); })[0];
       var fw0 = freshest0 && when(freshest0);
@@ -771,11 +776,6 @@
         }
         pc.appendChild(miniRow);
       }
-      pc.appendChild(hd);
-      var status = mine.filter(function (it) { return it.kind==="status"; })[0];
-      if (status) pc.appendChild(el("div","last",
-        String(status.body||status.title).split(/\n\s*\n/)[0]));
-      else if (p.last_done) pc.appendChild(el("div","last",p.last_done));
       var st = {done:0, flight:0, blocked:0, rest:0};
       mine.forEach(function (it) {
         if (it.state==="proven"||it.state==="done"||it.state==="settled") st.done++;
