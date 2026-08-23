@@ -1495,9 +1495,19 @@ async def _serve_control_listener(connector, ctl_path: str,
                 elif request.get("op") == "fleet-runtime":
                     from tools.network.fleet_relay_sync import connector_runtime
 
-                    reply = await asyncio.to_thread(
-                        connector_runtime.configure, request.get("args") or {}
-                    )
+                    try:
+                        reply = await asyncio.to_thread(
+                            connector_runtime.configure, request.get("args") or {}
+                        )
+                    except Exception as exc:
+                        # Unlike the generic connector.control() branch below,
+                        # this had no exception handling of its own -- any
+                        # failure here fell through to the outer
+                        # `except Exception: pass` and silently closed the
+                        # connection with zero diagnostics on either side
+                        # (the dashboard only ever saw "connector closed the
+                        # control connection", never why). Report it instead.
+                        reply = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
                 else:
                     try:
                         reply = await connector.control(
