@@ -185,6 +185,23 @@ def iter_indexed_snapshot_mutations(
             excluded = ",".join("?" for _ in EXCLUDED_SETTING_SET_IDS)
             where = f' WHERE "set_id" NOT IN ({excluded})'
             params = tuple(sorted(EXCLUDED_SETTING_SET_IDS))
+            # A logical setting has exactly one live base value per natural key
+            # but may carry many override/exclusion patches. Base rows collapse
+            # to a single address (role 'base', no id), and the platform keeps
+            # that invariant by DEPRECATING all but the newest live base row per
+            # key (GraphDB open heal + the partial unique indexes, both gated on
+            # ``deprecated = 0``). A store that accumulated duplicate base rows
+            # therefore retains the superseded ones as deprecated history -- and
+            # the snapshot must skip them, or it streams several records for one
+            # catalog address and breaks the checkpoint's row-count invariant
+            # against the catalog's ON CONFLICT(address) collapse. Skip
+            # deprecated BASE rows only (the winner is the sole ``deprecated=0``
+            # base row); override/exclusion rows keep their own per-id addresses
+            # and all stream, matching the catalog exactly.
+            where += (
+                ' AND (supersedes IS NOT NULL OR excludes IS NOT NULL'
+                ' OR deprecated = 0)'
+            )
         if start_table == table:
             comparison = f"({','.join(expressions)}) > ({','.join('?' for _ in expressions)})"
             where += (" AND " if where else " WHERE ") + comparison
