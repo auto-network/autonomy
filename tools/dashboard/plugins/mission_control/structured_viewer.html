@@ -86,7 +86,8 @@
   .mc-psel-menu{display:none}
   .mc-psel.open .mc-psel-menu{display:block;position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:8;
     background:#11151d;border:1px solid var(--line2);border-radius:10px;
-    box-shadow:0 12px 30px rgba(0,0,0,.5);overflow:hidden}
+    box-shadow:0 12px 30px rgba(0,0,0,.5);
+    max-height:min(60vh,420px);overflow-y:auto;-webkit-overflow-scrolling:touch}
   .mc-psel-row{display:flex;align-items:center;gap:9px;width:100%;padding:10px 13px;
     background:none;border:0;border-top:1px solid #1c2230;cursor:pointer;
     font:inherit;color:var(--ink2);font-size:.88rem;text-align:left}
@@ -298,7 +299,7 @@
     <div class="mc-act-scroll"><table class="mc-act-table" id="mc-act"></table></div>
   </div>
 
-  <div id="mc-psel"></div>
+  <div id="mc-psel" class="mc-psel"></div>
   <div id="mc-views"></div>
 
   <div class="mc-foot">Structured mission · rendered by the platform from
