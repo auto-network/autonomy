@@ -1488,9 +1488,18 @@ async def _serve_control_listener(connector, ctl_path: str,
                     # Supervisor-local readiness probe.  This never becomes
                     # a registry control frame: it reports whether the
                     # connector has completed the tunnel hello right now.
+                    from tools.network.fleet_relay_sync import connector_runtime
+
                     reply = {
                         "ok": True,
                         "serving": connector.connected.is_set(),
+                        # Added live 2026-08-23 while diagnosing "locked for
+                        # Fleet sync" persisting across an unlock that
+                        # logged no error -- lets a caller ask this exact
+                        # process directly whether fleet-runtime configure()
+                        # ever actually landed here, instead of inferring it
+                        # from dashboard-side logs alone.
+                        "fleet_runtime_configured": connector_runtime.scheduler is not None,
                     }
                 elif request.get("op") == "fleet-runtime":
                     from tools.network.fleet_relay_sync import connector_runtime
