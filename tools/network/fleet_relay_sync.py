@@ -111,16 +111,27 @@ class ConnectorFleetRuntime:
         self.scheduler: FleetSyncScheduler | None = None
 
     def configure(self, payload: object) -> dict:
+        from tools.dashboard.link_approvals import _load_binding
         from tools.network import fleet_tunnel_server
 
         root_pub = fleet_tunnel_server._personal_root_pub()
         if root_pub is None:
             raise FleetRelaySyncError("connector has no personal Fleet anchor")
         entries = tuple(fleet_roster.load_entries(org=None))
+        # The dashboard-side caller (_activate_runtime) resolves and passes
+        # org_uuid when it builds its own copy of this same credential from
+        # the same payload; this connector-side build was missing it, so a
+        # payload carrying a reachability_cert (the normal case once the
+        # personal org is registered) always failed
+        # "reachability credential delivered without a registered org_uuid"
+        # here even though the org WAS registered -- found live 2026-08-23.
+        binding, _err = _load_binding(None)
+        org_uuid = binding.get("org_uuid") if binding else None
         credential = fleet_runtime.FleetRuntimeCredential.from_browser_payload(
             payload,
             personal_root_pub=root_pub,
             roster_entries=entries,
+            org_uuid=org_uuid,
         )
         config = FleetSyncRuntimeConfig(
             machine_key=credential.process_key,
