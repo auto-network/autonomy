@@ -26,9 +26,12 @@ Automatic, no operator step:
     mounts ramfs. No ``CAP_SYS_ADMIN`` on the dashboard container itself; the
     socket already is the privilege.
   * Host-native root — mounts directly.
-  * Host-native unprivileged — cannot self-provision; raises with what to
-    install once (a systemd ramfs mount unit). The one unavoidable human step,
-    and only off the containerized path.
+  * Host-native unprivileged — hands off to a narrow, root-owned sudo helper
+    (``/usr/local/sbin/provision_ramfs``, NOPASSWD-scoped to that exact path;
+    source in ``agents/provision_ramfs.sh``) instead of the containerized
+    path's docker-socket/nsenter dance, which needs a socket this node doesn't
+    have. The helper self-heals the base delivery mount too (mkdir/mount if
+    missing), so no separate systemd unit is needed on this path.
 
 Idempotent, every boot: an already-ramfs mount is left alone; ramfs is
 ephemeral across a host reboot, so re-checking every boot is what self-heals.
@@ -184,26 +187,48 @@ def _session_dir_script(path: str, uid: int) -> str:
     )
 
 
+#: Root-owned, non-writable-by-us copy of agents/provision_ramfs.sh — sudo is
+#: only a real privilege boundary if the calling user can't also edit the
+#: script it grants root on (see NOPASSWD line in /etc/sudoers.d/provision-ramfs).
+_SUDO_HELPER = "/usr/local/sbin/provision_ramfs"
+
+
+def _provision_via_sudo_helper(path: str, uid: int) -> None:
+    """Host-native, unprivileged, no docker socket to borrow root from: hand off
+    to the narrow root helper instead of failing outright. Still fails closed —
+    a helper error still raises — but the caller (session_launcher) treats that
+    as best-effort and launches the session anyway, without the secret mount."""
+    r = subprocess.run(
+        ["sudo", "-n", _SUDO_HELPER, path, str(int(uid))],
+        capture_output=True, text=True, timeout=15,
+    )
+    if r.returncode != 0:
+        raise ProvisionError(
+            f"cannot create {path} via {_SUDO_HELPER}: {(r.stderr or r.stdout).strip()}"
+        )
+
+
 def provision_session_dir(session_name: str, uid: int, *, base: str = DELIVERY_MOUNT) -> str:
     """Create *session_name*'s own writable ramfs subdir under the delivery mount,
     owned by *uid* (mode 0700), and return its host path. Fails closed: the subdir
     must be ramfs afterward. The caller binds this ``src`` with refuse-missing, so
     a helper failure fails the launch rather than yielding a writable on-disk
-    directory that looks identical and is not memory-backed."""
+    directory that looks identical and is not memory-backed. Note this function
+    still raises on failure — it is the CALLER's job (session_launcher) to treat
+    that as best-effort and launch without secrets rather than fail the session;
+    this function has no business deciding that policy for every caller."""
     path = _session_dir(session_name, base)
     if _own_container_id() is not None and Path(_DOCKER_SOCKET).exists():
         _run_in_host_mount_ns(
             _session_dir_script(path, uid), what=f"provision session secret dir {path}"
         )
-    else:
-        if os.geteuid() != 0:
-            raise ProvisionError(
-                f"cannot create {path}: host-native node running unprivileged, no socket to borrow root from"
-            )
+    elif os.geteuid() == 0:
         Path(path).mkdir(parents=True, exist_ok=True)
         os.chown(path, int(uid), int(uid))
         os.chmod(path, 0o700)
         assert_memory_backed(path)  # ramfs only; tmpfs refused by name
+    else:
+        _provision_via_sudo_helper(path, uid)
     return path
 
 
