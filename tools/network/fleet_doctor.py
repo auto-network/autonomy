@@ -368,13 +368,15 @@ def check_serving_readiness(report: dict) -> None:
             # (settings_ops(org=None) deterministically opens the personal
             # org DB -- see commit 669cf592), so a connector launched under
             # either name satisfies the other; they are not two independent
-            # scopes that both need their own running process.
-            aliases = {org} | ({"personal"} if org is None else set())
-            is_running = any(
-                info.get("graph_org") in aliases
-                or (org is None and info.get("graph_org") is None)
-                for info in running.values()
-            )
+            # scopes that both need their own running process. Symmetric on
+            # purpose -- an earlier one-directional version (None matches
+            # "personal", but not the reverse) produced a live false
+            # positive on the "personal" scope once the connector actually
+            # started reporting --graph-org as unset (None) rather than the
+            # literal string "personal".
+            personal_aliases = {None, "personal"}
+            aliases = personal_aliases if org in personal_aliases else {org}
+            is_running = any(info.get("graph_org") in aliases for info in running.values())
             if should_run and not is_running:
                 _line(
                     f"{label}: expected to be serving but isn't",
@@ -391,7 +393,36 @@ def check_serving_readiness(report: dict) -> None:
                     warn=(cert_state["status"] != "ok"),
                 )
             else:
-                _line(f"{label}: serving readiness", "eligible and running")
+                # Confirmed live 2026-08-23: "eligible and running" alone
+                # was not enough. A connector can be up, have a real tunnel,
+                # AND its serve-cert/grant checked out fine, while its
+                # in-memory fleet-runtime scheduler is still never
+                # configured (only a genuine unlock's POST /api/fleet/runtime
+                # sets it, and it does not survive the connector's own
+                # restart). That state is invisible from anything checked
+                # above -- it needed a direct, live query against the exact
+                # running process (connector-status) to actually confirm.
+                configured_note = ""
+                try:
+                    status = sup.control(org, "connector-status", {})
+                    configured = status.get("fleet_runtime_configured")
+                    if configured is False:
+                        _line(
+                            f"{label}: serving readiness",
+                            "connector is up and eligible, but "
+                            "fleet_runtime_configured=False -- every sync pull will "
+                            "refuse with 'serving machine is locked for Fleet sync' "
+                            "until a genuine unlock configures it (and that "
+                            "configuration will not survive this connector's next "
+                            "restart)",
+                            fail=True,
+                        )
+                        continue
+                    elif configured is True:
+                        configured_note = ", fleet_runtime_configured=True"
+                except Exception:
+                    pass  # connector-status is itself best-effort here
+                _line(f"{label}: serving readiness", f"eligible and running{configured_note}")
     except Exception as exc:
         _line("serving readiness check", f"FAILED to run: {exc!r}", fail=True)
 
@@ -526,18 +557,132 @@ def check_sync_data(report: dict) -> None:
         _line("sync-data check", f"FAILED to run: {exc!r}", fail=True)
 
 
+def check_catalog_canary(report: dict) -> None:
+    """Cheap, approximate signal for whether a checkpoint would even build.
+
+    Found live 2026-08-23, hours into diagnosing a totally silent Fleet-sync
+    failure: alpha.py's real checkpoint builder refuses (AlphaError:
+    "checkpoint contains untracked logical rows") whenever
+    fleet_sync_catalog's live-row count doesn't match the actual row count
+    across the replicated tables -- a real, versioned mismatch, not a
+    phantom, caused here by rows bootstrapped before an earlier SQLite
+    RETURNING-on-upsert fix landed. That failure is invisible anywhere
+    except the SERVING CONNECTOR's own log file (never dashboard.log, never
+    surfaced to the operator), and only fires mid-sync, so it cost hours to
+    even locate.
+
+    This does NOT call the real, authoritative check
+    (MutationCatalog._verify_catalog_integrity) -- that does a full scan of
+    the whole catalog AND every live row, the same expensive operation
+    behind an earlier live freeze bug tonight (fixed by gating it out of
+    the hot path). This is instead a handful of cheap COUNT(*) queries: a
+    canary, not a guarantee. A mismatch here means "go run
+    --verify-catalog to confirm and see the real numbers"; a match here is
+    reassuring but not a full proof the way --verify-catalog is.
+    """
+    _section("Fleet-sync catalog canary (approximate -- see --verify-catalog for the real check)")
+    try:
+        import sqlite3
+        from tools.graph.db import _org_db_path
+        from tools.network.fleet_sync_sim.policies import TABLE_POLICIES, PolicyKind
+
+        path = _org_db_path("personal")
+        if not path.exists():
+            _line("personal.db", "does not exist", warn=True)
+            return
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            tracked_live = conn.execute(
+                "SELECT COUNT(*) FROM fleet_sync_catalog WHERE tombstone=0"
+            ).fetchone()[0]
+        except sqlite3.OperationalError:
+            _line("fleet_sync_catalog", "table does not exist -- sync not yet activated", warn=True)
+            return
+        real_total = 0
+        for table, policy in TABLE_POLICIES.items():
+            if policy.kind in (PolicyKind.LOCAL, PolicyKind.DERIVED):
+                continue
+            try:
+                real_total += conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            except sqlite3.OperationalError:
+                continue
+        report["catalog_tracked_live"] = tracked_live
+        report["catalog_real_total_approx"] = real_total
+        if tracked_live == real_total:
+            _line(
+                "tracked_live vs real row count",
+                f"{tracked_live:,} == {real_total:,} -- consistent (approximate check; "
+                "not a full proof)",
+            )
+        else:
+            _line(
+                "tracked_live vs real row count",
+                f"{tracked_live:,} != {real_total:,} -- MISMATCH. A real checkpoint attempt "
+                "will likely fail with AlphaError('checkpoint contains untracked logical "
+                "rows'), refusing silently from the operator's view (only the serving "
+                "connector's own log shows it). Run --verify-catalog for the authoritative "
+                "check and exact discrepancy before assuming this is real -- this canary "
+                "isn't watermark-aware and can false-positive on rows mutated concurrently "
+                "with this scan.",
+                warn=True,
+            )
+    except Exception as exc:
+        _line("catalog canary", f"FAILED to run: {exc!r}", fail=True)
+
+
+def verify_catalog(*, org: str = "personal") -> dict:
+    """The REAL, authoritative catalog-integrity check
+    (MutationCatalog._verify_catalog_integrity) -- a full scan of the whole
+    fleet_sync_catalog table plus every live row across every replicated
+    table. Slow on a large personal.db (this is the same operation behind
+    an earlier live freeze bug, deliberately never run automatically) --
+    only invoke this explicitly, when the canary above raised a real
+    question worth paying for a definitive answer.
+    """
+    import sqlite3
+    from tools.graph.db import _org_db_path
+    from tools.network.fleet_sync_sim.catalog import MutationCatalog
+
+    _section("Catalog integrity (authoritative, full scan -- this may take a while)")
+    path = _org_db_path(org)
+    if not path.exists():
+        _line(f"{org}.db", "does not exist", fail=True)
+        return {"ok": False}
+    conn = sqlite3.connect(str(path))
+    try:
+        origin_incarnation = conn.execute(
+            "SELECT origin_incarnation FROM fleet_sync_state"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        _line("fleet_sync_state", "table does not exist -- sync not yet activated", fail=True)
+        return {"ok": False}
+    if origin_incarnation is None:
+        _line("fleet_sync_state", "no row -- sync not yet activated", fail=True)
+        return {"ok": False}
+    catalog = MutationCatalog(conn, origin_incarnation[0])
+    try:
+        live_rows, catalog_rows = catalog._verify_catalog_integrity()
+    except Exception as exc:
+        _line(
+            "integrity check",
+            f"FAILED: {exc!r} -- this is very likely the same class of problem blocking "
+            "a real checkpoint; the exact failure text here is the authoritative answer",
+            fail=True,
+        )
+        return {"ok": False, "error": repr(exc)}
+    _line("live rows (real tables)", live_rows)
+    _line("catalog rows (all, including tombstones)", catalog_rows)
+    _line("integrity check", "passed -- every live row has winner metadata, every catalog row decodes and names a replicated table")
+    return {"ok": True, "live_rows": live_rows, "catalog_rows": catalog_rows}
+
+
 # ── recent errors ────────────────────────────────────────────────────────
 
 def check_recent_errors(report: dict, *, tail_lines: int = 4000) -> None:
-    _section(f"Recent Fleet-related errors (last {tail_lines} log lines)")
+    _section(f"Recent Fleet-related errors (last {tail_lines} log lines per source)")
     try:
         from tools.data_paths import DATA_ROOT
 
-        log_path = DATA_ROOT / "dashboard.log"
-        if not log_path.exists():
-            _line("dashboard.log", "not found at this path (may be elsewhere in a container)", warn=True)
-            return
-        lines = log_path.read_text(errors="replace").splitlines()[-tail_lines:]
         # NOTE some of these are one-sided: 'fleet server hello envelope is
         # malformed' is raised by fleet_relay_sync's PULLING side (the
         # machine dialing IN, e.g. a newly-enrolled member reaching for
@@ -558,19 +703,45 @@ def check_recent_errors(report: dict, *, tail_lines: int = 4000) -> None:
             "POST /api/network/register 5",
             "POST /api/network/serve-cert 5",
             "post_serve_cert:",
+            # A checkpoint that can't actually be built -- see
+            # check_catalog_canary. Only ever appears in a CONNECTOR's own
+            # log (below), never dashboard.log -- this exact class of gap
+            # (deep, connector-log-only errors invisible to every other
+            # check) is why this function now reads connector logs at all.
+            "AlphaError", "checkpoint contains untracked logical rows",
+            "fleet relay sync stream failed", "fleet relay sync request refused",
         ]
-        counts: dict[str, int] = {}
-        last_seen: dict[str, str] = {}
-        for line in lines:
-            for pat in patterns:
-                if pat in line:
-                    counts[pat] = counts.get(pat, 0) + 1
-                    last_seen[pat] = line.strip()[:160]
-        if not counts:
-            _line("errors in recent log window", "none found")
-        for pat, n in counts.items():
-            _line(f"{pat!r}", f"{n}x -- last: {last_seen[pat]}", warn=True)
-        report["recent_error_counts"] = counts
+
+        def _scan(label: str, log_path: Path) -> None:
+            if not log_path.exists():
+                _line(label, "not found at this path (may be elsewhere in a container)", warn=True)
+                return
+            lines = log_path.read_text(errors="replace").splitlines()[-tail_lines:]
+            counts: dict[str, int] = {}
+            last_seen: dict[str, str] = {}
+            for line in lines:
+                for pat in patterns:
+                    if pat in line:
+                        counts[pat] = counts.get(pat, 0) + 1
+                        last_seen[pat] = line.strip()[:160]
+            if not counts:
+                _line(f"{label}: errors in recent log window", "none found")
+            for pat, n in counts.items():
+                _line(f"{label}: {pat!r}", f"{n}x -- last: {last_seen[pat]}", warn=True)
+            report.setdefault("recent_error_counts", {})[label] = counts
+
+        _scan("dashboard.log", DATA_ROOT / "dashboard.log")
+        # A connector subprocess is a SEPARATE long-running process with its
+        # own log file (data/network/serve-<org_uuid>-<pub>.log) -- every
+        # deep exception tonight (the scheduler-config gap, the checkpoint
+        # AlphaError) only ever showed up there, never in dashboard.log.
+        # check_connectors already discovers these paths; do the same scan
+        # here instead of leaving connector logs as a manual-grep-only spot.
+        net_dir = DATA_ROOT / "network"
+        for org_uuid, info in report.get("running_connectors", {}).items():
+            matches = sorted(net_dir.glob(f"serve-{org_uuid}-*.log"))
+            if matches:
+                _scan(f"connector log ({org_uuid[:8]}...)", matches[-1])
     except Exception as exc:
         _line("recent-errors check", f"FAILED to run: {exc!r}", fail=True)
 
@@ -820,6 +991,13 @@ def main() -> int:
              "a bare venv host checkout; a containerized node needs something like "
              "'docker exec <container> python3 -m tools.network.fleet_doctor')",
     )
+    parser.add_argument(
+        "--verify-catalog", action="store_true",
+        help="run the REAL, authoritative Fleet-sync catalog integrity check "
+             "(full scan -- slow on a large personal.db, deliberately not part "
+             "of the default report; run this when the canary in the default "
+             "report raises a real question)",
+    )
     args = parser.parse_args()
     _QUIET = args.json
 
@@ -831,6 +1009,8 @@ def main() -> int:
             forwarded.append("--clear-stale-invite")
         if args.kick_roster_entry:
             forwarded += ["--kick-roster-entry", args.kick_roster_entry]
+        if args.verify_catalog:
+            forwarded.append("--verify-catalog")
         if args.yes:
             forwarded.append("--yes")
         return _run_remote(args.ssh, args.remote_cmd, forwarded)
@@ -840,6 +1020,9 @@ def main() -> int:
         return 0
     if args.kick_roster_entry:
         kick_roster_entry(args.kick_roster_entry, dry_run=not args.yes)
+        return 0
+    if args.verify_catalog:
+        verify_catalog()
         return 0
 
     report: dict = {}
@@ -854,6 +1037,7 @@ def main() -> int:
     check_serving_readiness(report)
     check_org_resolution(report)
     check_sync_data(report)
+    check_catalog_canary(report)
     check_recent_errors(report)
 
     if args.json:
