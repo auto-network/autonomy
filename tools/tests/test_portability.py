@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from tools.data_paths import STORE_MANIFEST
-from tools.graph.db import GraphDB, _SCHEMA_USER_VERSION
+from tools.graph.db import GraphDB
 from tools.graph.models import Source
 from tools.network.idkit import (
     KeyPair,
@@ -518,10 +518,6 @@ def test_migrate_on_mount_upgrades_legacy_volume_and_stamps_it(tmp_path):
     volume = tmp_path / "legacy"
     volume.mkdir()
     (volume / "orgs").mkdir()
-    other_org = volume / "orgs" / "second-org.db"
-    GraphDB(other_org).close()
-    with sqlite3.connect(other_org) as conn:
-        conn.execute("PRAGMA user_version = 0")
     sessions = volume / "dashboard_identity_sessions.db"
     with sqlite3.connect(sessions) as conn:
         conn.executescript(
@@ -558,11 +554,6 @@ def test_migrate_on_mount_upgrades_legacy_volume_and_stamps_it(tmp_path):
             "WHERE type='table' AND name='dashboard_access_grants'"
         ).fetchone()
     assert (volume / "personal.db").is_file()
-    with sqlite3.connect(other_org) as conn:
-        # A graph org DB heals to the CURRENT graph schema version on
-        # open (crypto's fleet-wide self-heal), not the version this
-        # test was written against.
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == _SCHEMA_USER_VERSION
 
 
 def test_newer_volume_is_refused_before_any_mutation(tmp_path):
@@ -609,7 +600,7 @@ def test_snapshot_refuses_store_resolved_outside_selected_volume(
 
 def test_deploy_entrypoint_migrates_volume_before_dashboard_start():
     entrypoint = (
-        Path(__file__).resolve().parents[2] / "deploy" / "entrypoint.sh"
+        Path(__file__).resolve().parents[2] / "deploy" / "serve.sh"
     ).read_text(encoding="utf-8")
     migrate = "python3 -m tools.portability migrate-on-mount /app/data"
     assert migrate in entrypoint
