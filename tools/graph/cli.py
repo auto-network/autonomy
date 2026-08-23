@@ -6332,6 +6332,11 @@ def main():
     p_share.add_argument("--caption", help="Optional caption shown under the tile")
     p_share.set_defaults(func=cmd_share)
 
+    # dropbox — machine-global screenshot ingress, read through the normal
+    # authenticated session bearer (never the upload-only Shortcut token).
+    from .dropbox_cmd import register as _register_dropbox
+    _register_dropbox(sub, resolve_token=_resolve_crosstalk_token)
+
     # set — Settings primitive (graph://0d3f750f-f9c)
     from .set_cmd import attach_set_subparser
     attach_set_subparser(sub)

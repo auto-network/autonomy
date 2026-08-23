@@ -8,6 +8,7 @@ allowed to select:
 * a dashboard cookie is the local operator and may select any org;
 * an org-stamped session bearer is an agent and is forced to its token org;
 * a positively identified org-less host bearer is a local operator session;
+* route-scoped service bearers classify only on their registered API routes;
 * missing or unrecognised credentials remain compatibility traffic for now.
 
 The middleware deliberately does not reject compatibility traffic.  Route
@@ -42,6 +43,9 @@ class ApiPrincipalKind(str, Enum):
     #: reach is those routes — everywhere else the same token does not classify
     #: here and fails to authenticate.
     MCP_SERVICE = "mcp_service"
+    #: An operator-approved external service credential. It classifies only
+    #: when a stored exact method/path capability matches the current request.
+    EXTERNAL_SERVICE = "external_service"
     COMPATIBILITY = "compatibility"
 
 
@@ -53,6 +57,10 @@ class ApiPrincipal:
     subject: str | None = None
     org: str | None = None
     auth_error_status: int | None = None
+    api_capabilities: tuple[tuple[str, str], ...] = ()
+    application_scope: str | None = None
+    resource_audience: str | None = None
+    source_approval_id: str | None = None
 
     @property
     def authenticated(self) -> bool:
@@ -68,6 +76,10 @@ class ApiPrincipal:
     @property
     def org_bound(self) -> bool:
         return self.kind is ApiPrincipalKind.ORG_SESSION
+
+    def allows_api(self, method: str, path: str) -> bool:
+        """Whether a scoped external principal allows this exact API call."""
+        return (method.upper(), path) in self.api_capabilities
 
 
 COMPATIBILITY_PRINCIPAL = ApiPrincipal(ApiPrincipalKind.COMPATIBILITY)

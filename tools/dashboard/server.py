@@ -125,6 +125,7 @@ from tools.dashboard import turn_corrections as turn_corrections_mod
 from tools.dashboard.dao import auth_db, dashboard_db, mcp_relay_db
 from tools.dashboard import approvals_routes
 from tools.dashboard import mcp_relay_routes
+from tools.dashboard import dropbox_routes
 from tools.dashboard import jira_routes
 from tools.dashboard import identity_routes
 from tools.dashboard import fleet_enrollment_routes
@@ -3549,6 +3550,42 @@ def authenticate_mcp_service(request) -> "api_auth.ApiPrincipal | None":
         return None
     return api_auth.ApiPrincipal(
         api_auth.ApiPrincipalKind.MCP_SERVICE, subject=name,
+    )
+
+
+def authenticate_service(request) -> "api_auth.ApiPrincipal | None":
+    """Classify a fixed-purpose or generically scoped machine credential.
+
+    The existing MCP verifier remains unchanged and independently testable.
+    Operator-approved external credentials carry immutable exact method/path
+    capabilities in the hashed auth store. A token classifies only when the
+    current request matches one of those stored pairs; off-scope it falls
+    through and cannot resolve as a session token.
+    """
+    mcp = authenticate_mcp_service(request)
+    if mcp is not None:
+        return mcp
+    auth = request.headers.get("authorization", "")
+    parts = auth.split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1]:
+        return None
+    token_hash = hashlib.sha256(parts[1].encode()).hexdigest()
+    scope = auth_db.resolve_scoped_service_token(
+        token_hash, method=request.method, path=request.url.path,
+    )
+    if scope is None:
+        return None
+    capabilities = tuple(
+        (capability["method"], capability["path"])
+        for capability in scope["capabilities"]
+    )
+    return api_auth.ApiPrincipal(
+        api_auth.ApiPrincipalKind.EXTERNAL_SERVICE,
+        subject=scope["name"],
+        api_capabilities=capabilities,
+        application_scope=scope.get("application_scope"),
+        resource_audience=scope.get("resource_audience"),
+        source_approval_id=scope.get("sourceApprovalId"),
     )
 
 
@@ -18889,6 +18926,10 @@ routes = [
     # ChatGPT MCP relay: session/crosstalk resolve + approval (service-token auth)
     *mcp_relay_routes.ROUTES,
 
+    # Machine-global operator dropbox: public approval bootstrap, upload-only
+    # ingress credential, and session-authenticated global reads.
+    *dropbox_routes.ROUTES,
+
     # auto.network identity (C2 sign-on ceremony): encrypted org key,
     # binding record, revocation forwarding
     *network_routes.ROUTES,
@@ -19707,7 +19748,7 @@ app = Starlette(
             authenticate_bearer=authenticate_session_request,
             verify_cookie=unlock_routes.verify_session_token,
             cookie_name=unlock_routes.SESSION_COOKIE,
-            authenticate_service=authenticate_mcp_service,
+            authenticate_service=authenticate_service,
         ),
         Middleware(_CSPMiddleware),
         # Innermost: the human unlock gate (fail-open-then-enforce).

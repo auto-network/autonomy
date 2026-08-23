@@ -7,12 +7,14 @@ the route's ``(method, path)`` is one of the explicit, justified exceptions in
 by being written into that one table with a reason a reviewer reads — never by
 omission. Forgetting to declare a route's policy yields **closed**, not open.
 
-The two credentials a route accepts are the two the middleware already
-classifies as authenticated: a **bearer session token** (an agent using the
-API) or the **dashboard session cookie** (the operator). There is no third
-way in — no visitor token, no anonymous, no outside access. Guest surfaces
-(e.g. a mission's rendered screen) are served through the sandboxed Content
-Frame document path, not through these ``/api`` routes.
+Most routes accept one of two identities the middleware classifies as
+authenticated: a **bearer session token** (an agent using the API) or the
+**dashboard session cookie** (the operator). A small number of exact routes
+also accept machine-scoped service bearers; the identity middleware recognizes
+each only on its registered method/path, so it gains no general API authority.
+There is no implicit visitor or anonymous authority. Guest surfaces (e.g. a
+mission's rendered screen) are served through the sandboxed Content Frame
+document path, not through these ``/api`` routes.
 
 Design of record: ``graph://78220bd8-fea`` (this feature's decision note),
 ``graph://f42db05f-7ca`` (the lockdown invariants), ``graph://a557b9ff-a5a``
@@ -81,6 +83,13 @@ PUBLIC_EXCEPTIONS: dict[tuple[str, str], str] = {
         "stored by first run. It must remain reachable after encrypted root "
         "delivery turns on the human gate but before the joining browser can "
         "unlock and obtain its first session.",
+    ("POST", "/api/dropbox/enrollments"):
+        "A generic signed iPhone Shortcut begins with only this dashboard "
+        "origin. This bounded route creates an operator approval but grants no "
+        "authority until the operator decides it.",
+    ("GET", "/api/dropbox/enrollments/{id}"):
+        "The high-entropy enrollment id is the one-time reply capability used "
+        "by the Shortcut while it waits for the operator-approved upload token.",
 }
 
 
@@ -160,8 +169,8 @@ def apply_default_deny(routes: list, *, plugin: bool = False) -> list:
 def assert_no_plugin_exceptions(plugin_route_paths: set[str]) -> None:
     """Refuse a plugin route that tries to be a public exception.
 
-    Plugins get no open option: the two credentials cover every plugin case
-    (agent = bearer, operator = cookie). A plugin path appearing in
+    Plugins get no open option: session and operator credentials cover every
+    plugin case. A plugin path appearing in
     :data:`PUBLIC_EXCEPTIONS` is a configuration error, raised loudly at
     startup rather than served open.
     """

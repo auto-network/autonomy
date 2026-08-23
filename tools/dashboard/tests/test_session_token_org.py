@@ -66,7 +66,7 @@ def test_legacy_db_without_org_column_is_altered_in_place(tmp_path):
     try:
         cols = {r["name"] for r in auth_db._conn.execute(
             "PRAGMA table_info(session_tokens)").fetchall()}
-        assert "org" in cols
+        assert {"org", "kind", "expires_at", "service_scope"}.issubset(cols)
         # The pre-existing row is NOT backfilled: it reads org=None.
         assert auth_db.resolve_token(_hash("old")) == ("auto-legacy", None)
     finally:

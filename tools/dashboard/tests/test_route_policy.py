@@ -101,6 +101,26 @@ async def test_fleet_resume_stays_reachable_during_pre_session_handoff(
     assert resp.status_code == 200
 
 
+@pytest.mark.asyncio
+async def test_dropbox_enrollment_transport_is_public_but_contents_are_not(
+    gate_enforced,
+):
+    compat = api_auth.COMPATIBILITY_PRINCIPAL
+    create = _wrap("/api/dropbox/enrollments", method="POST")
+    wait = _wrap("/api/dropbox/enrollments/{id}", method="GET")
+    listing = _wrap("/api/dropbox", method="GET")
+
+    assert (await _call(
+        create, _req("POST", "/api/dropbox/enrollments", compat),
+    )).status_code == 200
+    assert (await _call(
+        wait, _req("GET", "/api/dropbox/enrollments/opaque", compat),
+    )).status_code == 200
+    assert (await _call(
+        listing, _req("GET", "/api/dropbox", compat),
+    )).status_code == 401
+
+
 def test_every_exception_carries_a_justification():
     for key, reason in route_policy.PUBLIC_EXCEPTIONS.items():
         assert isinstance(reason, str) and len(reason.strip()) >= 20, key

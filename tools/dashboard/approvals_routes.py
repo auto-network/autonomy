@@ -165,6 +165,7 @@ from tools.dashboard import visitor_approvals as _visitor
 from tools.dashboard import mcp_peer_approvals as _mcp_peer
 from tools.dashboard import secure_setting_approvals as _secure_setting
 from tools.dashboard import fleet_enrollment_approvals as _fleet_enrollment
+from tools.dashboard import external_service_approvals as _external_service
 
 # Optional per-kind request preparation. A handler returns the normalized
 # request plus a server-frozen staged context. Kinds absent here retain the
@@ -176,6 +177,7 @@ PREPARE_CREATE = {
     **_mcp_peer.PREPARE_CREATE,
     **_secure_setting.PREPARE_CREATE,
     **_fleet_enrollment.PREPARE_CREATE,
+    **_external_service.PREPARE_CREATE,
 }
 AUTHORIZE_DECISION = {
     **_dashboard_access.AUTHORIZE_DECISION,
@@ -183,6 +185,7 @@ AUTHORIZE_DECISION = {
     **_mcp_peer.AUTHORIZE_DECISION,
     **_secure_setting.AUTHORIZE_DECISION,
     **_fleet_enrollment.AUTHORIZE_DECISION,
+    **_external_service.AUTHORIZE_DECISION,
 }
 
 # Per-kind GET enrichment — the only kind-specific hook on the server side of
@@ -195,6 +198,7 @@ ENRICH = {
     **_mcp_peer.ENRICH,
     **_secure_setting.ENRICH,
     **_fleet_enrollment.ENRICH,
+    **_external_service.ENRICH,
 }
 
 
@@ -220,6 +224,7 @@ EXECUTORS: dict = {
     **_mcp_peer.EXECUTORS,
     **_secure_setting.EXECUTORS,
     **_fleet_enrollment.EXECUTORS,
+    **_external_service.EXECUTORS,
 }
 
 
@@ -269,6 +274,70 @@ def _finalize_decision(rid: str, kind: str, session: str) -> None:
 MAX_WAIT_S = 60.0
 
 
+async def open_approval(
+    *,
+    kind: str,
+    session: str,
+    request_payload: dict,
+    request_id: str | None = None,
+    prepared_staged: dict | None = None,
+) -> str:
+    """Create and announce one prepared approval request.
+
+    Specialized producers use this seam instead of duplicating registry,
+    Web Push, and event-bus behavior. A caller may supply a high-entropy id
+    when that id is itself its reply capability. ``prepared_staged`` is only
+    for a server-owned producer that already resolved a registered capability;
+    ordinary callers always pass through the kind's preparation hook.
+    """
+    staged = prepared_staged
+    if staged is None:
+        prepare = PREPARE_CREATE.get(kind)
+        if prepare:
+            request_payload, staged = prepare(session, request_payload)
+    if request_id is None:
+        rid = ar.create(
+            kind=kind, session=session, request=request_payload,
+            staged=staged, created_at=time.time(),
+        )
+    else:
+        ar.create_idempotent(
+            request_id=request_id,
+            kind=kind,
+            session=session,
+            request=request_payload,
+            staged=staged,
+            created_at=time.time(),
+        )
+        rid = request_id
+    if push_eligible_kind(kind):
+        await web_push.register_approval_pending(rid, kind)
+    await event_bus.broadcast(
+        "approval:pending", {"id": rid, "kind": kind, "session": session},
+    )
+    return rid
+
+
+async def wait_for_approval(rid: str, wait_seconds: float) -> dict | None:
+    """Return an approval row, waiting boundedly when it is still pending."""
+    row = ar.get(rid)
+    if row is None or row["result"] is not None or wait_seconds <= 0:
+        return row
+    ev = _decision_waiters.setdefault(rid, asyncio.Event())
+    # Close the read→waiter registration race: a decision may have committed
+    # after the first read but before the event existed, so no finalizer could
+    # have signalled it. Re-read once with the event installed.
+    latest = ar.get(rid)
+    if latest is None or latest["result"] is not None:
+        _decision_waiters.pop(rid, None)
+        return latest
+    try:
+        await asyncio.wait_for(ev.wait(), min(wait_seconds, MAX_WAIT_S))
+    except asyncio.TimeoutError:
+        pass
+    return ar.get(rid) or row
+
+
 async def create_approval(request: Request) -> JSONResponse:
     """POST /api/approvals  {kind, session, request} -> {id}."""
     try:
@@ -287,23 +356,12 @@ async def create_approval(request: Request) -> JSONResponse:
                 "must be a non-empty object"
             )},
             status_code=400)
-    staged = None
-    prepare = PREPARE_CREATE.get(kind)
-    if prepare:
-        try:
-            req, staged = prepare(session, req)
-        except ValueError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
-    rid = ar.create(kind=kind, session=session, request=req, staged=staged,
-                    created_at=time.time())
-    # The first registered background-attention producer. Unknown generic
-    # approval kinds retain the rendezvous but cannot mint OS interruptions.
-    if push_eligible_kind(kind):
-        await web_push.register_approval_pending(rid, kind)
-    # Push-notify the operator's open viewer(s); pending_approval on the
-    # session detail stays the durable fallback for a viewer that (re)connects.
-    await event_bus.broadcast("approval:pending",
-                              {"id": rid, "kind": kind, "session": session})
+    try:
+        rid = await open_approval(
+            kind=kind, session=session, request_payload=req,
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
     return JSONResponse({"id": rid})
 
 
@@ -324,12 +382,10 @@ async def get_approval(request: Request) -> JSONResponse:
     wait = request.query_params.get("wait")
     if wait is not None:
         if r["result"] is None:
-            ev = _decision_waiters.setdefault(rid, asyncio.Event())
             try:
-                await asyncio.wait_for(ev.wait(), min(float(wait or 0), MAX_WAIT_S))
-            except (asyncio.TimeoutError, ValueError):
+                r = await wait_for_approval(rid, float(wait or 0)) or r
+            except ValueError:
                 pass
-            r = ar.get(rid) or r
         return JSONResponse({
             "id": r["id"], "kind": r["kind"], "session": r["session"],
             "request": r["request"], "result": r["result"],
