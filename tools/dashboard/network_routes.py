@@ -1239,6 +1239,29 @@ async def post_register(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": (
             f"could not reach the registry at {registry_url}: {e}"
         )}, status_code=502)
+    if resp.status_code == 409:
+        # The registry already holds a binding for this UUID. A registry taught
+        # same-root idempotency returns 201 (claim_org's already_bound_self); a
+        # registry not yet running that fix still 409s a same-root
+        # re-registration. Treat the 409 as idempotent success ONLY when our own
+        # persisted binding proves the org is ours (same org_uuid + root_pub) —
+        # a genuine different-root conflict still fails below. This lets a
+        # re-unlock sail past register to serve-cert provisioning without
+        # depending on the production registry being redeployed, and it is the
+        # reason registration must be safe to repeat: the personal org derives a
+        # deterministic org_uuid, so every unlock re-attempts it.
+        existing = _first_member(NETWORK_BINDING_SET_ID, org)
+        if (
+            existing is not None
+            and existing.payload.get("org_uuid") == payload["org_uuid"]
+            and existing.payload.get("root_pub") == payload["root_pub"]
+        ):
+            return JSONResponse({
+                "ok": True,
+                "registry": existing.key,
+                "binding": existing.payload,
+                "already_registered": True,
+            })
     if resp.status_code != 201:
         try:
             detail = resp.json().get("detail", resp.text)
