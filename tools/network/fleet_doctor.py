@@ -513,6 +513,16 @@ def check_recent_errors(report: dict, *, tail_lines: int = 4000) -> None:
             "TunnelUnavailable", "WatermarkError", "FleetRelaySyncError",
             "fleet server hello envelope is malformed",
             "serving machine is locked for Fleet sync",
+            # Provisioning-ceremony failures during an unlock -- these are
+            # request/response events, not persistent state, so this is the
+            # only place fleet_doctor can see them at all. Caught live
+            # 2026-08-23: a second unlock's registration retry 502'd because
+            # post_register treats any non-201 registry response (including
+            # 409 "already registered") as a hard failure -- state-at-rest
+            # checks elsewhere in this script had no way to see that.
+            "POST /api/network/register 5",
+            "POST /api/network/serve-cert 5",
+            "post_serve_cert:",
         ]
         counts: dict[str, int] = {}
         last_seen: dict[str, str] = {}
