@@ -438,6 +438,10 @@
   // pillar is a number about somewhere else. Mission-wide views count
   // mission-wide.
   function viewScope(){
+    // STATUS IS MISSION-WIDE, ALWAYS. The pillar chips are not even
+    // visible there, so a selection lingering from another tab must not
+    // scope its numbers — the special case the operator named.
+    if (currentView === MID) return null;
     var v = pillarFilter || "";
     if (!v) return null;
     return function (it) { return it.surface_id === v; };
