@@ -167,6 +167,10 @@ class ConnectorFleetRuntime:
             scheduler.authenticator.accept_client(hello, session=token)
         )
         current_epoch = scheduler._current_epoch()
+        logger.warning(
+            "fleet relay sync: accept_client ok, peer_pub=%s, entering stream",
+            peer_pub[:16] if isinstance(peer_pub, str) else peer_pub,
+        )
 
         async def stream():
             root = Path(tempfile.mkdtemp(prefix="fleet-relay-checkpoint-"))
@@ -227,6 +231,19 @@ class ConnectorFleetRuntime:
                 )
                 async for frame in deltas:
                     yield frame
+            except Exception:
+                # This generator's own body -- everything from the
+                # server-hello yield onward -- runs lazily, driven by
+                # whatever iterates handle()'s return value at the actual
+                # WS-send layer, not by _fleet_sync's try/except (which
+                # only covers handle()'s own synchronous setup, already
+                # complete by the time this generator is even created).
+                # An exception here was silently swallowed before -- no
+                # server-hello sent, connection just closes clean (1000),
+                # with nothing logged anywhere. Found live 2026-08-23
+                # chasing exactly that symptom.
+                logger.warning("fleet relay sync stream failed", exc_info=True)
+                raise
             finally:
                 shutil.rmtree(root, ignore_errors=True)
 
