@@ -33,6 +33,50 @@ def _source(identity: str, title: str, timestamp: int) -> Mutation:
     )
 
 
+def _insert_setting(
+    conn: sqlite3.Connection, *, identity: str, set_id: str, key: str,
+    payload: str, deprecated: int, schema_revision: int = 1,
+    publication_state: str = "raw",
+) -> None:
+    conn.execute(
+        "INSERT INTO settings(id,set_id,schema_revision,key,payload,"
+        "publication_state,deprecated,created_at,updated_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?)",
+        (identity, set_id, schema_revision, key, payload, publication_state,
+         deprecated, "2026-08-19T00:00:00Z", "2026-08-19T00:00:00Z"),
+    )
+
+
+def test_live_row_settings_base_resolves_the_deprecated_zero_winner(
+    tmp_path: Path,
+) -> None:
+    """Superseded base rows accumulate as deprecated history but collapse to one
+    logical settings address. ``_live_row`` must resolve the sole
+    ``deprecated = 0`` winner, not an arbitrary deprecated sibling — the base
+    snapshot filters to ``deprecated = 0`` with the same predicate, so if this
+    resolver (which builds the winner catalog's candidate hash) picked a
+    different physical row the checkpoint would fail install with a winner/base
+    hash mismatch.
+    """
+    db = GraphDB(tmp_path / "personal.db")
+    try:
+        # Deprecated siblings first (lower rowids), so an unordered fetchone()
+        # would return one of them; the live winner is inserted last.
+        _insert_setting(db.conn, identity="dep-a", set_id="dashboard.x",
+                        key="default", payload='{"n":1}', deprecated=1)
+        _insert_setting(db.conn, identity="dep-b", set_id="dashboard.x",
+                        key="default", payload='{"n":2}', deprecated=1)
+        _insert_setting(db.conn, identity="live", set_id="dashboard.x",
+                        key="default", payload='{"n":3}', deprecated=0)
+        db.conn.commit()
+        address = ("dashboard.x", 1, "default", "raw", "base")
+        row = MutationCatalog._live_row(db.conn, "settings", address)
+        assert row["id"] == "live"
+        assert row["deprecated"] == 0
+    finally:
+        db.close()
+
+
 def test_replicating_writes_require_an_authored_transaction(tmp_path: Path) -> None:
     db = GraphDB(tmp_path / "personal.db")
     try:
