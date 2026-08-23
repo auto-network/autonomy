@@ -24,6 +24,19 @@ state that the current UI actively hides:
   envelope, catalog integrity, the 4404-overload) that no human or remote agent
   could see from the UI.
 
+**The deeper routing bug — "accepted" is mistaken for "done."** The moment the
+invitation is *accepted*, the system assumes onboarding is complete and hands
+the operator the assistant-setup page — but acceptance is only step 1 of five.
+The machine is not usable until its **personal database has actually
+synchronized**. Between acceptance and a finished first sync (which can be
+**many gigabytes** and take a long time) the operator has no honest view: even
+after re-logging in a fresh incognito window (the only way in, because the
+stale cookie path is broken), they land on *install Claude / install Codex* —
+useless, because there is nothing to configure until sync lands. **The status
+screen must persist for the entire onboarding lifecycle — from
+invitation-in-progress until the first sync completes and the operator can log
+directly into a working dashboard — never dismissed early on mere acceptance.**
+
 **What's needed:** for a machine **in the invitation / joining / member state**,
 the homepage is a **fleet status screen** — a catalogue of every check we learned
 to run, as human-readable status flags — backed by a **JSON status API** that a
@@ -41,6 +54,64 @@ tailing.** Fast, complete, machine- and human-consumable.
    of what the status means and what to do about it. Never a wall of text.
 3. **Routing** — a machine in the joining/member-degraded state lands here, not
    on assistant-setup (see "When this screen shows").
+
+## The onboarding view: five steps
+
+The **default view for a machine mid-join** is not the raw flag catalogue — it
+is a **five-step linear checklist**, the operator's honest picture of "how far
+along is this machine becoming a working fleet member." Each step is one line
+with a big state chip (done / active / pending / failed) and expands to the
+underlying flags from the catalogue below. The steps are strictly ordered; the
+screen highlights the first non-`done` step as the current one. The exhaustive
+flag catalogue is the *detail* underneath — this checklist is the summary a
+human reads in two seconds.
+
+| # | Step (operator-facing) | Means | Backed by flags |
+|---|---|---|---|
+| 1 | **Invitation accepted** | The operator on the home fleet approved this machine's join and its personal armor was delivered. | `enroll.admission`, `enroll.armor_delivered` |
+| 2 | **Personal armor unlocked** | The delivered armor was unlocked on this machine — the personal root decrypted, the machine key derived, the vault warm. | `enroll.completed`, `vault.warm`, `cred.runtime_present`/`cred.runtime_valid` |
+| 3 | **Fleet connection established (roster)** | This machine is a signed member of the root-signed roster and can resolve its peers. *(This is where two days of bring-up got stuck.)* | `enroll.completed` (roster `machine_id`), `reach.announced`, `reach.peers_resolved` |
+| 4 | **Secure tunnel created** | A live path up through the relay into the parent fleet's serving node — the channel dials, is admitted, and stays open. | `relay.reachable`, `relay.link_live`, `relay.hub_tunnel`, `sync.last_error` clean |
+| 5 | **Personal database synchronizing** | The first full checkpoint is transferring and installing. **Shows a progress bar** (see below). Done when the frontier reaches the origin's and the catalog installs. | `sync.transfer` (bytes/%), `sync.frontier`, `catalog.integrity` |
+
+Steps 1–2 are the **prerequisites**; 3–4 are **establishing the path**; 5 is
+the **payload**. Only when step 5 reaches `done` — first sync complete, member
+fully live — does onboarding close out and the operator get the normal
+dashboard. Until then, this is the homepage.
+
+### Step 5 progress — a machine-db sync-progress setting
+
+Step 5 must show a **progress bar**, and for a multi-gigabyte personal database
+that bar has to be fed by something the sync path writes as it goes. Add a
+**graph Setting in the machine database** (local, `machine.db` — never
+replicated) that the fleet sync scheduler updates as the checkpoint streams and
+materializes:
+
+```json
+// autonomy.fleet.sync_progress  (machine.db, keyed by origin org_uuid + machine_id)
+{
+  "phase": "transfer",              // idle | transfer | materialize | done | failed
+  "bytes_total": 601931776,          // checkpoint size when known (574 MiB here)
+  "bytes_transferred": 247463936,
+  "records_total": 812443,           // catalog total_records
+  "records_applied": 318902,
+  "started_at": 1755975000,
+  "updated_at": 1755975041,
+  "last_error": null                 // distinct cause on failure (throttled / fk_orphan / …)
+}
+```
+
+- The scheduler/relay-sync writes `bytes_transferred` during the stream and
+  `records_applied` during materialize; the screen renders
+  `bytes_transferred/bytes_total` then `records_applied/records_total`, and the
+  bar survives a browser refresh because it reads persisted state, not a live
+  socket.
+- `GET /api/fleet/status` returns this object verbatim under the `sync.transfer`
+  flag's `evidence`, so a **remote agent watches a multi-GB first sync advance
+  with no SSH** — the same observability the operator gets, programmatically.
+- It lives in `machine.db` precisely because it is **per-machine observation of
+  this machine's own download**, not fleet-shared truth; it must not ride the
+  replicated personal graph.
 
 ## Status-flag model
 
@@ -119,7 +190,8 @@ Every one of these is a `fail`/`warn` we actually hit. Group = screen section.
 | `sync.last_pull` | `fleet_sync_peer_state.last_success_ns` | never synced / stale frontier |
 | `sync.last_error` | last pull outcome + **distinct** close code | surfaces the real cause (not an overloaded 4404): `throttled` (byte cap), `no_tunnel`, `unknown_link`, `tls`, `handshake` |
 | `sync.frontier` | earned watermark vs peers | how far behind |
-| `sync.transfer` | bytes / % of first checkpoint | in-progress checkpoint (e.g. throttled at N MB of 574 MiB) |
+| `sync.transfer` | bytes / % of first checkpoint (machine-db `sync_progress` setting) | in-progress checkpoint (e.g. throttled at N MB of 574 MiB) |
+| `sync.install` | last `install_checkpoint`/materialize outcome | the transfer landed but **materialize aborted** — e.g. an **FK-orphan** (a `thoughts` row whose `sources` parent was deleted long ago without cascade — hit live: 16.6k orphans on home's personal.db) failing the whole checkpoint. A robust receiver **skips/quarantines** the offending rows and advances the frontier rather than aborting a multi-GB sync over origin-side referential debris. |
 
 ### F. Checkpoint / catalog (server side of a pull)
 | Flag | Probe | Fail means |
@@ -146,14 +218,25 @@ The homepage router must distinguish **role**, not just "logged in":
 - Machine has a **fleet-joining marker** or a **roster identity** (`machine_id`)
   → this is a **fleet member**. Its homepage is the **fleet status screen**,
   regardless of an existing session cookie. Never assistant-setup.
-- Within that: if `cred.runtime_present`/`vault.warm` is `fail`, the screen's
-  headline is an explicit **"Unlock to re-mint sync keys"** call to action (this
-  is the exact state that today silently drops the operator on the useless page).
+- **Acceptance is not completion.** The screen persists from
+  invitation-in-progress until **step 5 (first sync) reaches `done`** — not when
+  the invitation is merely accepted. The current bug is exactly this: the router
+  treats "invitation accepted" as "onboarding complete" and hands over
+  assistant-setup while the personal database has not yet transferred. The gate
+  to the normal dashboard is *first-sync-complete*, tracked by the machine-db
+  sync-progress setting's `phase == "done"`.
+- **The re-login path must land here too.** Because the stale-cookie path is
+  broken, the operator's real way back in is a fresh (incognito) login — and
+  today that *still* drops them on assistant-setup because they are "part of the
+  fleet." Post-login role resolution must route a not-yet-synced member to this
+  screen. If `vault.warm`/`cred.runtime_present` is `fail`, the headline is an
+  explicit **"Unlock to re-mint sync keys"** call to action.
 - A genuinely fresh, non-fleet machine keeps the assistant-setup homepage.
 
-So the fix has two halves: (1) **detect the member/joining role** and route to
-the status screen; (2) **build the screen + API**. Half (1) alone already ends
-the "useless homepage on a broken node" trap.
+So the fix has two halves: (1) **detect the member/joining role AND whether
+first sync is complete**, and route to the status screen until it is; (2)
+**build the screen + API**. Half (1) alone already ends the "useless homepage on
+a broken node" trap.
 
 ## Build notes / reuse
 
@@ -179,6 +262,13 @@ the "useless homepage on a broken node" trap.
 - A rebooted, unsynced member opens the dashboard → lands on the status screen
   with a red headline "Unlock to re-mint sync keys" and a green/amber/red flag
   for every row above — **not** the assistant-setup page.
+- A machine mid-join shows the **five-step checklist** with the current step
+  highlighted; the screen **persists until step 5 (first sync) is `done`**, and
+  a fresh (incognito) re-login during onboarding returns to it, never to
+  assistant-setup.
+- Step 5 shows a **progress bar** driven by the machine-db `sync_progress`
+  setting; a **multi-gigabyte** first sync is observable advancing, both in the
+  UI and via `GET /api/fleet/status` (so a remote agent watches it too).
 - `curl -s /api/fleet/status | jq` returns the same flags; a remote agent
   diagnoses and remediates the machine **without a single SSH or log tail**.
 - Every failure we hit over the two-day bring-up maps to exactly one flag whose
