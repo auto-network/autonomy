@@ -83,7 +83,8 @@
     cursor:pointer;font:inherit;color:var(--ink)}
   .mc-psel-btn b{flex:1;text-align:left;font-size:.92rem;color:#fff}
   .mc-psel-btn .caret{color:var(--ink3);font-size:.7rem}
-  .mc-psel-menu{position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:8;
+  .mc-psel-menu{display:none}
+  .mc-psel.open .mc-psel-menu{display:block;position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:8;
     background:#11151d;border:1px solid var(--line2);border-radius:10px;
     box-shadow:0 12px 30px rgba(0,0,0,.5);overflow:hidden}
   .mc-psel-row{display:flex;align-items:center;gap:9px;width:100%;padding:10px 13px;
@@ -961,22 +962,27 @@
   function rememberPillar(pid){
     try { localStorage.setItem(PSEL_KEY, pid); } catch (e) {}
   }
-  var pselOpen = false;
+  // BUILT ONCE, TOGGLED BY CLASS. Rebuilding the selector's DOM on every
+  // toggle put freshly-created nodes under an in-flight tap whenever
+  // anything re-rendered between paint and touch (the chrome re-renders
+  // on every live presence event) — on a phone the tap landed on nothing
+  // or on the wrong row. Stable nodes; only a class changes.
+  var pselOpen = false, pselFor = null;
   function renderPsel(){
     var host = document.getElementById("mc-psel");
-    host.innerHTML = "";
     var cur = pillarChoices().filter(function (c) {
       return c.id === currentView; })[0];
-    if (!cur) return;
-    var btn = el("button","mc-psel-btn");
-    btn.appendChild(dot(cur.color));
-    btn.appendChild(el("b",null,cur.name));
-    btn.appendChild(el("span","caret", pselOpen ? "\u25B4" : "\u25BE"));
-    btn.addEventListener("click", function () {
-      pselOpen = !pselOpen; renderPsel();
-    });
-    host.appendChild(btn);
-    if (pselOpen){
+    if (!cur){ host.innerHTML = ""; pselFor = null; return; }
+    if (pselFor !== cur.id){
+      host.innerHTML = "";
+      var btn = el("button","mc-psel-btn");
+      btn.appendChild(dot(cur.color));
+      btn.appendChild(el("b",null,cur.name));
+      btn.appendChild(el("span","caret","\u25BE"));
+      btn.addEventListener("click", function () {
+        pselOpen = !pselOpen; renderPsel();
+      });
+      host.appendChild(btn);
       var menu = el("div","mc-psel-menu");
       pillarChoices().forEach(function (c) {
         var r = el("button","mc-psel-row" + (c.id === cur.id ? " on" : ""));
@@ -990,7 +996,11 @@
         menu.appendChild(r);
       });
       host.appendChild(menu);
+      pselFor = cur.id;
     }
+    host.classList.toggle("open", pselOpen);
+    var caret = host.querySelector(".caret");
+    if (caret) caret.textContent = pselOpen ? "\u25B4" : "\u25BE";
   }
   var qView = collectionView("questions","Open questions",
     function (it) { return it.kind==="question" && it.state==="open"; },
