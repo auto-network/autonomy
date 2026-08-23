@@ -19,7 +19,6 @@ from tools.dashboard.fleet_enrollment_service import (
     StoredFleetInvitation,
 )
 from tools.graph.db import _org_db_path
-from tools.graph import org_ops
 from tools.network import (
     fleet_invite,
     fleet_machine_profile,
@@ -44,7 +43,7 @@ class ProjectionInputs:
     invitation: StoredFleetInvitation | None
     machine_names: Mapping[str, str] = field(default_factory=dict)
     invitation_publication: Mapping | None = None
-    publishing_org: str = "autonomy"
+    publishing_org: str = "personal"
 
 
 def _peer_rows(epoch: str | None) -> dict[str, dict]:
@@ -122,7 +121,7 @@ def _load_inputs(*, now_ms: int) -> ProjectionInputs:
         invitation=store.current_invitation(now_ms=now_ms),
         machine_names=fleet_machine_profile.names(org=None),
         invitation_publication=invitation_publication,
-        publishing_org=org_ops.resolve_first_org_slug(),
+        publishing_org="personal",
     )
 
 
