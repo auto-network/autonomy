@@ -65,11 +65,10 @@
     scrollbar-width:thin}
   .mc-act-table{border-collapse:separate;border-spacing:2px}
   .mc-act-table td,.mc-act-table th{padding:0}
-  .mc-act-table th{font:400 .7rem/1.2 inherit;color:var(--ink3);text-align:left;
+  .mc-act-table th{font:400 .66rem/1.2 inherit;color:var(--ink3);text-align:left;
     padding-right:8px;white-space:nowrap;max-width:216px;overflow:hidden;text-overflow:ellipsis;
     cursor:pointer}
-  .mc-act-table th .dot{display:inline-block;width:7px;height:7px;border-radius:50%;
-    margin-right:6px;vertical-align:1px}
+  .mc-act-table th .pband{margin-right:4px;height:11px}
   .mc-act-cell{width:11px;height:11px;border-radius:3px;background:var(--card2)}
   .mc-act-cell.a1{background:#2b2f52}.mc-act-cell.a2{background:#46448c}
   .mc-act-cell.a3{background:#6a63c8}.mc-act-cell.a4{background:#8f87ff}
@@ -78,11 +77,12 @@
 
   /* ── nav ── */
   .mc-psel{position:relative;margin:0 0 12px}
-  .mc-psel-btn{display:flex;align-items:center;gap:9px;background:var(--card);
-    border:1px solid var(--line);border-radius:10px;padding:9px 13px;width:100%;
-    cursor:pointer;font:inherit;color:var(--ink)}
-  .mc-psel-btn b{flex:1;text-align:left;font-size:.92rem;color:#fff}
-  .mc-psel-btn .caret{color:var(--ink3);font-size:.7rem}
+  .mc-psel-btn{display:flex;align-items:center;gap:9px;background:none;
+    border:0;padding:4px 0;width:100%;cursor:pointer;font:inherit;color:var(--ink)}
+  .mc-psel-btn b{flex:1;text-align:left;font-size:1.02rem;color:#fff}
+  .mc-psel-btn .pband{height:16px}
+  .mc-psel-btn .caret{color:var(--ink3);font-size:.7rem;border:1px solid var(--line);
+    border-radius:7px;padding:4px 9px;background:var(--card)}
   .mc-psel-menu{display:none}
   .mc-psel.open .mc-psel-menu{display:block;position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:8;
     background:#11151d;border:1px solid var(--line2);border-radius:10px;
@@ -223,10 +223,12 @@
   .mc-psum:hover{border-color:var(--line2)}
   .mc-psum .hd{display:flex;align-items:flex-start;gap:8px}
   .mc-psum .hd b{flex:1;min-width:0}
-  .mc-minirow{display:flex;align-items:center;margin:0 0 6px}
+  .mc-minirow{display:flex;align-items:center;margin:12px 0 0}
   .mc-minirow .ago{font-size:.7rem;color:var(--ink3)}
   .mc-minirow .grow{flex:1}
-  .mc-psum .hd .band{width:4px;height:15px;border-radius:999px;flex-shrink:0;align-self:center}
+  .pband{width:4px;height:14px;border-radius:999px;flex:none;display:inline-block;
+    align-self:center;vertical-align:-2px}
+  .mc-psum .hd .pband{height:15px}
   .mc-psum .hd b{color:#fff;font-size:.88rem}
   .mc-mini{flex:none;display:inline-flex;align-items:center;margin-left:auto;
     border:1px solid var(--line);border-radius:6px;overflow:hidden;
@@ -239,7 +241,7 @@
   .mc-mini .m-z{opacity:.35}
   .mc-psum .last{font-size:.79rem;color:var(--ink2);margin:5px 0 0}
   .mc-statbar{display:flex;height:4px;border-radius:3px;overflow:hidden;
-    background:var(--card2);margin:10px 0 0}
+    background:var(--card2);margin:4px 0 0}
   .mc-statbar i{height:100%}
   .mc-statmeta{font-size:.72rem;color:var(--ink3);margin-top:5px}
 
@@ -382,6 +384,9 @@
   function dot(color){
     var d = el("span","dot"); d.style.background = color; return d;
   }
+  function band(color){
+    var b = el("span","pband"); b.style.background = color || "#8391a8"; return b;
+  }
 
   // ── header ──────────────────────────────────────────────────────
   // The mission title lives in the platform bar; the page starts at its
@@ -451,7 +456,7 @@
     surfaces.forEach(function (s) {
       var tr = document.createElement("tr");
       var th = document.createElement("th");
-      th.appendChild(dot(surfColor(s.id)));
+      th.appendChild(band(surfColor(s.id)));
       th.appendChild(document.createTextNode(surfName(s.id)));
       th.title = "Show " + surfName(s.id) + "'s updates over time";
       th.addEventListener("click", function () { showFeedFor(s.id); });
@@ -538,7 +543,7 @@
     top.setAttribute("data-mc-noexcerpt", "");
     var where = el("span","where");
     if (opts.showSurface){
-      where.appendChild(dot(surfColor(it.surface_id)));
+      where.appendChild(band(surfColor(it.surface_id)));
       where.appendChild(document.createTextNode(shortName(it.surface_id)));
     }
     if (it.owner) where.appendChild(document.createTextNode(
@@ -739,9 +744,7 @@
         show(p.pillar_id);
       });
       var hd = el("div","hd");
-      var band = el("span","band");
-      band.style.background = p.color || "#8391a8";
-      hd.appendChild(band);
+      hd.appendChild(band(p.color || "#8391a8"));
       hd.appendChild(el("b",null,p.name));
       var mine = liveItems.filter(function (it) { return it.surface_id===p.pillar_id; });
       var n = {};
@@ -866,7 +869,7 @@
       row.dataset.bucket = bucket(x.it);
       var main = el("div","main");
       var who = el("div","who");
-      who.appendChild(dot(surfColor(x.it.surface_id)));
+      who.appendChild(band(surfColor(x.it.surface_id)));
       who.appendChild(el("span","k",surfName(x.it.surface_id)));
       main.appendChild(who);
       main.appendChild(el("div","t",x.it.title));
@@ -988,7 +991,7 @@
     if (pselFor !== cur.id){
       host.innerHTML = "";
       var btn = el("button","mc-psel-btn");
-      btn.appendChild(dot(cur.color));
+      btn.appendChild(band(cur.color));
       btn.appendChild(el("b",null,cur.name));
       btn.appendChild(el("span","caret","\u25BE"));
       btn.addEventListener("click", function () {
@@ -998,7 +1001,7 @@
       var menu = el("div","mc-psel-menu");
       pillarChoices().forEach(function (c) {
         var r = el("button","mc-psel-row" + (c.id === cur.id ? " on" : ""));
-        r.appendChild(dot(c.color));
+        r.appendChild(band(c.color));
         r.appendChild(el("span",null,c.name));
         r.addEventListener("click", function () {
           pselOpen = false;
@@ -1066,7 +1069,7 @@
         c.dataset.surface = q.pillar_id || MID;
         var top = el("div","top");
         var wh = el("span","where");
-        wh.appendChild(dot(q.pillar_id ? surfColor(q.pillar_id) : "#8391a8"));
+        wh.appendChild(band(q.pillar_id ? surfColor(q.pillar_id) : "#8391a8"));
         wh.appendChild(document.createTextNode(
           (q.pillar_id ? surfName(q.pillar_id) : "Mission")
           + (q.asked_by_label ? " \u00b7 " + q.asked_by_label : "")));
@@ -1138,7 +1141,7 @@
       var top = el("div","top");
       var wh = el("span","where");
       if (!inGroup){
-        wh.appendChild(dot(p.color || "#8391a8"));
+        wh.appendChild(band(p.color || "#8391a8"));
         wh.appendChild(document.createTextNode(p.pillar_name || ""));
       }
       top.appendChild(wh);
@@ -1167,7 +1170,7 @@
         order.forEach(function (pid) {
           var sec = el("section","mc-sec");
           var h = el("h2",null,"");
-          h.appendChild(dot(surfColor(pid)));
+          h.appendChild(band(surfColor(pid)));
           h.appendChild(document.createTextNode(" " + surfName(pid)));
           sec.appendChild(h);
           groups[pid].forEach(function (p) { sec.appendChild(postCard(p, true)); });
