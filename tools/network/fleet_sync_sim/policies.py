@@ -214,6 +214,18 @@ LOCAL_SYNC_TABLES: Final[frozenset[str]] = frozenset({
     "fleet_sync_transactions",
 })
 
+#: Ledger state is node-local, keyed by genesis id — fleet authority reaches
+#: a member via the root-signed roster delivery, not by replicating raw
+#: ledger rows (whose cross-machine merge is undecided).
+LEDGER_TABLES: Final[frozenset[str]] = frozenset({
+    "ledger_events",
+    "ledger_heads",
+    "ledger_meta",
+    "ledger_parents",
+    "ledger_pending_claims",
+    "ledger_projections",
+})
+
 
 def classify_table(name: str) -> PolicyKind | None:
     """Return the explicit classification for *name*, or ``None``."""
@@ -224,6 +236,8 @@ def classify_table(name: str) -> PolicyKind | None:
     if name.startswith(DERIVED_TABLE_PREFIXES):
         return PolicyKind.DERIVED
     if name in LOCAL_SYNC_TABLES:
+        return PolicyKind.LOCAL
+    if name in LEDGER_TABLES:
         return PolicyKind.LOCAL
     return None
 

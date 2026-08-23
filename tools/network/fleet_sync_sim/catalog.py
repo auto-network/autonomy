@@ -653,11 +653,18 @@ class MutationCatalog:
                         (generation,),
                     )
                 timestamp = mutation.timestamp_ns
-                ordinal = int(self.conn.execute(
+                # SQLite < 3.38 can return no row from RETURNING on an
+                # upsert's DO-UPDATE path — split into a plain upsert plus a
+                # separate SELECT rather than relying on RETURNING here.
+                self.conn.execute(
                     "INSERT INTO fleet_sync_bootstrap_progress VALUES(?,1) "
                     "ON CONFLICT(timestamp_ns) DO UPDATE SET "
-                    "next_operation=next_operation+1 "
-                    "RETURNING next_operation-1",
+                    "next_operation=next_operation+1",
+                    (timestamp,),
+                )
+                ordinal = int(self.conn.execute(
+                    "SELECT next_operation-1 FROM fleet_sync_bootstrap_progress "
+                    "WHERE timestamp_ns=?",
                     (timestamp,),
                 ).fetchone()[0])
                 batch = ordinal // MAX_TRANSACTION_OPERATIONS
