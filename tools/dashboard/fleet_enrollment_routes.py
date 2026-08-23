@@ -10,6 +10,7 @@ authenticate an API caller but cannot exercise personal-root authority.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import time
@@ -22,6 +23,7 @@ from tools.dashboard import (
     fleet_enrollment_service,
     identity_routes,
     link_serving,
+    link_serving_supervisor,
     unlock_routes,
 )
 from tools.graph.db import _org_db_path
@@ -313,7 +315,32 @@ def _activate_runtime(
             and tunnel.selected_machine_id == credential.machine_id
         )
     if publish_connector:
-        fleet_relay_sync.publish_connector_runtime(payload)
+        # This activation is always for the operator's own personal/
+        # scopeless Fleet sync scope, never a specific org -- pass org=None
+        # explicitly rather than leaving publish_connector_runtime to fall
+        # back to shell_default_org(), which is documented as a UI/
+        # attribution default only, never a request-scoping input. Left
+        # implicit, it notifies whatever org happens to be cosmetically
+        # "default" (e.g. alphabetically first) instead of the scope this
+        # credential is actually for.
+        try:
+            fleet_relay_sync.publish_connector_runtime(payload, org=None)
+        except (
+            link_serving_supervisor.TunnelUnavailable,
+            fleet_relay_sync.FleetRelaySyncError,
+        ) as exc:
+            # The credential above is already configured and valid; only
+            # the "tell the already-running connector" step failed, most
+            # commonly because no connector has been provisioned for this
+            # scope yet. Log it rather than raising -- failing this request
+            # would also discard the credential setup that already
+            # succeeded, for a step that's a notification, not a
+            # precondition.
+            logging.getLogger(__name__).warning(
+                "activate_local_runtime: could not notify the personal "
+                "serving connector (%s) -- credential is still configured",
+                exc,
+            )
     return credential
 
 
