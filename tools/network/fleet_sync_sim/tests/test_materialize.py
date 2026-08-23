@@ -1,5 +1,6 @@
 from pathlib import Path
 import hashlib
+import json
 
 import pytest
 
@@ -223,6 +224,40 @@ def test_settings_sibling_overrides_sharing_a_target_all_survive(
         assert sorted(
             row[0] for row in db.conn.execute("SELECT id FROM settings")
         ) == ["base-id", "override-a", "override-b"]
+    finally:
+        db.close()
+
+
+def test_settings_scalar_json_payload_materializes_as_valid_json(
+    tmp_path: Path,
+) -> None:
+    """A JSON column holding a SCALAR round-trips as valid JSON. A vault-sealed
+    settings payload is a JSON string literal (not an object), and the write
+    side must re-encode it with json.dumps, symmetric with the decode side.
+    Otherwise it lands in the column unquoted and fails to re-parse on the next
+    read — silently corrupting vault-protected settings on every sync.
+    """
+    db = GraphDB(tmp_path / "personal.db")
+    try:
+        payload = "autonomy.vault.v1.eyJhbGciOiJzZWFsZWQifQ"  # decoded scalar
+        row = Mutation(
+            "settings", ("autonomy.vault.audited", 1, "demo", "raw", "base"),
+            1, False,
+            tuple(sorted((
+                ("created_at", "2026-08-19T10:00:00Z"), ("deprecated", 0),
+                ("id", "s1"), ("key", "demo"), ("payload", payload),
+                ("publication_state", "raw"), ("schema_revision", 1),
+                ("set_id", "autonomy.vault.audited"),
+                ("updated_at", "2026-08-19T10:00:00Z"),
+            ))),
+        )
+        materialize(db.conn, [row])
+        stored = db.conn.execute(
+            "SELECT payload FROM settings WHERE id='s1'"
+        ).fetchone()[0]
+        # Stored as a valid JSON string literal that re-parses to the scalar.
+        assert stored == json.dumps(payload)
+        assert json.loads(stored) == payload
     finally:
         db.close()
 
