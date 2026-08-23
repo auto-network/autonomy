@@ -1528,6 +1528,11 @@ async def post_serve_cert(request: Request) -> JSONResponse:
     root_pub = binding.get("root_pub")
     org_uuid = binding.get("org_uuid")
     if not isinstance(root_pub, str) or not isinstance(org_uuid, str):
+        logger.warning(
+            "post_serve_cert: binding row for org=%r is malformed -- "
+            "root_pub=%r org_uuid=%r",
+            org, root_pub, org_uuid,
+        )
         return JSONResponse({"ok": False, "error": "the org's binding row is malformed"},
                             status_code=500)
 
@@ -1653,6 +1658,10 @@ async def post_serve_cert(request: Request) -> JSONResponse:
     try:
         _write_serve_key(key_path, body["private_key"])
     except Exception as e:
+        logger.warning(
+            "post_serve_cert: could not write serve key file %s for org=%r: %r",
+            key_path, org, e,
+        )
         return JSONResponse({"ok": False, "error": f"could not write the serve key file: {e}"},
                             status_code=500)
     try:
@@ -1664,6 +1673,10 @@ async def post_serve_cert(request: Request) -> JSONResponse:
             org=org,
         )
     except Exception as e:
+        logger.warning(
+            "post_serve_cert: could not store serve cert settings row for org=%r: %r",
+            org, e,
+        )
         with contextlib.suppress(OSError):
             key_path.unlink()
         return JSONResponse({"ok": False, "error": f"could not store the serve cert: {e}"},
