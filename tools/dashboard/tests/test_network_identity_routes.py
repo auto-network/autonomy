@@ -523,6 +523,103 @@ def _serve_key_dir(monkeypatch, tmp_path):
     return d
 
 
+PERSONAL_ORG_UUID = "02d833fd-a664-5b08-86ca-86615db52f6f"
+
+
+def test_provision_serve_cert_personal_scope(env, root, tmp_path, monkeypatch):
+    """A personal-org serve-cert (org=None) must be WRITTEN under the "personal"
+    store, not refused as a scopeless write to the @home("organization") set.
+
+    Regression pin for the exact bug that blocked the personal tunnel live:
+    post_serve_cert wrote the cert with org=org, which for the personal scope is
+    None, and the org-homed set refuses a scopeless write — 500ing the mint,
+    swallowed by the browser's best-effort provisioning ("binding present,
+    serve-cert never provisioned"). The write now targets "personal", which
+    resolves to the same personal.db serve_cert_state(None) reads.
+    """
+    monkeypatch.delenv("GRAPH_ORG", raising=False)   # personal (scopeless) caller
+    _serve_key_dir(monkeypatch, tmp_path)
+    # The personal binding lives in the personal store; an org-homed set needs an
+    # explicit scope on write, so it is stored under "personal" (post_register
+    # does the same). `root` stands in for the personal root here.
+    settings_ops.add_setting(
+        NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION, "auto.network",
+        {"org_uuid": PERSONAL_ORG_UUID, "root_pub": root.public_hex,
+         "registry_url": REGISTRY_URL, "recovery_policy": {"mode": "none"},
+         "binding_expires_at": time.strftime(
+             "%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(time.time()) + 30 * 86400))},
+        org="personal",
+    )
+    delegate, cert = _mint_serve(root, org_uuid=PERSONAL_ORG_UUID)
+    # org=None is the scopeless POST the browser makes for the personal org.
+    r = env.post("/api/network/serve-cert",
+                 json=_serve_body(root, delegate, cert, org=None))
+    assert r.status_code == 200, r.text
+    assert r.json()["child_pub"] == delegate.public_hex
+    # The row landed in the personal store the runtime reads (org=None), proving
+    # the org-homed scopeless-write refusal is gone.
+    members = settings_ops.read_owned_set(
+        NETWORK_SERVE_CERT_SET_ID, org=None).members
+    assert any(delegate.public_hex in (m.payload.get("cert") or "")
+               for m in members), "personal serve-cert row not written"
+
+
+def test_register_treats_registry_409_as_idempotent_when_binding_matches(
+    env, root, monkeypatch
+):
+    """A same-root re-registration that the (not-yet-upgraded production) registry
+    409s is treated as idempotent success — but ONLY when our own persisted
+    binding proves the org is ours (same org_uuid + root_pub). This is what lets a
+    re-unlock proceed past register to serve-cert provisioning without depending on
+    the production registry running claim_org's same-root idempotency."""
+    monkeypatch.delenv("GRAPH_ORG", raising=False)   # personal scope
+    _store_personal_identity(root)
+    settings_ops.add_setting(
+        NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION, "auto.network",
+        {"org_uuid": PERSONAL_ORG_UUID, "root_pub": root.public_hex,
+         "registry_url": REGISTRY_URL, "recovery_policy": {"mode": "none"},
+         "binding_expires_at": time.strftime(
+             "%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(time.time()) + 30 * 86400))},
+        org="personal",
+    )
+
+    class _Conflict:
+        status_code = 409
+        text = "conflict"
+
+        def json(self):
+            return {"detail": "org UUID is already bound"}
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, *a, **k):
+            return _Conflict()
+
+    monkeypatch.setattr(network_routes, "_registry_client", lambda url: _Client())
+
+    r = env.post("/api/network/register",
+                 json={"envelope": _registration_envelope(
+                     root, org_uuid=PERSONAL_ORG_UUID)})
+    assert r.status_code == 200, r.text
+    assert r.json().get("already_registered") is True
+
+    # A DIFFERENT root hitting the same 409 must still fail — the idempotency is
+    # scoped to our own persisted binding, not "any 409 is fine". (The stored
+    # binding keeps root's pub; overwriting the personal identity only satisfies
+    # the recoverability precondition so we reach the registry 409.)
+    other = KeyPair.generate()
+    _store_personal_identity(other)   # singleton upsert
+    r2 = env.post("/api/network/register",
+                  json={"envelope": _registration_envelope(
+                      other, org_uuid=PERSONAL_ORG_UUID)})
+    assert r2.status_code == 502, r2.text
+
+
 def test_provision_serve_cert_happy_path(env, root, tmp_path, monkeypatch):
     _serve_key_dir(monkeypatch, tmp_path)
     _store_binding(root)
