@@ -102,7 +102,20 @@ _TABLE_ORDER = (
 )
 
 
-def _sql_value(value: CanonicalValue) -> object:
+def _sql_value(value: CanonicalValue, *, json_column: bool = False) -> object:
+    if json_column:
+        # Symmetric with snapshot._json_value's decode side: a JSON column round
+        # trips through json.dumps for ANY value — object, array, string,
+        # number, bool — not only dict/list. None maps to SQL NULL (which
+        # _json_value returns without parsing), matching the read side exactly.
+        # Without this, a scalar JSON value (e.g. a vault-sealed settings
+        # payload, which is a JSON string literal) is written to the column
+        # unquoted and fails to re-parse on the next read, silently corrupting
+        # the value on every sync.
+        if value is None:
+            return None
+        return json.dumps(value, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":"))
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False, sort_keys=True,
                           separators=(",", ":"))
@@ -112,7 +125,11 @@ def _sql_value(value: CanonicalValue) -> object:
 
 
 def _row(mutation: Mutation) -> dict[str, object]:
-    return {key: _sql_value(value) for key, value in mutation.values}
+    json_columns = TABLE_POLICIES[mutation.table].json_columns
+    return {
+        key: _sql_value(value, json_column=key in json_columns)
+        for key, value in mutation.values
+    }
 
 
 def _where(columns: tuple[str, ...], row: dict[str, object]) -> tuple[str, list[object]]:
