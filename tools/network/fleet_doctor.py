@@ -470,6 +470,7 @@ def main() -> int:
         print("=" * 60)
 
     check_identity(report)
+    check_local_store_migration(report)
     check_roster(report)
     check_connectors(report)
     check_org_resolution(report)
