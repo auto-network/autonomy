@@ -21,11 +21,31 @@ class TestRegister:
 
     def test_uuid_collision_409(self, client, clock, root):
         register(client, clock, root)
-        # Names are not authority: a different key cannot take the UUID...
+        # Names are not authority: a different key cannot take a live UUID.
         other = KeyPair.generate()
         assert register(client, clock, other).status_code == 409
-        # ...and re-claiming with the SAME key is still a collision.
-        assert register(client, clock, root).status_code == 409
+
+    def test_same_root_reregistration_is_idempotent(self, client, clock, root):
+        # Re-registering a live binding with the SAME root returns the UUID
+        # (idempotent), not a 409 — the caller proved control of exactly this
+        # key, so this is how a personal identity recovers its own org_uuid.
+        first = register(client, clock, root)
+        assert first.status_code == 201
+        clock.advance(HOUR)
+        again = register(client, clock, root)
+        assert again.status_code == 201, again.json()
+        assert again.json()["org_uuid"] == first.json()["org_uuid"]
+        assert again.json()["root_pub"] == root.public_hex
+        # ...and the re-registration refreshed liveness (stronger auth than a
+        # renew heartbeat), so the binding's expiry advanced with the clock.
+        assert again.json()["expires_at"] > first.json()["expires_at"]
+
+    def test_same_uuid_different_root_still_conflicts(self, client, clock, root):
+        # The idempotency above is scoped to the OWNING key: a different key
+        # aiming at the same live UUID is still refused.
+        register(client, clock, root)
+        other = KeyPair.generate()
+        assert register(client, clock, other).status_code == 409
 
     def test_expired_binding_is_reclaimable(self, client, clock, root):
         register(client, clock, root, ttl=HOUR)

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -23,9 +24,31 @@ from tools.network.idkit.errors import IdkitError
 FLEET_SYNC_SCOPE = "fleet:sync"
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
+# Fixed namespace for deriving a personal identity's OWN auto.network org_uuid
+# from its root pubkey. The derivation is deterministic so every machine
+# computes the SAME personal org_uuid from the same personal root: registering
+# the personal org (the "personal tunnel") is then idempotent and needs no
+# cross-machine coordination — the registry hands back the UUID when the same
+# root re-registers (registry claim_org same-root path). Never regenerate this
+# constant; it is the stable anchor of every personal org_uuid in existence.
+_PERSONAL_ORG_NS = uuid.UUID("6f2a1e8c-7b3d-5a4f-9c1e-2d8b0a6f3c17")
+
 
 class FleetRuntimeError(ValueError):
     """A runtime handoff is malformed or not authorized by the live roster."""
+
+
+def personal_org_uuid(personal_root_pub: str) -> str:
+    """The deterministic auto.network org_uuid for a personal identity.
+
+    A personal identity is its own org (the "personal tunnel"), bound to the
+    personal root itself. Deriving the org_uuid from the personal root pub keeps
+    it stable and re-derivable on any machine without first syncing the binding,
+    so registration is idempotent everywhere.
+    """
+    if not _HEX64.match(personal_root_pub or ""):
+        raise FleetRuntimeError("personal_root_pub must be a canonical pubkey")
+    return str(uuid.uuid5(_PERSONAL_ORG_NS, personal_root_pub))
 
 
 @dataclass(frozen=True)

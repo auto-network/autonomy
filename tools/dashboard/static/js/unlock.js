@@ -151,9 +151,34 @@
     } else {
       var rc = await _fetchJson('/api/fleet/runtime');
       if (rc.enabled) {
+        // Bring the PERSONAL TUNNEL online before minting the runtime
+        // credential. When the personal org is not yet registered (org_uuid is
+        // null), register it — and, on the serving machine, provision its
+        // serving delegate — using the personal root that is already open. This
+        // is what gives a virgin system with zero collaborative orgs a tunnel
+        // to serve the fleet on: its own. Idempotent and best-effort — a
+        // failure here degrades to a sync-only credential, never a lockout.
+        if (!rc.org_uuid && rc.personal_org_uuid) {
+          try {
+            await _signonI().provisionPersonalNetworkIdentity({
+              personalRootSeed: new Uint8Array(seed),   // ceremony zeroes its copy
+              orgUuid: rc.personal_org_uuid,
+              rootPub: rc.personal_root_pub,
+              serve: !!rc.serves,
+            });
+            // The binding now exists; re-read so the runtime credential carries
+            // the reachability material minted under the registered org_uuid.
+            rc = await _fetchJson('/api/fleet/runtime');
+          } catch (e) {
+            if (window.console && console.warn) {
+              console.warn('personal tunnel provisioning failed:',
+                           (e && e.message) || e);
+            }
+          }
+        }
         var frc = await import('./ceremony/fleet-enrollment.js');
         var cred = await frc.mintFleetRuntimeCredential({
-          personalRootSeed: seed,
+          personalRootSeed: new Uint8Array(seed),   // fresh copy; mint zeroes it
           rootPub: rc.personal_root_pub,
           machineId: rc.machine_id,
           machinePub: rc.machine_pub,
@@ -164,6 +189,7 @@
         });
         await _postJson('/api/fleet/runtime', cred);
       }
+      seed.fill(0);   // original consumed only via fresh copies above; drop it
     }
   }
 

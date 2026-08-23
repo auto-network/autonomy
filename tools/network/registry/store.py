@@ -561,12 +561,28 @@ class RegistryStore:
         """Atomic first-claim (F1/Codex): check existence + expiry and INSERT
         under ONE held lock, so two concurrent claims cannot both pass the
         existence check (the register_org get-then-create TOCTOU). Returns
-        ``"conflict_live"`` (a live binding already holds the UUID — no
+        ``"already_bound_self"`` (the SAME root re-registering its own live
+        binding — idempotent, liveness refreshed, no rebind),
+        ``"conflict_live"`` (a DIFFERENT key wants a live binding — no
         write), ``"reclaimed_expired"`` (an expired binding was atomically
         replaced), or ``"claimed"`` (fresh). The RLock is held across the
         whole body, so get_org/create_org here are one atomic transaction."""
         existing = self.get_org(org_uuid)
         if existing is not None and existing.expires_at >= now:
+            if existing.root_pub == root_pub:
+                # Idempotent re-registration by the root that already holds
+                # the binding: the caller proved control of exactly this key
+                # (the envelope is self-signed by root_pub and verified), so
+                # handing back "you already own this UUID" grants nothing new
+                # — it is how a personal identity reliably recovers its own
+                # org_uuid without minting a duplicate. Refresh liveness (a
+                # self-signed re-registration is strictly stronger auth than
+                # a renew heartbeat) but leave the bound root and recovery
+                # policy untouched; changing the policy is /policy, rebinding
+                # the root is /rebind. A DIFFERENT key on a live UUID still
+                # conflicts below — names are not authority (§4.1).
+                self.renew_org(org_uuid, now=now, expires_at=expires_at)
+                return "already_bound_self"
             return "conflict_live"
         replacing = existing is not None
         self.create_org(

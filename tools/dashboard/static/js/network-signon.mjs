@@ -490,6 +490,66 @@ var signRegistryRequestCore;
     }
   }
 
+  // Bring the PERSONAL identity online as its OWN auto.network org — the
+  // "personal tunnel." A virgin system has zero collaborative orgs, but the
+  // fleet is anchored on the personal root (its roster is root-signed, its
+  // runtime cert is org=personal:<rootpub>), so the one tunnel it can always
+  // serve on is its own. The registry registers principals, not "orgs": the
+  // personal root registered as its own org yields a real org_uuid, and the
+  // whole per-org serving stack then runs under it unchanged.
+  //
+  // Unlike provisionServeCert (which opens an ORG root sealed under an org-key
+  // and names an org-scoped persona), both acts here are signed by the personal
+  // root ALREADY OPEN at unlock — no org-key, no second passphrase — and the
+  // registry cert names the personal root as its own persona subject (the
+  // registry only requires a canonical pubkey there, not a folded persona).
+  // Registration is idempotent (the registry hands back the UUID when the same
+  // root re-registers), and the serve-cert is minted only when one is not
+  // already provisioned, so re-running this each unlock is a cheap no-op once
+  // the tunnel exists. The caller passes a fresh seed copy; this zeroes it at
+  // import (I1).
+  async function provisionPersonalNetworkIdentity(opts) {
+    opts = opts || {};
+    var seed = opts.personalRootSeed;
+    var orgUuid = opts.orgUuid;
+    var rootPub = opts.rootPub;
+    var serve = opts.serve !== false;   // a joiner registers but does not serve
+    if (!(seed instanceof Uint8Array) || seed.length !== 32) {
+      throw new Error('personalRootSeed must be a 32-byte Uint8Array');
+    }
+    if (typeof orgUuid !== 'string' || !orgUuid) {
+      throw new Error('personal org uuid is required');
+    }
+    if (typeof rootPub !== 'string' || !/^[0-9a-f]{64}$/.test(rootPub)) {
+      throw new Error('rootPub must be the canonical personal root pub');
+    }
+    var rootKey;
+    try {
+      rootKey = await _importRootKey(seed);
+    } finally {
+      seed.fill(0);                      // I1: root seed gone at import
+    }
+    try {
+      // 1. Register the personal org (root-direct, self-signed; idempotent).
+      var regEnv = await _signRootRequest(
+        rootKey, rootPub, 'POST', '/v1/orgs',
+        { org_uuid: orgUuid, root_pub: rootPub, recovery_policy: 'none' });
+      await _postEnvelope('/api/network/register', null, regEnv);
+      // 2. Provision the serving delegate — only the serving machine needs one,
+      // and only when a usable one is not already in place.
+      if (serve) {
+        var status = await _fetchJsonOrNull('/api/network/serve-cert', null);
+        if (!status || status.status !== 'ok') {
+          var credential = await _mintServeCredential(rootKey, orgUuid, rootPub);
+          await _postServeCredential(credential, null);
+        }
+      }
+    } finally {
+      rootKey = null;                    // I1: last root reference dropped
+    }
+    return { orgUuid: orgUuid, served: serve };
+  }
+
   // Cheap, read-only repair decision shared by ordinary organization sign-on
   // and the dashboard password-unlock hook.  It never opens a root key.
   async function _serveCredentialRepairState(orgSlug, binding) {
@@ -1319,6 +1379,7 @@ var signRegistryRequestCore;
     signOn: signOn,
     signOut: signOut,
     provisionServeCert: provisionServeCert,
+    provisionPersonalNetworkIdentity: provisionPersonalNetworkIdentity,
     repairServeCredential: repairServeCredential,
     repairAllServeCredentials: repairAllServeCredentials,
     revokeCurrentKey: revokeCurrentKey,
@@ -1340,6 +1401,7 @@ var signRegistryRequestCore;
         return _resolveOrgEntry(_state.session, ref);
       },
       provisionServeCert: provisionServeCert,
+      provisionPersonalNetworkIdentity: provisionPersonalNetworkIdentity,
       repairServeCredential: repairServeCredential,
       installSession: _installSession,
       loadFromStore: _loadFromStore,

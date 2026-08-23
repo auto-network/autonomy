@@ -664,6 +664,10 @@ def create_app(
         )
         if outcome == "conflict_live":
             raise HTTPException(status_code=409, detail="org UUID is already bound")
+        # "claimed", "reclaimed_expired", and "already_bound_self" all succeed:
+        # the last is a same-root re-registration (idempotent), whose liveness
+        # claim_org already refreshed to t + ttl, so the response below reports
+        # the correct expiry for every accepted outcome.
         return {"org_uuid": org_uuid, "root_pub": root_pub, "expires_at": t + ttl}
 
     # -- §4.2 renew (heartbeat) ----------------------------------------------

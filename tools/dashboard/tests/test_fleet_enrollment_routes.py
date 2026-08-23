@@ -29,6 +29,7 @@ from tools.network import (
     fleet_machine_profile,
     fleet_route,
     fleet_roster,
+    fleet_runtime,
     fleet_sync_scheduler,
     machine_boot,
 )
@@ -345,6 +346,7 @@ def test_generic_approval_commits_exact_request(operator_api, monkeypatch):
 
     # The same process-only handoff is reminted after every later unlock.
     runtime_context = client.get("/api/fleet/runtime")
+    _tunnel = fleet_enrollment_routes.fleet_tunnel_server.state()
     assert runtime_context.json() == {
         "ok": True,
         "enabled": True,
@@ -352,6 +354,12 @@ def test_generic_approval_commits_exact_request(operator_api, monkeypatch):
         "machine_id": machine_id,
         "machine_pub": machine_key.public_hex,
         "org_uuid": None,  # personal org not registered in this fixture
+        # The deterministic org_uuid the browser registers the personal tunnel
+        # under, and whether this machine is the selected tunnel server.
+        "personal_org_uuid": fleet_runtime.personal_org_uuid(root.public_hex),
+        "serves": bool(
+            _tunnel.allowed and _tunnel.selected_machine_id == machine_id
+        ),
     }
     activated = client.post("/api/fleet/runtime", json=runtime_payload)
     assert activated.status_code == 200, activated.text

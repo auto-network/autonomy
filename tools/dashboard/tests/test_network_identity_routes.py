@@ -324,6 +324,61 @@ def test_register_root_mismatch_with_stored_key_refused(env, root, registry_app)
     assert registry_app.state.store.get_org(ORG_UUID) is None
 
 
+def _store_personal_identity(personal: KeyPair) -> None:
+    from tools.graph import settings_ops
+    from tools.graph.schemas.personal_identity import (
+        PERSONAL_IDENTITY_REVISION,
+        PERSONAL_IDENTITY_SET_ID,
+    )
+    from tools.network.idkit.armor import encrypt_root_key
+
+    armor = encrypt_root_key(personal, "correct horse battery staple",
+                             iterations=10_000)  # low iters: fast test
+    with settings_ops.identity_write_context():
+        settings_ops.upsert_by_key(
+            PERSONAL_IDENTITY_SET_ID, PERSONAL_IDENTITY_REVISION, "default",
+            {"armored_private_key": armor, "root_pub": personal.public_hex,
+             "display_name": "Operator", "created_at": "2026-01-01T00:00:00Z"},
+            org=None)
+
+
+def test_register_personal_org_accepts_the_personal_root(env, monkeypatch, registry_app):
+    """The personal identity registers as its OWN org (the 'personal tunnel'):
+    no NetworkOrgKeyV2 org-key is needed — the personal identity row proves the
+    personal root's armor is stored, satisfying the same recoverability
+    invariant — and the binding lands in the personal store, which is exactly
+    what the fleet reachability path (_load_binding(None)) reads."""
+    from tools.graph import settings_ops
+    from tools.network import fleet_runtime
+
+    # Personal scope: no org stamped, so CALLER_ORG collapses to the personal DB.
+    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    personal = KeyPair.generate()
+    _store_personal_identity(personal)
+
+    org_uuid = fleet_runtime.personal_org_uuid(personal.public_hex)
+    r = env.post("/api/network/register",
+                 json={"envelope": _registration_envelope(personal, org_uuid=org_uuid)})
+    assert r.status_code == 200, r.text
+    bound = registry_app.state.store.get_org(org_uuid)
+    assert bound is not None and bound.root_pub == personal.public_hex
+    members = settings_ops.read_owned_set(NETWORK_BINDING_SET_ID, org=None).members
+    assert [m.payload["org_uuid"] for m in members] == [org_uuid]
+
+
+def test_register_named_org_still_requires_its_own_org_key(env, registry_app):
+    """The personal-identity fallback is scoped to the personal org only: a
+    NAMED org with no org-key is still refused even when a personal identity for
+    the same root exists (env keeps GRAPH_ORG=ORG → a named-org registration)."""
+    personal = KeyPair.generate()
+    _store_personal_identity(personal)
+    r = env.post("/api/network/register",
+                 json={"org": ORG, "envelope": _registration_envelope(personal)})
+    assert r.status_code == 409
+    assert "store the encrypted armor first" in r.json()["error"]
+    assert registry_app.state.store.get_org(ORG_UUID) is None
+
+
 def test_register_foreign_signer_refused(env, root, registry_app):
     _store_key(env, root)
     attacker = KeyPair.generate()
