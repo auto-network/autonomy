@@ -860,6 +860,44 @@
             </div>
           </div>
         </template>
+        <template x-if="approvalRequest.kind === 'external_service_access'">
+          <div class="mt-4 space-y-4" data-testid="approval-external-service-access">
+            <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div class="rounded-2xl border border-white/10 bg-slate-900/60 p-4">
+                <div class="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Requester</div>
+                <div class="mt-1 text-sm text-slate-100" x-text="approvalRequest.externalAccess?.requester?.label || approvalRequest.session"></div>
+              </div>
+              <div class="rounded-2xl border border-white/10 bg-slate-900/60 p-4">
+                <div class="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Audience</div>
+                <div class="mt-1 font-mono text-xs text-slate-100" x-text="approvalRequest.externalAccess?.resource_audience"></div>
+              </div>
+            </div>
+            <div>
+              <div class="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Exact capability</div>
+              <div class="mt-2 space-y-2">
+                <template x-for="capability in (approvalRequest.externalAccess?.capabilities || [])"
+                          :key="`${capability.method}:${capability.path}`">
+                  <div class="flex items-center gap-3 rounded-xl border border-emerald-400/20 bg-emerald-500/10 px-3 py-2 font-mono text-xs text-emerald-100">
+                    <span class="font-semibold" x-text="capability.method"></span>
+                    <span class="min-w-0 break-all" x-text="capability.path"></span>
+                  </div>
+                </template>
+              </div>
+            </div>
+            <div>
+              <label class="text-sm font-medium text-slate-200">Credential expires</label>
+              <select x-model="approvalRequest.ttl" data-testid="approval-external-service-ttl"
+                      class="mt-2 w-full rounded-2xl border border-slate-600 bg-slate-900/60 px-4 py-3 text-sm text-slate-100 focus:border-indigo-400 focus:outline-none">
+                <option value="86400">1 day</option>
+                <option value="604800">7 days</option>
+                <option value="2592000">30 days</option>
+                <option value="31536000">1 year</option>
+                <option value="315360000">10 years</option>
+                <option value="">Never</option>
+              </select>
+            </div>
+          </div>
+        </template>
         <template x-if="approvalRequest.kind === 'mcp_crosstalk'">
           <div class="mt-4 space-y-4" data-testid="approval-mcp-crosstalk">
             <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">

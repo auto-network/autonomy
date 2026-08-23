@@ -193,6 +193,26 @@ def test_recent_for_kind_returns_parsed_newest_records(tmp_path):
     assert rows[1]["staged"] == {"frozen": 1}
 
 
+def test_pending_count_can_filter_one_external_application(tmp_path):
+    db = tmp_path / "approval_requests.db"
+    for scope in ("dropbox", "dropbox", "mission_control"):
+        ar.create(
+            kind="external_service_access",
+            session="device",
+            request={"application_scope": scope},
+            created_at=1,
+            db_path=db,
+        )
+    assert ar.pending_count(
+        kind="external_service_access", db_path=db,
+    ) == 3
+    assert ar.pending_count(
+        kind="external_service_access",
+        application_scope="dropbox",
+        db_path=db,
+    ) == 2
+
+
 def test_commit_sign_diff_from_parent_and_tree(tmp_path):
     """The live diff-tree of a not-yet-committed change (parent + tree), the way
     the commit_sign enricher renders a pending request for the overlay."""

@@ -297,6 +297,7 @@ live one.
 | `tls.key` | `AUTONOMY_TLS_KEY` | TLS private key |
 | `agent-runs`/ | `DASHBOARD_AGENT_RUNS_DIR` | session artifacts |
 | `session-traces`/ | `DASHBOARD_TRACE_DIR` | session traces |
+| `dropbox`/ | `AUTONOMY_DROPBOX_DIR` | machine-global operator dropbox objects and receipt metadata |
 
 Every row is **test-coupled** to `tools/data_paths.py::STORE_MANIFEST`,
 which is also what the resolvers read: `test_volume_contract.py` fails if a

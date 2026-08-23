@@ -129,6 +129,8 @@ STORE_MANIFEST: tuple = (
           "session artifacts"),
     Store("session_traces", "session-traces", "DASHBOARD_TRACE_DIR", "dir",
           "session traces"),
+    Store("dropbox", "dropbox", "AUTONOMY_DROPBOX_DIR", "dir",
+          "machine-global operator dropbox objects and receipt metadata"),
 )
 
 STORES_BY_KEY = {store.key: store for store in STORE_MANIFEST}

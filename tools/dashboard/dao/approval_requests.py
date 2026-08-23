@@ -235,6 +235,33 @@ def pending_all(
         c.close()
 
 
+def pending_count(
+    *,
+    kind: str,
+    application_scope: str | None = None,
+    db_path: Path | str | None = None,
+) -> int:
+    """Number of pending requests for a kind, optionally one application."""
+    c = _conn(db_path)
+    try:
+        if application_scope is None:
+            row = c.execute(
+                "SELECT COUNT(*) AS n FROM approval_requests "
+                "WHERE kind=? AND result IS NULL",
+                (kind,),
+            ).fetchone()
+        else:
+            row = c.execute(
+                "SELECT COUNT(*) AS n FROM approval_requests "
+                "WHERE kind=? AND result IS NULL "
+                "AND json_extract(request, '$.application_scope')=?",
+                (kind, application_scope),
+            ).fetchone()
+        return int(row["n"])
+    finally:
+        c.close()
+
+
 def decided_ids_for_kind(
     kind: str, db_path: Path | str | None = None
 ) -> set[str]:

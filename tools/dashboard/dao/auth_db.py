@@ -2,11 +2,14 @@
 
 Database: data/auth.db
 Owned by the dashboard process, never mounted into agent containers.
-Stores SHA-256 hashes of session tokens (raw tokens live only in container env).
+Stores SHA-256 hashes of session and service tokens. Raw session tokens live
+in container environments; raw service tokens live only with their external
+caller and in the approval result that enrolled it.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import time
@@ -71,9 +74,19 @@ def init_db(db_path: Path | None = None) -> None:
     # machine-scoped service token (e.g. 'mcp_service'). Only ADDED here; a
     # pre-existing token reads back kind=NULL and stays an ordinary session
     # token, which is correct — a service token is only ever created by an
-    # explicit install-time insert_service_token call.
+    # explicit install-time act or an operator-approved enrollment.
     if "kind" not in cols:
         _conn.execute("ALTER TABLE session_tokens ADD COLUMN kind TEXT")
+    # Service credentials may be operator-approved for a bounded lifetime.
+    # NULL means no expiry. Session-token lifetime remains owned by the session
+    # lifecycle; this column is intentionally consulted only by the service
+    # resolver below.
+    if "expires_at" not in cols:
+        _conn.execute("ALTER TABLE session_tokens ADD COLUMN expires_at REAL")
+    # Scope envelope for generic external-service credentials. It is absent on
+    # ordinary sessions and legacy fixed-purpose service tokens.
+    if "service_scope" not in cols:
+        _conn.execute("ALTER TABLE session_tokens ADD COLUMN service_scope TEXT")
     _conn.commit()
     logger.info("auth_db: initialised at %s", path)
 
@@ -118,7 +131,9 @@ def resolve_token(token_hash: str) -> tuple[str, str | None] | None:
     Machine-scoped service tokens (``kind`` set) are deliberately invisible here:
     they are not session tokens and must never resolve through the session-token
     path (a service token presented off its own routes then simply fails to
-    authenticate). Resolve one with :func:`resolve_service_token`.
+    authenticate). Resolve fixed-purpose service tokens with
+    :func:`resolve_service_token` and generic API-scoped tokens with
+    :func:`resolve_scoped_service_token`.
     """
     conn = get_conn()
     row = conn.execute(
@@ -129,28 +144,40 @@ def resolve_token(token_hash: str) -> tuple[str, str | None] | None:
     return (row["tmux_name"], row["org"]) if row else None
 
 
-#: The only service-token kind that exists today: the ChatGPT MCP relay's
-#: machine-scoped credential. Its whole authority is reaching the ``/api/mcp/*``
-#: protocol routes — no organization, no dashboard authority (see the middleware
-#: in api_auth.py and the route-scoped principal it produces).
+#: Registered service-token kinds. Their authority is established by the
+#: method/path-specific authenticator, never by a general session-token lookup.
 MCP_SERVICE_KIND = "mcp_service"
+EXTERNAL_SERVICE_KIND = "external_service"
 
 
-def insert_service_token(token_hash: str, name: str, kind: str = MCP_SERVICE_KIND) -> None:
+def insert_service_token(
+    token_hash: str,
+    name: str,
+    kind: str = MCP_SERVICE_KIND,
+    *,
+    expires_at: float | None = None,
+    service_scope: dict | None = None,
+) -> None:
     """Store a hashed machine-scoped SERVICE token.
 
     A service token has no organization (``org`` is NULL) and is marked with a
     ``kind`` so it never resolves as an ordinary session token. It is created by
-    an explicit install-time act, not minted per session, and is machine-local:
-    auth.db is never mounted into containers and never synced across the fleet.
+    either an explicit install-time act or an operator-approved enrollment,
+    never per session, and is machine-local: auth.db is never mounted into
+    containers and never synced across the fleet.
     ``name`` is a stable identity label (e.g. ``mcp-relay-service``) used only
     for display and revocation.
     """
     conn = get_conn()
     conn.execute(
-        "INSERT INTO session_tokens (token_hash, tmux_name, created_at, org, kind)"
-        " VALUES (?, ?, ?, NULL, ?)",
-        (token_hash, name, time.time(), kind),
+        "INSERT INTO session_tokens "
+        "(token_hash, tmux_name, created_at, org, kind, expires_at, service_scope)"
+        " VALUES (?, ?, ?, NULL, ?, ?, ?)",
+        (
+            token_hash, name, time.time(), kind, expires_at,
+            json.dumps(service_scope, sort_keys=True, separators=(",", ":"))
+            if service_scope is not None else None,
+        ),
     )
     conn.commit()
 
@@ -159,16 +186,118 @@ def resolve_service_token(token_hash: str, kind: str = MCP_SERVICE_KIND) -> str 
     """Resolve a non-revoked service token of ``kind`` to its identity label.
 
     Returns the stored ``name`` (tmux_name column) or ``None`` if unknown,
-    revoked, or of a different kind. This is the ONLY way a service token
-    authenticates; :func:`resolve_token` cannot see it.
+    revoked, expired, or of a different kind. Fixed-purpose service tokens use
+    this lookup; generic external credentials use
+    :func:`resolve_scoped_service_token`. :func:`resolve_token` can see neither.
     """
     conn = get_conn()
     row = conn.execute(
         "SELECT tmux_name FROM session_tokens"
-        " WHERE token_hash=? AND revoked_at IS NULL AND kind=?",
-        (token_hash, kind),
+        " WHERE token_hash=? AND revoked_at IS NULL AND kind=?"
+        " AND (expires_at IS NULL OR expires_at > ?)",
+        (token_hash, kind, time.time()),
     ).fetchone()
     return row["tmux_name"] if row else None
+
+
+def insert_scoped_service_token(
+    token_hash: str,
+    name: str,
+    *,
+    capabilities: list[dict[str, str]],
+    application_scope: str,
+    resource_audience: str,
+    source_approval_id: str,
+    expires_at: float | None = None,
+) -> None:
+    """Store a generic bearer authorized for exact API method/path pairs.
+
+    Capability records are immutable mint-time authority derived from a
+    server-side registration. No wildcard or prefix semantics exist: every
+    route is an explicit ``{"method": "POST", "path": "/api/..."}`` pair.
+    """
+    fields = {
+        "application_scope": application_scope,
+        "resource_audience": resource_audience,
+        "source_approval_id": source_approval_id,
+    }
+    for field, value in fields.items():
+        if not isinstance(value, str) or not value or len(value) > 256:
+            raise ValueError(f"{field} must be a non-empty string up to 256 characters")
+    normalized = normalize_api_capabilities(capabilities)
+    insert_service_token(
+        token_hash,
+        name,
+        kind=EXTERNAL_SERVICE_KIND,
+        expires_at=expires_at,
+        service_scope={
+            "application_scope": application_scope,
+            "resource_audience": resource_audience,
+            "sourceApprovalId": source_approval_id,
+            "capabilities": normalized,
+        },
+    )
+
+
+def normalize_api_capabilities(
+    capabilities: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    """Validate and canonicalize exact API method/path capabilities."""
+    if (
+        not isinstance(capabilities, list)
+        or not capabilities
+        or len(capabilities) > 64
+    ):
+        raise ValueError("scoped service token requires 1 to 64 capabilities")
+    normalized = []
+    for capability in capabilities:
+        if not isinstance(capability, dict) or set(capability) != {"method", "path"}:
+            raise ValueError("API capability must be an object")
+        method = capability.get("method")
+        path = capability.get("path")
+        if (
+            not isinstance(method, str)
+            or method not in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
+            or not isinstance(path, str)
+            or not path.startswith("/api/")
+            or "?" in path
+            or "#" in path
+        ):
+            raise ValueError("API capability requires an uppercase method and exact /api/ path")
+        record = {"method": method, "path": path}
+        if record not in normalized:
+            normalized.append(record)
+    return normalized
+
+
+def resolve_scoped_service_token(
+    token_hash: str, *, method: str, path: str,
+) -> dict | None:
+    """Resolve a generic service bearer only when its exact API scope allows it."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT tmux_name,service_scope FROM session_tokens"
+        " WHERE token_hash=? AND revoked_at IS NULL AND kind=?"
+        " AND (expires_at IS NULL OR expires_at > ?)",
+        (token_hash, EXTERNAL_SERVICE_KIND, time.time()),
+    ).fetchone()
+    if row is None or row["service_scope"] is None:
+        return None
+    try:
+        scope = json.loads(row["service_scope"])
+        capabilities = scope["capabilities"]
+    except (TypeError, ValueError, KeyError):
+        return None
+    if (
+        not isinstance(scope, dict)
+        or not isinstance(capabilities, list)
+        or any(not isinstance(item, dict) for item in capabilities)
+    ):
+        return None
+    exact = {"method": method.upper(), "path": path}
+    if exact not in capabilities:
+        return None
+    return {"name": row["tmux_name"], **scope}
 
 
 def revoke_token(tmux_name: str) -> None:
