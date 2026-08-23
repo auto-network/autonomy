@@ -473,12 +473,53 @@ async def pull_checkpoint_once(
         shutil.rmtree(stage_root, ignore_errors=True)
 
 
+#: Distinct, greppable classification for the last pull attempt -- the
+#: "money line" a diagnostic needs instead of re-deriving it from a raw
+#: traceback each time. Order matters: first matching classifier wins.
+def _classify_pull_failure(exc: BaseException) -> str:
+    from tools.network.fleet_sync_sim.compaction import WatermarkError
+    from tools.network.fleet_sync_sim.codec import CodecError
+    from tools.network.fleet_sync_sim.alpha import AlphaError
+
+    text = str(exc)
+    if isinstance(exc, WatermarkError):
+        if "hash mismatch" in text:
+            return "hash_mismatch"
+        if "missing live row" in text:
+            return "missing_live_row"
+        return "watermark_error"
+    if isinstance(exc, CodecError):
+        return "codec_error"
+    if isinstance(exc, AlphaError):
+        if "unavailable attachment bytes" in text:
+            return "attachment_bytes_unavailable"
+        return "alpha_error"
+    if isinstance(exc, FleetRelaySyncError):
+        if "locked" in text:
+            return "locked"
+        if "malformed" in text:
+            return "malformed_hello"
+        if "TTL" in text or "exceeds its TTL" in text:
+            return "ttl_bound"
+        return "protocol_error"
+    code = getattr(exc, "code", None)
+    if code == 4404:
+        return "unknown_link"
+    if code is not None:
+        return f"relay_close_{code}"
+    return type(exc).__name__
+
+
 class DashboardFleetRelaySyncService:
     """Retry the machine-local origin route while this runtime is unlocked."""
 
     def __init__(self) -> None:
         self._credential: fleet_runtime.FleetRuntimeCredential | None = None
         self._task: asyncio.Task | None = None
+        #: The single "money line" fleet_doctor reads instead of grepping
+        #: logs -- distinct outcome + reason for the most recent attempt,
+        #: whichever process is actually running this loop right now.
+        self.last_result: dict[str, object] | None = None
 
     def configure(self, credential: fleet_runtime.FleetRuntimeCredential) -> None:
         self._credential = credential
@@ -491,6 +532,8 @@ class DashboardFleetRelaySyncService:
         self._task = loop.create_task(self._run(credential), name="fleet-relay-sync")
 
     async def _run(self, credential: fleet_runtime.FleetRuntimeCredential) -> None:
+        import time
+
         delay = 0.5
         while self._credential is credential:
             try:
@@ -505,11 +548,18 @@ class DashboardFleetRelaySyncService:
                 await pull_checkpoint_once(
                     credential, route, include_checkpoint=include_checkpoint
                 )
+                self.last_result = {"outcome": "success", "reason": None, "at": time.time()}
                 delay = 0.5
                 await asyncio.sleep(1.0)
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
+                self.last_result = {
+                    "outcome": "failed",
+                    "reason": _classify_pull_failure(exc),
+                    "detail": str(exc)[:300],
+                    "at": time.time(),
+                }
                 logger.warning("Fleet relay checkpoint pull failed", exc_info=True)
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 30.0)

@@ -1497,6 +1497,7 @@ async def _serve_control_listener(connector, ctl_path: str,
                     # a registry control frame: it reports whether the
                     # connector has completed the tunnel hello right now.
                     from tools.network.fleet_relay_sync import connector_runtime
+                    from tools.network import build_version
 
                     reply = {
                         "ok": True,
@@ -1508,6 +1509,12 @@ async def _serve_control_listener(connector, ctl_path: str,
                         # ever actually landed here, instead of inferring it
                         # from dashboard-side logs alone.
                         "fleet_runtime_configured": connector_runtime.scheduler is not None,
+                        # The commit THIS process loaded at import time, not
+                        # what's on disk now -- see build_version.py. Added
+                        # the same day, same debugging cycle, one hop later:
+                        # a stale-code worker looks identical to a correctly
+                        # -configured one on every check above this line.
+                        "process_commit": build_version.PROCESS_COMMIT,
                     }
                 elif request.get("op") == "fleet-runtime":
                     from tools.network.fleet_relay_sync import connector_runtime
