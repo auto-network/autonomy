@@ -226,7 +226,7 @@
   .mc-minirow{display:flex;align-items:center;margin:0 0 6px}
   .mc-minirow .ago{font-size:.7rem;color:var(--ink3)}
   .mc-minirow .grow{flex:1}
-  .mc-psum .hd .dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;align-self:center}
+  .mc-psum .hd .band{width:4px;height:15px;border-radius:2px;flex-shrink:0;align-self:center}
   .mc-psum .hd b{color:#fff;font-size:.88rem}
   .mc-mini{flex:none;display:inline-flex;align-items:center;margin-left:auto;
     border:1px solid var(--line);border-radius:6px;overflow:hidden;
@@ -737,7 +737,9 @@
         show(p.pillar_id);
       });
       var hd = el("div","hd");
-      hd.appendChild(dot(p.color || "#8391a8"));
+      var band = el("span","band");
+      band.style.background = p.color || "#8391a8";
+      hd.appendChild(band);
       hd.appendChild(el("b",null,p.name));
       var mine = liveItems.filter(function (it) { return it.surface_id===p.pillar_id; });
       var n = {};
