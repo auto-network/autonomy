@@ -210,6 +210,7 @@ LOCAL_SYNC_TABLES: Final[frozenset[str]] = frozenset({
     "fleet_sync_journal",
     "fleet_sync_origins",
     "fleet_sync_peer_state",
+    "fleet_sync_quarantine",
     "fleet_sync_state",
     "fleet_sync_transactions",
 })

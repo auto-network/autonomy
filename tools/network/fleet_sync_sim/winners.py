@@ -251,6 +251,9 @@ def iter_winner_catalog(
 
 
 def install_winner_catalog(
-    target: MutationCatalog, directory: Path, catalog: WinnerCatalog
+    target: MutationCatalog, directory: Path, catalog: WinnerCatalog,
+    *, skip_addresses: frozenset[bytes] = frozenset(),
 ) -> int:
-    return target.install_winner_metadata(iter_winner_catalog(directory, catalog))
+    return target.install_winner_metadata(
+        iter_winner_catalog(directory, catalog), skip_addresses=skip_addresses,
+    )

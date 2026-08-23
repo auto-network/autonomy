@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import shutil
@@ -26,6 +27,7 @@ from raptorq import Decoder
 from tools.network.swarmkit.fountain import FountainStore, source_symbols
 
 from .catalog import MutationCatalog
+from .codec import encode_value
 from .delta import DeltaCatalog, read_delta_catalog, stream_delta_to_chunks
 from .materialize import ContentAddressedBlobStore
 from .policies import EXCLUDED_SETTING_SET_IDS, PolicyKind, TABLE_POLICIES
@@ -42,6 +44,8 @@ from .winners import (
 
 
 ALPHA_VERSION = "1.0-alpha.1"
+
+_log = logging.getLogger(__name__)
 
 
 class AlphaError(RuntimeError):
@@ -603,6 +607,47 @@ def _record_checkpoint_receipt(
     conn.commit()
 
 
+def _quarantine_orphans(
+    conn: sqlite3.Connection,
+    orphans: tuple[tuple[str, tuple], ...],
+    *,
+    watermark: int,
+) -> None:
+    """Retain skipped foreign-key-orphan rows for observability and repair.
+
+    The origin holds these rows; the fleet cannot represent them because their
+    NOT-NULL parent is absent from the checkpoint. Recording them here keeps a
+    durable, decodable list so a later repair (once the missing parents are
+    recovered) can re-materialize them, and so the retained skip delta is
+    ``COUNT(*)`` over this table rather than a fresh foreign-key scan across
+    every child table. Rewritable per address: a later checkpoint that finally
+    carries the parent installs the row and this entry becomes stale, so repair
+    clears it."""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS fleet_sync_quarantine("
+        "address BLOB PRIMARY KEY,"
+        "table_name TEXT NOT NULL,"
+        "logical_address TEXT NOT NULL,"
+        "reason TEXT NOT NULL,"
+        "watermark INTEGER NOT NULL,"
+        "quarantined_at_ns INTEGER NOT NULL)"
+    )
+    now = time.time_ns()
+    for table, address in orphans:
+        conn.execute(
+            "INSERT OR REPLACE INTO fleet_sync_quarantine VALUES(?,?,?,?,?,?)",
+            (
+                encode_value([table, list(address)]),
+                table,
+                json.dumps(list(address)),
+                "fk_orphan",
+                int(watermark),
+                now,
+            ),
+        )
+    conn.commit()
+
+
 def install_checkpoint(
     checkpoint_directory: Path,
     target_path: Path,
@@ -656,18 +701,44 @@ def install_checkpoint(
                     "checkpoint has unavailable attachment bytes: "
                     + ",".join(report.pending_attachments[:4])
                 )
+            # Referentially-orphaned rows — a NOT-NULL foreign key whose parent
+            # is absent from the whole checkpoint (e.g. a thought whose source
+            # conversation was deleted long ago without cascade) — cannot be
+            # represented and were skipped by the materializer rather than
+            # aborting the entire sync. Exclude them from the winner catalog and
+            # from both count invariants, and quarantine them for later repair.
+            # The origin keeps its own copy; the fleet simply does not carry
+            # rows it cannot represent.
+            skipped_orphans = report.skipped_orphans
+            skip_count = len(skipped_orphans)
+            skip_blobs = frozenset(
+                encode_value([table, list(address)])
+                for table, address in skipped_orphans
+            )
             catalog = MutationCatalog(stage.conn, target_origin_incarnation)
             catalog.install()
             installed_winners = install_winner_catalog(
-                catalog, checkpoint_directory / "winners", winners
+                catalog, checkpoint_directory / "winners", winners,
+                skip_addresses=skip_blobs,
             )
-            if installed_winners != winners.total_records:
+            if installed_winners != winners.total_records - skip_count:
                 raise AlphaError("winner installation count mismatch")
             installed_live = int(stage.conn.execute(
                 "SELECT COUNT(*) FROM fleet_sync_catalog WHERE tombstone=0"
             ).fetchone()[0])
-            if installed_live != base.total_records:
+            if installed_live != base.total_records - skip_count:
                 raise AlphaError("winner metadata does not cover the exact base")
+            if skipped_orphans:
+                _quarantine_orphans(
+                    stage.conn, skipped_orphans,
+                    watermark=winners.through_watermark,
+                )
+                _log.warning(
+                    "fleet checkpoint install skipped %d referentially-orphaned "
+                    "row(s) whose foreign-key parent is absent from the "
+                    "checkpoint; quarantined in fleet_sync_quarantine for repair",
+                    skip_count,
+                )
             _copy_peer_state(target_path, stage.conn)
             if merge_existing:
                 _merge_existing_winners(

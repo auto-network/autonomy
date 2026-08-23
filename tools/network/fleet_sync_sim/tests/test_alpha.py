@@ -25,6 +25,14 @@ def _source(conn, identity: str, title: str) -> None:
     )
 
 
+def _thought(conn, identity: str, source_id: str) -> None:
+    conn.execute(
+        "INSERT INTO thoughts(id,source_id,content,turn_number,created_at) "
+        "VALUES(?,?,?,?,?)",
+        (identity, source_id, "body", 0, "2026-08-19T00:00:00Z"),
+    )
+
+
 def _identity(path: Path, marker: str) -> None:
     graph = GraphDB(path)
     try:
@@ -238,6 +246,67 @@ def test_failed_checkpoint_build_publishes_no_partial_directory(
             )
     assert not checkpoint.exists()
     assert not list(tmp_path.glob(".fleet-sync-checkpoint-*"))
+
+
+def test_checkpoint_install_skips_and_quarantines_foreign_key_orphans(
+    tmp_path: Path,
+) -> None:
+    """A thought whose source was deleted long ago without cascade — legacy
+    foreign-key-off debris — must not abort the whole checkpoint. The receiver
+    skips it, keeps the catalog exactly consistent with the rows that landed,
+    and quarantines it for later repair."""
+    origin_path = tmp_path / "origin.db"
+    target_path = tmp_path / "target.db"
+    _identity(origin_path, "origin-secret")
+    _identity(target_path, "target-secret")
+    with FleetSyncAlpha(origin_path, "machine-a") as origin:
+        conn = origin.graph.conn
+        with origin.author(100, "tx-good"):
+            _source(conn, "src-live", "kept")
+            _thought(conn, "t-good", "src-live")
+        # Simulate historical debris: a thought whose parent source is absent,
+        # still tracked by the catalog (SQLite shipped with foreign keys off, so
+        # such orphans accumulated unnoticed and now ride the checkpoint).
+        conn.execute("PRAGMA foreign_keys=OFF")
+        with origin.author(105, "tx-orphan"):
+            _thought(conn, "t-orphan", "src-missing")
+        conn.execute("PRAGMA foreign_keys=ON")
+        checkpoint = origin.checkpoint(
+            tmp_path / "checkpoint", roster_epoch=7,
+            active_roster=("machine-a", "machine-b"), target_chunk_bytes=4096,
+        )
+    # The origin tracked the orphan, so it is part of the checkpoint's base.
+    assert checkpoint.winner_records == 3  # src-live, t-good, t-orphan
+
+    installed = install_checkpoint(
+        tmp_path / "checkpoint", target_path,
+        target_origin_incarnation="machine-b", expected_roster_epoch=7,
+        expected_active_roster=("machine-a", "machine-b"),
+    )
+    assert installed.manifest_sha256 == checkpoint.manifest_sha256
+    with FleetSyncAlpha(target_path, "machine-b") as target:
+        tconn = target.graph.conn
+        # The orphan was skipped; the representable rows landed intact.
+        assert [r[0] for r in tconn.execute(
+            "SELECT id FROM thoughts ORDER BY id"
+        )] == ["t-good"]
+        assert [r[0] for r in tconn.execute(
+            "SELECT id FROM sources ORDER BY id"
+        )] == ["src-live"]
+        # The catalog is exactly consistent with what landed — the orphan is
+        # neither a data row nor a live catalog entry.
+        live = tconn.execute(
+            "SELECT COUNT(*) FROM fleet_sync_catalog WHERE tombstone=0"
+        ).fetchone()[0]
+        assert live == 2  # src-live + t-good
+        # The retained skip delta is the quarantine row count — a later canary
+        # reads COUNT(*) here instead of re-scanning foreign keys.
+        quarantined = [tuple(r) for r in tconn.execute(
+            "SELECT table_name,logical_address,reason FROM fleet_sync_quarantine"
+        )]
+        assert quarantined == [
+            ("thoughts", json.dumps(["t-orphan"]), "fk_orphan")
+        ]
 
 
 def test_preexisting_untracked_rows_fail_checkpoint_closed(tmp_path: Path) -> None:
