@@ -65,7 +65,7 @@
     scrollbar-width:thin}
   .mc-act-table{border-collapse:separate;border-spacing:2px}
   .mc-act-table td,.mc-act-table th{padding:0}
-  .mc-act-table th{font:400 .74rem/1.2 inherit;color:var(--ink2);text-align:left;
+  .mc-act-table th{font:400 .7rem/1.2 inherit;color:var(--ink3);text-align:left;
     padding-right:8px;white-space:nowrap;max-width:216px;overflow:hidden;text-overflow:ellipsis;
     cursor:pointer}
   .mc-act-table th .dot{display:inline-block;width:7px;height:7px;border-radius:50%;
@@ -77,51 +77,25 @@
   .mc-act-table .daylab{font-size:.6rem;color:var(--ink3);text-align:center;padding:0 1px}
 
   /* ── nav ── */
-  .mc-nav{display:flex;gap:6px;overflow-x:auto;padding:2px 0 10px;margin-bottom:6px;
-    border-bottom:1px solid var(--line);-webkit-overflow-scrolling:touch;
-    position:sticky;top:3rem;background:var(--bg);z-index:5;
-    scrollbar-width:none}
-  .mc-nav::-webkit-scrollbar{display:none}
-  .mc-nav button{
-    flex-shrink:0;font:600 .78rem/1 inherit;color:var(--ink2);background:var(--bg2);
-    border:1px solid var(--line);border-radius:16px;padding:7px 13px;cursor:pointer;
-    white-space:nowrap;display:flex;align-items:center;gap:6px;
-  }
-  .mc-nav button .dot{width:7px;height:7px;border-radius:50%;display:inline-block}
-  .mc-nav button .n{font-weight:400;color:var(--ink3);font-size:.72rem}
-  .mc-nav button.on{color:#fff;border-color:var(--accent-dim);background:#232345}
-  .mc-nav button.warns .n{color:var(--warn)}
-  .mc-nav button.mc-dim{opacity:.45}
-  .mc-glance .g.mc-dim{opacity:.5}
-  .mc-seg{display:inline-flex;gap:2px;background:var(--bg2);border:1px solid var(--line);
-    border-radius:8px;padding:2px}
-  .mc-seg button{background:none;border:0;cursor:pointer;font:600 .74rem/1 inherit;
-    color:var(--ink3);border-radius:6px;padding:5px 10px}
-  .mc-seg .mc-seg-on{background:#232345;color:#fff}
-  .mc-news-seg{margin:0 0 12px}
-  .mc-qa-seg{margin:0 0 12px}
-  .mc-qa{cursor:pointer}
-  .mc-qa:hover{border-color:var(--line2)}
-  .mc-qa-peek{font-size:.8rem;color:var(--ink3);margin-top:6px;
-    border-left:2px solid var(--line2);padding-left:9px;font-style:italic}
-  .mc-qa-state{font-size:.68rem;color:var(--ink3);text-transform:uppercase;
-    letter-spacing:.05em;margin-top:7px}
-  .mc-qa-ask{display:flex;justify-content:flex-start;margin:4px 0 0}
-  .mc-subtabs{display:flex;gap:14px;margin:0 0 12px;border-bottom:1px solid var(--line);
-    overflow-x:auto;scrollbar-width:none}
-  .mc-subtabs::-webkit-scrollbar{display:none}
-  .mc-subtabs button{background:none;border:0;cursor:pointer;font:inherit;
-    font-size:.78rem;color:var(--ink3);padding:7px 2px;flex:none;
-    border-bottom:2px solid transparent;margin-bottom:-1px;white-space:nowrap}
-  .mc-subtabs button .n{font-size:.68rem;color:var(--ink3);opacity:.8}
-  .mc-subtabs button.on{color:var(--ink);border-color:var(--line2)}
-  .mc-group{font-size:.72rem;color:var(--ink3);letter-spacing:.06em;
-    text-transform:uppercase;margin:16px 0 8px}
-  .mc-news .body{margin-top:2px}
-  .mc-news-foot{display:flex;justify-content:flex-end;margin-top:6px}
-  .mc-news-reply{background:none;border:0;cursor:pointer;font:600 .74rem/1 inherit;
-    color:var(--accent);padding:2px 4px}
-  .mc-gout{display:none!important}
+  .mc-psel{position:relative;margin:0 0 12px}
+  .mc-psel-btn{display:flex;align-items:center;gap:9px;background:var(--card);
+    border:1px solid var(--line);border-radius:10px;padding:9px 13px;width:100%;
+    cursor:pointer;font:inherit;color:var(--ink)}
+  .mc-psel-btn b{flex:1;text-align:left;font-size:.92rem;color:#fff}
+  .mc-psel-btn .caret{color:var(--ink3);font-size:.7rem}
+  .mc-psel-menu{position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:8;
+    background:#11151d;border:1px solid var(--line2);border-radius:10px;
+    box-shadow:0 12px 30px rgba(0,0,0,.5);overflow:hidden}
+  .mc-psel-row{display:flex;align-items:center;gap:9px;width:100%;padding:10px 13px;
+    background:none;border:0;border-top:1px solid #1c2230;cursor:pointer;
+    font:inherit;color:var(--ink2);font-size:.88rem;text-align:left}
+  .mc-psel-row:first-child{border-top:0}
+  .mc-psel-row:hover{background:#171b26}
+  .mc-psel-row.on{color:#fff;background:#171b26}
+  .mc-secfilters{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 10px}
+  .mc-secfilters button{font:600 .68rem/1 inherit;color:var(--ink3);background:var(--bg2);
+    border:1px solid var(--line);border-radius:12px;padding:5px 10px;cursor:pointer}
+  .mc-secfilters button.on{color:#fff;border-color:var(--accent-dim);background:#232345}
 
   /* ── views ── */
   .mc-view{display:none}
@@ -231,19 +205,28 @@
   .mc-mini .m-w{color:var(--warn)} .mc-mini .m-g{color:var(--good)}
   .mc-mini .m-z{opacity:.35}
   .mc-psum .last{font-size:.83rem;color:var(--ink2);margin:6px 0 0}
-  .mc-psum .stat{font-size:.8rem;color:var(--ink3);margin:6px 0 0;font-style:italic}
+  .mc-statbar{display:flex;height:4px;border-radius:3px;overflow:hidden;
+    background:var(--card2);margin:10px 0 0}
+  .mc-statbar i{height:100%}
+  .mc-statmeta{font-size:.72rem;color:var(--ink3);margin-top:5px}
 
   /* feed */
   .mc-feed-day{font-size:.72rem;color:var(--ink3);text-transform:uppercase;
     letter-spacing:.06em;margin:18px 0 8px}
-  .mc-feed-row{display:flex;gap:9px;align-items:baseline;background:var(--card);
+  .mc-feed-row{display:flex;gap:10px;align-items:flex-start;background:var(--card);
     border:1px solid var(--line);border-radius:8px;padding:8px 12px;margin:0 0 6px;
-    font-size:.84rem}
-  .mc-feed-row .dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;align-self:center}
-  .mc-feed-row .t{color:var(--ink);flex:1 1 auto;min-width:0}
-  .mc-feed-row .k{color:var(--ink3);font-size:.7rem;flex-shrink:0;max-width:88px;
-    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .mc-feed-row .mc-pill{margin-left:auto;align-self:center}
+    font-size:.84rem;cursor:pointer}
+  .mc-feed-row:hover{border-color:var(--line2)}
+  .mc-feed-row .main{flex:1;min-width:0}
+  .mc-feed-row .who{display:flex;align-items:center;gap:6px;margin:0 0 2px}
+  .mc-feed-row .who .dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+  .mc-feed-row .who .k{color:var(--ink3);font-size:.7rem;overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap}
+  .mc-feed-row .t{color:var(--ink);min-width:0}
+  .mc-feed-row .mc-pill{flex:none;align-self:center}
+  .mc-feed-row .mc-pill.sm{font-size:.58rem;padding:2px 6px}
+  .mc-feed-filtered .mc-feed-row .who{display:none}
+  .mc-bhidden{display:none!important}
   .mc-feed-note{display:inline-flex;align-items:center;gap:6px;font:600 .74rem/1 inherit;
     color:#fff;background:#232345;border:1px solid var(--accent-dim);border-radius:14px;
     padding:6px 11px;margin:0 0 10px;cursor:pointer}
@@ -270,7 +253,7 @@
 
 <div id="mc-app">
   <nav class="mc-tabs" id="mc-tabs"></nav>
-  <div class="mc-glance" id="mc-glance"></div>
+
 
   <div class="mc-activity">
     <div class="hd">
@@ -283,7 +266,7 @@
     <div class="mc-act-scroll"><table class="mc-act-table" id="mc-act"></table></div>
   </div>
 
-  <nav class="mc-nav" id="mc-nav"></nav>
+  <div id="mc-psel"></div>
   <div id="mc-views"></div>
 
   <div class="mc-foot">Structured mission · rendered by the platform from
@@ -381,7 +364,6 @@
     // it clears any pillar filter and returns to the summary.
     {id: "overview",  label: "Status"},
     {id: "pillars",   label: "Pillars"},
-    {id: "decisions", label: "Decisions"},
     {id: "questions", label: "Questions"},
     {id: "news",      label: "News"},
     {id: "feed",      label: "Feed"},
@@ -391,169 +373,11 @@
     var b = el("button", null, t.label);
     b.id = "tab-" + t.id;
     b.addEventListener("click", function () {
+      if (t.id === "pillars") { show(selectedPillar()); return; }
       show(t.id === "overview" ? MID : t.id);
     });
     tabsHost.appendChild(b);
   });
-  var counts = {proven:0, activeish:0, blocked:0, asks:0};
-  liveItems.forEach(function (it) {
-    if (it.state==="proven"||it.state==="done"||it.state==="settled") counts.proven++;
-    if (it.state==="active"||it.state==="code_only") counts.activeish++;
-    if (it.state==="blocked") counts.blocked++;
-    if (it.kind==="question" && it.state==="open" && it.ask) counts.asks++;
-  });
-  // The hero numbers are single-select filters: tap one to see exactly the
-  // items it counts, across every pillar; tap it again to put the screen
-  // back the way it was. Selecting a chip while another is on switches to
-  // it — never two at once.
-  var GLANCE = [
-    {key:"asks",    cls:"ga", n:counts.asks,     label:"asks",
-     match:function (it) { return it.kind==="question" && it.state==="open" && !!it.ask; },
-     empty:"Nothing is waiting on you."},
-    {key:"blocked", cls:"gc", n:counts.blocked,  label:"blocked",
-     match:function (it) { return it.state==="blocked"; },
-     empty:"Nothing is blocked."},
-    {key:"flight",  cls:"gw", n:counts.activeish, label:"in flight",
-     match:function (it) { return it.state==="active"||it.state==="code_only"; },
-     empty:"Nothing in flight."},
-    {key:"proven",  cls:"gd", n:counts.proven,   label:"done",
-     match:function (it) { return it.state==="proven"||it.state==="done"||it.state==="settled"; },
-     empty:"Nothing proven or done yet."},
-  ];
-  // Every item wears the one glance bucket it belongs to (states are
-  // single-valued, so the buckets never overlap); the global filter and
-  // the nav counts both read it.
-  function glanceKeyOf(it){
-    for (var i = 0; i < GLANCE.length; i++)
-      if (GLANCE[i].match(it)) return GLANCE[i].key;
-    return "";
-  }
-  var glance = document.getElementById("mc-glance");
-  var glanceActive = null, glanceReturn = null;
-  function chipTitle(g){ return {proven:"Proven / done", flight:"In flight",
-    blocked:"Blocked", asks:"Asks for you"}[g.key]; }
-  // EVERY NUMBER DESCRIBES WHAT IS ON SCREEN. When a pillar (or a
-  // pillar-narrowed feed) is the view, the hero chips count that pillar's
-  // items, not the mission's — a "94 proven" over a screen showing one
-  // pillar is a number about somewhere else. Mission-wide views count
-  // mission-wide.
-  function viewScope(){
-    // STATUS IS MISSION-WIDE, ALWAYS. The pillar chips are not even
-    // visible there, so a selection lingering from another tab must not
-    // scope its numbers — the special case the operator named.
-    if (currentView === MID) return null;
-    var v = pillarFilter || "";
-    if (!v) return null;
-    return function (it) { return it.surface_id === v; };
-  }
-  function updateChips(){
-    document.querySelectorAll(".mc-nav button").forEach(function (n) {
-      n.classList.toggle("on", !!pillarFilter && n.id === "nav-"+pillarFilter);
-    });
-    var base = viewScope();
-    GLANCE.forEach(function (g) {
-      var n = liveItems.filter(function (it) {
-        return g.match(it) && (!base || base(it));
-      }).length;
-      g.numEl.textContent = String(n);
-      g.btn.style.display = (n === 0 && glanceActive !== g.key) ? "none" : "";
-      g.btn.classList.toggle("on", glanceActive === g.key);
-      g.btn.setAttribute("aria-pressed", glanceActive === g.key ? "true" : "false");
-    });
-    updateNavCounts();
-  }
-  // The active chip hides everything outside its bucket, in every view:
-  // items, feed rows, then the furniture that would otherwise sit empty
-  // (folds, sections). Day headers are the feed filter's problem — it
-  // already walks them, so it just has to also respect .mc-gout.
-  function applyGlance(){
-    var key = glanceActive, pf = pillarFilter;
-    document.querySelectorAll("#mc-views .mc-item, #mc-views .mc-feed-row")
-      .forEach(function (n) {
-        n.classList.toggle("mc-gout",
-          (!!key && ("glance" in n.dataset) && n.dataset.glance !== key) ||
-          (!!pf && !!n.dataset.surface && n.dataset.surface !== pf));
-      });
-    document.querySelectorAll("#mc-views details.mc-finished").forEach(function (d) {
-      var vis = d.querySelectorAll(".mc-item:not(.mc-gout):not(.mc-hidden)").length;
-      if (key) d.open = vis > 0;
-      d.classList.toggle("mc-gout", !!key && !vis);
-    });
-    document.querySelectorAll("#mc-views section.mc-sec").forEach(function (sec) {
-      if (!sec.querySelector(".mc-item")) return;
-      var vis = sec.querySelectorAll(".mc-item:not(.mc-gout):not(.mc-hidden)").length;
-      sec.classList.toggle("mc-gout", !!key && !vis);
-    });
-    applyFeedFilter();
-    rescueEmpties();
-  }
-  function rescueEmpties(){
-    var pv0 = document.getElementById("view-pillars");
-    if (pv0 && pv0._syncFilters) pv0._syncFilters();
-    document.querySelectorAll("#mc-views .mc-view").forEach(function (v) {
-      var old = v.querySelector(".mc-noresult");
-      if (old) old.remove();
-      if (!glanceActive && !pillarFilter) return;
-      var scopeEl = v;
-      if (v.id === "view-pillars"){
-        var act = null;
-        v.querySelectorAll("section.mc-sec").forEach(function (sec) {
-          if (sec.style.display !== "none" && !act) act = sec;
-        });
-        if (act) scopeEl = act;
-      }
-      var cards = scopeEl.querySelectorAll(".mc-item");
-      if (!cards.length) return;
-      if (scopeEl.querySelectorAll(".mc-item:not(.mc-gout):not(.mc-hidden)").length) return;
-      var n = el("div","mc-empty mc-noresult");
-      n.appendChild(document.createTextNode(
-        "Nothing here matches the active filters. "));
-      var b = el("button","mc-news-reply","Show everything");
-      b.addEventListener("click", function () {
-        glanceActive = null; glanceReturn = null; pillarFilter = null;
-        var fv = document.getElementById("view-feed");
-        if (fv) fv.dataset.filter = "";
-        applyGlance();
-        updateChips();
-      });
-      n.appendChild(b);
-      (v.id === "view-pillars" ? v : scopeEl).insertBefore(
-        n, v.id === "view-pillars" ? v.firstChild : scopeEl.firstChild);
-      if (v.id === "view-pillars" && scopeEl.classList) scopeEl.classList.remove("mc-gout");
-    });
-  }
-  function toggleGlance(key){
-    if (glanceActive === key){
-      glanceActive = null;
-      applyGlance();
-      var back = glanceReturn; glanceReturn = null;
-      if (currentView === "glance-" + key) show(back || MID);
-      else updateChips();
-      return;
-    }
-    if (glanceActive === null) glanceReturn = currentView;
-    glanceActive = key;
-    applyGlance();
-    // FILTERS STACK. From the overview a chip opens the cross-pillar
-    // list it counts; from anywhere else it narrows the view you are
-    // already in — pick a pillar, then "proven", and you see that
-    // pillar's proven items, with every nav count recomputed to match.
-    if (currentView === MID || String(currentView).indexOf("glance-") === 0)
-      show("glance-" + key);
-    else updateChips();
-  }
-  var glanceCluster = el("div","mc-gset");
-  GLANCE.forEach(function (g) {
-    var c = el("button","g "+g.cls);
-    g.numEl = el("b",null,String(g.n));
-    c.appendChild(g.numEl);
-    c.appendChild(el("span",null,g.label));
-    c.setAttribute("aria-pressed","false");
-    c.addEventListener("click",function(){ toggleGlance(g.key); });
-    g.btn = c;
-    (g.key === "asks" ? glance : glanceCluster).appendChild(c);
-  });
-  glance.appendChild(glanceCluster);
 
   // ── activity grid: surfaces × days from item timestamps ─────────
   (function activity(){
@@ -624,13 +448,9 @@
       c.title = "Open in " + surfName(it.surface_id);
       c.addEventListener("click", function (ev) {
         if (ev.target.closest("a,button,summary")) return;
-        if (pillarFilter && pillarFilter !== it.surface_id) {
-          pillarFilter = it.surface_id;
-          var fv = document.getElementById("view-feed");
-          if (fv) fv.dataset.filter = pillarFilter;
-          applyGlance();
-        }
-        show("pillars");
+        if (!document.getElementById("view-" + it.surface_id)) return;
+        rememberPillar(it.surface_id);
+        show(it.surface_id);
         var target = document.querySelector(
           '.mc-view [data-mc-anchor="' + it.key + '"]');
         if (target){
@@ -675,7 +495,6 @@
       }
     }
     c.dataset.state = it.state; c.dataset.kind = it.kind;
-    c.dataset.glance = glanceKeyOf(it);
     c.dataset.surface = it.surface_id;
     c.dataset.search = (it.title+" "+it.body+" "+(it.evidence||[]).join(" ")).toLowerCase();
 
@@ -773,33 +592,8 @@
       [].forEach.call(subs.children, function (b) {
         b.classList.toggle("on", b.dataset.sec === name);
       });
-      if (typeof rescueEmpties === "function") rescueEmpties();
     }
     v._showSection = showSection;
-    // THE SECTION TABS OBEY THE FILTERS. With a filter on, each tab
-    // recounts what actually matches, tabs that can contain nothing
-    // disappear, and if the section on screen went empty the view jumps
-    // to the first one with matches — tapping "asks" lands the reader ON
-    // the asks, never on a sibling section insisting nothing exists.
-    v._syncFilters = function(){
-      var filtered = !!(glanceActive || pillarFilter);
-      var vis = {}, total = 0, firstWith = null;
-      names.forEach(function (n) {
-        var count = filtered
-          ? secEls[n].querySelectorAll(
-              ".mc-item:not(.mc-gout):not(.mc-hidden)").length
-          : sections[n].length;
-        vis[n] = count; total += count;
-        if (count && !firstWith) firstWith = n;
-      });
-      [].forEach.call(subs.children, function (b) {
-        var n2 = b.dataset.sec;
-        var cnt = b.querySelector(".n");
-        if (cnt) cnt.textContent = " " + vis[n2];
-        b.style.display = (filtered && total && !vis[n2]) ? "none" : "";
-      });
-      if (filtered && total && !vis[activeName]) showSection(firstWith);
-    };
     names.forEach(function (name) {
       var b = el("button", null, name);
       b.dataset.sec = name;
@@ -811,6 +605,38 @@
       var sec = el("section","mc-sec");
       sec.dataset.sec = name;
       secEls[name] = sec;
+      // THE FILTERS LIVE WHERE THEY APPLY: each section offers toggles
+      // for exactly the states its own cards are in — none at all on
+      // Objective and scope, which is prose, not a worklist.
+      (function sectionFilters(){
+        if (name === "Objective and scope") return;
+        var present = {};
+        sections[name].forEach(function (it) { present[it.state] = (present[it.state]||0)+1; });
+        var keys = Object.keys(present);
+        if (keys.length < 2) return;
+        var on = {};
+        var fb = el("div","mc-secfilters");
+        function apply(){
+          var act = Object.keys(on).filter(function (k) { return on[k]; });
+          sec.querySelectorAll(".mc-item").forEach(function (n) {
+            n.classList.toggle("mc-hidden",
+              !!act.length && act.indexOf(n.dataset.state) < 0);
+          });
+          sec.querySelectorAll("details.mc-finished").forEach(function (d) {
+            var vis = d.querySelectorAll(".mc-item:not(.mc-hidden)").length;
+            d.open = !!act.length && vis > 0;
+            d.classList.toggle("mc-hidden", !!act.length && !vis);
+          });
+        }
+        keys.sort().forEach(function (k) {
+          var b = el("button", null, (STATE_LABEL[k] || k) + " " + present[k]);
+          b.addEventListener("click", function () {
+            on[k] = !on[k]; b.classList.toggle("on", !!on[k]); apply();
+          });
+          fb.appendChild(b);
+        });
+        sec.appendChild(fb);
+      })();
       var list = sections[name].slice().sort(function (a, b) {
         var ga = (a.section && a.section !== name) ? a.section : "";
         var gb = (b.section && b.section !== name) ? b.section : "";
@@ -878,11 +704,8 @@
     PILLARS.forEach(function (p) {
       var pc = el("div","mc-psum");
       pc.addEventListener("click",function(){
-        pillarFilter = p.pillar_id;
-        var fv = document.getElementById("view-feed");
-        if (fv) fv.dataset.filter = p.pillar_id;
-        applyGlance();
-        show("pillars");
+        rememberPillar(p.pillar_id);
+        show(p.pillar_id);
       });
       var hd = el("div","hd");
       hd.appendChild(dot(p.color || "#8391a8"));
@@ -909,7 +732,30 @@
       if (status) pc.appendChild(el("div","last",
         String(status.body||status.title).split(/\n\s*\n/)[0]));
       else if (p.last_done) pc.appendChild(el("div","last",p.last_done));
-      pc.appendChild(el("div","stat", mine.length + " items"));
+      var st = {done:0, flight:0, blocked:0, rest:0};
+      mine.forEach(function (it) {
+        if (it.state==="proven"||it.state==="done"||it.state==="settled") st.done++;
+        else if (it.state==="active"||it.state==="code_only") st.flight++;
+        else if (it.state==="blocked") st.blocked++;
+        else st.rest++;
+      });
+      if (mine.length){
+        var bar = el("div","mc-statbar");
+        [[st.done,"var(--good)"],[st.flight,"var(--warn)"],
+         [st.blocked,"var(--crit)"],[st.rest,"var(--line2)"]].forEach(function (seg) {
+          if (!seg[0]) return;
+          var i2 = el("i"); i2.style.width = (100*seg[0]/mine.length) + "%";
+          i2.style.background = seg[1];
+          bar.appendChild(i2);
+        });
+        bar.title = st.done + " done \u00b7 " + st.flight + " in flight \u00b7 "
+          + st.blocked + " blocked \u00b7 " + st.rest + " not started";
+        pc.appendChild(bar);
+      }
+      var freshest = mine.slice().sort(function (a,b) {
+        return (when(b)||0) - (when(a)||0); })[0];
+      var fw = freshest && when(freshest);
+      if (fw) pc.appendChild(el("div","mc-statmeta","active " + agoText(fw)));
       sec.appendChild(pc);
     });
     v.appendChild(sec);
@@ -939,23 +785,53 @@
       .sort(function (a,b){ return b.d - a.d; });
     if (!dated.length){ v.appendChild(el("div","mc-empty",
       "No dated items yet — the feed builds itself from item timestamps.")); return v; }
+    function bucket(it){
+      if (it.kind==="question" && it.state==="open" && it.ask) return "asks";
+      if (it.state==="blocked") return "blocked";
+      if (it.state==="active"||it.state==="code_only") return "flight";
+      if (it.state==="proven"||it.state==="done"||it.state==="settled") return "done";
+      return "other";
+    }
+    var bCounts = {};
+    dated.forEach(function (x) {
+      var b = bucket(x.it); bCounts[b] = (bCounts[b]||0)+1;
+    });
+    var bOn = {};
+    var fb = el("div","mc-secfilters");
+    [["asks","Asks"],["blocked","Blocked"],["flight","In flight"],
+     ["done","Done"],["other","Other"]].forEach(function (pair) {
+      if (!bCounts[pair[0]]) return;
+      var b = el("button", null, pair[1] + " " + bCounts[pair[0]]);
+      b.addEventListener("click", function () {
+        bOn[pair[0]] = !bOn[pair[0]];
+        b.classList.toggle("on", !!bOn[pair[0]]);
+        var act = Object.keys(bOn).filter(function (k) { return bOn[k]; });
+        v.querySelectorAll(".mc-feed-row").forEach(function (r) {
+          r.classList.toggle("mc-bhidden",
+            !!act.length && act.indexOf(r.dataset.bucket) < 0);
+        });
+        applyFeedFilter();
+      });
+      fb.appendChild(b);
+    });
+    v.appendChild(fb);
     var lastDay = "";
     dated.forEach(function (x) {
       var day = x.d.toLocaleDateString(undefined,{weekday:"short",month:"short",day:"numeric"});
       if (day !== lastDay){ v.appendChild(el("div","mc-feed-day",day)); lastDay = day; }
       var row = el("div","mc-feed-row");
       row.dataset.surface = x.it.surface_id;
-      row.dataset.glance = glanceKeyOf(x.it);
-      row.appendChild(dot(surfColor(x.it.surface_id)));
-      row.appendChild(el("span","k",shortName(x.it.surface_id)));
-      row.appendChild(el("span","t",x.it.title));
-      row.appendChild(pill(x.it.state));
-      row.style.cursor = "pointer";
-      row.addEventListener("click",function(){
-        show(x.it.surface_id===MID ? MID : x.it.surface_id);
-        var target = document.querySelector('[data-mc-anchor="'+x.it.key+'"]');
-        if (target) target.scrollIntoView({behavior:"smooth",block:"center"});
-      });
+      row.dataset.bucket = bucket(x.it);
+      var main = el("div","main");
+      var who = el("div","who");
+      who.appendChild(dot(surfColor(x.it.surface_id)));
+      who.appendChild(el("span","k",surfName(x.it.surface_id)));
+      main.appendChild(who);
+      main.appendChild(el("div","t",x.it.title));
+      row.appendChild(main);
+      var pl = pill(x.it.state); pl.classList.add("sm");
+      row.appendChild(pl);
+      row.addEventListener("click",function(){ gotoItem(x.it); });
       v.appendChild(row);
     });
     return v;
@@ -967,6 +843,8 @@
     var v = document.getElementById("view-feed");
     if (!v) return;
     var sid = v.dataset.filter || "";
+    // Filtered to one pillar, the per-row pillar name is redundant.
+    v.classList.toggle("mc-feed-filtered", !!sid);
     var old = v.querySelector(".mc-feed-note");
     if (old) old.remove();
     v.querySelectorAll(".mc-feed-row").forEach(function (r) {
@@ -974,7 +852,7 @@
     });
     function rowShown(r){
       return !r.classList.contains("mc-hidden")
-          && !r.classList.contains("mc-gout");
+          && !r.classList.contains("mc-bhidden");
     }
     var kids = [].slice.call(v.children);
     for (var i = 0; i < kids.length; i++){
@@ -991,31 +869,101 @@
       var chip = el("button","mc-feed-note",
         "Showing " + surfName(sid) + " only — show all");
       chip.addEventListener("click", function () {
-        v.dataset.filter = ""; applyFeedFilter(); updateChips();
+        v.dataset.filter = ""; applyFeedFilter();
       });
       v.insertBefore(chip, v.firstChild);
     }
   }
+  // The one way any reference reaches an item: its pillar's page, with
+  // the section revealed and the card flashed.
+  function gotoItem(it){
+    var vid = it.surface_id;
+    if (!document.getElementById("view-" + vid)) return;
+    rememberPillar(vid);
+    show(vid);
+    var target = document.querySelector(
+      '#view-' + (window.CSS && CSS.escape ? CSS.escape(vid) : vid)
+      + ' [data-mc-anchor="' + it.key + '"]');
+    if (!target) return;
+    var pv = document.getElementById("view-" + vid);
+    var secEl = target.closest("section.mc-sec");
+    if (pv && pv._showSection && secEl && secEl.dataset.sec)
+      pv._showSection(secEl.dataset.sec);
+    var fold = target.closest("details.mc-finished");
+    if (fold) fold.open = true;
+    target.scrollIntoView({behavior:"smooth", block:"center"});
+    target.classList.remove("mc-flash");
+    void target.offsetWidth;
+    target.classList.add("mc-flash");
+  }
+
   function showFeedFor(sid){
-    pillarFilter = sid || null;
     var v = document.getElementById("view-feed");
     if (v){ v.dataset.filter = sid || ""; }
-    applyGlance();
     show("feed");
     applyFeedFilter();
-    updateChips();
   }
 
   // ── assemble views + nav ────────────────────────────────────────
   var views = document.getElementById("mc-views");
   views.appendChild(overviewView());
-  views.appendChild(surfaceView(null));
-  GLANCE.forEach(function (g) {
-    views.appendChild(collectionView("glance-"+g.key, chipTitle(g), g.match, g.empty));
-  });
-  views.appendChild(collectionView("decisions","Decisions",
-    function (it) { return it.kind==="decision"; },
-    "No decisions recorded yet."));
+  PILLARS.forEach(function (p) { views.appendChild(surfaceView(p.pillar_id)); });
+  if (liveItems.some(function (it) { return it.surface_id === MID; }))
+    views.appendChild(surfaceView(MID));
+
+  // ── ONE PILLAR AT A TIME. The selector is a name: closed, it shows
+  // only the current pillar; tap it for the list. No merged view, no
+  // chip strip — choosing is the page's first act. ──
+  var PSEL_KEY = "mcSelectedPillar:" + MID;
+  function pillarChoices(){
+    var out = PILLARS.map(function (p) {
+      return {id: p.pillar_id, name: p.name, color: p.color || "#8391a8"};
+    });
+    if (document.getElementById("view-" + MID) && liveItems.some(function (it) {
+        return it.surface_id === MID; }))
+      out.push({id: MID, name: "Mission (legacy)", color: "#e2e8f0"});
+    return out;
+  }
+  function selectedPillar(){
+    var saved = null;
+    try { saved = localStorage.getItem(PSEL_KEY); } catch (e) {}
+    if (saved && document.getElementById("view-" + saved)) return saved;
+    return pillarChoices()[0].id;
+  }
+  function rememberPillar(pid){
+    try { localStorage.setItem(PSEL_KEY, pid); } catch (e) {}
+  }
+  var pselOpen = false;
+  function renderPsel(){
+    var host = document.getElementById("mc-psel");
+    host.innerHTML = "";
+    var cur = pillarChoices().filter(function (c) {
+      return c.id === currentView; })[0];
+    if (!cur) return;
+    var btn = el("button","mc-psel-btn");
+    btn.appendChild(dot(cur.color));
+    btn.appendChild(el("b",null,cur.name));
+    btn.appendChild(el("span","caret", pselOpen ? "\u25B4" : "\u25BE"));
+    btn.addEventListener("click", function () {
+      pselOpen = !pselOpen; renderPsel();
+    });
+    host.appendChild(btn);
+    if (pselOpen){
+      var menu = el("div","mc-psel-menu");
+      pillarChoices().forEach(function (c) {
+        var r = el("button","mc-psel-row" + (c.id === cur.id ? " on" : ""));
+        r.appendChild(dot(c.color));
+        r.appendChild(el("span",null,c.name));
+        r.addEventListener("click", function () {
+          pselOpen = false;
+          rememberPillar(c.id);
+          show(c.id);
+        });
+        menu.appendChild(r);
+      });
+      host.appendChild(menu);
+    }
+  }
   var qView = collectionView("questions","Open questions",
     function (it) { return it.kind==="question" && it.state==="open"; },
     "Nothing is waiting on an answer.");
@@ -1176,74 +1124,28 @@
           host.appendChild(sec);
         });
       }
-      applyGlance();
     }
     v.appendChild(seg); v.appendChild(host);
     draw();
     return v;
   }
 
-  var nav = document.getElementById("mc-nav");
-  var NAVS = [];
-  function navBtn(id,label,color,base,warnWhen){
-    var b = el("button",null,"");
-    if (color) b.appendChild(dot(color));
-    b.appendChild(document.createTextNode(label));
-    if (base){
-      var n = el("span","n","");
-      b.appendChild(n);
-      NAVS.push({base:base, el:n, btn:b, warn:warnWhen});
-    }
-    b.id = "nav-"+id;
-    b.addEventListener("click",function(){ togglePillar(id); });
-    nav.appendChild(b);
-  }
-  // A count is a claim about what tapping the chip will show, so it obeys
-  // the active glance filter: "done" on plus a pillar chip reading 3 means
-  // three done items live there. A chip at 0 dims instead of vanishing —
-  // the destination still exists, it is just empty under this filter.
-  function updateNavCounts(){
-    NAVS.forEach(function (nv) {
-      var n = liveItems.filter(function (it) {
-        return nv.base(it) &&
-          (!glanceActive || glanceKeyOf(it) === glanceActive);
-      }).length;
-      nv.el.textContent = n ? String(n) : (glanceActive ? "0" : "");
-      nv.btn.classList.toggle("warns", !!nv.warn && n > 0 && !glanceActive);
-      nv.btn.classList.toggle("mc-dim", !!glanceActive && n === 0);
-    });
-  }
-  PILLARS.forEach(function (p) {
-    navBtn(p.pillar_id, shortName(p.pillar_id), p.color || "#8391a8",
-      function (it) { return it.surface_id===p.pillar_id; });
-  });
-  updateNavCounts();
-
-  var pillarFilter = null;
-  function togglePillar(pid){
-    pillarFilter = (pillarFilter === pid) ? null : pid;
-    var fv = document.getElementById("view-feed");
-    if (fv) fv.dataset.filter = pillarFilter || "";
-    applyGlance();
-    if (currentView === "feed") applyFeedFilter();
-    updateChips();
-  }
 
   var currentView = null;
   function show(id){
     currentView = id;
-    updateChips();
     document.querySelectorAll(".mc-view").forEach(function (n) {
       n.classList.toggle("on", n.id === "view-"+id);
     });
-    var named = {pillars:"Pillars", decisions:"Decisions",
-                 questions:"Questions", feed:"Feed", news:"News"};
-    var fam = named[id] ? id : "overview";
+    var named = {questions:"Questions", feed:"Feed", news:"News"};
+    var fam = named[id] ? id
+      : (id === MID ? "overview" : "pillars");
     document.querySelectorAll(".mc-tabs button").forEach(function (b) {
       b.classList.toggle("on", b.id === "tab-" + fam);
     });
-    var strip = document.getElementById("mc-nav");
-    if (strip) strip.style.display = (fam === "overview") ? "none" : "";
+    var psel = document.getElementById("mc-psel");
+    if (psel) psel.style.display = (fam === "pillars") ? "" : "none";
+    if (fam === "pillars") renderPsel();
   }
   // The activity panel is mission-wide chrome, but it belongs to the
   // overview: pillar views get their vertical room back.
