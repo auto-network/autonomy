@@ -222,6 +222,7 @@
   .mc-psum:hover{border-color:var(--line2)}
   .mc-psum .hd{display:flex;align-items:flex-start;gap:8px}
   .mc-psum .hd b{flex:1;min-width:0}
+  .mc-minirow{display:flex;justify-content:flex-end;margin:0 0 6px}
   .mc-psum .hd .dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;align-self:center}
   .mc-psum .hd b{color:#fff;font-size:.95rem}
   .mc-mini{flex:none;display:inline-flex;align-items:center;margin-left:auto;
@@ -747,14 +748,18 @@
       var done = (n.proven || 0) + (n.done || 0) + (n.settled || 0);
       var asks = mine.filter(function (it) {
         return it.kind==="question" && it.state==="open" && it.ask; }).length;
+      // ABOVE the title, never beside it: two badges next to a long
+      // pillar name wrapped the title around them and wrecked the card.
       if (asks || blocked) {
+        var miniRow = el("div","mc-minirow");
         var mini = el("span","mc-mini");
         mini.title = (asks ? asks + " waiting on you" : "")
           + (asks && blocked ? " \u00b7 " : "")
           + (blocked ? blocked + " blocked" : "");
         if (asks) mini.appendChild(el("i","m-a",asks + " ask" + (asks>1?"s":"")));
         if (blocked) mini.appendChild(el("i","m-c",blocked + " blocked"));
-        hd.appendChild(mini);
+        miniRow.appendChild(mini);
+        pc.appendChild(miniRow);
       }
       pc.appendChild(hd);
       var status = mine.filter(function (it) { return it.kind==="status"; })[0];
