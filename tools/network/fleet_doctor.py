@@ -34,32 +34,58 @@ import sys
 from pathlib import Path
 
 
+_QUIET = False  # set True in main() for --json: report data still collected, nothing printed but the JSON
+
+
 def _section(title: str) -> None:
-    print(f"\n== {title} ==")
+    if not _QUIET:
+        print(f"\n== {title} ==")
 
 
 def _line(label: str, value, *, warn: bool = False, fail: bool = False) -> None:
+    if _QUIET:
+        return
     mark = "FAIL" if fail else ("WARN" if warn else "ok  ")
     print(f"  [{mark}] {label}: {value}")
+
+
+def _detail(text: str) -> None:
+    if not _QUIET:
+        print(text)
 
 
 # ── identity + designation ──────────────────────────────────────────────
 
 def _machine_identity_cross_check() -> tuple[str | None, list[str]]:
-    """Read the machine-identity row directly off disk from every candidate
-    path, rather than trusting one resolver. Found live 2026-08-22: the
-    canonical resolver (_org_db_path("machine")) points at data/machine.db,
-    which is EMPTY of the identity row in a fresh process -- the real row
-    lives at data/orgs/machine.db. The live dashboard reports the right
-    machine_id anyway (almost certainly an in-memory value established once
-    at enrollment time, never re-read from _org_db_path's file since), which
-    means a fresh process asking through the "normal" API silently gets a
-    different, wrong answer. Report both paths so this gap is visible
-    instead of silently trusting whichever one happens to work."""
-    import sqlite3
-    from tools.data_paths import DATA_ROOT
+    """Read the machine-identity row directly off disk from every path the
+    real resolver could mean, rather than trusting only the winner it picks.
 
-    candidates = [DATA_ROOT / "machine.db", DATA_ROOT / "orgs" / "machine.db"]
+    Derives the two candidate paths the SAME way tools.graph.db._org_db_path
+    does (via _orgs_dir()), so this works unmodified on the host and inside
+    a container with a differently-nested data/orgs layout -- never a
+    hardcoded DATA_ROOT-relative guess.
+
+    Found live 2026-08-22: resolve_local_store_path() (tools.data_paths,
+    what _org_db_path("machine") delegates to) picks between the local
+    store's new home (orgs_dir.parent/"machine.db") and its legacy home
+    (orgs_dir/"machine.db") purely by whether the NEW-HOME FILE EXISTS --
+    not whether the row being looked up is actually in it. The new home
+    here is a large, actively-written file (schema registry, harness
+    bootstrap, ...) -- migration is clearly underway -- but the
+    machine-identity row specifically, written once at enrollment and never
+    touched again, was never copied over, so it's still only in the legacy
+    file. Once ANYTHING writes to the new home the resolver treats the
+    whole local store as relocated and stops looking at the legacy file at
+    all, silently orphaning every row that hasn't itself been rewritten
+    since. This is a partial-migration bug, not a wrong-path one -- report
+    both files' contents so it's visible instead of silently trusting
+    whichever the resolver happens to pick.
+    """
+    import sqlite3
+    from tools.graph.db import _orgs_dir
+
+    orgs_dir = _orgs_dir()
+    candidates = [orgs_dir.parent / "machine.db", orgs_dir / "machine.db"]
     found_in: list[str] = []
     machine_id = None
     for path in candidates:
@@ -90,11 +116,18 @@ def check_identity(report: dict) -> None:
         if local_id is None and disk_id is not None:
             _line(
                 "machine_boot.machine_id() vs direct disk read",
-                f"MISMATCH -- the standard resolver ({resolver_path}) found nothing, "
-                f"but the identity row exists on disk at {disk_paths}. "
-                "This script is being fooled the same way a fresh process always "
-                "would be; the live dashboard likely has this cached in memory. "
-                f"Using the disk value ({disk_id[:16]}...) for the rest of this report.",
+                f"PARTIAL MIGRATION -- the local store's resolved home "
+                f"({resolver_path}) exists and is actively written (schema "
+                "registry, harness bootstrap, ...), so the resolver treats "
+                "the machine local store as fully relocated there -- but "
+                "the machine-identity row itself, written once at "
+                "enrollment and never touched since, was never copied over "
+                f"and is still only on disk at {disk_paths}. Any process "
+                "asking through the normal resolver gets nothing; the live "
+                "dashboard likely still answers correctly only because it "
+                "cached machine_id in memory back when it WAS reachable. "
+                f"Using the disk value ({disk_id[:16]}...) for the rest of "
+                "this report.",
                 warn=True,
             )
             local_id = disk_id
@@ -162,7 +195,7 @@ def check_roster(report: dict) -> None:
         # NOT machine_id -- compare against entry.machine_id, not the dict key.
         for machine_pub, entry in sorted(active.items()):
             marker = " <- this machine" if entry.machine_id == report.get("local_machine_id") else ""
-            print(f"        machine_id={entry.machine_id[:16]}...  seq={entry.seq}{marker}")
+            _detail(f"        machine_id={entry.machine_id[:16]}...  seq={entry.seq}{marker}")
         if len(entries) != len(active):
             _line(
                 "stale/kicked entries present",
@@ -284,7 +317,7 @@ def check_org_resolution(report: dict) -> None:
             )
             if running:
                 alt = ", ".join(o[:8] + "..." for o in running)
-                print(f"        orgs that DO have a live connector: {alt}")
+                _detail(f"        orgs that DO have a live connector: {alt}")
     except Exception as exc:
         _line("org-resolution check", f"FAILED to run: {exc!r}", fail=True)
 
@@ -365,9 +398,11 @@ def check_recent_errors(report: dict, *, tail_lines: int = 4000) -> None:
 
 
 def main() -> int:
+    global _QUIET
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="emit the collected report as JSON instead of text")
     args = parser.parse_args()
+    _QUIET = args.json
 
     report: dict = {}
     if not args.json:
