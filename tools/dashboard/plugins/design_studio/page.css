@@ -382,11 +382,13 @@ body.route-design-linked #pinned-beads-strip,
 body.route-design-linked #live-panel,
 body.route-design-linked .action-sheet-overlay,
 body.route-design-linked .action-sheet,
-body.route-design-linked .voice-rebind-confirm,
-body.route-design-linked .voice-sheet-backdrop,
-body.route-design-linked .voice-caption,
-body.route-design-linked .voice-sheet,
-body.route-design-linked .voice-capsule {
+/* The voice CAPSULE stays: mute and send are global controls the
+   operator reaches for everywhere, and hiding them here made voice
+   silently die on linked design pages. The sheet, its backdrop and
+   the rebind prompt follow, because a capsule whose tap opens nothing
+   is worse than none. Only the live-caption gutter stays hidden — it
+   overlays the design stage itself. */
+body.route-design-linked .voice-caption {
   display: none !important;
 }
 
