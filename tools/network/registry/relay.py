@@ -119,6 +119,7 @@ class _ViewerRelayChannel:
         on_writer_failure: Callable[["_ViewerRelayChannel"], None],
         max_queued_bytes: int = VIEWER_QUEUE_MAX_BYTES,
         abuse_lease: ChannelLease | None = None,
+        exempt_bytes: bool = False,
     ):
         self.ws = ws
         self.max_queued_bytes = max_queued_bytes
@@ -129,6 +130,14 @@ class _ViewerRelayChannel:
         self.stream_token: Optional[str] = None
         self._on_writer_failure = on_writer_failure
         self._abuse_lease = abuse_lease
+        # A fleet:join channel is a roster-authenticated peer doing bulk
+        # replication (bounded by the checkpoint codec's own MAX_CHECKPOINT_*
+        # limits, not this org's public-viewer byte buckets). It is
+        # categorically not the anonymous bootloader/attachment traffic the
+        # abuse limiter's byte buckets exist to bound -- active-connection
+        # and admission-rate accounting still apply via abuse_lease, only
+        # the byte-rate charge is skipped.
+        self._exempt_bytes = exempt_bytes
         self._queue: asyncio.Queue[bytes] = asyncio.Queue()
         self._queued_bytes = 0
         self._closing = False
@@ -148,9 +157,8 @@ class _ViewerRelayChannel:
         payload = bytes(payload)
         if len(payload) > self.max_queued_bytes - self._queued_bytes:
             return False
-        if self._abuse_lease is not None and not self._abuse_lease.charge_bytes(
-            len(payload)
-        ):
+        if not self._exempt_bytes and self._abuse_lease is not None \
+                and not self._abuse_lease.charge_bytes(len(payload)):
             # The public close remains deliberately uniform. Starting the
             # close here also makes stream fan-out drop the listener through
             # its existing failed-enqueue cleanup path.
@@ -366,6 +374,7 @@ class Tunnel:
         ws: WebSocket,
         *,
         abuse_lease: ChannelLease | None = None,
+        exempt_bytes: bool = False,
     ) -> _ViewerRelayChannel:
         channel = _ViewerRelayChannel(
             ws,
@@ -373,6 +382,7 @@ class Tunnel:
                 channel_id, failed
             ),
             abuse_lease=abuse_lease,
+            exempt_bytes=exempt_bytes,
         )
         self.channels[channel_id] = channel
         return channel
@@ -902,7 +912,8 @@ async def viewer_endpoint(
     channel_id = new_channel_id()
     try:
         relay_channel = tunnel.add_viewer(
-            channel_id, websocket, abuse_lease=abuse_lease
+            channel_id, websocket, abuse_lease=abuse_lease,
+            exempt_bytes=link.target_type == "fleet:join",
         )
     except Exception:
         if abuse_lease is not None:
