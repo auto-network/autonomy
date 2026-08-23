@@ -607,22 +607,24 @@ def _record_checkpoint_receipt(
     conn.commit()
 
 
-def _quarantine_orphans(
+def _quarantine_unrealized(
     conn: sqlite3.Connection,
-    orphans: tuple[tuple[str, tuple], ...],
+    rows: list[tuple[str, tuple, str]],
     *,
     watermark: int,
 ) -> None:
-    """Retain skipped foreign-key-orphan rows for observability and repair.
+    """Retain rows the receiver could not realize, for observability and repair.
 
-    The origin holds these rows; the fleet cannot represent them because their
-    NOT-NULL parent is absent from the checkpoint. Recording them here keeps a
-    durable, decodable list so a later repair (once the missing parents are
-    recovered) can re-materialize them, and so the retained skip delta is
-    ``COUNT(*)`` over this table rather than a fresh foreign-key scan across
-    every child table. Rewritable per address: a later checkpoint that finally
-    carries the parent installs the row and this entry becomes stale, so repair
-    clears it."""
+    Each entry is ``(table, address, reason)``. ``reason`` is ``fk_orphan`` (a
+    NOT-NULL parent absent from the checkpoint — the origin keeps its own copy;
+    repair re-materializes it once the parent is recovered) or
+    ``attachment_bytes_unavailable`` (external content-addressed bytes not yet
+    fetched — the row lands once blob transfer backfills it). Recording them
+    keeps a durable, decodable backlog so a later repair or fetch can drain it,
+    and so the retained skip delta is ``COUNT(*)`` over this table rather than a
+    fresh foreign-key scan across every child table. Rewritable per address: a
+    later checkpoint that finally carries the row installs it and its entry
+    becomes stale, so the drain clears it."""
     conn.execute(
         "CREATE TABLE IF NOT EXISTS fleet_sync_quarantine("
         "address BLOB PRIMARY KEY,"
@@ -633,14 +635,14 @@ def _quarantine_orphans(
         "quarantined_at_ns INTEGER NOT NULL)"
     )
     now = time.time_ns()
-    for table, address in orphans:
+    for table, address, reason in rows:
         conn.execute(
             "INSERT OR REPLACE INTO fleet_sync_quarantine VALUES(?,?,?,?,?,?)",
             (
                 encode_value([table, list(address)]),
                 table,
                 json.dumps(list(address)),
-                "fk_orphan",
+                reason,
                 int(watermark),
                 now,
             ),
@@ -696,24 +698,32 @@ def install_checkpoint(
                 stage.conn, checkpoint_directory / "base", base,
                 batch_records=1024, blob_store=blob_store,
             )
-            if report.pending_attachments:
-                raise AlphaError(
-                    "checkpoint has unavailable attachment bytes: "
-                    + ",".join(report.pending_attachments[:4])
-                )
-            # Referentially-orphaned rows — a NOT-NULL foreign key whose parent
-            # is absent from the whole checkpoint (e.g. a thought whose source
-            # conversation was deleted long ago without cascade) — cannot be
-            # represented and were skipped by the materializer rather than
-            # aborting the entire sync. Exclude them from the winner catalog and
-            # from both count invariants, and quarantine them for later repair.
-            # The origin keeps its own copy; the fleet simply does not carry
-            # rows it cannot represent.
-            skipped_orphans = report.skipped_orphans
-            skip_count = len(skipped_orphans)
+            # Rows the receiver cannot fully realize right now are skipped
+            # rather than aborting the whole checkpoint, then quarantined. Two
+            # kinds today, both excluded from the winner catalog and from both
+            # count invariants so the catalog stays exactly consistent with the
+            # rows that landed:
+            #   * foreign-key orphans — a NOT-NULL parent absent from the whole
+            #     checkpoint (legacy foreign-key-off debris). Permanently
+            #     unrepresentable; the origin keeps its own copy and the fleet
+            #     does not carry it.
+            #   * attachments whose external bytes are unavailable — the blob is
+            #     content-addressed and fetched separately, and file_path is
+            #     NOT NULL, so the row cannot be stored until the bytes arrive.
+            #     Until blob transfer is wired (blob_store is None today), every
+            #     attachment waits here; the quarantine is the fetch backlog.
+            unrealized = [
+                (table, address, "fk_orphan")
+                for table, address in report.skipped_orphans
+            ]
+            unrealized += [
+                ("attachments", (attachment_id,), "attachment_bytes_unavailable")
+                for attachment_id in report.pending_attachments
+            ]
+            skip_count = len(unrealized)
             skip_blobs = frozenset(
                 encode_value([table, list(address)])
-                for table, address in skipped_orphans
+                for table, address, _reason in unrealized
             )
             catalog = MutationCatalog(stage.conn, target_origin_incarnation)
             catalog.install()
@@ -728,16 +738,18 @@ def install_checkpoint(
             ).fetchone()[0])
             if installed_live != base.total_records - skip_count:
                 raise AlphaError("winner metadata does not cover the exact base")
-            if skipped_orphans:
-                _quarantine_orphans(
-                    stage.conn, skipped_orphans,
+            if unrealized:
+                _quarantine_unrealized(
+                    stage.conn, unrealized,
                     watermark=winners.through_watermark,
                 )
                 _log.warning(
-                    "fleet checkpoint install skipped %d referentially-orphaned "
-                    "row(s) whose foreign-key parent is absent from the "
-                    "checkpoint; quarantined in fleet_sync_quarantine for repair",
+                    "fleet checkpoint install skipped %d row(s) it cannot yet "
+                    "realize (%d foreign-key orphan(s), %d attachment(s) awaiting "
+                    "bytes); quarantined in fleet_sync_quarantine",
                     skip_count,
+                    len(report.skipped_orphans),
+                    len(report.pending_attachments),
                 )
             _copy_peer_state(target_path, stage.conn)
             if merge_existing:
