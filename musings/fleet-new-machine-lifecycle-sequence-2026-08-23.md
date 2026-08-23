@@ -158,13 +158,36 @@ snapshot-replace**; every row carries its own timestamp (LWW). See ALPHA-1.0.md,
 
 ## Bootstrap → steady-state: the invite link is not the fleet
 
-**The invite link is bootstrap only, and it is designed to die.** A joiner's
+**The invite link is bootstrap only, and it is not durable.** A joiner's
 `FleetRoute.rendezvous` is the `fleet:join` relay link (`.../l/<token>`). That
-grant is transient — a fixed TTL (7 days) and it is the *invitation*, not the
-fleet. A fleet that keeps synchronizing over the invite link stops the moment
-the grant lapses or the serving gate drops it: the relay returns
-`4404 CLOSE_UNKNOWN_LINK` (`relay.py:69`) because no tunnel is registered for the
-org, even though the link envelope still resolves.
+grant is transient because it **expires** — a fixed 7-day TTL (`meta.ttl =
+604800`) — and it is the *invitation*, not the fleet. A fleet that keeps
+synchronizing over the invite link therefore stops permanently once the grant's
+TTL elapses.
+
+**Grant lifecycle (authoritative — verified against the code, not the spec):**
+the `fleet:join` grant is *published* (`link_publish`), *registered*
+(`register_invite`), then used to route the bootstrap pull. It stays live until
+**exactly one of two things** happens: its **7-day TTL expires**, or an
+**explicit operator revoke** (`graph link revoke` → the `link_revoke` approval →
+the relay's `revoke-link` control op, `relay.py:660`). It is **NOT** revoked
+automatically by enrollment, by the first roster-authorized handshake, by the
+first pull, or by completion — there is no such code anywhere in the enrollment
+surface (`fleet_enrollment_service` / `_approvals` / `fleet_enroll` /
+`fleet_enrollment_client` / `fleet_enrollment_routes` — zero `revoke`/
+`remove-grant` calls). The design note `ac81cc06` states "the first
+roster-authorized handshake … revokes the invitation grant"; that line is
+**specified but not implemented** — a spec-vs-code gap, recorded here so this
+document, not the spec, is the authority.
+
+Home's *serving* of the tunnel is gated on `_has_live_grant` **OR** fleet
+membership (invariant #1 below), so serving does not stop when the grant
+eventually expires, as long as the fleet has members. (Note: the relay's
+`4404 CLOSE_UNKNOWN_LINK` is overloaded across six unrelated conditions —
+unknown/expired/revoked link, no tunnel, admission reject, and a **mid-stream
+byte-quota throttle** — so a 4404 does *not* by itself mean the grant or tunnel
+is gone; a large checkpoint hitting the relay's anti-abuse byte buckets closes
+with the same code.)
 
 **Everything a fleet needs to find itself is stable and never changes:**
 
@@ -220,14 +243,82 @@ sequenceDiagram
 
 **Current gap / remaining work:** a freshly bootstrapped member can stay stuck on
 the `fleet_relay_sync` invite-link path and never hand off to the reachability
-mesh — if home stops serving (invite grant gone) the member 4404s instead of
-re-finding home by `machine_pub`. Closing this = (a) invariant #1 (done — the
+mesh — if home stops serving (its live grant expired, or the membership gate is
+not yet deployed) the member 4404s instead of re-finding home by `machine_pub`. Closing this = (a) invariant #1 (done — the
 membership serving gate), and (b) invariant #2: retire the `FleetRoute` invite
 rendezvous once reachability has resolved the origin's `machine_pub`, so the pull
 runs on the stable identity. Until (b) lands, keep the invite grant alive (or the
 membership gate serving) so the bootstrap link keeps routing.
 
 ---
+
+## The parties, and the state each one holds
+
+The workflow has **four** parties, not two. The relay is a stateful participant,
+and most of the confusing failures live in *its* state, not the two dashboards'.
+
+| Party | Durable state it holds | Ephemeral / in-memory state |
+|---|---|---|
+| **Operator browser** (on each machine) | nothing — opens the armored personal root only while unlocked | the **personal root seed** (zeroed after every signature); derives the machine key + mints every cert |
+| **Home dashboard + serving connector** | `personal.db` (roster, graph, the `fleet_sync_catalog`), the **serve-cert** (0600 key file + Settings row, 30d), the durable `machine_id` | the **fleet runtime process cert** (12h→30d, memory-only today — `auto-oj5pt`), the configured **fleet-sync scheduler**, and the **tunnel-serve WS** it holds open to the relay |
+| **Relay / registry** (`relay.auto.network`) | `links` table (per-token grants: `revoked_at`, `expires_at`), `node_hints` (reachability: `(org_uuid, machine_pub)→addrs`, TTL'd) | **`TunnelHub`** — one live tunnel **per org_uuid**, in-memory, last-writer-wins (`CLOSE_REPLACED 4409`); per-channel/-link **abuse byte buckets** + admission windows |
+| **SJC dashboard** (the joiner/member) | `machine.db` (its `machine_id`, join recovery, `FleetRoute`), `personal.db` (synced) | its pull loop, the `ReachabilityCache`, and (once armed) its own fleet runtime cert |
+
+**Two independent "is home serving?" facts that this workflow kept conflating:**
+
+1. **Home's local serving state** — the connector process is alive, `serve_cert_ok`, `_has_live_grant`/membership true. This is what `fleet_doctor` / the control socket report.
+2. **The relay's hub state** — whether home's tunnel-serve **WS is currently registered in `TunnelHub` for the org**. This is what actually routes a viewer.
+
+(1) can be true while (2) is false (the WS dropped, or was `4409`-replaced by a duplicate connector). A viewer only cares about (2). Diagnose the relay's hub, not home's flag.
+
+## Failure-mode catalog
+
+Every mode observed bringing SJC into the fleet, by layer. "Fixed" cites the
+commit; "gap" is tracked work.
+
+### Relay / registry
+| Symptom | Root cause | Resolution |
+|---|---|---|
+| all connects fail; relay `/healthz` down | relay crash-loop — `deploy.sh` rsyncs only `tools/network/{idkit,relaykit,registry}`, never top-level `clock.py` that `assertion.py` imports | scp `clock.py` + restart; **gap:** fix `deploy.sh` to sync the whole `tools/network` tree |
+| `4404 CLOSE_UNKNOWN_LINK` at **dial** | one of: unknown/expired/revoked token, **or** `hub.get(org_uuid) is None` (no tunnel), **or** admission-window reject | deliberately uniform to the client (anti-enumeration); **must** be logged server-side per branch |
+| `4404` **mid-stream** (fails inside `recv_message_stream`) | the anti-abuse **byte-rate limiter** (`try_enqueue → charge_bytes`) closes with the same 4404 when a transfer exceeds the buckets (**channel 16 MB burst / 8 MB/s, link 64 MB burst / 32 MB/s**) — and a full personal.db checkpoint is **574 MiB** | **gap:** exempt authenticated `fleet:join` channels from the byte limiter (bounded already by `MAX_CHECKPOINT_BYTES`); and stop reusing 4404 |
+| home's tunnel flaps in/out of the hub | `CLOSE_REPLACED 4409` — a **duplicate connector** for the same org keeps registering, booting the other | ensure exactly one serving connector per org |
+| six failure modes indistinguishable | `CLOSE_UNKNOWN_LINK 4404` overloaded across all of the above | **gap:** distinct close codes for post-authentication conditions (keep dial-time uniform for anti-enumeration) |
+
+### Home serving (connector)
+| Symptom | Root cause | Resolution |
+|---|---|---|
+| SJC sees "fleet server hello envelope is malformed" | home's `connector_runtime.scheduler is None` → "serving machine is locked for Fleet sync" (no server-hello) | arm via unlock → `publish_connector_runtime`; **gap:** persist the runtime cert (`auto-oj5pt`) so a restart re-arms |
+| unlock returns 200 but connector still unarmed | `configure()` rejected the credential (`org_uuid` unresolved) — silently | fixed `56a3442d` (resolve `org_uuid` from binding) + `eda69e3f` (surface the error) |
+| tunnel torn down after enrollment | `_reconcile` required `_has_live_grant`; the invite grant is transient | fixed `338f26bc` — serve on **fleet membership** OR a live grant |
+| connector dies on every reload, needs re-unlock | fleet runtime cert is memory-only; `uvicorn --reload` (or any restart) drops it | **gap:** `auto-oj5pt` — persist + warm-restore + `RENEW_BELOW_DAYS` refresh |
+| unlock stalls the event loop ~24s | the 700K-row `_verify_catalog_integrity` ran synchronously on the loop each unlock | early-skip when already active |
+
+### Checkpoint build (home)
+| Symptom | Root cause | Resolution |
+|---|---|---|
+| `AlphaError: checkpoint contains untracked logical rows` | `tracked_live != base.total_records` — 274 **deprecated duplicate settings base rows** streamed by the snapshot | fixed `f7c1996d` — skip `deprecated` base rows in the settings enumeration |
+| same AlphaError, off by exactly 1 | a settings row deprecated in **May** left a `tombstone=0` catalog orphan (deprecation never tombstoned the catalog) | tombstone the one orphan; **gap:** extend `reconcile_catalog` to tombstone orphaned-live entries |
+| catalog incomplete after activation | the SQLite < 3.38 `RETURNING`-on-upsert bug (host runs 3.37.2) dropped rows during the original bootstrap | fixed (split upsert + SELECT) + `reconcile_catalog` backfill (`4ba28a01`) |
+
+### Credential / cert
+| Symptom | Root cause | Resolution |
+|---|---|---|
+| `HandshakeError: fleet runtime delegation … expired` | the fleet **process delegation cert** TTL was 12h, memory-only, never refreshed | fixed `d0d6983a` (30d, matched to serve-cert); **gap:** persist + refresh (`auto-oj5pt`) |
+| fresh unlock didn't refresh the running loop | the scheduler cached the old credential; reconfigure didn't hot-swap | restart the loop (until the persist/refresh lands) |
+
+### SJC / joiner
+| Symptom | Root cause | Resolution |
+|---|---|---|
+| `initial Fleet delivery must identify exactly one origin route` | each wiped re-enroll mints a **new random `machine_id`** → stale roster entries accumulate → >1 non-joiner member | kicked the stale entries; **gap:** roster re-enroll dedup + invite-bound origin selection |
+| resume replays a stale 3-entry roster | the joiner cached the approved delivery in `machine.db`; resume replayed it | clear the join-state; a fresh admission re-fetches |
+| container crash-loops on boot | `first_run._migrate_all_org_dbs` raw-globbed `orgs/*.db` and hit an empty `orgs/personal.db` stub (`DEPLOY.md` relocation runbook re-run) | deleted the redundant migration walk (`122b00e3`) + removed the stub |
+| client cert expired overnight | its own 12h fleet runtime delegation lapsed | re-unlock SJC (fixed durably by the 30d + persist work) |
+
+### Vault
+| Symptom | Root cause | Resolution |
+|---|---|---|
+| a cold boot boots locked | the personal root is never vaulted; the vault opens only from the operator's factors | first login warms it; a graceful hot-reload carries the warm vault via the ramfs key cache (`save/restore_vault_across_hot_reload`) |
 
 ## Why the certificate expires, and who is supposed to refresh it
 
