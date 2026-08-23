@@ -84,7 +84,7 @@
   left: 50%;
   bottom: calc(env(safe-area-inset-bottom, 0px) + 20px);
   transform: translateX(-50%);
-  z-index: 110;
+  z-index: 10001;  /* the rebind prompt must beat the capsule it repositions */
   display: flex;
   align-items: center;
   gap: 12px;
@@ -546,7 +546,11 @@ body.sv-viewer-composer-active .voice-caption {
   position: fixed;
   right: 14px;
   bottom: calc(env(safe-area-inset-bottom, 0px) + 16px);
-  z-index: 110;
+  /* Above every app overlay (review 120, approvals 130, lightbox 9999):
+     the voice capsule is a global control and must never be buried —
+     it vanished behind the Design Studio overlay opened from a session.
+     Only the design fixture picker (intentionally maxed) sits higher. */
+  z-index: 10000;
   display: inline-flex;
   align-items: center;
   gap: 6px;
