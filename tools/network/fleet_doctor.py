@@ -174,6 +174,66 @@ def check_identity(report: dict) -> None:
         report["identity_error"] = repr(exc)
 
 
+def check_local_store_migration(report: dict) -> None:
+    """The 'machine'/'personal' local stores may live at either the new
+    home (data/<name>.db) or the legacy home (data/orgs/<name>.db); the
+    resolver falls back to whichever it finds. But it decides "has this
+    store been migrated?" purely by whether the new-home FILE EXISTS, not
+    whether it's actually complete -- so a new home created by ordinary
+    use (any write at all) permanently shadows a legacy file that still
+    holds real, un-copied rows.
+
+    Caught live 2026-08-22: machine.db's new home existed, and 194 rows
+    -- including a live credential reference -- were stranded in the old
+    file and invisible to every reader through the normal resolver. This
+    check catches that class of bug directly: whenever BOTH homes exist
+    for a local store, diff every settings row between them instead of
+    trusting either one blindly.
+    """
+    _section("Local store migration completeness")
+    try:
+        from tools.graph.db import _orgs_dir
+        import sqlite3
+
+        orgs_dir = _orgs_dir()
+        for name in ("machine", "personal"):
+            target = orgs_dir.parent / f"{name}.db"
+            legacy = orgs_dir / f"{name}.db"
+            if not (target.exists() and legacy.exists()):
+                continue  # single copy, either location -- nothing to compare
+
+            def _keys(path: Path) -> set[tuple[str, str]]:
+                conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+                try:
+                    return {
+                        (r[0], r[1])
+                        for r in conn.execute("SELECT set_id, key FROM settings").fetchall()
+                    }
+                except sqlite3.OperationalError:
+                    return set()
+
+            legacy_keys, target_keys = _keys(legacy), _keys(target)
+            stranded = legacy_keys - target_keys
+            report[f"{name}_local_store_stranded_rows"] = len(stranded)
+            if stranded:
+                _line(
+                    f"{name}: rows stranded in legacy, invisible to the resolver",
+                    f"{len(stranded)} row(s) exist only at {legacy}, e.g. "
+                    f"{sorted(stranded)[:3]}. The resolver prefers {target} purely "
+                    "because it exists, not because it's complete. Merge before "
+                    "removing the legacy file -- a plain 'mv' per the DEPLOY.md "
+                    "runbook would clobber the target's own content instead.",
+                    fail=True,
+                )
+            else:
+                _line(
+                    f"{name}: legacy/new content",
+                    "identical -- legacy file is redundant and safe to remove",
+                )
+    except Exception as exc:
+        _line("local-store migration check", f"FAILED to run: {exc!r}", fail=True)
+
+
 # ── roster ───────────────────────────────────────────────────────────────
 
 def check_roster(report: dict) -> None:
