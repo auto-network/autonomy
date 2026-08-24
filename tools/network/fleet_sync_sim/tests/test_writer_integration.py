@@ -127,6 +127,39 @@ def test_graph_writers_auto_author_group_commit_and_rollback(tmp_path: Path) -> 
         bypass.close()
 
 
+def test_reopen_refreshes_triggers_after_replicated_columns_are_added(
+    tmp_path: Path,
+) -> None:
+    """An activated pre-upgrade trigger cannot keep its frozen old arity."""
+    path = tmp_path / "personal.db"
+    with GraphDB(path) as db:
+        db.activate_fleet_sync_writers(ORIGIN)
+        old_trigger = db.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' "
+            "AND name='fleet_sync_sources_insert'"
+        ).fetchone()[0]
+        db.conn.execute("ALTER TABLE sources ADD COLUMN later_persona TEXT")
+        db.conn.execute("ALTER TABLE sources ADD COLUMN later_session TEXT")
+        db.conn.commit()
+        assert "later_persona" not in old_trigger
+
+    # GraphDB schema initialization happens before catalog attachment.  The
+    # attach must now replace the old trigger before enabling authored writes;
+    # otherwise SQLite collapses the frame-function arity mismatch into the
+    # opaque error "user-defined function raised exception".
+    with GraphDB(path) as reopened:
+        trigger = reopened.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' "
+            "AND name='fleet_sync_sources_insert'"
+        ).fetchone()[0]
+        assert "later_persona" in trigger
+        assert "later_session" in trigger
+        reopened.insert_source(Source(id="after-schema-upgrade", type="note"))
+        assert reopened.conn.execute(
+            "SELECT COUNT(*) FROM fleet_sync_journal"
+        ).fetchone()[0] == 1
+
+
 def test_graph_writer_rejects_clock_rollback_before_data_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

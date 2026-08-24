@@ -588,6 +588,64 @@ class MutationCatalog:
             "AND name LIKE 'fleet_sync_%'"
         ).fetchone()[0])
 
+    @staticmethod
+    def _normalized_trigger_sql(sql: str) -> str:
+        """Canonical comparison form for generated versus stored DDL."""
+        return " ".join(sql.split()).rstrip(";")
+
+    def _triggers_match_current_schema(self) -> bool:
+        """Whether every capture trigger carries the current table columns.
+
+        Trigger bodies freeze their ``NEW``/``OLD`` argument list when they
+        are created.  Adding a replicated column therefore requires replacing
+        the trigger even though its name and the catalog schema are unchanged.
+        """
+        expected: dict[str, str] = {}
+        for table, policy in TABLE_POLICIES.items():
+            if policy.kind in {PolicyKind.LOCAL, PolicyKind.DERIVED}:
+                continue
+            for operation, sql in zip(
+                ("insert", "update", "delete"), _trigger_sql(table), strict=True,
+            ):
+                expected[f"fleet_sync_{table}_{operation}"] = (
+                    self._normalized_trigger_sql(sql)
+                )
+        actual = {
+            str(row[0]): self._normalized_trigger_sql(str(row[1]))
+            for row in self.conn.execute(
+                "SELECT name,sql FROM sqlite_master WHERE type='trigger' "
+                "AND name LIKE 'fleet_sync_%'"
+            )
+        }
+        return actual == expected
+
+    def refresh_triggers_for_current_schema(self) -> bool:
+        """Atomically replace stale capture DDL after a graph schema upgrade.
+
+        No replicated row or winner metadata changes here.  The operation
+        only recompiles trigger argument lists against the columns already
+        installed by ``GraphDB._init_schema``.  A second opener rechecks after
+        taking the writer lock so concurrent repair is idempotent.
+        """
+        if self._triggers_match_current_schema():
+            return False
+        if self.conn.in_transaction:
+            raise WatermarkError("trigger refresh requires an idle connection")
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            if self._triggers_match_current_schema():
+                self.conn.commit()
+                return False
+            audit_schema(self.conn)
+            self._install_triggers()
+            if not self._triggers_match_current_schema():
+                raise WatermarkError("fleet-sync trigger refresh incomplete")
+            self.conn.commit()
+            return True
+        except Exception:
+            self.conn.rollback()
+            raise
+
     def triggers_active(self) -> bool:
         replicated = sum(
             policy.kind not in {PolicyKind.LOCAL, PolicyKind.DERIVED}
@@ -1429,5 +1487,6 @@ def attach_active_production_catalog(
     catalog = MutationCatalog(conn, str(row[0]))
     if not catalog.triggers_active():
         raise WatermarkError("fleet-sync capture triggers are only partially active")
+    catalog.refresh_triggers_for_current_schema()
     conn.install_fleet_sync_hook(catalog)
     return catalog
