@@ -91,6 +91,13 @@ def _register_fleet_sync_sql_functions(conn: sqlite3.Connection) -> None:
     conn.create_function(
         "fleet_sha256_text", 1, _fleet_sha256_text, deterministic=True
     )
+    # A prepared fleet-sync database already has capture triggers when it is
+    # opened.  Schema migration may update a replicated table before the live
+    # catalog hook is attached, so those triggers must be callable during the
+    # migration window.  Capture is deliberately disabled there; attaching
+    # MutationCatalog replaces this function with its transaction-aware
+    # implementation immediately after the schema reaches the current version.
+    conn.create_function("fleet_sync_capture_enabled", 0, lambda: 0)
 
 
 class GraphDBMissing(RuntimeError):
