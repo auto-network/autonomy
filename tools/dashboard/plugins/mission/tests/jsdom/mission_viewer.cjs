@@ -206,6 +206,20 @@ const SCENARIOS = {
     check("feed has work event",
       feedTexts.some((t) => t.includes("reconnect fixed")));
 
+    // ── the ask text renders on the question page (it was stored
+    //    but invisible until the operator noticed) ──
+    const askView = openPillar("Relay");
+    askView._showSection("Questions");
+    const askRow = Array.from(askView.querySelectorAll(
+      '.mc-sec[data-sec="Questions"] .mc-bead')).find(
+      (r) => r.textContent.includes("Who provisions"));
+    askRow.click();
+    const askPage = document.getElementById("mc-critpage");
+    check("ask text renders on the question page",
+      !!askPage.querySelector(".mc-ask")
+      && askPage.textContent.includes("installer works offline"));
+    askPage.remove();
+
     // ── chat: attributed log, no tracking controls ──
     document.getElementById("tab-chat").click();
     const cview = document.querySelector(".mc-view.on");
