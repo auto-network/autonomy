@@ -18,9 +18,9 @@ server half and the gate itself:
   challenge single-use + TTL + bounded concurrent options, completion
   host-locked, unknown credentials refused, user-verification required,
   sign-count regressions refused and the stored count advances;
-* password unlock is the always-available floor: works with zero
-  passkeys, single-use host-bound challenges, and only a signature by
-  the STORED personal root verifies.
+* password unlock supports two deliberately separate proofs: a root signature
+  when the current policy is satisfied, or a factor-specific access signature
+  when that password may enter the dashboard but may not release the root.
 """
 
 from __future__ import annotations
@@ -47,6 +47,14 @@ from tools.graph import settings_ops
 from tools.network.idkit import KeyPair
 from tools.network.idkit.armor import encrypt_root_key
 from tools.network.idkit.canonical import canonical_json
+from tools.network.idkit.root_factor_policy import (
+    build_envelope,
+    create_password_factor,
+    emit_armored_envelope,
+    factor_access_keypair,
+    passkey_factor,
+)
+from tools.network.idkit.sealing import derive_encapsulation_keypair
 
 ORG = "unlockorg"
 PASSWORD = "week-glacier-thirty-nine"
@@ -1242,6 +1250,70 @@ def test_assert_advances_stored_sign_count(env, root):
     assert _unlock_with_passkey(env, key, sign_count=7).status_code == 200
 
 
+def _store_v3_passkey_identity(client, root, *, access):
+    credential_id = _b64url(b"test-credential-0001")
+    seed = b"p" * 32
+    _private, recipient = derive_encapsulation_keypair(
+        seed, "autonomy/root-factor-recipient/v1",
+    )
+    factor = passkey_factor("passkey-device", credential_id, recipient)
+    envelope = build_envelope(
+        root,
+        generation=1,
+        factors=[factor],
+        access=[factor["factor_id"]] if access else [],
+        policy={"op": "factor", "factor_id": factor["factor_id"]},
+    )
+    response = client.post("/api/identity/personal", json={
+        "display_name": "Alex",
+        "armored_private_key": emit_armored_envelope(envelope),
+    })
+    assert response.status_code == 200, response.text
+    return factor
+
+
+def test_v3_passkey_access_respects_dashboard_membership(env, root):
+    _store_v3_passkey_identity(env, root, access=True)
+    private_key = _enroll_passkey(env, root)
+    env.cookies.clear()
+    response = _unlock_with_passkey(env, private_key)
+    assert response.status_code == 200, response.text
+    assert response.json()["root_released"] is False
+
+
+def test_v3_passkey_without_dashboard_access_requires_root_proof(env, root):
+    _store_v3_passkey_identity(env, root, access=False)
+    private_key = _enroll_passkey(env, root)
+    env.cookies.clear()
+    response = _unlock_with_passkey(env, private_key)
+    assert response.status_code == 403
+    assert "not enabled for dashboard access" in response.json()["error"]
+
+
+def test_v3_passkey_root_proof_can_enter_without_dashboard_membership(env, root):
+    _store_v3_passkey_identity(env, root, access=False)
+    private_key = _enroll_passkey(env, root)
+    env.cookies.clear()
+    minted = _assert_options(env)
+    assertion = _make_assertion(
+        private_key,
+        minted["options"]["challenge"],
+        rp_id=minted["rp_id"],
+        origin=minted["origin"],
+    )
+    message = unlock_routes.UNLOCK_SIGNING_DOMAIN + canonical_json({
+        "v": 1,
+        "challenge": minted["options"]["challenge"],
+        "origin": minted["origin"],
+    })
+    response = env.post("/api/identity/unlock/passkey", json={
+        "credential": assertion,
+        "root_signature": root.sign_hex(message),
+    })
+    assert response.status_code == 200, response.text
+    assert response.json()["root_released"] is True
+
+
 # ── password unlock (the floor) ───────────────────────────────────────
 
 
@@ -1314,6 +1386,82 @@ def test_password_unlock_rejects_wrong_key(env, root):
                  json={"challenge": minted["challenge"], "signature": sig})
     assert r.status_code == 403
     assert "does not verify" in r.json()["error"]
+
+
+def _store_v3_access_identity(client, root: KeyPair, *, access=True):
+    first, first_seed = create_password_factor(
+        root.public_hex, "password-primary", "primary-password", iterations=10_000,
+    )
+    second, second_seed = create_password_factor(
+        root.public_hex, "password-second", "second-password", iterations=10_000,
+    )
+    try:
+        envelope = build_envelope(
+            root,
+            generation=1,
+            factors=[first, second],
+            access=[first["factor_id"]] if access else [],
+            policy={
+                "op": "and",
+                "children": [
+                    {"op": "factor", "factor_id": first["factor_id"]},
+                    {"op": "factor", "factor_id": second["factor_id"]},
+                ],
+            },
+        )
+        response = client.post("/api/identity/personal", json={
+            "display_name": "Alex",
+            "armored_private_key": emit_armored_envelope(envelope),
+        })
+        assert response.status_code == 200, response.text
+        return first, bytes(first_seed)
+    finally:
+        first_seed[:] = b"\x00" * len(first_seed)
+        second_seed[:] = b"\x00" * len(second_seed)
+
+
+def _unlock_with_factor_access(client, factor, seed, *, signer_seed=None):
+    minted_response = client.post("/api/identity/unlock/password/options", json={})
+    assert minted_response.status_code == 200, minted_response.text
+    minted = minted_response.json()
+    message = unlock_routes.FACTOR_ACCESS_UNLOCK_DOMAIN + canonical_json({
+        "v": 1,
+        "challenge": minted["challenge"],
+        "factor_id": factor["factor_id"],
+        "origin": minted["origin"],
+    })
+    signer = factor_access_keypair(seed if signer_seed is None else signer_seed)
+    return client.post("/api/identity/unlock/password", json={
+        "challenge": minted["challenge"],
+        "factor_id": factor["factor_id"],
+        "access_signature": signer.sign_hex(message),
+    })
+
+
+def test_password_factor_can_access_dashboard_without_releasing_root(env, root):
+    factor, seed = _store_v3_access_identity(env, root)
+    env.cookies.clear()
+    response = _unlock_with_factor_access(env, factor, seed)
+    assert response.status_code == 200, response.text
+    assert response.json()["method"] == "password"
+    assert response.json()["root_released"] is False
+    assert env.get("/beads").status_code == 200
+
+
+def test_password_factor_access_requires_exact_factor_seed(env, root):
+    factor, seed = _store_v3_access_identity(env, root)
+    env.cookies.clear()
+    response = _unlock_with_factor_access(env, factor, seed, signer_seed=b"x" * 32)
+    assert response.status_code == 403
+    assert "access proof does not verify" in response.json()["error"]
+
+
+def test_password_factor_without_access_cannot_enter_dashboard(env, root):
+    factor, seed = _store_v3_access_identity(env, root, access=False)
+    env.cookies.clear()
+    response = _unlock_with_factor_access(env, factor, seed)
+    assert response.status_code == 403
+    assert "not enabled for dashboard access" in response.json()["error"]
 
 
 def test_password_unlock_rejects_unknown_challenge(env, root):

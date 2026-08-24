@@ -13,9 +13,12 @@ import pytest
 from tools.graph.schemas.personal_identity import PersonalIdentityV1
 from tools.graph.schemas.registry import SchemaValidationError
 from tools.network.idkit import KeyPair
-from tools.network.idkit.armor import (
-    encrypt_root_key,
-    encrypt_root_key,
+from tools.network.idkit.armor import encrypt_root_key
+from tools.network.idkit.root_factor_policy import (
+    build_envelope,
+    create_password_factor,
+    emit_armored_envelope,
+    factor_leaf,
 )
 
 PASSWORD = "the-personal-password"
@@ -40,12 +43,26 @@ def test_a_legacy_armored_identity_is_accepted():
     validate(payload(encrypt_root_key(key, PASSWORD, iterations=ITERS), key.public_hex))
 
 
-def test_a_multi_lock_armored_identity_is_accepted():
-    """The format the ceremonies are moving to must be storable."""
-    key = KeyPair.generate()
-    validate(
-        payload(encrypt_root_key(key, PASSWORD, iterations=ITERS), key.public_hex)
+def v3_armor(key, password=PASSWORD, *, iterations=ITERS):
+    factor, seed = create_password_factor(
+        key.public_hex, "password-primary", password, iterations=iterations,
     )
+    try:
+        return emit_armored_envelope(build_envelope(
+            key,
+            generation=1,
+            factors=[factor],
+            access=[factor["factor_id"]],
+            policy=factor_leaf(factor["factor_id"]),
+        ))
+    finally:
+        seed[:] = b"\x00" * len(seed)
+
+
+def test_a_root_signed_factor_policy_identity_is_accepted():
+    """The grouped-factor generation format must be storable."""
+    key = KeyPair.generate()
+    validate(payload(v3_armor(key), key.public_hex))
 
 
 def test_a_multi_lock_identity_carrying_a_recovery_lock_is_accepted():
@@ -61,7 +78,7 @@ def test_a_multi_lock_identity_carrying_a_recovery_lock_is_accepted():
     validate(payload(add_recovery_factor(armor, PASSWORD, kem_pub), key.public_hex))
 
 
-@pytest.mark.parametrize("mint", [encrypt_root_key, encrypt_root_key])
+@pytest.mark.parametrize("mint", [encrypt_root_key, v3_armor])
 def test_a_mismatched_root_pub_is_refused_in_both_formats(mint):
     key = KeyPair.generate()
     other = KeyPair.generate()
@@ -69,7 +86,7 @@ def test_a_mismatched_root_pub_is_refused_in_both_formats(mint):
         validate(payload(mint(key, PASSWORD, iterations=ITERS), other.public_hex))
 
 
-@pytest.mark.parametrize("mint", [encrypt_root_key, encrypt_root_key])
+@pytest.mark.parametrize("mint", [encrypt_root_key, v3_armor])
 def test_a_non_canonical_armor_is_refused_in_both_formats(mint):
     """Accepting two versions must not mean accepting them loosely."""
     key = KeyPair.generate()

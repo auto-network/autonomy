@@ -46,6 +46,7 @@ options, which the browser flow does anyway.
 from __future__ import annotations
 
 import base64
+import hashlib
 import ipaddress
 import json
 import logging
@@ -62,6 +63,8 @@ from tools.graph import settings_ops
 from tools.dashboard.network_routes import _first_member, _mock_mode
 # Importing registers the autonomy.identity.* Setting schemas.
 from tools.graph.schemas.personal_identity import (  # noqa: F401
+    FACTOR_METADATA_REVISION,
+    FACTOR_METADATA_SET_ID,
     PASSKEY_REVISION,
     PASSKEY_SET_ID,
     PASSKEY_TRANSPORTS,
@@ -145,6 +148,13 @@ def _rp_from_request(request: Request):
 #: defaults to it and refuses overwrite — one root per person).
 PERSONAL_CANONICAL_LABEL = "default"
 
+# A root-authorized transition binds the optimistic-concurrency base, the
+# complete staged operation list, and the byte-exact candidate armor.  The
+# candidate also carries its own root signature (verified at every use); this
+# distinct signature makes the *change request* non-malleable and non-replayable
+# across generations without requiring another operator gesture.
+FACTOR_POLICY_TRANSITION_DOMAIN = b"autonomy.identity.factor-policy-transition.v1\n"
+
 
 def _personal_member():
     """The canonical personal identity row.
@@ -174,6 +184,15 @@ def _passkey_rows():
         key=lambda m: m.key,
     )
     return [m for m in members if isinstance(m.payload, dict)]
+
+
+def _factor_metadata_rows() -> dict[str, dict]:
+    members = settings_ops.read_owned_set(FACTOR_METADATA_SET_ID, org=None).members
+    return {
+        member.key: dict(member.payload)
+        for member in members
+        if isinstance(member.payload, dict)
+    }
 
 
 def _b64url(raw: bytes) -> str:
@@ -461,12 +480,18 @@ async def post_rearmor(request: Request) -> JSONResponse:
         ArmorError,
         armor_factor_types,
         armor_root_pub,
+        armor_version,
         canonicalize_armor,
     )
     from tools.network.idkit.keys import verify_signature
     from tools.network.idkit.errors import IdkitError
     try:
         canonical_armor = canonicalize_armor(body["armored_private_key"])
+        if armor_version(canonical_armor) != 2:
+            return JSONResponse({"ok": False, "error": (
+                "version 3 factor policies must use the generation-aware "
+                "factor-policy preview and commit endpoints"
+            )}, status_code=409)
         new_root_pub = armor_root_pub(canonical_armor)
         factor_types = armor_factor_types(canonical_armor)
     except ArmorError as e:
@@ -528,6 +553,472 @@ async def post_rearmor(request: Request) -> JSONResponse:
                             status_code=500)
     return JSONResponse({"ok": True, "root_pub": stored_root_pub,
                          "factors": factor_types, "require_pair": require_pair})
+
+
+# ── factor-policy generations ────────────────────────────────────────
+
+
+def _legacy_factor_policy(armor_text: str) -> tuple[list[dict], dict]:
+    """Describe a v2 armor without pretending its physical locks are v3.
+
+    These synthetic ids are display/migration handles only.  A v2 password
+    wrap is not yet a normalized public recipient, so the transition API
+    accepts only one explicit ``migrate_legacy`` operation at generation zero.
+    """
+    from tools.network.idkit.armor import parse_armor
+    from tools.network.idkit.root_factor_policy import canonical_expression
+
+    data = parse_armor(armor_text)
+    factors: list[dict] = []
+    branches: list[dict] = []
+    for index, factor in enumerate(data["factors"]):
+        kind = factor["type"]
+        if kind == "password":
+            factor_id = "legacy.password"
+            factors.append({"factor_id": factor_id, "type": "password"})
+            branches.append({"op": "factor", "factor_id": factor_id})
+        elif kind == "passkey":
+            suffix = hashlib.sha256(
+                f"{factor['credential_id']}:{factor['kem_pub']}".encode("utf-8")
+            ).hexdigest()[:20]
+            factor_id = f"legacy.passkey:{suffix}"
+            factors.append({
+                "factor_id": factor_id,
+                "type": "passkey",
+                "credential_id": factor["credential_id"],
+                "recipients": [{
+                    "recipient_public_key": factor["kem_pub"],
+                    "label": "Legacy device",
+                    "created_at": "1970-01-01T00:00:00Z",
+                }],
+            })
+            branches.append({"op": "factor", "factor_id": factor_id})
+        elif kind == "combined":
+            suffix = hashlib.sha256(
+                f"{index}:{factor['credential_id']}:{factor['kem_pub']}".encode("utf-8")
+            ).hexdigest()[:20]
+            password_id = f"legacy.combined-password:{suffix}"
+            passkey_id = f"legacy.combined-passkey:{suffix}"
+            factors.extend([
+                {"factor_id": password_id, "type": "password"},
+                {
+                    "factor_id": passkey_id,
+                    "type": "passkey",
+                    "credential_id": factor["credential_id"],
+                    "recipients": [{
+                        "recipient_public_key": factor["kem_pub"],
+                        "label": "Legacy device",
+                        "created_at": "1970-01-01T00:00:00Z",
+                    }],
+                },
+            ])
+            branches.append({
+                "op": "and",
+                "children": [
+                    {"op": "factor", "factor_id": password_id},
+                    {"op": "factor", "factor_id": passkey_id},
+                ],
+            })
+        # Recovery remains visible in the legacy personal endpoint but is not a
+        # day-to-day factor in the new policy editor.
+    if not branches:
+        raise ValueError("legacy armor has no day-to-day root opener")
+    policy = branches[0] if len(branches) == 1 else {
+        "op": "or", "children": branches,
+    }
+    return factors, canonical_expression(policy)
+
+
+def _factor_policy_state(member) -> dict:
+    from tools.network.idkit.armor import armor_version
+    from tools.network.idkit.root_factor_policy import (
+        factor_roles,
+        parse_armored_envelope,
+    )
+
+    armor_text = member.payload["armored_private_key"]
+    version = armor_version(armor_text)
+    if version == 3:
+        envelope = parse_armored_envelope(armor_text)
+        return {
+            "armor_version": 3,
+            "generation": envelope["generation"],
+            "root_pub": envelope["root_pub"],
+            "factors": envelope["factors"],
+            "access": envelope["access"],
+            "root_policy": envelope["policy"],
+            "roles": factor_roles(
+                envelope["policy"], envelope["factors"], envelope["access"],
+            ),
+            "envelope": envelope,
+            "migration_required": False,
+        }
+    factors, policy = _legacy_factor_policy(armor_text)
+    member_ids = {factor["factor_id"] for factor in factors}
+    roles = {}
+    from tools.network.idkit.root_factor_policy import policy_satisfied
+    for factor in factors:
+        factor_id = factor["factor_id"]
+        roles[factor_id] = {
+            "access": "enabled",
+            "root_role": (
+                "individual" if policy_satisfied(policy, {factor_id})
+                else "mfa-member"
+            ),
+        }
+    return {
+        "armor_version": version,
+        "generation": 0,
+        "root_pub": member.payload["root_pub"],
+        "factors": factors,
+        "access": sorted(member_ids),
+        "root_policy": policy,
+        "roles": roles,
+        "envelope": None,
+        "migration_required": True,
+    }
+
+
+def _factor_policy_view(state: dict) -> dict:
+    try:
+        metadata = _factor_metadata_rows()
+        passkeys = {
+            row.payload.get("credential_id"): row.payload for row in _passkey_rows()
+        }
+    except Exception:
+        metadata, passkeys = {}, {}
+    factors = []
+    for factor in state["factors"]:
+        factor_id = factor["factor_id"]
+        role = state["roles"].get(factor_id, {
+            "access": "disabled", "root_role": "none",
+        })
+        meta = metadata.get(factor_id, {})
+        credential = passkeys.get(factor.get("credential_id"), {})
+        label = (
+            meta.get("label")
+            or credential.get("label")
+            or ("Password" if factor["type"] == "password" else "Passkey")
+        )
+        row = {
+            "factor_id": factor_id,
+            "type": factor["type"],
+            "label": label,
+            "purpose": meta.get("purpose"),
+            "access": role["access"],
+            "root_role": role["root_role"],
+            "capabilities": {
+                "dashboard": role["access"] == "enabled",
+                "root": (
+                    role["root_role"] != "none"
+                    and (
+                        factor["type"] == "password"
+                        or bool(factor.get("recipients"))
+                    )
+                ),
+            },
+        }
+        if factor["type"] == "password":
+            protector = factor.get("protector") or {}
+            kdf = protector.get("kdf") or {}
+            row["kdf"] = {
+                "name": kdf.get("name"),
+                "hash": kdf.get("hash"),
+                "iterations": kdf.get("iterations"),
+            }
+        else:
+            row.update({
+                "credential_id": factor.get("credential_id"),
+                "rp_id": credential.get("rp_id"),
+                "transports": credential.get("transports") or [],
+                "created_at": credential.get("created_at"),
+                "backup_eligible": credential.get("backup_eligible"),
+                "backed_up": credential.get("backed_up"),
+                "recipients": factor.get("recipients") or [],
+            })
+        factors.append(row)
+    return {
+        "version": 1,
+        "armor_version": state["armor_version"],
+        "generation": state["generation"],
+        "root_pub": state["root_pub"],
+        "root_policy": state["root_policy"],
+        "factors": factors,
+        "migration_required": state["migration_required"],
+        "allowed_operations": (
+            ["migrate_legacy"] if state["migration_required"] else [
+                "enroll_password", "enroll_passkey", "change_password",
+                "add_passkey_recipient", "remove_passkey_recipient",
+                "remove_factor", "set_access", "set_root_policy",
+            ]
+        ),
+    }
+
+
+def _project_factor_policy(state: dict, operations: object) -> dict:
+    from tools.network.idkit.root_factor_policy import (
+        POLICY_VERSION,
+        project_operations,
+        validate_state,
+    )
+    if not isinstance(operations, list) or not operations:
+        raise ValueError("operations must be a non-empty array")
+    if not state["migration_required"]:
+        return project_operations({
+            "generation": state["generation"],
+            "root_pub": state["root_pub"],
+            "factors": state["factors"],
+            "access": state["access"],
+            "policy": state["root_policy"],
+        }, operations)
+    if len(operations) != 1 or not isinstance(operations[0], dict) \
+            or set(operations[0]) != {"op", "factors", "access", "root_policy"} \
+            or operations[0].get("op") != "migrate_legacy":
+        raise ValueError(
+            "generation zero accepts exactly one migrate_legacy operation "
+            "carrying factors, access, and root_policy"
+        )
+    operation = operations[0]
+    validated = validate_state(
+        operation["factors"], operation["access"], operation["root_policy"],
+        root_pub=state["root_pub"],
+    )
+    return {
+        "version": POLICY_VERSION,
+        "base_generation": 0,
+        "generation": 1,
+        "root_pub": state["root_pub"],
+        "factors": validated["factors"],
+        "access": validated["access"],
+        "root_policy": validated["policy"],
+        "roles": validated["roles"],
+        "operations": ["migrate_legacy"],
+        "change_count": 1,
+    }
+
+
+def _validate_passkey_bindings(projected: dict) -> None:
+    enrolled = {
+        row.payload.get("credential_id") for row in _passkey_rows()
+        if isinstance(row.payload.get("credential_id"), str)
+    }
+    unknown = sorted({
+        factor["credential_id"] for factor in projected["factors"]
+        if factor["type"] == "passkey"
+        and factor["credential_id"] not in enrolled
+    })
+    if unknown:
+        raise ValueError(
+            "root policy names passkeys that are not enrolled for dashboard "
+            f"access: {unknown}"
+        )
+
+
+async def get_factor_policy(request: Request) -> JSONResponse:
+    """Return the canonical root policy and the derived per-factor roles."""
+    if _mock_mode():
+        return JSONResponse({"error": "mock dashboard has no factor policy"},
+                            status_code=404)
+    try:
+        member = _personal_member()
+        if member is None or not member.payload.get("armored_private_key"):
+            return JSONResponse({"error": "no personal identity is stored"},
+                                status_code=404)
+        return JSONResponse(_factor_policy_view(_factor_policy_state(member)))
+    except Exception as exc:
+        return JSONResponse({"error": f"could not read factor policy: {exc}"},
+                            status_code=500)
+
+
+async def post_factor_policy_preview(request: Request) -> JSONResponse:
+    """Validate a staged batch against its final projected state only."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "body must be JSON"},
+                            status_code=400)
+    if not isinstance(body, dict) or set(body) != {"base_generation", "operations"}:
+        return JSONResponse({"ok": False, "error": (
+            "body must carry exactly base_generation and operations"
+        )}, status_code=400)
+    if not isinstance(body["base_generation"], int) \
+            or isinstance(body["base_generation"], bool) \
+            or body["base_generation"] < 0:
+        return JSONResponse({"ok": False, "error": (
+            "base_generation must be a non-negative integer"
+        )}, status_code=400)
+    try:
+        member = _personal_member()
+        if member is None:
+            return JSONResponse({"ok": False, "error": "no personal identity is stored"},
+                                status_code=404)
+        state = _factor_policy_state(member)
+        if body["base_generation"] != state["generation"]:
+            return JSONResponse({"ok": False, "error": (
+                "factor policy changed while you were editing; refresh and reapply"
+            ), "generation": state["generation"]}, status_code=409)
+        projected = _project_factor_policy(state, body["operations"])
+        _validate_passkey_bindings(projected)
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    return JSONResponse({
+        "ok": True,
+        "base_generation": projected["base_generation"],
+        "generation": projected["generation"],
+        "root_policy": projected["root_policy"],
+        "factors": projected["factors"],
+        "access": projected["access"],
+        "roles": projected["roles"],
+        "change_count": 1,
+    })
+
+
+def _transition_message(base_generation: int, operations: list, armor: str) -> bytes:
+    from tools.network.idkit.canonical import canonical_json
+    return FACTOR_POLICY_TRANSITION_DOMAIN + canonical_json({
+        "base_generation": base_generation,
+        "candidate_sha256": hashlib.sha256(armor.encode("utf-8")).hexdigest(),
+        "operations": operations,
+    })
+
+
+async def post_factor_policy_commit(request: Request) -> JSONResponse:
+    """Atomically install one root-authorized factor-policy generation."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "body must be JSON"},
+                            status_code=400)
+    expected = {"base_generation", "operations", "candidate_armor", "root_signature"}
+    if not isinstance(body, dict) or set(body) != expected \
+            or not isinstance(body.get("candidate_armor"), str) \
+            or not isinstance(body.get("root_signature"), str):
+        return JSONResponse({"ok": False, "error": (
+            "body must carry exactly base_generation, operations, "
+            "candidate_armor, and root_signature"
+        )}, status_code=400)
+    if not isinstance(body["base_generation"], int) \
+            or isinstance(body["base_generation"], bool) \
+            or body["base_generation"] < 0:
+        return JSONResponse({"ok": False, "error": (
+            "base_generation must be a non-negative integer"
+        )}, status_code=400)
+    try:
+        member = _personal_member()
+        if member is None:
+            return JSONResponse({"ok": False, "error": "no personal identity is stored"},
+                                status_code=404)
+        state = _factor_policy_state(member)
+        if body["base_generation"] != state["generation"]:
+            return JSONResponse({"ok": False, "error": (
+                "factor policy changed while you were editing; refresh and reapply"
+            ), "generation": state["generation"]}, status_code=409)
+        projected = _project_factor_policy(state, body["operations"])
+        _validate_passkey_bindings(projected)
+
+        from tools.network.idkit.armor import canonicalize_armor
+        from tools.network.idkit.canonical import canonical_json
+        from tools.network.idkit.keys import verify_signature
+        from tools.network.idkit.root_factor_policy import parse_armored_envelope
+        canonical_armor = canonicalize_armor(body["candidate_armor"])
+        if canonical_armor != body["candidate_armor"]:
+            raise ValueError("candidate_armor must already be canonical")
+        candidate = parse_armored_envelope(canonical_armor)
+        expected_state = {
+            "generation": projected["generation"],
+            "root_pub": projected["root_pub"],
+            "factors": projected["factors"],
+            "access": projected["access"],
+            "policy": projected["root_policy"],
+        }
+        candidate_state = {
+            key: candidate[key] for key in
+            ("generation", "root_pub", "factors", "access", "policy")
+        }
+        if canonical_json(candidate_state) != canonical_json(expected_state):
+            raise ValueError(
+                "candidate armor does not encode the previewed final policy"
+            )
+        verify_signature(
+            state["root_pub"], body["root_signature"],
+            _transition_message(
+                body["base_generation"], body["operations"], canonical_armor,
+            ),
+        )
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    except Exception:
+        return JSONResponse({"ok": False, "error": (
+            "the factor-policy authorization did not verify against your root"
+        )}, status_code=403)
+
+    payload = dict(member.payload)
+    payload["armored_private_key"] = canonical_armor
+    payload["root_pub"] = state["root_pub"]
+    payload.pop("require_pair", None)
+    payload["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    try:
+        with settings_ops.identity_write_context():
+            settings_ops.upsert_by_key(
+                PERSONAL_IDENTITY_SET_ID, PERSONAL_IDENTITY_REVISION,
+                member.key, payload, org=None,
+            )
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": (
+            f"could not store factor-policy generation: {exc}"
+        )}, status_code=500)
+    from tools.dashboard import unlock_routes
+    unlock_routes.bust_enforce_cache()
+    installed = _factor_policy_state(_personal_member())
+    return JSONResponse({"ok": True, **_factor_policy_view(installed)})
+
+
+async def patch_factor_metadata(request: Request) -> JSONResponse:
+    """Rename or describe a factor without re-armoring the root."""
+    factor_id = request.path_params.get("factor_id")
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "body must be JSON"},
+                            status_code=400)
+    if not isinstance(body, dict) or not body or not set(body) <= {"label", "purpose"}:
+        return JSONResponse({"ok": False, "error": (
+            "body may carry only label and purpose"
+        )}, status_code=400)
+    try:
+        member = _personal_member()
+        state = _factor_policy_state(member) if member is not None else None
+        if state is None or factor_id not in {
+            factor["factor_id"] for factor in state["factors"]
+        }:
+            return JSONResponse({"ok": False, "error": "no such factor"},
+                                status_code=404)
+        old = _factor_metadata_rows().get(factor_id, {})
+        label = body.get("label", old.get("label"))
+        purpose = body.get("purpose", old.get("purpose"))
+        if not isinstance(label, str) or not label.strip():
+            return JSONResponse({"ok": False, "error": "label must be non-empty"},
+                                status_code=400)
+        payload = {
+            "factor_id": factor_id,
+            "label": label.strip(),
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        if purpose is not None:
+            if not isinstance(purpose, str) or not purpose.strip():
+                return JSONResponse({"ok": False, "error": (
+                    "purpose must be a non-empty string when supplied"
+                )}, status_code=400)
+            payload["purpose"] = purpose.strip()
+        with settings_ops.identity_write_context():
+            settings_ops.upsert_by_key(
+                FACTOR_METADATA_SET_ID, FACTOR_METADATA_REVISION,
+                factor_id, payload, org=None,
+            )
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": f"could not update factor: {exc}"},
+                            status_code=400)
+    return JSONResponse({"ok": True, **payload})
 
 
 # ── passkey enrollment (WebAuthn) ─────────────────────────────────────
@@ -804,6 +1295,13 @@ async def post_register(request: Request) -> JSONResponse:
     }
     if verification.aaguid:
         payload["aaguid"] = verification.aaguid
+    device_type = getattr(verification, "credential_device_type", None)
+    payload["backup_eligible"] = (
+        getattr(device_type, "value", None) == "multi_device"
+    )
+    payload["backed_up"] = bool(
+        getattr(verification, "credential_backed_up", False)
+    )
     payload["statement"] = statement.to_dict()
     try:
         with settings_ops.identity_write_context():
@@ -860,8 +1358,13 @@ async def delete_passkey(request: Request) -> JSONResponse:
         personal = None
     if personal is not None and personal.payload.get("armored_private_key"):
         try:
-            from tools.network.idkit.armor import parse_armor
-            factors = parse_armor(personal.payload["armored_private_key"])["factors"]
+            from tools.network.idkit.armor import armor_version, parse_armor
+            armor_text = personal.payload["armored_private_key"]
+            if armor_version(armor_text) == 3:
+                from tools.network.idkit.root_factor_policy import parse_armored_envelope
+                factors = parse_armored_envelope(armor_text)["factors"]
+            else:
+                factors = parse_armor(armor_text)["factors"]
         except Exception:
             factors = []
         if any(f.get("type") == "passkey" and f.get("credential_id") == credential_id
@@ -984,6 +1487,13 @@ ROUTES = [
     Route("/api/identity/personal", get_personal, methods=["GET"]),
     Route("/api/identity/personal", post_personal, methods=["POST"]),
     Route("/api/identity/personal/armor", post_rearmor, methods=["POST"]),
+    Route("/api/identity/factor-policy", get_factor_policy, methods=["GET"]),
+    Route("/api/identity/factor-policy/preview", post_factor_policy_preview,
+          methods=["POST"]),
+    Route("/api/identity/factor-policy/commit", post_factor_policy_commit,
+          methods=["POST"]),
+    Route("/api/identity/factors/{factor_id}/metadata", patch_factor_metadata,
+          methods=["PATCH"]),
     Route("/api/identity/passkey/register-options", post_register_options,
           methods=["POST"]),
     Route("/api/identity/passkey/register", post_register, methods=["POST"]),

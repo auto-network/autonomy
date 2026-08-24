@@ -338,6 +338,7 @@ import contextvars as _contextvars
 PROTECTED_IDENTITY_SET_IDS = frozenset({
     "autonomy.identity.personal",
     "autonomy.identity.passkey",
+    "autonomy.identity.factor-metadata",
 })
 
 
