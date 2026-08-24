@@ -17,7 +17,7 @@ def _args():
     )
 
 
-def test_secured_read_requests_vault_open_and_prints_only_delivered_payload(
+def test_secured_read_requests_vault_open_and_prints_only_ramfs_path(
     monkeypatch, capsys,
 ):
     calls = []
@@ -45,10 +45,13 @@ def test_secured_read_requests_vault_open_and_prints_only_delivered_payload(
 
         def request_vault_open(self, set_id, key, *, org):
             calls.append((set_id, key, org))
-            return {"value": "delivered-secret"}
+            return {
+                "delivery": "session-ramfs",
+                "path": "/run/secrets/vault-open-release-1.json",
+            }
 
     monkeypatch.setattr(set_cmd, "get_client", lambda: Client())
     set_cmd.cmd_set_read(_args())
 
-    assert json.loads(capsys.readouterr().out) == {"value": "delivered-secret"}
+    assert capsys.readouterr().out == "/run/secrets/vault-open-release-1.json\n"
     assert calls == [("autonomy.vault.secured", "mac.ssh", "autonomy")]

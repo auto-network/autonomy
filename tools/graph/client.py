@@ -778,8 +778,9 @@ class HttpClient:
 
         The session identity is intentionally absent from the body: the
         dashboard derives it from this client's bearer.  Held GETs receive
-        only the final delivered payload; factor bootstrap is available solely
-        on the browser's operator-cookie GET.
+        only a value-free receipt naming the requesting session's ramfs path;
+        factor bootstrap is available solely on the browser's operator-cookie
+        GET.
         """
         org = _resolve_client_org_arg(org)
         created = self._request(
@@ -821,10 +822,15 @@ class HttpClient:
                 500,
                 execution,
             )
-        value = execution.get("value")
-        if not isinstance(value, dict):
-            raise GraphHttpError("secured Setting returned no payload", 500)
-        return value
+        receipt = execution.get("receipt")
+        if (
+            not isinstance(receipt, dict)
+            or receipt.get("delivery") != "session-ramfs"
+            or not isinstance(receipt.get("path"), str)
+            or not receipt["path"].startswith("/run/secrets/")
+        ):
+            raise GraphHttpError("secured Setting returned no ramfs receipt", 500)
+        return receipt
 
     def get_setting(self, setting_id, *, org, target_revision=None):
         org = _resolve_client_org_arg(org)

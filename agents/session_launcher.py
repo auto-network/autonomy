@@ -1549,9 +1549,10 @@ def launch_session(
     # session uid (1000, the agent user) via a privileged host-ns helper BEFORE
     # the container starts, then bound refuse-missing so a race that removes it
     # fails the launch rather than yielding a look-alike on-disk directory. In
-    # `delivered` mode the SESSION writes the plaintext here (no dashboard
-    # variable holds it), on ramfs (never swappable), 0700-isolated from other
-    # sessions. Best-effort: a node without the delivery ramfs launches without
+    # `delivered` mode the trusted dashboard vault-open chokepoint writes the
+    # exact approved plaintext here, on ramfs (never swappable), and returns
+    # only the path; the mount remains 0700-isolated from other sessions.
+    # Best-effort: a node without the delivery ramfs launches without
     # it and secret delivery fails closed later — never a launch that needs no
     # secret. Cleanup is the sweeper's (auto-pw9bs.5); an early session-end
     # unlink is a memory-reclamation optimisation only. (An empty subdir left by
@@ -1560,7 +1561,9 @@ def launch_session(
     mounts = dict(mounts or {})
     try:
         from agents import secret_ramfs
-        _secret_host_dir = secret_ramfs.provision_session_dir(name, 1000)
+        _secret_host_dir = secret_ramfs.provision_session_dir(
+            name, secret_ramfs.SESSION_SECRET_UID,
+        )
         mounts[_secret_host_dir] = BindRefuseMissing(
             f"{secret_ramfs.SESSION_SECRET_DST}:rw"
         )

@@ -48,8 +48,11 @@ CREATE INDEX IF NOT EXISTS idx_vault_releases_session
 #: cannot drift. ``expired`` = the deadline passed; ``session_end`` = the
 #: session's whole subdirectory was reclaimed; ``reconciled`` = destroyed by
 #: start-up reconciliation after a restart; ``orphaned`` = the session no
-#: longer exists.
-SHRED_REASONS = frozenset({"expired", "session_end", "reconciled", "orphaned"})
+#: longer exists; ``delivery_failed`` = the record committed but materialising
+#: the ramfs file did not complete.
+SHRED_REASONS = frozenset({
+    "expired", "session_end", "reconciled", "orphaned", "delivery_failed",
+})
 
 
 class VaultReleaseStoreError(RuntimeError):
@@ -107,8 +110,8 @@ def record_release(
     """Commit a release record. THIS RUNS BEFORE THE DELIVERY LAYER RETURNS.
 
     The ordering is the invariant the whole store exists for: the caller
-    must commit the record here and only then materialise the sealed
-    response, so a crash between the two leaves a record with no file — a
+    must commit the record here and only then materialise the ramfs file, so a
+    crash between the two leaves a record with no file — a
     state the sweeper cleans — and never a file with no record, which
     nothing would ever find. A caller that materialises first and records
     second has silently defeated the store; the delivery bead's contract

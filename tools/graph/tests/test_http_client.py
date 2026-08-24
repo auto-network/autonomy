@@ -49,7 +49,7 @@ def test_search_calls_api_graph_search_with_params():
     assert results == [{"id": "abc", "content": "hit"}]
 
 
-def test_request_vault_open_derives_session_server_side_and_returns_value():
+def test_request_vault_open_derives_session_server_side_and_returns_receipt():
     client = _make_client()
     captured = []
 
@@ -61,16 +61,29 @@ def test_request_vault_open_derives_session_server_side_and_returns_value():
         return _FakeResponse({
             "result": {
                 "approved": True,
-                "execution": {"ok": True, "value": {"value": "secret"}},
+                "execution": {
+                    "ok": True,
+                    "receipt": {
+                        "release_id": "open-1",
+                        "delivery": "session-ramfs",
+                        "path": "/run/secrets/vault-open-open-1.json",
+                        "expires_at": 123,
+                    },
+                },
             },
         })
 
     with patch("urllib.request.urlopen", fake_urlopen):
-        value = client.request_vault_open(
+        receipt = client.request_vault_open(
             "autonomy.vault.secured", "mac.ssh", org="autonomy",
         )
 
-    assert value == {"value": "secret"}
+    assert receipt == {
+        "release_id": "open-1",
+        "delivery": "session-ramfs",
+        "path": "/run/secrets/vault-open-open-1.json",
+        "expires_at": 123,
+    }
     assert captured[0][2] == {
         "kind": "vault_open",
         "request": {

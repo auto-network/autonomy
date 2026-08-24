@@ -98,7 +98,7 @@ def test_a_crash_at_any_owned_point_leaves_no_undestroyed_secret(
     point, store, delivery_root
 ):
     """The store and the sweeper own the record commit and the unlink; the
-    sealed-response/notice/decision points belong to the delivery bead. At
+    ramfs-write/notice/decision points belong to the delivery bead. At
     each point this side owns, the outcome is either no artifact or a
     recorded artifact the sweep destroys — never a file with no record."""
     live = lambda s: True

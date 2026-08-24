@@ -1558,6 +1558,43 @@ def test_stale_graph_db_mount_is_gone(
     assert not any("graph.db" in s for s in _mount_specs(captured_run[0]))
 
 
+def test_each_session_mounts_only_its_exact_secret_ramfs_subdir(
+    tmp_path, fake_creds, fake_crosstalk, captured_run, monkeypatch,
+):
+    """The dashboard may see the delivery root; a session must never see it."""
+    from agents import secret_ramfs
+
+    monkeypatch.setattr(
+        secret_ramfs,
+        "provision_session_dir",
+        lambda name, uid: f"/run/autonomy-secrets/{name}",
+    )
+    _run(name="auto-a", output_dir=str(tmp_path / "run-a"))
+    _run(name="auto-b", output_dir=str(tmp_path / "run-b"))
+
+    mounts_a = [
+        captured_run[0][i + 1]
+        for i, token in enumerate(captured_run[0][:-1])
+        if token == "--mount"
+    ]
+    mounts_b = [
+        captured_run[1][i + 1]
+        for i, token in enumerate(captured_run[1][:-1])
+        if token == "--mount"
+    ]
+    assert "type=bind,src=/run/autonomy-secrets/auto-a,dst=/run/secrets" in mounts_a
+    assert "type=bind,src=/run/autonomy-secrets/auto-b,dst=/run/secrets" in mounts_b
+    assert not any("autonomy-secrets/auto-b" in mount for mount in mounts_a)
+    assert not any("autonomy-secrets/auto-a" in mount for mount in mounts_b)
+    assert not any(
+        mount in {
+            "type=bind,src=/run/autonomy-secrets,dst=/run/secrets",
+            "type=bind,src=/run/autonomy-secrets,dst=/run/autonomy-secrets",
+        }
+        for mount in mounts_a + mounts_b
+    )
+
+
 def test_uploads_dir_mounted_read_only_for_file_handoff(
     tmp_path, fake_creds, fake_crosstalk, captured_run, platform_snapshot,
 ):
@@ -1852,7 +1889,7 @@ def test_agent_test_capability_exposes_cli_and_refuses_raw_pytest_commands(
     )
     stdout, stderr = process.communicate(timeout=10)
     assert process.returncode == 0, stderr
-    assert stdout.strip() == "0.4.1"
+    assert stdout.strip() == "0.5.1"
 
     for command in ("pytest", "py.test"):
         gate = run_dir / "cap-bin" / command
@@ -1894,6 +1931,8 @@ def test_golden_mount_argv_is_byte_identical(
     platform roots, snapshot, optional-tool mounts and the session token are all
     pinned, and REPO_ROOT is deliberately NOT /workspace/repo, so normalizing host
     source prefixes can never rewrite a fixed container destination."""
+    from agents import secret_ramfs
+
     repo = tmp_path / "repo"
     data = repo / "data"
     (data / "uploads").mkdir(parents=True)
@@ -1907,6 +1946,11 @@ def test_golden_mount_argv_is_byte_identical(
         lambda **kw: {str(tmp_path / "codex-config.toml"): "/home/agent/.codex/config.toml:ro"},
     )
     monkeypatch.setattr(session_launcher.secrets, "token_urlsafe", lambda n=32: "TOKEN")
+    monkeypatch.setattr(
+        secret_ramfs,
+        "provision_session_dir",
+        lambda name, uid: f"/run/autonomy-secrets/{name}",
+    )
     run_dir = tmp_path / "run"
     gmd = tmp_path / "CLAUDE.md"; gmd.write_text("primer")
     startup = tmp_path / "startup.sh"; startup.write_text("#!/bin/sh\n")
@@ -1945,6 +1989,7 @@ def test_golden_mount_argv_is_byte_identical(
         "-v", "{RUN}:/workspace/output",
         "-v", "{RUN}/sessions:/home/agent/.claude/projects",
         "-v", "{TMP}/wsmount:/opt/data:ro",
+        "--mount", "type=bind,src=/run/autonomy-secrets/test-session,dst=/run/secrets",
         "-v", "{SNAP}:/workspace/repo:ro",
         "-v", "{DATA}/uploads:/workspace/repo/data/uploads:ro",
         "-v", "{RUN}/cap-bin:/etc/autonomy/cap-bin:ro",

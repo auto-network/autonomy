@@ -67,12 +67,11 @@ fi
 python3 -m agents.secret_ramfs || \
     echo "WARNING: secret ramfs provisioning failed — secret delivery and the key cache will fail closed until resolved" >&2
 
-# The key cache (/run/autonomy-keycache) is the dashboard's OWN memory-class
-# store; the dashboard runs as autonomy, so hand the ramfs to it — otherwise the
-# vault hot-reload restore reads it as root-owned, hits Permission denied, and
-# tracebacks on every boot. (The per-session delivery ramfs is chowned per-uid by
-# the launcher, so it is deliberately not touched here.)
-chown -R autonomy:autonomy /run/autonomy-keycache 2>/dev/null || true
+# The key cache and delivery root are dashboard-owned memory-class stores. The
+# dashboard runs as autonomy, so hand the mounted roots to it after the ramfs
+# provisioner verifies them. Per-session delivery subdirectories retain their
+# launcher-assigned ownership and mode 0700.
+chown autonomy:autonomy /run/autonomy-keycache /run/autonomy-secrets 2>/dev/null || true
 
 # Drop to autonomy and serve. The data volume is now autonomy-owned, so schema
 # init + everything the server does runs as the session-agent uid.

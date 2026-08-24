@@ -10,8 +10,13 @@ import pytest
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
-from tools.dashboard import api_auth, approvals_routes, vault_open_approvals
-from tools.dashboard.dao import approval_requests as ar
+from tools.dashboard import (
+    api_auth,
+    approvals_routes,
+    vault_open_approvals,
+    vault_release_delivery,
+)
+from tools.dashboard.dao import approval_requests as ar, vault_releases
 from tools.graph import ops, settings_ops
 from tools.graph.schemas.vault_credential import (
     VAULT_CREDENTIAL_REVISION,
@@ -42,6 +47,16 @@ def vault_open_env(tmp_path, monkeypatch):
         ),
     )
     monkeypatch.setattr(ar, "DB_PATH", tmp_path / "approvals.db")
+    release_root = tmp_path / "ramfs"
+    (release_root / "auto-real").mkdir(parents=True)
+    (release_root / "auto-real").chmod(0o700)
+    monkeypatch.setattr(vault_release_delivery, "_delivery_root", lambda: release_root)
+    monkeypatch.setattr(
+        vault_release_delivery,
+        "assert_memory_backed",
+        lambda path: None,
+    )
+    monkeypatch.setattr(vault_releases, "db_path", lambda: tmp_path / "releases.db")
     monkeypatch.setattr(
         vault_open_approvals.dashboard_db,
         "get_session",
@@ -80,7 +95,6 @@ def vault_open_env(tmp_path, monkeypatch):
     monkeypatch.setattr(approvals_routes.web_push, "cancel_approval", lambda *_a, **_k: None)
     approvals_routes._executing.clear()
     approvals_routes._decision_waiters.clear()
-    vault_open_approvals.clear_ephemeral_deliveries()
 
     world = VaultWorld(tmp_path / "vault").register()
     try:
@@ -90,7 +104,6 @@ def vault_open_env(tmp_path, monkeypatch):
         clear_seams()
         approvals_routes._executing.clear()
         approvals_routes._decision_waiters.clear()
-        vault_open_approvals.clear_ephemeral_deliveries()
 
 
 def test_random_secret_is_delivered_byte_identical_without_opener_leak(
@@ -182,23 +195,30 @@ def test_random_secret_is_delivered_byte_identical_without_opener_leak(
         delivered = client.get(f"/api/approvals/{rid}?wait=10").json()
         replay = client.get(f"/api/approvals/{rid}?wait=0").json()
 
-    assert delivered["result"] == {
-        "approved": True,
-        "execution": {"ok": True, "value": {"value": secret}},
-    }
-    assert replay["result"]["execution"]["ok"] is False
-    assert "value" not in replay["result"]["execution"]
+    execution = delivered["result"]["execution"]
+    assert execution["ok"] is True
+    receipt = execution["receipt"]
+    assert receipt["delivery"] == "session-ramfs"
+    assert receipt["path"] == f"/run/secrets/vault-open-{rid}.json"
+    assert replay["result"] == delivered["result"]
+    assert "value" not in execution
+    assert secret not in json.dumps(delivered)
+    ramfs_payload = json.loads(
+        (graph_db.parent / "ramfs" / "auto-real" / f"vault-open-{rid}.json")
+        .read_text()
+    )
     assert hashlib.sha256(
-        delivered["result"]["execution"]["value"]["value"].encode()
+        ramfs_payload["value"].encode()
     ).hexdigest() == expected_digest
     persisted = ar.get(rid)
     assert "openers" not in json.dumps(persisted)
     assert opener_hex not in json.dumps(persisted)
     assert secret not in json.dumps(persisted)
-    assert persisted["result"]["execution"] == {
-        "ok": True,
-        "delivery": "ephemeral-single-use",
-    }
+    assert persisted["result"] == delivered["result"]
+    release = vault_releases.get(rid)
+    assert release["session"] == "auto-real"
+    assert release["container_path"] == receipt["path"]
+    assert secret not in json.dumps(release)
     assert "cek" not in json.dumps(delivered).lower()
 
 
