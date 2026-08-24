@@ -1,4 +1,7 @@
+from pathlib import Path
+
 from tools.agent_test.cli import _progress_line
+from tools.agent_test import pytest_plugin
 from tools.agent_test.worker import _execution_state, _hang_threshold
 
 
@@ -47,3 +50,12 @@ def test_progress_line_reports_suspect_and_known_remaining_work():
     assert "Progress: 87% (7/8 test nodes)." in line
     assert "Suspect hung: test_stuck" in line
     assert "Known remaining work: ~12.0s" in line
+
+
+def test_line_coverage_resolves_each_filename_once(tmp_path):
+    pytest_plugin._RESOLVED.clear()
+    filename = str(tmp_path / "module.py")
+    key = (str(tmp_path), filename)
+    for _ in range(100):
+        assert pytest_plugin._relative_source_path(filename, str(tmp_path)) == Path("module.py")
+    assert list(pytest_plugin._RESOLVED).count(key) == 1

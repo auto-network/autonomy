@@ -11,6 +11,29 @@ from typing import Any
 import pytest
 
 
+# A traced Python line can execute millions of times during a run.  Resolving
+# the same source filename for every one of those lines turns coverage into a
+# filesystem benchmark, especially for tests that reload a large module.
+_RESOLVED: dict[tuple[str, str], Path | None] = {}
+
+
+def _relative_source_path(filename: str, repo_raw: str) -> Path | None:
+    """Resolve one source filename once per repository/run process."""
+    key = (repo_raw, filename)
+    if key not in _RESOLVED:
+        try:
+            path = Path(filename).resolve().relative_to(repo_raw)
+        except (OSError, ValueError):
+            path = None
+        if path is not None and (
+            path.suffix != ".py"
+            or any(part in {".venv", "venv", "env"} for part in path.parts)
+        ):
+            path = None
+        _RESOLVED[key] = path
+    return _RESOLVED[key]
+
+
 def _events_path() -> Path | None:
     raw = os.environ.get("AGENT_TEST_EVENTS_DIR", "").strip()
     if not raw:
@@ -66,11 +89,8 @@ def pytest_runtest_protocol(item, nextitem):
 
     def trace(frame, event, _arg):
         if event == "line":
-            try:
-                path = Path(frame.f_code.co_filename).resolve().relative_to(repo_raw)
-            except (OSError, ValueError):
-                return trace
-            if path.suffix == ".py" and not any(part in {".venv", "venv", "env"} for part in path.parts):
+            path = _relative_source_path(frame.f_code.co_filename, repo_raw)
+            if path is not None:
                 lines.setdefault(path.as_posix(), set()).add(frame.f_lineno)
         return trace
 
