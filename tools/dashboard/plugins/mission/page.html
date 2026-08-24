@@ -147,8 +147,8 @@
         <span class="text-sm font-medium truncate" style="color:#aab3c4"
               x-text="(missions.find(m => m.mission_id === current) || {}).name || ''"></span>
       </div>
-      <iframe :src="frameSrc()" class="flex-1 w-full border-0 min-h-0"
-              title="Mission screen"></iframe>
+      <iframe :src="frameSrc()" class="w-full border-0 block"
+              x-init="fitFrame($el)" title="Mission screen"></iframe>
     </div>
   </template>
 
