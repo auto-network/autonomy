@@ -19694,7 +19694,8 @@ class _CSPMiddleware(BaseHTTPMiddleware):
         # same-origin frame so entering/leaving a mission never unloads the
         # app; 'self' still refuses every foreign embedder).
         if (request.url.path.startswith("/api/attachment/")
-                or request.url.path.startswith("/missions/")):
+                or request.url.path.startswith("/missions/")
+                or request.url.path.startswith("/api/mission/screen/")):
             response.headers["Content-Security-Policy"] = self._CSP_FRAMEABLE
         else:
             response.headers["Content-Security-Policy"] = self._CSP
