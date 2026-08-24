@@ -23,17 +23,35 @@ actually has comments.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+
+from tools.data_paths import DATA_ROOT
 
 _TIMEOUT_S = 30
 _DESC_LIMIT = 1400
 
 
-def _bd(args: list[str]) -> list | dict | None:
+def _beads_env(org: str | None) -> dict | None:
+    """Route bd to the mission org's tracker (autonomy@74585ba).
+
+    An org with a provisioned tracker dir gets BEADS_DIR pointed at it
+    — the same config the launcher mounts as that org's /data/.beads —
+    so an anchore mission's ``mission:<uuid>`` beads resolve from the
+    anchore database. No org dir → inherit the ambient (shared) tracker.
+    """
+    if org:
+        org_dir = DATA_ROOT / ".beads" / "orgs" / str(org)
+        if (org_dir / "metadata.json").is_file():
+            return {**os.environ, "BEADS_DIR": str(org_dir)}
+    return None
+
+
+def _bd(args: list[str], org: str | None = None) -> list | dict | None:
     try:
         raw = subprocess.run(
             ["bd", *args, "--json"], capture_output=True, text=True,
-            timeout=_TIMEOUT_S).stdout
+            timeout=_TIMEOUT_S, env=_beads_env(org)).stdout
         return json.loads(raw) if raw.strip() else None
     except Exception:
         return None
@@ -57,7 +75,8 @@ def _trim(text: str) -> str:
     return text[:_DESC_LIMIT].rsplit("\n", 1)[0] + "\n…"
 
 
-def load_beads(mission_id: str, pillars: list[dict]) -> dict[str, list[dict]]:
+def load_beads(mission_id: str, pillars: list[dict],
+               org: str | None = None) -> dict[str, list[dict]]:
     """``{pillar_id: [task, ...]}`` for every pillar with mapped beads."""
     label_map: dict[str, str] = {}
     for p in pillars:
@@ -65,11 +84,12 @@ def load_beads(mission_id: str, pillars: list[dict]) -> dict[str, list[dict]]:
             label_map[lb] = p["pillar_id"]
     if not label_map:
         return {}
-    rows = _bd(["list", "--label", f"mission:{mission_id}", "--all"])
+    rows = _bd(["list", "--label", f"mission:{mission_id}", "--all"],
+               org=org)
     if not isinstance(rows, list) or not rows:
         return {}
     ids = [r["id"] for r in rows if r.get("id")]
-    full_rows = _bd(["show", *ids]) or []
+    full_rows = _bd(["show", *ids], org=org) or []
     if isinstance(full_rows, dict):
         full_rows = [full_rows]
     full = {r["id"]: r for r in full_rows if isinstance(r, dict) and r.get("id")}
@@ -95,7 +115,7 @@ def load_beads(mission_id: str, pillars: list[dict]) -> dict[str, list[dict]]:
         if detail.get("issue_type") == "epic":
             task["epic"] = True
         if detail.get("comment_count"):
-            comments = _bd(["comments", detail["id"]]) or []
+            comments = _bd(["comments", detail["id"]], org=org) or []
             task["comments"] = [
                 {"by": c.get("author") or "", "at": c.get("created_at") or "",
                  "text": c.get("text") or ""}

@@ -244,7 +244,7 @@ def load_directory(org: str) -> dict[str, dict]:
 def load_beads(org: str, mission_id: str, pillars: list[dict]) -> dict:
     """Task payload per pillar — the bd bridge (bridge.py)."""
     from tools.dashboard.plugins.mission import bridge
-    return bridge.load_beads(mission_id, pillars)
+    return bridge.load_beads(mission_id, pillars, org=org)
 
 
 def _marker(pct: int, note: str) -> str:
