@@ -1,0 +1,436 @@
+"""Human-factor release of one secured vault Setting.
+
+``vault_open`` is a kind on the generic approval rendezvous.  The requesting
+agent names only a secured set member and a short delivery TTL.  This module
+derives the real session/workspace from its bearer, freezes the selected
+Setting and policy generation, serves factor bootstrap material only to the
+operator-cookie browser, and returns the opened Setting payload through the
+approval result.
+
+No content-encryption key, factor seed, password, armor, or vault locator is
+ever placed in the requester-visible request/result.  The one factor gesture
+is the authorization; there is no preceding generic approval followed by a
+second decrypt dialog.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import hmac
+import time
+
+from starlette.requests import Request
+
+from tools.dashboard import api_auth
+from tools.dashboard.dao import dashboard_db
+from tools.graph import schemas, settings_ops
+from tools.graph.schemas.personal_identity import PASSKEY_SET_ID
+from tools.graph.schemas.vault_policy_class import VAULT_POLICY_CLASS_SET_ID
+from tools.network.idkit.canonical import canonical_json
+from tools.vault.errors import VaultError
+from tools.vault.key_holder import _scoped_db
+from tools.vault.store import VaultStore
+
+
+KIND = "vault_open"
+MIN_TTL_SECONDS = 1
+MAX_TTL_SECONDS = 300
+DEFAULT_TTL_SECONDS = 60
+_ALLOWED_REQUEST_FIELDS = {"set_id", "key", "ttl_seconds"}
+_HEX_SEED_LEN = 64
+
+# Approved plaintext waits here only long enough for the exact requesting
+# bearer to consume it once. The durable approval row records the release
+# outcome but never the value; a restart or missed TTL loses the delivery and
+# requires another ceremony. Each entry owns a timer so an unclaimed secret is
+# dropped even when no later vault traffic arrives to prune it.
+_EPHEMERAL_DELIVERIES: dict[str, tuple[float, dict, asyncio.TimerHandle]] = {}
+
+
+def _digest(value: object) -> str:
+    return hashlib.sha256(canonical_json(value)).hexdigest()
+
+
+def _forget_delivery(request_id: str) -> None:
+    entry = _EPHEMERAL_DELIVERIES.pop(request_id, None)
+    if entry is not None:
+        entry[2].cancel()
+
+
+def clear_ephemeral_deliveries() -> None:
+    """Drop all in-memory releases (application shutdown and test isolation)."""
+    for request_id in list(_EPHEMERAL_DELIVERIES):
+        _forget_delivery(request_id)
+
+
+def _remember_delivery(row: dict, payload: dict) -> None:
+    request_id = row["id"]
+    expires_at = float((row.get("request") or {}).get("expires_at") or 0)
+    delay = max(0.0, expires_at - time.time())
+    _forget_delivery(request_id)
+    loop = asyncio.get_running_loop()
+    handle = loop.call_later(delay, _forget_delivery, request_id)
+    _EPHEMERAL_DELIVERIES[request_id] = (expires_at, payload, handle)
+
+
+def _class_snapshot(
+    class_id: str,
+    org: str | None,
+    *,
+    gen_id: str | None = None,
+) -> tuple[dict, object]:
+    with VaultStore(_scoped_db(VAULT_POLICY_CLASS_SET_ID, org)) as store:
+        record = store.get_class(class_id)
+    # A secured Setting may name an older generation. Its factor roster must
+    # come from that exact generation—the same one ``open_cek`` will use—not
+    # from today's generation after a revocation or enrollment.
+    generation = record.generation(gen_id) if gen_id else record.current()
+    snapshot = {
+        "class_id": record.class_id,
+        "policy": record.policy,
+        "generation": generation.to_dict(),
+    }
+    return snapshot, record
+
+
+def _factor_bootstrap(class_snapshot: dict, org: str | None) -> list[dict]:
+    """Resolve the browser inputs for the frozen generation.
+
+    The returned list is digest-frozen at request creation and re-derived at
+    enrichment and execution.  Armor remains confined to server staging and
+    the operator-cookie response; it is never copied into the safe request.
+    """
+    generation = class_snapshot.get("generation") or {}
+    factors = []
+    seen: set[str] = set()
+    with VaultStore(_scoped_db(VAULT_POLICY_CLASS_SET_ID, org)) as store:
+        for wrap in generation.get("wraps") or []:
+            factor_id = wrap.get("factor_id")
+            factor_type = wrap.get("factor_type")
+            if not isinstance(factor_id, str) or factor_id in seen:
+                continue
+            seen.add(factor_id)
+            factor = {"factor_id": factor_id, "type": factor_type}
+            if factor_type == "password":
+                factor["armor"] = store.get_password_armor(factor_id)
+            elif factor_type == "passkey":
+                passkey = _passkey_for_public_key(str(wrap.get("public_key") or ""))
+                if (
+                    not passkey
+                    or not isinstance(passkey.get("credential_id"), str)
+                    or not passkey["credential_id"]
+                    or not isinstance(passkey.get("rp_id"), str)
+                    or not passkey["rp_id"]
+                ):
+                    raise VaultError(
+                        f"passkey factor {factor_id!r} has no enrolled credential"
+                    )
+                factor.update(passkey)
+            else:
+                raise VaultError(f"unsupported vault factor type {factor_type!r}")
+            factors.append(factor)
+    if not factors:
+        raise VaultError("the policy class has no usable factors")
+    return factors
+
+
+def prepare_create_from_request(
+    http_request: Request,
+    _claimed_session: object,
+    request: dict,
+) -> tuple[str, dict, dict]:
+    """Freeze a request under the authenticated launcher's identity.
+
+    The caller-supplied ``session`` is deliberately ignored.  A bearer may
+    request release only for the dashboard launcher record that minted it.
+    """
+    principal = api_auth.principal_from_request(http_request)
+    if principal.kind not in {
+        api_auth.ApiPrincipalKind.ORG_SESSION,
+        api_auth.ApiPrincipalKind.LOCAL_SESSION,
+    } or not principal.subject:
+        raise PermissionError("vault_open requires an authenticated session bearer")
+    if set(request) - _ALLOWED_REQUEST_FIELDS:
+        raise ValueError(
+            "vault_open request accepts only set_id, key, and ttl_seconds"
+        )
+    set_id = request.get("set_id")
+    key = request.get("key")
+    if not isinstance(set_id, str) or not set_id or len(set_id) > 256:
+        raise ValueError("vault_open set_id must be a short non-empty string")
+    if not isinstance(key, str) or not key or len(key) > 256:
+        raise ValueError("vault_open key must be a short non-empty string")
+    if schemas.declared_vault_tier(set_id) != "secured":
+        raise ValueError(f"{set_id!r} is not a secured vault set")
+    ttl = request.get("ttl_seconds", DEFAULT_TTL_SECONDS)
+    if isinstance(ttl, bool) or not isinstance(ttl, int) \
+            or not MIN_TTL_SECONDS <= ttl <= MAX_TTL_SECONDS:
+        raise ValueError(
+            f"vault_open ttl_seconds must be {MIN_TTL_SECONDS}–{MAX_TTL_SECONDS}"
+        )
+
+    launcher = dashboard_db.get_session(principal.subject)
+    if launcher is None:
+        raise PermissionError("the authenticated session has no launcher record")
+    workspace = str(launcher.get("project") or "").strip()
+    if not workspace:
+        raise PermissionError("the authenticated session has no workspace binding")
+
+    members = settings_ops.read_set(set_id, org=principal.org, peers=[]).members
+    member = next((candidate for candidate in members if candidate.key == key), None)
+    if member is None:
+        raise ValueError(f"no secured Setting matches {set_id}/{key}")
+    if member.vault_error is not None:
+        raise ValueError(member.vault_error.message)
+    sealed = member.sealed_content_key
+    if not isinstance(sealed, dict):
+        raise ValueError(f"{set_id}/{key} is not awaiting a human-factor open")
+    class_id = sealed.get("policy_class_id")
+    if not isinstance(class_id, str) or not class_id:
+        raise ValueError("the secured Setting names no policy class")
+    sealed_cek = sealed.get("sealed_cek") or {}
+    gen_id = sealed_cek.get("gen_id")
+    if not isinstance(gen_id, str) or not gen_id:
+        raise ValueError("the secured Setting names no policy generation")
+    class_snapshot, policy_class = _class_snapshot(
+        class_id, member.org, gen_id=gen_id,
+    )
+    required_policy = sealed.get("required_policy")
+    if policy_class.policy != required_policy:
+        raise ValueError("the secured Setting and policy class disagree")
+    factor_bootstrap = _factor_bootstrap(class_snapshot, member.org)
+
+    now = time.time()
+    safe_request = {
+        "setting": {"set_id": set_id, "key": key, "id": member.id},
+        "operation": "read",
+        "requester": {
+            "session": principal.subject,
+            "workspace": workspace,
+            "label": str(launcher.get("label") or principal.subject),
+        },
+        "target": f"{set_id}/{key}",
+        "delivery": "plaintext Setting value to the requesting session",
+        "release_mode": "delivered",
+        "ttl_seconds": ttl,
+        "expires_at": now + ttl,
+    }
+    staged = {
+        "v": 1,
+        "org": member.org,
+        "setting_id": member.id,
+        "sealed_digest": _digest(sealed),
+        "class_snapshot": class_snapshot,
+        "class_digest": _digest(class_snapshot),
+        "factor_digest": _digest(factor_bootstrap),
+    }
+    return principal.subject, safe_request, staged
+
+
+def _passkey_for_public_key(public_key: str) -> dict | None:
+    rows = settings_ops.read_owned_set(PASSKEY_SET_ID, org=None).members
+    for row in rows:
+        payload = row.payload if isinstance(row.payload, dict) else {}
+        statement = payload.get("statement") or {}
+        if hmac.compare_digest(
+            str(statement.get("provisioning_public_key") or ""), public_key,
+        ):
+            return {
+                "credential_id": payload.get("credential_id"),
+                "label": payload.get("label"),
+                "rp_id": payload.get("rp_id"),
+                "transports": payload.get("transports") or [],
+            }
+    return None
+
+
+def enrich_from_request(http_request: Request, row: dict) -> dict:
+    """Return factor armor/PRF bootstrap only to the operator browser."""
+    principal = api_auth.principal_from_request(http_request)
+    if principal.kind is not api_auth.ApiPrincipalKind.OPERATOR_COOKIE:
+        raise PermissionError("operator-cookie authority is required for vault factors")
+    staged = row.get("staged") or {}
+    snapshot = staged.get("class_snapshot") or {}
+    factors = _factor_bootstrap(snapshot, staged.get("org"))
+    if not hmac.compare_digest(
+        _digest(factors), str(staged.get("factor_digest") or ""),
+    ):
+        raise VaultError("the vault factors changed before approval")
+    return {
+        "ceremony": {
+            "v": 1,
+            "policy": snapshot.get("policy"),
+            "factors": factors,
+        }
+    }
+
+
+def authorize_decision(
+    http_request: Request,
+    row: dict,
+    decision: dict,
+) -> str | None:
+    """The factor-bearing decision is accepted only from the operator cookie."""
+    principal = api_auth.principal_from_request(http_request)
+    if principal.kind is not api_auth.ApiPrincipalKind.OPERATOR_COOKIE:
+        return "operator-cookie authority is required to open a secured Setting"
+    if decision.get("approved") is False:
+        return None if set(decision) == {"approved"} else (
+            "a declined vault_open decision must carry only approved"
+        )
+    if set(decision) != {"approved", "openers"}:
+        return "vault_open approval must carry only approved and openers"
+    openers = decision.get("openers")
+    if not isinstance(openers, dict) or not openers:
+        return "vault_open approval requires factor opener seeds"
+    if any(
+        not isinstance(factor_id, str)
+        or not isinstance(seed, str)
+        or len(seed) != _HEX_SEED_LEN
+        or any(ch not in "0123456789abcdef" for ch in seed)
+        for factor_id, seed in openers.items()
+    ):
+        return "vault_open opener seeds must be 32-byte lowercase hex"
+    snapshot = (row.get("staged") or {}).get("class_snapshot") or {}
+    wraps = (snapshot.get("generation") or {}).get("wraps") or []
+    factor_types = {
+        wrap.get("factor_id"): wrap.get("factor_type")
+        for wrap in wraps
+        if isinstance(wrap, dict)
+    }
+    if not set(openers).issubset(factor_types):
+        return "vault_open contains an opener outside the frozen factor roster"
+    supplied_types = [factor_types[factor_id] for factor_id in openers]
+    policy = snapshot.get("policy")
+    satisfied = (
+        (policy == "password" and supplied_types == ["password"])
+        or (policy == "prf" and supplied_types == ["passkey"])
+        or (
+            policy == "both"
+            and sorted(supplied_types) == ["passkey", "password"]
+        )
+    )
+    if not satisfied:
+        return "vault_open requires one complete opener set for its frozen policy"
+    return None
+
+
+def authorize_get(
+    http_request: Request,
+    row: dict,
+    waiting: bool,
+) -> str | None:
+    """Bind review to the operator and delivery to the exact requester."""
+    principal = api_auth.principal_from_request(http_request)
+    if waiting:
+        if principal.kind not in {
+            api_auth.ApiPrincipalKind.ORG_SESSION,
+            api_auth.ApiPrincipalKind.LOCAL_SESSION,
+        } or principal.subject != row.get("session"):
+            return "this vault release belongs to another requesting session"
+        return None
+    if principal.kind is not api_auth.ApiPrincipalKind.OPERATOR_COOKIE:
+        return "operator-cookie authority is required to review vault factors"
+    return None
+
+
+def _assert_frozen(row: dict) -> tuple[dict, dict]:
+    req = row.get("request") or {}
+    staged = row.get("staged") or {}
+    if staged.get("v") != 1 or not isinstance(req.get("setting"), dict):
+        raise VaultError("this request has no frozen vault-open context")
+    if time.time() > float(req.get("expires_at") or 0):
+        raise VaultError("this vault-open request expired before delivery")
+    launcher = dashboard_db.get_session(row.get("session"))
+    requester = req.get("requester") or {}
+    if launcher is None or str(launcher.get("project") or "").strip() != (
+        requester.get("workspace")
+    ):
+        raise VaultError("the requesting session changed before approval")
+    snapshot, _record = _class_snapshot(
+        staged["class_snapshot"]["class_id"],
+        staged.get("org"),
+        gen_id=staged["class_snapshot"]["generation"]["gen_id"],
+    )
+    if not hmac.compare_digest(_digest(snapshot), str(staged.get("class_digest") or "")):
+        raise VaultError("the vault policy changed before approval")
+    factors = _factor_bootstrap(snapshot, staged.get("org"))
+    if not hmac.compare_digest(
+        _digest(factors), str(staged.get("factor_digest") or ""),
+    ):
+        raise VaultError("the vault factors changed before approval")
+    return req, staged
+
+
+async def execute(row: dict, decision: dict) -> dict:
+    """Open at the single server chokepoint and deliver only the payload."""
+    req, staged = _assert_frozen(row)
+    raw_openers = decision.get("openers") or {}
+    opener_buffers: dict[str, bytearray] = {}
+    try:
+        for factor_id, seed_hex in raw_openers.items():
+            opener_buffers[factor_id] = bytearray.fromhex(seed_hex)
+        payload = settings_ops.open_secured_setting(
+            req["setting"]["set_id"],
+            req["setting"]["key"],
+            setting_id=staged["setting_id"],
+            sealed_content_key_digest=staged["sealed_digest"],
+            opener_seeds=opener_buffers,
+            org=staged.get("org"),
+        )
+        return {"ok": True, "value": payload}
+    finally:
+        for seed in opener_buffers.values():
+            seed[:] = b"\x00" * len(seed)
+        # The parsed JSON body otherwise remains captured by the executor task
+        # until it exits.  Replace the immutable hex strings at the earliest
+        # possible boundary; approval result construction drops this field.
+        if isinstance(raw_openers, dict):
+            for factor_id in list(raw_openers):
+                raw_openers[factor_id] = ""
+
+
+def result(_row: dict, decision: dict, outcome: dict) -> dict:
+    """Persist the outcome without factor material or released plaintext."""
+    if outcome.get("ok") is True and isinstance(outcome.get("value"), dict):
+        payload = outcome.pop("value")
+        _remember_delivery(_row, payload)
+        outcome = {"ok": True, "delivery": "ephemeral-single-use"}
+    return {"approved": bool(decision.get("approved")), "execution": outcome}
+
+
+def wait_result(row: dict, persisted_result: dict) -> dict:
+    """Attach the value once, only to the authenticated requester held GET."""
+    execution = persisted_result.get("execution") or {}
+    if persisted_result.get("approved") is not True or execution.get("ok") is not True:
+        return persisted_result
+    entry = _EPHEMERAL_DELIVERIES.pop(row["id"], None)
+    if entry is None:
+        return {
+            "approved": True,
+            "execution": {
+                "ok": False,
+                "error": "the approved vault release is no longer available",
+            },
+        }
+    expires_at, payload, handle = entry
+    handle.cancel()
+    if time.time() > expires_at:
+        return {
+            "approved": True,
+            "execution": {
+                "ok": False,
+                "error": "the approved vault release is no longer available",
+            },
+        }
+    return {"approved": True, "execution": {"ok": True, "value": payload}}
+
+
+PREPARE_CREATE_FROM_REQUEST = {KIND: prepare_create_from_request}
+ENRICH_FROM_REQUEST = {KIND: enrich_from_request}
+AUTHORIZE_DECISION = {KIND: authorize_decision}
+AUTHORIZE_GET = {KIND: authorize_get}
+EXECUTORS = {KIND: execute}
+RESULT_BUILDERS = {KIND: result}
+WAIT_RESULT_BUILDERS = {KIND: wait_result}

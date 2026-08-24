@@ -53,3 +53,18 @@ def test_password_material_route_rejects_malformed_armor(monkeypatch, tmp_path):
         })
     assert response.status_code == 400
     assert "armor" in response.json()["error"]
+
+
+def test_legacy_open_route_never_returns_a_content_key(monkeypatch, tmp_path):
+    path = tmp_path / "vault.db"
+    monkeypatch.setattr(vault_routes, "_store", lambda: VaultStore(path))
+    monkeypatch.setattr(vault_routes, "_guard", lambda request: None)
+    app = Starlette(routes=vault_routes.ROUTES)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/identity/settings/demo/open",
+            json={"openers": {"pw": "00" * 32}},
+        )
+    assert response.status_code == 410
+    assert "cek" not in response.text.lower()
+    assert "content-encryption keys are never returned" in response.json()["error"]

@@ -763,7 +763,9 @@
       <div class="mx-auto flex max-w-3xl items-center gap-3">
         <button type="button"
                 class="h-12 flex-1 rounded-2xl bg-indigo-600 text-base font-semibold text-white transition hover:bg-indigo-500 disabled:cursor-wait disabled:opacity-50"
-                :disabled="approvalBusy || (approvalRequest.kind === 'fleet_machine_admission' && !(approvalRequest.machineName || '').trim())"
+                :disabled="approvalBusy ||
+                  (approvalRequest.kind === 'fleet_machine_admission' && !(approvalRequest.machineName || '').trim()) ||
+                  (approvalRequest.kind === 'vault_open' && approvalRequest.needsPassword && !(approvalRequest.password || '').trim())"
                 @click="approveRequest()" data-testid="approval-approve-button">
           <span x-show="!approvalBusy" x-text="approvalRequest.actionLabel"></span>
           <span x-show="approvalBusy" x-cloak>Approving…</span>

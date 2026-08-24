@@ -1,0 +1,54 @@
+"""CLI secured reads use the approval delivery path, never export a CEK."""
+
+from __future__ import annotations
+
+import argparse
+import json
+
+from tools.graph import set_cmd
+from tools.graph.settings_ops import DropAccounting, ResolvedSetting, SetMembers
+
+
+def _args():
+    return argparse.Namespace(
+        id_parts=["autonomy.vault.secured", "mac.ssh"],
+        org="autonomy",
+        chain=False,
+    )
+
+
+def test_secured_read_requests_vault_open_and_prints_only_delivered_payload(
+    monkeypatch, capsys,
+):
+    calls = []
+
+    class Client:
+        def read_set(self, set_id, *, org):
+            return SetMembers(members=[ResolvedSetting(
+                id="setting-1",
+                set_id=set_id,
+                stored_revision=1,
+                key="mac.ssh",
+                payload=None,
+                state="raw",
+                supersedes=None,
+                excludes=False,
+                deprecated=False,
+                successor_id=None,
+                created_at="now",
+                updated_at="now",
+                target_revision=1,
+                org="personal",
+                upconverted=False,
+                sealed_content_key={"sealed_cek": "must-not-print"},
+            )], dropped=DropAccounting())
+
+        def request_vault_open(self, set_id, key, *, org):
+            calls.append((set_id, key, org))
+            return {"value": "delivered-secret"}
+
+    monkeypatch.setattr(set_cmd, "get_client", lambda: Client())
+    set_cmd.cmd_set_read(_args())
+
+    assert json.loads(capsys.readouterr().out) == {"value": "delivered-secret"}
+    assert calls == [("autonomy.vault.secured", "mac.ssh", "autonomy")]

@@ -227,10 +227,18 @@ def seal_body(
     return _BODY_AEADS[body_suite_id](cek).encrypt(body_nonce, bytes(plaintext), aad)
 
 
-def open_body(header: ObjectKeyHeader, cek: bytes, body_blob: bytes) -> bytes:
+def open_body(header: ObjectKeyHeader, cek: bytes | bytearray, body_blob: bytes) -> bytes:
     """Verify the content address, then open the blob under the header's
-    own context. Fails closed on any mismatch."""
-    _require_bytes(cek, CEK_LEN, "content encryption key")
+    own context. Fails closed on any mismatch.
+
+    The read broker supplies a mutable ``bytearray`` so it can erase its CEK
+    buffer immediately after this call.  Accepting that bytes-like key avoids
+    forcing the broker to retain another immutable Python copy.
+    """
+    if not isinstance(cek, (bytes, bytearray)) or len(cek) != CEK_LEN:
+        raise MalformedRecordError(
+            f"content encryption key must be {CEK_LEN} raw bytes"
+        )
     if not isinstance(body_blob, (bytes, bytearray)):
         raise MalformedRecordError("body blob must be bytes")
     if header.version != OBJECT_HEADER_VERSION:

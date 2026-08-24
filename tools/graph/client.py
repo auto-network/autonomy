@@ -24,6 +24,7 @@ import json as _json
 import mimetypes
 import os
 import ssl
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -771,6 +772,59 @@ class HttpClient:
             members=[_dict_to_resolved_setting(m) for m in result.get("members", [])],
             dropped=DropAccounting(**(result.get("dropped") or {})),
         )
+
+    def request_vault_open(self, set_id, key, *, org, ttl_seconds=60):
+        """Request and await one operator-approved secured Setting release.
+
+        The session identity is intentionally absent from the body: the
+        dashboard derives it from this client's bearer.  Held GETs receive
+        only the final delivered payload; factor bootstrap is available solely
+        on the browser's operator-cookie GET.
+        """
+        org = _resolve_client_org_arg(org)
+        created = self._request(
+            "POST",
+            "/api/approvals",
+            body={
+                "kind": "vault_open",
+                "request": {
+                    "set_id": set_id,
+                    "key": key,
+                    "ttl_seconds": ttl_seconds,
+                },
+            },
+            headers=_settings_headers(org),
+        )
+        request_id = (created or {}).get("id")
+        if not isinstance(request_id, str) or not request_id:
+            raise GraphHttpError("dashboard created no vault-open request", 500)
+        deadline = time.monotonic() + ttl_seconds + 5
+        result = None
+        while result is None and time.monotonic() < deadline:
+            remaining = max(0, deadline - time.monotonic())
+            response = self._request(
+                "GET",
+                f"/api/approvals/{urllib.parse.quote(request_id, safe='')}",
+                params={"wait": min(60, int(remaining) or 1)},
+                headers=_settings_headers(org),
+                timeout=min(65, max(2, int(remaining) + 1)),
+            )
+            result = (response or {}).get("result")
+        if result is None:
+            raise GraphHttpError("vault-open approval expired", 408)
+        if result.get("approved") is not True:
+            raise PermissionError("secured Setting release was declined")
+        execution = result.get("execution") or {}
+        if execution.get("ok") is not True:
+            raise GraphHttpError(
+                execution.get("error") or "secured Setting release failed",
+                500,
+                execution,
+            )
+        value = execution.get("value")
+        if not isinstance(value, dict):
+            raise GraphHttpError("secured Setting returned no payload", 500)
+        return value
 
     def get_setting(self, setting_id, *, org, target_revision=None):
         org = _resolve_client_org_arg(org)

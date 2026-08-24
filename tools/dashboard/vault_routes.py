@@ -132,11 +132,18 @@ async def seal(request: Request):
     try:
         body = await request.json()
         with _store() as store:
-            cek = service.seal_setting(
+            service.seal_setting(
                 store, request.path_params["name"], body["class_id"], body["genesis_id"],
                 body["required_policy"], _openers(body),
             )
-        return JSONResponse({"setting_name": request.path_params["name"], "class_id": body["class_id"], "cek": cek.hex()}, status_code=201)
+        # The CEK is an internal cryptographic intermediate, never a transport
+        # result. This legacy low-level route records the wrap only; the real
+        # Setting seal workflow is the operator-cookie ceremony.
+        return JSONResponse({
+            "setting_name": request.path_params["name"],
+            "class_id": body["class_id"],
+            "sealed": True,
+        }, status_code=201)
     except (KeyError, TypeError, ValueError, VaultError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
@@ -144,13 +151,12 @@ async def seal(request: Request):
 async def open_setting(request: Request):
     if (denied := _guard(request)) is not None:
         return denied
-    try:
-        body = await request.json()
-        with _store() as store:
-            cek = service.open_setting(store, request.path_params["name"], _openers(body))
-        return JSONResponse({"setting_name": request.path_params["name"], "cek": cek.hex()})
-    except (KeyError, TypeError, ValueError, VaultError) as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse({
+        "error": (
+            "content-encryption keys are never returned; read the secured "
+            "Setting through a vault_open approval"
+        ),
+    }, status_code=410)
 
 
 async def reseal(request: Request):

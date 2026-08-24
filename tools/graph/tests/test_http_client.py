@@ -49,6 +49,40 @@ def test_search_calls_api_graph_search_with_params():
     assert results == [{"id": "abc", "content": "hit"}]
 
 
+def test_request_vault_open_derives_session_server_side_and_returns_value():
+    client = _make_client()
+    captured = []
+
+    def fake_urlopen(req, timeout=None, context=None):
+        body = json.loads(req.data) if req.data else None
+        captured.append((req.get_method(), req.full_url, body, timeout))
+        if req.get_method() == "POST":
+            return _FakeResponse({"id": "open-1"})
+        return _FakeResponse({
+            "result": {
+                "approved": True,
+                "execution": {"ok": True, "value": {"value": "secret"}},
+            },
+        })
+
+    with patch("urllib.request.urlopen", fake_urlopen):
+        value = client.request_vault_open(
+            "autonomy.vault.secured", "mac.ssh", org="autonomy",
+        )
+
+    assert value == {"value": "secret"}
+    assert captured[0][2] == {
+        "kind": "vault_open",
+        "request": {
+            "set_id": "autonomy.vault.secured",
+            "key": "mac.ssh",
+            "ttl_seconds": 60,
+        },
+    }
+    assert "session" not in captured[0][2]
+    assert "/api/approvals/open-1?wait=" in captured[1][1]
+
+
 def test_search_passes_or_mode_and_tag():
     """Optional params (or, tag) flow through to query string."""
     client = _make_client()
