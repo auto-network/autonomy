@@ -14318,6 +14318,22 @@ def _caller_org(request) -> str | None:
     return _token_org_or_none(request) or request.headers.get("X-Graph-Org") or None
 
 
+def _graph_write_identity(request) -> tuple[str | None, str | None]:
+    """Trusted `(persona_id, session_id)` for graph content writes.
+
+    ``session_id`` is always the authenticated tmux session name, never a
+    client-supplied UUID or graph source id. Browser-cookie writes deliberately
+    carry no session id. Persona resolution reads the local org-persona record
+    at authentication time, so no operator identity is embedded in source or schema.
+    """
+    principal = api_auth.principal_from_request(request)
+    session_id = principal.subject if principal.kind in (
+        api_auth.ApiPrincipalKind.LOCAL_SESSION,
+        api_auth.ApiPrincipalKind.ORG_SESSION,
+    ) else None
+    return principal.persona_id, session_id
+
+
 def _settings_caller_org(request):
     """Resolve caller org for a Settings public-API call.
 
@@ -14483,6 +14499,7 @@ async def api_graph_note(request):
     """
     content_type = request.headers.get("content-type", "")
     org = _caller_org(request)
+    persona_id, session_id = _graph_write_identity(request)
 
     if "multipart/form-data" in content_type:
         try:
@@ -14497,8 +14514,8 @@ async def api_graph_note(request):
         tags_raw = form.get("tags")
         if tags_raw and not _GRAPH_TAGS_RE.match(str(tags_raw)):
             return JSONResponse({"error": f"invalid tags: {tags_raw!r}"}, status_code=400)
-        author = str(form["author"]) if form.get("author") else None
-        session_hint = str(form["session_hint"]) if form.get("session_hint") else None
+        author = None
+        session_hint = session_id
         auto_provenance_source_id = str(form["auto_provenance_source_id"]) if form.get("auto_provenance_source_id") else None
         auto_provenance_turn = int(form["auto_provenance_turn"]) if form.get("auto_provenance_turn") else None
         short_description = str(form["short_description"]) if form.get("short_description") else None
@@ -14523,8 +14540,8 @@ async def api_graph_note(request):
         tags_raw = body.get("tags")
         if tags_raw and not _GRAPH_TAGS_RE.match(tags_raw):
             return JSONResponse({"error": f"invalid tags: {tags_raw!r}"}, status_code=400)
-        author = body.get("author")
-        session_hint = body.get("session_hint")
+        author = None
+        session_hint = session_id
         auto_provenance_source_id = body.get("auto_provenance_source_id")
         auto_provenance_turn = body.get("auto_provenance_turn")
         short_description = body.get("short_description")
@@ -14547,6 +14564,8 @@ async def api_graph_note(request):
             html_path=html_path,
             short_description=short_description,
             keywords=keywords,
+            persona_id=persona_id,
+            session_id=session_id,
             org=org,
         )
     except FileNotFoundError as e:
@@ -14689,6 +14708,7 @@ async def api_graph_note_update(request):
     """
     content_type = request.headers.get("content-type", "")
     org = _caller_org(request)
+    persona_id, session_id = _graph_write_identity(request)
 
     if "multipart/form-data" in content_type:
         try:
@@ -14764,6 +14784,8 @@ async def api_graph_note_update(request):
             html_path=html_path,
             short_description=short_description,
             keywords=keywords,
+            persona_id=persona_id,
+            session_id=session_id,
             org=org,
         )
     except graph_ops.CrossOrgWriteError as e:
@@ -14883,6 +14905,7 @@ async def api_graph_comment(request):
         return JSONResponse({"error": e}, status_code=400)
 
     org = _caller_org(request)
+    persona_id, session_id = _graph_write_identity(request)
 
     # Source lookup goes through the full-surface cross-org resolver so
     # peer-raw notes still produce the correct CrossOrgWriteError
@@ -14898,7 +14921,9 @@ async def api_graph_comment(request):
             comment = await asyncio.to_thread(
                 graph_ops.add_comment,
                 source_id, body["content"],
-                actor=body.get("actor", "user"),
+                actor="user",
+                persona_id=persona_id,
+                session_id=session_id,
                 org=org,
             )
         except graph_ops.CrossOrgWriteError as ex:
@@ -14920,7 +14945,9 @@ async def api_graph_comment(request):
         comment = await asyncio.to_thread(
             graph_ops.add_comment,
             resolved["id"], body["content"],
-            actor=body.get("actor", "user"),
+            actor="user",
+            persona_id=persona_id,
+            session_id=session_id,
             org=org,
         )
     except graph_ops.CrossOrgWriteError as ex:

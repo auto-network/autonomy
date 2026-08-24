@@ -29,7 +29,9 @@ CREATE TABLE IF NOT EXISTS sources (
         CHECK (publication_state IN ('raw','curated','published','canonical')),
     deprecated        INTEGER NOT NULL DEFAULT 0 CHECK (deprecated IN (0,1)),
     successor_id      TEXT,                   -- loose reference to another source (promotion succession)
-    moved_to_org      TEXT
+    moved_to_org      TEXT,
+    persona_id        TEXT,                   -- org-scoped human persona; nullable for legacy/imports
+    session_id        TEXT                    -- submitting tmux session; nullable for direct browser writes
 );
 -- The ``type`` column is an open string; common values include the ones
 -- listed above. The ``agentic`` value identifies short-lived agent-action
@@ -54,7 +56,9 @@ CREATE TABLE IF NOT EXISTS thoughts (
     tags              TEXT DEFAULT '[]',              -- JSON array of topic tags
     metadata          TEXT DEFAULT '{}',              -- JSON blob
     created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    publication_state TEXT NOT NULL DEFAULT 'raw' CHECK (publication_state = 'raw')
+    publication_state TEXT NOT NULL DEFAULT 'raw' CHECK (publication_state = 'raw'),
+    persona_id        TEXT,
+    session_id        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_thoughts_source ON thoughts(source_id);
 CREATE INDEX IF NOT EXISTS idx_thoughts_source_turn ON thoughts(source_id, turn_number);
@@ -235,7 +239,9 @@ CREATE TABLE IF NOT EXISTS note_comments (
     actor             TEXT DEFAULT 'user',
     integrated        INTEGER DEFAULT 0,    -- 0=active, 1=integrated (content rolled into note body)
     created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    publication_state TEXT NOT NULL DEFAULT 'raw' CHECK (publication_state = 'raw')
+    publication_state TEXT NOT NULL DEFAULT 'raw' CHECK (publication_state = 'raw'),
+    persona_id        TEXT,
+    session_id        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_note_comments_source ON note_comments(source_id);
 
@@ -248,6 +254,8 @@ CREATE TABLE IF NOT EXISTS note_versions (
     version     INTEGER NOT NULL,
     content     TEXT NOT NULL,
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    persona_id  TEXT,
+    session_id  TEXT,
     UNIQUE(source_id, version)
 );
 CREATE INDEX IF NOT EXISTS idx_note_versions_source ON note_versions(source_id);
@@ -266,7 +274,9 @@ CREATE TABLE IF NOT EXISTS attachments (
     turn_number INTEGER,               -- conversation turn
     metadata    TEXT DEFAULT '{}',      -- JSON: width, height, description, tags
     alt_text    TEXT,                   -- textual description / alt-text for accessibility and agent consumption
-    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    persona_id  TEXT,
+    session_id  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_attachments_hash ON attachments(hash);
 CREATE INDEX IF NOT EXISTS idx_attachments_source ON attachments(source_id);
@@ -312,7 +322,8 @@ CREATE INDEX IF NOT EXISTS idx_threads_status ON threads(status);
 -- ============================================================
 -- CAPTURES — raw thought captures (inbox → threads)
 -- ============================================================
--- captures are inbox thoughts / attention records — publication_state pinned to 'raw'.
+-- DEPRECATED: captures were a lightly-used inbox feature exposed confusingly
+-- as "thoughts". Do not add new product dependencies; replace consumers before removal.
 CREATE TABLE IF NOT EXISTS captures (
     id                TEXT PRIMARY KEY,
     content           TEXT NOT NULL,

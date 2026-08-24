@@ -62,7 +62,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # unsigned rows, idx_settings_one_slot adds terminal_persona for signed rows,
 # and the duplicate-base self-heal groups by the same columns (the pair moves
 # as one).
-_SCHEMA_USER_VERSION = 8
+# v9: first-class persona_id/session_id on authored graph content.
+_SCHEMA_USER_VERSION = 9
 DEFAULT_ORGS_DIR = DATA_ROOT / "orgs"
 
 # Keep SQLite's existing default lock wait explicit so contention tests can
@@ -488,6 +489,8 @@ class GraphDB:
         schema = SCHEMA_PATH.read_text()
         self.conn.executescript(schema)
         self._migrate_attachments_alt_text()
+        self._migrate_content_attribution()
+        self._backfill_content_persona()
         self._migrate_sources_last_activity()
         self._migrate_publication_state()
         self._migrate_source_moves()
@@ -542,6 +545,41 @@ class GraphDB:
         if "alt_text" not in cols:
             self.conn.execute("ALTER TABLE attachments ADD COLUMN alt_text TEXT")
             self.conn.commit()
+
+    def _migrate_content_attribution(self):
+        """Add first-class human and submitting-session attribution columns.
+
+        Values are deliberately nullable. Historical provisioning is owned by
+        the host, not by a schema upgrade; the schema itself never writes an
+        operator's persona key.
+        """
+        for table in ("sources", "thoughts", "note_comments", "note_versions", "attachments"):
+            cols = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+            for column in ("persona_id", "session_id"):
+                if column not in cols:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
+        self.conn.commit()
+
+    def _backfill_content_persona(self):
+        """Provision legacy authored rows from one cached Settings lookup.
+
+        This is deliberately a migration, not a schema default: the personal
+        Settings value is read once, then each table is updated in bulk. It
+        never embeds an operator-specific value in source code.
+        """
+        org_row = self.conn.execute("SELECT type FROM orgs LIMIT 1").fetchone()
+        if not org_row or org_row["type"] != "shared":
+            return
+        from .org_ops import local_persona_pub
+        persona_id = local_persona_pub()
+        if not persona_id:
+            return
+        for table in ("sources", "thoughts", "note_comments", "note_versions", "attachments"):
+            self.conn.execute(
+                f"UPDATE {table} SET persona_id = ? WHERE persona_id IS NULL",
+                (persona_id,),
+            )
+        self.conn.commit()
 
     def _migrate_publication_state(self):
         """Add publication_state / deprecated / successor_id (idempotent).
@@ -1155,13 +1193,14 @@ class GraphDB:
             """INSERT INTO sources (id, type, platform, title, url, file_path, metadata,
                                     created_at, ingested_at, last_activity_at,
                                     publication_state, deprecated, successor_id, moved_to_org,
-                                    short_description, keywords)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    short_description, keywords, persona_id, session_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (src.id, src.type, src.platform, src.title, src.url,
              src.file_path, json.dumps(src.metadata), src.created_at, src.ingested_at,
              src.last_activity_at,
              src.publication_state, int(bool(src.deprecated)), src.successor_id,
-             src.moved_to_org, src.short_description, src.keywords),
+             src.moved_to_org, src.short_description, src.keywords,
+             src.persona_id, src.session_id),
         )
         self.conn.commit()
         return src
@@ -1259,10 +1298,11 @@ class GraphDB:
         # concurrent writers that both passed dedup before either
         # committed.
         self.conn.execute(
-            """INSERT OR IGNORE INTO thoughts (id, source_id, content, role, turn_number, message_id, tags, metadata, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT OR IGNORE INTO thoughts (id, source_id, content, role, turn_number, message_id, tags, metadata, created_at, persona_id, session_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (t.id, t.source_id, t.content, t.role, t.turn_number, t.message_id,
-             json.dumps(t.tags), json.dumps(t.metadata), t.created_at),
+             json.dumps(t.tags), json.dumps(t.metadata), t.created_at,
+             t.persona_id, t.session_id),
         )
         return t
 
@@ -2481,12 +2521,12 @@ class GraphDB:
 
     # ── Note Comments ───────────────────────────────────────
 
-    def insert_comment(self, source_id: str, content: str, actor: str = "user") -> dict:
+    def insert_comment(self, source_id: str, content: str, actor: str = "user", *, persona_id: str | None = None, session_id: str | None = None) -> dict:
         cid = new_id()
         self.conn.execute(
-            """INSERT INTO note_comments (id, source_id, content, actor)
-               VALUES (?, ?, ?, ?)""",
-            (cid, source_id, content, actor),
+            """INSERT INTO note_comments (id, source_id, content, actor, persona_id, session_id)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (cid, source_id, content, actor, persona_id, session_id),
         )
         self.conn.commit()
         row = self.conn.execute("SELECT * FROM note_comments WHERE id = ?", (cid,)).fetchone()
@@ -2515,11 +2555,11 @@ class GraphDB:
 
     # ── Note Versions ─────────────────────────────────────
 
-    def insert_note_version(self, source_id: str, version: int, content: str):
+    def insert_note_version(self, source_id: str, version: int, content: str, *, persona_id: str | None = None, session_id: str | None = None):
         self.conn.execute(
-            """INSERT INTO note_versions (source_id, version, content)
-               VALUES (?, ?, ?)""",
-            (source_id, version, content),
+            """INSERT INTO note_versions (source_id, version, content, persona_id, session_id)
+               VALUES (?, ?, ?, ?, ?)""",
+            (source_id, version, content, persona_id, session_id),
         )
 
     def get_note_version(self, source_id: str, version: int) -> dict | None:
@@ -2554,10 +2594,11 @@ class GraphDB:
     def insert_attachment(self, att: Attachment) -> Attachment:
         self.conn.execute(
             """INSERT INTO attachments (id, hash, filename, mime_type, size_bytes, file_path,
-                                        source_id, turn_number, metadata, alt_text, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                        source_id, turn_number, metadata, alt_text, created_at, persona_id, session_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (att.id, att.hash, att.filename, att.mime_type, att.size_bytes, att.file_path,
-             att.source_id, att.turn_number, json.dumps(att.metadata), att.alt_text, att.created_at),
+             att.source_id, att.turn_number, json.dumps(att.metadata), att.alt_text, att.created_at,
+             att.persona_id, att.session_id),
         )
         self.conn.commit()
         return att
