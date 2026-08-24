@@ -82,6 +82,7 @@ def checks():
             """() => {
                 const r = window.getSessionStore('auto-pwreal-0001');
                 r.isLive=true; r.project='autonomy'; r.sessionType='container';
+                r.role='Builder'; r.harness='claude'; r.model='claude-pwtest';
                 r.startedAt=Date.now()/1000 + 1;
                 r.setupPhase='container_starting'; r.harnessPhase='harness_starting';
                 window.dispatchEvent(new CustomEvent('sessions:store-changed', {detail:{reason:'pwtest2'}}));
@@ -90,6 +91,9 @@ def checks():
         pg.wait_for_timeout(700)
         r["pending_after_reconcile"] = pg.locator('[data-session-id="pending-pwtest"]').count()
         r["real_in_launching"] = pg.locator('[data-testid="launching-section"] [data-session-id="auto-pwreal-0001"]').count()
+        launch = pg.locator('[data-testid="launching-section"] [data-session-id="auto-pwreal-0001"]')
+        r["launch_role_badges"] = launch.locator('.sc-role:visible').count()
+        r["launch_harness_visible"] = launch.locator('[data-testid="session-harness-badge"]:visible').count()
         r["page_errors"] = errors
         # cleanup injected store rows so we don't pollute a live page
         pg.evaluate(
@@ -116,6 +120,15 @@ def test_pending_tile_not_in_active(checks):
 def test_real_session_reconciles_pending_away(checks):
     assert checks["pending_after_reconcile"] == 0, "Pending tile not reconciled away after real session arrived"
     assert checks["real_in_launching"] >= 1, "Real booting session not shown in Launching"
+
+
+def test_launching_card_prioritizes_phase_over_secondary_badges(checks):
+    assert checks["launch_role_badges"] == 0, (
+        "Launching card kept its type/role badges ahead of the startup phase"
+    )
+    assert checks["launch_harness_visible"] >= 1, (
+        "Launching card hid the model badge even though the test viewport has room"
+    )
 
 
 def test_no_page_errors(checks):

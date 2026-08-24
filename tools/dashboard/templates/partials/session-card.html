@@ -76,20 +76,14 @@
               'sc-nag-both':       s.nag_enabled &&  s.dispatch_nag_enabled
             }"
             x-show="s.is_live && (s.nag_enabled != null || s.dispatch_nag_enabled != null)">🔔</span>
-      <span class="sc-role" :class="typeCls(s.session_type)" x-text="typeBadge(s.session_type)" x-show="typeBadge(s.session_type)" data-testid="session-role"></span>
-      <span class="sc-role" x-text="s.role" x-show="s.role" data-testid="session-role"></span>
-      <!-- Official provider icon + compact active model in one live badge. -->
-      <span class="sc-harness-wrap"
-            x-data="{ harness: null, model: null }"
-            x-effect="harness = s.harness; model = s.model">
-        {% include 'partials/session-harness-badge.html' %}
-      </span>
-      {% include 'partials/session-contributions.html' %}
-      <!-- Startup-phase chip (auto-yfcoc; design rev 63542418). Visible
-           whenever the lifecycle derivation has a chip label for this
-           session — covers every active startup state plus the ready/
-           planning/confirming-trust overlays. Hidden for ``ready`` and
-           dead states (the chrome below the chip handles those). -->
+      <span class="sc-role" :class="typeCls(s.session_type)" x-text="typeBadge(s.session_type)"
+            x-show="typeBadge(s.session_type) && !(window.Autonomy && window.Autonomy.lifecycle && window.Autonomy.lifecycle.startupVisible(s))"
+            data-testid="session-role"></span>
+      <span class="sc-role" x-text="s.role"
+            x-show="s.role && !(window.Autonomy && window.Autonomy.lifecycle && window.Autonomy.lifecycle.startupVisible(s))"
+            data-testid="session-role"></span>
+      <!-- Startup phase takes priority over ordinary metadata. It comes before
+           the model so the model can use only genuinely spare row width. -->
       <template x-if="window.Autonomy && window.Autonomy.lifecycle && window.Autonomy.lifecycle.phaseChip(s) && window.Autonomy.lifecycle.phaseTone(s) !== 'dead'">
         <span class="sc-phase-chip"
               :class="window.Autonomy.lifecycle.phaseTone(s)"
@@ -98,6 +92,16 @@
           <span x-text="window.Autonomy.lifecycle.phaseChip(s)"></span>
         </span>
       </template>
+      <!-- Official provider icon + compact active model in one live badge. -->
+      <span class="sc-harness-wrap"
+            x-data="{ harness: null, model: null }"
+            x-effect="harness = s.harness; model = s.model">
+        {% include 'partials/session-harness-badge.html' %}
+      </span>
+      <span class="sc-session-contributions"
+            x-show="!(window.Autonomy && window.Autonomy.lifecycle && window.Autonomy.lifecycle.startupVisible(s))">
+        {% include 'partials/session-contributions.html' %}
+      </span>
       <!-- Workspace-changes indicator. Same shape as the page-mode
            header anchor; shows when this session has commits-ahead
            or dirty files in any of its worktrees. Optional helpers —
@@ -194,21 +198,13 @@
               'sc-nag-both':       s.nag_enabled &&  s.dispatch_nag_enabled
             }"
             x-show="s.is_live && (s.nag_enabled != null || s.dispatch_nag_enabled != null)">🔔</span>
-      <span class="sc-role" :class="typeCls(s.session_type)" x-text="typeBadge(s.session_type)" x-show="typeBadge(s.session_type)" data-testid="session-role"></span>
-      <span class="sc-role" x-text="s.role" x-show="s.role" data-testid="session-role"></span>
-      <!-- Harness badge mirrored on the stats row for the same reason
-           the role/type badges are duplicated: zoom modes hide one row
-           or the other via CSS. -->
-      <span class="sc-harness-wrap"
-            x-data="{ harness: null, model: null }"
-            x-effect="harness = s.harness; model = s.model">
-        {% include 'partials/session-harness-badge.html' %}
-      </span>
-      {% include 'partials/session-contributions.html' %}
-      <!-- Startup-phase chip mirrored on the stats row (auto-yfcoc).
-           Same chrome + derivation as the compact-row chip; both rows
-           render it so the chip survives zoom modes via the existing
-           row-hiding rules. -->
+      <span class="sc-role" :class="typeCls(s.session_type)" x-text="typeBadge(s.session_type)"
+            x-show="typeBadge(s.session_type) && !(window.Autonomy && window.Autonomy.lifecycle && window.Autonomy.lifecycle.startupVisible(s))"
+            data-testid="session-role"></span>
+      <span class="sc-role" x-text="s.role"
+            x-show="s.role && !(window.Autonomy && window.Autonomy.lifecycle && window.Autonomy.lifecycle.startupVisible(s))"
+            data-testid="session-role"></span>
+      <!-- Mirror the launch-priority ordering for normal + expanded zoom. -->
       <template x-if="window.Autonomy && window.Autonomy.lifecycle && window.Autonomy.lifecycle.phaseChip(s) && window.Autonomy.lifecycle.phaseTone(s) !== 'dead'">
         <span class="sc-phase-chip"
               :class="window.Autonomy.lifecycle.phaseTone(s)"
@@ -217,6 +213,18 @@
           <span x-text="window.Autonomy.lifecycle.phaseChip(s)"></span>
         </span>
       </template>
+      <!-- Harness badge mirrored on the stats row for the same reason
+           the role/type badges are duplicated: zoom modes hide one row
+           or the other via CSS. -->
+      <span class="sc-harness-wrap"
+            x-data="{ harness: null, model: null }"
+            x-effect="harness = s.harness; model = s.model">
+        {% include 'partials/session-harness-badge.html' %}
+      </span>
+      <span class="sc-session-contributions"
+            x-show="!(window.Autonomy && window.Autonomy.lifecycle && window.Autonomy.lifecycle.startupVisible(s))">
+        {% include 'partials/session-contributions.html' %}
+      </span>
       <!-- Workspace-changes indicator. Same shape as the page-mode
            header anchor; shows when this session has commits-ahead
            or dirty files in any of its worktrees. Optional helpers —
