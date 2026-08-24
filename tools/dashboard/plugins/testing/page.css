@@ -264,7 +264,7 @@
 .testing-finished-strip small { display: flex; justify-content: space-between; gap: .5rem; }
 .testing-finished-strip small b { color: var(--test-muted); font: .6rem ui-monospace, monospace; }
 
-.testing-history-grid { display: grid; gap: .65rem; }
+.testing-history-grid { display: grid; align-items: start; gap: .55rem; }
 .testing-history-card { border: 1px solid var(--test-line); background: var(--test-panel-2); }
 .testing-history-card > header {
   display: flex;
@@ -280,12 +280,15 @@
 .testing-history-summary { display: flex; flex-wrap: wrap; gap: .8rem; padding: .6rem .8rem; border-bottom: 1px solid var(--test-line); }
 .testing-history-summary span { color: var(--test-muted); font: .6rem ui-monospace, monospace; }
 .testing-history-summary b { color: var(--test-ink); font-size: .72rem; }
+.testing-history-runs {
+  min-height: 0;
+}
 .testing-history-runs > div {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: .65rem;
-  padding: .65rem .8rem;
+  padding: .55rem .8rem;
   border-bottom: 1px solid var(--test-line);
 }
 .testing-history-runs > div:last-child { border-bottom: 0; }
@@ -294,7 +297,6 @@
 .testing-history-runs p strong { font: 700 .68rem ui-monospace, monospace; }
 .testing-history-runs p small { margin-top: .18rem; overflow: hidden; color: var(--test-muted); font: .58rem ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; }
 .testing-history-runs > div > b { color: var(--test-muted); font: 700 .62rem ui-monospace, monospace; }
-.testing-history-more { margin: 0; padding: .65rem .8rem; color: var(--test-muted); font: italic .62rem Georgia, serif; }
 
 .testing-feature-list { display: grid; grid-template-columns: 1fr 1fr; gap: .45rem; }
 .testing-feature-list > div {

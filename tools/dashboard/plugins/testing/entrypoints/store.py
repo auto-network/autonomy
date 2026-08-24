@@ -562,6 +562,58 @@ def duration_history(
     }
 
 
+def node_estimates(
+    org: str,
+    repository: str,
+    nodeids: list[str],
+    *,
+    limit_samples: int = 10,
+) -> dict[str, Any]:
+    """Return compact per-node timing estimates for an active run watchdog."""
+    if not repository or len(repository) > 1000:
+        return {"ok": False, "error": "valid repository is required"}
+    if not isinstance(nodeids, list) or not 1 <= len(nodeids) <= 2000:
+        return {"ok": False, "error": "nodeids must contain 1 to 2000 entries"}
+    try:
+        limit_samples = max(1, min(int(limit_samples), MAX_OBSERVATIONS_PER_TEST))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "limit_samples must be an integer"}
+    wanted = list(dict.fromkeys(str(value).strip() for value in nodeids if str(value).strip()))
+    if not wanted:
+        return {"ok": False, "error": "nodeids must contain non-empty strings"}
+    wanted_set = set(wanted)
+    histories: dict[str, list[Any]] = {}
+    for member in _observation_members(org, repository):
+        nodeid = str(member.payload.get("nodeid") or "")
+        if nodeid in wanted_set:
+            histories.setdefault(nodeid, []).append(member)
+    estimates = []
+    for nodeid, members in histories.items():
+        members.sort(
+            key=lambda member: (
+                float(member.payload.get("recorded_at") or 0),
+                member.created_at,
+                member.id,
+            ),
+            reverse=True,
+        )
+        durations = [float(member.payload["duration_seconds"]) for member in members[:limit_samples]]
+        estimates.append({
+            "nodeid": nodeid,
+            "samples": len(durations),
+            "median_seconds": median(durations),
+            "maximum_seconds": max(durations),
+        })
+    estimates.sort(key=lambda item: item["nodeid"])
+    return {
+        "ok": True,
+        "repository": repository,
+        "estimates": estimates,
+        "missing": len(wanted_set - set(histories)),
+        "history_limit": MAX_OBSERVATIONS_PER_TEST,
+    }
+
+
 def estimate_duration(
     org: str,
     repository: str,
@@ -761,6 +813,11 @@ def dashboard_summary(
             "estimated_high_seconds": float(payload.get("estimated_high_seconds") or 0) or None,
             "estimate_complete": bool(payload.get("estimate_complete", False)),
             "estimate_sampled_tests": int(payload.get("estimate_sampled_tests") or 0),
+            "hang_detected": bool(payload.get("hang_detected", False)),
+            "hung_nodeid": str(payload.get("hung_nodeid") or ""),
+            "hang_reason": str(payload.get("hang_reason") or ""),
+            "hang_elapsed_seconds": float(payload.get("hang_elapsed_seconds") or 0),
+            "hang_threshold_seconds": float(payload.get("hang_threshold_seconds") or 0),
         })
     telemetry = telemetry_status(org)
     operational_errors = error_status(org)
@@ -883,6 +940,7 @@ def dashboard_summary(
         "runs": {
             "total": len(runs),
             "status_counts": status_counts,
+            "hang_count": sum(bool(member.payload.get("hang_detected")) for member in runs),
             "pass_ratio": pass_ratio,
             "estimate_quality": estimate_quality,
             "test_totals": totals,

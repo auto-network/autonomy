@@ -98,8 +98,11 @@
       selectorText(run) {
         const selectors = run.selectors || run.selector_preview || [];
         const preview = selectors.map(value => value.split('/').pop()).join(', ');
-        const omitted = Math.max(0, Number(run.selector_count || 0) - selectors.length);
-        return (preview || 'selectors unavailable') + (omitted ? ' +' + omitted + ' more' : '');
+        const total = Number(run.selector_count || 0);
+        // The activity endpoint intentionally bounds selector payloads. Keep the
+        // tile honest about that bound without a noisy trailing count badge;
+        // the run id remains the handle for full evidence.
+        return preview || (total ? total + ' selectors' : 'selectors unavailable');
       },
       etaText(run) {
         const estimate = Number(run.estimated_seconds || 0);
