@@ -1,0 +1,29 @@
+id: mission
+api_version: 1
+org: autonomy
+
+# Ships dormant: the operator enables it at cutover, in the same commit
+# that unhooks the legacy static `graph mission` CLI registration so the
+# verb has exactly one owner at any moment.
+default_enabled: false
+
+paths:
+  - /mission
+
+assets:
+  template: page.html
+  script: page.js
+
+nav:
+  label: Mission Control
+
+frontend:
+  alpine_root: missionPage
+
+entrypoints:
+  api: tools.dashboard.plugins.mission.entrypoints.api:routes
+  schemas:
+    - tools.dashboard.plugins.mission.entrypoints.schemas:MissionV1
+    - tools.dashboard.plugins.mission.entrypoints.schemas:MissionPillarV1
+    - tools.dashboard.plugins.mission.entrypoints.schemas:MissionContentV1
+    - tools.dashboard.plugins.mission.entrypoints.schemas:MissionChatV1

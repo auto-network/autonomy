@@ -1,0 +1,2554 @@
+<!-- Structured mission viewer — the platform's standard template.
+     Served by structured.render_screen() with __MC_STRUCTURED_DATA__
+     replaced by the mission's baked item JSON. Everything renders
+     client-side, once, into the DOM; view switching is CSS-only so the
+     platform chrome's anchor/ask discovery sees every item at load. -->
+<style>
+  :root{
+    --bg:#0c0f14; --bg2:#11151d; --card:#151a23; --card2:#1a2029;
+    --line:#262d3a; --line2:#303948;
+    --ink:#e6e9f0; --ink2:#aab3c4; --ink3:#7c8698;
+    --accent:#8b85ff; --accent-dim:#46448c; --ind:#7d78ea;
+    --good:#0ca30c; --warn:#fab219; --crit:#d03b3b; --serious:#ec835a;
+    --neut:#8391a8;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  }
+  html{background:#0c0f14}
+  body{background:#0c0f14;margin:0}
+  #mc-app,#mc-app *{box-sizing:border-box}
+  #mc-app{
+    max-width:1060px;margin:0 auto;padding:14px 14px 80px;
+    color:var(--ink);
+    font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  }
+  #mc-app a{color:var(--accent)}
+  .mc-tabs{display:flex;gap:18px;margin:4px 0 14px;border-bottom:1px solid var(--line);
+    overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+  .mc-tabs::-webkit-scrollbar{display:none}
+  .mc-tabs button{background:none;border:0;cursor:pointer;font:inherit;
+    padding:9px 2px;font-size:.85rem;color:var(--ink3);flex:none;
+    border-bottom:2px solid transparent;margin-bottom:-1px}
+  .mc-tabs button.on{color:#fff;border-color:var(--accent)}
+  #mc-app .mc-sub{color:var(--ink3);font-size:.82rem;margin:0 0 14px}
+
+  /* glance chips */
+  .mc-glance{display:flex;gap:6px;flex-wrap:nowrap;align-items:stretch;
+    margin:0 0 16px;overflow-x:auto;scrollbar-width:none}
+  .mc-glance::-webkit-scrollbar{display:none}
+  .mc-glance .g{
+    flex:none;display:flex;align-items:baseline;gap:4px;background:var(--card);
+    border:1px solid var(--line);border-radius:8px;padding:6px 7px;
+    cursor:pointer;font:inherit;color:inherit;white-space:nowrap;
+  }
+  .mc-gset{flex:none;display:inline-flex;background:var(--card);
+    border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .mc-gset .g{border:0;border-radius:0;border-left:1px solid var(--line)}
+  .mc-gset .g:first-child{border-left:0}
+  .mc-gset .g.on{box-shadow:inset 0 0 0 1px var(--accent-dim)}
+  .mc-glance .g:hover{border-color:var(--line2)}
+  .mc-glance .g.on{border-color:var(--accent-dim);background:#232345}
+  .mc-glance .g.on span{color:var(--ink2)}
+  .mc-glance .g b{font-size:.95rem;color:#fff}
+  .mc-glance .g span{font-size:.66rem;color:var(--ink3);text-transform:uppercase;letter-spacing:.03em}
+  .mc-glance .g.gd b{color:var(--good)} .mc-glance .g.gw b{color:var(--warn)}
+  .mc-glance .g.gc b{color:var(--crit)} .mc-glance .g.ga b{color:var(--accent)}
+
+  /* ── activity grid ── */
+  .mc-activity{background:var(--card);border:1px solid var(--line);border-radius:12px;
+    padding:12px 14px;margin:0 0 16px}
+  .mc-activity .hd{display:flex;justify-content:space-between;align-items:baseline;
+    gap:8px;margin-bottom:8px}
+  .mc-activity .hd .t{font-size:.78rem;color:var(--ink2);text-transform:uppercase;letter-spacing:.06em}
+  .mc-activity .legend{display:flex;align-items:center;gap:3px;font-size:.68rem;color:var(--ink3)}
+  .mc-activity .legend i{width:9px;height:9px;border-radius:2px;display:inline-block}
+  .mc-act-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:2px;
+    scrollbar-width:thin}
+  .mc-act-table{border-collapse:separate;border-spacing:2px 2px}
+  .mc-act-table th .pband{height:10px}
+  .mc-act-table td,.mc-act-table th{padding:0}
+  .mc-act-table th{text-align:left;padding-right:42px;max-width:232px;
+    overflow:hidden;cursor:pointer;font-size:0;line-height:0;color:var(--ink3)}
+  .mc-act-table th .thw{display:inline-flex;align-items:center;gap:3px;max-width:100%;
+    color:var(--ink3)}
+  .mc-act-table th .thn{font-weight:400;font-size:.64rem;line-height:1;
+    color:var(--ink3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .mc-act-table th .pband{height:10px}
+  .mc-act-cell{width:11px;height:11px;border-radius:3px;background:var(--card2)}
+  .mc-act-cell.a1{background:#2b2f52}.mc-act-cell.a2{background:#46448c}
+  .mc-act-cell.a3{background:#6a63c8}.mc-act-cell.a4{background:#8f87ff}
+  .mc-act-table .dayrow td{padding-top:3px}
+  .mc-act-table .daylab{font-size:.6rem;color:var(--ink3);text-align:center;padding:0 1px}
+
+  /* ── nav ── */
+  .mc-psel{position:relative;margin:0 0 12px;display:flex;
+    align-items:center;gap:8px}
+  .mc-psel-btn{display:flex;align-items:center;gap:5px;background:none;
+    border:0;padding:4px 0;flex:1;min-width:0;cursor:pointer;font:inherit;
+    color:var(--ink)}
+  .mc-plabel{flex:1;min-width:0;display:flex;align-items:center;gap:5px;
+    overflow:hidden;text-align:left}
+  .mc-plabel > :last-child{flex:1;min-width:0;white-space:nowrap;overflow:hidden;
+    text-overflow:ellipsis}
+  .mc-psel-btn b{font-size:.95rem;color:#fff}
+  .mc-psel-btn .pband{height:16px}
+  .mc-psel-btn .caret{color:var(--ink3);font-size:.7rem;border:1px solid var(--line);
+    border-radius:7px;padding:4px 9px;background:var(--card)}
+  .mc-psel-menu{display:none}
+  .mc-psel.open .mc-psel-menu{display:block;position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:8;
+    background:#11151d;border:1px solid var(--line2);border-radius:10px;
+    box-shadow:0 12px 30px rgba(0,0,0,.5);
+    max-height:min(60vh,420px);overflow-y:auto;-webkit-overflow-scrolling:touch}
+  .mc-psel-row{display:flex;align-items:center;gap:5px;width:100%;padding:10px 13px;
+    background:none;border:0;border-top:1px solid #1c2230;cursor:pointer;
+    font:inherit;color:var(--ink2);font-size:.88rem;text-align:left}
+  .mc-psel-row:first-child{border-top:0}
+  .mc-psel-row:hover{background:#171b26}
+  .mc-psel-row.on{color:#fff;background:#171b26}
+  .mc-secfilters{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 10px}
+  .mc-secfilters button{font:600 .68rem/1 inherit;color:var(--ink3);background:var(--bg2);
+    border:1px solid var(--line);border-radius:12px;padding:5px 10px;cursor:pointer}
+  .mc-secfilters button.on{color:#fff;border-color:var(--accent-dim);background:#232345}
+  .mc-flegend{display:flex;gap:12px;align-items:baseline;margin:0 0 10px;flex-wrap:wrap}
+  /* Phones: the entries split the row evenly — spacing self-balances,
+     so growing counts compress whitespace instead of wrapping. */
+  @media (max-width:400px){
+    .mc-flegend{gap:0}
+    .mc-flegend .fl{gap:3px;flex:1 1 0;min-width:0;justify-content:flex-start}
+    .mc-flegend .fl b{font-size:.76rem}
+    .mc-flegend .fl .w2{font-size:.6rem;letter-spacing:.02em}
+  }
+  @media (max-width:380px){
+    .mc-flegend .fl{gap:2px}
+    .mc-flegend .fl b{font-size:.72rem}
+    .mc-flegend .fl .w2{font-size:.56rem;letter-spacing:0}
+  }
+  .mc-flegend .fl{background:none;border:0;padding:2px 0 4px;cursor:pointer;
+    font:inherit;font-size:.72rem;color:var(--ink3);display:inline-flex;
+    gap:5px;align-items:baseline}
+  .mc-flegend .fl .mk2{font-weight:700}
+  .mc-flegend .fl b{font-size:.82rem}
+  .mc-flegend .fl .w2{text-transform:uppercase;letter-spacing:.04em;font-size:.64rem}
+  .mc-flegend .fl.on{color:var(--ink);box-shadow:inset 0 -2px 0 var(--line2)}
+  .mc-flegend .fl.dim{opacity:.4}
+  .gx-dot{font-size:1.45em;line-height:.7}
+  .gx-arr svg{width:.95em;height:.95em;vertical-align:-0.1em}
+  .gx-stop svg{width:.95em;height:.95em;vertical-align:-0.1em}
+  .gx-news svg{width:.95em;height:.95em;vertical-align:-0.12em}
+  .gx-ring{font-size:.88em}
+  .md-pre{background:var(--card2);border:1px solid var(--line);border-radius:8px;
+    padding:9px 11px;overflow-x:auto;font-size:.74rem;line-height:1.5;
+    font-family:var(--mono);margin:8px 0}
+  .md-pre code{background:none;padding:0}
+  .mc-bead.q-open .bmk{color:var(--warn)}
+  .mc-bead.q-blocking .bmk{color:var(--crit)}
+  .mc-bead.q-answered .bmk{color:var(--good)}
+  .qe{margin:0 0 14px}
+  .qe .qwho{font-size:.7rem;color:var(--ink3);margin-bottom:3px}
+  .qe .qwho b{color:var(--ink2);font-weight:600}
+  .qe .qtx{font-size:.88rem;color:var(--ink2);line-height:1.55}
+  .qprog{display:flex;gap:7px;align-items:baseline;font-size:.74rem;
+    color:var(--ink3);margin:0 0 10px}
+  .qprog .qpm{color:var(--warn);font-weight:700}
+  .qprog .qpa{margin-left:auto;flex:none;font-size:.66rem}
+  .qcomp{margin:16px 0 0;display:flex;flex-direction:column;gap:8px}
+  .qcomp textarea{background:var(--card2);border:1px solid var(--line);
+    border-radius:10px;color:var(--ink);font:inherit;font-size:.85rem;
+    padding:10px 12px;min-height:64px;resize:vertical}
+  .qcomp .qsend{align-self:flex-end;background:var(--card2);color:var(--ink2);
+    border:1px solid var(--line2);border-radius:8px;padding:6px 16px;
+    font:inherit;font-size:.78rem;cursor:pointer}
+  .qhint{font-size:.68rem;color:var(--ink3);line-height:1.5}
+
+  .mc-seg{display:inline-flex;gap:2px;background:var(--bg2);border:1px solid var(--line);
+    border-radius:8px;padding:2px}
+  .mc-seg button{background:none;border:0;cursor:pointer;font:600 .74rem/1 inherit;
+    color:var(--ink3);border-radius:6px;padding:5px 10px}
+  .mc-seg .mc-seg-on{background:#232345;color:#fff}
+  .mc-news-seg{margin:0 0 12px}
+  .mc-qa-seg{margin:0 0 12px}
+  .mc-qa{cursor:pointer}
+  .mc-qa:hover{border-color:var(--line2)}
+  .mc-qa-peek{font-size:.8rem;color:var(--ink3);margin-top:6px;
+    border-left:2px solid var(--line2);padding-left:9px;font-style:italic}
+  .mc-qa-state{font-size:.68rem;color:var(--ink3);text-transform:uppercase;
+    letter-spacing:.05em;margin-top:7px}
+  .mc-qa-ask{display:flex;justify-content:flex-start;margin:4px 0 0}
+  .mc-subtabs{display:flex;gap:14px;margin:0 0 9px;border-bottom:1px solid var(--line);
+    overflow-x:auto;scrollbar-width:none}
+  .mc-subtabs::-webkit-scrollbar{display:none}
+  .mc-subtabs button{background:none;border:0;cursor:pointer;font:inherit;
+    font-size:.78rem;color:var(--ink3);padding:7px 2px;flex:none;
+    border-bottom:2px solid transparent;margin-bottom:-1px;white-space:nowrap}
+  .mc-subtabs button sup.n{font-size:.62rem;color:var(--warn);
+    margin-left:4px;line-height:0}
+  .mc-subtabs button.on{color:var(--ink);border-color:var(--line2)}
+  .mc-subtabs button.off{opacity:.32;cursor:default}
+  .mc-charter{padding:2px 0 6px}
+  .mc-newsstamp{font-size:.68rem;color:var(--ink3);margin:0 0 4px;
+    letter-spacing:.01em}
+  .mc-bead.d-row .bmk{color:var(--ink3);font-size:.72rem}
+  .mc-bead .x2{font-size:.76rem;color:var(--ink3);margin-top:3px}
+  .mc-critpage .mk3.c-dec{color:var(--ink3)}
+  .mc-bead.d-fav .bmk{color:var(--warn)}
+  .dstar{background:none;border:0;cursor:pointer;font:inherit;
+    font-size:.95rem;color:var(--ink3);padding:0 4px;margin-left:8px;
+    vertical-align:-1px}
+  .dstar.on{color:var(--warn)}
+  .tk.tk-link{cursor:pointer}
+  .tk.tk-link:hover .tt{color:var(--ink)}
+  .ifw3{color:var(--ink3);font-style:italic}
+  .pinfo{flex:none;background:none;cursor:pointer;color:var(--ink3);
+    border:0;padding:3px 7px;display:inline-flex;align-items:center}
+  .pinfo svg{width:15px;height:15px}
+  .pinfo.on{color:var(--accent)}
+  .mc-status-prose .body{font-size:.9rem;color:var(--ink2)}
+  .md-a{color:var(--accent);text-decoration:underline dotted}
+  .md-c{font-family:var(--mono);font-size:.82em;background:var(--bg2);
+    border:1px solid var(--line);border-radius:4px;padding:1px 5px}
+  .md-h{font-size:.78rem;letter-spacing:.07em;text-transform:uppercase;
+    color:var(--ink3);margin:14px 0 4px}
+  .md-ul{margin:6px 0;padding-left:20px}
+  .md-ul li{margin:3px 0}
+  .md-gallery{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+  .md-gallery img{height:84px;border-radius:8px;border:1px solid var(--line);
+    cursor:zoom-in;object-fit:cover}
+  .md-lightbox{position:fixed;inset:0;z-index:60;background:rgba(2,6,12,.93);
+    display:flex;align-items:center;justify-content:center;cursor:zoom-out;padding:18px}
+  .md-lightbox img{max-width:100%;max-height:100%;border-radius:10px}
+  .mc-status-prose .body p{margin:6px 0}
+  .mc-status-prose .mc-when{font-size:.7rem;color:var(--ink3);margin-top:7px}
+  .mc-crit{display:flex;gap:10px;align-items:baseline;padding:9px 2px;
+    border-top:1px solid #1c2230}
+  .mc-crit:first-of-type,.mc-status-prose + .mc-crit{border-top:0;margin-top:6px}
+  .mc-crit .mk{flex:none;width:18px;text-align:center;font-weight:700}
+  .mc-crit.c-ok .mk{color:var(--good)} .mc-crit.c-run .mk{color:var(--warn)}
+  .mc-crit.c-bad .mk{color:var(--crit)} .mc-crit.c-ask .mk{color:var(--accent)}
+  .mc-crit.c-todo .mk{color:var(--ind)}
+  .mc-crit .bx{flex:1;min-width:0}
+  .mc-crit .t{font-size:.88rem;color:var(--ink)}
+  .mc-crit.c-ok .t{color:var(--ink2)}
+  .mc-crit .d{font-size:.76rem;color:var(--ink3);margin-top:2px}
+  .mc-crit .word{flex:none;font-size:.64rem;text-transform:uppercase;
+    letter-spacing:.05em}
+  .mc-crit .word.w-ok{color:var(--good)} .mc-crit .word.w-run{color:var(--warn)}
+  .mc-crit .word.w-todo{color:var(--ink3)}
+  .mc-crit .tl2{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px}
+  .mc-crit .n2{font-size:.68rem;color:var(--ink3)}
+  .mc-crit .rdy{font-size:.64rem;font-weight:700;color:var(--warn);
+    text-transform:uppercase;letter-spacing:.05em}
+  .tk{display:flex;gap:7px;align-items:baseline;margin-top:5px;min-width:0}
+  .tk .tmk{flex:none;width:14px;text-align:center;font-size:.72rem}
+  .tk.s-complete .tmk{color:var(--good)} .tk.s-running .tmk{color:var(--warn)}
+  .tk.s-specified .tmk{color:var(--ind)}
+  .tk.s-defined .tmk{color:var(--ink3)}
+  .tk .tt{font-size:.76rem;color:var(--ink3);white-space:nowrap;
+    overflow:hidden;text-overflow:ellipsis;min-width:0}
+  .mc-critpage{position:fixed;inset:0;z-index:55;background:var(--bg);
+    overflow-y:auto;overscroll-behavior:contain}
+  .mc-critpage .cbar{position:sticky;top:0;display:flex;align-items:center;gap:10px;
+    background:#111318;border-bottom:1px solid #1e293b;padding:12px 14px;z-index:2}
+  .mc-critpage .cback{background:none;border:0;color:#94a3b8;font:inherit;
+    font-size:.88rem;cursor:pointer;padding:0}
+  .mc-critpage .cpos{font-size:.7rem;color:var(--ink3);
+    text-transform:uppercase;letter-spacing:.06em;align-self:center}
+  .mc-critpage .cback .chv{margin-right:9px;color:var(--ink3)}
+  .mc-critpage .cbody{max-width:720px;margin:0 auto;padding:16px 16px 60px}
+  .mc-critpage .hd3{display:flex;gap:10px;align-items:flex-start}
+  .mc-critpage .hd3 b{flex:1;color:#fff;font-size:1.08rem;line-height:1.35}
+  .mc-critpage .mk3{flex:none;font-weight:700;margin-top:3px;font-size:1rem}
+  .mc-critpage .mk3.c-ok{color:var(--good)} .mc-critpage .mk3.c-run{color:var(--warn)}
+  .mc-critpage .mk3.c-todo{color:var(--ind)}
+  .mc-critpage .mk3.c-blk{color:var(--crit)}
+  .mc-critpage .meta3{font-size:.72rem;color:var(--ink3);text-transform:uppercase;
+    letter-spacing:.05em;margin:6px 0 0}
+  .mc-critpage .sh3{font-size:.7rem;letter-spacing:.08em;text-transform:uppercase;
+    color:var(--ink3);margin:20px 0 8px}
+  .mc-critpage .body3{font-size:.9rem;color:var(--ink2)}
+  .mc-critpage .body3 p{margin:7px 0}
+  .mc-critpage .evblock{margin:0 0 14px}
+  .provt{background:none;border:0;padding:0;cursor:pointer;font:inherit;
+    color:inherit;text-decoration:underline dotted;text-underline-offset:3px}
+  .provpop{position:fixed;z-index:70;background:#1a2029;border:1px solid var(--line2);
+    border-radius:10px;box-shadow:0 12px 32px rgba(0,0,0,.5);padding:10px 13px;
+    font-size:.76rem;color:var(--ink2);display:flex;flex-direction:column;gap:5px;
+    text-transform:none;letter-spacing:0}
+  .mc-critpage .evprov{font-size:.7rem;color:var(--ink3);font-family:var(--mono);
+    margin:0 0 3px}
+  .mc-critpage .evblock .md-gallery img{height:120px}
+  .mc-critpage .tk .tst{flex:none;font-size:.64rem;color:var(--ink3);
+    text-transform:uppercase;letter-spacing:.05em}
+  .mc-critpage .cnav{display:flex;justify-content:space-between;align-items:center;
+    gap:10px;margin-top:26px}
+  .mc-critpage .cnb{background:var(--card);border:1px solid var(--line);
+    border-radius:9px;color:var(--ink2);font:inherit;font-size:.82rem;
+    padding:8px 14px;cursor:pointer}
+  .mc-critpage .cnb:disabled{opacity:.3;cursor:default}
+  .md-video{max-width:100%;border-radius:10px;border:1px solid var(--line);margin-top:8px}
+  .mc-bead{display:flex;gap:10px;padding:9px 2px;border-top:1px solid #1c2230;
+    align-items:baseline}
+  .mc-bead:first-of-type{border-top:0}
+  .mc-bead .bmk{flex:none;width:16px;text-align:center;font-weight:700}
+  .mc-bead.s-complete .bmk{color:var(--good)} .mc-bead.s-running .bmk{color:var(--warn)}
+  .mc-bead.s-specified .bmk{color:var(--ind)}
+  .mc-bead .ep{flex:none;font-size:.6rem;font-weight:700;color:var(--accent);
+    text-transform:uppercase;letter-spacing:.06em;border:1px solid var(--accent-dim);
+    border-radius:5px;padding:1px 5px;margin-right:6px;vertical-align:2px}
+  .mc-bead.s-defined .bmk{color:var(--ink3)}
+  .mc-bead .bx2{flex:1;min-width:0}
+  .mc-bead .t2{font-size:.88rem;color:var(--ink)}
+  .mc-bead.s-done .t2{color:var(--ink3)}
+  .mc-bead .m2{font-size:.68rem;color:var(--ink3);margin-top:2px;font-family:var(--mono)}
+  .mc-bead details{margin-top:4px}
+  .mc-bead summary{cursor:pointer;font-size:.72rem;color:var(--good);list-style:none}
+  .mc-bead .ev2{background:#0f1a12;border:1px solid #14532d;border-radius:8px;
+    padding:8px 10px;font-size:.78rem;color:#bbf7d0;white-space:pre-wrap;margin-top:5px}
+  .mc-group{font-size:.72rem;color:var(--ink3);letter-spacing:.06em;
+    text-transform:uppercase;margin:16px 0 8px}
+  .mc-news .body{margin-top:2px}
+  .mc-news-foot{display:flex;justify-content:flex-end;margin-top:6px}
+  .mc-news-reply{background:none;border:0;cursor:pointer;font:600 .74rem/1 inherit;
+    color:var(--accent);padding:2px 4px}
+
+  /* ── views ── */
+  .mc-view{display:none}
+  .mc-view.on{display:block}
+  .mc-sec{margin:22px 0 8px}
+  .mc-sec h2{font-size:.78rem;letter-spacing:.09em;text-transform:uppercase;
+    color:var(--ink3);margin:0 0 10px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+  .mc-empty{color:var(--ink3);font-size:.86rem;padding:14px;background:var(--bg2);
+    border:1px dashed var(--line);border-radius:10px}
+  .mc-empty code{font-family:var(--mono);font-size:.8em;color:var(--ink2)}
+
+  /* ── item cards ── */
+  .mc-item{
+    background:var(--card);border:1px solid var(--line);border-left:3px solid var(--line2);
+    border-radius:0 10px 10px 0;padding:12px 14px;margin:0 0 10px;
+  }
+  .mc-item.st-confirmed,.mc-item.st-answered{border-left-color:var(--good)}
+  .mc-item.st-in_progress,.mc-item.st-open{border-left-color:var(--warn)}
+  .mc-item.k-incident{border-left-color:var(--serious)}
+  .mc-item.mc-hidden,.mc-hidden{display:none !important}
+  .mc-item .top{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+  .mc-item .top .where{font-size:.7rem;color:var(--ink3);display:flex;gap:4px;
+    align-items:center;min-width:0}
+  .mc-item .top .where .pband{height:9px}
+  .mc-item .top .where .dot{width:6px;height:6px;border-radius:50%;display:inline-block}
+  .mc-item h3{font-size:.95rem;line-height:1.35;margin:4px 0 2px;color:var(--ink);font-weight:600}
+  .mc-item .body{font-size:.86rem;color:var(--ink2);margin:4px 0 0}
+  .mc-item .body p{margin:5px 0}
+  .mc-item details{margin:7px 0 0}
+  .mc-item summary{cursor:pointer;font-size:.78rem;color:var(--accent);list-style:none;user-select:none}
+  .mc-item summary::before{content:"▸ ";color:var(--ink3)}
+  .mc-item details[open] summary::before{content:"▾ "}
+  .mc-item .ev{font-size:.8rem;color:var(--ink2);border-left:1px solid var(--line);
+    margin:6px 0 0 3px;padding:2px 0 2px 11px}
+  .mc-item .ev p{margin:4px 0}
+  .mc-refs{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px}
+  .mc-refs span{font-family:var(--mono);font-size:.68rem;color:var(--ink3);
+    background:var(--bg2);border:1px solid var(--line);border-radius:4px;padding:2px 6px}
+  .mc-when{font-size:.7rem;color:var(--ink3);margin-top:7px}
+
+  /* a mirror card (cross-pillar views) is a door to its home item */
+  .mc-item.mc-mirror{cursor:pointer}
+  .mc-item.mc-mirror:hover{border-color:var(--line2);background:#181e29}
+  .mc-item.mc-flash{animation:mcflash 1.6s ease-out 1}
+  @keyframes mcflash{0%{box-shadow:0 0 0 2px var(--accent)}100%{box-shadow:0 0 0 0 transparent}}
+
+  /* finished items fold away per section: the count stays honest, the
+     scroll goes. */
+  details.mc-finished{margin:2px 0 10px;border:1px dashed var(--line);
+    border-radius:10px;padding:0}
+  details.mc-finished > summary{cursor:pointer;list-style:none;user-select:none;
+    color:var(--ink3);font-size:.8rem;padding:9px 13px}
+  details.mc-finished > summary::before{content:"▸ ";color:var(--ink3)}
+  details.mc-finished[open] > summary::before{content:"▾ "}
+  details.mc-finished > .mc-item{margin-left:10px;margin-right:10px}
+  details.mc-finished[open]{padding-bottom:8px}
+
+  /* pills */
+  .mc-pill{display:inline-block;flex-shrink:0;font:700 .64rem/1 inherit;letter-spacing:.05em;
+    text-transform:uppercase;padding:4px 8px;border-radius:12px;white-space:nowrap}
+  .p-good{color:var(--good);background:rgba(12,163,12,.13);border:1px solid rgba(12,163,12,.3)}
+  .p-warn{color:var(--warn);background:rgba(250,178,25,.12);border:1px solid rgba(250,178,25,.3)}
+  .p-crit{color:#ff7b7b;background:rgba(208,59,59,.15);border:1px solid rgba(208,59,59,.4)}
+  .p-neut{color:var(--neut);background:rgba(131,145,168,.1);border:1px solid rgba(131,145,168,.28)}
+
+  /* decision fields */
+  .mc-dec{font-size:.84rem;color:var(--ink2);margin-top:6px}
+  .mc-dec b{color:var(--ink3);font-size:.7rem;text-transform:uppercase;letter-spacing:.05em;
+    display:block;margin:7px 0 1px}
+  .mc-dec p{margin:0}
+  .mc-dec .ifw{color:#e8b8ac}
+
+  /* checkpoints (ordered arc) */
+  .mc-arc{position:relative}
+  .mc-arc .mc-item{display:grid;grid-template-columns:34px 1fr;gap:12px}
+  .mc-arc .stepno{
+    width:34px;height:34px;display:grid;place-items:center;border:1px solid var(--line2);
+    border-radius:8px;background:var(--bg2);color:var(--accent);
+    font:600 .78rem var(--mono);
+  }
+  .mc-arc .mc-item > div:last-child{min-width:0}
+  .mc-arc .mc-item .top{margin-top:2px}
+
+  /* metric tiles */
+  .mc-metrics{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));
+    gap:8px;margin:0 0 10px}
+  .mc-metric{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:11px 13px}
+  .mc-metric b{display:block;font-size:1.05rem;color:#fff}
+  .mc-metric span{display:block;font-size:.72rem;color:var(--ink3);margin-top:3px;line-height:1.35}
+
+  /* pillar summary cards (overview) */
+  .mc-psum{
+    background:var(--card);border:1px solid var(--line);border-radius:12px;
+    padding:9px 13px 12px;margin:0 0 10px;cursor:pointer;
+  }
+  .mc-psum:hover{border-color:var(--line2)}
+  .mc-psum .hd{display:flex;align-items:flex-start;gap:4px}
+  .mc-psum .hd b{flex:1;min-width:0;font-size:.88rem}
+  .mc-minirow{display:flex;align-items:baseline;margin:12px 0 0}
+  .mc-minirow .ago{font-size:.7rem;color:var(--ink3)}
+  .mc-minirow .grow{flex:1}
+  .pband{width:4px;height:14px;border-radius:999px;flex:none;display:inline-block;
+    align-self:center;vertical-align:-2px}
+  .mc-psum .hd .pband{height:15px}
+  .mc-psum .hd b{color:#fff;font-size:.88rem}
+  .mc-mini{flex:none;display:inline-flex;align-items:baseline;margin-left:auto;
+    border:1px solid var(--line);border-radius:6px;overflow:hidden;
+    font-size:.66rem;line-height:1;background:var(--bg2)}
+  .mc-mini i{font-style:normal;font-weight:700;padding:3px 6px;
+    border-left:1px solid var(--line)}
+  .mc-mini i:first-child{border-left:0}
+  .mc-mini .m-a{color:var(--accent)} .mc-mini .m-c{color:var(--crit)}
+  .mc-mini .m-w{color:var(--warn)} .mc-mini .m-g{color:var(--good)}
+  .mc-mini .m-z{opacity:.35}
+  .mc-psum .last{font-size:.79rem;color:var(--ink2);margin:5px 0 0}
+  .mc-statbar{display:flex;height:4px;border-radius:3px;overflow:hidden;
+    background:var(--card2);flex:1}
+  .mc-statrow{display:flex;align-items:center;gap:8px;margin:6px 0 0}
+  .mc-statrow .lb{flex:none;width:48px;font-size:.58rem;font-weight:700;
+    color:var(--ink2);text-transform:uppercase;letter-spacing:.05em;text-align:left}
+  .mc-statrow .fr{flex:none;font-size:.66rem;color:var(--ink3);min-width:26px}
+  .mc-statbar i{height:100%}
+  .mc-statmeta{font-size:.72rem;color:var(--ink3);margin-top:5px}
+
+  /* feed */
+  .mc-feed-day{font-size:.72rem;color:var(--ink3);text-transform:uppercase;
+    letter-spacing:.06em;margin:18px 0 8px}
+  .mc-feed-row{display:flex;gap:10px;align-items:flex-start;background:var(--card);
+    border:1px solid var(--line);border-radius:8px;padding:8px 12px;margin:0 0 6px;
+    font-size:.84rem;cursor:pointer}
+  .mc-feed-row .fmk{flex:none;width:18px;text-align:center;font-weight:700;
+    margin-top:1px;margin-right:4px}
+  .mc-feed-row.fe-blocking .fmk{color:var(--crit)}
+  .mc-feed-row.fe-progress .fmk{color:var(--warn)}
+  .mc-feed-row.fe-finished .fmk{color:var(--good)}
+  .mc-feed-row.fe-news .fmk,.mc-feed-row.fe-decided .fmk{color:var(--ink3)}
+  .mc-feed-row .fago{flex:none;font-size:.68rem;color:var(--ink3);margin-top:2px}
+  .fl-line{display:flex;align-items:baseline;gap:10px}
+  .fl-line .fl-lab{flex:none;width:44px;font-size:.6rem;font-weight:700;
+    color:var(--ink3);text-transform:uppercase;letter-spacing:.06em}
+  .fl-line .mc-flegend{margin:0 0 3px;flex:1}
+  .mc-chatlog{margin:2px 0 0}
+  #view-chat{padding-bottom:calc(16px + var(--mc-kb, 0px))}
+  .mc-critpage .cbody{padding-bottom:calc(16px + var(--mc-kb, 0px))}
+
+  .mc-feed-row:hover{border-color:var(--line2)}
+  .mc-feed-row .main{flex:1;min-width:0}
+  .mc-feed-row .who{display:flex;align-items:center;gap:4px;margin:0 0 2px}
+  .mc-feed-row .who .pband{height:9px}
+  .mc-feed-row .who .k{color:var(--ink3);font-size:.7rem;overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap}
+  .mc-feed-row .t{color:var(--ink);min-width:0}
+  .mc-feed-row .mc-pill{flex:none;align-self:center}
+  .mc-feed-row .mc-pill.sm{font-size:.58rem;padding:2px 6px}
+  .mc-feed-filtered .mc-feed-row .who{display:none}
+  .mc-bhidden{display:none!important}
+  .mc-feed-note{display:inline-flex;align-items:center;gap:6px;font:600 .74rem/1 inherit;
+    color:#fff;background:#232345;border:1px solid var(--accent-dim);border-radius:14px;
+    padding:6px 11px;margin:0 0 10px;cursor:pointer}
+  .mc-act-table th{cursor:pointer}
+  .mc-act-table th:hover{color:var(--ink)}
+
+  /* non-stateful kinds: no pill, neutral spine */
+  .mc-item.k-scope,.mc-item.k-status{border-left-color:var(--line2)}
+  .mc-item.k-scope .mc-pill,.mc-item.k-status .mc-pill{display:none}
+  /* An open question under an "Open questions" heading needs no OPEN badge;
+     the amber spine already carries the state. */
+  .mc-item.k-question.st-open .mc-pill{display:none}
+  .mc-item.k-question.st-open{cursor:pointer}
+  .mc-item.k-question.st-open:hover{border-color:var(--line2)}
+
+  .mc-foot{color:var(--ink3);font-size:.72rem;margin-top:36px;text-align:center}
+
+  @media(min-width:680px){
+    #mc-app{padding:18px 24px 90px}
+    .mc-two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    .mc-two .mc-item{margin:0}
+  }
+</style>
+
+<div id="mc-app">
+  <nav class="mc-tabs" id="mc-tabs"></nav>
+
+
+  <div class="mc-activity">
+    <div class="hd">
+      <span class="t">Activity</span>
+      <span class="legend">less
+        <i style="background:var(--card2)"></i><i style="background:#2b2f52"></i>
+        <i style="background:#46448c"></i><i style="background:#6a63c8"></i>
+        <i style="background:#8f87ff"></i> more</span>
+    </div>
+    <div class="mc-act-scroll"><table class="mc-act-table" id="mc-act"></table></div>
+  </div>
+
+  <div id="mc-psel" class="mc-psel"></div>
+  <div id="mc-views"></div>
+
+</div>
+
+<script id="mc-data" type="application/json">__MC_STRUCTURED_DATA__</script>
+<script>
+(function () {
+  "use strict";
+  var T_SCRIPT = performance.now();   // chrome boot + HTML parse end at our turn
+  var DATA = JSON.parse(document.getElementById("mc-data").textContent);
+  var T_PARSED = performance.now();
+  var ITEMS = DATA.items || [];
+  var PILLARS = DATA.pillars || [];
+  var MID = DATA.mission.mission_id;
+
+  // ── vocab ───────────────────────────────────────────────────────
+  // Schema v2 — greenfield. A state exists only where it means
+  // something: checkpoints climb confirmed/in_progress/pending,
+  // questions are open/answered. Prose and records carry no state.
+  var PILL = {
+    confirmed:"p-good", answered:"p-good",
+    in_progress:"p-warn", open:"p-warn",
+    pending:"p-neut"
+  };
+  var STATE_LABEL = {
+    confirmed:"Confirmed", in_progress:"In progress", pending:"Pending",
+    open:"Open", answered:"Answered"
+  };
+  var SECTION_OF = {scope:"News", status:"News",
+    checkpoint:"Delivery", decision:"Decisions", question:"Questions"};
+  var SECTION_ORDER = ["News","Delivery","Tasks",
+    "Questions","Decisions"];
+
+  var byId = {};
+  PILLARS.forEach(function (p) { byId[p.pillar_id] = p; });
+  function surfName(sid){ return sid===MID ? "Overview" : (byId[sid]||{}).name || sid; }
+  function shortName(sid){
+    var words = surfName(sid).split(" ");
+    var n = words[0].replace(/[^\w-]/g,"");
+    if (/^(Mission|The|A|An|Core)$/i.test(n) && words[1])
+      n += " " + words[1].replace(/[^\w-]/g,"");
+    return n || surfName(sid);
+  }
+  function surfColor(sid){ return sid===MID ? "#8b85ff" : (byId[sid]||{}).color || "#8391a8"; }
+  function when(it){
+    var t = it.happened_at || it.updated_at || it.created_at || "";
+    var d = new Date(t);
+    return isNaN(d) ? null : d;
+  }
+  function live(it){ return !it.retired; }
+  function agoText(d){
+    var s = Math.max(0, (Date.now() - d.getTime()) / 1000);
+    if (s < 60) return "just now";
+    if (s < 3600) return Math.round(s/60) + "m ago";
+    if (s < 86400) return Math.round(s/3600) + "h ago";
+    return Math.round(s/86400) + "d ago";
+  }
+
+  // ── tiny DOM helpers (no innerHTML for item text — coordinator
+  //    prose is data, not markup; exhibits are the one trusted hole) ──
+  function el(tag, cls, text){
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    return e;
+  }
+  function paras(container, text, cls){
+    String(text||"").split(/\n\s*\n/).forEach(function (p) {
+      if (p.trim()) container.appendChild(el("p", cls||null, p.trim()));
+    });
+  }
+  function pill(state){
+    var s = el("span", "mc-pill " + (PILL[state]||"p-neut"), STATE_LABEL[state]||state);
+    s.setAttribute("data-mc-noexcerpt", "");
+    return s;
+  }
+  function dot(color){
+    var d = el("span","dot"); d.style.background = color; return d;
+  }
+  // A filter that reads as a legend: flat inline entries (mark, count,
+  // word), the active one underlined in its own colour, the rest dimmed.
+  // One reusable control for every filter-with-counts surface.
+  function filterLegend(defs, onChange, opts){
+    if (typeof onChange !== "function"){
+      var swap = onChange; onChange = opts; opts = swap;
+    }
+    var host = el("div","mc-flegend");
+    var active = {};
+    defs.forEach(function (d) {
+      if (!d.count && !(opts && opts.showEmpty)) return;
+      var b = el("button","fl");
+      if (d.mark) b.appendChild(markSpan("mk2", d.mark));
+      var num = el("b", null, String(d.count));
+      if (d.color) num.style.color = d.color;
+      b.appendChild(num);
+      b.appendChild(el("span","w2", d.word));
+      b.addEventListener("click", function () {
+        active[d.word] = !active[d.word];
+        var act = Object.keys(active).filter(function (k) { return active[k]; });
+        [].forEach.call(host.children, function (c) {
+          var on = act.indexOf(c.dataset.word) >= 0;
+          c.classList.toggle("on", on);
+          c.classList.toggle("dim", !!act.length && !on);
+        });
+
+        onChange(act);
+      });
+      b.dataset.word = d.word;
+      if (d.color) b.dataset.color = d.color;
+      host.appendChild(b);
+    });
+    return (host.children.length > 1
+      || (opts && opts.always && host.children.length)) ? host : el("span");
+  }
+
+  function provTap(label, buildDetail){
+    var frag = document.createDocumentFragment();
+    var t = el("button","provt", label);
+    t.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      var old = document.querySelector(".provpop");
+      if (old) old.remove();
+      var pop = el("div","provpop");
+      buildDetail(pop);
+      document.body.appendChild(pop);
+      var r = t.getBoundingClientRect();
+      var pw = Math.min(300, innerWidth - 24);
+      pop.style.maxWidth = pw + "px";
+      var left = Math.min(Math.max(12, r.left), innerWidth - pw - 12);
+      pop.style.left = left + "px";
+      pop.style.top = (r.bottom + 8) + "px";
+      // one tap anywhere dismisses — including on the popover itself,
+      // except its links, which must still be tappable
+      setTimeout(function () {
+        function dismiss(e2){
+          if (e2.target.closest && e2.target.closest(".provpop a")) return;
+          pop.remove();
+          document.removeEventListener("click", dismiss, true);
+        }
+        document.addEventListener("click", dismiss, true);
+      }, 0);
+    });
+    frag.appendChild(t);
+    return frag;
+  }
+
+  // THE CRITERION PAGE: full-screen overlay — back to the pillar, the
+  // demonstration and its evidence (screenshots, video) at full size,
+  // and prev/next to walk the ladder in order.
+  function openCriterion(crits, idx, ctx){
+    var old = document.getElementById("mc-critpage");
+    if (old) old.remove();
+    var it = crits[idx];
+    var bk = ctx.bucket(it.state);
+    var linked = ctx.linkedOf(it);
+    var page = el("div","mc-critpage");
+    page.id = "mc-critpage";
+    var bar = el("div","cbar");
+    var back = el("button","cback");
+    back.appendChild(el("span","chv","\u2039"));
+    back.appendChild(el("span",null,surfName(it.surface_id)));
+    back.addEventListener("click", function () { page.remove(); });
+    bar.appendChild(back);
+    page.appendChild(bar);
+    var body = el("div","cbody");
+    var hd = el("div","hd3");
+    hd.appendChild(markSpan("mk3 c-" + bk.cls, bk.mark));
+    hd.appendChild(el("b",null,it.title));
+    body.appendChild(hd);
+    var d0 = when(it);
+    var work = it.work || [];
+    var lastW = work.length ? work[work.length-1] : null;
+    var meta = el("div","meta3");
+    meta.appendChild(document.createTextNode(bk.word + (d0 ? " \u00b7 " : "")));
+    if (d0){
+      meta.appendChild(provTap(
+        (it.happened_at ? "" : "updated ") + agoText(d0),
+        function (box) {
+          box.appendChild(el("div",null,d0.toLocaleString()));
+          if (it.confirmed_by){
+            box.appendChild(linkEl(
+              it.confirmed_by
+                + (it.confirmed_turn ? " \u00b7 turn " + it.confirmed_turn : ""),
+              "/graph/" + it.confirmed_by
+                + (it.confirmed_turn ? "#turn-" + it.confirmed_turn : "")));
+          }
+        }));
+    }
+    if (lastW && bk.word === "in progress"){
+      meta.appendChild(document.createTextNode(" \u00b7 worked "));
+      meta.appendChild(provTap(agoText(new Date(lastW.at)), function (box) {
+        box.appendChild(el("div",null,new Date(lastW.at).toLocaleString()));
+        box.appendChild(linkEl(lastW.by, "/graph/" + lastW.by));
+      }));
+    }
+    body.appendChild(meta);
+    if (it.body){
+      body.appendChild(el("div","sh3","Demonstration"));
+      var b3 = el("div","body3"); mdInto(b3, it.body); body.appendChild(b3);
+    }
+    var evs = (it.evidence || []);
+    var beadEv = linked.filter(function (b) { return b.state === "complete" && b.evidence; });
+    if (evs.length || beadEv.length){
+      body.appendChild(el("div","sh3","Evidence"));
+      evs.forEach(function (e2) {
+        var entry = (typeof e2 === "string") ? {text: e2} : (e2 || {});
+        var e4 = el("div","evblock");
+        if (entry.at || entry.by){
+          var pl = el("div","evprov");
+          pl.appendChild(provTap(entry.at || "when", function (box) {
+            if (entry.at) box.appendChild(el("div",null,entry.at));
+            if (entry.by){
+              box.appendChild(linkEl(
+                entry.by + (entry.turn ? " \u00b7 turn " + entry.turn : ""),
+                "/graph/" + entry.by
+                  + (entry.turn ? "#turn-" + entry.turn : "")));
+            }
+          }));
+          e4.appendChild(pl);
+        }
+        var tx = el("div","body3"); mdInto(tx, entry.text || "");
+        e4.appendChild(tx);
+        body.appendChild(e4);
+      });
+      beadEv.forEach(function (b) {
+        var e3 = el("div","evblock");
+        e3.appendChild(el("div","evprov", b.id + " \u00b7 close reason"));
+        var tx2 = el("div","body3");
+        tx2.appendChild(document.createTextNode(b.evidence));
+        e3.appendChild(tx2);
+        body.appendChild(e3);
+      });
+    }
+    if (linked.length){
+      body.appendChild(el("div","sh3","Tasks"));
+      linked.forEach(function (b) {
+        var ln = el("div","tk s-" + b.state);
+        ln.appendChild(markSpan("tmk", BEAD_MARK[b.state] || "\u25E6"));
+        ln.appendChild(el("span","tt", b.title));
+        ln.appendChild(el("span","tst", b.state));
+        body.appendChild(ln);
+      });
+    }
+    if (work.length){
+      body.appendChild(el("div","sh3","Work log"));
+      work.forEach(function (w) {
+        var pr = el("div","qprog");
+        pr.appendChild(markSpan("qpm","\u27F3"));
+        pr.appendChild(el("span",null,w.text));
+        pr.appendChild(el("span","qpa",agoText(new Date(w.at))));
+        body.appendChild(pr);
+      });
+    }
+    var nav = el("div","cnav");
+    var prev = el("button","cnb", "\u2039 previous");
+    prev.disabled = idx === 0;
+    prev.addEventListener("click", function () { openCriterion(crits, idx-1, ctx); });
+    var next = el("button","cnb", "next \u203A");
+    next.disabled = idx === crits.length - 1;
+    next.addEventListener("click", function () { openCriterion(crits, idx+1, ctx); });
+    nav.appendChild(prev);
+    nav.appendChild(el("span","cpos",
+      "deliverable " + (idx+1) + " of " + crits.length));
+    nav.appendChild(next);
+    body.appendChild(nav);
+    page.appendChild(body);
+    document.body.appendChild(page);
+    page.scrollTop = 0;
+  }
+
+  function openTask(list, idx){
+    var old = document.getElementById("mc-critpage");
+    if (old) old.remove();
+    var b = list[idx];
+    var page = el("div","mc-critpage");
+    page.id = "mc-critpage";
+    var bar = el("div","cbar");
+    var back = el("button","cback");
+    back.appendChild(el("span","chv","\u2039"));
+    back.appendChild(el("span",null,"Tasks"));
+    back.addEventListener("click", function () { page.remove(); });
+    bar.appendChild(back);
+    page.appendChild(bar);
+    var body = el("div","cbody");
+    var hd = el("div","hd3");
+    var cls3 = b.state==="complete" ? "ok" : b.state==="running" ? "run" : "todo";
+    hd.appendChild(markSpan("mk3 c-" + cls3, BEAD_MARK[b.state] || "\u25E6"));
+    var tb = el("b");
+    if (b.epic) tb.appendChild(el("span","ep","acceptance"));
+    tb.appendChild(document.createTextNode(b.title));
+    hd.appendChild(tb);
+    body.appendChild(hd);
+    var meta = el("div","meta3");
+    meta.appendChild(document.createTextNode(
+      b.state + " \u00b7 " + b.id
+      + (b.epic ? " \u00b7 final acceptance for this pillar" : "")));
+    body.appendChild(meta);
+    if (b.desc){
+      body.appendChild(el("div","sh3","Specification"));
+      var d3 = el("div","body3"); mdInto(d3, b.desc); body.appendChild(d3);
+    }
+    if (b.evidence){
+      body.appendChild(el("div","sh3","Evidence"));
+      var e3 = el("div","evblock");
+      e3.appendChild(el("div","evprov", "close reason"));
+      var tx = el("div","body3"); mdInto(tx, b.evidence);
+      e3.appendChild(tx);
+      body.appendChild(e3);
+    }
+    if ((b.comments || []).length){
+      body.appendChild(el("div","sh3","Comments"));
+      b.comments.forEach(function (c) {
+        var en = el("div","qe");
+        var wh = el("div","qwho");
+        var who = String(c.by || "").replace(/^terminal:/, "");
+        wh.appendChild(el("b",null,who));
+        wh.appendChild(document.createTextNode(" \u00b7 "));
+        wh.appendChild(provTap(agoText(new Date(c.at)), function (box) {
+          box.appendChild(el("div",null,new Date(c.at).toLocaleString()));
+          if (/^(auto|host)-/.test(who))
+            box.appendChild(linkEl(who, "/graph/" + who));
+        }));
+        en.appendChild(wh);
+        var tx = el("div","qtx"); mdInto(tx, c.text);
+        en.appendChild(tx);
+        body.appendChild(en);
+      });
+    }
+    if ((b.deps || []).length){
+      body.appendChild(el("div","sh3","Depends on"));
+      b.deps.forEach(function (did) {
+        var db = null, dbi = -1;
+        list.forEach(function (x, xi) {
+          if (x.id === did){ db = x; dbi = xi; }
+        });
+        var ln = el("div","tk" + (db ? " s-" + db.state + " tk-link" : ""));
+        ln.appendChild(markSpan("tmk", db ? (BEAD_MARK[db.state]||"\u25E6") : "\u25E6"));
+        ln.appendChild(el("span","tt", db ? db.title : did));
+        if (db){
+          ln.appendChild(el("span","tst", db.state));
+          ln.addEventListener("click", function () { openTask(list, dbi); });
+        }
+        body.appendChild(ln);
+      });
+    }
+    var nav = el("div","cnav");
+    var prev = el("button","cnb", "\u2039 previous");
+    prev.disabled = idx === 0;
+    prev.addEventListener("click", function () { openTask(list, idx-1); });
+    var next = el("button","cnb", "next \u203A");
+    next.disabled = idx === list.length - 1;
+    next.addEventListener("click", function () { openTask(list, idx+1); });
+    nav.appendChild(prev);
+    nav.appendChild(el("span","cpos",
+      "task " + (idx+1) + " of " + list.length));
+    nav.appendChild(next);
+    body.appendChild(nav);
+    page.appendChild(body);
+    document.body.appendChild(page);
+    page.scrollTop = 0;
+  }
+
+  function openQuestion(list, idx, opts){
+    opts = opts || {};
+    var old = document.getElementById("mc-critpage");
+    if (old) old.remove();
+    var q = list[idx];
+    var isOpen = q.state === "open";
+    var page = el("div","mc-critpage");
+    page.id = "mc-critpage";
+    var bar = el("div","cbar");
+    var back = el("button","cback");
+    back.appendChild(el("span","chv","\u2039"));
+    back.appendChild(el("span",null,opts.back || "Questions"));
+    back.addEventListener("click", function () { page.remove(); });
+    bar.appendChild(back);
+    page.appendChild(bar);
+    var body = el("div","cbody");
+    var hd = el("div","hd3");
+    hd.appendChild(markSpan(
+      "mk3 c-" + (isOpen ? (q.blocking ? "blk" : "run") : "ok"),
+      isOpen ? (q.blocking ? "\u2298" : "?") : "\u2713"));
+    hd.appendChild(el("b",null,q.title));
+    body.appendChild(hd);
+    var meta = el("div","meta3");
+    meta.appendChild(document.createTextNode(
+      (isOpen ? "open" : "answered")
+      + (isOpen && q.blocking ? " \u00b7 blocking" : "")
+      + " \u00b7 asked by " + (q.asked_by || "?") + " \u00b7 "));
+    var d0 = when(q) || (q.asked_at ? new Date(q.asked_at) : null);
+    if (d0){
+      meta.appendChild(provTap(agoText(d0), function (box) {
+        box.appendChild(el("div",null,d0.toLocaleString()));
+        if (/^(auto|host)-/.test(q.asked_by || ""))
+          box.appendChild(linkEl(q.asked_by, "/graph/" + q.asked_by));
+      }));
+    }
+    body.appendChild(meta);
+    if (q.body){
+      var b3 = el("div","body3"); mdInto(b3, q.body); body.appendChild(b3);
+    }
+    if (q.answer && q.answer.text){
+      body.appendChild(el("div","sh3","Answer"));
+      var ab = el("div","evblock");
+      var ap = el("div","evprov");
+      ap.appendChild(document.createTextNode("answered \u00b7 "));
+      ap.appendChild(provTap(agoText(new Date(q.answer.at)), function (box) {
+        box.appendChild(el("div",null,new Date(q.answer.at).toLocaleString()));
+        if (q.answer.by)
+          box.appendChild(linkEl(q.answer.by, "/graph/" + q.answer.by));
+      }));
+      ab.appendChild(ap);
+      var atx = el("div","body3"); mdInto(atx, q.answer.text);
+      ab.appendChild(atx);
+      body.appendChild(ab);
+    }
+    var disc = q.discussion || [];
+    if (disc.length || isOpen)
+      body.appendChild(el("div","sh3","Discussion"));
+    disc.forEach(function (e2) {
+      if (e2.type === "progress"){
+        var pr = el("div","qprog");
+        pr.appendChild(markSpan("qpm","\u27F3"));
+        pr.appendChild(el("span",null,e2.text));
+        pr.appendChild(el("span","qpa",agoText(new Date(e2.at))));
+        body.appendChild(pr);
+        return;
+      }
+      var en = el("div","qe");
+      var wh = el("div","qwho");
+      wh.appendChild(el("b",null,e2.by));
+      wh.appendChild(document.createTextNode(" \u00b7 "));
+      wh.appendChild(provTap(agoText(new Date(e2.at)), function (box) {
+        box.appendChild(el("div",null,new Date(e2.at).toLocaleString()));
+        if (/^(auto|host)-/.test(e2.by || ""))
+          box.appendChild(linkEl(e2.by, "/graph/" + e2.by));
+      }));
+      en.appendChild(wh);
+      var tx = el("div","qtx"); mdInto(tx, e2.text);
+      en.appendChild(tx);
+      body.appendChild(en);
+    });
+    if (isOpen){
+      var comp = el("div","qcomp");
+      var ta = document.createElement("textarea");
+      ta.placeholder = "Reply\u2026";
+      comp.appendChild(ta);
+      var send = el("button","qsend","Reply");
+      send.addEventListener("click", function () {
+        var t2 = ta.value.trim();
+        if (!t2) return;
+        var en2 = el("div","qe");
+        var wh2 = el("div","qwho");
+        wh2.appendChild(el("b",null,"you"));
+        wh2.appendChild(document.createTextNode(" \u00b7 just now"));
+        en2.appendChild(wh2);
+        var tx2 = el("div","qtx"); mdInto(tx2, t2);
+        en2.appendChild(tx2);
+        body.insertBefore(en2, comp);
+        ta.value = "";
+      });
+      comp.appendChild(send);
+      comp.appendChild(el("div","qhint",
+        "A reply joins the discussion \u2014 it does not resolve the question. "
+        + "The question resolves when a cohesive answer is written; resolved "
+        + "questions feed the decision log."));
+      body.appendChild(comp);
+    }
+    var nav = el("div","cnav");
+    var prev = el("button","cnb", "\u2039 previous");
+    prev.disabled = idx === 0;
+    prev.addEventListener("click", function () { openQuestion(list, idx-1, opts); });
+    var next = el("button","cnb", "next \u203A");
+    next.disabled = idx === list.length - 1;
+    next.addEventListener("click", function () { openQuestion(list, idx+1, opts); });
+    nav.appendChild(prev);
+    nav.appendChild(el("span","cpos",
+      "question " + (idx+1) + " of " + list.length));
+    nav.appendChild(next);
+    body.appendChild(nav);
+    page.appendChild(body);
+    document.body.appendChild(page);
+    page.scrollTop = 0;
+  }
+
+  function openDecision(list, idx){
+    var old = document.getElementById("mc-critpage");
+    if (old) old.remove();
+    var d = list[idx];
+    var page = el("div","mc-critpage");
+    page.id = "mc-critpage";
+    var bar = el("div","cbar");
+    var back = el("button","cback");
+    back.appendChild(el("span","chv","\u2039"));
+    back.appendChild(el("span",null,"Decisions"));
+    back.addEventListener("click", function () { page.remove(); });
+    bar.appendChild(back);
+    page.appendChild(bar);
+    var body = el("div","cbody");
+    var hd = el("div","hd3");
+    hd.appendChild(markSpan("mk3 c-dec","\u25C6"));
+    hd.appendChild(el("b",null,d.title));
+    body.appendChild(hd);
+    var meta = el("div","meta3");
+    meta.appendChild(document.createTextNode("decided \u00b7 "));
+    var d0 = when(d);
+    if (d0){
+      meta.appendChild(provTap(agoText(d0), function (box) {
+        box.appendChild(el("div",null,d0.toLocaleString()));
+      }));
+    }
+    // favorite it right here: the flag that pins a decision as FAQ
+    var star = el("button","dstar", d.faq ? "\u2605" : "\u2606");
+    star.title = "Mark as a favorite / FAQ decision";
+    star.classList.toggle("on", !!d.faq);
+    star.addEventListener("click", function () {
+      d.faq = !d.faq;
+      star.textContent = d.faq ? "\u2605" : "\u2606";
+      star.classList.toggle("on", d.faq);
+      var row2 = document.querySelector(
+        '.mc-sec[data-sec="Decisions"] [data-mc-anchor="' + d.key + '"]');
+      if (row2){
+        row2.classList.toggle("d-fav", d.faq);
+        row2.dataset.dcat = "decided" + (d.faq ? " favorite" : "");
+        row2.querySelector(".bmk").textContent = d.faq ? "\u2605" : "\u25C6";
+      }
+      var lg2 = document.querySelector('.mc-sec[data-sec="Decisions"] .mc-flegend');
+      if (lg2){
+        var fav2 = lg2.querySelector('[data-word="favorite"] b');
+        if (fav2) fav2.textContent = String(
+          document.querySelectorAll(
+            '.mc-sec[data-sec="Decisions"] .mc-bead.d-fav').length);
+      }
+    });
+    meta.appendChild(star);
+    body.appendChild(meta);
+    if (d.body){
+      var b4 = el("div","body3"); mdInto(b4, d.body); body.appendChild(b4);
+    }
+    [["fork","The fork"],["chosen","Chosen"],["if_wrong","If wrong"]]
+      .forEach(function (pair) {
+        if (!d[pair[0]]) return;
+        body.appendChild(el("div","sh3",pair[1]));
+        var tx = el("div","body3" + (pair[0]==="if_wrong" ? " ifw3" : ""));
+        mdInto(tx, d[pair[0]]);
+        body.appendChild(tx);
+      });
+    var nav = el("div","cnav");
+    var prev = el("button","cnb", "\u2039 previous");
+    prev.disabled = idx === 0;
+    prev.addEventListener("click", function () { openDecision(list, idx-1); });
+    var next = el("button","cnb", "next \u203A");
+    next.disabled = idx === list.length - 1;
+    next.addEventListener("click", function () { openDecision(list, idx+1); });
+    nav.appendChild(prev);
+    nav.appendChild(el("span","cpos",
+      "decision " + (idx+1) + " of " + list.length));
+    nav.appendChild(next);
+    body.appendChild(nav);
+    page.appendChild(body);
+    document.body.appendChild(page);
+    page.scrollTop = 0;
+  }
+
+  function mdStrip(t){
+    return String(t||"")
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+      .replace(/\*\*([^*]+)\*\*/g, "$1")
+      .replace(/`([^`]+)`/g, "$1")
+      .replace(/^#{1,3} /gm, "");
+  }
+  function goInternal(href){
+    return function (ev) {
+      try {
+        if (window.parent !== window &&
+            typeof window.parent.navigateTo === "function"){
+          ev.preventDefault();
+          window.parent.navigateTo(href);
+        }
+      } catch (e) {}
+    };
+  }
+  function linkEl(label, href){
+    var a = el("a","md-a", label);
+    a.href = href;
+    if (/^https?:\/\//.test(href)){ a.target = "_blank"; a.rel = "noopener"; }
+    else a.addEventListener("click", goInternal(href));
+    return a;
+  }
+  function mdInto(host, text){
+    var gallery = [];
+    function inline(node, t){
+      var re = /!\[([^\]]*)\]\(([^)\s]+)\)|\[([^\]]+)\]\(([^)\s]+)\)|`([^`]+)`|\*\*([^*]+)\*\*|graph:\/\/([a-f0-9][a-f0-9-]{4,})/g;
+      var last = 0, m;
+      while ((m = re.exec(t))){
+        if (m.index > last) node.appendChild(document.createTextNode(t.slice(last, m.index)));
+        if (m[2] != null){                     // image -> gallery
+          gallery.push({alt: m[1] || "", src: m[2]});
+        } else if (m[4] != null){              // [text](url)
+          if (/^(https?:\/\/|\/)/.test(m[4]))
+            node.appendChild(linkEl(m[3], m[4]));
+          else node.appendChild(el("span",null,m[3]));
+        } else if (m[5] != null){
+          node.appendChild(el("code","md-c", m[5]));
+        } else if (m[6] != null){
+          node.appendChild(el("b", null, m[6]));
+        } else if (m[7] != null){              // graph://id
+          node.appendChild(linkEl("graph://" + m[7], "/graph/" + m[7]));
+        }
+        last = re.lastIndex;
+      }
+      if (last < t.length) node.appendChild(document.createTextNode(t.slice(last)));
+    }
+    var fence = null, list = null, para = [];
+    function flushPara(){
+      if (!para.length) return;
+      var pEl = el("p"); inline(pEl, para.join(" ")); host.appendChild(pEl);
+      para = [];
+    }
+    function flushList(){ if (list){ host.appendChild(list); list = null; } }
+    String(text || "").split("\n").forEach(function (raw) {
+      var l = raw.trim();
+      if (fence){
+        if (/^```/.test(l)){
+          var pre = el("pre","md-pre");
+          pre.appendChild(el("code",null,fence.join("\n")));
+          host.appendChild(pre); fence = null;
+        } else fence.push(raw);
+        return;
+      }
+      if (/^```/.test(l)){ flushPara(); flushList(); fence = []; return; }
+      if (!l){ flushPara(); flushList(); return; }
+      var m2 = /^([-*]|\d+[.)])\s+(.*)$/.exec(l);
+      if (m2){
+        flushPara();
+        var ordered = /^\d/.test(m2[1]);
+        if (!list || (list.tagName === "OL") !== ordered){
+          flushList();
+          list = el(ordered ? "ol" : "ul","md-ul");
+        }
+        var li = el("li"); inline(li, m2[2]); list.appendChild(li);
+        return;
+      }
+      var mh = /^#{1,4}\s+(.*)$/.exec(l);
+      if (mh){
+        flushPara(); flushList();
+        var h = el("div","md-h"); inline(h, mh[1]); host.appendChild(h);
+        return;
+      }
+      flushList();
+      para.push(l);
+    });
+    flushPara(); flushList();
+    if (fence){
+      var pre2 = el("pre","md-pre");
+      pre2.appendChild(el("code",null,fence.join("\n")));
+      host.appendChild(pre2);
+    }
+    if (gallery.length){
+      var g2 = el("div","md-gallery");
+      gallery.forEach(function (im) {
+        if (!/^(https?:\/\/|\/)/.test(im.src)) return;
+        if (/\.(mp4|webm|mov)(\?|$)/i.test(im.src)){
+          var vid = document.createElement("video");
+          vid.src = im.src; vid.controls = true; vid.playsInline = true;
+          vid.className = "md-video";
+          g2.appendChild(vid);
+          return;
+        }
+        var img = document.createElement("img");
+        img.src = im.src; img.alt = im.alt; img.loading = "lazy";
+        img.addEventListener("click", function () {
+          var box = el("div","md-lightbox");
+          var big = document.createElement("img");
+          big.src = im.src; big.alt = im.alt;
+          box.appendChild(big);
+          box.addEventListener("click", function () { box.remove(); });
+          document.body.appendChild(box);
+        });
+        g2.appendChild(img);
+      });
+      if (g2.children.length) host.appendChild(g2);
+    }
+  }
+
+  (function keyboardAware(){
+    function measure(){
+      var vv = window.visualViewport;
+      if (!vv) return;
+      var covered = Math.max(0, Math.round(
+        window.innerHeight - vv.height - vv.offsetTop));
+      document.documentElement.style.setProperty("--mc-kb", covered + "px");
+    }
+    if (window.visualViewport){
+      visualViewport.addEventListener("resize", measure);
+      visualViewport.addEventListener("scroll", measure);
+      measure();
+    }
+    document.addEventListener("focusin", function (ev) {
+      if (!ev.target.closest || !ev.target.closest(".qcomp")) return;
+      setTimeout(function () {
+        try {
+          ev.target.scrollIntoView({block:"center", behavior:"smooth"});
+        } catch (e) {}
+      }, 300);
+    });
+  })();
+
+  var BEADS = null;
+  try {
+    var bEl = document.getElementById("mc-beads");
+    if (bEl) BEADS = JSON.parse(bEl.textContent);
+  } catch (e) {}
+  var BEAD_MARK = {complete:"\u2713", running:"\u27F3",
+                   specified:"\u25CB", defined:"\u25E6"};
+  var GLYPH_CLS = {"\u25E6":"gx-dot", "\u25CB":"gx-ring"};
+  // The running mark is drawn, not typed: font glyphs for \u27F3 vary
+  // wildly in ink size and baseline across platforms, so an inline SVG
+  // (currentColor, em-sized) renders identically everywhere.
+  var ARR_SVG = '<svg viewBox="0 0 16 16" aria-hidden="true">'
+    + '<g transform="rotate(15 8 8)">'
+    + '<path d="M13.5 8A5.5 5.5 0 1 1 10.75 3.24" fill="none" '
+    + 'stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>'
+    + '<path d="M13.89 5.06L8.21 5.21 11.18 0.05z" fill="currentColor"/>'
+    + '</g></svg>';
+  var NEWS_SVG = '<svg viewBox="0 0 16 16" aria-hidden="true">'
+    + '<rect x="2.2" y="3" width="11.6" height="10" rx="1.6" fill="none" '
+    + 'stroke="currentColor" stroke-width="1.4"/>'
+    + '<path d="M4.8 6.2h6.4M4.8 8.5h6.4M4.8 10.8h4" '
+    + 'stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>';
+  var STOP_SVG = '<svg viewBox="0 0 16 16" aria-hidden="true">'
+    + '<circle cx="8" cy="8" r="6.2" fill="none" '
+    + 'stroke="currentColor" stroke-width="1.7"/>'
+    + '<path d="M3.9 3.9L12.1 12.1" stroke="currentColor" '
+    + 'stroke-width="1.7" stroke-linecap="round"/></svg>';
+  function markSpan(cls, glyph){
+    if (glyph === "\u27F3"){
+      var sp2 = el("span", cls + " gx-arr");
+      sp2.innerHTML = ARR_SVG;
+      return sp2;
+    }
+    if (glyph === "\u2298"){
+      var sp3 = el("span", cls + " gx-stop");
+      sp3.innerHTML = STOP_SVG;
+      return sp3;
+    }
+    if (glyph === "\u2022"){
+      var sp4 = el("span", cls + " gx-news");
+      sp4.innerHTML = NEWS_SVG;
+      return sp4;
+    }
+    var sp = el("span", cls, glyph);
+    if (GLYPH_CLS[glyph]) sp.classList.add(GLYPH_CLS[glyph]);
+    return sp;
+  }
+  function beadsFor(sid){ return (BEADS && BEADS[sid]) || null; }
+  function beadById(sid, id){
+    var list = beadsFor(sid) || [];
+    return list.filter(function (b) { return b.id === id; })[0] || null;
+  }
+
+  function band(color){
+    var b = el("span","pband"); b.style.background = color || "#8391a8"; return b;
+  }
+
+  // ── header ──────────────────────────────────────────────────────
+  // The mission title lives in the platform bar; the page starts at its
+  // navigation.
+  var liveItems = ITEMS.filter(live);
+  // PRIMARY NAVIGATION, under the title where a reader looks first. The
+  // pillars tab is home (the overview, or the filtered pillar's page);
+  // the rest are the cross-pillar views. Replaces the "6 pillars · 187
+  // items" caption, which named the same things without being tappable.
+  var TABS = [
+    // The landing screen — the activity grid and one card per pillar —
+    // IS the status screen, and its tab says so. It stays home: tapping
+    // it clears any pillar filter and returns to the summary.
+    {id: "overview",  label: "Activity"},
+    {id: "pillars",   label: "Pillars"},
+    {id: "questions", label: "Blockers"},
+    {id: "feed",      label: "Feed"},
+    {id: "chat",      label: "Chat"},
+  ];
+  var tabsHost = document.getElementById("mc-tabs");
+  TABS.forEach(function (t) {
+    var b = el("button", null, t.label);
+    b.id = "tab-" + t.id;
+    b.addEventListener("click", function () {
+      if (t.id === "pillars") { show(selectedPillar()); return; }
+      show(t.id === "overview" ? MID : t.id);
+    });
+    tabsHost.appendChild(b);
+  });
+
+  // ── activity grid: surfaces × days from item timestamps ─────────
+  (function activity(){
+    // WHAT'S BEEN HAPPENING LATELY, not a calendar. The last ~100 item
+    // events sliced into eight recency columns ending at now — a dense
+    // mission's grid spans hours, a sparse one's weeks. A fixed 48h
+    // window renders a quiet week as an empty grid.
+    var COLS = 8, LAST = 100;
+    // LIVE items decide the row: a mission surface holding only retired
+    // history is content-free, and its grid row retires with it.
+    var hasMissionItems = liveItems.some(function (it) { return it.surface_id===MID; });
+    var surfaces = (hasMissionItems ? [{id:MID}] : [])
+      .concat(PILLARS.map(function(p){return {id:p.pillar_id};}));
+    var events = [];
+    ITEMS.forEach(function (it) {
+      var d = when(it); if (!d) return;
+      events.push({t: d.getTime(), sid: it.surface_id});
+    });
+    events.sort(function (a,b){ return a.t - b.t; });
+    if (events.length > LAST) events = events.slice(events.length - LAST);
+    var buckets = {};   // sid -> [count per recency column, oldest first]
+    surfaces.forEach(function (s) { buckets[s.id] = new Array(COLS).fill(0); });
+    if (events.length){
+      var t0 = events[0].t, span = Math.max(1, Date.now() - t0);
+      events.forEach(function (e) {
+        var idx = Math.min(COLS - 1, Math.floor((e.t - t0) / span * COLS));
+        if (buckets[e.sid]) buckets[e.sid][idx]++;
+      });
+    }
+    var max = 1;
+    surfaces.forEach(function (s) { buckets[s.id].forEach(function (n) { if (n>max) max=n; }); });
+    var lvl = function (n) {
+      if (!n) return "";
+      var r = n / max;
+      return r > .75 ? "a4" : r > .5 ? "a3" : r > .25 ? "a2" : "a1";
+    };
+    var table = document.getElementById("mc-act");
+    surfaces.forEach(function (s) {
+      var tr = document.createElement("tr");
+      var th = document.createElement("th");
+      var thw = el("span","thw");
+      thw.appendChild(band(surfColor(s.id)));
+      thw.appendChild(el("span","thn",surfName(s.id)));
+      th.appendChild(thw);
+      th.title = "Show " + surfName(s.id) + "'s updates over time";
+      th.addEventListener("click", function () { showFeedFor(s.id); });
+      tr.appendChild(th);
+      buckets[s.id].forEach(function (n) {
+        var td = document.createElement("td");
+        var cell = el("div","mc-act-cell " + lvl(n));
+        cell.title = surfName(s.id) + ": " + n + " item change" + (n===1?"":"s");
+        td.appendChild(cell); tr.appendChild(td);
+      });
+      table.appendChild(tr);
+    });
+    // SELF-BALANCING, LOCKED: full names at full size come first; every
+    // pixel left over becomes the gap that pushes the cells right. No
+    // static widths, no tuning — the row divides itself.
+    var scEl2 = document.querySelector(".mc-act-scroll");
+    if (scEl2 && scEl2.clientWidth){
+      var cellsBlock = COLS * 13 + (COLS - 1) * 2;
+      var names2 = table.querySelectorAll(".thn");
+      var need = 0;
+      [].forEach.call(names2, function (n) {
+        need = Math.max(need, n.scrollWidth);
+      });
+      var nameCol = need + 12;                       // band + its gap
+      var avail = scEl2.clientWidth - cellsBlock - 9;
+      var fs = 0.64;
+      while (nameCol > avail && fs > 0.5){           // tiny screens only
+        fs -= 0.02;
+        [].forEach.call(names2, function (n) {
+          n.style.fontSize = fs.toFixed(2) + "rem"; });
+        need = 0;
+        [].forEach.call(names2, function (n) {
+          need = Math.max(need, n.scrollWidth); });
+        nameCol = need + 12;
+      }
+      var pad = Math.max(8, avail - nameCol);
+      table.querySelectorAll("th").forEach(function (th) {
+        th.style.width = (nameCol + pad) + "px";
+        th.style.maxWidth = (nameCol + pad) + "px";
+        th.style.paddingRight = pad + "px";
+      });
+    }
+  })();
+
+  // ── item card renderer ──────────────────────────────────────────
+  function card(it, opts){
+    opts = opts || {};
+    var c = el("article","mc-item"+(it.state?" st-"+it.state:"")+" k-"+it.kind
+                 + (opts.mirror ? " mc-mirror" : ""));
+    if (opts.mirror){
+      // A mirror is a pointer, not the record: tapping it lands on the
+      // REAL item in its home view — where the chrome's anchor control
+      // (and for open asks, the Answer flow) is mounted.
+      c.title = "Open in " + surfName(it.surface_id);
+      c.addEventListener("click", function (ev) {
+        if (ev.target.closest("a,button,summary")) return;
+        if (!document.getElementById("view-" + viewIdFor(it.surface_id))) return;
+        rememberPillar(viewIdFor(it.surface_id));
+        show(viewIdFor(it.surface_id));
+        var target = document.querySelector(
+          '.mc-view [data-mc-anchor="' + it.key + '"]');
+        if (target){
+          var pv = document.getElementById("view-" + viewIdFor(it.surface_id));
+          var secEl = target.closest("section.mc-sec");
+          if (pv && pv._showSection && secEl && secEl.dataset.sec)
+            pv._showSection(secEl.dataset.sec);
+          var fold = target.closest("details.mc-finished");
+          if (fold) fold.open = true;
+          target.scrollIntoView({behavior:"smooth", block:"center"});
+          target.classList.remove("mc-flash");
+          void target.offsetWidth;   // restart the animation
+          target.classList.add("mc-flash");
+        }
+      });
+    }
+    if (!opts.mirror){
+      c.setAttribute("data-mc-anchor", it.key);
+      if (it.kind==="question" && it.state==="open" && it.ask){
+        c.setAttribute("data-mc-ask", it.ask);
+        // The chrome mounts its Answer control inside this card as a small
+        // chip. The card itself is the honest tap target — forward a tap
+        // anywhere on it to that control.
+        c.addEventListener("click", function (ev) {
+          if (ev.target.closest("a,summary")) return;
+          var ctl = c.querySelector("[data-mc-control] button")
+                 || c.querySelector("[data-mc-control]");
+          if (ctl && ctl.click && !ev.target.closest("[data-mc-control]"))
+            ctl.click();
+        });
+      }
+    }
+    if (it.state) c.dataset.state = it.state;
+    c.dataset.kind = it.kind;
+    c.dataset.surface = it.surface_id;
+    c.dataset.search = (it.title+" "+it.body+" "+(it.evidence||[]).join(" ")).toLowerCase();
+
+    var inner = c;
+    if (opts.stepno != null){
+      var wrap = el("div");
+      c.appendChild(el("div","stepno", String(opts.stepno)));
+      c.appendChild(wrap); inner = wrap;
+    }
+    var top = el("div","top");
+    top.setAttribute("data-mc-noexcerpt", "");
+    var where = el("span","where");
+    if (opts.showSurface){
+      where.appendChild(band(surfColor(it.surface_id)));
+      where.appendChild(document.createTextNode(shortName(it.surface_id)));
+    }
+    if (it.owner) where.appendChild(document.createTextNode(
+      (opts.showSurface ? " · " : "") + "owner: " + it.owner));
+    top.appendChild(where);
+    if (it.state) top.appendChild(pill(it.state));
+    inner.appendChild(top);
+    inner.appendChild(el("h3",null,it.title));
+
+    if (it.kind==="decision" && (it.fork || it.chosen || it.if_wrong)){
+      var dv = el("div","mc-dec");
+      if (it.fork){ dv.appendChild(el("b",null,"Fork")); paras(dv,it.fork); }
+      if (it.chosen){ dv.appendChild(el("b",null,"Chosen")); paras(dv,it.chosen); }
+      if (it.if_wrong){ dv.appendChild(el("b",null,"If wrong")); paras(dv,it.if_wrong,"ifw"); }
+      inner.appendChild(dv);
+      if (it.body){ var b0 = el("div","body"); paras(b0,it.body); inner.appendChild(b0); }
+    } else if (it.body){
+      var b = el("div","body"); paras(b,it.body); inner.appendChild(b);
+    }
+    if (it.kind==="exhibit" && it.html){
+      var ex = el("div","body"); ex.innerHTML = it.html;   // trusted, same as freeform
+      inner.appendChild(ex);
+    }
+    if ((it.evidence||[]).length){
+      var det = document.createElement("details");
+      det.appendChild(el("summary",null,"Evidence ("+it.evidence.length+")"));
+      var ev = el("div","ev");
+      it.evidence.forEach(function (e) { ev.appendChild(el("p",null,e)); });
+      det.appendChild(ev); inner.appendChild(det);
+    }
+    if ((it.refs||[]).length){
+      var refs = el("div","mc-refs");
+      refs.setAttribute("data-mc-noexcerpt", "");
+      it.refs.forEach(function (r) { refs.appendChild(el("span",null,r)); });
+      inner.appendChild(refs);
+    }
+    var d = when(it);
+    var whenEl = null;
+    if (d) {
+      inner.appendChild(whenEl = el("div","mc-when",
+        (it.happened_at ? "" : "updated ") + agoText(d)));
+      whenEl.title = d.toLocaleString();
+      whenEl.setAttribute("data-mc-noexcerpt", "");
+    }
+    return c;
+  }
+
+  // ── per-surface view builder ────────────────────────────────────
+  function viewIdFor(sid){ return sid === MID ? "mission-legacy" : sid; }
+  function surfaceView(sid){
+    var v = el("div","mc-view"); v.id = "view-"+viewIdFor(sid);
+    var mine = (sid ? liveItems.filter(function (it) { return it.surface_id===sid; })
+                    : liveItems.slice())
+      .sort(function (a,b){ return (a.order||0)-(b.order||0) ||
+        String(a.title).localeCompare(String(b.title)); });
+    if (!mine.length){
+      var em = el("div","mc-empty");
+      em.appendChild(document.createTextNode("No items yet. Add the first: "));
+      var code = el("code",null,'graph mission add '+
+        (sid ? surfName(sid).toLowerCase() : "<pillar>")+
+        ' <item-id> --kind work --title "…"');
+      em.appendChild(code); v.appendChild(em);
+      return v;
+    }
+    var showSurf = !sid;
+    var sections = {};
+    var charter = [];
+    mine.forEach(function (it) {
+      if (it.kind === "scope"){ charter.push(it); return; }
+      var canon = (it.section && SECTION_ORDER.indexOf(it.section) >= 0)
+        ? it.section : (SECTION_OF[it.kind] || "News");
+      (sections[canon] = sections[canon] || []).push(it);
+    });
+    var names = SECTION_ORDER.filter(function (s) {
+      if (s === "Tasks") return !!(beadsFor(sid) || {}).length || sections[s];
+      return sections[s];
+    });
+    var host = el("div"); v.appendChild(host);
+    var secEls = {};
+    var subs = el("div","mc-subtabs");
+    var activeName = names[0];
+    function showSection(name){
+      activeName = name;
+      names.forEach(function (n) {
+        if (secEls[n]) secEls[n].style.display = (n === name) ? "" : "none";
+      });
+      [].forEach.call(subs.children, function (b) {
+        b.classList.toggle("on", b.dataset.sec === name);
+      });
+    }
+    v._showSection = showSection;
+    SECTION_ORDER.forEach(function (name) {
+      var b = el("button", null, name);
+      b.dataset.sec = name;
+      if (names.indexOf(name) < 0){
+        b.classList.add("off");
+        b.disabled = true;
+        subs.appendChild(b);
+        return;
+      }
+      var hot = 0;
+      if (name === "Delivery")
+        hot = (sections[name] || []).filter(function (it) {
+          return it.kind==="checkpoint" && it.state==="in_progress"; }).length;
+      else if (name === "Tasks")
+        hot = (beadsFor(sid) || []).filter(function (b2) {
+          return b2.state==="running"; }).length;
+      else if (name === "Questions")
+        hot = (sections[name] || []).filter(function (it) {
+          return it.state==="open"; }).length;
+      else if (name === "Decisions")
+        hot = (sections[name] || []).filter(function (it) {
+          return it.faq; }).length;
+      if (hot) b.appendChild(el("sup","n", String(hot)));
+      b.addEventListener("click", function () { showSection(name); });
+      subs.appendChild(b);
+    });
+    names.forEach(function (name) {
+      var sec = el("section","mc-sec");
+      sec.dataset.sec = name;
+      secEls[name] = sec;
+      // THE FILTERS LIVE WHERE THEY APPLY: each section offers toggles
+      // for exactly the states its own cards are in — none at all on
+      // Objective and scope, which is prose, not a worklist.
+      (function sectionFilters(){
+        if (name === "Delivery" || name === "Questions") return;
+        if (name === "Tasks" && beadsFor(sid)) return;
+        var present = {};
+        sections[name].forEach(function (it) {
+          if (it.state) present[it.state] = (present[it.state]||0)+1;
+        });
+        var keys = Object.keys(present);
+        if (keys.length < 2) return;
+        var on = {};
+        var fb = el("div","mc-secfilters");
+        function apply(){
+          var act = Object.keys(on).filter(function (k) { return on[k]; });
+          sec.querySelectorAll(".mc-item").forEach(function (n) {
+            n.classList.toggle("mc-hidden",
+              !!act.length && act.indexOf(n.dataset.state) < 0);
+          });
+          sec.querySelectorAll("details.mc-finished").forEach(function (d) {
+            var vis = d.querySelectorAll(".mc-item:not(.mc-hidden)").length;
+            d.open = !!act.length && vis > 0;
+            d.classList.toggle("mc-hidden", !!act.length && !vis);
+          });
+        }
+        keys.sort().forEach(function (k) {
+          var b = el("button", null, (STATE_LABEL[k] || k) + " " + present[k]);
+          b.addEventListener("click", function () {
+            on[k] = !on[k]; b.classList.toggle("on", !!on[k]); apply();
+          });
+          fb.appendChild(b);
+        });
+        sec.appendChild(fb);
+      })();
+      var list = (sections[name] || []).slice().sort(function (a, b) {
+        var ga = (a.section && a.section !== name) ? a.section : "";
+        var gb = (b.section && b.section !== name) ? b.section : "";
+        return ga.localeCompare(gb) || (a.order||0)-(b.order||0) ||
+          String(a.title).localeCompare(String(b.title));
+      });
+      // ACCEPTANCE CRITERIA: structured, top-to-bottom, each with its
+      // tracked state — the demonstrable-value ladder. Scope prose (the
+      // objective) renders as the intro; criteria are the checklist.
+      if (name === "Delivery"){
+        // Three states by definition: confirmed (demonstrated end-to-end),
+        // in progress, pending. Item states map onto that vocabulary.
+        function bucket(st){
+          if (st==="confirmed") return {mark:"\u2713", cls:"ok", word:"confirmed"};
+          if (st==="in_progress") return {mark:"\u27F3", cls:"run", word:"in progress"};
+          return {mark:"\u25CB", cls:"todo", word:"pending"};
+        }
+        var depthMemo = {};
+        function beadDepth(sid2, id){
+          if (id in depthMemo) return depthMemo[id];
+          depthMemo[id] = 0;                       // cycle guard
+          var b = beadById(sid2, id);
+          if (!b || b.state === "complete") return (depthMemo[id] = 0);
+          var d2 = 1;
+          (b.deps || []).forEach(function (dep) {
+            d2 = Math.max(d2, 1 + beadDepth(sid2, dep));
+          });
+          return (depthMemo[id] = d2);
+        }
+        function critRank(it){
+          var linked2 = (it.refs || []).filter(function (x) {
+            return String(x).indexOf("bead:") === 0; });
+          if (!linked2.length) return 99;          // unlinked: authored order, last
+          var r2 = 0;
+          linked2.forEach(function (x) {
+            r2 = Math.max(r2, beadDepth(it.surface_id, x.slice(5)));
+          });
+          return r2;
+        }
+        var crits = list.filter(function (it) { return it.kind === "checkpoint"; })
+          .sort(function (a,b){
+            var ca = bucket(a.state).word === "confirmed" ? 0 : 1;
+            var cb = bucket(b.state).word === "confirmed" ? 0 : 1;
+            return (ca - cb) || (critRank(a) - critRank(b))
+              || (a.order||0) - (b.order||0);
+          });
+        var counts2 = {confirmed:0, "in progress":0, pending:0};
+        crits.forEach(function (it) { counts2[bucket(it.state).word]++; });
+        sec.appendChild(filterLegend([
+          {word:"confirmed",   count:counts2["confirmed"],
+           mark:"\u2713", color:"var(--good)"},
+          {word:"in progress", count:counts2["in progress"],
+           mark:"\u27F3", color:"var(--warn)", spin:true},
+          {word:"pending",     count:counts2["pending"],
+           mark:"\u25CB", color:"var(--ind)"},
+        ], function (act) {
+          sec.querySelectorAll(".mc-crit").forEach(function (r) {
+            r.classList.toggle("mc-hidden",
+              !!act.length && act.indexOf(r.dataset.word) < 0);
+          });
+        }));
+        function linkedOf(it){
+          return (it.refs || []).filter(function (x) {
+            return String(x).indexOf("bead:") === 0; })
+            .map(function (x) { return beadById(it.surface_id, x.slice(5)); })
+            .filter(Boolean);
+        }
+        crits.forEach(function (it) {
+          var bk = bucket(it.state);
+          var r = el("div","mc-crit c-" + bk.cls);
+          r.setAttribute("data-mc-anchor", it.key);
+          r.dataset.state = it.state; r.dataset.kind = it.kind;
+          r.dataset.surface = it.surface_id;
+          r.dataset.word = bk.word;
+          r.style.cursor = "pointer";
+          (function (idx2) {
+            r.addEventListener("click", function (ev) {
+              if (ev.target.closest("a,button")) return;
+              openCriterion(crits, idx2, {bucket: bucket, linkedOf: linkedOf});
+            });
+          })(crits.indexOf(it));
+          r.appendChild(markSpan("mk c-" + bk.cls, bk.mark));
+          var bx = el("div","bx");
+          bx.appendChild(el("div","t", it.title));
+          if (it.body) bx.appendChild(el("div","d",
+            String(it.body).split(/\n/)[0].slice(0, 140)));
+          // TASKS ARE BEADS: a criterion's bead refs render as live
+          // progress. All-done work does NOT confirm the criterion — it
+          // only says the demonstration is ready to be made.
+          var linked = (it.refs || []).filter(function (x) {
+            return String(x).indexOf("bead:") === 0; })
+            .map(function (x) { return beadById(it.surface_id, x.slice(5)); })
+            .filter(Boolean);
+          if (linked.length){
+            var doneN = linked.filter(function (b) { return b.state === "complete"; }).length;
+            if (doneN === linked.length && bk.word === "pending"){
+              var rl = el("div","tl2");
+              rl.appendChild(el("span","rdy","ready to confirm"));
+              bx.appendChild(rl);
+            } else if (bk.word === "in progress"){
+              linked.forEach(function (b) {
+                var ln = el("div","tk s-" + b.state);
+                ln.appendChild(markSpan("tmk", BEAD_MARK[b.state] || "\u25E6"));
+                ln.appendChild(el("span","tt", b.title));
+                ln.title = b.id + " \u00b7 " + b.state;
+                bx.appendChild(ln);
+              });
+            }
+          }
+          r.appendChild(bx);
+          sec.appendChild(r);
+        });
+        list.filter(function (it) { return it.kind !== "checkpoint"; })
+          .forEach(function (it) { sec.appendChild(card(it)); });
+        host.appendChild(sec);
+        return;
+      }
+      // The Status section is one standing statement, not a work list:
+      // no card chrome, no restated title — just the prose and its age.
+      // The anchor survives so comments and asks still attach.
+      if (name === "News"){
+        // News order: an explicit `order` pins; otherwise newest first.
+        // Never alphabetical — a reader expects fresh on top.
+        list.sort(function (a, b) {
+          return (a.order||0) - (b.order||0)
+            || ((when(b)||0) - (when(a)||0));
+        });
+        list.forEach(function (it) {
+            var w = el("div","mc-status-prose");
+            w.setAttribute("data-mc-anchor", it.key);
+            if (it.state) w.dataset.state = it.state;
+            w.dataset.kind = it.kind;
+            w.dataset.surface = it.surface_id;
+            var d0 = when(it);
+            if (d0){
+              // Full local timestamp leads every entry — consistent as
+              // you scroll — with the no-math relative tail for the
+              // recent past (a week).
+              var full = d0.toLocaleString(undefined, {
+                month:"short", day:"numeric", year:"numeric",
+                hour:"numeric", minute:"2-digit", timeZoneName:"short"});
+              var rel = (Date.now() - d0.getTime() < 7*86400e3)
+                ? " \u00b7 " + agoText(d0) : "";
+              var st = el("div","mc-newsstamp", full + rel);
+              st.setAttribute("data-mc-noexcerpt","");
+              w.appendChild(st);
+            }
+            var b = el("div","body"); mdInto(b, it.body || it.title);
+            w.appendChild(b);
+            sec.appendChild(w);
+          });
+        host.appendChild(sec);
+        return;
+      }
+      if (name === "Tasks"){
+        var bl = beadsFor(sid);
+        if (bl && bl.length){
+          // Same legend control as Delivery; the four-state task ladder
+          // is the only vocabulary this tab speaks.
+          var bc = {};
+          bl.forEach(function (b) { bc[b.state] = (bc[b.state]||0)+1; });
+          sec.appendChild(filterLegend([
+            {word:"defined", count:bc.defined||0, mark:"\u25E6", color:"var(--ink3)"},
+            {word:"specified", count:bc.specified||0, mark:"\u25CB", color:"var(--ind)"},
+            {word:"running", count:bc.running||0, mark:"\u27F3", color:"var(--warn)"},
+            {word:"complete", count:bc.complete||0, mark:"\u2713", color:"var(--good)"}
+          ], {showEmpty: true}, function (act) {
+            sec.querySelectorAll(".mc-bead").forEach(function (r) {
+              r.classList.toggle("mc-hidden",
+                !!act.length && act.indexOf(r.dataset.bstate) < 0);
+            });
+          }));
+          // SINGLE SOURCE OF TRUTH: the work is the beads, read from bd —
+          // never duplicated into mission items. Evidence rides along.
+          var ORD = {running:0, specified:1, defined:2, complete:3};
+          var sorted2 = bl.slice().sort(function (a,b) {
+            return (ORD[a.state]||0) - (ORD[b.state]||0);
+          });
+          sorted2.forEach(function (b, bi) {
+            var row = el("div","mc-bead s-" + b.state);
+            row.dataset.bstate = b.state;
+            row.appendChild(markSpan("bmk", BEAD_MARK[b.state] || "\u25E6"));
+            var bx2 = el("div","bx2");
+            var t2 = el("div","t2");
+            // An epic's parent bead is the pillar's final-acceptance task.
+            if (b.epic) t2.appendChild(el("span","ep","acceptance"));
+            t2.appendChild(document.createTextNode(b.title));
+            bx2.appendChild(t2);
+            var meta2 = el("div","m2");
+            meta2.appendChild(el("span",null, b.id));
+            bx2.appendChild(meta2);
+            row.appendChild(bx2);
+            row.addEventListener("click", function () { openTask(sorted2, bi); });
+            sec.appendChild(row);
+          });
+          host.appendChild(sec);
+          return;
+        }
+      }
+      if (name === "Questions"){
+        var qs2 = list.filter(function (it) { return it.kind === "question"; });
+        function qWhen(q){
+          return when(q) || (q.asked_at ? new Date(q.asked_at) : 0);
+        }
+        function newestFirst(a, b){ return (qWhen(b)||0) - (qWhen(a)||0); }
+        var blocks = qs2.filter(function (q) {
+          return q.state === "open" && q.blocking; }).sort(newestFirst);
+        var opens = qs2.filter(function (q) {
+          return q.state === "open" && !q.blocking; }).sort(newestFirst);
+        var dones = qs2.filter(function (q) { return q.state !== "open"; })
+          .sort(newestFirst);
+        var ordered = blocks.concat(opens, dones);
+        function qRow(q){
+          var qcat = q.state !== "open" ? "answered"
+            : (q.blocking ? "blocking" : "open");
+          var row = el("div","mc-bead q-" + (qcat === "blocking" ? "blocking" : qcat === "open" ? "open" : "answered"));
+          row.setAttribute("data-mc-anchor", q.key);
+          row.appendChild(markSpan("bmk",
+            qcat === "blocking" ? "\u2298" : qcat === "open" ? "?" : "\u2713"));
+          var bx3 = el("div","bx2");
+          bx3.appendChild(el("div","t2", q.title));
+          var replies = (q.discussion || []).filter(function (e2) {
+            return e2.type !== "progress"; }).length;
+          var d4 = when(q) || (q.asked_at ? new Date(q.asked_at) : null);
+          bx3.appendChild(el("div","m2",
+            "asked by " + (q.asked_by || "?")
+            + (d4 ? " \u00b7 " + agoText(d4) : "")
+            + (replies ? " \u00b7 " + replies + " repl" + (replies>1?"ies":"y") : "")));
+          row.appendChild(bx3);
+          row.addEventListener("click", function () {
+            openQuestion(ordered, ordered.indexOf(q));
+          });
+          return row;
+        }
+        sec.appendChild(filterLegend([
+          {word:"blocking", count:blocks.length, mark:"\u2298", color:"var(--crit)"},
+          {word:"open", count:opens.length, mark:"?", color:"var(--warn)"},
+          {word:"answered", count:dones.length, mark:"\u2713", color:"var(--good)"}
+        ], {showEmpty: true}, function (act) {
+          sec.querySelectorAll(".mc-bead").forEach(function (r) {
+            r.classList.toggle("mc-hidden",
+              !!act.length && act.indexOf(r.dataset.qstate) < 0);
+          });
+        }));
+        ordered.forEach(function (q) {
+          var row = qRow(q);
+          row.dataset.qstate = q.state !== "open" ? "answered"
+            : (q.blocking ? "blocking" : "open");
+          sec.appendChild(row);
+        });
+        host.appendChild(sec);
+        return;
+      }
+      if (name === "Decisions"){
+        var decs = list.filter(function (it) { return it.kind === "decision"; })
+          .sort(function (a, b) { return (when(b)||0) - (when(a)||0); });
+        var favN = decs.filter(function (d) { return d.faq; }).length;
+        var dlg = filterLegend([
+          {word:"decided", count:decs.length, mark:"\u25C6", color:"var(--ink2)"},
+          {word:"favorite", count:favN, mark:"\u2605", color:"var(--warn)"}
+        ], {always: true, showEmpty: true}, function (act) {
+          sec.querySelectorAll(".mc-bead").forEach(function (r) {
+            var cats = (r.dataset.dcat || "").split(" ");
+            r.classList.toggle("mc-hidden",
+              !!act.length && !act.some(function (a) {
+                return cats.indexOf(a) >= 0; }));
+          });
+        });
+        sec.appendChild(dlg);
+        sec._dlg = dlg;
+        decs.forEach(function (d, di) {
+          var row = el("div","mc-bead d-row" + (d.faq ? " d-fav" : ""));
+          row.setAttribute("data-mc-anchor", d.key);
+          row.dataset.dcat = "decided" + (d.faq ? " favorite" : "");
+          row.appendChild(el("span","bmk", d.faq ? "\u2605" : "\u25C6"));
+          var bx4 = el("div","bx2");
+          bx4.appendChild(el("div","t2", d.title));
+          var pick = mdStrip(String(d.chosen || d.body || "").split(/\n/)[0]);
+          if (pick) bx4.appendChild(el("div","x2", pick.slice(0, 120)));
+          row.appendChild(bx4);
+          row.addEventListener("click", function () { openDecision(decs, di); });
+          sec.appendChild(row);
+        });
+        host.appendChild(sec);
+        return;
+      }
+      var steps = list.filter(function (it) { return it.kind==="checkpoint"; });
+      var rest = list.filter(function (it) { return it.kind!=="checkpoint"; });
+      if (steps.length){
+        var arc = el("div","mc-arc");
+        steps.forEach(function (s,i){ arc.appendChild(card(s,{stepno:i+1})); });
+        sec.appendChild(arc);
+      }
+      // FINISHED WORK FOLDS AWAY. The record stays (count on the fold, cards
+      // one tap away, anchors still in the DOM for the chrome), but a reader
+      // scrolling a pillar sees what is ALIVE. Checkpoints stay unfolded —
+      // an arc's completed gates are its narrative, not clutter — and
+      // decisions/scope/status are their own sections with their own logic.
+      var FOLDS = {question:1};
+      var TERMINAL = {answered:1};
+      var live_ = rest.filter(function (it) { return !(FOLDS[it.kind] && TERMINAL[it.state]); });
+      var finished = rest.filter(function (it) { return FOLDS[it.kind] && TERMINAL[it.state]; });
+      var lastGroup = null;
+      live_.forEach(function (it) {
+        var g = (it.section && it.section !== name) ? it.section : "";
+        if (g !== lastGroup){
+          if (g) sec.appendChild(el("h3","mc-group",g));
+          lastGroup = g;
+        }
+        sec.appendChild(card(it, {showSurface: showSurf}));
+      });
+      if (finished.length){
+        var fold = document.createElement("details");
+        fold.className = "mc-finished";
+        fold.appendChild(el("summary",null,
+          finished.length + " answered question" + (finished.length>1?"s":"")));
+        finished.forEach(function (it) { fold.appendChild(card(it, {showSurface: showSurf})); });
+        sec.appendChild(fold);
+      }
+      host.appendChild(sec);
+    });
+    if (names.length) v.insertBefore(subs, v.firstChild);
+    if (charter.length){
+      var cpan = el("div","mc-charter");
+      charter.forEach(function (it) {
+        var w2 = el("div","mc-status-prose");
+        w2.setAttribute("data-mc-anchor", it.key);
+        var b2 = el("div","body"); mdInto(b2, it.body || it.title);
+        w2.appendChild(b2);
+        var d5 = when(it);
+        if (d5){
+          var wh2 = el("div","mc-when","updated " + agoText(d5));
+          wh2.title = d5.toLocaleString();
+          w2.appendChild(wh2);
+        }
+        cpan.appendChild(w2);
+      });
+      cpan.style.display = "none";
+      v._charterOpen = false;
+      v._toggleCharter = function () {
+        v._charterOpen = !v._charterOpen;
+        cpan.style.display = v._charterOpen ? "" : "none";
+        subs.style.display = v._charterOpen ? "none" : "";
+        host.style.display = v._charterOpen ? "none" : "";
+        return v._charterOpen;
+      };
+      v.insertBefore(cpan, v.firstChild);
+    }
+    showSection(names[0]);
+    return v;
+  }
+
+  // ── overview view (mission surface + pillar summaries) ──────────
+  function overviewView(){
+    var v = el("div","mc-view"); v.id = "view-"+MID;
+    var sec = el("section","mc-sec");
+    sec.appendChild(el("h2",null,"Pillars"));
+    PILLARS.forEach(function (p) {
+      var pc = el("div","mc-psum");
+      pc.addEventListener("click",function(){
+        rememberPillar(p.pillar_id);
+        show(p.pillar_id);
+      });
+      var hd = el("div","hd");
+      hd.appendChild(band(p.color || "#8391a8"));
+      hd.appendChild(el("b",null,p.name));
+      var mine = liveItems.filter(function (it) { return it.surface_id===p.pillar_id; });
+      // blocked = an open question is preventing forward progress.
+      // Task dependency order is sequencing, not blockage.
+      var blocked = mine.filter(function (it) {
+        return it.kind === "question" && it.state === "open" && it.blocking;
+      }).length;
+      var asks = mine.filter(function (it) {
+        return it.kind==="question" && it.state==="open" && it.ask; }).length;
+      pc.appendChild(hd);
+      var status = mine.filter(function (it) { return it.kind==="status"; })[0];
+      if (status) pc.appendChild(el("div","last",
+        mdStrip(String(status.body||status.title).split(/\n\s*\n/)[0])));
+      else if (p.last_done) pc.appendChild(el("div","last",p.last_done));
+      // Between the text and the colour bar, per the operator: freshness
+      // left, ask/blocked badges right; the title keeps its full width
+      // above.
+      var freshest0 = mine.slice().sort(function (a,b) {
+        return (when(b)||0) - (when(a)||0); })[0];
+      var fw0 = freshest0 && when(freshest0);
+      if (asks || blocked || fw0) {
+        var miniRow = el("div","mc-minirow");
+        if (fw0) miniRow.appendChild(el("span","ago","active " + agoText(fw0)));
+        miniRow.appendChild(el("span","grow"));
+        if (asks || blocked) {
+          var mini = el("span","mc-mini");
+          mini.title = (asks ? asks + " waiting on you" : "")
+            + (asks && blocked ? " \u00b7 " : "")
+            + (blocked ? blocked + " blocked" : "");
+          if (asks) mini.appendChild(el("i","m-a",asks + " ask" + (asks>1?"s":"")));
+          if (blocked) mini.appendChild(el("i","m-c",blocked + " blocked"));
+          miniRow.appendChild(mini);
+        }
+        pc.appendChild(miniRow);
+      }
+      // TWO BARS, TWO TRUTHS. Criteria bound the mission: confirmed /
+      // in progress / pending is the value ladder. Beads are the work
+      // underneath. Each bar reads its own source; neither pretends to
+      // be the other.
+      function segbar(segs, total, title){
+        var bar = el("div","mc-statbar");
+        segs.forEach(function (sg) {
+          if (!sg[0]) return;
+          var i3 = el("i"); i3.style.width = (100*sg[0]/total) + "%";
+          i3.style.background = sg[1];
+          bar.appendChild(i3);
+        });
+        bar.title = title;
+        return bar;
+      }
+      function statrow(label, bar, frac){
+        var row = el("div","mc-statrow");
+        row.appendChild(el("span","lb",label));
+        row.appendChild(bar);
+        row.appendChild(el("span","fr",frac));
+        return row;
+      }
+      var bl2 = beadsFor(p.pillar_id);
+      if (bl2 && bl2.length){
+        var bc2 = {complete:0, running:0, specified:0, defined:0};
+        bl2.forEach(function (b) { bc2[b.state] = (bc2[b.state]||0)+1; });
+        pc.appendChild(statrow("tasks",
+          segbar([[bc2.complete,"var(--good)"],[bc2.running,"var(--warn)"],
+                  [bc2.specified,"var(--accent-dim)"],[bc2.defined,"var(--line2)"]],
+            bl2.length,
+            bc2.complete + " complete \u00b7 " + bc2.running + " running \u00b7 "
+              + bc2.specified + " specified \u00b7 " + bc2.defined + " defined"),
+          bc2.complete + "/" + bl2.length));
+      }
+      var crits2 = mine.filter(function (it) { return it.kind === "checkpoint"; });
+      if (crits2.length){
+        var cc = {ok:0, run:0, todo:0};
+        crits2.forEach(function (it) {
+          if (it.state==="confirmed") cc.ok++;
+          else if (it.state==="in_progress") cc.run++;
+          else cc.todo++;
+        });
+        pc.appendChild(statrow("delivery",
+          segbar([[cc.ok,"var(--good)"],[cc.run,"var(--warn)"],[cc.todo,"var(--line2)"]],
+            crits2.length,
+            cc.ok + " confirmed \u00b7 " + cc.run + " in progress \u00b7 " + cc.todo + " pending"),
+          cc.ok + "/" + crits2.length));
+      }
+
+      sec.appendChild(pc);
+    });
+    v.appendChild(sec);
+    return v;
+  }
+
+  // ── cross-pillar views ──────────────────────────────────────────
+  function collectionView(id, title, filter, empty){
+    var v = el("div","mc-view"); v.id = "view-"+id;
+    var all = liveItems.filter(filter).sort(function (a,b){
+      var da = when(a), db_ = when(b);
+      return (db_?db_.getTime():0) - (da?da.getTime():0);
+    });
+    if (!all.length){ v.appendChild(el("div","mc-empty",empty)); return v; }
+    var host = el("section","mc-sec");
+    host.appendChild(el("h2",null,title+" — every pillar"));
+    all.forEach(function (it) {
+      host.appendChild(card(it,{showSurface:true, mirror:true})); });
+    v.appendChild(host);
+    return v;
+  }
+
+  // THE FEED IS EVENTS, NOT ITEMS — derived entirely from streams the
+  // item store already records (history transitions, work entries,
+  // discussion, answers, post and decision timestamps). No new stream.
+  function feedView(){
+    var v = el("div","mc-view"); v.id = "view-feed";
+    var events = [];
+    function ev(cat, at, it, text){
+      var d = at instanceof Date ? at : new Date(at);
+      if (isNaN(d)) return;
+      events.push({cat:cat, d:d, it:it, text:text});
+    }
+    liveItems.forEach(function (it) {
+      if (it.kind === "checkpoint"){
+        (it.history || []).forEach(function (h) {
+          if (h.to === "confirmed") ev("finished", h.at, it, "confirmed: " + it.title);
+          else if (h.to === "in_progress") ev("progress", h.at, it, "started: " + it.title);
+        });
+        (it.work || []).forEach(function (w) { ev("progress", w.at, it, w.text); });
+        if (!(it.history || []).length && it.state === "confirmed" && when(it))
+          ev("finished", when(it), it, "confirmed: " + it.title);
+      } else if (it.kind === "question"){
+        var askedAt = it.asked_at || (when(it) && when(it).toISOString());
+        if (askedAt)
+          ev(it.blocking && it.state === "open" ? "blocking" : "progress",
+             askedAt, it, "asked: " + it.title);
+        (it.discussion || []).forEach(function (e2) { ev("progress", e2.at, it, e2.text); });
+        if (it.answer && it.answer.at)
+          ev("finished", it.answer.at, it, "answered: " + it.title);
+      } else if (it.kind === "status"){
+        if (when(it)) ev("news", when(it), it,
+          mdStrip(String(it.body || it.title).split(/\n/)[0]).slice(0, 140));
+      } else if (it.kind === "decision"){
+        if (when(it)) ev("decided", when(it), it, it.title);
+      }
+    });
+    events.sort(function (a, b) { return b.d - a.d; });
+    if (!events.length){ v.appendChild(el("div","mc-empty",
+      "Nothing has happened yet \u2014 the feed builds itself from what the pillars record.")); return v; }
+    var CATS = [
+      {key:"blocking", word:"blocking", mark:"\u2298", color:"var(--crit)"},
+      {key:"progress", word:"progress", mark:"\u27F3", color:"var(--warn)"},
+      {key:"finished", word:"finished", mark:"\u2713", color:"var(--good)"},
+      {key:"news",     word:"news",     mark:"\u2022", color:"var(--ink2)"},
+      {key:"decided",  word:"decided",  mark:"\u25C6", color:"var(--ink2)"}
+    ];
+    var cc2 = {};
+    events.forEach(function (e2) { cc2[e2.cat] = (cc2[e2.cat]||0)+1; });
+    // 3+2 on purpose: the work pulse (state colours) on one line, the
+    // record (stateless kinds) on the other, each with its label.
+    var actFeed = {};
+    function applyCats(){
+      var act = Object.keys(actFeed).filter(function (k) { return actFeed[k]; });
+      v.querySelectorAll(".mc-feed-row").forEach(function (r) {
+        r.classList.toggle("mc-bhidden",
+          !!act.length && act.indexOf(r.dataset.bucket) < 0);
+      });
+      v.querySelectorAll(".mc-flegend .fl").forEach(function (c) {
+        var on = act.indexOf(c.dataset.word) >= 0;
+        c.classList.toggle("on", on);
+        c.classList.toggle("dim", !!act.length && !on);
+      });
+      applyFeedFilter();
+    }
+    [["tasks", CATS.slice(0,3)], ["updates", CATS.slice(3)]].forEach(function (grp) {
+      var lg = filterLegend(
+        grp[1].map(function (c) {
+          return {word:c.word, count:cc2[c.key]||0, mark:c.mark, color:c.color};
+        }),
+        {always: true, showEmpty: true},
+        function () {});
+      lg.classList.add("fl-grp");
+      lg.querySelectorAll(".fl").forEach(function (b) {
+        b.addEventListener("click", function (ev2) {
+          ev2.stopImmediatePropagation();
+          actFeed[b.dataset.word] = !actFeed[b.dataset.word];
+          applyCats();
+        }, true);
+      });
+      var wrap = el("div","fl-line");
+      wrap.appendChild(el("span","fl-lab",grp[0]));
+      wrap.appendChild(lg);
+      v.appendChild(wrap);
+    });
+    var MARKS2 = {};
+    CATS.forEach(function (c) { MARKS2[c.key] = c.mark; });
+    var lastDay = "";
+    events.forEach(function (e2) {
+      var day = e2.d.toLocaleDateString(undefined,{weekday:"short",month:"short",day:"numeric"});
+      if (day !== lastDay){ v.appendChild(el("div","mc-feed-day",day)); lastDay = day; }
+      var row = el("div","mc-feed-row fe-" + e2.cat);
+      row.dataset.surface = e2.it.surface_id;
+      row.dataset.bucket = e2.cat;
+      row.appendChild(markSpan("fmk", MARKS2[e2.cat]));
+      var main = el("div","main");
+      var who = el("div","who");
+      who.appendChild(band(surfColor(e2.it.surface_id)));
+      who.appendChild(el("span","k",surfName(e2.it.surface_id)));
+      main.appendChild(who);
+      main.appendChild(el("div","t",e2.text));
+      row.appendChild(main);
+      row.appendChild(el("span","fago",agoText(e2.d)));
+      row.addEventListener("click",function(){ gotoItem(e2.it); });
+      v.appendChild(row);
+    });
+    return v;
+  }
+
+  // A pillar's own timeline: the feed, narrowed to one surface. Reached
+  // by tapping the pillar's row in the activity grid; one chip clears it.
+  function applyFeedFilter(){
+    var v = document.getElementById("view-feed");
+    if (!v) return;
+    var sid = v.dataset.filter || "";
+    // Filtered to one pillar, the per-row pillar name is redundant.
+    v.classList.toggle("mc-feed-filtered", !!sid);
+    var old = v.querySelector(".mc-feed-note");
+    if (old) old.remove();
+    v.querySelectorAll(".mc-feed-row").forEach(function (r) {
+      r.classList.toggle("mc-hidden", !!sid && r.dataset.surface !== sid);
+    });
+    function rowShown(r){
+      return !r.classList.contains("mc-hidden")
+          && !r.classList.contains("mc-bhidden");
+    }
+    var kids = [].slice.call(v.children);
+    for (var i = 0; i < kids.length; i++){
+      if (!kids[i].classList.contains("mc-feed-day")) continue;
+      var any = false;
+      for (var j = i + 1; j < kids.length
+           && !kids[j].classList.contains("mc-feed-day"); j++){
+        if (kids[j].classList.contains("mc-feed-row") && rowShown(kids[j]))
+          any = true;
+      }
+      kids[i].classList.toggle("mc-hidden", !any);
+    }
+    if (sid){
+      var chip = el("button","mc-feed-note",
+        "Showing " + surfName(sid) + " only — show all");
+      chip.addEventListener("click", function () {
+        v.dataset.filter = ""; applyFeedFilter();
+      });
+      v.insertBefore(chip, v.firstChild);
+    }
+  }
+  // The one way any reference reaches an item: its pillar's page, with
+  // the section revealed and the card flashed.
+  function gotoItem(it){
+    var vid = viewIdFor(it.surface_id);
+    if (!document.getElementById("view-" + vid)) return;
+    rememberPillar(vid);
+    show(vid);
+    var target = document.querySelector(
+      '#view-' + (window.CSS && CSS.escape ? CSS.escape(vid) : vid)
+      + ' [data-mc-anchor="' + it.key + '"]');
+    if (!target) return;
+    var pv = document.getElementById("view-" + vid);
+    var secEl = target.closest("section.mc-sec");
+    if (pv && pv._showSection && secEl && secEl.dataset.sec)
+      pv._showSection(secEl.dataset.sec);
+    var fold = target.closest("details.mc-finished");
+    if (fold) fold.open = true;
+    target.scrollIntoView({behavior:"smooth", block:"center"});
+    target.classList.remove("mc-flash");
+    void target.offsetWidth;
+    target.classList.add("mc-flash");
+  }
+
+  function showFeedFor(sid){
+    var v = document.getElementById("view-feed");
+    if (v){ v.dataset.filter = sid || ""; }
+    show("feed");
+    applyFeedFilter();
+  }
+
+  // ── assemble views + nav ────────────────────────────────────────
+  var views = document.getElementById("mc-views");
+  views.appendChild(overviewView());
+  PILLARS.forEach(function (p) { views.appendChild(surfaceView(p.pillar_id)); });
+  if (liveItems.some(function (it) { return it.surface_id === MID; }))
+    views.appendChild(surfaceView(MID));
+
+  // ── ONE PILLAR AT A TIME. The selector is a name: closed, it shows
+  // only the current pillar; tap it for the list. No merged view, no
+  // chip strip — choosing is the page's first act. ──
+  var PSEL_KEY = "mcSelectedPillar:" + MID;
+  function pillarChoices(){
+    var out = PILLARS.map(function (p) {
+      return {id: p.pillar_id, name: p.name, color: p.color || "#8391a8"};
+    });
+    if (document.getElementById("view-mission-legacy"))
+      out.push({id: "mission-legacy", name: "Mission (legacy)", color: "#e2e8f0"});
+    return out;
+  }
+  function selectedPillar(){
+    var saved = null;
+    try { saved = localStorage.getItem(PSEL_KEY); } catch (e) {}
+    if (saved && document.getElementById("view-" + saved)) return saved;
+    return pillarChoices()[0].id;
+  }
+  function rememberPillar(pid){
+    try { localStorage.setItem(PSEL_KEY, pid); } catch (e) {}
+  }
+  // BUILT ONCE, TOGGLED BY CLASS. Rebuilding the selector's DOM on every
+  // toggle put freshly-created nodes under an in-flight tap whenever
+  // anything re-rendered between paint and touch (the chrome re-renders
+  // on every live presence event) — on a phone the tap landed on nothing
+  // or on the wrong row. Stable nodes; only a class changes.
+  var pselOpen = false, pselFor = null;
+  function renderPsel(){
+    var host = document.getElementById("mc-psel");
+    var cur = pillarChoices().filter(function (c) {
+      return c.id === currentView; })[0];
+    if (!cur){ host.innerHTML = ""; pselFor = null; return; }
+    if (pselFor !== cur.id){
+      host.innerHTML = "";
+      var btn = el("button","mc-psel-btn");
+      var lbl = el("span","mc-plabel");
+      lbl.appendChild(band(cur.color));
+      lbl.appendChild(el("b",null,cur.name));
+      btn.appendChild(lbl);
+      btn.addEventListener("click", function () {
+        pselOpen = !pselOpen; renderPsel();
+      });
+      host.appendChild(btn);
+      var vEl = document.getElementById("view-" + cur.id);
+      if (vEl && vEl._toggleCharter){
+        var eye = el("button","pinfo");
+        eye.title = "About this pillar";
+        eye.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true">'
+          + '<circle cx="8" cy="8" r="6.4" fill="none" '
+          + 'stroke="currentColor" stroke-width="1.3"/>'
+          + '<circle cx="8" cy="5.1" r="1.05" fill="currentColor"/>'
+          + '<path d="M8 7.3v4.2" stroke="currentColor" '
+          + 'stroke-width="1.7" stroke-linecap="round"/></svg>';
+        eye.classList.toggle("on", !!vEl._charterOpen);
+        eye.addEventListener("click", function () {
+          eye.classList.toggle("on", vEl._toggleCharter());
+        });
+        host.appendChild(eye);
+      }
+      var menu = el("div","mc-psel-menu");
+      pillarChoices().forEach(function (c) {
+        var r = el("button","mc-psel-row" + (c.id === cur.id ? " on" : ""));
+        var rl = el("span","mc-plabel");
+        rl.appendChild(band(c.color));
+        rl.appendChild(el("span",null,c.name));
+        r.appendChild(rl);
+        r.addEventListener("click", function () {
+          pselOpen = false;
+          rememberPillar(c.id);
+          show(c.id);
+        });
+        menu.appendChild(r);
+      });
+      host.appendChild(menu);
+      pselFor = cur.id;
+    }
+    host.classList.toggle("open", pselOpen);
+    // The name shrinks to fit before it ellipsizes: a long pillar name on
+    // a phone reads smaller, not truncated. No-op where there is room.
+    var nameEl = host.querySelector(".mc-psel-btn b");
+    if (nameEl){
+      nameEl.style.fontSize = "";
+      var size = 0.95;
+      while (nameEl.scrollWidth > nameEl.clientWidth && size > 0.6){
+        size -= 0.02;
+        nameEl.style.fontSize = size.toFixed(2) + "rem";
+      }
+    }
+  }
+  // BLOCKERS: the mission-level cut is only what stands in the way —
+  // open questions flagged blocking, grouped by the pillar they block.
+  var qView = el("div","mc-view");
+  qView.id = "view-questions";
+  (function buildBlockers(){
+    var blocks = liveItems.filter(function (it) {
+      return it.kind === "question" && it.state === "open" && it.blocking;
+    });
+    if (!blocks.length){
+      qView.appendChild(el("div","mc-empty",
+        "No blockers \u2014 nothing is preventing forward progress."));
+      return;
+    }
+    var surfOrder = [MID].concat(PILLARS.map(function (p) { return p.pillar_id; }));
+    surfOrder.forEach(function (sid2) {
+      var mineB = blocks.filter(function (q) { return q.surface_id === sid2; })
+        .sort(function (a, b) { return (when(b)||0) - (when(a)||0); });
+      if (!mineB.length) return;
+      var sec2 = el("section","mc-sec");
+      var h2 = el("h2");
+      h2.appendChild(band(surfColor(sid2)));
+      h2.appendChild(document.createTextNode(" " + surfName(sid2)));
+      sec2.appendChild(h2);
+      mineB.forEach(function (q, qi) {
+        var row = el("div","mc-bead q-blocking");
+        row.appendChild(markSpan("bmk","\u2298"));
+        var bx5 = el("div","bx2");
+        bx5.appendChild(el("div","t2", q.title));
+        var d7 = when(q) || (q.asked_at ? new Date(q.asked_at) : null);
+        bx5.appendChild(el("div","m2",
+          "asked by " + (q.asked_by || "?")
+          + (d7 ? " \u00b7 " + agoText(d7) : "")));
+        row.appendChild(bx5);
+        row.addEventListener("click", function () {
+          openQuestion(mineB, qi, {back: "Blockers"}); });
+        sec2.appendChild(row);
+      });
+      qView.appendChild(sec2);
+    });
+  })();
+  views.appendChild(qView);
+
+  // ── Q&A conversations, inline under the Questions tab. This was the
+  // one thing only the bar's chat bubble showed; the bubble is gone, so
+  // the record lives here — filterable, tappable through to the chrome's
+  // entry view, with Ask summoning the chrome's composer. ──
+  views.appendChild(feedView());
+  views.appendChild(chatView());
+  function chatView(){
+    var v = el("div","mc-view"); v.id = "view-chat";
+    var CHAT = {};
+    try {
+      var cEl = document.getElementById("mc-chat");
+      if (cEl) CHAT = JSON.parse(cEl.textContent);
+    } catch (e) {}
+    var cur = PILLARS.length ? PILLARS[0].pillar_id : null;
+    var head = el("div","mc-psel");
+    var log = el("div","mc-chatlog");
+    var open2 = false;
+    function renderHead(){
+      head.innerHTML = "";
+      var pb = el("button","mc-psel-btn");
+      var lbl2 = el("span","mc-plabel");
+      lbl2.appendChild(band(surfColor(cur)));
+      lbl2.appendChild(el("b",null,surfName(cur)));
+      pb.appendChild(lbl2);
+      pb.addEventListener("click", function () { open2 = !open2; renderHead(); });
+      head.appendChild(pb);
+      if (open2){
+        head.classList.add("open");
+        var menu = el("div","mc-psel-menu");
+        PILLARS.forEach(function (p2) {
+          var r = el("button","mc-psel-row" + (p2.pillar_id === cur ? " on" : ""));
+          var rl = el("span","mc-plabel");
+          rl.appendChild(band(p2.color));
+          rl.appendChild(el("span",null,p2.name));
+          r.appendChild(rl);
+          r.addEventListener("click", function () {
+            cur = p2.pillar_id; open2 = false; renderHead(); renderLog();
+          });
+          menu.appendChild(r);
+        });
+        head.appendChild(menu);
+      } else head.classList.remove("open");
+    }
+    function msgEl(m){
+      var en = el("div","qe");
+      var wh = el("div","qwho");
+      wh.appendChild(el("b",null,m.by));
+      wh.appendChild(document.createTextNode(" \u00b7 " + agoText(new Date(m.at))));
+      en.appendChild(wh);
+      var tx = el("div","qtx"); mdInto(tx, m.text);
+      en.appendChild(tx);
+      return en;
+    }
+    function renderLog(){
+      log.innerHTML = "";
+      var msgs = (CHAT[cur] || []).slice().sort(function (a,b) {
+        return new Date(a.at) - new Date(b.at);
+      });
+      if (!msgs.length)
+        log.appendChild(el("div","mc-empty","No messages yet."));
+      msgs.forEach(function (m) { log.appendChild(msgEl(m)); });
+    }
+    var comp = el("div","qcomp");
+    var ta = document.createElement("textarea");
+    ta.placeholder = "Message the pillar\u2026";
+    comp.appendChild(ta);
+    var send = el("button","qsend","Send");
+    send.addEventListener("click", function () {
+      var t2 = ta.value.trim();
+      if (!t2) return;
+      (CHAT[cur] = CHAT[cur] || []).push(
+        {by:"you", at:new Date().toISOString(), text:t2});
+      ta.value = ""; renderLog();
+    });
+    comp.appendChild(send);
+    comp.appendChild(el("div","qhint",
+      "A free conversation with the pillar \u2014 nothing here is tracked. "
+      + "The pillar decides what becomes a question, a decision, or a task."));
+    renderHead(); renderLog();
+    v.appendChild(head); v.appendChild(log); v.appendChild(comp);
+    return v;
+  }
+  var currentView = null;
+  function show(id){
+    currentView = id;
+    document.querySelectorAll(".mc-view").forEach(function (n) {
+      n.classList.toggle("on", n.id === "view-"+id);
+    });
+    var named = {questions:"Questions", feed:"Feed", chat:"Chat"};
+    var fam = named[id] ? id
+      : (id === MID ? "overview" : "pillars");
+    document.querySelectorAll(".mc-tabs button").forEach(function (b) {
+      b.classList.toggle("on", b.id === "tab-" + fam);
+    });
+    var psel = document.getElementById("mc-psel");
+    if (psel) psel.style.display = (fam === "pillars") ? "" : "none";
+    if (fam === "pillars") renderPsel();
+  }
+  // The activity panel is mission-wide chrome, but it belongs to the
+  // overview: pillar views get their vertical room back.
+  var ov = document.getElementById("view-"+MID);
+  ov.insertBefore(document.querySelector(".mc-activity"), ov.firstChild);
+
+  // LANDING IS THE OVERVIEW, from every door: the mission URL, a pillar
+  // URL out of the session viewer, a PWA restoring its last route. The
+  // baked focus stays in the data for anything that wants it, but the
+  // reader always starts at the summary and taps into a pillar from
+  // there — arriving somewhere unnameable was worse than one extra tap.
+  show(MID);
+
+  // ── load diagnostics — visible, so a slow open can be read off the
+  //    screen instead of guessed at. All times are ms since navigation
+  //    start (the moment the link was tapped, srcdoc paths excepted). ──
+  (function diag(){
+    // Mission accomplished (5.3 s -> tens of ms) and retired from the
+    // screen. The instrumentation stays: add ?diag=1 to any mission URL
+    // to bring the strip back, and the console.log below always fires.
+    var DIAG_ON = /[?&]diag=1/.test(location.search);
+    var T_DONE = performance.now();
+    var kb = function (n) { return (n/1024).toFixed(0) + " KB"; };
+    var ms = function (n) { return n >= 2500 ? (n/1000).toFixed(1) + " s"
+                                             : Math.round(n) + " ms"; };
+    var itemsKB = document.getElementById("mc-data").textContent.length;
+    var nav = (performance.getEntriesByType &&
+               performance.getEntriesByType("navigation")[0]) || null;
+    var parts = [];
+    if (nav && nav.decodedBodySize)
+      parts.push("doc " + kb(nav.decodedBodySize) +
+                 (nav.transferSize ? " (wire " + kb(nav.transferSize) + ")" : ""));
+    if (nav && nav.responseEnd)
+      parts.push("net " + ms(nav.responseEnd - nav.startTime));
+    parts.push("chrome+parse " + ms(T_SCRIPT));
+    parts.push("items " + kb(itemsKB) + "/" + (DATA.items||[]).length);
+    parts.push("render " + ms(T_DONE - T_SCRIPT));
+    parts.push("interactive " + ms(T_DONE));
+    // Which serving path built this document. A srcdoc frame is the relay
+    // share-link viewer: its bootloader fetched the document over the
+    // tunnel BEFORE this page's clock started, so seconds of white screen
+    // with fast numbers here means the time went to that transport layer.
+    var framed = !!document.querySelector('base[href="about:srcdoc"]') ||
+                 location.protocol === "about:";
+    parts.push(framed ? "via relay srcdoc (transport not visible here)"
+                      : "direct");
+    var line = el("div", null, "⏱ " + parts.join(" · "));
+    line.id = "mc-diag";
+    line.style.cssText = "font-family:var(--mono);font-size:.68rem;" +
+      "color:var(--ink3);background:var(--bg2);border:1px solid var(--line);" +
+      "border-radius:7px;padding:5px 9px;margin:0 0 12px;overflow-x:auto;" +
+      "white-space:nowrap";
+    if (DIAG_ON) {
+      var glance = document.getElementById("mc-glance");
+      glance.parentNode.insertBefore(line, glance.nextSibling);
+    }
+    // Late chrome/network work shows up as the page staying busy after we
+    // finish; stamp the load event too so the gap is attributable.
+    window.addEventListener("load", function () {
+      line.textContent += " · window.load " + ms(performance.now());
+    });
+    if (window.console && console.log)
+      console.log("mc-structured diag", {script_at: T_SCRIPT,
+        json_parse: T_PARSED - T_SCRIPT, render: T_DONE - T_PARSED,
+        items_bytes: itemsKB, nav: nav});
+  })();
+})();
+</script>
