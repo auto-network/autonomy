@@ -76,13 +76,21 @@
   .mc-act-cell{width:11px;height:11px;border-radius:3px;background:var(--card2)}
   .mc-act-cell.a1{background:#2b2f52}.mc-act-cell.a2{background:#46448c}
   .mc-act-cell.a3{background:#6a63c8}.mc-act-cell.a4{background:#8f87ff}
-  /* desktop line-chart mode: room to breathe, readable names */
-  .mc-act-table.lines th{padding-right:14px;max-width:200px;width:200px}
-  .mc-act-table.lines th .thn{font-size:.78rem}
-  .mc-act-table.lines td{vertical-align:middle}
-  .mc-act-table.lines svg{display:block}
+  /* desktop line-chart mode: one chart, pillar-colored series. The
+     legend overlays the top-left of the plot — the early-history corner
+     is the least important pixels — so the chart keeps every row. */
+  .mc-act-chart{position:relative}
+  .mc-act-chart svg{display:block}
+  .mc-act-lgd{position:absolute;top:2px;left:4px;z-index:2;
+    display:flex;flex-direction:column;gap:4px;max-width:46%}
+  .mc-act-lgd .lchip{display:inline-flex;align-items:center;gap:7px;
+    font-size:.82rem;color:var(--ink2);cursor:pointer;white-space:nowrap;
+    overflow:hidden;text-shadow:0 1px 5px rgba(0,0,0,.85)}
+  .mc-act-lgd .lchip>span{overflow:hidden;text-overflow:ellipsis}
+  .mc-act-lgd .lchip:hover{color:var(--ink)}
+  .mc-act-lgd .lchip .pband{height:11px;flex:none}
   .mc-act-axis{display:flex;justify-content:space-between;
-    font-size:.62rem;color:var(--ink3);padding:1px 2px 0}
+    font-size:.62rem;color:var(--ink3);padding:3px 2px 0}
 
   /* ── nav ── */
   .mc-psel{position:relative;margin:0 0 12px;display:flex;
@@ -1463,15 +1471,15 @@
       var COLS = Math.max(24, Math.min(72, Math.floor(w / 16)));
       var bk = bucketize(got.surfaces, got.events, COLS);
       // light smoothing turns integer bucket counts into an intensity
-      // curve; the raw count stays in the hover title
-      var K = [1,2,3,2,1], KS = 9;
+      // curve; the raw counts stay in the hover title
+      var K = [1,3,6,8,6,3,1], KS = 28, KH = 3;
       var smoothed = {}, sharedMax = 0.001;
       got.surfaces.forEach(function (s) {
         var raw = bk.buckets[s.id], out = new Array(COLS).fill(0);
         for (var i = 0; i < COLS; i++){
           var acc = 0;
           for (var j = 0; j < K.length; j++){
-            var idx = i + j - 2;
+            var idx = i + j - KH;
             if (idx >= 0 && idx < COLS) acc += raw[idx] * K[j];
           }
           out[i] = acc / KS;
@@ -1479,62 +1487,63 @@
         }
         smoothed[s.id] = out;
       });
-      table.classList.add("lines");
-      var nameCol = 200, H = 38, padT = 5;
-      var chartW = Math.max(220, w - nameCol - 10);
-      var baseY = H - 3;
+      // ONE chart, every surface a colored series on the shared scale —
+      // the pillar colors are the series identity, the legend names them
+      var wrap = el("div","mc-act-chart");
+      wrap.id = "mc-act-lines";
+      var lg = el("div","mc-act-lgd");
       got.surfaces.forEach(function (s) {
-        var tr = document.createElement("tr");
-        tr.className = "mc-act-line";
-        tr.appendChild(nameCell(s.id));
-        var td = document.createElement("td");
-        var svg = svgEl("svg", {width: chartW, height: H,
-                                viewBox: "0 0 " + chartW + " " + H});
-        var color = surfColor(s.id);
+        var chip = el("span","lchip");
+        chip.appendChild(band(surfColor(s.id)));
+        chip.appendChild(el("span","",surfName(s.id)));
+        chip.title = "Show " + surfName(s.id) + "'s updates over time";
+        chip.addEventListener("click", function () { showFeedFor(s.id); });
+        lg.appendChild(chip);
+      });
+      wrap.appendChild(lg);
+      // tall enough that the overlaid legend never swallows the plot
+      var H = Math.max(150, got.surfaces.length * 24 + 40), padT = 8;
+      var chartW = Math.max(220, w - 4);
+      var baseY = H - 4;
+      var svg = svgEl("svg", {width: chartW, height: H,
+                              viewBox: "0 0 " + chartW + " " + H});
+      svg.appendChild(svgEl("line", {x1: 0, y1: baseY, x2: chartW,
+        y2: baseY, stroke: "var(--line)", "stroke-width": 1}));
+      got.surfaces.forEach(function (s) {
         var pts = smoothed[s.id].map(function (v, i) {
           return [ (i + 0.5) / COLS * chartW,
                    baseY - (v / sharedMax) * (baseY - padT) ];
         });
-        var line = smoothPath(pts, padT, baseY);
-        var area = line
-          + "L" + Math.round(pts[pts.length-1][0]*10)/10 + "," + baseY
-          + "L" + Math.round(pts[0][0]*10)/10 + "," + baseY + "Z";
-        svg.appendChild(svgEl("line", {x1: 0, y1: baseY, x2: chartW,
-          y2: baseY, stroke: "var(--line)", "stroke-width": 1}));
-        svg.appendChild(svgEl("path", {d: area, fill: color,
-          "fill-opacity": 0.13, stroke: "none"}));
-        svg.appendChild(svgEl("path", {d: line, fill: "none",
-          stroke: color, "stroke-width": 2, "stroke-linecap": "round",
-          "stroke-linejoin": "round"}));
-        // hover layer: one hit rect per bucket, raw count + recency
-        var raw = bk.buckets[s.id];
-        var span = Math.max(1, Date.now() - bk.t0);
-        for (var i = 0; i < COLS; i++){
-          if (!raw[i]) continue;
-          var hit = svgEl("rect", {x: i / COLS * chartW, y: 0,
-            width: chartW / COLS, height: H, fill: "transparent"});
-          var mid = new Date(bk.t0 + (i + 0.5) / COLS * span);
-          var t = svgEl("title", {});
-          t.textContent = surfName(s.id) + ": " + raw[i] + " item change"
-            + (raw[i]===1?"":"s") + " · " + agoText(mid);
-          hit.appendChild(t);
-          svg.appendChild(hit);
-        }
-        td.appendChild(svg);
-        tr.appendChild(td);
-        table.appendChild(tr);
+        svg.appendChild(svgEl("path", {d: smoothPath(pts, padT, baseY),
+          fill: "none", stroke: surfColor(s.id), "stroke-width": 2,
+          "stroke-linecap": "round", "stroke-linejoin": "round",
+          "stroke-opacity": 0.9}));
       });
-      // one shared time axis under the small multiples
-      var axr = document.createElement("tr");
-      axr.appendChild(document.createElement("th"));
-      var axd = document.createElement("td");
+      // hover layer: one hit column per bucket, titled with every
+      // surface that moved there plus the bucket's recency
+      var span = Math.max(1, Date.now() - bk.t0);
+      for (var i = 0; i < COLS; i++){
+        var lines = [];
+        got.surfaces.forEach(function (s) {
+          var n = bk.buckets[s.id][i];
+          if (n) lines.push(surfName(s.id) + ": " + n);
+        });
+        if (!lines.length) continue;
+        var hit = svgEl("rect", {x: i / COLS * chartW, y: 0,
+          width: chartW / COLS, height: H, fill: "transparent"});
+        var t = svgEl("title", {});
+        t.textContent = agoText(new Date(bk.t0 + (i + 0.5) / COLS * span))
+          + "\n" + lines.join("\n");
+        hit.appendChild(t);
+        svg.appendChild(hit);
+      }
+      wrap.appendChild(svg);
       var ax = el("div","mc-act-axis");
       ax.appendChild(el("span","", got.events.length
         ? agoText(new Date(bk.t0)) : ""));
       ax.appendChild(el("span","","now"));
-      axd.appendChild(ax);
-      axr.appendChild(axd);
-      table.appendChild(axr);
+      wrap.appendChild(ax);
+      scEl.appendChild(wrap);
     }
 
     function render(){
@@ -1542,7 +1551,9 @@
       if (!w && lastMode) return;              // hidden: keep last render
       var mode = w >= WIDE ? "lines" : "blocks";
       table.innerHTML = "";
-      table.classList.remove("lines");
+      var old = document.getElementById("mc-act-lines");
+      if (old) old.remove();
+      table.style.display = (mode === "lines") ? "none" : "";
       if (mode === "lines") renderLines(w); else renderBlocks();
       var lg = document.querySelector(".mc-activity .legend");
       if (lg) lg.style.display = (mode === "lines") ? "none" : "";
