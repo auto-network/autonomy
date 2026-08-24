@@ -226,16 +226,24 @@ window.missionPage = function () {
       while (el.firstChild) el.removeChild(el.firstChild);
       if (!W || !H) return;
       el.setAttribute("viewBox", "0 0 " + W + " " + H);
-      const cutoff = Date.now() / 1000 - winSecs;
+      const now = Date.now() / 1000;
+      const cutoff = now - winSecs;
       const N = Math.max(24, Math.min(96, Math.floor(W / 12)));
-      // one series per surface, same rendering as inside the mission:
-      // the pillar colors ARE the identity, here as at every depth
-      const perSid = {};
+      // Adaptive span, same as inside the mission: the window is a
+      // cap, not the scale. A nine-day-old mission fills the card at
+      // 30d instead of compressing into a clipped needle at the edge.
+      const evs = [];
       ((m.activity && m.activity.events) || []).forEach((ev) => {
         const t = Array.isArray(ev) ? ev[0] : ev;
         const sid = Array.isArray(ev) ? (ev[1] || "") : "";
-        const idx = Math.floor((t - cutoff) / (winSecs / N));
-        if (idx < 0 || idx >= N) return;
+        if (t >= cutoff) evs.push([t, sid]);
+      });
+      const t0 = evs.length
+        ? Math.min(...evs.map((e) => e[0])) : cutoff;
+      const span = Math.max(3600, now - t0);
+      const perSid = {};
+      evs.forEach(([t, sid]) => {
+        const idx = Math.min(N - 1, Math.floor((t - t0) / span * N));
         (perSid[sid] = perSid[sid] || new Array(N).fill(0))[idx]++;
       });
       const K = [1, 3, 6, 8, 6, 3, 1], KS = 28, KH = 3;
@@ -262,7 +270,7 @@ window.missionPage = function () {
           .find((p) => p.pillar_id === sid);
         return (pl && pl.color) || "#8b85ff";
       };
-      const padT = 6, baseY = H - 1;
+      const padT = 9, baseY = H - 4;
       const r = (v) => Math.round(v * 10) / 10;
       const cl = (y) => Math.min(baseY, Math.max(padT, y));
       const NS = "http://www.w3.org/2000/svg";
