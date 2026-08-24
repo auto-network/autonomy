@@ -116,6 +116,58 @@ def test_schema_upgrade_precedes_fleet_sync_activation(tmp_path, monkeypatch):
     assert observed_versions == [db_module._SCHEMA_USER_VERSION]
 
 
+def test_schema_upgrade_disables_existing_capture_triggers_until_activation(
+        tmp_path, monkeypatch):
+    """Migration DML can cross a trigger left by an earlier synced open."""
+    path = tmp_path / "personal.db"
+    with GraphDB(path, attach_fleet_sync=False) as setup:
+        setup.conn.executescript(
+            """
+            CREATE TRIGGER fleet_sync_settings_update_probe
+            AFTER UPDATE ON settings
+            WHEN fleet_sync_capture_enabled() = 1
+            BEGIN
+                SELECT RAISE(ABORT, 'capture ran before activation');
+            END;
+            """
+        )
+        setup.conn.execute("PRAGMA user_version = 0")
+        setup.conn.commit()
+
+    observed_capture_states = []
+
+    class Hook:
+        def before_statement(self, _sql):
+            return False
+
+        def before_commit(self):
+            return None
+
+        def after_transaction(self):
+            return None
+
+    def attach(connection):
+        observed_capture_states.append(
+            connection.execute(
+                "SELECT fleet_sync_capture_enabled()"
+            ).fetchone()[0]
+        )
+        connection.install_fleet_sync_hook(Hook())
+        return object()
+
+    monkeypatch.setattr(
+        "tools.network.fleet_sync_sim.catalog.attach_active_production_catalog",
+        attach,
+    )
+
+    with GraphDB(path) as opened:
+        assert opened.conn.execute("PRAGMA user_version").fetchone()[0] == (
+            db_module._SCHEMA_USER_VERSION
+        )
+
+    assert observed_capture_states == [0]
+
+
 def test_writable_lock_exhaustion_does_not_silently_fallback(
         tmp_path, monkeypatch):
     path = tmp_path / "personal.db"
