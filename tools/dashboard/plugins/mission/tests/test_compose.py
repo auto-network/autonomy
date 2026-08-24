@@ -139,3 +139,38 @@ def test_focus_pillar_carried(monkeypatch, rows):
     _members(monkeypatch, rows)
     doc = compose.render_screen("autonomy", MID, "relay")
     assert _doc_data(doc)["focus"] == "relay"
+
+
+def test_render_stages_streams_markers_then_doc(monkeypatch, rows):
+    """The ?progress=1 contract: ascending stage markers narrating real
+    counts, a doc marker carrying the exact byte length, then the
+    document itself — and nothing about the document changes."""
+    _members(monkeypatch, rows)
+    from tools.graph import ops as graph_ops
+    counts = {compose.PILLAR_SET_ID: 3, compose.ITEM_SET_ID: 4,
+              compose.CHAT_SET_ID: 2}
+    monkeypatch.setattr(
+        graph_ops, "count_set_rows",
+        lambda set_id, org=None, prefix=None: counts[set_id])
+    chunks = list(compose.render_stages("autonomy", MID))
+    doc = chunks[-1]
+    assert doc.startswith("<!doctype html>")
+    stages = [re.match(r"<!--msn:(\d+)\|(.*?)-->", c)
+              for c in chunks[:-2]]
+    assert all(stages), "every pre-doc chunk is a stage marker"
+    pcts = [int(m.group(1)) for m in stages]
+    assert pcts == sorted(pcts) and pcts[-1] <= 88
+    # count = 3 pillars + 4 items + 2 chat rows + the registry row
+    assert any("of 10 settings" in m.group(2) for m in stages)
+    dm = re.fullmatch(r"<!--msn:doc:(\d+)-->", chunks[-2])
+    assert dm and int(dm.group(1)) == len(doc.encode("utf-8"))
+    assert _doc_data(doc)["mission"]["name"] == "Multi-User Autonomy"
+
+
+def test_render_stages_unknown_mission_raises(monkeypatch, rows):
+    _members(monkeypatch, rows)
+    from tools.graph import ops as graph_ops
+    monkeypatch.setattr(graph_ops, "count_set_rows",
+                        lambda *a, **k: 0)
+    with pytest.raises(KeyError):
+        list(compose.render_stages("autonomy", "nope"))

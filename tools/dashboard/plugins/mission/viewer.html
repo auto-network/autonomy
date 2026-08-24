@@ -76,8 +76,13 @@
   .mc-act-cell{width:11px;height:11px;border-radius:3px;background:var(--card2)}
   .mc-act-cell.a1{background:#2b2f52}.mc-act-cell.a2{background:#46448c}
   .mc-act-cell.a3{background:#6a63c8}.mc-act-cell.a4{background:#8f87ff}
-  .mc-act-table .dayrow td{padding-top:3px}
-  .mc-act-table .daylab{font-size:.6rem;color:var(--ink3);text-align:center;padding:0 1px}
+  /* desktop line-chart mode: room to breathe, readable names */
+  .mc-act-table.lines th{padding-right:14px;max-width:200px;width:200px}
+  .mc-act-table.lines th .thn{font-size:.78rem}
+  .mc-act-table.lines td{vertical-align:middle}
+  .mc-act-table.lines svg{display:block}
+  .mc-act-axis{display:flex;justify-content:space-between;
+    font-size:.62rem;color:var(--ink3);padding:1px 2px 0}
 
   /* ── nav ── */
   .mc-psel{position:relative;margin:0 0 12px;display:flex;
@@ -1322,90 +1327,240 @@
     tabsHost.appendChild(b);
   });
 
-  // ── activity grid: surfaces × days from item timestamps ─────────
+  // ── activity: recency of item events, rendered to the width ─────
+  // WHAT'S BEEN HAPPENING LATELY, not a calendar. Recent item events
+  // sliced into recency buckets ending at now — a dense mission's
+  // window spans hours, a sparse one's weeks. Two renderings of the
+  // same data: compact blocks where width is scarce (phones), one
+  // smooth line chart per surface where it isn't (desktop). Lines are
+  // drawn at the container's native pixel width and redrawn on resize,
+  // never stretched — stretching is what makes SVG strokes jagged.
   (function activity(){
-    // WHAT'S BEEN HAPPENING LATELY, not a calendar. The last ~100 item
-    // events sliced into eight recency columns ending at now — a dense
-    // mission's grid spans hours, a sparse one's weeks. A fixed 48h
-    // window renders a quiet week as an empty grid.
-    var COLS = 8, LAST = 100;
-    // LIVE items decide the row: a mission surface holding only retired
-    // history is content-free, and its grid row retires with it.
-    var hasMissionItems = liveItems.some(function (it) { return it.surface_id===MID; });
-    var surfaces = (hasMissionItems ? [{id:MID}] : [])
-      .concat(PILLARS.map(function(p){return {id:p.pillar_id};}));
-    var events = [];
-    ITEMS.forEach(function (it) {
-      var d = when(it); if (!d) return;
-      events.push({t: d.getTime(), sid: it.surface_id});
-    });
-    events.sort(function (a,b){ return a.t - b.t; });
-    if (events.length > LAST) events = events.slice(events.length - LAST);
-    var buckets = {};   // sid -> [count per recency column, oldest first]
-    surfaces.forEach(function (s) { buckets[s.id] = new Array(COLS).fill(0); });
-    if (events.length){
-      var t0 = events[0].t, span = Math.max(1, Date.now() - t0);
-      events.forEach(function (e) {
-        var idx = Math.min(COLS - 1, Math.floor((e.t - t0) / span * COLS));
-        if (buckets[e.sid]) buckets[e.sid][idx]++;
-      });
-    }
-    var max = 1;
-    surfaces.forEach(function (s) { buckets[s.id].forEach(function (n) { if (n>max) max=n; }); });
-    var lvl = function (n) {
-      if (!n) return "";
-      var r = n / max;
-      return r > .75 ? "a4" : r > .5 ? "a3" : r > .25 ? "a2" : "a1";
-    };
     var table = document.getElementById("mc-act");
-    surfaces.forEach(function (s) {
-      var tr = document.createElement("tr");
+    var scEl = document.querySelector(".mc-act-scroll");
+    var WIDE = 700;
+    var lastMode = null, lastW = 0;
+
+    function collect(limit){
+      var hasMissionItems = liveItems.some(function (it) { return it.surface_id===MID; });
+      var surfaces = (hasMissionItems ? [{id:MID}] : [])
+        .concat(PILLARS.map(function(p){return {id:p.pillar_id};}));
+      var events = [];
+      ITEMS.forEach(function (it) {
+        var d = when(it); if (!d) return;
+        events.push({t: d.getTime(), sid: it.surface_id});
+      });
+      events.sort(function (a,b){ return a.t - b.t; });
+      if (events.length > limit) events = events.slice(events.length - limit);
+      return {surfaces: surfaces, events: events};
+    }
+
+    function bucketize(surfaces, events, cols){
+      var buckets = {};
+      surfaces.forEach(function (s) { buckets[s.id] = new Array(cols).fill(0); });
+      var t0 = events.length ? events[0].t : Date.now();
+      if (events.length){
+        var span = Math.max(1, Date.now() - t0);
+        events.forEach(function (e) {
+          var idx = Math.min(cols - 1, Math.floor((e.t - t0) / span * cols));
+          if (buckets[e.sid]) buckets[e.sid][idx]++;
+        });
+      }
+      return {buckets: buckets, t0: t0};
+    }
+
+    function nameCell(sid){
       var th = document.createElement("th");
       var thw = el("span","thw");
-      thw.appendChild(band(surfColor(s.id)));
-      thw.appendChild(el("span","thn",surfName(s.id)));
+      thw.appendChild(band(surfColor(sid)));
+      thw.appendChild(el("span","thn",surfName(sid)));
       th.appendChild(thw);
-      th.title = "Show " + surfName(s.id) + "'s updates over time";
-      th.addEventListener("click", function () { showFeedFor(s.id); });
-      tr.appendChild(th);
-      buckets[s.id].forEach(function (n) {
-        var td = document.createElement("td");
-        var cell = el("div","mc-act-cell " + lvl(n));
-        cell.title = surfName(s.id) + ": " + n + " item change" + (n===1?"":"s");
-        td.appendChild(cell); tr.appendChild(td);
-      });
-      table.appendChild(tr);
-    });
-    // SELF-BALANCING, LOCKED: full names at full size come first; every
-    // pixel left over becomes the gap that pushes the cells right. No
-    // static widths, no tuning — the row divides itself.
-    var scEl2 = document.querySelector(".mc-act-scroll");
-    if (scEl2 && scEl2.clientWidth){
-      var cellsBlock = COLS * 13 + (COLS - 1) * 2;
-      var names2 = table.querySelectorAll(".thn");
-      var need = 0;
-      [].forEach.call(names2, function (n) {
-        need = Math.max(need, n.scrollWidth);
-      });
-      var nameCol = need + 12;                       // band + its gap
-      var avail = scEl2.clientWidth - cellsBlock - 9;
-      var fs = 0.64;
-      while (nameCol > avail && fs > 0.5){           // tiny screens only
-        fs -= 0.02;
-        [].forEach.call(names2, function (n) {
-          n.style.fontSize = fs.toFixed(2) + "rem"; });
-        need = 0;
-        [].forEach.call(names2, function (n) {
-          need = Math.max(need, n.scrollWidth); });
-        nameCol = need + 12;
-      }
-      var pad = Math.max(8, avail - nameCol);
-      table.querySelectorAll("th").forEach(function (th) {
-        th.style.width = (nameCol + pad) + "px";
-        th.style.maxWidth = (nameCol + pad) + "px";
-        th.style.paddingRight = pad + "px";
-      });
+      th.title = "Show " + surfName(sid) + "'s updates over time";
+      th.addEventListener("click", function () { showFeedFor(sid); });
+      return th;
     }
+
+    function renderBlocks(){
+      var COLS = 8;
+      var got = collect(100);
+      var bk = bucketize(got.surfaces, got.events, COLS);
+      var buckets = bk.buckets;
+      var max = 1;
+      got.surfaces.forEach(function (s) { buckets[s.id].forEach(function (n) { if (n>max) max=n; }); });
+      var lvl = function (n) {
+        if (!n) return "";
+        var r = n / max;
+        return r > .75 ? "a4" : r > .5 ? "a3" : r > .25 ? "a2" : "a1";
+      };
+      got.surfaces.forEach(function (s) {
+        var tr = document.createElement("tr");
+        tr.appendChild(nameCell(s.id));
+        buckets[s.id].forEach(function (n) {
+          var td = document.createElement("td");
+          var cell = el("div","mc-act-cell " + lvl(n));
+          cell.title = surfName(s.id) + ": " + n + " item change" + (n===1?"":"s");
+          td.appendChild(cell); tr.appendChild(td);
+        });
+        table.appendChild(tr);
+      });
+      // SELF-BALANCING, LOCKED: full names at full size come first; every
+      // pixel left over becomes the gap that pushes the cells right. No
+      // static widths, no tuning — the row divides itself.
+      if (scEl && scEl.clientWidth){
+        var cellsBlock = COLS * 13 + (COLS - 1) * 2;
+        var names2 = table.querySelectorAll(".thn");
+        var need = 0;
+        [].forEach.call(names2, function (n) {
+          need = Math.max(need, n.scrollWidth);
+        });
+        var nameCol = need + 12;                       // band + its gap
+        var avail = scEl.clientWidth - cellsBlock - 9;
+        var fs = 0.64;
+        while (nameCol > avail && fs > 0.5){           // tiny screens only
+          fs -= 0.02;
+          [].forEach.call(names2, function (n) {
+            n.style.fontSize = fs.toFixed(2) + "rem"; });
+          need = 0;
+          [].forEach.call(names2, function (n) {
+            need = Math.max(need, n.scrollWidth); });
+          nameCol = need + 12;
+        }
+        var pad = Math.max(8, avail - nameCol);
+        table.querySelectorAll("th").forEach(function (th) {
+          th.style.width = (nameCol + pad) + "px";
+          th.style.maxWidth = (nameCol + pad) + "px";
+          th.style.paddingRight = pad + "px";
+        });
+      }
+    }
+
+    function svgEl(tag, attrs){
+      var e = document.createElementNS("http://www.w3.org/2000/svg", tag);
+      for (var k in attrs) e.setAttribute(k, attrs[k]);
+      return e;
+    }
+
+    // Catmull-Rom through the bucket midpoints, emitted as cubic
+    // beziers; control-point y clamped to the plot band so a spike
+    // never makes the curve dip below its own baseline.
+    function smoothPath(pts, yMin, yMax){
+      var cl = function (y) { return Math.min(yMax, Math.max(yMin, y)); };
+      var r = function (v) { return Math.round(v * 10) / 10; };
+      if (!pts.length) return "";
+      var d = "M" + r(pts[0][0]) + "," + r(pts[0][1]);
+      for (var i = 0; i < pts.length - 1; i++){
+        var p0 = pts[Math.max(0, i-1)], p1 = pts[i],
+            p2 = pts[i+1], p3 = pts[Math.min(pts.length-1, i+2)];
+        d += "C" + r(p1[0] + (p2[0]-p0[0])/6) + "," + r(cl(p1[1] + (p2[1]-p0[1])/6))
+           + " " + r(p2[0] - (p3[0]-p1[0])/6) + "," + r(cl(p2[1] - (p3[1]-p1[1])/6))
+           + " " + r(p2[0]) + "," + r(p2[1]);
+      }
+      return d;
+    }
+
+    function renderLines(w){
+      var got = collect(400);
+      var COLS = Math.max(24, Math.min(72, Math.floor(w / 16)));
+      var bk = bucketize(got.surfaces, got.events, COLS);
+      // light smoothing turns integer bucket counts into an intensity
+      // curve; the raw count stays in the hover title
+      var K = [1,2,3,2,1], KS = 9;
+      var smoothed = {}, sharedMax = 0.001;
+      got.surfaces.forEach(function (s) {
+        var raw = bk.buckets[s.id], out = new Array(COLS).fill(0);
+        for (var i = 0; i < COLS; i++){
+          var acc = 0;
+          for (var j = 0; j < K.length; j++){
+            var idx = i + j - 2;
+            if (idx >= 0 && idx < COLS) acc += raw[idx] * K[j];
+          }
+          out[i] = acc / KS;
+          if (out[i] > sharedMax) sharedMax = out[i];
+        }
+        smoothed[s.id] = out;
+      });
+      table.classList.add("lines");
+      var nameCol = 200, H = 38, padT = 5;
+      var chartW = Math.max(220, w - nameCol - 10);
+      var baseY = H - 3;
+      got.surfaces.forEach(function (s) {
+        var tr = document.createElement("tr");
+        tr.className = "mc-act-line";
+        tr.appendChild(nameCell(s.id));
+        var td = document.createElement("td");
+        var svg = svgEl("svg", {width: chartW, height: H,
+                                viewBox: "0 0 " + chartW + " " + H});
+        var color = surfColor(s.id);
+        var pts = smoothed[s.id].map(function (v, i) {
+          return [ (i + 0.5) / COLS * chartW,
+                   baseY - (v / sharedMax) * (baseY - padT) ];
+        });
+        var line = smoothPath(pts, padT, baseY);
+        var area = line
+          + "L" + Math.round(pts[pts.length-1][0]*10)/10 + "," + baseY
+          + "L" + Math.round(pts[0][0]*10)/10 + "," + baseY + "Z";
+        svg.appendChild(svgEl("line", {x1: 0, y1: baseY, x2: chartW,
+          y2: baseY, stroke: "var(--line)", "stroke-width": 1}));
+        svg.appendChild(svgEl("path", {d: area, fill: color,
+          "fill-opacity": 0.13, stroke: "none"}));
+        svg.appendChild(svgEl("path", {d: line, fill: "none",
+          stroke: color, "stroke-width": 2, "stroke-linecap": "round",
+          "stroke-linejoin": "round"}));
+        // hover layer: one hit rect per bucket, raw count + recency
+        var raw = bk.buckets[s.id];
+        var span = Math.max(1, Date.now() - bk.t0);
+        for (var i = 0; i < COLS; i++){
+          if (!raw[i]) continue;
+          var hit = svgEl("rect", {x: i / COLS * chartW, y: 0,
+            width: chartW / COLS, height: H, fill: "transparent"});
+          var mid = new Date(bk.t0 + (i + 0.5) / COLS * span);
+          var t = svgEl("title", {});
+          t.textContent = surfName(s.id) + ": " + raw[i] + " item change"
+            + (raw[i]===1?"":"s") + " · " + agoText(mid);
+          hit.appendChild(t);
+          svg.appendChild(hit);
+        }
+        td.appendChild(svg);
+        tr.appendChild(td);
+        table.appendChild(tr);
+      });
+      // one shared time axis under the small multiples
+      var axr = document.createElement("tr");
+      axr.appendChild(document.createElement("th"));
+      var axd = document.createElement("td");
+      var ax = el("div","mc-act-axis");
+      ax.appendChild(el("span","", got.events.length
+        ? agoText(new Date(bk.t0)) : ""));
+      ax.appendChild(el("span","","now"));
+      axd.appendChild(ax);
+      axr.appendChild(axd);
+      table.appendChild(axr);
+    }
+
+    function render(){
+      var w = scEl ? scEl.clientWidth : 0;
+      if (!w && lastMode) return;              // hidden: keep last render
+      var mode = w >= WIDE ? "lines" : "blocks";
+      table.innerHTML = "";
+      table.classList.remove("lines");
+      if (mode === "lines") renderLines(w); else renderBlocks();
+      var lg = document.querySelector(".mc-activity .legend");
+      if (lg) lg.style.display = (mode === "lines") ? "none" : "";
+      lastMode = mode; lastW = w;
+    }
+
+    render();
+    var rt = null;
+    window.addEventListener("resize", function () {
+      clearTimeout(rt);
+      rt = setTimeout(function () {
+        var w = scEl ? scEl.clientWidth : 0;
+        if (!w) return;
+        var mode = w >= WIDE ? "lines" : "blocks";
+        if (mode !== lastMode || (mode === "lines" && Math.abs(w - lastW) > 32))
+          render();
+      }, 180);
+    });
   })();
 
   // ── item card renderer ──────────────────────────────────────────
@@ -1560,6 +1715,7 @@
       [].forEach.call(subs.children, function (b) {
         b.classList.toggle("on", b.dataset.sec === name);
       });
+      try { reportWhere(); } catch (e) {}
     }
     v._showSection = showSection;
     SECTION_ORDER.forEach(function (name) {
@@ -2530,6 +2686,19 @@
     var psel = document.getElementById("mc-psel");
     if (psel) psel.style.display = (fam === "pillars") ? "" : "none";
     if (fam === "pillars") renderPsel();
+    reportWhere();
+  }
+  function reportWhere(){
+    try {
+      if (window.parent === window) return;
+      var v = document.querySelector(".mc-view.on");
+      var sec = v && v.querySelector && v.querySelector(".mc-sec.on");
+      window.parent.postMessage({
+        type: "mission:where",
+        view: currentView === MID ? "overview" : currentView,
+        section: (sec && sec.dataset.sec) || "",
+      }, "*");
+    } catch (e) {}
   }
   // The activity panel is mission-wide chrome, but it belongs to the
   // overview: pillar views get their vertical room back.

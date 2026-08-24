@@ -142,11 +142,17 @@ with the data model you intend to ship.
 
 - **Documents render inside the shell, never as navigations.** If your
   plugin serves complete documents, the fragment embeds them in a
-  same-origin iframe with pushState URLs (deep links + popstate for
-  back). `window.location` to your document tears down the dashboard
-  SPA — and shell services live there: the voice/dictation layer died
-  on every mission open until this was fixed. Cross the frame boundary
-  with postMessage seams, not navigation.
+  same-origin iframe. `window.location` to your document tears down
+  the dashboard SPA — and shell services live there: the voice/
+  dictation layer died on every mission open until this was fixed.
+  Cross the frame boundary with postMessage seams, not navigation.
+- **URLs name the page; they never grow history.** Use
+  `history.replaceState` for every internal step, not `pushState` —
+  the operator ruled pushState "way too heavy": the back button must
+  stay a pure exit from the plugin, while the address bar always shows
+  a copyable name for the current page (deep-linkable on load). For
+  sub-page state, have the embedded document postMessage its position
+  up (`{type:"<app>:where", ...}`) and mirror it into the hash.
 - **The fragment speaks your documents' design language.** A scoped
   style block carrying your palette/type tokens, your drawn SVG icons,
   your control idioms — a generic-Tailwind list page next to a
@@ -171,6 +177,22 @@ with the data model you intend to ship.
   code needed. The org dropdown idiom to copy lives in the worktrees
   page (`pages/worktrees.html`, `worktrees-org-select`); orgs come
   from `/api/orgs` (identity payload carries name/color/initial).
+
+### Loading interstitials that tell the truth
+
+A document that takes >300ms to compose gets a pre-rendered overlay
+(visible in the same frame as the tap) with a progress bar carrying a
+real signal — never a spinner. The whole pattern fits one round trip:
+the screen endpoint takes `?progress=1` and returns a
+`StreamingResponse` that yields HTML-comment stage markers
+(`<!--app:42|Loading items — 12 of 78 settings-->`) between compose
+stages, then `<!--app:doc:<bytes>-->`, then the document; the client's
+`getReader()` loop parses markers into bar % + an italic sub-status,
+uses the doc marker for byte progress, strips everything before
+`<!doctype` and mounts via `srcdoc`. Upfront counts come from
+`graph_ops.count_set_rows(set_id, org=..., prefix=...)` — a COUNT(*)
+built for exactly this. Mission Control is the reference
+implementation (`compose.render_stages`, `page.js loadScreen`).
 
 ## 3c. Attribution and identity
 

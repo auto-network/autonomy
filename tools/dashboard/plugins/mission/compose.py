@@ -232,13 +232,79 @@ def load_beads(org: str, mission_id: str, pillars: list[dict]) -> dict:
     return bridge.load_beads(mission_id, pillars)
 
 
+def _marker(pct: int, note: str) -> str:
+    """A progress heartbeat, legal ahead of the doctype (HTML comment)."""
+    return f"<!--msn:{pct}|{note}-->"
+
+
+def render_stages(org: str, mission_id: str,
+                  focus_pillar_id: str | None = None):
+    """Stage-by-stage screen composition, for a streaming response.
+
+    Yields progress-marker comment strings while the settings loads run,
+    then ``<!--msn:doc:<bytes>-->`` and finally the complete document.
+    The markers are what the loading interstitial narrates; without them
+    the client sees nothing until the whole compose finishes. The caller
+    must have resolved the mission's existence already (``load_mission``)
+    — an unknown mission raises ``KeyError`` here.
+    """
+    from tools.graph import ops as graph_ops
+    yield _marker(3, "Counting settings")
+    total = 0
+    try:
+        for sid in (PILLAR_SET_ID, ITEM_SET_ID, CHAT_SET_ID):
+            total += graph_ops.count_set_rows(
+                sid, org=org or None, prefix=mission_id)
+        total += 1                                # the registry row itself
+    except Exception:                             # noqa: BLE001
+        total = 0                                 # narrate without counts
+
+    got = 0
+
+    def note(text: str) -> str:
+        return (f"{text} — {got} of {total} settings" if total else text)
+
+    yield _marker(6, note("Reading mission registry"))
+    mission = load_mission(org, mission_id)
+    if mission is None:
+        raise KeyError(mission_id)
+    got += 1
+    yield _marker(10, note("Loading pillars"))
+    pillars = load_pillars(org, mission_id)
+    got += len(pillars)
+    yield _marker(16, note("Loading mission items"))
+    items = load_items(org, mission_id)
+    got += len(items)
+    yield _marker(42, note("Loading discussion"))
+    chat = load_chat(org, mission_id)
+    got += sum(len(v) for v in chat.values())
+    got = min(got, total) if total else got
+    yield _marker(55, note("Bridging beads"))
+    beads = load_beads(org, mission_id, pillars)
+    yield _marker(80, "Resolving member directory")
+    directory = load_directory(org)
+    yield _marker(88, "Rendering document")
+    doc = _assemble(org, mission_id, focus_pillar_id, mission, pillars,
+                    items, beads, chat, directory)
+    yield f"<!--msn:doc:{len(doc.encode('utf-8'))}-->"
+    yield doc
+
+
 def render_screen(org: str, mission_id: str,
                   focus_pillar_id: str | None = None) -> str | None:
     """The complete mission document, or None for an unknown mission."""
-    mission = load_mission(org, mission_id)
-    if mission is None:
+    try:
+        doc = None
+        for chunk in render_stages(org, mission_id, focus_pillar_id):
+            doc = chunk
+        return doc
+    except KeyError:
         return None
-    pillars = load_pillars(org, mission_id)
+
+
+def _assemble(org: str, mission_id: str, focus_pillar_id: str | None,
+              mission: dict, pillars: list[dict], items: list[dict],
+              beads: dict, chat: dict, directory: dict) -> str:
     data = {
         "generated_at": time.time(),
         "focus": focus_pillar_id or "",
@@ -257,7 +323,7 @@ def render_screen(org: str, mission_id: str,
             }
             for p in pillars
         ],
-        "items": load_items(org, mission_id),
+        "items": items,
     }
     # The template is the content layer; this shell is what makes it a
     # phone-correct document. Without the viewport meta, mobile browsers
@@ -270,9 +336,6 @@ def render_screen(org: str, mission_id: str,
            + _TEMPLATE_PATH.read_text(encoding="utf-8").replace(
                _DATA_MARK, _blob(data))
            + "</body></html>")
-    beads = load_beads(org, mission_id, pillars)
-    chat = load_chat(org, mission_id)
-    directory = load_directory(org)
     inject = ""
     if directory:
         inject += ('<script type="application/json" id="mc-directory">'
