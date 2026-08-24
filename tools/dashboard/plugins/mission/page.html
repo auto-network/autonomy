@@ -243,7 +243,7 @@
                 :key="m.mission_id">
         <div class="msn-row" :class="m.status === 'complete' ? 'done' : ''">
           <svg class="msn-spark" aria-label="activity in the window"
-               x-effect="drawSpark($el, m, win.secs, sparkTick)"></svg>
+               x-effect="drawSpark($el, m, win.secs, sparkTick, alloc)"></svg>
 
           <div class="msn-name" x-init="fitName($el)" x-text="m.name"
                @click="open(m)"></div>

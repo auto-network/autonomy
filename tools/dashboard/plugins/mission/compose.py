@@ -127,7 +127,7 @@ def activity_summary(org: str, mission_id: str,
     """
     import datetime
     now = now or time.time()
-    stamps: list[float] = []
+    stamps: list[tuple[float, str]] = []
 
     def _epoch(v) -> float | None:
         if not v:
@@ -141,21 +141,22 @@ def activity_summary(org: str, mission_id: str,
     blockers = in_progress = open_questions = 0
     previews = {"blockers": [], "in_progress": [], "open": []}
     for it in load_items(org, mission_id):
+        sid = it.get("surface_id") or ""
         for v in (it.get("happened_at"), it.get("updated_at")):
             e = _epoch(v)
             if e:
-                stamps.append(e)
+                stamps.append((e, sid))
                 break
         for stream, field2 in (("history", "at"), ("work", "at"),
                                ("discussion", "at")):
             for entry in it.get(stream) or []:
                 e = _epoch(entry.get(field2))
                 if e:
-                    stamps.append(e)
+                    stamps.append((e, sid))
         ans = it.get("answer") or {}
         e = _epoch(ans.get("at"))
         if e:
-            stamps.append(e)
+            stamps.append((e, sid))
         kind, state = it.get("kind"), it.get("state")
         row = {"t": it.get("title") or "", "p": it.get("surface_id") or ""}
         if kind == "question" and state == "open":
@@ -170,15 +171,17 @@ def activity_summary(org: str, mission_id: str,
             previews["in_progress"].append(row)
 
     days = [0] * 28
-    for e in stamps:
+    for e, _sid in stamps:
         age_days = int((now - e) // 86400)
         if 0 <= age_days < 28:
             days[27 - age_days] += 1
     return {
-        "last_at": max(stamps) if stamps else None,
+        "last_at": max(t for t, _ in stamps) if stamps else None,
         "days": days,
-        # capped raw stamps let the homepage re-bucket to any window
-        "events": sorted(stamps)[-400:],
+        # capped raw [epoch, surface_id] pairs: the homepage re-buckets
+        # to any window AND splits per-pillar series without any read
+        # beyond the one this summary already does
+        "events": [[t, sid] for t, sid in sorted(stamps)[-400:]],
         "previews": {k: v[:6] for k, v in previews.items()},
         "blockers": blockers,
         "in_progress": in_progress,
