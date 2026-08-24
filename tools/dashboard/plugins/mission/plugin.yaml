@@ -20,6 +20,10 @@ nav:
 frontend:
   alpine_root: missionPage
 
+# Agent-facing doctrine + verbs. Embedded into every session's workspace
+# primer while this plugin is enabled; served at GET /api/plugins/mission/skill.
+skill: SKILL.md
+
 entrypoints:
   api: tools.dashboard.plugins.mission.entrypoints.api:routes
   cli: tools.dashboard.plugins.mission.entrypoints.cli:register
