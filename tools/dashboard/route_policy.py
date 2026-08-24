@@ -166,6 +166,42 @@ def apply_default_deny(routes: list, *, plugin: bool = False) -> list:
     return out
 
 
+def gate_plugin_enabled(plugin_id: str, routes: list, enabled_fn) -> list:
+    """Return *routes* with every ``/api`` route gated on plugin enablement.
+
+    Dormant means dormant: pages, fragments, static, and the skill route
+    already check the enable Setting per request, and the CLI mounts only
+    while enabled — this closes the one surface that didn't, the plugin's
+    own API routes. Applied INSIDE ``apply_default_deny`` (gate wraps the
+    endpoint first, auth wraps the gate), so an unauthenticated caller
+    still sees the uniform auth refusal and learns nothing about which
+    plugins exist; an authenticated caller gets 404 while disabled.
+
+    ``enabled_fn`` is called per request (no restart needed to flip the
+    Setting), matching ``_plugin_enabled_map``'s live semantics.
+    """
+    out = []
+    for r in routes:
+        if not (isinstance(r, Route) and r.path.startswith("/api/")):
+            out.append(r)
+            continue
+        original = r.endpoint
+
+        def _make(original, plugin_id=plugin_id):
+            async def gated(request):
+                if not enabled_fn().get(plugin_id):
+                    from starlette.responses import JSONResponse
+                    return JSONResponse({"error": "Not Found"},
+                                        status_code=404)
+                return await original(request)
+            gated.__name__ = getattr(original, "__name__", "route")
+            return gated
+
+        out.append(Route(r.path, _make(original),
+                         methods=list(r.methods or ["GET"]), name=r.name))
+    return out
+
+
 def assert_no_plugin_exceptions(plugin_route_paths: set[str]) -> None:
     """Refuse a plugin route that tries to be a public exception.
 

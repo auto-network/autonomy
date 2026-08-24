@@ -18588,8 +18588,14 @@ def _build_plugin_routes() -> list:
             # Plugin routes are authenticated by construction: the plugin
             # infrastructure wraps them, plugins never add auth themselves.
             # plugin=True refuses an unauthenticated caller unconditionally
-            # (an unenrolled dashboard exposes no plugin routes).
-            out.extend(route_policy.apply_default_deny(p.routes, plugin=True))
+            # (an unenrolled dashboard exposes no plugin routes). The
+            # enablement gate sits inside the auth wrapper, so dormant
+            # means dormant for the API surface too — same live-Setting
+            # semantics as the page and fragment handlers.
+            out.extend(route_policy.apply_default_deny(
+                route_policy.gate_plugin_enabled(
+                    p.id, p.routes, _plugin_enabled_map),
+                plugin=True))
         out.append(Mount(
             f"/static/plugins/{p.id}",
             app=StaticFiles(directory=str(p.plugin_dir)),
