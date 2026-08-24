@@ -30,6 +30,7 @@ from tools.network.idkit.canonical import canonical_json
 from .errors import ConcurrencyError, PolicyClassError, VaultError
 from .factors import PublishedFactor
 from .policy_class import PolicyClassRecord
+from .root_anchor import RootAnchorRecord
 
 
 def _assert_append_only_successor(old: PolicyClassRecord, new: PolicyClassRecord) -> None:
@@ -40,6 +41,10 @@ def _assert_append_only_successor(old: PolicyClassRecord, new: PolicyClassRecord
     if new.policy != old.policy:
         raise ConcurrencyError(
             f"class {old.class_id!r} policy changed {old.policy!r}→{new.policy!r}"
+        )
+    if new.governance != old.governance:
+        raise ConcurrencyError(
+            f"class {old.class_id!r} governance changed; stale or corrupt write"
         )
     if len(new.generations) < len(old.generations):
         raise ConcurrencyError(
@@ -75,6 +80,10 @@ CREATE TABLE IF NOT EXISTS vault_factors (
     factor_type TEXT NOT NULL,
     public_key  TEXT NOT NULL,
     armor       TEXT
+);
+CREATE TABLE IF NOT EXISTS root_anchors (
+    anchor_id TEXT PRIMARY KEY,
+    wire      TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS vault_secrets (
     setting_name TEXT PRIMARY KEY,
@@ -228,6 +237,46 @@ class VaultStore:
             "SELECT factor_id, factor_type, public_key FROM vault_factors ORDER BY factor_id"
         ).fetchall()
         return [PublishedFactor(*row) for row in rows]
+
+    # -- personal-root anchors ---------------------------------------------
+
+    def put_root_anchor(self, record: RootAnchorRecord) -> None:
+        """Enroll one immutable, root-attested anchor.
+
+        Replacing an anchor in place would silently substitute the key behind
+        every class that names it.  Root rotation re-wraps the same anchor seed
+        through a separate continuity operation; ordinary enrollment is
+        insert-only.
+        """
+        wire = canonical_json(record.to_dict()).decode("ascii")
+        with self.db:
+            row = self.db.execute(
+                "SELECT wire FROM root_anchors WHERE anchor_id = ?",
+                (record.anchor_id,),
+            ).fetchone()
+            if row is not None:
+                if row[0] == wire:
+                    return
+                raise VaultError(
+                    f"root anchor {record.anchor_id!r} already exists and cannot be replaced"
+                )
+            self.db.execute(
+                "INSERT INTO root_anchors(anchor_id, wire) VALUES (?, ?)",
+                (record.anchor_id, wire),
+            )
+
+    def get_root_anchor(self, anchor_id: str) -> RootAnchorRecord:
+        row = self.db.execute(
+            "SELECT wire FROM root_anchors WHERE anchor_id = ?", (anchor_id,),
+        ).fetchone()
+        if row is None:
+            raise VaultError(f"no root anchor {anchor_id!r}")
+        return RootAnchorRecord.from_dict(json.loads(row[0]))
+
+    def root_anchor_ids(self) -> list[str]:
+        return [r[0] for r in self.db.execute(
+            "SELECT anchor_id FROM root_anchors ORDER BY anchor_id"
+        ).fetchall()]
 
     def class_ids(self) -> list[str]:
         return [r[0] for r in self.db.execute(

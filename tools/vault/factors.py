@@ -67,11 +67,16 @@ class PublishedFactor:
             raise FactorError("factor public_key must be 64 hex chars")
 
 
-def _public_from_seed(seed: bytes) -> str:
+def public_from_seed(seed: bytes) -> str:
     if not isinstance(seed, (bytes, bytearray)) or len(seed) < _SEED_LEN:
         raise FactorError(f"factor seed must be at least {_SEED_LEN} bytes")
     _, public_hex = derive_encapsulation_keypair(bytes(seed), VAULT_FACTOR_PURPOSE)
     return public_hex
+
+
+# Kept as an internal alias for callers written before the public root-anchor
+# seam existed.
+_public_from_seed = public_from_seed
 
 
 def factor_private_from_seed(seed: bytes) -> str:

@@ -24,8 +24,19 @@ from tools.graph.schemas.vault_credential import (
     VAULT_CREDENTIAL_REVISION,
     VAULT_SECURED_SET_ID,
 )
+from tools.graph.schemas.personal_identity import (
+    PERSONAL_IDENTITY_REVISION,
+    PERSONAL_IDENTITY_SET_ID,
+)
 from tools.graph.tests.vault_read_harness import VaultWorld, clear_seams
-from tools.vault.policy_class import extend_class, revoke_factor
+from tools.network.idkit import KeyPair
+from tools.network.idkit.armor import encrypt_root_key
+from tools.vault.policy_class import (
+    create_root_reachable_class,
+    extend_class,
+    revoke_factor,
+)
+from tools.vault.root_anchor import create_root_anchor
 from tools.vault.store import VaultStore
 from tools.vault.testkit import make_test_identity
 
@@ -239,6 +250,101 @@ def test_fake_ssh_key_is_sealed_approved_delivered_and_expired_without_leak(
     expired = vault_releases.get(rid)
     assert expired["shred_reason"] == "expired"
     assert secret not in json.dumps(expired)
+
+
+def test_root_reachable_fake_ssh_key_uses_personal_root_anchor(vault_open_env):
+    """One stable anchor, opened by the root ceremony, releases exact bytes."""
+    graph_db, world, client = vault_open_env
+    root = KeyPair.generate()
+    root_password = "disposable-root-password"
+    root_armor = encrypt_root_key(root, root_password, iterations=10_000)
+    with settings_ops.identity_write_context():
+        settings_ops.upsert_by_key(
+            PERSONAL_IDENTITY_SET_ID,
+            PERSONAL_IDENTITY_REVISION,
+            "default",
+            {
+                "armored_private_key": root_armor,
+                "root_pub": root.public_hex,
+                "display_name": "Disposable Operator",
+                "created_at": "2026-08-24T00:00:00Z",
+            },
+            org=None,
+        )
+
+    anchor, anchor_seed = create_root_anchor(
+        root,
+        anchor_id="personal-root-vault",
+        display_name="Personal root vault",
+        created_at="2026-08-24T00:01:00Z",
+    )
+    root_class = create_root_reachable_class(
+        anchor.published_recipient(),
+        display_name="Personal root vault",
+        created_at="2026-08-24T00:02:00Z",
+    )
+    world.policy_class = root_class
+    secret = (
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+        + base64.b64encode(secrets.token_bytes(96)).decode("ascii")
+        + "\n-----END OPENSSH PRIVATE KEY-----\n"
+    )
+    expected_digest = hashlib.sha256(secret.encode()).hexdigest()
+    ops.add_setting(
+        VAULT_SECURED_SET_ID,
+        VAULT_CREDENTIAL_REVISION,
+        "test.root-reachable-ssh",
+        {"value": secret},
+        org=ops.CALLER_ORG,
+    )
+    with VaultStore(graph_db) as store:
+        store.put_root_anchor(anchor)
+        store.put_class(root_class)
+
+    with client:
+        created = client.post("/api/approvals", json={
+            "kind": "vault_open",
+            "request": {
+                "set_id": VAULT_SECURED_SET_ID,
+                "key": "test.root-reachable-ssh",
+                "ttl_seconds": 60,
+            },
+        })
+        assert created.status_code == 200, created.text
+        rid = created.json()["id"]
+        review = client.get(
+            f"/api/approvals/{rid}", headers={"x-test-operator": "1"},
+        )
+        assert review.status_code == 200, review.text
+        ceremony = review.json()["ceremony"]
+        assert ceremony["v"] == 2
+        assert ceremony["governance"] == root_class.governance
+        assert ceremony["anchor"] == anchor.to_dict()
+        assert ceremony["root"]["armor"] == root_armor
+        assert ceremony["root"]["root_pub"] == root.public_hex
+        assert ceremony["root"]["methods"] == ["password"]
+
+        decided = client.post(
+            f"/api/approvals/{rid}/decision",
+            headers={"x-test-operator": "1"},
+            json={
+                "approved": True,
+                "openers": {anchor.anchor_id: anchor_seed.hex()},
+            },
+        )
+        assert decided.status_code == 200, decided.text
+        delivered = client.get(f"/api/approvals/{rid}?wait=10").json()
+
+    receipt = delivered["result"]["execution"]["receipt"]
+    ramfs_payload = json.loads(
+        (graph_db.parent / "ramfs" / "auto-real" / f"vault-open-{rid}.json")
+        .read_text()
+    )
+    assert hashlib.sha256(ramfs_payload["value"].encode()).hexdigest() == expected_digest
+    assert secret not in json.dumps(delivered)
+    assert secret not in json.dumps(ar.get(rid))
+    assert anchor_seed.hex() not in json.dumps(ar.get(rid))
+    assert receipt["path"] == f"/run/secrets/vault-open-{rid}.json"
 
 
 def test_vault_open_refuses_setting_drift(vault_open_env):

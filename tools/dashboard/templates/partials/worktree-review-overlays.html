@@ -765,6 +765,7 @@
                 class="h-12 flex-1 rounded-2xl bg-indigo-600 text-base font-semibold text-white transition hover:bg-indigo-500 disabled:cursor-wait disabled:opacity-50"
                 :disabled="approvalBusy ||
                   (approvalRequest.kind === 'fleet_machine_admission' && !(approvalRequest.machineName || '').trim()) ||
+                  (approvalRequest.kind === 'vault_open' && approvalRequest.vaultOpen && approvalRequest.vaultOpen.rootMethods.length > 1 && !approvalRequest.vaultOpen.rootMethod) ||
                   (approvalRequest.kind === 'vault_open' && approvalRequest.needsPassword && !(approvalRequest.password || '').trim())"
                 @click="approveRequest()" data-testid="approval-approve-button">
           <span x-show="!approvalBusy" x-text="approvalRequest.actionLabel"></span>
@@ -983,6 +984,26 @@
             <p class="text-xs leading-5 text-slate-500">
               🔒 Sealed in this browser to the host's recipient key
               — the dashboard stores only the ciphertext.
+            </p>
+          </div>
+        </template>
+        <template x-if="approvalRequest.kind === 'vault_open' && approvalRequest.vaultOpen && approvalRequest.vaultOpen.rootMethods.length > 1">
+          <div class="mt-4" data-testid="approval-vault-root-methods">
+            <p class="text-sm font-medium text-slate-200">Open your personal root with</p>
+            <div class="mt-2 grid grid-cols-2 gap-2">
+              <template x-for="method in approvalRequest.vaultOpen.rootMethods" :key="method">
+                <button type="button"
+                        class="rounded-2xl border px-4 py-3 text-sm font-semibold transition"
+                        :class="approvalRequest.vaultOpen.rootMethod === method
+                          ? 'border-indigo-400 bg-indigo-500/15 text-indigo-100'
+                          : 'border-slate-600 bg-slate-900/60 text-slate-300 hover:border-slate-500'"
+                        :data-testid="'approval-vault-root-method-' + method"
+                        @click="approvalRequest.vaultOpen.selectMethod(method)"
+                        x-text="method === 'both' ? 'Password + passkey' : (method === 'passkey' ? 'Passkey' : 'Password')"></button>
+              </template>
+            </div>
+            <p class="mt-2 text-xs leading-5 text-slate-500">
+              This opens the same personal-root vault access; it does not select a separate vault password.
             </p>
           </div>
         </template>

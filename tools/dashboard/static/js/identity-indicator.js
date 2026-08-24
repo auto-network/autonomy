@@ -140,6 +140,15 @@
     credentialsMounted = false;
     render();
   }
+  function openPersonalVault() {
+    closePanel();
+    import('./vault-management.js')
+      .then(function (m) { return m.open(); })
+      .catch(function (err) {
+        loadError = 'Personal vault unavailable: ' + ((err && err.message) || err);
+        render();
+      });
+  }
   // Return from the credentials sub-view to the drawer's main (org list).
   function closeCredentials() {
     credentialsOpen = false;
@@ -414,6 +423,8 @@
     if (status && status.signed_in === true && status.gate_disabled !== true) {
       actions.appendChild(actionButton('manage-factors', 'Manage credentials',
         'Your password and passkeys', function () { openCredentials(); }));
+      actions.appendChild(actionButton('personal-vault', 'Secure a credential',
+        'Seal a value to your personal root', openPersonalVault));
       actions.appendChild(actionButton('lock', lockBusy ? 'Locking...' : 'Lock dashboard',
         'This session only', lockDashboard));
     }

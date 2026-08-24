@@ -24,6 +24,7 @@ from .factors import (
 )
 from .policy_class import (
     create_class,
+    create_root_reachable_class,
     enable_public_sealing,
     extend_class,
     open_cek,
@@ -31,6 +32,7 @@ from .policy_class import (
     seal_cek,
 )
 from .store import VaultSecretRecord, VaultStore
+from .root_anchor import RootAnchorRecord
 
 _CEK_LEN = 32
 
@@ -110,6 +112,31 @@ def create_policy_class(
     record = create_class(policy, factors, created_at=created_at)
     store.put_class(record)
     return record.class_id
+
+
+def create_root_policy_class(
+    store: VaultStore,
+    anchor_id: str,
+    *,
+    display_name: str,
+    created_at: str,
+) -> str:
+    """Create the default class inherited from the personal root's policy."""
+    anchor = store.get_root_anchor(anchor_id)
+    record = create_root_reachable_class(
+        anchor.published_recipient(),
+        display_name=display_name,
+        created_at=created_at,
+    )
+    store.put_class(record)
+    return record.class_id
+
+
+def enroll_root_anchor(store: VaultStore, value: dict) -> RootAnchorRecord:
+    """Validate and insert a browser-created, root-signed anchor envelope."""
+    record = RootAnchorRecord.from_dict(value)
+    store.put_root_anchor(record)
+    return record
 
 
 def enroll_into_class(

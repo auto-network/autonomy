@@ -85,6 +85,11 @@ from .factors import (
     PublishedFactor,
     factor_private_from_seed,
 )
+from .recipients import (
+    PERSONAL_ROOT_RECIPIENT,
+    PublishedRecipient,
+    recipient_private_from_seed,
+)
 
 #: Purpose label the per-factor wrap of a class_key (or share) is sealed under.
 #: Class id, generation id, policy and role are appended so a wrap cannot be
@@ -117,6 +122,8 @@ ROLE_B = "b"  # passkey  share of a `both` split
 _BOTH_ROLE_TYPE = {PASSWORD: ROLE_A, PASSKEY: ROLE_B}
 
 _CLASS_KEY_LEN = 32
+ROOT_REACHABLE_FORM = "root-reachable"
+ROOT_GOVERNANCE_VERSION = 1
 
 
 # ── records ────────────────────────────────────────────────────────────────
@@ -200,14 +207,18 @@ class PolicyClassRecord:
     policy: str
     generations: tuple[Generation, ...]
     created_at: str
+    governance: dict | None = None
 
     def to_dict(self) -> dict:
-        return {
+        value = {
             "class_id": self.class_id,
             "policy": self.policy,
             "generations": [g.to_dict() for g in self.generations],
             "created_at": self.created_at,
         }
+        if self.governance is not None:
+            value["governance"] = self.governance
+        return value
 
     @classmethod
     def from_dict(cls, d: dict) -> "PolicyClassRecord":
@@ -217,6 +228,7 @@ class PolicyClassRecord:
                 policy=d["policy"],
                 generations=tuple(Generation.from_dict(g) for g in d["generations"]),
                 created_at=d["created_at"],
+                governance=d.get("governance"),
             )
         except (KeyError, TypeError) as exc:
             raise PolicyClassError(f"malformed policy-class record: {exc}") from exc
@@ -225,6 +237,12 @@ class PolicyClassRecord:
             # is a corrupted store, surfaced in the package's own taxonomy
             # rather than as a downstream IndexError (attack finding MINOR-6e).
             raise PolicyClassError("policy-class record has no generations")
+        if record.governance is not None:
+            _validate_governance(record.governance)
+            if record.policy != governance_policy(record.governance):
+                raise PolicyClassError(
+                    "policy-class policy does not match its governance commitment"
+                )
         return record
 
     def current(self) -> Generation:
@@ -249,6 +267,47 @@ class PolicyClassRecord:
 def _require_policy(policy: str) -> None:
     if policy not in POLICIES:
         raise PolicyClassError(f"unknown policy {policy!r}; known: {POLICIES}")
+
+
+def _validate_governance(governance: object) -> dict:
+    if not isinstance(governance, dict) or set(governance) != {
+        "v", "form", "anchor_id", "display_name",
+    }:
+        raise PolicyClassError("root governance has unknown or missing fields")
+    if governance.get("v") != ROOT_GOVERNANCE_VERSION:
+        raise PolicyClassError("unsupported root governance version")
+    if governance.get("form") != ROOT_REACHABLE_FORM:
+        raise PolicyClassError("unsupported policy-class governance form")
+    for field in ("anchor_id", "display_name"):
+        value = governance.get(field)
+        if not isinstance(value, str) or not value or len(value) > 256:
+            raise PolicyClassError(
+                f"root governance {field} must be a short non-empty string"
+            )
+    return governance
+
+
+def governance_policy(governance: dict) -> str:
+    """The canonical cryptographic commitment carried in secured locators."""
+    _validate_governance(governance)
+    return "expr-sha256:" + hashlib.sha256(canonical_json(governance)).hexdigest()
+
+
+def root_governance(anchor_id: str, display_name: str) -> dict:
+    governance = {
+        "v": ROOT_GOVERNANCE_VERSION,
+        "form": ROOT_REACHABLE_FORM,
+        "anchor_id": anchor_id,
+        "display_name": display_name,
+    }
+    return _validate_governance(governance)
+
+
+def is_root_reachable(record: PolicyClassRecord) -> bool:
+    return bool(
+        record.governance
+        and record.governance.get("form") == ROOT_REACHABLE_FORM
+    )
 
 
 def _wrap_purpose(class_id: str, gen_id: str, policy: str, role: str) -> str:
@@ -287,7 +346,10 @@ def _seal_wrap(key, factor, class_id, gen_id, policy, role) -> Wrap:
 
 
 def _open_wrap(wrap, seed, class_id, gen_id, policy) -> bytes:
-    priv = factor_private_from_seed(seed)
+    if wrap.factor_type in (PASSWORD, PASSKEY):
+        priv = factor_private_from_seed(seed)
+    else:
+        priv = recipient_private_from_seed(seed, wrap.factor_type)
     return seal_open(
         bytes.fromhex(wrap.wrapped), priv, _wrap_purpose(class_id, gen_id, policy, wrap.role)
     )
@@ -350,6 +412,23 @@ def _open_generation(record: PolicyClassRecord, gen: Generation, seeds) -> tuple
     """Recover *gen*'s class_key. Returns ``(class_key, shares)`` where shares
     is ``{}`` for single-wrap policies and ``{"a","b"}`` for ``both``."""
     policy = record.policy
+    if is_root_reachable(record):
+        if (
+            len(gen.wraps) != 1
+            or gen.wraps[0].factor_type != PERSONAL_ROOT_RECIPIENT
+        ):
+            raise ClassOpenError("root-reachable class has no canonical anchor wrap")
+        wrap = gen.wraps[0]
+        seed = seeds.get(wrap.factor_id)
+        if seed is None:
+            raise ClassOpenError("the personal-root vault anchor was not opened")
+        try:
+            key = _open_wrap(wrap, seed, record.class_id, gen.gen_id, policy)
+        except (SealingError, FactorError) as exc:
+            raise ClassOpenError("the personal-root vault anchor did not open") from exc
+        if len(key) != _CLASS_KEY_LEN:
+            raise ClassOpenError("the personal-root vault anchor opened malformed material")
+        return key, {}
     if policy in (PASSWORD_POLICY, PRF_POLICY):
         for wrap in gen.wraps:
             seed = seeds.get(wrap.factor_id)
@@ -412,6 +491,40 @@ def create_class(
     return PolicyClassRecord(class_id, policy, (gen,), created_at)
 
 
+def create_root_reachable_class(
+    anchor: PublishedRecipient,
+    *,
+    display_name: str,
+    class_id: str | None = None,
+    created_at: str,
+) -> PolicyClassRecord:
+    """Mint the default personal class behind one stable root anchor.
+
+    The class record names no password or passkey.  The root armor owns that
+    policy; this class has one public recipient reached after the root opens.
+    """
+    if anchor.recipient_kind != PERSONAL_ROOT_RECIPIENT:
+        raise PolicyClassError("a root-reachable class requires a root anchor")
+    governance = root_governance(anchor.factor_id, display_name)
+    policy = governance_policy(governance)
+    class_id = class_id or secrets.token_hex(16)
+    gen_id = secrets.token_hex(12)
+    class_key = secrets.token_bytes(_CLASS_KEY_LEN)
+    wrap = _seal_wrap(
+        class_key, anchor, class_id, gen_id, policy, ROLE_SINGLE,
+    )
+    _, sealing_public_key = derive_encapsulation_keypair(
+        class_key, _class_seal_key_purpose(class_id, gen_id),
+    )
+    return PolicyClassRecord(
+        class_id,
+        policy,
+        (Generation(gen_id, (wrap,), sealing_public_key),),
+        created_at,
+        governance,
+    )
+
+
 def enable_public_sealing(
     record: PolicyClassRecord, *, created_at: str
 ) -> PolicyClassRecord:
@@ -470,6 +583,10 @@ def extend_class(
     sealing it into the generations those secrets live under. No class_key
     changes, so no setting's stored ciphertext is touched. Returns a NEW record.
     """
+    if is_root_reachable(record):
+        raise PolicyClassError(
+            "a root-reachable class inherits factors from the personal root"
+        )
     if new_factor.factor_id in _all_factor_ids(record):
         raise PolicyClassError(f"factor {new_factor.factor_id!r} is already enrolled")
     if new_factor.public_key in _all_public_keys(record):
@@ -530,6 +647,10 @@ def revoke_factor(
     Ceremony-free by design: minting and wrapping the fresh class secret uses
     only surviving factors' published keys. ``created_at`` re-stamps the class.
     """
+    if is_root_reachable(record):
+        raise PolicyClassError(
+            "root factors are changed on the personal armor, not on this class"
+        )
     current = record.current()
     survivors = [
         PublishedFactor(w.factor_id, w.factor_type, w.public_key)
@@ -662,7 +783,12 @@ def open_cek(
 
 
 def _check_policy_match(record: PolicyClassRecord, required_policy: str) -> None:
-    _require_policy(required_policy)
+    if record.governance is None:
+        _require_policy(required_policy)
+    elif required_policy != governance_policy(record.governance):
+        raise PolicyMismatchError(
+            "setting policy commitment does not match its class governance"
+        )
     if record.policy != required_policy:
         raise PolicyMismatchError(
             f"setting requires policy {required_policy!r} but its class is "
