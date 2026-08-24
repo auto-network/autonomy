@@ -247,19 +247,47 @@ async def post_state(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "state": item["state"]})
 
 
-def _entry_route(fn, **fixed):
+async def _relay_to_coordinator(org: str | None, mission_id: str,
+                                pillar_id: str, by: str,
+                                note: str) -> bool:
+    """Best-effort CrossTalk to the pillar's coordinator (storage always
+    precedes delivery; a failed relay never loses the write)."""
+    try:
+        pillars = compose.load_pillars(org, mission_id)
+        me = next((x for x in pillars
+                   if x["pillar_id"] == pillar_id), None)
+        target = (me or {}).get("coordinator_session")
+        if not target or target == by:
+            return False
+        from tools.dashboard.crosstalk_delivery import deliver_from_chat
+        out = await deliver_from_chat(by, target, note)
+        return bool(out.get("delivered"))
+    except Exception:                             # noqa: BLE001
+        return False
+
+
+def _entry_route(fn, what: str = "entry", **fixed):
     async def handler(request: Request) -> JSONResponse:
         pp = request.path_params
         org = _owning_org(request, pp["mission_id"])
         text = await _text_body(request)
         if text is None:
             return JSONResponse({"error": "text required"}, status_code=400)
+        by = _identity(request, org)
         try:
             fn(org, pp["mission_id"], pp["pillar_id"], pp["item_id"],
-               text=text, by=_identity(request, org), **fixed)
+               text=text, by=by, **fixed)
         except Exception as exc:                  # noqa: BLE001
             return _refused(exc)
-        return JSONResponse({"ok": True})
+        # The chat route always relayed; item entries silently did not —
+        # a question reply reached the record but never the coordinator
+        # (found live by the operator on the first cross-org mission).
+        relayed = await _relay_to_coordinator(
+            org, pp["mission_id"], pp["pillar_id"], by,
+            f"[mission {what} \u00b7 {pp['pillar_id']}] "
+            f"on item {pp['item_id']}: {text}\n"
+            f"View: /mission/{pp['mission_id']}")
+        return JSONResponse({"ok": True, "relayed": relayed})
     return handler
 
 
@@ -279,22 +307,11 @@ async def post_chat(request: Request) -> JSONResponse:
     # Storage precedes delivery, and delivery is best-effort: the pillar's
     # coordinator hears about the message over CrossTalk when one is
     # declared and live; a failed relay never loses the message.
-    relayed = False
-    try:
-        pillars = compose.load_pillars(org, pp["mission_id"])
-        me = next((x for x in pillars
-                   if x["pillar_id"] == pp["pillar_id"]), None)
-        target = (me or {}).get("coordinator_session")
-        if target and target != by:
-            from tools.dashboard.crosstalk_delivery import deliver_from_chat
-            note = (f"[mission chat \u00b7 {me.get('name') or pp['pillar_id']}] "
-                    f"{text}\n"
-                    f"Reply with: graph mission chat {pp['mission_id']} "
-                    f"{pp['pillar_id']} \"...\"")
-            out = await deliver_from_chat(by, target, note)
-            relayed = bool(out.get("delivered"))
-    except Exception:                             # noqa: BLE001
-        pass
+    relayed = await _relay_to_coordinator(
+        org, pp["mission_id"], pp["pillar_id"], by,
+        f"[mission chat \u00b7 {pp['pillar_id']}] {text}\n"
+        f"Reply with: graph mission chat {pp['mission_id']} "
+        f"{pp['pillar_id']} \"...\"")
     return JSONResponse({"ok": True, "entries": entries, "relayed": relayed})
 
 
@@ -439,13 +456,17 @@ routes: list = [
           methods=["GET"]),
     Route(_ITEM, put_item, methods=["PUT"]),
     Route(_ITEM + "/state", post_state, methods=["POST"]),
-    Route(_ITEM + "/work", _entry_route(writes.add_work), methods=["POST"]),
-    Route(_ITEM + "/reply", _entry_route(writes.add_discussion),
+    Route(_ITEM + "/work", _entry_route(writes.add_work, what="work note"),
+          methods=["POST"]),
+    Route(_ITEM + "/reply",
+          _entry_route(writes.add_discussion, what="question reply"),
           methods=["POST"]),
     Route(_ITEM + "/progress",
-          _entry_route(writes.add_discussion, progress=True),
+          _entry_route(writes.add_discussion, what="progress update",
+                       progress=True),
           methods=["POST"]),
-    Route(_ITEM + "/answer", _entry_route(writes.answer_question),
+    Route(_ITEM + "/answer",
+          _entry_route(writes.answer_question, what="answer"),
           methods=["POST"]),
     Route("/api/mission/chat/{mission_id}/{pillar_id}", post_chat,
           methods=["POST"]),
