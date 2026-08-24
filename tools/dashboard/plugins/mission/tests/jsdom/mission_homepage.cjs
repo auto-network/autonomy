@@ -131,6 +131,8 @@ setTimeout(() => {
         check("url pushed",
           window.location.pathname === "/mission/m1");
         check("no in-page back bar", !d.querySelector(".msn-list + div .border-b"));
+        check("back chevron in toolbar",
+          !!d.querySelector('#app-topbar-slot [aria-label="Back to missions"]'));
         check("mission title in toolbar",
           d.querySelector("#app-topbar-slot").textContent
             .includes("Multi-User Autonomy"));
