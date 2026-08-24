@@ -103,6 +103,10 @@ const SCENARIOS = {
     crit.click();
     let page = document.getElementById("mc-critpage");
     check("criterion page", !!page);
+    // breadcrumbs always name section AND pillar (operator ruling)
+    check("delivery breadcrumb names section + pillar",
+      page.querySelector(".cback").textContent.includes("Delivery")
+      && page.querySelector(".cback").textContent.includes("Relay"));
     check("worked meta", page.querySelector(".meta3").textContent
       .includes("worked"));
     check("work log entries",
