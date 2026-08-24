@@ -155,6 +155,23 @@ with the data model you intend to ship.
   a floor, one-line metas in the icon vocabulary instead of word
   labels, and look at a real phone before calling it done.
 
+### Full-frame seating and the shell toolbar
+
+- **Full frame:** the shell mounts fragments inside `<main id="content"
+  class="pt-6 px-6">`. A plugin that owns its whole surface escapes
+  that padding on its ROOT element: `margin:-1.5rem -1.5rem 0;
+  height:calc(100% + 1.5rem)`. Without this your page floats in a wide
+  border no inner CSS can remove.
+- **The toolbar is claimable — do not rebuild it.** The shell ships
+  `#app-topbar-slot` beside the global search input, hidden until a
+  page claims it: add `app-topbar-active` to `<header>` (hides search
+  + page-title, shows the slot) and teleport your controls in with
+  `<template x-teleport="#app-topbar-slot">`. The SPA router's
+  `resetTopbar()` removes the class on every navigation — no cleanup
+  code needed. The org dropdown idiom to copy lives in the worktrees
+  page (`pages/worktrees.html`, `worktrees-org-select`); orgs come
+  from `/api/orgs` (identity payload carries name/color/initial).
+
 ## 3c. Attribution and identity
 
 Acts are attributed by IDENTITY; presentation resolves at render.

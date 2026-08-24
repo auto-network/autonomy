@@ -1,5 +1,6 @@
 <div x-data="missionPage()" data-testid="mission-fragment-root"
-     class="h-full flex flex-col">
+     class="flex flex-col"
+     style="margin:-1.5rem -1.5rem 0;height:calc(100% + 1.5rem)">
   <style>
     /* Ported from Design Studio ff8b7ff9 — the mission screens' design
        language. The org selector belongs to the shell nav bar. */
@@ -7,6 +8,24 @@
       --line2:#39415a;--ink:#e8ebf2;--ink2:#aab3c4;--ink3:#8391a8;
       --accent:#8b85ff;--warn:#fab219;--crit:#f4597b;--good:#34d399;
       background:var(--bg);padding:14px 14px 40px;flex:1;overflow-y:auto}
+    .msn-tabs{display:flex;gap:16px;padding:0 2px 8px}
+    .msn-tabs button{background:none;border:0;padding:3px 0 5px;cursor:pointer;
+      font:inherit;font-size:.78rem;font-weight:650;color:var(--ink3)}
+    .msn-tabs button.on{color:var(--ink);box-shadow:inset 0 -2px 0 var(--accent)}
+    .msn-amission{margin:0 0 16px}
+    .msn-aname{color:var(--ink);font-weight:650;font-size:.88rem;margin:0 0 7px}
+    .msn-arow{display:flex;align-items:baseline;gap:8px;padding:5px 0;
+      border-top:1px solid var(--line);font-size:.74rem;min-width:0}
+    .msn-arow .pband{flex:none;width:3px;height:12px;border-radius:2px;
+      align-self:center}
+    .msn-arow .apillar{color:var(--ink2);flex:1;min-width:0;overflow:hidden;
+      text-overflow:ellipsis;white-space:nowrap}
+    .msn-arow .asess{flex:none;text-align:right;min-width:0;max-width:55%}
+    .msn-arow .sid{font-family:ui-monospace,monospace;font-size:.66rem;
+      color:var(--accent)}
+    .msn-arow .sid.off{color:var(--ink3)}
+    .msn-arow .stitle{display:block;font-size:.62rem;color:var(--ink3);
+      overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
     .msn-head{display:flex;align-items:baseline;gap:12px;padding:0 2px 4px}
     .msn-head .msn-leg{flex:1;margin:0}
     .msn-leg{display:flex;gap:12px;align-items:baseline;flex-wrap:wrap}
@@ -80,6 +99,44 @@
     }
   </style>
 
+  <template x-teleport="#app-topbar-slot">
+    <div class="flex min-w-0 flex-1 items-center gap-2">
+      <div class="relative shrink-0" @click.outside="orgOpen = false">
+        <button type="button"
+                class="flex h-9 items-center gap-2 rounded-lg border border-gray-700 bg-gray-800 px-3 text-xs font-semibold text-gray-200 hover:border-gray-500"
+                @click="orgOpen = !orgOpen">
+          <span class="grid h-4 w-4 place-items-center rounded-full text-[9px] font-bold leading-none text-white"
+                :style="'background:' + ((curOrg() || {}).color || '#64748b')">
+            <span x-text="(curOrg() || {}).initial || '?'"></span>
+          </span>
+          <span class="max-w-[10rem] truncate"
+                x-text="(curOrg() || {}).name || 'All organizations'"></span>
+          <svg class="h-3 w-3 text-gray-500" fill="none" stroke="currentColor"
+               viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round"
+                  stroke-width="2.5" d="m19 9-7 7-7-7"/>
+          </svg>
+        </button>
+        <div x-show="orgOpen" x-cloak
+             class="absolute left-0 z-50 mt-1 w-56 rounded-xl border border-gray-700 bg-gray-900 p-1 shadow-2xl shadow-black/50">
+          <template x-for="o in orgs" :key="o.slug">
+            <button type="button"
+                    class="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left hover:bg-gray-800"
+                    :class="o.slug === org ? 'bg-gray-800' : ''"
+                    @click="setOrg(o.slug)">
+              <span class="grid h-4 w-4 shrink-0 place-items-center rounded-full text-[9px] font-bold leading-none text-white"
+                    :style="'background:' + o.color">
+                <span x-text="o.initial"></span>
+              </span>
+              <span class="truncate text-xs font-semibold text-gray-200"
+                    x-text="o.name"></span>
+            </button>
+          </template>
+        </div>
+      </div>
+    </div>
+  </template>
+
   <!-- the mission screen, embedded — never a page navigation -->
   <template x-if="current">
     <div class="flex-1 flex flex-col min-h-0">
@@ -101,7 +158,14 @@
         <p class="msn-err" x-text="'Could not load missions: ' + error"></p>
       </template>
 
-      <div class="msn-head">
+      <div class="msn-tabs">
+        <button :class="screen === 'missions' ? 'on' : ''"
+                @click="screen = 'missions'">Missions</button>
+        <button :class="screen === 'sessions' ? 'on' : ''"
+                @click="screen = 'sessions'">Sessions</button>
+      </div>
+
+      <div class="msn-head" x-show="screen === 'missions'">
         <div class="msn-leg">
           <template x-for="d in legend()" :key="d.word">
             <button class="fl"
@@ -121,11 +185,36 @@
         </span>
       </div>
 
-      <template x-if="loaded && !error && !visible().length">
+      <!-- SESSIONS: every mission's pillars with the session that
+           holds each one — pillar name beside the session's own title -->
+      <template x-if="screen === 'sessions'">
+        <div>
+          <template x-for="m in allocVisible()" :key="'a' + m.mission_id">
+            <div class="msn-amission">
+              <div class="msn-aname" x-text="m.name"></div>
+              <template x-for="p in m.pillars" :key="p.pillar_id">
+                <div class="msn-arow">
+                  <span class="pband" :style="'background:' + (p.color || '#8391a8')"></span>
+                  <span class="apillar" x-text="p.name"></span>
+                  <span class="asess">
+                    <span class="sid" :class="p.live ? '' : 'off'"
+                          x-text="p.session || 'unassigned'"></span>
+                    <span class="stitle" x-show="p.session_title"
+                          x-text="p.session_title"></span>
+                  </span>
+                </div>
+              </template>
+            </div>
+          </template>
+        </div>
+      </template>
+
+      <template x-if="screen === 'missions' && loaded && !error && !visible().length">
         <p class="msn-empty">Nothing in this window.</p>
       </template>
 
-      <template x-for="m in visible()" :key="m.mission_id">
+      <template x-for="m in (screen === 'missions' ? visible() : [])"
+                :key="m.mission_id">
         <div class="msn-row" :class="m.status === 'complete' ? 'done' : ''">
           <div class="msn-name" x-init="fitName($el)" x-text="m.name"
                @click="open(m)"></div>
