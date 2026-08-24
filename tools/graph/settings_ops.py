@@ -3273,11 +3273,11 @@ def write_by_key(
     * everything else — :func:`upsert_by_key`, unchanged, so the fix that
       introduced it still holds.
 
-    Sealing needs a sealer registered in THIS process, which the dashboard does
-    at unlock. A cold vault raises ``VaultSealerMissing`` from the write below
-    with the plaintext unwritten; this function deliberately adds no fallback
-    of its own, because the only fallback available would be storing the value
-    in the clear.
+    A personal secured set seals directly to its persisted policy-class public
+    key and is intentionally cold-writable. Organization vault sets still need
+    the process sealer registered at unlock; without it the write below raises
+    ``VaultSealerMissing`` with the plaintext unwritten. This function adds no
+    plaintext fallback on either path.
     """
     org = _resolve_org_arg(org)
     append_only = _access_pattern_for(set_id, schema_revision) == "append_only_log"
