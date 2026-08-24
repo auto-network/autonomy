@@ -400,12 +400,18 @@ class GraphDB:
         self.conn.execute("PRAGMA journal_mode = WAL")
         self.conn.execute("PRAGMA foreign_keys = ON")
         self._fleet_catalog = None
+        # Bring the database to the current schema BEFORE activating authored
+        # fleet-sync tracking.  Schema initialization uses ``executescript``;
+        # an activated FleetSyncConnection deliberately refuses that API
+        # because sqlite3_exec can commit outside the authored transaction
+        # hook.  Attaching first therefore made every legitimate schema bump
+        # brick the next writable open of a synced personal database.
+        self._init_schema()
         if self._attach_fleet_sync:
             from tools.network.fleet_sync_sim.catalog import (
                 attach_active_production_catalog,
             )
             self._fleet_catalog = attach_active_production_catalog(self.conn)
-        self._init_schema()
 
     def _discard_failed_connection(self) -> None:
         conn = getattr(self, "conn", None)

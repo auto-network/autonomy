@@ -3182,7 +3182,10 @@ def _existing_base_id(
 ) -> "str | None":
     """The live base row for a key, or None. Bases only — an override or an
     exclusion is not a write target."""
-    db = _open(org, set_id, for_read=True)
+    # This is a pure existence probe.  A writable open needlessly runs schema
+    # initialization, takes write locks, and on a fleet-synced personal store
+    # can collide with the authored-write hook before the real write begins.
+    db = _open_read(org, set_id)
     try:
         row = db.conn.execute(
             "SELECT id FROM settings "
