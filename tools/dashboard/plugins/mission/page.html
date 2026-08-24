@@ -101,6 +101,8 @@
 
   <template x-teleport="#app-topbar-slot">
     <div class="flex min-w-0 flex-1 items-center gap-2">
+      <button x-show="current" @click="back()" aria-label="Back to missions"
+              class="shrink-0 -ml-1 px-1.5 py-1 text-xl leading-none text-gray-400 hover:text-gray-100">&#8249;</button>
       <span class="min-w-0 flex-1 truncate text-sm font-semibold text-gray-100"
             x-text="currentTitle()"></span>
       <div class="relative shrink-0" @click.outside="orgOpen = false">
