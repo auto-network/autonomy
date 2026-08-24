@@ -1,4 +1,11 @@
+import hashlib
+import json
+from pathlib import Path
+
 from tools.shortcuts import autonomy_capture
+
+
+DIST_DIR = Path(__file__).resolve().parents[1] / "dist"
 
 
 def _actions():
@@ -114,3 +121,26 @@ def test_config_is_fixed_path_and_overwritten():
     assert save["WFAskWhereToSave"] is False
     assert load["WFGetFilePath"] == autonomy_capture.CONFIG_PATH
     assert load["WFFileErrorIfNotFound"] is True
+
+
+def test_checked_in_signed_artifact_matches_generator_manifest():
+    manifest = json.loads((DIST_DIR / "manifest.json").read_text())
+    artifact = DIST_DIR / manifest["artifact"]["filename"]
+    data = artifact.read_bytes()
+    workflow = autonomy_capture.build_workflow()
+
+    assert data.startswith(b"AEA1")
+    assert len(data) == manifest["artifact"]["size_bytes"]
+    assert hashlib.sha256(data).hexdigest() == manifest["artifact"]["sha256"]
+    assert (
+        hashlib.sha256(Path(autonomy_capture.__file__).read_bytes()).hexdigest()
+        == manifest["generator"]["source_sha256"]
+    )
+    assert manifest["signing"]["mode"] == "anyone"
+    assert manifest["signing"]["contact_information_included"] is False
+    assert len(workflow["WFWorkflowActions"]) == manifest["workflow"]["action_count"]
+    assert workflow["WFWorkflowClientVersion"] == manifest["workflow"]["client_version"]
+    assert (
+        workflow["WFWorkflowMinimumClientVersion"]
+        == manifest["workflow"]["minimum_client_version"]
+    )
