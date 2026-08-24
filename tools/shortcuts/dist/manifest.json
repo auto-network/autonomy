@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "name": "Autonomy Capture",
+  "artifact": {
+    "filename": "Autonomy Capture.shortcut",
+    "format": "Apple Encrypted Archive (AEA1)",
+    "size_bytes": 24379,
+    "sha256": "38843acac1bc9c86d1a526f54c011dfe071a6a1556a34fa4393af74a8d5c90e4"
+  },
+  "signing": {
+    "mode": "anyone",
+    "command": "shortcuts sign --mode anyone",
+    "signed_at_utc": "2026-08-24T12:21:18Z",
+    "signing_platform": "macOS 15.6",
+    "apple_validation": true,
+    "contact_information_included": false
+  },
+  "generator": {
+    "source": "tools/shortcuts/autonomy_capture.py",
+    "source_sha256": "ca6343c488f16da225f3d2030a6cde351912bd9261ed8b19bf4389efc273e8ef"
+  },
+  "workflow": {
+    "client_version": "3612.0.2.1",
+    "minimum_client_version": 900,
+    "action_count": 24,
+    "accepts_shortcut_input": true,
+    "input_content_item_classes": [
+      "WFStringContentItem"
+    ],
+    "output_content_item_classes": [],
+    "import_questions": [],
+    "config_path": "Autonomy Capture/config.txt"
+  },
+  "security": {
+    "contains_server_origin": false,
+    "contains_upload_credential": false,
+    "contains_org_or_session_metadata": false
+  },
+  "documentation": "https://support.apple.com/guide/shortcuts-mac/run-shortcuts-from-the-command-line-apd455c82f02/mac"
+}
