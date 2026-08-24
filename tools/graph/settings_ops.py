@@ -4235,6 +4235,36 @@ def _prefix_like_pattern(prefix: str) -> str:
     return f"{escaped}:%"
 
 
+def count_set_rows(
+    set_id: str,
+    *,
+    org: "str | None | _CallerOrgSentinel",
+    prefix: str | None = None,
+) -> int:
+    """Raw row count for *set_id* (optionally under a composite-key prefix).
+
+    One ``COUNT(*)`` against the caller org's own database — no resolution,
+    no peers, no payload parsing. This exists for progress reporting: a
+    loader that wants to say "0 of N settings" before paying for the real
+    :func:`read_set`. The count is rows, not resolved members (overrides
+    and historical duplicates are included), so treat it as a ceiling.
+    """
+    org = _resolve_org_arg(org)
+    clause = " AND deprecated = 0"
+    params: list[Any] = [set_id]
+    if prefix is not None:
+        clause += " AND key LIKE ? ESCAPE '\\'"
+        params.append(_prefix_like_pattern(prefix))
+    db = _open_read(org, set_id)
+    try:
+        row = db.conn.execute(
+            "SELECT COUNT(*) FROM settings WHERE set_id = ?" + clause,
+            params).fetchone()
+        return int(row[0]) if row else 0
+    finally:
+        db.close()
+
+
 def _vault_key_control(org: str | None, set_id: str, cache: dict):
     """The key control for *org*, consulted at most once per read.
 
