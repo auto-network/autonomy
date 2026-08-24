@@ -110,6 +110,18 @@ def test_unknown_mission_returns_none(monkeypatch, rows):
     assert compose.render_screen("autonomy", "nope") is None
 
 
+def test_document_shell_is_phone_correct(monkeypatch, rows):
+    """The composed document must be a complete page with the viewport
+    meta — without it, phones lay out at ~980px and shrink everything."""
+    _members(monkeypatch, rows)
+    doc = compose.render_screen("autonomy", MID)
+    assert doc.startswith("<!doctype html>")
+    assert 'name="viewport"' in doc and "width=device-width" in doc
+    assert doc.rstrip().endswith("</html>")
+    # injected data blocks still precede the viewer's script execution
+    assert doc.index('id="mc-chat"') < doc.index("<script>")
+
+
 def test_focus_pillar_carried(monkeypatch, rows):
     _members(monkeypatch, rows)
     doc = compose.render_screen("autonomy", MID, "relay")
