@@ -17,6 +17,7 @@ from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route
 
 from tools.dashboard.api_auth import (
+    ApiPrincipalKind,
     organization_scope_from_request,
     principal_from_request,
 )
@@ -49,8 +50,15 @@ def _org_scopes(request: Request) -> list[str]:
 
 
 def _identity(request: Request) -> str:
-    """Attribution label from the API boundary, never the body."""
+    """Attribution label from the API boundary, never the body.
+
+    An org session's subject is its readable session name (auto-...);
+    an operator cookie's subject is an opaque cookie-session hex that
+    means nothing on a screen — the operator's messages say "operator".
+    """
     principal = principal_from_request(request)
+    if principal.kind is ApiPrincipalKind.OPERATOR_COOKIE:
+        return "operator"
     if principal.subject:
         return principal.subject
     return "operator" if principal.global_authority else "unknown"
