@@ -159,6 +159,10 @@ class MissionContentV1(SettingSchema):
         default=0.0,
         description="Explicit pin within a tab; 0 defers to the tab's "
                     "own rule (news: newest first; delivery: bead topology)")
+    section: str = field(
+        default="",
+        description="Optional group heading within the item's tab "
+                    "(e.g. a phase name); blank means ungrouped")
     evidence: list = field(
         default_factory=list,
         element={

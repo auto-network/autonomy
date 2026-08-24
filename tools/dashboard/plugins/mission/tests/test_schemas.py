@@ -80,6 +80,10 @@ class TestItemVocabulary:
                   work=[entry], history=[hist]))
         _refused(_item(kind="decision", work=[entry]), "checkpoints")
 
+    def test_section_grouping_declared(self):
+        _ok(_item(kind="checkpoint", state="pending",
+                  section="Phase 2 \u2014 fleet sync"))
+
     def test_declarations_enforced_by_substrate(self):
         _refused(_item(bogus=1), "undeclared")
         with pytest.raises(SchemaValidationError):
