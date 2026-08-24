@@ -134,24 +134,9 @@ def env(tmp_path, monkeypatch):
     # AUTONOMY_ORGS_DIR + GRAPH_ORG give the same isolation and COMPOSE with
     # org routing. The dashboard's own conftest already refuses to pin graph.
     monkeypatch.setenv("GRAPH_ORG", ORG)
-    # No store is pre-created. Five tests in this file still fail and each is
-    # a real question the pin was hiding rather than answering:
-    #
-    #   * the two "fresh/missing store" tests name `{ORG}.db` as `personal_db`
-    #     — under the pin the gate's explicit-personal read resolved to the
-    #     PINNED file, so the two were the same path and the confusion was
-    #     invisible. Unpinned they are different stores, and what those tests
-    #     actually assert (a gate that has never been set up reads empty and
-    #     stays OPEN) is now a statement about personal.db.
-    #   * three construct hostile rows by WRITING a personal-homed set into an
-    #     org DB, which `@home` now correctly refuses. The read guard is what
-    #     is under test, so they need to force the row in directly — a row can
-    #     reach a store by a path no write guard sees (0d3f750f-f9c), which is
-    #     precisely the case they cover.
-    #
-    # Left failing rather than papered over: they are worth answering
-    # properly, and a pre-created store would silence them without deciding
-    # anything.
+    # No store is pre-created. Missing-store tests resolve the personal path
+    # through the production resolver rather than assuming an organization
+    # file; the distinction is the behavior those tests exist to preserve.
     monkeypatch.setenv("DASHBOARD_SESSION_SECRET_FILE",
                        str(tmp_path / "session.secret"))
     monkeypatch.setenv("DASHBOARD_IDENTITY_SESSION_DB",
@@ -571,8 +556,10 @@ class TestGateFailsClosedOnReadError:
         assert unlock_routes._enforce_cache == {"at": 0.0, "value": None}
 
     def test_fresh_missing_store_reads_empty_and_stays_open(
-            self, env, tmp_path):
-        personal_db = tmp_path / "orgs" / f"{ORG}.db"   # the env fixture's pin
+            self, env):
+        from tools.graph.db import resolve_caller_db_path
+
+        personal_db = resolve_caller_db_path(None)
         assert not personal_db.exists()
 
         assert unlock_routes.human_auth_enrolled() is False
@@ -595,13 +582,14 @@ class TestGateFailsClosedOnReadError:
         assert reads == 0
 
     def test_short_write_lock_recovers_without_gate_flip(
-            self, env, root, tmp_path, monkeypatch):
+            self, env, root, monkeypatch):
         import sqlite3
         import threading
         from tools.graph import db as graph_db
+        from tools.graph.db import resolve_caller_db_path
 
         _store_identity(env, root)
-        personal_db = tmp_path / "orgs" / f"{ORG}.db"   # the env fixture's pin
+        personal_db = resolve_caller_db_path(None)
         with sqlite3.connect(personal_db) as conn:
             conn.execute("PRAGMA user_version = 0")
 
@@ -626,12 +614,12 @@ class TestGateFailsClosedOnReadError:
             holder.close()
 
     def test_long_write_lock_fails_closed_then_recovers(
-            self, env, tmp_path, monkeypatch):
+            self, env, monkeypatch):
         import sqlite3
         from tools.graph import db as graph_db
-        from tools.graph.db import GraphDB
+        from tools.graph.db import GraphDB, resolve_caller_db_path
 
-        personal_db = tmp_path / "orgs" / f"{ORG}.db"   # the env fixture's pin
+        personal_db = resolve_caller_db_path(None)
         GraphDB(personal_db).close()
         with sqlite3.connect(personal_db) as conn:
             conn.execute("PRAGMA user_version = 0")
@@ -676,13 +664,13 @@ class TestGateFailsClosedOnReadError:
 
 
 def test_server_startup_warm_open_prepares_first_gate_read(
-        env, tmp_path, monkeypatch):
+        env, monkeypatch):
     import sqlite3
     from tools.dashboard import server
     from tools.graph import db as graph_db
-    from tools.graph.db import GraphDB
+    from tools.graph.db import GraphDB, resolve_caller_db_path
 
-    personal_db = tmp_path / "orgs" / f"{ORG}.db"   # the env fixture's pin
+    personal_db = resolve_caller_db_path(None)
     assert not personal_db.exists()
 
     server._warm_personal_settings_store()
