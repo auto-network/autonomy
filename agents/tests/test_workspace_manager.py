@@ -2544,14 +2544,14 @@ def test_prepare_session_mounts_warns_on_metadata_collision(
 
 class TestScanFingerprintCache:
     """Fingerprint-gated row memo: unchanged rows cost file reads, not
-    git subprocesses; any input change (worktree HEAD/index, clone
-    master, host target head) invalidates; orphaned worktrees fall back
-    to the full scan and carry the orphaned flag."""
+    git subprocesses; worktree HEAD/index and clone master invalidate;
+    host target-head movement only rechecks autonomy rows that might be
+    caught up; orphaned worktrees fall back to the full scan."""
 
-    def _fresh(self, tmp_path, monkeypatch, session="sess-memo"):
+    def _fresh(self, tmp_path, monkeypatch, session="sess-memo", repo_name="upstream"):
         wm.invalidate_row_cache()
         worktrees_dir, clone, worktree = _make_writable_session_worktree(
-            tmp_path, session, monkeypatch,
+            tmp_path, session, monkeypatch, repo_name=repo_name,
         )
         subprocess.run(["git", "-C", str(worktree), "config", "user.email", "t@t"], check=True)
         subprocess.run(["git", "-C", str(worktree), "config", "user.name", "t"], check=True)
@@ -2581,6 +2581,78 @@ class TestScanFingerprintCache:
         # resolution: default-branch probe + rev-parse), independent of
         # row count.
         assert warm_calls <= 4, f"warm dead-row scan spawned {warm_calls} git calls"
+
+    def test_non_autonomy_row_survives_host_target_head_change(self, tmp_path, monkeypatch):
+        worktrees_dir, _clone, _wt = self._fresh(tmp_path, monkeypatch)
+        target = [("master", "a" * 40)]
+        monkeypatch.setattr(wm, "_autonomy_target_branch_and_head", lambda: target[0])
+        first = wm.scan_all_worktrees(worktrees_dir=worktrees_dir, live_session_names=set())
+        calls_before = wm.git_call_count()
+        hits_before, _ = wm.scan_cache_stats()
+
+        target[0] = ("master", "b" * 40)
+        second = wm.scan_all_worktrees(worktrees_dir=worktrees_dir, live_session_names=set())
+
+        hits_after, _ = wm.scan_cache_stats()
+        assert second == first
+        assert hits_after - hits_before == 1
+        assert wm.git_call_count() == calls_before
+
+    def test_behind_autonomy_row_survives_host_target_head_change(self, tmp_path, monkeypatch):
+        worktrees_dir, clone, _wt = self._fresh(
+            tmp_path, monkeypatch, repo_name="autonomy",
+        )
+        subprocess.run(["git", "-C", str(clone), "config", "user.email", "t@t"], check=True)
+        subprocess.run(["git", "-C", str(clone), "config", "user.name", "t"], check=True)
+        (clone / "host-ahead.txt").write_text("host ahead\n")
+        subprocess.run(["git", "-C", str(clone), "add", "host-ahead.txt"], check=True)
+        subprocess.run(
+            ["git", "-C", str(clone), "-c", "commit.gpgsign=false",
+             "commit", "-q", "-m", "host ahead"],
+            check=True,
+        )
+        target_branch = wm._repo_default_branch(clone)
+        target_head = subprocess.run(
+            ["git", "-C", str(clone), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        target = [(target_branch, target_head)]
+        monkeypatch.setattr(wm, "_autonomy_target_branch_and_head", lambda: target[0])
+        first = wm.scan_all_worktrees(worktrees_dir=worktrees_dir, live_session_names=set())
+        assert first[0].rebase_required is True
+        calls_before = wm.git_call_count()
+        hits_before, _ = wm.scan_cache_stats()
+
+        target[0] = ("master", "b" * 40)
+        second = wm.scan_all_worktrees(worktrees_dir=worktrees_dir, live_session_names=set())
+
+        hits_after, _ = wm.scan_cache_stats()
+        assert second == first
+        assert hits_after - hits_before == 1
+        assert wm.git_call_count() == calls_before
+
+    def test_caught_up_autonomy_row_recomputes_when_host_target_moves(self, tmp_path, monkeypatch):
+        worktrees_dir, _clone, worktree = self._fresh(
+            tmp_path, monkeypatch, repo_name="autonomy",
+        )
+        base_head = subprocess.run(
+            ["git", "-C", str(worktree), "rev-parse", "HEAD~1"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        target = [("master", base_head)]
+        monkeypatch.setattr(wm, "_autonomy_target_branch_and_head", lambda: target[0])
+        first = wm.scan_all_worktrees(worktrees_dir=worktrees_dir, live_session_names=set())
+        assert first[0].rebase_required is False
+        calls_before = wm.git_call_count()
+        hits_before, _ = wm.scan_cache_stats()
+
+        target[0] = ("master", "f" * 40)
+        second = wm.scan_all_worktrees(worktrees_dir=worktrees_dir, live_session_names=set())
+
+        hits_after, _ = wm.scan_cache_stats()
+        assert hits_after == hits_before
+        assert wm.git_call_count() > calls_before
+        assert second[0].clone_stale is True
 
     def test_row_cache_snapshot_round_trips_real_scanned_rows(self, tmp_path, monkeypatch):
         worktrees_dir, _clone, _wt = self._fresh(tmp_path, monkeypatch)
