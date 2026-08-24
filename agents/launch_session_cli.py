@@ -287,6 +287,7 @@ def main() -> int:
             harness=args.harness,
             working_dir="/workspace/repo",
             caller_mounts=caller_mounts,
+            org=args.org,
             include_capabilities=False,
         )
         # Docker socket refusal is enforced in mount_args() over the full plan.

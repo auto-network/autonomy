@@ -2119,3 +2119,25 @@ def test_build_mount_plan_socket_via_global_claude_md_is_refused(tmp_path, monke
     )
     with pytest.raises(SocketMountRefused):
         mount_args(plan, NodeTopology(is_host_process=True))
+
+
+def test_build_mount_plan_routes_org_beads_dir(tmp_path, monkeypatch):
+    """An org with a provisioned tracker config gets it as /data/.beads;
+    everyone else (autonomy included) keeps the shared tracker."""
+    monkeypatch.setattr(session_launcher, "DATA_ROOT", tmp_path)
+    (tmp_path / ".beads").mkdir()
+    org_dir = tmp_path / ".beads" / "orgs" / "anchore"
+    org_dir.mkdir(parents=True)
+    (org_dir / "metadata.json").write_text("{}")
+
+    def beads_source(org):
+        plan, _env, _codex = session_launcher.build_mount_plan(
+            run_dir=tmp_path / "run", sessions_dir=tmp_path / "sess",
+            harness="claude", working_dir="/workspace/repo", org=org)
+        return next(sp.source for sp in plan.specs()
+                    if sp.container_spec.split(":")[0] == "/data/.beads"
+                    and sp.source != "/dev/null")
+
+    assert beads_source("anchore") == str(org_dir)
+    assert beads_source("autonomy") == str(tmp_path / ".beads")
+    assert beads_source(None) == str(tmp_path / ".beads")
