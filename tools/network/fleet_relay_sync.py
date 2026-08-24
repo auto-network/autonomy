@@ -549,6 +549,16 @@ class DashboardFleetRelaySyncService:
                     credential, route, include_checkpoint=include_checkpoint
                 )
                 self.last_result = {"outcome": "success", "reason": None, "at": time.time()}
+                # The happy path was completely silent before this line -- a
+                # working delta pull and "nothing has attempted a pull in a
+                # while" looked identical in the logs, which cost a real
+                # multi-hour debugging session on 2026-08-24 chasing a delta-
+                # propagation bug that didn't exist. One line, not a WARNING
+                # (failures already log loudly below) -- just proof of life.
+                logger.info(
+                    "fleet relay sync: pull succeeded (%s)",
+                    "checkpoint" if include_checkpoint else "delta",
+                )
                 delay = 0.5
                 await asyncio.sleep(1.0)
             except asyncio.CancelledError:
