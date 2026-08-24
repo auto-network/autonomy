@@ -18,6 +18,7 @@ silently skipped when the schema is unregistered.
 from __future__ import annotations
 
 import json
+import functools
 import os
 import secrets
 import sqlite3
@@ -788,6 +789,19 @@ def persona_pub_for_org(genesis_id: str) -> str | None:
     if isinstance(pub, str) and pub:
         _persona_pub_cache[genesis_id] = pub
         return pub
+    return None
+
+
+@functools.lru_cache(maxsize=1)
+def local_persona_pub() -> str | None:
+    """Read the operator's one configured persona from personal Settings."""
+    from . import settings_ops
+    from .schemas.network_identity import NETWORK_PERSONA_SET_ID
+    members = settings_ops.read_owned_set(NETWORK_PERSONA_SET_ID, org=None).members
+    for member in members:
+        value = member.payload.get("persona_pub") if isinstance(member.payload, dict) else None
+        if isinstance(value, str) and value:
+            return value
     return None
 
 

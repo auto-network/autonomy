@@ -1752,6 +1752,8 @@ def add_comment(
     *,
     org: str | None = None,
     actor: str = "user",
+    persona_id: str | None = None,
+    session_id: str | None = None,
 ) -> dict:
     """Add a comment to a note. Returns the inserted row.
 
@@ -1762,7 +1764,10 @@ def add_comment(
     write_org = _write_org_for_source(source_id, org=org)
     db = _open(write_org)
     try:
-        return db.insert_comment(source_id, content, actor=actor)
+        return db.insert_comment(
+            source_id, content, actor=actor,
+            persona_id=persona_id, session_id=session_id,
+        )
     finally:
         db.close()
 
@@ -2595,6 +2600,8 @@ def _store_attachment_db(
     turn_number: int | None = None,
     alt_text: str | None = None,
     original_filename: str | None = None,
+    persona_id: str | None = None,
+    session_id: str | None = None,
 ):
     """Hash, dedup, store a file and insert an attachment record.
 
@@ -2651,6 +2658,8 @@ def _store_attachment_db(
             file_path=existing["file_path"],
             source_id=source_id or existing.get("source_id"),
             alt_text=alt_text or existing.get("alt_text"),
+            persona_id=existing.get("persona_id") or persona_id,
+            session_id=existing.get("session_id") or session_id,
         )
 
     mime_type, _ = mimetypes.guess_type(filename)
@@ -2669,6 +2678,8 @@ def _store_attachment_db(
         source_id=source_id,
         turn_number=int(turn_number) if turn_number else None,
         alt_text=alt_text,
+        persona_id=persona_id,
+        session_id=session_id,
     )
     db.insert_attachment(att)
     return att
@@ -2904,6 +2915,8 @@ def create_note(
     auto_provenance_turn: int | None = None,
     short_description: str | None = None,
     keywords: str | None = None,
+    persona_id: str | None = None,
+    session_id: str | None = None,
     org: str | None = None,
 ) -> dict:
     """Create a note source + turn-1 thought in ``org``'s DB.
@@ -2957,6 +2970,8 @@ def create_note(
         publication_state="curated",
         short_description=short_description,
         keywords=keywords,
+        persona_id=persona_id,
+        session_id=session_id,
     )
 
     db = _open(org)
@@ -2967,7 +2982,7 @@ def create_note(
 
         if is_rich:
             html_att = _store_attachment_db(
-                db, html_path, source_id=f"{source.id}@1",
+                db, html_path, source_id=f"{source.id}@1", persona_id=persona_id, session_id=session_id,
             )
             att_records.append({
                 "id": html_att.id, "filename": html_att.filename,
@@ -2977,7 +2992,7 @@ def create_note(
         if attachments:
             att_ids = []
             for fp in attachments:
-                att = _store_attachment_db(db, fp, source_id=source.id)
+                att = _store_attachment_db(db, fp, source_id=source.id, persona_id=persona_id, session_id=session_id)
                 att_ids.append(att.id)
                 att_records.append({
                     "id": att.id, "filename": att.filename,
@@ -2996,9 +3011,11 @@ def create_note(
             role="user",
             turn_number=1,
             tags=tags,
+            persona_id=persona_id,
+            session_id=session_id,
         )
         db.insert_thought(thought)
-        db.insert_note_version(source.id, 1, content)
+        db.insert_note_version(source.id, 1, content, persona_id=persona_id, session_id=session_id)
 
         for name, etype in extract_entities(content):
             eid = db.upsert_entity(name, etype)
@@ -3058,6 +3075,8 @@ def update_note(
     html_path: str | None = None,
     short_description: str | None = None,
     keywords: str | None = None,
+    persona_id: str | None = None,
+    session_id: str | None = None,
     org: str | None = None,
 ) -> dict:
     """Update a note's body and/or metadata.
@@ -3259,7 +3278,7 @@ def update_note(
                     )
                 att_ids = []
                 for fp in attachments:
-                    att = _store_attachment_db(db, fp, source_id=src_id)
+                    att = _store_attachment_db(db, fp, source_id=src_id, persona_id=persona_id, session_id=session_id)
                     att_ids.append(att.id)
                     att_records.append({
                         "id": att.id, "filename": att.filename,
@@ -3298,16 +3317,16 @@ def update_note(
 
             current_max = db.get_max_note_version(src_id)
             if current_max == 0:
-                db.insert_note_version(src_id, 1, thought["content"])
+                db.insert_note_version(src_id, 1, thought["content"], persona_id=persona_id, session_id=session_id)
                 next_version = 2
             else:
                 next_version = current_max + 1
 
-            db.insert_note_version(src_id, next_version, content)
+            db.insert_note_version(src_id, next_version, content, persona_id=persona_id, session_id=session_id)
 
             if html_path:
                 html_att = _store_attachment_db(
-                    db, html_path, source_id=f"{src_id}@{next_version}",
+                    db, html_path, source_id=f"{src_id}@{next_version}", persona_id=persona_id, session_id=session_id,
                 )
                 att_records.append({
                     "id": html_att.id, "filename": html_att.filename,

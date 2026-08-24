@@ -56,6 +56,7 @@ class ApiPrincipal:
     kind: ApiPrincipalKind
     subject: str | None = None
     org: str | None = None
+    persona_id: str | None = None
     auth_error_status: int | None = None
     api_capabilities: tuple[tuple[str, str], ...] = ()
     application_scope: str | None = None
@@ -340,9 +341,11 @@ class ApiIdentityMiddleware:
                 identity, error = None, None
             if identity is not None and error is None:
                 session, org = identity
+                from tools.graph.org_ops import local_persona_pub
+                persona_id = local_persona_pub()
                 if org is None:
                     return (
-                        ApiPrincipal(ApiPrincipalKind.LOCAL_SESSION, subject=session),
+                        ApiPrincipal(ApiPrincipalKind.LOCAL_SESSION, subject=session, persona_id=persona_id),
                         header_org,
                     )
                 return (
@@ -350,6 +353,7 @@ class ApiIdentityMiddleware:
                         ApiPrincipalKind.ORG_SESSION,
                         subject=session,
                         org=org,
+                        persona_id=persona_id,
                     ),
                     org,
                 )
@@ -367,10 +371,12 @@ class ApiIdentityMiddleware:
             )
             cookie_payload = None
         if cookie_payload is not None:
+            from tools.graph.org_ops import local_persona_pub
             return (
                 ApiPrincipal(
                     ApiPrincipalKind.OPERATOR_COOKIE,
                     subject=cookie_payload.get("sid"),
+                    persona_id=local_persona_pub(),
                 ),
                 header_org,
             )

@@ -32,6 +32,8 @@ class Source:
     moved_to_org: str | None = None
     short_description: str | None = None  # one or two sentences explaining the note's purpose
     keywords: str | None = None  # comma-separated synonym/alias list, indexed by sources_fts
+    persona_id: str | None = None
+    session_id: str | None = None
 
 
 @dataclass
@@ -45,6 +47,8 @@ class Thought:
     tags: list[str] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
     created_at: str = field(default_factory=now_iso)
+    persona_id: str | None = None
+    session_id: str | None = None
 
 
 @dataclass
@@ -113,6 +117,8 @@ class Attachment:
     metadata: dict = field(default_factory=dict)
     alt_text: str | None = None
     created_at: str = field(default_factory=now_iso)
+    persona_id: str | None = None
+    session_id: str | None = None
 
 
 @dataclass
