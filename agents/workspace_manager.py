@@ -2839,31 +2839,36 @@ def scan_all_worktrees(
                     clone_sha_memo[clone] = _clone_master_sha(clone)
                 fp = _worktree_fingerprint(repo_dir, clone_sha_memo[clone])
                 if fp is not None:
-                    # clone_stale / rebase_required compare against the
-                    # HOST checkout's integration head, which can move
-                    # independently of the clone's master — it is part
-                    # of the row's inputs, so it is part of the key.
-                    fp = fp + (target_branch_and_head[1],)
-                if fp is not None:
                     with _row_cache_lock:
                         cached = _row_cache.get(repo_dir)
                     if cached is not None and cached[0] == fp:
-                        row = replace(cached[1], session_live=row_is_live)
-                        if row_is_live:
-                            # Unstaged edits touch neither HEAD nor index —
-                            # live rows re-check dirt every pass.
-                            dirty_or_none = _worktree_dirty_files(repo_dir)
-                            dirty_now = dirty_or_none or []
-                            tracked_now = [f for f in dirty_now if f.status != "??"]
-                            row = replace(
-                                row,
-                                dirty_files=dirty_now,
-                                is_dirty=(True if dirty_or_none is None
-                                          else bool(tracked_now)),
-                            )
-                        _bump_scan_cache(hit=True)
-                        out.append(row)
-                        continue
+                        # The host autonomy HEAD is irrelevant to non-autonomy
+                        # rows.  For autonomy rows already known to require a
+                        # rebase, forward-only mainline movement cannot make
+                        # that verdict false; their base ref is static too.
+                        # A caught-up autonomy row may derive its base ref from
+                        # the moving HEAD, so deliberately recompute only it.
+                        reusable = (
+                            logical_name != "autonomy"
+                            or cached[1].rebase_required
+                        )
+                        if reusable:
+                            row = replace(cached[1], session_live=row_is_live)
+                            if row_is_live:
+                                # Unstaged edits touch neither HEAD nor index —
+                                # live rows re-check dirt every pass.
+                                dirty_or_none = _worktree_dirty_files(repo_dir)
+                                dirty_now = dirty_or_none or []
+                                tracked_now = [f for f in dirty_now if f.status != "??"]
+                                row = replace(
+                                    row,
+                                    dirty_files=dirty_now,
+                                    is_dirty=(True if dirty_or_none is None
+                                              else bool(tracked_now)),
+                                )
+                            _bump_scan_cache(hit=True)
+                            out.append(row)
+                            continue
                 _bump_scan_cache(hit=False)
             branch = _worktree_branch_name(repo_dir)
             base_ref = _worktree_dashboard_base_ref(
@@ -2975,7 +2980,7 @@ def scan_all_worktrees(
                 if store_fp is not None:
                     with _row_cache_lock:
                         _row_cache[repo_dir] = (
-                            store_fp + (target_branch_and_head[1],), row,
+                            store_fp, row,
                         )
             out.append(row)
 
