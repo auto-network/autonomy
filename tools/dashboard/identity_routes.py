@@ -65,6 +65,8 @@ from tools.dashboard.network_routes import _first_member, _mock_mode
 from tools.graph.schemas.personal_identity import (  # noqa: F401
     FACTOR_METADATA_REVISION,
     FACTOR_METADATA_SET_ID,
+    FACTOR_RECIPIENT_METADATA_REVISION,
+    FACTOR_RECIPIENT_METADATA_SET_ID,
     PASSKEY_REVISION,
     PASSKEY_SET_ID,
     PASSKEY_TRANSPORTS,
@@ -193,6 +195,22 @@ def _factor_metadata_rows() -> dict[str, dict]:
         for member in members
         if isinstance(member.payload, dict)
     }
+
+
+def _factor_recipient_metadata_rows() -> dict[tuple[str, str], dict]:
+    members = settings_ops.read_owned_set(
+        FACTOR_RECIPIENT_METADATA_SET_ID, org=None,
+    ).members
+    return {
+        (member.payload.get("factor_id"), member.payload.get("recipient_public_key")):
+            dict(member.payload)
+        for member in members
+        if isinstance(member.payload, dict)
+    }
+
+
+def _factor_recipient_metadata_key(factor_id: str, public_key: str) -> str:
+    return hashlib.sha256(f"{factor_id}\n{public_key}".encode("utf-8")).hexdigest()
 
 
 def _b64url(raw: bytes) -> str:
@@ -682,11 +700,12 @@ def _factor_policy_state(member) -> dict:
 def _factor_policy_view(state: dict) -> dict:
     try:
         metadata = _factor_metadata_rows()
+        recipient_metadata = _factor_recipient_metadata_rows()
         passkeys = {
             row.payload.get("credential_id"): row.payload for row in _passkey_rows()
         }
     except Exception:
-        metadata, passkeys = {}, {}
+        metadata, recipient_metadata, passkeys = {}, {}, {}
     factors = []
     for factor in state["factors"]:
         factor_id = factor["factor_id"]
@@ -727,6 +746,15 @@ def _factor_policy_view(state: dict) -> dict:
                 "iterations": kdf.get("iterations"),
             }
         else:
+            recipients = []
+            for recipient in factor.get("recipients") or []:
+                displayed = dict(recipient)
+                override = recipient_metadata.get((
+                    factor_id, recipient.get("recipient_public_key"),
+                ))
+                if override:
+                    displayed["label"] = override["label"]
+                recipients.append(displayed)
             row.update({
                 "credential_id": factor.get("credential_id"),
                 "rp_id": credential.get("rp_id"),
@@ -734,7 +762,7 @@ def _factor_policy_view(state: dict) -> dict:
                 "created_at": credential.get("created_at"),
                 "backup_eligible": credential.get("backup_eligible"),
                 "backed_up": credential.get("backed_up"),
-                "recipients": factor.get("recipients") or [],
+                "recipients": recipients,
             })
         factors.append(row)
     return {
@@ -1018,6 +1046,59 @@ async def patch_factor_metadata(request: Request) -> JSONResponse:
     except Exception as exc:
         return JSONResponse({"ok": False, "error": f"could not update factor: {exc}"},
                             status_code=400)
+    return JSONResponse({"ok": True, **payload})
+
+
+async def patch_factor_recipient_metadata(request: Request) -> JSONResponse:
+    """Rename one passkey device without changing the signed generation."""
+    factor_id = request.path_params.get("factor_id")
+    public_key = request.path_params.get("recipient_public_key")
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "body must be JSON"},
+                            status_code=400)
+    if not isinstance(body, dict) or set(body) != {"label"} \
+            or not isinstance(body.get("label"), str) or not body["label"].strip():
+        return JSONResponse({"ok": False, "error": (
+            "body must carry exactly one non-empty label"
+        )}, status_code=400)
+    if len(body["label"].strip()) > 120:
+        return JSONResponse({"ok": False, "error": "label is too long"},
+                            status_code=400)
+    try:
+        member = _personal_member()
+        state = _factor_policy_state(member) if member is not None else None
+        factor = next(
+            row for row in (state["factors"] if state is not None else [])
+            if row["factor_id"] == factor_id and row["type"] == "passkey"
+        )
+        if public_key not in {
+            row["recipient_public_key"] for row in factor.get("recipients") or []
+        }:
+            raise StopIteration
+    except (StopIteration, TypeError, ValueError):
+        return JSONResponse({"ok": False, "error": "no such passkey recipient"},
+                            status_code=404)
+    payload = {
+        "factor_id": factor_id,
+        "recipient_public_key": public_key,
+        "label": body["label"].strip(),
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    try:
+        with settings_ops.identity_write_context():
+            settings_ops.upsert_by_key(
+                FACTOR_RECIPIENT_METADATA_SET_ID,
+                FACTOR_RECIPIENT_METADATA_REVISION,
+                _factor_recipient_metadata_key(factor_id, public_key),
+                payload,
+                org=None,
+            )
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": (
+            f"could not update passkey recipient: {exc}"
+        )}, status_code=400)
     return JSONResponse({"ok": True, **payload})
 
 
@@ -1494,6 +1575,12 @@ ROUTES = [
           methods=["POST"]),
     Route("/api/identity/factors/{factor_id}/metadata", patch_factor_metadata,
           methods=["PATCH"]),
+    Route(
+        "/api/identity/factors/{factor_id}/recipients/"
+        "{recipient_public_key}/metadata",
+        patch_factor_recipient_metadata,
+        methods=["PATCH"],
+    ),
     Route("/api/identity/passkey/register-options", post_register_options,
           methods=["POST"]),
     Route("/api/identity/passkey/register", post_register, methods=["POST"]),

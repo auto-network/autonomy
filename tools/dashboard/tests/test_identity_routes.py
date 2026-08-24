@@ -1099,6 +1099,50 @@ def test_factor_metadata_rename_does_not_advance_policy(env, root):
     assert view["factors"][0]["label"] == "Travel password"
 
 
+def test_factor_recipient_metadata_rename_does_not_advance_policy(env, root):
+    from tools.network.idkit.root_factor_policy import (
+        FACTOR_RECIPIENT_PURPOSE,
+        parse_armored_envelope,
+        passkey_factor,
+    )
+    from tools.network.idkit.sealing import derive_encapsulation_keypair
+
+    _private, recipient_public = derive_encapsulation_keypair(
+        b"r" * 32, FACTOR_RECIPIENT_PURPOSE,
+    )
+    factor = passkey_factor(
+        "passkey.icloud", "credential-rename", recipient_public,
+        recipient_label="MacBook",
+        recipient_created_at="2026-08-24T12:00:00Z",
+    )
+    original_armor = _store_policy_identity(
+        env, root, [factor], ["passkey.icloud"],
+        {"op": "factor", "factor_id": "passkey.icloud"},
+    )
+
+    response = env.patch(
+        "/api/identity/factors/passkey.icloud/recipients/"
+        f"{recipient_public}/metadata",
+        json={"label": "Work laptop"},
+    )
+    assert response.status_code == 200, response.text
+    view = env.get("/api/identity/factor-policy").json()
+    assert view["generation"] == 1
+    assert view["factors"][0]["recipients"][0]["label"] == "Work laptop"
+
+    stored_armor = env.get("/api/identity/personal").json()["armored_private_key"]
+    assert stored_armor == original_armor
+    signed = parse_armored_envelope(stored_armor)
+    assert signed["factors"][0]["recipients"][0]["label"] == "MacBook"
+
+    unknown = env.patch(
+        "/api/identity/factors/passkey.icloud/recipients/"
+        f"{'0' * 64}/metadata",
+        json={"label": "Unknown device"},
+    )
+    assert unknown.status_code == 404
+
+
 def test_passkey_device_recipient_changes_preserve_one_logical_leaf(env, root):
     from tools.network.idkit.root_factor_policy import (
         FACTOR_RECIPIENT_PURPOSE,
