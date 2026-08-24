@@ -1,0 +1,28 @@
+<div x-data="missionPage()" data-testid="mission-fragment-root" class="p-6">
+  <h2 class="text-xl font-semibold text-gray-100 mb-4">Mission Control</h2>
+
+  <template x-if="loaded && error">
+    <p class="text-red-400" x-text="'Could not load missions: ' + error"></p>
+  </template>
+
+  <template x-if="loaded && !error && !missions.length">
+    <p class="text-gray-400">
+      No missions yet. Create one with
+      <code class="text-indigo-300">graph set add mission.registry#1</code>
+      — the screen renders the moment the row exists.
+    </p>
+  </template>
+
+  <ul class="space-y-2">
+    <template x-for="m in missions" :key="m.mission_id">
+      <li>
+        <button @click="open(m)"
+                class="w-full text-left px-4 py-3 rounded-lg bg-gray-800/60
+                       hover:bg-gray-800 border border-gray-700/60">
+          <span class="text-gray-100 font-medium" x-text="m.name"></span>
+          <span class="text-gray-500 text-sm ml-2" x-text="m.status"></span>
+        </button>
+      </li>
+    </template>
+  </ul>
+</div>
