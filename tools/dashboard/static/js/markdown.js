@@ -5,6 +5,22 @@
 // Usage: <div x-markdown="expression"></div>
 // The expression should evaluate to a markdown string.
 
+// DOMPurify deliberately strips unknown app schemes. Preserve exactly one
+// user-gesture shape: an anchor that runs an installed Apple Shortcut. A
+// tag-aware hook is important here — a broad URI-regex exception would also
+// admit shortcuts: in passive attributes such as <img src>, allowing content
+// insertion alone to attempt an app launch.
+function _isAllowedExternalAppHref(href) {
+  return /^shortcuts:\/\/run-shortcut(?:[/?#]|$)/i.test(href || '');
+}
+
+DOMPurify.addHook('uponSanitizeAttribute', (node, data) => {
+  if (node.nodeName === 'A' && data.attrName === 'href' &&
+      _isAllowedExternalAppHref(data.attrValue)) {
+    data.forceKeepAttr = true;
+  }
+});
+
 const SECURE_CONFIG = {
   ALLOWED_TAGS: ['h1','h2','h3','h4','h5','h6','p','br','hr','ul','ol','li',
                  'blockquote','pre','code','em','strong','del','a','img',
@@ -283,7 +299,25 @@ document.addEventListener('alpine:init', () => {
       // Post-process links
       el.querySelectorAll('a').forEach(a => {
         const href = a.getAttribute('href') || '';
-        if (/^javascript:|^data:/i.test(href)) {
+        if (!href) return;
+        if (/^shortcuts:/i.test(href)) {
+          // A direct anchor click is the user gesture iOS needs to leave the
+          // standalone PWA and open Shortcuts. Do not use target=_blank: that
+          // can strand a blank Safari tab behind the app handoff. Limit the
+          // newly admitted scheme to running an installed shortcut; all other
+          // Shortcuts deep-link commands remain non-clickable.
+          if (!_isAllowedExternalAppHref(href)) {
+            a.removeAttribute('href');
+            return;
+          }
+          a.setAttribute('rel', 'noopener noreferrer');
+          a.removeAttribute('target');
+          a.setAttribute('data-external-app', 'shortcuts');
+          if (!a.getAttribute('title')) a.setAttribute('title', 'Open in Shortcuts');
+        } else if (/^[a-z][a-z0-9+.\-]*:/i.test(href) &&
+                   !/^(?:https?|mailto|tel|callto|sms|cid|xmpp):/i.test(href)) {
+          // Defense in depth if the sanitizer's URI policy changes: never
+          // turn an unknown protocol into an actionable chat link.
           a.removeAttribute('href');
         } else if (href.startsWith('/')) {
           // Internal SPA link — use navigateTo() (app.js)
