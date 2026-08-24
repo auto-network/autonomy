@@ -118,7 +118,7 @@ def test_schema_upgrade_precedes_fleet_sync_activation(tmp_path, monkeypatch):
 
 def test_schema_upgrade_disables_existing_capture_triggers_until_activation(
         tmp_path, monkeypatch):
-    """Migration DML can cross a trigger left by an earlier synced open."""
+    """Migration DML can prepare a complete trigger left by a synced open."""
     path = tmp_path / "personal.db"
     with GraphDB(path, attach_fleet_sync=False) as setup:
         setup.conn.executescript(
@@ -127,7 +127,13 @@ def test_schema_upgrade_disables_existing_capture_triggers_until_activation(
             AFTER UPDATE ON settings
             WHEN fleet_sync_capture_enabled() = 1
             BEGIN
-                SELECT RAISE(ABORT, 'capture ran before activation');
+                SELECT
+                    fleet_sync_transaction_ref(),
+                    fleet_sync_next_operation(),
+                    fleet_sync_frame_settings(0, NEW.id),
+                    fleet_sync_key('settings', NEW.id),
+                    fleet_sync_timestamp(),
+                    fleet_sync_current_operation();
             END;
             """
         )

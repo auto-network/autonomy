@@ -93,11 +93,29 @@ def _register_fleet_sync_sql_functions(conn: sqlite3.Connection) -> None:
     )
     # A prepared fleet-sync database already has capture triggers when it is
     # opened.  Schema migration may update a replicated table before the live
-    # catalog hook is attached, so those triggers must be callable during the
-    # migration window.  Capture is deliberately disabled there; attaching
-    # MutationCatalog replaces this function with its transaction-aware
-    # implementation immediately after the schema reaches the current version.
+    # catalog hook is attached, so every function referenced by those triggers
+    # must exist while SQLite prepares the migration statement.  Capture is
+    # deliberately disabled there; the other placeholders fail closed if they
+    # are somehow invoked.  Attaching MutationCatalog replaces the complete
+    # function set with its transaction-aware implementation immediately after
+    # the schema reaches the current version.
     conn.create_function("fleet_sync_capture_enabled", 0, lambda: 0)
+
+    def _capture_is_inactive(*_args):
+        raise sqlite3.IntegrityError(
+            "fleet-sync capture function used before catalog activation"
+        )
+
+    conn.create_function("fleet_sync_key", -1, _capture_is_inactive)
+    conn.create_function("fleet_sync_timestamp", 0, _capture_is_inactive)
+    conn.create_function("fleet_sync_transaction_ref", 0, _capture_is_inactive)
+    conn.create_function("fleet_sync_next_operation", 0, _capture_is_inactive)
+    conn.create_function("fleet_sync_current_operation", 0, _capture_is_inactive)
+    from tools.network.fleet_sync_sim.policies import TABLE_POLICIES
+    for table in TABLE_POLICIES:
+        conn.create_function(
+            f"fleet_sync_frame_{table}", -1, _capture_is_inactive
+        )
 
 
 class GraphDBMissing(RuntimeError):
