@@ -281,7 +281,8 @@ def cmd_coverage(args):
     print(f"{m['name']}: {len(all_tasks)} tasks, {checkpoints} criteria "
           f"covering {len(covered)}, {len(uncovered)} uncovered")
     last = None
-    for pid, t in sorted(uncovered):
+    # dicts aren't orderable — sort by (pillar, bead id), never the dict
+    for pid, t in sorted(uncovered, key=lambda x: (x[0], x[1]["id"])):
         if pid != last:
             print(f"  {pid}")
             last = pid
