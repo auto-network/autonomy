@@ -99,6 +99,11 @@ with absolute paths (`/api/<id>/...`). The substrate wraps them in
 - Serve screens as **complete documents with data baked in** (a pure
   settings→bytes compose function). Baking keeps rendering testable,
   spares N fetches, and leaves the door open for relay sealing later.
+  **You own the whole document shell**: doctype, charset, and the
+  viewport meta (`width=device-width, initial-scale=1`) — things a
+  platform composer used to add invisibly. Without the viewport meta,
+  phones lay out at ~980px and shrink everything; pin the shell with a
+  test, and look at the screen on a real phone before calling it done.
 - Your own templates are **trusted**: same-origin fetch from them is
   fine. (Untrusted author-HTML surfaces are the opposite regime —
   platform-chrome mediation; know which one you are serving.)
