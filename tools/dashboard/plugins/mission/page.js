@@ -100,9 +100,9 @@ window.missionPage = function () {
     },
 
     currentTitle() {
-      if (!this.current) return "";
+      if (!this.current) return "Mission Control";
       const m = this.missions.find((x) => x.mission_id === this.current);
-      return (m && m.name) || "";
+      return (m && m.name) || "Mission Control";
     },
 
     curOrg() {

@@ -107,6 +107,8 @@ setTimeout(() => {
     // toolbar claimed + selector teleported
     check("toolbar claimed",
       d.querySelector("header").classList.contains("app-topbar-active"));
+    check("list level titles the app", d.querySelector("#app-topbar-slot")
+      .textContent.includes("Mission Control"));
     // icon-only selector: initial visible, full names only in the menu
     const slot = d.querySelector("#app-topbar-slot");
     check("org icon in slot", slot.textContent.includes("A"));
