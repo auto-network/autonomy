@@ -27,6 +27,27 @@ from tools.dashboard.plugins.mission.entrypoints.schemas import (
 from tools.graph.schemas.registry import SchemaValidationError
 
 
+def _org_scopes(request: Request) -> list[str]:
+    """The org databases this caller's reads may span.
+
+    An org-bound session reads its own org. A dashboard operator or
+    local host session with no explicit org selection holds global
+    authority — for them the honest answer is every org, aggregated
+    (the same shape the legacy mission list serves), not the personal
+    database that a literal None scope would resolve to.
+    """
+    org = organization_scope_from_request(request)
+    if org:
+        return [org]
+    if principal_from_request(request).global_authority:
+        try:
+            from tools.graph.cross_org import list_org_slugs
+            return [o for o in list_org_slugs() if o != "personal"]
+        except Exception:
+            return []
+    return []
+
+
 def _identity(request: Request) -> str:
     """Attribution label from the API boundary, never the body."""
     principal = principal_from_request(request)
@@ -53,27 +74,43 @@ def _refused(exc: Exception) -> JSONResponse:
 
 
 async def list_missions(request: Request) -> JSONResponse:
-    """Every mission in the caller's org: ``{missions: [{mission_id, ...}]}``."""
-    org = organization_scope_from_request(request)
+    """Every mission visible to the caller: org-bound sessions see their
+    org; the operator sees all orgs aggregated."""
     from tools.graph import ops as graph_ops
     rows = []
-    for m in graph_ops.read_set(MISSION_SET_ID, org=org or None, peers=[]):
-        rows.append({"mission_id": m.key, **dict(m.payload)})
+    for org in _org_scopes(request):
+        try:
+            members = graph_ops.read_set(MISSION_SET_ID, org=org, peers=[])
+        except Exception:
+            continue
+        for m in members:
+            rows.append({"mission_id": m.key, "org": org, **dict(m.payload)})
     rows.sort(key=lambda r: r.get("name") or "")
     return JSONResponse({"missions": rows})
 
 
+def _owning_org(request: Request, mission_id: str) -> str | None:
+    for org in _org_scopes(request):
+        try:
+            if compose.load_mission(org, mission_id) is not None:
+                return org
+        except Exception:
+            continue
+    return None
+
+
 async def list_pillars(request: Request) -> JSONResponse:
     """The mission's pillars in declared order: ``{pillars: [...]}``."""
-    org = organization_scope_from_request(request)
+    org = _owning_org(request, request.path_params["mission_id"])
     return JSONResponse({"pillars": compose.load_pillars(
-        org, request.path_params["mission_id"])})
+        org, request.path_params["mission_id"]) if org else []})
 
 
 async def list_items(request: Request) -> JSONResponse:
     """Viewer-shaped items; ``?pillar=<id>`` narrows to one surface."""
-    org = organization_scope_from_request(request)
-    items = compose.load_items(org, request.path_params["mission_id"])
+    org = _owning_org(request, request.path_params["mission_id"])
+    items = compose.load_items(org, request.path_params["mission_id"]) \
+        if org else []
     pillar = request.query_params.get("pillar")
     if pillar:
         items = [i for i in items if i["surface_id"] == pillar]
@@ -82,27 +119,28 @@ async def list_items(request: Request) -> JSONResponse:
 
 async def list_tasks(request: Request) -> JSONResponse:
     """The bead-bridge payload: ``{tasks: {pillar_id: [...]}}``."""
-    org = organization_scope_from_request(request)
     mission_id = request.path_params["mission_id"]
-    pillars = compose.load_pillars(org, mission_id)
+    org = _owning_org(request, mission_id)
+    pillars = compose.load_pillars(org, mission_id) if org else []
     return JSONResponse(
         {"tasks": compose.load_beads(org, mission_id, pillars)})
 
 
 async def get_chat(request: Request) -> JSONResponse:
     """One pillar's chat log: ``{entries: [...]}``."""
-    org = organization_scope_from_request(request)
     pp = request.path_params
-    logs = compose.load_chat(org, pp["mission_id"])
+    org = _owning_org(request, pp["mission_id"])
+    logs = compose.load_chat(org, pp["mission_id"]) if org else {}
     return JSONResponse({"entries": logs.get(pp["pillar_id"], [])})
 
 
 async def mission_screen(request: Request) -> HTMLResponse | JSONResponse:
     """The complete mission document. ``?pillar=<id>`` opens focused."""
-    org = organization_scope_from_request(request)
     mission_id = request.path_params["mission_id"]
+    org = _owning_org(request, mission_id)
     doc = compose.render_screen(
-        org, mission_id, request.query_params.get("pillar"))
+        org, mission_id, request.query_params.get("pillar")) \
+        if org else None
     if doc is None:
         return JSONResponse({"error": "unknown mission"}, status_code=404)
     return HTMLResponse(doc)
@@ -110,8 +148,9 @@ async def mission_screen(request: Request) -> HTMLResponse | JSONResponse:
 
 async def put_item(request: Request) -> JSONResponse:
     """Create or fully rewrite one item; the schema is the gate."""
-    org = organization_scope_from_request(request)
     pp = request.path_params
+    org = _owning_org(request, pp["mission_id"]) \
+        or organization_scope_from_request(request)
     try:
         payload = await request.json()
         if not isinstance(payload, dict):
@@ -125,8 +164,8 @@ async def put_item(request: Request) -> JSONResponse:
 
 async def post_state(request: Request) -> JSONResponse:
     """Checkpoint transition: history appended, confirmation stamped."""
-    org = organization_scope_from_request(request)
     pp = request.path_params
+    org = _owning_org(request, pp["mission_id"])
     try:
         body = await request.json()
         item = writes.transition(
@@ -142,8 +181,8 @@ async def post_state(request: Request) -> JSONResponse:
 
 def _entry_route(fn, **fixed):
     async def handler(request: Request) -> JSONResponse:
-        org = organization_scope_from_request(request)
         pp = request.path_params
+        org = _owning_org(request, pp["mission_id"])
         text = await _text_body(request)
         if text is None:
             return JSONResponse({"error": "text required"}, status_code=400)
@@ -158,8 +197,8 @@ def _entry_route(fn, **fixed):
 
 async def post_chat(request: Request) -> JSONResponse:
     """One message into the pillar's untracked log."""
-    org = organization_scope_from_request(request)
     pp = request.path_params
+    org = _owning_org(request, pp["mission_id"])
     text = await _text_body(request)
     if text is None:
         return JSONResponse({"error": "text required"}, status_code=400)

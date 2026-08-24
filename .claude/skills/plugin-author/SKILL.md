@@ -155,6 +155,21 @@ direction) is deliberate and stays; the registration becoming a
 manifest stanza is `auto-ydvz0`. Until then, ship direct-access-only
 and keep documents whole so sealing can come later.
 
+## Test with both credentials — the org-scope trap
+
+`organization_scope_from_request` returns the bearer's org for an
+org-bound session, but for a dashboard operator with no explicit org
+selection it returns **None — and None resolves to the personal
+database**, so every read comes back empty while your own bearer-based
+tests pass. Routes serving org-homed data must handle the
+global-authority caller deliberately: resolve the resource's **owning
+org** (try each org from `cross_org.list_org_slugs()`), aggregate
+lists across orgs, and route writes into the owning org — never
+personal. Verify every route twice: once with a session bearer, once
+through the operator's browser cookie. The mission plugin shipped,
+demoed green on bearer auth, and showed the operator an empty list —
+this exact trap, found by the first real user.
+
 ## Known pitfalls (all hit before, all avoidable)
 
 - Hyphenated plugin dirs break entrypoint imports.
@@ -167,3 +182,8 @@ and keep documents whole so sealing can come later.
 - Writing settings from a container writes a container-local copy —
   verify writes by reading back through the dashboard, from another
   process.
+- Container CLIs can't read org settings locally (no org database in
+  the container) — the substrate's plugin CLI mounting handles this
+  with an HTTP fallback to `/api/plugins`; anything else your CLI
+  reads must go through your plugin's authenticated routes, never
+  local settings reads.
