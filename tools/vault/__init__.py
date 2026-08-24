@@ -37,12 +37,25 @@ from .policy_class import (
     PolicyClassRecord,
     Wrap,
     create_class,
+    create_root_reachable_class,
     enable_public_sealing,
     extend_class,
     open_cek,
     open_class,
     revoke_factor,
     seal_cek,
+)
+from .root_anchor import (
+    ROOT_ANCHOR_WRAP_PURPOSE,
+    RootAnchorRecord,
+    create_root_anchor,
+    open_root_anchor,
+)
+from .recipients import (
+    ORGANIZATION_PERSONA_RECIPIENT,
+    PERSONAL_ROOT_RECIPIENT,
+    PublishedRecipient,
+    recipient_keypair_from_seed,
 )
 
 __all__ = [
@@ -66,10 +79,19 @@ __all__ = [
     "PRF_POLICY",
     "BOTH_POLICY",
     "create_class",
+    "create_root_reachable_class",
     "enable_public_sealing",
     "open_class",
     "extend_class",
     "revoke_factor",
     "seal_cek",
     "open_cek",
+    "RootAnchorRecord",
+    "ROOT_ANCHOR_WRAP_PURPOSE",
+    "create_root_anchor",
+    "open_root_anchor",
+    "PublishedRecipient",
+    "PERSONAL_ROOT_RECIPIENT",
+    "ORGANIZATION_PERSONA_RECIPIENT",
+    "recipient_keypair_from_seed",
 ]

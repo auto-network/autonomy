@@ -20,7 +20,15 @@ from tools.vault.errors import VaultError
 from tools.vault.store import VaultStore
 from tools.vault.key_holder import _scoped_db
 from tools.vault.policy_class import extend_class
+from tools.vault.root_anchor import RootAnchorRecord
 from tools.network.idkit.armor import ArmorError
+from tools.dashboard.identity_routes import _personal_member
+from tools.graph import settings_ops
+from tools.graph.schemas.registry import SchemaValidationError
+from tools.graph.schemas.vault_credential import (
+    VAULT_CREDENTIAL_REVISION,
+    VAULT_SECURED_SET_ID,
+)
 
 _HOME_SET = "autonomy.identity.personal"
 
@@ -46,6 +54,142 @@ async def factors(request: Request):
             "classes": [store.get_class(i).to_dict() for i in store.class_ids()],
             "secrets": store.secret_names(),
         })
+
+
+def _personal_root_pub() -> str:
+    member = _personal_member()
+    if member is None or not isinstance(member.payload, dict):
+        raise VaultError("no personal root is enrolled")
+    root_pub = member.payload.get("root_pub")
+    if not isinstance(root_pub, str) or len(root_pub) != 64:
+        raise VaultError("the personal root has no canonical public key")
+    return root_pub
+
+
+async def root_anchors(request: Request):
+    """Inventory the stable personal recipients and their bound classes."""
+    if (denied := _guard(request)) is not None:
+        return denied
+    root_pub = _personal_root_pub()
+    with _store() as store:
+        anchors = [
+            anchor.to_dict()
+            for anchor in (store.get_root_anchor(i) for i in store.root_anchor_ids())
+            if anchor.root_pub == root_pub
+        ]
+        anchor_ids = {anchor["anchor_id"] for anchor in anchors}
+        classes = [
+            record.to_dict()
+            for record in (store.get_class(i) for i in store.class_ids())
+            if record.governance
+            and record.governance.get("form") == "root-reachable"
+            and record.governance.get("anchor_id") in anchor_ids
+        ]
+    return JSONResponse({"anchors": anchors, "classes": classes})
+
+
+async def enroll_root_anchor(request: Request):
+    """Persist a browser-created anchor only after its root signature verifies."""
+    if (denied := _guard(request)) is not None:
+        return denied
+    try:
+        body = await request.json()
+        if set(body) != {"anchor"}:
+            raise VaultError("root anchor enrollment accepts only anchor")
+        anchor = RootAnchorRecord.from_dict(body["anchor"])
+        if anchor.root_pub != _personal_root_pub():
+            raise VaultError("root anchor is signed by a different personal root")
+        with _store() as store:
+            service.enroll_root_anchor(store, anchor.to_dict())
+        return JSONResponse({"anchor": anchor.to_dict()}, status_code=201)
+    except (KeyError, TypeError, ValueError, VaultError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+async def create_root_class(request: Request):
+    """Mint a class to an enrolled anchor's public recipient (no opener)."""
+    if (denied := _guard(request)) is not None:
+        return denied
+    try:
+        body = await request.json()
+        if set(body) != {"display_name"}:
+            raise VaultError("root class creation accepts only display_name")
+        display_name = body.get("display_name")
+        if not isinstance(display_name, str) or not display_name.strip():
+            raise VaultError("root class display_name must be non-empty")
+        with _store() as store:
+            anchor = store.get_root_anchor(request.path_params["anchor_id"])
+            if anchor.root_pub != _personal_root_pub():
+                raise VaultError("root anchor belongs to a different personal root")
+            class_id = service.create_root_policy_class(
+                store,
+                anchor.anchor_id,
+                display_name=display_name.strip(),
+                created_at=_now(),
+            )
+            record = store.get_class(class_id)
+        return JSONResponse({"policy_class": record.to_dict()}, status_code=201)
+    except (KeyError, TypeError, ValueError, VaultError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+async def seal_personal_setting(request: Request):
+    """Route one browser-submitted secret into the personal secured store.
+
+    This is a trusted application routing seam, not a vault write ACL.  The
+    operator cookie selects the personal application and this handler pins the
+    destination to ``org=None``; an organization bearer cannot use it and the
+    generic Settings API is not widened across stores.
+    """
+    if (denied := _guard(request)) is not None:
+        return denied
+    try:
+        body = await request.json()
+        if set(body) != {"key", "value", "policy_class_id"}:
+            raise VaultError(
+                "personal secured writes accept only key, value, and policy_class_id"
+            )
+        key = body.get("key")
+        value = body.get("value")
+        class_id = body.get("policy_class_id")
+        if not isinstance(key, str) or not key.strip() or len(key) > 256:
+            raise VaultError("credential key must be a short non-empty string")
+        if not isinstance(value, str) or not value:
+            raise VaultError("credential value must be a non-empty string")
+        if not isinstance(class_id, str) or not class_id:
+            raise VaultError("policy_class_id must be a non-empty string")
+        with _store() as store:
+            policy_class = store.get_class(class_id)
+            if (
+                not policy_class.governance
+                or policy_class.governance.get("form") != "root-reachable"
+            ):
+                raise VaultError("the selected class is not personal-root reachable")
+            anchor = store.get_root_anchor(policy_class.governance["anchor_id"])
+            if anchor.root_pub != _personal_root_pub():
+                raise VaultError("the selected class is not carried by the current personal root")
+        setting_id = settings_ops.write_by_key(
+            VAULT_SECURED_SET_ID,
+            VAULT_CREDENTIAL_REVISION,
+            key.strip(),
+            {"value": value},
+            org=None,
+            state="raw",
+            vault_policy_class_id=class_id,
+        )
+        return JSONResponse({
+            "id": setting_id,
+            "set_id": VAULT_SECURED_SET_ID,
+            "key": key.strip(),
+            "policy_class_id": class_id,
+            "sealed": True,
+        }, status_code=201)
+    except SchemaValidationError as exc:
+        return JSONResponse({"error": f"schema validation failed: {exc}"}, status_code=400)
+    except settings_ops.VaultSealerMissing as exc:
+        return JSONResponse({"error": str(exc)}, status_code=423)
+    except (KeyError, TypeError, ValueError, VaultError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
 
 
 async def enroll_password(request: Request):
@@ -173,6 +317,14 @@ async def reseal(request: Request):
 
 ROUTES = [
     Route("/api/identity/factors", factors, methods=["GET"]),
+    Route("/api/identity/vault-anchors", root_anchors, methods=["GET"]),
+    Route("/api/identity/vault-anchors", enroll_root_anchor, methods=["POST"]),
+    Route(
+        "/api/identity/vault-anchors/{anchor_id}/classes",
+        create_root_class,
+        methods=["POST"],
+    ),
+    Route("/api/identity/vault-settings", seal_personal_setting, methods=["POST"]),
     Route("/api/identity/factors/password", enroll_password, methods=["POST"]),
     Route("/api/identity/classes", create_class, methods=["POST"]),
     Route("/api/identity/classes/{class_id}", show_class, methods=["GET"]),

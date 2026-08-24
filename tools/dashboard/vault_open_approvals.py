@@ -4,8 +4,9 @@
 agent names only a secured set member and a short delivery TTL.  This module
 derives the real session/workspace from its bearer, freezes the selected
 Setting and policy generation, serves factor bootstrap material only to the
-operator-cookie browser, and returns the opened Setting payload through the
-approval result.
+operator-cookie browser, and writes the opened Setting payload only into the
+requesting session's isolated memory-backed delivery directory.  The approval
+result carries the value-free delivery receipt.
 
 No content-encryption key, factor seed, password, armor, or vault locator is
 ever placed in the requester-visible request/result.  The one factor gesture
@@ -23,14 +24,18 @@ from starlette.requests import Request
 
 from tools.dashboard import api_auth
 from tools.dashboard import vault_release_delivery
+from tools.dashboard.identity_routes import _passkey_rows, _personal_member
 from tools.dashboard.dao import dashboard_db
 from tools.graph import schemas, settings_ops
 from tools.graph.schemas.personal_identity import PASSKEY_SET_ID
 from tools.graph.schemas.vault_policy_class import VAULT_POLICY_CLASS_SET_ID
+from tools.network.idkit.armor import armor_factor_types, parse_armor
 from tools.network.idkit.canonical import canonical_json
 from tools.vault.errors import VaultError
 from tools.vault.key_holder import _scoped_db
 from tools.vault.store import VaultStore
+from tools.vault.policy_class import ROOT_REACHABLE_FORM
+from tools.vault.recipients import PERSONAL_ROOT_RECIPIENT
 
 
 KIND = "vault_open"
@@ -61,10 +66,12 @@ def _class_snapshot(
         "policy": record.policy,
         "generation": generation.to_dict(),
     }
+    if record.governance is not None:
+        snapshot["governance"] = record.governance
     return snapshot, record
 
 
-def _factor_bootstrap(class_snapshot: dict, org: str | None) -> list[dict]:
+def _ceremony_bootstrap(class_snapshot: dict, org: str | None) -> dict:
     """Resolve the browser inputs for the frozen generation.
 
     The returned list is digest-frozen at request creation and re-derived at
@@ -72,6 +79,68 @@ def _factor_bootstrap(class_snapshot: dict, org: str | None) -> list[dict]:
     the operator-cookie response; it is never copied into the safe request.
     """
     generation = class_snapshot.get("generation") or {}
+    governance = class_snapshot.get("governance")
+    if isinstance(governance, dict) and governance.get("form") == ROOT_REACHABLE_FORM:
+        anchor_id = governance.get("anchor_id")
+        with VaultStore(_scoped_db(VAULT_POLICY_CLASS_SET_ID, org)) as store:
+            anchor = store.get_root_anchor(anchor_id)
+        wraps = generation.get("wraps") or []
+        if (
+            len(wraps) != 1
+            or wraps[0].get("factor_id") != anchor.anchor_id
+            or wraps[0].get("factor_type") != PERSONAL_ROOT_RECIPIENT
+            or wraps[0].get("public_key") != anchor.public_key
+        ):
+            raise VaultError("root-reachable class and personal anchor disagree")
+        personal = _personal_member()
+        if personal is None or not isinstance(personal.payload, dict):
+            raise VaultError("no personal root is enrolled")
+        if personal.payload.get("root_pub") != anchor.root_pub:
+            raise VaultError("the vault anchor is not carried by the current personal root")
+        armor = personal.payload.get("armored_private_key")
+        if not isinstance(armor, str) or not armor:
+            raise VaultError("the personal root has no canonical armor")
+        armor_data = parse_armor(armor)
+        root_credential_ids = {
+            factor.get("credential_id")
+            for factor in armor_data.get("factors", [])
+            if factor.get("type") in {"passkey", "combined"}
+            and isinstance(factor.get("credential_id"), str)
+        }
+        passkeys = []
+        for member in _passkey_rows():
+            payload = member.payload if isinstance(member.payload, dict) else {}
+            if payload.get("credential_id") not in root_credential_ids:
+                continue
+            passkeys.append({
+                "credential_id": payload.get("credential_id"),
+                "label": payload.get("label"),
+                "rp_id": payload.get("rp_id"),
+                "transports": payload.get("transports") or [],
+            })
+        factor_types = armor_factor_types(armor)
+        methods = (
+            ["both"]
+            if "combined" in factor_types
+            else [kind for kind in ("password", "passkey") if kind in factor_types]
+        )
+        if not methods:
+            raise VaultError("the personal root has no interactive opener")
+        if any(method in {"passkey", "both"} for method in methods) and not passkeys:
+            raise VaultError("the personal root passkey has no enrolled credential")
+        return {
+            "v": 2,
+            "governance": governance,
+            "anchor": anchor.to_dict(),
+            "root": {
+                "armor": armor,
+                "root_pub": anchor.root_pub,
+                "require_pair": bool(personal.payload.get("require_pair", False)),
+                "passkeys": passkeys,
+                "methods": methods,
+            },
+        }
+
     factors = []
     seen: set[str] = set()
     with VaultStore(_scoped_db(VAULT_POLICY_CLASS_SET_ID, org)) as store:
@@ -102,7 +171,11 @@ def _factor_bootstrap(class_snapshot: dict, org: str | None) -> list[dict]:
             factors.append(factor)
     if not factors:
         raise VaultError("the policy class has no usable factors")
-    return factors
+    return {
+        "v": 1,
+        "policy": class_snapshot.get("policy"),
+        "factors": factors,
+    }
 
 
 def prepare_create_from_request(
@@ -169,7 +242,7 @@ def prepare_create_from_request(
     required_policy = sealed.get("required_policy")
     if policy_class.policy != required_policy:
         raise ValueError("the secured Setting and policy class disagree")
-    factor_bootstrap = _factor_bootstrap(class_snapshot, member.org)
+    ceremony_bootstrap = _ceremony_bootstrap(class_snapshot, member.org)
 
     now = time.time()
     safe_request = {
@@ -183,6 +256,10 @@ def prepare_create_from_request(
         "target": f"{set_id}/{key}",
         "delivery": "plaintext Setting value to the requesting session",
         "release_mode": "delivered",
+        "access": (
+            (class_snapshot.get("governance") or {}).get("display_name")
+            or class_snapshot.get("policy")
+        ),
         "ttl_seconds": ttl,
         "expires_at": now + ttl,
     }
@@ -193,7 +270,7 @@ def prepare_create_from_request(
         "sealed_digest": _digest(sealed),
         "class_snapshot": class_snapshot,
         "class_digest": _digest(class_snapshot),
-        "factor_digest": _digest(factor_bootstrap),
+        "factor_digest": _digest(ceremony_bootstrap),
     }
     return principal.subject, safe_request, staged
 
@@ -222,18 +299,12 @@ def enrich_from_request(http_request: Request, row: dict) -> dict:
         raise PermissionError("operator-cookie authority is required for vault factors")
     staged = row.get("staged") or {}
     snapshot = staged.get("class_snapshot") or {}
-    factors = _factor_bootstrap(snapshot, staged.get("org"))
+    ceremony = _ceremony_bootstrap(snapshot, staged.get("org"))
     if not hmac.compare_digest(
-        _digest(factors), str(staged.get("factor_digest") or ""),
+        _digest(ceremony), str(staged.get("factor_digest") or ""),
     ):
         raise VaultError("the vault factors changed before approval")
-    return {
-        "ceremony": {
-            "v": 1,
-            "policy": snapshot.get("policy"),
-            "factors": factors,
-        }
-    }
+    return {"ceremony": ceremony}
 
 
 def authorize_decision(
@@ -271,6 +342,15 @@ def authorize_decision(
     }
     if not set(openers).issubset(factor_types):
         return "vault_open contains an opener outside the frozen factor roster"
+    governance = snapshot.get("governance")
+    if isinstance(governance, dict) and governance.get("form") == ROOT_REACHABLE_FORM:
+        anchor_id = governance.get("anchor_id")
+        if set(openers) != {anchor_id}:
+            return "vault_open requires the frozen personal-root anchor opener"
+        if factor_types.get(anchor_id) != PERSONAL_ROOT_RECIPIENT:
+            return "vault_open personal-root anchor does not match the class"
+        return None
+
     supplied_types = [factor_types[factor_id] for factor_id in openers]
     policy = snapshot.get("policy")
     satisfied = (
@@ -325,9 +405,9 @@ def _assert_frozen(row: dict) -> tuple[dict, dict]:
     )
     if not hmac.compare_digest(_digest(snapshot), str(staged.get("class_digest") or "")):
         raise VaultError("the vault policy changed before approval")
-    factors = _factor_bootstrap(snapshot, staged.get("org"))
+    ceremony = _ceremony_bootstrap(snapshot, staged.get("org"))
     if not hmac.compare_digest(
-        _digest(factors), str(staged.get("factor_digest") or ""),
+        _digest(ceremony), str(staged.get("factor_digest") or ""),
     ):
         raise VaultError("the vault factors changed before approval")
     return req, staged

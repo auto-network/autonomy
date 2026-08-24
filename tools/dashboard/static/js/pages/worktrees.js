@@ -2302,24 +2302,42 @@
             const ceremony = r.ceremony;
             const setting = req.setting || {};
             const requester = req.requester || {};
-            if (!ceremony || ceremony.v !== 1 ||
-                !['password', 'prf', 'both'].includes(ceremony.policy) ||
-                !Array.isArray(ceremony.factors) || !ceremony.factors.length ||
+            const legacyCeremony = ceremony && ceremony.v === 1 &&
+              ['password', 'prf', 'both'].includes(ceremony.policy) &&
+              Array.isArray(ceremony.factors) && ceremony.factors.length;
+            const rootCeremony = ceremony && ceremony.v === 2 &&
+              ceremony.governance && ceremony.governance.form === 'root-reachable' &&
+              ceremony.anchor && ceremony.root &&
+              ceremony.governance.anchor_id === ceremony.anchor.anchor_id &&
+              Array.isArray(ceremony.root.methods) && ceremony.root.methods.length &&
+              ceremony.root.methods.every((method) =>
+                ['password', 'passkey', 'both'].includes(method));
+            if ((!legacyCeremony && !rootCeremony) ||
                 !setting.set_id || !setting.key || !requester.session ||
                 !requester.workspace || req.operation !== 'read' ||
                 req.release_mode !== 'delivered') {
               throw new Error('vault open request has no complete server-frozen ceremony');
             }
             const expiry = new Date(Number(req.expires_at) * 1000);
-            const policyLabel = ceremony.policy === 'both'
-              ? 'password + passkey' : (ceremony.policy === 'prf' ? 'passkey' : 'password');
+            const policyLabel = rootCeremony
+              ? (req.access || ceremony.governance.display_name || 'Personal root vault')
+              : (ceremony.policy === 'both'
+                ? 'password + passkey' : (ceremony.policy === 'prf' ? 'passkey' : 'password'));
+            const rootMethods = rootCeremony ? [...ceremony.root.methods] : [];
+            const rootMethod = rootMethods.length === 1 ? rootMethods[0] : null;
+            const methodNeedsPassword = (method) => method === 'password' || method === 'both';
+            const methodAction = (method) => method === 'passkey'
+              ? 'Use passkey & deliver' : (method === 'both'
+                ? 'Verify both & deliver' : (method === 'password'
+                  ? 'Open & deliver' : 'Choose an opener'));
             self.approvalBusy = false;
-            self.approvalRequest = {
+            const approval = {
               id: r.id, kind: r.kind, session: requester.session,
               title: 'Release secured setting',
-              actionLabel: ceremony.policy === 'prf'
-                ? 'Use passkey & deliver' : (ceremony.policy === 'both'
-                  ? 'Verify both & deliver' : 'Open & deliver'),
+              actionLabel: rootCeremony ? methodAction(rootMethod)
+                : (ceremony.policy === 'prf'
+                  ? 'Use passkey & deliver' : (ceremony.policy === 'both'
+                    ? 'Verify both & deliver' : 'Open & deliver')),
               op: req.operation, target: req.target,
               bodyMarkdown: [
                 'Setting: ' + setting.set_id + ' / ' + setting.key,
@@ -2329,22 +2347,48 @@
                 'Target: ' + req.target,
                 'Delivered: ' + req.delivery,
                 'Release mode: ' + req.release_mode,
-                'Factor: ' + policyLabel,
+                (rootCeremony ? 'Access: ' : 'Factor: ') + policyLabel,
+                ...(rootCeremony ? ['Root opener: ' + (
+                  rootMethod === 'both' ? 'password + passkey' :
+                    (rootMethod || 'choose below')
+                )] : []),
                 'TTL: ' + req.ttl_seconds + ' seconds (expires ' + expiry.toLocaleTimeString() + ')',
               ].join('\n'),
-              needsPassword: ceremony.policy === 'password' || ceremony.policy === 'both',
-              passwordLabel: ceremony.policy === 'both'
-                ? 'Vault password (passkey also required)' : 'Vault password',
+              needsPassword: rootCeremony ? methodNeedsPassword(rootMethod)
+                : ceremony.policy === 'password' || ceremony.policy === 'both',
+              passwordLabel: rootCeremony
+                ? (rootMethod === 'both'
+                  ? 'Personal password (passkey also required)' : 'Personal password')
+                : (ceremony.policy === 'both'
+                  ? 'Vault password (passkey also required)' : 'Vault password'),
               password: '',
-              vaultOpen: { ceremony, gathered: null },
+              vaultOpen: {
+                ceremony, gathered: null, rootMethods, rootMethod,
+                selectMethod(method) {
+                  if (!rootMethods.includes(method)) return;
+                  this.rootMethod = method;
+                  approval.needsPassword = methodNeedsPassword(method);
+                  approval.passwordLabel = method === 'both'
+                    ? 'Personal password (passkey also required)' : 'Personal password';
+                  approval.actionLabel = methodAction(method);
+                  approval.bodyMarkdown = approval.bodyMarkdown.replace(
+                    /^Root opener:.*$/m,
+                    'Root opener: ' + (method === 'both' ? 'password + passkey' : method),
+                  );
+                  approval.error = '';
+                  if (!approval.needsPassword) approval.password = '';
+                },
+              },
               awaitExecution: true,
               error: '',
             };
+            self.approvalRequest = approval;
           },
           async decision(self, req) {
             const vault = await import('../ceremony/open-vault.js');
             req.vaultOpen.gathered = await vault.gatherVaultOpeners(
               req.vaultOpen.ceremony, req.password,
+              { rootMethod: req.vaultOpen.rootMethod },
             );
             return { openers: req.vaultOpen.gathered.openers };
           },
