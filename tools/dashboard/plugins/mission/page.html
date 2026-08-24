@@ -99,6 +99,8 @@
       overflow:hidden}
     .msn-load-bar i{display:block;height:100%;border-radius:2px;
       background:#8b85ff;transition:width .12s linear}
+    .msn-load-note{color:#5b6578;font-style:italic;font-size:.7rem;
+      margin-top:8px;text-align:center;min-height:1em}
     .msn-empty{color:var(--ink3);font-size:.85rem;padding:18px 4px}
     .msn-err{color:var(--crit);font-size:.8rem;padding:12px 4px}
     @media (max-width:400px){
@@ -155,6 +157,7 @@
           <div class="msn-load-bar">
             <i :style="'width:' + progress + '%'"></i>
           </div>
+          <div class="msn-load-note" x-text="loadNote"></div>
         </div>
       </div>
     </div>

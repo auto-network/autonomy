@@ -13,7 +13,11 @@ the trusted organization scope — no org ever arrives in a path or body.
 from __future__ import annotations
 
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import (
+    HTMLResponse,
+    JSONResponse,
+    StreamingResponse,
+)
 from starlette.routing import Route
 
 from tools.dashboard.api_auth import (
@@ -180,13 +184,24 @@ async def get_chat(request: Request) -> JSONResponse:
     return JSONResponse({"entries": logs.get(pp["pillar_id"], [])})
 
 
-async def mission_screen(request: Request) -> HTMLResponse | JSONResponse:
-    """The complete mission document. ``?pillar=<id>`` opens focused."""
+async def mission_screen(request: Request):
+    """The complete mission document. ``?pillar=<id>`` opens focused.
+
+    ``?progress=1`` streams stage markers ahead of the document so the
+    loading interstitial can narrate the compose (settings counts, bead
+    bridge) on the same round trip — no separate progress endpoint.
+    """
     mission_id = request.path_params["mission_id"]
     org = _owning_org(request, mission_id)
-    doc = compose.render_screen(
-        org, mission_id, request.query_params.get("pillar")) \
-        if org else None
+    focus = request.query_params.get("pillar")
+    if org and request.query_params.get("progress"):
+        if compose.load_mission(org, mission_id) is None:
+            return JSONResponse({"error": "unknown mission"},
+                                status_code=404)
+        return StreamingResponse(
+            compose.render_stages(org, mission_id, focus),
+            media_type="text/html")
+    doc = compose.render_screen(org, mission_id, focus) if org else None
     if doc is None:
         return JSONResponse({"error": "unknown mission"}, status_code=404)
     return HTMLResponse(doc)

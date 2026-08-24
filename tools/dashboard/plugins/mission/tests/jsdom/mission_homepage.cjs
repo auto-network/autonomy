@@ -71,11 +71,13 @@ window.localStorage.clear();
 window.fetch = (url) => {
   const key = String(url).split("?")[0];
   if (key.startsWith("/api/mission/screen/")) {
-    const html = "<html><body>screen</body></html>";
+    // the ?progress=1 stream shape: stage markers, doc marker, document
+    const doc = "<!doctype html><html><body>screen</body></html>";
+    const html = "<!--msn:16|Loading mission items — 7 of 78 settings-->"
+      + "<!--msn:doc:" + doc.length + "-->" + doc;
     return Promise.resolve({
       ok: true, status: 200,
-      headers: {get: (h) => h === "content-length"
-        ? String(html.length) : null},
+      headers: {get: () => null},
       body: null,                      // exercises the text() fallback
       text: () => Promise.resolve(html),
     });
@@ -130,6 +132,7 @@ setTimeout(() => {
 
       // opening a mission: src set + measured nonzero height
       comp.screen = "missions";
+      const histBefore = window.history.length;
       comp.open(FIXTURES["/api/mission/missions"].missions[0]);
       // the interstitial is SYNCHRONOUS with the tap
       check("interstitial instant", comp.loading === true);
@@ -138,12 +141,27 @@ setTimeout(() => {
         check("frame exists", !!frame);
         check("frame content mounted", !!frame
           && typeof frame.srcdoc === "string" && frame.srcdoc.length > 0);
+        // progress markers are narration, never document content
+        check("markers stripped from srcdoc", !!frame
+          && frame.srcdoc.startsWith("<!doctype")
+          && !frame.srcdoc.includes("msn:"));
         check("interstitial bar rendered",
           !!d.querySelector(".msn-load-bar i") || comp.loading === false);
         const h = frame && parseInt(frame.style.height || "0", 10);
         check("frame measured height > 0 (" + h + ")", h > 100);
-        check("url pushed",
+        // the URL NAMES the page but never grows history: the browser
+        // back button stays a pure exit from the plugin
+        check("url named via replaceState",
           window.location.pathname === "/mission/m1");
+        check("no history entry added ("
+          + histBefore + " -> " + window.history.length + ")",
+          window.history.length === histBefore);
+        // the inner screen reports its position; it lands in the hash
+        window.dispatchEvent(new window.MessageEvent("message", {
+          data: {type: "mission:where", view: "relay", section: "Delivery"},
+        }));
+        check("position mirrored into hash",
+          window.location.hash === "#view=relay&tab=Delivery");
         check("no in-page back bar", !d.querySelector(".msn-list + div .border-b"));
         check("back chevron in toolbar",
           !!d.querySelector('#app-topbar-slot [aria-label="Back to missions"]'));
