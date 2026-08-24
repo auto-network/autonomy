@@ -683,6 +683,32 @@ class TestStableActiveOrdering:
 class TestMobileToolbarLayout:
     def test_long_org_name_cannot_wrap_launch_control(self, h):
         ab_raw("set", "viewport", "320", "900")
+        compact_state = ab_eval("""
+            var toolbar = document.querySelector('[data-testid="sessions-page-toolbar"]');
+            var zoom = toolbar.querySelector('.sc-zoom-bar');
+            var org = toolbar.querySelector('[data-testid="org-filter"]');
+            var launch = toolbar.querySelector('[data-testid="session-launch-dropdown"]');
+            var zr = zoom.getBoundingClientRect();
+            var or = org.getBoundingClientRect();
+            var lr = launch.getBoundingClientRect();
+            return {
+              orgWidth: or.width,
+              orgHeight: or.height,
+              launchHeight: lr.height,
+              zoomHeight: zr.height,
+              centered: Math.abs((or.left + or.right) / 2 - (zr.right + lr.left) / 2),
+            };
+        """)
+        assert compact_state["orgWidth"] < 150, (
+            "The picker was given a fixed mobile width instead of fitting the selected organization"
+        )
+        assert compact_state["centered"] <= 1, "The picker was not centered between zoom and create"
+        assert abs(compact_state["orgHeight"] - compact_state["launchHeight"]) <= 1, (
+            "The create button was taller than the organization picker"
+        )
+        assert compact_state["zoomHeight"] <= compact_state["orgHeight"], (
+            "Zoom controls should not be taller than the primary toolbar controls"
+        )
         ready = ab_eval("""
             var root = document.querySelector('[x-data="sessionsPage()"]');
             var d = root && root._x_dataStack && root._x_dataStack[0];
@@ -772,17 +798,36 @@ class TestDesktopToolbarLayout:
         layout = ab_eval("""
             var toolbar = document.querySelector('[data-testid="sessions-page-toolbar"]');
             var zoom = toolbar && toolbar.querySelector('.sc-zoom-bar');
+            var org = toolbar && toolbar.querySelector('[data-testid="org-filter"]');
+            var launch = toolbar && toolbar.querySelector('[data-testid="session-launch-dropdown"]');
             var actions = toolbar && toolbar.querySelector('.sessions-toolbar-actions');
-            if (!zoom || !actions) return null;
+            if (!zoom || !org || !launch || !actions) return null;
             var zr = zoom.getBoundingClientRect();
+            var or = org.getBoundingClientRect();
+            var lr = launch.getBoundingClientRect();
             var ar = actions.getBoundingClientRect();
-            return {gap: ar.left - zr.right, toolbarWidth: toolbar.getBoundingClientRect().width};
+            return {
+              gap: ar.left - zr.right,
+              leftGap: or.left - zr.right,
+              rightGap: lr.left - or.right,
+              orgHeight: or.height,
+              launchHeight: lr.height,
+              zoomHeight: zr.height,
+              toolbarWidth: toolbar.getBoundingClientRect().width,
+            };
         """)
         assert layout is not None
         assert layout["gap"] <= 16, (
             "The organization and create-session controls were distributed across "
             "the desktop toolbar instead of remaining beside zoom."
         )
+        assert abs(layout["leftGap"] - layout["rightGap"]) <= 1, (
+            "The organization picker was not centered between zoom and create"
+        )
+        assert abs(layout["orgHeight"] - layout["launchHeight"]) <= 1, (
+            "The create button was taller than the organization picker"
+        )
+        assert layout["zoomHeight"] <= layout["orgHeight"]
         assert layout["toolbarWidth"] > 1000
 
 

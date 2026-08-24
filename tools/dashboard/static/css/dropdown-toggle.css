@@ -69,6 +69,8 @@
   min-width: 0;
 }
 .sessions-org-filter-toggle {
+  box-sizing: border-box;
+  min-height: 32px;
   max-width: 100%;
   min-width: 0;
 }
@@ -80,9 +82,13 @@
   white-space: nowrap;
 }
 .sessions-org-filter .sc-org,
-.sessions-org-filter .sort-toggle-icon,
 .sessions-launch-control {
   flex: 0 0 auto;
+}
+.sessions-org-filter .sort-toggle-icon {
+  flex: 0 0 auto;
+  font-size: 11px;
+  line-height: 1;
 }
 
 /* A compact icon with a comfortable touch target. Toggling it is also the
@@ -144,14 +150,30 @@
     max-width: calc(100vw - 24px);
     width: max-content;
   }
-  /* Desktop keeps the controls as one compact group. On a phone the launch
-     control owns the far edge so its right-aligned workspace menu stays
-     inside the viewport. The org picker is the flexible middle item. */
-  .sessions-toolbar-actions {
-    justify-content: flex-end;
-    gap: 8px;
-    flex: 1 1 auto;
+  /* Use three deliberate tracks: zoom remains left, creation remains right,
+     and the selected organization sits in the exact middle space between
+     them.  `display: contents` lets the two action children participate in
+     the toolbar grid without changing the desktop markup or grouping. */
+  .sessions-page-toolbar {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr) max-content;
+    align-items: center;
   }
-  .sessions-org-filter { flex-basis: 190px; }
-  .sessions-org-filter-toggle { width: 100%; }
+  .sessions-toolbar-actions {
+    display: contents;
+  }
+  .sessions-org-filter {
+    grid-column: 2;
+    justify-self: center;
+    width: fit-content;
+    max-width: 100%;
+    min-width: 0;
+  }
+  .sessions-launch-control {
+    grid-column: 3;
+  }
+  .sessions-org-filter-toggle {
+    width: auto;
+    max-width: 100%;
+  }
 }
