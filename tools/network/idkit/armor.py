@@ -496,10 +496,15 @@ def parse_armor(armor: str) -> dict:
                 f"closed to {sorted(_FACTOR_PARSERS)}"
             )
         # Singular types (password, recovery) dedupe on type; passkey and
-        # combined are plural, one per credential, so they dedupe on
-        # (type, credential_id).
+        # combined are plural. One synced credential enrolls a distinct factor
+        # per device because the passkey PRF is device-specific (iCloud syncs
+        # the credential, not the PRF), so a device slot is identified by
+        # (type, credential_id, kem_pub) — same credential + a new device PRF is
+        # a new slot, not a duplicate. A true duplicate repeats the kem_pub too.
         plural = ftype in ("passkey", "combined")
-        dedup_key = (ftype, f.get("credential_id")) if plural else ftype
+        dedup_key = (
+            (ftype, f.get("credential_id"), f.get("kem_pub")) if plural else ftype
+        )
         if dedup_key in seen:
             raise ArmorError(
                 f"v2 has a duplicate factor {dedup_key!r}"
@@ -704,7 +709,9 @@ def add_passkey_factor(
     fresh PRF eval on that device able to open this armor ALONE later. The PRF
     private half never enters this process; only the owner, who can already open
     the armor with *passphrase*, can add a lock, and every existing factor keeps
-    working. Plural by design: one passkey factor per credential.
+    working. Plural by design: one passkey factor per (credential, device) — the
+    same synced credential enrolls a distinct factor on each device because its
+    PRF, and hence *passkey_kem_pub*, is device-specific.
     """
     if not isinstance(credential_id, str) or not _CREDENTIAL_ID_RE.match(credential_id):
         raise ArmorError("credential_id must be base64url (the WebAuthn rawId)")
@@ -714,12 +721,14 @@ def add_passkey_factor(
 
     data = parse_armor(armor)
     if any(
-        f["type"] == "passkey" and f["credential_id"] == credential_id
+        f["type"] == "passkey"
+        and f["credential_id"] == credential_id
+        and f["kem_pub"] == passkey_kem_pub
         for f in data["factors"]
     ):
         raise ArmorError(
-            "this armor already carries a factor for that passkey; replacing one "
-            "is a rotation, not an addition"
+            "this armor already carries a factor for that passkey on this device; "
+            "replacing one is a rotation, not an addition"
         )
     master_kek = _v2_master_kek(data, passphrase)
     previous_factors = list(data["factors"])
@@ -739,8 +748,15 @@ def add_passkey_factor(
     return _emit_v2(parse_armor(_emit_v2(data)))
 
 
-def remove_passkey_factor(armor: str, passphrase: str, credential_id: str) -> str:
-    """Demote one passkey — drop the factor for *credential_id*.
+def remove_passkey_factor(
+    armor: str, passphrase: str, credential_id: str, kem_pub: str | None = None
+) -> str:
+    """Demote a passkey — drop its factor(s).
+
+    With *kem_pub* given, drop only that one device slot (the same synced
+    credential holds one slot per device; *kem_pub* selects the device). With
+    *kem_pub* omitted, drop every slot for *credential_id* — a full revocation of
+    that passkey across all devices.
 
     Authorised by the passphrase, like :func:`remove_factor`: changing the set
     re-seals the seed, which needs the master KEK. The last lock can never be
@@ -748,19 +764,23 @@ def remove_passkey_factor(armor: str, passphrase: str, credential_id: str) -> st
     that already exist — a real demotion of a compromised device pairs with a
     root rotation (:mod:`tools.network.idkit.root_rotation`).
     """
+
+    def _targeted(f: dict) -> bool:
+        return (
+            f["type"] == "passkey"
+            and f["credential_id"] == credential_id
+            and (kem_pub is None or f["kem_pub"] == kem_pub)
+        )
+
     data = parse_armor(armor)
-    match = [
-        f
-        for f in data["factors"]
-        if f["type"] == "passkey" and f["credential_id"] == credential_id
-    ]
+    match = [f for f in data["factors"] if _targeted(f)]
     if not match:
-        raise ArmorError("this armor carries no passkey factor for that credential")
-    remaining = [
-        f
-        for f in data["factors"]
-        if not (f["type"] == "passkey" and f["credential_id"] == credential_id)
-    ]
+        raise ArmorError(
+            "this armor carries no passkey factor for that credential on that device"
+            if kem_pub is not None
+            else "this armor carries no passkey factor for that credential"
+        )
+    remaining = [f for f in data["factors"] if not _targeted(f)]
     if not remaining:
         raise ArmorError(
             "refusing to remove the last factor: an armor nothing can open is "

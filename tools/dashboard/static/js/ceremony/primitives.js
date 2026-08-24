@@ -400,10 +400,14 @@ function parseArmor(armorText) {
     }
     const parser = V2_FACTOR_PARSERS[f.type];
     if (!parser) throw new Error(`v2 factor has unknown type ${f.type}`);
-    // Singular types dedupe on type; passkey and combined are plural (one per
-    // credential).
+    // Singular types dedupe on type; passkey and combined are plural. One
+    // synced credential enrolls a distinct factor per device (its passkey PRF,
+    // and hence kem_pub, is device-specific — iCloud syncs the credential, not
+    // the PRF), so a device slot is (type, credential_id, kem_pub). Same
+    // credential + a new device PRF is a new slot; a true duplicate repeats the
+    // kem_pub too.
     const dedupKey = (f.type === 'passkey' || f.type === 'combined')
-      ? `${f.type}:${f.credential_id}` : f.type;
+      ? `${f.type}:${f.credential_id}:${f.kem_pub}` : f.type;
     if (seen.has(dedupKey)) throw new Error(`v2 duplicate factor ${dedupKey}`);
     seen.add(dedupKey);
     parser(f); // total dispatch — a known type always has a strict parser
@@ -607,8 +611,13 @@ async function addPasskeyFactor(armorText, passphrase, credentialId, passkeyKemP
     throw new Error('passkey_kem_pub must be 64 lowercase hex chars');
   }
   const data = parseArmor(armorText);
-  if (data.factors.some((f) => f.type === 'passkey' && f.credential_id === credentialId)) {
-    throw new Error('this armor already carries a factor for that passkey');
+  // The same synced credential enrolls one slot per device (device-specific
+  // PRF -> device-specific kem_pub), so reject only a true duplicate: same
+  // credential AND same device PRF. A new device's PRF is a new slot.
+  if (data.factors.some((f) => f.type === 'passkey'
+      && f.credential_id === credentialId
+      && f.kem_pub === passkeyKemPubHex)) {
+    throw new Error('this armor already carries a factor for that passkey on this device');
   }
   const masterKek = await v2MasterKekFromPassword(data, passphrase);
   try {
@@ -629,13 +638,19 @@ async function addPasskeyFactor(armorText, passphrase, credentialId, passkeyKemP
   }
 }
 
-async function removePasskeyFactor(armorText, passphrase, credentialId) {
+async function removePasskeyFactor(armorText, passphrase, credentialId, kemPub = null) {
+  // With kemPub given, drop only that one device slot (the same synced
+  // credential holds one slot per device; kemPub selects the device). With
+  // kemPub omitted, drop every slot for the credential — full revocation.
   const data = parseArmor(armorText);
-  const remaining = data.factors.filter(
-    (f) => !(f.type === 'passkey' && f.credential_id === credentialId),
-  );
+  const targeted = (f) => f.type === 'passkey'
+    && f.credential_id === credentialId
+    && (kemPub === null || f.kem_pub === kemPub);
+  const remaining = data.factors.filter((f) => !targeted(f));
   if (remaining.length === data.factors.length) {
-    throw new Error('this armor carries no passkey factor for that credential');
+    throw new Error(kemPub !== null
+      ? 'this armor carries no passkey factor for that credential on that device'
+      : 'this armor carries no passkey factor for that credential');
   }
   if (remaining.length === 0) {
     throw new Error(
@@ -1096,7 +1111,7 @@ async function openArmorWithOpener(currentArmor, opener) {
 //
 //   opener = password string | {password} | {prf} | {password, prf}
 //   action = {kind:'promote',        credentialId, provisioningPub}   // password
-//          | {kind:'demote',         credentialId}                    // password
+//          | {kind:'demote',         credentialId, kemPub?}           // password (kemPub: one device slot; omit: all)
 //          | {kind:'removePassword'}                                  // password
 //          | {kind:'setPassword',    newPassword}                     // password
 //          | {kind:'addPassword',    newPassword}                     // prf
@@ -1113,7 +1128,7 @@ async function signArmorUpdate(currentArmor, opener, action, requirePair) {
         currentArmor, o.password, action.credentialId, action.provisioningPub);
     } else if (action.kind === 'demote') {
       newArmor = await removePasskeyFactor(
-        currentArmor, o.password, action.credentialId);
+        currentArmor, o.password, action.credentialId, action.kemPub || null);
     } else if (action.kind === 'removePassword') {
       newArmor = await removePasswordFactor(currentArmor, o.password);
     } else if (action.kind === 'setPassword') {

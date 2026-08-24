@@ -120,3 +120,63 @@ def test_python_sealed_armor_still_opens_with_password_in_browser():
     out = _js({"op": "open_password", "armor": armor2, "password": _PW,
                "prf_hex": prf.hex()})
     assert out["seed_hex"] == root.private_hex
+
+
+def test_same_credential_two_devices_each_prf_opens_crossimpl():
+    """One synced credential, two device PRFs -> two slots; each device's PRF
+    opens the armor. The passkey PRF is device-specific even for an iCloud-synced
+    credential, so 'the same passkey' must hold one factor slot per device, and
+    both impls must parse an armor that carries two slots sharing a credential."""
+    from tools.network.idkit.armor import (
+        add_passkey_factor,
+        decrypt_root_key_with_passkey,
+    )
+    root, armor = _new_armor()
+    prf_a = bytes([0x11]) * 32
+    prf_b = bytes([0x22]) * 32
+    cred = "cred-synced"  # SAME credential on both devices
+    armor_a = add_passkey_factor(armor, _PW, cred, _kem_pub(prf_a))
+    armor_ab = add_passkey_factor(armor_a, _PW, cred, _kem_pub(prf_b))
+    # Both device PRFs open it, in Python and in the browser (find-by-kem_pub
+    # selects the right slot from what each device's ceremony produces).
+    assert decrypt_root_key_with_passkey(armor_ab, prf_a).private_hex == root.private_hex
+    assert decrypt_root_key_with_passkey(armor_ab, prf_b).private_hex == root.private_hex
+    assert _js({"op": "open_passkey", "armor": armor_ab,
+                "prf_hex": prf_a.hex()})["seed_hex"] == root.private_hex
+    assert _js({"op": "open_passkey", "armor": armor_ab,
+                "prf_hex": prf_b.hex()})["seed_hex"] == root.private_hex
+
+
+def test_browser_enrolls_second_device_slot_python_opens_both():
+    """The blocker this vector guards: the browser must let the SAME credential
+    enroll a SECOND device slot (a new PRF), not reject it as a duplicate."""
+    from tools.network.idkit.armor import decrypt_root_key_with_passkey
+    root, armor = _new_armor()
+    prf_a = bytes([0x77]) * 32
+    prf_b = bytes([0x88]) * 32
+    cred = "cred-synced-js"
+    kem_a = _js({"op": "kem_pub", "prf_hex": prf_a.hex()})["kem_pub"]
+    kem_b = _js({"op": "kem_pub", "prf_hex": prf_b.hex()})["kem_pub"]
+    armor_a = _js({"op": "add", "armor": armor, "password": _PW,
+                   "credential_id": cred, "kem_pub": kem_a})["armor"]
+    armor_ab = _js({"op": "add", "armor": armor_a, "password": _PW,
+                    "credential_id": cred, "kem_pub": kem_b})["armor"]
+    assert decrypt_root_key_with_passkey(armor_ab, prf_a).private_hex == root.private_hex
+    assert decrypt_root_key_with_passkey(armor_ab, prf_b).private_hex == root.private_hex
+
+
+def test_true_duplicate_same_credential_and_prf_rejected_crossimpl():
+    """A true duplicate — same credential AND same device PRF — is still an error
+    in both impls (that is a rotation, not a new device slot)."""
+    from tools.network.idkit.armor import ArmorError, add_passkey_factor
+    _, armor = _new_armor()
+    prf = bytes([0x99]) * 32
+    cred = "cred-dup"
+    armor2 = add_passkey_factor(armor, _PW, cred, _kem_pub(prf))
+    with pytest.raises(ArmorError):
+        add_passkey_factor(armor2, _PW, cred, _kem_pub(prf))
+    # the browser rejects the true duplicate too: addPasskeyFactor throws, node
+    # exits nonzero, and _js asserts on returncode.
+    with pytest.raises(AssertionError):
+        _js({"op": "add", "armor": armor2, "password": _PW,
+             "credential_id": cred, "kem_pub": _kem_pub(prf)})
