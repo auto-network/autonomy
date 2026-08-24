@@ -92,13 +92,18 @@ def test_bd_failure_is_contained(monkeypatch):
 
 
 def test_beads_env_routes_to_org_tracker(monkeypatch, tmp_path):
-    """A mission org with a provisioned tracker dir gets BEADS_DIR
-    pointed at it; anyone else inherits the ambient tracker."""
-    monkeypatch.setattr(bridge, "DATA_ROOT", tmp_path)
+    """A mission org with a provisioned tracker dir gets BEADS_DIR (and
+    that tracker's SQL credentials) pointed at it; anyone else inherits
+    the ambient tracker."""
+    import tools.data_paths as data_paths
+    monkeypatch.setattr(data_paths, "DATA_ROOT", tmp_path)
     org_dir = tmp_path / ".beads" / "orgs" / "anchore"
     org_dir.mkdir(parents=True)
     (org_dir / "metadata.json").write_text("{}")
+    (org_dir / "credentials.env").write_text(
+        "BEADS_DOLT_SERVER_USER=beads_anchore\nBEADS_DOLT_PASSWORD=pw\n")
     env = bridge._beads_env("anchore")
     assert env is not None and env["BEADS_DIR"] == str(org_dir)
+    assert env["BEADS_DOLT_SERVER_USER"] == "beads_anchore"
     assert bridge._beads_env("autonomy") is None
     assert bridge._beads_env(None) is None

@@ -411,7 +411,8 @@ _KNOWN_PAUSE_LABELS = ["dashboard"]
 
 # ── CLI Subprocess Helper ─────────────────────────────────────
 
-async def run_cli(cmd: list[str], timeout: int = 30, stdin_data: str | None = None) -> tuple[str, str, int]:
+async def run_cli(cmd: list[str], timeout: int = 30, stdin_data: str | None = None,
+                  beads_dir=None) -> tuple[str, str, int]:
     """Run a CLI command async and return (stdout, stderr, returncode).
 
     A missing binary (e.g. no ``bd`` on a fresh deployment without the
@@ -425,7 +426,9 @@ async def run_cli(cmd: list[str], timeout: int = 30, stdin_data: str | None = No
     volume, and 8e3c3486 moved it to the state volume. An explicit
     ``BEADS_DIR`` in the environment still wins.
     """
+    from tools.data_paths import beads_client_env
     env = dict(os.environ)
+    env.update(beads_client_env(beads_dir))
     env.setdefault("BEADS_DIR", str(DATA_ROOT / ".beads"))
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -15033,14 +15036,20 @@ async def api_graph_bead(request):
         if e:
             return JSONResponse({"error": e}, status_code=400)
 
-    # Create bead via bd (tracker system).
-    bd_cmd = ["bd", "create", title, "-p", str(priority), "-l", "readiness:idea"]
+    # Create bead via bd (tracker system), in the CALLER ORG's tracker
+    # (per-org databases, autonomy@74585ba) with the org label applied
+    # by convention (graph note 74e2b864).
+    caller_org = _caller_org(request)
+    labels = "readiness:idea" + (f",org:{caller_org}" if caller_org else "")
+    bd_cmd = ["bd", "create", title, "-p", str(priority), "-l", labels]
     if desc:
         bd_cmd += ["-d", desc]
     if body.get("type"):
         bd_cmd += ["-t", body["type"]]
 
-    stdout, stderr, rc = await run_cli(bd_cmd, timeout=60)
+    from tools.data_paths import org_beads_dir
+    stdout, stderr, rc = await run_cli(
+        bd_cmd, timeout=60, beads_dir=org_beads_dir(caller_org))
     if rc != 0:
         return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
 

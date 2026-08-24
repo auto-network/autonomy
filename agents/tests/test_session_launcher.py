@@ -2141,3 +2141,30 @@ def test_build_mount_plan_routes_org_beads_dir(tmp_path, monkeypatch):
     assert beads_source("anchore") == str(org_dir)
     assert beads_source("autonomy") == str(tmp_path / ".beads")
     assert beads_source(None) == str(tmp_path / ".beads")
+
+
+def test_beads_credential_env_args_follow_the_org_dir(tmp_path, monkeypatch):
+    """Credential env pairs come from the same dir the mount resolves:
+    per-org file for a provisioned org, shared file otherwise, no args
+    when no credentials file exists."""
+    import tools.data_paths as data_paths
+    monkeypatch.setattr(data_paths, "DATA_ROOT", tmp_path)
+    shared = tmp_path / ".beads"
+    shared.mkdir()
+    (shared / "credentials.env").write_text(
+        "BEADS_DOLT_SERVER_USER=beads_autonomy\nBEADS_DOLT_PASSWORD=pw-a\n")
+    org_dir = tmp_path / ".beads" / "orgs" / "anchore"
+    org_dir.mkdir(parents=True)
+    (org_dir / "metadata.json").write_text("{}")
+    (org_dir / "credentials.env").write_text(
+        "BEADS_DOLT_SERVER_USER=beads_anchore\nBEADS_DOLT_PASSWORD=pw-n\n")
+
+    args = session_launcher._beads_credential_env_args("anchore")
+    assert "BEADS_DOLT_SERVER_USER=beads_anchore" in args
+    assert "BEADS_DOLT_PASSWORD=pw-n" in args
+    args = session_launcher._beads_credential_env_args("autonomy")
+    assert "BEADS_DOLT_SERVER_USER=beads_autonomy" in args
+    args = session_launcher._beads_credential_env_args(None)
+    assert "BEADS_DOLT_SERVER_USER=beads_autonomy" in args
+    (shared / "credentials.env").unlink()
+    assert session_launcher._beads_credential_env_args(None) == []

@@ -2583,8 +2583,16 @@ def cmd_bead(args):
         import sys as _sys
         desc = _sys.stdin.read().strip()
 
-    # Build bd create command — always set readiness:idea as pipeline entry point
-    cmd = ["bd", "create", args.title, "-p", str(args.priority), "-l", "readiness:idea"]
+    # Build bd create command — always set readiness:idea as pipeline
+    # entry point, plus the org label by convention (graph note
+    # 74e2b864). Tracker ROUTING needs no handling here: this branch
+    # runs with the ambient BEADS_DIR, which sessions already have
+    # mounted per-org.
+    labels = "readiness:idea"
+    _org = os.environ.get("GRAPH_ORG") or os.environ.get("GRAPH_SCOPE")
+    if _org:
+        labels += f",org:{_org}"
+    cmd = ["bd", "create", args.title, "-p", str(args.priority), "-l", labels]
     if desc:
         cmd += ["-d", desc]
     if args.type:

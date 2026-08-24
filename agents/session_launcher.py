@@ -1181,6 +1181,22 @@ def _delete_if_present(path) -> None:
         pass
 
 
+def _beads_credential_env_args(org: str | None) -> list[str]:
+    """``-e`` args carrying the session's tracker SQL credentials.
+
+    Reads credentials.env from the same beads dir build_mount_plan
+    mounts for this org (per-org dir when provisioned, else shared).
+    No credentials file → no args: bd's defaults apply.
+    """
+    from tools.data_paths import beads_client_env, org_beads_dir
+    env = beads_client_env(org_beads_dir(org))
+    out: list[str] = []
+    for key in ("BEADS_DOLT_SERVER_USER", "BEADS_DOLT_PASSWORD"):
+        if env.get(key):
+            out += ["-e", f"{key}={env[key]}"]
+    return out
+
+
 def build_mount_plan(
     *,
     run_dir,
@@ -1727,6 +1743,14 @@ def launch_session(
         "-e", f"BD_ACTOR={session_type}:{name}",
         "-e", f"AUTONOMY_SESSION={name}",
         "-e", "BD_READONLY=0",
+        # Per-org tracker SQL credentials (operator ruling: no shared
+        # root user). The credentials.env sits inside whichever beads
+        # dir this session's /data/.beads mount resolves to — shared or
+        # per-org — so the pair always matches the mounted tracker.
+        *_beads_credential_env_args(
+            (metadata or {}).get("graph_org")
+            or (metadata or {}).get("org")
+            or (metadata or {}).get("graph_project")),
         "-e", f"GRAPH_API={graph_api}",
         "-e", f"CROSSTALK_TOKEN={raw_token}",
         "-e", "CODEX_HOME=/home/agent/.codex",
