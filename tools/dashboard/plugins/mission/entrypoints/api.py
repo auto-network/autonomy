@@ -49,19 +49,46 @@ def _org_scopes(request: Request) -> list[str]:
     return []
 
 
-def _identity(request: Request) -> str:
-    """Attribution label from the API boundary, never the body.
+def _operator_persona(org: str | None) -> str | None:
+    """This dashboard's member persona in *org* — one settings call.
 
-    An org session's subject is its readable session name (auto-...);
-    an operator cookie's subject is an opaque cookie-session hex that
-    means nothing on a screen — the operator's messages say "operator".
+    ``autonomy.network.persona`` is written at the found/join ceremony,
+    keyed by the persona public key: the stable member id the signed-
+    settings envelope will carry as ``terminal_persona``. Storing THIS
+    (never a resolved label) is the final form — display name and icon
+    resolve from the member directory at render time.
+    """
+    if not org:
+        return None
+    try:
+        from tools.graph import ops as graph_ops
+        rows = list(graph_ops.read_set(
+            "autonomy.network.persona", org=org, peers=[]))
+        if len(rows) == 1:
+            return rows[0].key
+        for m in rows:
+            if (m.payload or {}).get("source") in ("found", "join"):
+                return m.key
+    except Exception:
+        pass
+    return None
+
+
+def _identity(request: Request, org: str | None = None) -> str:
+    """Attribution identity from the API boundary, never the body.
+
+    An org session: its readable session name. The operator: their org
+    member persona public key — the same identity the signed-settings
+    envelope will stamp as terminal_persona, resolved to their chosen
+    per-org display name and icon at render. "operator" only when the
+    org has no persona ceremony recorded.
     """
     principal = principal_from_request(request)
-    if principal.kind is ApiPrincipalKind.OPERATOR_COOKIE:
-        return "operator"
+    if principal.kind is ApiPrincipalKind.OPERATOR_COOKIE             or (principal.global_authority and not principal.subject):
+        return _operator_persona(org) or "operator"
     if principal.subject:
         return principal.subject
-    return "operator" if principal.global_authority else "unknown"
+    return "unknown"
 
 
 async def _text_body(request: Request) -> str | None:
@@ -92,8 +119,15 @@ async def list_missions(request: Request) -> JSONResponse:
         except Exception:
             continue
         for m in members:
-            rows.append({"mission_id": m.key, "org": org, **dict(m.payload)})
-    rows.sort(key=lambda r: r.get("name") or "")
+            row = {"mission_id": m.key, "org": org, **dict(m.payload)}
+            try:
+                row["activity"] = compose.activity_summary(org, m.key)
+            except Exception:
+                row["activity"] = None
+            rows.append(row)
+    rows.sort(key=lambda r: (
+        -(((r.get("activity") or {}).get("last_at")) or 0),
+        r.get("name") or ""))
     return JSONResponse({"missions": rows})
 
 
@@ -179,7 +213,7 @@ async def post_state(request: Request) -> JSONResponse:
         item = writes.transition(
             org, pp["mission_id"], pp["pillar_id"], pp["item_id"],
             to_state=str((body or {}).get("state") or ""),
-            by=_identity(request),
+            by=_identity(request, org),
             at=(body or {}).get("at"),
             turn=(body or {}).get("turn"))
     except Exception as exc:                      # noqa: BLE001
@@ -196,7 +230,7 @@ def _entry_route(fn, **fixed):
             return JSONResponse({"error": "text required"}, status_code=400)
         try:
             fn(org, pp["mission_id"], pp["pillar_id"], pp["item_id"],
-               text=text, by=_identity(request), **fixed)
+               text=text, by=_identity(request, org), **fixed)
         except Exception as exc:                  # noqa: BLE001
             return _refused(exc)
         return JSONResponse({"ok": True})
@@ -210,7 +244,7 @@ async def post_chat(request: Request) -> JSONResponse:
     text = await _text_body(request)
     if text is None:
         return JSONResponse({"error": "text required"}, status_code=400)
-    by = _identity(request)
+    by = _identity(request, org)
     try:
         entries = writes.add_chat(org, pp["mission_id"], pp["pillar_id"],
                                   text=text, by=by)
@@ -238,11 +272,35 @@ async def post_chat(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "entries": entries, "relayed": relayed})
 
 
+async def post_mission_status(request: Request) -> JSONResponse:
+    """Transition a mission's lifecycle: {status: active|paused|complete}."""
+    mission_id = request.path_params["mission_id"]
+    org = _owning_org(request, mission_id)
+    if org is None:
+        return JSONResponse({"error": "unknown mission"}, status_code=404)
+    try:
+        body = await request.json()
+        status = (body or {}).get("status")
+        mission = compose.load_mission(org, mission_id) or {}
+        mission["status"] = status
+        from tools.graph import settings_ops
+        from tools.dashboard.plugins.mission.entrypoints.schemas import (
+            SCHEMA_REVISION,
+        )
+        settings_ops.upsert_by_key(MISSION_SET_ID, SCHEMA_REVISION,
+                                   mission_id, mission, org=org)
+    except Exception as exc:                      # noqa: BLE001
+        return _refused(exc)
+    return JSONResponse({"ok": True, "status": status})
+
+
 _ITEM = "/api/mission/item/{mission_id}/{pillar_id}/{item_id}"
 
 routes: list = [
     Route("/api/mission/missions", list_missions, methods=["GET"]),
     Route("/api/mission/screen/{mission_id}", mission_screen, methods=["GET"]),
+    Route("/api/mission/status/{mission_id}", post_mission_status,
+          methods=["POST"]),
     Route("/api/mission/pillars/{mission_id}", list_pillars, methods=["GET"]),
     Route("/api/mission/items/{mission_id}", list_items, methods=["GET"]),
     Route("/api/mission/tasks/{mission_id}", list_tasks, methods=["GET"]),

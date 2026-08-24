@@ -175,6 +175,20 @@ Decisions: newest first.
   long inline argument. Every coordinator hits this on their first
   chat reply; the operator is reading on a phone.
 
+## Identity and attribution
+
+Acts are attributed by IDENTITY, presentation resolves at render. An
+agent's acts carry its session name. A member's acts carry their
+**org-scoped persona public key** (`autonomy.network.persona` — derived
+per-org, unlinkable across organizations; never the personal root).
+Screens resolve keys through the org member directory
+(`autonomy.org.member-profile`: display name, avatar — the name the
+member chose FOR THIS ORG) — so a rename re-labels history and an
+unmapped key renders truncated, never as raw hex. When the
+signed-settings envelope lands (design `graph://21a0da9e-1c2`), rows
+carry the writer's membership identity by construction and the stamp
+becomes redundant. Never store a resolved display name.
+
 ## HTTP surface
 
 Same-origin, substrate-authenticated; identity is stamped at the API

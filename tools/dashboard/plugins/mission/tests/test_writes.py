@@ -37,6 +37,16 @@ class FakeOps:
         self.rows[(set_id, key)] = dict(payload)
         return key
 
+    def add_setting(self, set_id, revision, key, payload, *, org,
+                    state="raw"):
+        """Append-only semantics, as the real one: a second write at
+        the same key is a UNIQUE violation, never an update."""
+        validate_payload(set_id, revision, payload)
+        if (set_id, key) in self.rows:
+            raise ValueError("UNIQUE constraint failed (fake)")
+        self.rows[(set_id, key)] = dict(payload)
+        return key
+
 
 @pytest.fixture()
 def store(monkeypatch):
@@ -139,15 +149,19 @@ class TestQuestions:
 
 
 class TestChatAndUpsert:
-    def test_chat_appends_attributed_and_validated(self, store):
+    def test_chat_is_one_signable_row_per_message(self, store):
+        persona = "5ff2d4e2" * 8               # a member persona pub key
         entries = writes.add_chat("o", MID, "relay",
-                                  text="What's going on?", by="Jeremy")
-        assert entries[-1]["by"] == "Jeremy"
+                                  text="What's going on?", by=persona)
+        assert entries[-1]["by"] == persona
         entries = writes.add_chat("o", MID, "relay", text="Update?",
-                                  by="operator")
+                                  by="auto-relay")
         assert len(entries) == 2
-        stored = store.rows[(S.CHAT_SET_ID, f"{MID}:relay")]
-        assert len(stored["entries"]) == 2
+        msg_rows = [k for (sid, k) in store.rows
+                    if sid == S.CHAT_SET_ID
+                    and k.startswith(f"{MID}:relay:")]
+        assert len(msg_rows) == 2              # one row per message
+        assert entries[0]["text"] == "What's going on?"   # oldest first
 
     def test_upsert_is_schema_gated(self, store):
         writes.upsert_item("o", MID, "relay", "sc",

@@ -99,9 +99,8 @@ class TestCompanionSets:
                          {"name": "Relay",
                           "bead_labels": ["pillar:relay-network"]})
         validate_payload(S.CHAT_SET_ID, S.SCHEMA_REVISION,
-                         {"entries": [{"by": "Jeremy",
-                                       "at": "2026-08-24T00:00:00Z",
-                                       "text": "hi"}]})
+                         {"by": "5ff2d4e2" * 8,
+                          "at": "2026-08-24T00:00:00Z", "text": "hi"})
 
     def test_key_segments_not_repeated_in_payload(self):
         with pytest.raises(SchemaValidationError):

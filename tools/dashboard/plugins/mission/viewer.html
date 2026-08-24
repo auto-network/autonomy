@@ -820,7 +820,7 @@
         var en = el("div","qe");
         var wh = el("div","qwho");
         var who = String(c.by || "").replace(/^terminal:/, "");
-        wh.appendChild(el("b",null,who));
+        wh.appendChild(el("b",null,whoName(who)));
         wh.appendChild(document.createTextNode(" \u00b7 "));
         wh.appendChild(provTap(agoText(new Date(c.at)), function (box) {
           box.appendChild(el("div",null,new Date(c.at).toLocaleString()));
@@ -893,7 +893,7 @@
     meta.appendChild(document.createTextNode(
       (isOpen ? "open" : "answered")
       + (isOpen && q.blocking ? " \u00b7 blocking" : "")
-      + " \u00b7 asked by " + (q.asked_by || "?") + " \u00b7 "));
+      + " \u00b7 asked by " + whoName(q.asked_by || "?") + " \u00b7 "));
     var d0 = when(q) || (q.asked_at ? new Date(q.asked_at) : null);
     if (d0){
       meta.appendChild(provTap(agoText(d0), function (box) {
@@ -935,7 +935,7 @@
       }
       var en = el("div","qe");
       var wh = el("div","qwho");
-      wh.appendChild(el("b",null,e2.by));
+      wh.appendChild(el("b",null,whoName(e2.by)));
       wh.appendChild(document.createTextNode(" \u00b7 "));
       wh.appendChild(provTap(agoText(new Date(e2.at)), function (box) {
         box.appendChild(el("div",null,new Date(e2.at).toLocaleString()));
@@ -1227,6 +1227,20 @@
     var bEl = document.getElementById("mc-beads");
     if (bEl) BEADS = JSON.parse(bEl.textContent);
   } catch (e) {}
+  var DIRECTORY = {};
+  try {
+    var dEl = document.getElementById("mc-directory");
+    if (dEl) DIRECTORY = JSON.parse(dEl.textContent) || {};
+  } catch (e) {}
+  // Attribution identities are stored raw (member persona pub keys,
+  // session names); presentation resolves HERE, so a rename re-labels
+  // history. Unknown member keys render truncated, never the full hex.
+  function whoName(by){
+    var d = DIRECTORY[by];
+    if (d && d.display_name) return d.display_name;
+    if (/^[0-9a-f]{16,}$/.test(String(by))) return String(by).slice(0, 8) + "\u2026";
+    return String(by || "?");
+  }
   var BEAD_MARK = {complete:"\u2713", running:"\u27F3",
                    specified:"\u25CB", defined:"\u25E6"};
   var GLYPH_CLS = {"\u25E6":"gx-dot", "\u25CB":"gx-ring"};
@@ -1838,7 +1852,7 @@
             return e2.type !== "progress"; }).length;
           var d4 = when(q) || (q.asked_at ? new Date(q.asked_at) : null);
           bx3.appendChild(el("div","m2",
-            "asked by " + (q.asked_by || "?")
+            "asked by " + whoName(q.asked_by || "?")
             + (d4 ? " \u00b7 " + agoText(d4) : "")
             + (replies ? " \u00b7 " + replies + " repl" + (replies>1?"ies":"y") : "")));
           row.appendChild(bx3);
@@ -2384,7 +2398,7 @@
         bx5.appendChild(el("div","t2", q.title));
         var d7 = when(q) || (q.asked_at ? new Date(q.asked_at) : null);
         bx5.appendChild(el("div","m2",
-          "asked by " + (q.asked_by || "?")
+          "asked by " + whoName(q.asked_by || "?")
           + (d7 ? " \u00b7 " + agoText(d7) : "")));
         row.appendChild(bx5);
         row.addEventListener("click", function () {
@@ -2442,7 +2456,7 @@
     function msgEl(m){
       var en = el("div","qe");
       var wh = el("div","qwho");
-      wh.appendChild(el("b",null,m.by));
+      wh.appendChild(el("b",null,whoName(m.by)));
       wh.appendChild(document.createTextNode(" \u00b7 " + agoText(new Date(m.at))));
       en.appendChild(wh);
       var tx = el("div","qtx"); mdInto(tx, m.text);

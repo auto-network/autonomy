@@ -155,15 +155,21 @@ def answer_question(org: str, mission_id: str, pillar_id: str, item_id: str,
 
 def add_chat(org: str, mission_id: str, pillar_id: str,
              *, text: str, by: str) -> list[dict]:
-    """Append one message to the pillar's chat log; returns the log."""
-    key = f"{mission_id}:{pillar_id}"
-    row = None
-    for m in _ops().read_set(CHAT_SET_ID, org=org or None, peers=[]):
-        if m.key == key and (row is None
-                             or (m.updated_at or "") >= (row.updated_at or "")):
-            row = m
-    entries = list((dict(row.payload) if row else {}).get("entries") or [])
-    entries.append({"by": by, "at": now_iso(), "text": text})
-    _ops().upsert_by_key(CHAT_SET_ID, SCHEMA_REVISION, key,
-                         {"entries": entries}, org=org or None)
-    return entries
+    """Append one message ROW; returns the pillar's log, oldest first.
+
+    One row per message (append-only): when the signed-settings
+    envelope lands, each message individually carries its writer's
+    signed membership identity — the merge across members' stores is
+    the substrate's, not ours.
+    """
+    import uuid as _uuid
+    entry = {"by": by, "at": now_iso(), "text": text}
+    key = f"{mission_id}:{pillar_id}:{_uuid.uuid4().hex}"
+    _ops().add_setting(CHAT_SET_ID, SCHEMA_REVISION, key, entry,
+                       org=org or None)
+    prefix = f"{mission_id}:{pillar_id}:"
+    log = [dict(m.payload) for m in
+           _ops().read_set(CHAT_SET_ID, org=org or None, peers=[])
+           if m.key.startswith(prefix)]
+    log.sort(key=lambda e: e.get("at") or "")
+    return log
