@@ -120,14 +120,22 @@ def test_chat_send_and_read(parser, monkeypatch, capsys):
 
 def test_coverage_reports_both_gaps(parser, monkeypatch, capsys):
     canned = dict(BASE)
+    # THREE tasks, TWO uncovered in the SAME pillar: pinned because
+    # sorted(uncovered) over (pid, dict) tuples crashed on the pid tie
+    # (dicts aren't orderable) — found live by the OSS Insights V2
+    # migration coordinator on the first real non-empty uncovered list.
+    canned[("GET", f"/api/mission/tasks/{MID}")] = {"tasks": {"relay": [
+        {"id": "auto-1", "state": "complete", "title": "Close codes"},
+        {"id": "auto-3", "state": "defined", "title": "Also uncovered"},
+        {"id": "auto-2", "state": "running", "title": "Tunnels"}]}}
     canned[("GET", f"/api/mission/items/{MID}")] = {"items": [
         {"surface_id": "relay", "item_id": "c", "kind": "checkpoint",
          "state": "pending", "title": "t",
          "refs": ["bead:auto-1", "bead:auto-ghost"]}]}
     _run(parser, ["mission", "coverage", MID], monkeypatch, canned)
     out = capsys.readouterr().out
-    assert "2 tasks, 1 criteria covering 2, 1 uncovered" in out
-    assert "auto-2" in out
+    assert "3 tasks, 1 criteria covering 2, 2 uncovered" in out
+    assert out.index("auto-2") < out.index("auto-3")   # sorted by id
     assert "auto-ghost" in out
 
 
