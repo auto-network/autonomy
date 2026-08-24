@@ -128,6 +128,55 @@ def test_get_setting_by_id(graph_db_env, example_schema, client):
     assert r.json()["id"] == sid
 
 
+def test_create_forwards_secured_policy_class_to_the_write_seam(
+    graph_db_env, client, monkeypatch,
+):
+    from tools.dashboard import server
+
+    captured = {}
+
+    def write_by_key(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return "setting-secured-1"
+
+    monkeypatch.setattr(server.graph_ops, "write_by_key", write_by_key)
+    monkeypatch.setattr(server.graph_ops, "take_shadowed_write", lambda *_: None)
+    response = client.post("/api/graph/setting", json={
+        "set_id": "autonomy.vault.secured",
+        "schema_revision": 1,
+        "key": "mac.ssh",
+        "payload": {"value": "fake-private-key"},
+        "vault_policy_class_id": "class-1",
+    })
+
+    assert response.status_code == 201
+    assert captured["kwargs"]["vault_policy_class_id"] == "class-1"
+
+
+def test_secured_create_failure_never_echoes_the_secret(
+    graph_db_env, client, monkeypatch,
+):
+    from tools.dashboard import server
+
+    def locked(*_args, **_kwargs):
+        raise server.VaultSealerNotReady("vault storage author is unavailable")
+
+    monkeypatch.setattr(server.graph_ops, "write_by_key", locked)
+    secret = "-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n"
+    response = client.post("/api/graph/setting", json={
+        "set_id": "autonomy.vault.secured",
+        "schema_revision": 1,
+        "key": "mac.ssh",
+        "payload": {"value": secret},
+        "vault_policy_class_id": "class-1",
+    })
+
+    assert response.status_code == 423
+    assert secret not in response.text
+    assert response.json() == {"error": "vault storage author is unavailable"}
+
+
 def test_get_setting_by_id_404(graph_db_env, example_schema, client):
     r = client.get("/api/graph/setting/00000000-0000-0000-0000-000000000000")
     assert r.status_code == 404

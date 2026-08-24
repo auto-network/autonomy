@@ -210,7 +210,6 @@ class VaultWorld:
             content_store=self.content_store,
             tier=tier,
             policy_class=self.policy_class if secured else None,
-            opener_seeds=self.opener_seeds if secured else None,
         )
         self.sync()
         return sealed.locator

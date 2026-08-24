@@ -414,7 +414,6 @@ def test_a_secured_setting_needs_the_human_factor_on_top_of_membership(
         content_store=store,
         tier=SECURED,
         policy_class=record,
-        opener_seeds=seeds,
     )
     reference = parse_locator(sealed.locator)
     assert reference["tier"] == SECURED
@@ -501,7 +500,6 @@ def test_a_secured_key_does_not_open_another_setting_of_the_same_class(world, st
         content_store=store,
         tier=SECURED,
         policy_class=record,
-        opener_seeds=seeds,
     )
     first = seal_revision(
         frontier=world.fold(), set_id="s.one", key="k", setting_id="r1",

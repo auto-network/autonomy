@@ -18,8 +18,7 @@ VIEW-STATE MAP (data entered → data displayed):
 
   enroll-password   enter: factor-id, password          show: {factor_id, public_key}
   create-class      enter: policy, factor-ids           show: {class_id, policy, factor_ids}
-  seal-setting      enter: name, class, genesis, policy,
-                           opener(id:password)           show: {setting_name, class_id, cek}
+  seal-setting      enter: name, class, genesis, policy  show: {setting_name, class_id, sealed}
   open-setting      enter: name, opener                 show: {setting_name, cek}
   enroll-into-class enter: class, opener, new factor    show: {class_id, wraps, added}
   revoke            enter: class, factor-id             show: {class_id, revoked, survivors}
@@ -75,10 +74,8 @@ def cmd_create_class(store: VaultStore, a) -> dict:
 
 
 def cmd_seal_setting(store: VaultStore, a) -> dict:
-    cek = service.seal_setting(
-        store, a.name, a.klass, a.genesis, a.policy, _openers(store, a.opener)
-    )
-    return {"setting_name": a.name, "class_id": a.klass, "cek": cek.hex()}
+    service.seal_setting(store, a.name, a.klass, a.genesis, a.policy)
+    return {"setting_name": a.name, "class_id": a.klass, "sealed": True}
 
 
 def cmd_open_setting(store: VaultStore, a) -> dict:
@@ -126,8 +123,8 @@ def cmd_demo(store: VaultStore, a) -> dict:
     _emit({"step": "create-class", **cmd_create_class(store, _ns(policy="password", factors="pw-1"))})
     class_id = store.db.execute("SELECT class_id FROM policy_classes").fetchone()[0]
 
-    s1 = service.seal_setting(store, "setting.a", class_id, genesis, "password", _openers(store, "pw-1:alpha"))
-    s2 = service.seal_setting(store, "setting.b", class_id, genesis, "password", _openers(store, "pw-1:alpha"))
+    s1 = service.seal_setting(store, "setting.a", class_id, genesis, "password")
+    s2 = service.seal_setting(store, "setting.b", class_id, genesis, "password")
     _emit({"step": "seal-two-settings", "class_id": class_id, "a": s1.hex()[:16], "b": s2.hex()[:16]})
 
     o1 = service.open_setting(store, "setting.a", _openers(store, "pw-1:alpha"))
@@ -180,7 +177,6 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--class", dest="klass", required=True)
     s.add_argument("--genesis", required=True)
     s.add_argument("--policy", default="password")
-    s.add_argument("--opener", required=True, help="factor_id:password[,...]")
     s.set_defaults(fn=cmd_seal_setting)
 
     o = sub.add_parser("open-setting")

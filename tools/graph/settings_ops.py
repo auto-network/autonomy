@@ -585,6 +585,7 @@ def _seal_vault_payload(
     payload: dict,
     tier: str,
     org: str | None,
+    policy_class_id: str | None = None,
 ) -> str:
     """The locator this row stores in place of *payload*.
 
@@ -602,7 +603,7 @@ def _seal_vault_payload(
             "The vault is locked and must be warmed by the operator "
             "(sign-in or warm client) before a secret can be written."
         )
-    locator = sealer(
+    sealer_args = dict(
         set_id=set_id,
         schema_revision=int(schema_revision),
         key=key,
@@ -611,6 +612,9 @@ def _seal_vault_payload(
         tier=tier,
         org=org,
     )
+    if policy_class_id is not None:
+        sealer_args["policy_class_id"] = policy_class_id
+    locator = sealer(**sealer_args)
     if not vault_storage_object.is_vault_locator(locator):
         raise VaultSealerMissing(
             f"the vault sealer returned {type(locator).__name__}, not a "
@@ -2619,6 +2623,7 @@ def add_setting(
     *,
     org: "str | None | _CallerOrgSentinel",
     state: str = "raw",
+    vault_policy_class_id: str | None = None,
 ) -> str:
     """Create a base Setting in org's DB.
 
@@ -2659,6 +2664,7 @@ def add_setting(
             payload=payload,
             tier=vault_tier,
             org=org,
+            policy_class_id=vault_policy_class_id,
         )
     now = _now_iso()
     expires_at = schemas.cache_expires_at(set_id, int(schema_revision), now)
@@ -3198,6 +3204,7 @@ def write_by_key(
     *,
     org: "str | None | _CallerOrgSentinel",
     state: str = "raw",
+    vault_policy_class_id: str | None = None,
 ) -> str:
     """Write a complete payload to ``key``, by whichever call the set allows.
 
@@ -3245,14 +3252,19 @@ def write_by_key(
     if append_only:
         return add_setting(
             set_id, schema_revision, key, payload, org=org, state=state,
+            vault_policy_class_id=vault_policy_class_id,
         )
 
     existing = _existing_base_id(set_id, int(schema_revision), key, org)
     if existing is None:
         return add_setting(
             set_id, schema_revision, key, payload, org=org, state=state,
+            vault_policy_class_id=vault_policy_class_id,
         )
-    return override_setting(existing, payload, org=org, state=state)
+    return override_setting(
+        existing, payload, org=org, state=state,
+        vault_policy_class_id=vault_policy_class_id,
+    )
 
 
 def override_setting(
@@ -3261,6 +3273,7 @@ def override_setting(
     *,
     org: "str | None | _CallerOrgSentinel",
     state: str = "raw",
+    vault_policy_class_id: str | None = None,
 ) -> str:
     """Create a Setting with ``supersedes=target_id`` and partial payload.
 
@@ -3356,6 +3369,7 @@ def override_setting(
                 payload=merged,
                 tier=vault_tier,
                 org=org,
+                policy_class_id=vault_policy_class_id,
             )
         now = _now_iso()
         expires_at = schemas.cache_expires_at(

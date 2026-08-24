@@ -113,6 +113,63 @@ def test_a_first_write_is_readable_after_it_mints(world):
     assert opened == secret
 
 
+def test_secured_write_uses_named_class_public_key_without_an_opener(world):
+    """Production sealing names a class; only the subsequent open gets a seed."""
+    from tools.vault import service
+    from tools.vault.key_holder import _scoped_db
+    from tools.vault.store import VaultStore
+    from tools.graph.schemas.vault_policy_class import VAULT_POLICY_CLASS_SET_ID
+
+    class_db = _scoped_db(VAULT_POLICY_CLASS_SET_ID, "acme")
+    with VaultStore(class_db) as classes:
+        service.enroll_password_factor(classes, "pw-1", "fake-password")
+        class_id = service.create_policy_class(
+            classes, "password", ["pw-1"], created_at="t0"
+        )
+        record = classes.get_class(class_id)
+        seed = service.password_seed(classes, "pw-1", "fake-password")
+
+    cache = VaultKeyCache()
+    seal = build_vault_sealer(
+        cache, lambda: world["agent"], world["ledger_provider"],
+    )
+    secret = {"value": "-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n-----END OPENSSH PRIVATE KEY-----\n"}
+    locator = seal(
+        set_id="autonomy.vault.secured", schema_revision=1,
+        key="mac.ssh", setting_id="s-secured", payload=secret,
+        tier="secured", org="acme", policy_class_id=class_id,
+    )
+
+    control = build_key_holder(cache)(set_id="autonomy.vault.secured", org="acme")
+    from tools.vault.errors import ClassOpenError
+
+    with pytest.raises(ClassOpenError):
+        open_revision(
+            locator, holdings=control.holdings,
+            content_store=control.content_store,
+            policy_class=record, opener_seeds={},
+        )
+    assert open_revision(
+        locator, holdings=control.holdings,
+        content_store=control.content_store,
+        policy_class=record, opener_seeds={"pw-1": seed},
+    ) == secret
+
+
+def test_secured_write_without_an_explicit_policy_class_fails_closed(world):
+    from tools.vault.key_sealer import VaultSealerNotReady
+
+    seal = build_vault_sealer(
+        VaultKeyCache(), lambda: world["agent"], world["ledger_provider"],
+    )
+    with pytest.raises(VaultSealerNotReady, match="must name the policy class"):
+        seal(
+            set_id="autonomy.vault.secured", schema_revision=1,
+            key="mac.ssh", setting_id="s-secured", payload={"value": "fake"},
+            tier="secured", org="acme",
+        )
+
+
 def test_the_minted_descriptor_is_durable(world):
     """The descriptor must reach DISK, not just the caller's holdings.
 

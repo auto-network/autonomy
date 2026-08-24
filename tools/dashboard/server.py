@@ -151,6 +151,8 @@ from tools.dashboard.tmux_send import (
     tmux_send_sync,
 )
 from tools.graph import ops as graph_ops
+from tools.graph.settings_ops import VaultSealerMissing
+from tools.vault.key_sealer import VaultSealerNotReady
 
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -15927,6 +15929,7 @@ async def api_graph_setting_create(request):
             body["payload"],
             state=body.get("state", "raw"),
             org=org or graph_ops.CALLER_ORG,
+            vault_policy_class_id=body.get("vault_policy_class_id"),
         )
     except SchemaValidationError as e:
         return JSONResponse(
@@ -15935,6 +15938,11 @@ async def api_graph_setting_create(request):
         )
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
+    except (VaultSealerMissing, VaultSealerNotReady) as e:
+        # These failures occur before the Setting row is written. Return only
+        # the readiness reason; the submitted plaintext must never be echoed
+        # into an HTTP error body or log-friendly exception envelope.
+        return JSONResponse({"error": str(e)}, status_code=423)
     # setting.changed fires from settings_ops.add_setting via the
     # function-level emit hook — see _settings_emit_hook.
     #
@@ -15968,6 +15976,7 @@ async def api_graph_setting_override(request):
         sid = graph_ops.override_setting(
             target_id, body["payload"], state=body.get("state", "raw"),
             org=org or graph_ops.CALLER_ORG,
+            vault_policy_class_id=body.get("vault_policy_class_id"),
         )
     except LookupError as e:
         return JSONResponse({"error": str(e)}, status_code=404)
@@ -15978,6 +15987,8 @@ async def api_graph_setting_override(request):
         )
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
+    except (VaultSealerMissing, VaultSealerNotReady) as e:
+        return JSONResponse({"error": str(e)}, status_code=423)
     return JSONResponse({"id": sid}, status_code=201)
 
 

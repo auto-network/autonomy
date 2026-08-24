@@ -134,7 +134,7 @@ async def seal(request: Request):
         with _store() as store:
             service.seal_setting(
                 store, request.path_params["name"], body["class_id"], body["genesis_id"],
-                body["required_policy"], _openers(body),
+                body["required_policy"],
             )
         # The CEK is an internal cryptographic intermediate, never a transport
         # result. This legacy low-level route records the wrap only; the real
