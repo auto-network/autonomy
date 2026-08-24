@@ -41,9 +41,12 @@
     .msn-win button{background:none;border:0;padding:2px 0 3px;cursor:pointer;
       font:inherit;font-size:.68rem;color:var(--ink3)}
     .msn-win button.on{color:var(--ink);box-shadow:inset 0 -2px 0 var(--line2)}
+    /* no overflow:hidden — the lifecycle menu must overhang the card
+       (clipped, it rendered as an empty box); the chart clips itself
+       via border-radius:inherit instead */
     .msn-row{background:var(--card);border:1px solid var(--line);
       border-radius:10px;padding:12px 14px 11px;margin:0 0 10px;
-      position:relative;overflow:hidden;min-height:106px;
+      position:relative;min-height:106px;
       display:flex;flex-direction:column;justify-content:space-between}
     .msn-row.done{opacity:.55}
     .msn-row>*{position:relative;z-index:1}
@@ -54,12 +57,13 @@
        ratio beats inset:0 and sizes it width/ratio tall — the chart
        escaped its card and rendered clipped until this was pinned */
     .msn-spark{position:absolute;inset:0;width:100%;height:100%;
-      z-index:0;pointer-events:none}
+      z-index:0;pointer-events:none;border-radius:inherit}
     .msn-name{color:var(--ink);font-weight:650;line-height:1.25;
       white-space:nowrap;overflow:hidden;cursor:pointer;
       text-shadow:0 1px 5px rgba(0,0,0,.85);align-self:flex-start;
       max-width:100%}
     .msn-name:active{opacity:.6}
+    .msn-name{padding-right:84px}
     .msn-pl{display:flex;flex-direction:column;gap:3px;margin:7px 0 8px;
       align-self:flex-start;max-width:62%}
     .msn-pl .plc{display:inline-flex;align-items:center;gap:6px;
@@ -94,7 +98,7 @@
     .msn-pop.dim .pt b{color:var(--ink)}
     .msn-pop .go{display:inline-block;background:none;border:0;padding:5px 0 0;
       font:inherit;font-size:.7rem;color:var(--accent);cursor:pointer}
-    .msn-life{flex:none;margin-left:auto;position:relative}
+    .msn-life{position:absolute;top:9px;right:12px;z-index:3}
     .msn-life .cur{background:none;border:0;padding:2px 0 3px;cursor:pointer;
       font:inherit;font-size:.66rem;text-transform:uppercase;
       letter-spacing:.05em;color:var(--ink3);display:inline-flex;gap:4px;
@@ -253,6 +257,24 @@
           <svg class="msn-spark" aria-label="activity in the window"
                x-effect="drawSpark($el, m, win.secs, sparkTick, alloc)"></svg>
 
+          <!-- lifecycle control pinned to the card's top-right, its
+               menu free to overhang the card (operator ruling) -->
+          <span class="msn-life" @click.stop>
+            <button class="cur" @click="lifeTapCur(m)">
+              <span x-text="m.status || 'active'"></span>
+              <span class="caret">&#9662;</span>
+            </button>
+            <template x-if="lifeOpen === m.mission_id">
+              <div class="msn-lifemenu">
+                <template x-for="st in ['active','paused','complete']"
+                          :key="st">
+                  <button :class="m.status === st ? 'on' : ''"
+                          @click="lifePick(m, st)" x-text="st"></button>
+                </template>
+              </div>
+            </template>
+          </span>
+
           <div class="msn-name" x-init="fitName($el)" x-text="m.name"
                @click="open(m)"></div>
 
@@ -283,21 +305,6 @@
                 </template>
               </span>
             </template>
-            <span class="msn-life" @click.stop>
-              <button class="cur" @click="lifeTapCur(m)">
-                <span x-text="m.status || 'active'"></span>
-                <span class="caret">&#9662;</span>
-              </button>
-              <template x-if="lifeOpen === m.mission_id">
-                <div class="msn-lifemenu">
-                  <template x-for="st in ['active','paused','complete']"
-                            :key="st">
-                    <button :class="m.status === st ? 'on' : ''"
-                            @click="lifePick(m, st)" x-text="st"></button>
-                  </template>
-                </div>
-              </template>
-            </span>
           </div>
         </div>
       </template>
