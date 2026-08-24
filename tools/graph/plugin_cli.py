@@ -91,12 +91,59 @@ def _is_enabled(plugin: dict, payloads: dict[str, dict]) -> bool:
     return True
 
 
+_HTTP_CACHE = Path("/tmp/.graph-plugin-cli-enabled.json")
+_HTTP_CACHE_TTL_S = 300
+
+
+def _http_enabled_ids() -> dict[str, dict] | None:
+    """Container fallback: the dashboard's enabled-plugin list.
+
+    Sessions hold no org database, so the Setting read below fails
+    inside containers; ``GET /api/plugins`` is the same authority the
+    sidebar renders from. Cached briefly so every ``graph`` invocation
+    doesn't pay an HTTP round trip — enablement flips reach containers
+    within the TTL (or immediately after deleting the cache file).
+    """
+    import json as _json
+    import time
+    try:
+        st = _HTTP_CACHE.stat()
+        if time.time() - st.st_mtime < _HTTP_CACHE_TTL_S:
+            return _json.loads(_HTTP_CACHE.read_text())
+    except OSError:
+        pass
+    try:
+        import ssl
+        import urllib.request
+        from tools.graph.cli import _resolve_crosstalk_token
+        base = os.environ.get("GRAPH_API", "https://localhost:8080")
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        req = urllib.request.Request(
+            base + "/api/plugins",
+            headers={"Authorization": "Bearer " + _resolve_crosstalk_token()})
+        data = _json.loads(urllib.request.urlopen(
+            req, timeout=10, context=ctx).read())
+        out = {p["id"]: {"enabled": True} for p in data.get("plugins", [])}
+        try:
+            _HTTP_CACHE.write_text(_json.dumps(out))
+        except OSError:
+            pass
+        return out
+    except Exception:
+        return None
+
+
 def _read_payloads(org: str | None) -> dict[str, dict]:
     try:
         from tools.graph import ops as graph_ops
         members = graph_ops.read_set(PLUGIN_SET_ID, org=org)
         return {m.key: dict(m.payload) for m in members}
     except Exception:
+        via_http = _http_enabled_ids()
+        if via_http is not None:
+            return via_http
         return {}
 
 

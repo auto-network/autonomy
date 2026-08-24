@@ -149,6 +149,25 @@ def test_broken_plugin_and_collision_are_contained(tmp_path, sub, capsys):
     assert "aboom" in err and "cclash" in err
 
 
+def test_http_fallback_when_org_db_absent(monkeypatch):
+    """Containers hold no org database: the local Setting read raises and
+    _read_payloads falls back to the dashboard's enabled-plugin list."""
+    from tools.graph import ops as graph_ops
+    from tools.graph import plugin_cli
+
+    def raising_read_set(set_id, *, org=None, peers=None):
+        raise RuntimeError("no org db in container")
+
+    monkeypatch.setattr(graph_ops, "read_set", raising_read_set)
+    monkeypatch.setattr(plugin_cli, "_http_enabled_ids",
+                        lambda: {"fbplug": {"enabled": True}})
+    assert plugin_cli._read_payloads(None) == {"fbplug": {"enabled": True}}
+
+    # HTTP also unreachable -> empty map, never an exception
+    monkeypatch.setattr(plugin_cli, "_http_enabled_ids", lambda: None)
+    assert plugin_cli._read_payloads(None) == {}
+
+
 def test_two_plugins_mount_independently(tmp_path, sub):
     _toy_module(tmp_path, "one_cli", """
         def register(sub):
