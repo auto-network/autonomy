@@ -35,12 +35,15 @@ from .registry import (
     append_only_log,
     singleton,
     keyed_per_entity,
+    org_writeback_namespace,
     cache,
     # Which database a Setting lives in. Orthogonal to cardinality above:
     # how many rows there are, and whose database they are in, are
     # different questions and neither implies the other.
     home,
     declared_home,
+    declared_org_writeback_key_strategy,
+    derive_org_writeback_key,
     readiness_gate,
     readiness_gated_by,
     publication_band,
@@ -120,6 +123,8 @@ __all__ = [
     "normalize_remediation_ref",
     "home",
     "declared_home",
+    "declared_org_writeback_key_strategy",
+    "derive_org_writeback_key",
     "readiness_gate",
     "readiness_gated_by",
     "publication_band",
@@ -154,6 +159,7 @@ __all__ = [
     "append_only_log",
     "singleton",
     "keyed_per_entity",
+    "org_writeback_namespace",
     "cache",
     "action",
     "on_kind",

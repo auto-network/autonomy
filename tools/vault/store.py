@@ -194,6 +194,39 @@ class VaultStore:
             raise PolicyClassError(f"no policy class {class_id!r}")
         return PolicyClassRecord.from_dict(json.loads(row[0]))
 
+    def put_root_class_once(
+        self, record: PolicyClassRecord, anchor_id: str,
+    ) -> PolicyClassRecord:
+        """Atomically reuse or insert the sole root class for ``anchor_id``.
+
+        Two browser tabs can finish the same login bootstrap concurrently.
+        The check and insert therefore share one IMMEDIATE transaction; an
+        application-level check before ``put_class`` would still permit two
+        independently keyed classes to land between those operations.
+        """
+        wire = canonical_json(record.to_dict()).decode("ascii")
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            rows = self.db.execute("SELECT wire FROM policy_classes").fetchall()
+            for (stored_wire,) in rows:
+                stored = PolicyClassRecord.from_dict(json.loads(stored_wire))
+                if (
+                    stored.governance
+                    and stored.governance.get("form") == "root-reachable"
+                    and stored.governance.get("anchor_id") == anchor_id
+                ):
+                    self.db.commit()
+                    return stored
+            self.db.execute(
+                "INSERT INTO policy_classes(class_id, wire) VALUES (?, ?)",
+                (record.class_id, wire),
+            )
+            self.db.commit()
+            return record
+        except BaseException:
+            self.db.rollback()
+            raise
+
     # -- factor material -----------------------------------------------------
 
     def put_password_factor(self, factor_id: str, public_key: str, armor: str) -> None:

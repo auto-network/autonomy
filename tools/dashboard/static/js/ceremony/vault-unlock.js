@@ -29,9 +29,13 @@
  *     different signatures.
  */
 
-import { canonicalJson } from './primitives.js';
+import {
+  canonicalJson,
+  importEd25519RootSigningKey,
+} from './primitives.js';
 import { buildEvent, derivePersona, signEvent } from './ledger-event.js';
 import { buildPersonaKemCredential, deriveKemSeed } from './founding.js';
+import { createRootAnchorEnvelope } from './root-anchor.js';
 
 /** Mirrors ``tools.network.ledger.events.DELEGATE_CONSENT_DOMAIN``. */
 const DELEGATE_CONSENT_DOMAIN = 'autonomy.ledger.delegate-consent.v2\n';
@@ -40,6 +44,8 @@ const DELEGATE_CONSENT_DOMAIN = 'autonomy.ledger.delegate-consent.v2\n';
 export const DEFAULT_DELEGATE_TTL_MS = 12 * 60 * 60 * 1000;
 
 const GRANT_NONCE_BYTES = 32;
+const PERSONAL_ROOT_ANCHOR_ID = 'personal-root-default';
+const PERSONAL_ROOT_CLASS_NAME = 'Personal root vault';
 
 const textEncoder = new TextEncoder();
 const webCrypto = globalThis.crypto;
@@ -174,6 +180,107 @@ async function body(response) {
   try { return await response.json(); } catch { return {}; }
 }
 
+function rootReachableClass(inventory, anchorId = null) {
+  return (inventory?.classes || []).find((record) => (
+    record?.governance?.form === 'root-reachable'
+    && (!anchorId || record.governance.anchor_id === anchorId)
+  )) || null;
+}
+
+async function rootAnchorInventory(fetchImpl) {
+  const response = await fetchImpl('/api/identity/vault-anchors', {
+    headers: { Accept: 'application/json' },
+    credentials: 'same-origin',
+  });
+  return { response, inventory: await body(response) };
+}
+
+/**
+ * Ensure the one stable personal-root recipient exists as part of the login
+ * that has ALREADY opened the root. This is bootstrap, not a second ceremony:
+ * no setting name or value participates, and repeated/concurrent logins reuse
+ * the same anchor and class.
+ */
+export async function ensurePersonalRootVault({
+  personalRootSeed, fetchImpl = fetch, now = Date.now(),
+}) {
+  let { response, inventory } = await rootAnchorInventory(fetchImpl);
+  if (!response.ok) {
+    return { ready: false, created: false, reason: `anchor-inventory-${response.status}` };
+  }
+  if (rootReachableClass(inventory)) {
+    return { ready: true, created: false, reason: null };
+  }
+
+  let anchor = (inventory.anchors || []).find(
+    (item) => item?.anchor_id === PERSONAL_ROOT_ANCHOR_ID,
+  ) || (inventory.anchors || [])[0] || null;
+
+  if (!anchor) {
+    const personalResponse = await fetchImpl('/api/identity/personal', {
+      headers: { Accept: 'application/json' },
+      credentials: 'same-origin',
+    });
+    const personal = await body(personalResponse);
+    if (!personalResponse.ok) {
+      return { ready: false, created: false, reason: `personal-root-${personalResponse.status}` };
+    }
+    if (typeof personal.root_pub !== 'string' || !/^[0-9a-f]{64}$/.test(personal.root_pub)) {
+      return { ready: false, created: false, reason: 'personal-root-public-key' };
+    }
+
+    const signingKey = await importEd25519RootSigningKey(personalRootSeed);
+    const candidate = await createRootAnchorEnvelope({
+      seed: personalRootSeed,
+      signingKey,
+      rootPub: personal.root_pub,
+    }, {
+      anchorId: PERSONAL_ROOT_ANCHOR_ID,
+      displayName: 'Personal root vault access',
+      createdAt: new Date(now).toISOString(),
+    });
+    const enrolled = await fetchImpl('/api/identity/vault-anchors', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ anchor: candidate }),
+    });
+    if (enrolled.ok) {
+      anchor = (await body(enrolled)).anchor;
+    } else {
+      // Another login tab may have won the insert race. Re-read and reuse its
+      // signed record; never overwrite a stable anchor with our candidate.
+      ({ response, inventory } = await rootAnchorInventory(fetchImpl));
+      if (!response.ok) {
+        return { ready: false, created: false, reason: `anchor-race-${response.status}` };
+      }
+      anchor = (inventory.anchors || []).find(
+        (item) => item?.anchor_id === PERSONAL_ROOT_ANCHOR_ID,
+      ) || null;
+      if (!anchor) {
+        return { ready: false, created: false, reason: `anchor-enroll-${enrolled.status}` };
+      }
+    }
+  }
+
+  const minted = await fetchImpl(
+    `/api/identity/vault-anchors/${encodeURIComponent(anchor.anchor_id)}/classes`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ display_name: PERSONAL_ROOT_CLASS_NAME }),
+    },
+  );
+  if (!minted.ok) {
+    ({ response, inventory } = await rootAnchorInventory(fetchImpl));
+    if (!response.ok || !rootReachableClass(inventory, anchor.anchor_id)) {
+      return { ready: false, created: false, reason: `root-class-${minted.status}` };
+    }
+  }
+  return { ready: true, created: true, reason: null };
+}
+
 /**
  * Bring the vault up for this unlock. Call it AFTER the session exists.
  *
@@ -184,6 +291,11 @@ async function body(response) {
 export async function wakeVault({
   personalRootSeed, generationKeys = {}, fetchImpl = fetch, now = Date.now(),
 }) {
+  const personalVault = await ensurePersonalRootVault({
+    personalRootSeed, fetchImpl, now,
+  });
+  if (!personalVault.ready) return personalVault;
+
   const heads = await fetchImpl(
     '/api/network/ledger/heads?org=personal',
     { headers: personalHeaders(), credentials: 'same-origin' },

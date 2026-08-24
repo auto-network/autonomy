@@ -2314,6 +2314,7 @@
                 ['password', 'passkey', 'both'].includes(method));
             if ((!legacyCeremony && !rootCeremony) ||
                 !setting.set_id || !setting.key || !requester.session ||
+                !requester.organization ||
                 !requester.workspace || req.operation !== 'read' ||
                 req.release_mode !== 'delivered') {
               throw new Error('vault open request has no complete server-frozen ceremony');
@@ -2342,6 +2343,7 @@
               bodyMarkdown: [
                 'Setting: ' + setting.set_id + ' / ' + setting.key,
                 'Operation: ' + req.operation,
+                'Requesting organization: ' + requester.organization,
                 'Requesting session: ' + requester.session,
                 'Workspace: ' + requester.workspace,
                 'Target: ' + req.target,

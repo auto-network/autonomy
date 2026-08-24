@@ -524,6 +524,29 @@ def cmd_set_read(args) -> None:
         return
 
     client = get_client()
+    # An organization-scoped caller cannot enumerate or directly read a
+    # personal-homed set.  For a schema that explicitly declares the derived
+    # org namespace, go straight to the narrow approval/release seam: the
+    # server turns this suffix into ``<bearer-org>:<suffix>`` and returns only
+    # a ramfs receipt after the operator ceremony.
+    from tools.graph import schemas
+    if (
+        schemas.declared_vault_tier(set_id) == "secured"
+        and schemas.declared_home(set_id) == "personal"
+        and schemas.declared_org_writeback_key_strategy(set_id)
+        == "org_slug:credential_name"
+    ):
+        opener = getattr(client, "request_vault_open", None)
+        if opener is None:
+            print(
+                "Error: secured Settings require dashboard approval; "
+                "retry without --force-host",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        receipt = opener(set_id, key, org=org)
+        print(receipt["path"])
+        return
     members = client.read_set(set_id, org=org)
     for m in members.members:
         if m.key == key:
@@ -925,7 +948,7 @@ def _read_secret_bytes(args) -> bytearray:
 
 
 def cmd_set_seal(args) -> None:
-    """Write one raw value to the secured vault without argv/env exposure."""
+    """Write one personal raw value without argv/env or cross-store access."""
     from .schemas.vault_credential import (
         VAULT_CREDENTIAL_REVISION,
         VAULT_SECURED_SET_ID,
@@ -946,24 +969,48 @@ def cmd_set_seal(args) -> None:
                 file=sys.stderr,
             )
             sys.exit(1)
-        sid = get_client().add_setting(
-            VAULT_SECURED_SET_ID,
-            VAULT_CREDENTIAL_REVISION,
-            args.key,
-            payload,
-            state="raw",
-            org=_org(args),
-            vault_policy_class_id=args.policy_class,
-        )
+        client = get_client()
+        if hasattr(client, "seal_personal_setting"):
+            if getattr(args, "org", None) not in (None, "personal"):
+                print(
+                    "Error: graph set seal currently targets the personal "
+                    "credential store; organization-held vault schemas are "
+                    "not available yet",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            sid = client.seal_personal_setting(
+                args.key,
+                payload["value"],
+                policy_class_id=args.policy_class,
+            )
+        else:
+            # Disaster-recovery direct mode has no HTTP routing layer. Keep
+            # the same Settings primitive while the caller explicitly owns
+            # local store selection.
+            sid = client.add_setting(
+                VAULT_SECURED_SET_ID,
+                VAULT_CREDENTIAL_REVISION,
+                args.key,
+                payload,
+                state="raw",
+                org=_org(args),
+                vault_policy_class_id=args.policy_class,
+            )
     finally:
         payload["value"] = ""
         secret[:] = b"\x00" * len(secret)
     if not isinstance(sid, str) or not sid:
         print("Error: secured Setting write returned no identifier", file=sys.stderr)
         sys.exit(1)
+    report = getattr(client, "last_write_report", None)
+    stored_key = report.get("key") if isinstance(report, dict) else args.key
+    stored_policy = (
+        report.get("policy_class_id") if isinstance(report, dict) else None
+    ) or args.policy_class
     print(
-        f"  ✓ Secured Setting: {sid[:11]}  key={args.key}  "
-        f"policy-class={args.policy_class}"
+        f"  ✓ Secured Setting: {sid[:11]}  key={stored_key}  "
+        f"policy-class={stored_policy}"
     )
 
 
@@ -1519,7 +1566,7 @@ def attach_set_subparser(sub) -> None:
     # seal — raw secret input, deliberately unavailable through argv/env.
     p_seal = set_sub.add_parser(
         "seal",
-        help="Store a raw value in the human-gated secured vault",
+        help="Store a raw value in the personal human-gated secured vault",
         description=(
             "Read a UTF-8 secret from a file descriptor, file, hidden prompt, "
             "or stdin and seal it as autonomy.vault.secured#1. The secret is "
@@ -1528,8 +1575,12 @@ def attach_set_subparser(sub) -> None:
     )
     p_seal.add_argument("--key", required=True, help="Stable credential name")
     p_seal.add_argument(
-        "--policy-class", required=True,
-        help="Policy class whose public sealing key receives this value",
+        "--policy-class",
+        default="personal-root",
+        help=(
+            "Policy class whose public sealing key receives this value "
+            "(default: personal-root)"
+        ),
     )
     secret_source = p_seal.add_mutually_exclusive_group()
     secret_source.add_argument(
@@ -1544,7 +1595,14 @@ def attach_set_subparser(sub) -> None:
         "--prompt", dest="secret_prompt", action="store_true",
         help="Read one hidden line interactively (not suitable for multiline keys)",
     )
-    _add_org_arg(p_seal)
+    p_seal.add_argument(
+        "--org",
+        choices=("personal",),
+        help=(
+            "Explicitly name the personal destination (the default). "
+            "Organization-held vault schemas are not available yet."
+        ),
+    )
     p_seal.set_defaults(func=cmd_set_seal)
 
     # add

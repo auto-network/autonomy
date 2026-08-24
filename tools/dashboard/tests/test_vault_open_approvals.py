@@ -91,6 +91,12 @@ def vault_open_env(tmp_path, monkeypatch):
     )
 
     def principal(request):
+        if request.headers.get("x-test-other-org") == "1":
+            return api_auth.ApiPrincipal(
+                api_auth.ApiPrincipalKind.ORG_SESSION,
+                subject="auto-real",
+                org="other-org",
+            )
         if request.headers.get("x-test-stranger") == "1":
             return api_auth.ApiPrincipal(
                 api_auth.ApiPrincipalKind.ORG_SESSION,
@@ -133,7 +139,7 @@ def test_fake_ssh_key_is_sealed_approved_delivered_and_expired_without_leak(
     setting_id = ops.add_setting(
         VAULT_SECURED_SET_ID,
         VAULT_CREDENTIAL_REVISION,
-        "test.disposable",
+        "autonomy:test.disposable",
         {"value": secret},
         org=ops.CALLER_ORG,
     )
@@ -163,10 +169,15 @@ def test_fake_ssh_key_is_sealed_approved_delivered_and_expired_without_leak(
         assert row["session"] == "auto-real"
         assert row["request"]["requester"] == {
             "session": "auto-real",
+            "organization": "autonomy",
             "workspace": "autonomy-codex",
             "label": "Vault test requester",
         }
         assert row["request"]["setting"]["id"] == setting_id
+        assert row["request"]["setting"]["key"] == "autonomy:test.disposable"
+        assert row["request"]["target"] == (
+            f"{VAULT_SECURED_SET_ID}/autonomy:test.disposable"
+        )
         assert secret not in json.dumps(row)
 
         refused = client.get(f"/api/approvals/{rid}")
@@ -185,6 +196,32 @@ def test_fake_ssh_key_is_sealed_approved_delivered_and_expired_without_leak(
             f"/api/approvals/{rid}?wait=0",
             headers={"x-test-stranger": "1"},
         ).status_code == 403
+
+        # The caller supplies a suffix only.  Prefix injection is rejected,
+        # and the same suffix under another bearer org cannot cross into the
+        # Autonomy row.
+        prefixed = client.post("/api/approvals", json={
+            "kind": "vault_open",
+            "request": {
+                "set_id": VAULT_SECURED_SET_ID,
+                "key": "other-org:test.disposable",
+            },
+        })
+        assert prefixed.status_code == 400
+        assert "unprefixed credential name" in prefixed.text
+        other_org = client.post(
+            "/api/approvals",
+            headers={"x-test-other-org": "1"},
+            json={
+                "kind": "vault_open",
+                "request": {
+                    "set_id": VAULT_SECURED_SET_ID,
+                    "key": "test.disposable",
+                },
+            },
+        )
+        assert other_org.status_code == 400
+        assert "other-org:test.disposable" in other_org.text
 
         # Neither the requesting bearer nor a malformed decline can smuggle
         # opener material into the durable approval result.
@@ -293,7 +330,7 @@ def test_root_reachable_fake_ssh_key_uses_personal_root_anchor(vault_open_env):
     ops.add_setting(
         VAULT_SECURED_SET_ID,
         VAULT_CREDENTIAL_REVISION,
-        "test.root-reachable-ssh",
+        "autonomy:test.root-reachable-ssh",
         {"value": secret},
         org=ops.CALLER_ORG,
     )
@@ -352,7 +389,7 @@ def test_vault_open_refuses_setting_drift(vault_open_env):
     setting_id = ops.add_setting(
         VAULT_SECURED_SET_ID,
         VAULT_CREDENTIAL_REVISION,
-        "test.drift",
+        "autonomy:test.drift",
         {"value": "first"},
         org=ops.CALLER_ORG,
     )
@@ -395,7 +432,7 @@ def test_vault_open_uses_the_generation_named_by_an_older_setting(vault_open_env
     ops.add_setting(
         VAULT_SECURED_SET_ID,
         VAULT_CREDENTIAL_REVISION,
-        "test.older-generation",
+        "autonomy:test.older-generation",
         {"value": "sealed-before-revocation"},
         org=ops.CALLER_ORG,
     )

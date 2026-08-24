@@ -9,12 +9,13 @@ ephemeral opener seeds when an operation needs to open a class.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import logging
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from tools.dashboard.api_auth import require_global_api_authority
+from tools.dashboard import api_auth
 from tools.vault import service
 from tools.vault.errors import VaultError
 from tools.vault.store import VaultStore
@@ -24,6 +25,7 @@ from tools.vault.root_anchor import RootAnchorRecord
 from tools.network.idkit.armor import ArmorError
 from tools.dashboard.identity_routes import _personal_member
 from tools.graph import settings_ops
+from tools.graph.schemas import registry as schema_registry
 from tools.graph.schemas.registry import SchemaValidationError
 from tools.graph.schemas.vault_credential import (
     VAULT_CREDENTIAL_REVISION,
@@ -31,6 +33,7 @@ from tools.graph.schemas.vault_credential import (
 )
 
 _HOME_SET = "autonomy.identity.personal"
+logger = logging.getLogger(__name__)
 
 
 def _store():
@@ -42,7 +45,7 @@ def _now() -> str:
 
 
 def _guard(request):
-    return require_global_api_authority(request)
+    return api_auth.require_global_api_authority(request)
 
 
 async def factors(request: Request):
@@ -121,27 +124,33 @@ async def create_root_class(request: Request):
             anchor = store.get_root_anchor(request.path_params["anchor_id"])
             if anchor.root_pub != _personal_root_pub():
                 raise VaultError("root anchor belongs to a different personal root")
-            class_id = service.create_root_policy_class(
+            before = set(store.class_ids())
+            class_id = service.ensure_root_policy_class(
                 store,
                 anchor.anchor_id,
                 display_name=display_name.strip(),
                 created_at=_now(),
             )
             record = store.get_class(class_id)
-        return JSONResponse({"policy_class": record.to_dict()}, status_code=201)
+        return JSONResponse(
+            {"policy_class": record.to_dict()},
+            status_code=200 if class_id in before else 201,
+        )
     except (KeyError, TypeError, ValueError, VaultError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
 
 async def seal_personal_setting(request: Request):
-    """Route one browser-submitted secret into the personal secured store.
+    """Route one submitted secret into the personal secured store.
 
-    This is a trusted application routing seam, not a vault write ACL.  The
-    operator cookie selects the personal application and this handler pins the
-    destination to ``org=None``; an organization bearer cannot use it and the
-    generic Settings API is not widened across stores.
+    This is the narrow W2 application-routing seam, not a vault write ACL.
+    An authenticated session bearer is accepted so ``graph set seal`` can
+    submit personal-destined material without widening the generic Settings
+    API across stores. The bearer is attribution only: this handler fixes the
+    schema, publication state, and personal destination, then public-key seals
+    immediately. Operator-cookie calls use the identical seam.
     """
-    if (denied := _guard(request)) is not None:
+    if (denied := api_auth.require_authenticated_api_caller(request)) is not None:
         return denied
     try:
         body = await request.json()
@@ -158,7 +167,69 @@ async def seal_personal_setting(request: Request):
             raise VaultError("credential value must be a non-empty string")
         if not isinstance(class_id, str) or not class_id:
             raise VaultError("policy_class_id must be a non-empty string")
+        principal = api_auth.principal_from_request(request)
+        if principal.kind in {
+            api_auth.ApiPrincipalKind.OPERATOR_COOKIE,
+            api_auth.ApiPrincipalKind.LOCAL_SESSION,
+        } or (
+            principal.kind is api_auth.ApiPrincipalKind.ORG_SESSION
+            and principal.org == "personal"
+        ):
+            routed_key = key.strip()
+        elif principal.kind is api_auth.ApiPrincipalKind.ORG_SESSION:
+            if not principal.org:
+                return JSONResponse(
+                    {"error": "organization session has no trusted organization"},
+                    status_code=403,
+                )
+            if (
+                schema_registry.declared_home(VAULT_SECURED_SET_ID) != "personal"
+                or schema_registry.declared_org_writeback_key_strategy(
+                    VAULT_SECURED_SET_ID
+                )
+                != "org_slug:credential_name"
+            ):
+                logger.warning(
+                    "personal_vault_write_refused caller=%s caller_org=%s "
+                    "reason=set-not-org-keyed set_id=%s",
+                    principal.subject,
+                    principal.org,
+                    VAULT_SECURED_SET_ID,
+                )
+                return JSONResponse({
+                    "error": (
+                        "this personal-homed secured set does not declare an "
+                        "organization-keyed writeback slot"
+                    ),
+                }, status_code=403)
+            # The token's stamped organization is the ONLY prefix source on a
+            # cross-org writeback. The request supplies only the suffix.
+            routed_key = schema_registry.derive_org_writeback_key(
+                VAULT_SECURED_SET_ID, principal.org, key.strip(),
+            )
+        else:
+            return JSONResponse(
+                {"error": "a session or operator principal is required"},
+                status_code=403,
+            )
         with _store() as store:
+            if class_id == "personal-root":
+                root_pub = _personal_root_pub()
+                candidates = [
+                    record
+                    for record in (store.get_class(i) for i in store.class_ids())
+                    if record.governance
+                    and record.governance.get("form") == "root-reachable"
+                    and store.get_root_anchor(
+                        record.governance["anchor_id"]
+                    ).root_pub == root_pub
+                ]
+                if len(candidates) != 1:
+                    raise VaultError(
+                        "personal-root policy selector requires exactly one "
+                        "current root-reachable class"
+                    )
+                class_id = candidates[0].class_id
             policy_class = store.get_class(class_id)
             if (
                 not policy_class.governance
@@ -171,16 +242,26 @@ async def seal_personal_setting(request: Request):
         setting_id = settings_ops.write_by_key(
             VAULT_SECURED_SET_ID,
             VAULT_CREDENTIAL_REVISION,
-            key.strip(),
+            routed_key,
             {"value": value},
             org=None,
             state="raw",
             vault_policy_class_id=class_id,
         )
+        logger.info(
+            "personal_vault_sealed caller_kind=%s caller=%s caller_org=%s "
+            "key=%s policy_class=%s setting_id=%s",
+            principal.kind.value,
+            principal.subject,
+            principal.org,
+            routed_key,
+            class_id,
+            setting_id,
+        )
         return JSONResponse({
             "id": setting_id,
             "set_id": VAULT_SECURED_SET_ID,
-            "key": key.strip(),
+            "key": routed_key,
             "policy_class_id": class_id,
             "sealed": True,
         }, status_code=201)

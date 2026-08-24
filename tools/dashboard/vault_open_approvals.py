@@ -45,6 +45,39 @@ DEFAULT_TTL_SECONDS = 60
 _ALLOWED_REQUEST_FIELDS = {"set_id", "key", "ttl_seconds"}
 _HEX_SEED_LEN = 64
 
+
+def _setting_route(
+    principal: api_auth.ApiPrincipal,
+    set_id: str,
+    key: str,
+) -> tuple[str, str | None]:
+    """Resolve a request suffix to its exact store key and database scope.
+
+    Organization bearers never address the personal store directly.  A
+    personal-homed schema may opt into this one mediated shape, in which the
+    request carries a suffix and the server derives the bearer organization
+    prefix.  The same derivation is used by the seal route.
+    """
+    if (
+        principal.kind is api_auth.ApiPrincipalKind.ORG_SESSION
+        and principal.org != "personal"
+        and schemas.declared_home(set_id) == "personal"
+    ):
+        if (
+            schemas.declared_org_writeback_key_strategy(set_id)
+            != "org_slug:credential_name"
+        ):
+            raise PermissionError(
+                "this personal secured set has no organization-keyed release namespace"
+            )
+        try:
+            return schemas.derive_org_writeback_key(
+                set_id, principal.org or "", key,
+            ), None
+        except ValueError as exc:
+            raise ValueError(f"vault_open {exc}") from exc
+    return key, principal.org
+
 def _digest(value: object) -> str:
     return hashlib.sha256(canonical_json(value)).hexdigest()
 
@@ -220,15 +253,20 @@ def prepare_create_from_request(
     if not workspace:
         raise PermissionError("the authenticated session has no workspace binding")
 
-    members = settings_ops.read_set(set_id, org=principal.org, peers=[]).members
-    member = next((candidate for candidate in members if candidate.key == key), None)
+    routed_key, read_org = _setting_route(principal, set_id, key)
+    members = settings_ops.read_set(set_id, org=read_org, peers=[]).members
+    member = next(
+        (candidate for candidate in members if candidate.key == routed_key), None,
+    )
     if member is None:
-        raise ValueError(f"no secured Setting matches {set_id}/{key}")
+        raise ValueError(f"no secured Setting matches {set_id}/{routed_key}")
     if member.vault_error is not None:
         raise ValueError(member.vault_error.message)
     sealed = member.sealed_content_key
     if not isinstance(sealed, dict):
-        raise ValueError(f"{set_id}/{key} is not awaiting a human-factor open")
+        raise ValueError(
+            f"{set_id}/{routed_key} is not awaiting a human-factor open"
+        )
     class_id = sealed.get("policy_class_id")
     if not isinstance(class_id, str) or not class_id:
         raise ValueError("the secured Setting names no policy class")
@@ -246,14 +284,15 @@ def prepare_create_from_request(
 
     now = time.time()
     safe_request = {
-        "setting": {"set_id": set_id, "key": key, "id": member.id},
+        "setting": {"set_id": set_id, "key": routed_key, "id": member.id},
         "operation": "read",
         "requester": {
             "session": principal.subject,
+            "organization": principal.org or "local",
             "workspace": workspace,
             "label": str(launcher.get("label") or principal.subject),
         },
-        "target": f"{set_id}/{key}",
+        "target": f"{set_id}/{routed_key}",
         "delivery": "plaintext Setting value to the requesting session",
         "release_mode": "delivered",
         "access": (

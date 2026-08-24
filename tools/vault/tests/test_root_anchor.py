@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -115,6 +116,35 @@ def test_anchor_enrollment_is_idempotent_but_not_replaceable():
             store.put_root_anchor(replacement)
     finally:
         store.close()
+
+
+def test_concurrent_login_bootstrap_mints_only_one_root_class(tmp_path):
+    path = tmp_path / "personal-vault.db"
+    root = KeyPair.generate()
+    anchor, _seed = create_root_anchor(
+        root,
+        anchor_id="personal-root-default",
+        display_name="Personal root vault access",
+        created_at="2026-08-24T00:00:00Z",
+    )
+    with VaultStore(path) as store:
+        store.put_root_anchor(anchor)
+
+    def ensure(_index):
+        with VaultStore(path) as store:
+            return service.ensure_root_policy_class(
+                store,
+                anchor.anchor_id,
+                display_name="Personal root vault",
+                created_at="2026-08-24T00:00:01Z",
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        class_ids = list(pool.map(ensure, range(2)))
+
+    assert class_ids[0] == class_ids[1]
+    with VaultStore(path) as store:
+        assert store.class_ids() == [class_ids[0]]
 
 
 def test_root_class_wire_round_trip_keeps_governance_commitment():

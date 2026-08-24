@@ -17,10 +17,14 @@ import pytest
 from tools.graph.schemas.registry import (
     SCHEMAS,
     UPCONVERTERS,
+    SchemaValidationError,
     SettingSchema,
     append_only_log,
+    declared_org_writeback_key_strategy,
+    derive_org_writeback_key,
     field,
     keyed_per_entity,
+    org_writeback_namespace,
     singleton,
 )
 
@@ -280,3 +284,66 @@ def test_decorator_metadata_surfaces_in_export_json_schema_payload():
     assert js["schema_revision"] == 1
     assert js["type"] == "object"
     assert js["required"] == ["name"]
+
+
+def test_org_writeback_namespace_is_explicit_and_exported():
+    @org_writeback_namespace(suffix="credential_name")
+    @keyed_per_entity(key_strategy="setting_name")
+    class V1(SettingSchema):
+        set_id = "x.personal-secret"
+        schema_revision = 1
+
+    assert V1._key_strategy == "setting_name"
+    assert V1._org_writeback_key_strategy == "org_slug:credential_name"
+    assert V1.export_json_schema()["org_writeback_key_strategy"] == (
+        "org_slug:credential_name"
+    )
+    assert declared_org_writeback_key_strategy("x.personal-secret") == (
+        "org_slug:credential_name"
+    )
+    assert derive_org_writeback_key(
+        "x.personal-secret", "autonomy", "mac.ssh",
+    ) == "autonomy:mac.ssh"
+
+
+@pytest.mark.parametrize(
+    "suffix", ["autonomy:mac.ssh", "other:mac.ssh", ":mac.ssh", "../mac.ssh"],
+)
+def test_org_writeback_derivation_rejects_prefix_and_path_injection(suffix):
+    @org_writeback_namespace(suffix="credential_name")
+    class V1(SettingSchema):
+        set_id = "x.personal-secret"
+        schema_revision = 1
+
+    with pytest.raises(ValueError, match="unprefixed credential name"):
+        derive_org_writeback_key("x.personal-secret", "autonomy", suffix)
+
+
+def test_org_writeback_namespace_rejects_an_ambiguous_suffix_segment():
+    with pytest.raises(SchemaValidationError, match="simple segment name"):
+        org_writeback_namespace(suffix="credential:name")
+
+
+def test_ordinary_schema_export_does_not_acquire_writeback_metadata():
+    @keyed_per_entity(key_strategy="setting_name")
+    class V1(SettingSchema):
+        set_id = "x.ordinary"
+        schema_revision = 1
+
+    assert "org_writeback_key_strategy" not in V1.export_json_schema()
+    assert declared_org_writeback_key_strategy("x.ordinary") is None
+
+
+def test_org_writeback_revisions_must_keep_one_routing_strategy():
+    @org_writeback_namespace(suffix="credential_name")
+    class V1(SettingSchema):
+        set_id = "x.personal-secret"
+        schema_revision = 1
+
+    @org_writeback_namespace(suffix="secret_name")
+    class V2(SettingSchema):
+        set_id = "x.personal-secret"
+        schema_revision = 2
+
+    with pytest.raises(SchemaValidationError, match="different organization writeback"):
+        declared_org_writeback_key_strategy("x.personal-secret")

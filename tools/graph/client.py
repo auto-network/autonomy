@@ -867,6 +867,25 @@ class HttpClient:
         self.last_write_report = result
         return result.get("id")
 
+    def seal_personal_setting(self, key, value, *, policy_class_id):
+        """Use the narrow personal-write seam, never generic cross-org scope.
+
+        The caller's bearer is attached by ``_request`` for attribution. It
+        does not authorize the seal; the endpoint fixes the destination and
+        public-key seals immediately.
+        """
+        result = self._request(
+            "POST",
+            "/api/identity/vault-settings",
+            body={
+                "key": key,
+                "value": value,
+                "policy_class_id": policy_class_id,
+            },
+        )
+        self.last_write_report = result
+        return result.get("id")
+
     def override_setting(
         self, target_id, payload, *, org, state="raw",
         vault_policy_class_id=None,
