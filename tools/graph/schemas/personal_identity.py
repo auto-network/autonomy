@@ -48,6 +48,8 @@ PASSKEY_SET_ID = "autonomy.identity.passkey"
 PASSKEY_REVISION = 1
 FACTOR_METADATA_SET_ID = "autonomy.identity.factor-metadata"
 FACTOR_METADATA_REVISION = 1
+FACTOR_RECIPIENT_METADATA_SET_ID = "autonomy.identity.factor-recipient-metadata"
+FACTOR_RECIPIENT_METADATA_REVISION = 1
 
 #: Raw Ed25519 public key, lowercase hex (= the key id) — pinned to A1.
 PERSONAL_PUB_HEX_LEN = 64
@@ -315,6 +317,49 @@ class FactorMetadataV1(SettingSchema):
         _require_str(payload, "label", cls.__name__, max_len=120)
         if "purpose" in payload:
             _require_str(payload, "purpose", cls.__name__, max_len=240)
+        _require_iso_ts(payload, "updated_at", cls.__name__)
+
+
+@home("personal")
+@publication_band(max="raw")
+@keyed_per_entity(key_strategy="factor_recipient_id")
+class FactorRecipientMetadataV1(SettingSchema):
+    """Mutable operator-facing names for passkey device recipients.
+
+    The cryptographic recipient remains frozen in the root-signed armor; its
+    display name is overlaid from this row so a device rename is unattended
+    metadata and never recompiles a root-policy generation.
+    """
+
+    set_id = FACTOR_RECIPIENT_METADATA_SET_ID
+    schema_revision = FACTOR_RECIPIENT_METADATA_REVISION
+
+    factor_id: str = field(required=True, description="Owning logical factor id.")
+    recipient_public_key: str = field(
+        required=True,
+        description="The exact X25519 recipient public key being named.",
+    )
+    label: str = field(required=True, description="Operator-facing device name.")
+    updated_at: str = field(required=True, description="Latest metadata edit time.")
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        super().validate(payload)
+        if not isinstance(payload, dict):
+            return
+        factor_id = _require_str(payload, "factor_id", cls.__name__, max_len=128)
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", factor_id):
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'factor_id' has an invalid shape"
+            )
+        public_key = _require_str(
+            payload, "recipient_public_key", cls.__name__, max_len=64,
+        )
+        if len(public_key) != 64 or not _HEX_RE.fullmatch(public_key):
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'recipient_public_key' must be 64 lowercase hex chars"
+            )
+        _require_str(payload, "label", cls.__name__, max_len=120)
         _require_iso_ts(payload, "updated_at", cls.__name__)
 
 
