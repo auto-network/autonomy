@@ -49,7 +49,12 @@
     .msn-row>*{position:relative;z-index:1}
     /* the activity chart owns the whole card, flush to the top; the
        title and pillar names overlay its left (early-history) side */
-    .msn-spark{position:absolute;inset:0;z-index:0;pointer-events:none}
+    /* explicit 100% size is load-bearing: an absolutely positioned SVG
+       is a replaced element, so with auto height its viewBox aspect
+       ratio beats inset:0 and sizes it width/ratio tall — the chart
+       escaped its card and rendered clipped until this was pinned */
+    .msn-spark{position:absolute;inset:0;width:100%;height:100%;
+      z-index:0;pointer-events:none}
     .msn-name{color:var(--ink);font-weight:650;line-height:1.25;
       white-space:nowrap;overflow:hidden;cursor:pointer;
       text-shadow:0 1px 5px rgba(0,0,0,.85);align-self:flex-start;
@@ -130,7 +135,10 @@
     <div class="flex min-w-0 flex-1 items-center gap-2">
       <button x-show="current" @click="back()" aria-label="Back to missions"
               class="shrink-0 -ml-1 px-1.5 py-1 text-xl leading-none text-gray-400 hover:text-gray-100">&#8249;</button>
+      <!-- the title text taps back too: chevron + text are one target -->
       <span class="min-w-0 flex-1 truncate text-sm font-semibold text-gray-100"
+            :class="current ? 'cursor-pointer' : ''"
+            @click="current && back()"
             x-text="currentTitle()"></span>
       <div class="relative shrink-0" @click.outside="orgOpen = false">
         <button type="button" aria-label="Organization"

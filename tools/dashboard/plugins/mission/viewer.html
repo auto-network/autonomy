@@ -260,9 +260,14 @@
   .mc-critpage{position:fixed;inset:0;z-index:55;background:var(--bg);
     overflow-y:auto;overscroll-behavior:contain}
   .mc-critpage .cbar{position:sticky;top:0;display:flex;align-items:center;gap:10px;
-    background:#111318;border-bottom:1px solid #1e293b;padding:12px 14px;z-index:2}
+    background:#111318;border-bottom:1px solid #1e293b;padding:0;z-index:2}
+  /* the back button IS the bar: the whole horizontal surface taps back,
+     not just the word (operator ruling, all breadcrumb tiles) */
   .mc-critpage .cback{background:none;border:0;color:#94a3b8;font:inherit;
-    font-size:.88rem;cursor:pointer;padding:0}
+    font-size:.88rem;cursor:pointer;padding:12px 14px;flex:1;
+    display:flex;align-items:center;text-align:left;min-width:0}
+  .mc-critpage .cback span:last-child{overflow:hidden;text-overflow:ellipsis;
+    white-space:nowrap}
   .mc-critpage .cpos{font-size:.7rem;color:var(--ink3);
     text-transform:uppercase;letter-spacing:.06em;align-self:center}
   .mc-critpage .cback .chv{margin-right:9px;color:var(--ink3)}

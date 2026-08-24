@@ -179,6 +179,14 @@ setTimeout(() => {
         check("org menu names render", d.querySelector("#app-topbar-slot")
           .textContent.includes("Autonomy Network"));
 
+        // the toolbar title is a back target, not just the chevron
+        const title = Array.from(
+          d.querySelectorAll("#app-topbar-slot span"))
+          .find((e) => e.textContent === "Multi-User Autonomy");
+        title.click();
+        check("title tap goes back", comp.current === null
+          && window.location.pathname === "/mission");
+
         if (failures) {
           console.error(failures + " assertion(s) failed");
           process.exit(1);
