@@ -1188,6 +1188,7 @@ def build_mount_plan(
     harness: str,
     working_dir: str,
     caller_mounts=None,
+    org: str | None = None,
     include_capabilities: bool = False,
     capabilities=(),
     global_claude_md=None,
@@ -1220,7 +1221,19 @@ def build_mount_plan(
     # missing subpath, and NO CONTAINER WAS CREATED: every downstream symptom
     # on a fresh node, including a tmux session that looked like it died, was
     # this one mount (auto-qk4ip, found on sjc-2).
-    plan.set(mount_spec(DATA_ROOT / ".beads", "/data/.beads"), replace=False)
+    # Per-org beads sandbox (operator ruling 2026-08-24): an org whose
+    # tracker config exists at DATA_ROOT/.beads/orgs/<slug>/ gets THAT
+    # mounted as its /data/.beads — same shared Dolt server (port pinned
+    # in its config.yaml), its own database (named in metadata.json), its
+    # own issue prefix. Every other org — autonomy included — keeps the
+    # shared tracker (database "auto") via the fallback, so nothing
+    # changes for existing sessions until an org dir is provisioned.
+    beads_src = DATA_ROOT / ".beads"
+    if org:
+        org_beads = DATA_ROOT / ".beads" / "orgs" / str(org)
+        if (org_beads / "metadata.json").is_file():
+            beads_src = org_beads
+    plan.set(mount_spec(beads_src, "/data/.beads"), replace=False)
     # ``.beads`` is rw for bd, but its dolt-remote credential is host-only
     # material no session reads; mask it with an empty ro device bind (auto-j3oj3).
     plan.set(mount_spec("/dev/null", "/data/.beads/.beads-credential-key:ro"), replace=False)
@@ -1578,6 +1591,9 @@ def launch_session(
         harness=harness,
         working_dir=working_dir,
         caller_mounts=mounts,
+        org=(metadata or {}).get("graph_org")
+            or (metadata or {}).get("org")
+            or (metadata or {}).get("graph_project"),
         include_capabilities=True,
         capabilities=capabilities,
         global_claude_md=global_claude_md,
