@@ -13304,7 +13304,7 @@ _HARNESS_USAGE_POLL_INTERVAL = 900.0
 _WATCHER_HELPERS = [
     "collect_dispatch_data", "get_bead_counts", "count_active_sessions",
     "count_terminals", "count_today_done", "get_dispatcher_state", "get_pinned_beads",
-    "count_worktrees", "count_streams", "collect_harness_usage",
+    "count_worktrees", "count_streams", "collect_harness_usage", "collect_plugin_badges",
 ]
 _watcher_errors: dict[str, str] = {}  # helper_name -> last error string
 
@@ -14171,6 +14171,7 @@ async def _dispatch_watcher():
                 asyncio.to_thread(_count_worktrees),
                 asyncio.to_thread(_count_streams),
                 asyncio.to_thread(_collect_harness_usage),
+                asyncio.to_thread(_collect_plugin_badges),
                 return_exceptions=True,
             )
 
@@ -14197,6 +14198,7 @@ async def _dispatch_watcher():
             worktree_counts = results[7] if not isinstance(results[7], BaseException) else {"with_commits": 0, "with_changes": 0}
             stream_count = results[8] if not isinstance(results[8], BaseException) else 0
             harness_usage = results[9] if not isinstance(results[9], BaseException) else {"harnesses": []}
+            plugin_badges = results[10] if not isinstance(results[10], BaseException) else {}
 
             nav_data = {
                 "open_beads": counts.get("open_count", 0),
@@ -14210,7 +14212,7 @@ async def _dispatch_watcher():
                 "worktrees_with_commits": worktree_counts.get("with_commits", 0),
                 "worktrees_with_changes": worktree_counts.get("with_changes", 0),
                 "stream_count": stream_count,
-                "plugins": _collect_plugin_badges(),
+                "plugins": plugin_badges,
                 "harness_usage": harness_usage,
             }
             await event_bus.broadcast("dispatch", dispatch_data)
