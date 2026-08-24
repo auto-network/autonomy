@@ -80,7 +80,9 @@ from agents.workspace_manager import (
     managed_clone_path,
     merge_session_worktree,
     merge_session_worktree_commit,
+    load_row_cache,
     prepare_session_mounts,
+    save_row_cache,
     sync_session_worktree_base,
 )
 from agents.design_db import DuplicateDesignTitleError
@@ -395,6 +397,13 @@ EVENT_BUS_STATE_PATH = Path(
 RESOURCE_MONITOR_STATE_PATH = Path(
     os.environ.get("DASHBOARD_RESOURCE_MONITOR_STATE")
     or str(DATA_ROOT / "resource_monitor.state")
+)
+# The worktree monitor validates every restored row against current git-file
+# fingerprints before use; this snapshot merely avoids rebuilding unchanged
+# rows with hundreds of git subprocesses after a dashboard hot reload.
+WORKTREE_ROW_CACHE_PATH = Path(
+    os.environ.get("DASHBOARD_WORKTREE_ROW_CACHE_STATE")
+    or str(DATA_ROOT / "worktree_row_cache.state")
 )
 # Labels always shown in pause UI even if not in dispatch.state
 _KNOWN_PAUSE_LABELS = ["dashboard"]
@@ -19403,6 +19412,10 @@ async def _on_startup():
         todo_snapshot=_task_state_tracker.snapshot,
     )
     _mark("session_monitor.start")
+    try:
+        await asyncio.to_thread(load_row_cache, WORKTREE_ROW_CACHE_PATH)
+    except Exception:
+        logger.exception("worktree row-cache restore failed; continuing startup")
     await worktree_monitor.start()
     _mark("worktree_monitor.start")
     # Resource collector: skip under mock/test servers — it polls the real
@@ -19673,6 +19686,7 @@ async def _on_shutdown():
         logger.exception("error during session_monitor.stop()")
     try:
         await worktree_monitor.stop()
+        await asyncio.to_thread(save_row_cache, WORKTREE_ROW_CACHE_PATH)
     except Exception:
         logger.exception("error during worktree_monitor.stop()")
     try:

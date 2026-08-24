@@ -34,6 +34,7 @@ Design refs:
 from __future__ import annotations
 
 import logging
+import json
 import os
 import re
 import shutil
@@ -42,7 +43,7 @@ import tempfile
 import threading
 import sys
 import traceback
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -2611,6 +2612,115 @@ _row_cache: dict[Path, tuple[tuple, "WorktreeState"]] = {}
 _row_cache_lock = threading.Lock()
 _scan_cache_hits = 0
 _scan_cache_misses = 0
+_ROW_CACHE_SNAPSHOT_VERSION = 1
+
+
+def _json_compatible(value):
+    """Turn the frozen row-cache dataclasses into JSON-safe primitives."""
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _json_compatible(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_compatible(item) for item in value]
+    return value
+
+
+def _row_from_snapshot(value: object) -> WorktreeState:
+    """Rebuild the nested immutable dashboard row from persisted JSON."""
+    if not isinstance(value, dict):
+        raise ValueError("worktree row is not an object")
+    commits = value.get("commits")
+    dirty_files = value.get("dirty_files")
+    duplicate_commits = value.get("duplicate_commits")
+    if not isinstance(commits, list) or not isinstance(dirty_files, list) or not isinstance(duplicate_commits, list):
+        raise ValueError("worktree row has malformed nested collections")
+    return WorktreeState(
+        session_name=value["session_name"],
+        repo_name=value["repo_name"],
+        worktree_path=Path(value["worktree_path"]),
+        managed_clone=(Path(value["managed_clone"])
+                       if value.get("managed_clone") is not None else None),
+        branch=value.get("branch"),
+        commits_ahead=value["commits_ahead"],
+        is_dirty=value["is_dirty"],
+        ff_eligible=value["ff_eligible"],
+        clone_stale=value["clone_stale"],
+        rebase_required=value["rebase_required"],
+        session_live=value["session_live"],
+        cherry_pick_eligible=value.get("cherry_pick_eligible", False),
+        cherry_pick_commit=value.get("cherry_pick_commit"),
+        target_branch=value.get("target_branch"),
+        commits=[
+            WorktreeCommit(
+                sha=commit["sha"], short_sha=commit["short_sha"],
+                subject=commit["subject"], author=commit["author"],
+                date=commit["date"], body=commit["body"],
+                files=[GitFileChange(**file) for file in commit.get("files", [])],
+                patch=commit.get("patch"),
+            )
+            for commit in commits
+        ],
+        dirty_files=[GitFileChange(**file) for file in dirty_files],
+        net_empty=value.get("net_empty", False),
+        duplicate_commits=[WorktreeDuplicateRef(**ref) for ref in duplicate_commits],
+        orphaned=value.get("orphaned", False),
+    )
+
+
+def save_row_cache(path: Path | str) -> None:
+    """Atomically persist fingerprint-gated worktree rows across hot reloads.
+
+    A subsequent scan still compares every restored entry with fresh on-disk
+    fingerprints before using it, so this file accelerates startup without
+    becoming a source of truth for worktree state.
+    """
+    try:
+        target = Path(path)
+        with _row_cache_lock:
+            entries = [
+                {
+                    "worktree": str(worktree),
+                    "fingerprint": _json_compatible(fingerprint),
+                    "row": _json_compatible(asdict(row)),
+                }
+                for worktree, (fingerprint, row) in _row_cache.items()
+            ]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(target.suffix + ".tmp")
+        tmp.write_text(json.dumps({"version": _ROW_CACHE_SNAPSHOT_VERSION, "entries": entries}))
+        tmp.replace(target)
+    except Exception:
+        logger.exception("workspace_manager.save_row_cache(%s) failed", path)
+
+
+def load_row_cache(path: Path | str) -> bool:
+    """Seed the in-memory row cache from a previous process snapshot."""
+    try:
+        target = Path(path)
+        if not target.is_file():
+            return False
+        state = json.loads(target.read_text())
+        if (not isinstance(state, dict)
+                or state.get("version") != _ROW_CACHE_SNAPSHOT_VERSION
+                or not isinstance(state.get("entries"), list)):
+            return False
+        restored: dict[Path, tuple[tuple, WorktreeState]] = {}
+        for entry in state["entries"]:
+            if not isinstance(entry, dict) or not isinstance(entry.get("fingerprint"), list):
+                raise ValueError("worktree cache entry is malformed")
+            row = _row_from_snapshot(entry.get("row"))
+            worktree = Path(entry["worktree"])
+            if worktree != row.worktree_path:
+                raise ValueError("worktree cache key does not match row path")
+            restored[worktree] = (tuple(entry["fingerprint"]), row)
+        with _row_cache_lock:
+            _row_cache.clear()
+            _row_cache.update(restored)
+        return bool(restored)
+    except Exception:
+        logger.exception("workspace_manager.load_row_cache(%s) failed", path)
+        return False
 
 
 def scan_cache_stats() -> tuple[int, int]:

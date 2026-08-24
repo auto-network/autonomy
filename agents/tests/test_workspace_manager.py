@@ -2582,6 +2582,19 @@ class TestScanFingerprintCache:
         # row count.
         assert warm_calls <= 4, f"warm dead-row scan spawned {warm_calls} git calls"
 
+    def test_row_cache_snapshot_round_trips_real_scanned_rows(self, tmp_path, monkeypatch):
+        worktrees_dir, _clone, _wt = self._fresh(tmp_path, monkeypatch)
+        wm.scan_all_worktrees(worktrees_dir=worktrees_dir, live_session_names=set())
+        with wm._row_cache_lock:
+            original = dict(wm._row_cache)
+        state_path = tmp_path / "worktree-row-cache.state"
+
+        wm.save_row_cache(state_path)
+        wm.invalidate_row_cache()
+        assert wm._row_cache == {}
+        assert wm.load_row_cache(state_path) is True
+        assert wm._row_cache == original
+
     def test_correctness_gate_cold_equals_warm(self, tmp_path, monkeypatch):
         worktrees_dir, _clone, _wt = self._fresh(tmp_path, monkeypatch)
         wm.scan_all_worktrees(worktrees_dir=worktrees_dir, live_session_names=set())
