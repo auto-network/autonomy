@@ -140,6 +140,13 @@ def test_reopen_refreshes_triggers_after_replicated_columns_are_added(
         ).fetchone()[0]
         db.conn.execute("ALTER TABLE sources ADD COLUMN later_persona TEXT")
         db.conn.execute("ALTER TABLE sources ADD COLUMN later_session TEXT")
+        # Tables outside the already-activated replication inventory are a
+        # separate policy decision.  Their presence must not turn trigger DDL
+        # maintenance for classified graph tables into a total write outage.
+        for table in (
+            "policy_classes", "root_anchors", "vault_factors", "vault_secrets",
+        ):
+            db.conn.execute(f"CREATE TABLE {table}(id TEXT PRIMARY KEY)")
         db.conn.commit()
         assert "later_persona" not in old_trigger
 
