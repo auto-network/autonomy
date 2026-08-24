@@ -277,6 +277,7 @@ Always tee test output: `pytest ... 2>&1 | tee /tmp/test-results.txt`. Never re-
 - Agent prompt templates go in `agents/`
 - Extracted data goes under `data/<source>/`
 - Work tracking via `bd` (Beads) — all tasks are beads
+- Every bead carries an `org:<slug>` label (`org:autonomy`, `org:anchore`, …) — one shared tracker, org separation by label filter (`bd list -l org:anchore`); never per-org databases
 - Research before building — mine the graph for context before creating beads
 - Scoped agent access via `GRAPH_SCOPE` env var and `graph-<project>` wrappers
 - Set your session label when starting a new topic: `graph set-label "topic description"`
