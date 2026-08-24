@@ -347,7 +347,9 @@ def _assemble(org: str, mission_id: str, focus_pillar_id: str | None,
            '<meta name="viewport" '
            'content="width=device-width, initial-scale=1">'
            '<style>html{overflow-x:hidden}'
-           'body{margin:0;background:#0c0f14}</style></head><body>'
+           'body{margin:0;background:#0c0f14;'
+           'font:15px/1.55 -apple-system,BlinkMacSystemFont,'
+           '"Segoe UI",Roboto,sans-serif}</style></head><body>'
            + _TEMPLATE_PATH.read_text(encoding="utf-8").replace(
                _DATA_MARK, _blob(data))
            + "</body></html>")
