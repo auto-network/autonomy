@@ -36,8 +36,10 @@ def test_multiline_private_value_is_byte_identical_and_never_printed(
     calls = []
 
     class Client:
-        def add_setting(self, set_id, revision, key, payload, **kwargs):
-            calls.append((set_id, revision, key, payload["value"], kwargs))
+        last_write_report = {"key": "autonomy:mac.ssh"}
+
+        def seal_personal_setting(self, key, value, *, policy_class_id):
+            calls.append((key, value, policy_class_id))
             return "setting-123456789"
 
     monkeypatch.setattr(set_cmd, "get_client", lambda: Client())
@@ -46,21 +48,15 @@ def test_multiline_private_value_is_byte_identical_and_never_printed(
     output = capsys.readouterr().out
     assert fake not in output
     assert "setting-123" in output
-    assert calls == [(
-        "autonomy.vault.secured", 1, "mac.ssh", fake,
-        {
-            "state": "raw",
-            "org": set_cmd._org(_args()),
-            "vault_policy_class_id": "class-1",
-        },
-    )]
+    assert "key=autonomy:mac.ssh" in output
+    assert calls == [("mac.ssh", fake, "class-1")]
 
 
 def test_secret_buffer_is_zeroed_even_when_the_write_fails(monkeypatch):
     secret = bytearray(b"fake-private-key")
 
     class Client:
-        def add_setting(self, *_args, **_kwargs):
+        def seal_personal_setting(self, *_args, **_kwargs):
             raise RuntimeError("synthetic refusal")
 
     monkeypatch.setattr(set_cmd, "_read_secret_bytes", lambda _args: secret)
@@ -68,6 +64,22 @@ def test_secret_buffer_is_zeroed_even_when_the_write_fails(monkeypatch):
     with pytest.raises(RuntimeError, match="synthetic"):
         set_cmd.cmd_set_seal(_args())
     assert secret == bytearray(len(secret))
+
+
+def test_personal_seal_refuses_an_organization_destination(
+    monkeypatch, tmp_path, capsys,
+):
+    source = tmp_path / "fake-key"
+    source.write_text("fake-private-key")
+
+    class Client:
+        def seal_personal_setting(self, *_args, **_kwargs):
+            raise AssertionError("must refuse before transport")
+
+    monkeypatch.setattr(set_cmd, "get_client", lambda: Client())
+    with pytest.raises(SystemExit):
+        set_cmd.cmd_set_seal(_args(secret_file=str(source), org="autonomy"))
+    assert "personal credential store" in capsys.readouterr().err
 
 
 def test_interactive_mode_uses_hidden_prompt(monkeypatch):

@@ -570,6 +570,40 @@ def keyed_per_entity(
     return _wrap(cls)
 
 
+def org_writeback_namespace(
+    cls: type | None = None,
+    *,
+    suffix: str = "credential_name",
+) -> Any:
+    """Declare a personal-homed set writable inside a derived org namespace.
+
+    An organization session supplies only the suffix. Trusted application
+    routing derives the ``org_slug`` prefix from the bearer and persists
+    ``org_slug:suffix``. This declaration grants no read-through and is
+    intentionally separate from the set's ordinary key strategy, so the
+    personal owner can retain unprefixed user-keyed rows in the same set.
+    """
+    if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", suffix):
+        raise SchemaValidationError(
+            f"org writeback suffix must be a simple segment name, got {suffix!r}"
+        )
+
+    def _wrap(target: type) -> type:
+        existing = target.__dict__.get("_org_writeback_key_strategy")
+        strategy = f"org_slug:{suffix}"
+        if existing is not None and existing != strategy:
+            raise SchemaValidationError(
+                f"{target.__name__}: declares two org writeback strategies "
+                f"({existing!r} and {strategy!r})"
+            )
+        target._org_writeback_key_strategy = strategy
+        return target
+
+    if cls is None:
+        return _wrap
+    return _wrap(cls)
+
+
 VALID_HOMES = ("machine", "personal", "organization")
 
 #: What a declared ``exists`` check asserts about a filesystem entry. Checked
@@ -764,6 +798,54 @@ def declared_home(set_id: str) -> str | None:
             f"a Setting does not change database between revisions"
         )
     return seen.pop()
+
+
+def declared_org_writeback_key_strategy(set_id: str) -> str | None:
+    """The cross-org personal-write namespace every revision agrees on.
+
+    This is a routing contract, so revision disagreement is unsafe: a caller
+    must not gain or lose a namespace boundary merely because an older row is
+    selected.  Undeclared sets return ``None`` and remain inaccessible through
+    the narrow personal writeback/release seams.
+    """
+    prefix = f"{set_id}#"
+    seen = {
+        getattr(cls, "_org_writeback_key_strategy", None)
+        for key, cls in SCHEMAS.items()
+        if key.startswith(prefix)
+    }
+    seen.discard(None)
+    if not seen:
+        return None
+    if len(seen) > 1:
+        raise SchemaValidationError(
+            f"{set_id}: revisions declare different organization writeback "
+            f"strategies {sorted(seen)}"
+        )
+    return seen.pop()
+
+
+_ORG_WRITEBACK_SUFFIX_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$"
+)
+
+
+def derive_org_writeback_key(set_id: str, org: str, suffix: str) -> str:
+    """Derive the only personal-store key an organization caller may name."""
+    if declared_org_writeback_key_strategy(set_id) != (
+        "org_slug:credential_name"
+    ):
+        raise SchemaValidationError(
+            f"{set_id}: no organization-keyed writeback namespace is declared"
+        )
+    if not isinstance(org, str) or not org:
+        raise ValueError("organization session has no trusted organization")
+    if not isinstance(suffix, str) or not _ORG_WRITEBACK_SUFFIX_RE.fullmatch(suffix):
+        raise ValueError(
+            "organization writeback accepts a simple unprefixed credential "
+            "name; the server derives the organization namespace"
+        )
+    return f"{org}:{suffix}"
 
 
 def vaulted(tier: str) -> Any:
@@ -1318,6 +1400,7 @@ class SettingSchema:
     # substrate's generic ``.write({key, payload})`` is the escape hatch.
     _access_pattern: str | None = None
     _key_strategy: str | None = None
+    _org_writeback_key_strategy: str | None = None
 
     # ``@cache(ttl=...)``-only: TTL in whole seconds, stamped onto the
     # ``expires_at`` column on every write to a row of this schema.
@@ -1474,6 +1557,9 @@ class SettingSchema:
         payload["schema_revision"] = cls.schema_revision
         payload["access_pattern"] = cls._access_pattern
         payload["key_strategy"] = cls._key_strategy
+        org_writeback = getattr(cls, "_org_writeback_key_strategy", None)
+        if org_writeback is not None:
+            payload["org_writeback_key_strategy"] = org_writeback
         # Both the resolved tier and whether it was a reviewed choice: a
         # sensitive schema that FORGOT @signer("persona") signs unattended
         # and is invisible in the resolved tier alone — the export is where

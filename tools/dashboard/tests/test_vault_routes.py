@@ -1,10 +1,13 @@
 import subprocess
 from pathlib import Path
 
+import pytest
 from starlette.testclient import TestClient
 from starlette.applications import Starlette
+from starlette.responses import JSONResponse
 
 from tools.dashboard import vault_routes
+from tools.dashboard.api_auth import ApiPrincipal, ApiPrincipalKind
 from tools.vault.factors import create_password_factor
 from tools.network.idkit.keys import KeyPair
 from tools.vault.root_anchor import create_root_anchor
@@ -17,8 +20,8 @@ DASHBOARD = Path(__file__).resolve().parents[1]
 
 def test_vault_browser_modules_parse_as_javascript():
     for relative in (
-        "static/js/vault-management.js",
         "static/js/ceremony/root-anchor.js",
+        "static/js/ceremony/vault-unlock.js",
         "static/js/ceremony/open-vault.js",
         "static/js/pages/worktrees.js",
     ):
@@ -121,6 +124,11 @@ def test_root_signed_anchor_enrolls_then_mints_a_root_reachable_class(
             json={"display_name": "Personal root vault"},
         )
         assert minted.status_code == 201, minted.text
+        minted_again = client.post(
+            f"/api/identity/vault-anchors/{anchor.anchor_id}/classes",
+            json={"display_name": "Personal root vault"},
+        )
+        assert minted_again.status_code == 200, minted_again.text
         inventory = client.get("/api/identity/vault-anchors")
 
     assert inventory.status_code == 200
@@ -191,7 +199,23 @@ def test_personal_setting_route_pins_write_to_personal_and_never_echoes_value(
         return "setting-1"
 
     monkeypatch.setattr(vault_routes, "_store", lambda: VaultStore(path))
-    monkeypatch.setattr(vault_routes, "_guard", lambda request: None)
+    monkeypatch.setattr(
+        vault_routes.api_auth, "require_authenticated_api_caller", lambda request: None,
+    )
+    monkeypatch.setattr(
+        vault_routes,
+        "_guard",
+        lambda request: (_ for _ in ()).throw(
+            AssertionError("the personal write seam must not require operator authority")
+        ),
+    )
+    monkeypatch.setattr(
+        vault_routes.api_auth,
+        "principal_from_request",
+        lambda request: ApiPrincipal(
+            ApiPrincipalKind.ORG_SESSION, subject="personal-writer", org="personal",
+        ),
+    )
     monkeypatch.setattr(vault_routes, "_personal_root_pub", lambda: root.public_hex)
     monkeypatch.setattr(vault_routes.settings_ops, "write_by_key", write_by_key)
     app = Starlette(routes=vault_routes.ROUTES)
@@ -213,6 +237,154 @@ def test_personal_setting_route_pins_write_to_personal_and_never_echoes_value(
     assert captured["kwargs"]["vault_policy_class_id"] == policy_class.class_id
 
 
+def test_org_bearer_is_confined_to_its_derived_credential_namespace(
+    monkeypatch, tmp_path,
+):
+    path = tmp_path / "vault.db"
+    root = KeyPair.generate()
+    anchor, _seed = create_root_anchor(
+        root,
+        anchor_id="personal-default",
+        display_name="Personal root vault",
+        created_at="2026-08-24T00:00:00Z",
+    )
+    policy_class = create_root_reachable_class(
+        anchor.published_recipient(),
+        display_name="Personal root vault",
+        created_at="2026-08-24T00:01:00Z",
+    )
+    with VaultStore(path) as store:
+        store.put_root_anchor(anchor)
+        store.put_class(policy_class)
+    captured = {}
+
+    monkeypatch.setattr(
+        vault_routes.api_auth,
+        "require_authenticated_api_caller",
+        lambda request: None,
+    )
+    monkeypatch.setattr(
+        vault_routes.api_auth,
+        "principal_from_request",
+        lambda request: ApiPrincipal(
+            ApiPrincipalKind.ORG_SESSION,
+            subject="auto-writer",
+            org="autonomy",
+        ),
+    )
+    monkeypatch.setattr(vault_routes, "_store", lambda: VaultStore(path))
+    monkeypatch.setattr(vault_routes, "_personal_root_pub", lambda: root.public_hex)
+    monkeypatch.setattr(
+        vault_routes.settings_ops,
+        "write_by_key",
+        lambda *args, **kwargs: (
+            captured.update({"args": args, "kwargs": kwargs}) or "setting-1"
+        ),
+    )
+    app = Starlette(routes=vault_routes.ROUTES)
+    with TestClient(app) as client:
+        response = client.post("/api/identity/vault-settings", json={
+            "key": "mac.ssh",
+            "value": "fake-private-key",
+            "policy_class_id": "personal-root",
+        })
+    assert response.status_code == 201, response.text
+    assert response.json()["key"] == "autonomy:mac.ssh"
+    assert response.json()["policy_class_id"] == policy_class.class_id
+    assert captured["args"][2] == "autonomy:mac.ssh"
+    assert captured["args"][3] == {"value": "fake-private-key"}
+    assert captured["kwargs"]["org"] is None
+
+
+@pytest.mark.parametrize("spoofed", [
+    "other-org:mac.ssh",
+    "autonomy:mac.ssh",
+    ":mac.ssh",
+    "../mac.ssh",
+    "mac.ssh\nforged-log-entry",
+])
+def test_org_bearer_cannot_inject_or_spoof_a_namespace(
+    monkeypatch, spoofed,
+):
+    monkeypatch.setattr(
+        vault_routes.api_auth,
+        "require_authenticated_api_caller",
+        lambda request: None,
+    )
+    monkeypatch.setattr(
+        vault_routes.api_auth,
+        "principal_from_request",
+        lambda request: ApiPrincipal(
+            ApiPrincipalKind.ORG_SESSION,
+            subject="auto-writer",
+            org="autonomy",
+        ),
+    )
+    app = Starlette(routes=vault_routes.ROUTES)
+    with TestClient(app) as client:
+        response = client.post("/api/identity/vault-settings", json={
+            "key": spoofed,
+            "value": "fake-private-key",
+            "policy_class_id": "not-reached",
+        })
+    assert response.status_code == 400
+    assert "unprefixed credential name" in response.json()["error"]
+
+
+def test_org_bearer_is_refused_when_the_schema_did_not_opt_in(monkeypatch):
+    monkeypatch.setattr(
+        vault_routes.api_auth,
+        "require_authenticated_api_caller",
+        lambda request: None,
+    )
+    monkeypatch.setattr(
+        vault_routes.api_auth,
+        "principal_from_request",
+        lambda request: ApiPrincipal(
+            ApiPrincipalKind.ORG_SESSION,
+            subject="auto-writer",
+            org="autonomy",
+        ),
+    )
+    monkeypatch.setattr(
+        vault_routes.schema_registry,
+        "declared_org_writeback_key_strategy",
+        lambda *_args: None,
+    )
+    app = Starlette(routes=vault_routes.ROUTES)
+    with TestClient(app) as client:
+        response = client.post("/api/identity/vault-settings", json={
+            "key": "mac.ssh",
+            "value": "fake-private-key",
+            "policy_class_id": "not-reached",
+        })
+    assert response.status_code == 403
+    assert "does not declare" in response.json()["error"]
+
+
+def test_personal_setting_route_requires_an_attributable_caller(monkeypatch):
+    monkeypatch.setattr(
+        vault_routes.api_auth,
+        "require_authenticated_api_caller",
+        lambda request: JSONResponse({"error": "authentication required"}, status_code=401),
+    )
+    monkeypatch.setattr(
+        vault_routes.settings_ops,
+        "write_by_key",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("an unattributed request must not reach the write seam")
+        ),
+    )
+    app = Starlette(routes=vault_routes.ROUTES)
+    with TestClient(app) as client:
+        response = client.post("/api/identity/vault-settings", json={
+            "key": "mac.ssh",
+            "value": "fake-private-key",
+            "policy_class_id": "class-1",
+        })
+    assert response.status_code == 401
+
+
 def test_personal_setting_route_failure_never_echoes_value(monkeypatch, tmp_path):
     path = tmp_path / "vault.db"
     root = KeyPair.generate()
@@ -231,7 +403,20 @@ def test_personal_setting_route_failure_never_echoes_value(monkeypatch, tmp_path
         store.put_root_anchor(anchor)
         store.put_class(policy_class)
     monkeypatch.setattr(vault_routes, "_store", lambda: VaultStore(path))
-    monkeypatch.setattr(vault_routes, "_guard", lambda request: None)
+    monkeypatch.setattr(
+        vault_routes.api_auth,
+        "require_authenticated_api_caller",
+        lambda request: None,
+    )
+    monkeypatch.setattr(
+        vault_routes.api_auth,
+        "principal_from_request",
+        lambda request: ApiPrincipal(
+            ApiPrincipalKind.ORG_SESSION,
+            subject="auto-writer",
+            org="autonomy",
+        ),
+    )
     monkeypatch.setattr(vault_routes, "_personal_root_pub", lambda: root.public_hex)
     monkeypatch.setattr(
         vault_routes.settings_ops,

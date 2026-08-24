@@ -73,6 +73,7 @@ from .registry import (
     field,
     home,
     keyed_per_entity,
+    org_writeback_namespace,
     publication_band,
     vaulted,
 )
@@ -132,6 +133,7 @@ class VaultAuditedCredentialV1(SettingSchema):
 @home("personal")
 @publication_band(max="raw")
 @keyed_per_entity(key_strategy="setting_name")
+@org_writeback_namespace(suffix="credential_name")
 @vaulted("secured")
 class VaultSecuredCredentialV1(SettingSchema):
     """A secret whose release REQUIRES the operator's factor.

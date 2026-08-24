@@ -96,23 +96,32 @@ def test_request_vault_open_derives_session_server_side_and_returns_receipt():
     assert "/api/approvals/open-1?wait=" in captured[1][1]
 
 
-def test_secured_setting_write_carries_policy_class_but_no_opener_material():
+def test_personal_seal_uses_narrow_endpoint_with_policy_but_no_opener_material():
     client = _make_client()
     captured = {}
 
     def fake_urlopen(req, timeout=None, context=None):
+        captured["url"] = req.full_url
         captured["body"] = json.loads(req.data)
-        return _FakeResponse({"id": "setting-1"}, status=201)
+        return _FakeResponse(
+            {"id": "setting-1", "key": "autonomy:mac.ssh"}, status=201,
+        )
 
     with patch("urllib.request.urlopen", fake_urlopen):
-        assert client.add_setting(
-            "autonomy.vault.secured", 1, "mac.ssh",
-            {"value": "fake-private-key"}, org="personal",
-            vault_policy_class_id="class-1",
+        assert client.seal_personal_setting(
+            "mac.ssh", "fake-private-key", policy_class_id="class-1",
         ) == "setting-1"
 
-    assert captured["body"]["vault_policy_class_id"] == "class-1"
+    assert captured["url"].endswith("/api/identity/vault-settings")
+    assert captured["body"] == {
+        "key": "mac.ssh",
+        "value": "fake-private-key",
+        "policy_class_id": "class-1",
+    }
     assert "openers" not in captured["body"]
+    assert client.last_write_report == {
+        "id": "setting-1", "key": "autonomy:mac.ssh",
+    }
 
 
 def test_search_passes_or_mode_and_tag():

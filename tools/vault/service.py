@@ -132,6 +132,23 @@ def create_root_policy_class(
     return record.class_id
 
 
+def ensure_root_policy_class(
+    store: VaultStore,
+    anchor_id: str,
+    *,
+    display_name: str,
+    created_at: str,
+) -> str:
+    """Atomically create or reuse the one class inherited from an anchor."""
+    anchor = store.get_root_anchor(anchor_id)
+    candidate = create_root_reachable_class(
+        anchor.published_recipient(),
+        display_name=display_name,
+        created_at=created_at,
+    )
+    return store.put_root_class_once(candidate, anchor_id).class_id
+
+
 def enroll_root_anchor(store: VaultStore, value: dict) -> RootAnchorRecord:
     """Validate and insert a browser-created, root-signed anchor envelope."""
     record = RootAnchorRecord.from_dict(value)

@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import json
-
 from tools.graph import set_cmd
-from tools.graph.settings_ops import DropAccounting, ResolvedSetting, SetMembers
 
 
 def _args():
@@ -24,24 +21,7 @@ def test_secured_read_requests_vault_open_and_prints_only_ramfs_path(
 
     class Client:
         def read_set(self, set_id, *, org):
-            return SetMembers(members=[ResolvedSetting(
-                id="setting-1",
-                set_id=set_id,
-                stored_revision=1,
-                key="mac.ssh",
-                payload=None,
-                state="raw",
-                supersedes=None,
-                excludes=False,
-                deprecated=False,
-                successor_id=None,
-                created_at="now",
-                updated_at="now",
-                target_revision=1,
-                org="personal",
-                upconverted=False,
-                sealed_content_key={"sealed_cek": "must-not-print"},
-            )], dropped=DropAccounting())
+            raise AssertionError("personal secured reads must not enumerate the set")
 
         def request_vault_open(self, set_id, key, *, org):
             calls.append((set_id, key, org))
