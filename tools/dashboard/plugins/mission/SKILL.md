@@ -181,6 +181,16 @@ The order matters: each step makes the next verifiable.
    imports. Mark `--blocking` the moment something prevents progress;
    clear it (answer it) the moment it lifts.
 
+### Not everything belongs to a mission
+
+A mission is not a commit log. An item or bead joins a mission only
+when it advances a pillar's charter. Routine maintenance and platform
+upkeep outside every charter stays in bd WITHOUT a mission label —
+absent from the mission is honest, not invisible. Never invent a
+record to make work visible; if a charter later covers it, labeling
+joins it retroactively and cheaply. When unsure, ask the mission
+coordinator rather than padding the record.
+
 ### Accuracy checklist — run before calling a mission populated
 
 - `graph mission coverage <uuid>` → 0 uncovered, and no criteria
