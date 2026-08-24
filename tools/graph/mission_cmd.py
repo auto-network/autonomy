@@ -252,6 +252,83 @@ def cmd_mission_retire(args):
     cmd_mission_state(args)
 
 
+def cmd_mission_coverage(args):
+    """Beads labeled for the mission that no acceptance criterion covers.
+
+    Coverage means some checkpoint item carries a ``bead:<id>`` ref. The
+    bead pool is ``bd list --label mission:<mission_id> --all`` (closed
+    beads count: completed work is delivery evidence). The ladder column
+    is derived, never stored: closed=complete, in_progress=running
+    (approval-for-dispatch is the true bar; bd status is the visible
+    proxy), design/acceptance filled=specified, else defined.
+    """
+    import subprocess
+
+    call = _api()
+    kind, sid, mission = _resolve_surface(call, args.surface)
+    mid = mission["mission_id"]
+    items = call("GET", f"/api/missions/{mid}/items").get("items", [])
+    covered = set()
+    checkpoints = 0
+    for it in items:
+        if it.get("kind") != "checkpoint":
+            continue
+        checkpoints += 1
+        for ref in it.get("refs") or []:
+            if str(ref).startswith("bead:"):
+                covered.add(str(ref)[5:])
+    try:
+        raw = subprocess.run(
+            ["bd", "list", "--label", f"mission:{mid}", "--all", "--json"],
+            capture_output=True, text=True, timeout=60).stdout
+        beads = json.loads(raw) if raw.strip() else []
+    except Exception as exc:
+        print(f"mission coverage: bd query failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    def ladder(row) -> str:
+        if row.get("status") == "closed":
+            return "complete"
+        if row.get("status") == "in_progress":
+            return "running"
+        try:
+            show = subprocess.run(["bd", "show", row["id"], "--json"],
+                                  capture_output=True, text=True,
+                                  timeout=30).stdout
+            full = json.loads(show)
+            full = full[0] if isinstance(full, list) else full
+        except Exception:
+            full = row
+        if (full.get("design") or "").strip() or \
+           (full.get("acceptance") or "").strip():
+            return "specified"
+        return "defined"
+
+    def pillar_of(row) -> str:
+        for lb in row.get("labels") or []:
+            if lb.startswith("pillar:"):
+                return lb[7:]
+        return "(no pillar)"
+
+    uncovered = [b for b in beads if b["id"] not in covered]
+    print(f"{mission['name']}: {len(beads)} beads on the mission, "
+          f"{checkpoints} criteria covering {len(covered)}, "
+          f"{len(uncovered)} uncovered")
+    by_pillar: dict[str, list] = {}
+    for b in uncovered:
+        by_pillar.setdefault(pillar_of(b), []).append(b)
+    for pname in sorted(by_pillar):
+        print(f"  {pname}")
+        for b in by_pillar[pname]:
+            mark = "epic " if b.get("issue_type") == "epic" else ""
+            print(f"    {b['id']:14s} {ladder(b):9s} {mark}{b['title']}")
+    stale = sorted(covered - {b["id"] for b in beads})
+    if stale:
+        print("  criteria referencing beads NOT labeled for the mission:")
+        for bid in stale:
+            print(f"    {bid}")
+
+
 def cmd_mission_style(args):
     call = _api()
     kind, sid, mission = _resolve_surface(call, args.surface)
@@ -335,6 +412,11 @@ def register(sub) -> None:
     q.add_argument("item_id")
     q.add_argument("--note")
     q.set_defaults(func=cmd_mission_retire)
+
+    q = ms.add_parser("coverage", help="Beads on the mission that no "
+                                       "acceptance criterion covers")
+    q.add_argument("surface", help="The mission (id, prefix, or name)")
+    q.set_defaults(func=cmd_mission_coverage)
 
     q = ms.add_parser("style", help="Switch a mission between freeform and "
                                     "structured rendering")
