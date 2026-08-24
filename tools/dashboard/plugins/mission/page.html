@@ -42,15 +42,30 @@
       font:inherit;font-size:.68rem;color:var(--ink3)}
     .msn-win button.on{color:var(--ink);box-shadow:inset 0 -2px 0 var(--line2)}
     .msn-row{background:var(--card);border:1px solid var(--line);
-      border-radius:10px;padding:12px 14px 11px;margin:0 0 10px}
+      border-radius:10px;padding:12px 14px 11px;margin:0 0 10px;
+      position:relative;overflow:hidden;min-height:106px;
+      display:flex;flex-direction:column;justify-content:space-between}
     .msn-row.done{opacity:.55}
+    .msn-row>*{position:relative;z-index:1}
+    /* the activity chart owns the whole card, flush to the top; the
+       title and pillar names overlay its left (early-history) side */
+    .msn-spark{position:absolute;inset:0;z-index:0;pointer-events:none}
     .msn-name{color:var(--ink);font-weight:650;line-height:1.25;
-      white-space:nowrap;overflow:hidden;cursor:pointer}
+      white-space:nowrap;overflow:hidden;cursor:pointer;
+      text-shadow:0 1px 5px rgba(0,0,0,.85);align-self:flex-start;
+      max-width:100%}
     .msn-name:active{opacity:.6}
-    .msn-grid{display:flex;gap:2px;align-items:flex-end;height:13px;
-      margin:8px 0 7px}
-    .msn-grid i{flex:1;border-radius:1px;background:var(--accent)}
-    .msn-grid i.z{height:2px!important;background:var(--line);opacity:.7}
+    .msn-pl{display:flex;flex-direction:column;gap:3px;margin:7px 0 8px;
+      align-self:flex-start;max-width:62%}
+    .msn-pl .plc{display:inline-flex;align-items:center;gap:6px;
+      font-size:.72rem;color:var(--ink2);cursor:pointer;
+      white-space:nowrap;overflow:hidden;
+      text-shadow:0 1px 5px rgba(0,0,0,.85)}
+    .msn-pl .plc>span{overflow:hidden;text-overflow:ellipsis}
+    .msn-pl .plc:active{opacity:.6}
+    .msn-pl .plb{width:3px;height:11px;border-radius:2px;flex:none}
+    .msn-pl .plmore{font-size:.66rem;color:var(--ink3);
+      text-shadow:0 1px 5px rgba(0,0,0,.85)}
     .msn-meta{display:flex;align-items:baseline;gap:15px;font-size:.7rem;
       color:var(--ink3);white-space:nowrap;min-width:0}
     .msn-meta .ago{overflow:hidden;text-overflow:ellipsis;min-width:0}
@@ -227,14 +242,23 @@
       <template x-for="m in (screen === 'missions' ? visible() : [])"
                 :key="m.mission_id">
         <div class="msn-row" :class="m.status === 'complete' ? 'done' : ''">
+          <svg class="msn-spark" aria-label="activity in the window"
+               x-effect="drawSpark($el, m, win.secs, sparkTick)"></svg>
+
           <div class="msn-name" x-init="fitName($el)" x-text="m.name"
                @click="open(m)"></div>
 
-          <div class="msn-grid" aria-label="activity in the window">
-            <template x-for="(b, i) in bars(m)" :key="i">
-              <i :class="b.on ? '' : 'z'"
-                 :style="'height:' + b.h + '%;opacity:' + b.op"></i>
+          <div class="msn-pl">
+            <template x-for="p in pillarsOf(m)" :key="p.pillar_id">
+              <span class="plc" @click="openPillar(m, p)"
+                    :title="'Open ' + p.name">
+                <i class="plb"
+                   :style="'background:' + (p.color || '#8391a8')"></i>
+                <span x-text="p.name"></span>
+              </span>
             </template>
+            <span class="plmore" x-show="morePillars(m) > 0"
+                  x-text="'+' + morePillars(m) + ' more'"></span>
           </div>
 
           <div class="msn-meta">
