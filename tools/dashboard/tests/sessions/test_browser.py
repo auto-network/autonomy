@@ -701,18 +701,41 @@ class TestMobileToolbarLayout:
         state = ab_eval("""
             var toolbar = document.querySelector('[data-testid="sessions-page-toolbar"]');
             var launch = document.querySelector('[data-testid="session-launch-dropdown"]');
+            var actions = toolbar.querySelector('.sessions-toolbar-actions');
+            var page = toolbar.parentElement;
+            var content = document.getElementById('content');
             var value = document.querySelector('.sessions-org-filter-value');
             var tr = toolbar.getBoundingClientRect();
             var lr = launch.getBoundingClientRect();
+            var ar = actions.getBoundingClientRect();
+            var pr = page.getBoundingClientRect();
+            var cr = content.getBoundingClientRect();
             return {
               sameRow: lr.top >= tr.top && lr.bottom <= tr.bottom + 1,
               launchRight: lr.right,
               viewport: window.innerWidth,
+              launchRightGap: window.innerWidth - lr.right,
+              toolbarLeft: tr.left,
+              toolbarRight: tr.right,
+              actionsLeft: ar.left,
+              actionsRight: ar.right,
+              pageLeft: pr.left,
+              pageRight: pr.right,
+              contentLeft: cr.left,
+              contentRight: cr.right,
               truncated: value.scrollWidth > value.clientWidth,
             };
         """)
         assert state["sameRow"], "Create-workspace control wrapped below the toolbar"
         assert state["launchRight"] <= state["viewport"]
+        assert state["launchRightGap"] <= 28, (
+            "launch=%s toolbar=%s..%s actions=%s..%s page=%s..%s content=%s..%s" % (
+                state["launchRight"], state["toolbarLeft"], state["toolbarRight"],
+                state["actionsLeft"], state["actionsRight"],
+                state["pageLeft"], state["pageRight"],
+                state["contentLeft"], state["contentRight"],
+            )
+        )
         assert state["truncated"], "Long organization name was not ellipsized"
 
         ab_eval("""
