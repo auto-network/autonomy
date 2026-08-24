@@ -2686,10 +2686,19 @@ def save_row_cache(path: Path | str) -> None:
                 }
                 for worktree, (fingerprint, row) in _row_cache.items()
             ]
+        # A reload can interrupt its replacement while that process is still
+        # doing its first sweep.  Its cache is empty at shutdown, but replacing
+        # a known-good snapshot with that empty state turns the next reload
+        # cold.  Retain the older rows: each is fingerprint-validated before
+        # use, so stale entries are harmless cache misses.
+        if not entries:
+            logger.info("workspace_manager row-cache empty; retaining prior snapshot")
+            return
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_suffix(target.suffix + ".tmp")
         tmp.write_text(json.dumps({"version": _ROW_CACHE_SNAPSHOT_VERSION, "entries": entries}))
         tmp.replace(target)
+        logger.info("workspace_manager saved %d worktree row-cache entries", len(entries))
     except Exception:
         logger.exception("workspace_manager.save_row_cache(%s) failed", path)
 
@@ -2717,6 +2726,7 @@ def load_row_cache(path: Path | str) -> bool:
         with _row_cache_lock:
             _row_cache.clear()
             _row_cache.update(restored)
+        logger.info("workspace_manager restored %d worktree row-cache entries", len(restored))
         return bool(restored)
     except Exception:
         logger.exception("workspace_manager.load_row_cache(%s) failed", path)
