@@ -11,6 +11,7 @@ function loadVoiceStore(opts) {
   const docListeners = {};
   const stores = Object.assign({}, (opts && opts.initialStores) || {});
   const storageData = Object.assign({}, (opts && opts.localStorage) || {});
+  const sessionStorageData = Object.assign({}, (opts && opts.sessionStorage) || {});
   const fetchCalls = [];
   const spoken = [];
 
@@ -31,9 +32,21 @@ function loadVoiceStore(opts) {
       delete storageData[key];
     },
   };
+  const sessionStorage = {
+    getItem(key) {
+      return Object.prototype.hasOwnProperty.call(sessionStorageData, key) ? sessionStorageData[key] : null;
+    },
+    setItem(key, value) {
+      sessionStorageData[key] = String(value);
+    },
+    removeItem(key) {
+      delete sessionStorageData[key];
+    },
+  };
 
   const windowObj = {
     localStorage,
+    sessionStorage,
     Autonomy: {},
     speechSynthesis: {
       cancel() {},
@@ -62,6 +75,7 @@ function loadVoiceStore(opts) {
     window: windowObj,
     document,
     localStorage,
+    sessionStorage,
     Alpine,
     fetch: async function(url, init) {
       fetchCalls.push({ url, init: init || null });
@@ -94,6 +108,7 @@ function loadVoiceStore(opts) {
     store: stores.voice,
     stores,
     storageData,
+    sessionStorageData,
     window: windowObj,
     fetchCalls,
     spoken,
@@ -195,6 +210,23 @@ describe('voice store substrate', () => {
     });
     assert.equal(h.store.discoverabilitySeen, true);
     assert.deepEqual(toPlain(h.store.capsulePosition), { x: 120, y: 340 });
+  });
+
+  it('restores tab-scoped dictation intent after reload and clears it when ended', () => {
+    const h = loadVoiceStore();
+    h.store.bindSession('session-a');
+    h.store.toggleMic();
+    assert.deepEqual(JSON.parse(h.sessionStorageData['autonomy.voice.resumeIntent']), {
+      sessionId: 'session-a',
+      micMode: 'muted',
+    });
+
+    const reloaded = loadVoiceStore({ sessionStorage: h.sessionStorageData });
+    assert.equal(reloaded.store.boundSessionId, 'session-a');
+    assert.equal(reloaded.store.micMode, 'muted');
+
+    reloaded.store.endSession();
+    assert.equal(reloaded.sessionStorageData['autonomy.voice.resumeIntent'], undefined);
   });
 
   it('treats voice as disabled when the flags store is absent', () => {
