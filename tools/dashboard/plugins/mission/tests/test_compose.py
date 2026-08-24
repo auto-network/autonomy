@@ -61,10 +61,9 @@ def rows():
             Member("other-mission:x:y",
                    {"kind": "scope", "title": "not ours"}, "c", "u")],
         compose.CHAT_SET_ID: [
-            Member(f"{MID}:relay",
-                   {"entries": [{"by": "Jeremy",
-                                 "at": "2026-08-23T16:10:00Z",
-                                 "text": "What's going on? </script>"}]},
+            Member(f"{MID}:relay:msg-a",
+                   {"by": "Jeremy", "at": "2026-08-23T16:10:00Z",
+                    "text": "What's going on? </script>"},
                    "c", "u")],
     }
 
@@ -120,6 +119,20 @@ def test_document_shell_is_phone_correct(monkeypatch, rows):
     assert doc.rstrip().endswith("</html>")
     # injected data blocks still precede the viewer's script execution
     assert doc.index('id="mc-chat"') < doc.index("<script>")
+
+
+def test_activity_summary_derives_from_streams(monkeypatch, rows):
+    """The homepage read: stamps from items + streams, counts from
+    states, 14 daily buckets with today last."""
+    import time as _time
+    _members(monkeypatch, rows)
+    now = _time.mktime((2026, 8, 24, 12, 0, 0, 0, 0, 0))
+    a = compose.activity_summary("autonomy", MID, now=now)
+    assert a["blockers"] == 0 and a["open_questions"] == 0
+    assert a["in_progress"] == 0
+    assert a["last_at"] is not None
+    assert len(a["days"]) == 14
+    assert sum(a["days"]) >= 1          # the history entry lands in-window
 
 
 def test_focus_pillar_carried(monkeypatch, rows):

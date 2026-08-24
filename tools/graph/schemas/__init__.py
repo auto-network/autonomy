@@ -67,6 +67,7 @@ from .registry import (
 # Concrete schema registrations. Importing for side effects — each module
 # calls ``register_schema`` at import time.
 from . import org  # noqa: F401
+from . import org_member_profile  # noqa: F401 — autonomy.org.member-profile#1
 from . import workspace  # noqa: F401
 from . import workspace_artifact  # noqa: F401 — autonomy.workspace.artifact#1
 from . import artifact_path  # noqa: F401 — autonomy.artifact-path#1

@@ -26,6 +26,7 @@ class Store:
     def __init__(self):
         self.rows: dict[str, list[Member]] = {}
         self.beads: dict[str, list] = {}
+        self.directory: dict[str, dict] = {}
 
     def put(self, set_id, key, payload, created=NOW, updated=NOW):
         validate_payload(set_id, S.SCHEMA_REVISION, payload)
@@ -39,6 +40,8 @@ class Store:
         monkeypatch.setattr(
             compose, "load_beads",
             lambda org, mission_id, pillars: self.beads)
+        monkeypatch.setattr(
+            compose, "load_directory", lambda org: self.directory)
         doc = compose.render_screen("testorg", MID, focus)
         assert doc is not None
         return doc
@@ -138,12 +141,16 @@ def full() -> Store:
           "if_wrong": "A second engine grows.",
           "happened_at": _t(70)}, updated=_t(70))
 
-    # chat log
-    st.put(S.CHAT_SET_ID, f"{MID}:relay",
-           {"entries": [
-               {"by": "Jeremy", "at": _t(10), "text": "What's going on?"},
-               {"by": "auto-relay", "at": _t(9),
-                "text": "Reconnect fixed; rerunning the flow."}]})
+    # chat: one signable row per message; the member's persona resolves
+    # through the injected directory to their chosen org display name
+    st.directory = {"1f2e3d4c" * 8: {"display_name": "Jeremy",
+                                     "avatar": "", "color": ""}}
+    st.put(S.CHAT_SET_ID, f"{MID}:relay:msg-001",
+           {"by": "1f2e3d4c" * 8, "at": _t(10),
+            "text": "What's going on?"})
+    st.put(S.CHAT_SET_ID, f"{MID}:relay:msg-002",
+           {"by": "auto-relay", "at": _t(9),
+            "text": "Reconnect fixed; rerunning the flow."})
 
     # bead payload (bridge output shape)
     st.beads = {"relay": [

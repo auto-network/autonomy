@@ -25,6 +25,7 @@ version trail in the store.
 from __future__ import annotations
 
 from tools.graph.schemas.registry import (
+    append_only_log,
     publication_band,
     SchemaValidationError,
     SettingSchema,
@@ -300,20 +301,34 @@ class MissionContentV1(SettingSchema):
 
 @publication_band(min="raw", max="curated")
 @home("organization")
-@keyed_per_entity(key_strategy="mission_id:pillar_id")
+@append_only_log(key="mission_id:pillar_id:uuid")
 class MissionChatV1(SettingSchema):
-    """One pillar's chat log. Key: ``<mission_id>:<pillar_id>``.
+    """One chat MESSAGE. Key: ``<mission_id>:<pillar_id>:<uuid>``.
+
+    One row per message, deliberately: when the signed-settings
+    envelope lands (design 21a0da9e-1c2), each message individually
+    carries its writer's signed membership identity — the substrate
+    does attribution, nothing is stamped. Until then ``by`` records
+    the writer: a member's org persona public key (resolved to their
+    directory profile at render), or an agent's session name.
 
     A free conversation — the human's only input surface. Nothing here
     is tracked: no states, no categories. The pillar agent decides what
-    a message warrants (a question item, a decision item, a bead, a bd
-    comment) and writes that itself; entries stay as the raw record.
+    a message warrants and writes that itself.
     """
 
     set_id = CHAT_SET_ID
     schema_revision = SCHEMA_REVISION
 
-    entries: list = field(
-        default_factory=list, element=_ENTRY_ELEMENT,
-        description="Attributed messages, oldest first; append-in-place "
-                    "via the plugin API")
+    by: str = field(
+        required=True,
+        description="Writer: org member persona public key (64 hex; "
+                    "resolved via autonomy.org.member-profile at render) "
+                    "or an agent session name. Superseded by the signed "
+                    "envelope's terminal_persona once signing lands")
+    at: str = field(
+        required=True,
+        description="ISO-8601 moment the message was sent")
+    text: str = field(
+        required=True,
+        description="Message prose (markdown subset)")

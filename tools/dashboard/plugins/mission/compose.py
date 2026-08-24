@@ -100,14 +100,120 @@ def load_items(org: str, mission_id: str) -> list[dict]:
 
 
 def load_chat(org: str, mission_id: str) -> dict[str, list]:
+    """Per-pillar logs from per-message rows (key mission:pillar:uuid)."""
     prefix = mission_id + ":"
     out: dict[str, list] = {}
     for m in _read(CHAT_SET_ID, org):
         if not m.key.startswith(prefix):
             continue
-        entries = (m.payload or {}).get("entries") or []
-        if entries:
-            out[m.key[len(prefix):]] = entries
+        rest = m.key[len(prefix):]
+        pillar_id, _, msg_id = rest.partition(":")
+        if not msg_id or not isinstance(m.payload, dict):
+            continue
+        out.setdefault(pillar_id, []).append(dict(m.payload))
+    for entries in out.values():
+        entries.sort(key=lambda e: e.get("at") or "")
+    return out
+
+
+def activity_summary(org: str, mission_id: str,
+                     now: float | None = None) -> dict:
+    """The homepage's read: when things happened and what needs eyes.
+
+    Derived from the same streams the feed renders — item moments plus
+    history/work/discussion/answer entries. Returns last_at (epoch),
+    days (14 daily event counts, oldest first), blockers (open blocking
+    questions), in_progress (criteria being worked), open_questions.
+    """
+    import datetime
+    now = now or time.time()
+    stamps: list[float] = []
+
+    def _epoch(v) -> float | None:
+        if not v:
+            return None
+        try:
+            return datetime.datetime.fromisoformat(
+                str(v).replace("Z", "+00:00")).timestamp()
+        except Exception:
+            return None
+
+    blockers = in_progress = open_questions = 0
+    for it in load_items(org, mission_id):
+        for v in (it.get("happened_at"), it.get("updated_at")):
+            e = _epoch(v)
+            if e:
+                stamps.append(e)
+                break
+        for stream, field2 in (("history", "at"), ("work", "at"),
+                               ("discussion", "at")):
+            for entry in it.get(stream) or []:
+                e = _epoch(entry.get(field2))
+                if e:
+                    stamps.append(e)
+        ans = it.get("answer") or {}
+        e = _epoch(ans.get("at"))
+        if e:
+            stamps.append(e)
+        kind, state = it.get("kind"), it.get("state")
+        if kind == "question" and state == "open":
+            open_questions += 1
+            if it.get("blocking"):
+                blockers += 1
+        if kind == "checkpoint" and state == "in_progress":
+            in_progress += 1
+
+    days = [0] * 14
+    for e in stamps:
+        age_days = int((now - e) // 86400)
+        if 0 <= age_days < 14:
+            days[13 - age_days] += 1
+    return {
+        "last_at": max(stamps) if stamps else None,
+        "days": days,
+        "blockers": blockers,
+        "in_progress": in_progress,
+        "open_questions": open_questions,
+    }
+
+
+def load_directory(org: str) -> dict[str, dict]:
+    """persona pub key -> presentation, for render-time attribution.
+
+    Rows from the org member directory (autonomy.org.member-profile);
+    while a member's row is missing, this one-human dashboard falls
+    back to the personal identity's display name for its own persona —
+    the org row, once written, overrides.
+    """
+    out: dict[str, dict] = {}
+    try:
+        from tools.graph import ops as graph_ops
+        for m in graph_ops.read_set(
+                "autonomy.org.member-profile", org=org or None, peers=[]):
+            payload = m.payload or {}
+            if payload.get("display_name"):
+                out[m.key] = {
+                    "display_name": payload["display_name"],
+                    "avatar": payload.get("avatar") or "",
+                    "color": payload.get("color") or "",
+                }
+        persona = None
+        for m in graph_ops.read_set(
+                "autonomy.network.persona", org=org or None, peers=[]):
+            if (m.payload or {}).get("source") in ("found", "join"):
+                persona = m.key
+                break
+        if persona and persona not in out:
+            try:
+                from tools.dashboard.identity_routes import _personal_member
+                name = (_personal_member().payload or {}).get("display_name")
+                if name:
+                    out[persona] = {"display_name": name, "avatar": "",
+                                    "color": ""}
+            except Exception:
+                pass
+    except Exception:
+        pass
     return out
 
 
@@ -157,7 +263,11 @@ def render_screen(org: str, mission_id: str,
            + "</body></html>")
     beads = load_beads(org, mission_id, pillars)
     chat = load_chat(org, mission_id)
+    directory = load_directory(org)
     inject = ""
+    if directory:
+        inject += ('<script type="application/json" id="mc-directory">'
+                   + _blob(directory) + "</script>")
     if beads:
         inject += ('<script type="application/json" id="mc-beads">'
                    + _blob(beads) + "</script>")

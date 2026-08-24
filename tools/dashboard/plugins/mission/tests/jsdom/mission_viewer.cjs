@@ -205,8 +205,12 @@ const SCENARIOS = {
     // ── chat: attributed log, no tracking controls ──
     document.getElementById("tab-chat").click();
     const cview = document.querySelector(".mc-view.on");
-    check("chat messages attributed",
+    // the persona pub key resolves through the injected directory to
+    // the member's chosen org display name; sessions render as-is
+    check("chat attribution resolves persona -> display name",
       texts(cview, ".qe .qwho b").join("|") === "Jeremy|auto-relay");
+    check("no raw persona hex on screen",
+      !/[0-9a-f]{32}/.test(cview.textContent));
     check("no promotion controls", !cview.querySelector(".mc-promote"));
     check("chat hint agent-owns-graduation",
       cview.querySelector(".qhint").textContent
