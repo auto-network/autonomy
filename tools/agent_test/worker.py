@@ -26,6 +26,9 @@ from .lease_client import (
 )
 
 DEFAULT_COORDINATOR_UNAVAILABLE_SECONDS = 90.0
+HANG_MINIMUM_SECONDS = 120.0
+HANG_MULTIPLIER = 3.0
+HANG_UNKNOWN_SECONDS = 600.0
 from .store import atomic_write_json, read_json, update_manifest, utc_now
 from .timing import aggregate_test_durations
 
@@ -181,13 +184,71 @@ def _progress(events: list[dict[str, Any]]) -> tuple[int, int, int]:
     for event in events:
         if event.get("kind") == "collection":
             collected.update(str(node) for node in event.get("nodes") or [])
-        elif event.get("kind") == "report" and event.get("phase") == "call":
+        elif event.get("kind") == "report" and (
+            event.get("phase") == "call"
+            or (event.get("phase") == "setup" and event.get("outcome") == "failed")
+        ):
             nodeid = str(event.get("nodeid") or "")
             if nodeid and event.get("outcome") in {"passed", "failed", "skipped"}:
                 terminal.add(nodeid)
     total = max(len(collected), len(terminal))
     percent = int((len(terminal) * 100) / total) if total else 0
     return len(terminal), total, percent
+
+
+def _execution_state(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Describe unfinished nodes and the last node pytest touched.
+
+    A live worker can be perfectly healthy while its process remains alive, so
+    process liveness alone is not a useful hang signal.  The structured report
+    stream gives us a bounded state machine: a node with setup/call activity but
+    no terminal call report is the best current suspect.
+    """
+    collected: set[str] = set()
+    terminal: set[str] = set()
+    latest: dict[str, dict[str, Any]] = {}
+    for event in events:
+        if event.get("kind") == "collection":
+            collected.update(str(node) for node in event.get("nodes") or [])
+        elif event.get("kind") == "report":
+            nodeid = str(event.get("nodeid") or "")
+            if not nodeid:
+                continue
+            latest[nodeid] = event
+            if (
+                event.get("outcome") in {"passed", "failed", "skipped"}
+                and (
+                    event.get("phase") == "call"
+                    or (event.get("phase") == "setup" and event.get("outcome") == "failed")
+                )
+            ):
+                terminal.add(nodeid)
+    total = max(len(collected), len(terminal))
+    unfinished = sorted((collected - terminal) or set())
+    active = [
+        nodeid for nodeid, event in latest.items()
+        if nodeid in unfinished and event.get("phase") in {"setup", "call", "teardown"}
+    ]
+    return {
+        "collected": collected,
+        "terminal": terminal,
+        "total": total,
+        "unfinished": unfinished,
+        "active": active,
+        "current_nodeid": active[-1] if active else (unfinished[0] if unfinished else ""),
+    }
+
+
+def _hang_threshold(nodeid: str, estimates: dict[str, dict[str, Any]]) -> tuple[float, str]:
+    """Return an adaptive no-advancement threshold and its evidence label."""
+    estimate = estimates.get(nodeid) if nodeid else None
+    if estimate:
+        expected = max(
+            float(estimate.get("maximum_seconds") or 0),
+            float(estimate.get("median_seconds") or 0),
+        )
+        return max(HANG_MINIMUM_SECONDS, expected * HANG_MULTIPLIER), "retained node history"
+    return HANG_UNKNOWN_SECONDS, "no retained history for the active node"
 
 
 def _summarize(events: list[dict[str, Any]]) -> tuple[dict[str, int], list[dict[str, Any]]]:
@@ -505,33 +566,99 @@ def run(directory: Path) -> int:
             update_manifest(directory, {"pytest_pid": child.pid})
             renew_failures = 0
             last_progress_at = time.monotonic()
-            last_progress_percent = 0
             last_renewal_at = time.monotonic()
+            last_advanced_at = time.monotonic()
+            last_completed = 0
+            last_total = 0
+            estimates: dict[str, dict[str, Any]] = {}
+            estimates_requested = False
+            hang: dict[str, Any] | None = None
             while True:
                 try:
                     exit_code = child.wait(timeout=0.25)
                     break
                 except subprocess.TimeoutExpired:
                     now = time.monotonic()
-                    completed, total, percent = _progress(_read_events(events_dir))
-                    if now - last_progress_at >= 1.0 and (percent != last_progress_percent or total == 0):
+                    events = _read_events(events_dir)
+                    completed, total, percent = _progress(events)
+                    state = _execution_state(events)
+                    if total and not last_total:
+                        # Collection/discovery is a separate phase. Do not
+                        # classify a slow inventory as a stalled test node.
+                        last_advanced_at = now
+                    last_total = total
+                    if total and not estimates_requested:
+                        estimates_requested = True
+                        estimate_result = duration_request(
+                            "node_estimates",
+                            repository=str(manifest.get("repository") or repo.name),
+                            nodeids=sorted(state["collected"])[:2000],
+                        )
+                        if estimate_result.get("ok"):
+                            estimates = {
+                                str(item["nodeid"]): item
+                                for item in estimate_result.get("estimates") or []
+                                if isinstance(item, dict) and item.get("nodeid")
+                            }
+                    if completed > last_completed:
+                        last_completed = completed
+                        last_advanced_at = now
+                    current_nodeid = str(state.get("current_nodeid") or "")
+                    threshold, threshold_source = _hang_threshold(current_nodeid, estimates)
+                    stalled_for = max(0.0, now - last_advanced_at)
+                    progress_status = "suspect" if hang is not None else "running"
+                    if total and state["unfinished"] and stalled_for >= threshold and hang is None:
+                        hang = {
+                            "detected_at": utc_now(),
+                            "nodeid": current_nodeid,
+                            "elapsed_seconds": round(now - started, 3),
+                            "stalled_seconds": round(stalled_for, 3),
+                            "threshold_seconds": round(threshold, 3),
+                            "reason": "no test node advanced beyond its adaptive timing threshold",
+                            "threshold_source": threshold_source,
+                        }
+                        error_request(
+                            "execution",
+                            "hung_test",
+                            f"run {run_id} has had no node advancement for {stalled_for:.0f}s; "
+                            f"suspect {current_nodeid or 'unknown node'} "
+                            f"(threshold {threshold:.0f}s, {threshold_source})",
+                            run_id=run_id,
+                        )
+                        progress_status = "suspect"
+                    if now - last_progress_at >= 1.0:
+                        known_remaining = sum(
+                            float(estimates[nodeid].get("median_seconds") or 0)
+                            for nodeid in state["unfinished"] if nodeid in estimates
+                        )
+                        parallelism = max(1, int(manifest.get("parallelism") or 1))
+                        estimated_remaining = known_remaining / parallelism
+                        unknown_remaining = sum(
+                            nodeid not in estimates for nodeid in state["unfinished"]
+                        )
                         progress = {
                             "completed": completed,
                             "total": total,
                             "percent": percent,
-                            "status": "collecting" if total == 0 else "running",
+                            "status": "collecting" if total == 0 else progress_status,
+                            "elapsed_seconds": round(now - started, 3),
+                            "remaining_nodes": len(state["unfinished"]),
+                            "known_remaining_seconds": round(known_remaining, 3),
+                            "estimated_remaining_seconds": round(estimated_remaining, 3),
+                            "unknown_remaining_nodes": unknown_remaining,
                             "updated_at": utc_now(),
                         }
+                        if hang is not None:
+                            progress["hang"] = hang
                         update_manifest(directory, {"progress": progress})
                         progress_request(
                             run_id,
                             completed=completed,
                             total=total,
                             percent=percent,
-                            status="collecting" if total == 0 else "running",
+                            status="collecting" if total == 0 else progress_status,
                         )
                         last_progress_at = now
-                        last_progress_percent = percent
                     if lease_id and now - last_renewal_at >= 20.0:
                         renewed = lease_request("renew", lease_id=lease_id)
                         last_renewal_at = now
@@ -639,6 +766,11 @@ def run(directory: Path) -> int:
             "estimate_sampled_tests": int(
                 (manifest.get("duration_estimate") or {}).get("sampled_tests") or 0
             ),
+            "hang_detected": bool(hang),
+            "hung_nodeid": str((hang or {}).get("nodeid") or ""),
+            "hang_reason": str((hang or {}).get("reason") or ""),
+            "hang_elapsed_seconds": float((hang or {}).get("elapsed_seconds") or 0),
+            "hang_threshold_seconds": float((hang or {}).get("threshold_seconds") or 0),
         },
     )
     run_history: dict[str, Any] = {
@@ -694,6 +826,7 @@ def run(directory: Path) -> int:
             "coverage_path": str(directory / "coverage.json"),
             "duration_history": duration_history,
             "organization_history": run_history,
+            "hang": hang,
         },
     )
     text = _notification_text(run_id, status, summary, duration)

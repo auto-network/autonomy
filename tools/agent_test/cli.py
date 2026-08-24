@@ -94,7 +94,27 @@ def _progress_line(manifest: dict[str, Any]) -> str | None:
     completed = int(progress.get("completed") or 0)
     total = int(progress.get("total") or 0)
     percent = max(0, min(100, int(progress.get("percent") or 0)))
-    return f"Progress: {percent}% ({completed}/{total} test nodes)."
+    line = f"Progress: {percent}% ({completed}/{total} test nodes)."
+    if status == "suspect":
+        hang = progress.get("hang") or {}
+        nodeid = str(hang.get("nodeid") or "unknown node")
+        stalled = float(hang.get("stalled_seconds") or 0)
+        threshold = float(hang.get("threshold_seconds") or 0)
+        line += (
+            f" Suspect hung: {nodeid} has not advanced for {format_estimate(stalled)} "
+            f"(threshold {format_estimate(threshold)})."
+        )
+    known_remaining = progress.get("estimated_remaining_seconds")
+    if not isinstance(known_remaining, (int, float)):
+        known_remaining = progress.get("known_remaining_seconds")
+    remaining_nodes = progress.get("remaining_nodes")
+    unknown_nodes = progress.get("unknown_remaining_nodes")
+    if isinstance(known_remaining, (int, float)) and known_remaining > 0:
+        suffix = f"; {unknown_nodes} node(s) without history" if unknown_nodes else ""
+        line += f" Known remaining work: ~{format_estimate(float(known_remaining))}{suffix}."
+    elif isinstance(remaining_nodes, int) and remaining_nodes:
+        line += f" {remaining_nodes} node(s) remain; timing history is not available yet."
+    return line
 
 
 def _duration_estimate(repository: str, selectors: list[str], parallelism: int = 1) -> dict[str, Any]:

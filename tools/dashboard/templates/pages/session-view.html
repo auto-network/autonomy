@@ -236,12 +236,12 @@
             <span class="tokens" x-show="contextTokens > 0"
                   style="font-size:11px;font-variant-numeric:tabular-nums;color:#6b7280;"
                   x-text="Math.round(contextTokens / 1000) + 'k'"></span>
-            <span x-show="agentTestProgress && agentTestProgress.status === 'running'"
+            <span x-show="agentTestProgress && ['collecting', 'running', 'suspect'].includes(agentTestProgress.status)"
                   x-cloak
                   class="agent-test-progress"
                   :title="agentTestProgress.completed + ' of ' + (agentTestProgress.total || '?') + ' tests completed'"
                   x-text="agentTestProgress.status === 'collecting' ? '—%' : (agentTestProgress.percent + '%')"
-                  style="font-size:11px;font-variant-numeric:tabular-nums;color:#67e8f9;white-space:nowrap;"></span>
+                  :style="'font-size:11px;font-variant-numeric:tabular-nums;color:' + (agentTestProgress.status === 'suspect' ? '#fbbf24' : '#67e8f9') + ';white-space:nowrap;'" ></span>
           </div>
           </div>
 

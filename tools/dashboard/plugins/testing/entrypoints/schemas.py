@@ -97,6 +97,11 @@ class AgentTestRunV1(SettingSchema):
     estimated_high_seconds: float = field(default=0.0, description="Observed high estimate for known tests.")
     estimate_complete: bool = field(default=False, description="Whether every requested test node had timing history.")
     estimate_sampled_tests: int = field(default=0, description="Historical test nodes contributing to the estimate.")
+    hang_detected: bool = field(default=False, description="Whether execution exceeded the adaptive no-advancement threshold.")
+    hung_nodeid: str = field(default="", description="Most likely node that stopped advancing, when known.")
+    hang_reason: str = field(default="", description="Bounded explanation for a recorded hang suspicion.")
+    hang_elapsed_seconds: float = field(default=0.0, description="Elapsed execution time when hang suspicion was recorded.")
+    hang_threshold_seconds: float = field(default=0.0, description="Adaptive threshold that triggered hang suspicion.")
 
     @classmethod
     def validate(cls, payload: Any) -> None:
@@ -136,6 +141,14 @@ class AgentTestRunV1(SettingSchema):
                 _non_negative_number(payload, name, 7 * 24 * 3600)
         if "estimate_complete" in payload and not isinstance(payload["estimate_complete"], bool):
             raise SchemaValidationError("estimate_complete must be boolean")
+        if "hang_detected" in payload and not isinstance(payload["hang_detected"], bool):
+            raise SchemaValidationError("hang_detected must be boolean")
+        for name in ("hung_nodeid", "hang_reason"):
+            if name in payload and (not isinstance(payload[name], str) or len(payload[name]) > 4000):
+                raise SchemaValidationError(f"{name} must be a bounded string")
+        for name in ("hang_elapsed_seconds", "hang_threshold_seconds"):
+            if name in payload:
+                _non_negative_number(payload, name, 7 * 24 * 3600)
         sampled_tests = payload.get("estimate_sampled_tests", 0)
         if isinstance(sampled_tests, bool) or not isinstance(sampled_tests, int) or sampled_tests < 0:
             raise SchemaValidationError("estimate_sampled_tests must be a non-negative integer")

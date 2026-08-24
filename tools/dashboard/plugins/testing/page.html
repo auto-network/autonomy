@@ -153,15 +153,13 @@
                 <span><b x-text="session.runs.length"></b> runs</span>
               </div>
               <div class="testing-history-runs">
-                <template x-for="run in session.runs.slice(0, 5)" :key="run.run_id">
+                <template x-for="run in session.runs" :key="run.run_id">
                   <div>
                     <span class="testing-status" :class="'is-' + run.status" x-text="run.status"></span>
                     <p><strong x-text="run.collected + ' tests'"></strong><small x-text="selectorText(run)"></small></p>
                     <b x-text="duration(run.duration_seconds)"></b>
                   </div>
                 </template>
-                <p x-show="session.runs.length > 5" class="testing-history-more"
-                   x-text="'+' + (session.runs.length - 5) + ' more retained runs'"></p>
               </div>
             </article>
           </template>

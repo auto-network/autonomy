@@ -140,8 +140,11 @@ def test_ui_has_pinned_org_picker_and_bounded_evidence_surfaces() -> None:
     assert "summary.activity.queued_runs" in html
     assert "summary.tests.observation_rows" in html
     assert "summary.tests.average_samples_per_test" in html
-    assert "session.runs.slice(0, 5)" in html
-    assert "+' + (session.runs.length - 5)" in html
+    assert "x-for=\"run in session.runs\"" in html
+    assert "testing-history-more" not in html
+    assert "more retained runs" not in html
+    assert "align-items: start" in css
+    assert "more retained runs" not in script
     assert "@media (max-width: 719px)" in css
     assert "overflow-x: hidden" in css
     assert ".testing-console * { min-width: 0; }" in css
@@ -215,6 +218,17 @@ def test_history_is_raw_org_owned_append_only_capped_and_isolated(tmp_path, monk
     assert estimate["effective_parallelism"] == 1
     assert estimate["selector_history_coverage"] == 1.0
     assert estimate["estimate_complete"] is True
+    node_estimates = store.node_estimates(
+        "alpha", "github.test/acme/widget", [nodeid, "tests/test_unseen.py"],
+    )
+    assert node_estimates["ok"] is True
+    assert node_estimates["missing"] == 1
+    assert node_estimates["estimates"] == [{
+        "nodeid": nodeid,
+        "samples": 10,
+        "median_seconds": 6.5,
+        "maximum_seconds": 11.0,
+    }]
 
     partial = store.estimate_duration(
         "alpha", "github.test/acme/widget", [nodeid, "tests/test_unseen.py"], parallelism=2,

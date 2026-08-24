@@ -161,7 +161,15 @@ async def durations(request: Request) -> JSONResponse:
             selectors,
             parallelism=body.get("parallelism", 1),
         ))
-    return JSONResponse({"error": "action must be record, history, or estimate"}, status_code=400)
+    if action == "node_estimates":
+        return _result(await asyncio.to_thread(
+            store.node_estimates,
+            organization,
+            repository,
+            body.get("nodeids"),
+            limit_samples=body.get("limit_samples", 10),
+        ))
+    return JSONResponse({"error": "action must be record, history, estimate, or node_estimates"}, status_code=400)
 
 
 async def summary(request: Request) -> JSONResponse:
