@@ -60,10 +60,10 @@
       z-index:0;pointer-events:none;border-radius:inherit;
       /* fade the plot under the overlaid text: 10% of a wide tile,
          never narrower than 50px on a phone */
-      -webkit-mask-image:linear-gradient(to right,
-        rgba(0,0,0,.12), #000 max(10%, 50px));
-      mask-image:linear-gradient(to right,
-        rgba(0,0,0,.12), #000 max(10%, 50px))}
+      -webkit-mask-image:linear-gradient(to right, rgba(0,0,0,.05),
+        rgba(0,0,0,.05) max(5%, 28px), #000 max(16%, 85px));
+      mask-image:linear-gradient(to right, rgba(0,0,0,.05),
+        rgba(0,0,0,.05) max(5%, 28px), #000 max(16%, 85px))}
     .msn-name{color:var(--ink);font-weight:650;line-height:1.25;
       white-space:nowrap;overflow:hidden;cursor:pointer;
       text-shadow:0 1px 5px rgba(0,0,0,.85);align-self:flex-start;
