@@ -22,6 +22,7 @@ frontend:
 
 entrypoints:
   api: tools.dashboard.plugins.mission.entrypoints.api:routes
+  cli: tools.dashboard.plugins.mission.entrypoints.cli:register
   schemas:
     - tools.dashboard.plugins.mission.entrypoints.schemas:MissionV1
     - tools.dashboard.plugins.mission.entrypoints.schemas:MissionPillarV1
