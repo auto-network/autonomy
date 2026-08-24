@@ -2595,6 +2595,17 @@ class TestScanFingerprintCache:
         assert wm.load_row_cache(state_path) is True
         assert wm._row_cache == original
 
+    def test_empty_cache_does_not_replace_a_prior_snapshot(self, tmp_path, monkeypatch):
+        worktrees_dir, _clone, _wt = self._fresh(tmp_path, monkeypatch)
+        wm.scan_all_worktrees(worktrees_dir=worktrees_dir, live_session_names=set())
+        state_path = tmp_path / "worktree-row-cache.state"
+        wm.save_row_cache(state_path)
+        snapshot = state_path.read_bytes()
+
+        wm.invalidate_row_cache()
+        wm.save_row_cache(state_path)
+        assert state_path.read_bytes() == snapshot
+
     def test_correctness_gate_cold_equals_warm(self, tmp_path, monkeypatch):
         worktrees_dir, _clone, _wt = self._fresh(tmp_path, monkeypatch)
         wm.scan_all_worktrees(worktrees_dir=worktrees_dir, live_session_names=set())
