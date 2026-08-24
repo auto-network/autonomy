@@ -27,6 +27,12 @@ from tools.dashboard.plugins.mission.entrypoints.schemas import (
 _TEMPLATE_PATH = Path(__file__).parent / "viewer.html"
 _DATA_MARK = "__MC_STRUCTURED_DATA__"
 
+#: Newest messages baked into the screen per pillar. The full log stays
+#: in settings (append-only, never pruned); this bounds only what one
+#: document carries so a chatty mission cannot grow the render without
+#: limit. A "load earlier" seam can raise the horizon later.
+CHAT_BAKE_LIMIT = 100
+
 
 def _read(set_id: str, org: str):
     from tools.graph import ops as graph_ops
@@ -100,7 +106,11 @@ def load_items(org: str, mission_id: str) -> list[dict]:
 
 
 def load_chat(org: str, mission_id: str) -> dict[str, list]:
-    """Per-pillar logs from per-message rows (key mission:pillar:uuid)."""
+    """Per-pillar logs from per-message rows (key mission:pillar:uuid).
+
+    Each pillar's log is bounded to the newest ``CHAT_BAKE_LIMIT``
+    messages; the settings rows themselves are never touched.
+    """
     prefix = mission_id + ":"
     out: dict[str, list] = {}
     for m in _read(CHAT_SET_ID, org):
@@ -111,8 +121,10 @@ def load_chat(org: str, mission_id: str) -> dict[str, list]:
         if not msg_id or not isinstance(m.payload, dict):
             continue
         out.setdefault(pillar_id, []).append(dict(m.payload))
-    for entries in out.values():
+    for pid, entries in out.items():
         entries.sort(key=lambda e: e.get("at") or "")
+        if len(entries) > CHAT_BAKE_LIMIT:
+            out[pid] = entries[-CHAT_BAKE_LIMIT:]
     return out
 
 

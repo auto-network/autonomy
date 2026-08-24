@@ -172,4 +172,5 @@ def add_chat(org: str, mission_id: str, pillar_id: str,
            _ops().read_set(CHAT_SET_ID, org=org or None, peers=[])
            if m.key.startswith(prefix)]
     log.sort(key=lambda e: e.get("at") or "")
-    return log
+    from tools.dashboard.plugins.mission.compose import CHAT_BAKE_LIMIT
+    return log[-CHAT_BAKE_LIMIT:]
