@@ -215,6 +215,32 @@ const SCENARIOS = {
     check("chat hint agent-owns-graduation",
       cview.querySelector(".qhint").textContent
         .includes("pillar decides"));
+
+    // ── overview card deep links: card->News, labels->their sections,
+    //    ask badge->Questions (operator ruling) ──
+    document.getElementById("tab-overview").click();
+    const card = Array.from(document.querySelectorAll(".mc-psum")).find(
+      (c) => c.textContent.includes("Relay"));
+    card.click();
+    let pv = document.querySelector(".mc-view.on");
+    check("card tap lands on News",
+      (pv.querySelector(".mc-sec.on") || {}).dataset
+        && pv.querySelector(".mc-sec.on").dataset.sec === "News");
+    document.getElementById("tab-overview").click();
+    const lb = Array.from(card.querySelectorAll(".lb-link")).find(
+      (e) => e.textContent === "delivery");
+    lb.click();
+    pv = document.querySelector(".mc-view.on");
+    check("delivery label deep-links",
+      pv.querySelector(".mc-sec.on").dataset.sec === "Delivery");
+    document.getElementById("tab-overview").click();
+    const badge = card.querySelector(".mc-mini");
+    if (badge) {
+      badge.click();
+      pv = document.querySelector(".mc-view.on");
+      check("ask badge deep-links to Questions",
+        pv.querySelector(".mc-sec.on").dataset.sec === "Questions");
+    }
   },
 
   empty() {

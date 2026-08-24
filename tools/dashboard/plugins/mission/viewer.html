@@ -445,6 +445,11 @@
   .mc-statbar{display:flex;height:4px;border-radius:3px;overflow:hidden;
     background:var(--card2);flex:1}
   .mc-statrow{display:flex;align-items:center;gap:8px;margin:6px 0 0}
+  .mc-statrow .lb.lb-link{cursor:pointer}
+  @media (hover:hover){
+    .mc-statrow .lb.lb-link:hover{text-decoration:underline}
+  }
+  .mc-mini{cursor:pointer}
   .mc-statrow .lb{flex:none;width:48px;font-size:.58rem;font-weight:700;
     color:var(--ink2);text-transform:uppercase;letter-spacing:.05em;text-align:left}
   .mc-statrow .fr{flex:none;font-size:.66rem;color:var(--ink3);min-width:26px}
@@ -1726,7 +1731,11 @@
     function showSection(name){
       activeName = name;
       names.forEach(function (n) {
-        if (secEls[n]) secEls[n].style.display = (n === name) ? "" : "none";
+        if (!secEls[n]) return;
+        secEls[n].style.display = (n === name) ? "" : "none";
+        // the .on class is semantics, not styling: reportWhere and the
+        // sweeps identify the active section by it
+        secEls[n].classList.toggle("on", n === name);
       });
       [].forEach.call(subs.children, function (b) {
         b.classList.toggle("on", b.dataset.sec === name);
@@ -2158,10 +2167,19 @@
     sec.appendChild(el("h2",null,"Pillars"));
     PILLARS.forEach(function (p) {
       var pc = el("div","mc-psum");
-      pc.addEventListener("click",function(){
+      // Card taps land on News; the tasks/delivery labels and the ask
+      // badge deep-link to their own sections (operator ruling).
+      function goTo(section){
         rememberPillar(p.pillar_id);
         show(p.pillar_id);
-      });
+        var pv = document.getElementById("view-" + p.pillar_id);
+        if (!pv || !pv._showSection) return;
+        var ok = pv.querySelector('.mc-sec[data-sec="' + section + '"]');
+        var first = pv.querySelector(".mc-sec");
+        pv._showSection(ok ? section
+          : (first && first.dataset.sec) || section);
+      }
+      pc.addEventListener("click",function(){ goTo("News"); });
       var hd = el("div","hd");
       hd.appendChild(band(p.color || "#8391a8"));
       hd.appendChild(el("b",null,p.name));
@@ -2193,6 +2211,10 @@
           mini.title = (asks ? asks + " waiting on you" : "")
             + (asks && blocked ? " \u00b7 " : "")
             + (blocked ? blocked + " blocked" : "");
+          mini.addEventListener("click", function (ev) {
+            ev.stopPropagation();
+            goTo("Questions");
+          });
           if (asks) mini.appendChild(el("i","m-a",asks + " ask" + (asks>1?"s":"")));
           if (blocked) mini.appendChild(el("i","m-c",blocked + " blocked"));
           miniRow.appendChild(mini);
@@ -2214,9 +2236,14 @@
         bar.title = title;
         return bar;
       }
-      function statrow(label, bar, frac){
+      function statrow(label, bar, frac, section){
         var row = el("div","mc-statrow");
-        row.appendChild(el("span","lb",label));
+        var lb = el("span","lb lb-link",label);
+        lb.addEventListener("click", function (ev) {
+          ev.stopPropagation();
+          goTo(section);
+        });
+        row.appendChild(lb);
         row.appendChild(bar);
         row.appendChild(el("span","fr",frac));
         return row;
@@ -2231,7 +2258,7 @@
             bl2.length,
             bc2.complete + " complete \u00b7 " + bc2.running + " running \u00b7 "
               + bc2.specified + " specified \u00b7 " + bc2.defined + " defined"),
-          bc2.complete + "/" + bl2.length));
+          bc2.complete + "/" + bl2.length, "Tasks"));
       }
       var crits2 = mine.filter(function (it) { return it.kind === "checkpoint"; });
       if (crits2.length){
@@ -2245,7 +2272,7 @@
           segbar([[cc.ok,"var(--good)"],[cc.run,"var(--warn)"],[cc.todo,"var(--line2)"]],
             crits2.length,
             cc.ok + " confirmed \u00b7 " + cc.run + " in progress \u00b7 " + cc.todo + " pending"),
-          cc.ok + "/" + crits2.length));
+          cc.ok + "/" + crits2.length, "Delivery"));
       }
 
       sec.appendChild(pc);
