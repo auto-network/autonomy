@@ -276,6 +276,54 @@ async def post_chat(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "entries": entries, "relayed": relayed})
 
 
+async def allocation(request: Request) -> JSONResponse:
+    """Sessions by pillar across every visible mission — who holds what.
+
+    Joins each pillar's coordinator_session with the dashboard's live
+    session records (label + liveness), so the screen can show the
+    pillar's name beside the session's own title.
+    """
+    labels: dict[str, dict] = {}
+    try:
+        from tools.dashboard.dao import dashboard_db
+        for row in dashboard_db.get_all_sessions():
+            name = row.get("tmux_name") or ""
+            if name:
+                labels[name] = {"label": row.get("label") or "",
+                                "live": bool(row.get("is_live"))}
+        live = {r.get("tmux_name") for r in dashboard_db.get_live_sessions()}
+        for name in labels:
+            labels[name]["live"] = name in live
+    except Exception:
+        pass
+    out = []
+    from tools.graph import ops as graph_ops
+    for org in _org_scopes(request):
+        try:
+            members = graph_ops.read_set(MISSION_SET_ID, org=org, peers=[])
+        except Exception:
+            continue
+        for m in members:
+            mission = {"mission_id": m.key, "org": org,
+                       "name": (m.payload or {}).get("name") or "",
+                       "status": (m.payload or {}).get("status") or "active",
+                       "pillars": []}
+            for pl in compose.load_pillars(org, m.key):
+                sid = pl.get("coordinator_session") or ""
+                info = labels.get(sid) or {}
+                mission["pillars"].append({
+                    "pillar_id": pl["pillar_id"],
+                    "name": pl.get("name") or "",
+                    "color": pl.get("color") or "",
+                    "session": sid,
+                    "session_title": info.get("label") or "",
+                    "live": bool(info.get("live")),
+                })
+            out.append(mission)
+    out.sort(key=lambda r: r.get("name") or "")
+    return JSONResponse({"missions": out})
+
+
 async def post_mission_status(request: Request) -> JSONResponse:
     """Transition a mission's lifecycle: {status: active|paused|complete}."""
     mission_id = request.path_params["mission_id"]
@@ -306,6 +354,7 @@ routes: list = [
     Route("/api/mission/screen/{mission_id}", mission_screen, methods=["GET"]),
     Route("/api/mission/status/{mission_id}", post_mission_status,
           methods=["POST"]),
+    Route("/api/mission/allocation", allocation, methods=["GET"]),
     Route("/api/mission/pillars/{mission_id}", list_pillars, methods=["GET"]),
     Route("/api/mission/items/{mission_id}", list_items, methods=["GET"]),
     Route("/api/mission/tasks/{mission_id}", list_tasks, methods=["GET"]),

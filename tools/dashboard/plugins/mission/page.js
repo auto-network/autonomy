@@ -20,6 +20,11 @@ window.missionPage = function () {
     lifeArmedAt: 0,
     popFor: null,           // "<mission_id>:<countKey>" with an open bubble
     win: {key: "30d", secs: 30 * 86400, buckets: 30},
+    screen: "missions",       // missions | sessions
+    alloc: [],
+    orgs: [],
+    org: localStorage.getItem("msn.org") || "",
+    orgOpen: false,
     windows: [
       {key: "24h", secs: 86400, buckets: 24},
       {key: "7d", secs: 7 * 86400, buckets: 28},
@@ -27,6 +32,23 @@ window.missionPage = function () {
     ],
 
     async init() {
+      // Claim the shell toolbar: the org selector teleports into
+      // #app-topbar-slot; the SPA router's resetTopbar removes the
+      // class on navigation away.
+      const header = document.querySelector("header");
+      if (header) header.classList.add("app-topbar-active");
+      try {
+        const d = await fetch("/api/orgs").then((r) => r.ok ? r.json() : {});
+        this.orgs = (d.orgs || []).map((e) => {
+          const b = (e && e.org) || {};
+          const idp = (e && e.identity && e.identity.payload) || {};
+          return {slug: b.slug || idp.slug || "",
+                  name: idp.name || b.slug || "?",
+                  color: idp.color || "#64748b",
+                  initial: idp.initial || (idp.name || "?")[0]};
+        }).filter((o) => o.slug && o.slug !== "personal");
+        if (!this.org && this.orgs.length) this.org = this.orgs[0].slug;
+      } catch (e) {}
       await this.refresh();
       const m = window.location.pathname.match(/^\/mission\/([0-9a-f-]{8,})/);
       if (m) this.current = m[1];
@@ -46,7 +68,25 @@ window.missionPage = function () {
       } catch (e) {
         this.error = String(e && e.message || e);
       }
+      try {
+        const r2 = await fetch("/api/mission/allocation");
+        if (r2.ok) this.alloc = (await r2.json()).missions || [];
+      } catch (e) {}
       this.loaded = true;
+    },
+
+    curOrg() {
+      return this.orgs.find((o) => o.slug === this.org) || null;
+    },
+
+    setOrg(slug) {
+      this.org = slug;
+      this.orgOpen = false;
+      localStorage.setItem("msn.org", slug);
+    },
+
+    allocVisible() {
+      return this.alloc.filter((m) => !this.org || m.org === this.org);
     },
 
     // ── window filter: only missions live inside the frame ──
@@ -55,6 +95,7 @@ window.missionPage = function () {
       const act = Object.keys(this.lifeFilter)
         .filter((k) => this.lifeFilter[k]);
       return this.missions.filter((m) => {
+        if (this.org && m.org && m.org !== this.org) return false;
         const at = m.activity && m.activity.last_at;
         if (!at || at < cutoff) return false;
         if (act.length && !act.includes(m.status || "active")) return false;
