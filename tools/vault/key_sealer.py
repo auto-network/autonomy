@@ -1,4 +1,4 @@
-"""Production vault sealer — the seam ``settings_ops`` WRITES through.
+"""Organization storage-domain sealer — the seam ``settings_ops`` uses there.
 
 The write-direction twin of :mod:`tools.vault.key_holder`. ``settings_ops``
 asks a registered *sealer* for the locator a ``@vaulted`` row stores in place
@@ -7,8 +7,11 @@ built one, so every vaulted write failed closed with ``VaultSealerMissing``
 and no vault row could ever be CREATED — the exact mirror of the read-side gap
 ``key_holder`` closed (``auto-a1pub``).
 
-Fails closed is the correct behaviour and is preserved here: there is no path
-that writes a payload in the clear because sealing was unavailable.
+Personal secured Settings deliberately do not enter this module. They seal
+directly to their owner policy class through ``personal_object`` and therefore
+remain cold-writable without an organization delegate or fold. Organization
+objects still fail closed here: there is no path that writes plaintext because
+storage-domain sealing was unavailable.
 
 ## Three things this needs that the read side did not
 

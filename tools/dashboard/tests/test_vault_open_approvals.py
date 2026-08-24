@@ -116,6 +116,14 @@ def vault_open_env(tmp_path, monkeypatch):
     approvals_routes._decision_waiters.clear()
 
     world = VaultWorld(tmp_path / "vault").register()
+    world.mint_policy_class()
+    with VaultStore(graph_db) as store:
+        store.put_class(world.policy_class)
+        store.put_password_factor(
+            world.identity.factor_id,
+            world.identity.published.public_key,
+            world.identity.armor,
+        )
     try:
         yield graph_db, world, TestClient(Starlette(routes=approvals_routes.ROUTES))
     finally:
@@ -142,6 +150,7 @@ def test_fake_ssh_key_is_sealed_approved_delivered_and_expired_without_leak(
         "autonomy:test.disposable",
         {"value": secret},
         org=ops.CALLER_ORG,
+        vault_policy_class_id=world.policy_class.class_id,
     )
     assert world.identity is not None
     with VaultStore(graph_db) as store:
@@ -321,6 +330,9 @@ def test_root_reachable_fake_ssh_key_uses_personal_root_anchor(vault_open_env):
         created_at="2026-08-24T00:02:00Z",
     )
     world.policy_class = root_class
+    with VaultStore(graph_db) as store:
+        store.put_root_anchor(anchor)
+        store.put_class(root_class)
     secret = (
         "-----BEGIN OPENSSH PRIVATE KEY-----\n"
         + base64.b64encode(secrets.token_bytes(96)).decode("ascii")
@@ -333,11 +345,8 @@ def test_root_reachable_fake_ssh_key_uses_personal_root_anchor(vault_open_env):
         "autonomy:test.root-reachable-ssh",
         {"value": secret},
         org=ops.CALLER_ORG,
+        vault_policy_class_id=root_class.class_id,
     )
-    with VaultStore(graph_db) as store:
-        store.put_root_anchor(anchor)
-        store.put_class(root_class)
-
     with client:
         created = client.post("/api/approvals", json={
             "kind": "vault_open",
@@ -392,6 +401,7 @@ def test_vault_open_refuses_setting_drift(vault_open_env):
         "autonomy:test.drift",
         {"value": "first"},
         org=ops.CALLER_ORG,
+        vault_policy_class_id=world.policy_class.class_id,
     )
     with VaultStore(graph_db) as store:
         store.put_class(world.policy_class)
@@ -408,7 +418,12 @@ def test_vault_open_refuses_setting_drift(vault_open_env):
                 "key": "test.drift",
             },
         }).json()["id"]
-        settings_ops.override_setting(setting_id, {"value": "second"}, org=None)
+        settings_ops.override_setting(
+            setting_id,
+            {"value": "second"},
+            org=None,
+            vault_policy_class_id=world.policy_class.class_id,
+        )
         client.post(
             f"/api/approvals/{rid}/decision",
             headers={"x-test-operator": "1"},
@@ -435,6 +450,7 @@ def test_vault_open_uses_the_generation_named_by_an_older_setting(vault_open_env
         "autonomy:test.older-generation",
         {"value": "sealed-before-revocation"},
         org=ops.CALLER_ORG,
+        vault_policy_class_id=world.policy_class.class_id,
     )
     original = world.policy_class
     old_generation_id = original.current().gen_id
