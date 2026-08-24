@@ -82,6 +82,12 @@ window.missionPage = function () {
       this.loaded = true;
     },
 
+    currentTitle() {
+      if (!this.current) return "";
+      const m = this.missions.find((x) => x.mission_id === this.current);
+      return (m && m.name) || "";
+    },
+
     curOrg() {
       return this.orgs.find((o) => o.slug === this.org) || null;
     },
