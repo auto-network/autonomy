@@ -38,17 +38,17 @@ window.missionPage = function () {
       this.loaded = true;
     },
 
-    // ── the name: one line, full width, auto-fit (measure, never wrap;
-    //    shrink only as far as needed, floor keeps it readable) ──
+    // ── the name: one line, full width, auto-fit between a modest
+    //    ceiling and a readable floor (the studio calibration lesson:
+    //    never comical, never wrapped) ──
     fitName(el) {
       const fit = () => {
-        let size = 1.35;                       // rem ceiling — never comical
+        let size = 1.02;                       // rem ceiling
         el.style.fontSize = size + "rem";
-        el.style.whiteSpace = "nowrap";
         const avail = () => el.parentElement.clientWidth;
         let guard = 24;
-        while (el.scrollWidth > avail() && size > 0.82 && guard--) {
-          size -= 0.04;
+        while (el.scrollWidth > avail() && size > 0.78 && guard--) {
+          size -= 0.03;
           el.style.fontSize = size + "rem";
         }
       };
@@ -67,24 +67,51 @@ window.missionPage = function () {
     },
 
     bars(m) {
+      // The studio activity-grid language: small cells, intensity by
+      // count — height AND opacity scale, empty days a faint baseline.
       const days = (m.activity && m.activity.days) || [];
       const max = Math.max(1, ...days);
       return days.map((n) => ({
-        h: n ? Math.max(18, Math.round((n / max) * 100)) : 6,
         on: n > 0,
+        h: n ? Math.max(30, Math.round((n / max) * 100)) : 100,
+        op: n ? (0.45 + 0.55 * (n / max)).toFixed(2) : 1,
       }));
     },
 
     counts(m) {
+      // The app's icon vocabulary, not words: ⊘ blocked, ⟳ in progress,
+      // ? open — numbers beside marks, one line, no wrapping.
+      const STOP = '<svg viewBox="0 0 16 16" aria-hidden="true">'
+        + '<circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor"'
+        + ' stroke-width="1.7"/><path d="M3.9 3.9L12.1 12.1"'
+        + ' stroke="currentColor" stroke-width="1.7"'
+        + ' stroke-linecap="round"/></svg>';
+      const ARR = '<svg viewBox="0 0 16 16" aria-hidden="true">'
+        + '<g transform="rotate(15 8 8)">'
+        + '<path d="M13.5 8A5.5 5.5 0 1 1 10.75 3.24" fill="none"'
+        + ' stroke="currentColor" stroke-width="1.7"'
+        + ' stroke-linecap="round"/>'
+        + '<path d="M13.89 5.06L8.21 5.21 11.18 0.05z"'
+        + ' fill="currentColor"/></g></svg>';
       const a = m.activity || {};
       const out = [];
-      if (a.blockers) out.push({label: a.blockers + " blocked", cls: "crit"});
-      if (a.in_progress) out.push({label: a.in_progress + " in progress",
-                                   cls: "warn"});
-      if (a.open_questions && a.open_questions > (a.blockers || 0))
-        out.push({label: (a.open_questions - (a.blockers || 0)) + " open",
-                  cls: "dim"});
+      if (a.blockers)
+        out.push({key: "b", mark: STOP, n: a.blockers, cls: "crit"});
+      if (a.in_progress)
+        out.push({key: "p", mark: ARR, n: a.in_progress, cls: "warn"});
+      const open = (a.open_questions || 0) - (a.blockers || 0);
+      if (open > 0) out.push({key: "q", mark: "?", n: open, cls: "dim"});
       return out;
+    },
+
+    lifeOpen: null,
+    lifeTap(m, st) {
+      if (this.lifeOpen !== m.mission_id) {
+        this.lifeOpen = m.mission_id;          // first tap: reveal choices
+        return;
+      }
+      this.lifeOpen = null;
+      if (st !== m.status) this.setStatus(m, st);
     },
 
     async setStatus(m, status) {
