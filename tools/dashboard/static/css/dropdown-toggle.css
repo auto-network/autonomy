@@ -130,6 +130,13 @@
    so right:0 would push the menu past the left edge of the viewport.
    Anchor to the left instead and cap width to keep the menu on-screen. */
 @media (max-width: 767px) {
+  /* The page shell keeps a desktop-sized right gutter for general content.
+     This toolbar owns a right-aligned 18rem menu, so it needs the usable
+     viewport width rather than that inset content width: otherwise its +
+     control is aligned too far left and the menu falls off the left edge. */
+  .sessions-page-toolbar {
+    width: calc(100vw - 2rem - env(safe-area-inset-left) - env(safe-area-inset-right));
+  }
   .sort-toggle { padding: 6px 12px; font-size: 12px; }
   .sort-menu {
     left: 0;
@@ -137,7 +144,14 @@
     max-width: calc(100vw - 24px);
     width: max-content;
   }
-  .sessions-toolbar-actions { gap: 8px; }
+  /* Desktop keeps the controls as one compact group. On a phone the launch
+     control owns the far edge so its right-aligned workspace menu stays
+     inside the viewport. The org picker is the flexible middle item. */
+  .sessions-toolbar-actions {
+    justify-content: flex-end;
+    gap: 8px;
+    flex: 1 1 auto;
+  }
   .sessions-org-filter { flex-basis: 190px; }
   .sessions-org-filter-toggle { width: 100%; }
 }
