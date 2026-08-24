@@ -70,3 +70,36 @@ def test_org_session_with_lost_scope_fails_closed(two_orgs):
     nothing — never fall through to aggregation or to personal."""
     req = _Req(ApiPrincipalKind.ORG_SESSION, subject="auto-x", org=None)
     assert api._org_scopes(req) == []
+
+
+def test_session_contributions_link_the_new_app(monkeypatch):
+    """A pillar coordinator gets one /mission/<uuid> badge; completed
+    missions and unrelated sessions contribute nothing."""
+    from collections import namedtuple
+    Member = namedtuple("Member", "key payload")
+    rows = {
+        "mission.registry": [
+            Member("mid-1", {"name": "Multi-User Autonomy",
+                             "status": "active"}),
+            Member("mid-2", {"name": "Old Push", "status": "complete"}),
+        ],
+        "mission.pillar": [
+            Member("mid-1:relay", {"name": "Relay",
+                                   "coordinator_session": "auto-relay",
+                                   "color": "#3987e5"}),
+            Member("mid-2:legacy", {"name": "Legacy",
+                                    "coordinator_session": "auto-old"}),
+        ],
+    }
+    from tools.graph import ops as graph_ops
+    monkeypatch.setattr(
+        graph_ops, "read_set",
+        lambda set_id, org=None, peers=None: rows.get(set_id, []))
+    monkeypatch.setattr(api, "_org_scopes", lambda request: ["autonomy"])
+    out = api.session_contributions(
+        ["auto-relay", "auto-old", "auto-none"], request=None)
+    assert [c["href"] for c in out["auto-relay"]] == ["/mission/mid-1"]
+    assert out["auto-relay"][0]["accent"] == "#3987e5"
+    assert "Relay" in out["auto-relay"][0]["title"]
+    assert out["auto-old"] == []      # completed mission: no badge
+    assert out["auto-none"] == []

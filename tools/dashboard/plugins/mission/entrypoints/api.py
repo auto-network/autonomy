@@ -28,6 +28,7 @@ from tools.dashboard.api_auth import (
 from tools.dashboard.plugins.mission import compose, writes
 from tools.dashboard.plugins.mission.entrypoints.schemas import (
     MISSION_SET_ID,
+    PILLAR_SET_ID,
 )
 from tools.graph.schemas.registry import SchemaValidationError
 
@@ -343,6 +344,61 @@ async def allocation(request: Request) -> JSONResponse:
             out.append(mission)
     out.sort(key=lambda r: r.get("name") or "")
     return JSONResponse({"missions": out})
+
+
+#: The session-viewer cross-link glyph (same concentric mark the
+#: legacy plugin used, so the operator's muscle memory carries over).
+_SESSION_ICON = (
+    '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true">'
+    '<circle cx="8" cy="8" r="6.2" stroke="currentColor" stroke-width="1.5"/>'
+    '<circle cx="8" cy="8" r="2.4" fill="currentColor"/></svg>'
+)
+
+
+def session_contributions(session_ids: list[str],
+                          request: Request) -> dict[str, list[dict]]:
+    """Session-viewer chrome: coordinated pillars link into /mission.
+
+    Reverse lookup over the mission.* settings (pillar payloads carry
+    ``coordinator_session``), scoped exactly like every other read here.
+    Completed missions contribute nothing — a live session should not
+    badge into a retired record.
+    """
+    from tools.graph import ops as graph_ops
+    result: dict[str, list[dict]] = {sid: [] for sid in session_ids}
+    wanted = set(session_ids)
+    for org in _org_scopes(request):
+        try:
+            missions = {m.key: dict(m.payload) for m in
+                        graph_ops.read_set(MISSION_SET_ID, org=org,
+                                           peers=[])}
+            pillars = graph_ops.read_set(PILLAR_SET_ID, org=org, peers=[])
+        except Exception:
+            continue
+        for m in pillars:
+            payload = dict(m.payload or {})
+            coord = str(payload.get("coordinator_session") or "")
+            if coord not in wanted:
+                continue
+            mission_id, _, pillar_id = m.key.partition(":")
+            mission = missions.get(mission_id)
+            if not mission or (mission.get("status") or "active") ==                     "complete":
+                continue
+            mission_name = str(mission.get("name") or "Mission Control")
+            pillar_name = str(payload.get("name") or "pillar")
+            result[coord].append({
+                "id": f"mission-pillar:{m.key}",
+                "kind": "action",
+                "label": mission_name,
+                "title": f"Open {mission_name} \u2014 {pillar_name} "
+                         "in Mission Control",
+                # the mission app always lands whole; ?pillar= focuses
+                "href": f"/mission/{mission_id}",
+                "icon_svg": _SESSION_ICON,
+                "accent": str(payload.get("color") or "#8b85ff"),
+                "hard_reload": False,
+            })
+    return result
 
 
 async def post_mission_status(request: Request) -> JSONResponse:

@@ -86,6 +86,10 @@ def session_contributions(session_ids: list[str], request: Request) -> dict[str,
         mission = db.get_mission(pillar["mission_id"])
         if not mission or api_auth.caller_org_scope_hides(request, mission.get("org")):
             continue
+        # A retired mission stops badging live sessions — after cutover
+        # to the `mission` plugin, its contribution owns the icon.
+        if (dict(mission).get("status") or "active") == "complete":
+            continue
         pillar_name = str(pillar.get("name") or "Mission pillar")
         mission_name = str(mission.get("name") or "Mission Control")
         # A structured mission is ONE app that always lands on Status —
