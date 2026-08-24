@@ -252,10 +252,22 @@ def test_wrong_prf_output_refused(armor):
         decrypt_root_key_with_passkey(a, b"\x04" * 32)
 
 
-def test_duplicate_credential_refused(armor):
-    a = add_passkey_factor(armor, _PW, "cred-dup", _passkey_pub(b"\x05" * 32))
+def test_duplicate_passkey_slot_refused_but_synced_credential_device_slot_allowed(
+    root, armor,
+):
+    """A synced credential may have one independent PRF recipient per device."""
+    first_prf = b"\x05" * 32
+    second_prf = b"\x06" * 32
+    first_pub = _passkey_pub(first_prf)
+    second_pub = _passkey_pub(second_prf)
+    a = add_passkey_factor(armor, _PW, "cred-dup", first_pub)
+
     with pytest.raises(ArmorError):
-        add_passkey_factor(a, _PW, "cred-dup", _passkey_pub(b"\x06" * 32))
+        add_passkey_factor(a, _PW, "cred-dup", first_pub)
+
+    a = add_passkey_factor(a, _PW, "cred-dup", second_pub)
+    assert decrypt_root_key_with_passkey(a, first_prf).private_hex == root.private_hex
+    assert decrypt_root_key_with_passkey(a, second_prf).private_hex == root.private_hex
 
 
 def test_remove_passkey_factor(root, armor):

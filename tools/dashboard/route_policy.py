@@ -47,6 +47,12 @@ PUBLIC_EXCEPTIONS: dict[tuple[str, str], str] = {
         "before it can authenticate. Its protection is the encryption and the "
         "password never leaving the browser, not an auth gate — gating it makes "
         "sign-in impossible.",
+    ("GET", "/api/identity/factor-policy"):
+        "Describes the public, root-signed policy already enclosed in the "
+        "pre-authentication personal armor plus operator-facing non-secret "
+        "factor labels. The sign-in browser needs the dashboard-access and "
+        "root-membership roles before choosing a ceremony; no password "
+        "protector ciphertext or private factor material is returned.",
     ("POST", "/api/identity/personal"):
         "First-run identity enrolment, which by definition happens before any "
         "credential exists. Reachable only while the dashboard is unenrolled "

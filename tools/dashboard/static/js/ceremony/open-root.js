@@ -56,16 +56,33 @@ function injectStyles() {
 
 // The openers an armor actually accepts, read from its own factor set.
 async function loadModel() {
-  const [st, pj] = await Promise.all([
+  const [st, pj, fp] = await Promise.all([
     fetch('/api/identity/status', {
       credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'application/json' },
     }).then((r) => r.json()),
     fetch('/api/identity/personal', {
       credentials: 'same-origin', headers: { Accept: 'application/json' },
     }).then((r) => r.json()),
+    fetch('/api/identity/factor-policy', {
+      credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'application/json' },
+    }).then((r) => r.json()).catch(() => null),
   ]);
   if (pj && pj.error) throw new Error(pj.error);
   if (!pj || !pj.armored_private_key) throw new Error('No personal identity is available.');
+  if (fp && fp.armor_version === 3 && !fp.error) {
+    const policyModule = await import('./root-factor-policy.js');
+    const envelope = await policyModule.parseFactorPolicyArmor(pj.armored_private_key);
+    return {
+      armor: pj.armored_private_key,
+      rootPub: pj.root_pub || envelope.root_pub,
+      rpId: st.rp_id || undefined,
+      passkeys: st.passkeys || [],
+      v3: true,
+      policyModule,
+      envelope,
+      factorViews: fp.factors || [],
+    };
+  }
   const data = primitives.parseArmor(pj.armored_private_key);
   const factors = data.factors || [];
   const mfa = factors.some((f) => f.type === 'combined');
@@ -92,13 +109,15 @@ function b64u(s) {
 }
 
 // A WebAuthn PRF assertion over the identity's passkeys (rp-scoped).
-async function getPrf(model) {
+async function getPrf(model, credentialIds = null) {
   if (!window.PublicKeyCredential || !navigator.credentials) {
     throw new Error('this browser cannot use a passkey');
   }
   const rpId = model.rpId;
+  const wanted = credentialIds ? new Set(credentialIds) : null;
   const allow = (model.passkeys || [])
-    .filter((p) => p.credential_id && (!rpId || p.rp_id === rpId))
+    .filter((p) => p.credential_id && (!rpId || p.rp_id === rpId)
+      && (!wanted || wanted.has(p.credential_id)))
     .map((p) => ({ type: 'public-key', id: b64u(p.credential_id) }));
   let asrt;
   try {
@@ -115,7 +134,11 @@ async function getPrf(model) {
   }
   const prf = prfOutputFromResults(asrt.getClientExtensionResults());
   if (!prf) throw new Error('this passkey has no PRF and cannot open your root');
-  return prf;
+  let credentialId = '';
+  const raw = new Uint8Array(asrt.rawId || allow[0]?.id || []);
+  let binary = ''; for (const byte of raw) binary += String.fromCharCode(byte);
+  credentialId = btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return { prf, credentialId };
 }
 
 // Open the armor with the gathered factor(s) and return the seed + signing key.
@@ -126,6 +149,165 @@ async function openWith(model, { password, prf }) {
   else opened = await primitives.decryptArmor(model.armor, password);
   const signingKey = await primitives.importEd25519RootSigningKey(opened.seed);
   return { seed: opened.seed, signingKey, rootPub: opened.rootPub };
+}
+
+async function openRootPolicy(model, { title, detail }) {
+  const policy = model.policyModule;
+  const memberIds = new Set(policy.policyFactorIds(model.envelope.policy));
+  const factors = model.envelope.factors.filter((factor) => memberIds.has(factor.factor_id));
+  const views = Object.fromEntries((model.factorViews || []).map((row) => [row.factor_id, row]));
+  const seeds = {};
+  const S = { selectedPassword: null, password: '', warn: null, busy: false };
+
+  return new Promise((resolve) => {
+    const host = document.createElement('div');
+    host.className = 'or-overlay'; host.setAttribute('data-testid', 'open-root');
+    const card = document.createElement('div'); card.className = 'or-card';
+    host.appendChild(card); document.body.appendChild(host);
+
+    function cleanFactorSeeds() {
+      Object.values(seeds).forEach((seed) => seed?.fill?.(0));
+      Object.keys(seeds).forEach((factorId) => { delete seeds[factorId]; });
+    }
+    function close(result) {
+      cleanFactorSeeds();
+      if (host.parentNode) host.parentNode.removeChild(host);
+      resolve(result);
+    }
+    function el(tag, cls, html) {
+      const node = document.createElement(tag);
+      if (cls) node.className = cls;
+      if (html != null) node.innerHTML = html;
+      return node;
+    }
+    function factorRow(cls, icon, text) {
+      const row = el('div', cls);
+      const iconNode = el('div'); iconNode.textContent = icon;
+      const textNode = el('div'); textNode.textContent = text;
+      row.append(iconNode, textNode);
+      return row;
+    }
+    function label(factor) {
+      return views[factor.factor_id]?.label
+        || (factor.type === 'password' ? 'Password' : 'Passkey');
+    }
+    async function finishIfSatisfied() {
+      if (!policy.policySatisfied(model.envelope.policy, Object.keys(seeds))) {
+        S.busy = false; render(); return;
+      }
+      try {
+        const opened = await policy.openFactorPolicyArmor(model.armor, seeds);
+        close(opened);
+      } catch (error) {
+        cleanFactorSeeds(); S.busy = false;
+        S.warn = error?.message || 'Those factors did not open your root.';
+        render();
+      }
+    }
+    async function addPassword() {
+      if (S.busy || !S.selectedPassword || !S.password) return;
+      S.busy = true; S.warn = null; render();
+      try {
+        const factor = factors.find((row) => row.factor_id === S.selectedPassword);
+        seeds[factor.factor_id] = await policy.openPasswordFactor(
+          model.rootPub, factor, S.password,
+        );
+        S.password = ''; S.selectedPassword = null;
+        await finishIfSatisfied();
+      } catch (error) {
+        S.busy = false; S.password = '';
+        S.warn = error?.message || 'That password did not open the selected factor.';
+        render();
+      }
+    }
+    async function addPasskey() {
+      if (S.busy) return;
+      const remaining = factors.filter(
+        (factor) => factor.type === 'passkey' && !seeds[factor.factor_id],
+      );
+      S.busy = true; S.warn = null; render();
+      let result;
+      try {
+        result = await getPrf(model, remaining.map((factor) => factor.credential_id));
+        const recipient = await primitives.deriveEncapsulationKeypair(
+          result.prf, policy.FACTOR_RECIPIENT_PURPOSE,
+        );
+        const match = remaining.find(
+          (factor) => factor.credential_id === result.credentialId
+            && factor.recipients.some(
+              (slot) => slot.recipient_public_key === recipient.publicKeyHex,
+            ),
+        );
+        if (!match) {
+          result.prf.fill(0);
+          throw new Error(
+            'This passkey works for dashboard access, but this device is not enrolled to authorize your root.',
+          );
+        }
+        seeds[match.factor_id] = result.prf;
+        await finishIfSatisfied();
+      } catch (error) {
+        result?.prf?.fill?.(0); S.busy = false;
+        S.warn = error?.message || 'That passkey did not open a policy factor.';
+        render();
+      }
+    }
+
+    function render() {
+      card.innerHTML = '';
+      card.appendChild(el('div', 'or-ttl', title));
+      if (detail) card.appendChild(el('div', 'or-sub', detail));
+      card.appendChild(el('div', 'or-sub',
+        'Choose the factor or factor combination required by your current root policy.'));
+
+      const collected = factors.filter((factor) => seeds[factor.factor_id]);
+      collected.forEach((factor) => card.appendChild(
+        factorRow('or-row on', '✓', label(factor)),
+      ));
+
+      const passwords = factors.filter(
+        (factor) => factor.type === 'password' && !seeds[factor.factor_id],
+      );
+      if (passwords.length) {
+        if (passwords.length === 1 && !S.selectedPassword) {
+          S.selectedPassword = passwords[0].factor_id;
+        }
+        if (!S.selectedPassword && passwords.length > 1) {
+          card.appendChild(el('div', 'or-lab', 'Password factor'));
+          passwords.forEach((factor) => {
+            const row = factorRow('or-row', '', label(factor));
+            row.onclick = () => { S.selectedPassword = factor.factor_id; render(); };
+            card.appendChild(row);
+          });
+        } else if (S.selectedPassword) {
+          const selected = passwords.find((factor) => factor.factor_id === S.selectedPassword);
+          if (selected) {
+            card.appendChild(el('label', 'or-lab', label(selected)));
+            const input = el('input', 'or-in'); input.type = 'password';
+            input.autocomplete = 'current-password'; input.value = S.password;
+            input.oninput = () => { S.password = input.value; };
+            input.onkeydown = (event) => { if (event.key === 'Enter') addPassword(); };
+            card.appendChild(input);
+            const add = el('div', 'or-btn', S.busy ? 'Checking…' : 'Use this password');
+            if (!S.busy) add.onclick = addPassword; card.appendChild(add);
+            setTimeout(() => input.focus(), 0);
+          }
+        }
+      }
+
+      const passkeys = factors.filter(
+        (factor) => factor.type === 'passkey' && !seeds[factor.factor_id],
+      );
+      if (passkeys.length) {
+        const button = el('div', 'or-btn alt', S.busy ? 'Waiting…' : 'Use a passkey');
+        if (!S.busy) button.onclick = addPasskey; card.appendChild(button);
+      }
+      if (S.warn) card.appendChild(el('div', 'or-warn', S.warn));
+      const cancel = el('div', 'or-cancel', 'Cancel'); cancel.onclick = () => close(null);
+      card.appendChild(cancel);
+    }
+    render();
+  });
 }
 
 /**
@@ -139,6 +321,7 @@ async function openWith(model, { password, prf }) {
 export async function openRoot({ title = 'Approve', detail = '' } = {}) {
   injectStyles();
   const model = await loadModel();
+  if (model.v3) return openRootPolicy(model, { title, detail });
   if (!model.openers.length) throw new Error('your identity has no factor that can open the root');
 
   return new Promise((resolve) => {
@@ -194,7 +377,7 @@ export async function openRoot({ title = 'Approve', detail = '' } = {}) {
     }
     async function provePasskey() {
       S.warn = null; S.busy = true; render();
-      try { S.prf = await getPrf(model); S.busy = false; render(); }
+      try { S.prf = (await getPrf(model)).prf; S.busy = false; render(); }
       catch (e) { S.busy = false; S.warn = (e && e.message) || String(e); render(); }
     }
 
@@ -215,7 +398,7 @@ export async function openRoot({ title = 'Approve', detail = '' } = {}) {
         card.appendChild(go);
       } else if (!S.method) {
         // Either factor works — let the operator choose which.
-        card.appendChild(el('div', 'or-sub', 'Choose how to unlock your root.'));
+        card.appendChild(el('div', 'or-sub', 'Choose a factor to unlock your root.'));
         model.openers.forEach((m) => {
           const row = el('div', 'or-row',
             '<div class="or-ic">' + (m === 'passkey' ? FACE : '') + '</div><div>' + NAME[m] + '</div>');

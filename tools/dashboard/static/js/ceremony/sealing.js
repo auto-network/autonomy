@@ -235,9 +235,48 @@ async function openSealedArmor(armor, personalRootSeed) {
   }
 }
 
+/** Open a sealed record with an already-derived X25519 private key.
+ *
+ * Policy-factor recipients deliberately derive their X25519 key under a
+ * stable factor purpose while binding each ciphertext to a separate policy
+ * generation/path purpose.  openSealedArmor derives both from one purpose and
+ * therefore cannot represent that construction; this generic half mirrors
+ * tools.network.idkit.sealing.open exactly.
+ */
+async function openWithEncapsulationPrivateKey(
+  recordValue,
+  recipientEncapsulationPrivateKeyHex,
+  purpose,
+) {
+  const record = asBytes(recordValue, 'sealed record');
+  validateRecord(record);
+  const privateBytes = decodeHex(
+    recipientEncapsulationPrivateKeyHex,
+    'X25519 encapsulation private key',
+    X25519_KEY_BYTES,
+  );
+  try {
+    const recipientKey = await x25519.deserializePrivateKey(privateBytes);
+    const plaintext = await suite.open(
+      {
+        recipientKey,
+        enc: record.slice(1, 1 + X25519_KEY_BYTES),
+        info: sealInfo(record[0], purpose),
+      },
+      record.slice(1 + X25519_KEY_BYTES),
+    );
+    return new Uint8Array(plaintext);
+  } catch {
+    throw new Error('failed to open sealed record');
+  } finally {
+    privateBytes.fill(0);
+  }
+}
+
 export {
   SUITE_X25519_HKDF_SHA256_CHACHA20POLY1305,
   deriveEncapsulationKeypair,
   openSealedArmor,
+  openWithEncapsulationPrivateKey,
   sealToEncapsulationKey,
 };

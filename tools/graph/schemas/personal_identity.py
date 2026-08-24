@@ -46,6 +46,8 @@ PERSONAL_IDENTITY_SET_ID = "autonomy.identity.personal"
 PERSONAL_IDENTITY_REVISION = 1
 PASSKEY_SET_ID = "autonomy.identity.passkey"
 PASSKEY_REVISION = 1
+FACTOR_METADATA_SET_ID = "autonomy.identity.factor-metadata"
+FACTOR_METADATA_REVISION = 1
 
 #: Raw Ed25519 public key, lowercase hex (= the key id) — pinned to A1.
 PERSONAL_PUB_HEX_LEN = 64
@@ -151,11 +153,11 @@ class PersonalIdentityV1(SettingSchema):
     armored_private_key: str = field(
         required=True,
         description=(
-            "The armored, password-encrypted Ed25519 personal root private "
-            "key in the CANONICAL idkit byte form (tools/network/idkit/"
-            "armor.py canonicalize_armor). Encrypted at rest; only ever "
-            "decrypted in the operator's browser with the password, which "
-            "the server never sees (I1)."
+            "The armored, factor-protected Ed25519 personal root private key "
+            "in the CANONICAL idkit byte form (tools/network/idkit/armor.py "
+            "canonicalize_armor). Encrypted at rest; only ever decrypted in "
+            "the operator's browser with factors whose secret material never "
+            "reaches the server (I1)."
         ),
     )
     root_pub: str = field(
@@ -196,7 +198,13 @@ class PersonalIdentityV1(SettingSchema):
             raise SchemaValidationError(
                 f"{cls.__name__}: 'require_pair' must be a boolean"
             )
-        armor = _require_str(payload, "armored_private_key", cls.__name__, max_len=16384)
+        armor = _require_str(
+            # The v3 bound permits 32 logical factors with bounded per-device
+            # passkey recipient sets.  HPKE wraps and base64 expansion can
+            # legitimately exceed the old 128 KiB ceiling at that declared
+            # maximum, so keep the schema bound aligned with the crypto bound.
+            payload, "armored_private_key", cls.__name__, max_len=1_048_576,
+        )
         # I1 tripwire: a raw Ed25519 private key is exactly 64 hex chars.
         # Kept for the clearer message; the canonical check below refuses
         # it too.
@@ -224,9 +232,9 @@ class PersonalIdentityV1(SettingSchema):
                 "write (I1 fail-closed)"
             ) from exc
         try:
-            # Version-agnostic: a personal identity may be armored in either
-            # format, and the ceremonies are moving to the newer one. Both are
-            # strictly parsed and both must already be in canonical byte form.
+            # Version-agnostic: personal identities may retain the established
+            # v2 armor or use a root-signed v3 factor-policy generation. Both
+            # are strictly parsed and must already be in canonical byte form.
             armor_data = {"root_pub": armor_root_pub(armor)}
             if canonicalize_armor(armor) != armor:
                 raise SchemaValidationError(
@@ -237,7 +245,7 @@ class PersonalIdentityV1(SettingSchema):
         except ArmorError as e:
             raise SchemaValidationError(
                 f"{cls.__name__}: 'armored_private_key' is not a canonical "
-                f"password-encrypted key armor (I1 — plaintext key material "
+                f"factor-protected key armor (I1 — plaintext key material "
                 f"must never be stored): {e}"
             ) from e
 
@@ -257,6 +265,57 @@ class PersonalIdentityV1(SettingSchema):
 
         _require_str(payload, "display_name", cls.__name__, max_len=120)
         _require_iso_ts(payload, "created_at", cls.__name__)
+
+
+# ── autonomy.identity.factor-metadata ─────────────────────────
+
+
+@home("personal")
+@publication_band(max="raw")
+@keyed_per_entity(key_strategy="factor_id")
+class FactorMetadataV1(SettingSchema):
+    """Operator-facing names for cryptographic factors.
+
+    Names and purpose labels do not participate in key derivation or the
+    root-signed armor.  Keeping them in a separate row makes rename an
+    unattended metadata edit while every authority transition remains an
+    atomic, signed policy-generation change.
+    """
+
+    set_id = FACTOR_METADATA_SET_ID
+    schema_revision = FACTOR_METADATA_REVISION
+
+    factor_id: str = field(
+        required=True,
+        description="Stable factor identifier; must equal the row key.",
+    )
+    label: str = field(
+        required=True,
+        description="Operator-facing factor name.",
+    )
+    purpose: str = field(
+        required=False,
+        description="Optional operator-facing explanation of this factor's purpose.",
+    )
+    updated_at: str = field(
+        required=True,
+        description="ISO-8601 UTC timestamp of the latest metadata edit.",
+    )
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        super().validate(payload)
+        if not isinstance(payload, dict):
+            return
+        factor_id = _require_str(payload, "factor_id", cls.__name__, max_len=128)
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", factor_id):
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'factor_id' has an invalid shape"
+            )
+        _require_str(payload, "label", cls.__name__, max_len=120)
+        if "purpose" in payload:
+            _require_str(payload, "purpose", cls.__name__, max_len=240)
+        _require_iso_ts(payload, "updated_at", cls.__name__)
 
 
 # ── autonomy.identity.passkey ─────────────────────────────────
@@ -345,6 +404,20 @@ class PasskeyCredentialV1(SettingSchema):
         required=False,
         description="Authenticator AAGUID (UUID string) when the attestation exposed one.",
     )
+    backup_eligible: bool = field(
+        required=False,
+        description=(
+            "The WebAuthn BE flag as verified at enrollment: true means the "
+            "credential is multi-device/sync-capable. UX metadata only."
+        ),
+    )
+    backed_up: bool = field(
+        required=False,
+        description=(
+            "The WebAuthn BS flag as verified at enrollment: true means the "
+            "credential was backed up at that ceremony. UX metadata only."
+        ),
+    )
     created_at: str = field(
         required=True,
         description="ISO-8601 UTC timestamp the credential was enrolled.",
@@ -411,6 +484,11 @@ class PasskeyCredentialV1(SettingSchema):
             )
         if "label" in payload:
             _require_str(payload, "label", cls.__name__, max_len=120)
+        for name in ("backup_eligible", "backed_up"):
+            if name in payload and not isinstance(payload[name], bool):
+                raise SchemaValidationError(
+                    f"{cls.__name__}: '{name}' must be a boolean"
+                )
         transports = payload.get("transports")
         if transports is not None:
             if not isinstance(transports, list):

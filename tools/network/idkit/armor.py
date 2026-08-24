@@ -135,7 +135,7 @@ def _armor_body(armor: str) -> dict:
 
 
 def canonicalize_armor(armor: str) -> str:
-    """Strict-parse a v2 armor and re-emit it in the one canonical byte form.
+    """Strict-parse an armor and re-emit it in the one canonical byte form.
 
     Unlike v1 this does not rebuild the body field by field, because it does
     not need to: :func:`parse_armor` is closed to an EXACT key set at every
@@ -145,6 +145,13 @@ def canonicalize_armor(armor: str) -> str:
     complete when a factor type is added, which a hand-copied field list here
     would not.
     """
+    body = _armor_body(armor)
+    if body.get("v") == 3:
+        from .root_factor_policy import canonicalize_armored_envelope
+        try:
+            return canonicalize_armored_envelope(armor)
+        except ValueError as exc:
+            raise ArmorError(str(exc)) from exc
     return _emit_v2(parse_armor(armor))
 
 
@@ -650,6 +657,18 @@ def remove_factor(armor: str, passphrase: str, factor_type: str) -> str:
 
 def armor_factor_types(armor: str) -> list:
     """Which locks this armor carries, in declaration order."""
+    body = _armor_body(armor)
+    if body.get("v") == 3:
+        from .root_factor_policy import parse_armored_envelope, policy_factor_ids
+        try:
+            envelope = parse_armored_envelope(armor)
+        except ValueError as exc:
+            raise ArmorError(str(exc)) from exc
+        members = set(policy_factor_ids(envelope["policy"]))
+        return [
+            factor["type"] for factor in envelope["factors"]
+            if factor["factor_id"] in members
+        ]
     return [f["type"] for f in parse_armor(armor)["factors"]]
 
 
@@ -1383,12 +1402,17 @@ def _v2_master_kek(data: dict, passphrase: str) -> bytes:
 def armor_version(armor: str) -> int:
     """The declared version of *armor*, else :class:`ArmorError`.
 
-    There is one armor format. This stays as a named check rather than an
-    inline comparison because the parse it performs is the strict one: a blob
-    that does not carry exactly ``v: 2`` is refused here, before anything
-    tries to read it.
+    This stays as a named check rather than an inline comparison because the
+    parse it performs is strict for every supported version.
     """
     v = _armor_body(armor).get("v")
+    if v == 3:
+        from .root_factor_policy import parse_armored_envelope
+        try:
+            parse_armored_envelope(armor)
+        except ValueError as exc:
+            raise ArmorError(str(exc)) from exc
+        return v
     if v != ARMOR_VERSION:
         raise ArmorError(f"unsupported armor version: {v!r}")
     return v
@@ -1400,6 +1424,11 @@ def armor_root_pub(armor: str) -> str:
     For the call sites that need only the identity, not the key. Strict-parses,
     so a malformed blob is still refused.
     """
+    body = _armor_body(armor)
+    if body.get("v") == 3:
+        from .root_factor_policy import parse_armored_envelope
+        try:
+            return parse_armored_envelope(armor)["root_pub"]
+        except ValueError as exc:
+            raise ArmorError(str(exc)) from exc
     return parse_armor(armor)["root_pub"]
-
-

@@ -41,6 +41,7 @@
     passkeyOpensRoot: false,
     pwOpensRoot: false,
     armorText: null,
+    factorPolicy: null,
     troubleOpen: false,
     techOpen: false,
     busy: false,
@@ -207,6 +208,7 @@
     }
     var minted = await _postJson('/api/identity/unlock/passkey/options', {});
     var pk = minted.options;
+    var challengeText = pk.challenge;
     pk.challenge = b64uToBytes(pk.challenge);
     (pk.allowCredentials || []).forEach(function (c) { c.id = b64uToBytes(c.id); });
     // Ask for the PRF eval in the SAME gesture: when this passkey is a root
@@ -227,8 +229,7 @@
       throw e;
     }
     if (!cred) throw new Error('unlock was cancelled — try again');
-    await _postJson('/api/identity/unlock/passkey', {
-      credential: {
+    var credentialPayload = {
         id: cred.id,
         rawId: bytesToB64u(cred.rawId),
         type: cred.type,
@@ -242,8 +243,74 @@
           userHandle: cred.response.userHandle
             ? bytesToB64u(cred.response.userHandle) : undefined,
         },
-      },
-    });
+    };
+
+    // A v3 passkey that opens the root signs the SAME WebAuthn ceremony before
+    // the server grants access. This keeps dashboard access and root authority
+    // genuinely independent: an access-disabled passkey succeeds only when its
+    // PRF actually opened the current root policy.
+    var openedForWarm = null;
+    var rootSignature = null;
+    if (U.passkeyOpensRoot && enroll && U.armorText
+        && U.factorPolicy && U.factorPolicy.armor_version === 3) {
+      var rootPrf = null;
+      try {
+        rootPrf = enroll.prfOutputFromResults(
+          (cred.getClientExtensionResults && cred.getClientExtensionResults()) || {});
+        if (rootPrf) {
+          var rootPrimitives = await import('./ceremony/primitives.js');
+          var rootPolicy = await import('./ceremony/root-factor-policy.js');
+          var rootEnvelope = await rootPolicy.parseFactorPolicyArmor(U.armorText);
+          var rootRecipient = await rootPrimitives.deriveEncapsulationKeypair(
+            rootPrf, rootPolicy.FACTOR_RECIPIENT_PURPOSE,
+          );
+          var credentialId = bytesToB64u(new Uint8Array(cred.rawId));
+          var rootFactor = rootEnvelope.factors.find(function (row) {
+            return row.type === 'passkey'
+              && row.credential_id === credentialId
+              && row.recipients.some(function (slot) {
+                return slot.recipient_public_key === rootRecipient.publicKeyHex;
+              });
+          });
+          if (rootFactor && rootPolicy.policySatisfied(
+            rootEnvelope.policy, [rootFactor.factor_id],
+          )) {
+            var rootSeeds = {}; rootSeeds[rootFactor.factor_id] = rootPrf;
+            try {
+              openedForWarm = await rootPolicy.openFactorPolicyArmor(
+                U.armorText, rootSeeds,
+              );
+            } finally { rootPrf.fill(0); }
+            var rootMessage = new TextEncoder().encode(
+              UNLOCK_DOMAIN + _signonI().canonicalJson({
+                v: 1, challenge: challengeText, origin: minted.origin,
+              }));
+            rootSignature = _signonI().bytesToHex(await crypto.subtle.sign(
+              'Ed25519', openedForWarm.signingKey, rootMessage,
+            ));
+          } else {
+            rootPrf.fill(0);
+          }
+        }
+      } catch (e) {
+        if (openedForWarm && openedForWarm.seed) openedForWarm.seed.fill(0);
+        openedForWarm = null;
+        if (window.console && console.warn) {
+          console.warn('passkey root proof unavailable:', (e && e.message) || e);
+        }
+      } finally {
+        if (rootPrf) rootPrf.fill(0);
+      }
+    }
+
+    var passkeyBody = { credential: credentialPayload };
+    if (rootSignature) passkeyBody.root_signature = rootSignature;
+    try {
+      await _postJson('/api/identity/unlock/passkey', passkeyBody);
+    } catch (e) {
+      if (openedForWarm && openedForWarm.seed) openedForWarm.seed.fill(0);
+      throw e;
+    }
 
     // Access is granted. If this passkey is a ROOT factor, use the PRF output
     // from the same gesture to open the armor and warm the vault — this is what
@@ -253,34 +320,42 @@
     // (where the passkey alone cannot reach the root).
     if (U.passkeyOpensRoot && enroll && U.armorText) {
       try {
-        var prf = enroll.prfOutputFromResults(
-          (cred.getClientExtensionResults && cred.getClientExtensionResults()) || {});
-        if (prf) {
-          var Pp = await import('./ceremony/primitives.js');
-          var opened = await Pp.decryptArmorWithPasskey(U.armorText, prf);
-          var rootSeed = new Uint8Array(opened.seed);
-          opened.seed.fill(0);
-          try {
-            // Warm the vault, then mint the Fleet runtime + reachability
-            // credential — the SAME root release the password path runs (shared
-            // via _fleetCompleteOrMint), so a passkey-only unlock activates fleet
-            // sync + discovery too. Fresh copies: each ceremony zeroes its own.
-            try {
-              await _signonI().wakeVault({ personalRootSeed: new Uint8Array(rootSeed) });
-            } catch (e) {
-              if (window.console && console.warn) console.warn('vault wake failed:', (e && e.message) || e);
-            }
-            try {
-              await _fleetCompleteOrMint(new Uint8Array(rootSeed));
-            } catch (e) {
-              if (window.console && console.warn) {
-                console.warn('fleet runtime after passkey unlock failed:', (e && e.message) || e);
-              }
-              if (U.fleetRootRequired) throw e;
-            }
-          } finally {
-            rootSeed.fill(0);
+        var opened = openedForWarm;
+        if (U.factorPolicy && U.factorPolicy.armor_version === 3) {
+          if (!opened) {
+            throw new Error('this passkey grants access but does not open the root alone');
           }
+        } else {
+          var prf = enroll.prfOutputFromResults(
+            (cred.getClientExtensionResults && cred.getClientExtensionResults()) || {});
+          if (!prf) throw new Error('this passkey supplied no PRF root material');
+          try {
+            var Pp = await import('./ceremony/primitives.js');
+            opened = await Pp.decryptArmorWithPasskey(U.armorText, prf);
+          } finally { prf.fill(0); }
+        }
+        var rootSeed = new Uint8Array(opened.seed);
+        opened.seed.fill(0);
+        try {
+          // Warm the vault, then mint the Fleet runtime + reachability
+          // credential — the SAME root release the password path runs (shared
+          // via _fleetCompleteOrMint), so a passkey-only unlock activates fleet
+          // sync + discovery too. Fresh copies: each ceremony zeroes its own.
+          try {
+            await _signonI().wakeVault({ personalRootSeed: new Uint8Array(rootSeed) });
+          } catch (e) {
+            if (window.console && console.warn) console.warn('vault wake failed:', (e && e.message) || e);
+          }
+          try {
+            await _fleetCompleteOrMint(new Uint8Array(rootSeed));
+          } catch (e) {
+            if (window.console && console.warn) {
+              console.warn('fleet runtime after passkey unlock failed:', (e && e.message) || e);
+            }
+            if (U.fleetRootRequired) throw e;
+          }
+        } finally {
+          rootSeed.fill(0);
         }
       } catch (e) {
         if (window.console && console.warn) {
@@ -322,7 +397,8 @@
     if (!prf) {
       throw new Error('this passkey cannot unlock your key (no PRF) — use a device enrolled for it');
     }
-    return prf;
+    var rawId = new Uint8Array(asrt.rawId || allow[0].id);
+    return { prf: prf, credentialId: bytesToB64u(rawId) };
   }
 
   // The plaintext seed exists only inside this function — zeroed the
@@ -332,6 +408,107 @@
     var S = _signonI();
     var I = _identityI();
     var stored = await _fetchJson('/api/identity/personal');
+    // Version 3 normalizes every password to a public recipient plus a
+    // password-derived access signing key. Try the named password factors
+    // locally. An individually-full factor opens and warms the root; an
+    // access-enabled MFA member may sign in without releasing the root.
+    if (U.factorPolicy && U.factorPolicy.armor_version === 3) {
+      var R = await import('./ceremony/root-factor-policy.js');
+      var envelope = await R.parseFactorPolicyArmor(stored.armored_private_key);
+      var passwordFactor = null;
+      var factorSeed = null;
+      for (var candidate of envelope.factors.filter(function (f) { return f.type === 'password'; })) {
+        try {
+          factorSeed = await R.openPasswordFactor(envelope.root_pub, candidate, password);
+          passwordFactor = candidate; break;
+        } catch (e) { /* this password may name another enrolled factor */ }
+      }
+      if (!passwordFactor || !factorSeed) {
+        throw new Error('that password does not open any enrolled password factor');
+      }
+      var individuallyFull = R.policySatisfied(
+        envelope.policy, [passwordFactor.factor_id],
+      );
+      if (!individuallyFull && envelope.access.includes(passwordFactor.factor_id)) {
+        try {
+          var accessKey = await R.importFactorAccessSigningKey(factorSeed);
+          var accessMinted = await _postJson('/api/identity/unlock/password/options', {});
+          var accessMessage = new TextEncoder().encode(
+            'autonomy.identity.factor-access-unlock.v1\n' + _signonI().canonicalJson({
+              v: 1,
+              challenge: accessMinted.challenge,
+              factor_id: passwordFactor.factor_id,
+              origin: accessMinted.origin,
+            }));
+          var accessSignature = _signonI().bytesToHex(await crypto.subtle.sign(
+            'Ed25519', accessKey, accessMessage,
+          ));
+          await _postJson('/api/identity/unlock/password', {
+            challenge: accessMinted.challenge,
+            factor_id: passwordFactor.factor_id,
+            access_signature: accessSignature,
+          });
+          return;
+        } finally { factorSeed.fill(0); }
+      }
+
+      var rootMember = R.policyFactorIds(envelope.policy)
+        .includes(passwordFactor.factor_id);
+      if (!rootMember) {
+        factorSeed.fill(0);
+        throw new Error('that password is not authorized for dashboard or root access');
+      }
+
+      var factorSeeds = {};
+      factorSeeds[passwordFactor.factor_id] = factorSeed;
+      var v3Route = '/api/identity/unlock/password';
+      try {
+        if (!R.policySatisfied(envelope.policy, Object.keys(factorSeeds))) {
+          var asserted = await _prfAssert();
+          var recipient = await (await import('./ceremony/primitives.js'))
+            .deriveEncapsulationKeypair(asserted.prf, R.FACTOR_RECIPIENT_PURPOSE);
+          var passkeyFactor = envelope.factors.find(function (factor) {
+            return factor.type === 'passkey'
+              && factor.credential_id === asserted.credentialId
+              && factor.recipients.some(function (slot) {
+                return slot.recipient_public_key === recipient.publicKeyHex;
+              });
+          });
+          if (!passkeyFactor) {
+            asserted.prf.fill(0);
+            throw new Error('this device is not enrolled as a root-authorizing passkey');
+          }
+          factorSeeds[passkeyFactor.factor_id] = asserted.prf;
+          v3Route = '/api/identity/unlock/combined';
+        }
+        if (!R.policySatisfied(envelope.policy, Object.keys(factorSeeds))) {
+          throw new Error('more factors are required by this root policy');
+        }
+        var v3Opened = await R.openFactorPolicyArmor(stored.armored_private_key, factorSeeds);
+        var rootSeed = new Uint8Array(v3Opened.seed);
+        v3Opened.seed.fill(0);
+        var mintedV3 = await _postJson('/api/identity/unlock/password/options', {});
+        var rootMessageV3 = new TextEncoder().encode(
+          UNLOCK_DOMAIN + _signonI().canonicalJson({
+            v: 1, challenge: mintedV3.challenge, origin: mintedV3.origin,
+          }));
+        var rootSignatureV3 = _signonI().bytesToHex(await crypto.subtle.sign(
+          'Ed25519', v3Opened.signingKey, rootMessageV3,
+        ));
+        await _postJson(v3Route, {
+          challenge: mintedV3.challenge, signature: rootSignatureV3,
+        });
+        try {
+          try { await _signonI().wakeVault({ personalRootSeed: new Uint8Array(rootSeed) }); }
+          catch (e) { if (window.console && console.warn) console.warn('vault wake failed:', e); }
+          await _fleetCompleteOrMint(rootSeed);
+          rootSeed = null;
+        } finally { if (rootSeed) rootSeed.fill(0); }
+        return;
+      } finally {
+        Object.values(factorSeeds).forEach(function (seed) { seed.fill(0); });
+      }
+    }
     // An MFA identity's armor carries a combined factor and opens only with
     // BOTH the password AND a passkey PRF. Branch on the armor itself (the
     // source of truth), not merely the require_pair hint.
@@ -345,7 +522,8 @@
     var opened;
     var unlockRoute = '/api/identity/unlock/password';
     if (isCombined) {
-      var prf = await _prfAssert();
+      var prfResult = await _prfAssert();
+      var prf = prfResult.prf;
       unlockRoute = '/api/identity/unlock/combined';
       try {
         opened = await P.decryptArmorWithCombined(stored.armored_private_key, password, prf);
@@ -734,21 +912,41 @@
     // armor's own factors via the tested policy model, best-effort — if the
     // armor can't be read, reach stays unknown and unlock proceeds unchanged.
     U.passkeyOpensRoot = false;
+    U.passkeyCanStart = U.passkeysForHost > 0;
     U.pwOpensRoot = !U.mfa && U.hasIdentity;   // a standalone password opens the root
     U.armorText = null;
+    U.factorPolicy = null;
     if (U.hasIdentity) {
       try {
         var personal = await _fetchJson('/api/identity/personal');
         U.armorText = personal.armored_private_key;
-        var Pm = await import('./ceremony/primitives.js');
-        var Pol = await import('./ceremony/factor-policy.js');
-        var m = Pol.buildModel(status, Pm.parseArmor(U.armorText));
-        U.mfa = m.mfa;
-        U.pwOpensRoot = Pol.level(m, 'pass') === 'b';
-        U.passkeyOpensRoot = Pol.level(m, 'face') === 'b';   // a full-authority passkey
+        try { U.factorPolicy = await _fetchJson('/api/identity/factor-policy'); }
+        catch (e) { U.factorPolicy = null; }
+        if (U.factorPolicy && U.factorPolicy.armor_version === 3) {
+          var passwordRows = U.factorPolicy.factors.filter(function (f) { return f.type === 'password'; });
+          U.pwOpensRoot = passwordRows.some(function (f) { return f.root_role === 'individual'; });
+          U.passkeyOpensRoot = U.factorPolicy.factors.some(function (f) {
+            return f.type === 'passkey' && f.root_role === 'individual';
+          });
+          U.passkeyCanStart = U.factorPolicy.factors.some(function (f) {
+            return f.type === 'passkey'
+              && (f.access === 'enabled' || f.root_role === 'individual');
+          });
+          var passwordHasAccess = passwordRows.some(function (f) { return f.access === 'enabled'; });
+          U.mfa = !passwordHasAccess && passwordRows.some(function (f) {
+            return f.root_role === 'mfa-member';
+          });
+        } else {
+          var Pm = await import('./ceremony/primitives.js');
+          var Pol = await import('./ceremony/factor-policy.js');
+          var m = Pol.buildModel(status, Pm.parseArmor(U.armorText));
+          U.mfa = m.mfa;
+          U.pwOpensRoot = Pol.level(m, 'pass') === 'b';
+          U.passkeyOpensRoot = Pol.level(m, 'face') === 'b';   // a full-authority passkey
+        }
       } catch (e) { /* reach unknown; the ceremonies still work */ }
     }
-    if (!U.fleetRootRequired && U.passkeysForHost > 0 && U.webauthnOk) {
+    if (!U.fleetRootRequired && U.passkeyCanStart && U.webauthnOk) {
       U.mode = 'passkey';
     } else if (U.hasIdentity) {
       U.mode = 'password';        // the always-available floor

@@ -187,7 +187,10 @@ def _statement_for(root, credential, opts):
     ).to_dict()
 
 
-def _enroll(client, root, *, host=HOST, label=None, cred_id=b"test-credential-0001"):
+def _enroll(
+    client, root, *, host=HOST, label=None,
+    cred_id=b"test-credential-0001", flags=0x45,
+):
     """Full happy-path ceremony against *host*; returns the verify response."""
     opts = client.post("/api/identity/passkey/register-options", json={},
                        headers={"host": host})
@@ -195,7 +198,7 @@ def _enroll(client, root, *, host=HOST, label=None, cred_id=b"test-credential-00
     body = opts.json()
     credential = _make_attestation(
         body["options"]["challenge"], rp_id=body["rp_id"], origin=body["origin"],
-        cred_id=cred_id)
+        cred_id=cred_id, flags=flags)
     payload = {"credential": credential,
                "statement": _statement_for(root, credential, body)}
     if label is not None:
@@ -496,6 +499,8 @@ def test_register_happy_path_stores_credential(env, root):
     assert stored["label"] == "This device"
     assert stored["sign_count"] == 0
     assert stored["transports"] == ["internal"]
+    assert stored["backup_eligible"] is False
+    assert stored["backed_up"] is False
     # The stored public key parses as COSE — usable for assertions later.
     cose = cbor2.loads(_b64url_decode(stored["public_key"]))
     assert cose[1] == 2 and cose[3] == -7
@@ -506,6 +511,16 @@ def test_register_ts_net_end_to_end(env, root):
     r = _enroll(env, root, host=TSNET_HOST, cred_id=b"tsnet-credential-01")
     assert r.status_code == 200, r.text
     assert r.json()["rp_id"] == TSNET_HOST
+
+
+def test_register_records_verified_multidevice_backup_flags(env, root):
+    _store_identity(env, root)
+    # UP | UV | BE | BS | AT: a sync-capable credential already backed up.
+    response = _enroll(env, root, flags=0x5D)
+    assert response.status_code == 200, response.text
+    stored = settings_ops.read_set(PASSKEY_SET_ID, org="personal").members[0].payload
+    assert stored["backup_eligible"] is True
+    assert stored["backed_up"] is True
 
 
 def test_register_refuses_unknown_challenge(env, root):
@@ -929,3 +944,227 @@ def test_delete_refused_while_combined_member(env, root):
     r = env.delete(f"/api/identity/passkey/{cred}")
     assert r.status_code == 409
     assert "Multi-Factor" in r.json()["error"]
+
+
+# ── generalized factor-policy generations ───────────────────────────
+
+
+def _password_descriptor(root, factor_id, password):
+    from tools.network.idkit.root_factor_policy import create_password_factor
+    factor, seed = create_password_factor(
+        root.public_hex, factor_id, password, iterations=10_000,
+    )
+    seed[:] = b"\x00" * len(seed)
+    return factor
+
+
+def _policy_armor(root, generation, factors, access, policy):
+    from tools.network.idkit.root_factor_policy import build_envelope, emit_armored_envelope
+    return emit_armored_envelope(build_envelope(
+        root, generation=generation, factors=factors, access=access, policy=policy,
+    ))
+
+
+def _store_policy_identity(env, root, factors, access, policy, generation=1):
+    armor = _policy_armor(root, generation, factors, access, policy)
+    r = env.post("/api/identity/personal", json={
+        "display_name": "Alex", "armored_private_key": armor,
+    })
+    assert r.status_code == 200, r.text
+    return armor
+
+
+def _policy_commit_body(root, base_generation, operations, candidate_armor):
+    return {
+        "base_generation": base_generation,
+        "operations": operations,
+        "candidate_armor": candidate_armor,
+        "root_signature": root.sign_hex(identity_routes._transition_message(
+            base_generation, operations, candidate_armor,
+        )),
+    }
+
+
+def test_factor_policy_legacy_view_requires_explicit_migration(env, root):
+    _store_identity(env, root)
+    r = env.get("/api/identity/factor-policy")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["generation"] == 0
+    assert body["migration_required"] is True
+    assert body["allowed_operations"] == ["migrate_legacy"]
+    assert body["factors"][0]["root_role"] == "individual"
+
+
+def test_factor_policy_preview_projects_batch_once_and_derives_roles(env, root):
+    first = _password_descriptor(root, "password.old", "old-password")
+    _store_policy_identity(
+        env, root, [first], ["password.old"],
+        {"op": "factor", "factor_id": "password.old"},
+    )
+    second = _password_descriptor(root, "password.new", "new-password")
+    operations = [
+        {"op": "remove_factor", "factor_id": "password.old"},
+        {"op": "enroll_password", "factor": second, "access": True},
+        {"op": "set_root_policy", "policy": {
+            "op": "factor", "factor_id": "password.new",
+        }},
+    ]
+    r = env.post("/api/identity/factor-policy/preview", json={
+        "base_generation": 1, "operations": operations,
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["generation"] == 2
+    assert body["change_count"] == 1
+    assert body["roles"] == {
+        "password.new": {"access": "enabled", "root_role": "individual"},
+    }
+
+
+def test_factor_policy_commit_is_atomic_generation_cas(env, root):
+    first = _password_descriptor(root, "password.one", "one-password")
+    _store_policy_identity(
+        env, root, [first], ["password.one"],
+        {"op": "factor", "factor_id": "password.one"},
+    )
+    second = _password_descriptor(root, "password.two", "two-password")
+    policy = {"op": "or", "children": [
+        {"op": "factor", "factor_id": "password.one"},
+        {"op": "factor", "factor_id": "password.two"},
+    ]}
+    operations = [
+        {"op": "enroll_password", "factor": second, "access": False},
+        {"op": "set_root_policy", "policy": policy},
+    ]
+    candidate = _policy_armor(
+        root, 2, [first, second], ["password.one"], policy,
+    )
+    request = _policy_commit_body(root, 1, operations, candidate)
+    r = env.post("/api/identity/factor-policy/commit", json=request)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["generation"] == 2
+    assert {factor["factor_id"]: factor["root_role"] for factor in body["factors"]} == {
+        "password.one": "individual", "password.two": "individual",
+    }
+    stale = env.post("/api/identity/factor-policy/commit", json=request)
+    assert stale.status_code == 409
+
+
+def test_factor_policy_commit_binds_operations_and_candidate(env, root):
+    first = _password_descriptor(root, "password.one", "one-password")
+    _store_policy_identity(
+        env, root, [first], ["password.one"],
+        {"op": "factor", "factor_id": "password.one"},
+    )
+    second = _password_descriptor(root, "password.two", "two-password")
+    policy = {"op": "or", "children": [
+        {"op": "factor", "factor_id": "password.one"},
+        {"op": "factor", "factor_id": "password.two"},
+    ]}
+    operations = [
+        {"op": "enroll_password", "factor": second, "access": True},
+        {"op": "set_root_policy", "policy": policy},
+    ]
+    candidate = _policy_armor(
+        root, 2, [first, second], ["password.one", "password.two"], policy,
+    )
+    body = _policy_commit_body(root, 1, operations, candidate)
+    body["operations"] = [*operations, {
+        "op": "set_access", "factor_id": "password.two", "enabled": False,
+    }]
+    # Keep the candidate internally root-signed and consistent with the
+    # tampered operation list.  The distinct transition signature must still
+    # reject it because that one signature binds the original batch + armor.
+    body["candidate_armor"] = _policy_armor(
+        root, 2, [first, second], ["password.one"], policy,
+    )
+    r = env.post("/api/identity/factor-policy/commit", json=body)
+    assert r.status_code == 403
+
+
+def test_factor_metadata_rename_does_not_advance_policy(env, root):
+    first = _password_descriptor(root, "password.one", "one-password")
+    _store_policy_identity(
+        env, root, [first], ["password.one"],
+        {"op": "factor", "factor_id": "password.one"},
+    )
+    r = env.patch("/api/identity/factors/password.one/metadata", json={
+        "label": "Travel password", "purpose": "Root recovery while away",
+    })
+    assert r.status_code == 200, r.text
+    view = env.get("/api/identity/factor-policy").json()
+    assert view["generation"] == 1
+    assert view["factors"][0]["label"] == "Travel password"
+
+
+def test_passkey_device_recipient_changes_preserve_one_logical_leaf(env, root):
+    from tools.network.idkit.root_factor_policy import (
+        FACTOR_RECIPIENT_PURPOSE,
+        passkey_factor,
+    )
+    from tools.network.idkit.sealing import derive_encapsulation_keypair
+
+    password = _password_descriptor(root, "password.one", "one-password")
+    _store_policy_identity(
+        env, root, [password], ["password.one"],
+        {"op": "factor", "factor_id": "password.one"},
+    )
+    assert _enroll(env, root).status_code == 200
+    credential_id = env.get("/api/identity/status").json()["passkeys"][0][
+        "credential_id"
+    ]
+    _private, first_public = derive_encapsulation_keypair(
+        b"1" * 32, FACTOR_RECIPIENT_PURPOSE,
+    )
+    passkey = passkey_factor(
+        "passkey.icloud", credential_id, first_public,
+        recipient_label="iPhone",
+        recipient_created_at="2026-08-24T12:00:00Z",
+    )
+    policy = {"op": "factor", "factor_id": "password.one"}
+    enroll_operations = [{
+        "op": "enroll_passkey", "factor": passkey, "access": True,
+    }]
+    candidate = _policy_armor(
+        root, 2, [password, passkey], ["password.one", "passkey.icloud"], policy,
+    )
+    response = env.post("/api/identity/factor-policy/commit", json=
+                        _policy_commit_body(root, 1, enroll_operations, candidate))
+    assert response.status_code == 200, response.text
+
+    _private, second_public = derive_encapsulation_keypair(
+        b"2" * 32, FACTOR_RECIPIENT_PURPOSE,
+    )
+    second_recipient = {
+        "recipient_public_key": second_public,
+        "label": "MacBook",
+        "created_at": "2026-08-24T12:01:00Z",
+    }
+    add_operations = [{
+        "op": "add_passkey_recipient",
+        "factor_id": "passkey.icloud",
+        "recipient": second_recipient,
+    }]
+    passkey_with_two_devices = dict(passkey)
+    passkey_with_two_devices["recipients"] = [
+        *passkey["recipients"], second_recipient,
+    ]
+    candidate = _policy_armor(
+        root, 3, [password, passkey_with_two_devices],
+        ["password.one", "passkey.icloud"], policy,
+    )
+    response = env.post("/api/identity/factor-policy/commit", json=
+                        _policy_commit_body(root, 2, add_operations, candidate))
+    assert response.status_code == 200, response.text
+    passkey_view = next(
+        factor for factor in response.json()["factors"]
+        if factor["factor_id"] == "passkey.icloud"
+    )
+    assert passkey_view["credential_id"] == credential_id
+    assert passkey_view["backup_eligible"] is False
+    assert passkey_view["backed_up"] is False
+    assert {row["label"] for row in passkey_view["recipients"]} == {
+        "iPhone", "MacBook",
+    }

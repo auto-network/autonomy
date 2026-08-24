@@ -33,6 +33,7 @@ globalThis.document = {
   readyState: "loading",
   addEventListener: () => {},
 };
+globalThis.location = { search: "", pathname: "/unlock" };
 const mode = process.env.AUTONOMY_REPAIR_MODE || "success";
 const events = [];
 let repairCalls = 0;

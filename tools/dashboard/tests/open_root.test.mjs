@@ -13,13 +13,22 @@ import { createRequire } from 'node:module';
 const { JSDOM } = createRequire(import.meta.url)('jsdom');
 import {
   encryptArmor, encryptArmorCombined, addPasskeyFactor, removePasswordFactor, bytesToHex,
+  deriveEncapsulationKeypair,
 } from '../static/js/ceremony/primitives.js';
 import { deriveProvisioningKey } from '../static/js/ceremony/enrollment.js';
+import {
+  FACTOR_RECIPIENT_PURPOSE, buildFactorPolicyArmor, createPasswordFactor,
+} from '../static/js/ceremony/root-factor-policy.js';
 
 const IT = 10000;
 function enc(l) { return btoa(l).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
 function prfFor(l) { const b = new Uint8Array(32); for (let i = 0; i < 32; i += 1) b[i] = (l.charCodeAt(i % l.length) + i * 7) & 0xff; return b; }
 async function provPub(l) { return (await deriveProvisioningKey(prfFor(l))).publicKeyHex; }
+async function rootRecipientPub(l) {
+  return (await deriveEncapsulationKeypair(
+    prfFor(l), FACTOR_RECIPIENT_PURPOSE,
+  )).publicKeyHex;
+}
 async function mintRoot() {
   const kp = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
   const pk8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', kp.privateKey));
@@ -39,6 +48,9 @@ async function router(url) {
   }
   if (url === '/api/identity/personal') {
     return J({ armored_private_key: SERVER.armor, root_pub: SERVER.rootPub });
+  }
+  if (url === '/api/identity/factor-policy') {
+    return J(SERVER.factorPolicy || { error: 'legacy armor' });
   }
   throw new Error('unrouted ' + url);
 }
@@ -149,4 +161,47 @@ test('cancel resolves null', async () => {
   await until(() => qa('.or-cancel').length);
   qa('.or-cancel').pop().click();
   assert.equal(await p, null);
+});
+
+test('v3 grouped policy gathers one password AND one passkey', async () => {
+  const root = await mintRoot(); const c = 'dev-v3';
+  const made = await createPasswordFactor(root.rootPub, 'pw.primary', 'pw', IT);
+  const passwordFactor = made.factor; made.seed.fill(0);
+  const passkeyFactor = {
+    factor_id: 'pk.primary', type: 'passkey', credential_id: enc(c),
+    recipients: [{
+      recipient_public_key: await rootRecipientPub(c),
+      label: 'Test device', created_at: '2026-08-24T00:00:00Z',
+    }],
+  };
+  const policy = {
+    op: 'and', children: [
+      { op: 'factor', factor_id: 'pw.primary' },
+      { op: 'factor', factor_id: 'pk.primary' },
+    ],
+  };
+  const armor = await buildFactorPolicyArmor({
+    rootSeed: root.seed, rootPub: root.rootPub, generation: 1,
+    factors: [passwordFactor, passkeyFactor],
+    access: ['pw.primary', 'pk.primary'], policy,
+  });
+  SERVER = {
+    armor, rootPub: root.rootPub,
+    passkeys: [{ credential_id: enc(c), rp_id: 'localhost' }],
+    factorPolicy: {
+      armor_version: 3,
+      factors: [
+        { factor_id: 'pw.primary', label: 'Main password' },
+        { factor_id: 'pk.primary', label: 'Phone passkey' },
+      ],
+    },
+  };
+  const promise = openRoot({ title: 'Approve X' });
+  await until(() => q('.or-in') && btnByText('Use this password'));
+  q('.or-in').value = 'pw'; q('.or-in').dispatchEvent(new window.Event('input'));
+  btnByText('Use this password').click();
+  await until(() => btnByText('Use a passkey'));
+  btnByText('Use a passkey').click();
+  const opened = await promise;
+  assert.equal(bytesToHex(opened.seed), bytesToHex(root.seed));
 });

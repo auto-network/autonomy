@@ -101,6 +101,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 #: signature can never be replayed as a registry request or a cert
 #: (which use their own domains).
 UNLOCK_SIGNING_DOMAIN = b"autonomy.identity.unlock.v1\n"
+FACTOR_ACCESS_UNLOCK_DOMAIN = b"autonomy.identity.factor-access-unlock.v1\n"
 
 #: Recovery kill-switch (bead auto-dmnm9). Env-ONLY — nothing derived
 #: from a request may ever feed this decision. Only these EXPLICIT
@@ -459,11 +460,13 @@ async def post_unlock_passkey_options(request: Request) -> JSONResponse:
 async def post_unlock_passkey(request: Request) -> JSONResponse:
     """Verify an authenticator's assertion → mint the dashboard session.
 
-    Body: ``{credential: <AuthenticationResponseJSON>}``. The
+    Body: ``{credential: <AuthenticationResponseJSON>, root_signature?}``. The
     pending ceremony is consumed on lookup (single-use); verification is
     pinned to the tuple frozen at options time and to the STORED
     credential public key. The stored sign count advances on success —
-    py_webauthn rejects a regression (clone signal) for us.
+    py_webauthn rejects a regression (clone signal) for us. Under a v3 policy,
+    the credential must either be enabled for dashboard access or accompany a
+    personal-root signature made after its PRF opened the root.
     """
     if _mock_mode():
         return JSONResponse({"ok": False,
@@ -474,7 +477,11 @@ async def post_unlock_passkey(request: Request) -> JSONResponse:
     except Exception:
         return JSONResponse({"ok": False, "error": "body must be JSON"},
                             status_code=400)
-    if not isinstance(body, dict) or not isinstance(body.get("credential"), dict):
+    if not isinstance(body, dict) or not set(body) <= {"credential", "root_signature"} \
+            or set(body) not in ({"credential"}, {"credential", "root_signature"}) \
+            or not isinstance(body.get("credential"), dict) \
+            or ("root_signature" in body
+                and not isinstance(body.get("root_signature"), str)):
         return JSONResponse({"ok": False, "error": (
             "body must carry 'credential' — the JSON-serialized "
             "navigator.credentials.get() result"
@@ -538,6 +545,45 @@ async def post_unlock_passkey(request: Request) -> JSONResponse:
             f"malformed passkey assertion response: {e}"
         )}, status_code=400)
 
+    root_released = False
+    try:
+        personal = _personal_member()
+        armor_text = (
+            personal.payload.get("armored_private_key") if personal is not None else None
+        )
+        if armor_text:
+            from tools.network.idkit.armor import armor_version
+            if armor_version(armor_text) == 3:
+                from tools.network.idkit.root_factor_policy import parse_armored_envelope
+                envelope = parse_armored_envelope(armor_text)
+                matching_ids = {
+                    factor["factor_id"] for factor in envelope["factors"]
+                    if factor["type"] == "passkey"
+                    and factor["credential_id"] == raw_id
+                }
+                access_enabled = bool(matching_ids.intersection(envelope["access"]))
+                if "root_signature" in body:
+                    from tools.network.idkit.keys import verify_signature
+                    from tools.network.idkit.canonical import canonical_json
+                    verify_signature(
+                        envelope["root_pub"], body["root_signature"],
+                        UNLOCK_SIGNING_DOMAIN + canonical_json({
+                            "v": 1,
+                            "challenge": challenge_key,
+                            "origin": pending["origin"],
+                        }),
+                    )
+                    root_released = True
+                if not access_enabled and not root_released:
+                    return JSONResponse({"ok": False, "error": (
+                        "this passkey is not enabled for dashboard access and "
+                        "did not provide a valid personal-root proof"
+                    )}, status_code=403)
+    except Exception:
+        return JSONResponse({"ok": False, "error": (
+            "the passkey's personal-root proof or factor policy did not verify"
+        )}, status_code=403)
+
     payload = dict(row.payload)
     payload["sign_count"] = verification.new_sign_count
     try:
@@ -552,7 +598,8 @@ async def post_unlock_passkey(request: Request) -> JSONResponse:
             f"could not advance the credential sign count: {e}"
         )}, status_code=500)
 
-    response = JSONResponse({"ok": True, "method": "passkey"})
+    response = JSONResponse({"ok": True, "method": "passkey",
+                             "root_released": root_released})
     try:
         token = mint_session_token(
             "passkey", request=request, credential_id=raw_id,
@@ -633,10 +680,23 @@ async def _complete_challenge_unlock(request: Request, method: str) -> JSONRespo
     except Exception:
         return JSONResponse({"ok": False, "error": "body must be JSON"},
                             status_code=400)
-    if not isinstance(body, dict) or not isinstance(body.get("challenge"), str) \
-            or not isinstance(body.get("signature"), str):
+    root_shape = (
+        isinstance(body, dict)
+        and set(body) == {"challenge", "signature"}
+        and isinstance(body.get("challenge"), str)
+        and isinstance(body.get("signature"), str)
+    )
+    factor_shape = (
+        method == "password"
+        and isinstance(body, dict)
+        and set(body) == {"challenge", "factor_id", "access_signature"}
+        and all(isinstance(body.get(key), str)
+                for key in ("challenge", "factor_id", "access_signature"))
+    )
+    if not root_shape and not factor_shape:
         return JSONResponse({"ok": False, "error": (
-            "body must carry 'challenge' and 'signature' (hex)"
+            "body must carry either challenge + root signature, or challenge + "
+            "factor_id + factor access signature"
         )}, status_code=400)
     _prune(_pw_pending)
     pending = _pw_pending.pop(body["challenge"], None)
@@ -681,20 +741,47 @@ async def _complete_challenge_unlock(request: Request, method: str) -> JSONRespo
     from tools.network.idkit.errors import IdkitError
     from tools.network.idkit.keys import verify_signature
 
-    message = UNLOCK_SIGNING_DOMAIN + canonical_json({
-        "v": 1,
-        "challenge": body["challenge"],
-        "origin": pending["origin"],
-    })
-    try:
-        verify_signature(root_pub, body["signature"], message)
-    except IdkitError:
-        return JSONResponse({"ok": False, "error": (
-            "the unlock proof does not verify — the signing key is not "
-            "this dashboard's personal root"
-        )}, status_code=403)
+    root_released = root_shape
+    if root_shape:
+        message = UNLOCK_SIGNING_DOMAIN + canonical_json({
+            "v": 1,
+            "challenge": body["challenge"],
+            "origin": pending["origin"],
+        })
+        try:
+            verify_signature(root_pub, body["signature"], message)
+        except IdkitError:
+            return JSONResponse({"ok": False, "error": (
+                "the unlock proof does not verify — the signing key is not "
+                "this dashboard's personal root"
+            )}, status_code=403)
+    else:
+        try:
+            from tools.network.idkit.root_factor_policy import parse_armored_envelope
+            envelope = parse_armored_envelope(personal.payload["armored_private_key"])
+            factor = next(
+                row for row in envelope["factors"]
+                if row["factor_id"] == body["factor_id"]
+            )
+            if factor["type"] != "password" or body["factor_id"] not in envelope["access"]:
+                raise ValueError("factor is not enabled for dashboard access")
+            message = FACTOR_ACCESS_UNLOCK_DOMAIN + canonical_json({
+                "v": 1,
+                "challenge": body["challenge"],
+                "factor_id": body["factor_id"],
+                "origin": pending["origin"],
+            })
+            verify_signature(
+                factor["access_public_key"], body["access_signature"], message,
+            )
+        except (IdkitError, StopIteration, ValueError):
+            return JSONResponse({"ok": False, "error": (
+                "the password factor access proof does not verify or is not "
+                "enabled for dashboard access"
+            )}, status_code=403)
 
     response = JSONResponse({"ok": True, "method": method,
+                             "root_released": root_released,
                              "display_name": personal.payload.get("display_name")})
     try:
         token = mint_session_token(method, request=request)
@@ -708,11 +795,11 @@ async def _complete_challenge_unlock(request: Request, method: str) -> JSONRespo
 
 
 async def post_unlock_password(request: Request) -> JSONResponse:
-    """Verify the root-key signature over the challenge → mint the session.
+    """Verify a root or password-factor access proof → mint the session.
 
-    The password floor: the browser decrypts the armor with the password
-    (locally — I1) and signs the challenge. Verified against the STORED
-    ``root_pub``; the client never says which key it used.
+    A root-authorizing password satisfies the current policy locally and signs
+    with the stored root. A dashboard-only password signs with its independent
+    factor access key and does not release or warm the root.
     """
     return await _complete_challenge_unlock(request, "password")
 
