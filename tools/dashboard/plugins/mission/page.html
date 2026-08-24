@@ -89,6 +89,16 @@
       color:var(--ink3);cursor:pointer;text-align:left}
     .msn-lifemenu button:first-child{border-top:0}
     .msn-lifemenu button.on{color:var(--ink)}
+    .msn-load{position:absolute;inset:0;background:#0c0f14;z-index:5;
+      display:flex;align-items:flex-start;justify-content:center;
+      padding-top:22vh}
+    .msn-load-inner{width:min(320px,72vw)}
+    .msn-load-t{color:#8391a8;font-size:.72rem;text-transform:uppercase;
+      letter-spacing:.08em;margin-bottom:10px;text-align:center}
+    .msn-load-bar{height:3px;border-radius:2px;background:#232837;
+      overflow:hidden}
+    .msn-load-bar i{display:block;height:100%;border-radius:2px;
+      background:#8b85ff;transition:width .12s linear}
     .msn-empty{color:var(--ink3);font-size:.85rem;padding:18px 4px}
     .msn-err{color:var(--crit);font-size:.8rem;padding:12px 4px}
     @media (max-width:400px){
@@ -134,8 +144,20 @@
 
   <!-- the mission screen, embedded — never a page navigation -->
   <template x-if="current">
-    <iframe :src="frameSrc()" class="w-full border-0 block"
-            x-init="fitFrame($el)" title="Mission screen"></iframe>
+    <div class="relative">
+      <iframe id="msn-frame" class="w-full border-0 block"
+              x-init="fitFrame($el)" title="Mission screen"></iframe>
+      <!-- pre-rendered interstitial: visible in the same frame as the
+           tap; the bar is real bytes, never a spinner lying about it -->
+      <div x-show="loading" class="msn-load" x-cloak>
+        <div class="msn-load-inner">
+          <div class="msn-load-t">loading mission</div>
+          <div class="msn-load-bar">
+            <i :style="'width:' + progress + '%'"></i>
+          </div>
+        </div>
+      </div>
+    </div>
   </template>
 
   <template x-if="!current">

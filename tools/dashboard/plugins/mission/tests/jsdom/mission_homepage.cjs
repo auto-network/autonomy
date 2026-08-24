@@ -70,6 +70,16 @@ const { window } = dom;
 window.localStorage.clear();
 window.fetch = (url) => {
   const key = String(url).split("?")[0];
+  if (key.startsWith("/api/mission/screen/")) {
+    const html = "<html><body>screen</body></html>";
+    return Promise.resolve({
+      ok: true, status: 200,
+      headers: {get: (h) => h === "content-length"
+        ? String(html.length) : null},
+      body: null,                      // exercises the text() fallback
+      text: () => Promise.resolve(html),
+    });
+  }
   const body = FIXTURES[key];
   return Promise.resolve({
     ok: !!body, status: body ? 200 : 404,
@@ -121,11 +131,15 @@ setTimeout(() => {
       // opening a mission: src set + measured nonzero height
       comp.screen = "missions";
       comp.open(FIXTURES["/api/mission/missions"].missions[0]);
+      // the interstitial is SYNCHRONOUS with the tap
+      check("interstitial instant", comp.loading === true);
       setTimeout(() => {
         const frame = d.querySelector("iframe");
         check("frame exists", !!frame);
-        check("frame src", !!frame
-          && frame.getAttribute("src") === "/api/mission/screen/m1");
+        check("frame content mounted", !!frame
+          && typeof frame.srcdoc === "string" && frame.srcdoc.length > 0);
+        check("interstitial bar rendered",
+          !!d.querySelector(".msn-load-bar i") || comp.loading === false);
         const h = frame && parseInt(frame.style.height || "0", 10);
         check("frame measured height > 0 (" + h + ")", h > 100);
         check("url pushed",
