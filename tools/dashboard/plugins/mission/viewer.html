@@ -694,7 +694,8 @@
     var bar = el("div","cbar");
     var back = el("button","cback");
     back.appendChild(el("span","chv","\u2039"));
-    back.appendChild(el("span",null,surfName(it.surface_id)));
+    back.appendChild(el("span",null,
+      "Delivery \u2014 " + surfName(it.surface_id)));
     back.addEventListener("click", function () { page.remove(); });
     bar.appendChild(back);
     page.appendChild(bar);
@@ -804,7 +805,8 @@
     page.scrollTop = 0;
   }
 
-  function openTask(list, idx){
+  function openTask(list, idx, opts){
+    opts = opts || {};
     var old = document.getElementById("mc-critpage");
     if (old) old.remove();
     var b = list[idx];
@@ -813,7 +815,8 @@
     var bar = el("div","cbar");
     var back = el("button","cback");
     back.appendChild(el("span","chv","\u2039"));
-    back.appendChild(el("span",null,"Tasks"));
+    back.appendChild(el("span",null,
+      "Tasks" + (opts.pillar ? " \u2014 " + opts.pillar : "")));
     back.addEventListener("click", function () { page.remove(); });
     bar.appendChild(back);
     page.appendChild(bar);
@@ -874,7 +877,8 @@
         ln.appendChild(el("span","tt", db ? db.title : did));
         if (db){
           ln.appendChild(el("span","tst", db.state));
-          ln.addEventListener("click", function () { openTask(list, dbi); });
+          ln.addEventListener("click", function () {
+            openTask(list, dbi, {pillar: surfName(it.surface_id)}); });
         }
         body.appendChild(ln);
       });
@@ -882,10 +886,10 @@
     var nav = el("div","cnav");
     var prev = el("button","cnb", "\u2039 previous");
     prev.disabled = idx === 0;
-    prev.addEventListener("click", function () { openTask(list, idx-1); });
+    prev.addEventListener("click", function () { openTask(list, idx-1, opts); });
     var next = el("button","cnb", "next \u203A");
     next.disabled = idx === list.length - 1;
-    next.addEventListener("click", function () { openTask(list, idx+1); });
+    next.addEventListener("click", function () { openTask(list, idx+1, opts); });
     nav.appendChild(prev);
     nav.appendChild(el("span","cpos",
       "task " + (idx+1) + " of " + list.length));
@@ -907,7 +911,8 @@
     var bar = el("div","cbar");
     var back = el("button","cback");
     back.appendChild(el("span","chv","\u2039"));
-    back.appendChild(el("span",null,opts.back || "Questions"));
+    back.appendChild(el("span",null,(opts.back || "Questions")
+      + " \u2014 " + surfName(q.surface_id)));
     back.addEventListener("click", function () { page.remove(); });
     bar.appendChild(back);
     page.appendChild(bar);
@@ -1036,7 +1041,8 @@
     var bar = el("div","cbar");
     var back = el("button","cback");
     back.appendChild(el("span","chv","\u2039"));
-    back.appendChild(el("span",null,"Decisions"));
+    back.appendChild(el("span",null,
+      "Decisions \u2014 " + surfName(d.surface_id)));
     back.addEventListener("click", function () { page.remove(); });
     bar.appendChild(back);
     page.appendChild(bar);
@@ -2006,7 +2012,8 @@
             meta2.appendChild(el("span",null, b.id));
             bx2.appendChild(meta2);
             row.appendChild(bx2);
-            row.addEventListener("click", function () { openTask(sorted2, bi); });
+            row.addEventListener("click", function () {
+              openTask(sorted2, bi, {pillar: surfName(sid)}); });
             sec.appendChild(row);
           });
           host.appendChild(sec);
