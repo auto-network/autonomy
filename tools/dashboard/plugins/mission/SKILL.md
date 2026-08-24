@@ -77,6 +77,7 @@ graph mission reply <mission> <pillar> <q> "text"      # a reply is NOT an answe
 graph mission progress <mission> <pillar> <q> "text"   # transient status while you work
 graph mission answer <mission> <pillar> <q> "text"     # the one cohesive resolution
 graph mission chat <mission> <pillar> ["text"|-]       # send, or omit text to read
+#   chat renders as markdown — structure every reply (see Writing rules)
 graph mission coverage <mission>                       # tasks no criterion covers
 ```
 
@@ -167,6 +168,12 @@ Decisions: newest first.
   the repository understands.
 - **Evidence** says what was exercised and what was seen, with markdown
   figures where numbers prove the point.
+- **Chat messages render as markdown. Always structure them**: a bold
+  one-line header, short labeled sections or one bullet per fact —
+  never a single-paragraph wall. For anything beyond one sentence, use
+  stdin (`graph mission chat <m> <p> -` with a heredoc) rather than a
+  long inline argument. Every coordinator hits this on their first
+  chat reply; the operator is reading on a phone.
 
 ## HTTP surface
 
