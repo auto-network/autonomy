@@ -15,7 +15,6 @@ second decrypt dialog.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import hmac
 import time
@@ -23,6 +22,7 @@ import time
 from starlette.requests import Request
 
 from tools.dashboard import api_auth
+from tools.dashboard import vault_release_delivery
 from tools.dashboard.dao import dashboard_db
 from tools.graph import schemas, settings_ops
 from tools.graph.schemas.personal_identity import PASSKEY_SET_ID
@@ -40,38 +40,8 @@ DEFAULT_TTL_SECONDS = 60
 _ALLOWED_REQUEST_FIELDS = {"set_id", "key", "ttl_seconds"}
 _HEX_SEED_LEN = 64
 
-# Approved plaintext waits here only long enough for the exact requesting
-# bearer to consume it once. The durable approval row records the release
-# outcome but never the value; a restart or missed TTL loses the delivery and
-# requires another ceremony. Each entry owns a timer so an unclaimed secret is
-# dropped even when no later vault traffic arrives to prune it.
-_EPHEMERAL_DELIVERIES: dict[str, tuple[float, dict, asyncio.TimerHandle]] = {}
-
-
 def _digest(value: object) -> str:
     return hashlib.sha256(canonical_json(value)).hexdigest()
-
-
-def _forget_delivery(request_id: str) -> None:
-    entry = _EPHEMERAL_DELIVERIES.pop(request_id, None)
-    if entry is not None:
-        entry[2].cancel()
-
-
-def clear_ephemeral_deliveries() -> None:
-    """Drop all in-memory releases (application shutdown and test isolation)."""
-    for request_id in list(_EPHEMERAL_DELIVERIES):
-        _forget_delivery(request_id)
-
-
-def _remember_delivery(row: dict, payload: dict) -> None:
-    request_id = row["id"]
-    expires_at = float((row.get("request") or {}).get("expires_at") or 0)
-    delay = max(0.0, expires_at - time.time())
-    _forget_delivery(request_id)
-    loop = asyncio.get_running_loop()
-    handle = loop.call_later(delay, _forget_delivery, request_id)
-    _EPHEMERAL_DELIVERIES[request_id] = (expires_at, payload, handle)
 
 
 def _class_snapshot(
@@ -364,7 +334,7 @@ def _assert_frozen(row: dict) -> tuple[dict, dict]:
 
 
 async def execute(row: dict, decision: dict) -> dict:
-    """Open at the single server chokepoint and deliver only the payload."""
+    """Open at the chokepoint and materialise only in requester ramfs."""
     req, staged = _assert_frozen(row)
     raw_openers = decision.get("openers") or {}
     opener_buffers: dict[str, bytearray] = {}
@@ -379,7 +349,14 @@ async def execute(row: dict, decision: dict) -> dict:
             opener_seeds=opener_buffers,
             org=staged.get("org"),
         )
-        return {"ok": True, "value": payload}
+        try:
+            receipt = vault_release_delivery.deliver_payload(row, payload)
+            return {"ok": True, "receipt": receipt}
+        finally:
+            # Drop every nested value reference as soon as the ramfs writer
+            # returns. Immutable Python strings cannot be overwritten, but the
+            # executor retains no payload object after this chokepoint.
+            payload.clear()
     finally:
         for seed in opener_buffers.values():
             seed[:] = b"\x00" * len(seed)
@@ -392,39 +369,8 @@ async def execute(row: dict, decision: dict) -> dict:
 
 
 def result(_row: dict, decision: dict, outcome: dict) -> dict:
-    """Persist the outcome without factor material or released plaintext."""
-    if outcome.get("ok") is True and isinstance(outcome.get("value"), dict):
-        payload = outcome.pop("value")
-        _remember_delivery(_row, payload)
-        outcome = {"ok": True, "delivery": "ephemeral-single-use"}
+    """Persist only the value-free ramfs receipt and execution outcome."""
     return {"approved": bool(decision.get("approved")), "execution": outcome}
-
-
-def wait_result(row: dict, persisted_result: dict) -> dict:
-    """Attach the value once, only to the authenticated requester held GET."""
-    execution = persisted_result.get("execution") or {}
-    if persisted_result.get("approved") is not True or execution.get("ok") is not True:
-        return persisted_result
-    entry = _EPHEMERAL_DELIVERIES.pop(row["id"], None)
-    if entry is None:
-        return {
-            "approved": True,
-            "execution": {
-                "ok": False,
-                "error": "the approved vault release is no longer available",
-            },
-        }
-    expires_at, payload, handle = entry
-    handle.cancel()
-    if time.time() > expires_at:
-        return {
-            "approved": True,
-            "execution": {
-                "ok": False,
-                "error": "the approved vault release is no longer available",
-            },
-        }
-    return {"approved": True, "execution": {"ok": True, "value": payload}}
 
 
 PREPARE_CREATE_FROM_REQUEST = {KIND: prepare_create_from_request}
@@ -433,4 +379,4 @@ AUTHORIZE_DECISION = {KIND: authorize_decision}
 AUTHORIZE_GET = {KIND: authorize_get}
 EXECUTORS = {KIND: execute}
 RESULT_BUILDERS = {KIND: result}
-WAIT_RESULT_BUILDERS = {KIND: wait_result}
+WAIT_RESULT_BUILDERS = {}

@@ -548,8 +548,11 @@ def cmd_set_read(args) -> None:
                         file=sys.stderr,
                     )
                     sys.exit(1)
-                payload = opener(set_id, key, org=org)
-                print(json.dumps(payload, indent=2, default=str))
+                receipt = opener(set_id, key, org=org)
+                # The common tool result contains only a path.  Secret bytes
+                # remain in the session's non-swappable ramfs and therefore do
+                # not enter the transcript/model context.
+                print(receipt["path"])
                 return
             print(json.dumps(m.payload, indent=2, default=str))
             _print_composition(set_id, key, org)

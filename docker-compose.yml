@@ -98,9 +98,19 @@ services:
       # needed to see the mount and no CAP_SYS_ADMIN is added here. Provisioning
       # needs the Docker socket (see the compose override that grants it, the
       # same one session-launching needs); without it the mount stays an empty
-      # dir and the vault's per-write ramfs check fails closed. The per-session
-      # delivery ramfs (/run/autonomy-secrets) needs no bind here — sessions
-      # mount their own subdir at launch; the dashboard never touches it.
+      # dir and the vault's per-write ramfs check fails closed.
+      #
+      # The delivery root is also bound into the trusted dashboard because the
+      # settled vault-open chokepoint decrypts the exact approved Setting there
+      # and writes it directly into the requester's per-session ramfs. Sessions
+      # still mount only their own subdirectory at /run/secrets. Both binds use
+      # rslave so a ramfs provisioned after container start propagates in.
+      - type: bind
+        source: /run/autonomy-secrets
+        target: /run/autonomy-secrets
+        bind:
+          propagation: rslave
+          create_host_path: true
       - type: bind
         source: /run/autonomy-keycache
         target: /run/autonomy-keycache

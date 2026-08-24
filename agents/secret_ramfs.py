@@ -2,11 +2,12 @@
 
 Two host ramfs mounts a node needs before it can hold secrets in memory:
 
-  * DELIVERY  ``/run/autonomy-secrets``  — per-session secret delivery. Each
-    session gets its OWN writable subdirectory bind-mounted in at launch; the
-    session writes and reads, the dashboard never binds this. Unlinking the
-    subdirectory at session end returns the memory (ramfs pages belong to the
-    file, not the writer). The per-session subdir wiring is auto-f51kg.
+  * DELIVERY  ``/run/autonomy-secrets``  — per-session secret delivery. The
+    trusted dashboard binds the root so the server-side vault-open chokepoint
+    can write an approved plaintext directly; each session sees ONLY its own
+    writable subdirectory at ``/run/secrets``. Unlinking the subdirectory at
+    session end returns the memory (ramfs pages belong to the file, not the
+    writer). The per-session subdir wiring is auto-f51kg.
   * KEY CACHE ``/run/autonomy-keycache`` — the dashboard's own memory-class
     home for opened key material (auto-a1pub). Bound into the dashboard with
     ``rslave`` propagation so this boot-time host mount reaches the running
@@ -57,7 +58,7 @@ from tools.network.storagekit import (
     filesystem_magic,
 )
 
-#: Per-session secret delivery (sessions bind their own subdir; dashboard never binds).
+#: Per-session secret delivery (dashboard binds root; sessions bind own subdir).
 DELIVERY_MOUNT = "/run/autonomy-secrets"
 #: The dashboard's own key cache (bound into the dashboard via rslave; never a session).
 KEYCACHE_MOUNT = "/run/autonomy-keycache"
@@ -145,17 +146,18 @@ def _mount_host_native(path: str) -> None:
 # ── Per-session secret delivery subdir (auto-f51kg) ──────────────────────────
 # Each session gets its OWN subdirectory under the delivery ramfs, owned by the
 # session's uid and readable by nobody else, bound into the container at
-# ``SESSION_SECRET_DST``. In ``delivered`` mode the SESSION (not the dashboard)
-# opens the sealed content key, decrypts the body, and writes the plaintext file
-# here; only the path enters the tool result. The guard exists for three real
-# reasons — state them right, because a guard with a wrong stated purpose gets
-# deleted by whoever notices it is not real:
-#   1. No dashboard variable ever holds the plaintext — the session materialises
-#      it, so a traceback or logging middleware cannot serialise a secret.
+# ``SESSION_SECRET_DST``. In ``delivered`` mode the dashboard's single
+# vault-open chokepoint decrypts the exact approved object and writes the
+# plaintext into that host-side subdirectory; only the path enters the tool
+# result. The guard exists for three real reasons — state them right, because a
+# guard with a wrong stated purpose gets deleted by whoever notices it is not
+# real:
+#   1. The dashboard holds plaintext only at the settled decrypt chokepoint and
+#      writes no ordinary filesystem or response-body copy.
 #   2. Plaintext never reaches disk — the subdir is ramfs, never swappable tmpfs
 #      (a tmpfs page can reach a swap slot, and a swap slot cannot be wiped).
-#   3. Cross-session isolation — 0700 + per-uid ownership, so session A cannot
-#      read session B's secrets.
+#   3. Cross-session isolation — each container mounts only its own subdir;
+#      mode 0700 and the launcher-assigned owner guard that contract on-host.
 # Provisioning is host-side (the launcher creates the subdir before the container
 # starts; the container binds it with refuse-missing, so a failed mkdir fails the
 # launch rather than yielding a look-alike on-disk directory). Teardown is the
@@ -163,6 +165,10 @@ def _mount_host_native(path: str) -> None:
 
 #: Container-side mount point for a session's own delivery subdir (f51kg spec).
 SESSION_SECRET_DST = "/run/secrets"
+#: All current session images run their unprivileged agent as uid 1000. Keep
+#: the launcher and delivery guard on one value until per-session host UIDs are
+#: introduced.
+SESSION_SECRET_UID = 1000
 
 _SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
@@ -312,12 +318,9 @@ def _is_ramfs(path: str) -> bool:
 def provision(path: str, *, container_bound: bool) -> None:
     """Ensure *path* is a ramfs mount, provisioning it if not. Idempotent.
 
-    ``container_bound`` marks a path this container also binds (the key cache,
-    via ``rslave``): for those the in-container view is verified too, so a
-    propagation failure is caught rather than assumed away. The delivery mount
-    is not bound by this container, so only the helper's host-side self-verify
-    applies here — the launcher and the session-side consumer verify it per
-    session.
+    ``container_bound`` marks a path this container also binds (the key cache
+    and delivery root, via ``rslave``): the in-container view is verified too,
+    so a propagation failure is caught rather than assumed away.
     """
     if container_bound and _is_ramfs(path):
         return  # already ramfs in our own view; nothing to do
@@ -334,8 +337,8 @@ def provision(path: str, *, container_bound: bool) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    # (path, container_bound): the cache is bound into us via rslave; delivery is not.
-    targets = [(DELIVERY_MOUNT, False), (KEYCACHE_MOUNT, True)]
+    # Both trusted dashboard roots are bound into us via rslave.
+    targets = [(DELIVERY_MOUNT, True), (KEYCACHE_MOUNT, True)]
     for path, bound in targets:
         try:
             provision(path, container_bound=bound)
