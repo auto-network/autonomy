@@ -102,8 +102,15 @@ def test_beads_env_routes_to_org_tracker(monkeypatch, tmp_path):
     (org_dir / "metadata.json").write_text("{}")
     (org_dir / "credentials.env").write_text(
         "BEADS_DOLT_SERVER_USER=beads_anchore\nBEADS_DOLT_PASSWORD=pw\n")
+    shared = tmp_path / ".beads"
+    (shared / "credentials.env").write_text(
+        "BEADS_DOLT_SERVER_USER=beads_autonomy\nBEADS_DOLT_PASSWORD=pa\n")
     env = bridge._beads_env("anchore")
-    assert env is not None and env["BEADS_DIR"] == str(org_dir)
+    assert env["BEADS_DIR"] == str(org_dir)
     assert env["BEADS_DOLT_SERVER_USER"] == "beads_anchore"
-    assert bridge._beads_env("autonomy") is None
-    assert bridge._beads_env(None) is None
+    # shared-tracker orgs still authenticate — with the shared creds
+    env = bridge._beads_env("autonomy")
+    assert "BEADS_DIR" not in {
+        k: v for k, v in env.items() if v == str(org_dir)}
+    assert env["BEADS_DOLT_SERVER_USER"] == "beads_autonomy"
+    assert bridge._beads_env(None)["BEADS_DOLT_SERVER_USER"] == "beads_autonomy"
