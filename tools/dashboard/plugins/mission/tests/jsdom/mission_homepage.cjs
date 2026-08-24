@@ -121,6 +121,12 @@ setTimeout(() => {
     check("counts on active only",
       d.querySelectorAll(".msn-ct").length === 3);
 
+    // cards carry their pillar names over a full-bleed chart
+    check("card lists pillars",
+      t(".msn-row .msn-pl .plc").join("|").includes("Relay Network"));
+    check("card chart present",
+      d.querySelectorAll(".msn-row .msn-spark").length === 2);
+
     // sessions screen populates with titles beside pillar names
     comp.screen = "sessions";
     setTimeout(() => {

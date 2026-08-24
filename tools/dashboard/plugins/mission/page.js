@@ -23,6 +23,7 @@ window.missionPage = function () {
     progress: 0,            // 0..100, real signal: stages, bytes, render
     loadNote: "",           // italic sub-status narrated by the server
     win: {key: "30d", secs: 30 * 86400, buckets: 30},
+    sparkTick: 0,           // bumped on resize: cards redraw at new width
     screen: "missions",       // missions | sessions
     alloc: [],
     orgs: [],
@@ -75,6 +76,11 @@ window.missionPage = function () {
           + (bits.length ? "#" + bits.join("&") : ""));
       });
       document.addEventListener("click", () => { this.popFor = null; });
+      let srt = null;
+      window.addEventListener("resize", () => {
+        clearTimeout(srt);
+        srt = setTimeout(() => { this.sparkTick++; }, 180);
+      });
     },
 
     async refresh() {
@@ -195,21 +201,85 @@ window.missionPage = function () {
       return parts.join(" · ");
     },
 
-    bars(m) {
-      const cutoff = Date.now() / 1000 - this.win.secs;
-      const nb = this.win.buckets;
-      const span = this.win.secs / nb;
-      const buckets = new Array(nb).fill(0);
+    // Full-bleed card chart: the window's events as one smooth line,
+    // drawn imperatively at the card's native pixel width (stretched
+    // SVG strokes go jagged) and redrawn when the window or width
+    // changes. The overlaid title/pillars sit on the left, so late
+    // history — the right side — stays clear.
+    drawSpark(el, m, winSecs, _tick) {
+      const W = el.clientWidth, H = el.clientHeight;
+      while (el.firstChild) el.removeChild(el.firstChild);
+      if (!W || !H) return;
+      el.setAttribute("viewBox", "0 0 " + W + " " + H);
+      el.setAttribute("width", W);
+      el.setAttribute("height", H);
+      const cutoff = Date.now() / 1000 - winSecs;
+      const N = Math.max(24, Math.min(96, Math.floor(W / 12)));
+      const raw = new Array(N).fill(0);
       ((m.activity && m.activity.events) || []).forEach((e) => {
-        const idx = Math.floor((e - cutoff) / span);
-        if (idx >= 0 && idx < nb) buckets[idx]++;
+        const idx = Math.floor((e - cutoff) / (winSecs / N));
+        if (idx >= 0 && idx < N) raw[idx]++;
       });
-      const max = Math.max(1, ...buckets);
-      return buckets.map((n) => ({
-        on: n > 0,
-        h: n ? Math.max(30, Math.round((n / max) * 100)) : 100,
-        op: n ? (0.45 + 0.55 * (n / max)).toFixed(2) : 1,
-      }));
+      const K = [1, 3, 6, 8, 6, 3, 1], KS = 28, KH = 3;
+      const sm = new Array(N).fill(0);
+      let max = 0.001;
+      for (let i = 0; i < N; i++) {
+        let acc = 0;
+        for (let j = 0; j < K.length; j++) {
+          const idx = i + j - KH;
+          if (idx >= 0 && idx < N) acc += raw[idx] * K[j];
+        }
+        sm[i] = acc / KS;
+        if (sm[i] > max) max = sm[i];
+      }
+      const padT = 6, baseY = H - 1;
+      const pts = sm.map((v, i) =>
+        [(i + 0.5) / N * W, baseY - (v / max) * (baseY - padT)]);
+      const r = (v) => Math.round(v * 10) / 10;
+      const cl = (y) => Math.min(baseY, Math.max(padT, y));
+      let d = "M" + r(pts[0][0]) + "," + r(pts[0][1]);
+      for (let i = 0; i < pts.length - 1; i++) {
+        const p0 = pts[Math.max(0, i - 1)], p1 = pts[i],
+              p2 = pts[i + 1], p3 = pts[Math.min(pts.length - 1, i + 2)];
+        d += "C" + r(p1[0] + (p2[0] - p0[0]) / 6) + ","
+          + r(cl(p1[1] + (p2[1] - p0[1]) / 6)) + " "
+          + r(p2[0] - (p3[0] - p1[0]) / 6) + ","
+          + r(cl(p2[1] - (p3[1] - p1[1]) / 6)) + " "
+          + r(p2[0]) + "," + r(p2[1]);
+      }
+      const NS = "http://www.w3.org/2000/svg";
+      const area = document.createElementNS(NS, "path");
+      area.setAttribute("d", d + "L" + r(pts[pts.length - 1][0]) + ","
+        + baseY + "L" + r(pts[0][0]) + "," + baseY + "Z");
+      area.setAttribute("fill", "#8b85ff");
+      area.setAttribute("fill-opacity", "0.08");
+      el.appendChild(area);
+      const line = document.createElementNS(NS, "path");
+      line.setAttribute("d", d);
+      line.setAttribute("fill", "none");
+      line.setAttribute("stroke", "#8b85ff");
+      line.setAttribute("stroke-width", "1.8");
+      line.setAttribute("stroke-opacity", "0.55");
+      line.setAttribute("stroke-linecap", "round");
+      line.setAttribute("stroke-linejoin", "round");
+      el.appendChild(line);
+    },
+
+    pillarsOf(m) {
+      const row = this.alloc.find((a) => a.mission_id === m.mission_id);
+      return ((row && row.pillars) || []).slice(0, 5);
+    },
+
+    morePillars(m) {
+      const row = this.alloc.find((a) => a.mission_id === m.mission_id);
+      return Math.max(0, ((row && row.pillars) || []).length - 5);
+    },
+
+    openPillar(m, p) {
+      this._focus = p.pillar_id;
+      this.current = m.mission_id;
+      history.replaceState(null, "", "/mission/" + m.mission_id);
+      this.loadScreen(m.mission_id);
     },
 
     counts(m) {
