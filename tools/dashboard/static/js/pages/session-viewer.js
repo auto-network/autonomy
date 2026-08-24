@@ -2388,6 +2388,14 @@
             try { this._termInstance.dispose(); } catch (e) {}
             this._termInstance = null;
           }
+          // The composer is behind x-if while the terminal is open, so Alpine
+          // creates a fresh (empty) contenteditable when this flips back. Its
+          // draft is still durable in the session store/localStorage; hydrate
+          // the replacement element once the DOM has been remounted.
+          var self = this;
+          this.$nextTick(function () {
+            if (!self.showTerminal) self.restoreComposerDraft();
+          });
         }
       },
 

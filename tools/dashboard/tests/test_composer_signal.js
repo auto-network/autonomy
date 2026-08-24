@@ -137,6 +137,25 @@ describe('composer-active signal (_composerActive + _syncComposerSignal)', () =>
     assert.equal(h.body.dataset.svComposerSession, undefined);
   });
 
+  it('restores the durable composer draft after closing the terminal', () => {
+    store.isLive = true; store.sessionType = 'container';
+    const v = h.makeViewer('auto-test');
+    const oldComposer = { innerText: '' };
+    v.$refs = { messageInput: oldComposer };
+    v.writeComposerText('message queued before opening terminal');
+
+    // x-if removes the original composer while the terminal is displayed,
+    // then supplies a distinct empty element on close.
+    v.showTerminal = true;
+    const remountedComposer = { innerText: '' };
+    v.$refs.messageInput = remountedComposer;
+    v.toggleTerminal();
+
+    assert.equal(v.showTerminal, false);
+    assert.equal(remountedComposer.innerText, 'message queued before opening terminal');
+    assert.equal(store.draftText, 'message queued before opening terminal');
+  });
+
   it('is false for a dead session', () => {
     store.isLive = false; store.sessionType = 'container';
     const v = h.makeViewer('auto-test');
