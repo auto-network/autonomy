@@ -636,7 +636,13 @@ class MutationCatalog:
             if self._triggers_match_current_schema():
                 self.conn.commit()
                 return False
-            audit_schema(self.conn)
+            # This is maintenance for an ALREADY-ACTIVATED policy inventory,
+            # not a new activation decision.  Do not run the whole durable-
+            # table audit here: unrelated product tables may still be waiting
+            # for an explicit replicate/local policy, and their separate gap
+            # must not prevent existing classified tables from recompiling
+            # after a column addition.  Migration and first activation retain
+            # the fail-closed full audit.
             self._install_triggers()
             if not self._triggers_match_current_schema():
                 raise WatermarkError("fleet-sync trigger refresh incomplete")
