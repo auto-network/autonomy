@@ -848,6 +848,7 @@ class HttpClient:
 
     def add_setting(
         self, set_id, schema_revision, key, payload, *, org, state="raw",
+        vault_policy_class_id=None,
     ):
         org = _resolve_client_org_arg(org)
         body = {
@@ -857,6 +858,8 @@ class HttpClient:
             "payload": payload,
             "state": state,
         }
+        if vault_policy_class_id is not None:
+            body["vault_policy_class_id"] = vault_policy_class_id
         result = self._request(
             "POST", "/api/graph/setting", body=body,
             headers=_settings_headers(org),
@@ -864,9 +867,14 @@ class HttpClient:
         self.last_write_report = result
         return result.get("id")
 
-    def override_setting(self, target_id, payload, *, org, state="raw"):
+    def override_setting(
+        self, target_id, payload, *, org, state="raw",
+        vault_policy_class_id=None,
+    ):
         org = _resolve_client_org_arg(org)
         body = {"payload": payload, "state": state}
+        if vault_policy_class_id is not None:
+            body["vault_policy_class_id"] = vault_policy_class_id
         result = self._request(
             "POST", f"/api/graph/setting/{target_id}/override",
             body=body, headers=_settings_headers(org),

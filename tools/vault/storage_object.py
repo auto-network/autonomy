@@ -430,7 +430,6 @@ def seal_revision(
     content_store,
     tier: str = AUDITED,
     policy_class=None,
-    opener_seeds=None,
     recipient_credentials=(),
     body_suite_id: str = suites.BODY_SUITE_DEFAULT,
 ) -> SealedRevision:
@@ -460,7 +459,7 @@ def seal_revision(
                 "a secured setting is sealed under a policy class; without one "
                 "the storage state alone would open it, which is the audited tier"
             )
-        inner = _SecuredBody(policy_class, opener_seeds or {}, object_id, genesis_id)
+        inner = _SecuredBody(policy_class, object_id, genesis_id)
 
     header, body, advance = _create_with_inline_advance(
         author=author,
@@ -509,9 +508,8 @@ class _SecuredBody:
     the only name for it a reader holding just the locator can reconstruct.
     """
 
-    def __init__(self, policy_class, opener_seeds, object_id, genesis_id):
+    def __init__(self, policy_class, object_id, genesis_id):
         self.policy_class = policy_class
-        self.opener_seeds = opener_seeds
         self.object_id = object_id
         self.genesis_id = genesis_id
 
@@ -527,7 +525,6 @@ class _SecuredBody:
         )
         sealed = seal_cek(
             self.policy_class,
-            self.opener_seeds,
             content_key,
             genesis_id=self.genesis_id,
             setting_name=self.object_id,

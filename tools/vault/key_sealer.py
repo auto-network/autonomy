@@ -51,6 +51,7 @@ retired.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -60,7 +61,9 @@ from tools.network.storagekit.credentials import (
     domain_member_keys,
     select_current_credential,
 )
+from tools.vault.policy_class import enable_public_sealing
 from tools.vault.storage_object import Holdings, seal_revision
+from tools.vault.store import VaultStore
 
 
 def _current_member_credentials(frontier, key_control, authority_ancestry) -> tuple:
@@ -159,6 +162,7 @@ def build_vault_sealer(
         payload: dict,
         tier: str,
         org: "str | None",
+        policy_class_id: "str | None" = None,
     ) -> str:
         author = author_provider()
         if author is None:
@@ -166,8 +170,8 @@ def build_vault_sealer(
                 f"{set_id} is a vault set, but this process holds no agent "
                 f"delegate to author the seal. The delegate is provisioned at "
                 f"unlock and does not survive a restart, so unlock this node "
-                f"before writing a secret — there is no unattended path that "
-                f"skips it, by design."
+                f"before writing. This is storage authorship, not a vault "
+                f"factor gesture or per-write operator approval."
             )
         ledger = ledger_provider(set_id, org)
         if ledger is None:
@@ -177,11 +181,32 @@ def build_vault_sealer(
                 f"genesis, so an unfounded organization cannot hold one."
             )
         frontier, fold_at, authority_ancestry = ledger
+        from tools.vault.key_holder import _scoped_db
+
+        policy_class = None
+        if tier == "secured":
+            if not isinstance(policy_class_id, str) or not policy_class_id:
+                raise VaultSealerNotReady(
+                    "a secured Setting write must name the policy class whose "
+                    "public key receives it"
+                )
+            from tools.graph.schemas.vault_policy_class import (
+                VAULT_POLICY_CLASS_SET_ID,
+            )
+
+            class_db = _scoped_db(VAULT_POLICY_CLASS_SET_ID, org)
+            with VaultStore(class_db) as class_store:
+                policy_class = class_store.get_class(policy_class_id)
+                if policy_class.current().sealing_public_key is None:
+                    policy_class = enable_public_sealing(
+                        policy_class,
+                        created_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                    class_store.put_class(policy_class)
         # Routed by the set's declared HOME, exactly as the ledger is: a
         # personal-homed set's ciphertext belongs in personal.db whatever org
         # the caller is acting as.
         from tools.vault.db_content_store import DbContentStore
-        from tools.vault.key_holder import _scoped_db
 
         scoped = _scoped_db(set_id, org)
         with KeyControlStore(scoped) as key_control:
@@ -208,6 +233,7 @@ def build_vault_sealer(
                 ancestry=authority_ancestry,
                 content_store=DbContentStore(scoped),
                 tier=tier,
+                policy_class=policy_class,
                 # Every credential published in this store receives a grant
                 # when this write mints a generation — the durable recovery
                 # copy _land_advance persists. Without this, advance.grants

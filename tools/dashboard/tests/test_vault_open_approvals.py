@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import secrets
@@ -15,6 +16,7 @@ from tools.dashboard import (
     approvals_routes,
     vault_open_approvals,
     vault_release_delivery,
+    vault_release_sweeper,
 )
 from tools.dashboard.dao import approval_requests as ar, vault_releases
 from tools.graph import ops, settings_ops
@@ -106,12 +108,16 @@ def vault_open_env(tmp_path, monkeypatch):
         approvals_routes._decision_waiters.clear()
 
 
-def test_random_secret_is_delivered_byte_identical_without_opener_leak(
+def test_fake_ssh_key_is_sealed_approved_delivered_and_expired_without_leak(
     vault_open_env,
 ):
-    """The cp-1 harness: generate, seal, approve, deliver, compare digest."""
+    """The Mac-key rehearsal: full path, exact bytes, then deadline shred."""
     graph_db, world, client = vault_open_env
-    secret = secrets.token_urlsafe(48)
+    secret = (
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+        + base64.b64encode(secrets.token_bytes(96)).decode("ascii")
+        + "\n-----END OPENSSH PRIVATE KEY-----\n"
+    )
     expected_digest = hashlib.sha256(secret.encode()).hexdigest()
     setting_id = ops.add_setting(
         VAULT_SECURED_SET_ID,
@@ -220,6 +226,19 @@ def test_random_secret_is_delivered_byte_identical_without_opener_leak(
     assert release["container_path"] == receipt["path"]
     assert secret not in json.dumps(release)
     assert "cek" not in json.dumps(delivered).lower()
+
+    host_path = graph_db.parent / "ramfs" / "auto-real" / f"vault-open-{rid}.json"
+    swept = vault_release_sweeper.sweep(
+        session_exists=lambda session: session == "auto-real",
+        delivery_root=graph_db.parent / "ramfs",
+        store_path=graph_db.parent / "releases.db",
+        now=int(float(receipt["expires_at"]) * 1000),
+    )
+    assert swept["shredded"] == 1
+    assert not host_path.exists()
+    expired = vault_releases.get(rid)
+    assert expired["shred_reason"] == "expired"
+    assert secret not in json.dumps(expired)
 
 
 def test_vault_open_refuses_setting_drift(vault_open_env):

@@ -186,8 +186,8 @@ def test_held_both_downgrade_via_policy_tamper_is_refused():
 def test_held_suite_id_type_confusion_is_refused():
     pub, seed = pw_factor("alpha", "pw-1")
     rec = create_class(PASSWORD_POLICY, [pub], created_at="t0")
-    sealed = seal_cek(rec, {"pw-1": seed}, os.urandom(32), genesis_id=GENESIS, setting_name="s", required_policy=PASSWORD_POLICY)
-    sealed["suite_id"] = 1  # coerce the string suite id to the int seal position
+    sealed = seal_cek(rec, os.urandom(32), genesis_id=GENESIS, setting_name="s", required_policy=PASSWORD_POLICY)
+    sealed["format"] = "unknown-public-seal"
     with pytest.raises(Exception):  # SuiteError / PolicyClassError — never opens
         open_cek(rec, {"pw-1": seed}, sealed, genesis_id=GENESIS, setting_name="s", required_policy=PASSWORD_POLICY)
 
@@ -196,9 +196,32 @@ def test_held_sealed_cek_tamper_is_refused():
     pub, seed = pw_factor("alpha", "pw-1")
     rec = create_class(PASSWORD_POLICY, [pub], created_at="t0")
     cek = os.urandom(32)
-    sealed = seal_cek(rec, {"pw-1": seed}, cek, genesis_id=GENESIS, setting_name="s", required_policy=PASSWORD_POLICY)
+    sealed = seal_cek(rec, cek, genesis_id=GENESIS, setting_name="s", required_policy=PASSWORD_POLICY)
     ct = bytearray(bytes.fromhex(sealed["ciphertext"]))
     ct[0] ^= 0x01
     sealed["ciphertext"] = ct.hex()
     with pytest.raises(PolicyClassError):
         open_cek(rec, {"pw-1": seed}, sealed, genesis_id=GENESIS, setting_name="s", required_policy=PASSWORD_POLICY)
+
+
+def test_held_generation_public_key_substitution_is_refused():
+    import dataclasses
+
+    pub, seed = pw_factor("alpha", "pw-1")
+    rec = create_class(PASSWORD_POLICY, [pub], created_at="t0")
+    sealed = seal_cek(
+        rec, os.urandom(32), genesis_id=GENESIS, setting_name="s",
+        required_policy=PASSWORD_POLICY,
+    )
+    other_pub, _ = pw_factor("beta", "pw-2")
+    other = create_class(PASSWORD_POLICY, [other_pub], created_at="t0")
+    forged_gen = dataclasses.replace(
+        rec.current(), sealing_public_key=other.current().sealing_public_key,
+    )
+    forged = dataclasses.replace(rec, generations=(forged_gen,))
+
+    with pytest.raises(PolicyClassError, match="does not match"):
+        open_cek(
+            forged, {"pw-1": seed}, sealed, genesis_id=GENESIS,
+            setting_name="s", required_policy=PASSWORD_POLICY,
+        )

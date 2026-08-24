@@ -52,6 +52,11 @@ def _assert_append_only_successor(old: PolicyClassRecord, new: PolicyClassRecord
             raise ConcurrencyError(
                 f"class {old.class_id!r} generation {i} id changed; stale read"
             )
+        if new_gen.sealing_public_key != old_gen.sealing_public_key:
+            raise ConcurrencyError(
+                f"class {old.class_id!r} generation {old_gen.gen_id!r} "
+                "sealing public key changed; stale or corrupt write"
+            )
         old_wraps = {json.dumps(w.to_dict(), sort_keys=True) for w in old_gen.wraps}
         new_wraps = {json.dumps(w.to_dict(), sort_keys=True) for w in new_gen.wraps}
         if not old_wraps <= new_wraps:

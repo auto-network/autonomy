@@ -8,8 +8,10 @@ browser, no human-entered password.
 
 from __future__ import annotations
 
+import json
 import pathlib
 import re
+from dataclasses import replace
 
 import pytest
 
@@ -35,8 +37,8 @@ def test_full_headless_lifecycle():
     class_id = service.create_policy_class(store, "password", ["pw-1"], created_at="t0")
 
     # seal two settings; both name the one class
-    cek1 = service.seal_setting(store, "s.a", class_id, genesis, "password", _seeds(store, a))
-    cek2 = service.seal_setting(store, "s.b", class_id, genesis, "password", _seeds(store, a))
+    cek1 = service.seal_setting(store, "s.a", class_id, genesis, "password")
+    cek2 = service.seal_setting(store, "s.b", class_id, genesis, "password")
     assert service.open_setting(store, "s.a", _seeds(store, a)) == cek1
     assert service.open_setting(store, "s.b", _seeds(store, a)) == cek2
 
@@ -63,16 +65,45 @@ def test_full_headless_lifecycle():
     assert store.get_secret("s.b").sealed_cek["gen_id"] == store.get_class(class_id).current().gen_id
 
 
-def test_sealing_requires_a_factor_no_unattended_write():
-    """No unattended process can write a secured setting (crib §18): sealing
-    opens the class, and without a valid opener it is refused."""
+def test_sealing_is_unattended_and_opening_still_requires_a_factor():
+    """The class public key permits a write; only the read needs a factor."""
     store = _store()
     genesis = make_test_genesis()
     a = make_test_identity(factor_id="pw-1", password="alpha")
     service.enroll_password_factor(store, a.factor_id, a.password)
     class_id = service.create_policy_class(store, "password", ["pw-1"], created_at="t0")
+    cek = service.seal_setting(store, "s.a", class_id, genesis, "password")
     with pytest.raises(ClassOpenError):
-        service.seal_setting(store, "s.a", class_id, genesis, "password", {})
+        service.open_setting(store, "s.a", {})
+    assert service.open_setting(store, "s.a", _seeds(store, a)) == cek
+
+
+def test_unattended_seal_upgrades_a_legacy_class_by_appending_a_generation():
+    store = _store()
+    genesis = make_test_genesis()
+    a = make_test_identity(factor_id="pw-1", password="alpha")
+    service.enroll_password_factor(store, a.factor_id, a.password)
+    class_id = service.create_policy_class(
+        store, "password", ["pw-1"], created_at="t0"
+    )
+    current = store.get_class(class_id)
+    legacy_gen = replace(current.current(), sealing_public_key=None)
+    legacy = replace(current, generations=(legacy_gen,))
+    # Replace before the legacy form has ever been committed as a successor.
+    store.db.execute(
+        "UPDATE policy_classes SET wire = ? WHERE class_id = ?",
+        (json.dumps(legacy.to_dict(), sort_keys=True), class_id),
+    )
+    store.db.commit()
+
+    cek = service.seal_setting(
+        store, "s.legacy", class_id, genesis, "password", created_at="t1"
+    )
+    upgraded = store.get_class(class_id)
+    assert len(upgraded.generations) == 2
+    assert upgraded.generations[0].to_dict() == legacy_gen.to_dict()
+    assert upgraded.current().sealing_public_key is not None
+    assert service.open_setting(store, "s.legacy", _seeds(store, a)) == cek
 
 
 def test_store_round_trips_class_and_secret():
@@ -80,7 +111,7 @@ def test_store_round_trips_class_and_secret():
     a = make_test_identity(factor_id="pw-1", password="alpha")
     service.enroll_password_factor(store, a.factor_id, a.password)
     class_id = service.create_policy_class(store, "password", ["pw-1"], created_at="t0")
-    service.seal_setting(store, "s.a", class_id, make_test_genesis(), "password", _seeds(store, a))
+    service.seal_setting(store, "s.a", class_id, make_test_genesis(), "password")
     reopened = VaultStore(store.path) if store.path != ":memory:" else store
     rec = reopened.get_class(class_id)
     assert rec.class_id == class_id and rec.policy == "password"
@@ -213,8 +244,7 @@ def test_extending_a_class_seals_only_to_an_attested_address():
     a = make_test_identity(factor_id="pw-1", password="alpha")
     service.enroll_password_factor(store, a.factor_id, a.password)
     class_id = service.create_policy_class(store, "password", ["pw-1"], created_at="t0")
-    cek = service.seal_setting(store, "s.a", class_id, genesis, "password",
-                               _seeds(store, a))
+    cek = service.seal_setting(store, "s.a", class_id, genesis, "password")
 
     root, seed, published = _passkey_root()
     statement = _enrolment(root, prov=published.public_key)

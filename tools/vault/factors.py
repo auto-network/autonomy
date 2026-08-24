@@ -1,6 +1,6 @@
 """Vault factors — the human-gated inputs a policy class wraps its key to.
 
-A *factor* is one way a human proves presence at a secured write: a password,
+A *factor* is one way a human authorizes a secured read: a password,
 or a WebAuthn passkey's PRF output. Every factor reduces to a 32-byte **seed**;
 from that seed a single X25519 *encapsulation keypair* is derived under the
 purpose label ``autonomy/vault-factor/v1`` (crib §18). The factor publishes the
@@ -20,7 +20,7 @@ Two factor types exist:
   implemented here.
 
 Nothing here caches a seed. A seed lives only for the duration of the single
-call that opens a factor, exactly as the crib's NARROWING requires.
+call that opens a factor.
 """
 
 from __future__ import annotations

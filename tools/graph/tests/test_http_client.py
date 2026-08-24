@@ -96,6 +96,25 @@ def test_request_vault_open_derives_session_server_side_and_returns_receipt():
     assert "/api/approvals/open-1?wait=" in captured[1][1]
 
 
+def test_secured_setting_write_carries_policy_class_but_no_opener_material():
+    client = _make_client()
+    captured = {}
+
+    def fake_urlopen(req, timeout=None, context=None):
+        captured["body"] = json.loads(req.data)
+        return _FakeResponse({"id": "setting-1"}, status=201)
+
+    with patch("urllib.request.urlopen", fake_urlopen):
+        assert client.add_setting(
+            "autonomy.vault.secured", 1, "mac.ssh",
+            {"value": "fake-private-key"}, org="personal",
+            vault_policy_class_id="class-1",
+        ) == "setting-1"
+
+    assert captured["body"]["vault_policy_class_id"] == "class-1"
+    assert "openers" not in captured["body"]
+
+
 def test_search_passes_or_mode_and_tag():
     """Optional params (or, tag) flow through to query string."""
     client = _make_client()

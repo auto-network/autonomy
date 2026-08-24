@@ -4,8 +4,10 @@ The problem this avoids (bead auto-39d26): if every secret's data key were
 wrapped directly to every factor, enrolling a passkey would re-wrap every
 secret, and any secret missed would end up protected by a divergent factor set.
 So a setting's data key does not name factors at all — it names a **policy
-class**. The class holds a symmetric ``class_key`` and carries the per-factor
-wraps; a setting's content-encryption key (CEK) is sealed *under the class_key*.
+class**. The class holds a factor-wrapped secret from which an asymmetric
+sealing keypair is derived. Its PUBLIC sealing key wraps a setting's
+content-encryption key (CEK); opening the private half still requires the
+factor-wrapped class secret.
 Enrolling a factor adds one wrap to the class and touches no setting. Individual
 secrets hold no factor wraps, so they cannot diverge.
 
@@ -30,8 +32,9 @@ Named primitives are ADOPTED, not reimplemented (bead):
 
 * per-factor wraps  — ``idkit.sealing.seal`` / ``.open`` (RFC 9180 HPKE base
   mode, X25519 / HKDF-SHA-256 / ChaCha20-Poly1305), purpose-labelled.
-* the class→CEK seal — the AEAD suite resolved by ``storagekit.suites`` from the
-  record's ``suite_id`` (AES-256-GCM-SIV, nonce-misuse-resistant).
+* the class→CEK seal — ``idkit.sealing.seal`` again, addressed to the class's
+  public sealing key. This is what permits unattended writes without granting
+  unattended reads.
 
 Phase one ships the ``password`` policy. ``prf`` and ``both`` are constructible
 here (the XOR split is pure symmetric crypto) so the cross-model attack can
@@ -44,13 +47,16 @@ output whose library is out of this epic — see :mod:`tools.vault.factors`.
    downgrade, NOT so a caller can use them. Do not wire either policy into a
    production read or write path until that review lands.
 
-THE NARROWING (crib §18): ``class_key`` is symmetric, so sealing a CEK requires
-HOLDING it, which requires opening a per-factor wrap — a human at that instant.
-No function here caches a class_key; callers must not either.
+Writing is deliberately NOT factor-gated. Anyone authorized by the Settings
+layer to write can seal to the class's public key; only opening derives the
+private key and therefore requires the policy's factor gesture. The vault owns
+confidentiality, not application-level write authorization.
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import secrets
 from dataclasses import dataclass, replace
 
@@ -58,7 +64,12 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCMSIV
 
 from tools.network.idkit.canonical import canonical_json
-from tools.network.idkit.sealing import SealingError, open as seal_open, seal
+from tools.network.idkit.sealing import (
+    SealingError,
+    derive_encapsulation_keypair,
+    open as seal_open,
+    seal,
+)
 from tools.network.storagekit import suites
 
 from .errors import (
@@ -83,8 +94,14 @@ from .factors import (
 #: cross-class key confusion, both→password downgrade).
 CLASS_WRAP_PURPOSE = "autonomy/vault-policy-class/v1"
 
-#: AAD domain separator for the class→CEK AEAD seal.
+#: AAD domain separator for legacy class→CEK AES-GCM-SIV records.
 _CEK_AAD_DOMAIN = "autonomy/vault-policy-class/cek/v1"
+
+#: Deterministic derivation domain for a generation's asymmetric sealing key.
+CLASS_SEAL_KEY_PURPOSE = "autonomy/vault-policy-class/sealing-key/v1"
+#: HPKE info domain for a setting CEK sealed to that public key.
+CEK_PUBLIC_SEAL_PURPOSE = "autonomy/vault-policy-class/cek-hpke/v1"
+CEK_PUBLIC_SEAL_FORMAT = "hpke-x25519-v1"
 
 PASSWORD_POLICY = "password"
 PRF_POLICY = "prf"
@@ -128,7 +145,7 @@ class Wrap:
     def from_dict(cls, d: dict) -> "Wrap":
         try:
             return cls(d["factor_id"], d["factor_type"], d["role"], d["public_key"], d["wrapped"])
-        except (KeyError, TypeError) as exc:
+        except (AttributeError, KeyError, TypeError) as exc:
             raise PolicyClassError(f"malformed wrap: {exc}") from exc
 
 
@@ -139,14 +156,33 @@ class Generation:
 
     gen_id: str
     wraps: tuple[Wrap, ...]
+    sealing_public_key: str | None = None
 
     def to_dict(self) -> dict:
-        return {"gen_id": self.gen_id, "wraps": [w.to_dict() for w in self.wraps]}
+        result = {"gen_id": self.gen_id, "wraps": [w.to_dict() for w in self.wraps]}
+        if self.sealing_public_key is not None:
+            result["sealing_public_key"] = self.sealing_public_key
+        return result
 
     @classmethod
     def from_dict(cls, d: dict) -> "Generation":
         try:
-            return cls(d["gen_id"], tuple(Wrap.from_dict(w) for w in d["wraps"]))
+            sealing_public_key = d.get("sealing_public_key")
+            if sealing_public_key is not None and (
+                not isinstance(sealing_public_key, str)
+                or len(sealing_public_key) != 64
+                or any(c not in "0123456789abcdef" for c in sealing_public_key)
+            ):
+                raise PolicyClassError(
+                    "generation sealing_public_key must be 64 lowercase hex characters"
+                )
+            return cls(
+                d["gen_id"],
+                tuple(Wrap.from_dict(w) for w in d["wraps"]),
+                sealing_public_key,
+            )
+        except PolicyClassError:
+            raise
         except (KeyError, TypeError) as exc:
             raise PolicyClassError(f"malformed generation: {exc}") from exc
 
@@ -219,6 +255,28 @@ def _wrap_purpose(class_id: str, gen_id: str, policy: str, role: str) -> str:
     return f"{CLASS_WRAP_PURPOSE}|{class_id}|{gen_id}|{policy}|{role}"
 
 
+def _class_seal_key_purpose(class_id: str, gen_id: str) -> str:
+    digest = hashlib.sha256(canonical_json({
+        "class_id": class_id,
+        "gen_id": gen_id,
+    })).hexdigest()
+    return f"{CLASS_SEAL_KEY_PURPOSE}|{digest}"
+
+
+def _cek_public_seal_purpose(
+    record: "PolicyClassRecord", gen_id: str, genesis_id: str, setting_name: str
+) -> str:
+    digest = hashlib.sha256(canonical_json({
+        "format": CEK_PUBLIC_SEAL_FORMAT,
+        "genesis_id": genesis_id,
+        "class_id": record.class_id,
+        "gen_id": gen_id,
+        "setting_name": setting_name,
+        "policy": record.policy,
+    })).hexdigest()
+    return f"{CEK_PUBLIC_SEAL_PURPOSE}|{digest}"
+
+
 def _xor(a: bytes, b: bytes) -> bytes:
     return bytes(x ^ y for x, y in zip(a, b))
 
@@ -282,7 +340,10 @@ def _mint_generation(
         share_b = _xor(class_key, share_a)
         wraps = [_seal_wrap(share_a, f, class_id, gen_id, policy, ROLE_A) for f in pw]
         wraps += [_seal_wrap(share_b, f, class_id, gen_id, policy, ROLE_B) for f in pk]
-    return Generation(gen_id, tuple(wraps))
+    _, sealing_public_key = derive_encapsulation_keypair(
+        class_key, _class_seal_key_purpose(class_id, gen_id)
+    )
+    return Generation(gen_id, tuple(wraps), sealing_public_key)
 
 
 def _open_generation(record: PolicyClassRecord, gen: Generation, seeds) -> tuple[bytes, dict]:
@@ -340,8 +401,8 @@ def create_class(
 
     Requires NO existing factor and opens nothing — it consumes only the
     factors' published public keys (crib §18). Returns the record; the
-    class_key is not persisted or returned. Seal a setting under it with
-    :func:`seal_cek`, which re-derives the key from a factor.
+    class secret is not persisted or returned. Its derived public sealing key
+    is persisted so :func:`seal_cek` can write without a factor.
     """
     _require_policy(policy)
     if not factors:
@@ -351,13 +412,43 @@ def create_class(
     return PolicyClassRecord(class_id, policy, (gen,), created_at)
 
 
+def enable_public_sealing(
+    record: PolicyClassRecord, *, created_at: str
+) -> PolicyClassRecord:
+    """Make a legacy class public-sealable without opening it.
+
+    Records created before public sealing have no ``sealing_public_key``.  A
+    public key cannot be recovered from their factor wraps alone, so migration
+    appends a fresh generation sealed to the current factors' PUBLIC keys. Old
+    generations remain byte-identical and readable; new writes use the new
+    generation. This operation consumes no opener material.
+    """
+    if record.current().sealing_public_key is not None:
+        return record
+    factors = [
+        PublishedFactor(w.factor_id, w.factor_type, w.public_key)
+        for w in record.current().wraps
+    ]
+    new_gen = _mint_generation(
+        record.policy,
+        factors,
+        record.class_id,
+        secrets.token_hex(12),
+        secrets.token_bytes(_CLASS_KEY_LEN),
+    )
+    return replace(
+        record, generations=record.generations + (new_gen,), created_at=created_at
+    )
+
+
 # ── open ─────────────────────────────────────────────────────────────────
 
 
 def open_class(record: PolicyClassRecord, seeds: dict[str, bytes]) -> bytes:
     """Recover the CURRENT generation's class_key after the policy is satisfied
-    by *seeds* (``factor_id`` → 32-byte seed). This is the key new writes use.
-    Raises :class:`ClassOpenError` if the policy is not satisfied."""
+    by *seeds* (``factor_id`` → 32-byte seed). It derives the private sealing
+    key used by reads; writes use only the published half. Raises
+    :class:`ClassOpenError` if the policy is not satisfied."""
     key, _ = _open_generation(record, record.current(), seeds)
     return key
 
@@ -436,9 +527,8 @@ def revoke_factor(
     honest operations are to cycle the key forward (here) and to destroy
     plaintext rigorously (the caller's job).
 
-    Ceremony-free by design (the crib's REMEDY SHAPE / auto-resolve): a factor
-    is necessarily open at any secured write, so the acting client appends the
-    generation itself with no prompt. ``created_at`` re-stamps the class.
+    Ceremony-free by design: minting and wrapping the fresh class secret uses
+    only surviving factors' published keys. ``created_at`` re-stamps the class.
     """
     current = record.current()
     survivors = [
@@ -465,7 +555,6 @@ def revoke_factor(
 
 def seal_cek(
     record: PolicyClassRecord,
-    seeds: dict[str, bytes],
     cek: bytes,
     *,
     genesis_id: str,
@@ -474,12 +563,10 @@ def seal_cek(
 ) -> dict:
     """Seal a setting's *cek* under the class's CURRENT generation.
 
-    Opens the current generation with *seeds* first — sealing a secured setting
-    requires HOLDING the class_key, which requires a factor (crib §18: no
-    unattended process can write a secured setting). ``associated_data`` binds
-    ``genesis_id``, ``class_id``, the ``gen_id``, ``setting_name`` and the
-    class's ``policy``, so material sealed for one class, generation, setting or
-    policy does not verify for another. *required_policy* is the policy the
+    Uses only the current generation's PUBLIC sealing key. The HPKE purpose
+    binds ``genesis_id``, ``class_id``, ``gen_id``, ``setting_name`` and the
+    class policy, so material sealed for one context does not verify in
+    another. *required_policy* is the policy the
     naming setting demands; it must equal the class's policy, else
     :class:`PolicyMismatchError` — this stops a setting from being sealed under a
     class with a weaker factor set than it requires.
@@ -488,13 +575,20 @@ def seal_cek(
     if not isinstance(cek, (bytes, bytearray)) or not cek:
         raise PolicyClassError("cek must be non-empty bytes")
     gen = record.current()
-    class_key = open_class(record, seeds)  # requires a factor
-    suite_id = suites.WRAP_SUITE
-    suites.require_suite(suite_id, suites.WRAP_SUITES)
-    nonce = secrets.token_bytes(12)
-    aad = _cek_aad(record, gen.gen_id, genesis_id, setting_name, suite_id)
-    ct = AESGCMSIV(class_key).encrypt(nonce, bytes(cek), aad)
-    return {"suite_id": suite_id, "gen_id": gen.gen_id, "nonce": nonce.hex(), "ciphertext": ct.hex()}
+    if gen.sealing_public_key is None:
+        raise PolicyClassError(
+            "current generation has no public sealing key; append a public-sealing generation"
+        )
+    wire = seal(
+        bytes(cek),
+        gen.sealing_public_key,
+        _cek_public_seal_purpose(record, gen.gen_id, genesis_id, setting_name),
+    )
+    return {
+        "format": CEK_PUBLIC_SEAL_FORMAT,
+        "gen_id": gen.gen_id,
+        "ciphertext": wire.hex(),
+    }
 
 
 def open_cek(
@@ -509,10 +603,45 @@ def open_cek(
     """Recover a setting's CEK sealed by :func:`seal_cek`.
 
     Opens the GENERATION named in *sealed_cek* (so a survivor still reads a
-    secret sealed before a revocation) with *seeds*, then AEAD-decrypts. Fails
-    closed on any mismatch of key, class, generation, setting, policy or suite.
+    secret sealed before a revocation) with *seeds*, derives its private
+    sealing key, and opens the HPKE record. Legacy AES-GCM-SIV CEK records
+    remain readable. Fails closed on any mismatch of key, class, generation,
+    setting, policy, format, or suite.
     """
     _check_policy_match(record, required_policy)
+    if not isinstance(sealed_cek, dict):
+        raise PolicyClassError("sealed_cek must be an object")
+    seal_format = sealed_cek.get("format")
+    if seal_format == CEK_PUBLIC_SEAL_FORMAT:
+        try:
+            gen_id = sealed_cek["gen_id"]
+            wire = bytes.fromhex(sealed_cek["ciphertext"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise PolicyClassError(f"malformed sealed_cek: {exc}") from exc
+        gen = record.generation(gen_id)
+        if gen.sealing_public_key is None:
+            raise PolicyClassError("public-sealed CEK names a legacy generation")
+        class_key, _ = _open_generation(record, gen, seeds)
+        private_key, derived_public = derive_encapsulation_keypair(
+            class_key, _class_seal_key_purpose(record.class_id, gen_id)
+        )
+        if not hmac.compare_digest(derived_public, gen.sealing_public_key):
+            raise PolicyClassError("generation sealing public key does not match its factor-wrapped key")
+        try:
+            return seal_open(
+                wire,
+                private_key,
+                _cek_public_seal_purpose(record, gen_id, genesis_id, setting_name),
+            )
+        except SealingError as exc:
+            raise PolicyClassError(
+                "sealed_cek does not open with that class key in this context"
+            ) from exc
+    if seal_format is not None:
+        raise PolicyClassError(f"unsupported sealed_cek format {seal_format!r}")
+
+    # Compatibility: records written before public sealing used AES-GCM-SIV
+    # directly under the factor-wrapped symmetric class key.
     try:
         suite_id = sealed_cek["suite_id"]
         gen_id = sealed_cek["gen_id"]

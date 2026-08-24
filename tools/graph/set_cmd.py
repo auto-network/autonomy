@@ -9,6 +9,7 @@ The argparse setup lives in cli.py; per-subcommand handlers live here.
 
 from __future__ import annotations
 
+import getpass
 import json
 import os
 import sys
@@ -20,6 +21,7 @@ from .schemas.registry import SchemaValidationError
 
 
 _VALID_PROMOTION_STATES = ("curated", "published", "canonical")
+_MAX_SECRET_BYTES = 1024 * 1024
 
 
 # ── helpers ──────────────────────────────────────────────────
@@ -860,6 +862,7 @@ def cmd_set_add(args) -> None:
         sid = client.add_setting(
             set_id, rev, args.key, payload, state=args.state,
             org=_org(args),
+            vault_policy_class_id=getattr(args, "policy_class", None),
         )
     except SchemaValidationError as e:
         # Surface the validator's message verbatim — schemas already name
@@ -871,6 +874,97 @@ def cmd_set_add(args) -> None:
     _report_effective_value(set_id, args.key, _org(args), payload)
     _report_shadowed_write(set_id, args.key, client)
     _report_unresolved_references(set_id, rev, payload, _org(args))
+
+
+def _read_limited_secret(stream) -> bytearray:
+    value = bytearray(stream.read(_MAX_SECRET_BYTES + 1))
+    if len(value) > _MAX_SECRET_BYTES:
+        value[:] = b"\x00" * len(value)
+        print(
+            f"Error: secret exceeds {_MAX_SECRET_BYTES} bytes",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return value
+
+
+def _read_secret_bytes(args) -> bytearray:
+    """Read one secret without accepting it in argv or an environment value."""
+    source = getattr(args, "secret_file", None)
+    fd = getattr(args, "secret_fd", None)
+    prompt = bool(getattr(args, "secret_prompt", False))
+    if prompt:
+        value = bytearray(getpass.getpass("Secret value: ").encode("utf-8"))
+        if len(value) > _MAX_SECRET_BYTES:
+            value[:] = b"\x00" * len(value)
+            print(
+                f"Error: secret exceeds {_MAX_SECRET_BYTES} bytes",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        return value
+    if fd is not None:
+        if fd < 0:
+            print("Error: --from-fd must be non-negative", file=sys.stderr)
+            sys.exit(1)
+        with os.fdopen(os.dup(fd), "rb") as stream:
+            return _read_limited_secret(stream)
+    if source is not None:
+        if source == "-":
+            return _read_limited_secret(sys.stdin.buffer)
+        with Path(source).open("rb") as stream:
+            return _read_limited_secret(stream)
+    if not sys.stdin.isatty():
+        return _read_limited_secret(sys.stdin.buffer)
+    print(
+        "Error: no secret supplied — use --from-file PATH, --from-fd N, "
+        "--prompt, or pipe the value on stdin",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def cmd_set_seal(args) -> None:
+    """Write one raw value to the secured vault without argv/env exposure."""
+    from .schemas.vault_credential import (
+        VAULT_CREDENTIAL_REVISION,
+        VAULT_SECURED_SET_ID,
+    )
+
+    secret = _read_secret_bytes(args)
+    payload: dict[str, str] = {}
+    try:
+        if not secret:
+            print("Error: refusing to vault an empty secret", file=sys.stderr)
+            sys.exit(1)
+        try:
+            payload["value"] = secret.decode("utf-8")
+        except UnicodeDecodeError:
+            print(
+                "Error: secured Setting values are UTF-8 text; encode binary "
+                "material before sealing",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        sid = get_client().add_setting(
+            VAULT_SECURED_SET_ID,
+            VAULT_CREDENTIAL_REVISION,
+            args.key,
+            payload,
+            state="raw",
+            org=_org(args),
+            vault_policy_class_id=args.policy_class,
+        )
+    finally:
+        payload["value"] = ""
+        secret[:] = b"\x00" * len(secret)
+    if not isinstance(sid, str) or not sid:
+        print("Error: secured Setting write returned no identifier", file=sys.stderr)
+        sys.exit(1)
+    print(
+        f"  ✓ Secured Setting: {sid[:11]}  key={args.key}  "
+        f"policy-class={args.policy_class}"
+    )
 
 
 def cmd_set_override(args) -> None:
@@ -1421,6 +1515,37 @@ def attach_set_subparser(sub) -> None:
     )
     _add_org_arg(p_read)
     p_read.set_defaults(func=cmd_set_read)
+
+    # seal — raw secret input, deliberately unavailable through argv/env.
+    p_seal = set_sub.add_parser(
+        "seal",
+        help="Store a raw value in the human-gated secured vault",
+        description=(
+            "Read a UTF-8 secret from a file descriptor, file, hidden prompt, "
+            "or stdin and seal it as autonomy.vault.secured#1. The secret is "
+            "never accepted as a command-line or environment value."
+        ),
+    )
+    p_seal.add_argument("--key", required=True, help="Stable credential name")
+    p_seal.add_argument(
+        "--policy-class", required=True,
+        help="Policy class whose public sealing key receives this value",
+    )
+    secret_source = p_seal.add_mutually_exclusive_group()
+    secret_source.add_argument(
+        "--from-file", dest="secret_file", metavar="PATH",
+        help="Read exact bytes from PATH ('-' means stdin)",
+    )
+    secret_source.add_argument(
+        "--from-fd", dest="secret_fd", type=int, metavar="N",
+        help="Read exact bytes from an already-open file descriptor",
+    )
+    secret_source.add_argument(
+        "--prompt", dest="secret_prompt", action="store_true",
+        help="Read one hidden line interactively (not suitable for multiline keys)",
+    )
+    _add_org_arg(p_seal)
+    p_seal.set_defaults(func=cmd_set_seal)
 
     # add
     p_add = set_sub.add_parser("add", help="Create a base Setting")

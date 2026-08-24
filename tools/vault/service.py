@@ -1,16 +1,15 @@
 """Store-backed orchestration of the policy-class lifecycle.
 
-One layer both the headless CLI and the acceptance tests drive, so the flows —
-which always combine *opening a factor* with a class operation — are defined
-once. The security property that falls out: sealing a secured setting REQUIRES
-an opener (a factor secret), because holding the ``class_key`` requires opening
-a wrap. There is deliberately no code path that seals a setting without a
-factor present — "NO UNATTENDED PROCESS CAN WRITE A SECURED SETTING" (crib §18).
+One layer both the headless CLI and the acceptance tests drive. Writes seal to
+the class's public key and therefore need no factor; reads and factor enrollment
+open the class and remain factor-gated. Write authorization belongs to the
+Settings/application layer, while this layer enforces confidentiality.
 """
 
 from __future__ import annotations
 
 import secrets
+from datetime import datetime, timezone
 
 from tools.network.idkit.enrollment import verified_provisioning_key
 from tools.network.idkit.armor import canonicalize_armor
@@ -25,6 +24,7 @@ from .factors import (
 )
 from .policy_class import (
     create_class,
+    enable_public_sealing,
     extend_class,
     open_cek,
     revoke_factor,
@@ -171,20 +171,27 @@ def seal_setting(
     class_id: str,
     genesis_id: str,
     required_policy: str,
-    opener_seeds: dict[str, bytes],
     *,
     cek: bytes | None = None,
+    created_at: str | None = None,
 ) -> bytes:
-    """Seal a setting's data key (CEK) under its class. Requires an opener.
+    """Seal a setting's data key (CEK) to its class's public key.
 
     Generates a fresh CEK if none is given. Returns the CEK so a caller can
-    round-trip it in tests. The class_key is opened, used, and dropped.
+    round-trip it in tests. No factor or private class material is consumed.
+    A legacy class is migrated by appending a public-sealing generation using
+    only its current factors' published keys.
     """
     record = store.get_class(class_id)
+    if record.current().sealing_public_key is None:
+        record = enable_public_sealing(
+            record,
+            created_at=created_at or datetime.now(timezone.utc).isoformat(),
+        )
+        store.put_class(record)
     cek = cek or secrets.token_bytes(_CEK_LEN)
     sealed = seal_cek(
         record,
-        opener_seeds,  # sealing requires a factor — opened inside seal_cek
         cek,
         genesis_id=genesis_id,
         setting_name=setting_name,
@@ -216,11 +223,11 @@ def reseal_setting(
     store: VaultStore, setting_name: str, opener_seeds: dict[str, bytes]
 ) -> None:
     """The "next write" after a rotation: re-seal a setting's SAME data key
-    under its class's current class_key, so the setting follows the rotation.
+    to its class's current public key, so the setting follows the rotation.
 
     Opens the setting with *opener_seeds* to recover the CEK, then re-seals it
-    under the current class key (also opened). This is what "applied lazily at
-    the next write" means — a real write, not a bulk re-wrap.
+    to the current generation. This is what "applied lazily at the next write"
+    means — a real write, not a bulk re-wrap.
     """
     secret = store.get_secret(setting_name)
     cek = open_setting(store, setting_name, opener_seeds)
@@ -230,6 +237,5 @@ def reseal_setting(
         secret.policy_class_id,
         secret.genesis_id,
         secret.required_policy,
-        opener_seeds,
         cek=cek,
     )
