@@ -341,9 +341,10 @@ def cmd_mission_style(args):
 def register(sub) -> None:
     """Attach the ``mission`` command tree to the graph CLI's subparsers."""
     p = sub.add_parser(
-        "mission",
-        help="Drive a structured Mission Control mission (status, items, "
-             "transitions) without curl",
+        "mission-legacy",
+        help="LEGACY structured Mission Control (dashboard.mission.* store) "
+             "\u2014 superseded by the mission plugin's graph mission; "
+             "serves existing structured missions until they migrate",
     )
     p.set_defaults(func=lambda _a: p.print_help())
     ms = p.add_subparsers(dest="mission_subcmd")
