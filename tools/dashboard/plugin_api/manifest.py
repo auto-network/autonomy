@@ -52,6 +52,11 @@ class PluginEntrypoints(BaseModel):
     """All entrypoint fields are independent and optional."""
     model_config = ConfigDict(extra="forbid")
     api: Optional[str] = None
+    # ``module:attr`` resolving to a ``register(subparsers)`` callable;
+    # mounted into the ``graph`` CLI while the plugin is enabled
+    # (tools/graph/plugin_cli.py — deliberately validated here but
+    # imported there without pydantic).
+    cli: Optional[str] = None
     badge_counter: Optional[str] = None
     # Optional batched callback for session-card / session-viewer chrome.
     # Signature: ``(session_ids: list[str], request: Request) ->
