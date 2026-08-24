@@ -19,6 +19,8 @@ window.missionPage = function () {
     lifeOpen: null,
     lifeArmedAt: 0,
     popFor: null,           // "<mission_id>:<countKey>" with an open bubble
+    loading: false,
+    progress: 0,            // 0..100, real signal: bytes then render
     win: {key: "30d", secs: 30 * 86400, buckets: 30},
     screen: "missions",       // missions | sessions
     alloc: [],
@@ -58,10 +60,11 @@ window.missionPage = function () {
           || (this.orgs[0] || {}).slug || "";
       }
       const m = window.location.pathname.match(/^\/mission\/([0-9a-f-]{8,})/);
-      if (m) this.current = m[1];
+      if (m) { this.current = m[1]; this.loadScreen(m[1]); }
       window.addEventListener("popstate", () => {
         const mm = window.location.pathname.match(/^\/mission\/([0-9a-f-]{8,})/);
         this.current = mm ? mm[1] : null;
+        if (this.current) this.loadScreen(this.current);
       });
       document.addEventListener("click", () => { this.popFor = null; });
     },
@@ -284,6 +287,57 @@ window.missionPage = function () {
       this._focus = null;
       this.current = m.mission_id;
       history.pushState({}, "", "/mission/" + m.mission_id);
+      this.loadScreen(m.mission_id);
+    },
+
+    // The interstitial is honest: the bar is bytes actually received
+    // (the document is ~250KB and server compose dominates), with the
+    // final 5% closed by the frame's own load event.
+    async loadScreen(id) {
+      this.loading = true;
+      this.progress = 2;
+      const src = "/api/mission/screen/" + id
+        + (this._focus ? "?pillar=" + encodeURIComponent(this._focus) : "");
+      const mount = (html) => {
+        this.$nextTick(() => {
+          const f = document.getElementById("msn-frame");
+          if (!f) { this.loading = false; return; }
+          f.onload = () => {
+            this.progress = 100;
+            setTimeout(() => { this.loading = false; }, 120);
+          };
+          if (html != null) f.srcdoc = html;
+          else f.src = src;                    // fallback path
+          this.progress = Math.max(this.progress, 95);
+        });
+      };
+      try {
+        const r = await fetch(src);
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const total = parseInt(r.headers.get("content-length") || "0", 10);
+        if (r.body && r.body.getReader) {
+          const reader = r.body.getReader();
+          const chunks = [];
+          let got = 0;
+          for (;;) {
+            const {done, value} = await reader.read();
+            if (done) break;
+            chunks.push(value);
+            got += value.length;
+            this.progress = total
+              ? Math.min(90, 5 + Math.round((got / total) * 85))
+              : Math.min(90, this.progress + 6);
+          }
+          const buf = new Uint8Array(got);
+          let off = 0;
+          for (const c of chunks) { buf.set(c, off); off += c.length; }
+          mount(new TextDecoder().decode(buf));
+        } else {
+          mount(await r.text());
+        }
+      } catch (e) {
+        mount(null);                           // let the iframe try itself
+      }
     },
 
     back() {
