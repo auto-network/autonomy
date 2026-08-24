@@ -72,8 +72,28 @@ fields.
 with absolute paths (`/api/<id>/...`). The substrate wraps them in
 **default-deny auth**; never add your own.
 
-- Org scope: `organization_scope_from_request(request)` — the trusted
-  value. Never read an org from a path, query, or body.
+- **Org scope enforcement is YOUR job, and it is the security
+  boundary.** Plugin code runs in the dashboard process and can open
+  any org's database — nothing below your handler stops a cross-org
+  read. The middleware-established principal is the only legitimate
+  input, and there are exactly three legs:
+  1. **Org-bound session** (`principal.org_bound`): serve exactly
+     `organization_scope_from_request(request)` — the middleware pins
+     it from the bearer and ignores conflicting headers. Resolve a
+     resource's owning org by probing **only** that org, so another
+     org's resource ids return the same 404 as nonexistent ones (no
+     existence oracle).
+  2. **Global authority** (`principal.global_authority` — operator
+     cookie, local host session): aggregate across
+     `cross_org.list_org_slugs()`. Never let this caller's empty org
+     selection resolve to the personal database.
+  3. **Anything else**: empty scope. Fail closed — no fallback to
+     personal, no default org.
+  Never read an org from a path, query, or body — those are inputs to
+  the identity middleware, not sources of authority. Pin the three
+  legs with tests (the mission plugin's `test_org_isolation.py` is the
+  template). Keep settings reads `peers=[]` and org-content sets
+  banded `raw..curated` so federation isn't a fourth door.
 - Attribution: `principal_from_request(request).subject` — identity is
   stamped at the boundary, never taken from the payload.
 - Serve screens as **complete documents with data baked in** (a pure
