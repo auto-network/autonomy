@@ -130,6 +130,21 @@ window.missionPage = function () {
       return Object.keys(this.lifeFilter).some((k) => this.lifeFilter[k]);
     },
 
+    // The shell's content area has no definite height, so flex chains
+    // collapse to zero for absolutely-sized children like iframes.
+    // Measure instead: the frame gets exactly the viewport below it.
+    fitFrame(el) {
+      const fit = () => {
+        const top = el.getBoundingClientRect().top;
+        el.style.height = Math.max(240, window.innerHeight - top) + "px";
+      };
+      requestAnimationFrame(fit);
+      window.addEventListener("resize", () => requestAnimationFrame(fit));
+      if (window.visualViewport)
+        window.visualViewport.addEventListener(
+          "resize", () => requestAnimationFrame(fit));
+    },
+
     fitName(el) {
       const fit = () => {
         let size = 1.02;
