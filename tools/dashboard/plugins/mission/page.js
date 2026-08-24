@@ -1,11 +1,11 @@
 // Mission plugin — Alpine.data factory referenced by frontend.alpine_root.
 //
-// The homepage is activity-first (operator design guidance): full-width
-// mission rows, the name on one unwrapped auto-fit line, a 14-day
-// activity strip with "last activity" recency, attention counts
-// (blockers, in-progress), and an inline lifecycle control. No mission
-// descriptions — the screen answers "what moved and what needs me",
-// not "what is this mission".
+// Ported verbatim from the Design Studio iteration (design ff8b7ff9):
+// activity-first rows, lifecycle legend + timeframe zoom on one line,
+// tappable counts with titled preview bubbles, title-as-navigation,
+// lifecycle popover with a double-tap guard. The org selector belongs
+// to the shell's nav bar (not this page) and arrives with that
+// substrate slot.
 //
 // Screens embed in a same-origin iframe with pushState URLs — never a
 // page navigation (the shell's dictation layer must survive).
@@ -15,6 +15,16 @@ window.missionPage = function () {
     loaded: false,
     error: "",
     current: null,
+    lifeFilter: {},
+    lifeOpen: null,
+    lifeArmedAt: 0,
+    popFor: null,           // "<mission_id>:<countKey>" with an open bubble
+    win: {key: "30d", secs: 30 * 86400, buckets: 30},
+    windows: [
+      {key: "24h", secs: 86400, buckets: 24},
+      {key: "7d", secs: 7 * 86400, buckets: 28},
+      {key: "30d", secs: 30 * 86400, buckets: 30},
+    ],
 
     async init() {
       await this.refresh();
@@ -24,6 +34,7 @@ window.missionPage = function () {
         const mm = window.location.pathname.match(/^\/mission\/([0-9a-f-]{8,})/);
         this.current = mm ? mm[1] : null;
       });
+      document.addEventListener("click", () => { this.popFor = null; });
     },
 
     async refresh() {
@@ -38,16 +49,43 @@ window.missionPage = function () {
       this.loaded = true;
     },
 
-    // ── the name: one line, full width, auto-fit between a modest
-    //    ceiling and a readable floor (the studio calibration lesson:
-    //    never comical, never wrapped) ──
+    // ── window filter: only missions live inside the frame ──
+    visible() {
+      const cutoff = Date.now() / 1000 - this.win.secs;
+      const act = Object.keys(this.lifeFilter)
+        .filter((k) => this.lifeFilter[k]);
+      return this.missions.filter((m) => {
+        const at = m.activity && m.activity.last_at;
+        if (!at || at < cutoff) return false;
+        if (act.length && !act.includes(m.status || "active")) return false;
+        return true;
+      });
+    },
+
+    legend() {
+      const cutoff = Date.now() / 1000 - this.win.secs;
+      const inWin = this.missions.filter(
+        (m) => (m.activity && m.activity.last_at || 0) >= cutoff);
+      const n = (st) => inWin.filter(
+        (m) => (m.status || "active") === st).length;
+      return [
+        {word: "active", n: n("active"), color: "var(--accent)"},
+        {word: "paused", n: n("paused"), color: "var(--warn)"},
+        {word: "complete", n: n("complete"), color: "var(--good)"},
+      ];
+    },
+
+    anyFilter() {
+      return Object.keys(this.lifeFilter).some((k) => this.lifeFilter[k]);
+    },
+
     fitName(el) {
       const fit = () => {
-        let size = 1.02;                       // rem ceiling
+        let size = 1.02;
         el.style.fontSize = size + "rem";
-        const avail = () => el.parentElement.clientWidth;
         let guard = 24;
-        while (el.scrollWidth > avail() && size > 0.78 && guard--) {
+        while (el.scrollWidth > el.parentElement.clientWidth
+               && size > 0.78 && guard--) {
           size -= 0.03;
           el.style.fontSize = size + "rem";
         }
@@ -56,22 +94,35 @@ window.missionPage = function () {
       window.addEventListener("resize", () => requestAnimationFrame(fit));
     },
 
-    ago(m) {
-      const at = m.activity && m.activity.last_at;
-      if (!at) return "no activity yet";
+    rel(at) {
       const s = Date.now() / 1000 - at;
-      if (s < 60) return "active just now";
-      if (s < 3600) return "active " + Math.round(s / 60) + "m ago";
-      if (s < 172800) return "active " + Math.round(s / 3600) + "h ago";
-      return "active " + Math.round(s / 86400) + "d ago";
+      if (s < 60) return "just now";
+      if (s < 3600) return Math.round(s / 60) + "m ago";
+      if (s < 172800) return Math.round(s / 3600) + "h ago";
+      return Math.round(s / 86400) + "d ago";
+    },
+
+    statusLine(m) {
+      const at = m.activity && m.activity.last_at;
+      if ((m.status || "active") === "active")
+        return at ? "active " + this.rel(at) : "no activity yet";
+      const parts = [m.status + (m.status_changed_at
+        ? " " + this.rel(Date.parse(m.status_changed_at) / 1000) : "")];
+      if (at) parts.push("last activity " + this.rel(at));
+      return parts.join(" · ");
     },
 
     bars(m) {
-      // The studio activity-grid language: small cells, intensity by
-      // count — height AND opacity scale, empty days a faint baseline.
-      const days = (m.activity && m.activity.days) || [];
-      const max = Math.max(1, ...days);
-      return days.map((n) => ({
+      const cutoff = Date.now() / 1000 - this.win.secs;
+      const nb = this.win.buckets;
+      const span = this.win.secs / nb;
+      const buckets = new Array(nb).fill(0);
+      ((m.activity && m.activity.events) || []).forEach((e) => {
+        const idx = Math.floor((e - cutoff) / span);
+        if (idx >= 0 && idx < nb) buckets[idx]++;
+      });
+      const max = Math.max(1, ...buckets);
+      return buckets.map((n) => ({
         on: n > 0,
         h: n ? Math.max(30, Math.round((n / max) * 100)) : 100,
         op: n ? (0.45 + 0.55 * (n / max)).toFixed(2) : 1,
@@ -79,8 +130,9 @@ window.missionPage = function () {
     },
 
     counts(m) {
-      // The app's icon vocabulary, not words: ⊘ blocked, ⟳ in progress,
-      // ? open — numbers beside marks, one line, no wrapping.
+      if ((m.status || "active") !== "active") return [];
+      const a = m.activity || {};
+      const pv = a.previews || {};
       const STOP = '<svg viewBox="0 0 16 16" aria-hidden="true">'
         + '<circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor"'
         + ' stroke-width="1.7"/><path d="M3.9 3.9L12.1 12.1"'
@@ -93,53 +145,78 @@ window.missionPage = function () {
         + ' stroke-linecap="round"/>'
         + '<path d="M13.89 5.06L8.21 5.21 11.18 0.05z"'
         + ' fill="currentColor"/></g></svg>';
-      const a = m.activity || {};
+      // The bubble explains the number in one line and links in — no
+      // content previews (operator ruling: long strings overflowed).
       const out = [];
-      if (a.blockers)
-        out.push({key: "b", mark: STOP, n: a.blockers, cls: "crit"});
-      if (a.in_progress)
-        out.push({key: "p", mark: ARR, n: a.in_progress, cls: "warn"});
+      if (a.blockers) out.push({key: "b", mark: STOP, n: a.blockers,
+        cls: "crit",
+        desc: "<b>" + a.blockers + "</b> open question"
+              + (a.blockers > 1 ? "s are" : " is")
+              + " blocking progress"});
+      if (a.in_progress) out.push({key: "p", mark: ARR, n: a.in_progress,
+        cls: "warn",
+        desc: "<b>" + a.in_progress + "</b> acceptance criteri"
+              + (a.in_progress > 1 ? "a are" : "on is")
+              + " being worked"});
       const open = (a.open_questions || 0) - (a.blockers || 0);
-      if (open > 0) out.push({key: "q", mark: "?", n: open, cls: "dim"});
+      if (open > 0) out.push({key: "q", mark: "?", n: open, cls: "dim",
+        desc: "<b>" + open + "</b> question"
+              + (open > 1 ? "s await" : " awaits") + " an answer"});
       return out;
     },
 
-    lifeOpen: null,
-    lifeTap(m, st) {
-      if (this.lifeOpen !== m.mission_id) {
-        this.lifeOpen = m.mission_id;          // first tap: reveal choices
-        return;
-      }
-      this.lifeOpen = null;
-      if (st !== m.status) this.setStatus(m, st);
+    togglePop(m, c) {
+      const id = m.mission_id + ":" + c.key;
+      this.popFor = this.popFor === id ? null : id;
     },
 
-    async setStatus(m, status) {
+    openAt(m) {
+      this.popFor = null;
+      this._focus = null;
+      this.current = m.mission_id;
+      history.pushState({}, "", "/mission/" + m.mission_id);
+    },
+
+    lifeTapCur(m) {
+      this.lifeOpen = this.lifeOpen === m.mission_id ? null : m.mission_id;
+      this.lifeArmedAt = Date.now() + 350;
+    },
+
+    async lifePick(m, st) {
+      if (Date.now() < this.lifeArmedAt) return;   // stray double-tap
+      this.lifeOpen = null;
+      if (st === m.status) return;
       const prev = m.status;
-      m.status = status;                        // optimistic
+      m.status = st;
       try {
         const r = await fetch("/api/mission/status/" + m.mission_id, {
           method: "POST",
           headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({status}),
+          body: JSON.stringify({status: st}),
         });
         if (!r.ok) throw new Error("HTTP " + r.status);
+        m.status_changed_at = new Date().toISOString();
       } catch (e) {
         m.status = prev;
       }
     },
 
     frameSrc() {
-      return this.current ? "/api/mission/screen/" + this.current : "";
+      if (!this.current) return "";
+      const q = this._focus
+        ? "?pillar=" + encodeURIComponent(this._focus) : "";
+      return "/api/mission/screen/" + this.current + q;
     },
 
     open(m) {
+      this._focus = null;
       this.current = m.mission_id;
       history.pushState({}, "", "/mission/" + m.mission_id);
     },
 
     back() {
       this.current = null;
+      this._focus = null;
       history.pushState({}, "", "/mission");
       this.refresh();
     },

@@ -287,6 +287,7 @@ async def post_mission_status(request: Request) -> JSONResponse:
         status = (body or {}).get("status")
         mission = compose.load_mission(org, mission_id) or {}
         mission["status"] = status
+        mission["status_changed_at"] = writes.now_iso()
         from tools.graph import settings_ops
         from tools.dashboard.plugins.mission.entrypoints.schemas import (
             SCHEMA_REVISION,
