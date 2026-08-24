@@ -102,6 +102,7 @@
     // Viewport-agnostic: show the capsule on desktop too (operator wants the
     // mobile voice-first flow everywhere).
     if (!voice || voice.enabled !== true) return false;
+    if (voice.surfaceClaim && voice.surfaceClaim.controls === 'plugin') return false;
     if (!voice.boundSessionId || voice.sheetOpen === true) return false;
     return true;
   }
@@ -109,6 +110,7 @@
   function _sheetVisible() {
     var voice = _voiceStore();
     if (!voice || voice.enabled !== true) return false;
+    if (voice.surfaceClaim && voice.surfaceClaim.controls === 'plugin') return false;
     if (!voice.boundSessionId || voice.sheetOpen !== true) return false;
     return true;
   }
@@ -160,6 +162,7 @@
   function _captionVisible() {
     var voice = _voiceStore();
     if (!voice || voice.enabled !== true) return false;
+    if (voice.surfaceClaim && voice.surfaceClaim.caption === 'plugin') return false;
     if (!voice.boundSessionId || voice.sheetOpen === true) return false;
     // Inside the viewer, once the pinned outbox tile is mounted it owns the
     // bottom surface — hand the live text to it and hide this floating gutter.
@@ -680,7 +683,7 @@
 
         clearBuffer() {
           if (!this.voice || typeof this.voice.clearBuffer !== 'function') return false;
-          this.voice.clearBuffer();
+          this.voice.clearBuffer('clear');
           // Collapse the dictation tile too. The reactive capturing effect that
           // normally nulls the outbox gates on _viewerComposerActive(), which can
           // be false when the operator clears from a different view — leaving a
@@ -769,6 +772,9 @@
         onSheetInput() {
           if (!this.voice) return;
           this.voice.sheetError = '';
+          if (typeof this.voice.publishBuffer === 'function') {
+            this.voice.publishBuffer('edit');
+          }
         },
 
         onCapsuleKey(action) {

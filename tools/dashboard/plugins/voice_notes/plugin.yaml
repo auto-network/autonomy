@@ -1,0 +1,26 @@
+id: voice_notes
+api_version: 1
+org: autonomy
+
+paths:
+  - /voice-notes
+
+assets:
+  template: page.html
+  script: page.js
+  style: page.css
+
+nav:
+  label: Voice Notes
+
+frontend:
+  alpine_root: voiceNotesPage
+  voice:
+    live_transcript: true
+    replace_caption: true
+    replace_controls: true
+
+entrypoints:
+  api: tools.dashboard.plugins.voice_notes.entrypoints.api:routes
+  schemas:
+    - tools.dashboard.plugins.voice_notes.entrypoints.schemas:VoiceNoteV1

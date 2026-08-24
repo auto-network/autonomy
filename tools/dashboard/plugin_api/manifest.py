@@ -35,9 +35,24 @@ class PluginNav(BaseModel):
     identity_detail: Optional[str] = None
 
 
+class PluginVoice(BaseModel):
+    """Voice surfaces an active plugin is allowed to replace.
+
+    These are declarations of capability, not an always-on claim.  A plugin
+    still acquires a route-scoped lease from ``Autonomy.voice.claimSurface``
+    while its Alpine root is mounted.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    live_transcript: bool = False
+    replace_caption: bool = False
+    replace_controls: bool = False
+
+
 class PluginFrontend(BaseModel):
     model_config = ConfigDict(extra="forbid")
     alpine_root: str
+    voice: PluginVoice = Field(default_factory=PluginVoice)
 
 
 class PluginCapability(BaseModel):

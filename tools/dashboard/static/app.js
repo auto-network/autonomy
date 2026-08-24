@@ -2081,6 +2081,13 @@ async function route() {
   // when the new path matches a plugin.
   window.Autonomy._activePluginOrg = null;
   window.Autonomy._activePluginId = null;
+  // Voice UI replacement is leased only for the lifetime of an active plugin
+  // surface. Route changes release the prior claim even if a malformed plugin
+  // failed to run its Alpine ``destroy()`` hook.
+  if (window.Autonomy.voice
+      && typeof window.Autonomy.voice.releaseSurfaceClaim === 'function') {
+    window.Autonomy.voice.releaseSurfaceClaim();
+  }
   await _checkVersion();
   await window.Autonomy.refreshPlugins();
   _renderSidebarPlugins();
