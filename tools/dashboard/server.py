@@ -19185,6 +19185,22 @@ async def _on_startup():
     global _event_loop_watchdog_task
     global _recent_sessions_refresher_task, _serving_bootstrap_task
     global _event_proxy_task
+    # Startup phase timing (auto-network perf investigation, 2026-08-24):
+    # boot has gotten intermittently slow (12-66s stalls observed in prod
+    # logs) and the previous debugging pass could only narrow it to "some
+    # synchronous startup step" from indirect stall-watchdog snapshots.
+    # These marks give a real per-step breakdown on every restart instead
+    # of guessing from where the sampler happened to land.
+    _startup_t0 = time.monotonic()
+    _startup_last = [_startup_t0]
+
+    def _mark(label: str) -> None:
+        now = time.monotonic()
+        logger.info(
+            "startup phase: %-42s %8.1fms", label, (now - _startup_last[0]) * 1000,
+        )
+        _startup_last[0] = now
+
     # Re-arm the emit hook on every lifespan startup. Module import
     # already wires it (so ASGITransport-based tests that skip lifespan
     # still get function-level emits), but we re-arm here so that
@@ -19235,6 +19251,7 @@ async def _on_startup():
         init_db()  # ensure dispatch schema exists
         dashboard_db.init_db()  # ensure dashboard.db schema exists
         auth_db.init_db()  # ensure auth.db schema exists
+        _mark("db_init (dispatch+dashboard+auth)")
         # First-launch bootstrap: ensure data/orgs/{autonomy,personal}.db
         # exist. Idempotent — pre-existing DBs are left untouched. See
         # graph://d970d946-f95.
@@ -19246,7 +19263,9 @@ async def _on_startup():
             raise
         except Exception:
             logger.exception("ensure_bootstrap_orgs() failed; continuing startup")
+        _mark("org_ops.ensure_bootstrap_orgs")
         await web_push.start_worker()
+        _mark("web_push.start_worker")
         try:
             await web_push.reconcile_approval_attention(
                 approvals_routes.push_eligible_kind,
@@ -19255,6 +19274,7 @@ async def _on_startup():
             logger.exception(
                 "Web Push approval reconciliation failed; periodic sends remain active"
             )
+        _mark("web_push.reconcile_approval_attention")
 
     # A node booted with AUTONOMY_FLEET_INVITE is a Fleet member from first
     # boot: mark it joining now, before the serving supervisor can evaluate
@@ -19268,12 +19288,14 @@ async def _on_startup():
                         "(fails closed on tunnel serving until enrolled)")
     except Exception:
         logger.exception("marking machine fleet-joining from AUTONOMY_FLEET_INVITE failed")
+    _mark("machine_boot.mark_joining_from_env")
 
     # Personal fleet synchronization owns one in-process scheduler. It starts
     # idle before unlock/runtime credentials are available, so zero-peer,
     # mock, and cold-vault Dashboards pay no database or network cost.
     from tools.network.fleet_sync_scheduler import dashboard_fleet_sync_service
     await dashboard_fleet_sync_service.start()
+    _mark("fleet_sync_scheduler.start")
 
     # Restore EventBus sequence/buffer state from the prior process. restore()
     # advances the persisted epoch so clients show the existing reload banner
@@ -19293,6 +19315,7 @@ async def _on_startup():
             restore_fn(EVENT_BUS_STATE_PATH)
         except Exception:
             logger.exception("event_bus.restore() raised unexpectedly; continuing")
+    _mark("event_bus.restore")
     # Wire the terminal CrossTalk notifier before the monitor starts so
     # any initial-refresh cache write in ``start()`` can fire transitions
     # for already-armed rows.
@@ -19346,18 +19369,21 @@ async def _on_startup():
         )
     except Exception:
         logger.exception("flush_schema_meta_machine_store() failed; continuing startup")
+    _mark("flush_schema_meta_machine_store")
     try:
         await asyncio.to_thread(_warm_personal_settings_store)
     except Exception:
         logger.exception(
             "personal settings store warm-open failed; continuing startup"
         )
+    _mark("warm_personal_settings_store")
     try:
         from tools.graph.commit_policy import seed_default_workspace_policies
         seed_default_workspace_policies(workspace_settings.load_workspaces())
         workspace_settings.invalidate_caches()
     except Exception:
         logger.exception("commit policy default seed failed; continuing startup")
+    _mark("seed_default_workspace_policies")
     try:
         await asyncio.to_thread(
             plugin_loader.reconcile_declared_settings,
@@ -19365,8 +19391,10 @@ async def _on_startup():
         )
     except Exception:
         logger.exception("plugin declared-settings reconcile failed; continuing startup")
+    _mark("plugin_loader.reconcile_declared_settings")
     # Seed from filesystem on first run (one-time), then start background tasks
     await session_monitor.seed_from_filesystem()
+    _mark("session_monitor.seed_from_filesystem")
     await session_monitor.start(
         event_bus=event_bus,
         entry_parser=CLAUDE_HARNESS.parse_line,
@@ -19374,7 +19402,9 @@ async def _on_startup():
         harness=CLAUDE_HARNESS,
         todo_snapshot=_task_state_tracker.snapshot,
     )
+    _mark("session_monitor.start")
     await worktree_monitor.start()
+    _mark("worktree_monitor.start")
     # Resource collector: skip under mock/test servers — it polls the real
     # dashboard.db live-session set and attempts docker/tmux resolution per
     # session, which is pure noise (and timing jitter for browser tests)
@@ -19384,6 +19414,7 @@ async def _on_startup():
         # process snapshots them in _on_shutdown, mirroring the event bus.
         resource_monitor.load_state(RESOURCE_MONITOR_STATE_PATH)
         await resource_monitor.start(event_bus=event_bus)
+    _mark("resource_monitor.start")
     _dispatch_watcher_task = asyncio.create_task(_dispatch_watcher())
     _event_loop_watchdog_task = asyncio.create_task(_event_loop_watchdog())
     global _stall_sampler_started
@@ -19393,6 +19424,7 @@ async def _on_startup():
             target=_loop_stall_sampler, name="loop-stall-sampler", daemon=True,
         ).start()
     _recent_sessions_refresher_task = asyncio.create_task(_recent_sessions_refresher())
+    _mark("watcher_tasks_created (dispatch/stall/recent_sessions)")
     # Vault release reconciliation + sweeper (auto-pw9bs.5). Reconcile FIRST,
     # before the sweeper loop and before traffic: a delivered secret whose
     # cleanup was owed when the prior process died is still present in ramfs
@@ -19415,6 +19447,7 @@ async def _on_startup():
             "sweeper will still run and catch outstanding releases",
         )
     _vault_release_sweeper_task = asyncio.create_task(_vault_release_sweeper())
+    _mark("vault_release_sweeper.reconcile_on_startup")
     # Restore a WARM vault from a graceful hot-reload snapshot before traffic
     # (auto-a1pub). Present only after a graceful shutdown wrote it; a cold boot
     # or a crash finds nothing and the vault stays locked until a human unlock.
@@ -19426,6 +19459,7 @@ async def _on_startup():
         logger.exception(
             "vault hot-reload restore raised on startup; the vault stays locked"
         )
+    _mark("restore_vault_across_hot_reload")
     # Session lifecycle worker (FSM redesign 2026-06-18): start the single
     # off-loop thread that owns workspace start/stop/retry. It sits idle until
     # api_session_create is rewired to enqueue — starting it now is additive and
@@ -19446,9 +19480,11 @@ async def _on_startup():
     _SESSION_LIFECYCLE_WORKER.state_writer.set_transition_hook(_lifecycle_transition_hook)
     _SESSION_LIFECYCLE_WORKER.start()
     logger.info("session_lifecycle: worker started from _on_startup (idle until create enqueues)")
+    _mark("lifecycle_worker.start")
     # Recover rows a restart froze mid-launch — must run before traffic so
     # the first registry broadcast the clients see is already repaired.
     await _recover_stuck_lifecycle_rows()
+    _mark("recover_stuck_lifecycle_rows")
     if _should_run_harness_usage_poller():
         _harness_usage_poller_task = asyncio.create_task(_harness_usage_poller())
     if _claude_credentials_refresh.should_run_credentials_refresh_poller():
@@ -19462,6 +19498,7 @@ async def _on_startup():
     if os.environ.get("DASHBOARD_MOCK_EVENTS"):
         from tools.dashboard.dao.mock import mock_event_watcher
         _mock_event_watcher_task = asyncio.create_task(mock_event_watcher())
+    _mark("poller_tasks_created (harness_usage/claude_creds/codex_creds)")
     # Settings-mediator action loop: walks per-set cursors and dispatches
     # registered handlers on new rows. Mock-mode dashboards skip this —
     # the loop reads through ``settings_ops`` against the real graph DB,
@@ -19479,6 +19516,7 @@ async def _on_startup():
             "settings_mediator.start_action_loop() failed; "
             "continuing without action dispatch"
         )
+    _mark("settings_mediator.start_action_loop")
 
     # auto.network serving supervisor: bring up the tunnel connector for any
     # org whose serve-cert is provisioned and whose links are live, and arm the
@@ -19542,6 +19580,10 @@ async def _on_startup():
             link_serving.proxy_events_to_connectors(event_bus)
         )
         _event_proxy_task.add_done_callback(_log_event_proxy_result)
+    _mark("serving_supervisor_bootstrap+event_proxy tasks_created")
+    logger.info(
+        "startup phase: TOTAL %.1fms", (time.monotonic() - _startup_t0) * 1000,
+    )
 
 async def _on_shutdown():
     global _dispatch_watcher_task, _mock_event_watcher_task
