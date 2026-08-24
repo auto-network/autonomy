@@ -279,7 +279,7 @@ def render_stages(org: str, mission_id: str,
     chat = load_chat(org, mission_id)
     got += sum(len(v) for v in chat.values())
     got = min(got, total) if total else got
-    yield _marker(55, note("Bridging beads"))
+    yield _marker(55, "Bridging beads")
     beads = load_beads(org, mission_id, pillars)
     yield _marker(80, "Resolving member directory")
     directory = load_directory(org)
