@@ -351,6 +351,11 @@
   }
   .mc-item.st-confirmed,.mc-item.st-answered{border-left-color:var(--good)}
   .mc-item.st-in_progress,.mc-item.st-open{border-left-color:var(--warn)}
+  .mc-ask{border-left:3px solid var(--accent);background:rgba(139,133,255,.07);
+    border-radius:0 8px 8px 0;padding:8px 12px;margin:8px 0}
+  .mc-ask b{display:block;color:var(--accent);font-size:.66rem;
+    text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px}
+  .mc-ask p{margin:4px 0;color:var(--ink);font-size:.85rem;line-height:1.5}
   .mc-item.k-incident{border-left-color:var(--serious)}
   .mc-item.mc-hidden,.mc-hidden{display:none !important}
   .mc-item .top{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
@@ -937,6 +942,12 @@
       }));
     }
     body.appendChild(meta);
+    if (q.ask){
+      var av3 = el("div","mc-ask");
+      av3.appendChild(el("b",null,"Asks you"));
+      paras(av3, q.ask);
+      body.appendChild(av3);
+    }
     if (q.body){
       var b3 = el("div","body3"); mdInto(b3, q.body); body.appendChild(b3);
     }
@@ -1668,6 +1679,16 @@
     inner.appendChild(top);
     inner.appendChild(el("h3",null,it.title));
 
+    // THE ASK IS THE POINT: a reader-directed question's carefully
+    // worded decision prompt was stored but never shown (only counted
+    // in badges + stamped as a dead data-mc-ask attribute). Render it
+    // as the card's emphasized lead, above the context body.
+    if (it.kind==="question" && it.ask){
+      var av = el("div","mc-ask");
+      av.appendChild(el("b",null,"Asks you"));
+      paras(av, it.ask);
+      inner.appendChild(av);
+    }
     if (it.kind==="decision" && (it.fork || it.chosen || it.if_wrong)){
       var dv = el("div","mc-dec");
       if (it.fork){ dv.appendChild(el("b",null,"Fork")); paras(dv,it.fork); }

@@ -116,6 +116,9 @@ def full() -> Store:
     item("relay", "q-provision",
          {"kind": "question", "state": "open", "blocking": True,
           "title": "Who provisions the runtime?",
+          "ask": "Should the dashboard or the installer own runtime "
+                 "provisioning? Dashboard is simpler; installer works "
+                 "offline.",
           "asked_by": "auto-relay", "asked_at": _t(40),
           "discussion": [
               {"type": "progress", "by": "auto-relay", "at": _t(39),
