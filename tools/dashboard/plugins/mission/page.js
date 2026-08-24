@@ -207,12 +207,25 @@ window.missionPage = function () {
     // changes. The overlaid title/pillars sit on the left, so late
     // history — the right side — stays clear.
     drawSpark(el, m, winSecs, _tick) {
-      const W = el.clientWidth, H = el.clientHeight;
+      // paint via rAF + ResizeObserver: x-effect can fire before layout
+      // settles, and a chart drawn at a stale width letterboxes inside
+      // the real card. Measure at paint time, repaint on any resize.
+      el.__paint = () => this.paintSpark(el, m, winSecs);
+      if (!el.__ro && window.ResizeObserver) {
+        el.__ro = new ResizeObserver(() => el.__paint && el.__paint());
+        el.__ro.observe(el);
+      }
+      if (window.requestAnimationFrame)
+        requestAnimationFrame(() => el.__paint && el.__paint());
+      else el.__paint();
+    },
+
+    paintSpark(el, m, winSecs) {
+      const rect = el.getBoundingClientRect();
+      const W = Math.round(rect.width), H = Math.round(rect.height);
       while (el.firstChild) el.removeChild(el.firstChild);
       if (!W || !H) return;
       el.setAttribute("viewBox", "0 0 " + W + " " + H);
-      el.setAttribute("width", W);
-      el.setAttribute("height", H);
       const cutoff = Date.now() / 1000 - winSecs;
       const N = Math.max(24, Math.min(96, Math.floor(W / 12)));
       const raw = new Array(N).fill(0);
