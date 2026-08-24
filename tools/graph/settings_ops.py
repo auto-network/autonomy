@@ -541,17 +541,18 @@ def set_emit_hook(hook: Callable[..., None] | None) -> None:
 
 # ── The vault seam ──────────────────────────────────────────
 #
-# A set whose schema declares ``@vaulted(...)`` does not store its payload.
-# The payload is encrypted once as a content object under the organization's
-# current key generation and the row keeps a locator instead
+# A set whose schema declares ``@vaulted(...)`` does not store plaintext.
+# Organization objects use their storage generation and an opaque locator
 # (``tools.vault.storage_object``, design ``graph://0c206bd8-1c6`` §9).
+# Personal secured objects have no organization membership layer: their
+# opaque scalar directly carries ciphertext plus a CEK sealed to the owner's
+# policy class (``tools.vault.personal_object``).
 #
-# Sealing needs the domain's key control — the writer's persona, the authority
-# fold at its cited frontier, the state secrets it holds and the content
-# store — none of which a settings write has or should acquire for itself. So
-# it is injected, exactly as the emit hook is: the host process that holds
-# that material registers a sealer at startup, and contexts that hold none
-# never write a vaulted set.
+# Organization-domain sealing needs key control — the writer's persona, the
+# authority fold at its cited frontier, held state secrets and the content
+# store — none of which a settings write should acquire for itself. That
+# organization sealer is injected exactly as the emit hook is. The personal
+# secured branch above needs only its stored public class record.
 #
 # Sealer signature::
 #
@@ -595,7 +596,40 @@ def _seal_vault_payload(
     """
     # Imported here rather than at module scope: settings_ops is imported by
     # every CLI entry point, and the vault pulls in the whole storage stack.
-    from tools.vault import storage_object as vault_storage_object
+    from tools.vault import personal_object, storage_object as vault_storage_object
+
+    # A personal secured Setting is owner-at-rest data, not an organization
+    # storage-domain object.  Its only encryption layers are a fresh CEK and
+    # the named policy class's public sealing key.  In particular this path
+    # does not consult the process key cache, a delegate, or a ledger fold, so
+    # it remains writable when the vault is cold.
+    if schemas.declared_home(set_id) == "personal" and tier == "secured":
+        if not isinstance(policy_class_id, str) or not policy_class_id:
+            raise VaultSealerMissing(
+                "a personal secured Setting must name its policy class"
+            )
+        from tools.graph.schemas.vault_policy_class import (
+            VAULT_POLICY_CLASS_SET_ID,
+        )
+        from tools.vault.key_holder import _scoped_db
+        from tools.vault.policy_class import enable_public_sealing
+        from tools.vault.store import VaultStore
+
+        class_db = _scoped_db(VAULT_POLICY_CLASS_SET_ID, org)
+        with VaultStore(class_db) as class_store:
+            policy_class = class_store.get_class(policy_class_id)
+            if policy_class.current().sealing_public_key is None:
+                policy_class = enable_public_sealing(
+                    policy_class, created_at=_now_iso(),
+                )
+                class_store.put_class(policy_class)
+        return personal_object.seal_revision(
+            set_id=set_id,
+            key=key,
+            setting_id=setting_id,
+            payload=payload,
+            policy_class=policy_class,
+        )
 
     sealer = _vault_sealer
     if sealer is None:
@@ -615,7 +649,10 @@ def _seal_vault_payload(
     if policy_class_id is not None:
         sealer_args["policy_class_id"] = policy_class_id
     locator = sealer(**sealer_args)
-    if not vault_storage_object.is_vault_locator(locator):
+    if not (
+        vault_storage_object.is_vault_locator(locator)
+        or personal_object.is_personal_locator(locator)
+    ):
         raise VaultSealerMissing(
             f"the vault sealer returned {type(locator).__name__}, not a "
             f"locator; refusing to store it as {set_id}/{key}"
@@ -625,12 +662,10 @@ def _seal_vault_payload(
 
 # ── The other half of the seam: what OPENS a vault setting ───
 #
-# Reading is the mirror of writing and injected the same way. A vault row
-# holds a locator, and turning it back into a value needs the organization's
-# held generation keys and the store holding the objects — material a
-# settings read has no business acquiring for itself. So the host process
-# that holds it registers a key holder at startup, exactly as it registers
-# the sealer, and every other context reads a vault set to a refusal.
+# Reading is the mirror of writing. An organization locator needs held
+# generation keys and its content store, injected by the host process. A
+# personal secured scalar can expose its still-wrapped CEK without either;
+# only the later human-factor chokepoint can turn that view into plaintext.
 #
 # Key-holder signature::
 #
@@ -4330,13 +4365,37 @@ def _unwrap_vault_locator(
     # the whole storage stack.
     from tools.network.storagekit.errors import StorageError, SuiteError
     from tools.network.storagekit.objects import StateUnreachableError
-    from tools.vault import storage_object as vault_storage_object
+    from tools.vault import personal_object, storage_object as vault_storage_object
     from tools.vault.errors import VaultError
 
     def refuse(reason: str, message: str):
         return None, None, VaultReadFailure(
             reason=reason, message=f"{set_id}/{key}: {message}"
         )
+
+    if personal_object.is_personal_locator(locator):
+        if declared_tier != "secured":
+            return refuse(
+                VAULT_TIER_MISMATCH,
+                "This record's release tier does not match the set's and "
+                "cannot be processed.",
+            )
+        try:
+            gated = personal_object.inspect_revision(
+                locator, set_id=set_id, key=key,
+            )
+        except SuiteError:
+            return refuse(
+                VAULT_UNKNOWN_SUITE,
+                "This record's encryption suite is unrecognized and cannot "
+                "be processed.",
+            )
+        except VaultError:
+            return refuse(
+                VAULT_DECRYPTION_FAILED,
+                "This record could not be verified and cannot be processed.",
+            )
+        return None, asdict(gated), None
 
     if not vault_storage_object.is_vault_locator(locator):
         return refuse(
@@ -4474,7 +4533,7 @@ def open_secured_setting(
     import hashlib
 
     from tools.network.idkit.canonical import canonical_json
-    from tools.vault import storage_object as vault_storage_object
+    from tools.vault import personal_object, storage_object as vault_storage_object
     from tools.vault.errors import VaultError
     from tools.vault.key_holder import _scoped_db
     from tools.vault.store import VaultStore
@@ -4507,18 +4566,25 @@ def open_secured_setting(
     locator = _resolved_vault_locator(
         set_id, key, setting_id, org=org,
     )
-    control, missing = _vault_key_control(current.org, set_id, {})
-    if control is None:
-        raise VaultError(missing)
+    personal_direct = personal_object.is_personal_locator(locator)
+    control = None
+    if personal_direct:
+        gated = personal_object.inspect_revision(
+            locator, set_id=set_id, key=key,
+        )
+    else:
+        control, missing = _vault_key_control(current.org, set_id, {})
+        if control is None:
+            raise VaultError(missing)
 
-    # Re-derive the factor-gated view from the immutable object named by the
-    # locator.  This closes the small read/fetch race without exposing the
-    # locator or trusting only row metadata.
-    gated = vault_storage_object.open_revision_for_member(
-        locator,
-        holdings=control.holdings,
-        content_store=control.content_store,
-    )
+        # Re-derive the factor-gated view from the immutable object named by
+        # the locator. This closes the small read/fetch race without exposing
+        # the locator or trusting only row metadata.
+        gated = vault_storage_object.open_revision_for_member(
+            locator,
+            holdings=control.holdings,
+            content_store=control.content_store,
+        )
     if not isinstance(gated, vault_storage_object.SealedContentKey):
         raise VaultError(f"{set_id}/{key} no longer requires a factor")
     gated_digest = hashlib.sha256(canonical_json(asdict(gated))).hexdigest()
@@ -4530,15 +4596,27 @@ def open_secured_setting(
     with VaultStore(_scoped_db(VAULT_POLICY_CLASS_SET_ID, current.org)) as store:
         policy_class = store.get_class(gated.policy_class_id)
 
-    # Mandatory future insertion point: write the attributed, fail-closed audit
-    # event here, immediately before any factor can yield plaintext.
-    opened = vault_storage_object.open_revision(
-        locator,
-        holdings=control.holdings,
-        content_store=control.content_store,
-        policy_class=policy_class,
-        opener_seeds=opener_seeds,
-    )
+    # The ONE mandatory future insertion point: write the attributed,
+    # fail-closed audit event here, immediately before either storage shape can
+    # apply a factor and yield plaintext.
+    if personal_direct:
+        opened = personal_object.open_revision(
+            locator,
+            set_id=set_id,
+            key=key,
+            setting_id=setting_id,
+            policy_class=policy_class,
+            opener_seeds=opener_seeds,
+        )
+    else:
+        assert control is not None
+        opened = vault_storage_object.open_revision(
+            locator,
+            holdings=control.holdings,
+            content_store=control.content_store,
+            policy_class=policy_class,
+            opener_seeds=opener_seeds,
+        )
     if not isinstance(opened, dict):
         raise VaultError(f"{set_id}/{key} opened to a non-object payload")
     return opened

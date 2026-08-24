@@ -36,8 +36,8 @@ is the whole contract with everything that consumes it -- a workspace declares
 are the same string and neither can drift.
 
 The payload IS the secret, because ``@vaulted`` encrypts the whole payload and
-leaves the row holding a locator. Whatever can read the database file learns
-WHICH object a setting is and nothing about what it says.
+leaves the row holding an opaque scalar. Whatever can read the database file
+learns the credential's row identity and nothing about what its value says.
 
 ## Why personal, and why raw
 
@@ -85,8 +85,8 @@ VAULT_CREDENTIAL_REVISION = 1
 
 SYNOPSIS = {
     "summary": (
-        "The operator's secrets, stored encrypted under the organization's "
-        "content key and addressed by a stable credential name. Two sets, "
+        "The operator's secrets, stored encrypted in the personal store and "
+        "addressed by a stable credential name. Two sets, "
         "split only by whether opening one requires the human: audited "
         "releases to an authorized session unattended, secured additionally "
         "requires a factor."
