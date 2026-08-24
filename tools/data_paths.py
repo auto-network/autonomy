@@ -384,3 +384,41 @@ def resolve_orgs_root(
     if refuse_real_data_fallback_enabled():
         raise _refuse("data/orgs", "AUTONOMY_ORGS_DIR")
     return default
+
+
+def org_beads_dir(org: str | None):
+    """The org's provisioned bead-tracker dir, or None (shared tracker).
+
+    Per-org bead databases (autonomy@74585ba): an org whose config dir
+    exists under ``DATA_ROOT/.beads/orgs/<slug>/`` routes bd to its own
+    database on the shared Dolt server. Everyone else — autonomy
+    included — uses the shared dir and database ``auto``.
+    """
+    if org:
+        candidate = DATA_ROOT / ".beads" / "orgs" / str(org)
+        if (candidate / "metadata.json").is_file():
+            return candidate
+    return None
+
+
+def beads_client_env(beads_dir=None) -> dict:
+    """Client env additions for one bd invocation against *beads_dir*.
+
+    Reads the dir's ``credentials.env`` (BEADS_DOLT_SERVER_USER /
+    BEADS_DOLT_PASSWORD — the per-org SQL user, operator ruling
+    2026-08-24: no shared root). Returns {} when the dir has no
+    credentials file, letting bd's defaults apply.
+    """
+    d = beads_dir if beads_dir is not None else DATA_ROOT / ".beads"
+    out: dict = {}
+    try:
+        for line in (d / "credentials.env").read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, _, v = line.partition("=")
+                out[k.strip()] = v.strip()
+    except OSError:
+        pass
+    if beads_dir is not None:
+        out["BEADS_DIR"] = str(beads_dir)
+    return out

@@ -26,7 +26,7 @@ import json
 import os
 import subprocess
 
-from tools.data_paths import DATA_ROOT
+from tools.data_paths import beads_client_env, org_beads_dir
 
 _TIMEOUT_S = 30
 _DESC_LIMIT = 1400
@@ -35,15 +35,15 @@ _DESC_LIMIT = 1400
 def _beads_env(org: str | None) -> dict | None:
     """Route bd to the mission org's tracker (autonomy@74585ba).
 
-    An org with a provisioned tracker dir gets BEADS_DIR pointed at it
-    — the same config the launcher mounts as that org's /data/.beads —
-    so an anchore mission's ``mission:<uuid>`` beads resolve from the
-    anchore database. No org dir → inherit the ambient (shared) tracker.
+    An org with a provisioned tracker dir gets BEADS_DIR (and that
+    tracker's SQL credentials) pointed at it — the same config the
+    launcher mounts as that org's /data/.beads — so an anchore
+    mission's ``mission:<uuid>`` beads resolve from the anchore
+    database. No org dir → inherit the ambient (shared) tracker.
     """
-    if org:
-        org_dir = DATA_ROOT / ".beads" / "orgs" / str(org)
-        if (org_dir / "metadata.json").is_file():
-            return {**os.environ, "BEADS_DIR": str(org_dir)}
+    d = org_beads_dir(org)
+    if d is not None:
+        return {**os.environ, **beads_client_env(d)}
     return None
 
 
