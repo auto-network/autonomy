@@ -209,6 +209,7 @@
    was the one visibly "jumping". inline-flex makes the wrapper hug + center
    its pill so it lands on the same center line as everything else. */
 .sc-harness-wrap { display: inline-flex; align-items: center; }
+.sc-session-contributions { display: contents; }
 .sc-harness {
   display: inline-flex; align-items: center;
   min-height: 16px; gap: 3px;
