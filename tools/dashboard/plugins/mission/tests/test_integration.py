@@ -40,6 +40,24 @@ def _run_scenario(monkeypatch, tmp_path, name: str, store) -> None:
     assert f"PASS {name}" in proc.stdout, combined
 
 
+def test_homepage_fragment_sweep():
+    """The homepage acceptance gate: page.html + page.js + vendored
+    Alpine in jsdom, asserting the invariants shipped regressions
+    violated (legend/list universe, org default, sessions population,
+    toolbar contract, frame src + measured height)."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not available")
+    script = Path(__file__).parent / "jsdom" / "mission_homepage.cjs"
+    proc = subprocess.run([node, str(script)], capture_output=True,
+                          text=True, timeout=120)
+    combined = (proc.stdout or "") + (proc.stderr or "")
+    if "MODULE_NOT_FOUND" in combined or "Cannot find module 'jsdom'" in combined:
+        pytest.skip("jsdom not resolvable")
+    assert proc.returncode == 0, combined
+    assert "PASS homepage" in proc.stdout, combined
+
+
 def test_full_mission_renders_every_screen(monkeypatch, tmp_path):
     _run_scenario(monkeypatch, tmp_path, "full", scenarios.full())
 
