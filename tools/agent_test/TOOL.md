@@ -88,8 +88,10 @@ naming, prior retained per-test line coverage, and bounded import/reference
 search. It reports files for which no defensible selector was found rather
 than pretending a guess is complete. `run --changed` freezes that plan and the
 changed-line set into the run manifest. Line coverage is retained by default
-without requiring pytest-cov; `coverage` compares executed lines only with the
-lines changed at launch and bounds every missing-line listing.
+without requiring pytest-cov; source-path resolution is memoized per run so
+coverage does not perform a filesystem lookup for every traced line.
+`coverage` compares executed lines only with the lines changed at launch and
+bounds every missing-line listing.
 
 `baseline` publishes one retained run as the durable workspace comparison
 point. `metrics` reports machine-wide run/refusal telemetry without exposing
