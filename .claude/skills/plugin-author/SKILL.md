@@ -112,6 +112,40 @@ with absolute paths (`/api/<id>/...`). The substrate wraps them in
 - Storage precedes delivery: persist first, then relay (CrossTalk via
   `tools.dashboard.crosstalk_delivery`) best-effort.
 
+## 3b. The page fragment: containment and continuity
+
+- **Documents render inside the shell, never as navigations.** If your
+  plugin serves complete documents, the fragment embeds them in a
+  same-origin iframe with pushState URLs (deep links + popstate for
+  back). `window.location` to your document tears down the dashboard
+  SPA — and shell services live there: the voice/dictation layer died
+  on every mission open until this was fixed. Cross the frame boundary
+  with postMessage seams, not navigation.
+- **The fragment speaks your documents' design language.** A scoped
+  style block carrying your palette/type tokens, your drawn SVG icons,
+  your control idioms — a generic-Tailwind list page next to a
+  carefully designed document reads broken. Phone discipline applies
+  to fragments too: auto-fit single-line titles between a ceiling and
+  a floor, one-line metas in the icon vocabulary instead of word
+  labels, and look at a real phone before calling it done.
+
+## 3c. Attribution and identity
+
+Acts are attributed by IDENTITY; presentation resolves at render.
+Store an agent's session name, or a member's **org-scoped persona
+public key** (`autonomy.network.persona` — per-org, unlinkable; the
+personal root key never appears in org data). Never store a resolved
+display name: screens resolve keys through the org member directory
+(`autonomy.org.member-profile`), so a rename re-labels history; render
+unknown keys truncated, never raw hex. A local personal-name fallback
+is render-only — never persisted into an org row.
+
+**Storage shape is a signing decision.** If rows should someday carry
+per-writer signed identity (design `graph://21a0da9e-1c2`), model one
+row per act (`@append_only_log`), not an aggregate array — the
+envelope signs rows, and the cross-member merge is the substrate's
+per-signer slot resolution, free.
+
 ## 4. Dynamic CLI
 
 `entrypoints.cli: <module>:register` — `register(subparsers)`, the same
@@ -194,6 +228,16 @@ personal. Verify every route twice: once with a session bearer, once
 through the operator's browser cookie. The mission plugin shipped,
 demoed green on bearer auth, and showed the operator an empty list —
 this exact trap, found by the first real user.
+
+## Researching before building
+
+When the operator says "we designed this," search for the DESIGN
+DECISION — the Signpost Index and MADR notes — before searching for
+the artifact. Tonight's directory hunt burned an hour proving a
+nonexistence that the design note stated in one line ("the member
+directory is a consumer built against this"). `graph set find` can
+only surface registered schemas; concepts that are designed but
+unbuilt live in notes.
 
 ## Known pitfalls (all hit before, all avoidable)
 

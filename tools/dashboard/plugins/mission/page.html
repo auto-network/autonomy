@@ -1,15 +1,54 @@
 <div x-data="missionPage()" data-testid="mission-fragment-root"
      class="h-full flex flex-col">
+  <style>
+    /* The mission list speaks the mission screens' design language:
+       same palette, type scale, icon vocabulary, flat controls. */
+    .msn-list{--bg:#0c0f14;--card:#12151d;--card2:#161a24;--line:#232837;
+      --line2:#39415a;--ink:#e8ebf2;--ink2:#aab3c4;--ink3:#8391a8;
+      --accent:#8b85ff;--warn:#fab219;--crit:#f4597b;--good:#34d399;
+      background:var(--bg);padding:14px 14px 40px;flex:1;overflow-y:auto}
+    .msn-row{background:var(--card);border:1px solid var(--line);
+      border-radius:10px;padding:12px 14px 11px;margin:0 0 10px;
+      cursor:pointer}
+    .msn-row:active{background:var(--card2)}
+    .msn-row.done{opacity:.55}
+    .msn-name{color:var(--ink);font-weight:650;line-height:1.25;
+      white-space:nowrap;overflow:hidden}
+    .msn-grid{display:flex;gap:2px;align-items:flex-end;height:13px;
+      margin:8px 0 7px}
+    .msn-grid i{flex:1;border-radius:1px;background:var(--accent)}
+    .msn-grid i.z{height:2px!important;background:var(--line);opacity:.7}
+    .msn-meta{display:flex;align-items:baseline;gap:11px;
+      font-size:.7rem;color:var(--ink3);white-space:nowrap;min-width:0}
+    .msn-meta .ago{overflow:hidden;text-overflow:ellipsis;min-width:0}
+    .msn-meta b{font-weight:700;font-size:.76rem}
+    .msn-ct{flex:none;display:inline-flex;gap:4px;align-items:baseline}
+    .msn-ct .mk{font-weight:700}
+    .msn-ct.crit .mk,.msn-ct.crit b{color:var(--crit)}
+    .msn-ct.warn .mk,.msn-ct.warn b{color:var(--warn)}
+    .msn-ct.dim .mk,.msn-ct.dim b{color:var(--ink2)}
+    .msn-ct svg{width:.95em;height:.95em;vertical-align:-0.1em}
+    .msn-life{flex:none;margin-left:auto;display:inline-flex;gap:12px;
+      align-items:baseline}
+    .msn-life button{background:none;border:0;padding:2px 0 3px;
+      cursor:pointer;font:inherit;font-size:.66rem;text-transform:uppercase;
+      letter-spacing:.05em;color:var(--ink3)}
+    .msn-life button.on{color:var(--ink);
+      box-shadow:inset 0 -2px 0 var(--line2)}
+    .msn-life:not(.open) button:not(.on){display:none}
+    .msn-life.open button{display:inline}
+    .msn-empty{color:var(--ink3);font-size:.85rem;padding:18px 4px}
+    .msn-err{color:var(--crit);font-size:.8rem;padding:12px 4px}
+  </style>
 
   <!-- the mission screen, embedded — never a page navigation -->
   <template x-if="current">
     <div class="flex-1 flex flex-col min-h-0">
-      <div class="flex items-center gap-2 px-3 py-1.5 border-b border-gray-800">
-        <button @click="back()"
-                class="text-gray-400 hover:text-gray-100 text-sm px-2 py-1">
-          &#8249; Missions
-        </button>
-        <span class="text-gray-200 text-sm font-medium truncate"
+      <div class="flex items-center gap-2 px-3 py-1.5 border-b"
+           style="border-color:#232837;background:#0c0f14">
+        <button @click="back()" style="color:#8391a8"
+                class="text-sm px-2 py-1">&#8249; Missions</button>
+        <span class="text-sm font-medium truncate" style="color:#aab3c4"
               x-text="(missions.find(m => m.mission_id === current) || {}).name || ''"></span>
       </div>
       <iframe :src="frameSrc()" class="flex-1 w-full border-0 min-h-0"
@@ -18,70 +57,45 @@
   </template>
 
   <template x-if="!current">
-    <div class="px-4 pt-4 pb-8">
-
+    <div class="msn-list">
       <template x-if="loaded && error">
-        <p class="text-red-400 text-sm mb-3"
-           x-text="'Could not load missions: ' + error"></p>
+        <p class="msn-err" x-text="'Could not load missions: ' + error"></p>
       </template>
-
       <template x-if="loaded && !error && !missions.length">
-        <p class="text-gray-400 text-sm">
-          No missions yet — the first
-          <code class="text-indigo-300">mission.registry</code> row becomes a
-          screen the moment it exists.
-        </p>
+        <p class="msn-empty">No missions yet — the first
+          <code>mission.registry</code> row becomes a screen the moment it
+          exists.</p>
       </template>
 
-      <div class="space-y-3">
-        <template x-for="m in missions" :key="m.mission_id">
-          <div class="w-full rounded-xl bg-gray-900/70 border border-gray-800
-                      px-4 py-3 cursor-pointer hover:border-gray-700"
-               :class="m.status === 'complete' ? 'opacity-60' : ''"
-               @click="open(m)">
+      <template x-for="m in missions" :key="m.mission_id">
+        <div class="msn-row" :class="m.status === 'complete' ? 'done' : ''"
+             @click="open(m)">
+          <div class="msn-name" x-init="fitName($el)" x-text="m.name"></div>
 
-            <!-- name: full width, one line, auto-fit -->
-            <div class="w-full overflow-hidden">
-              <div class="text-gray-100 font-semibold leading-tight"
-                   x-init="fitName($el)" x-text="m.name"></div>
-            </div>
-
-            <!-- activity strip: 14 days, oldest -> today -->
-            <div class="flex items-end gap-[3px] h-7 mt-2.5"
-                 aria-label="activity, last 14 days">
-              <template x-for="(b, i) in bars(m)" :key="i">
-                <div class="flex-1 rounded-sm"
-                     :class="b.on ? 'bg-indigo-400/80' : 'bg-gray-800'"
-                     :style="'height:' + b.h + '%'"></div>
-              </template>
-            </div>
-
-            <!-- recency + attention counts + lifecycle -->
-            <div class="flex items-center mt-2 gap-3 text-xs">
-              <span class="text-gray-500" x-text="ago(m)"></span>
-              <template x-for="c in counts(m)" :key="c.label">
-                <span x-text="c.label"
-                      :class="{
-                        'text-red-400 font-medium': c.cls === 'crit',
-                        'text-amber-400': c.cls === 'warn',
-                        'text-gray-500': c.cls === 'dim',
-                      }"></span>
-              </template>
-              <span class="flex-1"></span>
-              <div class="flex rounded-lg border border-gray-800 overflow-hidden"
-                   @click.stop>
-                <template x-for="st in ['active','paused','complete']" :key="st">
-                  <button class="px-2.5 py-1 text-[11px] capitalize"
-                          :class="m.status === st
-                            ? 'bg-gray-700/80 text-gray-100'
-                            : 'text-gray-500 hover:text-gray-300'"
-                          @click="setStatus(m, st)" x-text="st"></button>
-                </template>
-              </div>
-            </div>
+          <div class="msn-grid" aria-label="activity, last 28 days">
+            <template x-for="(b, i) in bars(m)" :key="i">
+              <i :class="b.on ? '' : 'z'"
+                 :style="'height:' + b.h + '%;opacity:' + b.op"></i>
+            </template>
           </div>
-        </template>
-      </div>
+
+          <div class="msn-meta">
+            <span class="ago" x-text="ago(m)"></span>
+            <template x-for="c in counts(m)" :key="c.key">
+              <span class="msn-ct" :class="c.cls">
+                <span class="mk" x-html="c.mark"></span><b x-text="c.n"></b>
+              </span>
+            </template>
+            <span class="msn-life" :class="lifeOpen === m.mission_id ? 'open' : ''"
+                  @click.stop>
+              <template x-for="st in ['active','paused','complete']" :key="st">
+                <button :class="m.status === st ? 'on' : ''"
+                        @click="lifeTap(m, st)" x-text="st"></button>
+              </template>
+            </span>
+          </div>
+        </div>
+      </template>
     </div>
   </template>
 </div>

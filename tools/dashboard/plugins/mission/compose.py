@@ -122,7 +122,7 @@ def activity_summary(org: str, mission_id: str,
 
     Derived from the same streams the feed renders — item moments plus
     history/work/discussion/answer entries. Returns last_at (epoch),
-    days (14 daily event counts, oldest first), blockers (open blocking
+    days (28 daily event counts, oldest first), blockers (open blocking
     questions), in_progress (criteria being worked), open_questions.
     """
     import datetime
@@ -163,11 +163,11 @@ def activity_summary(org: str, mission_id: str,
         if kind == "checkpoint" and state == "in_progress":
             in_progress += 1
 
-    days = [0] * 14
+    days = [0] * 28
     for e in stamps:
         age_days = int((now - e) // 86400)
-        if 0 <= age_days < 14:
-            days[13 - age_days] += 1
+        if 0 <= age_days < 28:
+            days[27 - age_days] += 1
     return {
         "last_at": max(stamps) if stamps else None,
         "days": days,

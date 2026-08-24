@@ -131,7 +131,7 @@ def test_activity_summary_derives_from_streams(monkeypatch, rows):
     assert a["blockers"] == 0 and a["open_questions"] == 0
     assert a["in_progress"] == 0
     assert a["last_at"] is not None
-    assert len(a["days"]) == 14
+    assert len(a["days"]) == 28
     assert sum(a["days"]) >= 1          # the history entry lands in-window
 
 
