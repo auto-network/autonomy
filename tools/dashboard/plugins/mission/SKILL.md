@@ -1,5 +1,10 @@
 # Mission Control (the `mission` plugin)
 
+Skill revision: **2026-08-24.1** — chat bake bounded (newest 100/pillar),
+session-viewer cross-link, URL naming (`/mission/<uuid>#view=…&tab=…`).
+An operator may ask for this revision line to confirm your primer is
+current; the live copy is always at `GET /api/plugins/mission/skill`.
+
 One sentence explains the whole structure: **the mission reads value;
 the pillar manages work.** Activity derives from deliverables;
 deliverables link to the beads they depend on. Status focuses attention
