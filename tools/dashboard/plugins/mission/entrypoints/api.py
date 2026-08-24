@@ -125,7 +125,11 @@ async def list_missions(request: Request) -> JSONResponse:
             except Exception:
                 row["activity"] = None
             rows.append(row)
+    # Lifecycle groups first (active, paused, complete), recency within
+    # each — the many-missions ordering the homepage renders directly.
+    order = {"active": 0, "paused": 1, "complete": 2}
     rows.sort(key=lambda r: (
+        order.get(r.get("status") or "active", 0),
         -(((r.get("activity") or {}).get("last_at")) or 0),
         r.get("name") or ""))
     return JSONResponse({"missions": rows})
