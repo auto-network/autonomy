@@ -743,6 +743,26 @@ class TestMobileToolbarLayout:
         ab_raw("set", "viewport", "430", "900")
 
 
+class TestDesktopToolbarLayout:
+    def test_actions_follow_zoom_control_without_consuming_page_width(self, h):
+        ab_raw("set", "viewport", "1440", "900")
+        layout = ab_eval("""
+            var toolbar = document.querySelector('[data-testid="sessions-page-toolbar"]');
+            var zoom = toolbar && toolbar.querySelector('.sc-zoom-bar');
+            var actions = toolbar && toolbar.querySelector('.sessions-toolbar-actions');
+            if (!zoom || !actions) return null;
+            var zr = zoom.getBoundingClientRect();
+            var ar = actions.getBoundingClientRect();
+            return {gap: ar.left - zr.right, toolbarWidth: toolbar.getBoundingClientRect().width};
+        """)
+        assert layout is not None
+        assert layout["gap"] <= 16, (
+            "The organization and create-session controls were distributed across "
+            "the desktop toolbar instead of remaining beside zoom."
+        )
+        assert layout["toolbarWidth"] > 1000
+
+
 class TestRecentSessions:
     """Recent sessions section shows historical sessions."""
 
