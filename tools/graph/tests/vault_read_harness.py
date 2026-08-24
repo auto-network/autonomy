@@ -126,6 +126,7 @@ class VaultWorld:
         # cannot appear in the holdings the read path is handed.
         self.key_control = KeyControlStore(self._scoped_db or (root / "keycontrol.db"))
         self.policy_class = None
+        self.identity = None
         self.opener_seeds: dict = {}
         self.holder_calls: list = []
         self._held_override: dict | None = None
@@ -234,6 +235,7 @@ class VaultWorld:
     def mint_policy_class(self):
         """A throwaway password class, plus the seed that opens it."""
         identity = make_test_identity()
+        self.identity = identity
         self.policy_class = policy_class_mod.create_class(
             "password", [identity.published], created_at="2026-08-17T00:00:00Z",
         )

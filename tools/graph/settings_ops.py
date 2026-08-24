@@ -4358,6 +4358,145 @@ def _unwrap_vault_locator(
     return opened, None, None
 
 
+def _resolved_vault_locator(
+    set_id: str,
+    key: str,
+    base_id: str,
+    *,
+    org: str | None,
+):
+    """Return the opaque locator selected for one already-resolved member.
+
+    ``read_set`` deliberately replaces a secured member's locator with the
+    factor-gated ``sealed_content_key`` view.  The operator ceremony needs the
+    locator again only after the human has supplied the factor, and it must use
+    the *same* base/override fold as the original read.  Keep that recovery
+    private to the host process; a locator is never added to an HTTP response.
+
+    Vault sets are band-pinned raw, so their winning base and overrides live in
+    the set's declared home rather than a peer database.  ``_open_read`` routes
+    that home (personal for the built-in credential sets) exactly as
+    ``read_set`` does.
+    """
+    db = _open_read(org, set_id)
+    try:
+        rows = db.conn.execute(
+            "SELECT rowid AS _rowid, * FROM settings "
+            "WHERE set_id = ? AND key = ? AND deprecated = 0 "
+            "AND (id = ? OR supersedes = ?)",
+            (set_id, key, base_id, base_id),
+        ).fetchall()
+    finally:
+        db.close()
+
+    base = next((row for row in rows if row["id"] == base_id), None)
+    if base is None:
+        raise LookupError(
+            f"the secured setting changed before approval ({set_id}/{key})"
+        )
+    locator = json.loads(base["payload"])
+    for row in sorted(
+        (row for row in rows if row["supersedes"] == base_id),
+        key=lambda row: (row["created_at"] or "", row["_rowid"]),
+    ):
+        locator = json_merge_patch(locator, json.loads(row["payload"]))
+    return locator
+
+
+def open_secured_setting(
+    set_id: str,
+    key: str,
+    *,
+    setting_id: str,
+    sealed_content_key_digest: str,
+    opener_seeds: dict[str, bytes],
+    org: "str | None | _CallerOrgSentinel",
+) -> dict:
+    """Open one frozen secured Setting through the human-factor chokepoint.
+
+    This is intentionally the only production seam that turns a
+    ``sealed_content_key`` outcome into plaintext.  The approval layer freezes
+    ``setting_id`` and a digest of the factor-gated view; this function re-runs
+    normal Settings resolution and refuses any drift before applying opener
+    material.  Future audit-before-open attribution belongs immediately above
+    the final ``open_revision`` call below.
+
+    The returned value is the Setting payload, never its content-encryption
+    key.  Callers own and must zero ``opener_seeds`` after this call.
+    """
+    import hashlib
+
+    from tools.network.idkit.canonical import canonical_json
+    from tools.vault import storage_object as vault_storage_object
+    from tools.vault.errors import VaultError
+    from tools.vault.key_holder import _scoped_db
+    from tools.vault.store import VaultStore
+    from tools.graph.schemas.vault_policy_class import VAULT_POLICY_CLASS_SET_ID
+
+    org = _resolve_org_arg(org)
+    if schemas.declared_vault_tier(set_id) != "secured":
+        raise VaultError(f"{set_id!r} is not a secured vault set")
+
+    current = next(
+        (member for member in read_set(set_id, org=org, peers=[]).members
+         if member.key == key),
+        None,
+    )
+    if current is None or current.id != setting_id:
+        raise VaultError(
+            f"the secured setting changed before approval ({set_id}/{key})"
+        )
+    sealed = current.sealed_content_key
+    if not isinstance(sealed, dict):
+        raise VaultError(
+            f"{set_id}/{key} is not awaiting a human-factor open"
+        )
+    current_digest = hashlib.sha256(canonical_json(sealed)).hexdigest()
+    if current_digest != sealed_content_key_digest:
+        raise VaultError(
+            f"the secured setting changed before approval ({set_id}/{key})"
+        )
+
+    locator = _resolved_vault_locator(
+        set_id, key, setting_id, org=org,
+    )
+    control, missing = _vault_key_control(current.org, set_id, {})
+    if control is None:
+        raise VaultError(missing)
+
+    # Re-derive the factor-gated view from the immutable object named by the
+    # locator.  This closes the small read/fetch race without exposing the
+    # locator or trusting only row metadata.
+    gated = vault_storage_object.open_revision_for_member(
+        locator,
+        holdings=control.holdings,
+        content_store=control.content_store,
+    )
+    if not isinstance(gated, vault_storage_object.SealedContentKey):
+        raise VaultError(f"{set_id}/{key} no longer requires a factor")
+    gated_digest = hashlib.sha256(canonical_json(asdict(gated))).hexdigest()
+    if gated_digest != sealed_content_key_digest:
+        raise VaultError(
+            f"the secured setting changed before approval ({set_id}/{key})"
+        )
+
+    with VaultStore(_scoped_db(VAULT_POLICY_CLASS_SET_ID, current.org)) as store:
+        policy_class = store.get_class(gated.policy_class_id)
+
+    # Mandatory future insertion point: write the attributed, fail-closed audit
+    # event here, immediately before any factor can yield plaintext.
+    opened = vault_storage_object.open_revision(
+        locator,
+        holdings=control.holdings,
+        content_store=control.content_store,
+        policy_class=policy_class,
+        opener_seeds=opener_seeds,
+    )
+    if not isinstance(opened, dict):
+        raise VaultError(f"{set_id}/{key} opened to a non-object payload")
+    return opened
+
+
 def contested_keys(
     set_id: str,
     *,

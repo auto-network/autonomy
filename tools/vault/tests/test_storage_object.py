@@ -393,7 +393,9 @@ def test_a_member_holding_no_capability_cannot_write(world, store):
 # ── the secured tier: the policy layer beneath the storage state ──────────
 
 
-def test_a_secured_setting_needs_the_human_factor_on_top_of_membership(world, store):
+def test_a_secured_setting_needs_the_human_factor_on_top_of_membership(
+    world, store, monkeypatch
+):
     """Membership opens the object and yields the wrapped key — and stops."""
     author = world.member(0)
     world.mint_initial_state(author)
@@ -445,6 +447,20 @@ def test_a_secured_setting_needs_the_human_factor_on_top_of_membership(world, st
             policy_class=record,
             opener_seeds={},
         )
+    captured_cek = []
+    from tools.network.storagekit import object_header as object_header_mod
+
+    original_open_body = object_header_mod.open_body
+
+    def capture_open_body(header, cek, body_blob):
+        # The outer storage object still uses its ordinary bytes CEK. Capture
+        # only the mutable inner secured-value key owned by this chokepoint.
+        if isinstance(cek, bytearray):
+            captured_cek.append(cek)
+            assert any(cek)
+        return original_open_body(header, cek, body_blob)
+
+    monkeypatch.setattr(object_header_mod, "open_body", capture_open_body)
     assert open_revision(
         sealed.locator,
         holdings=held,
@@ -452,6 +468,7 @@ def test_a_secured_setting_needs_the_human_factor_on_top_of_membership(world, st
         policy_class=record,
         opener_seeds=seeds,
     ) == payload
+    assert captured_cek == [bytearray(32)]
 
 
 def test_a_secured_setting_is_refused_rather_than_downgraded(world, store):

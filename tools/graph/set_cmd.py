@@ -521,7 +521,8 @@ def cmd_set_read(args) -> None:
         print(json.dumps(chain, indent=2))
         return
 
-    members = get_client().read_set(set_id, org=org)
+    client = get_client()
+    members = client.read_set(set_id, org=org)
     for m in members.members:
         if m.key == key:
             # A vault secret that did not open has no payload, and printing
@@ -535,10 +536,20 @@ def cmd_set_read(args) -> None:
                 sys.exit(1)
             sealed = getattr(m, "sealed_content_key", None)
             if sealed is not None:
-                # A secured secret resolves to its content key, still sealed
-                # under the policy class. Opening that takes the human factor,
-                # which resolution neither holds nor applies.
-                print(json.dumps(sealed, indent=2, default=str))
+                # A secured read is a delivered release, not a key-export
+                # operation.  The normal HTTP client creates a vault_open
+                # rendezvous; direct-host recovery mode deliberately cannot
+                # bypass the human ceremony or print the sealed CEK.
+                opener = getattr(client, "request_vault_open", None)
+                if opener is None:
+                    print(
+                        "Error: secured Settings require dashboard approval; "
+                        "retry without --force-host",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                payload = opener(set_id, key, org=org)
+                print(json.dumps(payload, indent=2, default=str))
                 return
             print(json.dumps(m.payload, indent=2, default=str))
             _print_composition(set_id, key, org)

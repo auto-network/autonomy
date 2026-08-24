@@ -749,19 +749,28 @@ def open_revision(
     envelope = json.loads(opened)
     if envelope.get("v") != _SECURED_ENVELOPE_VERSION:
         raise VaultError(f"unsupported secured envelope version {envelope.get('v')!r}")
-    content_key = open_cek(
-        policy_class,
-        opener_seeds or {},
-        envelope["sealed_cek"],
-        genesis_id=reference["genesis_id"],
-        setting_name=reference["object_id"],
-        required_policy=reference["required_policy"],
+    # Keep the CEK in mutable storage for the shortest practical lifetime.
+    # ``open_cek`` necessarily returns one immutable bytes object from the
+    # cryptography library; converting immediately lets that temporary fall out
+    # of scope and gives this chokepoint a buffer it can reliably erase.
+    content_key = bytearray(
+        open_cek(
+            policy_class,
+            opener_seeds or {},
+            envelope["sealed_cek"],
+            genesis_id=reference["genesis_id"],
+            setting_name=reference["object_id"],
+            required_policy=reference["required_policy"],
+        )
     )
-    suites.require_suite(envelope["body_suite_id"], suites.BODY_SUITES)
-    inner_header = _replace_body(header, envelope)
-    plaintext = object_header.open_body(
-        inner_header, content_key, bytes.fromhex(envelope["ciphertext"])
-    )
+    try:
+        suites.require_suite(envelope["body_suite_id"], suites.BODY_SUITES)
+        inner_header = _replace_body(header, envelope)
+        plaintext = object_header.open_body(
+            inner_header, content_key, bytes.fromhex(envelope["ciphertext"])
+        )
+    finally:
+        content_key[:] = b"\x00" * len(content_key)
     return json.loads(plaintext)
 
 

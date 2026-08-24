@@ -2296,6 +2296,70 @@
       // overlay state; the chrome and Decline are kind-agnostic (declining is
       // identical for every kind, so it lives in the shell).
       _approvalKinds: {
+        vault_open: {
+          open(self, r) {
+            const req = r.request || {};
+            const ceremony = r.ceremony;
+            const setting = req.setting || {};
+            const requester = req.requester || {};
+            if (!ceremony || ceremony.v !== 1 ||
+                !['password', 'prf', 'both'].includes(ceremony.policy) ||
+                !Array.isArray(ceremony.factors) || !ceremony.factors.length ||
+                !setting.set_id || !setting.key || !requester.session ||
+                !requester.workspace || req.operation !== 'read' ||
+                req.release_mode !== 'delivered') {
+              throw new Error('vault open request has no complete server-frozen ceremony');
+            }
+            const expiry = new Date(Number(req.expires_at) * 1000);
+            const policyLabel = ceremony.policy === 'both'
+              ? 'password + passkey' : (ceremony.policy === 'prf' ? 'passkey' : 'password');
+            self.approvalBusy = false;
+            self.approvalRequest = {
+              id: r.id, kind: r.kind, session: requester.session,
+              title: 'Release secured setting',
+              actionLabel: ceremony.policy === 'prf'
+                ? 'Use passkey & deliver' : (ceremony.policy === 'both'
+                  ? 'Verify both & deliver' : 'Open & deliver'),
+              op: req.operation, target: req.target,
+              bodyMarkdown: [
+                'Setting: ' + setting.set_id + ' / ' + setting.key,
+                'Operation: ' + req.operation,
+                'Requesting session: ' + requester.session,
+                'Workspace: ' + requester.workspace,
+                'Target: ' + req.target,
+                'Delivered: ' + req.delivery,
+                'Release mode: ' + req.release_mode,
+                'Factor: ' + policyLabel,
+                'TTL: ' + req.ttl_seconds + ' seconds (expires ' + expiry.toLocaleTimeString() + ')',
+              ].join('\n'),
+              needsPassword: ceremony.policy === 'password' || ceremony.policy === 'both',
+              passwordLabel: ceremony.policy === 'both'
+                ? 'Vault password (passkey also required)' : 'Vault password',
+              password: '',
+              vaultOpen: { ceremony, gathered: null },
+              awaitExecution: true,
+              error: '',
+            };
+          },
+          async decision(self, req) {
+            const vault = await import('../ceremony/open-vault.js');
+            req.vaultOpen.gathered = await vault.gatherVaultOpeners(
+              req.vaultOpen.ceremony, req.password,
+            );
+            return { openers: req.vaultOpen.gathered.openers };
+          },
+          async cleanup(self, req) {
+            if (req.vaultOpen && req.vaultOpen.gathered) {
+              const vault = await import('../ceremony/open-vault.js');
+              vault.clearVaultOpeners(req.vaultOpen.gathered);
+              req.vaultOpen.gathered = null;
+            }
+            // JavaScript strings cannot be overwritten in place. Remove the
+            // sheet's last reference after every attempt, including a failed
+            // client-side armor validation.
+            req.password = '';
+          },
+        },
         external_service_access: {
           open(self, r) {
             const access = r.staged || r.request || {};
@@ -2989,14 +3053,21 @@
         if (!req || this.approvalBusy) return;
         this.approvalBusy = true;
         req.error = '';
+        const kindDef = this._approvalKinds[req.kind];
+        let cleaned = false;
         try {
-          const kindDef = this._approvalKinds[req.kind];
           const extra = (kindDef && kindDef.decision)
             ? await kindDef.decision(this, req) : {};
           const resp = await fetch('/api/approvals/' + encodeURIComponent(req.id) + '/decision', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ approved: true, ...extra }),
           });
+          // Factor material has crossed its one chokepoint. Drop browser
+          // references before waiting for the server-side open to finish.
+          if (kindDef && kindDef.cleanup) {
+            await kindDef.cleanup(this, req);
+            cleaned = true;
+          }
           const decisionResult = await resp.json().catch(() => ({}));
           if (!resp.ok || !decisionResult.ok) {
             throw new Error(decisionResult.error || 'This approval is no longer available.');
@@ -3019,6 +3090,9 @@
           if (req.gate2 || req.op === 'revoke' || req.awaitExecution) req.error = message;
           else _toast('Could not approve: ' + message, 'error');
         } finally {
+          if (!cleaned && kindDef && kindDef.cleanup) {
+            try { await kindDef.cleanup(this, req); } catch (e) { /* zeroization is best-effort */ }
+          }
           this.approvalBusy = false;
         }
       },
@@ -3027,7 +3101,12 @@
         if (!this.approvalRequest || this.approvalBusy) return;
         // Cancel must RESOLVE the server row (decline), not just hide it — else
         // the pending request re-surfaces on every reload. Declining executes nothing.
-        const id = this.approvalRequest.id;
+        const req = this.approvalRequest;
+        const id = req.id;
+        const kindDef = this._approvalKinds[req.kind];
+        if (kindDef && kindDef.cleanup) {
+          try { await kindDef.cleanup(this, req); } catch (e) { /* best-effort */ }
+        }
         this._markApprovalDecided(id);
         if (id) {
           try {
@@ -3054,9 +3133,14 @@
       // Decline is identical for every approval kind, so it lives here in the
       // shell rather than in the per-kind handlers.
       async declineApproval() {
-        const id = (this.approvalRequest && this.approvalRequest.id) ||
+        const req = this.approvalRequest;
+        const id = (req && req.id) ||
           (this.selectedCommit && this.selectedCommit.approvalId);
         if (!id) return;
+        const kindDef = req && this._approvalKinds[req.kind];
+        if (kindDef && kindDef.cleanup) {
+          try { await kindDef.cleanup(this, req); } catch (e) { /* best-effort */ }
+        }
         try {
           await fetch('/api/approvals/' + encodeURIComponent(id) + '/decision', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },

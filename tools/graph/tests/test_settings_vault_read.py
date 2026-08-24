@@ -13,6 +13,7 @@ been encrypted.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -21,7 +22,10 @@ import pytest
 from tools.graph import ops, schemas, settings_ops
 from tools.graph.schemas.registry import SCHEMAS, UPCONVERTERS
 from tools.graph.tests.vault_read_harness import VaultWorld, clear_seams
+from tools.network.idkit.canonical import canonical_json
+from tools.vault.errors import VaultError
 from tools.vault.policy_class import open_cek
+from tools.vault.store import VaultStore
 from tools.vault.storage_object import (
     is_vault_locator,
     object_id_for,
@@ -477,6 +481,46 @@ def test_a_secured_setting_resolves_to_a_sealed_key_and_not_to_a_value(
         required_policy=vault.policy_class.policy,
     )
     assert isinstance(content_key, bytes) and len(content_key) == 32
+
+
+def test_a_frozen_secured_setting_opens_to_plaintext_at_the_one_chokepoint(
+    graph_db_env, secured_schema, vault
+):
+    """The approval-facing seam consumes a factor and returns the payload,
+    while its frozen Setting digest prevents a later row from being substituted.
+    """
+    setting_id = ops.add_setting(
+        SECURED_SET, 1, "default", {"access_token": SECRET},
+        org=ops.CALLER_ORG,
+    )
+    with VaultStore(graph_db_env) as store:
+        store.put_class(vault.policy_class)
+    member = member_of(SECURED_SET)
+    digest = hashlib.sha256(
+        canonical_json(member.sealed_content_key)
+    ).hexdigest()
+
+    assert settings_ops.open_secured_setting(
+        SECURED_SET,
+        "default",
+        setting_id=setting_id,
+        sealed_content_key_digest=digest,
+        opener_seeds=vault.opener_seeds,
+        org=None,
+    ) == {"access_token": SECRET}
+
+    settings_ops.override_setting(
+        setting_id, {"access_token": "replacement"}, org=None,
+    )
+    with pytest.raises(VaultError, match="changed before approval"):
+        settings_ops.open_secured_setting(
+            SECURED_SET,
+            "default",
+            setting_id=setting_id,
+            sealed_content_key_digest=digest,
+            opener_seeds=vault.opener_seeds,
+            org=None,
+        )
 
 
 def test_a_secured_set_whose_row_names_the_audited_tier_is_refused(
