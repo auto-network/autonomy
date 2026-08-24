@@ -6301,6 +6301,11 @@ def main():
     from .mission_cmd import register as _register_mission
     _register_mission(sub)
 
+    # Plugin-declared commands: any enabled dashboard plugin with an
+    # entrypoints.cli manifest spec mounts its tree here (plugin_cli.py).
+    from .plugin_cli import register_plugin_commands
+    register_plugin_commands(sub)
+
     # session-auth — one-stroke operator-approved dashboard UI session
     p_sauth = sub.add_parser(
         "session-auth",
