@@ -88,7 +88,15 @@ def load_items(org: str, mission_id: str) -> list[dict]:
                if v not in ("", [], {}, 0, 0.0, False)},
         }
         items.append(item)
-    return items
+    # Historical duplicates (same key, split rows from the pre-upsert
+    # write path) render deterministically: newest updated_at wins.
+    by_key: dict[str, dict] = {}
+    for it in items:
+        prev = by_key.get(it["key"])
+        if prev is None or (it.get("updated_at") or "") >= \
+                (prev.get("updated_at") or ""):
+            by_key[it["key"]] = it
+    return list(by_key.values())
 
 
 def load_chat(org: str, mission_id: str) -> dict[str, list]:
@@ -136,8 +144,17 @@ def render_screen(org: str, mission_id: str,
         ],
         "items": load_items(org, mission_id),
     }
-    doc = _TEMPLATE_PATH.read_text(encoding="utf-8").replace(
-        _DATA_MARK, _blob(data))
+    # The template is the content layer; this shell is what makes it a
+    # phone-correct document. Without the viewport meta, mobile browsers
+    # lay out at ~980px and shrink — everything renders tiny.
+    doc = ('<!doctype html><html><head><meta charset="utf-8">'
+           '<meta name="viewport" '
+           'content="width=device-width, initial-scale=1">'
+           '<style>html{overflow-x:hidden}'
+           'body{margin:0;background:#0c0f14}</style></head><body>'
+           + _TEMPLATE_PATH.read_text(encoding="utf-8").replace(
+               _DATA_MARK, _blob(data))
+           + "</body></html>")
     beads = load_beads(org, mission_id, pillars)
     chat = load_chat(org, mission_id)
     inject = ""

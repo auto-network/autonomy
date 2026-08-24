@@ -32,8 +32,13 @@ def now_iso() -> str:
 
 
 def _ops():
-    from tools.graph import ops as graph_ops
-    return graph_ops
+    # settings_ops directly: plugin routes run inside the host dashboard
+    # process (the container-write warning does not apply), and the write
+    # verbs need upsert_by_key — the atomic UPDATE-or-INSERT that
+    # add_setting is not (a second add_setting at the same key raises
+    # UNIQUE; found live by the first migrating coordinator).
+    from tools.graph import settings_ops
+    return settings_ops
 
 
 class WriteRefused(Exception):
@@ -45,15 +50,28 @@ def _item_key(mission_id: str, pillar_id: str, item_id: str) -> str:
 
 
 def _load_item(org: str, key: str) -> dict:
-    row = _ops().read_set_key(ITEM_SET_ID, key, org=org or None, peers=[])
-    if row is None:
+    """The newest base row for *key* - symmetric with upsert_by_key.
+
+    Deliberately NOT read_set_key: over historical duplicate rows (the
+    pre-upsert write path could leave a stale twin) its precedence pick
+    is unspecified, and a verb reading the stale twin while the screen
+    renders the fresh one is exactly the bug the first migrating
+    coordinator hit. Newest updated_at wins, everywhere, always.
+    """
+    best = None
+    for m in _ops().read_set(ITEM_SET_ID, org=org or None, peers=[]):
+        if m.key != key:
+            continue
+        if best is None or (m.updated_at or "") >= (best.updated_at or ""):
+            best = m
+    if best is None:
         raise WriteRefused(f"no item {key.split(':', 1)[1]!r} on that pillar")
-    return dict(row)
+    return dict(best.payload)
 
 
 def _store_item(org: str, key: str, payload: dict) -> None:
-    _ops().add_setting(ITEM_SET_ID, SCHEMA_REVISION, key, payload,
-                       org=org or None)
+    _ops().upsert_by_key(ITEM_SET_ID, SCHEMA_REVISION, key, payload,
+                         org=org or None)
 
 
 def upsert_item(org: str, mission_id: str, pillar_id: str, item_id: str,
@@ -139,9 +157,13 @@ def add_chat(org: str, mission_id: str, pillar_id: str,
              *, text: str, by: str) -> list[dict]:
     """Append one message to the pillar's chat log; returns the log."""
     key = f"{mission_id}:{pillar_id}"
-    row = _ops().read_set_key(CHAT_SET_ID, key, org=org or None, peers=[])
-    entries = list((row or {}).get("entries") or [])
+    row = None
+    for m in _ops().read_set(CHAT_SET_ID, org=org or None, peers=[]):
+        if m.key == key and (row is None
+                             or (m.updated_at or "") >= (row.updated_at or "")):
+            row = m
+    entries = list((dict(row.payload) if row else {}).get("entries") or [])
     entries.append({"by": by, "at": now_iso(), "text": text})
-    _ops().add_setting(CHAT_SET_ID, SCHEMA_REVISION, key,
-                       {"entries": entries}, org=org or None)
+    _ops().upsert_by_key(CHAT_SET_ID, SCHEMA_REVISION, key,
+                         {"entries": entries}, org=org or None)
     return entries

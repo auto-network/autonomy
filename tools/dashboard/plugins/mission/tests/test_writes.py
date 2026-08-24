@@ -14,14 +14,25 @@ from tools.graph.schemas.registry import validate_payload
 MID = "m-uuid"
 
 
+class _Member:
+    def __init__(self, key, payload, updated_at="2026-08-24T00:00:00Z"):
+        self.key = key
+        self.payload = payload
+        self.updated_at = updated_at
+
+
 class FakeOps:
     def __init__(self):
         self.rows: dict[tuple[str, str], dict] = {}
+        self.stale_twins: list[_Member] = []
 
-    def read_set_key(self, set_id, key, *, org, peers=None):
-        return self.rows.get((set_id, key))
+    def read_set(self, set_id, *, org, peers=None):
+        out = [_Member(k, p) for (sid, k), p in self.rows.items()
+               if sid == set_id]
+        return out + [m for m in self.stale_twins]
 
-    def add_setting(self, set_id, revision, key, payload, *, org, state="raw"):
+    def upsert_by_key(self, set_id, revision, key, payload, *, org,
+                      state="raw"):
         validate_payload(set_id, revision, payload)   # the real gate
         self.rows[(set_id, key)] = dict(payload)
         return key
@@ -36,6 +47,19 @@ def store(monkeypatch):
 
 def _seed(store, item_id, payload):
     store.rows[(S.ITEM_SET_ID, f"{MID}:relay:{item_id}")] = payload
+
+
+def test_verbs_resolve_newest_over_stale_duplicates(store):
+    """The live bug: a stale twin row (pre-upsert write path) must never
+    outvote the fresh row in a verb's kind check."""
+    _seed(store, "q", {"kind": "question", "state": "open", "title": "t"})
+    store.stale_twins.append(_Member(
+        f"{MID}:relay:q",
+        {"kind": "decision", "title": "stale twin", "chosen": "x"},
+        updated_at="2026-08-20T00:00:00Z"))
+    item = writes.answer_question("o", MID, "relay", "q",
+                                  text="resolved", by="auto-x")
+    assert item["state"] == "answered"
 
 
 class TestCheckpoints:
@@ -128,6 +152,11 @@ class TestChatAndUpsert:
     def test_upsert_is_schema_gated(self, store):
         writes.upsert_item("o", MID, "relay", "sc",
                            {"kind": "scope", "title": "Charter"})
+        # re-PUT of the same key is an update, never a collision
+        writes.upsert_item("o", MID, "relay", "sc",
+                           {"kind": "scope", "title": "Charter v2"})
+        assert store.rows[(S.ITEM_SET_ID, f"{MID}:relay:sc")]["title"] \
+            == "Charter v2"
         with pytest.raises(Exception):
             writes.upsert_item("o", MID, "relay", "bad",
                                {"kind": "status", "state": "confirmed",
