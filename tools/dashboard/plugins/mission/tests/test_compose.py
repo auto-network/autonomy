@@ -174,3 +174,23 @@ def test_render_stages_unknown_mission_raises(monkeypatch, rows):
                         lambda *a, **k: 0)
     with pytest.raises(KeyError):
         list(compose.render_stages("autonomy", "nope"))
+
+
+def test_chat_bake_is_bounded_per_pillar(monkeypatch, rows):
+    """A chatty pillar bakes only the newest CHAT_BAKE_LIMIT messages;
+    the settings rows are untouched and other pillars unaffected."""
+    n = compose.CHAT_BAKE_LIMIT + 20
+    rows[compose.CHAT_SET_ID] = [
+        Member(f"{MID}:relay:m{i:04d}",
+               {"by": "auto-relay", "at": f"2026-08-01T00:{i//60:02d}:"
+                f"{i%60:02d}Z", "text": f"msg {i}"}, "c", "u")
+        for i in range(n)
+    ] + [Member(f"{MID}:crypto:solo",
+                {"by": "auto-c", "at": "2026-08-02T00:00:00Z",
+                 "text": "only one"}, "c", "u")]
+    _members(monkeypatch, rows)
+    chat = compose.load_chat("autonomy", MID)
+    assert len(chat["relay"]) == compose.CHAT_BAKE_LIMIT
+    assert chat["relay"][0]["text"] == "msg 20"      # oldest 20 dropped
+    assert chat["relay"][-1]["text"] == f"msg {n - 1}"
+    assert len(chat["crypto"]) == 1
