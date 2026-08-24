@@ -47,9 +47,16 @@ window.missionPage = function () {
                   color: idp.color || "#64748b",
                   initial: idp.initial || (idp.name || "?")[0]};
         }).filter((o) => o.slug && o.slug !== "personal");
-        if (!this.org && this.orgs.length) this.org = this.orgs[0].slug;
       } catch (e) {}
       await this.refresh();
+      // Default org: where the missions actually are — never a blind
+      // first-of-list. A stored choice with zero missions is stale
+      // (org renamed, missions moved): fall back the same way.
+      const orgsWithMissions = this.missions.map((m) => m.org);
+      if (!this.org || !orgsWithMissions.includes(this.org)) {
+        this.org = orgsWithMissions[0] || this.org
+          || (this.orgs[0] || {}).slug || "";
+      }
       const m = window.location.pathname.match(/^\/mission\/([0-9a-f-]{8,})/);
       if (m) this.current = m[1];
       window.addEventListener("popstate", () => {
@@ -104,9 +111,12 @@ window.missionPage = function () {
     },
 
     legend() {
+      // Same universe as visible(): org filter + window — the counts
+      // and the list must never disagree.
       const cutoff = Date.now() / 1000 - this.win.secs;
       const inWin = this.missions.filter(
-        (m) => (m.activity && m.activity.last_at || 0) >= cutoff);
+        (m) => (!this.org || !m.org || m.org === this.org)
+               && (m.activity && m.activity.last_at || 0) >= cutoff);
       const n = (st) => inWin.filter(
         (m) => (m.status || "active") === st).length;
       return [
