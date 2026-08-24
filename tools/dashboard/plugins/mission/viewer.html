@@ -964,6 +964,14 @@
         en2.appendChild(tx2);
         body.insertBefore(en2, comp);
         ta.value = "";
+        try {
+          fetch("/api/mission/item/" + MID + "/" + q.surface_id + "/"
+                + q.item_id + "/reply", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({text: t2})
+          }).catch(function () {});
+        } catch (e) {}
       });
       comp.appendChild(send);
       comp.appendChild(el("div","qhint",
@@ -2460,6 +2468,19 @@
       (CHAT[cur] = CHAT[cur] || []).push(
         {by:"you", at:new Date().toISOString(), text:t2});
       ta.value = ""; renderLog();
+      try {
+        var pid = cur;
+        fetch("/api/mission/chat/" + MID + "/" + pid, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({text: t2})
+        }).then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (out) {
+            if (out && out.entries && pid === cur){
+              CHAT[pid] = out.entries; renderLog();
+            }
+          }).catch(function () {});
+      } catch (e) {}
     });
     comp.appendChild(send);
     comp.appendChild(el("div","qhint",
