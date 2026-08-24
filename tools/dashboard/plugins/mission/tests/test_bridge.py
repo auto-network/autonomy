@@ -19,7 +19,7 @@ PILLARS = [
 def _stub(monkeypatch, lists, shows, comments=None):
     calls = []
 
-    def fake(args):
+    def fake(args, org=None):
         calls.append(args)
         if args[0] == "list":
             return lists
@@ -87,5 +87,18 @@ def test_no_labels_or_no_beads_short_circuits(monkeypatch):
 
 
 def test_bd_failure_is_contained(monkeypatch):
-    monkeypatch.setattr(bridge, "_bd", lambda args: None)
+    monkeypatch.setattr(bridge, "_bd", lambda args, org=None: None)
     assert bridge.load_beads(MID, PILLARS) == {}
+
+
+def test_beads_env_routes_to_org_tracker(monkeypatch, tmp_path):
+    """A mission org with a provisioned tracker dir gets BEADS_DIR
+    pointed at it; anyone else inherits the ambient tracker."""
+    monkeypatch.setattr(bridge, "DATA_ROOT", tmp_path)
+    org_dir = tmp_path / ".beads" / "orgs" / "anchore"
+    org_dir.mkdir(parents=True)
+    (org_dir / "metadata.json").write_text("{}")
+    env = bridge._beads_env("anchore")
+    assert env is not None and env["BEADS_DIR"] == str(org_dir)
+    assert bridge._beads_env("autonomy") is None
+    assert bridge._beads_env(None) is None
