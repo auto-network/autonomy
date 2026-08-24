@@ -32,19 +32,17 @@ _TIMEOUT_S = 30
 _DESC_LIMIT = 1400
 
 
-def _beads_env(org: str | None) -> dict | None:
+def _beads_env(org: str | None) -> dict:
     """Route bd to the mission org's tracker (autonomy@74585ba).
 
     An org with a provisioned tracker dir gets BEADS_DIR (and that
     tracker's SQL credentials) pointed at it — the same config the
-    launcher mounts as that org's /data/.beads — so an anchore
-    mission's ``mission:<uuid>`` beads resolve from the anchore
-    database. No org dir → inherit the ambient (shared) tracker.
+    launcher mounts as that org's /data/.beads. Everyone else gets the
+    ambient tracker PLUS the shared tracker's credentials: the dolt
+    server requires per-org SQL auth for every caller, and the
+    dashboard's own process env carries none.
     """
-    d = org_beads_dir(org)
-    if d is not None:
-        return {**os.environ, **beads_client_env(d)}
-    return None
+    return {**os.environ, **beads_client_env(org_beads_dir(org))}
 
 
 def _bd(args: list[str], org: str | None = None) -> list | dict | None:
