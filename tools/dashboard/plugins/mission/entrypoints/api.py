@@ -63,6 +63,40 @@ async def list_missions(request: Request) -> JSONResponse:
     return JSONResponse({"missions": rows})
 
 
+async def list_pillars(request: Request) -> JSONResponse:
+    """The mission's pillars in declared order: ``{pillars: [...]}``."""
+    org = organization_scope_from_request(request)
+    return JSONResponse({"pillars": compose.load_pillars(
+        org, request.path_params["mission_id"])})
+
+
+async def list_items(request: Request) -> JSONResponse:
+    """Viewer-shaped items; ``?pillar=<id>`` narrows to one surface."""
+    org = organization_scope_from_request(request)
+    items = compose.load_items(org, request.path_params["mission_id"])
+    pillar = request.query_params.get("pillar")
+    if pillar:
+        items = [i for i in items if i["surface_id"] == pillar]
+    return JSONResponse({"items": items})
+
+
+async def list_tasks(request: Request) -> JSONResponse:
+    """The bead-bridge payload: ``{tasks: {pillar_id: [...]}}``."""
+    org = organization_scope_from_request(request)
+    mission_id = request.path_params["mission_id"]
+    pillars = compose.load_pillars(org, mission_id)
+    return JSONResponse(
+        {"tasks": compose.load_beads(org, mission_id, pillars)})
+
+
+async def get_chat(request: Request) -> JSONResponse:
+    """One pillar's chat log: ``{entries: [...]}``."""
+    org = organization_scope_from_request(request)
+    pp = request.path_params
+    logs = compose.load_chat(org, pp["mission_id"])
+    return JSONResponse({"entries": logs.get(pp["pillar_id"], [])})
+
+
 async def mission_screen(request: Request) -> HTMLResponse | JSONResponse:
     """The complete mission document. ``?pillar=<id>`` opens focused."""
     org = organization_scope_from_request(request)
@@ -129,12 +163,32 @@ async def post_chat(request: Request) -> JSONResponse:
     text = await _text_body(request)
     if text is None:
         return JSONResponse({"error": "text required"}, status_code=400)
+    by = _identity(request)
     try:
         entries = writes.add_chat(org, pp["mission_id"], pp["pillar_id"],
-                                  text=text, by=_identity(request))
+                                  text=text, by=by)
     except Exception as exc:                      # noqa: BLE001
         return _refused(exc)
-    return JSONResponse({"ok": True, "entries": entries})
+    # Storage precedes delivery, and delivery is best-effort: the pillar's
+    # coordinator hears about the message over CrossTalk when one is
+    # declared and live; a failed relay never loses the message.
+    relayed = False
+    try:
+        pillars = compose.load_pillars(org, pp["mission_id"])
+        me = next((x for x in pillars
+                   if x["pillar_id"] == pp["pillar_id"]), None)
+        target = (me or {}).get("coordinator_session")
+        if target and target != by:
+            from tools.dashboard.crosstalk_delivery import deliver_from_chat
+            note = (f"[mission chat \u00b7 {me.get('name') or pp['pillar_id']}] "
+                    f"{text}\n"
+                    f"Reply with: graph mission chat {pp['mission_id']} "
+                    f"{pp['pillar_id']} \"...\"")
+            out = await deliver_from_chat(by, target, note)
+            relayed = bool(out.get("delivered"))
+    except Exception:                             # noqa: BLE001
+        pass
+    return JSONResponse({"ok": True, "entries": entries, "relayed": relayed})
 
 
 _ITEM = "/api/mission/item/{mission_id}/{pillar_id}/{item_id}"
@@ -142,6 +196,11 @@ _ITEM = "/api/mission/item/{mission_id}/{pillar_id}/{item_id}"
 routes: list = [
     Route("/api/mission/missions", list_missions, methods=["GET"]),
     Route("/api/mission/screen/{mission_id}", mission_screen, methods=["GET"]),
+    Route("/api/mission/pillars/{mission_id}", list_pillars, methods=["GET"]),
+    Route("/api/mission/items/{mission_id}", list_items, methods=["GET"]),
+    Route("/api/mission/tasks/{mission_id}", list_tasks, methods=["GET"]),
+    Route("/api/mission/chat/{mission_id}/{pillar_id}", get_chat,
+          methods=["GET"]),
     Route(_ITEM, put_item, methods=["PUT"]),
     Route(_ITEM + "/state", post_state, methods=["POST"]),
     Route(_ITEM + "/work", _entry_route(writes.add_work), methods=["POST"]),
