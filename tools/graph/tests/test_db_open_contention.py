@@ -79,6 +79,43 @@ def test_rw_open_retries_until_short_write_lock_releases(
         holder.close()
 
 
+def test_schema_upgrade_precedes_fleet_sync_activation(tmp_path, monkeypatch):
+    """An old synced store upgrades before its write hook is installed."""
+    path = tmp_path / "personal.db"
+    with GraphDB(path, attach_fleet_sync=False) as setup:
+        setup.conn.execute("PRAGMA user_version = 0")
+        setup.conn.commit()
+
+    observed_versions = []
+
+    class Hook:
+        def before_statement(self, _sql):
+            return False
+
+        def before_commit(self):
+            return None
+
+        def after_transaction(self):
+            return None
+
+    def attach(connection):
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        observed_versions.append(version)
+        connection.install_fleet_sync_hook(Hook())
+        return object()
+
+    monkeypatch.setattr(
+        "tools.network.fleet_sync_sim.catalog.attach_active_production_catalog",
+        attach,
+    )
+    with GraphDB(path) as opened:
+        assert opened.conn.execute("PRAGMA user_version").fetchone()[0] == (
+            db_module._SCHEMA_USER_VERSION
+        )
+
+    assert observed_versions == [db_module._SCHEMA_USER_VERSION]
+
+
 def test_writable_lock_exhaustion_does_not_silently_fallback(
         tmp_path, monkeypatch):
     path = tmp_path / "personal.db"
