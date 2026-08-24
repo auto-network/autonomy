@@ -104,12 +104,9 @@ def load_chat(org: str, mission_id: str) -> dict[str, list]:
 
 
 def load_beads(org: str, mission_id: str, pillars: list[dict]) -> dict:
-    """Task payload per pillar — the bd bridge (auto-m1knq).
-
-    Scaffold stub: an empty map renders the Tasks tabs dormant, exactly
-    as the viewer behaves for a pillar with no beads.
-    """
-    return {}
+    """Task payload per pillar — the bd bridge (bridge.py)."""
+    from tools.dashboard.plugins.mission import bridge
+    return bridge.load_beads(mission_id, pillars)
 
 
 def render_screen(org: str, mission_id: str,

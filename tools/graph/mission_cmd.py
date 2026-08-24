@@ -300,7 +300,7 @@ def cmd_mission_coverage(args):
         except Exception:
             full = row
         if (full.get("design") or "").strip() or \
-           (full.get("acceptance") or "").strip():
+           (full.get("acceptance_criteria") or "").strip():
             return "specified"
         return "defined"
 
