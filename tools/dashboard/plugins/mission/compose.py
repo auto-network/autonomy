@@ -139,6 +139,7 @@ def activity_summary(org: str, mission_id: str,
             return None
 
     blockers = in_progress = open_questions = 0
+    previews = {"blockers": [], "in_progress": [], "open": []}
     for it in load_items(org, mission_id):
         for v in (it.get("happened_at"), it.get("updated_at")):
             e = _epoch(v)
@@ -156,12 +157,17 @@ def activity_summary(org: str, mission_id: str,
         if e:
             stamps.append(e)
         kind, state = it.get("kind"), it.get("state")
+        row = {"t": it.get("title") or "", "p": it.get("surface_id") or ""}
         if kind == "question" and state == "open":
             open_questions += 1
             if it.get("blocking"):
                 blockers += 1
+                previews["blockers"].append(row)
+            else:
+                previews["open"].append(row)
         if kind == "checkpoint" and state == "in_progress":
             in_progress += 1
+            previews["in_progress"].append(row)
 
     days = [0] * 28
     for e in stamps:
@@ -171,6 +177,9 @@ def activity_summary(org: str, mission_id: str,
     return {
         "last_at": max(stamps) if stamps else None,
         "days": days,
+        # capped raw stamps let the homepage re-bucket to any window
+        "events": sorted(stamps)[-400:],
+        "previews": {k: v[:6] for k, v in previews.items()},
         "blockers": blockers,
         "in_progress": in_progress,
         "open_questions": open_questions,

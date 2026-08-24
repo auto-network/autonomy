@@ -142,6 +142,59 @@ criterion is **demonstrable end-to-end user value** — not a test, not
 an integration. Derive criteria from the charter and check them
 against it.
 
+## Populating a mission, start to finish
+
+The order matters: each step makes the next verifiable.
+
+1. **Registry row.** `graph set add mission.registry#1 --key <uuid>
+   --org <org> --inline '{"name":"...","coordinator_session":"..."}'`.
+   Use a fresh uuid; it becomes the bead label.
+2. **Pillars.** One row each: `graph set add mission.pillar#1 --key
+   <uuid>:<slug> --inline '{"name":"...","color":"#...","order":N,
+   "coordinator_session":"auto-...","bead_labels":["pillar:..."]}'`.
+   `coordinator_session` is REQUIRED for a working pillar — chat
+   relays to it. `bead_labels` lists the organic bd labels this pillar
+   owns; never mass-retag beads to match the pillar slug.
+3. **Charters.** One `scope` item per pillar: objective, completion
+   condition, what the pillar does NOT own. Criteria derive from the
+   charter — write it first, check them against it.
+4. **Beads.** Label every bead in the effort `mission:<uuid>` plus
+   exactly one owned pillar label — closed beads included (completed
+   work is delivery evidence). Where a spec is genuinely complete,
+   put it in bd's real fields (`--design`, `--acceptance`) — that is
+   what makes the ladder derive "specified", and it is specification
+   work, not bookkeeping.
+5. **Criteria from coverage.** Run `graph mission coverage <uuid>`;
+   for each uncovered cluster, write the checkpoint whose
+   demonstration those beads enable, linking them with
+   `--ref bead:<id>`. States honestly: `pending` until someone works
+   it, `in_progress` while they do (append `work` entries),
+   `confirmed` ONLY after the demonstration was witnessed on the real
+   system — transition with `--turn` so provenance stamps, and put
+   the proof in evidence. Migrated claims of completion without
+   witnessed provenance import as `in_progress`, never `confirmed`.
+6. **News.** Post a `status` item per completed result as it happens
+   (a new item id each time — it is a stream). This is what the
+   homepage's activity chart and recency draw from: a silent mission
+   looks dead because it is being reported as dead.
+7. **Questions and decisions as they arise** — the verbs, not batch
+   imports. Mark `--blocking` the moment something prevents progress;
+   clear it (answer it) the moment it lifts.
+
+### Accuracy checklist — run before calling a mission populated
+
+- `graph mission coverage <uuid>` → 0 uncovered, and no criteria
+  referencing beads that are not on the mission.
+- No `confirmed` criterion without `confirmed_by` + evidence.
+- Every pillar: a charter, a `coordinator_session`, at least one
+  status post.
+- Ladder honesty: beads at `defined` are genuinely just ideas; if a
+  spec exists in prose somewhere, move it into bd's fields.
+- Blockers real: every `blocking` question names a decision that
+  actually prevents work; nothing blocked is merely sequenced.
+- Attribution: your writes carry your persona (automatic); items you
+  author for others carry `--asked-by` / `owner` honestly.
+
 ## Playbook: the mission coordinator
 
 Owns the mission record and the pillar roster (`mission.registry`,
@@ -174,6 +227,22 @@ Decisions: newest first.
   stdin (`graph mission chat <m> <p> -` with a heredoc) rather than a
   long inline argument. Every coordinator hits this on their first
   chat reply; the operator is reading on a phone.
+
+## Joining as a session — the adoption path
+
+Every session working inside an effort tracked by a mission should
+operate through it:
+
+1. Find your pillar: `graph mission list`, then
+   `graph mission status <mission> <pillar>` — that IS your standing
+   brief: the delivery ladder, your tasks, and what is blocked.
+2. Label the beads you cut (`mission:<uuid>` + your pillar's bd
+   label) so they appear as tasks automatically.
+3. Bookkeep as you work: `work` entries while a criterion moves,
+   `progress` while you chase an answer, `reply`≠`answer`, news posts
+   for completed results, `bd comment` for task clarifications.
+4. The operator reads the mission, not your transcript. If it is not
+   in the mission, it did not happen.
 
 ## Identity and attribution
 

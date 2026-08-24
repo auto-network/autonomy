@@ -84,6 +84,11 @@ class MissionV1(SettingSchema):
         default="",
         description="Session receiving mission-level chat and questions; "
                     "routing data, not a permission")
+    status_changed_at: str = field(
+        default="",
+        description="ISO-8601 moment of the last lifecycle transition; "
+                    "stamped by the status route, shown beside last "
+                    "activity on the homepage")
 
 
 @publication_band(min="raw", max="curated")

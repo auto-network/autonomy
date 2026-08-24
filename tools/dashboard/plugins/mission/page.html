@@ -1,44 +1,83 @@
 <div x-data="missionPage()" data-testid="mission-fragment-root"
      class="h-full flex flex-col">
   <style>
-    /* The mission list speaks the mission screens' design language:
-       same palette, type scale, icon vocabulary, flat controls. */
+    /* Ported from Design Studio ff8b7ff9 — the mission screens' design
+       language. The org selector belongs to the shell nav bar. */
     .msn-list{--bg:#0c0f14;--card:#12151d;--card2:#161a24;--line:#232837;
       --line2:#39415a;--ink:#e8ebf2;--ink2:#aab3c4;--ink3:#8391a8;
       --accent:#8b85ff;--warn:#fab219;--crit:#f4597b;--good:#34d399;
       background:var(--bg);padding:14px 14px 40px;flex:1;overflow-y:auto}
+    .msn-head{display:flex;align-items:baseline;gap:12px;padding:0 2px 4px}
+    .msn-head .msn-leg{flex:1;margin:0}
+    .msn-leg{display:flex;gap:12px;align-items:baseline;flex-wrap:wrap}
+    .msn-leg .fl{background:none;border:0;padding:2px 0 4px;cursor:pointer;
+      font:inherit;font-size:.72rem;color:var(--ink3);display:inline-flex;
+      gap:5px;align-items:baseline}
+    .msn-leg .fl b{font-size:.82rem;font-weight:700}
+    .msn-leg .fl .w2{text-transform:uppercase;letter-spacing:.04em;
+      font-size:.64rem}
+    .msn-leg .fl.on{color:var(--ink);box-shadow:inset 0 -2px 0 var(--line2)}
+    .msn-leg .fl.dim{opacity:.4}
+    .msn-win{display:inline-flex;gap:11px;align-items:baseline;flex:none}
+    .msn-win button{background:none;border:0;padding:2px 0 3px;cursor:pointer;
+      font:inherit;font-size:.68rem;color:var(--ink3)}
+    .msn-win button.on{color:var(--ink);box-shadow:inset 0 -2px 0 var(--line2)}
     .msn-row{background:var(--card);border:1px solid var(--line);
-      border-radius:10px;padding:12px 14px 11px;margin:0 0 10px;
-      cursor:pointer}
-    .msn-row:active{background:var(--card2)}
+      border-radius:10px;padding:12px 14px 11px;margin:0 0 10px}
     .msn-row.done{opacity:.55}
     .msn-name{color:var(--ink);font-weight:650;line-height:1.25;
-      white-space:nowrap;overflow:hidden}
+      white-space:nowrap;overflow:hidden;cursor:pointer}
+    .msn-name:active{opacity:.6}
     .msn-grid{display:flex;gap:2px;align-items:flex-end;height:13px;
       margin:8px 0 7px}
     .msn-grid i{flex:1;border-radius:1px;background:var(--accent)}
     .msn-grid i.z{height:2px!important;background:var(--line);opacity:.7}
-    .msn-meta{display:flex;align-items:baseline;gap:11px;
-      font-size:.7rem;color:var(--ink3);white-space:nowrap;min-width:0}
+    .msn-meta{display:flex;align-items:baseline;gap:15px;font-size:.7rem;
+      color:var(--ink3);white-space:nowrap;min-width:0}
     .msn-meta .ago{overflow:hidden;text-overflow:ellipsis;min-width:0}
     .msn-meta b{font-weight:700;font-size:.76rem}
-    .msn-ct{flex:none;display:inline-flex;gap:4px;align-items:baseline}
+    .msn-ct{flex:none;display:inline-flex;gap:4px;align-items:baseline;
+      position:relative;padding:2px 0;cursor:pointer}
     .msn-ct .mk{font-weight:700}
-    .msn-ct.crit .mk,.msn-ct.crit b{color:var(--crit)}
-    .msn-ct.warn .mk,.msn-ct.warn b{color:var(--warn)}
-    .msn-ct.dim .mk,.msn-ct.dim b{color:var(--ink2)}
+    .msn-ct.crit .mk,.msn-ct.crit>b{color:var(--crit)}
+    .msn-ct.warn .mk,.msn-ct.warn>b{color:var(--warn)}
+    .msn-ct.dim .mk,.msn-ct.dim>b{color:var(--ink2)}
     .msn-ct svg{width:.95em;height:.95em;vertical-align:-0.1em}
-    .msn-life{flex:none;margin-left:auto;display:inline-flex;gap:12px;
+    /* the bubble: one line of meaning + the jump link; opens DOWNWARD
+       so it can never clip the top of the screen */
+    .msn-pop{position:absolute;left:-8px;top:calc(100% + 7px);z-index:12;
+      background:var(--card2);border:1px solid var(--line2);border-radius:10px;
+      box-shadow:0 12px 32px rgba(0,0,0,.55);padding:9px 12px;min-width:190px;
+      max-width:240px;white-space:normal;cursor:default}
+    .msn-pop .pt{font-size:.72rem;color:var(--ink2);line-height:1.4}
+    .msn-pop.crit .pt b{color:var(--crit)}
+    .msn-pop.warn .pt b{color:var(--warn)}
+    .msn-pop.dim .pt b{color:var(--ink)}
+    .msn-pop .go{display:inline-block;background:none;border:0;padding:5px 0 0;
+      font:inherit;font-size:.7rem;color:var(--accent);cursor:pointer}
+    .msn-life{flex:none;margin-left:auto;position:relative}
+    .msn-life .cur{background:none;border:0;padding:2px 0 3px;cursor:pointer;
+      font:inherit;font-size:.66rem;text-transform:uppercase;
+      letter-spacing:.05em;color:var(--ink3);display:inline-flex;gap:4px;
       align-items:baseline}
-    .msn-life button{background:none;border:0;padding:2px 0 3px;
-      cursor:pointer;font:inherit;font-size:.66rem;text-transform:uppercase;
-      letter-spacing:.05em;color:var(--ink3)}
-    .msn-life button.on{color:var(--ink);
-      box-shadow:inset 0 -2px 0 var(--line2)}
-    .msn-life:not(.open) button:not(.on){display:none}
-    .msn-life.open button{display:inline}
+    .msn-life .cur .caret{font-size:.8em}
+    .msn-lifemenu{position:absolute;right:0;top:calc(100% + 6px);z-index:9;
+      background:var(--card2);border:1px solid var(--line2);border-radius:9px;
+      overflow:hidden;box-shadow:0 10px 26px rgba(0,0,0,.5);min-width:118px}
+    .msn-lifemenu button{display:block;width:100%;background:none;border:0;
+      border-top:1px solid var(--line);padding:10px 14px;font:inherit;
+      font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;
+      color:var(--ink3);cursor:pointer;text-align:left}
+    .msn-lifemenu button:first-child{border-top:0}
+    .msn-lifemenu button.on{color:var(--ink)}
     .msn-empty{color:var(--ink3);font-size:.85rem;padding:18px 4px}
     .msn-err{color:var(--crit);font-size:.8rem;padding:12px 4px}
+    @media (max-width:400px){
+      .msn-leg{gap:0}
+      .msn-leg .fl{gap:3px;flex:1 1 0;min-width:0;justify-content:flex-start}
+      .msn-leg .fl b{font-size:.76rem}
+      .msn-leg .fl .w2{font-size:.6rem;letter-spacing:.02em}
+    }
   </style>
 
   <!-- the mission screen, embedded — never a page navigation -->
@@ -61,18 +100,37 @@
       <template x-if="loaded && error">
         <p class="msn-err" x-text="'Could not load missions: ' + error"></p>
       </template>
-      <template x-if="loaded && !error && !missions.length">
-        <p class="msn-empty">No missions yet — the first
-          <code>mission.registry</code> row becomes a screen the moment it
-          exists.</p>
+
+      <div class="msn-head">
+        <div class="msn-leg">
+          <template x-for="d in legend()" :key="d.word">
+            <button class="fl"
+                    :class="lifeFilter[d.word] ? 'on'
+                            : (anyFilter() ? 'dim' : '')"
+                    @click="lifeFilter[d.word] = !lifeFilter[d.word]">
+              <b :style="'color:' + d.color" x-text="d.n"></b>
+              <span class="w2" x-text="d.word"></span>
+            </button>
+          </template>
+        </div>
+        <span class="msn-win">
+          <template x-for="w in windows" :key="w.key">
+            <button :class="win.key === w.key ? 'on' : ''"
+                    @click="win = w" x-text="w.key"></button>
+          </template>
+        </span>
+      </div>
+
+      <template x-if="loaded && !error && !visible().length">
+        <p class="msn-empty">Nothing in this window.</p>
       </template>
 
-      <template x-for="m in missions" :key="m.mission_id">
-        <div class="msn-row" :class="m.status === 'complete' ? 'done' : ''"
-             @click="open(m)">
-          <div class="msn-name" x-init="fitName($el)" x-text="m.name"></div>
+      <template x-for="m in visible()" :key="m.mission_id">
+        <div class="msn-row" :class="m.status === 'complete' ? 'done' : ''">
+          <div class="msn-name" x-init="fitName($el)" x-text="m.name"
+               @click="open(m)"></div>
 
-          <div class="msn-grid" aria-label="activity, last 28 days">
+          <div class="msn-grid" aria-label="activity in the window">
             <template x-for="(b, i) in bars(m)" :key="i">
               <i :class="b.on ? '' : 'z'"
                  :style="'height:' + b.h + '%;opacity:' + b.op"></i>
@@ -80,17 +138,32 @@
           </div>
 
           <div class="msn-meta">
-            <span class="ago" x-text="ago(m)"></span>
+            <span class="ago" x-text="statusLine(m)"></span>
             <template x-for="c in counts(m)" :key="c.key">
-              <span class="msn-ct" :class="c.cls">
+              <span class="msn-ct" :class="c.cls"
+                    @click.stop="togglePop(m, c)">
                 <span class="mk" x-html="c.mark"></span><b x-text="c.n"></b>
+                <template x-if="popFor === m.mission_id + ':' + c.key">
+                  <div class="msn-pop" :class="c.cls" @click.stop>
+                    <div class="pt" x-html="c.desc"></div>
+                    <button class="go" @click="openAt(m, c)">view &#8594;</button>
+                  </div>
+                </template>
               </span>
             </template>
-            <span class="msn-life" :class="lifeOpen === m.mission_id ? 'open' : ''"
-                  @click.stop>
-              <template x-for="st in ['active','paused','complete']" :key="st">
-                <button :class="m.status === st ? 'on' : ''"
-                        @click="lifeTap(m, st)" x-text="st"></button>
+            <span class="msn-life" @click.stop>
+              <button class="cur" @click="lifeTapCur(m)">
+                <span x-text="m.status || 'active'"></span>
+                <span class="caret">&#9662;</span>
+              </button>
+              <template x-if="lifeOpen === m.mission_id">
+                <div class="msn-lifemenu">
+                  <template x-for="st in ['active','paused','complete']"
+                            :key="st">
+                    <button :class="m.status === st ? 'on' : ''"
+                            @click="lifePick(m, st)" x-text="st"></button>
+                  </template>
+                </div>
               </template>
             </span>
           </div>
