@@ -16,6 +16,7 @@
   var STORAGE_KEYS = {
     capsulePosition: 'autonomy.voice.capsulePosition',
     discoverabilitySeen: 'autonomy.voice.discoverabilitySeen',
+    resumeIntent: 'autonomy.voice.resumeIntent',
   };
 
   function _getLocalStorage() {
@@ -25,6 +26,50 @@
       }
     } catch (_err) {}
     return null;
+  }
+
+  // Dictation is deliberately scoped to one browser tab.  Persist enough to
+  // reconnect after a PWA reload, but never microphone permission, audio, or
+  // transcript text; the voice server restores the latter with buffer_state.
+  function _getSessionStorage() {
+    try {
+      if (typeof window !== 'undefined' && window.sessionStorage) {
+        return window.sessionStorage;
+      }
+    } catch (_err) {}
+    return null;
+  }
+
+  function _readResumeIntent() {
+    var storage = _getSessionStorage();
+    if (!storage) return null;
+    try {
+      var raw = storage.getItem(STORAGE_KEYS.resumeIntent);
+      if (!raw) return null;
+      var value = JSON.parse(raw);
+      if (!value || typeof value.sessionId !== 'string' || !value.sessionId ||
+          (value.micMode !== 'listening' && value.micMode !== 'muted')) {
+        return null;
+      }
+      return { sessionId: value.sessionId, micMode: value.micMode };
+    } catch (_err) {
+      return null;
+    }
+  }
+
+  function _writeResumeIntent(sessionId, micMode) {
+    var storage = _getSessionStorage();
+    if (!storage) return;
+    try {
+      if (!sessionId || (micMode !== 'listening' && micMode !== 'muted')) {
+        storage.removeItem(STORAGE_KEYS.resumeIntent);
+        return;
+      }
+      storage.setItem(STORAGE_KEYS.resumeIntent, JSON.stringify({
+        sessionId: sessionId,
+        micMode: micMode,
+      }));
+    } catch (_err) {}
   }
 
   function _readBool(key, fallback) {
@@ -309,9 +354,10 @@
   }
 
   function _buildStore() {
+    var resumeIntent = _readResumeIntent();
     return {
-      boundSessionId: '',
-      micMode: 'idle',
+      boundSessionId: resumeIntent ? resumeIntent.sessionId : '',
+      micMode: resumeIntent ? resumeIntent.micMode : 'idle',
       // Voice-socket health, driven by voice-capture's reconnect loop:
       //   'ok'            — connected (or not yet needed)
       //   'reconnecting'  — dropped, auto-retrying with backoff (mic shows red+spin)
@@ -398,6 +444,7 @@
         this.pendingRebindTarget = '';
         this.awayEventSessionId = '';
         this.micMode = this.boundSessionId ? 'listening' : 'idle';
+        _writeResumeIntent(this.boundSessionId, this.micMode);
       },
 
       confirmRebind() {
@@ -416,10 +463,12 @@
         if (!this.boundSessionId) return false;
         if (this.micMode === 'listening' || this.micMode === 'vad_paused') {
           this.micMode = 'muted';
+          _writeResumeIntent(this.boundSessionId, this.micMode);
           return true;
         }
         if (this.micMode === 'muted') {
           this.micMode = 'listening';
+          _writeResumeIntent(this.boundSessionId, this.micMode);
           return true;
         }
         return false;
@@ -431,6 +480,9 @@
           return false;
         }
         this.micMode = mode;
+        // A push-to-talk pause is transient.  Reloading resumes ordinary
+        // listening rather than preserving a stale pressed-button state.
+        _writeResumeIntent(this.boundSessionId, mode === 'vad_paused' ? 'listening' : mode);
         return true;
       },
 
@@ -498,6 +550,7 @@
         this.pendingRebindTarget = '';
         this.setBufferText('', { update: 'end' });
         this.micMode = 'idle';
+        _writeResumeIntent('', 'idle');
         this.awayEventSessionId = '';
         this.sheetOpen = false;
         this.sheetMode = 'partial';
@@ -557,7 +610,7 @@
         this.sheetMode = 'partial';
         this.sheetError = '';
         if (this.sheetResumeListeningOnDismiss && this.boundSessionId) {
-          this.micMode = 'listening';
+          this.setMicMode('listening');
         }
         this.sheetResumeListeningOnDismiss = false;
         return true;
@@ -698,7 +751,7 @@
           this.sheetOpen = false;
           this.sheetMode = 'partial';
           if (this.sheetResumeListeningOnDismiss && this.boundSessionId) {
-            this.micMode = 'listening';
+            this.setMicMode('listening');
           }
           this.sheetResumeListeningOnDismiss = false;
           return true;

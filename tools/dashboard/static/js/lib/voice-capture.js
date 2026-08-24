@@ -688,6 +688,12 @@
   function react() {
     var st = store();
     if (!st) return;
+    // A tab may have a saved resume intent before asynchronous feature flags
+    // arrive.  Do not acquire the microphone until the voice client is enabled.
+    if (!st.enabled) {
+      if (s.ws || s.stream) teardown();
+      return;
+    }
     var bound = st.boundSessionId;
     var mode = st.micMode;
     if (bound && mode === 'listening') {
