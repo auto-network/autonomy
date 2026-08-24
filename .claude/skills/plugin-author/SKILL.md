@@ -112,6 +112,32 @@ with absolute paths (`/api/<id>/...`). The substrate wraps them in
 - Storage precedes delivery: persist first, then relay (CrossTalk via
   `tools.dashboard.crosstalk_delivery`) best-effort.
 
+## 3a. Design the surfaces in Design Studio — as the real thing
+
+The correct workflow, proven across the mission viewer's entire
+design arc: **design exactly what the final product will be** — the
+studio file IS the production template, not a mockup (the studio
+prime directive: production UI verbatim, no non-production chrome).
+
+Set up the live loop once, then never "publish" manually again:
+
+1. Put the real template in a working directory and run
+   `graph ui-design "Title" <dir>` — the watcher auto-posts a revision
+   on every file save.
+2. Add a local rebuild loop if the template needs composing (fixture
+   data baked in) so a save → composed preview → revision, hands-free.
+3. The operator reviews the live design page (often by dictation) and
+   you edit files; every save appears on their screen in seconds. No
+   confirm step, no export step, ever.
+4. When the design is called done, the file ships **verbatim** as the
+   plugin's template — the mission viewer moved from studio to
+   production as a copy, byte-for-byte, because it was never anything
+   but the production file.
+
+Fixture data must be schema-shaped from day one: the studio fixtures
+became the migration draft AND the integration-test scenarios. Design
+with the data model you intend to ship.
+
 ## 3b. The page fragment: containment and continuity
 
 - **Documents render inside the shell, never as navigations.** If your
