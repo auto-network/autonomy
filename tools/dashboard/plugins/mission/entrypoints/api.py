@@ -198,9 +198,15 @@ async def mission_screen(request: Request):
         if compose.load_mission(org, mission_id) is None:
             return JSONResponse({"error": "unknown mission"},
                                 status_code=404)
+        # identity encoding is load-bearing: GZipMiddleware skips
+        # responses that already declare one. Under gzip, zlib sits on
+        # the tiny stage markers until the deflate buffer fills — the
+        # browser would receive the whole narration at once, defeating
+        # the streaming interstitial (curl streamed; browsers did not).
         return StreamingResponse(
             compose.render_stages(org, mission_id, focus),
-            media_type="text/html")
+            media_type="text/html",
+            headers={"Content-Encoding": "identity"})
     doc = compose.render_screen(org, mission_id, focus) if org else None
     if doc is None:
         return JSONResponse({"error": "unknown mission"}, status_code=404)

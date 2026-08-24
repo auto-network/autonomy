@@ -228,54 +228,67 @@ window.missionPage = function () {
       el.setAttribute("viewBox", "0 0 " + W + " " + H);
       const cutoff = Date.now() / 1000 - winSecs;
       const N = Math.max(24, Math.min(96, Math.floor(W / 12)));
-      const raw = new Array(N).fill(0);
-      ((m.activity && m.activity.events) || []).forEach((e) => {
-        const idx = Math.floor((e - cutoff) / (winSecs / N));
-        if (idx >= 0 && idx < N) raw[idx]++;
+      // one series per surface, same rendering as inside the mission:
+      // the pillar colors ARE the identity, here as at every depth
+      const perSid = {};
+      ((m.activity && m.activity.events) || []).forEach((ev) => {
+        const t = Array.isArray(ev) ? ev[0] : ev;
+        const sid = Array.isArray(ev) ? (ev[1] || "") : "";
+        const idx = Math.floor((t - cutoff) / (winSecs / N));
+        if (idx < 0 || idx >= N) return;
+        (perSid[sid] = perSid[sid] || new Array(N).fill(0))[idx]++;
       });
       const K = [1, 3, 6, 8, 6, 3, 1], KS = 28, KH = 3;
-      const sm = new Array(N).fill(0);
       let max = 0.001;
-      for (let i = 0; i < N; i++) {
-        let acc = 0;
-        for (let j = 0; j < K.length; j++) {
-          const idx = i + j - KH;
-          if (idx >= 0 && idx < N) acc += raw[idx] * K[j];
+      const series = Object.keys(perSid).map((sid) => {
+        const raw = perSid[sid], sm = new Array(N).fill(0);
+        let total = 0;
+        for (let i = 0; i < N; i++) {
+          let acc = 0;
+          for (let j = 0; j < K.length; j++) {
+            const idx = i + j - KH;
+            if (idx >= 0 && idx < N) acc += raw[idx] * K[j];
+          }
+          sm[i] = acc / KS;
+          total += raw[i];
+          if (sm[i] > max) max = sm[i];
         }
-        sm[i] = acc / KS;
-        if (sm[i] > max) max = sm[i];
-      }
+        return {sid, sm, total};
+      });
+      series.sort((a, b) => a.total - b.total);   // busiest drawn on top
+      const row = this.alloc.find((a) => a.mission_id === m.mission_id);
+      const colorOf = (sid) => {
+        const pl = ((row && row.pillars) || [])
+          .find((p) => p.pillar_id === sid);
+        return (pl && pl.color) || "#8b85ff";
+      };
       const padT = 6, baseY = H - 1;
-      const pts = sm.map((v, i) =>
-        [(i + 0.5) / N * W, baseY - (v / max) * (baseY - padT)]);
       const r = (v) => Math.round(v * 10) / 10;
       const cl = (y) => Math.min(baseY, Math.max(padT, y));
-      let d = "M" + r(pts[0][0]) + "," + r(pts[0][1]);
-      for (let i = 0; i < pts.length - 1; i++) {
-        const p0 = pts[Math.max(0, i - 1)], p1 = pts[i],
-              p2 = pts[i + 1], p3 = pts[Math.min(pts.length - 1, i + 2)];
-        d += "C" + r(p1[0] + (p2[0] - p0[0]) / 6) + ","
-          + r(cl(p1[1] + (p2[1] - p0[1]) / 6)) + " "
-          + r(p2[0] - (p3[0] - p1[0]) / 6) + ","
-          + r(cl(p2[1] - (p3[1] - p1[1]) / 6)) + " "
-          + r(p2[0]) + "," + r(p2[1]);
-      }
       const NS = "http://www.w3.org/2000/svg";
-      const area = document.createElementNS(NS, "path");
-      area.setAttribute("d", d + "L" + r(pts[pts.length - 1][0]) + ","
-        + baseY + "L" + r(pts[0][0]) + "," + baseY + "Z");
-      area.setAttribute("fill", "#8b85ff");
-      area.setAttribute("fill-opacity", "0.08");
-      el.appendChild(area);
-      const line = document.createElementNS(NS, "path");
-      line.setAttribute("d", d);
-      line.setAttribute("fill", "none");
-      line.setAttribute("stroke", "#8b85ff");
-      line.setAttribute("stroke-width", "1.8");
-      line.setAttribute("stroke-opacity", "0.55");
-      line.setAttribute("stroke-linecap", "round");
-      line.setAttribute("stroke-linejoin", "round");
-      el.appendChild(line);
+      series.forEach((sr) => {
+        const pts = sr.sm.map((v, i) =>
+          [(i + 0.5) / N * W, baseY - (v / max) * (baseY - padT)]);
+        let d = "M" + r(pts[0][0]) + "," + r(pts[0][1]);
+        for (let i = 0; i < pts.length - 1; i++) {
+          const p0 = pts[Math.max(0, i - 1)], p1 = pts[i],
+                p2 = pts[i + 1], p3 = pts[Math.min(pts.length - 1, i + 2)];
+          d += "C" + r(p1[0] + (p2[0] - p0[0]) / 6) + ","
+            + r(cl(p1[1] + (p2[1] - p0[1]) / 6)) + " "
+            + r(p2[0] - (p3[0] - p1[0]) / 6) + ","
+            + r(cl(p2[1] - (p3[1] - p1[1]) / 6)) + " "
+            + r(p2[0]) + "," + r(p2[1]);
+        }
+        const line = document.createElementNS(NS, "path");
+        line.setAttribute("d", d);
+        line.setAttribute("fill", "none");
+        line.setAttribute("stroke", colorOf(sr.sid));
+        line.setAttribute("stroke-width", "1.8");
+        line.setAttribute("stroke-opacity", "0.75");
+        line.setAttribute("stroke-linecap", "round");
+        line.setAttribute("stroke-linejoin", "round");
+        el.appendChild(line);
+      });
     },
 
     pillarsOf(m) {
