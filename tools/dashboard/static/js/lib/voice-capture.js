@@ -424,7 +424,7 @@
     return sendControl('reset', { reason: why });
   }
 
-  function _renderBuffer(text) {
+  function _renderBuffer(text, meta) {
     var st = store();
     if (!st || typeof st.setBufferText !== 'function') {
       _diag('NO STORE — text="' + (text || '').slice(-40) + '"');
@@ -437,7 +437,7 @@
     var full = s.carryPrefix ? (core ? (s.carryPrefix + ' ' + core) : s.carryPrefix) : core;
     s.lastRendered = full;   // remember what's on screen so a Clear can suppress it
     _traceRec('render', full);
-    st.setBufferText(full);
+    st.setBufferText(full, meta || { update: 'snapshot' });
   }
 
   function attachSocket(ws, bind) {
@@ -498,14 +498,18 @@
             if (!_rmode && s.removed.length) _vlog('FINAL t="' + t.slice(0, 70) + '" removedN=' + s.removed.length + ' kept="' + keptF.slice(0, 70) + '"');
             s.finals = keptF;
             _finalCount++;
-            _renderBuffer(s.finals);
+            _renderBuffer(s.finals, {
+              update: 'final', kind: 'final', epoch: frame.epoch, tsMs: frame.ts_ms,
+            });
           }
         } else if (frame.kind === 'partial') {
           if (t) {
             var candP = s.finals ? (s.finals + ' ' + t) : t;
             var keptP = _rmode ? candP : _stripRemoved(candP);
             if (!_rmode && s.removed.length) _vlog('PARTIAL t="' + t.slice(0, 70) + '" removedN=' + s.removed.length + ' kept="' + keptP.slice(0, 70) + '"');
-            _renderBuffer(keptP);
+            _renderBuffer(keptP, {
+              update: 'partial', kind: 'partial', epoch: frame.epoch, tsMs: frame.ts_ms,
+            });
           }
         }
         return;
@@ -518,7 +522,9 @@
         var bsKept = _rmode ? bsRaw : _stripRemoved(bsRaw);
         if (!_rmode && bsRaw) _vlog('BUFFER_STATE raw="' + bsRaw.slice(0, 70) + '" removedN=' + s.removed.length + ' kept="' + bsKept.slice(0, 70) + '"');
         s.finals = bsKept;
-        _renderBuffer(s.finals);
+        _renderBuffer(s.finals, {
+          update: 'restore', kind: 'buffer_state', epoch: frame.epoch,
+        });
         return;
       }
       if (type === 'error') {

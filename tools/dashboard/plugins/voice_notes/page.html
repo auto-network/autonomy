@@ -1,0 +1,135 @@
+<link rel="stylesheet" href="/static/plugins/voice_notes/page.css">
+<div class="voice-notes-page"
+     data-testid="voice-notes-fragment-root"
+     x-data="voiceNotesPage()"
+     x-init="init()">
+  <aside class="vn-library" aria-label="Saved notes">
+    <div class="vn-library__masthead">
+      <div class="vn-kicker">FIELD JOURNAL / 01</div>
+      <h1>Voice Notes</h1>
+      <p>Speak first. Shape it after.</p>
+    </div>
+
+    <button class="vn-new-note" type="button" @click="newNote()" data-testid="voice-notes-new">
+      <span aria-hidden="true">＋</span>
+      New note
+    </button>
+
+    <div class="vn-library__rule"><span>RECENT</span></div>
+
+    <div class="vn-note-list" x-show="!loading">
+      <template x-for="note in notes" :key="note.note_id">
+        <button class="vn-note-row"
+                type="button"
+                @click="selectNote(note)"
+                :class="{ 'is-active': draft && draft.note_id === note.note_id }">
+          <span class="vn-note-row__date" x-text="noteDate(note)"></span>
+          <strong x-text="noteTitle(note)"></strong>
+          <span class="vn-note-row__preview" x-text="notePreview(note)"></span>
+        </button>
+      </template>
+      <div class="vn-library__empty" x-show="notes.length === 0">
+        Saved notes will gather here.
+      </div>
+    </div>
+    <div class="vn-library__loading" x-show="loading">Opening notebook…</div>
+
+    <div class="vn-library__footer">
+      <span class="vn-privacy-mark" aria-hidden="true"></span>
+      Private to this organization
+    </div>
+  </aside>
+
+  <main class="vn-stage">
+    <template x-if="!hasDraft">
+      <div class="vn-empty-state" data-testid="voice-notes-empty">
+        <div class="vn-empty-state__folio">NO. 001</div>
+        <div class="vn-empty-state__mark" aria-hidden="true">
+          <svg viewBox="0 0 72 72" role="presentation">
+            <path d="M36 46c8 0 13-5 13-14V20c0-9-5-14-13-14S23 11 23 20v12c0 9 5 14 13 14Z"/>
+            <path d="M15 32c0 14 8 23 21 23s21-9 21-23M36 55v11M27 66h18"/>
+          </svg>
+        </div>
+        <p class="vn-empty-state__eyebrow">A QUIET PAGE</p>
+        <h2>What do you want<br>to remember?</h2>
+        <p class="vn-empty-state__copy">
+          Begin with an empty page. Tap the microphone, speak naturally, then pause to edit.
+        </p>
+        <button type="button" class="vn-empty-state__action" @click="newNote()">
+          Open a new note <span aria-hidden="true">→</span>
+        </button>
+      </div>
+    </template>
+
+    <template x-if="hasDraft">
+      <article class="vn-paper" :class="{ 'is-listening': isTalking }">
+        <header class="vn-paper__header">
+          <div class="vn-speaker">
+            <span class="vn-speaker__avatar">Y</span>
+            <span>
+              <strong>YOU</strong>
+              <small x-text="isTalking ? 'DICTATING NOW' : 'PERSONAL NOTE'"></small>
+            </span>
+          </div>
+          <div class="vn-paper__actions">
+            <span class="vn-unsaved" x-show="dirty && !savedPulse">UNSAVED</span>
+            <button type="button"
+                    class="vn-save"
+                    @click="saveNote()"
+                    :disabled="saving"
+                    x-text="saveLabel"
+                    data-testid="voice-notes-save"></button>
+          </div>
+        </header>
+
+        <div class="vn-paper__body">
+          <input class="vn-title"
+                 x-model="draft.title"
+                 @input="onDraftInput()"
+                 placeholder="Untitled thought"
+                 maxlength="240"
+                 aria-label="Note title">
+
+          <div class="vn-byline">
+            <span x-text="wordCount + (wordCount === 1 ? ' word' : ' words')"></span>
+            <span aria-hidden="true">/</span>
+            <span x-text="isTalking ? 'live transcript' : 'editable page'"></span>
+          </div>
+
+          <textarea class="vn-editor"
+                    x-ref="noteEditor"
+                    x-model="draft.body"
+                    @input="onDraftInput()"
+                    :readonly="isTalking"
+                    placeholder="Start typing, or tap the microphone and talk…"
+                    spellcheck="true"
+                    aria-label="Note body"
+                    data-testid="voice-notes-editor"></textarea>
+
+          <div class="vn-status-line" :class="{ 'is-error': voiceError || persistenceError }">
+            <span class="vn-status-line__signal" aria-hidden="true"></span>
+            <span x-text="persistenceError || voiceStatus"></span>
+          </div>
+        </div>
+      </article>
+    </template>
+
+    <button class="vn-mic"
+            x-show="hasDraft"
+            x-cloak
+            type="button"
+            @click="toggleTalking()"
+            :class="{ 'is-listening': isTalking, 'is-busy': micBusy }"
+            :disabled="micBusy"
+            :aria-label="isTalking ? 'Pause dictation' : 'Start dictation'"
+            :title="isTalking ? 'Pause dictation' : 'Start dictation'"
+            data-testid="voice-notes-mic">
+      <span class="vn-mic__rings" aria-hidden="true"></span>
+      <svg viewBox="0 0 32 32" aria-hidden="true">
+        <path d="M16 20.5c3.1 0 5-2.1 5-5.5V9c0-3.4-1.9-5.5-5-5.5S11 5.6 11 9v6c0 3.4 1.9 5.5 5 5.5Z"/>
+        <path d="M7.5 15c0 5.5 3.2 9 8.5 9s8.5-3.5 8.5-9M16 24v5M12 29h8"/>
+      </svg>
+      <span class="vn-mic__label" x-text="isTalking ? 'PAUSE' : 'TALK'"></span>
+    </button>
+  </main>
+</div>

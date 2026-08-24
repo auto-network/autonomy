@@ -306,6 +306,20 @@ describe('voice shell helpers', () => {
     assert.equal(h.component.showCaption, true);
   });
 
+  it('hides platform caption, capsule, and sheet while a plugin owns voice controls', () => {
+    const h = loadVoiceShell({
+      viewerPage: false,
+      voiceStore: {
+        boundSessionId: 'session-a',
+        sheetOpen: true,
+        surfaceClaim: { caption: 'plugin', controls: 'plugin' },
+      },
+    });
+    assert.equal(h.component.showCapsule, false);
+    assert.equal(h.component.showCaption, false);
+    assert.equal(h.component.showSheet, false);
+  });
+
   it('shows the sheet on non-viewer mobile surfaces when the sheet state is open', () => {
     const h = loadVoiceShell({
       viewerPage: false,

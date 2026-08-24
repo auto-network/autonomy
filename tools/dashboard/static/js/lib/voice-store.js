@@ -167,6 +167,147 @@
     }
   }
 
+  // Stable, snapshot-based live-transcript seam for dashboard plugins. Whisper
+  // partials revise earlier words, so consumers always receive the complete
+  // current buffer plus a monotonic revision — never append-only deltas.
+  var _bufferSubscribers = [];
+  var _bufferRevision = 0;
+  var _lastBufferSnapshot = Object.freeze({
+    revision: 0,
+    text: '',
+    update: 'initial',
+    kind: '',
+    sessionId: '',
+    epoch: 0,
+    tsMs: 0,
+  });
+  var _surfaceClaimSeq = 0;
+
+  function _voiceStore() {
+    try {
+      if (typeof Alpine === 'undefined' || typeof Alpine.store !== 'function') return null;
+      return Alpine.store('voice') || null;
+    } catch (_err) {
+      return null;
+    }
+  }
+
+  function _publishBuffer(store, meta) {
+    var detail = meta && typeof meta === 'object' ? meta : {};
+    _bufferRevision += 1;
+    _lastBufferSnapshot = Object.freeze({
+      revision: _bufferRevision,
+      text: _normalizeText(store && store.bufferText),
+      update: String(detail.update || detail.kind || 'snapshot'),
+      kind: String(detail.kind || ''),
+      sessionId: String((store && store.boundSessionId) || ''),
+      epoch: Number.isFinite(Number(detail.epoch)) ? Number(detail.epoch) : 0,
+      tsMs: Number.isFinite(Number(detail.tsMs)) ? Number(detail.tsMs) : 0,
+    });
+    var listeners = _bufferSubscribers.slice();
+    for (var i = 0; i < listeners.length; i++) {
+      try { listeners[i](_lastBufferSnapshot); } catch (_err) {}
+    }
+    return _lastBufferSnapshot;
+  }
+
+  function _snapshot() {
+    var store = _voiceStore();
+    if (!store || _lastBufferSnapshot.text === store.bufferText) return _lastBufferSnapshot;
+    return Object.freeze({
+      revision: _bufferRevision,
+      text: _normalizeText(store.bufferText),
+      update: 'snapshot',
+      kind: '',
+      sessionId: String(store.boundSessionId || ''),
+      epoch: 0,
+      tsMs: 0,
+    });
+  }
+
+  function _subscribeBuffer(callback) {
+    if (typeof callback !== 'function') return function () {};
+    var declaration = _activePluginVoiceDeclaration();
+    if (!declaration || declaration.voice.live_transcript !== true) {
+      return function () {};
+    }
+    _bufferSubscribers.push(callback);
+    try { callback(_snapshot()); } catch (_err) {}
+    var active = true;
+    return function () {
+      if (!active) return;
+      active = false;
+      var index = _bufferSubscribers.indexOf(callback);
+      if (index >= 0) _bufferSubscribers.splice(index, 1);
+    };
+  }
+
+  function _activePluginVoiceDeclaration() {
+    try {
+      var autonomy = window.Autonomy || {};
+      var pluginId = autonomy._activePluginId || '';
+      var plugins = Array.isArray(autonomy.plugins) ? autonomy.plugins : [];
+      var plugin = plugins.find(function (row) { return row && row.id === pluginId; });
+      return plugin ? { id: pluginId, voice: plugin.voice || {} } : null;
+    } catch (_err) {
+      return null;
+    }
+  }
+
+  function _claimSurface(options) {
+    var store = _voiceStore();
+    var declaration = _activePluginVoiceDeclaration();
+    var opts = options && typeof options === 'object' ? options : {};
+    if (!store || !declaration || declaration.voice.live_transcript !== true) return null;
+    if (opts.caption === 'plugin' && declaration.voice.replace_caption !== true) return null;
+    if (opts.controls === 'plugin' && declaration.voice.replace_controls !== true) return null;
+    var claimId = ++_surfaceClaimSeq;
+    store.surfaceClaim = {
+      claimId: claimId,
+      pluginId: declaration.id,
+      caption: opts.caption === 'plugin' ? 'plugin' : 'platform',
+      controls: opts.controls === 'plugin' ? 'plugin' : 'platform',
+    };
+    // A plugin that owns the controls must not inherit an already-open platform
+    // keyboard sheet underneath its own UI.
+    if (store.surfaceClaim.controls === 'plugin') store.sheetOpen = false;
+    var released = false;
+    return {
+      pluginId: declaration.id,
+      release: function () {
+        if (released) return;
+        released = true;
+        if (store.surfaceClaim && store.surfaceClaim.claimId === claimId) {
+          store.surfaceClaim = null;
+        }
+      },
+    };
+  }
+
+  function _publicSnapshot() {
+    var declaration = _activePluginVoiceDeclaration();
+    if (!declaration || declaration.voice.live_transcript !== true) return null;
+    return _snapshot();
+  }
+
+  function _releaseSurfaceClaim() {
+    var store = _voiceStore();
+    if (!store || !store.surfaceClaim) return false;
+    store.surfaceClaim = null;
+    return true;
+  }
+
+  function _clearBuffer(reason) {
+    var store = _voiceStore();
+    var declaration = _activePluginVoiceDeclaration();
+    if (!store || !declaration || declaration.voice.live_transcript !== true ||
+        typeof store.clearBuffer !== 'function') return false;
+    var update = reason || 'clear';
+    store.clearBuffer(update);
+    _resetVoiceCaptureEpoch(update);
+    return true;
+  }
+
   function _buildStore() {
     return {
       boundSessionId: '',
@@ -177,6 +318,7 @@
       //   'disconnected'  — backoff exhausted; tap the mic to retry (solid red)
       connState: 'ok',
       bufferText: '',
+      surfaceClaim: null,
       capsulePosition: _readPosition(STORAGE_KEYS.capsulePosition),
       pendingRebindTarget: '',
       discoverabilitySeen: _readBool(STORAGE_KEYS.discoverabilitySeen, false),
@@ -302,12 +444,17 @@
         this.viewedSessionId = sessionId || '';
       },
 
-      setBufferText(text) {
+      setBufferText(text, meta) {
         this.bufferText = _normalizeText(text);
+        return _publishBuffer(this, meta);
       },
 
-      clearBuffer() {
-        this.bufferText = '';
+      publishBuffer(update) {
+        return _publishBuffer(this, { update: update || 'edit' });
+      },
+
+      clearBuffer(update) {
+        this.setBufferText('', { update: update || 'clear' });
         this.sheetError = '';
         // Tactile confirmation that the buffer was wiped (#35). Clear-only — Send
         // empties bufferText directly, not through here.
@@ -349,7 +496,7 @@
       endSession() {
         this.boundSessionId = '';
         this.pendingRebindTarget = '';
-        this.bufferText = '';
+        this.setBufferText('', { update: 'end' });
         this.micMode = 'idle';
         this.awayEventSessionId = '';
         this.sheetOpen = false;
@@ -545,7 +692,7 @@
             ts: baseOutbox.ts || ((typeof Date !== 'undefined' && Date.now) ? Date.now() : 0),
           }, { tmuxSession: this.boundSessionId });
           _resetVoiceCaptureEpoch('send');
-          this.bufferText = '';
+          this.setBufferText('', { update: 'send' });
           this.clearAttachments();
           this.sheetError = '';
           this.sheetOpen = false;
@@ -628,7 +775,7 @@
             this.voiceoverHistory = this.voiceoverHistory.slice(-8);
           }
           _resetVoiceCaptureEpoch('voiceover');
-          this.bufferText = '';
+          this.setBufferText('', { update: 'voiceover' });
           this.speakVoiceover(this.voiceoverReply);
           return true;
         } catch (_err) {
@@ -648,4 +795,9 @@
   window.Autonomy = window.Autonomy || {};
   window.Autonomy.voice = window.Autonomy.voice || {};
   window.Autonomy.voice.storageKeys = STORAGE_KEYS;
+  window.Autonomy.voice.subscribe = _subscribeBuffer;
+  window.Autonomy.voice.snapshot = _publicSnapshot;
+  window.Autonomy.voice.claimSurface = _claimSurface;
+  window.Autonomy.voice.releaseSurfaceClaim = _releaseSurfaceClaim;
+  window.Autonomy.voice.clearBuffer = _clearBuffer;
 })();

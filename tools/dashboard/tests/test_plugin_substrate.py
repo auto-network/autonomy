@@ -107,6 +107,28 @@ def test_manifest_navigation_defaults_to_sidebar_only():
     assert manifest.nav.identity_detail is None
 
 
+def test_manifest_voice_capabilities_are_explicit_and_default_off():
+    ordinary = PluginManifest.model_validate(_MIN_MANIFEST_FIELDS)
+    assert ordinary.frontend.voice.live_transcript is False
+    assert ordinary.frontend.voice.replace_caption is False
+    assert ordinary.frontend.voice.replace_controls is False
+
+    voice_plugin = PluginManifest.model_validate({
+        **_MIN_MANIFEST_FIELDS,
+        "frontend": {
+            "alpine_root": "fooPage",
+            "voice": {
+                "live_transcript": True,
+                "replace_caption": True,
+                "replace_controls": True,
+            },
+        },
+    })
+    assert voice_plugin.frontend.voice.live_transcript is True
+    assert voice_plugin.frontend.voice.replace_caption is True
+    assert voice_plugin.frontend.voice.replace_controls is True
+
+
 def _write_plugin(plugins_dir: Path, dir_name: str, manifest_yaml: str) -> Path:
     pdir = plugins_dir / dir_name
     pdir.mkdir(parents=True, exist_ok=True)
@@ -131,7 +153,7 @@ def _write_setting_plugin(
           - set_id: dashboard.agent-actions
             schema_revision: 2
             key: design.refresh-preview
-            state: canonical
+            state: curated
             payload_file: agent_actions/refresh_preview.json
             uninstall: deprecate_if_unchanged
     """)
@@ -670,7 +692,7 @@ def test_plugin_declared_setting_drift_is_not_overwritten(tmp_path, org_graph):
         2,
         "design.refresh-preview",
         operator_payload,
-        state="canonical",
+        state="curated",
         org="autonomy",
     )
     plugin_update = _agent_action_payload("Plugin Update")
@@ -709,7 +731,7 @@ def test_plugin_declared_setting_force_overwrites_drift(tmp_path, org_graph):
         2,
         "design.refresh-preview",
         operator_payload,
-        state="canonical",
+        state="curated",
         org="autonomy",
     )
     plugin_update = _agent_action_payload("Plugin Update")

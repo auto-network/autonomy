@@ -431,6 +431,99 @@ describe('voice store substrate', () => {
     assert.equal(h.store.sheetError, '');
   });
 
+  it('publishes revisioned whole-buffer snapshots to plugin subscribers', () => {
+    const h = loadVoiceStore();
+    h.window.Autonomy.plugins = [{
+      id: 'voice_notes', voice: { live_transcript: true },
+    }];
+    h.window.Autonomy._activePluginId = 'voice_notes';
+    h.store.boundSessionId = 'session-a';
+    const snapshots = [];
+    const unsubscribe = h.window.Autonomy.voice.subscribe(snapshot => {
+      snapshots.push(toPlain(snapshot));
+    });
+
+    h.store.setBufferText('the first hypothesis', {
+      update: 'partial', kind: 'partial', epoch: 2, tsMs: 100,
+    });
+    h.store.setBufferText('the revised words', {
+      update: 'partial', kind: 'partial', epoch: 2, tsMs: 120,
+    });
+    h.store.clearBuffer('clear');
+    unsubscribe();
+    h.store.setBufferText('not delivered', { update: 'final', kind: 'final' });
+
+    assert.equal(snapshots.length, 4); // immediate snapshot + three writes
+    assert.equal(snapshots[1].text, 'the first hypothesis');
+    assert.equal(snapshots[2].text, 'the revised words');
+    assert.equal(snapshots[2].revision, snapshots[1].revision + 1);
+    assert.equal(snapshots[2].kind, 'partial');
+    assert.equal(snapshots[2].sessionId, 'session-a');
+    assert.equal(snapshots[3].text, '');
+    assert.equal(snapshots[3].update, 'clear');
+  });
+
+  it('grants route-scoped caption/control replacement only to a declared plugin', () => {
+    const h = loadVoiceStore();
+    h.window.Autonomy.plugins = [{
+      id: 'voice_notes',
+      voice: {
+        live_transcript: true,
+        replace_caption: true,
+        replace_controls: true,
+      },
+    }];
+    h.window.Autonomy._activePluginId = 'voice_notes';
+    h.store.sheetOpen = true;
+
+    const lease = h.window.Autonomy.voice.claimSurface({
+      caption: 'plugin', controls: 'plugin',
+    });
+    assert.ok(lease);
+    assert.equal(h.store.surfaceClaim.pluginId, 'voice_notes');
+    assert.equal(h.store.surfaceClaim.caption, 'plugin');
+    assert.equal(h.store.surfaceClaim.controls, 'plugin');
+    assert.equal(h.store.sheetOpen, false);
+
+    lease.release();
+    assert.equal(h.store.surfaceClaim, null);
+
+    h.window.Autonomy._activePluginId = 'undeclared';
+    assert.equal(h.window.Autonomy.voice.claimSurface({ controls: 'plugin' }), null);
+  });
+
+  it('does not expose transcript or clear controls to an undeclared plugin', () => {
+    const h = loadVoiceStore();
+    h.window.Autonomy.plugins = [{ id: 'ordinary', voice: {} }];
+    h.window.Autonomy._activePluginId = 'ordinary';
+    const snapshots = [];
+    h.window.Autonomy.voice.subscribe(snapshot => snapshots.push(snapshot));
+    h.store.setBufferText('private live words', { update: 'partial' });
+
+    assert.equal(snapshots.length, 0);
+    assert.equal(h.window.Autonomy.voice.snapshot(), null);
+    assert.equal(h.window.Autonomy.voice.clearBuffer('clear'), false);
+    assert.equal(h.store.bufferText, 'private live words');
+  });
+
+  it('public clearBuffer resets both the canonical snapshot and capture epoch', () => {
+    const h = loadVoiceStore();
+    h.window.Autonomy.plugins = [{
+      id: 'voice_notes', voice: { live_transcript: true },
+    }];
+    h.window.Autonomy._activePluginId = 'voice_notes';
+    const resets = [];
+    h.window.Autonomy.voiceCapture = {
+      resetEpoch(reason) { resets.push(reason); return true; },
+    };
+    h.store.setBufferText('unfinished note', { update: 'partial' });
+
+    assert.equal(h.window.Autonomy.voice.clearBuffer('clear'), true);
+    assert.equal(h.store.bufferText, '');
+    assert.deepEqual(resets, ['clear']);
+    assert.equal(h.window.Autonomy.voice.snapshot().update, 'clear');
+  });
+
   it('sendBuffer stages through the durable outbox engine and restores listening on success', async () => {
     const h = loadVoiceStore({
       initialStores: {

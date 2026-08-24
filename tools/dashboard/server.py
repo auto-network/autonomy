@@ -18431,7 +18431,7 @@ async def api_plugins(request):
     """Return enabled plugins with sidebar metadata + their effective org.
 
     Shape: ``{plugins: [{id, label, path, paths, badge_color, alpine_root, org,
-    asset_rev, has_style, sidebar, identity_menu, identity_detail}]}``
+    asset_rev, has_style, sidebar, identity_menu, identity_detail, voice}]}``
     — one entry per currently-enabled plugin. Each plugin's toggle row
     is read from *its own* ``manifest.org``'s DB, so unscoped browser
     requests still see the canonical state (substrate v1.1 fix). The
@@ -18476,6 +18476,7 @@ async def api_plugins(request):
             "paths": p.paths,
             "badge_color": _plugin_badge_color(idx),
             "alpine_root": p.alpine_root,
+            "voice": p.manifest.frontend.voice.model_dump(),
             "org": effective_org,
             "asset_rev": _plugin_asset_rev(p),
             "has_style": bool(p.style),

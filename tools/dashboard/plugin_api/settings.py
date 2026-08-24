@@ -169,7 +169,7 @@ def _write_owner(decl: ResolvedPluginSetting, payload: dict[str, Any]) -> str:
         PLUGIN_OWNED_SETTING_SCHEMA_REVISION,
         decl.owner_key,
         payload,
-        state="canonical",
+        state="curated",
         org=decl.org,
     )
 

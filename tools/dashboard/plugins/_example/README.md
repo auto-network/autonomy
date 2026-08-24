@@ -82,3 +82,39 @@ namespaces IDs, rejects external links or malformed descriptors, and renders
 the result. When a relationship changes, broadcast the shared
 `session-contributions` topic with `{"session_id": "..."}` so open surfaces
 refresh that session.
+
+## Optional live dictation surface
+
+Plugins run beside the dashboard's global microphone/transcription pipeline.
+Declare the voice surfaces the plugin may replace under `frontend.voice`:
+
+```yaml
+frontend:
+  alpine_root: yourPluginPage
+  voice:
+    live_transcript: true
+    replace_caption: true
+    replace_controls: true
+```
+
+The declaration grants capability but does not change the shell by itself.
+Acquire a route-scoped claim from the mounted Alpine component and release it
+from `destroy()`:
+
+```js
+const lease = Autonomy.voice.claimSurface({
+  caption: 'plugin',
+  controls: 'plugin',
+});
+const unsubscribe = Autonomy.voice.subscribe(snapshot => {
+  renderCurrentHypothesis(snapshot.text, snapshot.revision);
+});
+```
+
+Each snapshot contains the whole current buffer because partial transcription
+may replace or delete earlier words. Never treat updates as append-only deltas.
+`subscribe()` immediately yields the current snapshot, then publishes partial,
+final, restored, edited, and cleared revisions. Call
+`Autonomy.voice.clearBuffer('clear')` instead of assigning an empty string so
+the upstream transcription epoch resets too. A plugin that replaces controls
+must keep an accessible mute/resume affordance visible while listening.
