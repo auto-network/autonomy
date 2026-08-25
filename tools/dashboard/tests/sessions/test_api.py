@@ -13,6 +13,7 @@ from tools.dashboard.tests.sessions.conftest import SESSIONS_PAGE_SESSIONS
 
 
 JS_DIR = Path(__file__).resolve().parents[2] / "static" / "js"
+SESSIONS_TEMPLATE = Path(__file__).resolve().parents[2] / "templates" / "pages" / "sessions.html"
 
 
 # ── Active Sessions API ─────────────────────────────────────────────
@@ -130,6 +131,15 @@ class TestRecentSessionsAPI:
         session = data[0]
         for field in ("id", "type", "date", "title"):
             assert field in session, f"missing field: {field}"
+
+    def test_cold_history_response_advises_a_bounded_retry(self, test_client, monkeypatch):
+        """A cold cache should tell the async client when to retry, not invite rapid polling."""
+        from tools.dashboard import server
+
+        monkeypatch.setattr(server.dao_sessions, "recent_sessions_cached", lambda *args: None)
+        response = test_client.get("/api/dao/recent_sessions")
+        assert response.status_code == 202
+        assert response.headers["retry-after"] == "5"
 
     def test_limit_param_is_deprecated(self, test_client):
         """`limit` is retired in favour of server-side per-type quotas (auto-wyo79).
@@ -309,6 +319,27 @@ class TestSessionsJSWiring:
         assert "this.selectedOrg = slug;" in self.sessions_js
         assert "this._fetchRecent();" in self.sessions_js
         assert "selectedOrg ? '&org=' + encodeURIComponent(selectedOrg) : ''" in self.sessions_js
+
+    def test_recent_history_loading_is_visible_but_nonblocking(self):
+        """Regression: a background history fetch had no visible progress state."""
+        template = SESSIONS_TEMPLATE.read_text()
+        assert 'data-testid="recent-history-loading"' in template
+        assert 'x-show="recentLoading"' in template
+        assert "Loading history…" in template
+
+    def test_registry_events_update_ended_cards_without_refetching_history(self):
+        """Regression: every registry event made an immediate and delayed DAO request."""
+        assert "_applyEndedSessions(e && e.detail && e.detail.endedSessions)" in self.sessions_js
+        assert "_scheduleRecentRefresh" not in self.sessions_js
+        assert "_recentEchoTimer" not in self.sessions_js
+        assert "detail: { endedSessions: endedSessions || [] }" in self.store_js
+        assert "store.graphSourceId = s.graph_source_id || '';" in self.store_js
+
+    def test_duplicate_history_fetches_share_one_inflight_request(self):
+        """Regression: identical filter state could start redundant concurrent fetches."""
+        assert "this._recentRequest && this._recentRequest.key === queryKey" in self.sessions_js
+        assert "return this._recentRequest.promise;" in self.sessions_js
+        assert "response.headers.get('Retry-After')" in self.sessions_js
 
     def test_restart_action_precedes_close_and_calls_atomic_endpoint(self):
         restart = self.sessions_js.index("label: 'Restart Session'")

@@ -12212,7 +12212,7 @@ async def api_dao_recent_sessions(request):
     if sessions is None:
         # New scoped cache keys are warmed off the request path. Tell the UI
         # to retry without presenting a false "No recent sessions" state.
-        return JSONResponse([], status_code=202)
+        return JSONResponse([], status_code=202, headers={"Retry-After": "5"})
     return JSONResponse(sessions)
 
 
