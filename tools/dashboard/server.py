@@ -150,6 +150,7 @@ from tools.dashboard.tmux_send import (
     tmux_enter_checked_sync,
     tmux_paste_checked_sync,
     tmux_send,
+    tmux_send_awaited,
     tmux_send_sync,
 )
 from tools.graph import ops as graph_ops
@@ -11296,10 +11297,18 @@ async def _signal_session_merge_celebration(
           " Go CLI, registry — deploy on their own paths.)"
     )
     try:
-        await _send_dashboard_ui_crosstalk(target_session, message)
+        await _send_dashboard_ui_crosstalk(
+            target_session, message, await_delivery=True,
+        )
     except WorkspaceError:
-        # Session went dead between merge and signal — nothing to do.
-        pass
+        # Target session's tmux is gone. Log it — a silent drop here was the
+        # invisible failure mode: the operator saw no "you got merged" and had
+        # no trace to diagnose from.
+        logger.warning(
+            "merge celebration: target session %s has no live tmux; "
+            "'you got merged' notification not delivered",
+            target_session,
+        )
     except Exception:
         logger.exception(
             "merge celebration: dashboard-ui crosstalk failed for target=%s",
@@ -11317,8 +11326,18 @@ def _find_worktree_row(rows: list[WorktreeState], session_name: str, repo_name: 
     )
 
 
-async def _send_dashboard_ui_crosstalk(target_session: str, message: str) -> None:
-    """Deliver a dashboard-authored CrossTalk message to one live session."""
+async def _send_dashboard_ui_crosstalk(
+    target_session: str, message: str, *, await_delivery: bool = False,
+) -> None:
+    """Deliver a dashboard-authored CrossTalk message to one live session.
+
+    With ``await_delivery=True`` the tmux paste is awaited to completion
+    (``tmux_send_awaited``) instead of scheduled fire-and-forget
+    (``tmux_send``, which returns before its ~0.8s paste+Enter worker runs).
+    The merge-celebration path needs this: a merge that lands dashboard code
+    triggers a ``uvicorn --reload`` restart, and a fire-and-forget paste can
+    be killed mid-flight before the keystrokes land.
+    """
     if not _tmux_session_exists(target_session):
         raise WorkspaceError(f"target session not found: {target_session}")
 
@@ -11335,7 +11354,10 @@ async def _send_dashboard_ui_crosstalk(target_session: str, message: str) -> Non
         f'</crosstalk>'
     )
 
-    await tmux_send(target_session, envelope)
+    if await_delivery:
+        await tmux_send_awaited(target_session, envelope)
+    else:
+        await tmux_send(target_session, envelope)
     await asyncio.to_thread(
         auth_db.insert_message,
         sender,
@@ -11824,7 +11846,7 @@ async def _record_worktree_merge_timeline(
         )
 
 
-async def _finish_worktree_merge_after_response(
+async def _deliver_merge_notification_and_timeline(
     *,
     session_name: str,
     repo_name: str,
@@ -11833,14 +11855,15 @@ async def _finish_worktree_merge_after_response(
     celebration_kind: str,
     timeline_reason: str,
 ) -> None:
-    try:
-        await worktree_monitor.refresh()
-    except Exception:  # noqa: BLE001 — merge already succeeded
-        logger.exception(
-            "worktree-merge post-response refresh failed for %s/%s",
-            session_name,
-            repo_name,
-        )
+    """Send the 'you got merged' CrossTalk and write the timeline row.
+
+    Both are fast — a tmux paste and a single DB insert — and both are run
+    INLINE, before the merge response returns, so they complete before a
+    merge-triggered ``uvicorn --reload`` can restart this process. That is the
+    fix for the f6bf4e0d race, where these ran in a post-response background
+    task that the reload killed. Neither call raises (each swallows and logs
+    its own failures), so the merge response stays ``ok: True`` regardless.
+    """
     await _signal_session_merge_celebration(
         target_session=session_name,
         repo_name=repo_name,
@@ -11854,6 +11877,40 @@ async def _finish_worktree_merge_after_response(
         result=result,
         reason=timeline_reason,
     )
+
+
+# Hold references to detached deferred-refresh tasks so the event loop does not
+# garbage-collect them mid-sleep (asyncio only keeps weak refs to tasks).
+_DEFERRED_MERGE_REFRESH_TASKS: set[asyncio.Task] = set()
+
+
+def _schedule_deferred_worktree_refresh(delay: float = 5.0) -> asyncio.Task:
+    """Queue a worktree rescan ``delay`` seconds out, detached from the request.
+
+    The rescan only refreshes the cached worktree list the UI reads. It is
+    deliberately NOT a response BackgroundTask (uvicorn's graceful shutdown
+    would wait on that, delaying the reload) but a detached task, so:
+
+    - If the merge landed dashboard code, ``uvicorn --reload`` restarts this
+      process within the window and this task is cancelled before it runs —
+      which is correct, because the fresh process re-scans in
+      ``worktree_monitor.start()`` on boot (and the periodic poll follows).
+    - If there is no reload, the rescan runs normally after ``delay`` so the
+      worktree list reflects the just-merged branch.
+    """
+    async def _run() -> None:
+        try:
+            await asyncio.sleep(delay)
+            await worktree_monitor.refresh()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — merge already succeeded
+            logger.exception("deferred post-merge worktree refresh failed")
+
+    task = asyncio.create_task(_run())
+    _DEFERRED_MERGE_REFRESH_TASKS.add(task)
+    task.add_done_callback(_DEFERRED_MERGE_REFRESH_TASKS.discard)
+    return task
 
 
 async def api_worktree_commit_merge(request):
@@ -11883,19 +11940,20 @@ async def api_worktree_commit_merge(request):
     except WorkspaceError as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
 
-    return JSONResponse({
-        "ok": True,
-        "commit": result.get("commit", ""),
-        "message": result.get("message", ""),
-    }, background=BackgroundTask(
-        _finish_worktree_merge_after_response,
+    await _deliver_merge_notification_and_timeline(
         session_name=session_name,
         repo_name=repo_name,
         branch=None,
         result=result,
         celebration_kind="commit",
         timeline_reason="commit-merge",
-    ))
+    )
+    _schedule_deferred_worktree_refresh()
+    return JSONResponse({
+        "ok": True,
+        "commit": result.get("commit", ""),
+        "message": result.get("message", ""),
+    })
 
 async def api_worktree_merge(request):
     session_name = request.path_params["session"]
@@ -11950,19 +12008,20 @@ async def api_worktree_merge(request):
     except WorkspaceError as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
 
-    return JSONResponse({
-        "ok": True,
-        "commit": result.get("commit", ""),
-        "message": result.get("message", ""),
-    }, background=BackgroundTask(
-        _finish_worktree_merge_after_response,
+    await _deliver_merge_notification_and_timeline(
         session_name=session_name,
         repo_name=repo_name,
         branch=getattr(row, "branch", None),
         result=result,
         celebration_kind="ff",
         timeline_reason="ff",
-    ))
+    )
+    _schedule_deferred_worktree_refresh()
+    return JSONResponse({
+        "ok": True,
+        "commit": result.get("commit", ""),
+        "message": result.get("message", ""),
+    })
 
 
 async def api_worktree_cherry_pick(request):
@@ -11994,20 +12053,21 @@ async def api_worktree_cherry_pick(request):
     except WorkspaceError as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
 
-    return JSONResponse({
-        "ok": True,
-        "commit": result.get("commit", ""),
-        "source_commit": result.get("source_commit", ""),
-        "message": result.get("message", ""),
-    }, background=BackgroundTask(
-        _finish_worktree_merge_after_response,
+    await _deliver_merge_notification_and_timeline(
         session_name=session_name,
         repo_name=repo_name,
         branch=getattr(row, "branch", None),
         result=result,
         celebration_kind="cherry-pick",
         timeline_reason="cherry-pick",
-    ))
+    )
+    _schedule_deferred_worktree_refresh()
+    return JSONResponse({
+        "ok": True,
+        "commit": result.get("commit", ""),
+        "source_commit": result.get("source_commit", ""),
+        "message": result.get("message", ""),
+    })
 
 
 async def api_worktree_watch_set(request):
