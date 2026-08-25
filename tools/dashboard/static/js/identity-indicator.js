@@ -403,6 +403,16 @@
     if (unlockState) { var s = unlockState[f.key]; if (s && s.detail) return String(s.detail); }
     return f.body;
   }
+  // The liveliness readout shown green in the balloon corner: a boolean flag
+  // reports "Up"; a timed one reports its remaining range ("Valid for 71 days",
+  // "6 hours left"). Only when the state is actually known — unknown stays blank.
+  function flagValue(f) {
+    if (!unlockState) return '';
+    var s = unlockState[f.key];
+    if (!s) return '';
+    if (typeof s.value === 'string') return s.value;
+    return '';
+  }
   function svgFlag(shapes) {
     var s = root.document.createElementNS(FLAG_NS, 'svg');
     s.setAttribute('viewBox', '0 0 24 24');
@@ -437,7 +447,15 @@
       if (f) {
         var pop = el('div', 'identity-flagpop' + (flagNeeds(f) ? ' needs' : ''));
         pop.setAttribute('data-testid', 'identity-flagpop');
-        pop.appendChild(el('div', 'identity-flagpop-title', f.title));
+        var head = el('div', 'identity-flagpop-head');
+        head.appendChild(el('div', 'identity-flagpop-title', f.title));
+        var val = flagValue(f);
+        if (val) {
+          var vEl = el('div', 'identity-flagpop-value' + (flagNeeds(f) ? ' needs' : ''), val);
+          vEl.setAttribute('data-testid', 'identity-flagpop-value');
+          head.appendChild(vEl);
+        }
+        pop.appendChild(head);
         pop.appendChild(el('div', 'identity-flagpop-body', flagDetail(f)));
         band.appendChild(pop);
       }

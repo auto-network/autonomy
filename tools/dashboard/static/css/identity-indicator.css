@@ -500,13 +500,30 @@
   padding: 0.75rem 0.875rem;
   box-shadow: 0 10px 26px rgba(0, 0, 0, 0.5);
 }
+.identity-flagpop-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.3125rem;
+}
 .identity-flagpop-title {
   font-size: 0.875rem;
   font-weight: 700;
   color: #e5e7eb;
-  margin-bottom: 0.3125rem;
 }
 .identity-flagpop.needs .identity-flagpop-title {
+  color: #f59e0b;
+}
+/* Liveliness readout, top-right: green when healthy, amber when it needs attention. */
+.identity-flagpop-value {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #34d399;
+  white-space: nowrap;
+  flex: none;
+}
+.identity-flagpop-value.needs {
   color: #f59e0b;
 }
 .identity-flagpop-body {
