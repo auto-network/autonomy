@@ -139,6 +139,13 @@ setTimeout(() => {
         t(".msn-arow .stitle").includes("Fleet tunnel alpha"));
       check("unassigned shown",
         t(".msn-arow .sid").includes("unassigned"));
+      // the session id links straight into the session viewer
+      const sidLink = d.querySelector(".msn-arow a.sid");
+      check("session id links to the viewer", !!sidLink
+        && sidLink.getAttribute("href") === "/session/auto-1");
+      check("unassigned is not a link",
+        !Array.from(d.querySelectorAll(".msn-arow a.sid"))
+          .some((a) => a.textContent === "unassigned"));
 
       // opening a mission: src set + measured nonzero height
       comp.screen = "missions";
