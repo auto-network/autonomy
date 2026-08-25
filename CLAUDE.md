@@ -80,6 +80,7 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 | `graph ui-design --pull <design_id> <dir>` | Pull an existing design's variants + fixture into `<dir>` to revise, then re-append | `graph ui-design --pull 3c7e290b /tmp/cards/` |
 | `graph session-auth` | Mint an operator-approved dashboard UI session (approval → wait → redeem → cookie jar; `--browser` injects into agent-browser) | `graph session-auth --browser` |
 | `graph mission <verb>` | Drive a structured Mission Control mission: `list/status/items/add/update/state/retire/style` (stdin via `--body -`) | `graph mission state relay checkpoint-e proven --note "…"` |
+| `graph dropbox list` / `graph dropbox get <id>` | List/materialize the global iPhone screenshot dropbox — the operator's phone drops a screenshot in (org-unscoped, time-correlated); any session lists the newest and pulls one by id or unique prefix | `graph dropbox get a19dc43e --output-dir /workspace/output` |
 | `graph set-label "text"` | Set a working title for the current session | `graph set-label "Passkey auth design"` |
 | `graph notes --since <dur>` | List notes by recency with duration filter | `graph notes --since 1h --tags pitfall` |
 | `graph crosstalk` | CrossTalk message log (default) | `graph crosstalk --since 1h --session auto-0323-022132` |
