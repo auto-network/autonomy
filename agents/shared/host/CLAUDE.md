@@ -78,6 +78,24 @@ agent-browser eval "document.title"   # run JS in page context
 Run `agent-browser --help` for full reference.
 See `agents/shared/dashboard/agent-browser-primer.md` for dashboard-specific patterns.
 
+### Fleet Diagnostics — fleet_doctor
+For ANY question about fleet setup, network, connectivity, or sync — "did it
+sync", "does it know who it is", "is serving actually up", why is a connector
+churning, why did a checkpoint fail — run this BEFORE manual log-grepping or
+ad-hoc SQL against `fleet_sync_catalog`. Start from the signpost, then run it:
+```bash
+graph read 99009c9f-422              # Fleet Operations signpost & runbook index — check first
+.venv/bin/python3 -m tools.network.fleet_doctor                  # fast report
+.venv/bin/python3 -m tools.network.fleet_doctor --verify-catalog # authoritative but slow (full scan) — only when the fast canary flags a mismatch
+.venv/bin/python3 -m tools.network.fleet_doctor --json           # for scripting
+```
+It reads state through the same functions the dashboard itself uses (never a
+re-guess of the logic), so its answer matches what the live system believes —
+this is what the tool was built for (see its module docstring). A finding
+`fleet_doctor` doesn't cover is genuinely new ground, worth a targeted
+follow-up query; reaching straight for manual forensics without running it
+first repeats work the tool already exists to save.
+
 ### Docker & Agent Launch
 ```bash
 agents/launch.sh <bead-id>            # launch agent container for a bead (foreground)
