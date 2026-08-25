@@ -333,7 +333,17 @@ async function loadModel() {
     pass: { on: !!pwF || mfa, full: !!pwF && !mfa, canUnlock: !mfa },
     mfa,
     lit: [],
-    pw: { kdf: 'PBKDF2', mem: iters, changed: (pj.created_at || '') },
+    pw: {
+      kdf: 'PBKDF2',
+      mem: iters,
+      // 600000 is the PBKDF2 iteration COUNT, not a memory size — label it as
+      // iterations, grouped (600,000). created_at is a creation time, not a
+      // change; render it in the viewer's local time zone, never raw UTC.
+      itersLabel: (Number(iters) || 0).toLocaleString() + ' iterations',
+      createdLabel: pj.created_at
+        ? 'created ' + new Date(pj.created_at).toLocaleString()
+        : '',
+    },
     kdfNow: { mem: 600000 },
     keys,
     rootCached: false,
@@ -793,7 +803,8 @@ function keysScreen() {
     const weak = M.pw.mem < M.kdfNow.mem;
     const pr = el('div', 'krow', '<div class="kmid"><div class="knm">Password'
       + (weak ? '<span class="weak">below current strength</span>' : '') + '</div>'
-      + '<div class="kmeta">' + M.pw.kdf + ' &middot; ' + M.pw.mem + ' MB &middot; changed ' + M.pw.changed + '</div></div>' + ptag
+      + '<div class="kmeta">' + M.pw.kdf + ' &middot; ' + M.pw.itersLabel
+      + (M.pw.createdLabel ? ' &middot; ' + M.pw.createdLabel : '') + '</div></div>' + ptag
       + '<div class="chg">Change</div><div class="kx">&times;</div>');
     const pb = pr.querySelector('[data-p]');
     if (pb) pb.onclick = (e) => { e.stopPropagation(); gatherThen('authorize', rootNeed()); };
