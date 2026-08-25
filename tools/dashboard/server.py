@@ -12378,13 +12378,24 @@ async def api_dao_bead(request):
     )
     if not cli_bead or cli_bead.get("error"):
         return JSONResponse({"error": "not found"}, status_code=404)
-    # Served from the CLI because the DAO was unavailable. The rich embedded
-    # arrays the DAO would supply aren't in `bd show`; default them so the detail
-    # template (which guards on their presence) renders cleanly. The page loads
-    # deps separately via the CLI-backed /deps route, so those still populate.
-    cli_bead.setdefault("deps", [])
+    # Served from the CLI because the DAO was unavailable. `bd show` alone omits
+    # the relational arrays the DAO embeds, so the detail page would render an
+    # epic with NO children — which reads as "the epic is empty / mis-wired"
+    # when the parent-child edges are perfectly fine. Hydrate them from the CLI
+    # too: `bd dep list --direction=up` gives the dependents (an epic's children
+    # are the parent-child ones), and the down direction gives this bead's own
+    # dependency rows, matching the DAO's `deps`. Comments are the one thing
+    # `bd show --json` does not expose, so they degrade to empty on this path
+    # (rare on epics; the DAO path restores them when Dolt is reachable).
+    up = await run_cli_json(
+        ["bd", "dep", "list", bead_id, "--direction=up", "--json"], empty=[]
+    )
+    down = await run_cli_json(["bd", "dep", "list", bead_id, "--json"], empty=[])
+    up = up if isinstance(up, list) else []
+    down = down if isinstance(down, list) else []
+    cli_bead["children"] = [c for c in up if c.get("dependency_type") == "parent-child"]
+    cli_bead["deps"] = down
     cli_bead.setdefault("comments", [])
-    cli_bead.setdefault("children", [])
     return JSONResponse(cli_bead)
 
 
