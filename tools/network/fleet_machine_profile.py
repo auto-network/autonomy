@@ -14,10 +14,7 @@ def normalize_display_name(value: object) -> str:
     if not isinstance(value, str):
         raise ValueError("machine name must be text")
     name = value.strip()
-    FleetMachineProfileV1.validate({
-        "machine_id": "0" * 64,
-        "display_name": name,
-    })
+    FleetMachineProfileV1.validate({"display_name": name})
     return name
 
 
@@ -28,7 +25,7 @@ def store(machine_id: str, display_name: object) -> None:
             FLEET_MACHINE_PROFILE_SET_ID,
             FLEET_MACHINE_PROFILE_REVISION,
             machine_id,
-            {"machine_id": machine_id, "display_name": name},
+            {"display_name": name},
             org=None,
         )
 
@@ -46,5 +43,8 @@ def names(*, org=None) -> dict[str, str]:
             FleetMachineProfileV1.validate(payload)
         except Exception:
             continue
-        result[payload["machine_id"]] = payload["display_name"]
+        machine_id = str(member.key)
+        if len(machine_id) != 64 or any(char not in "0123456789abcdef" for char in machine_id):
+            continue
+        result[machine_id] = payload["display_name"]
     return result
