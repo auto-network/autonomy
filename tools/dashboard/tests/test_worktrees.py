@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -497,7 +498,7 @@ class TestWorktreeAPI:
         assert called["args"] == ("auto-test", "autonomy")
         assert fake.refresh_count == 1
 
-    def test_merge_endpoint_fast_forwards_and_refreshes_cache(self, test_client, monkeypatch):
+    def test_merge_endpoint_fast_forwards_and_schedules_deferred_refresh(self, test_client, monkeypatch):
         server, fake = _install_fake_monitor(monkeypatch, [_row()])
         called = {}
 
@@ -506,13 +507,21 @@ class TestWorktreeAPI:
             return {"commit": "abc1234", "message": "merged", "target_repo": "/repo"}
 
         monkeypatch.setattr(server, "merge_session_worktree", fake_merge)
+        scheduled = []
+        monkeypatch.setattr(
+            server, "_schedule_deferred_worktree_refresh",
+            lambda *a, **k: scheduled.append(True),
+        )
 
         resp = test_client.post("/api/worktrees/auto-test/autonomy/merge")
 
         assert resp.status_code == 200
         assert resp.json() == {"ok": True, "commit": "abc1234", "message": "merged"}
         assert called["args"] == ("auto-test", "autonomy")
-        assert fake.refresh_count == 1
+        # The cache rescan is deferred (it self-cancels if this merge hot-reloads
+        # the server), so the endpoint schedules it rather than refreshing inline.
+        assert scheduled == [True]
+        assert fake.refresh_count == 0
 
     def test_merge_endpoint_writes_worktree_merge_timeline_row(
         self, test_client, monkeypatch,
@@ -703,7 +712,7 @@ class TestWorktreeAPI:
         assert resp.status_code == 404
         assert "could not resolve base ref" in resp.json()["error"]
 
-    def test_commit_merge_endpoint_merges_selected_sha_and_refreshes(self, test_client, monkeypatch):
+    def test_commit_merge_endpoint_merges_selected_sha_and_schedules_deferred_refresh(self, test_client, monkeypatch):
         server, fake = _install_fake_monitor(monkeypatch, [_row()])
         called = {}
 
@@ -712,6 +721,11 @@ class TestWorktreeAPI:
             return {"commit": "abcdef1234567890", "message": "Add worktree dashboard"}
 
         monkeypatch.setattr(server, "merge_session_worktree_commit", fake_merge)
+        scheduled = []
+        monkeypatch.setattr(
+            server, "_schedule_deferred_worktree_refresh",
+            lambda *a, **k: scheduled.append(True),
+        )
 
         resp = test_client.post("/api/worktrees/auto-test/autonomy/commits/abcdef1/merge")
 
@@ -722,7 +736,8 @@ class TestWorktreeAPI:
             "message": "Add worktree dashboard",
         }
         assert called["args"] == ("auto-test", "autonomy", "abcdef1")
-        assert fake.refresh_count == 1
+        assert scheduled == [True]
+        assert fake.refresh_count == 0
 
     def test_commit_merge_endpoint_writes_worktree_merge_timeline_row(
         self, test_client, monkeypatch,
@@ -831,7 +846,7 @@ class TestWorktreeAPI:
         assert captured["branch"] == "session/auto-test"
         assert captured["branch_base"] == "master"
 
-    def test_cherry_pick_endpoint_defers_post_success_work_until_background(
+    def test_cherry_pick_endpoint_notifies_inline_and_defers_only_rescan(
         self, monkeypatch,
     ):
         server, fake = _install_fake_monitor(
@@ -859,28 +874,116 @@ class TestWorktreeAPI:
             captured.update(kwargs)
             return f"wt-{kwargs['commit_hash'][:12]}"
 
+        scheduled = []
+
         class _Request:
             path_params = {"session": "auto-test", "repo": "autonomy"}
 
         monkeypatch.setattr(server, "cherry_pick_session_worktree", fake_cherry_pick)
         monkeypatch.setattr(server, "_signal_session_merge_celebration", fake_signal)
         monkeypatch.setattr(server, "record_worktree_merge_run", fake_record)
+        monkeypatch.setattr(
+            server, "_schedule_deferred_worktree_refresh",
+            lambda *a, **k: scheduled.append(True),
+        )
 
         resp = asyncio.run(server.api_worktree_cherry_pick(_Request()))
 
         assert resp.status_code == 200
         assert json.loads(resp.body)["ok"] is True
-        assert fake.refresh_count == 0
-        assert signal_calls == []
-        assert captured == {}
-
-        assert resp.background is not None
-        asyncio.run(resp.background())
-
-        assert fake.refresh_count == 1
+        # Notification + timeline are delivered INLINE, before the response
+        # returns — so a merge that hot-reloads the server can't kill them
+        # (the f6bf4e0d race). This is the fix.
         assert signal_calls[0]["kind"] == "cherry-pick"
         assert captured["reason"] == "cherry-pick"
         assert captured["commit_hash"] == "fedcba9876543210"
+        # Only the slow cache rescan is deferred, and it is NOT a response
+        # BackgroundTask (uvicorn's graceful shutdown would wait on that) —
+        # it's scheduled detached so a reload cancels it instead.
+        assert resp.background is None
+        assert scheduled == [True]
+        assert fake.refresh_count == 0
+
+    def test_deferred_worktree_refresh_runs_after_delay_and_reload_cancels_it(
+        self, monkeypatch,
+    ):
+        """The deferred rescan runs after its delay when nothing interrupts it,
+        and if a merge-triggered hot-reload cancels it first, it never runs —
+        which is correct, because the fresh process re-scans on boot."""
+        from tools.dashboard import server
+
+        ran = {"n": 0}
+
+        async def fake_refresh():
+            ran["n"] += 1
+
+        monkeypatch.setattr(server.worktree_monitor, "refresh", fake_refresh)
+
+        async def scenario():
+            task = server._schedule_deferred_worktree_refresh(delay=0.05)
+            await asyncio.sleep(0.01)
+            assert ran["n"] == 0            # not run immediately
+            await task
+            assert ran["n"] == 1            # ran after the delay
+
+            # Hot-reload case: cancel before the delay elapses -> never runs.
+            task2 = server._schedule_deferred_worktree_refresh(delay=5.0)
+            task2.cancel()
+            try:
+                await task2
+            except asyncio.CancelledError:
+                pass
+            assert ran["n"] == 1            # still 1 — cancelled rescan did not run
+
+        asyncio.run(scenario())
+
+    def test_dashboard_ui_crosstalk_await_delivery_uses_blocking_sender(
+        self, monkeypatch,
+    ):
+        """With await_delivery=True the paste is awaited (tmux_send_awaited) so
+        the caller can guarantee the keystrokes landed before a hot-reload;
+        the default stays fire-and-forget (tmux_send)."""
+        from tools.dashboard import server
+
+        monkeypatch.setattr(server, "_tmux_session_exists", lambda name: True)
+        awaited, fire = [], []
+
+        async def fake_awaited(target, message):
+            awaited.append(target)
+
+        async def fake_fire(target, message):
+            fire.append(target)
+
+        monkeypatch.setattr(server, "tmux_send_awaited", fake_awaited)
+        monkeypatch.setattr(server, "tmux_send", fake_fire)
+        monkeypatch.setattr(server.auth_db, "insert_message", lambda *a, **k: None)
+
+        asyncio.run(server._send_dashboard_ui_crosstalk("sessX", "hi", await_delivery=True))
+        assert awaited == ["sessX"] and fire == []
+
+        asyncio.run(server._send_dashboard_ui_crosstalk("sessY", "hi"))
+        assert fire == ["sessY"]
+
+    def test_merge_celebration_logs_when_target_tmux_absent(
+        self, monkeypatch, caplog,
+    ):
+        """A missing target tmux must LOG (not silently swallow) — the silent
+        drop was the invisible failure the operator could not diagnose."""
+        from tools.dashboard import server
+
+        monkeypatch.setattr(server, "_tmux_session_exists", lambda name: False)
+        with caplog.at_level(logging.WARNING):
+            asyncio.run(server._signal_session_merge_celebration(
+                target_session="ghost-session",
+                repo_name="autonomy",
+                commit_sha="abc1234",
+                commit_message="msg",
+                kind="ff",
+            ))
+        assert any(
+            "ghost-session" in r.getMessage() and "not delivered" in r.getMessage()
+            for r in caplog.records
+        )
 
     def test_cherry_pick_endpoint_swallows_timeline_writer_failure(
         self, test_client, monkeypatch,
