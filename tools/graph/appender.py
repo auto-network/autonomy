@@ -58,6 +58,7 @@ from .ingest import (
     CodexTurnExtractor,
     _dedup_new_turns,
     _derive_session_title,
+    _ingest_persona,
     _write_new_turns,
 )
 
@@ -207,6 +208,8 @@ class GraphAppender:
                 thoughts, derivations, entities = _write_new_turns(
                     db, self.source_id, dedup_turns,
                     model=state.get("model") or self.default_model,
+                    persona_id=_ingest_persona(),
+                    session_id=self.file_path.stem,
                 )
 
                 existing_meta = json.loads(source["metadata"]) if source.get("metadata") else {}
