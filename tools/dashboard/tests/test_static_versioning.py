@@ -24,6 +24,7 @@ Two ways of naming a build, and which one applies is not a preference:
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -120,3 +121,23 @@ def test_every_vendored_library_is_recorded():
         "vendored but absent from VENDOR.md, so nothing records the version, "
         "the source, or the checksum:\n  " + "\n  ".join(sorted(missing))
     )
+
+
+def test_pwa_manifest_and_root_worker_have_stable_unversioned_identity():
+    """The browser, rather than the static build stamp, owns PWA updates."""
+    manifest = json.loads((DASHBOARD / "static" / "manifest.json").read_text())
+    controller = (
+        DASHBOARD / "static" / "js" / "web-push-register.js"
+    ).read_text()
+    worker = (DASHBOARD / "static" / "service-worker.js").read_text()
+
+    assert manifest["id"] == manifest["start_url"] == manifest["scope"] == "/"
+    registration = "navigator.serviceWorker.register('/service-worker.js'"
+    assert registration in controller
+    assert "scope: '/'" in controller
+    assert "updateViaCache: 'none'" in controller
+    assert "'/service-worker.js?v=" not in controller
+    assert "addEventListener('push'" in worker
+    assert "addEventListener('notificationclick'" in worker
+    assert "addEventListener('fetch'" not in worker
+    assert "caches." not in worker
