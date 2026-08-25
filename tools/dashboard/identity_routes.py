@@ -1028,7 +1028,6 @@ async def patch_factor_metadata(request: Request) -> JSONResponse:
             return JSONResponse({"ok": False, "error": "label must be non-empty"},
                                 status_code=400)
         payload = {
-            "factor_id": factor_id,
             "label": label.strip(),
             "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
