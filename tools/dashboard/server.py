@@ -452,6 +452,7 @@ async def run_cli(cmd: list[str], timeout: int = 30, stdin_data: str | None = No
 
 async def run_cli_json(
     cmd: list[str], timeout: int = 30, *, empty: list | dict | None = None,
+    beads_dir=None,
 ) -> list | dict:
     """Run CLI command and parse JSON output.
 
@@ -460,8 +461,12 @@ async def run_cli_json(
     empty collection from list-shaped endpoints instead of an error
     object the frontend has to special-case (DEPLOY.md, clean-machine
     degradation). Left ``None``, the error shape passes through.
+
+    ``beads_dir`` forwards to ``run_cli`` so a bead read can target a
+    specific org's tracker (per-org databases); left None, bd uses the
+    shared default.
     """
-    stdout, stderr, rc = await run_cli(cmd, timeout)
+    stdout, stderr, rc = await run_cli(cmd, timeout, beads_dir=beads_dir)
     if rc == 127 and empty is not None:
         return empty
     if rc != 0 or not stdout.strip():
@@ -12362,9 +12367,26 @@ async def api_dao_bead(request):
     is served from — so fall back to it: the detail page stays as resilient as
     the list, and a real 404 is returned only when the CLI also has no such bead.
     In mock mode, reads from the fixture file.
+
+    Per-org tracker (per-org databases, autonomy@74585ba): bead IDs do not
+    encode their org, so the caller names it with ``?org=`` (the list view
+    knows which org it navigated from). An ORG-BOUND caller (org session
+    bearer) is pinned by ``organization_scope_from_request`` and may read
+    ONLY its own org — a ``?org=`` naming any other is a cross-org read and
+    404s, matching ``caller_org_scope_hides``. A GLOBAL-authority caller
+    (operator cookie / local session) is not pinned and may name any org;
+    with none named it defaults to the shared autonomy tracker.
     """
     bead_id = request.path_params["id"]
-    bead = await asyncio.to_thread(dao_beads.get_bead, bead_id)
+    requested_org = request.query_params.get("org") or None
+    pinned_org = api_auth.organization_scope_from_request(request)
+    if pinned_org is not None:
+        if requested_org is not None and requested_org != pinned_org:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        org = pinned_org
+    else:
+        org = requested_org
+    bead = await asyncio.to_thread(dao_beads.get_bead, bead_id, org)
     if bead is not None:
         return JSONResponse(bead)
     if os.environ.get("DASHBOARD_MOCK"):
@@ -12372,9 +12394,11 @@ async def api_dao_bead(request):
         # fall back to, so None here is a genuine miss.
         return JSONResponse({"error": "not found"}, status_code=404)
     # DAO returned nothing: the bead is absent OR the Dolt SQL server is down.
-    # The CLI settles it against on-disk Dolt.
+    # The CLI settles it against on-disk Dolt, targeting the same org's tracker.
+    from tools.data_paths import org_beads_dir
+    bd_dir = org_beads_dir(org)
     cli_bead = _normalize_bead_show_payload(
-        await run_cli_json(["bd", "show", bead_id, "--json"])
+        await run_cli_json(["bd", "show", bead_id, "--json"], beads_dir=bd_dir)
     )
     if not cli_bead or cli_bead.get("error"):
         return JSONResponse({"error": "not found"}, status_code=404)
@@ -12388,9 +12412,12 @@ async def api_dao_bead(request):
     # `bd show --json` does not expose, so they degrade to empty on this path
     # (rare on epics; the DAO path restores them when Dolt is reachable).
     up = await run_cli_json(
-        ["bd", "dep", "list", bead_id, "--direction=up", "--json"], empty=[]
+        ["bd", "dep", "list", bead_id, "--direction=up", "--json"],
+        empty=[], beads_dir=bd_dir,
     )
-    down = await run_cli_json(["bd", "dep", "list", bead_id, "--json"], empty=[])
+    down = await run_cli_json(
+        ["bd", "dep", "list", bead_id, "--json"], empty=[], beads_dir=bd_dir,
+    )
     up = up if isinstance(up, list) else []
     down = down if isinstance(down, list) else []
     cli_bead["children"] = [c for c in up if c.get("dependency_type") == "parent-child"]
