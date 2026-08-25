@@ -647,23 +647,106 @@
       lightboxSrc: '',
       lightboxAlt: '',
       // 'image' (default — tap-to-close img) | 'iframe' (PDF/text/viewable) |
-      // 'download' (binary). File attachments open HERE as an in-page overlay
+      // 'shortcut' (signed Apple Shortcut installer) | 'download' (binary).
+      // File attachments open HERE as an in-page overlay
       // instead of navigating via <a target=_blank>, which on an iOS PWA kicks
       // out to Safari, backgrounds the app, and drops the voice connection.
       lightboxKind: 'image',
       lightboxName: '',
+      lightboxFile: null,
+      lightboxFileState: 'idle',
+      lightboxFileError: '',
+      _lightboxFileRequest: 0,
       // Rendered markdown HTML when lightboxKind === 'markdown'. Browsers have
       // no native text/markdown renderer, so we fetch the raw bytes and render
       // client-side with marked + DOMPurify rather than dropping the file into
       // an iframe (which white-screens).
       lightboxHtml: '',
       _lightboxPrevViewport: null,
-      lightboxKindForMime(mime) {
+      lightboxKindForMime(mime, name) {
+        if (typeof name === 'string' && /\.shortcut$/i.test(name)) return 'shortcut';
         if (typeof mime !== 'string' || !mime) return 'download';
         if (mime.indexOf('image/') === 0) return 'image';
         if (mime === 'text/markdown' || mime === 'text/x-markdown') return 'markdown';
         if (mime === 'application/pdf' || mime.indexOf('text/') === 0) return 'iframe';
         return 'download';
+      },
+      _prepareShortcutFile(src, name) {
+        var request = ++this._lightboxFileRequest;
+        this.lightboxFile = null;
+        this.lightboxFileState = 'loading';
+        this.lightboxFileError = '';
+        fetch(src, { credentials: 'same-origin' })
+          .then((r) => (r.ok ? r.blob() : Promise.reject(new Error('status ' + r.status))))
+          .then((blob) => {
+            if (request !== this._lightboxFileRequest || this.lightboxSrc !== src) return;
+            if (typeof File !== 'function') throw new Error('file sharing is unavailable');
+            this.lightboxFile = new File(
+              [blob],
+              name || 'Autonomy Capture.shortcut',
+              { type: blob.type || 'application/octet-stream' },
+            );
+            this.lightboxFileState = 'ready';
+          })
+          .catch((err) => {
+            if (request !== this._lightboxFileRequest || this.lightboxSrc !== src) return;
+            this.lightboxFileState = 'error';
+            this.lightboxFileError = 'The signed file could not be prepared for sharing.';
+            console.warn('Shortcut attachment preparation failed', err);
+          });
+      },
+      canShareLightboxFile() {
+        if (!this.lightboxFile || typeof navigator === 'undefined' ||
+            typeof navigator.share !== 'function') return false;
+        if (typeof navigator.canShare !== 'function') return true;
+        try {
+          return navigator.canShare({ files: [this.lightboxFile] });
+        } catch (_err) {
+          return false;
+        }
+      },
+      openLightboxInNewContext() {
+        if (!this.lightboxSrc) return;
+        // A real anchor click preserves the initiating user gesture on iOS.
+        // target=_blank keeps Quick Look out of the standalone PWA's only
+        // history entry; deliberately omit download, which is what replaces
+        // the PWA with the system download/preview surface.
+        var anchor = document.createElement('a');
+        anchor.href = this.lightboxSrc;
+        anchor.target = '_blank';
+        anchor.rel = 'noopener noreferrer';
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+      },
+      openShortcutInstaller() {
+        if (this.lightboxFileState === 'loading') return;
+        if (!this.canShareLightboxFile()) {
+          this.openLightboxInNewContext();
+          return;
+        }
+
+        // navigator.share() must begin inside this click's transient user
+        // activation. The file was prefetched when the sheet opened, so there
+        // is no await before invoking the native share controller.
+        var result;
+        try {
+          result = navigator.share({
+            files: [this.lightboxFile],
+            title: (this.lightboxName || 'Autonomy Capture.shortcut').replace(/\.shortcut$/i, ''),
+          });
+        } catch (err) {
+          this.lightboxFileError = 'Could not open the iOS share sheet.';
+          return;
+        }
+        Promise.resolve(result)
+          .then(() => this.closeLightbox())
+          .catch((err) => {
+            // Cancelling the system sheet is normal; leave our install sheet
+            // open so the operator can try again.
+            if (err && err.name === 'AbortError') return;
+            this.lightboxFileError = 'Could not open the iOS share sheet.';
+          });
       },
       openLightbox(src, alt, opts) {
         if (!src) return;
@@ -672,6 +755,12 @@
         this.lightboxAlt = alt || '';
         this.lightboxKind = opts.kind || 'image';
         this.lightboxName = opts.name || '';
+        this.lightboxFile = null;
+        this.lightboxFileState = 'idle';
+        this.lightboxFileError = '';
+        if (this.lightboxKind === 'shortcut') {
+          this._prepareShortcutFile(src, this.lightboxName);
+        }
         if (this.lightboxKind === 'markdown') {
           this.lightboxHtml = '';
           fetch(src, { credentials: 'same-origin' })
@@ -706,11 +795,15 @@
         }
       },
       closeLightbox() {
+        this._lightboxFileRequest += 1;
         this.lightboxSrc = '';
         this.lightboxAlt = '';
         this.lightboxKind = 'image';
         this.lightboxName = '';
         this.lightboxHtml = '';
+        this.lightboxFile = null;
+        this.lightboxFileState = 'idle';
+        this.lightboxFileError = '';
         var meta = document.querySelector('meta[name="viewport"]');
         if (meta && this._lightboxPrevViewport !== null) {
           meta.setAttribute('content', this._lightboxPrevViewport);

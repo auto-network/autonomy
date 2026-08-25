@@ -568,6 +568,111 @@
   cursor: zoom-out;
 }
 
+/* Signed Apple Shortcut handoff. This is intentionally quieter than a generic
+   download dialog: one recognizable artifact, one primary action, and a clear
+   statement that the Autonomy window will remain intact. */
+.sc-va-shortcut-sheet {
+  width: min(360px, calc(100vw - 40px));
+  padding: 30px 24px 20px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 24px;
+  background: linear-gradient(155deg, #1b2738 0%, #111a28 68%);
+  box-shadow: 0 26px 80px rgba(0, 0, 0, 0.55);
+  color: #f8fafc;
+  text-align: center;
+  cursor: default;
+}
+
+.sc-va-shortcut-mark {
+  position: relative;
+  width: 58px;
+  height: 58px;
+  margin: 0 auto 18px;
+  border-radius: 15px;
+  overflow: hidden;
+  background: #30186f;
+  box-shadow: 0 10px 28px rgba(68, 40, 170, 0.4);
+}
+
+.sc-va-shortcut-mark span {
+  position: absolute;
+  left: 15px;
+  width: 29px;
+  height: 20px;
+  border-radius: 7px;
+  transform: rotate(45deg) skew(-7deg, -7deg);
+}
+.sc-va-shortcut-mark span:first-child {
+  top: 11px;
+  background: linear-gradient(135deg, #ff6f91, #b842d0);
+}
+.sc-va-shortcut-mark span:last-child {
+  bottom: 10px;
+  background: linear-gradient(135deg, #7755ff, #4b2bb7);
+}
+
+.sc-va-shortcut-kicker {
+  margin-bottom: 6px;
+  color: #94a3b8;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+}
+
+.sc-va-shortcut-sheet h2 {
+  margin: 0;
+  font-size: 1.35rem;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+.sc-va-shortcut-copy {
+  margin: 10px auto 20px;
+  max-width: 280px;
+  color: #aebcd0;
+  font-size: 0.86rem;
+  line-height: 1.45;
+}
+
+.sc-va-shortcut-open,
+.sc-va-shortcut-cancel {
+  width: 100%;
+  min-height: 46px;
+  border: 0;
+  border-radius: 13px;
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.sc-va-shortcut-open {
+  background: #5b3df5;
+  color: #fff;
+  box-shadow: 0 8px 24px rgba(91, 61, 245, 0.3);
+}
+.sc-va-shortcut-open:active { transform: translateY(1px); }
+.sc-va-shortcut-open:disabled {
+  opacity: 0.58;
+  cursor: wait;
+}
+
+.sc-va-shortcut-hint,
+.sc-va-shortcut-error {
+  margin: 10px 4px 0;
+  min-height: 1.2em;
+  color: #8190a5;
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+.sc-va-shortcut-error { color: #fca5a5; }
+
+.sc-va-shortcut-cancel {
+  margin-top: 8px;
+  background: transparent;
+  color: #94a3b8;
+}
+.sc-va-shortcut-cancel:hover { color: #e2e8f0; }
+
 /* ── Markdown lightbox panel (auto-g41xg) ────────────────────────────────────
    Fullscreen viewer for text/markdown attachments. The panel is a fixed-size
    flex column; the × close button is pinned to its top-right so it stays put
