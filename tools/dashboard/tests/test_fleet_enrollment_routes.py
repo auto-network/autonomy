@@ -487,6 +487,8 @@ def test_joining_screen_resumes_approved_delivery_without_node_restart(
                 recovery=recovery,
                 delivery=delivery,
                 personal_root_armor="encrypted-personal-armor",
+                personal_root_created_at="2026-08-20T01:02:03Z",
+                personal_root_updated_at="2026-08-24T04:05:06Z",
             )
 
     from tools.init import first_run
@@ -498,8 +500,10 @@ def test_joining_screen_resumes_approved_delivery_without_node_restart(
     monkeypatch.setattr(
         first_run,
         "_store_fleet_personal_armor",
-        lambda armor, *, expected_root_pub: stored.update({
+        lambda armor, *, expected_root_pub, source_created_at,
+               source_updated_at: stored.update({
             "armor": armor, "root_pub": expected_root_pub,
+            "created_at": source_created_at, "updated_at": source_updated_at,
         }),
     )
     monkeypatch.setattr(
@@ -513,6 +517,8 @@ def test_joining_screen_resumes_approved_delivery_without_node_restart(
     assert stored == {
         "armor": "encrypted-personal-armor",
         "root_pub": invite.personal_root_pub,
+        "created_at": "2026-08-20T01:02:03Z",
+        "updated_at": "2026-08-24T04:05:06Z",
         "busted": True,
     }
 

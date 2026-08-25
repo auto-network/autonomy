@@ -11,14 +11,14 @@ from tools.network.fleet_sync_connection import (
     DatabaseQuiescence,
     require_database_quiescence,
 )
-from tools.network.fleet_sync_sim.alpha import (
+from tools.network.fleet_sync.sync import (
     AlphaCheckpoint,
     AlphaError,
     _fsync_directory,
     _read_manifest,
     install_checkpoint,
 )
-from tools.network.fleet_sync_sim.materialize import ContentAddressedBlobStore
+from tools.network.fleet_sync.materialize import ContentAddressedBlobStore
 
 
 HANDOFF_MARKER_VERSION = 1

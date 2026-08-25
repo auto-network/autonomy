@@ -16,6 +16,7 @@ import time
 import urllib.parse
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -93,6 +94,8 @@ class EnrollmentResult:
     recovery: EnrollmentRecovery
     delivery: fleet_enroll.EnrollmentDelivery | None = None
     personal_root_armor: str | None = None
+    personal_root_created_at: str | None = None
+    personal_root_updated_at: str | None = None
 
 
 class FleetJoinStateStore:
@@ -375,7 +378,8 @@ class FleetEnrollmentClient:
             return EnrollmentResult(status=status, recovery=frozen)
         approved_fields = base | {
             "approval", "roster_entry", "roster_entries",
-            "personal_root_armor"
+            "personal_root_armor", "personal_root_created_at",
+            "personal_root_updated_at",
         }
         if status != "approved" or set(reply) != approved_fields:
             raise FleetEnrollmentClientError(
@@ -385,6 +389,26 @@ class FleetEnrollmentClient:
         if not isinstance(armor, str) or not armor:
             raise FleetEnrollmentClientError(
                 "approved fleet response carries no encrypted personal root"
+            )
+        timestamps = []
+        parsed_timestamps = []
+        for field in ("personal_root_created_at", "personal_root_updated_at"):
+            value = reply[field]
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except (AttributeError, ValueError):
+                raise FleetEnrollmentClientError(
+                    f"approved fleet response carries invalid {field}"
+                ) from None
+            if parsed.tzinfo is None:
+                raise FleetEnrollmentClientError(
+                    f"approved fleet response carries invalid {field}"
+                )
+            timestamps.append(value)
+            parsed_timestamps.append(parsed)
+        if parsed_timestamps[0] > parsed_timestamps[1]:
+            raise FleetEnrollmentClientError(
+                "approved fleet response carries reversed personal-root timestamps"
             )
         approval = fleet_enroll.EnrollmentApproval.from_dict(reply["approval"])
         roster_entry = fleet_roster.RosterEntry.from_dict(reply["roster_entry"])
@@ -424,6 +448,8 @@ class FleetEnrollmentClient:
                 approval, roster_entry, roster_entries
             ),
             personal_root_armor=armor,
+            personal_root_created_at=timestamps[0],
+            personal_root_updated_at=timestamps[1],
         )
 
     async def _exchange(self, invite: fleet_invite.FleetInvite, message: dict):

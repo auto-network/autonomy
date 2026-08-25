@@ -591,7 +591,7 @@ def check_catalog_canary(report: dict) -> None:
     """Cheap, approximate signal for whether a checkpoint would even build.
 
     Found live 2026-08-23, hours into diagnosing a totally silent Fleet-sync
-    failure: alpha.py's real checkpoint builder refuses (AlphaError:
+    failure: sync.py's real checkpoint builder refuses (AlphaError:
     "checkpoint contains untracked logical rows") whenever
     fleet_sync_catalog's live-row count doesn't match the actual row count
     across the replicated tables -- a real, versioned mismatch, not a
@@ -614,7 +614,7 @@ def check_catalog_canary(report: dict) -> None:
     try:
         import sqlite3
         from tools.graph.db import _org_db_path
-        from tools.network.fleet_sync_sim.policies import TABLE_POLICIES, PolicyKind
+        from tools.network.fleet_sync.policies import TABLE_POLICIES, PolicyKind
 
         path = _org_db_path("personal")
         if not path.exists():
@@ -671,7 +671,7 @@ def verify_catalog(*, org: str = "personal") -> dict:
     """
     import sqlite3
     from tools.graph.db import _org_db_path
-    from tools.network.fleet_sync_sim.catalog import MutationCatalog
+    from tools.network.fleet_sync.catalog import MutationCatalog
 
     _section("Catalog integrity (authoritative, full scan -- this may take a while)")
     path = _org_db_path(org)

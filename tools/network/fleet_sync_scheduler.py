@@ -33,14 +33,14 @@ from tools.network.fleet_sync_channel import (
     fleet_direct_connect,
 )
 from tools.network.fleet_sync_connection import FleetSyncConnection
-from tools.network.fleet_sync_sim.catalog import (
+from tools.network.fleet_sync.catalog import (
     AuthoredMutation,
     MAX_TRANSACTION_OPERATIONS,
     MutationCatalog,
     WatermarkError,
     attach_active_production_catalog,
 )
-from tools.network.fleet_sync_sim.codec import (
+from tools.network.fleet_sync.codec import (
     decode_mutation_frame,
     encode_mutation_frame,
 )

@@ -7,7 +7,7 @@ credential expires. Grounded in the canonical notes (`graph read`):
 theory-of-operation, `82e3bdd4-667` vault wake sequence, `1b1e3df3-f43`
 root-provisioning registry, `ac81cc06-18e` rendezvous wire contract,
 `4a67d019-017` personal-as-org tunnel, `65e49c78-f53` roster-designated serving,
-and the sync contract `tools/network/fleet_sync_sim/ALPHA-1.0.md` — plus a
+and the sync contract `tools/network/fleet_sync/ALPHA-1.0.md` — plus a
 file-level trace of the code.*
 
 ## The one mental model

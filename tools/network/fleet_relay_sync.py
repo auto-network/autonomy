@@ -41,7 +41,7 @@ from tools.network.fleet_sync_scheduler import (
     dashboard_fleet_sync_service,
     roster_epoch,
 )
-from tools.network.fleet_sync_sim.alpha import FleetSyncAlpha
+from tools.network.fleet_sync.sync import FleetSyncAlpha
 from tools.network.idkit import canonical_json
 from tools.network.relaykit.viewer import ViewerChannel
 
@@ -477,9 +477,9 @@ async def pull_checkpoint_once(
 #: "money line" a diagnostic needs instead of re-deriving it from a raw
 #: traceback each time. Order matters: first matching classifier wins.
 def _classify_pull_failure(exc: BaseException) -> str:
-    from tools.network.fleet_sync_sim.compaction import WatermarkError
-    from tools.network.fleet_sync_sim.codec import CodecError
-    from tools.network.fleet_sync_sim.alpha import AlphaError
+    from tools.network.fleet_sync.compaction import WatermarkError
+    from tools.network.fleet_sync.codec import CodecError
+    from tools.network.fleet_sync.sync import AlphaError
 
     text = str(exc)
     if isinstance(exc, WatermarkError):

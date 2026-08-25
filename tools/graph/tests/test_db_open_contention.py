@@ -105,7 +105,7 @@ def test_schema_upgrade_precedes_fleet_sync_activation(tmp_path, monkeypatch):
         return object()
 
     monkeypatch.setattr(
-        "tools.network.fleet_sync_sim.catalog.attach_active_production_catalog",
+        "tools.network.fleet_sync.catalog.attach_active_production_catalog",
         attach,
     )
     with GraphDB(path) as opened:
@@ -162,7 +162,7 @@ def test_schema_upgrade_disables_existing_capture_triggers_until_activation(
         return object()
 
     monkeypatch.setattr(
-        "tools.network.fleet_sync_sim.catalog.attach_active_production_catalog",
+        "tools.network.fleet_sync.catalog.attach_active_production_catalog",
         attach,
     )
 

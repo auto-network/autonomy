@@ -111,7 +111,7 @@ def _register_fleet_sync_sql_functions(conn: sqlite3.Connection) -> None:
     conn.create_function("fleet_sync_transaction_ref", 0, _capture_is_inactive)
     conn.create_function("fleet_sync_next_operation", 0, _capture_is_inactive)
     conn.create_function("fleet_sync_current_operation", 0, _capture_is_inactive)
-    from tools.network.fleet_sync_sim.policies import TABLE_POLICIES
+    from tools.network.fleet_sync.policies import TABLE_POLICIES
     for table in TABLE_POLICIES:
         conn.create_function(
             f"fleet_sync_frame_{table}", -1, _capture_is_inactive
@@ -433,7 +433,7 @@ class GraphDB:
         # brick the next writable open of a synced personal database.
         self._init_schema()
         if self._attach_fleet_sync:
-            from tools.network.fleet_sync_sim.catalog import (
+            from tools.network.fleet_sync.catalog import (
                 attach_active_production_catalog,
             )
             self._fleet_catalog = attach_active_production_catalog(self.conn)
@@ -1037,7 +1037,7 @@ class GraphDB:
             raise sqlite3.OperationalError(
                 "fleet-sync catalog migration requires a writable database"
             )
-        from tools.network.fleet_sync_sim.catalog import MutationCatalog
+        from tools.network.fleet_sync.catalog import MutationCatalog
         return MutationCatalog(self.conn, origin_incarnation).migrate_existing()
 
     def reconcile_fleet_sync_catalog(self, origin_incarnation: str):
@@ -1054,7 +1054,7 @@ class GraphDB:
             raise sqlite3.OperationalError(
                 "fleet-sync catalog reconcile requires a writable database"
             )
-        from tools.network.fleet_sync_sim.catalog import MutationCatalog
+        from tools.network.fleet_sync.catalog import MutationCatalog
         return MutationCatalog(self.conn, origin_incarnation).reconcile_catalog()
 
     def activate_fleet_sync_writers(self, origin_incarnation: str) -> bool:
@@ -1065,7 +1065,7 @@ class GraphDB:
                     "fleet-sync writer identity does not match activated catalog"
                 )
             return False
-        from tools.network.fleet_sync_sim.catalog import MutationCatalog
+        from tools.network.fleet_sync.catalog import MutationCatalog
         catalog = MutationCatalog(self.conn, origin_incarnation)
         installed = catalog.activate_production_writers()
         self._fleet_catalog = catalog

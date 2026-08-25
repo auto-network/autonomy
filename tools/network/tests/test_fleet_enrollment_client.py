@@ -105,6 +105,8 @@ def path(tmp_path, monkeypatch):
                 armor_provider=lambda: (
                     "UNCHANGED-PASSWORD-ENCRYPTED-ARMOR",
                     root.public_hex,
+                    "2026-08-20T01:02:03Z",
+                    "2026-08-24T04:05:06Z",
                 ),
                 now_ms=NOW_MS,
             )
@@ -203,6 +205,8 @@ async def test_resume_verifies_public_approval_and_returns_unchanged_armor(path)
     assert approved.personal_root_armor == (
         "UNCHANGED-PASSWORD-ENCRYPTED-ARMOR"
     )
+    assert approved.personal_root_created_at == "2026-08-20T01:02:03Z"
+    assert approved.personal_root_updated_at == "2026-08-24T04:05:06Z"
     join_store.save_delivery(recovery.request_id, approved.delivery)
     assert join_store.load_delivery(recovery.request_id) == approved.delivery
     raw = join_store.path.read_bytes()
