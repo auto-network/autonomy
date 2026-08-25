@@ -220,6 +220,19 @@ def cmd_update(args):
                if k not in ("key", "surface_id", "item_id",
                             "created_at", "updated_at")}
     payload.update(_payload_from_flags(args))
+    # Repeatable flags APPEND on update — three real incidents of
+    # silently wiped ref lists (coverage broke each time) proved that
+    # replace semantics are a trap. Shrinking is explicit: --clear-refs
+    # resets the list to exactly what this invocation provides.
+    if getattr(args, "clear_refs", False):
+        payload["refs"] = list(args.ref or [])
+    elif getattr(args, "ref", None):
+        existing = current.get("refs") or []
+        payload["refs"] = existing + [r for r in args.ref
+                                      if r not in existing]
+    if getattr(args, "evidence", None):
+        payload["evidence"] = (current.get("evidence") or []) + [
+            {"text": e} for e in args.evidence]
     call("PUT", f"/api/mission/item/{m['mission_id']}/{args.pillar}/"
                 f"{args.item_id}", payload)
     print(f"  ✓ {args.pillar}:{args.item_id} updated")
@@ -337,7 +350,12 @@ def register(sub) -> None:
         qq.add_argument("--section")
         qq.add_argument("--order", type=float)
         qq.add_argument("--ref", action="append",
-                        help="Repeatable: bead:<id> commit:<sha> graph:<id>")
+                        help="Repeatable: bead:<id> commit:<sha> graph:<id>. "
+                             "On update, APPENDS to the existing list")
+        qq.add_argument("--clear-refs", dest="clear_refs",
+                        action="store_true",
+                        help="Update only: reset refs to exactly the "
+                             "--ref values given (empty if none)")
         qq.add_argument("--evidence", action="append",
                         help="Repeatable evidence text (provenance-bearing "
                              "entries via --from)")

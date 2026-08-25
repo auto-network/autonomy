@@ -91,6 +91,12 @@ the v2 flags: `--blocking`, `--faq`, `--asked-by`, `--ask`, `--fork
 --chosen --if-wrong`, `--evidence` (repeatable), `--ref bead:<id>`,
 `--from payload.json` for full payloads.
 
+On `update`, the repeatable flags **append**: `--ref` adds to the
+existing list (deduped) and `--evidence` adds entries — an update never
+silently shrinks a list. To actually remove refs, pass `--clear-refs`,
+which resets the list to exactly the `--ref` values in that invocation
+(empty if none).
+
 ## Playbook: the pillar session
 
 **Think in Mission Control verbs.** Once you coordinate a pillar, chat
