@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -585,6 +586,54 @@ class TestSinceWindow:
         results = isolated_dao.get_recent_sessions(limit=10, since="zzz")
         default = isolated_dao.get_recent_sessions(limit=10, since="all")
         assert len(results) == len(default)
+
+    def test_selected_org_ignores_since_but_global_view_does_not(self, isolated_dao):
+        """Quiet organizations retain their historical tail when selected.
+
+        The fixture's ``src-fresh-stale`` source is older than the global 1d
+        window. The global feed must keep excluding it; selecting autonomy
+        must return it because the single-org list is count-capped, not
+        date-capped.
+        """
+        global_ids = {
+            row["id"] for row in isolated_dao.get_recent_sessions(since="1d")
+        }
+        scoped = isolated_dao.get_recent_sessions(since="1d", org="autonomy")
+        scoped_ids = {row["id"] for row in scoped}
+
+        assert "src-fresh-stale" not in global_ids
+        assert "src-fresh-stale" in scoped_ids
+        assert {row["project"] for row in scoped} == {"[autonomy]"}
+
+    def test_selected_org_is_capped_by_count_not_age(self, isolated_dao):
+        """A busy selected org receives its own per-type quota, not a flood."""
+        from tools.graph.db import GraphDB
+
+        dynbench = GraphDB(Path(os.environ["AUTONOMY_ORGS_DIR"]) / "dynbench.db")
+        for index in range(25):
+            dynbench.conn.execute(
+                """INSERT INTO sources
+                    (id, type, platform, title, file_path, metadata, created_at,
+                     ingested_at, last_activity_at)
+                    VALUES (?, 'session', 'claude-code', ?, ?, ?, ?, ?, ?)""",
+                (
+                    f"dynbench-{index}",
+                    f"Dynbench historical session {index}",
+                    f"/tmp/dynbench/{index}.jsonl",
+                    json.dumps({"session_uuid": f"dynbench-{index}"}),
+                    "2020-01-01T00:00:00Z",
+                    "2020-01-01T00:00:00Z",
+                    f"2020-01-{(index % 9) + 1:02d}T00:00:00Z",
+                ),
+            )
+        dynbench.commit()
+        dynbench.close()
+
+        rows = isolated_dao.get_recent_sessions(
+            since="1d", type_group="all", org="dynbench"
+        )
+        assert len(rows) == 20  # the all-filter interactive quota
+        assert {row["project"] for row in rows} == {"[dynbench]"}
 
 
 # ══════════════════════════════════════════════════════════════════════

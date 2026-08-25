@@ -250,12 +250,12 @@
     </div>
 
     <!-- Empty states -->
-    <template x-if="filtered.length === 0 && recent.length > 0">
+    <template x-if="!recentLoading && filtered.length === 0 && recent.length > 0">
       <div class="text-gray-500 text-sm py-2"
            x-text="'No ' + recentFilter + ' sessions'"
            data-testid="empty-filter-msg"></div>
     </template>
-    <template x-if="recent.length === 0">
+    <template x-if="!recentLoading && recent.length === 0">
       <div class="text-gray-500 text-sm">No recent sessions</div>
     </template>
 

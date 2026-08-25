@@ -550,6 +550,7 @@ def get_recent_sessions(
     sort: str = "lastActivity",
     since: str = "1d",
     type_group: str = "all",
+    org: str | None = None,
 ) -> list[dict]:
     """Mirror of ``dao.sessions.get_recent_sessions`` for DASHBOARD_MOCK fixtures.
 
@@ -569,6 +570,14 @@ def get_recent_sessions(
     data = _load()
     rows = [_fill(s, RECENT_SESSION_DEFAULTS) for s in data.get("recent_sessions", [])]
 
+    # Match the production selected-org contract: the scoped list comes from
+    # that org alone and is capped by count, not by the global date window.
+    if org:
+        rows = [
+            r for r in rows
+            if (r.get("project") or "").strip("[]") == org
+        ]
+
     if type_group not in _DEFAULT_TYPE_QUOTAS:
         type_group = "all"
     quotas = _DEFAULT_TYPE_QUOTAS[type_group]
@@ -582,7 +591,7 @@ def get_recent_sessions(
         except (ValueError, TypeError):
             return 0.0
 
-    if since and since != "all":
+    if not org and since and since != "all":
         try:
             cutoff = _time.time() - parse_duration(since)
         except ValueError:
@@ -630,14 +639,16 @@ def get_recent_sessions(
     return _attach_org(out)
 
 
-def recent_sessions_cached(sort: str, since: str, type_group: str) -> list[dict] | None:
+def recent_sessions_cached(
+    sort: str, since: str, type_group: str, org: str | None = None,
+) -> list[dict] | None:
     """Mock-mode companion to ``dao.sessions.recent_sessions_cached``.
 
     Production serves a background-refreshed cache so request handlers never
     iterate org DBs. Mock mode is fixture-file backed, so compute immediately
     from the fixture to keep tests deterministic.
     """
-    return get_recent_sessions(None, sort, since, type_group)
+    return get_recent_sessions(None, sort, since, type_group, org)
 
 
 def refresh_recent_cache() -> int:

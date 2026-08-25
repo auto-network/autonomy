@@ -152,6 +152,7 @@
     Alpine.data('sessionsPage', () => ({
       interactive: [],
       recent: [],
+      recentLoading: true,
       loading: true,
       _creating: false,
       zoom: localStorage.getItem('sessionZoom') || 'normal',
@@ -481,6 +482,7 @@
         if (slug === this.selectedOrg) return;
         this.selectedOrg = slug;
         localStorage.setItem('sessionsOrgFilter', slug);
+        this._fetchRecent();
       },
 
       _matchesOrg(s) {
@@ -1300,11 +1302,23 @@
       },
 
       async _fetchRecent() {
+        const selectedOrg = this.selectedOrg;
+        this.recentLoading = true;
+        let warming = false;
         try {
           const url = '/api/dao/recent_sessions?type=' + encodeURIComponent(this.recentFilter || 'all')
             + '&sort=' + encodeURIComponent(this.recentSort)
-            + '&since=' + encodeURIComponent(this.recentSince);
-          const data = await fetch(url).then(r => r.json());
+            + '&since=' + encodeURIComponent(this.recentSince)
+            + (selectedOrg ? '&org=' + encodeURIComponent(selectedOrg) : '');
+          const response = await fetch(url);
+          if (selectedOrg !== this.selectedOrg) return;
+          if (response.status === 202) {
+            warming = true;
+            clearTimeout(this._recentWarmTimer);
+            this._recentWarmTimer = setTimeout(() => this._fetchRecent(), 1200);
+            return;
+          }
+          const data = await response.json();
           if (!Array.isArray(data)) { this.recent = []; return; }
           this.recent = data.map(function(r) {
             // tmux_session is the viewer's keying field — the unified tail
@@ -1379,6 +1393,8 @@
           }
         } catch (e) {
           console.warn('[sessionsPage] recent fetch error', e);
+        } finally {
+          if (selectedOrg === this.selectedOrg && !warming) this.recentLoading = false;
         }
       },
 

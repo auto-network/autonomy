@@ -459,6 +459,7 @@ def get_recent_sessions(
     sort: str = "lastActivity",
     since: str = "1d",
     type_group: str = "all",
+    org: str | None = None,
 ) -> list[dict]:
     """Fetch recent session sources, ordered and filtered for the Recent list.
 
@@ -478,6 +479,9 @@ def get_recent_sessions(
              librarian queue can't starve interactive sessions out of the
              window. Selecting a specific chip funnels the whole budget into
              that one group.
+      org: when set, read only this organization's history. Scoped views are
+             count-capped by the same per-type quotas but deliberately ignore
+             ``since`` so a quiet organization's older sessions remain visible.
 
     Strategy:
       1. Pull recent session rows from graph.db (the historical tail).
@@ -500,7 +504,7 @@ def get_recent_sessions(
 
     # Compute the since cutoff once (epoch seconds). ``all`` / unknown → None.
     since_cutoff: float | None = None
-    if since and since != "all":
+    if not org and since and since != "all":
         dur_str = _SINCE_WINDOWS.get(since, since)
         try:
             since_cutoff = time.time() - parse_duration(dur_str)
@@ -515,28 +519,35 @@ def get_recent_sessions(
 
     graph_rows: list[dict] = []
     sample_limit = max(total_quota * 25, 1000) if sort in ("turns", "ctx") else max(total_quota * 15, 600)
-    for slug in all_store_slugs():
+    # The global firehose samples every store before applying its recency
+    # window. A selected organization is different: it must be able to return
+    # its full historical tail (then count-cap it), so query that one store
+    # without a pre-truncating SQL limit.
+    org_slugs = (org,) if org else all_store_slugs()
+    for slug in org_slugs:
         slug_db = open_peer_db(slug)
         if slug_db is None:
             continue
         # Pooled handle from open_peer_db — must NOT close.
         conn = slug_db.conn
         has_la = _graph_sources_have_last_activity_column(conn)
+        limit_clause = "" if org else " LIMIT ?"
+        params: tuple[int, ...] = () if org else (sample_limit,)
         if has_la:
             sql = (
                 "SELECT id, type, title, created_at, last_activity_at,"
                 " file_path, metadata FROM sources"
                 " WHERE type IN ('session', 'agentic')"
-                " ORDER BY COALESCE(last_activity_at, created_at) DESC LIMIT ?"
+                " ORDER BY COALESCE(last_activity_at, created_at) DESC"
             )
         else:
             sql = (
                 "SELECT id, type, title, created_at, NULL as last_activity_at,"
                 " file_path, metadata FROM sources"
                 " WHERE type IN ('session', 'agentic')"
-                " ORDER BY created_at DESC LIMIT ?"
+                " ORDER BY created_at DESC"
             )
-        rows = conn.execute(sql, (sample_limit,)).fetchall()
+        rows = conn.execute(sql + limit_clause, params).fetchall()
         for r in rows:
             meta: dict = {}
             if r["metadata"]:
@@ -737,15 +748,17 @@ def get_recent_sessions(
 # path NEVER computes it: a background refresher (server _on_startup) precomputes
 # the hot param combos off-loop and the handler reads this cache. Unknown combos
 # are registered on first request and warmed within one refresh cycle.
-_RECENT_CACHE: dict[tuple, list] = {}
-_RECENT_KEYS: set[tuple] = {
-    ("lastActivity", "1d", "all"),
-    ("lastActivity", "1w", "interactive"),
+_RECENT_CACHE: dict[tuple[str, str, str, str | None], list] = {}
+_RECENT_KEYS: set[tuple[str, str, str, str | None]] = {
+    ("lastActivity", "1d", "all", None),
+    ("lastActivity", "1w", "interactive", None),
 }
 _RECENT_LOCK = threading.Lock()
 
 
-def recent_sessions_cached(sort: str, since: str, type_group: str) -> list | None:
+def recent_sessions_cached(
+    sort: str, since: str, type_group: str, org: str | None = None,
+) -> list | None:
     """Cached recent-sessions list for these params, or None if not yet warmed.
 
     Registers the key so the background refresher computes it. NEVER computes on
@@ -753,7 +766,7 @@ def recent_sessions_cached(sort: str, since: str, type_group: str) -> list | Non
     refresher fills it within one cycle, so a request can never block on org-DB
     iteration.
     """
-    key = (sort, since, type_group)
+    key = (sort, since, type_group, org)
     with _RECENT_LOCK:
         _RECENT_KEYS.add(key)
         return _RECENT_CACHE.get(key)
@@ -765,16 +778,16 @@ def refresh_recent_cache() -> int:
     with _RECENT_LOCK:
         keys = list(_RECENT_KEYS)
     n = 0
-    for sort, since, type_group in keys:
+    for sort, since, type_group, org in keys:
         try:
-            res = get_recent_sessions(None, sort, since, type_group)
+            res = get_recent_sessions(None, sort, since, type_group, org)
         except Exception:
             logger.exception(
-                "recent_sessions cache refresh failed for %s/%s/%s",
-                sort, since, type_group,
+                "recent_sessions cache refresh failed for %s/%s/%s org=%s",
+                sort, since, type_group, org,
             )
             continue
         with _RECENT_LOCK:
-            _RECENT_CACHE[(sort, since, type_group)] = res
+            _RECENT_CACHE[(sort, since, type_group, org)] = res
         n += 1
     return n

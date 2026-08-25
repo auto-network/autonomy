@@ -12194,13 +12194,25 @@ async def api_dao_recent_sessions(request):
     sort = request.query_params.get("sort", "lastActivity")
     since = request.query_params.get("since", "1d")
     type_group = request.query_params.get("type", "all")
+    requested_org = request.query_params.get("org") or None
+    org = None
+    if requested_org:
+        # A selected organization is a server-side scope, never a raw
+        # client-controlled filter. Reuse the network route's token/org
+        # reconciliation so an org-stamped session cannot read another org.
+        from tools.dashboard.network_routes import _scoped_org
+        org, refused = _scoped_org(requested_org, request=request)
+        if refused is not None:
+            return refused
     # Served from the background-refreshed cache — the request path NEVER
     # iterates the org DBs (that is what hung this endpoint to ~30s under graph
     # ingest contention). A cold key returns [] and is warmed within one refresh
     # cycle by _recent_sessions_refresher.
-    sessions = dao_sessions.recent_sessions_cached(sort, since, type_group)
+    sessions = dao_sessions.recent_sessions_cached(sort, since, type_group, org)
     if sessions is None:
-        sessions = []
+        # New scoped cache keys are warmed off the request path. Tell the UI
+        # to retry without presenting a false "No recent sessions" state.
+        return JSONResponse([], status_code=202)
     return JSONResponse(sessions)
 
 
