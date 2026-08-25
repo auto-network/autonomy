@@ -126,6 +126,7 @@ from tools.dashboard import session_trace
 from tools.dashboard import turn_corrections as turn_corrections_mod
 from tools.dashboard.dao import auth_db, dashboard_db, mcp_relay_db
 from tools.dashboard import approvals_routes
+from tools.dashboard import attention_routes
 from tools.dashboard import mcp_relay_routes
 from tools.dashboard import dropbox_routes
 from tools.dashboard import jira_routes
@@ -15895,6 +15896,23 @@ def _settings_emit_hook(
     happen to register a hook against this dashboard process still get
     deterministic delivery.
     """
+    set_id = snapshot.get("set_id") if isinstance(snapshot, dict) else None
+    if attention_routes.is_private_central_set_id(set_id):
+        key = snapshot.get("key") if isinstance(snapshot, dict) else None
+        try:
+            _invalidate_setting_caches(set_id, key=key, org=org)
+        except Exception:
+            logger.warning("private setting cache invalidation failed", exc_info=True)
+        try:
+            attention_routes.emit_setting_change(
+                operation=operation,
+                snapshot=snapshot,
+                org=org,
+            )
+        except Exception:
+            logger.warning("private attention diversion failed", exc_info=True)
+        return
+
     payload = {
         "set_id": snapshot["set_id"],
         "schema_revision": snapshot["schema_revision"],
@@ -19123,6 +19141,11 @@ routes = [
     # e.g. commit signing
     *approvals_routes.ROUTES,
 
+    # Settings-native Central Attention operator projection and its private
+    # wake/refetch stream.  The legacy Knowledge Graph GET /api/attention
+    # route above remains a separate exact path.
+    *attention_routes.routes,
+
     # ChatGPT MCP relay: session/crosstalk resolve + approval (service-token auth)
     *mcp_relay_routes.ROUTES,
 
@@ -19471,6 +19494,24 @@ async def _on_startup():
         except Exception:
             logger.exception("event_bus.restore() raised unexpectedly; continuing")
     _mark("event_bus.restore")
+    try:
+        scrubbed = attention_routes.scrub_private_cached_events(event_bus)
+        if scrubbed:
+            snapshot_fn = getattr(event_bus, "snapshot", None)
+            if callable(snapshot_fn):
+                snapshot_fn(EVENT_BUS_STATE_PATH)
+            logger.info(
+                "removed %d private Central Attention entries from EventBus replay",
+                scrubbed,
+            )
+    except Exception:
+        logger.critical(
+            "private Central Attention EventBus scrub failed; refusing to serve",
+            exc_info=True,
+        )
+        raise
+    await attention_routes.start()
+    _mark("attention_routes.start+event_bus_scrub")
     # Wire the terminal CrossTalk notifier before the monitor starts so
     # any initial-refresh cache write in ``start()`` can fire transitions
     # for already-armed rows.
@@ -19532,6 +19573,11 @@ async def _on_startup():
             "personal settings store warm-open failed; continuing startup"
         )
     _mark("warm_personal_settings_store")
+    try:
+        await asyncio.to_thread(attention_routes.sync_registrations)
+    except Exception:
+        logger.exception("Central Attention registration sync failed; continuing startup")
+    _mark("attention_routes.sync_registrations")
     try:
         from tools.graph.commit_policy import seed_default_workspace_policies
         seed_default_workspace_policies(workspace_settings.load_workspaces())
@@ -19755,6 +19801,10 @@ async def _on_shutdown():
         await web_push.stop_worker()
     except Exception:
         logger.exception("error stopping the Web Push worker")
+    try:
+        await attention_routes.stop()
+    except Exception:
+        logger.exception("error stopping the private Central Attention hub")
     # Clear the emit hook so a subsequent process / test reload doesn't
     # leak a stale binding into a swapped module-level event_bus.
     try:

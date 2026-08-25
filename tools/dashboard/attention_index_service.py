@@ -114,6 +114,9 @@ class AttentionIndexStore(Protocol):
         self, attention_id: str, payload: Mapping[str, Any],
     ) -> AttentionItemRecord: ...
     def list_items(self) -> list[AttentionItemRecord]: ...
+    def get_presentation(
+        self, attention_id: str,
+    ) -> AttentionPresentationRecord | None: ...
     def list_presentations(self) -> list[AttentionPresentationRecord]: ...
 
 
@@ -272,6 +275,15 @@ class SettingsAttentionIndexStore:
     def list_items(self) -> list[AttentionItemRecord]:
         return self._list(ATTENTION_ITEM_SET_ID, AttentionItemRecord)
 
+    def get_presentation(
+        self, attention_id: str,
+    ) -> AttentionPresentationRecord | None:
+        return self._read_one(
+            ATTENTION_PRESENTATION_SET_ID,
+            attention_id,
+            AttentionPresentationRecord,
+        )
+
     def list_presentations(self) -> list[AttentionPresentationRecord]:
         return self._list(ATTENTION_PRESENTATION_SET_ID, AttentionPresentationRecord)
 
@@ -329,6 +341,16 @@ class InMemoryAttentionIndexStore:
         if self.fail_items:
             raise RuntimeError("item list failed")
         return [AttentionItemRecord(key, _copy_json(value)) for key, value in self.items.items()]
+
+    def get_presentation(
+        self, attention_id: str,
+    ) -> AttentionPresentationRecord | None:
+        if self.fail_presentations:
+            raise RuntimeError("presentation read failed")
+        payload = self.presentations.get(attention_id)
+        return None if payload is None else AttentionPresentationRecord(
+            attention_id, _copy_json(payload),
+        )
 
     def list_presentations(self) -> list[AttentionPresentationRecord]:
         if self.fail_presentations:
@@ -626,6 +648,90 @@ class AttentionIndexService:
         except Exception as exc:
             raise AttentionIndexError("unavailable") from exc
 
+    def _validated_item(
+        self, record: AttentionItemRecord,
+    ) -> tuple[AttentionItemRecord, Any, Any]:
+        if (
+            not isinstance(record, AttentionItemRecord)
+            or not isinstance(record.payload, Mapping)
+        ):
+            raise AttentionIndexError("unavailable")
+        try:
+            payload = _copy_json(dict(record.payload))
+            _validate_attention_id(record.attention_id)
+            validate_payload(ATTENTION_ITEM_SET_ID, CENTRAL_ATTENTION_REVISION, payload)
+            _validate_version(payload.get("source_version"))
+            if not _coherent_role_state(
+                payload.get("participant_role"), payload.get("attention_state"),
+            ):
+                raise ValueError("stored role/state mismatch")
+            registration = self.registry.require_class(
+                payload["application_scope"], payload["notification_class"],
+            )
+            application = self.registry.require_application(payload["application_scope"])
+        except Exception as exc:
+            raise AttentionIndexError("unavailable") from exc
+        return AttentionItemRecord(record.attention_id, payload), registration, application
+
+    @staticmethod
+    def _validated_presentation(
+        record: AttentionPresentationRecord,
+    ) -> AttentionPresentationRecord:
+        if (
+            not isinstance(record, AttentionPresentationRecord)
+            or not isinstance(record.payload, Mapping)
+        ):
+            raise AttentionIndexError("unavailable")
+        try:
+            payload = _copy_json(dict(record.payload))
+            _validate_presentation_id(record.attention_id)
+            validate_payload(
+                ATTENTION_PRESENTATION_SET_ID,
+                CENTRAL_ATTENTION_REVISION,
+                payload,
+            )
+        except Exception as exc:
+            raise AttentionIndexError("unavailable") from exc
+        return AttentionPresentationRecord(record.attention_id, payload)
+
+    @staticmethod
+    def _query_item(
+        record: AttentionItemRecord,
+        registration: Any,
+        application: Any,
+        presentation: Mapping[str, Any] | None,
+    ) -> AttentionQueryItem:
+        return AttentionQueryItem(
+            attention_id=record.attention_id,
+            payload=record.payload,
+            presentation=presentation,
+            application_label=application.label,
+            icon_ref=application.icon_ref,
+            surface_category=registration.surface_category,
+            review_renderer_id=registration.review_renderer_id,
+        )
+
+    def get_query_item(self, attention_id: Any) -> AttentionQueryItem | None:
+        """Resolve one exact item through the same validation/join as query."""
+        key = _validate_attention_id(attention_id)
+        try:
+            raw_item = self.store.get_item(key)
+            raw_presentation = self.store.get_presentation(key)
+        except Exception as exc:
+            raise AttentionIndexError("unavailable") from exc
+        if raw_item is None:
+            return None
+        item, registration, application = self._validated_item(raw_item)
+        presentation = None
+        if raw_presentation is not None:
+            clean = self._validated_presentation(raw_presentation)
+            if clean.attention_id != key:
+                raise AttentionIndexError("unavailable")
+            presentation = clean.payload
+        return self._query_item(
+            item, registration, application, presentation,
+        )
+
     def _normalize_filters(
         self,
         *,
@@ -731,53 +837,32 @@ class AttentionIndexService:
         snapshot_rows = []
         seen_item_ids: set[str] = set()
         for record in raw_items:
-            if (
-                not isinstance(record, AttentionItemRecord)
-                or not isinstance(record.payload, Mapping)
-            ):
-                raise AttentionIndexError("unavailable")
             try:
-                payload = _copy_json(dict(record.payload))
-                _validate_attention_id(record.attention_id)
+                clean, registration, application = self._validated_item(record)
                 if record.attention_id in seen_item_ids:
                     raise ValueError("duplicate attention item")
                 seen_item_ids.add(record.attention_id)
-                validate_payload(ATTENTION_ITEM_SET_ID, CENTRAL_ATTENTION_REVISION, payload)
-                _validate_version(payload.get("source_version"))
-                if not _coherent_role_state(
-                    payload.get("participant_role"), payload.get("attention_state"),
-                ):
-                    raise ValueError("stored role/state mismatch")
-                registration = self.registry.require_class(
-                    payload["application_scope"], payload["notification_class"],
-                )
-                application = self.registry.require_application(payload["application_scope"])
+            except AttentionIndexError:
+                raise
             except Exception as exc:
                 raise AttentionIndexError("unavailable") from exc
-            clean = AttentionItemRecord(record.attention_id, payload)
             items.append((clean, registration, application))
-            snapshot_rows.append({"attention_id": record.attention_id, "payload": payload})
+            snapshot_rows.append({
+                "attention_id": record.attention_id,
+                "payload": clean.payload,
+            })
 
         presentations: dict[str, Mapping[str, Any]] = {}
         for record in raw_presentations:
-            if (
-                not isinstance(record, AttentionPresentationRecord)
-                or not isinstance(record.payload, Mapping)
-            ):
-                raise AttentionIndexError("unavailable")
             try:
-                payload = _copy_json(dict(record.payload))
-                _validate_presentation_id(record.attention_id)
+                clean = self._validated_presentation(record)
                 if record.attention_id in presentations:
                     raise ValueError("duplicate attention presentation")
-                validate_payload(
-                    ATTENTION_PRESENTATION_SET_ID,
-                    CENTRAL_ATTENTION_REVISION,
-                    payload,
-                )
+            except AttentionIndexError:
+                raise
             except Exception as exc:
                 raise AttentionIndexError("unavailable") from exc
-            presentations[record.attention_id] = payload
+            presentations[record.attention_id] = clean.payload
 
         try:
             snapshot = _b64(hashlib.sha256(_canonical_bytes({
@@ -787,14 +872,11 @@ class AttentionIndexService:
         except Exception as exc:
             raise AttentionIndexError("unavailable") from exc
 
-        joined = [AttentionQueryItem(
-            attention_id=record.attention_id,
-            payload=record.payload,
-            presentation=presentations.get(record.attention_id),
-            application_label=application.label,
-            icon_ref=application.icon_ref,
-            surface_category=registration.surface_category,
-            review_renderer_id=registration.review_renderer_id,
+        joined = [self._query_item(
+            record,
+            registration,
+            application,
+            presentations.get(record.attention_id),
         ) for record, registration, application in items]
         joined.sort(key=lambda item: (-item.payload["occurred_at"], item.attention_id))
 

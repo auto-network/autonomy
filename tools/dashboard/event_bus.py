@@ -33,7 +33,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -334,9 +334,68 @@ class EventBus:
                 "data": json.loads(entry.serialised),
             })
 
-        # Complete if we found the first requested seq
-        complete = bool(events) and events[0]["seq"] == from_seq
+        # A scrubbed or otherwise missing entry in the middle of the requested
+        # range is just as incomplete as an evicted first entry.  Checking only
+        # the first sequence used to label a range complete even when a startup
+        # privacy migration deliberately removed a later cached event.
+        complete = (
+            bool(events)
+            and events[0]["seq"] == from_seq
+            and events[-1]["seq"] == to_seq
+            and all(
+                current["seq"] == previous["seq"] + 1
+                for previous, current in zip(events, events[1:])
+            )
+        )
         return events, complete
+
+    def discard_cached(
+        self,
+        predicate: Callable[[str, Any, bool], bool],
+    ) -> int:
+        """Discard matching cached/replay entries without renumbering.
+
+        This is a startup migration primitive, not a broadcast filter.  The
+        caller receives ``(topic, decoded_data, decoded_ok)`` and decides
+        whether an entry is unsafe to retain.  Malformed JSON is surfaced as
+        ``decoded_ok=False`` with ``decoded_data=None`` so a migration can fail
+        closed for one topic without discarding malformed state from every
+        unrelated topic.
+
+        The global sequence is intentionally unchanged.  Any removed middle
+        sequence therefore becomes an honest replay gap and ``replay`` reports
+        the requested range incomplete.
+        """
+        if not callable(predicate):
+            raise TypeError("discard predicate must be callable")
+
+        def should_discard(topic: str, serialised: str) -> bool:
+            try:
+                decoded = json.loads(serialised)
+                decoded_ok = True
+            except Exception:
+                decoded = None
+                decoded_ok = False
+            return bool(predicate(topic, decoded, decoded_ok))
+
+        removed = 0
+        for topic, serialised in list(self._last.items()):
+            if should_discard(topic, serialised):
+                self._last.pop(topic, None)
+                self._last_seq.pop(topic, None)
+                removed += 1
+
+        kept: deque[_BufferEntry] = deque()
+        kept_bytes = 0
+        for entry in self._buffer:
+            if should_discard(entry.topic, entry.serialised):
+                removed += 1
+                continue
+            kept.append(entry)
+            kept_bytes += entry.size
+        self._buffer = kept
+        self._buffer_bytes = kept_bytes
+        return removed
 
     def all_cached_topics(self) -> list[str]:
         """Return topics that have cached state."""
