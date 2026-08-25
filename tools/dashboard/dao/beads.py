@@ -21,13 +21,111 @@ from typing import Any
 import pymysql
 import pymysql.cursors
 
-# Env overrides support non-localhost topologies (e.g. a `dolt` service in
-# the Compose distribution, DEPLOY.md). Defaults preserve the historical
-# same-host layout.
-_DOLT_HOST = os.environ.get("DOLT_SQL_HOST", "127.0.0.1")
-_DOLT_PORT = int(os.environ.get("DOLT_SQL_PORT", "3306"))
-_DOLT_USER = os.environ.get("DOLT_SQL_USER", "root")
-_DOLT_PASSWORD = os.environ.get("DOLT_SQL_PASSWORD", "")
+# ── Where the Dolt server actually is ───────────────────────────────────
+#
+# There is ONE source of truth for how to reach Dolt, and it is the beads
+# config the `bd` CLI already obeys: `<BEADS_DIR>/config.yaml` (dolt.host /
+# dolt.port) plus `<BEADS_DIR>/credentials.env` (the server user + password).
+# This DAO MUST read the same thing, or it silently diverges from bd: in the
+# host-network deployment config.yaml pins host=172.17.0.1 so --network=host
+# containers reach the shared instance, while this module's old default was
+# 127.0.0.1. The divergence connected the DAO to nothing, `_degrade_when_
+# unreachable` turned that into empty results, and `/api/dao/bead/{id}`
+# reported the empty as 404 — the operator saw "bead not found" on every bead
+# while the beads *list* (served from the bd CLI) worked fine.
+#
+# Precedence, highest first: an explicit DOLT_SQL_* env var (the Compose
+# distribution sets DOLT_SQL_HOST=dolt — see docker-compose.yml, DEPLOY.md);
+# then the beads config/credentials that bd uses; then the historical
+# same-host default. Reading a credential is best-effort — a permission error
+# or missing file falls through to the next source, never raising at import.
+
+
+def _beads_dir() -> str:
+    return os.environ.get("BEADS_DIR") or os.path.join(
+        os.environ.get("AUTONOMY_DATA_ROOT", "/data"), ".beads"
+    )
+
+
+def _dolt_host_port_from_config() -> tuple[str | None, int | None]:
+    """(host, port) from the `dolt:` block of the beads config.yaml, or Nones.
+
+    A minimal block parser rather than a YAML dependency, matching how
+    agents/start-dolt.sh reads the same file.
+    """
+    path = os.path.join(_beads_dir(), "config.yaml")
+    host: str | None = None
+    port: int | None = None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            in_dolt = False
+            for raw in fh:
+                line = raw.rstrip("\n")
+                if not line.strip() or line.lstrip().startswith("#"):
+                    continue
+                if not line[0].isspace():
+                    in_dolt = line.strip().rstrip(":") == "dolt"
+                    continue
+                if in_dolt:
+                    key, _, val = line.strip().partition(":")
+                    val = val.strip()
+                    if key == "host" and val:
+                        host = val
+                    elif key == "port" and val:
+                        try:
+                            port = int(val)
+                        except ValueError:
+                            pass
+    except OSError:
+        pass
+    return host, port
+
+
+def _beads_credential(name: str) -> str | None:
+    """A key from the exported env, else from `<BEADS_DIR>/credentials.env`."""
+    val = os.environ.get(name)
+    if val is not None:
+        return val
+    try:
+        with open(os.path.join(_beads_dir(), "credentials.env"), encoding="utf-8") as fh:
+            for raw in fh:
+                key, sep, v = raw.strip().partition("=")
+                if sep and key == name:
+                    return v
+    except OSError:
+        pass
+    return None
+
+
+def _pick(*values, default):
+    """First value that was actually provided (not None); else the default.
+
+    ``or`` would wrongly skip a deliberately-empty password, so test for None.
+    """
+    for v in values:
+        if v is not None:
+            return v
+    return default
+
+
+_cfg_host, _cfg_port = _dolt_host_port_from_config()
+
+_DOLT_HOST = _pick(
+    os.environ.get("DOLT_SQL_HOST"), _cfg_host, default="127.0.0.1"
+)
+_DOLT_PORT = int(
+    _pick(os.environ.get("DOLT_SQL_PORT"), _cfg_port, default=3306)
+)
+_DOLT_USER = _pick(
+    os.environ.get("DOLT_SQL_USER"),
+    _beads_credential("BEADS_DOLT_SERVER_USER"),
+    default="root",
+)
+_DOLT_PASSWORD = _pick(
+    os.environ.get("DOLT_SQL_PASSWORD"),
+    _beads_credential("BEADS_DOLT_PASSWORD"),
+    default="",
+)
 _DOLT_DB = os.environ.get("DOLT_SQL_DATABASE", "auto")
 
 _local = threading.local()

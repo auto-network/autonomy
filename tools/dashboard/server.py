@@ -12292,15 +12292,40 @@ async def api_dao_bead(request):
 
     GET /api/dao/bead/{id}
 
-    Uses dao_beads.get_bead() which connects directly to Dolt/MySQL.
-    Returns 404 JSON if the bead does not exist.
+    Prefers dao_beads.get_bead() (Dolt/MySQL: one round trip for labels, deps,
+    comments and children). But the DAO degrades to None when the Dolt SQL
+    server is unreachable, and that is INDISTINGUISHABLE from a genuinely-absent
+    bead — so a bare None must NOT be reported as 404 "not found". To the
+    operator that reads as "this bead does not exist" (they diagnosed it as an
+    auth failure), when the truth is the beads backend is down. The bd CLI reads
+    Dolt on disk and works without the SQL server — it is what the beads *list*
+    is served from — so fall back to it: the detail page stays as resilient as
+    the list, and a real 404 is returned only when the CLI also has no such bead.
     In mock mode, reads from the fixture file.
     """
     bead_id = request.path_params["id"]
     bead = await asyncio.to_thread(dao_beads.get_bead, bead_id)
-    if bead is None:
+    if bead is not None:
+        return JSONResponse(bead)
+    if os.environ.get("DASHBOARD_MOCK"):
+        # The fixture DAO is the whole truth in mock mode; there is no CLI to
+        # fall back to, so None here is a genuine miss.
         return JSONResponse({"error": "not found"}, status_code=404)
-    return JSONResponse(bead)
+    # DAO returned nothing: the bead is absent OR the Dolt SQL server is down.
+    # The CLI settles it against on-disk Dolt.
+    cli_bead = _normalize_bead_show_payload(
+        await run_cli_json(["bd", "show", bead_id, "--json"])
+    )
+    if not cli_bead or cli_bead.get("error"):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    # Served from the CLI because the DAO was unavailable. The rich embedded
+    # arrays the DAO would supply aren't in `bd show`; default them so the detail
+    # template (which guards on their presence) renders cleanly. The page loads
+    # deps separately via the CLI-backed /deps route, so those still populate.
+    cli_bead.setdefault("deps", [])
+    cli_bead.setdefault("comments", [])
+    cli_bead.setdefault("children", [])
+    return JSONResponse(cli_bead)
 
 
 # ── SSE EventBus endpoint ─────────────────────────────────────
