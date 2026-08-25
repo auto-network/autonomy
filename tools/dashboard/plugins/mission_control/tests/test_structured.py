@@ -155,8 +155,7 @@ def test_new_items_refuse_the_mission_surface_but_legacy_stays_writable():
     settings_ops.upsert_by_key(
         schemas.MISSION_ITEM_SET_ID, schemas.SCHEMA_REVISION,
         f"{mid}:legacy",
-        {"surface_id": mid, "item_id": "legacy",
-         "kind": "work", "title": "Old", "state": "active"},
+        {"kind": "work", "title": "Old", "state": "active"},
         org=dict(mission).get("org") or None)
     upd = client.put(f"/api/missions/{mid}/items/legacy",
                      json={"kind": "work", "title": "Old", "state": "retired"})

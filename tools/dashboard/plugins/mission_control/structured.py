@@ -51,13 +51,18 @@ def load_items(org: str, surface_ids: list[str]) -> list[dict]:
     items: list[dict] = []
     for m in members:
         payload = m.payload if isinstance(m.payload, dict) else {}
-        if payload.get("surface_id") not in wanted:
+        # identity comes from the composite key (<surface_id>:<item_id>);
+        # historical payload copies are tolerated but the key is truth
+        surface_id, _, item_id = m.key.partition(":")
+        if surface_id not in wanted:
             continue
         item = {
             "key": m.key,
             "created_at": m.created_at,
             "updated_at": m.updated_at,
             **payload,
+            "surface_id": surface_id,
+            "item_id": item_id,
         }
         # Empty strings, empty lists and zero orders are schema defaults the
         # viewer reapplies with `||`; shipping them roughly doubles the baked

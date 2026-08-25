@@ -424,8 +424,9 @@ async def put_surface_item(request: Request) -> JSONResponse:
         return JSONResponse({"error": "body must be a JSON object"},
                             status_code=400)
     payload = dict(body)
-    payload["surface_id"] = surface_id
-    payload["item_id"] = item_id
+    # the composite key carries surface/item identity; never the payload
+    payload.pop("surface_id", None)
+    payload.pop("item_id", None)
     key = f"{surface_id}:{item_id}"
     try:
         settings_ops.upsert_by_key(
@@ -433,7 +434,9 @@ async def put_surface_item(request: Request) -> JSONResponse:
             org=dict(mission).get("org") or None)
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
-    return JSONResponse({"ok": True, "key": key, "item": payload})
+    # responses still carry identity — derived from the key, never stored
+    return JSONResponse({"ok": True, "key": key, "item": {
+        **payload, "surface_id": surface_id, "item_id": item_id}})
 
 
 async def post_item_state(request: Request) -> JSONResponse:
@@ -473,13 +476,19 @@ async def post_item_state(request: Request) -> JSONResponse:
         note = str(body["note"]).strip()
         payload["body"] = (payload.get("body", "").rstrip()
                            + ("\n\n" if payload.get("body") else "") + note)
+    # historical rows carry the pre-doctrine key-duplicate fields;
+    # strict validation refuses them on rewrite, so strip before upsert
+    payload.pop("surface_id", None)
+    payload.pop("item_id", None)
     try:
         settings_ops.upsert_by_key(
             schemas.MISSION_ITEM_SET_ID, schemas.SCHEMA_REVISION, key, payload,
             org=org)
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
-    return JSONResponse({"ok": True, "key": key, "item": payload})
+    sid2, _, iid2 = key.partition(":")
+    return JSONResponse({"ok": True, "key": key, "item": {
+        **payload, "surface_id": sid2, "item_id": iid2}})
 
 
 async def delete_mission(request: Request) -> JSONResponse:

@@ -88,12 +88,10 @@ class MissionItemV1(SettingSchema):
     set_id = MISSION_ITEM_SET_ID
     schema_revision = SCHEMA_REVISION
 
-    surface_id: str = field(
-        required=True,
-        description="Mission id (overview item) or pillar id this item renders on")
-    item_id: str = field(
-        required=True,
-        description="Stable slug within the surface; anchors and asks bind to it")
+    # surface_id/item_id live in the composite KEY, never the payload
+    # (settings doctrine; Central schema gate). Historical rows still
+    # carry them as undeclared extras — readers derive from the key and
+    # tolerate the leftovers.
     kind: str = field(
         required=True, enum=list(ITEM_KINDS),
         description="What the item is; picks the renderer and default section")
