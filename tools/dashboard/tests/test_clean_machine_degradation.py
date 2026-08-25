@@ -43,7 +43,7 @@ def test_api_beads_list_empty_when_bd_missing(monkeypatch):
     """The API endpoint itself returns [], not a 200-with-error object."""
     import json
 
-    async def missing_binary_run_cli(cmd, timeout=30, stdin_data=None):
+    async def missing_binary_run_cli(cmd, timeout=30, stdin_data=None, beads_dir=None):
         return "", f"{cmd[0]}: not found", 127
 
     monkeypatch.setattr(server, "run_cli", missing_binary_run_cli)
@@ -60,11 +60,16 @@ def test_api_beads_list_empty_when_bd_missing(monkeypatch):
 
 @pytest.fixture()
 def _dead_dolt(monkeypatch):
-    """Point the DAO at a port nothing listens on, with a fast timeout."""
-    monkeypatch.setattr(dao_beads, "_DOLT_HOST", "127.0.0.1")
-    monkeypatch.setattr(dao_beads, "_DOLT_PORT", 1)  # reserved, never open
+    """Point the DAO at a port nothing listens on, with a fast timeout.
+
+    The DOLT_SQL_* env vars are the highest-precedence source in
+    ``_conn_params`` (the Compose override path), so setting them forces every
+    per-org connection to the dead target regardless of which org is resolved.
+    """
+    monkeypatch.setenv("DOLT_SQL_HOST", "127.0.0.1")
+    monkeypatch.setenv("DOLT_SQL_PORT", "1")  # reserved, never open
     monkeypatch.setattr(dao_beads, "_unreachable_logged", False)
-    # Thread-local cached connection would bypass the connect; clear it.
+    # Thread-local cached connections would bypass the connect; clear them.
     monkeypatch.setattr(dao_beads, "_local", type(dao_beads._local)())
 
 

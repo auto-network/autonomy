@@ -12,52 +12,68 @@ each worker thread gets its own pymysql connection.
 from __future__ import annotations
 
 import functools
+import json
 import logging
 import os
 import threading
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import pymysql
 import pymysql.cursors
 
-# ── Where the Dolt server actually is ───────────────────────────────────
+from tools import data_paths
+
+# ── Where the Dolt server is, PER ORG ───────────────────────────────────
 #
-# There is ONE source of truth for how to reach Dolt, and it is the beads
-# config the `bd` CLI already obeys: `<BEADS_DIR>/config.yaml` (dolt.host /
-# dolt.port) plus `<BEADS_DIR>/credentials.env` (the server user + password).
-# This DAO MUST read the same thing, or it silently diverges from bd: in the
-# host-network deployment config.yaml pins host=172.17.0.1 so --network=host
-# containers reach the shared instance, while this module's old default was
-# 127.0.0.1. The divergence connected the DAO to nothing, `_degrade_when_
-# unreachable` turned that into empty results, and `/api/dao/bead/{id}`
-# reported the empty as 404 — the operator saw "bead not found" on every bead
-# while the beads *list* (served from the bd CLI) worked fine.
+# There is ONE source of truth for how to reach a bead tracker, and it is the
+# per-org beads config the `bd` CLI already obeys — resolved through
+# tools.data_paths, NEVER re-derived here. ``data_paths.org_beads_dir(org)``
+# picks the org's provisioned dir (or None -> the shared DATA_ROOT/.beads,
+# which is autonomy's home). That dir alone yields the credential
+# (credentials.env -> the per-org SQL user ``beads_<org>``; operator ruling
+# 2026-08-24: no shared root), the database (metadata.json ``dolt_database``:
+# autonomy/shared -> "auto", a provisioned org -> its own name) and the
+# host/port (config.yaml -> 172.17.0.1 in the host deployment). Every OTHER
+# beads consumer already goes through
+# ``data_paths.beads_client_env(org_beads_dir(org))`` — the bd-CLI reads, the
+# mission bridge, the session launcher — so this DAO doing the same is what
+# keeps the two from diverging.
+#
+# This is deliberately routed through data_paths.DATA_ROOT and NOT a hardcoded
+# path: the old code defaulted BEADS_DIR to "/data" (a container convention),
+# host to 127.0.0.1 and user to root. The dashboard runs NATIVELY on the host
+# with none of those env vars set, so it resolved to a nonexistent
+# /data/.beads, read no config, fell to 127.0.0.1 (where nothing listens —
+# dolt binds only 172.17.0.1) and every DAO read degraded to empty. Resolving
+# from data_paths.DATA_ROOT fixes that at the root, for every org.
 #
 # Precedence, highest first: an explicit DOLT_SQL_* env var (the Compose
-# distribution sets DOLT_SQL_HOST=dolt — see docker-compose.yml, DEPLOY.md);
-# then the beads config/credentials that bd uses; then the historical
-# same-host default. Reading a credential is best-effort — a permission error
-# or missing file falls through to the next source, never raising at import.
+# distribution sets DOLT_SQL_HOST=dolt — docker-compose.yml, DEPLOY.md) for
+# operational overrides; then the per-org files; then a last-resort same-host
+# default so an unprovisioned box degrades rather than crashes.
 
 
-def _beads_dir() -> str:
-    return os.environ.get("BEADS_DIR") or os.path.join(
-        os.environ.get("AUTONOMY_DATA_ROOT", "/data"), ".beads"
-    )
+def _pick(*values, default):
+    """First value actually provided (not None); else the default. ``or``
+    would wrongly skip a deliberately-empty password, so test for None."""
+    for v in values:
+        if v is not None:
+            return v
+    return default
 
 
-def _dolt_host_port_from_config() -> tuple[str | None, int | None]:
-    """(host, port) from the `dolt:` block of the beads config.yaml, or Nones.
+def _config_host_port(beads_dir: Path) -> tuple[str | None, int | None]:
+    """(host, port) from the ``dolt:`` block of a beads dir's config.yaml.
 
-    A minimal block parser rather than a YAML dependency, matching how
+    A minimal block parser (no YAML dependency), matching how
     agents/start-dolt.sh reads the same file.
     """
-    path = os.path.join(_beads_dir(), "config.yaml")
     host: str | None = None
     port: int | None = None
     try:
-        with open(path, encoding="utf-8") as fh:
+        with open(beads_dir / "config.yaml", encoding="utf-8") as fh:
             in_dolt = False
             for raw in fh:
                 line = raw.rstrip("\n")
@@ -81,52 +97,76 @@ def _dolt_host_port_from_config() -> tuple[str | None, int | None]:
     return host, port
 
 
-def _beads_credential(name: str) -> str | None:
-    """A key from the exported env, else from `<BEADS_DIR>/credentials.env`."""
-    val = os.environ.get(name)
-    if val is not None:
-        return val
+def _dolt_database(beads_dir: Path) -> str | None:
+    """The org's Dolt database name from its metadata.json, or None.
+
+    Per-org databases (autonomy@74585ba): each org's metadata.json carries
+    ``dolt_database`` (autonomy/shared -> "auto", anchore -> "anchore"). This
+    is authoritative — DOLT_SQL_DATABASE is not set in this deployment.
+    """
     try:
-        with open(os.path.join(_beads_dir(), "credentials.env"), encoding="utf-8") as fh:
+        meta = json.loads((beads_dir / "metadata.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    db = meta.get("dolt_database")
+    return db if isinstance(db, str) and db else None
+
+
+def _credential(beads_dir: Path, name: str) -> str | None:
+    """One key from a beads dir's credentials.env, or None."""
+    try:
+        with open(beads_dir / "credentials.env", encoding="utf-8") as fh:
             for raw in fh:
-                key, sep, v = raw.strip().partition("=")
+                line = raw.strip()
+                if line.startswith("#"):
+                    continue
+                key, sep, val = line.partition("=")
                 if sep and key == name:
-                    return v
+                    return val
     except OSError:
         pass
     return None
 
 
-def _pick(*values, default):
-    """First value that was actually provided (not None); else the default.
-
-    ``or`` would wrongly skip a deliberately-empty password, so test for None.
+def _beads_root() -> Path:
+    """The beads state root. An explicit ``BEADS_DIR`` (a container mount)
+    wins; otherwise ``data_paths.DATA_ROOT/.beads`` — the host-native default,
+    which is what the dashboard uses because it sets no BEADS_DIR. This mirrors
+    ``run_cli``'s rule exactly ("explicit BEADS_DIR still wins"), so the DAO
+    and the bd CLI resolve to the same tree in every topology. The old bug was
+    a hardcoded "/data" here, which does not exist on the host and sent every
+    read to 127.0.0.1 (nothing listens there — dolt binds 172.17.0.1 only).
     """
-    for v in values:
-        if v is not None:
-            return v
-    return default
+    env = os.environ.get("BEADS_DIR")
+    return Path(env) if env else data_paths.DATA_ROOT / ".beads"
 
 
-_cfg_host, _cfg_port = _dolt_host_port_from_config()
+def _conn_params(org: str | None) -> dict:
+    """Resolve one org's Dolt connection from that org's OWN files — the same
+    files the bd CLI reads (config.yaml host/port, credentials.env for the
+    per-org ``beads_<org>`` user, metadata.json for the database). See the
+    module comment: never re-derive a beads connection elsewhere; call this.
+    ``org=None`` (or an org with no provisioned dir, e.g. autonomy) resolves to
+    the shared tracker + ``auto``.
+    """
+    base = _beads_root()
+    effective = base
+    if org:
+        candidate = base / "orgs" / str(org)
+        if (candidate / "metadata.json").is_file():
+            effective = candidate
+    cfg_host, cfg_port = _config_host_port(effective)
+    return {
+        "host": _pick(os.environ.get("DOLT_SQL_HOST"), cfg_host, default="127.0.0.1"),
+        "port": int(_pick(os.environ.get("DOLT_SQL_PORT"), cfg_port, default=3306)),
+        "user": _pick(os.environ.get("DOLT_SQL_USER"),
+                      _credential(effective, "BEADS_DOLT_SERVER_USER"), default="root"),
+        "password": _pick(os.environ.get("DOLT_SQL_PASSWORD"),
+                          _credential(effective, "BEADS_DOLT_PASSWORD"), default=""),
+        "database": _pick(os.environ.get("DOLT_SQL_DATABASE"),
+                          _dolt_database(effective), default="auto"),
+    }
 
-_DOLT_HOST = _pick(
-    os.environ.get("DOLT_SQL_HOST"), _cfg_host, default="127.0.0.1"
-)
-_DOLT_PORT = int(
-    _pick(os.environ.get("DOLT_SQL_PORT"), _cfg_port, default=3306)
-)
-_DOLT_USER = _pick(
-    os.environ.get("DOLT_SQL_USER"),
-    _beads_credential("BEADS_DOLT_SERVER_USER"),
-    default="root",
-)
-_DOLT_PASSWORD = _pick(
-    os.environ.get("DOLT_SQL_PASSWORD"),
-    _beads_credential("BEADS_DOLT_PASSWORD"),
-    default="",
-)
-_DOLT_DB = os.environ.get("DOLT_SQL_DATABASE", "auto")
 
 _local = threading.local()
 
@@ -140,7 +180,8 @@ def _degrade_when_unreachable(default_factory):
     A deployment without the beads toolchain (no dolt service — see
     DEPLOY.md) is a supported empty state, not an error: readers get
     zero beads instead of a 500 on every beads surface. Logged once per
-    process, at warning, so a misconfigured host is still diagnosable.
+    process, at warning, so a misconfigured host is still diagnosable
+    (the exception carries the exact host:port it tried).
     """
     def decorate(fn):
         @functools.wraps(fn)
@@ -152,40 +193,48 @@ def _degrade_when_unreachable(default_factory):
                 if not _unreachable_logged:
                     _unreachable_logged = True
                     _logger.warning(
-                        "dolt unreachable at %s:%s (%s) — beads surfaces "
-                        "degrade to empty until it comes back",
-                        _DOLT_HOST, _DOLT_PORT, exc,
+                        "dolt unreachable (%s) — beads surfaces degrade to "
+                        "empty until it comes back", exc,
                     )
                 return default_factory()
         return wrapper
     return decorate
 
 
-def _connect() -> pymysql.Connection:
+def _connect(org: str | None) -> pymysql.Connection:
+    p = _conn_params(org)
     return pymysql.connect(
-        host=_DOLT_HOST,
-        port=_DOLT_PORT,
-        user=_DOLT_USER,
-        password=_DOLT_PASSWORD,
-        database=_DOLT_DB,
+        host=p["host"],
+        port=p["port"],
+        user=p["user"],
+        password=p["password"],
+        database=p["database"],
         cursorclass=pymysql.cursors.DictCursor,
         autocommit=True,
         connect_timeout=5,
     )
 
 
-def _get_conn() -> pymysql.Connection:
-    """Get or create a thread-local pymysql connection, reconnecting on error."""
-    conn: pymysql.Connection | None = getattr(_local, "conn", None)
+def _get_conn(org: str | None = None) -> pymysql.Connection:
+    """Thread-local pymysql connection PER ORG — each org has its own SQL user
+    and database — reconnecting on error. Keyed by org so a read for one org
+    never rides another org's connection.
+    """
+    key = org or ""
+    conns = getattr(_local, "conns", None)
+    if conns is None:
+        conns = {}
+        _local.conns = conns
+    conn = conns.get(key)
     if conn is None:
-        conn = _connect()
-        _local.conn = conn
+        conn = _connect(org)
+        conns[key] = conn
         return conn
     try:
         conn.ping(reconnect=True)
     except Exception:
-        conn = _connect()
-        _local.conn = conn
+        conn = _connect(org)
+        conns[key] = conn
     return conn
 
 
@@ -335,12 +384,17 @@ def get_bead_title_priority(bead_ids: list[str]) -> dict[str, dict]:
 
 
 @_degrade_when_unreachable(lambda: None)
-def get_bead(bead_id: str) -> dict | None:
+def get_bead(bead_id: str, org: str | None = None) -> dict | None:
     """Return a single bead with its labels, deps, and comments.
+
+    ``org`` selects the tracker to read (per-org credential + database);
+    None / an unprovisioned org reads the shared autonomy tracker. Bead IDs
+    do not encode their org, so the caller supplies it — the route enforces
+    that an org-bound caller may only name its own.
 
     Returns None if the bead does not exist.
     """
-    conn = _get_conn()
+    conn = _get_conn(org)
     with conn.cursor() as cur:
 
         # Main bead row with all text fields
