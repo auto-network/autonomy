@@ -1242,6 +1242,7 @@ def _ingest_agentic_session(
 
     thoughts, derivations, all_entities = _write_new_turns(
         db, source_id, new_turns, model=meta.get("model", default_model),
+        persona_id=_ingest_persona(), session_id=Path(file_path).stem,
     )
 
     new_meta = _build_summary_meta(
@@ -1349,8 +1350,23 @@ def _dedup_new_turns(
     return deduped
 
 
+def _ingest_persona() -> str | None:
+    """The operator's one configured persona to stamp on ingested content.
+
+    Read once per ingest by the callers and threaded through as the
+    ``persona_id`` for every Thought/Derivation/Source. Fail-closed to None so
+    a missing/unreadable persona never breaks ingestion.
+    """
+    try:
+        from .org_ops import local_persona_pub
+        return local_persona_pub()
+    except Exception:
+        return None
+
+
 def _write_new_turns(
     db: GraphDB, source_id: str, new_turns: list[dict], *, model: str | None,
+    persona_id: str | None = None, session_id: str | None = None,
 ) -> tuple[list[Thought], list[Derivation], dict]:
     """Write a batch of new turns (thoughts/derivations/entities/edges) onto
     an existing source. Shared by the full-reparse incremental path
@@ -1395,6 +1411,8 @@ def _write_new_turns(
                 message_id=turn.get("message_id"),
                 metadata=t_meta,
                 created_at=turn.get("timestamp") or now_iso(),
+                persona_id=persona_id,
+                session_id=session_id,
             )
             db.insert_thought(t)
             thoughts.append(t)
@@ -1413,6 +1431,8 @@ def _write_new_turns(
                 message_id=turn.get("message_id"),
                 metadata={"timestamp": turn.get("timestamp", "")},
                 created_at=turn.get("timestamp") or now_iso(),
+                persona_id=persona_id,
+                session_id=session_id,
             )
             db.insert_thought(t)
             thoughts.append(t)
@@ -1432,6 +1452,8 @@ def _write_new_turns(
                 message_id=turn.get("message_id"),
                 metadata={"timestamp": turn.get("timestamp", "")},
                 created_at=turn.get("timestamp") or now_iso(),
+                persona_id=persona_id,
+                session_id=session_id,
             )
             db.insert_thought(t)
             thoughts.append(t)
@@ -1481,6 +1503,12 @@ def _ingest_text_session(
     """Shared ingest path for text-only JSONL session harnesses."""
     file_path = Path(file_path)
     abs_path = _normalize_session_path(file_path)
+
+    # Content attribution stamped on every row this ingest writes. session_id is
+    # the session's UUID (the JSONL transcript filename stem); persona_id is the
+    # operator's one configured persona. Read once, threaded through.
+    session_uuid = file_path.stem
+    persona_id = _ingest_persona()
 
     session_meta = _load_session_meta(file_path)
 
@@ -1536,6 +1564,7 @@ def _ingest_text_session(
 
         thoughts, derivations, all_entities = _write_new_turns(
             db, source_id, new_turns, model=meta.get("model", default_model),
+            persona_id=persona_id, session_id=session_uuid,
         )
 
         existing_meta = json.loads(existing["metadata"]) if existing["metadata"] else {}
@@ -1591,6 +1620,8 @@ def _ingest_text_session(
         metadata=source_meta,
         created_at=meta.get("started_at", now_iso()),
         last_activity_at=meta.get("ended_at") or meta.get("started_at") or now_iso(),
+        persona_id=persona_id,
+        session_id=session_uuid,
     )
     db.insert_source(source)
 
@@ -1612,6 +1643,8 @@ def _ingest_text_session(
                 message_id=turn.get("message_id"),
                 metadata=t_meta,
                 created_at=turn.get("timestamp") or now_iso(),
+                persona_id=persona_id,
+                session_id=session_uuid,
             )
             db.insert_thought(t)
             thoughts.append(t)
@@ -1630,6 +1663,8 @@ def _ingest_text_session(
                 message_id=turn.get("message_id"),
                 metadata={"timestamp": turn.get("timestamp", "")},
                 created_at=turn.get("timestamp") or now_iso(),
+                persona_id=persona_id,
+                session_id=session_uuid,
             )
             db.insert_thought(t)
             thoughts.append(t)
@@ -1649,6 +1684,8 @@ def _ingest_text_session(
                 message_id=turn.get("message_id"),
                 metadata={"timestamp": turn.get("timestamp", "")},
                 created_at=turn.get("timestamp") or now_iso(),
+                persona_id=persona_id,
+                session_id=session_uuid,
             )
             db.insert_thought(t)
             thoughts.append(t)

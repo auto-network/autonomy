@@ -14674,16 +14674,20 @@ def _token_org_or_none(request) -> str | None:
 def _graph_write_identity(request) -> tuple[str | None, str | None]:
     """Trusted `(persona_id, session_id)` for graph content writes.
 
-    ``session_id`` is always the authenticated tmux session name, never a
-    client-supplied UUID or graph source id. Browser-cookie writes deliberately
-    carry no session id. Persona resolution reads the local org-persona record
-    at authentication time, so no operator identity is embedded in source or schema.
+    ``session_id`` is the session's **UUID** (the JSONL transcript stem), the
+    canonical session identity used across the graph and matching what ingest
+    stamps — resolved from the authenticated tmux session name via the session
+    registry, never a client-supplied value. Falls back to None when the
+    session can't be resolved (or the write is a browser-cookie write with no
+    session). Persona resolution reads the local org-persona record at
+    authentication time, so no operator identity is embedded in source or schema.
     """
     principal = api_auth.principal_from_request(request)
-    session_id = principal.subject if principal.kind in (
+    tmux_name = principal.subject if principal.kind in (
         api_auth.ApiPrincipalKind.LOCAL_SESSION,
         api_auth.ApiPrincipalKind.ORG_SESSION,
     ) else None
+    session_id = _resolve_session_uuid(tmux_name) if tmux_name else None
     return principal.persona_id, session_id
 
 
