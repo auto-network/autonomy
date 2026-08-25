@@ -820,22 +820,64 @@
           self._updateFromStore();
         });
       },
-      _scheduleRecentRefresh() {
-        if (this._recentRefreshQueued) return;
-        this._recentRefreshQueued = true;
+      _recentQueryKey() {
+        return [this.selectedOrg, this.recentFilter, this.recentSort, this.recentSince].join('|');
+      },
+      _recentCap() {
+        // These are the server-side type quotas. The SSE-only tail is kept
+        // within the same bound until a deliberate foreground backfill.
+        return this.recentFilter === 'all' ? 40 : 50;
+      },
+      _applyEndedSessions(endedSessions) {
+        if (!Array.isArray(endedSessions) || !endedSessions.length) return;
         var self = this;
-        setTimeout(function() {
-          self._recentRefreshQueued = false;
-          self._fetchRecent();
-          // The endpoint serves a cache the server recomputes every ~5s off
-          // the request path. This fetch fires 150ms after registry churn —
-          // e.g. a session just ENDED — so it reads the PRE-churn snapshot
-          // and the freshly-ended card never appears (until some later
-          // manual fetch). Echo one more fetch after a full refresher
-          // cycle so the settled list always lands.
-          clearTimeout(self._recentEchoTimer);
-          self._recentEchoTimer = setTimeout(function() { self._fetchRecent(); }, 6500);
-        }, 150);
+        endedSessions.forEach(function(store) {
+          var sessionId = store.session_id;
+          if (!sessionId || sessionId.indexOf('pending-') === 0) return;
+          var project = store.project || '';
+          var org = store.org || null;
+          var orgSlug = org && org.slug ? org.slug : project;
+          if (self.selectedOrg && self.selectedOrg !== orgSlug) return;
+          var row = {
+            // Eager source creation supplies an id for ordinary sessions.
+            // Keep a stable fallback for the rare pre-source failure row.
+            id: store.graphSourceId || ('sse-ended:' + sessionId),
+            session_id: sessionId,
+            label: store.label || sessionId,
+            session_type: store.sessionType || 'interactive',
+            type: store.type || 'container',
+            is_live: false,
+            project: project ? '[' + project.replace(/^\[|\]$/g, '') + ']' : '',
+            topics: store.topics || [],
+            latest: store.lastMessage || '',
+            entry_count: store.entryCount || 0,
+            context_tokens: store.contextTokens || 0,
+            last_activity: store.lastActivity || Math.round(Date.now() / 1000),
+            created_at: store.startedAt || 0,
+            last_activity_at: store.lastActivity || 0,
+            ended_at: store.lastActivity || Math.round(Date.now() / 1000),
+            tmux_session: sessionId,
+            nag_enabled: false,
+            dispatch_nag_enabled: false,
+            role: store.role || '',
+            // A source-backed row can safely expose Resume immediately. A
+            // rare unsourced failure remains visible but cannot offer an
+            // action with a made-up source id.
+            resumable: !!store.resumable && !!store.graphSourceId,
+            bead_id: store.beadId || '',
+            org: org,
+            harness: store.harness || null,
+            model: store.model || null,
+            setup_phase: store.setupPhase || 'pending',
+            harness_phase: store.harnessPhase || 'pending',
+            harness_state: store.harnessState || {},
+            resolved: true,
+          };
+          var existing = self.recent.findIndex(function(item) { return item.session_id === sessionId; });
+          if (existing >= 0) self.recent.splice(existing, 1);
+          self.recent.unshift(row);
+          if (self.recent.length > self._recentCap()) self.recent.length = self._recentCap();
+        });
       },
       init() {
         this.$watch('activeSort', (v) => {
@@ -881,11 +923,13 @@
         };
         document.addEventListener('visibilitychange', this._onSessionsVisible);
 
-        // Fetch recent sessions (from graph.db, not monitor). Registry churn
-        // invalidates the recent list; we refresh on that signal instead of
-        // polling every 30s.
+        // Fetch the historical backfill once. Live registry SSE keeps the
+        // list current after that, including immediate ended-session cards;
+        // never query history merely because a label or topic changed.
         this._fetchRecent();
-        this._onRegistryChanged = function() { self._scheduleRecentRefresh(); };
+        this._onRegistryChanged = function(e) {
+          self._applyEndedSessions(e && e.detail && e.detail.endedSessions);
+        };
         window.addEventListener('sessions:registry-changed', this._onRegistryChanged);
 
         // Launching-tile sweep. _updateFromStore holds the placeholder
@@ -1302,20 +1346,32 @@
       },
 
       async _fetchRecent() {
+        const queryKey = this._recentQueryKey();
+        if (this._recentRequest && this._recentRequest.key === queryKey) {
+          return this._recentRequest.promise;
+        }
         const selectedOrg = this.selectedOrg;
         this.recentLoading = true;
         let warming = false;
-        try {
+        const request = { key: queryKey, promise: null };
+        this._recentRequest = request;
+        request.promise = (async () => {
+          try {
           const url = '/api/dao/recent_sessions?type=' + encodeURIComponent(this.recentFilter || 'all')
             + '&sort=' + encodeURIComponent(this.recentSort)
             + '&since=' + encodeURIComponent(this.recentSince)
             + (selectedOrg ? '&org=' + encodeURIComponent(selectedOrg) : '');
           const response = await fetch(url);
-          if (selectedOrg !== this.selectedOrg) return;
+          if (queryKey !== this._recentQueryKey()) return;
           if (response.status === 202) {
             warming = true;
             clearTimeout(this._recentWarmTimer);
-            this._recentWarmTimer = setTimeout(() => this._fetchRecent(), 1200);
+            // The server refreshes this cache every five seconds. Respect its
+            // Retry-After hint rather than hammering a cold history key.
+            const retryAfter = Number(response.headers.get('Retry-After')) || 5;
+            this._recentWarmTimer = setTimeout(() => {
+              if (queryKey === this._recentQueryKey()) this._fetchRecent();
+            }, Math.max(1000, retryAfter * 1000));
             return;
           }
           const data = await response.json();
@@ -1391,11 +1447,14 @@
               this.recent.map(function(s) { return s.session_id; })
             );
           }
-        } catch (e) {
+          } catch (e) {
           console.warn('[sessionsPage] recent fetch error', e);
-        } finally {
-          if (selectedOrg === this.selectedOrg && !warming) this.recentLoading = false;
-        }
+          } finally {
+            if (this._recentRequest === request) this._recentRequest = null;
+            if (queryKey === this._recentQueryKey() && !warming) this.recentLoading = false;
+          }
+        })();
+        return request.promise;
       },
 
       navigate(s) {
@@ -1488,6 +1547,7 @@
         if (this._launchSweep) { clearInterval(this._launchSweep); this._launchSweep = null; }
         if (this._onStoreChanged) window.removeEventListener('sessions:store-changed', this._onStoreChanged);
         if (this._onRegistryChanged) window.removeEventListener('sessions:registry-changed', this._onRegistryChanged);
+        if (this._recentWarmTimer) clearTimeout(this._recentWarmTimer);
         if (this._onSessionsNavigated) window.removeEventListener('app:navigated', this._onSessionsNavigated);
         if (this._onSessionsVisible) document.removeEventListener('visibilitychange', this._onSessionsVisible);
         if (this._workspaceHandler && typeof window.unregisterHandler === 'function') {

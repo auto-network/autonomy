@@ -412,6 +412,7 @@ window.getSessionStore = function(sessionId) {
       isLive: false,
       sessionType: '',
       project: '',
+      graphSourceId: '',
       label: '',
       role: '',
       startedAt: 0,
@@ -522,9 +523,14 @@ function _emitSessionStoreChanged(reason) {
   }));
 }
 
-function _emitSessionRegistryChanged() {
+function _emitSessionRegistryChanged(endedSessions) {
   if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function' || typeof CustomEvent !== 'function') return;
-  window.dispatchEvent(new CustomEvent('sessions:registry-changed'));
+  window.dispatchEvent(new CustomEvent('sessions:registry-changed', {
+    // The registry itself contains live rows only. Preserve the row just
+    // before it disappears so consumers can update an ended-session view
+    // without re-querying a historical endpoint for every registry event.
+    detail: { endedSessions: endedSessions || [] },
+  }));
 }
 
 // ── The one merge (auto-16g9t) ─────────────────────────────────────────
@@ -1007,6 +1013,7 @@ window.ensureSessionMessages = function() {
       activeIds[s.session_id] = true;
       var store = window.getSessionStore(s.session_id);
       store.project = s.project || '';
+      store.graphSourceId = s.graph_source_id || '';
       store.sessionType = s.type || '';
       store.label = s.label || '';
       store.role = s.role || '';
@@ -1071,8 +1078,16 @@ window.ensureSessionMessages = function() {
     // lingering as a stale "Ended + Resume" ghost; the Recent list renders
     // its true FAILED state (Setup failed + Retry) from the DAO.
     var allSessions = Alpine.store('sessions');
+    var endedSessions = [];
     for (var id in allSessions) {
       if (!activeIds[id] && allSessions[id].isLive) {
+        // Snapshot before mutating the reactive store. This is intentionally
+        // the existing registry shape, not a second backend payload: the
+        // Sessions page can render it immediately while its next foreground
+        // history backfill remains asynchronous.
+        if (id.indexOf('pending-') !== 0) {
+          endedSessions.push(Object.assign({ session_id: id }, allSessions[id]));
+        }
         allSessions[id].isLive = false;
         // The row WAS live and is now gone — the launch/session is over
         // (dead, or failed with is_live=0). Never-live placeholder tiles
@@ -1082,7 +1097,7 @@ window.ensureSessionMessages = function() {
       }
     }
     _emitSessionStoreChanged('registry');
-    _emitSessionRegistryChanged();
+    _emitSessionRegistryChanged(endedSessions);
   });
 
   // Handle label_update events — update stored session's label field
