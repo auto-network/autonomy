@@ -110,6 +110,71 @@ def _provision(world, grantor, newcomer_credential, cache, grantor_kem_state):
         kc.accept_grant(grant)
 
 
+def test_a_remint_grants_two_surviving_members_in_one_mint(tmp_path, monkeypatch):
+    """The n=2 recipient-set proof: one mint seals to TWO simultaneous members.
+
+    ``_current_member_credentials`` has only ever produced a single-recipient
+    set in every prior end-to-end run (the R6 test seals before the second
+    member joins and again after he is removed). This test forces the mint to
+    run while two members are simultaneously current: found with Alice, admit
+    Bob and Carol with head-grant expansion, remove Carol, then rewrite. The
+    generation minted by that rewrite must be granted by the SEALER to both
+    survivors — Bob's read must succeed with no expansion call for the new
+    generation — and Carol must be excluded.
+    """
+    monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
+    (tmp_path / "orgs").mkdir(parents=True, exist_ok=True)
+
+    world = World(member_count=1)
+    alice = world.member(0)
+    alice_kem = world.principals[alice.public_hex]["kem_private"]
+    with KeyControlStore(_scoped_db(TEST_SET, ORG)) as kc:
+        kc.accept_credential(world.principals[alice.public_hex]["credential"])
+
+    cache = VaultKeyCache()
+    seal = build_vault_sealer(cache, lambda: alice, _ledger_provider(world))
+
+    loc1 = seal(
+        set_id=TEST_SET, schema_revision=1, key="github.token",
+        setting_id="s-1", payload={"value": "secret-one"}, tier="audited", org=ORG,
+    )
+    assert _member_reads(loc1, alice_kem) == {"value": "secret-one"}
+    g1_state = next(iter(cache.secrets))
+
+    # Admit Bob and Carol; both receive the current head by expansion only.
+    bob = world.admit(seed_index=40)
+    bob_kem = world.principals[bob.public_hex]["kem_private"]
+    carol = world.admit(seed_index=41)
+    carol_kem = world.principals[carol.public_hex]["kem_private"]
+    with KeyControlStore(_scoped_db(TEST_SET, ORG)) as kc:
+        kc.accept_credential(world.principals[bob.public_hex]["credential"])
+        kc.accept_credential(world.principals[carol.public_hex]["credential"])
+    _provision(world, alice, world.principals[bob.public_hex]["credential"], cache, g1_state)
+    _provision(world, alice, world.principals[carol.public_hex]["credential"], cache, g1_state)
+    assert _member_reads(loc1, bob_kem) == {"value": "secret-one"}
+    assert _member_reads(loc1, carol_kem) == {"value": "secret-one"}
+
+    # Remove Carol; the rewrite's mint must cover BOTH survivors at once.
+    world.remove(carol)
+    loc2 = seal(
+        set_id=TEST_SET, schema_revision=1, key="github.token",
+        setting_id="s-2", payload={"value": "secret-two"}, tier="audited", org=ORG,
+    )
+
+    assert _member_reads(loc2, alice_kem) == {"value": "secret-two"}, (
+        "the sealing member must read the rewrite"
+    )
+    assert _member_reads(loc2, bob_kem) == {"value": "secret-two"}, (
+        "BUG (n=2 mint unproven): the second current member did not receive a "
+        "grant from the mint itself — the recipient set was not computed over "
+        "both simultaneous members"
+    )
+    assert _member_reads(loc2, carol_kem) != {"value": "secret-two"}, (
+        "the removed member must not read a rewrite minted after her removal"
+    )
+
+
 def test_a_kicked_out_member_cannot_read_a_rewritten_org_secret(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
