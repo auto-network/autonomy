@@ -30,9 +30,6 @@ SYNOPSIS = {
     "related_set_ids": ["autonomy.fleet.roster#2"],
 }
 
-_HEX = "0123456789abcdef"
-
-
 @home("personal")
 @publication_band(max="raw")
 @keyed_per_entity(key_strategy="machine_id")
@@ -40,10 +37,6 @@ class FleetMachineProfileV1(SettingSchema):
     set_id = FLEET_MACHINE_PROFILE_SET_ID
     schema_revision = FLEET_MACHINE_PROFILE_REVISION
 
-    machine_id: str = field(
-        required=True,
-        description="64-hex durable Fleet machine id this label describes.",
-    )
     display_name: str = field(
         required=True,
         description=(
@@ -57,15 +50,6 @@ class FleetMachineProfileV1(SettingSchema):
         super().validate(payload)
         if not isinstance(payload, dict):
             return
-        machine_id = payload.get("machine_id")
-        if (
-            not isinstance(machine_id, str)
-            or len(machine_id) != 64
-            or any(char not in _HEX for char in machine_id)
-        ):
-            raise SchemaValidationError(
-                f"{cls.__name__}: 'machine_id' must be exactly 64 lowercase hex chars"
-            )
         name = payload.get("display_name")
         if (
             not isinstance(name, str)
