@@ -14,15 +14,19 @@
     .msn-tabs button.on{color:var(--ink);box-shadow:inset 0 -2px 0 var(--accent)}
     .msn-amission{margin:0 0 16px}
     .msn-aname{color:var(--ink);font-weight:650;font-size:.88rem;margin:0 0 7px}
-    .msn-arow{display:flex;align-items:baseline;gap:8px;padding:5px 0;
+    /* top-align: the right column is two stacked lines, so baseline
+       alignment floated the color band mid-row and off the name */
+    .msn-arow{display:flex;align-items:flex-start;gap:8px;padding:6px 0;
       border-top:1px solid var(--line);font-size:.74rem;min-width:0}
     .msn-arow .pband{flex:none;width:3px;height:12px;border-radius:2px;
-      align-self:center}
-    .msn-arow .apillar{color:var(--ink2);flex:1;min-width:0;overflow:hidden;
-      text-overflow:ellipsis;white-space:nowrap}
-    .msn-arow .asess{flex:none;text-align:right;min-width:0;max-width:55%}
+      margin-top:3px}
+    /* names wrap instead of truncating — the pillar name IS the data */
+    .msn-arow .apillar{color:var(--ink2);flex:1;min-width:0;
+      line-height:1.35;padding-top:1px;overflow-wrap:break-word}
+    .msn-arow .asess{flex:none;text-align:right;min-width:0;max-width:50%}
     .msn-arow .sid{font-family:ui-monospace,monospace;font-size:.66rem;
-      color:var(--accent)}
+      color:var(--accent);text-decoration:none}
+    a.sid:active{opacity:.6}
     .msn-arow .sid.off{color:var(--ink3)}
     .msn-arow .stitle{display:block;font-size:.62rem;color:var(--ink3);
       overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -241,8 +245,12 @@
                   <span class="pband" :style="'background:' + (p.color || '#8391a8')"></span>
                   <span class="apillar" x-text="p.name"></span>
                   <span class="asess">
-                    <span class="sid" :class="p.live ? '' : 'off'"
-                          x-text="p.session || 'unassigned'"></span>
+                    <!-- the id IS the link: taps open the session viewer -->
+                    <a class="sid" x-show="p.session"
+                       :class="p.live ? '' : 'off'"
+                       :href="'/session/' + p.session"
+                       x-text="p.session"></a>
+                    <span class="sid off" x-show="!p.session">unassigned</span>
                     <span class="stitle" x-show="p.session_title"
                           x-text="p.session_title"></span>
                   </span>
