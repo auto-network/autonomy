@@ -160,7 +160,7 @@ def _runtime_context() -> tuple[str, fleet_roster.RosterEntry] | None:
 def _ensure_fleet_catalog(machine_pub: str) -> None:
     """Activate authored personal-DB capture under the durable machine id."""
     from tools.graph.db import GraphDB
-    from tools.network.fleet_sync_sim.compaction import WatermarkError
+    from tools.network.fleet_sync.compaction import WatermarkError
 
     path = _org_db_path("personal")
     GraphDB.close_pooled_path(path)
@@ -435,13 +435,20 @@ async def resume_local_enrollment(request: Request) -> JSONResponse:
         if result.status == "expired":
             return JSONResponse({"ok": True, "status": "expired"})
         if result.status == "approved":
-            if result.delivery is None or result.personal_root_armor is None:
+            if (
+                result.delivery is None
+                or result.personal_root_armor is None
+                or result.personal_root_created_at is None
+                or result.personal_root_updated_at is None
+            ):
                 raise FleetEnrollmentClientError(
                     "approved fleet enrollment returned incomplete delivery"
                 )
             _store_fleet_personal_armor(
                 result.personal_root_armor,
                 expected_root_pub=recovery.invite.personal_root_pub,
+                source_created_at=result.personal_root_created_at,
+                source_updated_at=result.personal_root_updated_at,
             )
             state.save_delivery(recovery.request_id, result.delivery)
             unlock_routes.bust_enforce_cache()

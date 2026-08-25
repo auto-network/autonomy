@@ -3,13 +3,14 @@ them — the "store" half of the bead's MODIFIES (a new policy-class schema and
 store; the vault secret schema's reference to its class).
 
 SQLite, one writer, mirroring ``storagekit.keycontrol.KeyControlStore``'s
-idiom. Three tables:
+idiom. Four tables:
 
 * ``policy_classes`` — the class record (``class_id`` → canonical JSON). A class
   is mutable in place: extending adds a wrap and revoking re-mints under the
   SAME ``class_id``, so this upserts. No class_key is ever stored here.
 * ``vault_factors`` — a password factor's armor (its persisted, password-gated
   material). A passkey factor stores no seed; the PRF output is produced live.
+* ``root_anchors`` — root-signed envelopes for stable personal vault anchors.
 * ``vault_secrets`` — a setting's ``sealed_cek`` plus its **reference to its
   class**: ``policy_class_id`` and the ``required_policy`` the setting demands.
   The data key opens ONLY through the named class.
@@ -25,6 +26,7 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
+from tools.network.fleet_sync_connection import FleetSyncConnection
 from tools.network.idkit.canonical import canonical_json
 
 from .errors import ConcurrencyError, PolicyClassError, VaultError
@@ -139,11 +141,15 @@ class VaultStore:
         self.path = str(path)
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(self.path)
+        self.db = sqlite3.connect(self.path, factory=FleetSyncConnection)
         if self.path != ":memory:":
             self.db.execute("PRAGMA journal_mode = WAL")
         with self.db:
             self.db.executescript(_SCHEMA)
+        from tools.network.fleet_sync.catalog import (
+            attach_active_production_catalog,
+        )
+        self._fleet_catalog = attach_active_production_catalog(self.db)
 
     def close(self) -> None:
         self.db.close()

@@ -320,13 +320,20 @@ def _run_fleet_join(report: InitReport, invitation, *, client=None) -> None:
         )
         return
     if result.status == "approved":
-        if result.delivery is None or result.personal_root_armor is None:
+        if (
+            result.delivery is None
+            or result.personal_root_armor is None
+            or result.personal_root_created_at is None
+            or result.personal_root_updated_at is None
+        ):
             raise FleetEnrollmentClientError(
                 "approved fleet enrollment returned incomplete delivery"
             )
         _store_fleet_personal_armor(
             result.personal_root_armor,
             expected_root_pub=invitation.personal_root_pub,
+            source_created_at=result.personal_root_created_at,
+            source_updated_at=result.personal_root_updated_at,
         )
         enrollment_client.state_store.save_delivery(
             recovery.request_id,
@@ -347,7 +354,8 @@ def _run_fleet_join(report: InitReport, invitation, *, client=None) -> None:
 
 
 def _store_fleet_personal_armor(
-    armor: str, *, expected_root_pub: str
+    armor: str, *, expected_root_pub: str,
+    source_created_at: str, source_updated_at: str,
 ) -> None:
     """Store only the canonical encrypted root delivered after approval."""
     import time
@@ -385,6 +393,8 @@ def _store_fleet_personal_armor(
                 ),
             },
             org=None,
+            _source_created_at=source_created_at,
+            _source_updated_at=source_updated_at,
         )
 
 

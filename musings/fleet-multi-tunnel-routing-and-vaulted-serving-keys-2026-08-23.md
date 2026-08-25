@@ -110,7 +110,7 @@ gets stronger under multi-tunnel:
   routing/revocation collapses.
 - `machine.db` is node-local and never part of personal-graph replication
   (LOCAL policy, alongside `keycontrol_meta`/`keycontrol_pending` —
-  `tools/network/fleet_sync_sim/policies.py`). It is the correct trust boundary.
+  `tools/network/fleet_sync/policies.py`). It is the correct trust boundary.
 - The vault is personal-scoped, and that is fine: the personal vault (warm after
   login) supplies the **encryption key**; the resulting ciphertext lives as an
   audited setting in machine.db. **Personal vault encrypts, machine-local

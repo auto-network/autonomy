@@ -690,7 +690,7 @@ def handle_request(
                     "approved request carries no signed delivery evidence"
                 )
             provider = armor_provider or _personal_root_armor
-            armor, anchor = provider()
+            armor, anchor, armor_created_at, armor_updated_at = provider()
             if anchor != pending.request.personal_root_pub:
                 raise FleetEnrollmentChannelError(
                     "stored personal identity no longer matches this invitation"
@@ -721,6 +721,8 @@ def handle_request(
                     entry.to_dict() for entry in bootstrap_roster
                 ],
                 "personal_root_armor": armor,
+                "personal_root_created_at": armor_created_at,
+                "personal_root_updated_at": armor_updated_at,
             })
         return reply
     raise FleetEnrollmentChannelError("unknown fleet invitation operation")
@@ -757,8 +759,8 @@ def _pending(row: sqlite3.Row) -> PendingEnrollment:
     )
 
 
-def _personal_root_armor() -> tuple[str, str]:
-    """Return unchanged encrypted armor plus its protected public anchor."""
+def _personal_root_armor() -> tuple[str, str, str, str]:
+    """Return encrypted armor, root anchor, and its original row timestamps."""
     from tools.graph import settings_ops
     from tools.graph.schemas.personal_identity import PERSONAL_IDENTITY_SET_ID
 
@@ -766,7 +768,7 @@ def _personal_root_armor() -> tuple[str, str]:
         PERSONAL_IDENTITY_SET_ID, org=None
     ).members
     candidates = [
-        member.payload
+        member
         for member in members
         if isinstance(member.payload, dict)
         and isinstance(member.payload.get("armored_private_key"), str)
@@ -775,13 +777,17 @@ def _personal_root_armor() -> tuple[str, str]:
         raise FleetEnrollmentChannelError(
             "exactly one stored personal identity is required for delivery"
         )
-    payload = candidates[0]
+    member = candidates[0]
+    payload = member.payload
     root_pub = payload.get("root_pub")
     if not isinstance(root_pub, str) or not _HEX64.fullmatch(root_pub):
         from tools.network.idkit.armor import armor_root_pub
 
         root_pub = armor_root_pub(payload["armored_private_key"])
-    return payload["armored_private_key"], root_pub
+    return (
+        payload["armored_private_key"], root_pub,
+        member.created_at, member.updated_at,
+    )
 
 
 def _require_uuid(value) -> str:

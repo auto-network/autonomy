@@ -426,8 +426,30 @@ CREATE TABLE IF NOT EXISTS settings (
 -- VAULT CONTENT + KEY CONTROL — scoped durable encrypted state
 -- ============================================================
 -- These tables live in the database whose scope owns the encrypted content.
--- Fleet sync carries immutable records; local progress/caches are rebuilt or
--- retained only on the machine that owns them.
+-- Fleet sync carries their durable records; local progress/caches are rebuilt
+-- or retained only on the machine that owns them.
+CREATE TABLE IF NOT EXISTS policy_classes (
+    class_id TEXT PRIMARY KEY,
+    wire     TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS vault_factors (
+    factor_id   TEXT PRIMARY KEY,
+    factor_type TEXT NOT NULL,
+    public_key  TEXT NOT NULL,
+    armor       TEXT
+);
+
+CREATE TABLE IF NOT EXISTS root_anchors (
+    anchor_id TEXT PRIMARY KEY,
+    wire      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS vault_secrets (
+    setting_name TEXT PRIMARY KEY,
+    wire         TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS vault_content_bodies (
     ciphertext_hash TEXT PRIMARY KEY,
     size_bytes      INTEGER NOT NULL,

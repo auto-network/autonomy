@@ -442,7 +442,7 @@ class KeyControlStore:
                 "INSERT OR IGNORE INTO keycontrol_pending_usage"
                 "(id, pending_rows, pending_bytes) VALUES (1, 0, 0)"
             )
-        from tools.network.fleet_sync_sim.catalog import (
+        from tools.network.fleet_sync.catalog import (
             attach_active_production_catalog,
         )
         self._fleet_catalog = attach_active_production_catalog(self.db)

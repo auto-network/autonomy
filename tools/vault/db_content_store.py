@@ -103,7 +103,7 @@ class DbContentStore:
             self.db_path, factory=FleetSyncConnection
         )
         self._db.executescript(_SCHEMA)
-        from tools.network.fleet_sync_sim.catalog import (
+        from tools.network.fleet_sync.catalog import (
             attach_active_production_catalog,
         )
         self._fleet_catalog = attach_active_production_catalog(self._db)

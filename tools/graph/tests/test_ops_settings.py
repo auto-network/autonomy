@@ -125,6 +125,22 @@ def test_upsert_by_key_updates_existing_row_in_place(graph_db_env, example_schem
     assert members.members[0].payload == {"x": 2, "name": "baz"}
 
 
+def test_upsert_by_key_can_preserve_imported_source_timestamps(
+    graph_db_env, example_schema,
+):
+    ops.upsert_by_key(
+        "autonomy.test.example", 1, "imported", {"x": 1, "name": "armor"},
+        org=ops.CALLER_ORG,
+        _source_created_at="2026-08-20T01:02:03Z",
+        _source_updated_at="2026-08-24T04:05:06Z",
+    )
+    member = ops.read_set(
+        "autonomy.test.example", org=ops.CALLER_ORG,
+    ).members[0]
+    assert member.created_at == "2026-08-20T01:02:03Z"
+    assert member.updated_at == "2026-08-24T04:05:06Z"
+
+
 def test_add_unknown_schema_raises(graph_db_env):
     with pytest.raises(SchemaValidationError):
         ops.add_setting("unregistered.set", 1, "k", {}, org=ops.CALLER_ORG)

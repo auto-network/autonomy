@@ -2813,6 +2813,8 @@ def upsert_by_key(
     *,
     org: "str | None | _CallerOrgSentinel",
     state: str = "raw",
+    _source_created_at: str | None = None,
+    _source_updated_at: str | None = None,
 ) -> str:
     """Atomic single-tx UPDATE-or-INSERT at ``(set_id, schema_revision, key)``.
 
@@ -2878,6 +2880,8 @@ def upsert_by_key(
     schemas.validate_payload(set_id, schema_revision, payload)
     schemas.validate_key(set_id, schema_revision, key)
     now = _now_iso()
+    created_at = _source_created_at or now
+    updated_at = _source_updated_at or now
     expires_at = schemas.cache_expires_at(set_id, int(schema_revision), now)
     payload_json = json.dumps(payload)
     db = _open(org, set_id)
@@ -2897,14 +2901,14 @@ def upsert_by_key(
                 "payload, publication_state, created_at, updated_at, "
                 "expires_at) VALUES(?,?,?,?,?,?,?,?,?)",
                 (sid, set_id, int(schema_revision), key, payload_json,
-                 state, now, now, expires_at),
+                 state, created_at, updated_at, expires_at),
             )
         else:
             sid = existing["id"]
             db.conn.execute(
                 "UPDATE settings SET payload = ?, publication_state = ?, "
                 "updated_at = ?, expires_at = ? WHERE id = ?",
-                (payload_json, state, now, expires_at, sid),
+                (payload_json, state, updated_at, expires_at, sid),
             )
         db.conn.commit()
     finally:
