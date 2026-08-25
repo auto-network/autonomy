@@ -115,6 +115,7 @@ from . import fleet_machine_profile  # noqa: F401 — autonomy.fleet.machine-pro
 from . import fleet_route  # noqa: F401 — autonomy.machine.fleet-route#1
 from . import agent_test_capacity  # noqa: F401 — dashboard.agent-test.{capacity,lease}#1
 from . import dashboard_shell  # noqa: F401 — dashboard.shell.default-org#1
+from . import central_attention  # noqa: F401 — dashboard.{attention,approval}.*#1
 
 __all__ = [
     "SchemaValidationError",
