@@ -149,3 +149,32 @@ def test_substrate_mounts_only_when_enabled(monkeypatch):
         sub2, payload_reader=lambda org: {"mission": {"enabled": True}})
     assert mounted == ["mission"]
     assert "mission" in sub2.choices
+
+
+def test_update_refs_append_never_wipe(parser, monkeypatch):
+    """Three real incidents: --ref on update silently replaced the list
+    and coverage broke. Update APPENDS (deduped); --clear-refs is the
+    only shrink path; untouched updates keep the list whole."""
+    canned = dict(BASE)
+    canned[("GET", f"/api/mission/items/{MID}")] = {"items": [
+        {"surface_id": "relay", "item_id": "c1", "kind": "checkpoint",
+         "state": "pending", "title": "t", "key": "relay:c1",
+         "created_at": "c", "updated_at": "u",
+         "refs": ["bead:auto-epic", "bead:auto-1"]}]}
+
+    fake = _run(parser, ["mission", "update", MID, "relay", "c1",
+                         "--ref", "bead:auto-2", "--ref", "bead:auto-1"],
+                monkeypatch, canned)
+    put = next(b for m, p2, b in fake.calls if m == "PUT")
+    assert put["refs"] == ["bead:auto-epic", "bead:auto-1", "bead:auto-2"]
+
+    fake = _run(parser, ["mission", "update", MID, "relay", "c1",
+                         "--title", "new title"], monkeypatch, canned)
+    put = next(b for m, p2, b in fake.calls if m == "PUT")
+    assert put["refs"] == ["bead:auto-epic", "bead:auto-1"]
+
+    fake = _run(parser, ["mission", "update", MID, "relay", "c1",
+                         "--clear-refs", "--ref", "bead:auto-9"],
+                monkeypatch, canned)
+    put = next(b for m, p2, b in fake.calls if m == "PUT")
+    assert put["refs"] == ["bead:auto-9"]
