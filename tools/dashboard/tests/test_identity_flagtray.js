@@ -94,6 +94,32 @@ describe('identity flag tray', () => {
     assert.equal(d.querySelector('[data-testid="identity-flagpop"]'), null, 'clicking again closes it');
   });
 
+  it('shows the flag liveliness value in the balloon corner (green / amber)', async () => {
+    const { dom, ind } = boot({ tunnel: { needs: false, value: 'Up' }, certificates: { needs: true, value: '6 days left' } });
+    await openPanel(dom, ind);
+    const d = dom.window.document;
+    d.querySelector('[data-testid="identity-fl-tunnel"]').click();
+    await tick();
+    const up = d.querySelector('[data-testid="identity-flagpop-value"]');
+    assert.equal(up.textContent, 'Up', 'a boolean flag reports "Up"');
+    assert.ok(!up.classList.contains('needs'), 'green when healthy');
+    d.querySelector('[data-testid="identity-fl-cert"]').click();
+    await tick();
+    const left = d.querySelector('[data-testid="identity-flagpop-value"]');
+    assert.equal(left.textContent, '6 days left', 'a timed flag reports its remaining range');
+    assert.ok(left.classList.contains('needs'), 'amber when running low');
+  });
+
+  it('shows no value when the state is unknown', async () => {
+    const { dom, ind } = boot();   // no unlock-state payload
+    await openPanel(dom, ind);
+    const d = dom.window.document;
+    d.querySelector('[data-testid="identity-fl-tunnel"]').click();
+    await tick();
+    assert.equal(d.querySelector('[data-testid="identity-flagpop-value"]'), null,
+      'unknown liveliness renders no value, not a fake "Up"');
+  });
+
   it('a loaded org favicon drops its tile background and hides the initial', async () => {
     const { dom, w, ind } = boot();
     // give /api/orgs a real org that declares a favicon
