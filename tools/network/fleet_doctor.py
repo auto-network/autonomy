@@ -22,6 +22,17 @@ process like this one cannot see it directly -- this script infers serving
 health from external, durable evidence instead (is the subprocess alive,
 what does its own log say, does the org it's serving match the org that
 SHOULD be serving) and says so plainly rather than guessing.
+
+SCOPE, operator directive (2026-08-25): this is a diagnostic tool, not a
+regression suite. Add a check here when an ERROR STATE has real odds of
+recurring in production -- a class of failure this file's own checks would
+have caught faster than manual log-grepping (the deprecate-orphans-its-own-
+catalog-address bug this same night is the model case: a real trigger/
+resolver mismatch, not a one-off). Do NOT add a check just because a bug was
+found and fixed once with no plausible recurrence path -- that belongs in a
+regression test near the code it protects, not here. Every check in this
+file should answer a question an operator or another agent might still need
+to ask tomorrow.
 """
 
 from __future__ import annotations
