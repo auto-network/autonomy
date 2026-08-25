@@ -28,6 +28,40 @@
   var credentialsMounted = false;
   var lockBusy = false;
   var initialized = false;
+  //: The pre-auth status flag tray (Design Studio e31b7e22 rev 32): a strip of
+  //: small tiles shown here and on the locked screen. `unlockState` is the
+  //: GET /api/identity/unlock-state payload (null until loaded / if absent —
+  //: absent renders every tile DIM, never falsely lit). openFlagId is the tile
+  //: whose detail balloon is showing.
+  var unlockState = null;
+  var unlockStateError = false;
+  var openFlagId = null;
+  var FLAG_NS = 'http://www.w3.org/2000/svg';
+  // id -> {key on the unlock-state payload, title, plain-language detail, icon shapes}.
+  // Order = tray order. Icons are the design's outline glyphs (placeholders to refine).
+  var FLAGS = [
+    { id: 'key', key: 'agent', title: 'Delegate key',
+      body: 'The key that keeps your fleet running while you’re away. When it lapses, unlock again to renew it.',
+      shapes: [['rect', { x: 7.5, y: 7.5, width: 9, height: 9, rx: 1.6 }],
+        ['path', { d: 'M10 4v3.5M14 4v3.5M10 16.5V20M14 16.5V20M4 10h3.5M4 14h3.5M16.5 10H20M16.5 14H20' }]] },
+    { id: 'session', key: 'ttl', title: 'Session',
+      body: 'How long this dashboard stays open unattended. Unlock again to extend it.',
+      shapes: [['path', { d: 'M6.5 3h11M6.5 21h11M8 3v3.6c0 1.4 4 3.4 4 5.4 0-2 4-4 4-5.4V3M8 21v-3.6c0-1.4 4-3.4 4-5.4 0 2 4 4 4 5.4V21' }]] },
+    { id: 'tunnel', key: 'tunnel', title: 'Tunnel',
+      body: 'The connection your other devices use to reach this dashboard.',
+      shapes: [['rect', { x: 3.5, y: 4.5, width: 17, height: 15, rx: 2.2 }], ['circle', { cx: 12, cy: 12, r: 3.4 }],
+        ['path', { d: 'M12 8.6V6.8M12 17.2v-1.8M15.4 12h1.8M6.8 12h1.8' }]] },
+    { id: 'cert', key: 'certificates', title: 'Certificate',
+      body: 'Your dashboard’s certificate. Renew it before it expires so your devices keep connecting.',
+      shapes: [['circle', { cx: 12, cy: 9.2, r: 5.2 }], ['path', { d: 'M9 13.6L8 21l4-2.2L16 21l-1-7.4' }]] },
+    { id: 'identity', key: 'domain', title: 'Identity',
+      body: 'Your personal identity, anchored to this dashboard.',
+      shapes: [['path', { d: 'M5 19v-6a7 7 0 0 1 14 0v6' }], ['path', { d: 'M9.5 19v-6a2.5 2.5 0 0 1 5 0v6' }], ['path', { d: 'M3 19h18' }]] },
+    { id: 'approvals', key: 'approvals', title: 'Approvals',
+      body: 'Requests waiting for your approval.',
+      shapes: [['path', { d: 'M4.5 5.5h15a1.5 1.5 0 0 1 1.5 1.5v8a1.5 1.5 0 0 1-1.5 1.5H12l-4.5 3.5v-3.5H4.5A1.5 1.5 0 0 1 3 15V7a1.5 1.5 0 0 1 1.5-1.5z' }],
+        ['path', { d: 'M8.8 11l2.1 2.1 4.3-4.3' }]] },
+  ];
 
   function deriveIdentityState(value) {
     if (!value) return 'loading';
@@ -131,6 +165,7 @@
     panelOpen = false;
     credentialsOpen = false;
     credentialsMounted = false;
+    openFlagId = null;
     render();
   }
 
@@ -284,6 +319,15 @@
       mark.addEventListener('error', function () {
         if (mark.parentNode) mark.parentNode.removeChild(mark);
       });
+      // Design: when a real icon loads, let it stand on its own — drop the
+      // colored tile and the initial underneath, so the logo sits transparent
+      // on the dark drawer. A drawn background behind a real favicon looks wrong
+      // (operator, 2026-08-24). On error the tile + letter remain (see above).
+      mark.addEventListener('load', function () {
+        iconHost.classList.add('has-favicon');
+        iconHost.style.background = 'transparent';
+        initial.style.display = 'none';
+      });
       mark.src = org.favicon;
       iconHost.appendChild(mark);
     }
@@ -350,6 +394,63 @@
       });
   }
 
+  function flagNeeds(f) {
+    if (!unlockState) return false;   // unknown / not loaded -> dim, never lit
+    var s = unlockState[f.key];
+    return !!(s && s.needs);
+  }
+  function flagDetail(f) {
+    if (unlockState) { var s = unlockState[f.key]; if (s && s.detail) return String(s.detail); }
+    return f.body;
+  }
+  function svgFlag(shapes) {
+    var s = root.document.createElementNS(FLAG_NS, 'svg');
+    s.setAttribute('viewBox', '0 0 24 24');
+    shapes.forEach(function (sh) {
+      var e = root.document.createElementNS(FLAG_NS, sh[0]);
+      for (var k in sh[1]) { if (Object.prototype.hasOwnProperty.call(sh[1], k)) e.setAttribute(k, sh[1][k]); }
+      s.appendChild(e);
+    });
+    return s;
+  }
+  function flagTray() {
+    var band = el('div', 'identity-band');
+    var tray = el('div', 'identity-flagtray');
+    tray.setAttribute('data-testid', 'identity-flagtray');
+    FLAGS.forEach(function (f) {
+      var tile = el('button', 'identity-fl'
+        + (flagNeeds(f) ? ' needs' : '') + (openFlagId === f.id ? ' on' : ''));
+      tile.type = 'button';
+      tile.setAttribute('data-testid', 'identity-fl-' + f.id);
+      tile.setAttribute('aria-label', f.title);
+      tile.appendChild(svgFlag(f.shapes));
+      tile.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        openFlagId = (openFlagId === f.id) ? null : f.id;
+        render();
+      });
+      tray.appendChild(tile);
+    });
+    band.appendChild(tray);
+    if (openFlagId) {
+      var f = FLAGS.filter(function (x) { return x.id === openFlagId; })[0];
+      if (f) {
+        var pop = el('div', 'identity-flagpop' + (flagNeeds(f) ? ' needs' : ''));
+        pop.setAttribute('data-testid', 'identity-flagpop');
+        pop.appendChild(el('div', 'identity-flagpop-title', f.title));
+        pop.appendChild(el('div', 'identity-flagpop-body', flagDetail(f)));
+        band.appendChild(pop);
+      }
+    }
+    return band;
+  }
+  function loadUnlockState() {
+    fetch('/api/identity/unlock-state', { headers: { 'Accept': 'application/json' } })
+      .then(function (res) { if (!res.ok) throw new Error('HTTP ' + res.status); return res.json(); })
+      .then(function (body) { unlockState = body || {}; unlockStateError = false; if (panelOpen) render(); })
+      .catch(function () { unlockState = null; unlockStateError = true; if (panelOpen) render(); });
+  }
+
   function panelForState(state) {
     var panel = el('section', 'identity-panel');
     panel.setAttribute('role', 'dialog');
@@ -373,6 +474,13 @@
     if (credentialsOpen && status && status.signed_in === true) {
       panel.appendChild(el('div', 'identity-credentials-mount'));
       return panel;
+    }
+
+    // Status flag tray — the identity band, directly under the header (same strip
+    // that appears on the locked screen). Loads its own state; absent -> all dim.
+    if (state !== 'bootstrap' && state !== 'error') {
+      panel.appendChild(flagTray());
+      if (unlockState === null && !unlockStateError) loadUnlockState();
     }
 
     if (state === 'gate-off') {
