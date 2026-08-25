@@ -292,7 +292,8 @@ live one.
 | `network`/ | `AUTONOMY_NETWORK_KEY_DIR` | mode-0600 auto.network tunnel-serving delegate keys |
 | `repl-login.key` | `REPL_LOGIN_KEY_FILE` | mode-0600 X25519 private key — the HPKE recipient for browser-sealed secure-setting provisioning |
 | `web-push-proof-vapid.pem` | `WEB_PUSH_PROOF_VAPID_KEY` | mode-0600 VAPID sender key for the isolated Web Push proof |
-| `web-push-vapid.pem` | `WEB_PUSH_VAPID_KEY` | mode-0600 stable VAPID sender key for Dashboard Web Push |
+| `web-push-keys`/ | `WEB_PUSH_KEY_DIR` | mode-0700 VAPID keyring for Dashboard Web Push (mode-0600 key files) |
+| `web-push-vapid.pem` | `WEB_PUSH_VAPID_KEY` | legacy mode-0600 Dashboard VAPID key (migration source only) |
 | `tls.crt` | `AUTONOMY_TLS_CERT` | TLS certificate (self-signed by default) |
 | `tls.key` | `AUTONOMY_TLS_KEY` | TLS private key |
 | `agent-runs`/ | `DASHBOARD_AGENT_RUNS_DIR` | session artifacts |

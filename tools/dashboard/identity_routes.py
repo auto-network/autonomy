@@ -47,9 +47,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import ipaddress
 import json
 import logging
+import re
 import secrets
 import time
 
@@ -149,6 +151,59 @@ def _rp_from_request(request: Request):
 #: The one label a personal identity is ever written under (post_personal
 #: defaults to it and refuses overwrite — one root per person).
 PERSONAL_CANONICAL_LABEL = "default"
+
+
+class StablePersonalIdentityUnavailable(RuntimeError):
+    """The canonical personal root cannot safely identify a durable owner."""
+
+
+def resolve_stable_personal_root_public_key() -> str:
+    """Return the one canonical personal root anchor, fail closed otherwise.
+
+    Durable device-shaped records must never fall back to the first arbitrary
+    identity row.  They bind only to the personal-scope ``default`` member and
+    verify that an explicit public anchor agrees with the encrypted armor.
+    """
+
+    try:
+        result = settings_ops.read_set(
+            PERSONAL_IDENTITY_SET_ID, org=None, peers=[],
+        )
+        if any(result.dropped.values()):
+            raise StablePersonalIdentityUnavailable(
+                "personal identity resolution dropped stored rows"
+            )
+        rows = result.to_dict()
+        if set(rows) != {PERSONAL_CANONICAL_LABEL}:
+            raise StablePersonalIdentityUnavailable(
+                "exactly one canonical personal identity is required"
+            )
+        payload = rows[PERSONAL_CANONICAL_LABEL].payload
+        if not isinstance(payload, dict):
+            raise StablePersonalIdentityUnavailable("personal identity is malformed")
+        explicit = payload.get("root_pub")
+        if explicit is not None and (
+            not isinstance(explicit, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", explicit)
+        ):
+            raise StablePersonalIdentityUnavailable("personal root anchor is malformed")
+        armor = payload.get("armored_private_key")
+        if not isinstance(armor, str):
+            raise StablePersonalIdentityUnavailable("personal identity armor is missing")
+        from tools.network.idkit.armor import armor_root_pub
+
+        derived = armor_root_pub(armor)
+        if not isinstance(derived, str) or not re.fullmatch(r"[0-9a-f]{64}", derived):
+            raise StablePersonalIdentityUnavailable("personal root anchor is malformed")
+        if explicit is not None and not hmac.compare_digest(explicit, derived):
+            raise StablePersonalIdentityUnavailable("personal root anchors disagree")
+        return explicit or derived
+    except StablePersonalIdentityUnavailable:
+        raise
+    except Exception as exc:
+        raise StablePersonalIdentityUnavailable(
+            "personal identity is unavailable"
+        ) from exc
 
 # A root-authorized transition binds the optimistic-concurrency base, the
 # complete staged operation list, and the byte-exact candidate armor.  The
