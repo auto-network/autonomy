@@ -287,10 +287,8 @@ class FactorMetadataV1(SettingSchema):
     set_id = FACTOR_METADATA_SET_ID
     schema_revision = FACTOR_METADATA_REVISION
 
-    factor_id: str = field(
-        required=True,
-        description="Stable factor identifier; must equal the row key.",
-    )
+    # The factor_id is the ROW KEY (key_strategy="factor_id") and comes back with
+    # the row — repeating it in the payload invites drift, so it is not a field.
     label: str = field(
         required=True,
         description="Operator-facing factor name.",
@@ -309,11 +307,6 @@ class FactorMetadataV1(SettingSchema):
         super().validate(payload)
         if not isinstance(payload, dict):
             return
-        factor_id = _require_str(payload, "factor_id", cls.__name__, max_len=128)
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", factor_id):
-            raise SchemaValidationError(
-                f"{cls.__name__}: 'factor_id' has an invalid shape"
-            )
         _require_str(payload, "label", cls.__name__, max_len=120)
         if "purpose" in payload:
             _require_str(payload, "purpose", cls.__name__, max_len=240)
