@@ -43,7 +43,9 @@ def transport(tmp_path, monkeypatch):
     db_path = tmp_path / "web-push.db"
     monkeypatch.setattr(web_push, "DB_PATH", db_path)
     monkeypatch.setattr(web_push, "VAPID_PATH", tmp_path / "web-push-vapid.pem")
-    monkeypatch.setattr(web_push, "_stable_owner_id", lambda: "owner-one")
+    monkeypatch.setattr(web_push, "VAPID_DIR", tmp_path / "web-push-keys")
+    web_push._vapid.clear()
+    monkeypatch.setattr(web_push, "_stable_owner_id", lambda: "a" * 64)
     monkeypatch.setattr(web_push, "_operator_only", lambda _request: None)
     monkeypatch.setattr(approval_requests, "DB_PATH", tmp_path / "approvals.db")
     web_push.init_db()
@@ -54,7 +56,7 @@ def _client() -> TestClient:
     return TestClient(Starlette(routes=web_push.ROUTES), base_url="https://dashboard.test")
 
 
-def _enroll(*, owner="owner-one", installation="install_1234567890", token="one"):
+def _enroll(*, owner="a" * 64, installation="install_1234567890", token="one"):
     subscription = web_push._validate_subscription(_subscription(token=token))
     web_push._upsert_subscription(
         owner_id=owner,
@@ -96,11 +98,11 @@ def test_enrollment_binds_to_server_owner_and_state(transport):
     connection = sqlite3.connect(transport)
     try:
         row = connection.execute(
-            "SELECT owner_id,origin FROM web_push_subscriptions"
+            "SELECT operator_subject,vapid_subject FROM web_push_subscriptions"
         ).fetchone()
     finally:
         connection.close()
-    assert row == ("owner-one", "https://dashboard.test")
+    assert row == ("a" * 64, "https://dashboard.test")
 
 
 def test_enrollment_refuses_body_identity_and_cross_owner_endpoint(transport):
@@ -115,10 +117,10 @@ def test_enrollment_refuses_body_identity_and_cross_owner_endpoint(transport):
     )
     assert bad.status_code == 422
 
-    _enroll(owner="owner-one")
+    _enroll(owner="a" * 64)
     with pytest.raises(PermissionError, match="another operator"):
         web_push._upsert_subscription(
-            owner_id="owner-two",
+            owner_id="b" * 64,
             origin="https://dashboard.test",
             installation_id="install_abcdefghij",
             subscription=web_push._validate_subscription(_subscription()),
@@ -136,7 +138,7 @@ def test_foreground_applied_ack_cancels_every_unsent_device(transport):
         budget_class="operator_approval", grace_seconds=20,
     )
     assert count == 2
-    assert web_push._ack_attention("approval:abc123", 1, "owner-one") is True
+    assert web_push._ack_attention("approval:abc123", 1, "a" * 64) is True
 
     connection = sqlite3.connect(transport)
     try:

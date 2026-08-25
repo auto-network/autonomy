@@ -14,7 +14,6 @@ import hashlib
 import ipaddress
 import json
 import logging
-import os
 import random
 import re
 import socket
@@ -25,12 +24,13 @@ import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from cryptography.hazmat.primitives.asymmetric import ec
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from tools.dashboard import api_auth
+from tools.dashboard.dao import web_push as web_push_dao
 from tools.data_paths import resolve_store
 
 
@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 DB_PATH = resolve_store("web_push")
 VAPID_PATH = resolve_store("web_push_vapid")
+VAPID_DIR = resolve_store("web_push_keys")
 
 _MAX_BODY_BYTES = 12 * 1024
 _MAX_ENDPOINT_CHARS = 4096
@@ -66,24 +67,6 @@ _BUDGET_LIMITS = {
 }
 
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS web_push_subscriptions (
-    installation_id TEXT PRIMARY KEY,
-    owner_id       TEXT NOT NULL,
-    origin         TEXT NOT NULL,
-    endpoint       TEXT NOT NULL UNIQUE,
-    endpoint_hash  TEXT NOT NULL,
-    p256dh         TEXT NOT NULL,
-    auth_secret    TEXT NOT NULL,
-    vapid_key_id   TEXT NOT NULL,
-    status         TEXT NOT NULL,
-    created_at     REAL NOT NULL,
-    last_seen_at   REAL NOT NULL,
-    retired_at     REAL,
-    retire_reason  TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_web_push_subscriptions_owner
-    ON web_push_subscriptions(owner_id, status);
-
 CREATE TABLE IF NOT EXISTS web_push_attention_events (
     event_id        TEXT NOT NULL,
     event_version   INTEGER NOT NULL,
@@ -134,7 +117,7 @@ CREATE TABLE IF NOT EXISTS web_push_attempts (
 """
 
 _vapid_lock = threading.Lock()
-_vapid = None
+_vapid: dict[str, object] = {}
 _worker_task: asyncio.Task | None = None
 _worker_wake: asyncio.Event | None = None
 _worker_stop: asyncio.Event | None = None
@@ -143,6 +126,7 @@ _worker_loop_ref: asyncio.AbstractEventLoop | None = None
 
 def _conn(db_path: Path | str | None = None) -> sqlite3.Connection:
     path = Path(db_path) if db_path is not None else DB_PATH
+    web_push_dao.WebPushStore(path).initialize()
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(str(path), timeout=10)
     connection.row_factory = sqlite3.Row
@@ -172,71 +156,41 @@ def _decode_b64url(value: object, *, name: str, exact_len: int) -> bytes:
     return decoded
 
 
-def _load_vapid():
-    """Load the stable Dashboard sender key, creating it mode-0600 once."""
+def _load_vapid(key_id: str | None = None):
+    """Load a custody-verified active/retiring sender key for pywebpush."""
 
-    global _vapid
     with _vapid_lock:
-        if _vapid is not None:
-            return _vapid
+        store = web_push_dao.WebPushStore(DB_PATH)
+        custody = web_push_dao.VapidKeyCustody(
+            store, key_dir=VAPID_DIR, legacy_key_path=VAPID_PATH,
+        )
+        record, _private_key = custody.load(key_id)
+        cached = _vapid.get(record.key_id)
+        if cached is not None:
+            return cached
         try:
             from py_vapid import Vapid
         except ImportError as exc:
             raise RuntimeError(
                 "Web Push runtime is unavailable; install deploy/requirements.txt"
             ) from exc
-        VAPID_PATH.parent.mkdir(parents=True, exist_ok=True)
-        if VAPID_PATH.exists():
-            vapid = Vapid.from_file(private_key_file=str(VAPID_PATH))
-            os.chmod(VAPID_PATH, 0o600)
-        else:
-            vapid = Vapid()
-            vapid.generate_keys()
-            try:
-                descriptor = os.open(
-                    VAPID_PATH, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
-                )
-            except FileExistsError:
-                vapid = Vapid.from_file(private_key_file=str(VAPID_PATH))
-            else:
-                with os.fdopen(descriptor, "wb") as key_file:
-                    key_file.write(vapid.private_pem())
-                os.chmod(VAPID_PATH, 0o600)
-        _vapid = vapid
+        vapid = Vapid.from_file(str(VAPID_DIR / record.private_key_path))
+        _vapid[record.key_id] = vapid
         return vapid
 
 
 def _application_server_key() -> str:
-    raw = _load_vapid().public_key.public_bytes(
-        Encoding.X962, PublicFormat.UncompressedPoint
-    )
-    return _b64url(raw)
+    store = web_push_dao.WebPushStore(DB_PATH)
+    return web_push_dao.VapidKeyCustody(
+        store, key_dir=VAPID_DIR, legacy_key_path=VAPID_PATH,
+    ).ensure_active().public_key
 
 
 def _stable_owner_id() -> str:
     """Derive routing ownership from the stored personal root, never a SID."""
+    from tools.dashboard.identity_routes import resolve_stable_personal_root_public_key
 
-    from tools.graph import settings_ops
-    from tools.graph.schemas.personal_identity import PERSONAL_IDENTITY_SET_ID
-
-    members = [
-        member
-        for member in settings_ops.read_owned_set(
-            PERSONAL_IDENTITY_SET_ID, org=None
-        ).members
-        if isinstance(member.payload, dict)
-    ]
-    personal = next((member for member in members if member.key == "default"), None)
-    if personal is None and members:
-        personal = sorted(members, key=lambda member: member.key)[0]
-    if personal is None:
-        raise RuntimeError("no personal identity is stored")
-    root_pub = personal.payload.get("root_pub")
-    if not root_pub and personal.payload.get("armored_private_key"):
-        from tools.network.idkit.armor import armor_root_pub
-        root_pub = armor_root_pub(personal.payload["armored_private_key"])
-    if not isinstance(root_pub, str) or not re.fullmatch(r"[0-9a-f]{64}", root_pub):
-        raise RuntimeError("the stored personal identity has no valid root anchor")
+    root_pub = resolve_stable_personal_root_public_key()
     return hashlib.sha256(
         b"autonomy:web-push-owner:v1\0" + bytes.fromhex(root_pub)
     ).hexdigest()
@@ -309,11 +263,26 @@ def _validate_subscription(value: object) -> dict:
     p256dh = _decode_b64url(keys.get("p256dh"), name="p256dh", exact_len=65)
     if p256dh[0] != 0x04:
         raise ValueError("p256dh must be an uncompressed P-256 point")
+    try:
+        ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), p256dh)
+    except ValueError as exc:
+        raise ValueError("p256dh must be a valid P-256 point") from exc
     _decode_b64url(keys.get("auth"), name="auth", exact_len=16)
+    expiration = value.get("expirationTime")
+    if expiration is not None:
+        if isinstance(expiration, bool) or not isinstance(expiration, (int, float)):
+            raise ValueError("expirationTime must be a finite Unix millisecond value")
+        try:
+            expiration = float(expiration) / 1000.0
+        except OverflowError as exc:
+            raise ValueError("expirationTime is out of range") from exc
+        if not 0 < expiration < 253402300800:
+            raise ValueError("expirationTime is out of range")
     return {
         "endpoint": endpoint,
         "host": host,
         "keys": {"p256dh": keys["p256dh"], "auth": keys["auth"]},
+        "expiration_time": expiration,
     }
 
 
@@ -338,97 +307,55 @@ def _upsert_subscription(
 ) -> None:
     if not _INSTALLATION_ID.fullmatch(installation_id):
         raise ValueError("installation_id is invalid")
-    now = time.time()
-    endpoint_hash = hashlib.sha256(subscription["endpoint"].encode()).hexdigest()
-    connection = _conn(db_path)
+    endpoint = subscription["endpoint"]
+    endpoint_hash = hashlib.sha256(endpoint.encode()).hexdigest()
+    parsed = urlsplit(endpoint)
+    endpoint_origin = f"{parsed.scheme}://{parsed.hostname}"
+    if parsed.port not in (None, 443):
+        endpoint_origin += f":{parsed.port}"
+    store = web_push_dao.WebPushStore(DB_PATH if db_path is None else db_path)
+    custody = web_push_dao.VapidKeyCustody(
+        store, key_dir=VAPID_DIR, legacy_key_path=VAPID_PATH,
+    )
     try:
-        connection.execute("BEGIN IMMEDIATE")
-        existing = connection.execute(
-            "SELECT owner_id FROM web_push_subscriptions WHERE installation_id=?",
-            (installation_id,),
-        ).fetchone()
-        if existing is not None and existing["owner_id"] != owner_id:
-            raise PermissionError("this browser installation belongs to another operator")
-        endpoint_owner = connection.execute(
-            "SELECT installation_id,owner_id FROM web_push_subscriptions WHERE endpoint=?",
-            (subscription["endpoint"],),
-        ).fetchone()
-        if endpoint_owner is not None and endpoint_owner["owner_id"] != owner_id:
-            raise PermissionError("this push endpoint belongs to another operator")
-        if endpoint_owner is not None and endpoint_owner["installation_id"] != installation_id:
-            connection.execute(
-                "UPDATE web_push_subscriptions SET status='retired',retired_at=?,"
-                "retire_reason='installation_id_replaced' WHERE installation_id=?",
-                (now, endpoint_owner["installation_id"]),
-            )
-        connection.execute(
-            "INSERT INTO web_push_subscriptions(installation_id,owner_id,origin,"
-            "endpoint,endpoint_hash,p256dh,auth_secret,vapid_key_id,status,created_at,"
-            "last_seen_at,retired_at,retire_reason) VALUES(?,?,?,?,?,?,?,'primary',"
-            "'active',?,?,NULL,NULL) ON CONFLICT(installation_id) DO UPDATE SET "
-            "origin=excluded.origin,endpoint=excluded.endpoint,"
-            "endpoint_hash=excluded.endpoint_hash,p256dh=excluded.p256dh,"
-            "auth_secret=excluded.auth_secret,status='active',"
-            "last_seen_at=excluded.last_seen_at,retired_at=NULL,retire_reason=NULL",
-            (
-                installation_id, owner_id, origin, subscription["endpoint"],
-                endpoint_hash, subscription["keys"]["p256dh"],
-                subscription["keys"]["auth"], now, now,
-            ),
+        key = custody.ensure_active()
+        store.enroll(
+            operator_subject=owner_id,
+            device_id=installation_id,
+            endpoint=endpoint,
+            endpoint_hash=endpoint_hash,
+            endpoint_origin=endpoint_origin,
+            vapid_subject=origin,
+            p256dh=subscription["keys"]["p256dh"],
+            auth_secret=subscription["keys"]["auth"],
+            vapid_key_id=key.key_id,
+            expiration_time=subscription.get("expiration_time"),
         )
-        connection.commit()
-    finally:
-        connection.close()
+    except web_push_dao.WebPushStoreError as exc:
+        if exc.code in {"device_conflict", "endpoint_conflict"}:
+            raise PermissionError(
+                "this browser installation or push endpoint belongs to another operator"
+            ) from exc
+        raise
 
 
 def _retire_subscription(
     installation_id: str, owner_id: str, reason: str,
     *, db_path: Path | str | None = None,
 ) -> bool:
-    now = time.time()
-    connection = _conn(db_path)
-    try:
-        connection.execute("BEGIN IMMEDIATE")
-        changed = connection.execute(
-            "UPDATE web_push_subscriptions SET status='retired',retired_at=?,"
-            "retire_reason=? WHERE installation_id=? AND owner_id=? AND status='active'",
-            (now, reason, installation_id, owner_id),
-        ).rowcount
-        connection.execute(
-            "UPDATE web_push_outbox SET state='canceled',last_reason=? "
-            "WHERE installation_id=? AND state IN ('fallback_wait','pending',"
-            "'retry_wait','leased')",
-            (reason, installation_id),
-        )
-        connection.commit()
-        return bool(changed)
-    finally:
-        connection.close()
+    store = web_push_dao.WebPushStore(DB_PATH if db_path is None else db_path)
+    return store.retire(
+        owner_id, installation_id, reason=reason,
+    )
 
 
 def _subscription_state(
     owner_id: str, installation_id: str | None,
     *, db_path: Path | str | None = None,
 ) -> dict:
-    connection = _conn(db_path)
-    try:
-        active_count = connection.execute(
-            "SELECT count(*) FROM web_push_subscriptions "
-            "WHERE owner_id=? AND status='active'", (owner_id,),
-        ).fetchone()[0]
-        row = None
-        if installation_id and _INSTALLATION_ID.fullmatch(installation_id):
-            row = connection.execute(
-                "SELECT status,last_seen_at,retire_reason FROM web_push_subscriptions "
-                "WHERE installation_id=? AND owner_id=?",
-                (installation_id, owner_id),
-            ).fetchone()
-        return {
-            "active_installations": int(active_count),
-            "this_installation": dict(row) if row is not None else None,
-        }
-    finally:
-        connection.close()
+    return web_push_dao.WebPushStore(
+        DB_PATH if db_path is None else db_path
+    ).state(owner_id, installation_id)
 
 
 def _register_attention(
@@ -450,8 +377,8 @@ def _register_attention(
     try:
         connection.execute("BEGIN IMMEDIATE")
         subscriptions = connection.execute(
-            "SELECT installation_id FROM web_push_subscriptions "
-            "WHERE owner_id=? AND status='active'", (owner_id,),
+            "SELECT device_id AS installation_id FROM web_push_subscriptions "
+            "WHERE operator_subject=? AND status='active'", (owner_id,),
         ).fetchall()
         if not subscriptions:
             connection.rollback()
@@ -537,7 +464,7 @@ def _reconcile_approval_attention_sync(eligible_kind) -> None:
     connection = _conn()
     try:
         has_subscription = connection.execute(
-            "SELECT 1 FROM web_push_subscriptions WHERE owner_id=? "
+            "SELECT 1 FROM web_push_subscriptions WHERE operator_subject=? "
             "AND status='active' LIMIT 1", (owner_id,),
         ).fetchone() is not None
     finally:
@@ -687,7 +614,7 @@ def _claim_due(*, db_path: Path | str | None = None) -> dict | None:
             "SELECT o.* FROM web_push_outbox o JOIN web_push_attention_events e "
             "ON e.event_id=o.event_id AND e.event_version=o.event_version "
             "AND e.owner_id=o.owner_id JOIN web_push_subscriptions s "
-            "ON s.installation_id=o.installation_id "
+            "ON s.device_id=o.installation_id "
             "WHERE o.state IN ('fallback_wait','pending','retry_wait') "
             "AND o.available_at<=? AND o.expires_at>? AND e.acknowledged_at IS NULL "
             "AND e.canceled_at IS NULL AND s.status='active' "
@@ -709,10 +636,11 @@ def _claim_due(*, db_path: Path | str | None = None) -> dict | None:
             connection.rollback()
             return None
         claimed = connection.execute(
-            "SELECT o.*,s.origin,s.endpoint,s.p256dh,s.auth_secret,"
+            "SELECT o.*,s.vapid_subject AS origin,s.endpoint,s.p256dh,s.auth_secret,"
+            "s.vapid_key_id,"
             "e.application,e.attention_class,e.route,e.created_at "
             "FROM web_push_outbox o JOIN web_push_subscriptions s "
-            "ON s.installation_id=o.installation_id "
+            "ON s.device_id=o.installation_id "
             "JOIN web_push_attention_events e ON e.event_id=o.event_id "
             "AND e.event_version=o.event_version AND e.owner_id=o.owner_id "
             "WHERE o.id=?", (row["id"],),
@@ -754,7 +682,7 @@ def _lease_still_sendable(
             "e.canceled_at,s.status FROM web_push_outbox o "
             "JOIN web_push_attention_events e ON e.event_id=o.event_id "
             "AND e.event_version=o.event_version AND e.owner_id=o.owner_id "
-            "JOIN web_push_subscriptions s ON s.installation_id=o.installation_id "
+            "JOIN web_push_subscriptions s ON s.device_id=o.installation_id "
             "WHERE o.id=?", (row["id"],),
         ).fetchone()
         return bool(
@@ -842,7 +770,7 @@ def _send_push(row: dict) -> int:
             "keys": {"p256dh": row["p256dh"], "auth": row["auth_secret"]},
         },
         data=_payload_for(row),
-        vapid_private_key=_load_vapid(),
+        vapid_private_key=_load_vapid(row["vapid_key_id"]),
         vapid_claims={"sub": row["origin"]},
         content_encoding="aes128gcm",
         ttl=max(0, min(int(row["expires_at"] - time.time()), 86400)),
@@ -926,8 +854,8 @@ def _finish_attempt(
         if retired:
             connection.execute(
                 "UPDATE web_push_subscriptions SET status='retired',retired_at=?,"
-                "retire_reason='push_service_gone' WHERE installation_id=?",
-                (now, row["installation_id"]),
+                "retire_reason='push_service_gone',updated_at=? WHERE device_id=?",
+                (now, now, row["installation_id"]),
             )
             connection.execute(
                 "UPDATE web_push_outbox SET state='canceled',"
@@ -1004,7 +932,14 @@ async def start_worker() -> None:
     global _worker_task, _worker_wake, _worker_stop, _worker_loop_ref
     if _worker_task is not None and not _worker_task.done():
         return
-    await asyncio.to_thread(init_db)
+    try:
+        await asyncio.to_thread(init_db)
+        await asyncio.to_thread(_application_server_key)
+    except Exception as exc:
+        logger.error(
+            "web_push_worker_disabled error_type=%s", type(exc).__name__,
+        )
+        return
     _worker_wake = asyncio.Event()
     _worker_stop = asyncio.Event()
     _worker_loop_ref = asyncio.get_running_loop()
@@ -1167,7 +1102,6 @@ async def api_test(request: Request) -> JSONResponse:
 
 
 ROUTES = [
-    Route("/api/web-push/config", api_config, methods=["GET"]),
     Route("/api/web-push/state", api_state, methods=["GET"]),
     Route("/api/web-push/subscriptions", api_enroll, methods=["POST"]),
     Route(

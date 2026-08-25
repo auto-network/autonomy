@@ -136,7 +136,7 @@ from tools.dashboard import unlock_routes
 from tools.dashboard import vault_routes
 from tools.dashboard import api_auth, route_policy
 from tools.dashboard import network_routes
-from tools.dashboard import web_push, web_push_proof
+from tools.dashboard import web_push, web_push_proof, web_push_routes
 if os.environ.get("DASHBOARD_MOCK"):
     from tools.dashboard.dao import mock as dao_beads
     from tools.dashboard.dao import mock as dao_dispatch
@@ -18908,6 +18908,7 @@ routes = [
     Route("/api/events/replay", api_events_replay),
     Route("/api/web-push/proof/config", web_push_proof.api_config),
     Route("/api/web-push/proof/send", web_push_proof.api_send, methods=["POST"]),
+    *web_push_routes.ROUTES,
     *web_push.ROUTES,
 
     # Diag round-trip — file/server/bus/client alignment
