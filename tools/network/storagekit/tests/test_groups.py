@@ -179,3 +179,97 @@ def test_recipients_mirror_the_member_credential_seam():
         world.fold(), charter, [], _Credentials(world), world.ancestry
     )
     assert [c.persona for c in creds] == [alice]
+
+
+# -- sealed content follows group membership ---------------------------------------
+
+
+def _mint_group_state(world: World, group_id: str):
+    from tools.network.storagekit import state
+    from tools.network.storagekit.acceptance import loss_projection_digest
+    from tools.network.storagekit.groups import group_content_domain_id
+
+    heads = sorted(world.sim.ledger.heads())
+    fold_state = world.sim.fold(heads=heads)
+    domain = group_content_domain_id(world.gen, group_id)
+    return state.generate(
+        world.member(0), world.gen, domain, (), heads,
+        sorted(fold_state.loss_heads), loss_projection_digest(fold_state),
+    ) + (heads,)
+
+
+def test_group_grants_reach_members_and_only_members():
+    from tools.network.storagekit import capability
+    from tools.network.storagekit.errors import StorageError
+    from tools.network.storagekit.groups import group_head_grants
+
+    world = World(member_count=3)
+    alice, bob, carol = (_pub(world, i) for i in range(3))
+    charter = create_charter(
+        world.member(0), _gid(), "infra", [alice], [alice, bob], HLC0
+    )
+    descriptor, secret, heads = _mint_group_state(world, charter.group_id)
+    creds = {p: world.principals[p]["credential"] for p in world.principals}
+
+    grants = group_head_grants(
+        world.member(0), charter, [], world.fold(), creds, descriptor, secret, heads
+    )
+    recipients = {g.recipient_kem_key_id for g in grants}
+    assert recipients == {creds[alice].kem_key_id, creds[bob].kem_key_id}, (
+        "the mint fans out to exactly the effective group members"
+    )
+
+    by_kem = {g.recipient_kem_key_id: g for g in grants}
+    for member in (alice, bob):
+        recovered = capability.accept(
+            by_kem[creds[member].kem_key_id],
+            world.principals[member]["kem_private"],
+            descriptor,
+        )
+        assert recovered == secret
+
+    # Carol holds no grant, and a grant addressed to Bob does not open
+    # for her key material: exclusion is cryptographic, not a filter.
+    try:
+        capability.accept(
+            by_kem[creds[bob].kem_key_id],
+            world.principals[carol]["kem_private"],
+            descriptor,
+        )
+    except (StorageError, Exception):
+        pass
+    else:
+        raise AssertionError("a non-member must not open another member's grant")
+
+
+def test_group_remint_after_removal_reaches_survivors_only():
+    from tools.network.storagekit.groups import group_head_grants
+
+    world = World(member_count=3)
+    alice, bob = _pub(world, 0), _pub(world, 1)
+    charter = create_charter(
+        world.member(0), _gid(), "infra", [alice], [alice, bob], HLC0
+    )
+    creds = {p: world.principals[p]["credential"] for p in world.principals}
+
+    d1, s1, heads1 = _mint_group_state(world, charter.group_id)
+    first = group_head_grants(
+        world.member(0), charter, [], world.fold(), creds, d1, s1, heads1
+    )
+    assert len(first) == 2
+
+    # Group-remove Bob, then mint fresh: the fan-out to survivors IS the
+    # re-mint, with no other machinery.
+    drop = make_group_event(world.member(0), charter, "remove", bob, HLC1)
+    d2, s2, heads2 = _mint_group_state(world, charter.group_id)
+    second = group_head_grants(
+        world.member(0), charter, [drop], world.fold(), creds, d2, s2, heads2
+    )
+    assert {g.recipient_kem_key_id for g in second} == {creds[alice].kem_key_id}
+
+    # Dedup: re-running the fan-out with the minted grants known mints nothing.
+    again = group_head_grants(
+        world.member(0), charter, [drop], world.fold(), creds, d2, s2, heads2,
+        existing_grants=second,
+    )
+    assert again == ()

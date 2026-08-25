@@ -322,3 +322,72 @@ def group_member_credentials(fold, charter, events, key_control, authority_ances
             continue
         recipients.append(select_current_credential(candidates, authority_ancestry))
     return tuple(recipients)
+
+
+def group_content_domain_id(genesis_id: str, group_id: str) -> str:
+    """The version-one group-content storage-domain identifier.
+
+    ``SHA-256("autonomy/storage-domain/v1" || genesis_id ||
+    "group-content" || group_id)`` — mirroring the organization content
+    domain's derivation and anchored the same way: on the genesis event
+    id (invariant across a ``key.rotate``) plus the stable group id
+    (invariant across membership churn, per the ratified rule that an
+    audience identifier never derives from its member list).
+    """
+    import hashlib
+
+    _require_hex(genesis_id, _ID_HEX_LEN, "genesis_id")
+    _require_hex(group_id, _ID_HEX_LEN, "group_id")
+    return hashlib.sha256(
+        b"autonomy/storage-domain/v1"
+        + genesis_id.encode("ascii")
+        + b"group-content"
+        + group_id.encode("ascii")
+    ).hexdigest()
+
+
+def group_head_grants(
+    grantor,
+    charter: GroupCharter,
+    events,
+    fold,
+    credentials_by_persona,
+    head_descriptor,
+    head_secret,
+    frontier,
+    existing_grants=(),
+) -> tuple:
+    """One grant per (effective group member x this head): the group mint.
+
+    The group twin of ``distribution.provision_missing``: identical grant
+    primitive, identical dedup against already-minted grants, identical
+    skip for a member without a published credential — only the recipient
+    set differs, computed by the derived fold instead of the whole-domain
+    roster. Removal (from the group or from the organization) excludes a
+    persona from the next fan-out with no other machinery: minting a
+    fresh state and fanning out to the survivors IS the re-mint.
+    """
+    from .distribution import grant_current_head
+
+    provisioned = {
+        (grant.storage_state_id, grant.recipient_kem_key_id)
+        for grant in existing_grants
+    }
+    minted = []
+    for persona in sorted(group_member_keys(fold, charter, events)):
+        credential = credentials_by_persona.get(persona)
+        if credential is None:
+            continue
+        if (head_descriptor.state_id, credential.kem_key_id) in provisioned:
+            continue
+        minted.append(
+            grant_current_head(
+                grantor,
+                head_descriptor.domain_id,
+                credential,
+                head_descriptor,
+                head_secret,
+                frontier,
+            )
+        )
+    return tuple(minted)
