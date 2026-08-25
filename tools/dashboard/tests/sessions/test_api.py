@@ -142,6 +142,41 @@ class TestRecentSessionsAPI:
         assert len(no_limit) == len(with_limit), \
             f"limit=2 changed row count ({len(no_limit)} vs {len(with_limit)})"
 
+    def test_org_scoped_session_cannot_read_another_org(self, test_client, monkeypatch):
+        """An org-stamped agent cannot turn ``?org=`` into a cross-org read."""
+        from tools.dashboard import server
+
+        monkeypatch.setattr(
+            server,
+            "authenticate_session_request",
+            lambda request: (("auto-dynbench", "dynbench"), None),
+        )
+        response = test_client.get("/api/dao/recent_sessions?org=anchore")
+        assert response.status_code == 403
+
+    def test_selected_org_is_forwarded_to_the_scoped_cache(self, test_client, monkeypatch):
+        """The endpoint scopes the DAO cache key instead of post-filtering rows."""
+        from tools.dashboard import server
+
+        captured = {}
+
+        def fake_cached(sort, since, type_group, org):
+            captured.update(sort=sort, since=since, type_group=type_group, org=org)
+            return []
+
+        monkeypatch.setattr(server, "_token_org_or_none", lambda request: None)
+        monkeypatch.setattr(server.dao_sessions, "recent_sessions_cached", fake_cached)
+        response = test_client.get(
+            "/api/dao/recent_sessions?org=dynbench&type=interactive&since=1d"
+        )
+        assert response.status_code == 200
+        assert captured == {
+            "sort": "lastActivity",
+            "since": "1d",
+            "type_group": "interactive",
+            "org": "dynbench",
+        }
+
 
 class TestSessionStatusAPI:
     """GET /api/dao/session_status powers ``graph sessions --status``."""
@@ -269,6 +304,11 @@ class TestSessionsJSWiring:
 
     def test_session_store_has_topics_default(self):
         assert "topics: []" in self.store_js
+
+    def test_org_selection_refetches_its_server_scoped_recent_history(self):
+        assert "this.selectedOrg = slug;" in self.sessions_js
+        assert "this._fetchRecent();" in self.sessions_js
+        assert "selectedOrg ? '&org=' + encodeURIComponent(selectedOrg) : ''" in self.sessions_js
 
     def test_restart_action_precedes_close_and_calls_atomic_endpoint(self):
         restart = self.sessions_js.index("label: 'Restart Session'")
