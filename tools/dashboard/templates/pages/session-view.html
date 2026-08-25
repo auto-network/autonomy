@@ -634,6 +634,30 @@
                  style="display:inline-block;padding:10px 18px;background:#5638f3;color:#fff;border-radius:8px;text-decoration:none;font-weight:600">Download</a>
             </div>
           </template>
+          <template x-if="lightboxKind === 'shortcut'">
+            <div @click.stop class="sc-va-shortcut-sheet" data-testid="shortcut-install-sheet">
+              <div class="sc-va-shortcut-mark" aria-hidden="true">
+                <span></span><span></span>
+              </div>
+              <div class="sc-va-shortcut-kicker">APPLE SHORTCUT</div>
+              <h2 x-text="(lightboxName || 'Autonomy Capture.shortcut').replace(/\.shortcut$/i, '')"></h2>
+              <p class="sc-va-shortcut-copy">
+                Hand the signed installer to iOS without replacing this Autonomy window.
+              </p>
+              <button type="button"
+                      class="sc-va-shortcut-open"
+                      data-testid="shortcut-install-open"
+                      :disabled="lightboxFileState === 'loading'"
+                      @click="openShortcutInstaller()">
+                <span x-show="lightboxFileState === 'loading'">Preparing signed file&hellip;</span>
+                <span x-show="lightboxFileState !== 'loading'">Open in Shortcuts</span>
+              </button>
+              <p class="sc-va-shortcut-hint"
+                 x-text="canShareLightboxFile() ? 'Choose Shortcuts in the iOS share sheet.' : 'The installer opens separately so Autonomy stays here.'"></p>
+              <p class="sc-va-shortcut-error" x-show="lightboxFileError" x-text="lightboxFileError"></p>
+              <button type="button" class="sc-va-shortcut-cancel" @click="closeLightbox()">Cancel</button>
+            </div>
+          </template>
         </div>
       </template>
 
