@@ -5351,7 +5351,6 @@ def cmd_session_auth(args):
     try:
         created, _ = _call("/api/approvals", {
             "kind": ACCESS_KIND,
-            "session": session_name,
             "request": {"ephemeral_pub": keypair.public_hex},
         })
     except urllib.error.URLError as exc:

@@ -68,7 +68,7 @@ from starlette.routing import Route
 
 from tools.graph import settings_ops
 from tools.graph.db import GraphDBNotReady
-from tools.data_paths import DATA_ROOT
+from tools.data_paths import resolve_store
 
 logger = logging.getLogger(__name__)
 from tools.dashboard.dao import identity_sessions
@@ -146,10 +146,15 @@ def _prune(store: dict, *, reserve: int = 0) -> None:
 
 
 def _secret_path() -> Path:
-    override = os.environ.get("DASHBOARD_SESSION_SECRET_FILE")
-    if override:
-        return Path(override)
-    return DATA_ROOT / "dashboard-session.secret"
+    """Return the session realm's manifest-rooted secret path.
+
+    The secret and ``identity_sessions`` store deliberately share one root.
+    An independent secret override used to let a deployment move the grant
+    database without its cookie/destination identity (or vice versa), creating
+    a split realm.  The manifest's ``roots_with`` relationship is now the only
+    production resolver.
+    """
+    return resolve_store("dashboard_session_secret")
 
 
 _secret_cache: dict = {"path": None, "value": None}

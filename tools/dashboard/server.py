@@ -19460,7 +19460,11 @@ async def _on_startup():
     # Personal fleet synchronization owns one in-process scheduler. It starts
     # idle before unlock/runtime credentials are available, so zero-peer,
     # mock, and cold-vault Dashboards pay no database or network cost.
-    from tools.network.fleet_sync_scheduler import dashboard_fleet_sync_service
+    from tools.network.fleet_sync_scheduler import (
+        dashboard_fleet_sync_service,
+        set_settings_materialization_hook,
+    )
+    set_settings_materialization_hook(attention_routes.emit_personal_sync_change)
     await dashboard_fleet_sync_service.start()
     _mark("fleet_sync_scheduler.start")
 
@@ -19794,6 +19798,11 @@ async def _on_shutdown():
         await web_push.stop_worker()
     except Exception:
         logger.exception("error stopping the Web Push worker")
+    try:
+        from tools.network.fleet_sync_scheduler import set_settings_materialization_hook
+        set_settings_materialization_hook(None)
+    except Exception:
+        logger.exception("error clearing the personal-sync Settings hint")
     try:
         await attention_routes.stop()
     except Exception:

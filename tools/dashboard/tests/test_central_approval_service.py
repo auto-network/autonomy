@@ -1,7 +1,7 @@
 """Contract tests for the Settings-native central approval authority.
 
-The public approval routes deliberately remain on the existing rendezvous in
-this bead.  These tests exercise the new internal service directly.
+The first production kind now uses the public requester bridge.  These tests
+exercise the substrate service independently of any one migrated adapter.
 """
 
 from __future__ import annotations
@@ -109,7 +109,9 @@ def test_production_catalog_field_map_is_exact():
 def _runtime(*, planner=None, validator=None, consumer="test.consumer"):
     return ApprovalKindRuntime(
         request_planner=planner or (lambda context, body: body),
-        decision_validator=validator or (lambda request, decision, grant: decision),
+        decision_validator=validator or (
+            lambda _context, request, decision, grant: decision
+        ),
         resolution_consumer_id=consumer,
     )
 
@@ -208,7 +210,7 @@ def _plan(_context, body):
     }
 
 
-def _validator(_request, decision, grant):
+def _validator(_context, _request, decision, grant):
     if not isinstance(decision, dict) or set(decision) - {"reason"}:
         raise ValueError("bad decision")
     return decision
@@ -603,7 +605,7 @@ def test_staged_secret_shape_and_malformed_decision_fail_closed():
 def test_decline_uses_human_actor_but_skips_grant_ceremony():
     grants = []
 
-    def validator(_request, decision, grant):
+    def validator(_context, _request, decision, grant):
         grants.append(grant)
         if grant:
             raise ValueError("missing ceremony")

@@ -15928,6 +15928,36 @@ CENTRAL_ATTENTION_DESKTOP_CHECKS = r"""(async () => {
     };
     const calls = [];
     const originalFetch = window.fetch;
+    const originalSession = window.AutonomyNetworkSession;
+    const ceremonyPrimitives = await import('/static/js/ceremony/primitives.js');
+    const ceremonyKeys = await crypto.subtle.generateKey(
+        {name: 'Ed25519'}, true, ['sign', 'verify']);
+    const ceremonyPkcs8 = new Uint8Array(
+        await crypto.subtle.exportKey('pkcs8', ceremonyKeys.privateKey));
+    const ceremonySeed = ceremonyPkcs8.slice(-32);
+    const ceremonyRootPub = ceremonyPrimitives.bytesToHex(new Uint8Array(
+        await crypto.subtle.exportKey('raw', ceremonyKeys.publicKey)));
+    const ceremonyArmor = await ceremonyPrimitives.encryptArmor(
+        ceremonySeed, ceremonyRootPub, 'central browser password', 10000);
+    ceremonySeed.fill(0);
+    ceremonyPkcs8.fill(0);
+    window.AutonomyNetworkSession = {
+        ...(originalSession || {}),
+        _internals: {
+            ...((originalSession && originalSession._internals) || {}),
+            canonicalJson: ceremonyPrimitives.canonicalJson,
+            bytesToHex: ceremonyPrimitives.bytesToHex,
+        },
+    };
+    const dashboardGrant = {
+        v: 1,
+        nonce: 'ab'.repeat(32),
+        grantee: 'opaque-dashboard-requester',
+        ephemeral_pub: '12'.repeat(32),
+        scope: ['dashboard:ui'],
+        issued_at: now,
+        expires_at: now + 7200,
+    };
     window.fetch = async (input, options={}) => {
         const url = new URL(typeof input === 'string' ? input : input.url, location.origin);
         const method = (options.method || 'GET').toUpperCase();
@@ -15953,6 +15983,35 @@ CENTRAL_ATTENTION_DESKTOP_CHECKS = r"""(async () => {
                 resolution: null,
                 actions: ['granted', 'declined'],
             }});
+        }
+        if (url.pathname === '/api/attention/items/dashboard-request' && method === 'GET') {
+            return reply({item: fixture.items.find(row =>
+                row.attention_id === 'dashboard-request'), review: {
+                type: 'approval',
+                renderer_id: 'approval.dashboard_access.review',
+                kind: 'dashboard_access',
+                authority_requirement: 'personal_root',
+                safe_review: {
+                    detail: 'Unlock your personal root to approve temporary Dashboard access.',
+                    grant: dashboardGrant,
+                },
+                requester: {kind: 'session', label: 'Coding session'},
+                resolution: null,
+                actions: ['granted', 'declined'],
+            }});
+        }
+        if (url.pathname === '/api/identity/status') {
+            return reply({rp_id: location.hostname, passkeys: []});
+        }
+        if (url.pathname === '/api/identity/personal') {
+            return reply({
+                display_name: 'Alex Operator',
+                armored_private_key: ceremonyArmor,
+                root_pub: ceremonyRootPub,
+            });
+        }
+        if (url.pathname === '/api/identity/factor-policy') {
+            return reply({error: 'not configured'}, 404);
         }
         if (url.pathname.endsWith('/opened') && method === 'POST') {
             calls.push({kind: 'opened', path: url.pathname});
@@ -16050,6 +16109,59 @@ CENTRAL_ATTENTION_DESKTOP_CHECKS = r"""(async () => {
         result.explicit_decline_only = decisions.length === 1 &&
             decisions[0].body.outcome === 'declined';
 
+        const dashboardRow = item(
+            'dashboard-request', 'sessions', 'Sessions', 'approvals', 'recipient',
+            'needs_attention', 'Dashboard access requested',
+            'A coding session wants temporary Dashboard access.');
+        fixture.items.push(dashboardRow);
+        fixture.counts.total_needs_attention = 6;
+        fixture.counts.categories.approvals = 2;
+        fixture.counts.states.needs_attention = 6;
+        fixture.counts.applications.sessions.needs_attention = 1;
+        await data.refresh(); await tick();
+        await data.openItem(data.items.find(candidate => candidate.id === 'dashboard-request'));
+        await tick();
+        result.dashboard_access_detail_open = !!document.querySelector(
+            '[data-testid="attention-item-sheet"]');
+        const dashboardGrantButton = document.querySelector(
+            '[data-testid="central-attention-grant"]');
+        dashboardGrantButton.click();
+        await sleep(250); await tick();
+        const rootDialog = document.querySelector('[data-testid="open-root"]');
+        result.dashboard_access_common_root_dialog = !!rootDialog &&
+            rootDialog.textContent.includes('Approve dashboard access');
+        const passwordInput = rootDialog?.querySelector('input[type="password"]');
+        if (passwordInput) {
+            passwordInput.value = 'central browser password';
+            passwordInput.dispatchEvent(new Event('input', {bubbles: true}));
+        }
+        const approveRoot = Array.from(rootDialog?.querySelectorAll('.or-btn') || [])
+            .find(button => button.textContent.trim() === 'Approve');
+        approveRoot?.click();
+        await sleep(300); await tick();
+        const dashboardDecision = calls.filter(call => call.kind === 'decision')
+            .find(call => call.body.outcome === 'granted');
+        const signedBytes = dashboardDecision
+            ? Uint8Array.from(dashboardDecision.body.decision.signature.match(/.{2}/g)
+                .map(value => parseInt(value, 16)))
+            : null;
+        const signedInput = new TextEncoder().encode(
+            'autonomy.identity.dashboard-access-grant.v1\n' +
+            ceremonyPrimitives.canonicalJson(dashboardGrant));
+        result.dashboard_access_signed_exact_grant = !!dashboardDecision &&
+            ceremonyPrimitives.canonicalJson(dashboardDecision.body.decision.grant) ===
+                ceremonyPrimitives.canonicalJson(dashboardGrant) &&
+            await crypto.subtle.verify(
+                'Ed25519', ceremonyKeys.publicKey, signedBytes, signedInput);
+        result.dashboard_access_closed_after_grant = !data.selectedItem &&
+            !document.querySelector('[data-testid="open-root"]');
+
+        fixture.items = fixture.items.filter(row => row.attention_id !== 'dashboard-request');
+        fixture.counts.total_needs_attention = 5;
+        fixture.counts.categories.approvals = 1;
+        fixture.counts.states.needs_attention = 5;
+        fixture.counts.applications.sessions.needs_attention = 0;
+
         data.closeInbox();
         fixture.items.unshift(item('new-app', 'photos', 'Photos', 'apps', 'recipient',
             'needs_attention', 'A new album arrived', 'Open Photos.'));
@@ -16078,6 +16190,7 @@ CENTRAL_ATTENTION_DESKTOP_CHECKS = r"""(async () => {
     } finally {
         window.removeEventListener('error', onError);
         window.fetch = originalFetch;
+        window.AutonomyNetworkSession = originalSession;
     }
 })()"""
 
@@ -16215,6 +16328,13 @@ class TestCentralAttentionSurface:
         assert c.get("fleet_grant_disabled_empty") and c.get("fleet_grant_enabled_named"), c
         assert c.get("escape_is_inert") and c.get("decline_requires_confirmation"), c
         assert c.get("keep_requested_is_inert") and c.get("explicit_decline_only"), c
+
+    def test_dashboard_access_uses_common_root_ceremony(self):
+        c = self.desktop
+        assert c.get("dashboard_access_detail_open"), c
+        assert c.get("dashboard_access_common_root_dialog"), c
+        assert c.get("dashboard_access_signed_exact_grant"), c
+        assert c.get("dashboard_access_closed_after_grant"), c
 
     def test_background_invalidation_never_force_opens(self):
         c = self.desktop

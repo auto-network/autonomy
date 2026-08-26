@@ -20,8 +20,8 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
-from tools.dashboard import api_auth, unlock_routes
-from tools.dashboard.approval_kind_registry import PRODUCTION_APPROVAL_REGISTRY
+from tools.dashboard import api_auth, dashboard_access_central, unlock_routes
+from tools.dashboard.approval_kind_registry import build_production_registry
 from tools.dashboard.approval_service import (
     ApprovalService,
     ApprovalServiceError,
@@ -300,6 +300,7 @@ class AttentionRouteRuntime:
     approvals: ApprovalService
     hub: PrivateAttentionHub
     approval_http: ApprovalHttpBridge | None = None
+    approval_reconciler: Any | None = None
 
     def __post_init__(self) -> None:
         if self.approval_http is None:
@@ -319,21 +320,60 @@ class AttentionRouteRuntime:
 
 
 def build_production_runtime() -> AttentionRouteRuntime:
-    approval_registry = PRODUCTION_APPROVAL_REGISTRY
-    attention_registry = build_production_attention_registry(
-        approval_registry=approval_registry,
-    )
-    index = AttentionIndexService(registry=attention_registry)
+    dashboard_approval_runtime = dashboard_access_central.build_approval_runtime()
+    approval_registry = build_production_registry(runtimes={
+        dashboard_access_central.KIND: dashboard_approval_runtime,
+    })
     approval_waiters = ApprovalWaitHub()
+    coordinator_holder: dict[str, Any] = {}
+
+    def approval_after_commit(record_type: str, approval_id: str) -> None:
+        approval_waiters.notify(record_type, approval_id)
+        coordinator = coordinator_holder.get("coordinator")
+        if coordinator is not None:
+            coordinator.offer(approval_id)
+
     approvals = ApprovalService(
         registry=approval_registry,
-        after_commit=approval_waiters.notify,
+        after_commit=approval_after_commit,
     )
+    dashboard_attention_runtime = dashboard_access_central.build_attention_runtime(
+        approvals,
+    )
+    attention_registry = build_production_attention_registry(
+        approval_registry=approval_registry,
+        runtimes={
+            (
+                dashboard_access_central.KIND,
+                dashboard_access_central.APPLICATION_SCOPE,
+            ): dashboard_attention_runtime,
+        },
+    )
+    index = AttentionIndexService(registry=attention_registry)
+    consumer = dashboard_access_central.DashboardAccessResultConsumer()
+    producer = attention_registry.producer(
+        dashboard_access_central.KIND,
+        dashboard_access_central.APPLICATION_SCOPE,
+    )
+    coordinator = dashboard_access_central.DashboardAccessCoordinator(
+        approvals=approvals,
+        index=index,
+        producer=producer,
+        consumer=consumer,
+    )
+    coordinator_holder["coordinator"] = coordinator
     approval_http = ApprovalHttpBridge(
         approvals=approvals,
         registry=ApprovalHttpRegistry(
             approvals=approval_registry,
             attention=attention_registry,
+            adapters={
+                dashboard_access_central.KIND:
+                    dashboard_access_central.build_http_adapter(
+                        consumer,
+                        reconcile=coordinator.reconcile_exact,
+                    ),
+            },
         ),
         wait_hub=approval_waiters,
     )
@@ -343,6 +383,7 @@ def build_production_runtime() -> AttentionRouteRuntime:
         approvals=approvals,
         hub=PrivateAttentionHub(item_resolver=index.get_query_item),
         approval_http=approval_http,
+        approval_reconciler=coordinator,
     )
 
 
@@ -361,9 +402,13 @@ def configure_runtime(runtime: AttentionRouteRuntime) -> AttentionRouteRuntime:
 
 async def start() -> None:
     await _runtime.hub.start()
+    if _runtime.approval_reconciler is not None:
+        await _runtime.approval_reconciler.start()
 
 
 async def stop() -> None:
+    if _runtime.approval_reconciler is not None:
+        await _runtime.approval_reconciler.stop()
     await _runtime.hub.stop()
     assert _runtime.approval_http is not None
     _runtime.approval_http.close()
@@ -380,11 +425,34 @@ def sync_registrations() -> int:
 
 def emit_setting_change(*, operation: str, snapshot: Mapping[str, Any], org: str | None) -> None:
     try:
+        if _runtime.approval_reconciler is not None:
+            _runtime.approval_reconciler.offer_local_setting(
+                operation=operation,
+                snapshot=snapshot,
+                org=org,
+            )
         _runtime.hub.emit_setting_change(
             operation=operation, snapshot=snapshot, org=org,
         )
     except Exception:
         logger.warning("private attention post-commit hint failed", exc_info=True)
+
+
+def emit_personal_sync_change(*, addresses=(), gap: bool = False) -> None:
+    """Accept one payload-free post-materialization hint from Fleet sync."""
+    try:
+        if _runtime.approval_reconciler is not None:
+            _runtime.approval_reconciler.offer_synced(
+                addresses=addresses,
+                gap=gap,
+            )
+    except Exception:
+        logger.warning("personal-sync approval hint failed", exc_info=True)
+        try:
+            if _runtime.approval_reconciler is not None:
+                _runtime.approval_reconciler.offer_gap()
+        except Exception:
+            pass
 
 
 def scrub_private_cached_events(bus: Any) -> int:

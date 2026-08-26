@@ -449,6 +449,12 @@
       },
 
       async buildGrantDecision(item) {
+        if (item.rendererId === 'approval.dashboard_access.review') {
+          const { signDashboardAccessGrant } = await import(
+            '../ceremony/dashboard-access.js'
+          );
+          return signDashboardAccessGrant(item.safeReview.grant);
+        }
         if (item.rendererId === 'approval.fleet_machine_admission.review') {
           return fleetDecision(item);
         }

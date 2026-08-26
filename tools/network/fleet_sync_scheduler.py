@@ -62,6 +62,71 @@ _DONE_FIELDS = frozenset(
 _MUTATION_MAGIC = b"FST1"
 _DONE_MAGIC = b"FSD1"
 _HEADER_LIMIT = 4096
+_SETTINGS_HINT_LIMIT = 256
+
+
+@dataclass(frozen=True, slots=True)
+class MaterializedSettingsAddress:
+    """One payload-free Settings address durably received through sync."""
+
+    set_id: str
+    schema_revision: int
+    key: str
+
+
+_settings_materialization_hook: Callable[..., object] | None = None
+
+
+def set_settings_materialization_hook(hook: Callable[..., object] | None) -> None:
+    """Install the process-local, best-effort post-materialization observer.
+
+    The hook is a wake hint, never synchronization authority.  It receives at
+    most 256 payload-free Settings addresses and a ``gap`` flag after a delta
+    transaction commits or a checkpoint is published.  Hook failure can never
+    fail or roll back Fleet synchronization.
+    """
+    global _settings_materialization_hook
+    if hook is not None and not callable(hook):
+        raise TypeError("settings materialization hook must be callable")
+    _settings_materialization_hook = hook
+
+
+def _emit_settings_materialized(
+    items: Iterable[AuthoredMutation] = (), *, gap: bool = False,
+) -> None:
+    hook = _settings_materialization_hook
+    if hook is None:
+        return
+    addresses: set[MaterializedSettingsAddress] = set()
+    overflow = bool(gap)
+    try:
+        for item in items:
+            mutation = item.mutation
+            if mutation.table != "settings":
+                continue
+            address = mutation.address
+            if len(address) < 3:
+                overflow = True
+                continue
+            set_id, revision, key = address[:3]
+            if (
+                not isinstance(set_id, str)
+                or isinstance(revision, bool)
+                or not isinstance(revision, int)
+                or not isinstance(key, str)
+            ):
+                overflow = True
+                continue
+            addresses.add(MaterializedSettingsAddress(set_id, revision, key))
+            if len(addresses) > _SETTINGS_HINT_LIMIT:
+                addresses.clear()
+                overflow = True
+                break
+        hook(addresses=tuple(sorted(
+            addresses, key=lambda row: (row.set_id, row.schema_revision, row.key)
+        )), gap=overflow)
+    except Exception:
+        logger.warning("post-materialization Settings hint failed", exc_info=True)
 
 
 class FleetSyncProtocolError(ValueError):
@@ -666,6 +731,14 @@ class FleetSyncScheduler:
             async def apply_pending(items: list[AuthoredMutation]) -> None:
                 nonlocal peer_watermark, transactions
                 won, _ignored = await asyncio.to_thread(self.store.apply, items)
+                if won == len(items):
+                    _emit_settings_materialized(items)
+                elif won:
+                    # The catalog currently returns counts rather than the
+                    # winning subset.  Never mislabel a losing address as
+                    # changed: one coalesced gap asks consumers to re-resolve
+                    # their durable truth.
+                    _emit_settings_materialized(gap=True)
                 transactions += 1
                 peer_watermark = max(
                     item.mutation.timestamp_ns for item in items
@@ -906,6 +979,11 @@ class DashboardFleetSyncService:
                     self._scheduler = FleetSyncScheduler(config)
                     await self._scheduler.start()
             assert installed is not None and epoch is not None
+            # A checkpoint replaces the personal database as one published
+            # snapshot.  Enumerating every changed address would be both
+            # expensive and misleading, so receivers get one bounded gap hint
+            # and reconcile durable truth through their own Settings reader.
+            _emit_settings_materialized(gap=True)
             return installed
 
     async def _run(self) -> None:

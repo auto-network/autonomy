@@ -69,7 +69,7 @@ def _route_runtime():
             ),
             "request": {"operation": "join"},
         },
-        decision_validator=lambda _request, decision, _grant: dict(decision),
+        decision_validator=lambda _context, _request, decision, _grant: dict(decision),
         resolution_consumer_id="test.consumer",
     )
     registration = ApprovalKindRegistration(
@@ -499,10 +499,15 @@ class TestAttentionOperatorAPI:
         applications = tuple(production.index.registry.applications)
         assert len(applications) == 9
         assert sum(len(app.classes) for app in applications) == 12
-        assert all(not app.enabled for app in applications)
-        assert all(
-            not cls.publication_enabled for app in applications for cls in app.classes
-        )
+        assert [app.application_scope for app in applications if app.enabled] == [
+            "sessions"
+        ]
+        assert [
+            cls.kind
+            for app in applications
+            for cls in app.classes
+            if cls.publication_enabled
+        ] == ["dashboard_access"]
         store = InMemoryAttentionIndexStore()
         index = AttentionIndexService(
             registry=production.index.registry, store=store,
