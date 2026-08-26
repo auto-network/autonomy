@@ -717,6 +717,79 @@ def verify_catalog(*, org: str = "personal") -> dict:
     return {"ok": True, "live_rows": live_rows, "catalog_rows": catalog_rows}
 
 
+def repair_catalog(*, org: str = "personal", dry_run: bool = True) -> dict:
+    """Run the two known Fleet-sync catalog reconciliation passes, real code
+    (``MutationCatalog._repair_deprecated_settings_tombstones`` and
+    ``._bootstrap_existing_rows``), not a re-derivation of their logic.
+
+    Repairs the exact self-inconsistent case a retired base Setting can leave
+    behind (a non-tombstone catalog winner whose journal frame carries
+    ``deprecated=1`` -- see ``graph://da0ab997-b3e``), then bootstraps
+    deterministic winner metadata for any live row the catalog has never
+    recorded at all.
+
+    Dry-run by default (the CLI's ``--yes`` flips it): both passes run for
+    real inside one transaction -- their own progress bookkeeping needs real
+    writes to iterate correctly, so a dry run cannot skip writing and still
+    detect accurately -- and the transaction is rolled back instead of
+    committed. Byte-identical detection either way; only whether it lands
+    differs. A conflict either pass would raise on (a live row whose address
+    the catalog already marks tombstoned) aborts the whole transaction --
+    nothing partial is ever left in place.
+    """
+    import sqlite3
+    from tools.graph.db import _org_db_path
+    from tools.network.fleet_sync.catalog import MutationCatalog
+
+    _section("Catalog reconciliation" + (" (dry run)" if dry_run else ""))
+    path = _org_db_path(org)
+    if not path.exists():
+        _line(f"{org}.db", "does not exist", fail=True)
+        return {"ok": False}
+    conn = sqlite3.connect(str(path))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=30000")
+    try:
+        origin_incarnation = conn.execute(
+            "SELECT origin_incarnation FROM fleet_sync_state"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        _line("fleet_sync_state", "table does not exist -- sync not yet activated", fail=True)
+        return {"ok": False}
+    if origin_incarnation is None:
+        _line("fleet_sync_state", "no row -- sync not yet activated", fail=True)
+        return {"ok": False}
+    catalog = MutationCatalog(conn, origin_incarnation[0])
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        repaired = catalog._repair_deprecated_settings_tombstones()
+        bootstrapped = catalog._bootstrap_existing_rows()
+    except Exception as exc:
+        conn.rollback()
+        conn.close()
+        _line(
+            "reconciliation",
+            f"FAILED and rolled back: {exc!r} -- nothing written",
+            fail=True,
+        )
+        return {"ok": False, "error": repr(exc)}
+
+    verb = "would repair" if dry_run else "repaired"
+    _line(f"{verb} (retired base -> proper tombstone)", repaired)
+    verb = "would bootstrap" if dry_run else "bootstrapped"
+    _line(f"{verb} (untracked live row -> winner metadata)", bootstrapped)
+
+    if dry_run:
+        conn.rollback()
+        _line("dry run", "nothing written -- pass --yes to actually repair")
+    else:
+        conn.commit()
+        _line("committed", f"{repaired + bootstrapped} catalog row(s) changed")
+    conn.close()
+    return {"ok": True, "repaired": repaired, "bootstrapped": bootstrapped, "dry_run": dry_run}
+
+
 # ── recent errors ────────────────────────────────────────────────────────
 
 def check_recent_errors(report: dict, *, tail_lines: int = 4000) -> None:
@@ -1019,7 +1092,7 @@ def main() -> int:
         help="remove one named roster entry by the Settings id check_roster "
              "prints next to it (dry run unless --yes is also given)",
     )
-    parser.add_argument("--yes", action="store_true", help="actually delete with --clear-stale-invite/--kick-roster-entry (default is dry run)")
+    parser.add_argument("--yes", action="store_true", help="actually act with --clear-stale-invite/--kick-roster-entry/--repair-catalog (default is dry run)")
     parser.add_argument(
         "--ssh", metavar="DESTINATION",
         help="run this same diagnostic on a remote node instead of locally -- "
@@ -1039,6 +1112,12 @@ def main() -> int:
              "of the default report; run this when the canary in the default "
              "report raises a real question)",
     )
+    parser.add_argument(
+        "--repair-catalog", action="store_true",
+        help="run the two known Fleet-sync catalog reconciliation passes "
+             "(retired-base tombstone repair + untracked-live-row bootstrap) "
+             "(dry run unless --yes is also given)",
+    )
     args = parser.parse_args()
     _QUIET = args.json
 
@@ -1052,6 +1131,8 @@ def main() -> int:
             forwarded += ["--kick-roster-entry", args.kick_roster_entry]
         if args.verify_catalog:
             forwarded.append("--verify-catalog")
+        if args.repair_catalog:
+            forwarded.append("--repair-catalog")
         if args.yes:
             forwarded.append("--yes")
         return _run_remote(args.ssh, args.remote_cmd, forwarded)
@@ -1064,6 +1145,9 @@ def main() -> int:
         return 0
     if args.verify_catalog:
         verify_catalog()
+        return 0
+    if args.repair_catalog:
+        repair_catalog(dry_run=not args.yes)
         return 0
 
     report: dict = {}
