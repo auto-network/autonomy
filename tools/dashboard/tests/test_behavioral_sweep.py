@@ -15863,3 +15863,346 @@ class TestCreateOrgScreen:
         assert c["finish_onboarding_label"] == "Finish"
         assert c["finish_closes_create_org"] is True
         assert c["finish_does_not_reopen_onboarding"] is True
+# ── Central Attention production surface (auto-fkhq0.6) ─────────────
+
+CENTRAL_ATTENTION_DESKTOP_CHECKS = r"""(async () => {
+    const result = {};
+    const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+    const tick = async () => { await Alpine.nextTick(); await sleep(80); };
+    const root = document.querySelector('[data-testid="central-attention-root"]');
+    if (!root) return JSON.stringify({error: 'central attention root missing'});
+    const data = Alpine.$data(root);
+    if (data._events) { data._events.close(); data._events = null; }
+
+    const now = Math.floor(Date.now() / 1000);
+    const item = (id, scope, label, category, role, state, title, summary, version=1) => ({
+        attention_id: id,
+        application: {scope, label, icon_ref: 'attention.' + scope},
+        category,
+        participant_role: role,
+        attention_state: state,
+        title,
+        summary,
+        counterparty_ref: category === 'comms' ? 'person:opaque' : null,
+        occurred_at: now - 120,
+        source_version: version,
+        presentation: {seen_at: null, last_opened_at: null, snoozed_until: null},
+        open: {mode: 'registered_renderer', renderer_id:
+            scope === 'fleet' ? 'approval.fleet_machine_admission.review' :
+            'attention.application.review'},
+    });
+    const fixture = {
+        items: [
+            item('fleet-request', 'fleet', 'Fleet', 'approvals', 'recipient',
+                 'needs_attention', 'Fleet approval requested',
+                 'New machine wants to join · Compare the verification code before answering.'),
+            item('message-one', 'messages', 'Messages', 'comms', 'recipient',
+                 'needs_attention', 'Are you available to review the release notes?', ''),
+            item('photo-one', 'photos', 'Photos', 'apps', 'recipient',
+                 'needs_attention', 'Three photos were shared with you', 'Open Photos to view the album.'),
+            item('market-one', 'marketplace', 'Market', 'apps', 'recipient',
+                 'needs_attention', 'A buyer revised their offer', 'The updated offer is waiting.'),
+            item('worktree-one', 'worktrees', 'Worktrees', 'apps', 'recipient',
+                 'needs_attention', 'A worktree finished', 'Review the completed change.'),
+            item('outgoing-one', 'sessions', 'Sessions', 'approvals', 'sender',
+                 'waiting', 'Session access requested', 'Waiting for Sherry.'),
+            item('resolved-one', 'links', 'Links', 'apps', 'recipient',
+                 'resolved', 'Link publication approved', 'The link is available.', 2),
+        ],
+        counts: {
+            total_needs_attention: 5,
+            categories: {apps: 3, comms: 1, approvals: 1},
+            states: {needs_attention: 5, waiting: 1, resolved: 1},
+            applications: {
+                fleet: {needs_attention: 1, waiting: 0, resolved: 0},
+                messages: {needs_attention: 1, waiting: 0, resolved: 0},
+                photos: {needs_attention: 1, waiting: 0, resolved: 0},
+                marketplace: {needs_attention: 1, waiting: 0, resolved: 0},
+                worktrees: {needs_attention: 1, waiting: 0, resolved: 0},
+                sessions: {needs_attention: 0, waiting: 1, resolved: 0},
+                links: {needs_attention: 0, waiting: 0, resolved: 1},
+            },
+        },
+        next_cursor: null,
+        snapshot_version: 'sweep-1',
+    };
+    const calls = [];
+    const originalFetch = window.fetch;
+    window.fetch = async (input, options={}) => {
+        const url = new URL(typeof input === 'string' ? input : input.url, location.origin);
+        const method = (options.method || 'GET').toUpperCase();
+        const reply = (body, status=200) => new Response(JSON.stringify(body), {
+            status, headers: {'Content-Type': 'application/json', 'Cache-Control': 'no-store'},
+        });
+        if (url.pathname === '/api/attention/items' && method === 'GET') return reply(fixture);
+        if (url.pathname === '/api/attention/items/fleet-request' && method === 'GET') {
+            return reply({item: fixture.items[0], review: {
+                type: 'approval',
+                renderer_id: 'approval.fleet_machine_admission.review',
+                kind: 'fleet_machine_admission',
+                authority_requirement: 'personal_root',
+                safe_review: {
+                    detail: 'Compare the code with the joining machine.',
+                    verification_code: '3D71 82AF 940C 61BE 2A08 7FC5',
+                    request: {machine_id: 'machine-sweep'},
+                    channel_binding: 'binding-sweep',
+                    issued_at: now,
+                    personal_root_pub: 'ROOT-SWEEP',
+                },
+                requester: {kind: 'session', label: 'Joining machine'},
+                resolution: null,
+                actions: ['granted', 'declined'],
+            }});
+        }
+        if (url.pathname.endsWith('/opened') && method === 'POST') {
+            calls.push({kind: 'opened', path: url.pathname});
+            return reply({presentation: {seen_at: null, last_opened_at: now, snoozed_until: null}});
+        }
+        if (url.pathname.endsWith('/approval-decision') && method === 'POST') {
+            calls.push({kind: 'decision', body: JSON.parse(options.body || '{}')});
+            return reply({resolution: {outcome: JSON.parse(options.body).outcome, resolved_at: now}});
+        }
+        if (url.pathname === '/api/web-push/config') {
+            return reply({applications: [], preferences: {fleet: 'generic'}});
+        }
+        if (url.pathname.startsWith('/api/web-push/preferences/')) {
+            const body = JSON.parse(options.body || '{}');
+            calls.push({kind: 'preference', mode: body.mode});
+            return reply({mode: body.mode});
+        }
+        return originalFetch(input, options);
+    };
+
+    const errors = [];
+    const onError = event => errors.push(event.message || 'window error');
+    window.addEventListener('error', onError);
+    try {
+        await data.refresh();
+        await tick();
+        const header = document.querySelector('[data-app-chrome]');
+        const ordered = Array.from(header.children)
+            .filter(el => getComputedStyle(el).display !== 'none')
+            .sort((a, b) => Number(getComputedStyle(a).order) - Number(getComputedStyle(b).order));
+        result.header_attention_after_search = ordered.indexOf(root) >
+            ordered.findIndex(el => el.id === 'global-search');
+        result.badge_text = document.querySelector('[data-testid="central-attention-badge"]')?.textContent.trim();
+        result.count_math = data.badgeCount === 5 &&
+            ['apps','comms','approvals'].reduce((sum, key) => sum + data.categoryCount(key), 0) === 5;
+
+        document.querySelector('[data-testid="central-attention-button"]').click();
+        await tick();
+        result.tray_visible = document.querySelector('[data-testid="central-attention-tray"]')?.offsetParent !== null;
+        result.tray_does_not_force_full = data.inboxOpen && !data.fullInbox;
+
+        data.fullInbox = true;
+        data.inboxOpen = false;
+        await tick();
+        const desktop = document.querySelector('[data-testid="central-attention-desktop"]');
+        result.desktop_center_visible = desktop?.offsetParent !== null;
+        const apps = desktop.querySelector('[data-testid="central-attention-desktop-category-apps"]');
+        apps.click(); await tick();
+        const selectedOnce = data.categoryFilter;
+        apps.click(); await tick();
+        result.category_deselects = selectedOnce === 'apps' && data.categoryFilter === 'all';
+
+        const comms = desktop.querySelector('[data-testid="central-attention-desktop-category-comms"]');
+        comms.click(); await tick();
+        const messageTile = desktop.querySelector('[data-testid="central-attention-desktop-item-message-one"]');
+        const messageText = messageTile?.textContent || '';
+        result.message_tile_person_icon = !!messageTile?.querySelector('svg');
+        result.message_tile_context = messageText.includes('Messages');
+        result.message_tile_is_message_first = messageText.includes('Are you available to review the release notes?');
+        result.message_tile_has_no_delivered = !messageText.toLowerCase().includes('delivered');
+
+        comms.click(); await tick();
+        desktop.querySelector('[data-testid="central-attention-desktop-category-approvals"]').click();
+        await tick();
+        desktop.querySelector('[data-testid="central-attention-desktop-item-fleet-request"]').click();
+        await sleep(120); await tick();
+        result.fleet_detail_open = !!document.querySelector('[data-testid="attention-item-sheet"]');
+        result.fleet_code_visible = document.body.textContent.includes('3D71 82AF 940C 61BE 2A08 7FC5');
+        const grant = document.querySelector('[data-testid="central-attention-grant"]');
+        result.fleet_grant_disabled_empty = !!grant?.disabled;
+        data.selectedItem.machine_name = 'SJC dashboard';
+        await tick();
+        result.fleet_grant_enabled_named = !document.querySelector('[data-testid="central-attention-grant"]')?.disabled;
+
+        const decisionsBeforeClose = calls.filter(call => call.kind === 'decision').length;
+        data.escape(); await tick();
+        result.escape_is_inert = !data.selectedItem &&
+            calls.filter(call => call.kind === 'decision').length === decisionsBeforeClose;
+
+        await data.openItem(data.items.find(candidate => candidate.id === 'fleet-request'));
+        await tick();
+        document.querySelector('[data-testid="central-attention-decline"]').click();
+        await tick();
+        result.decline_requires_confirmation = !!document.querySelector('[role="alertdialog"]') &&
+            calls.filter(call => call.kind === 'decision').length === decisionsBeforeClose;
+        document.querySelector('[data-testid="central-attention-keep-requested"]').click();
+        await tick();
+        result.keep_requested_is_inert = !!data.selectedItem &&
+            calls.filter(call => call.kind === 'decision').length === decisionsBeforeClose;
+        document.querySelector('[data-testid="central-attention-decline"]').click();
+        await tick();
+        document.querySelector('[data-testid="central-attention-confirm-decline"]').click();
+        await sleep(120); await tick();
+        const decisions = calls.filter(call => call.kind === 'decision');
+        result.explicit_decline_only = decisions.length === 1 &&
+            decisions[0].body.outcome === 'declined';
+
+        data.closeInbox();
+        fixture.items.unshift(item('new-app', 'photos', 'Photos', 'apps', 'recipient',
+            'needs_attention', 'A new album arrived', 'Open Photos.'));
+        fixture.counts.total_needs_attention = 6;
+        fixture.counts.categories.apps = 4;
+        fixture.counts.states.needs_attention = 6;
+        fixture.counts.applications.photos.needs_attention = 2;
+        data.scheduleRefresh();
+        await sleep(220); await tick();
+        result.background_refetch_updates_badge = data.badgeCount === 6;
+        result.background_refetch_does_not_open = !data.inboxOpen && !data.fullInbox && !data.selectedItem;
+
+        data.badgeCount = 100; await tick();
+        result.badge_caps_at_99 = document.querySelector('[data-testid="central-attention-badge"]')?.textContent.trim() === '99+';
+        data.badgeCount = 6;
+        data.settingsOpen = true; await tick();
+        const settings = document.querySelector('[data-testid="central-attention-settings"]');
+        result.settings_is_production_copy = settings?.textContent.includes('How applications can reach you') &&
+            settings.textContent.includes('On this phone');
+        result.settings_has_phone_modes = Array.from(settings?.querySelectorAll('option') || [])
+            .some(option => option.textContent.includes('Generic alert'));
+        result.no_console_errors = errors.length === 0;
+        return JSON.stringify(result);
+    } catch (error) {
+        return JSON.stringify({error: error.message, stack: error.stack, partial: result});
+    } finally {
+        window.removeEventListener('error', onError);
+        window.fetch = originalFetch;
+    }
+})()"""
+
+
+CENTRAL_ATTENTION_MOBILE_CHECKS = r"""(async () => {
+    const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+    const root = document.querySelector('[data-testid="central-attention-root"]');
+    const data = root ? Alpine.$data(root) : null;
+    if (!data) return JSON.stringify({error: 'central attention root missing'});
+    data.settingsOpen = false;
+    data.selectedItem = null;
+    data.fullInbox = false;
+    data.inboxOpen = false;
+    data.categoryFilter = 'all';
+    data.inboxOpen = true;
+    await Alpine.nextTick(); await sleep(100);
+    const mobile = document.querySelector('[data-testid="central-attention-mobile"]');
+    const nav = document.getElementById('nav-toggle');
+    const search = document.getElementById('global-search');
+    const header = document.querySelector('[data-app-chrome]');
+    const ordered = Array.from(header.children)
+        .filter(el => getComputedStyle(el).display !== 'none')
+        .sort((a, b) => Number(getComputedStyle(a).order) - Number(getComputedStyle(b).order));
+    const apps = mobile.querySelector('[data-testid="central-attention-mobile-category-apps"]');
+    apps.click(); await Alpine.nextTick();
+    const first = data.categoryFilter;
+    apps.click(); await Alpine.nextTick();
+    const rect = mobile.getBoundingClientRect();
+    const navRect = nav.getBoundingClientRect();
+    const attentionRect = root.querySelector(
+        '[data-testid="central-attention-button"]'
+    ).getBoundingClientRect();
+    const axisDelta = Math.abs(
+        (navRect.top + navRect.height / 2) -
+        (attentionRect.top + attentionRect.height / 2)
+    );
+    return JSON.stringify({
+        viewport_width: window.innerWidth,
+        mobile_center_visible: getComputedStyle(mobile).display !== 'none' &&
+            mobile.getClientRects().length > 0,
+        header_order_menu_inbox_search:
+            ordered.indexOf(nav) < ordered.indexOf(root) && ordered.indexOf(root) < ordered.indexOf(search),
+        category_deselects: first === 'apps' && data.categoryFilter === 'all',
+        no_horizontal_overflow: document.documentElement.scrollWidth <= window.innerWidth + 1 &&
+            rect.left >= -1 && rect.right <= window.innerWidth + 1,
+        axis_delta: axisDelta,
+        nav_rect: {top: navRect.top, width: navRect.width, height: navRect.height},
+        attention_rect: {
+            top: attentionRect.top, width: attentionRect.width, height: attentionRect.height,
+        },
+        button_on_same_axis: axisDelta <= 1,
+        button_matches_nav_size: Math.abs(navRect.height - attentionRect.height) <= 1 &&
+            Math.abs(navRect.width - attentionRect.width) <= 1,
+    });
+})()"""
+
+
+class TestCentralAttentionSurface:
+    """Approved Central Attention design wired to production API-shaped state."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    @classmethod
+    def checks(cls, browser, request):
+        subprocess.run(
+            ["agent-browser", "set", "viewport", "1280", "900"],
+            capture_output=True, check=True, timeout=10,
+        )
+        request.cls.desktop = _navigate_and_eval_async(
+            "/sessions", CENTRAL_ATTENTION_DESKTOP_CHECKS, wait_ms=1000,
+        )
+        try:
+            subprocess.run(
+                ["agent-browser", "set", "viewport", "390", "844"],
+                capture_output=True, check=True, timeout=10,
+            )
+            request.cls.mobile = _run_async_eval(CENTRAL_ATTENTION_MOBILE_CHECKS)
+        finally:
+            subprocess.run(
+                ["agent-browser", "set", "viewport", "1280", "900"],
+                capture_output=True, timeout=10,
+            )
+
+    def test_desktop_production_surface(self):
+        c = self.desktop
+        assert not c.get("error"), c
+        assert c.get("header_attention_after_search"), c
+        assert c.get("tray_visible") and c.get("tray_does_not_force_full"), c
+        assert c.get("desktop_center_visible"), c
+        assert c.get("settings_is_production_copy") and c.get("settings_has_phone_modes"), c
+
+    def test_honest_counts_filters_and_messages(self):
+        c = self.desktop
+        assert c.get("badge_text") == "5", c
+        assert c.get("count_math") and c.get("category_deselects"), c
+        assert c.get("message_tile_person_icon") and c.get("message_tile_context"), c
+        assert c.get("message_tile_is_message_first") and c.get("message_tile_has_no_delivered"), c
+        assert c.get("badge_caps_at_99"), c
+
+    def test_fleet_review_and_explicit_decision(self):
+        c = self.desktop
+        assert c.get("fleet_detail_open") and c.get("fleet_code_visible"), c
+        assert c.get("fleet_grant_disabled_empty") and c.get("fleet_grant_enabled_named"), c
+        assert c.get("escape_is_inert") and c.get("decline_requires_confirmation"), c
+        assert c.get("keep_requested_is_inert") and c.get("explicit_decline_only"), c
+
+    def test_background_invalidation_never_force_opens(self):
+        c = self.desktop
+        assert c.get("background_refetch_updates_badge"), c
+        assert c.get("background_refetch_does_not_open"), c
+        assert c.get("no_console_errors"), c
+
+    def test_mobile_production_surface(self):
+        c = self.mobile
+        assert not c.get("error"), c
+        assert c.get("viewport_width") == 390, c
+        assert c.get("mobile_center_visible"), c
+        assert c.get("header_order_menu_inbox_search"), c
+        assert c.get("button_on_same_axis"), {
+            "axis_delta": c.get("axis_delta"),
+            "nav_rect": c.get("nav_rect"),
+            "attention_rect": c.get("attention_rect"),
+        }
+        assert c.get("button_matches_nav_size"), {
+            "nav_rect": c.get("nav_rect"),
+            "attention_rect": c.get("attention_rect"),
+        }
+        assert c.get("category_deselects"), c
+        assert c.get("no_horizontal_overflow"), c

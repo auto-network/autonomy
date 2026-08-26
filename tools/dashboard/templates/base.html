@@ -1990,28 +1990,29 @@
   <div class="flex-1 flex flex-col overflow-hidden">
     <!-- Header -->
     <header data-app-chrome class="bg-gray-800 border-b border-gray-700 px-4 md:px-6 py-3 flex items-center gap-3 md:gap-4">
-      <button id="nav-toggle" class="md:hidden relative z-50 bg-gray-800 p-2 rounded-lg border border-gray-700 flex-shrink-0"
+      <button id="nav-toggle" class="order-1 md:hidden relative z-50 bg-gray-800 p-2 rounded-lg border border-gray-700 flex-shrink-0"
               onclick="document.getElementById('sidebar').classList.toggle('-translate-x-full')">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
         </svg>
       </button>
+      {% include 'partials/central-attention.html' %}
       <button type="button" id="global-search-icon"
-              class="hidden bg-gray-800 p-2 rounded-lg border border-gray-700 flex-shrink-0 text-gray-300 hover:text-white hover:border-gray-500"
+              class="order-3 md:order-2 hidden bg-gray-800 p-2 rounded-lg border border-gray-700 flex-shrink-0 text-gray-300 hover:text-white hover:border-gray-500"
               aria-label="Search" title="Search">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m21 21-4.35-4.35M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15Z"/>
         </svg>
       </button>
       <input type="text" id="global-search" placeholder="Search..."
-             class="bg-gray-700 text-gray-100 px-3 md:px-4 py-2 rounded-lg flex-1 max-w-xl text-sm
+             class="order-3 md:order-2 min-w-0 bg-gray-700 text-gray-100 px-3 md:px-4 py-2 rounded-lg flex-1 max-w-xl text-sm
                     focus:outline-none focus:ring-2 focus:ring-indigo-500">
-      <div id="app-topbar-slot" class="hidden items-center gap-2"></div>
-      <span class="text-sm text-gray-400 hidden md:inline" id="page-title"></span>
+      <div id="app-topbar-slot" class="order-4 hidden items-center gap-2"></div>
+      <span class="order-4 text-sm text-gray-400 hidden md:inline" id="page-title"></span>
       {# Persistent slot for the agentic-actions dropdown — never cleared by the SPA
          router. Sibling of #header-actions, which IS cleared per page nav for
          page-specific buttons (e.g. design Capture). #}
-      <div id="agent-actions-slot" class="flex items-center gap-2 ml-auto">
+      <div id="agent-actions-slot" class="order-4 flex items-center gap-2 ml-auto">
 
         <!-- Agentic actions dropdown (auto-pqgrl) -->
         <div class="agent-actions-root" x-data="agentActionsComponent()" x-init="init()" @keydown.escape.window="closePanel(); closeSendToModal(); closeInputModal()">
@@ -2148,7 +2149,7 @@
         </div>
 
       </div>
-      <div id="header-actions" class="flex items-center gap-2"></div>
+      <div id="header-actions" class="order-4 flex items-center gap-2"></div>
     </header>
 
     <!-- SSE interruption banner — shown on server restart or unrecoverable gap -->
@@ -2522,6 +2523,7 @@
   <script src="/static/js/lib/session-renderer.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/lib/session-stats.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/components/dispatch-cards.js?v=__STATIC_VERSION__"></script>
+  <script src="/static/js/components/central-attention.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/lib/screenshot.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/lib/toolbar-state.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/lib/terminal-mount.js?v=__STATIC_VERSION__"></script>
