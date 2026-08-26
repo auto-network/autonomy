@@ -8424,6 +8424,8 @@ def _run_session_stop(job: LifecycleJob, writer: SessionLifecycleStateWriter) ->
     idempotent; step errors degrade to warnings and the session still
     reaches ``dead`` (a half-stopped session must not stay ``running``).
     """
+    from tools.dashboard import vault_release_sweeper
+
     tmux_name = job.tmux_name
     loop = job.config.get("event_loop")
     if loop is not None and not isinstance(loop, asyncio.AbstractEventLoop):
@@ -8442,6 +8444,18 @@ def _run_session_stop(job: LifecycleJob, writer: SessionLifecycleStateWriter) ->
     for name, timeout, func in (
         ("remove_watchers", _LIFECYCLE_REMOVE_WATCHERS_TIMEOUT_S,
          lambda: _teardown_remove_watches(tmux_name)),
+        # The launcher's timely vault teardown (auto-pw9bs.5): shred this
+        # session's outstanding releases and reclaim its delivery dir the
+        # moment the container/tmux is gone, instead of leaving 100% of
+        # reclaim to the 30s periodic sweep. Running it as a stop step also
+        # sequences it strictly BEFORE a restart's re-provision (restart =
+        # this stop, then start, on one worker), closing the window where a
+        # sweep tick reclaimed a directory the relaunch had just
+        # re-provisioned and the launch preflight then refused. The periodic
+        # sweep stays as the crash backstop; both paths are idempotent and
+        # first-reason-wins, so racing is inert.
+        ("vault_release_teardown", _LIFECYCLE_REMOVE_WATCHERS_TIMEOUT_S,
+         lambda: vault_release_sweeper.on_session_end(tmux_name)),
         ("deregister", _LIFECYCLE_DEREGISTER_TIMEOUT_S,
          lambda: _teardown_deregister(tmux_name, loop)),
     ):

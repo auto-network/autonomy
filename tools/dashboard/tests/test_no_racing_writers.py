@@ -42,14 +42,24 @@ _WRITE_RE = re.compile(
 
 
 def _sql_writes_lifecycle_columns(text: str) -> list[str]:
-    """Return SQL-ish lines that UPDATE a guarded lifecycle column."""
+    """Return SQL-ish lines that UPDATE a guarded lifecycle column.
+
+    A line that names the table it updates is guarded only when that table
+    is ``tmux_sessions`` — other stores legitimately own an unrelated
+    ``state`` column (e.g. the web-push outbox/delivery queues). A SET on
+    a continuation line with no table in sight stays guarded: better a
+    loud false positive here than a silent second lifecycle writer."""
     hits = []
     for line in text.splitlines():
         stripped = line.strip()
         if stripped.startswith("#") or stripped.startswith("--"):
             continue
-        if _WRITE_RE.search(line):
-            hits.append(stripped)
+        if not _WRITE_RE.search(line):
+            continue
+        table = re.search(r"(?i)\bupdate\s+([a-z_][a-z0-9_]*)", line)
+        if table and table.group(1).lower() != "tmux_sessions":
+            continue
+        hits.append(stripped)
     return hits
 
 
