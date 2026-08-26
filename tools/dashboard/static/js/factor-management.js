@@ -78,6 +78,16 @@ const STYLE = `
 .rn-in:focus{outline:none}
 .rn-ok,.rn-x{display:inline-flex;align-items:center;justify-content:center;width:19px;height:19px;padding:0;background:none;border:none;cursor:pointer}
 .rn-ok svg,.rn-x svg{width:14px;height:14px}.rn-ok{color:#34d399}.rn-x{color:#f87171}
+.vfy{color:#34d399;cursor:pointer;font-size:12px}.vfy:hover{text-decoration:underline}
+.vfy-morph{display:flex;flex-direction:column;gap:6px;flex:1}
+.vfy-ttl{font-weight:600;color:#e5e7eb}
+.vfy-row{display:flex;align-items:center;gap:7px}
+.vfy-in{flex:1;min-width:0;background:#0b111b;border:1px solid #2b3240;border-radius:7px;color:#e5e7eb;font:inherit;padding:6px 9px}
+.vfy-in:focus{outline:none;border-color:#4f46e5}
+.vfy-go{padding:6px 13px}
+.vfy-cancel{color:#8b93a7;background:none;border:none;cursor:pointer;font:inherit}
+.vfy-ok{display:flex;align-items:center;gap:7px;color:#34d399;font-weight:600}.vfy-ok svg{width:18px;height:18px}
+.vfy-fail{display:flex;align-items:center;gap:5px;color:#f87171;font-size:12px}.vfy-fail svg{width:13px;height:13px}
 
 .tray{position:relative;display:flex;justify-content:center;gap:7px;margin:16px 0 15px}
 .fl{width:31px;height:31px;border-radius:8px;background:#161b26;border:1px solid #232a39;
@@ -380,6 +390,42 @@ async function saveName(factorId) {
     });
   } catch (e) { /* best-effort; server truth reappears on next load */ }
 }
+
+// ── inline verify (approved design): the card morphs to a password field; the
+// password is checked CLIENT-SIDE by opening the armor with it (read-only, no
+// server call, no write). Green check on success (auto-reverts), red X to retry.
+function verifyBlock() {
+  if (S.vfyResult === 'ok') return '<div class="vfy-ok">' + IC_OK + '<span>Verified</span></div>';
+  return '<div class="vfy-morph"><div class="vfy-ttl">Verify your password</div>'
+    + '<div class="vfy-row"><input class="vfy-in" type="password" autocomplete="current-password" placeholder="Password">'
+    + '<button class="btn vfy-go">Verify</button><button class="vfy-cancel">Cancel</button></div>'
+    + (S.vfyResult === 'fail' ? '<div class="vfy-fail">' + IC_XX + '<span>Incorrect — try again</span></div>' : '')
+    + '</div>';
+}
+async function doVerify() {
+  const pw = S.vfyVal || '';
+  if (!pw) return;
+  const target = S.verifying;
+  try {
+    await primitives.decryptArmor(armorText, pw);   // opens => the password is correct
+    S.vfyResult = 'ok'; render();
+    setTimeout(() => {
+      if (S.verifying === target) { S.verifying = null; S.vfyResult = null; S.vfyVal = ''; render(); }
+    }, 1500);
+  } catch (e) { S.vfyResult = 'fail'; render(); }
+}
+function wireVerify(row) {
+  const inp = row.querySelector('.vfy-in');
+  if (inp) {
+    inp.value = S.vfyVal || '';
+    inp.oninput = () => { S.vfyVal = inp.value; };
+    inp.onkeydown = (e) => { e.stopPropagation(); if (e.key === 'Enter') doVerify(); else if (e.key === 'Escape') { S.verifying = null; S.vfyResult = null; render(); } };
+    inp.onclick = (e) => e.stopPropagation();
+    setTimeout(() => inp.focus(), 0);
+  }
+  const go = row.querySelector('.vfy-go'); if (go) go.onclick = (e) => { e.stopPropagation(); doVerify(); };
+  const cx = row.querySelector('.vfy-cancel'); if (cx) cx.onclick = (e) => { e.stopPropagation(); S.verifying = null; S.vfyResult = null; S.vfyVal = ''; render(); };
+}
 function actionOn(k) {
   if (k === 'both') {
     if (M.mfa) return hasAlternative() ? 'change' : null;
@@ -484,7 +530,7 @@ async function loadModel() {
       });
     }
   } catch (e) { /* factor-policy is optional for display; armor model already rendered */ }
-  if (!S) S = { screen: 'keys', method: null, act: null, need: [], si: 0, after: null, sheet: null, pick: null, primed: 0, renaming: null, renameVal: '' };
+  if (!S) S = { screen: 'keys', method: null, act: null, need: [], si: 0, after: null, sheet: null, pick: null, primed: 0, renaming: null, renameVal: '', verifying: null, vfyVal: '', vfyResult: null };
 }
 
 // ── real ceremony layer (replaces the mock commit()) ─────────────────────
@@ -938,18 +984,28 @@ function keysScreen() {
     const cell = auCell(M.pw.rootRole, M.pw.access, lv, false, canTap ? ' data-p="1"' : '', false);
     const pwLabel = M.pw.label || 'Password';
     const pwRenaming = !!M.pw.factorId && S.renaming === M.pw.factorId;
-    const pr = el('div', 'krow', cell + '<div class="kmid"><div class="knm">'
-      + nameHtml(M.pw.factorId, pwLabel, weak ? '<span class="weak">below current strength</span>' : '')
-      + '</div><div class="kmeta">' + M.pw.kdf + ' &middot; ' + M.pw.itersLabel
-      + (M.pw.createdLabel ? ' &middot; ' + M.pw.createdLabel : '') + '</div></div>'
-      + (pwRenaming ? '' : '<div class="chg">Change</div><div class="kx">&times;</div>'));
-    const pb = pr.querySelector('[data-p]');
-    if (pb) pb.onclick = (e) => { e.stopPropagation(); gatherThen('authorize', rootNeed()); };
-    const pchg = pr.querySelector('.chg');
-    if (pchg) pchg.onclick = (e) => { e.stopPropagation(); S.pwMode = 'changepw'; gatherThen('setpw', rootNeed()); };
-    const pkx = pr.querySelector('.kx');
-    if (pkx) pkx.onclick = (e) => { e.stopPropagation(); gatherThen('removepw', rootNeed()); };
-    wireName(pr, M.pw.factorId, pwLabel);
+    const pwVerifying = S.verifying === 'pw';
+    let pr;
+    if (pwVerifying) {
+      pr = el('div', 'krow', cell + '<div class="kmid">' + verifyBlock() + '</div>');
+      wireVerify(pr);
+    } else {
+      const actions = pwRenaming ? ''
+        : '<div class="chg">Change</div>' + (M.mfa ? '' : '<div class="vfy">Verify</div>') + '<div class="kx">&times;</div>';
+      pr = el('div', 'krow', cell + '<div class="kmid"><div class="knm">'
+        + nameHtml(M.pw.factorId, pwLabel, weak ? '<span class="weak">below current strength</span>' : '')
+        + '</div><div class="kmeta">' + M.pw.kdf + ' &middot; ' + M.pw.itersLabel
+        + (M.pw.createdLabel ? ' &middot; ' + M.pw.createdLabel : '') + '</div></div>' + actions);
+      const pb = pr.querySelector('[data-p]');
+      if (pb) pb.onclick = (e) => { e.stopPropagation(); gatherThen('authorize', rootNeed()); };
+      const pchg = pr.querySelector('.chg');
+      if (pchg) pchg.onclick = (e) => { e.stopPropagation(); S.pwMode = 'changepw'; gatherThen('setpw', rootNeed()); };
+      const pvfy = pr.querySelector('.vfy');
+      if (pvfy) pvfy.onclick = (e) => { e.stopPropagation(); S.verifying = 'pw'; S.vfyVal = ''; S.vfyResult = null; render(); };
+      const pkx = pr.querySelector('.kx');
+      if (pkx) pkx.onclick = (e) => { e.stopPropagation(); gatherThen('removepw', rootNeed()); };
+      wireName(pr, M.pw.factorId, pwLabel);
+    }
     p.appendChild(pr);
   }
 
