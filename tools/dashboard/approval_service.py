@@ -23,6 +23,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 from tools.dashboard import api_auth
 from tools.dashboard.approval_kind_registry import (
+    ApprovalDecisionContext,
     ApprovalExpiryPolicy,
     ApprovalKindRegistration,
     ApprovalKindRegistry,
@@ -769,7 +770,13 @@ class ApprovalService:
             assert registration.runtime is not None
             try:
                 validated = registration.runtime.decision_validator(
-                    request.payload, dict(decision), outcome == "granted",
+                    ApprovalDecisionContext(
+                        approval_id=approval_id,
+                        decision_time=decision_time,
+                    ),
+                    request.payload,
+                    dict(decision),
+                    outcome == "granted",
                 )
             except Exception as exc:
                 raise ApprovalServiceError("invalid_decision") from exc

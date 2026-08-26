@@ -175,6 +175,19 @@ class ApprovalPlanningContext:
 
 
 @dataclass(frozen=True, slots=True)
+class ApprovalDecisionContext:
+    """Service-owned facts for validating one proposed human decision.
+
+    ``decision_time`` is the exact instant already used by ApprovalService for
+    expiry reconciliation and, if accepted, the resolution's ``resolved_at``.
+    A kind validator must never sample a second clock for deadline authority.
+    """
+
+    approval_id: str
+    decision_time: float
+
+
+@dataclass(frozen=True, slots=True)
 class ApprovalRequestPlan:
     subject_ref: str
     safe_review: Mapping[str, Any]
@@ -188,7 +201,10 @@ RequestPlanner = Callable[
     [ApprovalPlanningContext, Mapping[str, Any]],
     ApprovalRequestPlan | Mapping[str, Any],
 ]
-DecisionValidator = Callable[[Mapping[str, Any], Mapping[str, Any], bool], Mapping[str, Any]]
+DecisionValidator = Callable[
+    [ApprovalDecisionContext, Mapping[str, Any], Mapping[str, Any], bool],
+    Mapping[str, Any],
+]
 ResultRefBuilder = Callable[[str, Mapping[str, Any], Mapping[str, Any]], str]
 
 
@@ -338,7 +354,25 @@ _PRODUCTION_ROWS = (
 )
 
 
-def build_production_registry() -> ApprovalKindRegistry:
+def build_production_registry(
+    *, runtimes: Mapping[str, ApprovalKindRuntime] | None = None,
+) -> ApprovalKindRegistry:
+    """Build the exact production catalog with a bounded runtime delta.
+
+    Registration metadata is code-owned and immutable.  Migrations may only
+    activate a complete runtime for one of the twelve canonical kinds; they
+    cannot add, remove, or relabel a kind through dependency injection.
+    """
+    supplied = {} if runtimes is None else dict(runtimes)
+    expected = {row[0] for row in _PRODUCTION_ROWS}
+    unknown = set(supplied) - expected
+    if unknown or any(
+        not isinstance(runtime, ApprovalKindRuntime)
+        for runtime in supplied.values()
+    ):
+        raise ValueError(
+            f"unknown or incomplete production approval runtime(s): {sorted(unknown)!r}"
+        )
     registrations: list[ApprovalKindRegistration] = []
     classes: list[ApprovalAttentionClass] = []
     for kind, application, requester, authority, expiry in _PRODUCTION_ROWS:
@@ -360,14 +394,16 @@ def build_production_registry() -> ApprovalKindRegistry:
             decider_policy=DeciderPolicy.PERSONAL_OPERATOR,
             authority_requirement=authority,
             request_expiry_policy=expiry,
-            runtime=None,
+            runtime=supplied.get(kind),
         ))
         for app in scope.applications:
             classes.append(ApprovalAttentionClass(app, notification_class, renderer_id))
     return ApprovalKindRegistry(
         registrations,
         ApprovalAttentionClassCatalog(classes),
-        consumer_ids=(),
+        consumer_ids={
+            runtime.resolution_consumer_id for runtime in supplied.values()
+        },
     )
 
 

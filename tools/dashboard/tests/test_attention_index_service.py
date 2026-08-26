@@ -118,7 +118,7 @@ def _approval_registry_with_runtime(*enabled_kinds):
             consumer_ids.add(consumer_id)
             registration = replace(registration, runtime=ApprovalKindRuntime(
                 request_planner=lambda _context, _body: {},
-                decision_validator=lambda _request, _decision, _approved: {},
+                decision_validator=lambda _context, _request, _decision, _approved: {},
                 resolution_consumer_id=consumer_id,
             ))
         registrations.append(registration)

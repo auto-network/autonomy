@@ -386,12 +386,12 @@ def test_signed_cookie_without_server_row_is_rejected(env):
     assert unlock_routes.verify_session_token(f"{body}.{sig}") is None
 
 
-def test_session_token_rejects_foreign_secret(env, tmp_path):
+def test_session_token_rejects_foreign_secret(env):
     token = unlock_routes.mint_session_token("passkey")
     # Rotate to a different secret: previously minted tokens die with it.
     unlock_routes._secret_cache.update(
         {"path": None, "value": None})
-    (tmp_path / "session.secret").unlink()
+    unlock_routes._secret_path().unlink()
     assert unlock_routes.verify_session_token(token) is None
 
 
@@ -764,9 +764,18 @@ def test_identity_creation_survives_unwritable_session_secret(env, root, monkeyp
 def test_session_secret_survives_concurrent_creation(env, tmp_path, monkeypatch):
     """Two workers racing to create the secret must converge on one value
     (O_EXCL winner), not cache divergent per-worker secrets."""
-    monkeypatch.setenv("DASHBOARD_SESSION_SECRET_FILE", str(tmp_path / "race.secret"))
+    identity_db = tmp_path / "realm" / "identity.db"
+    monkeypatch.setenv("DASHBOARD_IDENTITY_SESSION_DB", str(identity_db))
+    monkeypatch.setenv(
+        "DASHBOARD_SESSION_SECRET_FILE",
+        str(tmp_path / "ignored-independent-secret"),
+    )
     unlock_routes._secret_cache.update({"path": None, "value": None})
     first = unlock_routes._session_secret()
+    assert unlock_routes._secret_path() == identity_db.with_name(
+        "dashboard-session.secret"
+    )
+    assert not (tmp_path / "ignored-independent-secret").exists()
     # Simulate a second worker with a cold cache reading the same file.
     unlock_routes._secret_cache.update({"path": None, "value": None})
     second = unlock_routes._session_secret()

@@ -98,7 +98,7 @@ def _build(
             "safe_review": {"summary": "Review test"},
             "request": dict(body),
         },
-        decision_validator=lambda _request, decision, _grant: dict(decision),
+        decision_validator=lambda _context, _request, decision, _grant: dict(decision),
         resolution_consumer_id="test.consumer",
     ) if approval_active else None
     registration = ApprovalKindRegistration(
@@ -247,17 +247,17 @@ PRODUCTION_KIND_INVENTORY = {
 }
 
 
-def test_production_composition_shares_one_service_and_activates_no_http_kind():
+def test_production_composition_shares_one_service_and_activates_dashboard_access():
     runtime = attention_routes.approval_runtime()
     assert runtime.approval_http is not None
     assert runtime.approval_http.approvals is runtime.approvals
     assert runtime.approval_http.registry.approvals is runtime.approvals.registry
     assert runtime.approval_http.registry.attention is runtime.index.registry
-    assert runtime.approval_http.registry.adapters == {}
+    assert set(runtime.approval_http.registry.adapters) == {"dashboard_access"}
     assert set(PRODUCTION_KIND_INVENTORY) == set(PRODUCTION_APPROVAL_REGISTRY.kinds)
     for kind, registration in PRODUCTION_APPROVAL_REGISTRY.kinds.items():
-        assert not runtime.approval_http.claims_kind(kind)
-        assert not runtime.approval_http.migrated_kind(kind)
+        assert runtime.approval_http.claims_kind(kind) is (kind == "dashboard_access")
+        assert runtime.approval_http.migrated_kind(kind) is (kind == "dashboard_access")
         assert registration.runtime is None
 
 

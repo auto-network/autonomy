@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 import time
 
@@ -65,13 +66,14 @@ def grant_env(tmp_path, monkeypatch):
 
 def _queue(client: TestClient, ephemeral: KeyPair,
            session: str = "host-0715-122549") -> tuple[str, dict]:
-    response = client.post("/api/approvals", json={
-        "kind": "dashboard_access",
-        "session": session,
-        "request": {"ephemeral_pub": ephemeral.public_hex},
-    })
-    assert response.status_code == 200, response.text
-    rid = response.json()["id"]
+    # Existing pre-migration IDs remain readable/decidable/redeemable through
+    # the legacy store, but production POST creation is now claimed by the
+    # Settings-backed Central bridge and intentionally rejects ``session``.
+    rid = asyncio.run(approvals_routes.open_approval(
+        kind="dashboard_access",
+        session=session,
+        request_payload={"ephemeral_pub": ephemeral.public_hex},
+    ))
     rendered = client.get(f"/api/approvals/{rid}")
     assert rendered.status_code == 200, rendered.text
     return rid, rendered.json()["staged"]
@@ -310,12 +312,7 @@ def test_concurrent_redeem_creates_exactly_one_session(grant_env):
 def test_hostile_org_header_cannot_select_approval_verification_root(grant_env):
     client, personal = grant_env
     ephemeral = KeyPair.generate()
-    response = client.post("/api/approvals", headers={"X-Graph-Org": "evil"},
-                           json={
-        "kind": "dashboard_access", "session": "host-1",
-        "request": {"ephemeral_pub": ephemeral.public_hex},
-    })
-    rid = response.json()["id"]
+    rid, _grant = _queue(client, ephemeral, "host-1")
     grant = client.get(f"/api/approvals/{rid}",
                        headers={"X-Graph-Org": "evil"}).json()["staged"]
     signature = personal.sign_hex(

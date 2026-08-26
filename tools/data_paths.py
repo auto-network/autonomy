@@ -107,6 +107,10 @@ STORE_MANIFEST: tuple = (
     Store("identity_sessions", "dashboard_identity_sessions.db",
           "DASHBOARD_IDENTITY_SESSION_DB", "db",
           "identity unlock-session store"),
+    Store("dashboard_session_secret", "dashboard-session.secret", None, "file",
+          "mode-0600 Dashboard session-token and local access-result destination key; "
+          "moves with the identity-session realm",
+          roots_with="identity_sessions"),
     Store("pending_joins", "pending_joins.db", "AUTONOMY_PENDING_JOINS_DB", "db",
           "restart-safe invite-join progress (identifiers and counts only)"),
     Store("vault_releases", "vault_releases.db", "VAULT_RELEASES_DB", "db",

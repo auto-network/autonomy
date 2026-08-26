@@ -316,6 +316,7 @@ live one.
 | `mission_control.db` | `MISSION_CONTROL_DB` | Mission Control store (missions + site revisions) |
 | `mcp_relay.db` | `MCP_RELAY_DB` | MCP-relay peer store (per-openai-session org bindings + crosstalk grants) |
 | `dashboard_identity_sessions.db` | `DASHBOARD_IDENTITY_SESSION_DB` | identity unlock-session store |
+| `dashboard-session.secret` | *(rooted beside `dashboard_identity_sessions.db`)* | mode-0600 Dashboard session-token and local approval-result destination key |
 | `pending_joins.db` | `AUTONOMY_PENDING_JOINS_DB` | restart-safe invite-join progress (identifiers and counts only) |
 | `vault_releases.db` | `VAULT_RELEASES_DB` | durable record of secret releases (paths + deadlines, never plaintext) |
 | `network`/ | `AUTONOMY_NETWORK_KEY_DIR` | mode-0600 auto.network tunnel-serving delegate keys |
@@ -451,7 +452,7 @@ no configuration is needed there either.
 | `AUTONOMY_FIRST_ORG_NAME` | title-cased slug | Display name seeded into the first org's `autonomy.org#1` identity Setting. |
 | `GRAPH_DB` / `GRAPH_API` | `<repo>/data/graph.db` / *(unset → local DB)* | Graph DB path, or a remote graph API base URL. |
 | `DASHBOARD_DB` | `<repo>/data/dashboard.db` | Dashboard overlay DB. |
-| `DASHBOARD_IDENTITY_SESSION_DB` | `<repo>/data/dashboard_identity_sessions.db` | Local revocation and history store for human dashboard sessions. Keep this writable; verification fails closed if it is unavailable. |
+| `DASHBOARD_IDENTITY_SESSION_DB` | `<repo>/data/dashboard_identity_sessions.db` | Local revocation and history store for human dashboard sessions. Its `dashboard-session.secret` is always resolved beside this database so cookies and local approval results cannot split into different realms. Keep both writable; verification fails closed if either is unavailable. |
 | `DISPATCH_DB` | `<repo>/data/dispatch.db` | Dispatch state DB. |
 | `APPROVAL_REQUESTS_DB` / `COMMIT_WORKFLOW_DB` | `<repo>/data/*.db` | Approval-request and commit-workflow DBs. |
 | `MISSION_CONTROL_DB` | `<repo>/data/mission_control.db` | Mission Control (missions + site revisions) DB. |
