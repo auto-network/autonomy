@@ -17,6 +17,30 @@ invariants.  When the observation/dispatch/drain/persistence order in
 that code changes shape, this model must change in the same commit
 (see README.md).
 
+## Session relaunch (added 2026-08-26)
+
+`Relaunch(s)` models a resume/retry/restart of ONE session while the
+dashboard stays up: `revive_session` resets the row cursor to 0 for a
+full backfill and wipes `rowComposer`/`composerEverSet` (harness_state
+describes the previous process), leaving monitor state, tracks, gates
+and in-flight workers untouched — the wipe does NOT claim the drain
+gate.  The ghost `relaunchGoal` records the delivery the backfill
+promises (consumed-at-relaunch + fLines-at-relaunch); the liveness
+property `RelaunchBackfills` says it is eventually met.
+
+The design switch `RelaunchOffsetCAS` models the drain ack's cursor CAS
+(`persist_tail_state(expect_offset=...)`): with it FALSE (the pre-fix
+Max-write), an in-flight pre-relaunch ack restores its high offset over
+the reset, reconciliation sees nothing to drain, and the backfill never
+runs — `calibration/CalReviveOffsetClobber.cfg` must rediscover exactly
+that.  `BoundedDuplicates` counts each relaunch as a deliberate full
+re-delivery.  `ComposerSticky` remains per-process: `Relaunch` resets
+both flags, so stickiness is only asserted within one harness lifetime.
+Relaunch budgets are enabled in the Scen2F greens; the Scen3M rollover
+greens keep `RelaunchBudget = 0` (a relaunch goal pinned to a
+predecessor file would need per-file goals to compose with rollover —
+extension noted, not modeled).
+
 ## Property classes
 
 This machine's center of gravity is **liveness and message ordering**,

@@ -52,7 +52,13 @@ CONSTANTS
     WORKERS,            \* drain worker slots per session, e.g. {"wA","wB"}
     \* ---- environment budgets -------------------------------------------
     RestartBudget, CrashBudget, CancelBudget, PollerBudget,
-    LateFlushBudget     \* writes landing on a SUPERSEDED main (late flush)
+    LateFlushBudget,    \* writes landing on a SUPERSEDED main (late flush)
+    RelaunchBudget,     \* session relaunches (revive_session + arm)
+    RelaunchOffsetCAS   \* TRUE | FALSE: drain ack lands only if the row's
+                        \*   cursor is still at the window's start (the
+                        \*   revive-clobber fix); FALSE restores the
+                        \*   monotonic Max-write that let an in-flight
+                        \*   pre-relaunch ack undo the backfill reset
 
 NoFile    == "none"
 MaxPasses == 2                  \* bounded consecutive dirty passes
@@ -93,19 +99,24 @@ VARIABLES
     sealedSet,      \* files whose pre-advance final check has happened
     sealedAt,       \* [FILES -> 0..MaxLines] lines present at that check
     \* -- environment budgets --
-    restartsLeft, crashesLeft, cancelsLeft, pollsLeft, lateFlushLeft
+    restartsLeft, crashesLeft, cancelsLeft, pollsLeft, lateFlushLeft,
+    relaunchesLeft,
+    \* -- ghost history: downstream-delivery target set by the latest
+    \*    relaunch (consumed-at-relaunch + fLines-at-relaunch): the full
+    \*    backfill a revive_session(file_offset=0) promises --
+    relaunchGoal
 
 vars == << fExists, fLines, wActive, registered, epochSnap, createSeen,
            evCreate, evMod, track, busyS, dirtyS, busyF, dirtyF, drainReq,
            pubAfter, cancelRel, pendingLink, pendingExp, wk,
            rowPath, rowOffset, rowComposer,
            composerEverSet, consumed, regLinked, regCount,
-           sealedSet, sealedAt,
+           sealedSet, sealedAt, relaunchGoal,
            restartsLeft, crashesLeft, cancelsLeft, pollsLeft,
-           lateFlushLeft >>
+           lateFlushLeft, relaunchesLeft >>
 
 envVars  == << restartsLeft, crashesLeft, cancelsLeft, pollsLeft,
-               lateFlushLeft >>
+               lateFlushLeft, relaunchesLeft >>
 fsVars   == << fExists, fLines, wActive >>
 chanVars == << registered, epochSnap, createSeen, evCreate, evMod >>
 rowVars  == << rowPath, rowOffset, rowComposer, composerEverSet >>
@@ -242,7 +253,9 @@ Init ==
     /\ regCount = [s \in SESSIONS |-> 0]
     /\ sealedSet = {}
     /\ sealedAt = [f \in FILES |-> 0]
+    /\ relaunchGoal = [s \in SESSIONS |-> 0]
     /\ restartsLeft = RestartBudget
+    /\ relaunchesLeft = RelaunchBudget
     /\ crashesLeft = CrashBudget
     /\ cancelsLeft = CancelBudget
     /\ pollsLeft = PollerBudget
@@ -258,7 +271,7 @@ Init ==
 CoreUnchanged ==
     UNCHANGED << track, rowPath, rowOffset, regLinked, regCount, pubAfter,
                  busyS, busyF, dirtyS, dirtyF, drainReq,
-                 pendingLink, pendingExp, sealedSet, sealedAt >>
+                 pendingLink, pendingExp, sealedSet, sealedAt, relaunchGoal >>
 
 \* Rollover / first-resolution compare-and-set:
 \*   persisted provenance re-attaches the already-linked file;
@@ -324,6 +337,7 @@ LinkEffect(s, f, prv, sync, exp) ==
                                g \in fExists /\ ChainBefore(g, f)
                                /\ g \notin sealedSet}
             IN /\ sealedSet' = sealedSet \cup newPreds
+               /\ UNCHANGED relaunchGoal
                /\ sealedAt' = [g \in FILES |->
                                  IF g \in newPreds THEN fLines[g]
                                  ELSE sealedAt[g]]
@@ -361,7 +375,7 @@ Promote(s, f, prv, exp, sync) ==
                               dl |-> FALSE, closeL |-> 0]]
               /\ UNCHANGED << rowPath, rowOffset, regLinked, regCount,
                               pubAfter, busyS, busyF, dirtyS, dirtyF,
-                              drainReq, sealedSet, sealedAt >>
+                              drainReq, sealedSet, sealedAt, relaunchGoal >>
          ELSE /\ LinkEffect(s, f, prv, sync, exp)
               /\ UNCHANGED << pendingLink, pendingExp >>
     ELSE \* CAS lost: never overwrite the newer association
@@ -371,7 +385,7 @@ Promote(s, f, prv, exp, sync) ==
                 ELSE [@ EXCEPT !.st = "closed", !.closeL = fLines[f]]]
          /\ UNCHANGED << rowPath, rowOffset, regLinked, regCount, pubAfter,
                          busyS, busyF, dirtyS, dirtyF, drainReq,
-                         pendingLink, pendingExp, sealedSet, sealedAt >>
+                         pendingLink, pendingExp, sealedSet, sealedAt, relaunchGoal >>
 
 \* Observe (s, f) with provenance p.  Trusted provenance (birth continuity
 \* or persisted identity) promotes WITHOUT content classification — that is
@@ -399,7 +413,7 @@ ObserveOutcome(s, f, p, sync) ==
               /\ UNCHANGED << rowPath, rowOffset, regLinked, regCount,
                               pubAfter, busyS, busyF, dirtyS, dirtyF,
                               drainReq,
-                              pendingLink, pendingExp, sealedSet, sealedAt >>
+                              pendingLink, pendingExp, sealedSet, sealedAt, relaunchGoal >>
          ELSE IF cls = "main"
          THEN \* ambiguous provenance: characterize; verification promotes
               \* on the next recheck/event step (never skips CHARACTERIZING)
@@ -407,14 +421,14 @@ ObserveOutcome(s, f, p, sync) ==
               /\ UNCHANGED << rowPath, rowOffset, regLinked, regCount,
                               pubAfter, busyS, busyF, dirtyS, dirtyF,
                               drainReq,
-                              pendingLink, pendingExp, sealedSet, sealedAt >>
+                              pendingLink, pendingExp, sealedSet, sealedAt, relaunchGoal >>
          ELSE \* unknown
               IF RetainUnknown
               THEN /\ track' = [track EXCEPT ![<<s, f>>] = chr]
                    /\ UNCHANGED << rowPath, rowOffset, regLinked, regCount,
                                    pubAfter, busyS, busyF, dirtyS, dirtyF,
                                    drainReq,
-                                   pendingLink, pendingExp, sealedSet, sealedAt >>
+                                   pendingLink, pendingExp, sealedSet, sealedAt, relaunchGoal >>
               ELSE \* defer without an owner (watch_scan path): no track,
                    \* no retry, responsibility dropped
                    CoreUnchanged
@@ -466,7 +480,8 @@ WWrite(f) ==
     /\ CoreUnchanged
     /\ UNCHANGED << cancelRel, wk, rowComposer, composerEverSet >>
     /\ UNCHANGED obsVars
-    /\ UNCHANGED << restartsLeft, crashesLeft, cancelsLeft, pollsLeft >>
+    /\ UNCHANGED << restartsLeft, crashesLeft, cancelsLeft, pollsLeft,
+                    relaunchesLeft >>
 
 WRollover(s) ==
     /\ wActive[s] # NoFile
@@ -492,7 +507,8 @@ PollerSet(s) ==
     /\ UNCHANGED fsVars /\ UNCHANGED chanVars /\ CoreUnchanged
     /\ UNCHANGED << cancelRel, wk, rowPath, rowOffset >>
     /\ UNCHANGED obsVars
-    /\ UNCHANGED << restartsLeft, crashesLeft, cancelsLeft, lateFlushLeft >>
+    /\ UNCHANGED << restartsLeft, crashesLeft, cancelsLeft, lateFlushLeft,
+                    relaunchesLeft >>
 
 (***************************************************************************)
 (* Event delivery and registration (the asyncio inotify loop).             *)
@@ -558,7 +574,7 @@ DeliverModify(f) ==
                      /\ UNCHANGED << rowPath, rowOffset, regLinked, regCount,
                                      pubAfter, busyS, busyF, dirtyS, dirtyF,
                                      drainReq,
-                                     pendingLink, pendingExp, sealedSet, sealedAt >>
+                                     pendingLink, pendingExp, sealedSet, sealedAt, relaunchGoal >>
                 ELSE IF EffClassify(f) = "main" /\ NoNewerExists(f)
                 THEN Promote(s, f, tr.prov, tr.expPrev, FALSE)
                 ELSE IF EffClassify(f) = "main"
@@ -569,7 +585,7 @@ DeliverModify(f) ==
                      /\ UNCHANGED << rowPath, rowOffset, regLinked, regCount,
                                      pubAfter, busyS, busyF, dirtyS, dirtyF,
                                      drainReq,
-                                     pendingLink, pendingExp, sealedSet, sealedAt >>
+                                     pendingLink, pendingExp, sealedSet, sealedAt, relaunchGoal >>
                 ELSE \* still unknown: the event-driven deadline check —
                      \* under the broken design this is the ONLY place the
                      \* deadline is ever evaluated (T110)
@@ -580,14 +596,14 @@ DeliverModify(f) ==
                           /\ UNCHANGED << rowPath, rowOffset, regLinked,
                                           regCount, pubAfter, busyS, busyF,
                                           dirtyS, dirtyF, drainReq,
-                                          pendingLink, pendingExp, sealedSet, sealedAt >>
+                                          pendingLink, pendingExp, sealedSet, sealedAt, relaunchGoal >>
                      ELSE CoreUnchanged
            ELSE \* streaming: request the common drain
                 /\ drainReq' = [drainReq EXCEPT ![<<s, f>>] = TRUE]
                 /\ UNCHANGED << track, rowPath, rowOffset, regLinked,
                                 regCount, pubAfter, busyS, busyF,
                                 dirtyS, dirtyF, pendingLink, pendingExp,
-                                sealedSet, sealedAt >>
+                                sealedSet, sealedAt, relaunchGoal >>
     /\ UNCHANGED << fExists, fLines, wActive, registered, epochSnap,
                     createSeen, evCreate >>
     /\ UNCHANGED << cancelRel, wk, rowComposer, composerEverSet >>
@@ -615,7 +631,7 @@ ClaimDrain(s, f) ==
                 [WkInit EXCEPT !.pc = "readRow", !.file = f]]
     /\ UNCHANGED fsVars /\ UNCHANGED chanVars
     /\ UNCHANGED << track, dirtyS, dirtyF, pubAfter, cancelRel,
-                    pendingLink, pendingExp, sealedSet, sealedAt >>
+                    pendingLink, pendingExp, sealedSet, sealedAt, relaunchGoal >>
     /\ UNCHANGED rowVars /\ UNCHANGED obsVars /\ UNCHANGED envVars
 
 \* A request meeting a held gate: transfer through dirty (fixed) or drop
@@ -632,7 +648,7 @@ ClaimContended(s, f) ==
             /\ dirtyF' = dirtyF
     /\ UNCHANGED fsVars /\ UNCHANGED chanVars
     /\ UNCHANGED << track, busyS, busyF, pubAfter, cancelRel, wk,
-                    pendingLink, pendingExp, sealedSet, sealedAt >>
+                    pendingLink, pendingExp, sealedSet, sealedAt, relaunchGoal >>
     /\ UNCHANGED rowVars /\ UNCHANGED obsVars /\ UNCHANGED envVars
 
 \* A cancelled worker finishes its current step and then stops; under the
@@ -679,8 +695,15 @@ GenOK(s, w) == rowPath[s] = wk[<<s, w>>].file
 WkPersist(s, w) ==
     LET rec == wk[<<s, w>>] IN
     /\ rec.pc = "persist"
-    /\ IF PerSessionGate /\ ~GenOK(s, w)
-       THEN /\ rowOffset' = rowOffset          \* stale generation loses safely
+    /\ IF (PerSessionGate /\ ~GenOK(s, w))
+          \* Cursor CAS (revive-clobber fix): the ack lands only if the
+          \* row's cursor is still where this window's read began. Path
+          \* and generation both survive a relaunch (same file, same
+          \* inode), so without this term an in-flight pre-relaunch ack
+          \* Max-wrote its high offset back over revive_session's reset
+          \* and the promised full backfill silently never ran.
+          \/ (RelaunchOffsetCAS /\ rowOffset[s] # rec.snap)
+       THEN /\ rowOffset' = rowOffset          \* stale ack loses safely
             /\ rowComposer' = rowComposer
        ELSE /\ rowOffset' = [rowOffset EXCEPT ![s] = Max(@, rec.upTo)]
             /\ rowComposer' = IF MergeHarnessAtWrite
@@ -693,7 +716,7 @@ WkPersist(s, w) ==
     /\ UNCHANGED fsVars /\ UNCHANGED chanVars
     /\ UNCHANGED << track, rowPath, regLinked, regCount, pubAfter,
                     busyS, busyF, dirtyS, dirtyF, drainReq,
-                    pendingLink, pendingExp, sealedSet, sealedAt >>
+                    pendingLink, pendingExp, sealedSet, sealedAt, relaunchGoal >>
     /\ UNCHANGED << cancelRel, composerEverSet >>
     /\ UNCHANGED << consumed >>
     /\ UNCHANGED envVars
@@ -754,7 +777,7 @@ WkFinal(s, w) ==
                                       THEN consumed[rowPath[s]] ELSE 0]
     /\ UNCHANGED fsVars /\ UNCHANGED chanVars
     /\ UNCHANGED << track, cancelRel, pendingLink, pendingExp,
-                    sealedSet, sealedAt >>
+                    sealedSet, sealedAt, relaunchGoal >>
     /\ UNCHANGED rowVars
     /\ UNCHANGED << consumed >>
     /\ UNCHANGED envVars
@@ -777,7 +800,7 @@ WkStopped(s, w) ==
             /\ drainReq' = drainReq
     /\ UNCHANGED fsVars /\ UNCHANGED chanVars
     /\ UNCHANGED << track, dirtyS, dirtyF, pubAfter, cancelRel,
-                    pendingLink, pendingExp, sealedSet, sealedAt >>
+                    pendingLink, pendingExp, sealedSet, sealedAt, relaunchGoal >>
     /\ UNCHANGED rowVars /\ UNCHANGED obsVars /\ UNCHANGED envVars
 
 \* Drain failure: the worker dies mid-flight.  The fixed design retains
@@ -795,9 +818,10 @@ WkCrash(s, w) ==
                       track[<<s, tgt>>].st = "stream"]
     /\ UNCHANGED fsVars /\ UNCHANGED chanVars
     /\ UNCHANGED << track, dirtyS, dirtyF, pubAfter, cancelRel,
-                    pendingLink, pendingExp, sealedSet, sealedAt >>
+                    pendingLink, pendingExp, sealedSet, sealedAt, relaunchGoal >>
     /\ UNCHANGED rowVars /\ UNCHANGED obsVars
-    /\ UNCHANGED << restartsLeft, cancelsLeft, pollsLeft, lateFlushLeft >>
+    /\ UNCHANGED << restartsLeft, cancelsLeft, pollsLeft, lateFlushLeft,
+                    relaunchesLeft >>
 
 \* Cancellation of the drain AWAITER.  The to_thread worker keeps running:
 \* it completes its current step and then stops (pc = "stopped").
@@ -818,9 +842,10 @@ WkCancel(s, w) ==
             /\ busyF' = busyF
     /\ UNCHANGED fsVars /\ UNCHANGED chanVars
     /\ UNCHANGED << track, dirtyS, dirtyF, drainReq, pubAfter, cancelRel,
-                    pendingLink, pendingExp, sealedSet, sealedAt >>
+                    pendingLink, pendingExp, sealedSet, sealedAt, relaunchGoal >>
     /\ UNCHANGED rowVars /\ UNCHANGED obsVars
-    /\ UNCHANGED << restartsLeft, crashesLeft, pollsLeft, lateFlushLeft >>
+    /\ UNCHANGED << restartsLeft, crashesLeft, pollsLeft, lateFlushLeft,
+                    relaunchesLeft >>
 
 (***************************************************************************)
 (* Reconciliation (level-triggered, reliable; carries the fairness that    *)
@@ -866,7 +891,7 @@ ReconRecheck(s, f) ==
             /\ UNCHANGED << rowPath, rowOffset, regLinked, regCount,
                             pubAfter, busyS, busyF, dirtyS, dirtyF,
                             drainReq,
-                            pendingLink, pendingExp, sealedSet, sealedAt >>
+                            pendingLink, pendingExp, sealedSet, sealedAt, relaunchGoal >>
        ELSE IF NoNewerExists(f)
        THEN Promote(s, f, track[<<s, f>>].prov, track[<<s, f>>].expPrev,
                     FALSE)
@@ -877,7 +902,7 @@ ReconRecheck(s, f) ==
             /\ UNCHANGED << rowPath, rowOffset, regLinked, regCount,
                             pubAfter, busyS, busyF, dirtyS, dirtyF,
                             drainReq,
-                            pendingLink, pendingExp, sealedSet, sealedAt >>
+                            pendingLink, pendingExp, sealedSet, sealedAt, relaunchGoal >>
     /\ UNCHANGED fsVars /\ UNCHANGED chanVars
     /\ UNCHANGED << cancelRel, wk, rowComposer, composerEverSet >>
     /\ UNCHANGED << consumed >>
@@ -895,7 +920,7 @@ ReconExpire(s, f) ==
     /\ UNCHANGED fsVars /\ UNCHANGED chanVars
     /\ UNCHANGED << busyS, dirtyS, busyF, dirtyF, drainReq, pubAfter,
                     cancelRel, wk, pendingLink, pendingExp,
-                    sealedSet, sealedAt >>
+                    sealedSet, sealedAt, relaunchGoal >>
     /\ UNCHANGED rowVars /\ UNCHANGED obsVars /\ UNCHANGED envVars
 
 \* Guarded post-cancel release is folded into WkStopped.  The environment:
@@ -908,7 +933,7 @@ DeadlinePass(s, f) ==
     /\ UNCHANGED fsVars /\ UNCHANGED chanVars
     /\ UNCHANGED << busyS, dirtyS, busyF, dirtyF, drainReq, pubAfter,
                     cancelRel, wk, pendingLink, pendingExp,
-                    sealedSet, sealedAt >>
+                    sealedSet, sealedAt, relaunchGoal >>
     /\ UNCHANGED rowVars /\ UNCHANGED obsVars /\ UNCHANGED envVars
 
 (***************************************************************************)
@@ -940,6 +965,7 @@ HandoverDrain(s) ==
                          @ + (IF fLines[p] > PubLevelOf(p)
                               THEN fLines[p] - PubLevelOf(p) ELSE 0)]
        /\ sealedSet' = sealedSet \cup {p}
+       /\ UNCHANGED relaunchGoal
        /\ sealedAt' = [sealedAt EXCEPT ![p] = Max(@, fLines[p])]
        \* When the predecessor is the CURRENTLY LINKED file, this walk
        \* step IS the ordinary drain-to-EOF and must advance the acked
@@ -985,7 +1011,7 @@ CommitLink(s) ==
             /\ pendingExp' = [pendingExp EXCEPT ![s] = NoFile]
             /\ UNCHANGED << rowPath, rowOffset, regLinked, regCount,
                             pubAfter, busyS, busyF, dirtyS, dirtyF,
-                            drainReq, sealedSet, sealedAt >>
+                            drainReq, sealedSet, sealedAt, relaunchGoal >>
     /\ UNCHANGED fsVars /\ UNCHANGED chanVars
     /\ UNCHANGED << cancelRel, wk, rowComposer, composerEverSet >>
     /\ UNCHANGED << consumed >>
@@ -1018,8 +1044,9 @@ Restart ==
     /\ epochSnap' = [s \in SESSIONS |-> fExists]  \* everything pre-existing
     /\ createSeen' = [s \in SESSIONS |-> FALSE]   \* fresh watch epoch
     /\ UNCHANGED fsVars /\ UNCHANGED rowVars /\ UNCHANGED obsVars
-    /\ UNCHANGED << sealedSet, sealedAt >>
-    /\ UNCHANGED << crashesLeft, cancelsLeft, pollsLeft, lateFlushLeft >>
+    /\ UNCHANGED << sealedSet, sealedAt, relaunchGoal >>
+    /\ UNCHANGED << crashesLeft, cancelsLeft, pollsLeft, lateFlushLeft,
+                    relaunchesLeft >>
 
 \* Startup recovery of a linked row (sync context): persisted-identity
 \* re-attach, which under the fixed design promotes and drains.
@@ -1032,6 +1059,35 @@ RecoverLinked(s) ==
     /\ UNCHANGED << cancelRel, wk, rowComposer, composerEverSet >>
     /\ UNCHANGED << consumed >>
     /\ UNCHANGED envVars
+
+(***************************************************************************)
+(* Session relaunch (resume/retry/restart of ONE session).  The dashboard  *)
+(* stays up: monitor state, tracks, gates and in-flight workers all        *)
+(* survive.  revive_session resets the row's cursor to 0 for a full        *)
+(* backfill and wipes harness_state (composer_ready describes the          *)
+(* PREVIOUS process; arm_startup_state also resets the poller's per-launch *)
+(* timers).  The wipe happens WITHOUT claiming the drain gate — that is    *)
+(* the race the WkPersist cursor CAS closes.  The ghost relaunchGoal       *)
+(* records the delivery the backfill promises: everything already          *)
+(* consumed plus the whole file again.                                     *)
+(***************************************************************************)
+
+Relaunch(s) ==
+    /\ relaunchesLeft > 0
+    /\ rowPath[s] # NoFile
+    /\ relaunchesLeft' = relaunchesLeft - 1
+    /\ rowOffset' = [rowOffset EXCEPT ![s] = 0]
+    /\ rowComposer' = [rowComposer EXCEPT ![s] = FALSE]
+    /\ composerEverSet' = [composerEverSet EXCEPT ![s] = FALSE]
+    /\ relaunchGoal' = [relaunchGoal EXCEPT
+                          ![s] = consumed[rowPath[s]] + fLines[rowPath[s]]]
+    /\ UNCHANGED fsVars /\ UNCHANGED chanVars
+    /\ UNCHANGED << track, busyS, dirtyS, busyF, dirtyF, drainReq, pubAfter,
+                    cancelRel, pendingLink, pendingExp, wk, rowPath,
+                    sealedSet, sealedAt >>
+    /\ UNCHANGED obsVars
+    /\ UNCHANGED << restartsLeft, crashesLeft, cancelsLeft, pollsLeft,
+                    lateFlushLeft >>
 
 (***************************************************************************)
 (* Next / Spec                                                             *)
@@ -1055,6 +1111,7 @@ MonitorActs ==
          \/ WkProcess(s, w) \/ WkFinal(s, w) \/ WkStopped(s, w)
          \/ WkCrash(s, w) \/ WkCancel(s, w)
     \/ Restart
+    \/ \E s \in SESSIONS : Relaunch(s)
 
 Next == WriterActs \/ MonitorActs
 
@@ -1091,6 +1148,8 @@ FairSpec ==
 
 TypeOK ==
     /\ fExists \subseteq FILES
+    /\ relaunchesLeft \in 0..RelaunchBudget
+    /\ relaunchGoal \in [SESSIONS -> Nat]
     /\ fLines \in [FILES -> 0..MaxLines]
     /\ rowPath \in [SESSIONS -> FILES \cup {NoFile}]
     /\ rowOffset \in [SESSIONS -> 0..MaxLines]
@@ -1115,6 +1174,8 @@ NoDuplicates ==
 BoundedDuplicates ==
     LET failures == (CrashBudget - crashesLeft) + (CancelBudget - cancelsLeft)
                     + (RestartBudget - restartsLeft)
+                    \* a relaunch's full backfill re-delivers deliberately
+                    + (RelaunchBudget - relaunchesLeft)
     IN \A f \in FILES : consumed[f] <= fLines[f] + failures * MaxLines
 
 \* The acked offset never exceeds the linked file's real content.
@@ -1154,6 +1215,16 @@ ProbeBirthCASFailUnreached ==
 EventuallyDrained ==
     <>[] (\A s \in SESSIONS :
             rowPath[s] # NoFile => consumed[rowPath[s]] >= fLines[rowPath[s]])
+
+\* A relaunch's promised full backfill actually happens: downstream
+\* delivery reaches the target the revive recorded (everything consumed
+\* before the relaunch, plus the whole file again).  The Max-write
+\* without the cursor CAS violates this: an in-flight pre-relaunch ack
+\* restores the high offset, reconciliation sees nothing to drain, and
+\* the backfill never runs (CalReviveOffsetClobber).
+RelaunchBackfills ==
+    <>[] (\A s \in SESSIONS :
+            rowPath[s] # NoFile => consumed[rowPath[s]] >= relaunchGoal[s])
 
 \* Every session whose writer produced content eventually links the file
 \* the writer actually wrote.

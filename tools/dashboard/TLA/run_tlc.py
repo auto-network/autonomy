@@ -52,6 +52,7 @@ CALIBRATION = [
     ("calibration/CalCancelPinned.cfg", "Scen2F"),
     ("calibration/CalFinallyRelease.cfg", "Scen2F"),
     ("calibration/CalRMWHarness.cfg", "Scen2F"),
+    ("calibration/CalReviveOffsetClobber.cfg", "Scen2F"),
     ("calibration/CalNoEpochBarrier.cfg", "Scen2F"),
     ("calibration/CalPerPathGates.cfg", "Scen3M"),
     ("calibration/CalRolloverCAS.cfg", "Scen3M"),
