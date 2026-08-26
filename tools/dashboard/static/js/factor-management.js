@@ -71,6 +71,13 @@ const STYLE = `
 .aucell.au-multi .au-word{color:#818cf8}
 .aucell.au-unlock .au-ico{color:#93a3bd}.aucell.au-unlock .au-word{color:#93a3bd}
 .aucell.au-none .au-ico{color:#4b5563;background:transparent}.aucell.au-none .au-word{color:#5b6578}
+.nm-edit{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;padding:0;margin-left:5px;background:none;border:none;color:#5b6578;cursor:pointer;vertical-align:middle}
+.nm-edit svg{width:14px;height:14px}.nm-edit:hover{color:#cbd5e1}
+.rn{display:inline-flex;align-items:center;gap:3px}
+.rn-in{background:#0b111b;border:1px solid #4f46e5;border-radius:6px;color:#e5e7eb;font:inherit;padding:2px 6px;max-width:150px}
+.rn-in:focus{outline:none}
+.rn-ok,.rn-x{display:inline-flex;align-items:center;justify-content:center;width:19px;height:19px;padding:0;background:none;border:none;cursor:pointer}
+.rn-ok svg,.rn-x svg{width:14px;height:14px}.rn-ok{color:#34d399}.rn-x{color:#f87171}
 
 .tray{position:relative;display:flex;justify-content:center;gap:7px;margin:16px 0 15px}
 .fl{width:31px;height:31px;border-radius:8px;background:#161b26;border:1px solid #232a39;
@@ -316,6 +323,63 @@ function auCell(role, access, oldLevel, isPasskey, dataAttr, noprf) {
   return '<div class="aucell ' + cls + '"' + (dataAttr || '') + (dataAttr ? ' style="cursor:pointer"' : '')
     + '><span class="au-ico">' + ico + '</span><span class="au-word">' + word + '</span></div>';
 }
+
+// ── inline rename (approved design): tap the pencil, edit in place, save.
+// A factor name is personal metadata (PATCH /api/identity/factors/{id}/metadata)
+// — instant, no root, no generation. Only offered when the factor-policy id is
+// known (fallback rows without one are not renameable).
+const IC_EDIT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>';
+const IC_OK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 6.5"/></svg>';
+const IC_XX = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>';
+function escAttr(s) { return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
+function nameHtml(factorId, label, suffix) {
+  suffix = suffix || '';
+  if (!factorId) return label + suffix;
+  if (S.renaming === factorId) {
+    return '<span class="rn"><input class="rn-in" value="' + escAttr(S.renameVal != null ? S.renameVal : label) + '">'
+      + '<button class="rn-ok" aria-label="Save">' + IC_OK + '</button>'
+      + '<button class="rn-x" aria-label="Cancel">' + IC_XX + '</button></span>';
+  }
+  return '<span class="nm-txt">' + label + '</span>'
+    + '<button class="nm-edit" data-edit="' + escAttr(factorId) + '" aria-label="Rename">' + IC_EDIT + '</button>'
+    + suffix;
+}
+function wireName(row, factorId, label) {
+  if (!factorId) return;
+  const edit = row.querySelector('.nm-edit');
+  if (edit) edit.onclick = (e) => { e.stopPropagation(); S.renaming = factorId; S.renameVal = label; render(); };
+  const inp = row.querySelector('.rn-in');
+  if (inp) {
+    inp.oninput = () => { S.renameVal = inp.value; };
+    inp.onkeydown = (e) => {
+      e.stopPropagation();
+      if (e.key === 'Enter') saveName(factorId);
+      else if (e.key === 'Escape') { S.renaming = null; render(); }
+    };
+    inp.onclick = (e) => e.stopPropagation();
+    setTimeout(() => { inp.focus(); inp.select(); }, 0);
+  }
+  const ok = row.querySelector('.rn-ok'); if (ok) ok.onclick = (e) => { e.stopPropagation(); saveName(factorId); };
+  const x = row.querySelector('.rn-x'); if (x) x.onclick = (e) => { e.stopPropagation(); S.renaming = null; render(); };
+}
+function applyLabel(factorId, label) {
+  if (M.pw && M.pw.factorId === factorId) M.pw.label = label;
+  M.keys.forEach((k) => { if (k.factorId === factorId) k.l = label; });
+}
+async function saveName(factorId) {
+  const label = (S.renameVal != null ? S.renameVal : '').trim();
+  S.renaming = null;
+  if (!label) { render(); return; }
+  applyLabel(factorId, label);   // optimistic — instant, personal metadata
+  render();
+  try {
+    await fetch('/api/identity/factors/' + encodeURIComponent(factorId) + '/metadata', {
+      method: 'PATCH', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ label }),
+    });
+  } catch (e) { /* best-effort; server truth reappears on next load */ }
+}
 function actionOn(k) {
   if (k === 'both') {
     if (M.mfa) return hasAlternative() ? 'change' : null;
@@ -406,15 +470,21 @@ async function loadModel() {
       const byCred = {};
       fp.factors.forEach((f) => {
         if (f.type === 'passkey' && f.credential_id) byCred[f.credential_id] = f;
-        else if (f.type === 'password' && M.pw) { M.pw.rootRole = f.root_role; M.pw.access = f.access; }
+        else if (f.type === 'password' && M.pw) {
+          M.pw.rootRole = f.root_role; M.pw.access = f.access;
+          M.pw.factorId = f.factor_id; if (f.label) M.pw.label = f.label;
+        }
       });
       M.keys.forEach((k) => {
         const f = byCred[k.credentialId];
-        if (f) { k.rootRole = f.root_role; k.access = f.access; }
+        if (f) {
+          k.rootRole = f.root_role; k.access = f.access; k.factorId = f.factor_id;
+          if (f.label) k.l = f.label;   // the factor-policy label overlays the raw passkey name
+        }
       });
     }
   } catch (e) { /* factor-policy is optional for display; armor model already rendered */ }
-  if (!S) S = { screen: 'keys', method: null, act: null, need: [], si: 0, after: null, sheet: null, pick: null, primed: 0 };
+  if (!S) S = { screen: 'keys', method: null, act: null, need: [], si: 0, after: null, sheet: null, pick: null, primed: 0, renaming: null, renameVal: '' };
 }
 
 // ── real ceremony layer (replaces the mock commit()) ─────────────────────
@@ -866,15 +936,20 @@ function keysScreen() {
     const canTap = hasAlternative();
     const weak = M.pw.mem < M.kdfNow.mem;
     const cell = auCell(M.pw.rootRole, M.pw.access, lv, false, canTap ? ' data-p="1"' : '', false);
-    const pr = el('div', 'krow', cell + '<div class="kmid"><div class="knm">Password'
-      + (weak ? '<span class="weak">below current strength</span>' : '') + '</div>'
-      + '<div class="kmeta">' + M.pw.kdf + ' &middot; ' + M.pw.itersLabel
+    const pwLabel = M.pw.label || 'Password';
+    const pwRenaming = !!M.pw.factorId && S.renaming === M.pw.factorId;
+    const pr = el('div', 'krow', cell + '<div class="kmid"><div class="knm">'
+      + nameHtml(M.pw.factorId, pwLabel, weak ? '<span class="weak">below current strength</span>' : '')
+      + '</div><div class="kmeta">' + M.pw.kdf + ' &middot; ' + M.pw.itersLabel
       + (M.pw.createdLabel ? ' &middot; ' + M.pw.createdLabel : '') + '</div></div>'
-      + '<div class="chg">Change</div><div class="kx">&times;</div>');
+      + (pwRenaming ? '' : '<div class="chg">Change</div><div class="kx">&times;</div>'));
     const pb = pr.querySelector('[data-p]');
     if (pb) pb.onclick = (e) => { e.stopPropagation(); gatherThen('authorize', rootNeed()); };
-    pr.querySelector('.chg').onclick = (e) => { e.stopPropagation(); S.pwMode = 'changepw'; gatherThen('setpw', rootNeed()); };
-    pr.querySelector('.kx').onclick = (e) => { e.stopPropagation(); gatherThen('removepw', rootNeed()); };
+    const pchg = pr.querySelector('.chg');
+    if (pchg) pchg.onclick = (e) => { e.stopPropagation(); S.pwMode = 'changepw'; gatherThen('setpw', rootNeed()); };
+    const pkx = pr.querySelector('.kx');
+    if (pkx) pkx.onclick = (e) => { e.stopPropagation(); gatherThen('removepw', rootNeed()); };
+    wireName(pr, M.pw.factorId, pwLabel);
     p.appendChild(pr);
   }
 
@@ -882,9 +957,12 @@ function keysScreen() {
   M.keys.forEach((k, i) => {
     const cell = auCell(k.rootRole, k.access, k.auth === 'full' ? 'b' : 'a', true,
       k.prf === false ? '' : ' data-k="' + i + '"', k.prf === false);
-    const r = el('div', 'krow', cell + '<div class="kmid"><div class="knm">' + k.l
-      + (k.here ? '<span class="here">this device</span>' : '') + '</div><div class="kmeta">'
-      + k.v + ' &middot; added ' + k.w + '</div></div><div class="kx">&times;</div>');
+    const kRenaming = !!k.factorId && S.renaming === k.factorId;
+    const r = el('div', 'krow', cell + '<div class="kmid"><div class="knm">'
+      + nameHtml(k.factorId, k.l, k.here ? '<span class="here">this device</span>' : '')
+      + '</div><div class="kmeta">' + k.v + ' &middot; added ' + k.w + '</div></div>'
+      + (kRenaming ? '' : '<div class="kx">&times;</div>'));
+    wireName(r, k.factorId, k.l);
     const kb = r.querySelector('[data-k]');
     // Under MFA a passkey cannot be raised on its own — a full standalone
     // passkey and require-both are contradictory — so tapping its authority
@@ -894,7 +972,8 @@ function keysScreen() {
       e.stopPropagation();
       if (M.mfa) gatherThen('authorize', rootNeed()); else changeKey(i);
     };
-    r.querySelector('.kx').onclick = (e) => { e.stopPropagation(); gatherThen('removekey', rootNeed(), { keyIdx: i }); };
+    const kkx = r.querySelector('.kx');
+    if (kkx) kkx.onclick = (e) => { e.stopPropagation(); gatherThen('removekey', rootNeed(), { keyIdx: i }); };
     p.appendChild(r);
   });
   if (S.warn) p.appendChild(el('div', 'fui-warn', S.warn));
