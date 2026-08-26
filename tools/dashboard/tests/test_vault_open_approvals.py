@@ -56,6 +56,7 @@ def vault_open_env(tmp_path, monkeypatch):
         "_org_db_path",
         lambda org, root=None: (
             graph_db if org == "personal"
+            else (graph_db.parent / "machine.db") if org == "machine"
             else original_org_db_path(org, root)
         ),
     )
@@ -69,7 +70,6 @@ def vault_open_env(tmp_path, monkeypatch):
         "assert_memory_backed",
         lambda path: None,
     )
-    monkeypatch.setattr(vault_releases, "db_path", lambda: tmp_path / "releases.db")
     monkeypatch.setattr(
         vault_open_approvals.dashboard_db,
         "get_session",
@@ -288,7 +288,6 @@ def test_fake_ssh_key_is_sealed_approved_delivered_and_expired_without_leak(
     swept = vault_release_sweeper.sweep(
         session_exists=lambda session: session == "auto-real",
         delivery_root=graph_db.parent / "ramfs",
-        store_path=graph_db.parent / "releases.db",
         now=int(float(receipt["expires_at"]) * 1000),
     )
     assert swept["shredded"] == 1

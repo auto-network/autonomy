@@ -62,7 +62,6 @@ def deliver_payload(
     payload: dict,
     *,
     delivery_root: Path | None = None,
-    store_path: Path | str | None = None,
     now: float | None = None,
 ) -> dict:
     """Write *payload* to the exact requester's ramfs and return a receipt.
@@ -122,7 +121,6 @@ def deliver_payload(
         container_path=container_path,
         host_path=str(host_path),
         delivered_at=delivered_at_ms,
-        path=store_path,
     )
 
     fd: int | None = None
@@ -157,8 +155,7 @@ def deliver_payload(
         vault_releases.mark_shredded(
             release_id,
             reason="delivery_failed",
-            path=store_path,
-            now=delivered_at_ms,
+                now=delivered_at_ms,
         )
         raise
     finally:

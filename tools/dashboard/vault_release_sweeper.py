@@ -87,7 +87,6 @@ def sweep(
     *,
     session_exists: Callable[[str], bool],
     delivery_root: Path | None = None,
-    store_path: Path | str | None = None,
     now: int | None = None,
     overdue_reason: str = "expired",
 ) -> dict:
@@ -108,7 +107,7 @@ def sweep(
     stamp = int(time.time() * 1000) if now is None else int(now)
 
     shredded = 0
-    for rec in vault_releases.outstanding(path=store_path):
+    for rec in vault_releases.outstanding():
         session = rec["session"]
         gone = not session_exists(session)
         if gone:
@@ -118,13 +117,12 @@ def sweep(
         else:
             continue
         _destroy_file(rec["host_path"])
-        if vault_releases.mark_shredded(rec["id"], reason=reason, path=store_path,
-                                        now=stamp):
+        if vault_releases.mark_shredded(rec["id"], reason=reason, now=stamp):
             shredded += 1
 
     reclaimed = 0
     if root.is_dir():
-        live = vault_releases.outstanding_sessions(path=store_path)
+        live = vault_releases.outstanding_sessions()
         for child in root.iterdir():
             if not child.is_dir():
                 continue
@@ -140,7 +138,6 @@ def on_session_end(
     session: str,
     *,
     delivery_root: Path | None = None,
-    store_path: Path | str | None = None,
     now: int | None = None,
 ) -> dict:
     """The launcher's timely teardown hook (auto-pw9bs.5 / auto-f51kg).
@@ -161,12 +158,12 @@ def on_session_end(
     root = Path(delivery_root) if delivery_root is not None else _delivery_root()
     stamp = int(time.time() * 1000) if now is None else int(now)
     shredded = 0
-    for rec in vault_releases.outstanding(path=store_path):
+    for rec in vault_releases.outstanding():
         if rec["session"] != session:
             continue
         _destroy_file(rec["host_path"])
         if vault_releases.mark_shredded(rec["id"], reason="session_end",
-                                        path=store_path, now=stamp):
+                                        now=stamp):
             shredded += 1
     reclaimed = _reclaim_session_dir(root, session)
     return {"shredded": shredded, "reclaimed_dir": reclaimed}
@@ -176,7 +173,6 @@ def reconcile_on_startup(
     *,
     session_exists: Callable[[str], bool],
     delivery_root: Path | None = None,
-    store_path: Path | str | None = None,
     now: int | None = None,
 ) -> dict:
     """The first pass after a (re)start. Same core as :func:`sweep`, but a
@@ -189,7 +185,6 @@ def reconcile_on_startup(
     result = sweep(
         session_exists=session_exists,
         delivery_root=delivery_root,
-        store_path=store_path,
         now=now,
         overdue_reason="reconciled",
     )
