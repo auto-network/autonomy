@@ -280,6 +280,30 @@ the floor; charm is optional.
   host directory instead, see DEPLOY.md's "Choosing where the data lives
   on the host" — `deploy/docker-compose.host-data.yml` +
   `AUTONOMY_HOST_DATA_ROOT`.
+- **To reset and start fresh** (abandon this install's identity/org and
+  re-run first-boot, e.g. to switch from `AUTONOMY_FIRST_ORG` to
+  `AUTONOMY_INVITE`/`AUTONOMY_FLEET_INVITE` or vice versa): first-run
+  initialization is idempotent, so re-running `docker compose up` against
+  an already-bootstrapped volume is a no-op for the founding mode — it sees
+  the work as already done and won't switch paths. A real reset needs the
+  volumes gone, not just emptied:
+  ```bash
+  docker compose down
+  docker volume rm autonomy-code autonomy-data autonomy-orgs   # + dolt-data if using --profile beads
+  ```
+  If using `deploy/docker-compose.host-data.yml` (data on a host directory),
+  removing the named volumes does **not** delete that directory's contents —
+  clear it explicitly before recreating the volumes, and do it through a
+  throwaway container, not directly as the host user: some files under
+  `autonomy-code` are written root-owned during the image's own init steps
+  (verified live 2026-08-25), so a plain `rm -rf` as the operator can leave
+  permission-denied leftovers that make Docker treat the volume as
+  non-empty and skip its usual seed-from-image on next creation.
+  ```bash
+  docker run --rm -v "$AUTONOMY_HOST_DATA_ROOT/code:/w" alpine sh -c 'rm -rf /w/* /w/.[!.]*'
+  # repeat for data/, orgs/, dolt/ under the same root
+  ```
+  Then re-run the install command for the founding mode you actually want.
 - TLS is self-signed by default; `DASHBOARD_TLS=off` behind your own
   proxy. Port: `DASHBOARD_PORT` (default 8080).
 - The optional beads issue-tracker backend is a separate compose profile
