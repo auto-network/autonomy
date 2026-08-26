@@ -794,6 +794,30 @@ _MAX_CONSECUTIVE_DIRTY_PASSES = 10
 # reconciliation tick re-enters (WF backstop).
 _MAX_HANDOVER_STEPS = 20
 
+# Per-window read cap. A resume revives the row with file_offset=0 for full
+# backfill; an unbounded read then hands the ENTIRE rollout to the loop task
+# as one window, and publish+persist of a 100MB window stalls the event loop
+# for seconds per pass — the whole dashboard hangs while one big session
+# relaunches (auto-0821-154759). Capping the window keeps each loop hold
+# short; the drain protocol already continues via gate.dirty / the handover
+# step loop, so a capped read is indistinguishable from having observed the
+# file earlier in its growth (no model change — the interleaving is already
+# in RolloutIngestion's nondeterminism).
+_TAIL_WINDOW_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _read_line_bounded(fh, max_bytes: int = _TAIL_WINDOW_MAX_BYTES) -> bytes:
+    """Read up to ~max_bytes from fh, extending past the cap only as far as
+    needed to include at least one complete line (a single line larger than
+    the cap must still make progress, or the drain would spin forever)."""
+    data = fh.read(max_bytes)
+    while data and b"\n" not in data:
+        more = fh.read(max_bytes)
+        if not more:
+            break
+        data += more
+    return data
+
 
 @dataclass
 class _FileTrack:
@@ -1272,6 +1296,16 @@ class SessionMonitor:
         # write outcome — composer detection must run for this launch even if
         # the row was already in the proposed state.
         self._screen_poll_armed.add(tmux_name)
+        # Reset the poller's per-launch timers with the arm. These describe
+        # the PREVIOUS attempt's pane; nothing clears them when an attempt
+        # fails, and a grace timer left expired by attempt N makes attempt
+        # N+1's first readable poll instant-promote composer_ready — the
+        # worker then injects into a harness that isn't ready (or a pane
+        # that is about to die), the same class of lie revive_session's
+        # harness_state wipe exists to prevent (auto-0821-154759).
+        self._harness_ready_grace.pop(tmux_name, None)
+        self._screen_stuck_since.pop(tmux_name, None)
+        self._self_repair_filed.discard(tmux_name)
         if changed:
             await self._broadcast_registry()
         return changed
@@ -3106,7 +3140,7 @@ class SessionMonitor:
         try:
             with open(jsonl_path, "rb") as fh:
                 fh.seek(file_offset)
-                data = fh.read()
+                data = _read_line_bounded(fh)
         except OSError:
             return None
         last_nl = data.rfind(b"\n")
@@ -3156,7 +3190,7 @@ class SessionMonitor:
         try:
             with open(p, "rb") as fh:
                 fh.seek(start_offset)
-                data = fh.read()
+                data = _read_line_bounded(fh)
         except OSError:
             return None
         last_nl = data.rfind(b"\n")
@@ -4447,31 +4481,38 @@ class SessionMonitor:
         jsonl_path_str = row.get("jsonl_path")
         if not jsonl_path_str:
             return
-        try:
-            jsonl_path = Path(jsonl_path_str)
-            if not jsonl_path.exists():
-                return
-            # Current file_offset marks the boundary; everything before it is history.
-            file_offset = row.get("file_offset", 0) or 0
-            if file_offset <= 0:
-                return
-            with open(jsonl_path, "rb") as fh:
-                data = fh.read(file_offset)
-        except OSError:
+        jsonl_path = Path(jsonl_path_str)
+        # Current file_offset marks the boundary; everything before it is history.
+        file_offset = row.get("file_offset", 0) or 0
+        if file_offset <= 0:
             return
-        reader = session_harness_mod.resolve_harness_for_path(jsonl_path)
-        prior: list = []
-        for raw_line in data.splitlines():
-            line = raw_line.decode("utf-8", errors="replace").strip()
-            if not line:
-                continue
-            parsed = reader.parse_line(line)
-            if parsed is None:
-                continue
-            if isinstance(parsed, list):
-                prior.extend(parsed)
-            else:
-                prior.append(parsed)
+
+        def _read_and_parse_history() -> list:
+            # Pure read+parse, off-loop: a large session's history is tens of
+            # MB and parsing it inline stalled the event loop for seconds.
+            try:
+                if not jsonl_path.exists():
+                    return []
+                with open(jsonl_path, "rb") as fh:
+                    data = fh.read(file_offset)
+            except OSError:
+                return []
+            reader = session_harness_mod.resolve_harness_for_path(jsonl_path)
+            entries: list = []
+            for raw_line in data.splitlines():
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                parsed = reader.parse_line(line)
+                if parsed is None:
+                    continue
+                if isinstance(parsed, list):
+                    entries.extend(parsed)
+                else:
+                    entries.append(parsed)
+            return entries
+
+        prior = await asyncio.to_thread(_read_and_parse_history)
         if self._entry_enricher is None:
             return
         if prior:
