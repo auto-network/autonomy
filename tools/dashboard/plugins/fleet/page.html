@@ -84,6 +84,12 @@
                     <div><dt>Last result</dt><dd x-text="resultLabel(machine)"></dd></div>
                     <div><dt>Applied here</dt><dd class="mono" x-text="machine.rowKind === 'pending_admission' ? '—' : numberLabel(machine.transactionsApplied)"></dd></div>
                     <div><dt>Transferred here</dt><dd class="mono" x-text="machine.rowKind === 'pending_admission' ? '—' : bytesLabel(machine.bytesSent + machine.bytesReceived)"></dd></div>
+                    <div><dt>Sync iterations</dt><dd class="mono" x-text="machine.rowKind === 'pending_admission' ? '—' : numberLabel(machine.syncIterations)"></dd></div>
+                    <div><dt>Last duration</dt><dd class="mono" x-text="machine.rowKind === 'pending_admission' || !machine.syncIterations ? '—' : durationLabel(machine.lastSyncDurationMs)"></dd></div>
+                    <div><dt>Total sync time</dt><dd class="mono" x-text="machine.rowKind === 'pending_admission' || !machine.syncIterations ? '—' : durationLabel(machine.totalSyncDurationMs)"></dd></div>
+                    <div><dt>Completed / failed</dt><dd class="mono" x-text="machine.rowKind === 'pending_admission' ? '—' : numberLabel(machine.successfulIterations) + ' / ' + numberLabel(machine.failedIterations)"></dd></div>
+                    <div><dt>Mutation frames</dt><dd class="mono" x-text="machine.rowKind === 'pending_admission' ? '—' : numberLabel(machine.mutationFrames)"></dd></div>
+                    <div><dt>Transactions moved</dt><dd class="mono" x-text="machine.rowKind === 'pending_admission' ? '—' : numberLabel(machine.transactionsTransferred)"></dd></div>
                     <div x-show="machine.lastErrorCode"><dt>Last error</dt><dd class="error-code" x-text="machine.lastErrorCode"></dd></div>
                   </dl>
                   <button x-show="machine.rowKind === 'pending_admission' && machine.standing === 'pending_approval' && machine.sourceApprovalId"
@@ -152,6 +158,9 @@
             <dl class="fleet-activity">
               <div><dt>Applied</dt><dd x-text="numberLabel(activity.transactionsApplied)"></dd></div>
               <div><dt>Transferred</dt><dd x-text="bytesLabel(activity.bytesSent + activity.bytesReceived)"></dd></div>
+              <div><dt>Sync iterations</dt><dd x-text="numberLabel(activity.syncIterations)"></dd></div>
+              <div><dt>Total sync time</dt><dd x-text="durationLabel(activity.totalSyncDurationMs)"></dd></div>
+              <div><dt>Completed / failed</dt><dd x-text="numberLabel(activity.successfulIterations) + ' / ' + numberLabel(activity.failedIterations)"></dd></div>
             </dl>
             <p>This Dashboard · current roster</p>
           </div>

@@ -5,12 +5,10 @@ listener and outbound peer sessions, while each SQLite operation uses a short
 fresh connection on a worker thread. No file watcher, daemon, or long-lived
 database transaction participates.
 
-This first production slice replays the retained authored journal on every
-successful pull, reading and releasing one complete transaction at a time.
-Remote application is idempotent, so reconnect is safe even
-when a prior connection died after committing a transaction but before its
-summary arrived. Exact peer ACK floors and journal retirement are a later
-contract; replay avoids inventing an unsafe scalar cursor in the meantime.
+Each receiver acknowledges the serving database's local transaction row id
+only after it verifies the terminal stream summary. A reconnect can replay the
+last incomplete page safely, while an ordinary poll requests only transactions
+inserted after the last completed stream.
 """
 
 from __future__ import annotations
@@ -51,10 +49,15 @@ from tools.network.relaykit.direct import new_session_id
 
 logger = logging.getLogger(__name__)
 
-FLEET_SYNC_PROTOCOL_VERSION = 1
-_REQUEST_FIELDS = frozenset({"v", "op", "roster_epoch"})
+FLEET_SYNC_PROTOCOL_VERSION = 2
+_REQUEST_FIELDS = frozenset({
+    "v", "op", "roster_epoch", "after_transaction_ref",
+})
 _DONE_FIELDS = frozenset(
-    {"v", "kind", "roster_epoch", "message_count", "digest"}
+    {
+        "v", "kind", "roster_epoch", "message_count", "digest",
+        "through_transaction_ref",
+    }
 )
 _MUTATION_MAGIC = b"FST1"
 _DONE_MAGIC = b"FSD1"
@@ -83,10 +86,12 @@ class FleetSyncRuntimeConfig:
     require_delegation: bool = False
     listen_host: str = "127.0.0.1"
     listen_port: int = 0
-    poll_interval: float = 1.0
+    poll_interval: float = 10.0
     connect_timeout: float = 3.0
     min_backoff: float = 0.25
     max_backoff: float = 5.0
+    telemetry_recorder: Callable[..., object] | None = None
+    resume_cursor: Callable[[str], int] | None = None
 
 
 def roster_epoch(entries: Iterable[RosterEntry], root_pub: str) -> str:
@@ -113,13 +118,24 @@ def _json_object(raw: bytes, fields: frozenset[str], what: str) -> dict:
     return value
 
 
-def encode_pull_request(epoch: str) -> bytes:
+def encode_pull_request(epoch: str, *, after_transaction_ref: int = 0) -> bytes:
+    if (
+        isinstance(after_transaction_ref, bool)
+        or not isinstance(after_transaction_ref, int)
+        or after_transaction_ref < 0
+    ):
+        raise FleetSyncProtocolError("after_transaction_ref is malformed")
     return canonical_json(
-        {"v": FLEET_SYNC_PROTOCOL_VERSION, "op": "pull", "roster_epoch": epoch}
+        {
+            "v": FLEET_SYNC_PROTOCOL_VERSION,
+            "op": "pull",
+            "roster_epoch": epoch,
+            "after_transaction_ref": after_transaction_ref,
+        }
     )
 
 
-def decode_pull_request(raw: bytes) -> str:
+def decode_pull_request(raw: bytes) -> tuple[str, int]:
     value = _json_object(raw, _REQUEST_FIELDS, "fleet sync request")
     if value["op"] != "pull":
         raise FleetSyncProtocolError("unsupported fleet sync operation")
@@ -130,7 +146,10 @@ def decode_pull_request(raw: bytes) -> str:
         or any(ch not in "0123456789abcdef" for ch in epoch)
     ):
         raise FleetSyncProtocolError("fleet sync roster_epoch is malformed")
-    return epoch
+    after = value["after_transaction_ref"]
+    if isinstance(after, bool) or not isinstance(after, int) or after < 0:
+        raise FleetSyncProtocolError("after_transaction_ref is malformed")
+    return epoch, after
 
 
 def encode_authored(item: AuthoredMutation, *, transaction_operations: int) -> bytes:
@@ -194,7 +213,15 @@ def decode_authored(raw: bytes) -> tuple[AuthoredMutation, int]:
     return AuthoredMutation(origin, transaction, operation, mutation), operation_count
 
 
-def encode_done(*, epoch: str, count: int, digest: str) -> bytes:
+def encode_done(
+    *, epoch: str, count: int, digest: str, through_transaction_ref: int = 0,
+) -> bytes:
+    if (
+        isinstance(through_transaction_ref, bool)
+        or not isinstance(through_transaction_ref, int)
+        or through_transaction_ref < 0
+    ):
+        raise FleetSyncProtocolError("through_transaction_ref is malformed")
     return _DONE_MAGIC + canonical_json(
         {
             "v": FLEET_SYNC_PROTOCOL_VERSION,
@@ -202,11 +229,12 @@ def encode_done(*, epoch: str, count: int, digest: str) -> bytes:
             "roster_epoch": epoch,
             "message_count": count,
             "digest": digest,
+            "through_transaction_ref": through_transaction_ref,
         }
     )
 
 
-def decode_done(raw: bytes) -> tuple[str, int, str]:
+def decode_done(raw: bytes) -> tuple[str, int, str, int]:
     if not raw.startswith(_DONE_MAGIC):
         raise FleetSyncProtocolError("fleet sync summary has wrong magic")
     value = _json_object(raw[len(_DONE_MAGIC):], _DONE_FIELDS, "fleet sync summary")
@@ -215,6 +243,7 @@ def decode_done(raw: bytes) -> tuple[str, int, str]:
     epoch = value["roster_epoch"]
     digest = value["digest"]
     count = value["message_count"]
+    through = value["through_transaction_ref"]
     for name, candidate in (("roster_epoch", epoch), ("digest", digest)):
         if (
             not isinstance(candidate, str)
@@ -224,7 +253,11 @@ def decode_done(raw: bytes) -> tuple[str, int, str]:
             raise FleetSyncProtocolError(f"fleet sync summary {name} is malformed")
     if not isinstance(count, int) or isinstance(count, bool) or count < 0:
         raise FleetSyncProtocolError("fleet sync summary message_count is malformed")
-    return epoch, count, digest
+    if isinstance(through, bool) or not isinstance(through, int) or through < 0:
+        raise FleetSyncProtocolError(
+            "fleet sync summary through_transaction_ref is malformed"
+        )
+    return epoch, count, digest, through
 
 
 def _digest_add(digest, message: bytes) -> None:
@@ -252,11 +285,11 @@ class SQLiteFleetSyncStore:
         return conn, catalog
 
     def next_transaction(
-        self, after: tuple[int, str, str] | None
-    ) -> tuple[tuple[int, str, str], list[AuthoredMutation]] | None:
+        self, after_transaction_ref: int
+    ) -> tuple[int, list[AuthoredMutation]] | None:
         conn, catalog = self._open()
         try:
-            return catalog.next_journal_transaction(after)
+            return catalog.next_journal_transaction_ref(after_transaction_ref)
         finally:
             conn.close()
 
@@ -426,34 +459,96 @@ class FleetSyncScheduler:
                 logger.warning("fleet roster refresh failed", exc_info=True)
 
     async def _handle(
-        self, _token: str, message: bytes, peer_pub: str
+        self,
+        _token: str,
+        message: bytes,
+        peer_pub: str,
+        *,
+        telemetry_channel: str = "direct",
+        telemetry_mode: str = "delta",
+        telemetry_stats: dict[str, int] | None = None,
+        telemetry_started_at_ns: int | None = None,
+        telemetry_started_monotonic_ns: int | None = None,
     ):
-        decode_pull_request(message)
+        _requested_epoch, requested_after = decode_pull_request(message)
         epoch = self._current_epoch()
+        record_here = telemetry_stats is None
+        stats = telemetry_stats if telemetry_stats is not None else {}
+        stats.setdefault("bytes_sent", 0)
+        stats.setdefault("bytes_received", len(message))
+        stats.setdefault("mutation_frames", 0)
+        stats.setdefault("transactions", 0)
+        stats.setdefault("checkpoint_bytes", 0)
+        started_at_ns = telemetry_started_at_ns or time.time_ns()
+        started_monotonic_ns = (
+            telemetry_started_monotonic_ns or time.monotonic_ns()
+        )
 
         async def response():
             digest = hashlib.sha256()
             count = 0
-            cursor: tuple[int, str, str] | None = None
-            while True:
-                self.authenticator.authorize(peer_pub)
-                page = await asyncio.to_thread(
-                    self.store.next_transaction, cursor
-                )
-                if page is None:
-                    break
-                cursor, items = page
-                operation_count = len(items)
-                for item in items:
+            cursor = requested_after
+            outcome = "failed"
+            error_code = "stream_incomplete"
+            try:
+                while True:
                     self.authenticator.authorize(peer_pub)
-                    encoded = encode_authored(
-                        item, transaction_operations=operation_count
+                    page = await asyncio.to_thread(
+                        self.store.next_transaction, cursor
                     )
-                    _digest_add(digest, encoded)
-                    count += 1
-                    yield encoded
-            self.authenticator.authorize(peer_pub)
-            yield encode_done(epoch=epoch, count=count, digest=digest.hexdigest())
+                    if page is None:
+                        break
+                    cursor, items = page
+                    stats["transactions"] += 1
+                    operation_count = len(items)
+                    for item in items:
+                        self.authenticator.authorize(peer_pub)
+                        encoded = encode_authored(
+                            item, transaction_operations=operation_count
+                        )
+                        _digest_add(digest, encoded)
+                        count += 1
+                        stats["mutation_frames"] += 1
+                        stats["bytes_sent"] += len(encoded)
+                        yield encoded
+                self.authenticator.authorize(peer_pub)
+                done = encode_done(
+                    epoch=epoch,
+                    count=count,
+                    digest=digest.hexdigest(),
+                    through_transaction_ref=cursor,
+                )
+                stats["bytes_sent"] += len(done)
+                yield done
+                outcome = "success"
+                error_code = ""
+            except asyncio.CancelledError:
+                outcome = "cancelled"
+                error_code = ""
+                raise
+            except Exception as exc:
+                error_code = type(exc).__name__
+                raise
+            finally:
+                recorder = self.config.telemetry_recorder
+                if record_here and recorder is not None:
+                    duration_ms = max(
+                        0,
+                        (time.monotonic_ns() - started_monotonic_ns) // 1_000_000,
+                    )
+                    with contextlib.suppress(Exception):
+                        await asyncio.to_thread(
+                            recorder,
+                            peer_pub,
+                            channel=telemetry_channel,
+                            direction="serve",
+                            mode=telemetry_mode,
+                            outcome=outcome,
+                            started_at_ns=started_at_ns,
+                            duration_ms=duration_ms,
+                            error_code=error_code,
+                            **stats,
+                        )
 
         return response()
 
@@ -488,7 +583,46 @@ class FleetSyncScheduler:
         channel = None
         sent = 0
         received = 0
+        mutation_frames = 0
+        transactions = 0
+        started_at_ns = time.time_ns()
+        started_monotonic_ns = time.monotonic_ns()
         peer_watermark: int | None = None
+
+        async def record(
+            outcome: str,
+            error_code: str = "",
+            acknowledged_transaction_ref: int | None = None,
+        ) -> None:
+            recorder = self.config.telemetry_recorder
+            if recorder is None:
+                return
+            duration_ms = max(
+                0, (time.monotonic_ns() - started_monotonic_ns) // 1_000_000
+            )
+            values = {
+                "channel": "direct",
+                "direction": "pull",
+                "mode": "delta",
+                "outcome": outcome,
+                "started_at_ns": started_at_ns,
+                "duration_ms": duration_ms,
+                "bytes_sent": sent,
+                "bytes_received": received,
+                "mutation_frames": mutation_frames,
+                "transactions": transactions,
+                "error_code": error_code,
+            }
+            if acknowledged_transaction_ref is not None:
+                values["acknowledged_transaction_ref"] = (
+                    acknowledged_transaction_ref
+                )
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(
+                    recorder,
+                    machine_pub,
+                    **values,
+                )
         try:
             last_error: Exception | None = None
             for address in addresses:
@@ -510,7 +644,14 @@ class FleetSyncScheduler:
             await asyncio.to_thread(
                 self.store.record_peer, machine_pub, epoch, online=True
             )
-            request = encode_pull_request(epoch)
+            after_transaction_ref = 0
+            if self.config.resume_cursor is not None:
+                after_transaction_ref = await asyncio.to_thread(
+                    self.config.resume_cursor, machine_pub
+                )
+            request = encode_pull_request(
+                epoch, after_transaction_ref=after_transaction_ref
+            )
             sent += len(request)
             await channel.send_message(request)
 
@@ -520,10 +661,12 @@ class FleetSyncScheduler:
             pending_identity = None
             pending_count: int | None = None
             saw_done = False
+            through_transaction_ref = after_transaction_ref
 
             async def apply_pending(items: list[AuthoredMutation]) -> None:
-                nonlocal peer_watermark
+                nonlocal peer_watermark, transactions
                 won, _ignored = await asyncio.to_thread(self.store.apply, items)
+                transactions += 1
                 peer_watermark = max(
                     item.mutation.timestamp_ns for item in items
                 )
@@ -553,7 +696,12 @@ class FleetSyncScheduler:
                 self.authenticator.authorize(machine_pub)
                 received += len(message)
                 if message.startswith(_DONE_MAGIC):
-                    remote_epoch, expected_count, expected_digest = decode_done(message)
+                    (
+                        remote_epoch,
+                        expected_count,
+                        expected_digest,
+                        through_transaction_ref,
+                    ) = decode_done(message)
                     if not stream_final:
                         raise FleetSyncProtocolError("fleet summary is not final")
                     if pending:
@@ -586,6 +734,7 @@ class FleetSyncScheduler:
                 pending.append(item)
                 _digest_add(digest, message)
                 message_count += 1
+                mutation_frames += 1
             if not saw_done:
                 raise FleetSyncProtocolError("fleet stream ended without summary")
 
@@ -603,6 +752,10 @@ class FleetSyncScheduler:
             )
             self._failures.pop(machine_pub, None)
             self._next_attempt.pop(machine_pub, None)
+            await record(
+                "success",
+                acknowledged_transaction_ref=through_transaction_ref,
+            )
         except asyncio.CancelledError:
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(
@@ -613,6 +766,7 @@ class FleetSyncScheduler:
                     bytes_sent=sent,
                     bytes_received=received,
                 )
+            await record("cancelled")
             raise
         except Exception as exc:
             failures = self._failures.get(machine_pub, 0) + 1
@@ -635,6 +789,7 @@ class FleetSyncScheduler:
                     retries=1,
                     error=type(exc).__name__,
                 )
+            await record("failed", type(exc).__name__)
             logger.warning(
                 "fleet sync peer %s failed (%s)",
                 machine_pub[:12],

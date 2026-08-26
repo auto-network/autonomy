@@ -38,7 +38,7 @@ def _admission(approval_id: str, *, status="pending", error=None, offset=0):
 def _inputs(
     *, entries=(), admissions=(), approvals=None, executing=(),
     invitation=None, machine_names=None, invitation_publication=None,
-    publishing_org="autonomy",
+    publishing_org="autonomy", telemetry_rows=None,
 ):
     root = ROOT
     return ProjectionInputs(
@@ -64,6 +64,7 @@ def _inputs(
         machine_names=machine_names or {},
         invitation_publication=invitation_publication,
         publishing_org=publishing_org,
+        telemetry_rows=telemetry_rows or {},
     )
 
 
@@ -96,6 +97,43 @@ def test_projection_joins_roster_local_tunnel_and_current_epoch_observations():
     assert remote["bytesSent"] + remote["bytesReceived"] == 400
     assert view["activity"]["transactionsApplied"] == 12
     assert view["activity"]["scope"] == "this_dashboard_current_roster"
+
+
+def test_machine_local_telemetry_drives_transfer_and_iteration_counters():
+    view = project(_inputs(
+        entries=(LOCAL_ENTRY, REMOTE_ENTRY),
+        telemetry_rows={
+            REMOTE.public_hex: {
+                "iterations": 4,
+                "successful_iterations": 3,
+                "failed_iterations": 1,
+                "cancelled_iterations": 0,
+                "total_duration_ms": 412_500,
+                "last_duration_ms": 2_500,
+                "bytes_sent": 61_460_671,
+                "bytes_received": 512,
+                "mutation_frames": 347_760,
+                "transactions": 64_579,
+                "checkpoint_bytes": 0,
+                "last_outcome": "success",
+                "last_success_at_ns": (NOW - 500) * 1_000_000,
+            },
+        },
+    ))
+
+    remote = next(row for row in view["machines"] if row["machineId"] == REMOTE_ID)
+    assert remote["syncIterations"] == 4
+    assert remote["successfulIterations"] == 3
+    assert remote["failedIterations"] == 1
+    assert remote["lastSyncDurationMs"] == 2_500
+    assert remote["totalSyncDurationMs"] == 412_500
+    assert remote["bytesSent"] == 61_460_671
+    assert remote["bytesReceived"] == 512
+    assert remote["mutationFrames"] == 347_760
+    assert remote["transactionsTransferred"] == 64_579
+    assert remote["lastSuccessfulSyncAt"] == NOW - 500
+    assert view["activity"]["syncIterations"] == 4
+    assert view["activity"]["totalSyncDurationMs"] == 412_500
 
 
 def test_human_machine_name_overrides_unsigned_fallback_label():

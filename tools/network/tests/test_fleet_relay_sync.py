@@ -93,7 +93,7 @@ async def test_connector_stream_requires_fleet_machine_hello_and_chunks_checkpoi
     assert server.scheduler.authenticator.machine_key.public_hex \
         == server_process.public_hex
 
-    async def fake_handle(_token, _message, _peer_pub):
+    async def fake_handle(_token, _message, _peer_pub, **_telemetry):
         async def response():
             yield encode_done(
                 epoch="ef" * 32,
@@ -119,6 +119,7 @@ async def test_connector_stream_requires_fleet_machine_hello_and_chunks_checkpoi
         "op": "fleet.sync.pull",
         "roster_epoch": "cd" * 32,
         "checkpoint": True,
+        "after_transaction_ref": 0,
         "hello": json.loads(hello),
     })
     frames = [frame async for frame in stream]
@@ -141,7 +142,7 @@ async def test_connector_stream_requires_fleet_machine_hello_and_chunks_checkpoi
         "total_bytes": 17,
     }
     assert decode_done(frames[-1])[1:] == (
-        0, __import__("hashlib").sha256().hexdigest()
+        0, __import__("hashlib").sha256().hexdigest(), 0,
     )
 
 

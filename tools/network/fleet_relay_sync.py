@@ -15,6 +15,7 @@ change this protocol.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -23,11 +24,17 @@ import sqlite3
 import shutil
 import struct
 import tempfile
+import time
 import urllib.parse
 from pathlib import Path, PurePosixPath
 
 from tools.graph.db import _org_db_path
-from tools.network import fleet_roster, fleet_route, fleet_runtime
+from tools.network import (
+    fleet_roster,
+    fleet_route,
+    fleet_runtime,
+    fleet_sync_telemetry,
+)
 from tools.network.fleet_sync_channel import FleetAuthenticator
 from tools.network.fleet_sync_scheduler import (
     _DONE_MAGIC,
@@ -54,7 +61,9 @@ CONTROL_OP = "fleet-runtime"
 FILE_MAGIC = b"FSB1"
 MAX_CHECKPOINT_FILES = 4096
 MAX_CHECKPOINT_BYTES = 4 * 1024 * 1024 * 1024
-_REQUEST_FIELDS = {"v", "op", "roster_epoch", "checkpoint", "hello"}
+_REQUEST_FIELDS = {
+    "v", "op", "roster_epoch", "checkpoint", "after_transaction_ref", "hello",
+}
 
 
 class FleetRelaySyncError(RuntimeError):
@@ -142,6 +151,7 @@ class ConnectorFleetRuntime:
             roster_entries=lambda: fleet_roster.load_entries(org=None),
             peer_addresses=lambda: {},
             personal_db_path=_org_db_path("personal"),
+            telemetry_recorder=fleet_sync_telemetry.record_iteration,
         )
         scheduler = FleetSyncScheduler(config)
         scheduler._roster_snapshot = entries
@@ -162,6 +172,13 @@ class ConnectorFleetRuntime:
         include_checkpoint = message.get("checkpoint")
         if not isinstance(include_checkpoint, bool):
             raise FleetRelaySyncError("fleet sync pull checkpoint flag must be bool")
+        after_transaction_ref = message.get("after_transaction_ref")
+        if (
+            isinstance(after_transaction_ref, bool)
+            or not isinstance(after_transaction_ref, int)
+            or after_transaction_ref < 0
+        ):
+            raise FleetRelaySyncError("fleet sync pull position is malformed")
         hello = canonical_json(message.get("hello"))
         peer_pub, _private, server_hello, _transcript = (
             scheduler.authenticator.accept_client(hello, session=token)
@@ -173,15 +190,28 @@ class ConnectorFleetRuntime:
         )
 
         async def stream():
+            started_at_ns = time.time_ns()
+            started_monotonic_ns = time.monotonic_ns()
+            stats = {
+                "bytes_sent": 0,
+                "bytes_received": len(canonical_json(message)),
+                "mutation_frames": 0,
+                "transactions": 0,
+                "checkpoint_bytes": 0,
+            }
+            outcome = "failed"
+            error_code = "stream_incomplete"
             root = Path(tempfile.mkdtemp(prefix="fleet-relay-checkpoint-"))
             checkpoint = root / "checkpoint"
             try:
-                yield canonical_json({
+                server_hello_frame = canonical_json({
                     "v": PROTOCOL_VERSION,
                     "kind": "fleet.server-hello",
                     "hello": _json(server_hello, "fleet server hello"),
                     "roster_epoch": current_epoch,
                 })
+                stats["bytes_sent"] += len(server_hello_frame)
+                yield server_hello_frame
                 if include_checkpoint:
                     active = tuple(sorted(fleet_roster.resolve(
                         scheduler._roster_snapshot,
@@ -206,7 +236,7 @@ class ConnectorFleetRuntime:
                     total = sum(path.stat().st_size for path in files)
                     if len(files) > MAX_CHECKPOINT_FILES or total > MAX_CHECKPOINT_BYTES:
                         raise FleetRelaySyncError("checkpoint exceeds relay bounds")
-                    yield canonical_json({
+                    begin = canonical_json({
                         "v": PROTOCOL_VERSION,
                         "kind": "checkpoint.begin",
                         "file_count": len(files),
@@ -214,23 +244,46 @@ class ConnectorFleetRuntime:
                         "source_machine_pub": scheduler.authenticator.machine_pub,
                         "roster_epoch": current_epoch,
                     })
+                    stats["bytes_sent"] += len(begin)
+                    yield begin
                     for path in files:
                         scheduler.authenticator.authorize(peer_pub)
                         relative = path.relative_to(checkpoint).as_posix()
-                        yield _encode_file(
+                        encoded_file = _encode_file(
                             relative, await asyncio.to_thread(path.read_bytes)
                         )
-                    yield canonical_json({
+                        stats["bytes_sent"] += len(encoded_file)
+                        stats["checkpoint_bytes"] += path.stat().st_size
+                        yield encoded_file
+                    end = canonical_json({
                         "v": PROTOCOL_VERSION,
                         "kind": "checkpoint.end",
                         "file_count": len(files),
                         "total_bytes": total,
                     })
+                    stats["bytes_sent"] += len(end)
+                    yield end
                 deltas = await scheduler._handle(
-                    token, encode_pull_request(requested_epoch), peer_pub
+                    token,
+                    encode_pull_request(
+                        requested_epoch,
+                        after_transaction_ref=after_transaction_ref,
+                    ),
+                    peer_pub,
+                    telemetry_channel="relay",
+                    telemetry_mode="checkpoint" if include_checkpoint else "delta",
+                    telemetry_stats=stats,
+                    telemetry_started_at_ns=started_at_ns,
+                    telemetry_started_monotonic_ns=started_monotonic_ns,
                 )
                 async for frame in deltas:
                     yield frame
+                outcome = "success"
+                error_code = ""
+            except asyncio.CancelledError:
+                outcome = "cancelled"
+                error_code = ""
+                raise
             except Exception:
                 # This generator's own body -- everything from the
                 # server-hello yield onward -- runs lazily, driven by
@@ -243,9 +296,29 @@ class ConnectorFleetRuntime:
                 # with nothing logged anywhere. Found live 2026-08-23
                 # chasing exactly that symptom.
                 logger.warning("fleet relay sync stream failed", exc_info=True)
+                error_code = "relay_stream_failed"
                 raise
             finally:
                 shutil.rmtree(root, ignore_errors=True)
+                recorder = scheduler.config.telemetry_recorder
+                if recorder is not None:
+                    with contextlib.suppress(Exception):
+                        await asyncio.to_thread(
+                            recorder,
+                            peer_pub,
+                            channel="relay",
+                            direction="serve",
+                            mode="checkpoint" if include_checkpoint else "delta",
+                            outcome=outcome,
+                            started_at_ns=started_at_ns,
+                            duration_ms=max(
+                                0,
+                                (time.monotonic_ns() - started_monotonic_ns)
+                                // 1_000_000,
+                            ),
+                            error_code=error_code,
+                            **stats,
+                        )
 
         return stream()
 
@@ -290,7 +363,16 @@ async def pull_checkpoint_once(
     route: fleet_route.FleetRoute,
     *,
     include_checkpoint: bool = True,
-) -> None:
+    metrics: dict[str, int] | None = None,
+) -> dict[str, int]:
+    metrics = metrics if metrics is not None else {}
+    metrics.update({
+        "bytes_sent": 0,
+        "bytes_received": 0,
+        "mutation_frames": 0,
+        "transactions": 0,
+        "checkpoint_bytes": 0,
+    })
     entries = tuple(fleet_roster.load_entries(org=None))
     root_pub = credential.delegation_cert.org.removeprefix("personal:")
     auth = FleetAuthenticator(
@@ -316,13 +398,20 @@ async def pull_checkpoint_once(
     try:
         private, hello = auth.build_client_hello(token)
         client_eph = _json(hello, "fleet client hello")["eph_pub"]
-        await channel.send_message(canonical_json({
+        after_transaction_ref = await asyncio.to_thread(
+            fleet_sync_telemetry.read_acknowledged_transaction_ref,
+            route.origin_machine_pub,
+        )
+        request = canonical_json({
             "v": PROTOCOL_VERSION,
             "op": PULL_OP,
             "roster_epoch": epoch,
             "checkpoint": include_checkpoint,
+            "after_transaction_ref": after_transaction_ref,
             "hello": _json(hello, "fleet client hello"),
-        }))
+        })
+        metrics["bytes_sent"] += len(request)
+        await channel.send_message(request)
         expected_files = expected_bytes = seen_files = seen_bytes = None
         saw_hello = False
         installed_checkpoint = False
@@ -345,9 +434,11 @@ async def pull_checkpoint_once(
                     "fleet relay transaction is incomplete or out of order"
                 )
             await asyncio.to_thread(store.apply, pending)
+            metrics["transactions"] += 1
             pending = []
 
         async for raw, final in channel.recv_message_stream():
+            metrics["bytes_received"] += len(raw)
             if not saw_hello:
                 first = _json(raw, "fleet server hello envelope")
                 if first.get("kind") == "fleet.server-error":
@@ -385,14 +476,23 @@ async def pull_checkpoint_once(
                 delta_digest.update(struct.pack(">Q", len(raw)))
                 delta_digest.update(raw)
                 delta_count += 1
+                metrics["mutation_frames"] += 1
                 continue
             if raw.startswith(_DONE_MAGIC):
                 await apply_pending()
-                remote_epoch, expected_count, expected_digest = decode_done(raw)
+                (
+                    remote_epoch,
+                    expected_count,
+                    expected_digest,
+                    through_transaction_ref,
+                ) = decode_done(raw)
                 if delta_count != expected_count \
                         or delta_digest.hexdigest() != expected_digest:
                     raise FleetRelaySyncError("fleet relay delta digest mismatch")
                 _ = remote_epoch
+                metrics["acknowledged_transaction_ref"] = (
+                    through_transaction_ref
+                )
                 saw_done = True
                 break
             if raw.startswith(FILE_MAGIC):
@@ -407,6 +507,7 @@ async def pull_checkpoint_once(
                     os.fsync(handle.fileno())
                 seen_files += 1
                 seen_bytes += len(body)
+                metrics["checkpoint_bytes"] += len(body)
                 continue
             value = _json(raw, "checkpoint control")
             kind = value.get("kind")
@@ -471,6 +572,7 @@ async def pull_checkpoint_once(
         )
     finally:
         shutil.rmtree(stage_root, ignore_errors=True)
+    return metrics
 
 
 #: Distinct, greppable classification for the last pull attempt -- the
@@ -536,6 +638,11 @@ class DashboardFleetRelaySyncService:
 
         delay = 0.5
         while self._credential is credential:
+            route = None
+            include_checkpoint = False
+            started_at_ns = time.time_ns()
+            started_monotonic_ns = time.monotonic_ns()
+            metrics: dict[str, int] = {}
             try:
                 route = await asyncio.to_thread(fleet_route.load, org="machine")
                 if route is None:
@@ -546,8 +653,26 @@ class DashboardFleetRelaySyncService:
                     credential.delegation_cert.org.removeprefix("personal:"),
                 )
                 await pull_checkpoint_once(
-                    credential, route, include_checkpoint=include_checkpoint
+                    credential,
+                    route,
+                    include_checkpoint=include_checkpoint,
+                    metrics=metrics,
                 )
+                duration_ms = max(
+                    0, (time.monotonic_ns() - started_monotonic_ns) // 1_000_000
+                )
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(
+                        fleet_sync_telemetry.record_iteration,
+                        route.origin_machine_pub,
+                        channel="relay",
+                        direction="pull",
+                        mode="checkpoint" if include_checkpoint else "delta",
+                        outcome="success",
+                        started_at_ns=started_at_ns,
+                        duration_ms=duration_ms,
+                        **metrics,
+                    )
                 self.last_result = {"outcome": "success", "reason": None, "at": time.time()}
                 # The happy path was completely silent before this line -- a
                 # working delta pull and "nothing has attempted a pull in a
@@ -560,13 +685,49 @@ class DashboardFleetRelaySyncService:
                     "checkpoint" if include_checkpoint else "delta",
                 )
                 delay = 0.5
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(10.0)
             except asyncio.CancelledError:
+                if route is not None:
+                    with contextlib.suppress(Exception):
+                        await asyncio.to_thread(
+                            fleet_sync_telemetry.record_iteration,
+                            route.origin_machine_pub,
+                            channel="relay",
+                            direction="pull",
+                            mode="checkpoint" if include_checkpoint else "delta",
+                            outcome="cancelled",
+                            started_at_ns=started_at_ns,
+                            duration_ms=max(
+                                0,
+                                (time.monotonic_ns() - started_monotonic_ns)
+                                // 1_000_000,
+                            ),
+                            **metrics,
+                        )
                 raise
             except Exception as exc:
+                reason = _classify_pull_failure(exc)
+                if route is not None:
+                    with contextlib.suppress(Exception):
+                        await asyncio.to_thread(
+                            fleet_sync_telemetry.record_iteration,
+                            route.origin_machine_pub,
+                            channel="relay",
+                            direction="pull",
+                            mode="checkpoint" if include_checkpoint else "delta",
+                            outcome="failed",
+                            started_at_ns=started_at_ns,
+                            duration_ms=max(
+                                0,
+                                (time.monotonic_ns() - started_monotonic_ns)
+                                // 1_000_000,
+                            ),
+                            error_code=reason,
+                            **metrics,
+                        )
                 self.last_result = {
                     "outcome": "failed",
-                    "reason": _classify_pull_failure(exc),
+                    "reason": reason,
                     "detail": str(exc)[:300],
                     "at": time.time(),
                 }

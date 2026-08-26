@@ -267,6 +267,8 @@ def _activate_runtime(
     expected_entry: fleet_roster.RosterEntry | None = None,
     publish_connector: bool | None = None,
 ) -> fleet_runtime.FleetRuntimeCredential:
+    from tools.network import fleet_sync_telemetry
+
     context = _runtime_context() if root_pub is None or expected_entry is None else None
     if context is None and (root_pub is None or expected_entry is None):
         raise fleet_runtime.FleetRuntimeError(
@@ -305,6 +307,10 @@ def _activate_runtime(
             # identical to the sync-only path.
             peer_addresses=_reachability_peer_addresses(credential, root_pub),
             personal_db_path=_org_db_path("personal"),
+            telemetry_recorder=fleet_sync_telemetry.record_iteration,
+            resume_cursor=(
+                fleet_sync_telemetry.read_acknowledged_transaction_ref
+            ),
         )
     )
     fleet_relay_sync.dashboard_relay_sync_service.configure(credential)
