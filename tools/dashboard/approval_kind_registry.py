@@ -172,6 +172,8 @@ class ApprovalPlanningContext:
     requester_ref: Mapping[str, str]
     application_scope: str
     producer_id: str | None = None
+    requester_principal_kind: str | None = None
+    requester_org: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

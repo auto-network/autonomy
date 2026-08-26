@@ -40,6 +40,10 @@ from tools.graph.schemas.central_attention import (
     ATTENTION_DELIVERY_SET_ID, ATTENTION_ITEM_SET_ID,
     ATTENTION_PRESENTATION_SET_ID,
 )
+from tools.graph.schemas.link_approval import (
+    LINK_APPROVAL_INTENT_SET_ID,
+    LINK_APPROVAL_RESULT_SET_ID,
+)
 
 ROOT = "a" * 64
 APPROVAL_ID = "approval-1234567890"
@@ -251,6 +255,32 @@ class TestAttentionOperatorAPI:
             headers={"Origin": "https://dashboard.test"}, json={},
         ).status_code == 200
 
+    def test_operator_application_result_is_joined_and_bounded(self, route_client):
+        client, runtime, _producer = route_client
+        runtime.operator_result_projectors = {
+            "test_kind": lambda status: {
+                "approved": status.resolution is not None,
+                "execution": {"ok": True},
+                "url": "https://registry.example/l/" + "5" * 32,
+            },
+        }
+        detail = client.get("/api/attention/items/recipient-item")
+        assert detail.status_code == 200
+        assert detail.headers["cache-control"] == "no-store"
+        assert detail.json()["review"]["application_result"] == {
+            "approved": False,
+            "execution": {"ok": True},
+            "url": "https://registry.example/l/" + "5" * 32,
+        }
+
+        runtime.operator_result_projectors = {
+            "test_kind": lambda _status: {"oversized": "x" * (64 * 1024)},
+        }
+        refused = client.get("/api/attention/items/recipient-item")
+        assert refused.status_code == 503
+        assert refused.headers["cache-control"] == "no-store"
+        assert refused.json() == {"error": "unavailable"}
+
     def test_query_cursor_filters_refresh_and_partial_read(self, route_client):
         client, runtime, producer = route_client
         runtime.index.publish(producer, {
@@ -342,6 +372,39 @@ class TestAttentionOperatorAPI:
                 lambda _request, kind=kind: api_auth.ApiPrincipal(kind, "agent"),
             )
             assert client.get("/api/attention/items").status_code == 403
+
+    def test_link_receipt_forwarder_is_same_origin_item_keyed_and_no_store(
+        self, route_client,
+    ):
+        client, runtime, _producer = route_client
+        path = "/api/attention/items/recipient-item/link-operation-receipt"
+        origin = {"Origin": "https://dashboard.test"}
+        inactive = client.post(path, headers=origin, json={"envelope": {}})
+        assert inactive.status_code == 404
+        assert inactive.headers["Cache-Control"] == "no-store"
+
+        calls = []
+
+        class Forwarder:
+            def forward(self, attention_id, body):
+                if set(body) != {"envelope"}:
+                    from tools.dashboard.link_central import LinkCentralError
+                    raise LinkCentralError("invalid_request")
+                calls.append((attention_id, body))
+                return {"receipt": {"v": 1}, "signature": "signed"}
+
+        runtime.link_receipt_forwarder = Forwarder()
+        selector = client.post(
+            path,
+            headers=origin,
+            json={"envelope": {}, "org": "forged"},
+        )
+        assert selector.status_code == 422 and calls == []
+        accepted = client.post(path, headers=origin, json={"envelope": {}})
+        assert accepted.status_code == 200
+        assert accepted.headers["Cache-Control"] == "no-store"
+        assert accepted.json() == {"receipt": {"v": 1}, "signature": "signed"}
+        assert calls == [("recipient-item", {"envelope": {}})]
 
     def test_lifecycle_binding_mismatch_disabled_and_storage_failure(
         self, route_client,
@@ -653,6 +716,12 @@ async def test_private_hub_thread_coalescing_delete_and_shutdown():
     assert await asyncio.wait_for(queue.get(), timeout=1) == (
         "attention:refresh", {"attention_id": "deleted-item"},
     )
+    thread = threading.Thread(target=hub.emit_refresh, args=("private-link",))
+    thread.start()
+    thread.join()
+    assert await asyncio.wait_for(queue.get(), timeout=1) == (
+        "attention:refresh", {"attention_id": None},
+    )
     await hub.stop()
     hub.emit_setting_change(
         operation="upsert",
@@ -701,21 +770,26 @@ def test_event_bus_scrub_gap_unrelated_and_restart(tmp_path):
         "setting.changed", {"set_id": ATTENTION_ITEM_SET_ID, "key": "private"},
         dedup=False,
     )
+    bus.broadcast_sync(
+        "setting.changed",
+        {"set_id": LINK_APPROVAL_RESULT_SET_ID, "key": "private-link"},
+        dedup=False,
+    )
     bus.broadcast_sync("dispatch", {"active": []}, dedup=False)
     bus.broadcast_sync(
         "setting.changed", {"set_id": "dashboard.feature_flags", "key": "public"},
         dedup=False,
     )
-    malformed = _BufferEntry(5, "setting.changed", "{", 1.0, 1)
+    malformed = _BufferEntry(6, "setting.changed", "{", 1.0, 1)
     bus._buffer.append(malformed)
     bus._buffer_bytes += malformed.size
-    bus._seq = 5
+    bus._seq = 6
     bus._last["setting.changed"] = "{"
-    bus._last_seq["setting.changed"] = 5
-    assert attention_routes.scrub_private_cached_events(bus) == 3
-    assert bus._seq == 5 and "setting.changed" not in bus._last
-    events, complete = bus.replay(1, 4)
-    assert [row["seq"] for row in events] == [1, 3, 4]
+    bus._last_seq["setting.changed"] = 6
+    assert attention_routes.scrub_private_cached_events(bus) == 4
+    assert bus._seq == 6 and "setting.changed" not in bus._last
+    events, complete = bus.replay(1, 5)
+    assert [row["seq"] for row in events] == [1, 4, 5]
     assert complete is False
     assert [
         row for row in events if row["topic"] == "setting.changed"
@@ -741,6 +815,7 @@ def test_server_hook_diverts_all_private_sets(monkeypatch):
         APPROVAL_REQUEST_SET_ID, APPROVAL_RESOLUTION_SET_ID,
         ATTENTION_ITEM_SET_ID, ATTENTION_PRESENTATION_SET_ID,
         ATTENTION_DELIVERY_SET_ID,
+        LINK_APPROVAL_INTENT_SET_ID, LINK_APPROVAL_RESULT_SET_ID,
     ):
         private = {
             "set_id": set_id, "schema_revision": 99, "key": "private-key",
@@ -749,7 +824,7 @@ def test_server_hook_diverts_all_private_sets(monkeypatch):
         server._settings_emit_hook(
             operation="upsert", snapshot=private, org="wrong-org",
         )
-    assert len(delivered) == 5 and bus.all_cached_topics() == []
+    assert len(delivered) == 7 and bus.all_cached_topics() == []
     public = dict(private, set_id="dashboard.feature_flags", schema_revision=1)
     server._settings_emit_hook(operation="upsert", snapshot=public, org=None)
     assert bus.all_cached_topics() == ["setting.changed"]

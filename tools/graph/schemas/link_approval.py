@@ -216,10 +216,12 @@ class LinkApprovalIntentV1(SettingSchema):
         target = payload["target"]
         target_uuid = target.get("target_uuid")
         target_type = target.get("target_type")
-        if not isinstance(target_uuid, str) or _UUID_RE.fullmatch(target_uuid) is None:
-            raise SchemaValidationError("target.target_uuid must be a canonical UUID")
-        if target_type not in TARGET_TYPES:
-            raise SchemaValidationError("target.target_type is outside the registered vocabulary")
+        unresolved_revoke = operation == "revoke" and target == {"resolved": False}
+        if not unresolved_revoke:
+            if not isinstance(target_uuid, str) or _UUID_RE.fullmatch(target_uuid) is None:
+                raise SchemaValidationError("target.target_uuid must be a canonical UUID")
+            if target_type not in TARGET_TYPES:
+                raise SchemaValidationError("target.target_type is outside the registered vocabulary")
         try:
             encoded_size = len(
                 json.dumps(
