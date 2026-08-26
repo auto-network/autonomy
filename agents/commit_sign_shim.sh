@@ -32,6 +32,11 @@ DASH="${AUTONOMY_DASHBOARD:-${GRAPH_API:-https://localhost:8080}}"
 SESSION="$(git config --get autonomy.sign.session 2>/dev/null || true)"
 [ -z "$SESSION" ] && SESSION="${AUTONOMY_SESSION:-}"
 REPO="$(git config --get autonomy.sign.repo 2>/dev/null || true)"
+# The /api/approvals rendezvous is default-deny like every other /api route, so
+# the signing request must carry the session bearer (the same credential every
+# other in-container call uses). ``:-`` keeps it safe under ``set -u``; an empty
+# token simply gets the ordinary 401 below, not an unbound-variable abort.
+TOKEN="${CROSSTALK_TOKEN:-}"
 
 fail() { echo "$1" >&2; exit 1; }
 
@@ -63,9 +68,10 @@ print(json.dumps({"kind": "commit_sign", "session": session, "request": {
 }}))
 PY
 id="$(curl -sk -X POST "$DASH/api/approvals" -H 'Content-Type: application/json' \
+        -H "Authorization: Bearer $TOKEN" \
         --data-binary @"$req" \
         | python3 -c 'import sys,json; print(json.load(sys.stdin).get("id",""))' 2>/dev/null)"
-[ -n "$id" ] || fail "commit signing: dashboard did not accept the request (is it running at $DASH?)"
+[ -n "$id" ] || fail "commit signing: dashboard did not accept the request (running at $DASH, and is CROSSTALK_TOKEN set? /api/approvals requires the session bearer)."
 
 # block until the operator decides. No polling: ?wait= makes the server hold
 # the GET open until the decision is written (or the window elapses, in which
@@ -74,6 +80,7 @@ id="$(curl -sk -X POST "$DASH/api/approvals" -H 'Content-Type: application/json'
 # declined.
 while :; do
   state="$(curl -sk --max-time 70 "$DASH/api/approvals/$id?wait=55" \
+            -H "Authorization: Bearer $TOKEN" \
             | python3 -c 'import sys,json
 r=json.load(sys.stdin).get("result")
 if r is None: print("PENDING")
@@ -91,6 +98,7 @@ done
 
 # ?wait=0: decided request returns immediately on the bare (no-enrichment) path
 sig="$(curl -sk "$DASH/api/approvals/$id?wait=0" \
+        -H "Authorization: Bearer $TOKEN" \
         | python3 -c 'import sys,json; print(json.load(sys.stdin)["result"]["signature"])')"
 
 # hand git the armored signature (stdout) + the status line it looks for (stderr)
