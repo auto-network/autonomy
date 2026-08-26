@@ -927,6 +927,13 @@ class HttpClient:
             body=body, headers=_settings_headers(org),
         )
 
+    def undeprecate_setting(self, setting_id, *, org):
+        org = _resolve_client_org_arg(org)
+        self._request(
+            "POST", f"/api/graph/setting/{setting_id}/undeprecate",
+            body={}, headers=_settings_headers(org),
+        )
+
     def remove_setting(self, setting_id, *, org):
         org = _resolve_client_org_arg(org)
         self._request(

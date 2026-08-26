@@ -299,6 +299,21 @@ def test_deprecate_marks_flag_and_successor(graph_db_env, example_schema):
     assert got.successor_id == b
 
 
+def test_undeprecate_clears_flag_and_successor(graph_db_env, example_schema):
+    a = ops.add_setting("autonomy.test.example", 1, "k1", {"v": 1}, org=ops.CALLER_ORG)
+    b = ops.add_setting("autonomy.test.example", 1, "k2", {"v": 2}, org=ops.CALLER_ORG)
+    ops.deprecate_setting(a, successor_id=b, org=ops.CALLER_ORG)
+    ops.undeprecate_setting(a, org=ops.CALLER_ORG)
+    got = ops.get_setting(a, org=ops.CALLER_ORG)
+    assert got.deprecated is False
+    assert got.successor_id is None
+
+
+def test_undeprecate_missing_setting_raises(graph_db_env):
+    with pytest.raises(LookupError):
+        ops.undeprecate_setting("nope", org=ops.CALLER_ORG)
+
+
 def test_remove_only_works_on_raw(graph_db_env, example_schema):
     sid = ops.add_setting("autonomy.test.example", 1, "k", {"v": 1},
                           state="canonical", org=ops.CALLER_ORG)

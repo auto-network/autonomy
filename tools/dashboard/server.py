@@ -16297,6 +16297,17 @@ async def api_graph_setting_deprecate(request):
     return JSONResponse({"ok": True})
 
 
+async def api_graph_setting_undeprecate(request):
+    """POST /api/graph/setting/<id>/undeprecate — reverse a deprecation."""
+    sid = request.path_params["id"]
+    org = api_auth.organization_scope_from_request(request)
+    try:
+        graph_ops.undeprecate_setting(sid, org=org or graph_ops.CALLER_ORG)
+    except LookupError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    return JSONResponse({"ok": True})
+
+
 async def api_graph_setting_delete(request):
     """DELETE /api/graph/setting/<id> — hard-delete (raw only)."""
     sid = request.path_params["id"]
@@ -18975,6 +18986,7 @@ routes = [
     Route("/api/graph/source/{id}/move", api_graph_source_move, methods=["POST"]),
     Route("/api/graph/source/{id}/promote", api_graph_source_promote, methods=["POST"]),
     Route("/api/graph/setting/{id}/deprecate", api_graph_setting_deprecate, methods=["POST"]),
+    Route("/api/graph/setting/{id}/undeprecate", api_graph_setting_undeprecate, methods=["POST"]),
     Route("/api/graph/setting/{id}", api_graph_setting_get, methods=["GET"]),
     Route("/api/graph/setting/{id}", api_graph_setting_delete, methods=["DELETE"]),
     Route("/api/agent-actions/dispatch", api_agent_action_dispatch, methods=["POST"]),

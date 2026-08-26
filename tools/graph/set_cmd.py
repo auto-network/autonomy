@@ -1093,6 +1093,16 @@ def cmd_set_deprecate(args) -> None:
     print(f"  ✓ Deprecated: {sid[:11]}{suc}")
 
 
+def cmd_set_undeprecate(args) -> None:
+    sid = _resolve_address(args)
+    try:
+        get_client().undeprecate_setting(sid, org=_org(args))
+    except LookupError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"  ✓ Undeprecated: {sid[:11]}")
+
+
 def _report_rows_left_for(set_id: str, key: str, org) -> None:
     """After removing one row, say what is still under that key.
 
@@ -1721,6 +1731,17 @@ def attach_set_subparser(sub) -> None:
     p_dep.add_argument("--successor", help="Optional successor Setting id")
     _add_org_arg(p_dep)
     p_dep.set_defaults(func=cmd_set_deprecate)
+
+    # undeprecate
+    p_undep = set_sub.add_parser(
+        "undeprecate", help="Reverse a previous deprecate"
+    )
+    _add_address_arg(
+        p_undep,
+        help_text="Setting id (full or unique prefix), or `set_id key`",
+    )
+    _add_org_arg(p_undep)
+    p_undep.set_defaults(func=cmd_set_undeprecate)
 
     # remove
     p_rem = set_sub.add_parser("remove", help="Hard-delete a raw Setting")
