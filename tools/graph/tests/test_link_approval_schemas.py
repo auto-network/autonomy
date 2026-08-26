@@ -134,6 +134,37 @@ def test_link_intent_accepts_closed_publish_and_revoke_shapes():
     validate_payload(
         LINK_APPROVAL_INTENT_SET_ID, LINK_APPROVAL_INTENT_REVISION, _intent("revoke")
     )
+
+
+def test_revoke_intent_accepts_only_the_closed_unresolved_target_shape():
+    payload = _intent("revoke")
+    payload["target"] = {"resolved": False}
+    payload["local_intent_digest"] = _digest(
+        [
+            "autonomy.link.local-intent",
+            1,
+            payload["target"],
+            payload["binding"],
+            payload["review"],
+            payload["local_intent"],
+            payload["origin_destination_id"],
+        ]
+    )
+    validate_payload(
+        LINK_APPROVAL_INTENT_SET_ID, LINK_APPROVAL_INTENT_REVISION, payload
+    )
+    payload["target"] = {"resolved": False, "target_type": "present"}
+    with pytest.raises(SchemaValidationError):
+        validate_payload(
+            LINK_APPROVAL_INTENT_SET_ID, LINK_APPROVAL_INTENT_REVISION, payload
+        )
+
+    publish = _intent()
+    publish["target"] = {"resolved": False}
+    with pytest.raises(SchemaValidationError):
+        validate_payload(
+            LINK_APPROVAL_INTENT_SET_ID, LINK_APPROVAL_INTENT_REVISION, publish
+        )
     validate_payload(
         LINK_APPROVAL_INTENT_SET_ID,
         LINK_APPROVAL_INTENT_REVISION,

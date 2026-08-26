@@ -53,6 +53,10 @@ from tools.graph.schemas.central_attention import (
     ATTENTION_PRESENTATION_SET_ID,
     CENTRAL_ATTENTION_REVISION,
 )
+from tools.graph.schemas.link_approval import (
+    LINK_APPROVAL_INTENT_SET_ID,
+    LINK_APPROVAL_RESULT_SET_ID,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -63,6 +67,8 @@ PRIVATE_CENTRAL_SET_IDS = frozenset({
     ATTENTION_ITEM_SET_ID,
     ATTENTION_PRESENTATION_SET_ID,
     ATTENTION_DELIVERY_SET_ID,
+    LINK_APPROVAL_INTENT_SET_ID,
+    LINK_APPROVAL_RESULT_SET_ID,
 })
 
 _BROWSER_EVENT_SET_IDS = frozenset({
@@ -202,6 +208,29 @@ class PrivateAttentionHub:
                 self._pending.clear()
                 self._gap_pending = False
 
+    def emit_refresh(self, _attention_id: str | None = None) -> None:
+        """Schedule one payload-free full refetch from any thread.
+
+        Organization-owned Link result rows never enter browser frames.  Their
+        reconciler uses this method only after exact personal/org correlation.
+        Coalescing to the existing gap frame keeps the hint bounded and avoids
+        disclosing the organization set address or result key.
+        """
+        with self._thread_lock:
+            loop = self._loop
+            if loop is None or loop.is_closed():
+                return
+            self._pending.clear()
+            self._gap_pending = True
+            if self._drain_scheduled:
+                return
+            self._drain_scheduled = True
+            try:
+                loop.call_soon_threadsafe(self._begin_drain)
+            except Exception:
+                self._drain_scheduled = False
+                self._gap_pending = False
+
     def _begin_drain(self) -> None:
         if self._drain_task is None or self._drain_task.done():
             self._drain_task = asyncio.create_task(self._drain())
@@ -301,8 +330,19 @@ class AttentionRouteRuntime:
     hub: PrivateAttentionHub
     approval_http: ApprovalHttpBridge | None = None
     approval_reconciler: Any | None = None
+    link_receipt_forwarder: Any | None = None
+    operator_result_projectors: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
+        if self.operator_result_projectors is None:
+            self.operator_result_projectors = {}
+        elif not isinstance(self.operator_result_projectors, Mapping) or any(
+            not isinstance(kind, str) or not callable(projector)
+            for kind, projector in self.operator_result_projectors.items()
+        ):
+            raise ValueError("operator result projectors are invalid")
+        else:
+            self.operator_result_projectors = dict(self.operator_result_projectors)
         if self.approval_http is None:
             self.approval_http = ApprovalHttpBridge(
                 approvals=self.approvals,
@@ -771,18 +811,36 @@ async def api_attention_item(request: Request):
     safe_requester = {"kind": requester["kind"]}
     if requester.get("label"):
         safe_requester["label"] = requester["label"]
+    application_result = None
+    has_application_result = False
+    assert _runtime.operator_result_projectors is not None
+    projector = _runtime.operator_result_projectors.get(approval_registration.kind)
+    if projector is not None:
+        has_application_result = True
+        try:
+            projected = await asyncio.to_thread(projector, status)
+            if projected is not None:
+                application_result = ApprovalHttpBridge._json_mapping(
+                    projected,
+                    code="unavailable",
+                )
+        except Exception:
+            return _no_store({"error": "unavailable"}, status_code=503)
+    review = {
+        "type": "approval",
+        "renderer_id": item.review_renderer_id,
+        "kind": approval_registration.kind,
+        "authority_requirement": approval_registration.authority_requirement.value,
+        "safe_review": dict(request_payload["safe_review"]),
+        "requester": safe_requester,
+        "resolution": resolution,
+        "actions": actions,
+    }
+    if has_application_result:
+        review["application_result"] = application_result
     return _no_store({
         "item": _safe_item(item),
-        "review": {
-            "type": "approval",
-            "renderer_id": item.review_renderer_id,
-            "kind": approval_registration.kind,
-            "authority_requirement": approval_registration.authority_requirement.value,
-            "safe_review": dict(request_payload["safe_review"]),
-            "requester": safe_requester,
-            "resolution": resolution,
-            "actions": actions,
-        },
+        "review": review,
     })
 
 
@@ -854,6 +912,44 @@ async def api_attention_decision(request: Request):
     if public is not None and public["outcome"] == "expired":
         return _no_store({"resolution": public}, status_code=409)
     return _no_store({"resolution": public})
+
+
+async def api_attention_link_receipt(request: Request):
+    """Forward one signed Link receipt request to its frozen registry.
+
+    The handler accepts no destination, organization, path, approval kind, or
+    store selector.  The inactive Link runtime supplies the item-bound
+    forwarder in tests; production returns not-found until Link activation.
+    """
+    denied = operator_mutation_guard(request)
+    if denied is not None:
+        return denied
+    try:
+        body = await _strict_json_object(request)
+    except ValueError:
+        return _no_store({"error": "invalid_request"}, status_code=422)
+    forwarder = _runtime.link_receipt_forwarder
+    if forwarder is None:
+        return _no_store({"error": "not_found"}, status_code=404)
+    try:
+        result = await asyncio.to_thread(
+            forwarder.forward,
+            request.path_params["attention_id"],
+            body,
+        )
+    except Exception as exc:
+        code = getattr(exc, "code", "unavailable")
+        if code == "not_found":
+            status = 404
+        elif code in {"invalid_request", "invalid_decision", "receipt_invalid"}:
+            status = 422
+        elif code in {"not_actionable", "source_expired", "binding_drift"}:
+            status = 409
+        else:
+            status = 503
+            code = "unavailable"
+        return _no_store({"error": code}, status_code=status)
+    return _no_store(dict(result))
 
 
 async def _presentation_mutation(request: Request, operation: str):
@@ -952,6 +1048,11 @@ routes = [
     Route(
         "/api/attention/items/{attention_id:path}/approval-decision",
         api_attention_decision,
+        methods=["POST"],
+    ),
+    Route(
+        "/api/attention/items/{attention_id:path}/link-operation-receipt",
+        api_attention_link_receipt,
         methods=["POST"],
     ),
     Route(

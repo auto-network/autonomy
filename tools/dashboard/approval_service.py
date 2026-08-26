@@ -473,6 +473,8 @@ class ApprovalService:
         return self._create(
             registration, requester, safe_body, approval_id=approval_id,
             producer_id=None, stable_retry=False,
+            requester_principal_kind=principal.kind.value,
+            requester_org=principal.org,
         )
 
     def create_from_producer(
@@ -504,6 +506,8 @@ class ApprovalService:
         return self._create(
             registration, requester, safe_body, approval_id=approval_id,
             producer_id=producer.producer_id, stable_retry=stable_retry,
+            requester_principal_kind=None,
+            requester_org=None,
         )
 
     @staticmethod
@@ -624,6 +628,8 @@ class ApprovalService:
         approval_id: str,
         producer_id: str | None,
         stable_retry: bool,
+        requester_principal_kind: str | None,
+        requester_org: str | None,
     ) -> ApprovalRecord:
         lock = _ApprovalLocks.for_id(approval_id)
         with lock:
@@ -644,6 +650,8 @@ class ApprovalService:
                 requester_ref=dict(requester),
                 application_scope=application,
                 producer_id=producer_id,
+                requester_principal_kind=requester_principal_kind,
+                requester_org=requester_org,
             )
             assert registration.runtime is not None
             try:
