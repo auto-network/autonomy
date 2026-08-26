@@ -1,6 +1,7 @@
 """Unit tests for the Design Studio plugin catalog API."""
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import patch
 import json
 import yaml
@@ -384,3 +385,81 @@ def test_update_design_status_rejects_invalid_status():
 
     assert resp.status_code == 400
     assert resp.json()["error"] == "invalid status"
+
+
+# ── Org-scoping: an org caller sees only its own org's designs ────────────
+
+
+def _org_rows() -> list[dict]:
+    """Two single-revision designs owned by different orgs."""
+    base = {
+        "description": "", "status": "pending", "revision_seq": 1,
+        "creator_session_id": "", "creator_session_label": "",
+        "variant_count": 1, "has_fixture": False,
+    }
+    return [
+        {**base, "id": "rev-auto", "design_id": "series-auto",
+         "title": "Autonomy design", "created_at": "2026-05-01 10:00:00",
+         "org": "autonomy"},
+        {**base, "id": "rev-anc", "design_id": "series-anc",
+         "title": "Anchore design", "created_at": "2026-05-02 10:00:00",
+         "org": "anchore"},
+    ]
+
+
+def _req(principal, *, path_params=None, query_string=b"") -> Request:
+    return Request({
+        "type": "http", "method": "GET", "path": "/x", "headers": [],
+        "query_string": query_string,
+        "path_params": path_params or {},
+        "state": {"api_principal": principal},
+    })
+
+
+def _org_session(org: str):
+    return api_auth.ApiPrincipal(
+        api_auth.ApiPrincipalKind.ORG_SESSION, subject="agent", org=org)
+
+
+def _operator():
+    return api_auth.ApiPrincipal(
+        api_auth.ApiPrincipalKind.OPERATOR_COOKIE, subject="op")
+
+
+def test_list_designs_scopes_the_catalog_to_the_caller_org():
+    with patch.object(design_api, "_design_rows", return_value=_org_rows()), \
+         patch.object(design_api, "_thumbnail_url", lambda rev_id: ""):
+        # An anchore agent sees ONLY anchore designs — and the summary counts
+        # are computed over that visible set, so no cross-org total leaks.
+        resp = asyncio.run(design_api.list_designs(_req(_org_session("anchore"))))
+        data = json.loads(resp.body)
+        assert {d["design_id"] for d in data["designs"]} == {"series-anc"}
+        assert data["summary"]["series"] == 1
+
+        # The operator (global authority) sees both orgs' designs.
+        resp2 = asyncio.run(design_api.list_designs(_req(_operator())))
+        data2 = json.loads(resp2.body)
+        assert {d["design_id"] for d in data2["designs"]} == {
+            "series-auto", "series-anc"}
+        assert data2["summary"]["series"] == 2
+
+
+def test_get_design_series_hides_a_cross_org_design_as_404():
+    with patch.object(design_api, "_design_rows", return_value=_org_rows()), \
+         patch.object(design_api, "_thumbnail_url", lambda rev_id: ""):
+        # An anchore agent asking for the autonomy design gets the same 404 as a
+        # nonexistent one — byte-indistinguishable, no cross-org existence leak.
+        cross = asyncio.run(design_api.get_design_series(
+            _req(_org_session("anchore"), path_params={"design_id": "series-auto"})))
+        assert cross.status_code == 404
+
+        # Its own org's design resolves.
+        own = asyncio.run(design_api.get_design_series(
+            _req(_org_session("anchore"), path_params={"design_id": "series-anc"})))
+        assert own.status_code == 200
+        assert json.loads(own.body)["design_id"] == "series-anc"
+
+        # The operator sees the autonomy design.
+        op = asyncio.run(design_api.get_design_series(
+            _req(_operator(), path_params={"design_id": "series-auto"})))
+        assert op.status_code == 200
