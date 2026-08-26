@@ -696,30 +696,28 @@ def handle_request(
                     "stored personal identity no longer matches this invitation"
                 )
             # Bootstrap peer authentication from public, individually
-            # root-signed evidence. This set is sufficient to connect the
-            # origin and joiner; ongoing roster sync, not this snapshot,
-            # supplies revocation freshness and completeness afterward.
-            from tools.network import fleet_roster
+            # root-signed evidence: this Dashboard's own roster entry,
+            # looked up directly by its own known machine id -- never a
+            # roster-wide scan the joiner has to search. Ongoing roster
+            # sync, not this pair, supplies the rest of the fleet and any
+            # revocation freshness after first contact.
+            from tools.network import fleet_roster, machine_boot
 
-            bootstrap_roster = tuple(fleet_roster.load_entries(org=None))
-            for entry in bootstrap_roster:
-                fleet_roster.verify(entry, anchor_root_pub=anchor)
-            active = fleet_roster.resolve(
-                bootstrap_roster, anchor_root_pub=anchor
+            own_machine_id = machine_boot.machine_id(org="machine")
+            origin_entry = (
+                fleet_roster.own_entry(
+                    own_machine_id, anchor_root_pub=anchor, org=None
+                )
+                if own_machine_id is not None else None
             )
-            if (
-                pending.roster_entry.machine_pub not in active
-                or len(active) < 2
-            ):
+            if origin_entry is None:
                 raise FleetEnrollmentChannelError(
-                    "fleet delivery lacks origin and joiner roster evidence"
+                    "this Dashboard has no active Fleet roster identity"
                 )
             reply.update({
                 "approval": pending.approval.to_dict(),
                 "roster_entry": pending.roster_entry.to_dict(),
-                "roster_entries": [
-                    entry.to_dict() for entry in bootstrap_roster
-                ],
+                "origin_entry": origin_entry.to_dict(),
                 "personal_root_armor": armor,
                 "personal_root_created_at": armor_created_at,
                 "personal_root_updated_at": armor_updated_at,

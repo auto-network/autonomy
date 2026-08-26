@@ -81,7 +81,7 @@ def complete_enrollment(
         )
     except (ValueError, TypeError, IdkitError) as exc:
         raise MachineBootError(f"could not accept fleet approval: {exc}") from exc
-    for entry in delivery.roster_entries:
+    for entry in (delivery.origin_entry, delivery.roster_entry):
         fleet_roster.store_entry(entry, org=None)
     _write_row({"machine_id": assigned_id}, org=org)
     return key
@@ -126,7 +126,7 @@ def accept_browser_completion(
                 roster_entry_id=delivery.roster_entry.entry_id,
             ),
         )
-        bootstrap = fleet_enroll.verify_bootstrap_roster(
+        origin = fleet_enroll.verify_bootstrap_roster(
             delivery,
             anchor_root_pub=invite.personal_root_pub,
             joining_machine_pub=delivery.roster_entry.machine_pub,
@@ -135,22 +135,14 @@ def accept_browser_completion(
         raise MachineBootError(
             f"could not accept browser fleet completion: {exc}"
         ) from exc
-    remote = tuple(
-        entry for entry in bootstrap
-        if entry.machine_pub != delivery.roster_entry.machine_pub
-    )
-    if len(remote) != 1:
-        raise MachineBootError(
-            "initial Fleet delivery must identify exactly one origin route"
-        )
     # Each public record self-verifies against the personal root. Store this
-    # minimum first-peer snapshot and its machine-local route before adopting
+    # minimum first-peer pair and its machine-local route before adopting
     # the local identity; a crash can leave harmless authorization evidence
     # but never an identity unable to authenticate the origin peer.
-    for entry in bootstrap:
+    for entry in (origin, delivery.roster_entry):
         fleet_roster.store_entry(entry, org=None)
     fleet_route.store(
-        fleet_route.FleetRoute(invite.rendezvous, remote[0].machine_pub),
+        fleet_route.FleetRoute(invite.rendezvous, origin.machine_pub),
         org=org,
     )
     _write_row({"machine_id": machine_id_value}, org=org)

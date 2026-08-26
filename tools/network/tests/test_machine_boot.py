@@ -84,7 +84,7 @@ def _approved(root, invite, request):
     return fleet_enroll.EnrollmentDelivery(
         delivery.approval,
         delivery.roster_entry,
-        (origin_entry, delivery.roster_entry),
+        origin_entry,
     )
 
 

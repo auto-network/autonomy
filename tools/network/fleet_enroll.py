@@ -134,7 +134,10 @@ class EnrollmentDelivery:
 
     approval: EnrollmentApproval
     roster_entry: fleet_roster.RosterEntry
-    roster_entries: tuple[fleet_roster.RosterEntry, ...] = ()
+    #: The approving machine's own roster entry, named directly by the
+    #: server that already knows it -- never a snapshot the joiner has to
+    #: search. None until the bootstrap origin has been attached.
+    origin_entry: fleet_roster.RosterEntry | None = None
 
 
 def build_request(
@@ -348,28 +351,24 @@ def verify_bootstrap_roster(
     *,
     anchor_root_pub: str,
     joining_machine_pub: str,
-) -> tuple[fleet_roster.RosterEntry, ...]:
-    """Verify the public first-peer roster snapshot in one delivery.
+) -> fleet_roster.RosterEntry:
+    """Verify the one, directly-named origin entry in this delivery.
 
-    The snapshot authenticates the origin and joiner for bootstrap. It is not
-    an authoritative completeness or revocation frontier; the authenticated
-    ongoing roster synchronization owns that freshness after first contact.
+    The server hands over exactly the entry it already knows is its own --
+    no snapshot to search, no elimination among candidates. This
+    authenticates the origin for bootstrap; it is not an authoritative
+    completeness or revocation frontier, and the authenticated ongoing
+    roster synchronization owns that freshness after first contact.
     """
-    entries = tuple(delivery.roster_entries)
-    for entry in entries:
-        fleet_roster.verify(entry, anchor_root_pub=anchor_root_pub)
-    active = fleet_roster.resolve(entries, anchor_root_pub=anchor_root_pub)
-    if joining_machine_pub not in active or len(active) < 2:
-        raise FleetEnrollError(
-            "fleet delivery lacks origin and joiner roster evidence"
-        )
-    if not any(
-        entry.entry_id == delivery.roster_entry.entry_id for entry in entries
-    ):
-        raise FleetEnrollError(
-            "fleet delivery bootstrap omits its approved roster entry"
-        )
-    return entries
+    origin = delivery.origin_entry
+    if origin is None:
+        raise FleetEnrollError("fleet delivery names no origin roster entry")
+    fleet_roster.verify(origin, anchor_root_pub=anchor_root_pub)
+    if origin.kind != fleet_roster.EntryKind.ENROLL:
+        raise FleetEnrollError("fleet delivery origin entry is not an enrollment")
+    if origin.machine_pub == joining_machine_pub:
+        raise FleetEnrollError("fleet delivery origin entry names the joiner")
+    return origin
 
 
 def _require_hex64(value, what: str) -> str:

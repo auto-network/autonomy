@@ -15,6 +15,7 @@ from tools.network import (
     fleet_enrollment_client,
     fleet_invite,
     fleet_roster,
+    machine_boot,
 )
 from tools.network.idkit import KeyPair
 
@@ -42,10 +43,14 @@ class HandlerChannel:
 
 @pytest.fixture
 def path(tmp_path, monkeypatch):
-    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
+    orgs = tmp_path / "orgs"
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs))
     monkeypatch.delenv("GRAPH_DB", raising=False)
     GraphDB.close_all_pooled()
     GraphDB.create_org_db("personal", type_="personal").close()
+    GraphDB.create_org_db(
+        "machine", type_="personal", path=orgs.parent / "machine.db"
+    ).close()
     monkeypatch.setattr(ar, "DB_PATH", tmp_path / "approvals.db")
     root = KeyPair.from_private_hex("34" * 32)
     origin_machine_id = "01" * 32
@@ -61,6 +66,10 @@ def path(tmp_path, monkeypatch):
         ),
         org=None,
     )
+    # This fixture's "origin" is the already-enrolled Dashboard approving the
+    # join -- it must know its own machine id directly, the same way a real
+    # Dashboard does, so the server can hand over its own row without a scan.
+    machine_boot._write_row({"machine_id": origin_machine_id}, org="machine")
     serving = KeyPair.from_private_hex("56" * 32)
     invite = fleet_invite.mint(
         root,
@@ -200,8 +209,9 @@ async def test_resume_verifies_public_approval_and_returns_unchanged_armor(path)
     assert approved.status == "approved"
     assert approved.delivery.approval == approval
     assert approved.delivery.roster_entry == roster_entry
-    assert len(approved.delivery.roster_entries) == 2
-    assert roster_entry in approved.delivery.roster_entries
+    assert approved.delivery.origin_entry is not None
+    assert approved.delivery.origin_entry.machine_id == "01" * 32
+    assert approved.delivery.origin_entry.machine_pub != roster_entry.machine_pub
     assert approved.personal_root_armor == (
         "UNCHANGED-PASSWORD-ENCRYPTED-ARMOR"
     )

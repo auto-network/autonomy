@@ -219,7 +219,7 @@ def test_joiner_verifies_assignment_and_derives_authorized_key():
     )
     delivery = replace(
         delivery,
-        roster_entries=(origin_entry, delivery.roster_entry),
+        origin_entry=origin_entry,
     )
 
     machine_id, key = fleet_enroll.verify_delivery(
