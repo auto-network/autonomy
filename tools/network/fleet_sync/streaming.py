@@ -153,6 +153,7 @@ def iter_indexed_snapshot_mutations(
     conn: sqlite3.Connection,
     *,
     start_after: tuple[str, tuple[object, ...]] | None = None,
+    audit: bool = True,
 ) -> Iterator[Mutation]:
     """Yield a WAL-snapshot base in table/key order using keyset seeks.
 
@@ -160,7 +161,8 @@ def iter_indexed_snapshot_mutations(
     provides direct resume without OFFSET or replaying prior tables.
     """
     register_streaming_functions(conn)
-    audit_schema(conn)
+    if audit:
+        audit_schema(conn)
     _audit_base_order()
     conn.row_factory = sqlite3.Row
     start_table = start_after[0] if start_after else None

@@ -162,6 +162,115 @@ def test_local_write_delete_and_rollback_are_atomic(tmp_path: Path) -> None:
         db.close()
 
 
+def test_deprecated_settings_base_is_an_idempotent_tombstone(
+    tmp_path: Path,
+) -> None:
+    source = GraphDB(tmp_path / "source.db")
+    target = GraphDB(tmp_path / "target.db")
+    try:
+        source_catalog = MutationCatalog(source.conn, "machine-a")
+        target_catalog = MutationCatalog(target.conn, "machine-b")
+        source_catalog.install()
+        target_catalog.install()
+        with source_catalog.transaction(10, "create"):
+            _insert_setting(
+                source.conn,
+                identity="setting-a",
+                set_id="dashboard.example",
+                key="default",
+                payload='{"enabled":true}',
+                deprecated=0,
+            )
+        created = list(source_catalog.iter_journal(after_watermark=-1))
+        assert target_catalog.apply_remote_batch(created) == (1, 0)
+
+        with source_catalog.transaction(20, "deprecate"):
+            source.conn.execute(
+                "UPDATE settings SET deprecated=1 WHERE id='setting-a'"
+            )
+        retired = list(source_catalog.iter_journal(after_watermark=10))
+        assert len(retired) == 1
+        assert retired[0].mutation.address == (
+            "dashboard.example", 1, "default", "raw", "base",
+        )
+        assert retired[0].mutation.tombstone
+
+        assert target_catalog.apply_remote_batch(retired) == (1, 0)
+        assert target.conn.execute(
+            "SELECT COUNT(*) FROM settings WHERE deprecated=0"
+        ).fetchone()[0] == 0
+        assert target_catalog.apply_remote_batch(retired) == (0, 1)
+    finally:
+        source.close()
+        target.close()
+
+
+def test_reconcile_repairs_legacy_live_encoding_of_deprecated_base(
+    tmp_path: Path,
+) -> None:
+    db = GraphDB(tmp_path / "personal.db")
+    try:
+        catalog = MutationCatalog(db.conn, "a" * 64)
+        catalog.install()
+        with catalog.transaction(10, "create"):
+            _insert_setting(
+                db.conn,
+                identity="retired",
+                set_id="dashboard.example",
+                key="legacy",
+                payload='{"enabled":false}',
+                deprecated=0,
+            )
+        with catalog.transaction(20_000, "deprecate"):
+            db.conn.execute(
+                "UPDATE settings SET deprecated=1, "
+                "updated_at='1970-01-01T00:00:00.000020Z' "
+                "WHERE id='retired'"
+            )
+
+        address_blob, transaction_ref, operation_index = db.conn.execute(
+            "SELECT address,transaction_ref,operation_index "
+            "FROM fleet_sync_catalog WHERE tombstone=1"
+        ).fetchone()
+        row = dict(db.conn.execute(
+            "SELECT * FROM settings WHERE id='retired'"
+        ).fetchone())
+        legacy = Mutation(
+            "settings",
+            ("dashboard.example", 1, "legacy", "raw", "base"),
+            20_000,
+            False,
+            catalog_module._logical_values(TABLE_POLICIES["settings"], row),
+        )
+        db.conn.execute(
+            "UPDATE fleet_sync_catalog SET tombstone=0 WHERE address=?",
+            (address_blob,),
+        )
+        db.conn.execute(
+            "UPDATE fleet_sync_journal SET frame=? WHERE transaction_ref=? "
+            "AND operation_index=?",
+            (
+                catalog_module._pack_journal(
+                    catalog_module.encode_mutation_frame(legacy)
+                ),
+                transaction_ref,
+                operation_index,
+            ),
+        )
+        db.conn.commit()
+
+        catalog.reconcile_catalog(audit=False)
+        repaired = list(catalog.iter_journal(after_watermark=10))
+        assert len(repaired) == 1
+        assert repaired[0].mutation.tombstone
+        assert db.conn.execute(
+            "SELECT tombstone FROM fleet_sync_catalog WHERE address=?",
+            (address_blob,),
+        ).fetchone()[0] == 1
+    finally:
+        db.close()
+
+
 def test_frozen_cut_is_a_coherent_wal_snapshot_and_advances_floor(
     tmp_path: Path,
 ) -> None:
