@@ -4029,18 +4029,14 @@ def cmd_agent_runs(args):
 
 
 def cmd_ui_design(args):
-    """Create a Design Studio design from HTML files and watch for changes."""
+    """Create/watch, list, or pull a Design Studio design."""
     import time as _time
     import urllib.error
+    import urllib.parse
     import urllib.request
     import ssl
 
     sys.stdout.reconfigure(line_buffering=True)
-
-    dir_path = Path(args.dir)
-    if not dir_path.is_dir():
-        print(f"Error: {dir_path} is not a directory", file=sys.stderr)
-        sys.exit(1)
 
     api_base = args.api.rstrip("/")
     token = _resolve_crosstalk_token()
@@ -4048,6 +4044,15 @@ def cmd_ui_design(args):
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
+
+    def _get(endpoint):
+        req = urllib.request.Request(
+            f"{api_base}{endpoint}",
+            headers={"Authorization": f"Bearer {token}"},
+            method="GET",
+        )
+        resp = urllib.request.urlopen(req, context=ctx, timeout=30)
+        return json.loads(resp.read())
 
     def _post(endpoint, data):
         body = json.dumps(data).encode()
@@ -4082,6 +4087,84 @@ def cmd_ui_design(args):
             "--api https://host.docker.internal:8080",
             file=sys.stderr,
         )
+        sys.exit(1)
+
+    # ── Read modes: list / pull ───────────────────────────────────────────
+    # The library search and pull-to-revise workflows the skill documents as
+    # raw curl. Org-scoped for free by /api/design-studio (an org caller sees
+    # only its own designs). When Design Studio moves to the full plugin
+    # format these belong to the plugin's own CLI; here for now so the
+    # create -> pull -> edit -> watch -> append loop is complete in one tool.
+    if args.list is not None:
+        endpoint = "/api/design-studio/designs?limit=500&sort=updated"
+        if args.list:
+            endpoint += "&q=" + urllib.parse.quote(args.list)
+        try:
+            data = _get(endpoint)
+        except urllib.error.HTTPError as exc:
+            _fail_http(exc, "list designs")
+        except urllib.error.URLError as exc:
+            _fail_connection(exc)
+        designs = data.get("designs", []) if isinstance(data, dict) else []
+        if not designs:
+            print("No designs match." if args.list else "No designs found.")
+            return
+        for d in designs:
+            org = d.get("org") or "-"
+            print(f"{(d.get('design_id') or ''):<38} {(d.get('status') or ''):<10} "
+                  f"[{org}] {d.get('title') or ''}")
+        print(f"\n{len(designs)} design(s).")
+        return
+
+    if args.pull:
+        design_id = args.pull
+        # The destination is the sole positional; with two optional positionals
+        # argparse fills `title` before `dir`, so accept whichever is set.
+        dest = Path(args.dir or args.title or ".")
+        dest.mkdir(parents=True, exist_ok=True)
+        try:
+            series = _get(f"/api/design-studio/designs/{urllib.parse.quote(design_id)}")
+            rev = (series.get("latest_revision_id") or "") if isinstance(series, dict) else ""
+            if not rev:
+                print(f"Design {design_id} has no revisions to pull.", file=sys.stderr)
+                sys.exit(2)
+            full = _get(f"/api/design/{urllib.parse.quote(rev)}/full")
+        except urllib.error.HTTPError as exc:
+            _fail_http(exc, f"pull design {design_id}")
+        except urllib.error.URLError as exc:
+            _fail_connection(exc)
+        written = []
+        for variant in (full.get("variants") or []):
+            vid = variant.get("id") or "variant"
+            (dest / f"{vid}.html").write_text(variant.get("html") or "", encoding="utf-8")
+            written.append(f"{vid}.html")
+        fixture_val = full.get("fixture")
+        if fixture_val:
+            fixture_str = fixture_val if isinstance(fixture_val, str) else json.dumps(fixture_val, indent=2)
+            (dest / "fixture.json").write_text(fixture_str, encoding="utf-8")
+            written.append("fixture.json")
+        if not written:
+            print(f"Design {design_id} (revision {rev}) had no variants to write.", file=sys.stderr)
+            sys.exit(2)
+        title = series.get("title") or ""
+        print(f"Pulled design {design_id} (revision {rev}) into {dest}/:")
+        for name in written:
+            print(f"  {name}")
+        print(f"\n  Revise, then append: graph ui-design "
+              f"{json.dumps(title, ensure_ascii=False)} {dest} --design {design_id}")
+        return
+
+    # ── Create / watch mode (needs a source directory) ────────────────────
+    if not args.dir:
+        print("Error: create/watch needs a directory of .html variant files "
+              "(or use --list / --pull)", file=sys.stderr)
+        sys.exit(1)
+    dir_path = Path(args.dir)
+    if not dir_path.is_dir():
+        print(f"Error: {dir_path} is not a directory", file=sys.stderr)
+        sys.exit(1)
+    if not args.title:
+        print("Error: create/watch needs a design title", file=sys.stderr)
         sys.exit(1)
 
     def _activate_in_present(did):
@@ -5946,9 +6029,17 @@ def main():
     p.add_argument("--timeout", type=int, default=600, help="Max wait seconds (default: 600)")
     p.set_defaults(func=cmd_wait)
 
-    p = sub.add_parser("ui-design", help="Create and live-watch a Design Studio design from HTML files")
-    p.add_argument("title", help="Design title")
-    p.add_argument("dir", help="Directory of .html variant files")
+    p = sub.add_parser("ui-design", help="Create/watch, list, or pull a Design Studio design")
+    p.add_argument("title", nargs="?", help="Design title (create/watch mode)")
+    p.add_argument("dir", nargs="?", help="Directory of .html variant files (create/watch; destination for --pull)")
+    p.add_argument(
+        "--list", nargs="?", const="", metavar="QUERY", default=None,
+        help="List the design library (optional QUERY filters by title) instead of publishing",
+    )
+    p.add_argument(
+        "--pull", metavar="DESIGN_ID", default=None,
+        help="Pull an existing design's variants + fixture into <dir> to revise, instead of publishing",
+    )
     p.add_argument("--design", help="Existing design ID to append to")
     p.add_argument("--description", help="Subtitle/summary stored on each design revision")
     p.add_argument("--fixture", help="Path to fixture JSON file")
