@@ -404,7 +404,7 @@ test('password + passkey → promote a second passkey to full authority', async 
     passkeys: [await pkRow(c1), await pkRow(c2)], // c2 registered but NOT a root factor yet
   });
   await openPanel();
-  const c2row = qa('.krow').find((r) => r.querySelector('[data-k]') && r.textContent.includes('unlock only'));
+  const c2row = qa('.krow').find((r) => r.querySelector('[data-k]') && /unlock only/i.test(r.textContent));
   assert.ok(c2row, 'the unlock-only passkey row is present');
   c2row.querySelector('[data-k]').click();     // changeKey → prove root, then present the key
   await gather('pw');                           // proves the password, then presents c2 (promote)
@@ -422,7 +422,7 @@ test('password + passkey → demote the passkey to unlock only', async () => {
   const armor = await aBoth(root, 'pw', cred);
   SERVER = makeServer({ armor, rootPub: root.rootPub, passkeys: [await pkRow(cred)] });
   await openPanel();
-  const row = qa('.krow').find((r) => r.querySelector('[data-k]') && r.textContent.includes('full authority'));
+  const row = qa('.krow').find((r) => r.querySelector('[data-k]') && /full authority/i.test(r.textContent));
   assert.ok(row, 'the full-authority passkey row is present');
   row.querySelector('[data-k]').click();        // changeKey → demote (no present step)
   await gather('pw');
@@ -477,7 +477,7 @@ test('MFA → dual full-authority factors, no MFA (UI shows BOTH full)', async (
   assert.ok(await opensWithPasskey(out, cred), 'passkey opens alone');
   // the rendered authority badges must BOTH say full authority
   assert.equal(warnText(), '', 'no invalid-state error');
-  const pwBadge = q('.krow .tag');
+  const pwBadge = q('.krow .aucell');
   assert.match(pwBadge.textContent, /full authority/i, 'password badge full');
   const keyBadge = qa('.krow [data-k]').pop();
   assert.ok(keyBadge, 'passkey authority badge present');
