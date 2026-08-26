@@ -1,0 +1,46 @@
+# Optional override: point Autonomy's persistent volumes at real directories
+# on the HOST filesystem, instead of Docker's own internal volume storage
+# (/var/lib/docker/volumes/...). Compose layers this on top of the base file:
+#
+#   AUTONOMY_HOST_DATA_ROOT=/opt/autonomy docker compose \
+#     -f docker-compose.yml -f deploy/docker-compose.host-data.yml up -d
+#
+# AUTONOMY_HOST_DATA_ROOT/{code,data,orgs,dolt} must exist and be owned by
+# the user running `docker compose`. A root-owned parent like /opt needs a
+# one-time:
+#   sudo mkdir -p "$AUTONOMY_HOST_DATA_ROOT" && sudo chown "$USER:$USER" "$AUTONOMY_HOST_DATA_ROOT"
+#   mkdir -p "$AUTONOMY_HOST_DATA_ROOT"/{code,data,orgs,dolt}
+#
+# These stay real, named Docker volumes -- `docker volume inspect
+# autonomy-code` still works, `docker compose down` without `-v` still
+# leaves them alone -- only their storage backing changes, via the `local`
+# driver's bind option (`type: none, o: bind`). That distinction matters on
+# first boot: Docker auto-seeds an EMPTY named volume from the image's
+# baked-in content the first time it's mounted; a plain bind mount of the
+# container path (`- /host/path:/app` in the service's own `volumes:`) does
+# NOT get this treatment at all -- verified live 2026-08-25: a plain bind
+# mount over an empty host directory hides the image's /app entirely,
+# including its own entrypoint, and the container fails to start. Use this
+# override's driver_opts form, never a raw bind, to relocate these volumes.
+
+volumes:
+  autonomy-code:
+    driver_opts:
+      type: none
+      o: bind
+      device: ${AUTONOMY_HOST_DATA_ROOT}/code
+  autonomy-data:
+    driver_opts:
+      type: none
+      o: bind
+      device: ${AUTONOMY_HOST_DATA_ROOT}/data
+  autonomy-orgs:
+    driver_opts:
+      type: none
+      o: bind
+      device: ${AUTONOMY_HOST_DATA_ROOT}/orgs
+  dolt-data:
+    driver_opts:
+      type: none
+      o: bind
+      device: ${AUTONOMY_HOST_DATA_ROOT}/dolt
