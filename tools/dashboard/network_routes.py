@@ -1422,7 +1422,7 @@ async def get_serve_cert_status(request: Request) -> JSONResponse:
     to decide whether the organization root it is about to unlock should also
     sign the two context-specific serving certificates.
     """
-    org, refused = resolve_scoped_org(request.query_params.get("org"))
+    org, refused = resolve_scoped_org(request.query_params.get("org"), request=request)
     if refused is not None:
         return refused
     from tools.dashboard.link_serving_supervisor import serve_cert_state

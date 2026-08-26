@@ -154,9 +154,20 @@ def test_cross_org_read_and_write_refused(env, root, monkeypatch):
     # netorg dashboard — stamp it, so a foreign ``?org=`` is the refused
     # cross-org attempt this test asserts, not a local operator's legitimate
     # selection (which would open the missing foreign store and 500).
-    from tools.dashboard import server
-    monkeypatch.setattr(server, "_token_org_or_none", lambda request: ORG)
-    _store_key(env, root)                     # netorg's own key exists
+    from _pytest.monkeypatch import MonkeyPatch
+
+    from tools.dashboard import api_auth
+    from tools.dashboard.api_auth import ApiPrincipal, ApiPrincipalKind
+    _store_key(env, root)   # setup runs as the operator: org-key is operator-only
+    # A dedicated patch instance: the shared `monkeypatch` fixture also carries
+    # the env fixture's setup, which a blanket undo() would destroy.
+    stamp = MonkeyPatch()
+    stamp.setattr(
+        api_auth, "principal_from_request",
+        lambda request: ApiPrincipal(
+            ApiPrincipalKind.ORG_SESSION, subject="auto-1", org=ORG
+        ),
+    )
     FOREIGN = "victimorg"
 
     # reads of a foreign org's key/binding → 403 (not 200-with-their-data)
@@ -177,9 +188,11 @@ def test_cross_org_read_and_write_refused(env, root, monkeypatch):
         json={"org": FOREIGN, "record": "{}", "revoked_cert": "{}"},
     ).status_code == 403
 
-    # own-org access is unaffected: default (no override) and explicit
-    # own-org both resolve the caller's own key.
-    assert env.get("/api/network/org-key").status_code == 200
+    # Own-org access is unaffected for the authority that may read at all
+    # (org-key is operator-only). The ambient-default resolution (contextvar
+    # -> GRAPH_ORG -> scopeless) is pinned by test_h4kzx_derive_org; here the
+    # operator's explicit own-org selection must still resolve the key.
+    stamp.undo()
     assert env.get(f"/api/network/org-key?org={ORG}").status_code == 200
 
 
@@ -913,8 +926,14 @@ def test_provision_cross_org_refused(env, root, tmp_path, monkeypatch):
     # The env is the authenticated netorg dashboard (invariant 1): stamp its
     # token org so provisioning a serving credential for a FOREIGN org is the
     # refused cross-org attempt, not a local selection of a missing store.
-    from tools.dashboard import server
-    monkeypatch.setattr(server, "_token_org_or_none", lambda request: ORG)
+    from tools.dashboard import api_auth
+    from tools.dashboard.api_auth import ApiPrincipal, ApiPrincipalKind
+    monkeypatch.setattr(
+        api_auth, "principal_from_request",
+        lambda request: ApiPrincipal(
+            ApiPrincipalKind.ORG_SESSION, subject="auto-1", org=ORG
+        ),
+    )
     _serve_key_dir(monkeypatch, tmp_path)
     _store_binding(root)
     delegate, cert = _mint_serve(root)
@@ -963,3 +982,25 @@ def test_a_store_that_cannot_hold_a_serving_credential_is_not_evidence_of_reuse(
     assert not network_routes._serve_child_used_by_another_local_org(
         "ab" * 32, "org-a"
     ), "a fresh child key must be mintable on a node with a machine store"
+
+
+def test_serve_cert_status_get_answers_without_a_500(env):
+    """Regression pin: the GET status check must never crash the route.
+
+    The resolve_scoped_org migration left this one call site without the
+    required ``request`` keyword, so EVERY pre-unlock status check raised a
+    TypeError and returned 500 — the browser's mint decision never ran, no
+    serving credential was ever provisioned, and the Fleet serving connector
+    stayed locked ("serving machine is locked for Fleet sync"), blocking the
+    two-Dashboard sync witness. The check must answer for the personal scope,
+    an explicit org, and no org at all.
+    """
+    for query in ("?org=personal", "", "?org=" + ORG):
+        r = env.get("/api/network/serve-cert" + query)
+        assert r.status_code == 200, (query, r.status_code, r.text)
+        body = r.json()
+        assert body["status"] in (
+            "ok", "missing", "expired", "key-invalid", "key-missing",
+            "identity-invalid",
+        ), body
+        assert isinstance(body["required"], bool)
