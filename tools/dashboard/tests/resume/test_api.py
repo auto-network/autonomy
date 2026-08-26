@@ -139,13 +139,14 @@ class TestResumeAuthorization:
             "resolve_token",
             lambda _token_hash: ("agent-fixture", "fixture-org"),
         )
+        # Authorization is by the bearer's org vs the source's server-side owner
+        # org — the handler never reads X-Graph-Org, so none is sent. (A
+        # conflicting one would now be refused by the middleware; that refusal
+        # is proven in test_api_auth_middleware, not simulated here.)
         response = test_client.post(
             "/api/session/resume",
             json={"source_id": resume_env["container_source_id"]},
-            headers={
-                "Authorization": "Bearer valid-agent-token",
-                "X-Graph-Org": "spoofed-org",
-            },
+            headers={"Authorization": "Bearer valid-agent-token"},
         )
         assert response.status_code == 202, response.text
 
@@ -171,13 +172,15 @@ class TestResumeAuthorization:
         )
 
         with caplog.at_level("WARNING"):
+            # A foreign-org bearer requesting a fixture-org source: cross-org,
+            # opaque 404. Authorization is by the bearer vs the source's owner
+            # org; no X-Graph-Org is sent (the handler ignores it, and a
+            # conflicting one is now refused upstream — see
+            # test_api_auth_middleware).
             response = test_client.post(
                 "/api/session/resume",
                 json={"source_id": resume_env["container_source_id"]},
-                headers={
-                    "Authorization": "Bearer foreign-agent-token",
-                    "X-Graph-Org": "fixture-org",
-                },
+                headers={"Authorization": "Bearer foreign-agent-token"},
             )
 
         assert response.status_code == 404

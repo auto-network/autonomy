@@ -109,10 +109,26 @@ def test_valid_dashboard_cookie_needs_no_org_selector():
     assert result["effective_org"] is None
 
 
-def test_org_session_token_is_forced_to_its_org_despite_spoofed_header():
+def test_org_session_conflicting_header_is_refused():
+    """auto-lbwzr: an org bearer for org-a WITH ``X-Graph-Org: org-b`` names two
+    different orgs. The token is authoritative and un-widenable, and an org
+    caller has no reason to request another org, so the conflict is a spoof or a
+    client bug — refused loudly (403), not silently scoped to org-a."""
+    with TestClient(_app()) as client:
+        resp = client.get("/api/probe", headers={
+            "Authorization": "Bearer org-a",
+            "X-Graph-Org": "org-b",
+        })
+    assert resp.status_code == 403
+    assert "mismatch" in resp.json()["error"].lower()
+
+
+def test_org_session_matching_header_is_served():
+    """A redundant but MATCHING ``X-Graph-Org`` is not a conflict — served,
+    scoped to the bearer's org."""
     result = _get(headers={
         "Authorization": "Bearer org-a",
-        "X-Graph-Org": "org-b",
+        "X-Graph-Org": "org-a",
     })
     assert result["kind"] == "org_session"
     assert result["subject"] == "agent-a"
@@ -129,11 +145,11 @@ def test_org_session_token_supplies_scope_when_header_is_absent():
 
 
 def test_valid_bearer_takes_narrower_precedence_over_valid_cookie():
+    # No conflicting X-Graph-Org: the point is bearer-vs-cookie precedence, not
+    # the mismatch refuse (test_org_session_conflicting_header_is_refused covers
+    # that). A conflicting header would 403 before precedence even mattered.
     result = _get(
-        headers={
-            "Authorization": "Bearer org-a",
-            "X-Graph-Org": "org-b",
-        },
+        headers={"Authorization": "Bearer org-a"},
         cookies={COOKIE: "valid-cookie"},
     )
     assert result["kind"] == "org_session"
