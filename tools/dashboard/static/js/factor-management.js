@@ -270,6 +270,21 @@ function level(k) {
   if (k === 'face') return anyKeyFull() ? 'b' : 'a';
   return M.pass.full ? 'b' : 'a';
 }
+
+// ── authority cell (approved design): the single word a factor shows, derived
+// from the SERVER's factor-policy root_role + access (GET /api/identity/
+// factor-policy) — the authoritative version of what the local solver computes.
+// One ladder, five states; sign-in folds in for the multi-factor and none rows.
+export function authorityWord(rootRole, access) {
+  if (rootRole === 'individual') return 'Full authority';
+  if (rootRole === 'mfa-member') return access === 'disabled' ? 'Multi-factor only' : 'Multi-factor w/ unlock';
+  return access === 'disabled' ? 'No authority' : 'Unlock only';   // root_role 'none'
+}
+export function authorityCls(rootRole, access) {
+  if (rootRole === 'individual') return 'au-full';
+  if (rootRole === 'mfa-member') return 'au-multi';
+  return access === 'disabled' ? 'au-none' : 'au-unlock';   // root_role 'none'
+}
 function actionOn(k) {
   if (k === 'both') {
     if (M.mfa) return hasAlternative() ? 'change' : null;
@@ -348,6 +363,26 @@ async function loadModel() {
     keys,
     rootCached: false,
   };
+  // Overlay the SERVER's authoritative factor-policy roles (root_role + access)
+  // onto the model for the authority cell. Optional/best-effort: if the endpoint
+  // is absent the panel still renders from the armor-derived model above.
+  try {
+    const fp = await (await fetch('/api/identity/factor-policy', {
+      credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'application/json' },
+    })).json();
+    if (fp && Array.isArray(fp.factors)) {
+      M.fpGeneration = fp.generation;
+      const byCred = {};
+      fp.factors.forEach((f) => {
+        if (f.type === 'passkey' && f.credential_id) byCred[f.credential_id] = f;
+        else if (f.type === 'password' && M.pw) { M.pw.rootRole = f.root_role; M.pw.access = f.access; }
+      });
+      M.keys.forEach((k) => {
+        const f = byCred[k.credentialId];
+        if (f) { k.rootRole = f.root_role; k.access = f.access; }
+      });
+    }
+  } catch (e) { /* factor-policy is optional for display; armor model already rendered */ }
   if (!S) S = { screen: 'keys', method: null, act: null, need: [], si: 0, after: null, sheet: null, pick: null, primed: 0 };
 }
 
