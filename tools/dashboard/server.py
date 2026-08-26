@@ -7736,6 +7736,32 @@ def _register_project_session_from_worker(
         dashboard_db.update_tail_state(tmux_name, last_message="Starting...")
 
 
+def _apply_env_from_host(names, extra_env: dict, *, context: str) -> None:
+    """Copy each var in ``names`` from THIS (dashboard) process's environment
+    into ``extra_env`` for the launched container — the LEGACY host-passthrough
+    credential mechanism (pre-vault). A var not present in the dashboard's own
+    environment used to drop SILENTLY (``if val is not None`` with no else), so
+    a workspace could ship with no GitHub auth and nothing said — which is
+    exactly what cost the debugging time on anchore/enterprise-ng (the dashboard
+    process simply never had GH_TOKEN). Log the miss by NAME (never the value)
+    so it is diagnosable. The durable fix is migrating the workspace to the
+    vault ``credential:<key>`` scheme (agents/…/vault_credential.py), which is
+    preflight-protected and audited; this only ends the silence for whatever
+    still rides env_from_host.
+    """
+    for name in names or ():
+        val = os.environ.get(name)
+        if val is not None:
+            extra_env[name] = val
+        else:
+            logger.warning(
+                "env_from_host: %r requested by %s but not set in the dashboard "
+                "process environment — launched WITHOUT it (legacy host-"
+                "passthrough; migrate this workspace to the vault credential "
+                "scheme).", name, context,
+            )
+
+
 def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateWriter) -> None:
     """Worker-thread implementation of workspace prepare/launch/tmux/register."""
     tmux_name = job.tmux_name
@@ -7812,10 +7838,10 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
         if proj.default_tags:
             meta["graph_tags"] = list(proj.default_tags)
         extra_env: dict[str, str] = dict(proj.env) if proj.env else {}
-        for var in proj.env_from_host:
-            val = os.environ.get(var)
-            if val is not None:
-                extra_env[var] = val
+        _apply_env_from_host(
+            proj.env_from_host, extra_env,
+            context=f"workspace {getattr(proj, 'id', None) or proj.graph_project}",
+        )
         extra_env = extra_env or None
 
         ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -8085,10 +8111,10 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
             if proj.default_tags:
                 meta["graph_tags"] = list(proj.default_tags)
             extra_env: dict[str, str] = dict(proj.env) if proj.env else {}
-            for var in proj.env_from_host:
-                val = os.environ.get(var)
-                if val is not None:
-                    extra_env[var] = val
+            _apply_env_from_host(
+                proj.env_from_host, extra_env,
+                context=f"workspace {getattr(proj, 'id', None) or proj.graph_project}",
+            )
             run_dir.mkdir(parents=True, exist_ok=True)
             primer_path = run_dir / ".claude_md"
             primer_path.write_text(render_workspace_primer(proj))
@@ -17721,10 +17747,10 @@ async def api_agent_action_dispatch(request):
             )
         project_mounts.update(workspace_settings.artifact_mounts(workspace))
         extra_env: dict[str, str] = dict(workspace.env) if workspace.env else {}
-        for env_name in workspace.env_from_host:
-            env_value = os.environ.get(env_name)
-            if env_value is not None:
-                extra_env[env_name] = env_value
+        _apply_env_from_host(
+            workspace.env_from_host, extra_env,
+            context=f"workspace {getattr(workspace, 'id', None) or workspace.graph_project}",
+        )
         output_dir_path.mkdir(parents=True, exist_ok=True)
         primer_path = output_dir_path / ".claude_md"
         primer_path.write_text(render_workspace_primer(workspace))
