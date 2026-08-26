@@ -172,6 +172,29 @@ def _design_rows() -> list[dict]:
     return _sqlite_design_rows()
 
 
+def _design_org(identifier: str) -> str | None:
+    """The owning org for a design_id or revision id — a design's revisions share
+    one org, so a non-null value is preferred when present."""
+    if os.environ.get("DASHBOARD_MOCK"):
+        for row in _design_rows():
+            if (str(row.get("id")) == identifier
+                    or str(row.get("design_id") or row.get("id")) == identifier):
+                return row.get("org")
+        return None
+    from agents.design_db import _get_conn
+
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT org FROM designs WHERE (id = ? OR design_id = ?)"
+            " ORDER BY (org IS NULL) LIMIT 1",
+            (identifier, identifier),
+        ).fetchone()
+        return row["org"] if row else None
+    finally:
+        conn.close()
+
+
 def _clear_catalog_cache() -> None:
     _catalog_cache["series"] = None
     _catalog_cache["expires_at"] = 0.0
@@ -349,8 +372,11 @@ def _series_from_rows(rows: list[dict]) -> list[dict]:
                 thumbnail_url = str(revision.get("thumbnail_url") or _thumbnail_url(str(revision.get("id") or "")))
                 if thumbnail_url:
                     break
+        design_org = next(
+            (r.get("org") for r in reversed(revisions) if r.get("org")), None)
         series.append({
             "design_id": design_id,
+            "org": design_org,
             "latest_revision_id": latest.get("id"),
             "title": latest.get("title") or "Untitled Design",
             "description": latest.get("description") or "",
@@ -390,10 +416,17 @@ async def list_designs(request: Request) -> JSONResponse:
     direction = request.query_params.get("direction") or "desc"
     limit = max(1, min(_coerce_int(request.query_params.get("limit"), 250), 500))
 
-    # Queries are also the lightweight reverse-lookup path used by the
-    # session viewer. Bypass the ten-second gallery cache so navigating from a
-    # freshly linked design cannot briefly lose its return control.
-    all_series = _series_from_rows(_design_rows()) if query else _all_series()
+    # Queries are also the lightweight reverse-lookup path used by the session
+    # viewer; bypass the ten-second gallery cache so navigating from a freshly
+    # linked design cannot briefly lose its return control.
+    # Org-scope first (invariant 1): an org caller sees only its own org's
+    # designs; the operator sees all. Everything below — summary counts included
+    # — is computed over the caller's visible set, so no cross-org total leaks.
+    base = _series_from_rows(_design_rows()) if query else _all_series()
+    all_series = [
+        row for row in base
+        if not api_auth.caller_org_scope_hides(request, row.get("org"))
+    ]
     filtered = [
         row for row in all_series
         if (statuses is None or row.get("status") in statuses)
@@ -420,6 +453,9 @@ async def get_design_series(request: Request) -> JSONResponse:
     if not rows:
         return JSONResponse({"error": "not found"}, status_code=404)
     series = _series_from_rows(rows)[0]
+    # Org-scope: a cross-org design is the same 404 as a nonexistent one.
+    if api_auth.caller_org_scope_hides(request, series.get("org")):
+        return JSONResponse({"error": "not found"}, status_code=404)
     revisions = sorted(rows, key=lambda r: (
         _coerce_int(r.get("revision_seq"), 1),
         r.get("created_at") or "",
@@ -431,6 +467,9 @@ async def get_design_series(request: Request) -> JSONResponse:
 
 async def get_revision_thumbnail(request: Request):
     revision_id = request.path_params["revision_id"]
+    # Org-scope: another org's thumbnail is the same 404 as a missing one.
+    if api_auth.caller_org_scope_hides(request, _design_org(revision_id)):
+        return JSONResponse({"error": "thumbnail not found"}, status_code=404)
     path = _screenshot_path(revision_id)
     if not path or not path.is_file():
         return JSONResponse({"error": "thumbnail not found"}, status_code=404)
@@ -439,6 +478,10 @@ async def get_revision_thumbnail(request: Request):
 
 async def update_revision_metadata(request: Request) -> JSONResponse:
     revision_id = request.path_params["revision_id"]
+    # Org-scope: refuse a cross-org revision as an indistinguishable 404 before
+    # any read or write.
+    if api_auth.caller_org_scope_hides(request, _design_org(revision_id)):
+        return JSONResponse({"error": "not found"}, status_code=404)
     try:
         body = await request.json()
     except Exception:
@@ -499,6 +542,10 @@ async def update_revision_metadata(request: Request) -> JSONResponse:
 
 async def update_design_status(request: Request) -> JSONResponse:
     design_id = request.path_params["design_id"]
+    # Org-scope: refuse a cross-org design as an indistinguishable 404 before
+    # any read or write.
+    if api_auth.caller_org_scope_hides(request, _design_org(design_id)):
+        return JSONResponse({"error": "not found"}, status_code=404)
     try:
         body = await request.json()
     except Exception:
