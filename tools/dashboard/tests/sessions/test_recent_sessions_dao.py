@@ -153,17 +153,15 @@ class TestActivityOrdering:
             f"Expected most-recent-active session first; got {ids}"
 
 
-class TestFullHistorySnapshot:
-    def test_snapshot_bypasses_the_recency_window_and_quota(self, isolated_dao):
-        """The one browser bootstrap must contain old rows for local facets.
+class TestBoundedHistorySnapshot:
+    def test_snapshot_adds_ten_old_rows_per_org_without_unbounded_history(self, isolated_dao):
+        """A quiet old org gets a floor while the bootstrap remains bounded.
 
-        This would have failed before the snapshot contract existed: the DAO
-        did not accept ``full_history`` and could only return a recency-windowed,
-        quota-trimmed server projection.
+        This fails on the prior full-history implementation because it has no
+        ``include_org_floor`` contract; it also protects the intended ten-row
+        cap against regressing into another all-history payload.
         """
-        # Add enough dead interactive rows to cross the ordinary all-type
-        # quota (20). A page snapshot must retain all of them so selecting an
-        # organization or changing a local filter never needs another read.
+        # Give autonomy more than ten old rows; its floor must still cap at ten.
         db_path = Path(os.environ["AUTONOMY_ORGS_DIR"]) / "autonomy.db"
         conn = sqlite3.connect(db_path)
         try:
@@ -177,21 +175,45 @@ class TestFullHistorySnapshot:
                         f"src-snapshot-{index}", f"Snapshot row {index}",
                         f"/tmp/sessions/snapshot-{index}.jsonl",
                         json.dumps({"session_uuid": f"uuid-snapshot-{index}"}),
-                        "2026-04-16T00:00:00Z", "2026-04-16T00:01:00Z",
-                        "2026-04-16T00:02:00Z",
+                        "1900-01-01T00:00:00Z", "1900-01-01T00:01:00Z",
+                        "1900-01-01T00:02:00Z",
                     ),
                 )
             conn.commit()
         finally:
             conn.close()
 
+        # A separate quiet org has eleven entirely old sessions. The response
+        # must retain its newest ten even though the one-week global window
+        # excludes all eleven.
+        from tools.graph.db import GraphDB
+        quiet = GraphDB(Path(os.environ["AUTONOMY_ORGS_DIR"]) / "quiet.db")
+        try:
+            for index in range(11):
+                day = f"1900-02-{index + 1:02d}T00:00:00Z"
+                quiet.conn.execute(
+                    """INSERT INTO sources
+                    (id, type, platform, title, file_path, metadata, created_at,
+                     ingested_at, last_activity_at)
+                    VALUES (?, 'session', 'claude-code', ?, ?, ?, ?, ?, ?)""",
+                    (
+                        f"quiet-{index}", f"Quiet session {index}",
+                        f"/tmp/sessions/quiet-{index}.jsonl",
+                        json.dumps({"session_uuid": f"quiet-uuid-{index}"}),
+                        day, day, day,
+                    ),
+                )
+            quiet.commit()
+        finally:
+            quiet.close()
+
         rows = isolated_dao.get_recent_sessions(
-            sort="lastActivity", since="6h", full_history=True,
+            sort="lastActivity", since="1w", include_org_floor=True,
         )
-        assert len(rows) == 23
-        assert {"src-fresh-stale", "src-with-label"}.issubset(
-            {row["id"] for row in rows}
-        )
+        quiet_ids = {row["id"] for row in rows if row["id"].startswith("quiet-")}
+        assert quiet_ids == {f"quiet-{index}" for index in range(1, 11)}
+        assert "quiet-0" not in quiet_ids
+        assert len(rows) <= 20
 
 
 # ══════════════════════════════════════════════════════════════════════

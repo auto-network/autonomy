@@ -12421,19 +12421,16 @@ async def api_dao_recent_sessions(request):
             return refused
         if requested_org:
             return JSONResponse({"error": "history snapshot cannot be organization-scoped"}, status_code=400)
-        # The Sessions page reads this complete card projection once after a
-        # reload, behind the already-rendered Active list. From then on its
-        # organization/type/sort/since facets are local and lifecycle SSE
-        # events supply the deltas. Do not route this through the cache's
-        # timer-driven warmup protocol: that would turn one read into polling.
-        try:
-            sessions = await asyncio.to_thread(
-                dao_sessions.get_recent_sessions,
-                None, "lastActivity", "all", "all", None, True,
-            )
-        except Exception:
-            logger.exception("recent_sessions history snapshot failed")
-            return JSONResponse({"error": "recent sessions snapshot failed"}, status_code=503)
+        # The Sessions page reads this bounded card projection once after a
+        # reload, behind the already-rendered Active list. It is a normal
+        # background-warmed cache value: the one-week global firehose plus an
+        # age-independent ten-session floor for every org. Local facets and
+        # lifecycle SSE supply everything after that first read.
+        sessions = dao_sessions.recent_sessions_cached(
+            "lastActivity", "1w", "all", None, include_org_floor=True,
+        )
+        if sessions is None:
+            return JSONResponse([], status_code=202)
         return JSONResponse(sessions)
     if requested_org:
         # A selected organization is a server-side scope, never a raw

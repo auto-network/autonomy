@@ -460,7 +460,7 @@ def get_recent_sessions(
     since: str = "1d",
     type_group: str = "all",
     org: str | None = None,
-    full_history: bool = False,
+    include_org_floor: bool = False,
 ) -> list[dict]:
     """Fetch recent session sources, ordered and filtered for the Recent list.
 
@@ -483,9 +483,10 @@ def get_recent_sessions(
       org: when set, read only this organization's history. Scoped views are
              count-capped by the same per-type quotas but deliberately ignore
              ``since`` so a quiet organization's older sessions remain visible.
-      full_history: return the untrimmed cross-org card projection. This is the
-             one bootstrap snapshot for the Sessions screen; the browser owns
-             its facets and thereafter applies SSE deltas locally.
+      include_org_floor: for the bounded Sessions bootstrap snapshot, union
+             each org's ten most-recent sessions regardless of age with the
+             normal windowed, quota-capped list. This lets a quiet org render
+             locally without sending a new query for its old history.
 
     Strategy:
       1. Pull recent session rows from graph.db (the historical tail).
@@ -493,10 +494,11 @@ def get_recent_sessions(
          that registered with the session monitor, dashboard.db has richer
          metadata (label, entry_count, context_tokens, role) than graph.db.
       3. Filter out currently-live sessions (they belong on Active list).
-      4. Apply the ``since`` window unless this is the full snapshot.
+      4. Apply the ``since`` window to the normal recent-list candidate set.
       5. For ordinary endpoint reads, bucket rows by session-type group and
          trim each bucket to its quota using the requested sort column.
-      6. Sort the merged union (or full snapshot) by the same column.
+      6. When requested, union each org's age-independent ten-row floor,
+         then sort the merged result by the same column.
     """
     if sort not in _VALID_RECENT_SORTS:
         sort = "lastActivity"
@@ -508,7 +510,7 @@ def get_recent_sessions(
 
     # Compute the since cutoff once (epoch seconds). ``all`` / unknown → None.
     since_cutoff: float | None = None
-    if not org and not full_history and since and since != "all":
+    if not org and since and since != "all":
         dur_str = _SINCE_WINDOWS.get(since, since)
         try:
             since_cutoff = time.time() - parse_duration(dur_str)
@@ -522,13 +524,12 @@ def get_recent_sessions(
     from tools.graph.cross_org import all_store_slugs, open_peer_db
 
     graph_rows: list[dict] = []
+    org_floor_source_ids: set[str] = set()
     sample_limit = max(total_quota * 25, 1000) if sort in ("turns", "ctx") else max(total_quota * 15, 600)
     # The global firehose samples every store before applying its recency
     # window. A selected organization is different: it must be able to return
     # its full historical tail (then count-cap it), so query that one store
-    # without a pre-truncating SQL limit. The screen's one-time history
-    # projection likewise needs the full row set so local facets never cause
-    # another fetch.
+    # without a pre-truncating SQL limit.
     org_slugs = (org,) if org else all_store_slugs()
     for slug in org_slugs:
         slug_db = open_peer_db(slug)
@@ -537,8 +538,8 @@ def get_recent_sessions(
         # Pooled handle from open_peer_db — must NOT close.
         conn = slug_db.conn
         has_la = _graph_sources_have_last_activity_column(conn)
-        limit_clause = "" if (org or full_history) else " LIMIT ?"
-        params: tuple[int, ...] = () if (org or full_history) else (sample_limit,)
+        limit_clause = "" if org else " LIMIT ?"
+        params: tuple[int, ...] = () if org else (sample_limit,)
         if has_la:
             sql = (
                 "SELECT id, type, title, created_at, last_activity_at,"
@@ -554,6 +555,13 @@ def get_recent_sessions(
                 " ORDER BY created_at DESC"
             )
         rows = conn.execute(sql + limit_clause, params).fetchall()
+        # The bounded history snapshot needs a small, age-independent floor
+        # for every org. Keep this query explicit rather than relying on the
+        # global sample limit: its contract is stable even if that heuristic
+        # changes for a future sort mode.
+        if include_org_floor and not org:
+            floor_rows = conn.execute(sql + " LIMIT 10").fetchall()
+            org_floor_source_ids.update(r["id"] for r in floor_rows)
         for r in rows:
             meta: dict = {}
             if r["metadata"]:
@@ -686,10 +694,13 @@ def get_recent_sessions(
         row["org"] = resolve_session_org(row)
         # Wrap project in brackets for backwards-compat with the existing UI
         row["project"] = f"[{row['project']}]" if row["project"] else ""
+        if row["id"] in org_floor_source_ids:
+            row["_org_floor"] = True
 
         merged[row["id"]] = row
 
     # ── Step 4: apply `since` window ──────────────────────────────
+    org_floor_rows = [r for r in merged.values() if r.get("_org_floor")]
     rows = list(merged.values())
     if since_cutoff is not None:
         rows = [
@@ -717,30 +728,27 @@ def get_recent_sessions(
         def _sort_key(r: dict) -> float:
             return _iso_to_epoch(r.get("last_activity_at", ""))
 
-    if full_history:
-        # This is intentionally untrimmed. A client-side organization/type/
-        # sort/since facet can only be correct without another request when
-        # its one bootstrap snapshot contains the complete projection.
-        rows.sort(key=_sort_key, reverse=True)
-        out = rows if limit is None else rows[:limit]
-    else:
-        # ── Step 5: bucket by type group and trim to quota ────────
-        buckets: dict[str, list[dict]] = {"interactive": [], "dispatch": [], "librarian": []}
-        for row in rows:
-            group = _group_for_session_type(row.get("session_type"))
-            buckets[group].append(row)
+    # ── Step 5: bucket by type group and trim to quota ────────────
+    buckets: dict[str, list[dict]] = {"interactive": [], "dispatch": [], "librarian": []}
+    for row in rows:
+        group = _group_for_session_type(row.get("session_type"))
+        buckets[group].append(row)
 
-        trimmed: list[dict] = []
-        for group, bucket in buckets.items():
-            q = quotas.get(group, 0)
-            if q <= 0:
-                continue
-            bucket.sort(key=_sort_key, reverse=True)
-            trimmed.extend(bucket[:q])
+    trimmed: list[dict] = []
+    for group, bucket in buckets.items():
+        q = quotas.get(group, 0)
+        if q <= 0:
+            continue
+        bucket.sort(key=_sort_key, reverse=True)
+        trimmed.extend(bucket[:q])
 
-        # ── Step 6: sort the merged union by the requested column ─
-        trimmed.sort(key=_sort_key, reverse=True)
-        out = trimmed if limit is None else trimmed[:limit]
+    # ── Step 6: union the bounded org floor, then sort ────────────
+    if include_org_floor:
+        by_id = {row["id"]: row for row in trimmed}
+        by_id.update({row["id"]: row for row in org_floor_rows})
+        trimmed = list(by_id.values())
+    trimmed.sort(key=_sort_key, reverse=True)
+    out = trimmed if limit is None else trimmed[:limit]
 
     # Annotate librarian rows with type + target so the UI can render a
     # meaningful title ('{type} · {target}') instead of the raw process name.
@@ -749,6 +757,7 @@ def get_recent_sessions(
     # Strip internal fields used only during row construction
     for r in out:
         r.pop("_source", None)
+        r.pop("_org_floor", None)
         r.pop("_job_id", None)
         r.pop("_job_type", None)
     return out
@@ -761,16 +770,21 @@ def get_recent_sessions(
 # path NEVER computes it: a background refresher (server _on_startup) precomputes
 # the hot param combos off-loop and the handler reads this cache. Unknown combos
 # are registered on first request and warmed within one refresh cycle.
-_RECENT_CACHE: dict[tuple[str, str, str, str | None], list] = {}
-_RECENT_KEYS: set[tuple[str, str, str, str | None]] = {
-    ("lastActivity", "1d", "all", None),
-    ("lastActivity", "1w", "interactive", None),
+_RECENT_CACHE: dict[tuple[str, str, str, str | None, bool], list] = {}
+_RECENT_KEYS: set[tuple[str, str, str, str | None, bool]] = {
+    ("lastActivity", "1d", "all", None, False),
+    ("lastActivity", "1w", "interactive", None, False),
+    # The Sessions page's only history request. A bounded global recent list
+    # plus ten old rows per org is enough for local facets without shipping
+    # the entire graph history on every PWA reload.
+    ("lastActivity", "1w", "all", None, True),
 }
 _RECENT_LOCK = threading.Lock()
 
 
 def recent_sessions_cached(
     sort: str, since: str, type_group: str, org: str | None = None,
+    include_org_floor: bool = False,
 ) -> list | None:
     """Cached recent-sessions list for these params, or None if not yet warmed.
 
@@ -779,7 +793,7 @@ def recent_sessions_cached(
     refresher fills it within one cycle, so a request can never block on org-DB
     iteration.
     """
-    key = (sort, since, type_group, org)
+    key = (sort, since, type_group, org, include_org_floor)
     with _RECENT_LOCK:
         _RECENT_KEYS.add(key)
         return _RECENT_CACHE.get(key)
@@ -791,16 +805,18 @@ def refresh_recent_cache() -> int:
     with _RECENT_LOCK:
         keys = list(_RECENT_KEYS)
     n = 0
-    for sort, since, type_group, org in keys:
+    for sort, since, type_group, org, include_org_floor in keys:
         try:
-            res = get_recent_sessions(None, sort, since, type_group, org)
+            res = get_recent_sessions(
+                None, sort, since, type_group, org, include_org_floor,
+            )
         except Exception:
             logger.exception(
-                "recent_sessions cache refresh failed for %s/%s/%s org=%s",
-                sort, since, type_group, org,
+                "recent_sessions cache refresh failed for %s/%s/%s org=%s floor=%s",
+                sort, since, type_group, org, include_org_floor,
             )
             continue
         with _RECENT_LOCK:
-            _RECENT_CACHE[(sort, since, type_group, org)] = res
+            _RECENT_CACHE[(sort, since, type_group, org, include_org_floor)] = res
         n += 1
     return n
