@@ -15,6 +15,7 @@ from tools.network.fleet_sync_scheduler import (
     encode_done,
     FleetSyncRuntimeConfig,
     FleetSyncScheduler,
+    SQLiteFleetSyncStore,
     roster_epoch,
 )
 from tools.network.fleet_sync_channel import FleetAuthenticator, FleetDirectServer
@@ -79,6 +80,20 @@ async def _eventually(predicate, *, timeout: float = 4.0) -> None:
         if asyncio.get_running_loop().time() >= deadline:
             raise AssertionError("condition did not become true")
         await asyncio.sleep(0.02)
+
+
+def test_scheduler_store_uses_the_catalog_row_shape(tmp_path: Path) -> None:
+    path = tmp_path / "personal.db"
+    _prepare(path, KeyPair.generate())
+    conn, _catalog = SQLiteFleetSyncStore(path)._open()
+    try:
+        assert conn.row_factory is sqlite3.Row
+        assert isinstance(
+            conn.execute("SELECT * FROM fleet_sync_state").fetchone(),
+            sqlite3.Row,
+        )
+    finally:
+        conn.close()
 
 
 def test_two_schedulers_transfer_once_and_resume_after_reconnect(tmp_path: Path) -> None:
