@@ -77,33 +77,30 @@ def test_resolve_codex_harness_from_rollout_path(tmp_path):
     assert harness.name == "codex"
 
 
-def test_resolved_harness_caches_version_by_file_identity(tmp_path):
-    from tools import codex_transcript
-
-    codex_transcript._read_version.cache_clear()
-    rollout = tmp_path / "rollout-cache.jsonl"
-    rollout.write_text(json.dumps({
-        "type": "session_meta",
-        "payload": {"originator": "codex-tui", "cli_version": "0.147.0"},
-    }) + "\n")
-
-    first = resolve_harness_for_path(rollout)
-    second = resolve_harness_for_path(rollout)
-
-    assert first.ctx["codex_cli_version"] == "0.147.0"
-    assert second.ctx["codex_cli_version"] == "0.147.0"
-    assert codex_transcript._read_version.cache_info().hits == 1
-
-
-def test_resolved_harness_rejects_codex_file_without_mandatory_version(tmp_path):
+def test_resolved_harness_parses_codex_file_without_version(tmp_path):
+    """Codex parsing is version-free: a rollout with no cli_version — or no
+    session_meta at all (a repaired/truncated file) — resolves and parses
+    chat instead of raising. The old mandatory-version machinery existed
+    only for the deleted event_msg/response_item arbitration gate."""
     rollout = tmp_path / "rollout-missing-version.jsonl"
     rollout.write_text(json.dumps({
         "type": "session_meta",
         "payload": {"originator": "codex-tui"},
     }) + "\n")
 
-    with pytest.raises(MissingCodexVersionError, match="version is unavailable"):
-        resolve_harness_for_path(rollout)
+    reader = resolve_harness_for_path(rollout)
+    assert reader.name == "codex"
+    entry = reader.parse_line(json.dumps({
+        "timestamp": TS,
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "still parses"}],
+        },
+    }))
+    assert entry["type"] == "user"
+    assert entry["content"] == "still parses"
 
 
 def test_resolve_codex_harness_from_rollout_session_uuid():

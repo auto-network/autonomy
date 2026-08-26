@@ -20,7 +20,6 @@ from typing import Protocol, Any
 from tools.codex_transcript import (
     CodexTranscriptVersionError,
     TranscriptVersionError,
-    codex_cli_version,
 )
 
 
@@ -2629,12 +2628,7 @@ def parse_codex_log_line(line: str, ctx: dict | None = None) -> dict | list[dict
         return None
     entry_type = raw.get("type")
 
-    # session_meta is the FIRST record of every rollout, so the CLI version
-    # is known before any chat record arrives — which is what makes the
-    # version gate on response_item chat safe in a streaming parser.
     if entry_type == "session_meta":
-        if ctx is not None and payload.get("cli_version"):
-            ctx["codex_cli_version"] = str(payload["cli_version"])
         return None
 
     if entry_type == "compacted":
@@ -3123,35 +3117,14 @@ def _detect_harness_for_path(path: str | Path | None) -> SessionHarness:
     return CLAUDE_HARNESS
 
 
-def _seed_parse_context_for_file(
-    ctx: dict[str, Any],
-    harness: SessionHarness,
-    path: str | Path | None,
-) -> dict[str, Any]:
-    """Seed the context required to parse a bounded transcript window.
-
-    Codex changed its operator-chat record shape at 0.147.  Every real rollout
-    records the authoritative CLI version in its leading ``session_meta``;
-    A partial reader must recover that metadata before it can decide whether
-    ``response_item.message`` is visible chat or duplicate/noise.  Missing or
-    malformed metadata is an explicit error rather than a successful,
-    message-free parse.
-    """
-    if getattr(harness, "name", "") != "codex":
-        return ctx
-
-    if path is None:
-        raise MissingCodexVersionError("Codex transcript path is unavailable")
-    ctx["codex_cli_version"] = codex_cli_version(path)
-    return ctx
-
-
 class TranscriptReader:
     """One parse stream bound to one transcript file.
 
-    This is the consumer boundary.  Harness selection and provider-specific
-    parse prerequisites are established here once; callers only request parsed
-    lines or byte windows and never handle Codex versions themselves.
+    This is the consumer boundary.  Harness selection is established here
+    once; callers only request parsed lines or byte windows.  (The codex
+    parse used to require a version seeded from the file's session_meta —
+    chat parsing is version-free now, so a headerless or repaired rollout
+    parses instead of raising.)
     """
 
     def __init__(
@@ -3163,7 +3136,6 @@ class TranscriptReader:
         self.path = Path(path)
         self.harness = _detect_harness_for_path(self.path)
         self.ctx = ctx if ctx is not None else {}
-        _seed_parse_context_for_file(self.ctx, self.harness, self.path)
 
     def parse_line(self, line: str) -> dict | list[dict] | None:
         return self.harness.parse_line(line, ctx=self.ctx)

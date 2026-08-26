@@ -55,8 +55,9 @@ def _fork_meta_line(uuid: str, ts: str = "2026-08-10T12:00:05Z") -> str:
 def _msg_line(text: str, ts: str = "2026-08-10T12:00:01.000Z") -> str:
     return json.dumps({
         "timestamp": ts,
-        "type": "event_msg",
-        "payload": {"type": "agent_message", "message": text},
+        "type": "response_item",
+        "payload": {"type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": text}]},
     })
 
 

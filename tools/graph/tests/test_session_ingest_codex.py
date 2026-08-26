@@ -36,18 +36,22 @@ def _session_meta(ts: str = "2026-04-24T05:00:00Z") -> dict:
 
 
 def _user_message(text: str, ts: str) -> dict:
+    # Chat ingests from response_item.message only (the event_msg UI-view
+    # shape is a duplicate and is ignored by the extractor).
     return {
-        "type": "event_msg",
+        "type": "response_item",
         "timestamp": ts,
-        "payload": {"type": "user_message", "message": text},
+        "payload": {"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": text}]},
     }
 
 
 def _agent_message(text: str, ts: str) -> dict:
     return {
-        "type": "event_msg",
+        "type": "response_item",
         "timestamp": ts,
-        "payload": {"type": "agent_message", "message": text},
+        "payload": {"type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": text}]},
     }
 
 
