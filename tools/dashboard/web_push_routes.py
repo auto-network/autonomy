@@ -24,6 +24,10 @@ from tools.dashboard.identity_routes import (
     StablePersonalIdentityUnavailable,
     resolve_stable_personal_root_public_key,
 )
+from tools.dashboard.web_push_delivery import (
+    WebPushDeliveryError,
+    WebPushDeliveryStore,
+)
 
 
 DB_PATH = web_push_dao.DB_PATH
@@ -275,6 +279,33 @@ async def api_devices(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "devices": devices})
 
 
+async def api_diagnostics(request: Request) -> JSONResponse:
+    refused = _operator_cookie_only(request)
+    if refused is not None:
+        return refused
+    try:
+        store = _store()
+        diagnostics = WebPushDeliveryStore(
+            store, owner_subject=stable_operator_subject(),
+        ).diagnostics()
+    except StablePersonalIdentityUnavailable as exc:
+        return _error(exc)
+    except WebPushDeliveryError as exc:
+        return JSONResponse(
+            {"ok": False, "error": exc.code}, status_code=503,
+            headers={"Cache-Control": "no-store"},
+        )
+    except Exception:
+        return JSONResponse(
+            {"ok": False, "error": "unavailable"}, status_code=503,
+            headers={"Cache-Control": "no-store"},
+        )
+    return JSONResponse(
+        {"ok": True, "delivery": diagnostics},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 async def api_preference(request: Request) -> JSONResponse:
     refused = _operator_cookie_only(request)
     if refused is not None:
@@ -292,6 +323,9 @@ async def api_preference(request: Request) -> JSONResponse:
         )
     except Exception as exc:
         return _error(exc)
+    from tools.dashboard import web_push, web_push_worker
+    web_push.wake_worker()
+    web_push_worker.wake_worker()
     return JSONResponse({"ok": True, "application": application, "mode": mode})
 
 
@@ -309,8 +343,9 @@ async def api_delete_device(request: Request) -> JSONResponse:
         return _error(exc)
     if not retired:
         return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
-    from tools.dashboard import web_push
+    from tools.dashboard import web_push, web_push_worker
     web_push.wake_worker()
+    web_push_worker.wake_worker()
     return JSONResponse({"ok": True, "retired": True})
 
 
@@ -347,8 +382,9 @@ async def api_refresh_device(request: Request) -> JSONResponse:
     except Exception as exc:
         return _error(exc)
     if result is None:
-        from tools.dashboard import web_push
+        from tools.dashboard import web_push, web_push_worker
         web_push.wake_worker()
+        web_push_worker.wake_worker()
         return JSONResponse({"ok": True, "retired": True})
     return JSONResponse({
         "ok": True,
@@ -362,6 +398,7 @@ async def api_refresh_device(request: Request) -> JSONResponse:
 ROUTES = [
     Route("/api/web-push/config", api_config, methods=["GET"]),
     Route("/api/web-push/devices", api_devices, methods=["GET"]),
+    Route("/api/web-push/diagnostics", api_diagnostics, methods=["GET"]),
     Route("/api/web-push/devices/{device_id}", api_put_device, methods=["PUT"]),
     Route("/api/web-push/devices/{device_id}", api_delete_device, methods=["DELETE"]),
     Route(

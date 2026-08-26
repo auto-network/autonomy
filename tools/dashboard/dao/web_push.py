@@ -39,7 +39,7 @@ DB_PATH = resolve_store("web_push")
 KEY_DIR = resolve_store("web_push_keys")
 LEGACY_KEY_PATH = resolve_store("web_push_vapid")
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 KEY_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 MODES = frozenset({"off", "generic", "descriptive"})
@@ -193,6 +193,89 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_web_push_one_active_vapid
     ON web_push_vapid_keys(status) WHERE status='active';
 """
 
+_DELIVERY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS web_push_delivery_events (
+    owner_subject       TEXT NOT NULL,
+    delivery_id         TEXT NOT NULL,
+    event_id            TEXT NOT NULL,
+    attention_id        TEXT NOT NULL,
+    source_version      INTEGER NOT NULL,
+    application_scope   TEXT NOT NULL,
+    notification_class  TEXT NOT NULL,
+    class_policy_revision INTEGER NOT NULL,
+    delivery_class      TEXT NOT NULL,
+    budget_class        TEXT NOT NULL,
+    coalesce_key        TEXT NOT NULL,
+    urgency             TEXT NOT NULL,
+    privacy_renderer_id TEXT NOT NULL,
+    route_builder_id    TEXT NOT NULL,
+    destination_id      TEXT NOT NULL,
+    source_guard_kind   TEXT NOT NULL,
+    source_guard_ref    TEXT NOT NULL,
+    source_guard_version INTEGER NOT NULL,
+    latch_created_at    REAL NOT NULL,
+    latch_expires_at    REAL NOT NULL,
+    latch_state         TEXT NOT NULL,
+    latch_state_version INTEGER NOT NULL,
+    latch_updated_at    REAL NOT NULL,
+    fallback_due_at     REAL,
+    budget_reserved_at  REAL,
+    projected_at        REAL NOT NULL,
+    PRIMARY KEY(owner_subject, delivery_id),
+    UNIQUE(owner_subject, event_id)
+);
+CREATE INDEX IF NOT EXISTS idx_web_push_delivery_event_budget
+    ON web_push_delivery_events(owner_subject,budget_class,budget_reserved_at);
+CREATE INDEX IF NOT EXISTS idx_web_push_delivery_event_coalesce
+    ON web_push_delivery_events(owner_subject,application_scope,coalesce_key,latch_created_at);
+
+CREATE TABLE IF NOT EXISTS web_push_delivery_targets (
+    target_id           TEXT PRIMARY KEY,
+    owner_subject       TEXT NOT NULL,
+    delivery_id         TEXT NOT NULL,
+    event_id            TEXT NOT NULL,
+    subscription_id     TEXT NOT NULL,
+    state               TEXT NOT NULL,
+    available_at        REAL NOT NULL,
+    expires_at          REAL NOT NULL,
+    attempt_count       INTEGER NOT NULL DEFAULT 0,
+    lease_token         TEXT,
+    lease_until         REAL,
+    release_token       TEXT,
+    guard_crossed_at    REAL,
+    accepted_at         REAL,
+    last_status         INTEGER,
+    last_reason         TEXT,
+    created_at          REAL NOT NULL,
+    updated_at          REAL NOT NULL,
+    UNIQUE(owner_subject,delivery_id,subscription_id),
+    FOREIGN KEY(owner_subject,delivery_id)
+        REFERENCES web_push_delivery_events(owner_subject,delivery_id)
+        ON DELETE CASCADE,
+    FOREIGN KEY(subscription_id) REFERENCES web_push_subscriptions(id)
+);
+CREATE INDEX IF NOT EXISTS idx_web_push_delivery_target_due
+    ON web_push_delivery_targets(state,available_at,lease_until);
+CREATE INDEX IF NOT EXISTS idx_web_push_delivery_target_event
+    ON web_push_delivery_targets(owner_subject,delivery_id,event_id,state);
+CREATE INDEX IF NOT EXISTS idx_web_push_delivery_target_subscription
+    ON web_push_delivery_targets(subscription_id,state);
+
+CREATE TABLE IF NOT EXISTS web_push_delivery_attempts (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    target_id           TEXT NOT NULL,
+    release_token       TEXT,
+    attempted_at        REAL NOT NULL,
+    outcome             TEXT NOT NULL,
+    status              INTEGER,
+    reason              TEXT,
+    FOREIGN KEY(target_id) REFERENCES web_push_delivery_targets(target_id)
+        ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_web_push_delivery_attempt_time
+    ON web_push_delivery_attempts(attempted_at);
+"""
+
 
 def _execute_ddl(connection: sqlite3.Connection, script: str) -> None:
     """Execute simple DDL without ``executescript``'s implicit commit.
@@ -272,6 +355,7 @@ class WebPushStore:
                         "ON web_push_subscriptions(device_id,status);"
                     )
             _execute_ddl(connection, _SUBSTRATE_SCHEMA)
+            _execute_ddl(connection, _DELIVERY_SCHEMA)
             connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             connection.commit()
         except Exception:
@@ -545,6 +629,17 @@ class WebPushStore:
                 f"WHERE installation_id=? AND state IN ({placeholders})",
                 (reason, row["device_id"], *NONTERMINAL_OUTBOX_STATES),
             )
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='web_push_delivery_targets'"
+        ).fetchone():
+            connection.execute(
+                "UPDATE web_push_delivery_targets SET state='canceled',"
+                "last_reason=?,updated_at=? WHERE subscription_id=? "
+                "AND state IN ('fallback_wait','budget_wait','pending','leased',"
+                "'guard_crossed','retry_wait')",
+                (reason, timestamp, row["id"]),
+            )
 
     def retire(self, operator_subject: str, device_id: str, *, reason: str) -> bool:
         device_id = _device_id(device_id)
@@ -655,6 +750,21 @@ class WebPushStore:
                 "mode=excluded.mode,updated_at=excluded.updated_at",
                 (operator_subject, application, mode, time.time()),
             )
+            if mode == "off" and connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='web_push_delivery_targets'"
+            ).fetchone():
+                timestamp = time.time()
+                connection.execute(
+                    "UPDATE web_push_delivery_targets SET state='canceled',"
+                    "last_reason='preference_off',updated_at=? "
+                    "WHERE owner_subject=? AND delivery_id IN ("
+                    "SELECT delivery_id FROM web_push_delivery_events "
+                    "WHERE owner_subject=? AND application_scope=?) "
+                    "AND state IN ('fallback_wait','budget_wait','pending','leased',"
+                    "'guard_crossed','retry_wait')",
+                    (timestamp, operator_subject, operator_subject, application),
+                )
             connection.commit()
             return mode
         finally:

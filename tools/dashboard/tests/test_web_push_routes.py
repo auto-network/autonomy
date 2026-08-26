@@ -222,6 +222,24 @@ class TestWebPushSubscriptionRoutes:
             assert forbidden not in wire
         assert response.json()["devices"][0]["device_label"] == "Jeremy's iPhone"
 
+    def test_delivery_diagnostics_are_operator_only_aggregate_and_no_store(self, client):
+        browser, _db = client
+        response = browser.get("/api/web-push/diagnostics")
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store"
+        assert response.json()["delivery"] == {
+            "states": {},
+            "oldest_due_age_seconds": None,
+            "attempts_24h": {},
+            "budget_reservations_1h": 0,
+        }
+        assert ROOT not in response.text
+        browser.cookies.clear()
+        assert browser.get("/api/web-push/diagnostics").status_code == 401
+        assert browser.get(
+            "/api/web-push/diagnostics", headers={"Authorization": "Bearer org"},
+        ).status_code == 403
+
     def test_preference_registry_and_explicit_modes(self, client):
         browser, _db = client
         changed = browser.patch(
