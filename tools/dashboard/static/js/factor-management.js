@@ -198,6 +198,118 @@ const STYLE = `
 .shbtn{background:#0a84ff;color:#fff;border-radius:10px;padding:11px;font-size:15px;
   font-weight:600;cursor:pointer}
 .shcancel{font-size:15px;color:#0a84ff;padding:11px;cursor:pointer}
+
+/* ── Manage-credentials screen — the design VERBATIM (factor-ui-restart mock).
+   Every var + rule is the mock's, scoped under .credpanel so the tokens
+   (--accent/--panel/…) cannot leak onto the host dashboard. ──────────────── */
+.credpanel{ --bg:#0b0f17; --panel:#111827; --panel2:#0d1420; --line:#1f2937; --line2:#374151;
+  --ink:#e5e7eb; --dim:#9ca3af; --faint:#6b7280; --accent:#6366f1; --accent2:#818cf8;
+  --good:#34d399; --goodbg:#064e3b; --warn:#fbbf24; --warnbg:#4d3908; --danger:#f87171;
+  --mfa:#38bdf8; --mfabg:#0c2c40;
+  display:flex; flex-direction:column; background:var(--panel); color:var(--ink); }
+.credpanel .credbody{ overflow-y:auto; padding:6px 12px 16px }
+.credpanel .scrhead{ display:flex; align-items:center; gap:10px; padding:13px 14px 12px;
+  border-bottom:1px solid var(--line) }
+.credpanel .scrhead .ttl{ min-width:0 }
+.credpanel .scrhead h1{ margin:0; font-size:15.5px; font-weight:650 }
+.credpanel .scrhead .sub{ font-size:12px; color:var(--dim) }
+.credpanel .closex{ margin-left:auto; background:none; border:none; color:var(--faint);
+  font-size:22px; line-height:1; cursor:pointer; padding:2px 8px; border-radius:8px }
+.credpanel .closex:hover{ background:#0d1420; color:var(--ink) }
+.credpanel .mfacard{ margin:10px 6px 4px; border:1px solid var(--line2); border-radius:12px;
+  padding:12px; display:flex; align-items:center; gap:11px;
+  background:linear-gradient(180deg,#0c1626,#0b1220) }
+.credpanel .mfacard .mi{ min-width:0; flex:1 }
+.credpanel .mfacard .mt{ font-weight:650; font-size:14px; white-space:nowrap }
+.credpanel .mfacard .md{ font-size:12px; color:var(--dim); margin-top:3px }
+.credpanel .ficon{ position:relative; width:34px; height:34px; border-radius:9px; flex:none;
+  display:grid; place-items:center; background:#0b1220; border:1px solid var(--line2);
+  color:var(--accent2) }
+.credpanel .ficon svg{ width:18px; height:18px }
+.credpanel .grouphead{ display:flex; align-items:center; padding:14px 8px 6px }
+.credpanel .grouplbl{ padding:0; font-size:11px; letter-spacing:.12em; text-transform:uppercase;
+  color:var(--faint) }
+.credpanel .addbtn{ margin-left:auto; background:none; border:1px solid var(--line2);
+  color:var(--accent2); border-radius:8px; padding:4px 11px; font:inherit; font-size:12px;
+  font-weight:650; cursor:pointer; display:inline-flex; align-items:center; gap:5px }
+.credpanel .addbtn:hover{ background:#12203b }
+.credpanel .addbtn svg{ width:12px; height:12px }
+.credpanel .row{ display:flex; align-items:center; gap:12px; padding:12px; border:1px solid var(--line);
+  background:var(--panel2); border-radius:12px; margin:6px 0 }
+.credpanel .authcell{ width:80px; flex:none; display:flex; flex-direction:column; align-items:center;
+  gap:6px; cursor:pointer; text-align:center }
+.credpanel .authcell .ac-ico{ position:relative; width:34px; height:34px; border-radius:9px;
+  display:grid; place-items:center; background:#0b1220; border:1px solid var(--line2);
+  color:var(--accent2); overflow:visible }
+.credpanel .authcell .ac-ico svg{ width:18px; height:18px }
+.credpanel .authcell .ac-lbl{ font-size:10.5px; line-height:1.15; font-weight:600; color:var(--dim) }
+.credpanel .authcell.au-full .ac-ico{ color:#34d399; border-color:rgba(52,211,153,.45);
+  background:rgba(52,211,153,.08) }
+.credpanel .authcell.au-full .ac-lbl{ color:#34d399 }
+.credpanel .authcell.au-multi .ac-ico{ color:var(--mfa); border-color:rgba(120,130,240,.5);
+  background:rgba(120,130,240,.08) }
+.credpanel .authcell.au-multi .ac-lbl{ color:var(--mfa) }
+.credpanel .authcell.au-unlock .ac-ico{ color:var(--accent2) }
+.credpanel .authcell.au-unlock .ac-lbl{ color:#93a3bd }
+.credpanel .authcell.au-none .ac-ico{ color:var(--line2); background:transparent }
+.credpanel .authcell.au-none .ac-lbl{ color:#5b6578 }
+.credpanel .fmid{ min-width:0; flex:1 }
+.credpanel .fname{ font-weight:600; display:flex; align-items:center; gap:8px; flex-wrap:wrap }
+.credpanel .fmeta{ font-size:12px; color:var(--dim); margin-top:2px; overflow-wrap:break-word }
+.credpanel .fmeta>div{ line-height:1.5 }
+.credpanel .facts{ display:flex; align-items:center; gap:2px; margin-left:auto }
+.credpanel .factcol{ display:flex; flex-direction:column; align-items:flex-end; gap:1px; margin-left:auto }
+.credpanel .lnk{ background:none; border:none; color:var(--dim); font-size:12px; cursor:pointer;
+  padding:6px 8px; border-radius:8px }
+.credpanel .lnk:hover{ color:var(--ink); background:#0d1420 }
+.credpanel .lnk.lchange{ color:var(--accent2) }
+.credpanel .lnk.lverify{ color:#34d399 }
+.credpanel .lnk.ldelete{ color:var(--danger) }
+.credpanel .lnk.lcancel{ color:var(--dim); margin-left:auto }
+.credpanel .lnk.lchange:hover,.credpanel .lnk.lverify:hover,.credpanel .lnk.ldelete:hover,
+.credpanel .lnk.lcancel:hover{ text-decoration:underline; background:none }
+.credpanel .trashbtn{ width:30px; height:30px; border-radius:8px; border:1px solid var(--line2);
+  background:#0e1420; color:var(--faint); display:grid; place-items:center; cursor:pointer }
+.credpanel .trashbtn svg{ width:15px; height:15px }
+@media (hover:hover){ .credpanel .trashbtn:hover{ color:var(--danger); border-color:var(--danger);
+  background:#3b1414 } }
+.credpanel .namewrap{ display:inline-flex; align-items:center; gap:5px }
+.credpanel .editbtn{ display:inline-flex; align-items:center; justify-content:center; width:16px;
+  height:16px; padding:0; background:none; border:none; color:var(--dim); cursor:pointer }
+.credpanel .editbtn svg{ width:16px; height:16px }
+.credpanel .editbtn:hover{ color:#fff }
+.credpanel .renamewrap{ display:inline-flex; align-items:center; gap:2px }
+.credpanel .renameinput{ background:#0b111b; border:1px solid var(--accent); border-radius:6px;
+  color:var(--ink); font-size:inherit; font-weight:inherit; font-family:inherit; padding:2px 7px;
+  max-width:170px }
+.credpanel .renameinput:focus{ outline:none }
+.credpanel .renameok,.credpanel .renamecancel{ display:inline-flex; align-items:center;
+  justify-content:center; width:20px; height:20px; padding:0; background:none; border:none;
+  cursor:pointer }
+.credpanel .renameok svg,.credpanel .renamecancel svg{ width:16px; height:16px }
+.credpanel .renameok{ color:#34d399 }
+.credpanel .renamecancel{ color:var(--danger) }
+.credpanel .inlinepw{ flex:1; min-width:0; display:flex; flex-direction:column; gap:8px }
+.credpanel .inlinepw .fname{ font-weight:600 }
+.credpanel .inlinerow{ display:flex; gap:8px; align-items:center }
+.credpanel .inlineinput{ flex:1; min-width:0; background:#0b111b; border:1px solid var(--line2);
+  border-radius:8px; color:var(--ink); padding:8px 10px; font-size:14px }
+.credpanel .inlineinput:focus{ outline:none; border-color:var(--accent) }
+.credpanel .inlinego{ flex:none; padding:8px 16px }
+.credpanel .inlinefoot{ display:flex; align-items:center; gap:12px; min-height:16px }
+.credpanel .inlinemsg{ display:inline-flex; align-items:center; gap:5px; font-size:12px }
+.credpanel .inlinemsg svg{ width:14px; height:14px }
+.credpanel .inlinemsg.fail{ color:var(--danger) }
+.credpanel .inlineok{ display:inline-flex; align-items:center; gap:8px; color:#34d399;
+  font-weight:600; font-size:14px; padding:4px 0 }
+.credpanel .inlineok svg{ width:20px; height:20px }
+.credpanel .btn{ font:inherit; font-weight:600; cursor:pointer; border-radius:10px; padding:9px 13px;
+  border:1px solid var(--line2); display:inline-flex; align-items:center; gap:7px;
+  justify-content:center }
+.credpanel .btn-primary{ background:var(--accent); color:#fff; border-color:var(--accent) }
+.credpanel .btn-primary:hover{ background:#5457e6 }
+.credpanel .weak{ font:600 8px/1 ui-monospace,monospace; letter-spacing:.06em; text-transform:uppercase;
+  color:var(--warn); background:var(--warnbg); padding:3px 5px; border-radius:3px; margin-left:6px }
 `;
 
 // ── module state ───────────────────────────────────────────────────────────
@@ -321,8 +433,8 @@ const IC_PK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke
 function auCell(role, access, oldLevel, isPasskey, dataAttr, noprf) {
   const ico = isPasskey ? IC_PK : IC_KEY;
   if (noprf) {
-    return '<div class="aucell au-none"><span class="au-ico">' + ico
-      + '</span><span class="au-word">' + (M.mfa ? 'Cannot pair' : 'No PRF') + '</span></div>';
+    return '<div class="authcell au-none"><span class="ac-ico">' + ico
+      + '</span><span class="ac-lbl">' + (M.mfa ? 'Cannot pair' : 'No PRF') + '</span></div>';
   }
   let word;
   let cls;
@@ -330,8 +442,8 @@ function auCell(role, access, oldLevel, isPasskey, dataAttr, noprf) {
     word = ({ a: 'Unlock only', b: 'Full authority', off: 'No authority' })[oldLevel] || 'Unlock only';
     cls = ({ a: 'au-unlock', b: 'au-full', off: 'au-none' })[oldLevel] || 'au-unlock';
   }
-  return '<div class="aucell ' + cls + '"' + (dataAttr || '') + (dataAttr ? ' style="cursor:pointer"' : '')
-    + '><span class="au-ico">' + ico + '</span><span class="au-word">' + word + '</span></div>';
+  return '<div class="authcell ' + cls + '"' + (dataAttr || '') + (dataAttr ? ' style="cursor:pointer"' : '')
+    + '><span class="ac-ico">' + ico + '</span><span class="ac-lbl">' + word + '</span></div>';
 }
 
 // ── inline rename (approved design): tap the pencil, edit in place, save.
@@ -341,24 +453,27 @@ function auCell(role, access, oldLevel, isPasskey, dataAttr, noprf) {
 const IC_EDIT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>';
 const IC_OK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 6.5"/></svg>';
 const IC_XX = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>';
+const IC_SHIELD = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/></svg>';
+const IC_PLUS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>';
+const IC_TRASH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13M10 11v6M14 11v6"/></svg>';
 function escAttr(s) { return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
 function nameHtml(factorId, label, suffix) {
   suffix = suffix || '';
-  if (!factorId) return label + suffix;
+  if (!factorId) return '<span>' + label + '</span>' + suffix;
   if (S.renaming === factorId) {
-    return '<span class="rn"><input class="rn-in" value="' + escAttr(S.renameVal != null ? S.renameVal : label) + '">'
-      + '<button class="rn-ok" aria-label="Save">' + IC_OK + '</button>'
-      + '<button class="rn-x" aria-label="Cancel">' + IC_XX + '</button></span>';
+    return '<span class="renamewrap"><input class="renameinput" value="' + escAttr(S.renameVal != null ? S.renameVal : label) + '">'
+      + '<button class="renameok" aria-label="Save">' + IC_OK + '</button>'
+      + '<button class="renamecancel" aria-label="Cancel">' + IC_XX + '</button></span>';
   }
-  return '<span class="nm-txt">' + label + '</span>'
-    + '<button class="nm-edit" data-edit="' + escAttr(factorId) + '" aria-label="Rename">' + IC_EDIT + '</button>'
+  return '<span class="namewrap"><span>' + label + '</span>'
+    + '<button class="editbtn" data-edit="' + escAttr(factorId) + '" aria-label="Rename">' + IC_EDIT + '</button></span>'
     + suffix;
 }
 function wireName(row, factorId, label) {
   if (!factorId) return;
-  const edit = row.querySelector('.nm-edit');
+  const edit = row.querySelector('.editbtn');
   if (edit) edit.onclick = (e) => { e.stopPropagation(); S.renaming = factorId; S.renameVal = label; render(); };
-  const inp = row.querySelector('.rn-in');
+  const inp = row.querySelector('.renameinput');
   if (inp) {
     inp.oninput = () => { S.renameVal = inp.value; };
     inp.onkeydown = (e) => {
@@ -369,8 +484,8 @@ function wireName(row, factorId, label) {
     inp.onclick = (e) => e.stopPropagation();
     setTimeout(() => { inp.focus(); inp.select(); }, 0);
   }
-  const ok = row.querySelector('.rn-ok'); if (ok) ok.onclick = (e) => { e.stopPropagation(); saveName(factorId); };
-  const x = row.querySelector('.rn-x'); if (x) x.onclick = (e) => { e.stopPropagation(); S.renaming = null; render(); };
+  const ok = row.querySelector('.renameok'); if (ok) ok.onclick = (e) => { e.stopPropagation(); saveName(factorId); };
+  const x = row.querySelector('.renamecancel'); if (x) x.onclick = (e) => { e.stopPropagation(); S.renaming = null; render(); };
 }
 function applyLabel(factorId, label) {
   if (M.pw && M.pw.factorId === factorId) M.pw.label = label;
@@ -395,12 +510,16 @@ async function saveName(factorId) {
 // password is checked CLIENT-SIDE by opening the armor with it (read-only, no
 // server call, no write). Green check on success (auto-reverts), red X to retry.
 function verifyBlock() {
-  if (S.vfyResult === 'ok') return '<div class="vfy-ok">' + IC_OK + '<span>Verified</span></div>';
-  return '<div class="vfy-morph"><div class="vfy-ttl">Verify your password</div>'
-    + '<div class="vfy-row"><input class="vfy-in" type="password" autocomplete="current-password" placeholder="Password">'
-    + '<button class="btn vfy-go">Verify</button><button class="vfy-cancel">Cancel</button></div>'
-    + (S.vfyResult === 'fail' ? '<div class="vfy-fail">' + IC_XX + '<span>Incorrect — try again</span></div>' : '')
-    + '</div>';
+  if (S.vfyResult === 'ok') {
+    return '<div class="inlinepw"><div class="fname">Verify your password</div>'
+      + '<div class="inlineok">' + IC_OK + '<span>Verified</span></div></div>';
+  }
+  return '<div class="inlinepw"><div class="fname">Verify your password</div><div>'
+    + '<div class="inlinerow"><input class="inlineinput" type="password" autocomplete="current-password" placeholder="Password">'
+    + '<button class="btn btn-primary inlinego">Verify</button></div>'
+    + '<div class="inlinefoot">'
+    + (S.vfyResult === 'fail' ? '<span class="inlinemsg fail">' + IC_XX + '<span>Incorrect — try again</span></span>' : '')
+    + '<button class="lnk lcancel">Cancel</button></div></div></div>';
 }
 async function doVerify() {
   const pw = S.vfyVal || '';
@@ -415,7 +534,7 @@ async function doVerify() {
   } catch (e) { S.vfyResult = 'fail'; render(); }
 }
 function wireVerify(row) {
-  const inp = row.querySelector('.vfy-in');
+  const inp = row.querySelector('.inlineinput');
   if (inp) {
     inp.value = S.vfyVal || '';
     inp.oninput = () => { S.vfyVal = inp.value; };
@@ -423,8 +542,8 @@ function wireVerify(row) {
     inp.onclick = (e) => e.stopPropagation();
     setTimeout(() => inp.focus(), 0);
   }
-  const go = row.querySelector('.vfy-go'); if (go) go.onclick = (e) => { e.stopPropagation(); doVerify(); };
-  const cx = row.querySelector('.vfy-cancel'); if (cx) cx.onclick = (e) => { e.stopPropagation(); S.verifying = null; S.vfyResult = null; S.vfyVal = ''; render(); };
+  const go = row.querySelector('.inlinego'); if (go) go.onclick = (e) => { e.stopPropagation(); doVerify(); };
+  const cx = row.querySelector('.lcancel'); if (cx) cx.onclick = (e) => { e.stopPropagation(); S.verifying = null; S.vfyResult = null; S.vfyVal = ''; render(); };
 }
 function actionOn(k) {
   if (k === 'both') {
@@ -454,6 +573,21 @@ function displayName() {
 }
 function initial() { return (displayName() || '?').trim().charAt(0).toUpperCase(); }
 
+// Friendly factor metadata, verbatim from the design's transportHuman/createdLocal:
+// a passkey's transports become human tokens (Built-in / Security key / Cloud-Sync /
+// This device) joined with " · "; a timestamp renders in the viewer's local zone.
+function transportHuman(p, here) {
+  const t = (p && p.transports) || [];
+  const has = (x) => t.indexOf(x) !== -1;
+  const parts = [];
+  if (has('internal')) parts.push('Built-in');
+  if (has('usb') || has('nfc') || has('ble')) parts.push('Security key');
+  if (p && (p.backed_up || has('hybrid'))) parts.push('Cloud-Sync');   // backed-up flag is authoritative (BE/BS)
+  if (here) parts.push('This device');
+  return parts.join(' · ') || 'Passkey';
+}
+function createdLocal(iso) { return iso ? new Date(iso).toLocaleString().replace(', ', ' ') : ''; }
+
 // Build the design's M shape from the real /status + parsed armor.
 async function loadModel() {
   const st = await (await fetch('/api/identity/status', {
@@ -474,9 +608,9 @@ async function loadModel() {
   factors.filter((f) => f.type === 'passkey').forEach((f) => { rootIds[f.credential_id] = 1; });
   const keys = (st.passkeys || []).map((p) => ({
     l: p.label || 'Passkey',
-    v: (p.transports && p.transports.length) ? p.transports.join(', ') : 'passkey',
+    v: transportHuman(p, p.rp_id === st.rp_id),
     prf: !!p.provisioning_public_key,
-    w: p.created_at || '',
+    w: createdLocal(p.created_at),
     here: p.rp_id === st.rp_id ? 1 : 0,
     auth: rootIds[p.credential_id] ? 'full' : 'unlock',
     credentialId: p.credential_id,
@@ -496,9 +630,7 @@ async function loadModel() {
       // iterations, grouped (600,000). created_at is a creation time, not a
       // change; render it in the viewer's local time zone, never raw UTC.
       itersLabel: (Number(iters) || 0).toLocaleString() + ' iterations',
-      createdLabel: pj.created_at
-        ? 'created ' + new Date(pj.created_at).toLocaleString()
-        : '',
+      createdLabel: createdLocal(pj.created_at),
     },
     kdfNow: { mem: 600000 },
     keys,
@@ -961,86 +1093,105 @@ function panelScreen() {
 }
 
 function keysScreen() {
-  const p = el('div', 'panel');
+  const p = el('div', 'panel credpanel');
   const n = M.keys.length + (M.pass.on ? 1 : 0);
-  p.appendChild(el('div', 'ph', '<div class="pav">' + initial() + '</div><div><div class="pnm">Factors</div>'
-    + '<div class="pst">' + n + ' on this identity</div></div>'));
+  const head = el('div', 'scrhead',
+    '<div class="ttl"><h1>Manage credentials</h1><div class="sub">'
+    + escAttr(displayName()) + ' &middot; ' + n + ' factor' + (n === 1 ? '' : 's') + '</div></div>'
+    + '<button class="closex" aria-label="Close">&times;</button>');
+  head.querySelector('.closex').onclick = (e) => { e.stopPropagation(); if (onBackFn) onBackFn(); else close(); };
+  p.appendChild(head);
 
-  p.appendChild(el('div', 'plab', 'Password'));
-  if (!M.pass.on) {
-    const add0 = el('div', 'pact', '<div class="pico plus"></div><div><div class="pl">Set a password'
-      + '</div><div class="pd">Reach your identity where there is no passkey</div></div>');
-    add0.onclick = (e) => { e.stopPropagation(); S.pwMode = 'enrollpw'; gatherThen('setpw', rootNeed()); };
-    p.appendChild(add0);
-  } else {
-    const lv = level('pass');
-    // The authority editor (authScreen) is the single common control for every
-    // authority change, in EVERY state — including MFA, where the only legal
-    // move is dissolving the pair. Gating it off under MFA left the panel with
-    // no path back to password+passkey, so the badge stays tappable whenever an
-    // alternative authority state exists.
-    const canTap = hasAlternative();
-    const weak = M.pw.mem < M.kdfNow.mem;
-    const cell = auCell(M.pw.rootRole, M.pw.access, lv, false, canTap ? ' data-p="1"' : '', false);
-    const pwLabel = M.pw.label || 'Password';
-    const pwRenaming = !!M.pw.factorId && S.renaming === M.pw.factorId;
-    const pwVerifying = S.verifying === 'pw';
-    let pr;
-    if (pwVerifying) {
-      pr = el('div', 'krow', cell + '<div class="kmid">' + verifyBlock() + '</div>');
-      wireVerify(pr);
-    } else {
-      const actions = pwRenaming ? ''
-        : '<div class="chg">Change</div>' + (M.mfa ? '' : '<div class="vfy">Verify</div>') + '<div class="kx">&times;</div>';
-      pr = el('div', 'krow', cell + '<div class="kmid"><div class="knm">'
-        + nameHtml(M.pw.factorId, pwLabel, weak ? '<span class="weak">below current strength</span>' : '')
-        + '</div><div class="kmeta">' + M.pw.kdf + ' &middot; ' + M.pw.itersLabel
-        + (M.pw.createdLabel ? ' &middot; ' + M.pw.createdLabel : '') + '</div></div>' + actions);
-      const pb = pr.querySelector('[data-p]');
-      if (pb) pb.onclick = (e) => { e.stopPropagation(); gatherThen('authorize', rootNeed()); };
-      const pchg = pr.querySelector('.chg');
-      if (pchg) pchg.onclick = (e) => { e.stopPropagation(); S.pwMode = 'changepw'; gatherThen('setpw', rootNeed()); };
-      const pvfy = pr.querySelector('.vfy');
-      if (pvfy) pvfy.onclick = (e) => { e.stopPropagation(); S.verifying = 'pw'; S.vfyVal = ''; S.vfyResult = null; render(); };
-      const pkx = pr.querySelector('.kx');
-      if (pkx) pkx.onclick = (e) => { e.stopPropagation(); gatherThen('removepw', rootNeed()); };
-      wireName(pr, M.pw.factorId, pwLabel);
-    }
-    p.appendChild(pr);
-  }
+  const body = el('div', 'credbody');
 
-  p.appendChild(el('div', 'plab', 'Passkeys'));
-  M.keys.forEach((k, i) => {
-    const cell = auCell(k.rootRole, k.access, k.auth === 'full' ? 'b' : 'a', true,
-      k.prf === false ? '' : ' data-k="' + i + '"', k.prf === false);
-    const kRenaming = !!k.factorId && S.renaming === k.factorId;
-    const r = el('div', 'krow', cell + '<div class="kmid"><div class="knm">'
-      + nameHtml(k.factorId, k.l, k.here ? '<span class="here">this device</span>' : '')
-      + '</div><div class="kmeta">' + k.v + ' &middot; added ' + k.w + '</div></div>'
-      + (kRenaming ? '' : '<div class="kx">&times;</div>'));
-    wireName(r, k.factorId, k.l);
-    const kb = r.querySelector('[data-k]');
-    // Under MFA a passkey cannot be raised on its own — a full standalone
-    // passkey and require-both are contradictory — so tapping its authority
-    // opens the same authority editor (where dissolving the pair makes it full).
-    // Off MFA, the direct promote/demote path applies.
-    if (kb) kb.onclick = (e) => {
-      e.stopPropagation();
-      if (M.mfa) gatherThen('authorize', rootNeed()); else changeKey(i);
-    };
-    const kkx = r.querySelector('.kx');
-    if (kkx) kkx.onclick = (e) => { e.stopPropagation(); gatherThen('removekey', rootNeed(), { keyIdx: i }); };
-    p.appendChild(r);
-  });
-  if (S.warn) p.appendChild(el('div', 'fui-warn', S.warn));
-  const add = el('div', 'pact', '<div class="pico plus"></div><div><div class="pl">Add a passkey</div>'
-    + '<div class="pd">This device, or scan from a phone</div></div>');
-  add.onclick = (e) => { e.stopPropagation(); gatherThen('create', rootNeed()); };
-  p.appendChild(add);
-  const back = el('div', 'back', '&lsaquo; Back');
-  back.onclick = (e) => { e.stopPropagation(); if (onBackFn) onBackFn(); else close(); };
-  p.appendChild(back);
+  const mfa = el('div', 'mfacard',
+    '<div class="ficon">' + IC_SHIELD + '</div>'
+    + '<div class="mi"><div class="mt">Multi-factor authentication</div><div class="md">'
+    + (M.mfa ? 'Full authority requires both a password and a passkey together.'
+      : 'Require multiple factors to allow full authority.')
+    + '</div></div><button class="addbtn mfaset">' + (M.mfa ? 'Configure' : 'Set up') + '</button>');
+  mfa.querySelector('.mfaset').onclick = (e) => { e.stopPropagation(); gatherThen('authorize', rootNeed()); };
+  body.appendChild(mfa);
+
+  // A personal identity holds a single password, so "+ Add" is offered only
+  // when none exists; once set, Change/Verify/Delete on the row are the controls.
+  body.appendChild(groupHead('Passwords', M.pass.on ? null : () => {
+    S.pwMode = 'enrollpw'; gatherThen('setpw', rootNeed());
+  }));
+  if (M.pass.on) body.appendChild(pwRow());
+
+  body.appendChild(groupHead('Passkeys', () => gatherThen('create', rootNeed())));
+  M.keys.forEach((k, i) => body.appendChild(pkRow(k, i)));
+
+  if (S.warn) body.appendChild(el('div', 'fui-warn', S.warn));
+  p.appendChild(body);
   return p;
+}
+
+function groupHead(label, onAdd) {
+  const g = el('div', 'grouphead', '<span class="grouplbl">' + label + '</span>'
+    + (onAdd ? '<button class="addbtn">' + IC_PLUS + ' Add</button>' : ''));
+  const add = g.querySelector('.addbtn');
+  if (add) add.onclick = (e) => { e.stopPropagation(); onAdd(); };
+  return g;
+}
+
+function pwRow() {
+  const lv = level('pass');
+  // The authority cell is the single common control for every authority change,
+  // in EVERY state — including MFA (where the only legal move is dissolving the
+  // pair) — so it stays tappable whenever an alternative authority state exists.
+  const canTap = hasAlternative();
+  const weak = M.pw.mem < M.kdfNow.mem;
+  const cell = auCell(M.pw.rootRole, M.pw.access, lv, false, canTap ? ' data-p="1"' : '', false);
+  const pwLabel = M.pw.label || 'Password';
+  if (S.verifying === 'pw') {
+    const rv = el('div', 'row', cell + verifyBlock());
+    wireVerify(rv);
+    return rv;
+  }
+  const pwRenaming = !!M.pw.factorId && S.renaming === M.pw.factorId;
+  const meta = '<div class="fmeta"><div>' + M.pw.kdf + ' &middot; ' + M.pw.itersLabel + '</div>'
+    + (M.pw.createdLabel ? '<div>' + M.pw.createdLabel + '</div>' : '') + '</div>';
+  const actions = pwRenaming ? ''
+    : '<div class="facts factcol"><button class="lnk lchange">Change</button>'
+      + (M.mfa ? '' : '<button class="lnk lverify">Verify</button>')
+      + '<button class="lnk ldelete">Delete</button></div>';
+  const r = el('div', 'row', cell + '<div class="fmid"><div class="fname">'
+    + nameHtml(M.pw.factorId, pwLabel, weak ? '<span class="weak">below current strength</span>' : '')
+    + '</div>' + meta + '</div>' + actions);
+  const pb = r.querySelector('[data-p]');
+  if (pb) pb.onclick = (e) => { e.stopPropagation(); gatherThen('authorize', rootNeed()); };
+  const pchg = r.querySelector('.lchange');
+  if (pchg) pchg.onclick = (e) => { e.stopPropagation(); S.pwMode = 'changepw'; gatherThen('setpw', rootNeed()); };
+  const pvfy = r.querySelector('.lverify');
+  if (pvfy) pvfy.onclick = (e) => { e.stopPropagation(); S.verifying = 'pw'; S.vfyVal = ''; S.vfyResult = null; render(); };
+  const pdel = r.querySelector('.ldelete');
+  if (pdel) pdel.onclick = (e) => { e.stopPropagation(); gatherThen('removepw', rootNeed()); };
+  wireName(r, M.pw.factorId, pwLabel);
+  return r;
+}
+
+function pkRow(k, i) {
+  const cell = auCell(k.rootRole, k.access, k.auth === 'full' ? 'b' : 'a', true,
+    k.prf === false ? '' : ' data-k="' + i + '"', k.prf === false);
+  const kRenaming = !!k.factorId && S.renaming === k.factorId;
+  const meta = '<div class="fmeta"><div>' + k.v + '</div>' + (k.w ? '<div>' + k.w + '</div>' : '') + '</div>';
+  const del = kRenaming ? '' : '<button class="trashbtn" aria-label="Remove">' + IC_TRASH + '</button>';
+  const r = el('div', 'row', cell + '<div class="fmid"><div class="fname">'
+    + nameHtml(k.factorId, k.l, '')
+    + '</div>' + meta + '</div>' + del);
+  wireName(r, k.factorId, k.l);
+  const kb = r.querySelector('[data-k]');
+  // Under MFA a passkey can't be raised on its own; tapping opens the authority
+  // editor (where dissolving the pair makes it full). Off MFA, direct promote/demote.
+  if (kb) kb.onclick = (e) => {
+    e.stopPropagation();
+    if (M.mfa) gatherThen('authorize', rootNeed()); else changeKey(i);
+  };
+  const kt = r.querySelector('.trashbtn');
+  if (kt) kt.onclick = (e) => { e.stopPropagation(); gatherThen('removekey', rootNeed(), { keyIdx: i }); };
+  return r;
 }
 
 // Changing a factor's authority needs the root proven; then land on authorize.

@@ -218,14 +218,20 @@ function overlay() { const o = document.querySelectorAll('.fui-overlay'); return
 function q(sel) { const r = overlay(); return r ? r.querySelector(sel) : null; }
 function qa(sel) { const r = overlay(); return r ? [...r.querySelectorAll(sel)] : []; }
 function warnText() { const w = q('.fui-warn'); return w ? w.textContent : ''; }
-function clickPactByText(text) {
-  const row = qa('.pact').find((e) => e.textContent.includes(text));
-  assert.ok(row, `pact "${text}" present`); row.click();
+// Click the "+ Add" control in a named section (Passwords / Passkeys) header.
+function clickAddIn(label) {
+  const head = qa('.grouphead').find((h) => {
+    const l = h.querySelector('.grouplbl');
+    return l && l.textContent.trim().toLowerCase() === label.toLowerCase();
+  });
+  assert.ok(head, `group "${label}" present`);
+  const add = head.querySelector('.addbtn');
+  assert.ok(add, `group "${label}" offers Add`); add.click();
 }
 async function openPanel() {
   [...document.querySelectorAll('.fui-overlay')].forEach((e) => e.remove());
   panel.open({});
-  await until(() => q('.krow') || q('.pact'));
+  await until(() => q('.row') || q('.grouphead'));
 }
 // Walk the gather (Authorizing) screen: present passkeys and type the password,
 // waiting for each async step to advance the DOM before the next.
@@ -292,7 +298,7 @@ test('MFA → password + passkey (Change password: the operator bug)', async () 
     passkeys: [await pkRow(cred)],
   });
   await openPanel();
-  q('.krow .chg').click();          // Password row → Change
+  q('.row .lchange').click();          // Password row → Change
   await gather('oldpw');            // Authorizing: present passkey + type current pw
   const [a, b] = qa('input.oin'); a.value = 'newpw'; b.value = 'newpw';
   qa('.btn').filter((x) => !x.classList.contains('flat')).pop().click();
@@ -313,7 +319,7 @@ test('MFA → password + passkey (authority editor: uncheck Multi-Factor)', asyn
     passkeys: [await pkRow(cred)],
   });
   await openPanel();
-  q('.krow [data-p]').click();      // password authority badge → editor (reachable under MFA now)
+  q('.row [data-p]').click();      // password authority badge → editor (reachable under MFA now)
   await gather('pw');
   assert.ok(q('.pick'), 'authority editor rendered');
   const both = qa('.pick').find((r) => r.textContent.includes('Multi-Factor'));
@@ -335,7 +341,7 @@ test('password + passkey → MFA (authority editor: check Multi-Factor)', async 
     passkeys: [await pkRow(cred)],
   });
   await openPanel();
-  q('.krow [data-p]').click();      // password authority badge → editor
+  q('.row [data-p]').click();      // password authority badge → editor
   await gather('pw');
   assert.ok(q('.pick'), 'authority editor rendered');
   const both = qa('.pick').find((r) => r.textContent.includes('Multi-Factor'));
@@ -358,7 +364,7 @@ test('passkey-only → + password (Set a password)', async () => {
     passkeys: [await pkRow(cred)],
   });
   await openPanel();
-  clickPactByText('Set a password');
+  clickAddIn('Passwords');
   await gather('pw');               // Authorizing: present the passkey
   const [a, b] = qa('input.oin'); a.value = 'addpw'; b.value = 'addpw';
   qa('.btn').filter((x) => !x.classList.contains('flat')).pop().click();
@@ -375,7 +381,7 @@ test('password → change password', async () => {
   const armor = await aPassword(root, 'pw');
   SERVER = makeServer({ armor, rootPub: root.rootPub, passkeys: [] });
   await openPanel();
-  q('.krow .chg').click();
+  q('.row .lchange').click();
   await gather('pw');
   const [a, b] = qa('input.oin'); a.value = 'changed'; b.value = 'changed';
   qa('.btn').filter((x) => !x.classList.contains('flat')).pop().click();
@@ -395,7 +401,7 @@ test('password + passkey → remove password (passkey-only)', async () => {
     passkeys: [await pkRow(cred)],
   });
   await openPanel();
-  q('.krow .kx').click();           // password × → remove
+  q('.row .ldelete').click();           // password × → remove
   await gather('pw');
   await until(() => SERVER.posts.length > 0, 120);
   assert.ok(SERVER.posts.length, 'a re-arm was posted; warn=' + warnText());
@@ -413,7 +419,7 @@ test('password + passkey → promote a second passkey to full authority', async 
     passkeys: [await pkRow(c1), await pkRow(c2)], // c2 registered but NOT a root factor yet
   });
   await openPanel();
-  const c2row = qa('.krow').find((r) => r.querySelector('[data-k]') && /unlock only/i.test(r.textContent));
+  const c2row = qa('.row').find((r) => r.querySelector('[data-k]') && /unlock only/i.test(r.textContent));
   assert.ok(c2row, 'the unlock-only passkey row is present');
   c2row.querySelector('[data-k]').click();     // changeKey → prove root, then present the key
   await gather('pw');                           // proves the password, then presents c2 (promote)
@@ -431,7 +437,7 @@ test('password + passkey → demote the passkey to unlock only', async () => {
   const armor = await aBoth(root, 'pw', cred);
   SERVER = makeServer({ armor, rootPub: root.rootPub, passkeys: [await pkRow(cred)] });
   await openPanel();
-  const row = qa('.krow').find((r) => r.querySelector('[data-k]') && /full authority/i.test(r.textContent));
+  const row = qa('.row').find((r) => r.querySelector('[data-k]') && /full authority/i.test(r.textContent));
   assert.ok(row, 'the full-authority passkey row is present');
   row.querySelector('[data-k]').click();        // changeKey → demote (no present step)
   await gather('pw');
@@ -448,7 +454,7 @@ test('password-only → enroll a passkey (two-step: Authorizing then Enrolling)'
   const armor = await aPassword(root, 'pw');
   SERVER = makeServer({ armor, rootPub: root.rootPub, passkeys: [] });
   await openPanel();
-  clickPactByText('Add a passkey');
+  clickAddIn('Passkeys');
   await gather('pw');                            // Authorizing (open with the password)
   await until(() => q('.sheet .shbtn'));         // Enrolling sheet
   assert.match(q('.sheet .shttl').textContent, /Enrolling/);
@@ -467,7 +473,7 @@ test('MFA → dual full-authority factors, no MFA (UI shows BOTH full)', async (
   const armor = await aMfa(root, 'pw', cred);
   SERVER = makeServer({ armor, rootPub: root.rootPub, passkeys: [await pkRow(cred)] });
   await openPanel();
-  q('.krow [data-p]').click();                 // authority editor
+  q('.row [data-p]').click();                 // authority editor
   await gather('pw');
   const both = qa('.pick').find((r) => r.textContent.includes('Multi-Factor'));
   both.click();                                 // turn OFF require-both
@@ -479,16 +485,16 @@ test('MFA → dual full-authority factors, no MFA (UI shows BOTH full)', async (
   qa('.btn').pop().click();                      // Save
   await until(() => SERVER.posts.length > 0, 120);
   assert.ok(SERVER.posts.length, 'a re-arm was posted; warn=' + warnText());
-  await until(() => q('.krow'));                 // back on the Factors panel
+  await until(() => q('.row'));                 // back on the Factors panel
   const out = SERVER.armor;
   assert.deepEqual(factorTypes(out), ['passkey', 'password']);
   assert.ok(await opensWithPassword(out, 'pw'), 'password opens alone');
   assert.ok(await opensWithPasskey(out, cred), 'passkey opens alone');
   // the rendered authority badges must BOTH say full authority
   assert.equal(warnText(), '', 'no invalid-state error');
-  const pwBadge = q('.krow .aucell');
+  const pwBadge = q('.row .authcell');
   assert.match(pwBadge.textContent, /full authority/i, 'password badge full');
-  const keyBadge = qa('.krow [data-k]').pop();
+  const keyBadge = qa('.row [data-k]').pop();
   assert.ok(keyBadge, 'passkey authority badge present');
   assert.match(keyBadge.textContent, /full authority/i, 'passkey badge full authority (not unlock only)');
 });
@@ -504,21 +510,21 @@ test('inline rename PATCHes the factor metadata and updates the shown name', asy
   }];
   await openPanel();
   await settle();
-  const edit = q('.krow .nm-edit');
+  const edit = q('.row .editbtn');
   assert.ok(edit, 'the rename pencil renders when factor-policy provides a factor id');
   edit.click();
   await settle();
-  const input = q('.rn-in');
+  const input = q('.renameinput');
   assert.ok(input, 'an inline input appears in place of the name');
   input.value = 'Work password';
   input.dispatchEvent(new window.Event('input'));
-  q('.rn-ok').click();                       // save
+  q('.renameok').click();                       // save
   await settle();
   const patch = (SERVER.patches || []).pop();
   assert.ok(patch, 'a metadata PATCH was sent');
   assert.match(patch.url, /\/api\/identity\/factors\/pw\.a\/metadata/, 'to the right factor');
   assert.equal(patch.body.label, 'Work password', 'with only the new label');
-  assert.match(q('.krow .nm-txt').textContent, /Work password/, 'and the shown name updates');
+  assert.match(q('.row .fname').textContent, /Work password/, 'and the shown name updates');
 });
 
 test('inline verify: right password reads Verified, wrong reads Incorrect', async () => {
@@ -527,19 +533,19 @@ test('inline verify: right password reads Verified, wrong reads Incorrect', asyn
   SERVER = makeServer({ armor, rootPub: root.rootPub, passkeys: [] });
   await openPanel();
   await settle();
-  const vfy = q('.krow .vfy');
+  const vfy = q('.row .lverify');
   assert.ok(vfy, 'the Verify action is offered on a non-MFA password');
   vfy.click();
   await settle();
-  assert.ok(q('.vfy-in'), 'the card morphs to a password field');
-  q('.vfy-in').value = 'WRONGpw';
-  q('.vfy-in').dispatchEvent(new window.Event('input'));
-  q('.vfy-go').click();
-  assert.ok(await until(() => q('.vfy-fail')), 'a wrong password reports Incorrect');
-  q('.vfy-in').value = 'rightpw';
-  q('.vfy-in').dispatchEvent(new window.Event('input'));
-  q('.vfy-go').click();
-  assert.ok(await until(() => q('.vfy-ok')), 'the correct password verifies green (opened the armor client-side)');
+  assert.ok(q('.inlineinput'), 'the card morphs to a password field');
+  q('.inlineinput').value = 'WRONGpw';
+  q('.inlineinput').dispatchEvent(new window.Event('input'));
+  q('.inlinego').click();
+  assert.ok(await until(() => q('.inlinemsg.fail')), 'a wrong password reports Incorrect');
+  q('.inlineinput').value = 'rightpw';
+  q('.inlineinput').dispatchEvent(new window.Event('input'));
+  q('.inlinego').click();
+  assert.ok(await until(() => q('.inlineok')), 'the correct password verifies green (opened the armor client-side)');
 });
 
 test('a failed ceremony reports diagnostics to the server with NO secrets', async () => {
@@ -547,7 +553,7 @@ test('a failed ceremony reports diagnostics to the server with NO secrets', asyn
   const armor = await aPassword(root, 'realpw');
   SERVER = makeServer({ armor, rootPub: root.rootPub, passkeys: [] });
   await openPanel();
-  q('.krow .chg').click();
+  q('.row .lchange').click();
   await gather('WRONGpw');                       // wrong current password → re-arm fails
   const [a, b] = qa('input.oin'); a.value = 'newsecret'; b.value = 'newsecret';
   qa('.btn').filter((x) => !x.classList.contains('flat')).pop().click();
