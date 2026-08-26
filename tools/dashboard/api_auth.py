@@ -338,6 +338,28 @@ class ApiIdentityMiddleware:
         header_org = request.headers.get("x-graph-org") or None
         principal, effective_org = self._classify(request, header_org)
 
+        if principal.org_bound and header_org and header_org != principal.org:
+            # The mismatch REFUSE (auto-lbwzr / auto-h4kzx). An org-bound caller
+            # PROVES org A with its bearer; a conflicting ``X-Graph-Org: B``
+            # cannot widen or redirect that — the token is authoritative and
+            # un-widenable — and an org caller has no legitimate reason to name
+            # another org. So the conflict is a spoof attempt or a client bug,
+            # refused LOUDLY rather than silently scoped to the token's org.
+            # Nothing in production sends a bearer with a conflicting header:
+            # the graph CLI sends the bearer alone, the operator's browser uses
+            # the cookie (not org-bound), and org-scoped handlers (e.g. session
+            # resume) resolve from the trusted principal + server-side facts,
+            # never the header. A MATCHING or absent header is fine; a non-org
+            # caller selects via the header and has no bearer org to conflict
+            # with, so this never reaches it.
+            refusal = JSONResponse(
+                {"error": "organization mismatch: the request's bearer and "
+                          "X-Graph-Org name different organizations"},
+                status_code=403,
+            )
+            await refusal(scope, receive, send)
+            return
+
         request_state = scope.setdefault("state", {})
         request_state["api_principal"] = principal
         request_state["api_organization"] = effective_org
