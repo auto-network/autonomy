@@ -21,7 +21,6 @@ from tools.codex_transcript import (
     CodexTranscriptVersionError,
     TranscriptVersionError,
     codex_cli_version,
-    codex_uses_response_item_chat,
 )
 
 
@@ -2518,25 +2517,6 @@ def _parse_codex_exec_end(payload: dict, timestamp: str) -> dict | list[dict] | 
     return out if len(out) > 1 else result
 
 
-# First Codex release that stopped emitting ``event_msg.user_message`` /
-# ``agent_message``. From 0.147.0 the operator-visible chat exists ONLY as
-# ``response_item.message``. Measured across all 176 rollouts on this host:
-# every version through 0.146.0 (172 files) emits the event_msg shape; only
-# 0.147.0 does not.
-def _codex_reads_response_item_chat(ctx: dict | None) -> bool:
-    """True when this rollout's Codex no longer emits event_msg chat.
-
-    Older rollouts carry the SAME message in both shapes, plus tool-runtime
-    warnings filed under the user role — which is exactly why the
-    ``response_item.message`` skip below exists and must stay for them.
-    An unknown version is not an older version.  Returning ``False`` for it
-    silently drops every chat message from current Codex transcripts, so the
-    parser fails closed until the caller supplies file/session context.
-    """
-    return codex_uses_response_item_chat(
-        str((ctx or {}).get("codex_cli_version") or "") or None)
-
-
 # Machine-authored text that Codex files under the *user* role. The
 # event_msg shape never carried any of it, so it never reached the viewer
 # before 0.147 — reading response_items is what surfaced it, and it is
@@ -2662,52 +2642,15 @@ def parse_codex_log_line(line: str, ctx: dict | None = None) -> dict | list[dict
 
     if entry_type == "event_msg":
         event_type = payload.get("type")
-        if event_type == "user_message":
-            text = str(payload.get("message") or "")
-            if text:
-                identity = _codex_event_message_identity(payload, "user", text)
-                ct = _classify_crosstalk(text)
-                if ct:
-                    return {
-                        "type": "crosstalk",
-                        "role": "crosstalk",
-                        "content": ct["message"],
-                        "sender": ct["from"],
-                        "sender_label": ct["label"],
-                        "source_id": ct["source"],
-                        "turn": ct["turn"],
-                        "timestamp": timestamp,
-                    }
-                sys_info = _classify_system_message(text)
-                if sys_info:
-                    entry = {
-                        "type": "system",
-                        "role": "system",
-                        "content": sys_info["summary"],
-                        "tag": sys_info["tag"],
-                        "timestamp": timestamp,
-                    }
-                    if sys_info.get("body"):
-                        entry["body"] = sys_info["body"]
-                    return entry
-                return {
-                    "type": "user",
-                    "role": "user",
-                    "content": text,
-                    "timestamp": timestamp,
-                    **identity,
-                }
-        if event_type == "agent_message":
-            text = str(payload.get("message") or "")
-            if text:
-                identity = _codex_event_message_identity(payload, "assistant", text)
-                return {
-                    "type": "assistant_text",
-                    "role": "assistant",
-                    "content": text,
-                    "timestamp": timestamp,
-                    **identity,
-                }
+        # user_message / agent_message are deliberately NOT rendered here.
+        # Chat renders solely from response_item.message: codex's event_msg
+        # chat stream has flip-flopped twice (<0.147 both shapes, 0.147.0
+        # response_item only, 0.148+ both again), while response_item is
+        # the record `codex resume` itself replays, so it is the stream
+        # with a structural stability guarantee — and every measured
+        # rollout carries all chat there. Rendering both shapes duplicated
+        # every message on 0.148+ (auto-0821-154759, 2026-08-26); the
+        # version gate that used to arbitrate is gone with them.
         if event_type == "exec_command_end":
             return _parse_codex_exec_end(payload, timestamp)
         if event_type == "patch_apply_end":
@@ -2810,12 +2753,11 @@ def parse_codex_log_line(line: str, ctx: dict | None = None) -> dict | list[dict
             }
             return entry
 
-    # Skip response_item.message to avoid duplicating the operator-visible
-    # stream already emitted by event_msg.user_message/agent_message — unless
-    # this rollout's Codex no longer emits that stream at all (>=0.147.0),
-    # in which case response_item.message IS the operator-visible stream and
-    # skipping it renders the session blank.
-    if item_type == "message" and _codex_reads_response_item_chat(ctx):
+    # response_item.message is the ONE chat source (see the event_msg note
+    # above): it carries every user/assistant turn in every measured codex
+    # version, and the machine-authored noise it also carries (preambles,
+    # developer-role injections) is filtered inside the builder.
+    if item_type == "message":
         return _codex_response_item_chat_entry(payload, timestamp)
     return None
 

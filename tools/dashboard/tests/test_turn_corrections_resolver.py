@@ -111,8 +111,10 @@ def test_reads_claude_user_turns_with_uuid_message_id(tmp_path):
 
 
 def test_reads_codex_user_turns_with_synthetic_message_id(tmp_path):
-    # Codex event_msg user turns without a raw uuid get a synthetic
+    # Codex user turns without a raw uuid get a synthetic
     # ``codex-user:<hash>`` id — the resolver must read that same id.
+    # Chat parses from response_item.message only; the event_msg twin that
+    # 0.146/0.148+ rollouts also carry never produces a (duplicate) turn.
     from tools.dashboard.session_harness import codex_message_id
     text = "codex user message here"
     expected_id = codex_message_id({}, "user", text)
@@ -121,6 +123,10 @@ def test_reads_codex_user_turns_with_synthetic_message_id(tmp_path):
     jsonl = _write_jsonl(tmp_path / "sessions" / "u" / "rollout-2026.jsonl", [
         {"type": "session_meta", "payload": {"cli_version": "0.146.0"},
          "timestamp": "2026-08-10T11:59:59Z"},
+        {"type": "response_item",
+         "payload": {"type": "message", "role": "user",
+                     "content": [{"type": "input_text", "text": text}]},
+         "timestamp": "2026-08-10T12:00:00Z"},
         {"type": "event_msg", "payload": {"type": "user_message", "message": text},
          "timestamp": "2026-08-10T12:00:00Z"},
     ])

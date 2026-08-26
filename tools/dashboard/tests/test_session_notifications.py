@@ -54,8 +54,12 @@ async def test_typed_notification_is_idempotent_and_not_operator_input(monkeypat
 
     codex = parse_codex_log_line(json.dumps({
         "timestamp": "2026-08-20T00:00:00Z",
-        "type": "event_msg",
-        "payload": {"type": "user_message", "message": envelope},
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": envelope}],
+        },
     }))
     assert codex["type"] == "system"
     assert codex["role"] == "system"

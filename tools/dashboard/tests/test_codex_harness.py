@@ -910,16 +910,28 @@ def test_postprocess_codex_graph_share_output_emits_viewer_attachment(tmp_path):
     assert attachments[0]["mime"] == "image/png"
 
 
-def test_parse_codex_user_and_agent_event_messages():
+def test_parse_codex_chat_renders_from_response_item_only():
+    """Chat has ONE source: response_item.message. The event_msg chat shape
+    has flip-flopped across codex versions (<0.147 both shapes, 0.147.0
+    response_item only, 0.148+ both again — auto-0821-154759); rendering
+    both duplicated every message, so event_msg chat is never a tile."""
     user = parse_codex_log_line(_line({
         "timestamp": TS,
-        "type": "event_msg",
-        "payload": {"type": "user_message", "message": "Hello"},
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Hello"}],
+        },
     }))
     assistant = parse_codex_log_line(_line({
         "timestamp": TS,
-        "type": "event_msg",
-        "payload": {"type": "agent_message", "message": "Hello. How can I help?"},
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Hello. How can I help?"}],
+        },
     }))
 
     assert user["type"] == "user"
@@ -939,24 +951,38 @@ def test_parse_codex_user_and_agent_event_messages():
         + hashlib.sha1("assistant\nHello. How can I help?".encode("utf-8")).hexdigest()[:16]
     )
 
-
-def test_parse_codex_event_messages_preserve_explicit_identity():
-    user = parse_codex_log_line(_line({
+    # The 0.148+ duplicate shapes produce NO tile — one message, one tile.
+    assert parse_codex_log_line(_line({
         "timestamp": TS,
         "type": "event_msg",
+        "payload": {"type": "user_message", "message": "Hello"},
+    })) is None
+    assert parse_codex_log_line(_line({
+        "timestamp": TS,
+        "type": "event_msg",
+        "payload": {"type": "agent_message", "message": "Hello. How can I help?"},
+    })) is None
+
+
+def test_parse_codex_response_item_chat_preserves_explicit_identity():
+    user = parse_codex_log_line(_line({
+        "timestamp": TS,
+        "type": "response_item",
         "payload": {
-            "type": "user_message",
-            "message": "Hello",
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Hello"}],
             "uuid": "msg-user-123",
             "parentUuid": "parent-user-1",
         },
     }))
     assistant = parse_codex_log_line(_line({
         "timestamp": TS,
-        "type": "event_msg",
+        "type": "response_item",
         "payload": {
-            "type": "agent_message",
-            "message": "Hi there",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Hi there"}],
             "uuid": "msg-assistant-456",
             "parentUuid": "parent-assistant-1",
         },
@@ -971,16 +997,17 @@ def test_parse_codex_event_messages_preserve_explicit_identity():
 def test_parse_codex_inbound_crosstalk_user_message():
     entry = parse_codex_log_line(_line({
         "timestamp": TS,
-        "type": "event_msg",
+        "type": "response_item",
         "payload": {
-            "type": "user_message",
-            "message": (
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": (
                 '<crosstalk from="host-0422-201533" label="Dashboard UI" '
                 'source="5706c4cc-6570-4acd-a457-a8907bdb54f5" turn="1774" '
                 'timestamp="2026-04-23T21:41:16Z">\n'
                 'Rebase required before your commit can be merged.\n'
                 '</crosstalk>'
-            ),
+            )}],
         },
     }))
 
@@ -999,16 +1026,17 @@ def test_parse_codex_inbound_crosstalk_user_message():
 def test_parse_codex_inbound_crosstalk_allows_angle_bracket_code():
     entry = parse_codex_log_line(_line({
         "timestamp": TS,
-        "type": "event_msg",
+        "type": "response_item",
         "payload": {
-            "type": "user_message",
-            "message": (
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": (
                 '<crosstalk from="host-0422-201533" label="Dashboard UI" '
                 'source="5706c4cc-6570-4acd-a457-a8907bdb54f5" turn="1774" '
                 'timestamp="2026-04-23T21:41:16Z">\n'
                 'if (left < right && total > 0) return items[i];\n'
                 '</crosstalk>'
-            ),
+            )}],
         },
     }))
 
@@ -1189,7 +1217,11 @@ def test_resolve_harness_for_path_reads_session_meta(tmp_path):
     assert harness.name == "codex"
 
 
-def test_response_item_chat_without_codex_version_fails_closed():
+def test_response_item_chat_renders_without_codex_version():
+    """The chat path is version-free: response_item.message renders with no
+    ctx at all. The old version gate (and its fail-closed raise) existed to
+    arbitrate between the two chat shapes; with event_msg chat never
+    rendered, there is nothing to arbitrate."""
     line = json.dumps({
         "type": "response_item",
         "timestamp": TS,
@@ -1200,8 +1232,9 @@ def test_response_item_chat_without_codex_version_fails_closed():
         },
     })
 
-    with pytest.raises(MissingCodexVersionError, match="version is unavailable"):
-        parse_codex_log_line(line, ctx={})
+    entry = parse_codex_log_line(line, ctx={})
+    assert entry["type"] == "user"
+    assert entry["content"] == "Do not drop me"
 
 
 
