@@ -6,14 +6,14 @@ set -uo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/_jira_lib.sh"
 
 if [ "${1:-}" = "--probe" ]; then
-  curl -skf "$DASH/api/jira/probe?org=$ORG" || jira_fail "jira: broker probe failed at $DASH"
+  jira_curl -skf "$DASH/api/jira/probe?org=$ORG" || jira_fail "jira: broker probe failed at $DASH"
   exit 0
 fi
 
 KEY="${1:-}"
 [ -n "$KEY" ] || jira_fail "usage: jira-read ISSUE_KEY (e.g. jira-read ENTERPRISE-8385)"
 
-resp="$(curl -sk "$DASH/api/jira/issue/$KEY?org=$ORG")"
+resp="$(jira_curl -sk "$DASH/api/jira/issue/$KEY?org=$ORG")"
 echo "$resp" | python3 -c 'import sys,json
 d=json.load(sys.stdin)
 if "error" in d: sys.exit("jira: " + str(d["error"]))

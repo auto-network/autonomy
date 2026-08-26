@@ -8,7 +8,18 @@
 
 DASH="${AUTONOMY_DASHBOARD:-${GRAPH_API:-https://localhost:8080}}"
 SESSION="${AUTONOMY_SESSION:-}"
-# Org whose install Setting configures the broker (graph DBs are per-org).
+# Org whose install Setting configures the broker. The broker now derives the
+# AUTHORITATIVE org from the caller's bearer server-side (jira_routes._org), so
+# this only has to be SET (not correct) to satisfy `set -u` — GRAPH_ORG was
+# removed from the container environment when the org became a property of the
+# token, leaving nothing to pass. Left overridable for a non-standard topology.
+ORG="${AUTONOMY_ORG:-}"
+
+# Every broker/approvals call carries the session bearer: /api/jira/* and
+# /api/approvals are default-deny like every other /api route (an unauthenticated
+# call gets a bare 401). Wrap curl once so no call site can forget the header;
+# the token is passed, never logged. ``:-`` keeps it safe under `set -u`.
+jira_curl() { curl -H "Authorization: Bearer ${CROSSTALK_TOKEN:-}" "$@"; }
 
 jira_fail() { echo "$1" >&2; exit 1; }
 
@@ -30,13 +41,13 @@ jira_read_body() {
 jira_approval_wait() {
   local req_file="$1" id state
   [ -n "$SESSION" ] || jira_fail "jira: AUTONOMY_SESSION is not set"
-  id="$(curl -sk -X POST "$DASH/api/approvals" -H 'Content-Type: application/json' \
+  id="$(jira_curl -sk -X POST "$DASH/api/approvals" -H 'Content-Type: application/json' \
           --data-binary @"$req_file" \
           | python3 -c 'import sys,json; print(json.load(sys.stdin).get("id",""))' 2>/dev/null)"
   [ -n "$id" ] || jira_fail "jira: dashboard did not accept the request (is it running at $DASH?)"
   echo "Waiting for operator approval (request $id)…" >&2
   while :; do
-    state="$(curl -sk --max-time 70 "$DASH/api/approvals/$id?wait=55" \
+    state="$(jira_curl -sk --max-time 70 "$DASH/api/approvals/$id?wait=55" \
               | python3 -c 'import sys,json
 r=json.load(sys.stdin).get("result")
 if r is None: print("PENDING")
@@ -52,6 +63,6 @@ else:
       *)        sleep 2 ;;  # network/parse hiccup — brief backoff
     esac
   done
-  curl -sk "$DASH/api/approvals/$id?wait=0" \
+  jira_curl -sk "$DASH/api/approvals/$id?wait=0" \
     | python3 -c 'import sys,json; print(json.dumps(json.load(sys.stdin)["result"]["execution"], indent=2))'
 }

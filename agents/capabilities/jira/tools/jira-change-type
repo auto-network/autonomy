@@ -14,7 +14,7 @@ KEY="${1:-}"
 [ -n "$KEY" ] || jira_fail "usage: jira-change-type ISSUE_KEY 'Issue Type'  (or: jira-change-type ISSUE_KEY --list)"
 
 if [ "${2:-}" = "--list" ]; then
-  curl -sk "$DASH/api/jira/issue-types/$KEY?org=$ORG" \
+  jira_curl -sk "$DASH/api/jira/issue-types/$KEY?org=$ORG" \
     | python3 -c 'import sys, json
 d = json.load(sys.stdin)
 if "error" in d: sys.exit("jira: " + str(d["error"]))
@@ -39,7 +39,7 @@ trap 'rm -f "$req_file"' EXIT
 
 # Preflight: resolve the target against the project's type list and only
 # then emit the approval request — nothing is staged for a doomed change.
-curl -sk "$DASH/api/jira/issue-types/$KEY?org=$ORG" \
+jira_curl -sk "$DASH/api/jira/issue-types/$KEY?org=$ORG" \
   | python3 -c 'import sys, json
 session, key, org, target = sys.argv[1:5]
 d = json.load(sys.stdin)

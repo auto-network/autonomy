@@ -8,7 +8,7 @@ set -uo pipefail
 PROJECT="${1:-${JIRA_PROJECT:-ENTERPRISE}}"
 ISSUETYPE="${2:-${JIRA_ISSUETYPE:-Bug}}"
 
-resp="$(curl -sk "$DASH/api/jira/createmeta?project=$PROJECT&issuetype=$ISSUETYPE&version_prefix=Enterprise&org=$ORG")"
+resp="$(jira_curl -sk "$DASH/api/jira/createmeta?project=$PROJECT&issuetype=$ISSUETYPE&version_prefix=Enterprise&org=$ORG")"
 echo "$resp" | python3 -c 'import sys,json
 d=json.load(sys.stdin)
 if "error" in d: sys.exit("jira: " + str(d["error"]))
