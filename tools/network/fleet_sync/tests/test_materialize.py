@@ -267,6 +267,15 @@ def _seed_every_logical_table(db: GraphDB, blob: bytes, local_root: Path) -> str
     ciphertext = b"sealed personal secret"
     ciphertext_hash = hashlib.sha256(ciphertext).hexdigest()
     statements = [
+        ("INSERT INTO policy_classes(class_id,wire) VALUES(?,?)",
+         ("class-1", '{"class":1}')),
+        ("INSERT INTO vault_factors(factor_id,factor_type,public_key,armor) "
+         "VALUES(?,?,?,?)",
+         ("factor-1", "password", "public", "armor")),
+        ("INSERT INTO root_anchors(anchor_id,wire) VALUES(?,?)",
+         ("anchor-1", '{"anchor":1}')),
+        ("INSERT INTO vault_secrets(setting_name,wire) VALUES(?,?)",
+         ("secret-1", '{"secret":1}')),
         ("INSERT INTO vault_content_bodies(ciphertext_hash,size_bytes,body,created_at) "
          "VALUES(?,?,?,?)",
          (ciphertext_hash, len(ciphertext), ciphertext, 1_787_000_000)),

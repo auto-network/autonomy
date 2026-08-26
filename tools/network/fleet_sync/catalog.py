@@ -29,7 +29,7 @@ from .compaction import AuthoredMutation, WatermarkError
 from .materialize import materialize
 from .merge import mutation_wins
 from .policies import PolicyKind, TABLE_POLICIES, audit_schema
-from .snapshot import _logical_address, _logical_values
+from .snapshot import _logical_address, _logical_values, _row_timestamp
 from .streaming import ensure_streaming_indexes, iter_indexed_snapshot_mutations
 
 
@@ -82,6 +82,19 @@ def _sql_key(prefix: str, table: str) -> str:
         f"{prefix}.{_quote(column)}" for column in _trigger_key_arguments(table)
     )
     return f"fleet_sync_key('{table}',{arguments})"
+
+
+def _settings_row_is_live(prefix: str) -> str:
+    """Match the base-row visibility rule used by snapshot and lookup.
+
+    Deprecated base Settings are retained as local history, but they are not a
+    live logical row.  Override and exclusion rows have per-row logical
+    addresses and remain replicated even when deprecated.
+    """
+    return (
+        f"({prefix}.supersedes IS NOT NULL OR {prefix}.excludes IS NOT NULL "
+        f"OR {prefix}.deprecated = 0)"
+    )
 
 
 def _winner_predicate() -> str:
@@ -165,6 +178,35 @@ def _trigger_sql(table: str) -> tuple[str, str, str]:
         delete = f"""
             CREATE TRIGGER fleet_sync_{table}_delete BEFORE DELETE ON {_quote(table)}
             BEGIN SELECT RAISE(ABORT, 'fleet-sync immutable row cannot delete'); END
+        """
+        return insert, update, delete
+    if table == "settings":
+        old_live = _settings_row_is_live("OLD")
+        new_live = _settings_row_is_live("NEW")
+        insert = f"""
+            CREATE TRIGGER fleet_sync_{table}_insert AFTER INSERT ON {_quote(table)}
+            WHEN {capture} AND {new_live} BEGIN
+                {_capture_statement(table, 'NEW', 0)}
+            END
+        """
+        update = f"""
+            CREATE TRIGGER fleet_sync_{table}_update AFTER UPDATE ON {_quote(table)}
+            WHEN {capture} BEGIN
+                {_capture_statement(table, 'NEW', 0, condition=new_live)}
+                {_capture_statement(
+                    table, 'OLD', 1,
+                    condition=(
+                        f"{old_live} AND (NOT {new_live} OR "
+                        f"{_sql_key('OLD', table)} != {_sql_key('NEW', table)})"
+                    ),
+                )}
+            END
+        """
+        delete = f"""
+            CREATE TRIGGER fleet_sync_{table}_delete AFTER DELETE ON {_quote(table)}
+            WHEN {capture} AND {old_live} BEGIN
+                {_capture_statement(table, 'OLD', 1)}
+            END
         """
         return insert, update, delete
     delete = f"""
@@ -650,7 +692,7 @@ class MutationCatalog:
             self.conn.rollback()
             raise
 
-    def _bootstrap_existing_rows(self) -> int:
+    def _bootstrap_existing_rows(self, *, audit: bool = True) -> int:
         """Give each untracked live row deterministic legacy winner metadata."""
         self.conn.execute(
             "CREATE TEMP TABLE fleet_sync_bootstrap_progress("
@@ -663,7 +705,9 @@ class MutationCatalog:
         maximum = 0
         generation: int | None = None
         try:
-            for mutation in iter_indexed_snapshot_mutations(self.conn):
+            for mutation in iter_indexed_snapshot_mutations(
+                self.conn, audit=audit,
+            ):
                 address_blob = encode_value([
                     mutation.table, list(mutation.address)
                 ])
@@ -734,7 +778,72 @@ class MutationCatalog:
         )
         return inserted
 
-    def _verify_catalog_integrity(self) -> tuple[int, int]:
+    def _repair_deprecated_settings_tombstones(self) -> int:
+        """Repair the pre-fix encoding of a retired base Setting.
+
+        Older settings triggers recorded ``deprecated: 0 -> 1`` as a live
+        update even though snapshots and ``_live_row`` both define that base
+        address as absent.  Rewrite only the exact self-inconsistent case: the
+        winner and its journal frame are non-tombstones carrying
+        ``deprecated=1``, and the physical row at that address has the same
+        authored timestamp.  Provenance and operation ordering are preserved.
+        """
+        policy = TABLE_POLICIES["settings"]
+        repaired = 0
+        retired = self.conn.execute(
+            "SELECT * FROM settings WHERE supersedes IS NULL "
+            "AND excludes IS NULL AND deprecated=1"
+        ).fetchall()
+        for raw in retired:
+            row = dict(raw)
+            address = _logical_address(policy, row)
+            address_blob = encode_value(["settings", list(address)])
+            winner = self.conn.execute(
+                "SELECT timestamp_ns,transaction_ref,operation_index "
+                "FROM fleet_sync_catalog WHERE address=? AND tombstone=0",
+                (address_blob,),
+            ).fetchone()
+            if winner is None:
+                continue
+            timestamp, transaction_ref, operation_index = winner
+            if _row_timestamp(policy, row) != int(timestamp):
+                continue
+            stored = self.conn.execute(
+                "SELECT frame FROM fleet_sync_journal WHERE transaction_ref=? "
+                "AND operation_index=?",
+                (transaction_ref, operation_index),
+            ).fetchone()
+            if stored is None:
+                continue
+            legacy = decode_mutation_frame(_unpack_journal(bytes(stored[0])))
+            if (
+                legacy.table != "settings"
+                or legacy.address != address
+                or legacy.timestamp_ns != int(timestamp)
+                or legacy.tombstone
+                or dict(legacy.values).get("deprecated") != 1
+            ):
+                continue
+            tombstone = Mutation("settings", address, int(timestamp), True)
+            self.conn.execute(
+                "UPDATE fleet_sync_catalog SET tombstone=1 WHERE address=?",
+                (address_blob,),
+            )
+            self.conn.execute(
+                "UPDATE fleet_sync_journal SET frame=? WHERE transaction_ref=? "
+                "AND operation_index=?",
+                (
+                    _pack_journal(encode_mutation_frame(tombstone)),
+                    transaction_ref,
+                    operation_index,
+                ),
+            )
+            repaired += 1
+        return repaired
+
+    def _verify_catalog_integrity(
+        self, *, audit: bool = True,
+    ) -> tuple[int, int]:
         """Validate bounded catalog decoding and complete live-row coverage."""
         catalog_rows = 0
         for raw in self.conn.execute(
@@ -755,7 +864,9 @@ class MutationCatalog:
             catalog_rows += 1
 
         live_rows = 0
-        for mutation in iter_indexed_snapshot_mutations(self.conn):
+        for mutation in iter_indexed_snapshot_mutations(
+            self.conn, audit=audit,
+        ):
             address_blob = encode_value([mutation.table, list(mutation.address)])
             row = self.conn.execute(
                 "SELECT tombstone FROM fleet_sync_catalog WHERE address=?",
@@ -847,10 +958,11 @@ class MutationCatalog:
     def reconcile_catalog(self, *, audit: bool = True) -> CatalogMigrationReport:
         """Backfill untracked live rows into an ALREADY-ACTIVATED catalog.
 
-        Unlike :meth:`migrate_existing`, this tolerates capture triggers and
-        never rebuilds or deletes: it inserts winner metadata only for live
-        rows the catalog is currently missing, via the idempotent
-        skip-if-present path in :meth:`_bootstrap_existing_rows`.
+        Unlike :meth:`migrate_existing`, this tolerates capture triggers. It
+        repairs the one legacy Settings encoding where a retired base row was
+        journaled as live, then inserts winner metadata only for live rows the
+        catalog is currently missing via the idempotent skip-if-present path in
+        :meth:`_bootstrap_existing_rows`.
 
         It repairs a production catalog that an earlier buggy bootstrap left
         incomplete -- e.g. the SQLite < 3.38 RETURNING-on-upsert gap that
@@ -859,11 +971,12 @@ class MutationCatalog:
         (``AlphaError: checkpoint contains untracked logical rows``) with no
         self-healing path, because migration early-skips once triggers exist.
 
-        Only ``fleet_sync_catalog``/``fleet_sync_transactions``/
-        ``fleet_sync_origins`` are written, never a replicated table, so no
-        capture trigger fires and authored history is left untouched. The
-        final integrity scan proves every live row now has winner metadata
-        before the single transaction commits; any shortfall rolls back.
+        Only synchronization metadata is written, never a replicated table,
+        so no capture trigger fires. The legacy repair preserves the original
+        transaction identity, timestamp, address, and operation index while
+        correcting its live/tombstone bit. The final integrity scan proves
+        every live row now has winner metadata before the single transaction
+        commits; any shortfall rolls back.
         """
         if self.conn.in_transaction:
             raise WatermarkError("catalog reconcile requires an idle connection")
@@ -881,8 +994,9 @@ class MutationCatalog:
         self.conn.execute("BEGIN IMMEDIATE")
         try:
             self._ensure_state()
-            bootstrapped = self._bootstrap_existing_rows()
-            live_rows, catalog_rows = self._verify_catalog_integrity()
+            self._repair_deprecated_settings_tombstones()
+            bootstrapped = self._bootstrap_existing_rows(audit=audit)
+            live_rows, catalog_rows = self._verify_catalog_integrity(audit=audit)
             self.conn.commit()
             return CatalogMigrationReport(
                 schema_created=False,
