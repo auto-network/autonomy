@@ -59,7 +59,7 @@ from starlette.routing import Route
 from tools.data_paths import resolve_store
 # Safe at module scope: api_auth imports only starlette, and defers its one
 # unlock_routes import into the call. The reverse edge is what is circular.
-from tools.dashboard.api_auth import require_global_api_authority
+from tools.dashboard.api_auth import require_global_api_authority, resolve_scoped_org
 from tools.graph import schemas, settings_ops
 # Importing registers the autonomy.network.* Setting schemas (they
 # self-register on import).
@@ -170,44 +170,6 @@ def _mock_mode() -> bool:
     return bool(os.environ.get("DASHBOARD_MOCK"))
 
 
-def _scoped_org(requested_org, *, request=None):
-    """Resolve the org a network route is scoped to, refusing cross-org access.
-
-    A network route reads/writes another org's ENCRYPTED root key + registry
-    binding — an org-key blob is offline-attackable, so a cross-org read is a
-    real leak. Two caller classes, two rules (invariant 1, auto-h4kzx):
-
-    * An org-stamped session token IS the caller's org. An explicit
-      ``?org=`` / body ``org`` is honored only when it names that org; any
-      other value is a cross-org attempt and is refused. Nothing the
-      request carries can widen it.
-    * A caller with no org-stamped token is local — the operator's browser
-      or a host process. Its explicit ``?org=`` is a SELECTION, not an
-      escalation: the operator holds every org's key, and the org names
-      WHICH one, not which authority (the ``/api/sign-key?org=`` case).
-
-    # org-scope: request — token org for agents, explicit selection for
-    # local callers; no ambient source exists.
-
-    Returns ``(org, None)`` on success — the org the route should read —
-    or ``(None, JSONResponse)`` (403) on a cross-org attempt.
-    """
-    token_org = None
-    if request is not None:
-        # Lazy import: network_routes is imported BY server, so a top-level
-        # import would be circular; at request time server is fully loaded.
-        from tools.dashboard.server import _token_org_or_none
-        token_org = _token_org_or_none(request)
-    if token_org is not None:
-        if requested_org and requested_org != token_org:
-            return None, JSONResponse({"error": (
-                "cross-org access to another org's network identity is not "
-                "permitted"
-            )}, status_code=403)
-        return token_org, None
-    return (requested_org or settings_ops.CALLER_ORG), None
-
-
 def _first_member(set_id: str, org: str | None):
     """Lexically-first member of a keyed set, or None. One row is the
     common case; with several, the lexically first key wins
@@ -273,7 +235,7 @@ async def get_org_key(request: Request) -> JSONResponse:
     refused = require_global_api_authority(request)
     if refused is not None:
         return refused
-    org, refused = _scoped_org(request.query_params.get("org"), request=request)
+    org, refused = resolve_scoped_org(request.query_params.get("org"), request=request)
     if refused is not None:
         return refused
     try:
@@ -302,7 +264,7 @@ async def get_binding(request: Request) -> JSONResponse:
     """The org's registry binding row, or 404."""
     if _mock_mode():
         return JSONResponse({"error": "no network binding configured"}, status_code=404)
-    org, refused = _scoped_org(request.query_params.get("org"), request=request)
+    org, refused = resolve_scoped_org(request.query_params.get("org"), request=request)
     if refused is not None:
         return refused
     try:
@@ -346,7 +308,7 @@ async def post_revocation(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": "body must be a JSON object"},
                             status_code=400)
     # Refuse a cross-org revocation before touching the (foreign) binding.
-    org, refused = _scoped_org(body.get("org"), request=request)
+    org, refused = resolve_scoped_org(body.get("org"), request=request)
     if refused is not None:
         return refused
     if not isinstance(body.get("record"), str) \
@@ -425,7 +387,7 @@ async def post_ledger_found(request: Request) -> JSONResponse:
             {"ok": False, "error": "body must carry the local org slug"},
             status_code=400,
         )
-    _org, refused = _scoped_org(requested_org, request=request)
+    _org, refused = resolve_scoped_org(requested_org, request=request)
     if refused is not None:
         return refused
     wires = body.get("events")
@@ -579,7 +541,7 @@ async def get_ledger_heads(request: Request) -> JSONResponse:
             {"ok": False, "error": "query must carry the local org slug"},
             status_code=400,
         )
-    _org, refused = _scoped_org(requested_org, request=request)
+    _org, refused = resolve_scoped_org(requested_org, request=request)
     if refused is not None:
         return refused
 
@@ -700,7 +662,7 @@ async def post_ledger_claim(request: Request) -> JSONResponse:
             {"error": "body must carry the local org slug"},
             status_code=400,
         )
-    _org, refused = _scoped_org(requested_org, request=request)
+    _org, refused = resolve_scoped_org(requested_org, request=request)
     if refused is not None:
         return refused
     wire = body.get("event")
@@ -730,7 +692,7 @@ async def get_ledger_claim_context(request: Request) -> JSONResponse:
             {"error": "query must carry the local org slug"},
             status_code=400,
         )
-    _org, refused = _scoped_org(requested_org, request=request)
+    _org, refused = resolve_scoped_org(requested_org, request=request)
     if refused is not None:
         return refused
     from tools.dashboard import claim_service
@@ -758,7 +720,7 @@ async def get_ledger_claim(request: Request) -> JSONResponse:
             {"error": "query must carry the local org slug"},
             status_code=400,
         )
-    _org, refused = _scoped_org(requested_org, request=request)
+    _org, refused = resolve_scoped_org(requested_org, request=request)
     if refused is not None:
         return refused
     if not _claim_key_matches(claim_key, invite_ref, persona_pub):
@@ -795,7 +757,7 @@ async def post_ledger_claim_approval(request: Request) -> JSONResponse:
             {"error": "body must carry the local org slug"},
             status_code=400,
         )
-    _org, refused = _scoped_org(requested_org, request=request)
+    _org, refused = resolve_scoped_org(requested_org, request=request)
     if refused is not None:
         return refused
     invite_ref = body.get("invite_ref")
@@ -848,7 +810,7 @@ async def post_invite_email(request: Request) -> JSONResponse:
             {"ok": False, "error": "org must be a non-empty slug"},
             status_code=400,
         )
-    _org, refused = _scoped_org(requested_org, request=request)
+    _org, refused = resolve_scoped_org(requested_org, request=request)
     if refused is not None:
         return refused
 
@@ -932,7 +894,7 @@ async def post_ledger_delegate(request: Request) -> JSONResponse:
     if not isinstance(requested_org, str) or not requested_org:
         return JSONResponse({"ok": False, "error": "body must carry the local org slug"},
                             status_code=400)
-    _org, refused = _scoped_org(requested_org, request=request)
+    _org, refused = resolve_scoped_org(requested_org, request=request)
     if refused is not None:
         return refused
     wire = body.get("event")
@@ -1004,7 +966,7 @@ async def post_ledger_invite(request: Request) -> JSONResponse:
             {"ok": False, "error": "body must carry the local org slug"},
             status_code=400,
         )
-    _org, refused = _scoped_org(requested_org, request=request)
+    _org, refused = resolve_scoped_org(requested_org, request=request)
     if refused is not None:
         return refused
     wire = body.get("event")
@@ -1125,7 +1087,7 @@ async def post_sealed_org_key(request: Request) -> JSONResponse:
         )
 
     # Refuse a cross-org write BEFORE processing the (foreign) payload.
-    org, refused = _scoped_org(body.get("org"), request=request)
+    org, refused = resolve_scoped_org(body.get("org"), request=request)
     if refused is not None:
         return refused
 
@@ -1197,7 +1159,7 @@ async def post_register(request: Request) -> JSONResponse:
         )}, status_code=400)
 
     # Refuse a cross-org registration BEFORE processing the foreign envelope.
-    org, refused = _scoped_org(body.get("org"), request=request)
+    org, refused = resolve_scoped_org(body.get("org"), request=request)
     if refused is not None:
         return refused
 
@@ -1356,7 +1318,7 @@ async def post_renew(request: Request) -> JSONResponse:
             f"unexpected keys {sorted(unknown)}: renewal carries only 'org' "
             "and 'envelope' — the registry destination is fixed server-side"
         )}, status_code=400)
-    org, refused = _scoped_org(body.get("org"), request=request)
+    org, refused = resolve_scoped_org(body.get("org"), request=request)
     if refused is not None:
         return refused
     try:
@@ -1460,7 +1422,7 @@ async def get_serve_cert_status(request: Request) -> JSONResponse:
     to decide whether the organization root it is about to unlock should also
     sign the two context-specific serving certificates.
     """
-    org, refused = _scoped_org(request.query_params.get("org"))
+    org, refused = resolve_scoped_org(request.query_params.get("org"))
     if refused is not None:
         return refused
     from tools.dashboard.link_serving_supervisor import serve_cert_state
@@ -1534,7 +1496,7 @@ async def post_serve_cert(request: Request) -> JSONResponse:
         )}, status_code=400)
 
     # Refuse a cross-org write BEFORE processing the (foreign) payload.
-    org, refused = _scoped_org(body.get("org"), request=request)
+    org, refused = resolve_scoped_org(body.get("org"), request=request)
     if refused is not None:
         return refused
 

@@ -3,7 +3,7 @@
 The repo-level test in this module is the *enforcement path*. A future
 edit that introduces ``settings_ops.X(..., org=org)`` (or
 ``graph_ops.X(..., org=org)``) inside a request handler — where ``org``
-came from a bare ``_caller_org(request)`` — will fail
+came from a bare ``organization_scope_from_request(request)`` — will fail
 ``test_repo_has_no_request_handler_passing_raw_caller_org_to_settings``
 and block merge. The other tests pin the detector's behaviour on
 synthetic input so that pin doesn't drift silently.
@@ -32,7 +32,7 @@ def test_local_var_assigned_caller_org_then_passed_bare_is_flagged():
     src = textwrap.dedent(
         '''
         async def handler(request):
-            org = _caller_org(request)
+            org = organization_scope_from_request(request)
             graph_ops.add_setting(
                 "set", 1, "key", {}, org=org,
             )
@@ -40,7 +40,7 @@ def test_local_var_assigned_caller_org_then_passed_bare_is_flagged():
     )
     vs = find_violations_in_source(src, "synthetic_local_var.py")
     assert len(vs) == 1, vs
-    assert "_caller_org" in vs[0].reason
+    assert "organization_scope_from_request" in vs[0].reason
     assert "graph_ops.add_setting" in vs[0].reason
 
 
@@ -48,7 +48,7 @@ def test_inline_caller_org_call_without_fallback_is_flagged():
     src = textwrap.dedent(
         '''
         async def handler(request):
-            graph_ops.read_set("set", org=_caller_org(request))
+            graph_ops.read_set("set", org=organization_scope_from_request(request))
         '''
     )
     vs = find_violations_in_source(src, "synthetic_inline.py")
@@ -61,7 +61,7 @@ def test_settings_ops_module_path_is_also_flagged():
     src = textwrap.dedent(
         '''
         async def handler(request):
-            org = _caller_org(request)
+            org = organization_scope_from_request(request)
             settings_ops.upsert_by_key(
                 "set", 1, "k", {}, org=org,
             )
@@ -81,7 +81,7 @@ def test_every_settings_api_func_is_caught():
         src = textwrap.dedent(
             f'''
             async def handler(request):
-                org = _caller_org(request)
+                org = organization_scope_from_request(request)
                 graph_ops.{func}("a", org=org)
             '''
         )
@@ -95,7 +95,7 @@ def test_violation_in_sync_def_handler_too():
     src = textwrap.dedent(
         '''
         def handler(request):
-            org = _caller_org(request)
+            org = organization_scope_from_request(request)
             graph_ops.list_set_ids(org=org)
         '''
     )
@@ -111,7 +111,7 @@ def test_local_var_with_caller_org_fallback_passes():
     src = textwrap.dedent(
         '''
         async def handler(request):
-            org = _caller_org(request)
+            org = organization_scope_from_request(request)
             graph_ops.add_setting(
                 "set", 1, "k", {}, org=org or graph_ops.CALLER_ORG,
             )
@@ -121,12 +121,12 @@ def test_local_var_with_caller_org_fallback_passes():
 
 
 def test_settings_caller_org_helper_passes():
-    """The dedicated ``_settings_caller_org(request)`` helper folds the
+    """The dedicated ``settings_scope_from_request(request)`` helper folds the
     fallback in, so passing its result bare is correct."""
     src = textwrap.dedent(
         '''
         async def handler(request):
-            org = _settings_caller_org(request)
+            org = settings_scope_from_request(request)
             graph_ops.add_setting(
                 "set", 1, "k", {}, org=org,
             )
@@ -140,7 +140,7 @@ def test_inline_caller_org_with_fallback_passes():
         '''
         async def handler(request):
             graph_ops.read_set(
-                "set", org=_caller_org(request) or graph_ops.CALLER_ORG,
+                "set", org=organization_scope_from_request(request) or graph_ops.CALLER_ORG,
             )
         '''
     )
@@ -153,7 +153,7 @@ def test_settings_ops_caller_org_attr_also_passes():
     src = textwrap.dedent(
         '''
         async def handler(request):
-            org = _caller_org(request)
+            org = organization_scope_from_request(request)
             settings_ops.add_setting(
                 "set", 1, "k", {}, org=org or settings_ops.CALLER_ORG,
             )
@@ -163,13 +163,13 @@ def test_settings_ops_caller_org_attr_also_passes():
 
 
 def test_assignment_with_fallback_untaints_subsequent_uses():
-    """``org = _caller_org(request) or graph_ops.CALLER_ORG`` is a safe
+    """``org = organization_scope_from_request(request) or graph_ops.CALLER_ORG`` is a safe
     assignment; a downstream bare ``org=org`` on a Settings call is
     fine."""
     src = textwrap.dedent(
         '''
         async def handler(request):
-            org = _caller_org(request) or graph_ops.CALLER_ORG
+            org = organization_scope_from_request(request) or graph_ops.CALLER_ORG
             graph_ops.add_setting("set", 1, "k", {}, org=org)
         '''
     )
@@ -183,7 +183,7 @@ def test_reassignment_to_safe_value_clears_taint():
     src = textwrap.dedent(
         '''
         async def handler(request):
-            org = _caller_org(request)
+            org = organization_scope_from_request(request)
             org = org or graph_ops.CALLER_ORG
             graph_ops.add_setting("set", 1, "k", {}, org=org)
         '''
@@ -221,7 +221,7 @@ def test_unrelated_function_call_with_org_kwarg_passes():
     src = textwrap.dedent(
         '''
         async def handler(request):
-            org = _caller_org(request)
+            org = organization_scope_from_request(request)
             mock.add_setting("set", 1, "k", {}, org=org)
         '''
     )
@@ -235,7 +235,7 @@ def test_non_settings_call_with_caller_org_passes():
     src = textwrap.dedent(
         '''
         async def handler(request):
-            org = _caller_org(request)
+            org = organization_scope_from_request(request)
             graph_ops.add_comment(source_id, "x", org=org)
         '''
     )
@@ -248,7 +248,7 @@ def test_dao_mock_call_passes():
     src = textwrap.dedent(
         '''
         async def handler(request):
-            org = _caller_org(request)
+            org = organization_scope_from_request(request)
             return dao_mock.get_settings_members("set", org=org)
         '''
     )
@@ -264,7 +264,7 @@ def test_handler_calling_local_helper_passes():
     src = textwrap.dedent(
         '''
         async def handler(request):
-            org = _caller_org(request)
+            org = organization_scope_from_request(request)
             return _settings_diag_rows(org=org)
         '''
     )
@@ -278,7 +278,7 @@ def test_repo_has_no_request_handler_passing_raw_caller_org_to_settings():
     """Enforcement: scanning the repo produces zero violations.
 
     A future commit that introduces a request handler passing
-    ``_caller_org(request)`` directly into ``settings_ops.X`` /
+    ``organization_scope_from_request(request)`` directly into ``settings_ops.X`` /
     ``graph_ops.X`` (where X is a Settings public API function) without
     a ``CALLER_ORG`` fallback will fail this test. This is the path the
     bead's acceptance hinges on — the check is not advisory.
@@ -286,7 +286,7 @@ def test_repo_has_no_request_handler_passing_raw_caller_org_to_settings():
     roots = [_REPO_ROOT / "tools", _REPO_ROOT / "agents"]
     violations = find_violations_in_repo(roots)
     assert violations == [], (
-        "Found request handlers passing raw _caller_org(request) into "
+        "Found request handlers passing raw organization_scope_from_request(request) into "
         "Settings public API:\n"
         + "\n".join(v.format(_REPO_ROOT) for v in violations)
     )
@@ -299,7 +299,7 @@ def test_existing_server_py_settings_handlers_are_recognised_as_clean():
     """The known-good Settings handlers in tools/dashboard/server.py
     must scan clean. If this fails, the detector has regressed: it
     either lost the fallback recognition or stopped tolerating the
-    ``_settings_caller_org`` helper.
+    ``settings_scope_from_request`` helper.
 
     We pin against ``server.py`` rather than the full repo because the
     repo-level enforcement already covers everything; this test is a
@@ -334,7 +334,7 @@ def test_plant_a_bad_example_into_a_realistic_handler_shape():
             for f in required:
                 if f not in body:
                     return JSONResponse({"error": f"{f} required"}, status_code=400)
-            org = _caller_org(request)
+            org = organization_scope_from_request(request)
             try:
                 sid = graph_ops.add_setting(
                     body["set_id"],
@@ -352,7 +352,7 @@ def test_plant_a_bad_example_into_a_realistic_handler_shape():
     vs = find_violations_in_source(bad, "synthetic_realistic_bad.py")
     assert len(vs) == 1, vs
     assert "graph_ops.add_setting" in vs[0].reason
-    assert "_caller_org" in vs[0].reason
+    assert "organization_scope_from_request" in vs[0].reason
 
     fixed = bad.replace("org=org,", "org=org or graph_ops.CALLER_ORG,")
     assert find_violations_in_source(fixed, "synthetic_realistic_fixed.py") == []
@@ -365,7 +365,7 @@ def test_violation_format_includes_lineno():
     src = textwrap.dedent(
         '''
         async def handler(request):
-            org = _caller_org(request)
+            org = organization_scope_from_request(request)
             graph_ops.add_setting("s", 1, "k", {}, org=org)
         '''
     )

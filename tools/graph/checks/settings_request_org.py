@@ -1,5 +1,6 @@
-"""Detect request handlers that pass ``_caller_org(request)`` directly into
-the Settings public API without the ``CALLER_ORG`` fallback.
+"""Detect request handlers that pass
+``api_auth.organization_scope_from_request(request)`` directly into the
+Settings public API without the ``CALLER_ORG`` fallback.
 
 Background (auto-cfb8u, auto-ryrfg)
 -----------------------------------
@@ -12,16 +13,17 @@ Three values are meaningful:
   ``GRAPH_ORG`` env → scopeless default)
 * literal ``None`` → explicit *scopeless* write
 
-In dashboard request handlers, ``_caller_org(request)`` returns
-``X-Graph-Org`` header value or ``None``. Passing that bare result into
+In dashboard request handlers, the common-core resolver
+``api_auth.organization_scope_from_request(request)`` returns the caller's
+selected org or ``None``. Passing that bare result into
 ``settings_ops.add_setting(..., org=org)`` re-introduces the very bug
-required-org was meant to prevent: a missing header silently lands the
-write in the scopeless DB, while readers carrying ``X-Graph-Org`` see
-nothing (graph://53f7412f-51e). Handlers must use either:
+required-org was meant to prevent: no selected org silently lands the
+write in the scopeless DB, while readers carrying an org see nothing
+(graph://53f7412f-51e). Handlers must use either:
 
 1. the inline fallback ``org=org or graph_ops.CALLER_ORG``, or
-2. the ``_settings_caller_org(request)`` helper, which already returns
-   ``CALLER_ORG`` on a missing header.
+2. the ``api_auth.settings_scope_from_request(request)`` helper, which
+   already returns ``CALLER_ORG`` when no org was selected.
 
 Detection model
 ---------------
@@ -85,16 +87,22 @@ SETTINGS_API_FUNCS = frozenset(
 
 _SETTINGS_MODULE_NAMES = frozenset({"settings_ops", "graph_ops"})
 
-_CALLER_ORG_NAME = "_caller_org"
+#: The common-core org resolver that returns ``None`` when no org is selected
+#: (api_auth.organization_scope_from_request, the former ``_caller_org``).
+#: Passing its bare result into a required-org Settings write is the bug this
+#: check catches; the safe helper is ``settings_scope_from_request`` (returns
+#: the CALLER_ORG sentinel). Matched as a bare name or an ``api_auth.`` attr.
+_CALLER_ORG_NAME = "organization_scope_from_request"
 
 _DEFAULT_SCAN_ROOTS: tuple[str, ...] = ("tools", "agents")
 
 _VIOLATION_REASON = (
     "request handler passes the raw result of {origin} to "
     "{module}.{func}(org=...) — without 'or graph_ops.CALLER_ORG' a "
-    "missing X-Graph-Org header silently lands the write in the "
+    "caller that selected no org silently lands the write in the "
     "scopeless DB. Use 'org=org or graph_ops.CALLER_ORG' or replace "
-    "'_caller_org(request)' with '_settings_caller_org(request)'. "
+    "'api_auth.organization_scope_from_request(request)' with "
+    "'api_auth.settings_scope_from_request(request)'. "
     "Contract: graph://53f7412f-51e (auto-cfb8u)."
 )
 
@@ -193,11 +201,52 @@ def _scan_handler(
             _update_taint_from_assign(stmt, tainted)
         elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
             _update_taint_from_ann_assign(stmt, tainted)
+        else:
+            # `if org is None: return/raise` (or `if not org: ...`) proves the
+            # name non-None afterwards — the require-org guard, which is stricter
+            # than the CALLER_ORG fallback and the canonical way an app-private
+            # route rejects a scopeless caller. Untaint it so this correct
+            # pattern is not a false positive.
+            for name in _guard_proven_names(stmt):
+                tainted.discard(name)
         for call_node in _iter_calls(stmt):
             v = _check_call(call_node, tainted, path)
             if v is not None:
                 violations.append(v)
     return violations
+
+
+def _guard_proven_names(stmt: ast.stmt) -> set[str]:
+    """Names proven non-None by an early-exit guard ``if <name> is None:`` or
+    ``if not <name>:`` whose body unconditionally returns or raises."""
+    if not isinstance(stmt, ast.If) or not _body_always_exits(stmt.body):
+        return set()
+    test = stmt.test
+    names: set[str] = set()
+    # `if name is None:`
+    if (
+        isinstance(test, ast.Compare)
+        and len(test.ops) == 1
+        and isinstance(test.ops[0], ast.Is)
+        and isinstance(test.left, ast.Name)
+        and len(test.comparators) == 1
+        and isinstance(test.comparators[0], ast.Constant)
+        and test.comparators[0].value is None
+    ):
+        names.add(test.left.id)
+    # `if not name:`
+    if (
+        isinstance(test, ast.UnaryOp)
+        and isinstance(test.op, ast.Not)
+        and isinstance(test.operand, ast.Name)
+    ):
+        names.add(test.operand.id)
+    return names
+
+
+def _body_always_exits(body: list[ast.stmt]) -> bool:
+    """True if the last statement of ``body`` is a ``return`` or ``raise``."""
+    return bool(body) and isinstance(body[-1], (ast.Return, ast.Raise))
 
 
 def _iter_in_order(func: ast.FunctionDef | ast.AsyncFunctionDef):
@@ -285,11 +334,17 @@ def _value_is_tainted(value: ast.expr) -> bool:
 
 
 def _is_caller_org_call(node: ast.expr) -> bool:
-    return (
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == _CALLER_ORG_NAME
-    )
+    """True for a call to the None-returning org resolver, whether imported
+    bare (``organization_scope_from_request(request)``) or via the module
+    (``api_auth.organization_scope_from_request(request)``)."""
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id == _CALLER_ORG_NAME
+    if isinstance(func, ast.Attribute):
+        return func.attr == _CALLER_ORG_NAME
+    return False
 
 
 def _is_caller_org_attr(node: ast.expr) -> bool:
@@ -357,9 +412,12 @@ def _check_call(
     if _expression_has_caller_org_fallback(org_value):
         return None
     if isinstance(org_value, ast.Name) and org_value.id in tainted:
-        origin = f"_caller_org(request) (via local '{org_value.id}')"
+        origin = (
+            "api_auth.organization_scope_from_request(request) "
+            f"(via local '{org_value.id}')"
+        )
     elif _is_caller_org_call(org_value):
-        origin = "_caller_org(request)"
+        origin = "api_auth.organization_scope_from_request(request)"
     else:
         return None
     module, func = target

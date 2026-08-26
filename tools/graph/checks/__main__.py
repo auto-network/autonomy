@@ -8,7 +8,8 @@ Current checks:
 * :mod:`tools.graph.checks.force_host` — graph-CLI subprocess
   invocations missing ``--force-host``.
 * :mod:`tools.graph.checks.settings_request_org` — request handlers
-  passing the raw result of ``_caller_org(request)`` into the Settings
+  passing the raw result of
+  ``api_auth.organization_scope_from_request(request)`` into the Settings
   public API without the ``CALLER_ORG`` fallback.
 """
 
@@ -53,13 +54,13 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"\n{len(settings_violations)} settings-request-org violation(s). "
             f"Use 'org=org or graph_ops.CALLER_ORG' or replace "
-            f"'_caller_org(request)' with '_settings_caller_org(request)'.",
+            f"'api_auth.organization_scope_from_request(request)' with 'api_auth.settings_scope_from_request(request)'.",
             file=sys.stderr,
         )
         exit_code = 1
     else:
         print(
-            "OK: no request handlers passing _caller_org(request) directly "
+            "OK: no request handlers passing api_auth.organization_scope_from_request(request) directly "
             "into the Settings public API"
         )
 
