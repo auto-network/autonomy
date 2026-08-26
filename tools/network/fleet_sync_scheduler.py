@@ -240,9 +240,11 @@ class SQLiteFleetSyncStore:
 
     def _open(self) -> tuple[FleetSyncConnection, MutationCatalog]:
         import sqlite3
+        from tools.network.fleet_sync.streaming import register_streaming_functions
 
         conn = sqlite3.connect(self.path, factory=FleetSyncConnection)
         conn.row_factory = sqlite3.Row
+        register_streaming_functions(conn)
         catalog = attach_active_production_catalog(conn)
         if catalog is None:
             conn.close()

@@ -92,6 +92,9 @@ def test_scheduler_store_uses_the_catalog_row_shape(tmp_path: Path) -> None:
             conn.execute("SELECT * FROM fleet_sync_state").fetchone(),
             sqlite3.Row,
         )
+        assert conn.execute("SELECT fleet_sha256_text('fleet')").fetchone()[0] == (
+            "5eb2ce291c7d227dd684ec83f9ddc05776e2fe9a0c4e62927b4592383e66fb28"
+        )
     finally:
         conn.close()
 
