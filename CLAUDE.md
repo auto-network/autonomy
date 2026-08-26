@@ -76,6 +76,8 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 | `graph dispatch runs --primer` | Rich per-run output: title, commit, diff, scores, merge state | `graph dispatch runs --primer --completed` |
 | `graph primer <bead-id>` | Dynamic context primer for a bead (description + pitfalls + provenance) | `graph primer auto-n9qa` |
 | `graph ui-design "title" <dir>` | Create Design Studio design from HTML files + live-watch for changes | `graph ui-design "Input redesign" /tmp/cards/` |
+| `graph ui-design --list [query]` | List/search the design library (org-scoped to the caller) before creating | `graph ui-design --list "session card"` |
+| `graph ui-design --pull <design_id> <dir>` | Pull an existing design's variants + fixture into `<dir>` to revise, then re-append | `graph ui-design --pull 3c7e290b /tmp/cards/` |
 | `graph session-auth` | Mint an operator-approved dashboard UI session (approval → wait → redeem → cookie jar; `--browser` injects into agent-browser) | `graph session-auth --browser` |
 | `graph mission <verb>` | Drive a structured Mission Control mission: `list/status/items/add/update/state/retire/style` (stdin via `--body -`) | `graph mission state relay checkpoint-e proven --note "…"` |
 | `graph set-label "text"` | Set a working title for the current session | `graph set-label "Passkey auth design"` |
