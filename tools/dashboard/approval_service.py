@@ -7,6 +7,7 @@ the application that consumes a granted resolution.
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 import hashlib
 import hmac
@@ -17,6 +18,7 @@ import re
 import secrets
 import threading
 import time
+import unicodedata
 from typing import Any, Callable, Mapping, Protocol
 
 from tools.dashboard import api_auth
@@ -61,6 +63,8 @@ _ROOT_RE = re.compile(r"^[0-9a-f]{64}$")
 _SOURCE_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{16,256}$")
 _ALLOWED_HUMAN_METHODS = frozenset({"bootstrap", "passkey", "password"})
 _ACTOR_SEAL = object()
+_REQUESTER_DOMAIN = "dashboard.approval.requester"
+_CENTRAL_ID_PREFIX = "central-"
 
 
 class ApprovalServiceError(RuntimeError):
@@ -218,6 +222,56 @@ class _ApprovalLocks:
         return cls._locks[int.from_bytes(digest[:4], "big") % len(cls._locks)]
 
 
+def _bounded_principal_text(value: Any, *, label: str, maximum_bytes: int) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or any(unicodedata.category(char).startswith("C") for char in value)
+    ):
+        raise ApprovalServiceError("unauthenticated", f"invalid {label}")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeError as exc:
+        raise ApprovalServiceError("unauthenticated", f"invalid {label}") from exc
+    if len(encoded) > maximum_bytes:
+        raise ApprovalServiceError("unauthenticated", f"invalid {label}")
+    return value
+
+
+def canonical_session_requester_id(principal: api_auth.ApiPrincipal) -> str:
+    """Derive the durable, scope-bound identity of one session requester.
+
+    The row deliberately stores neither the raw session subject nor its
+    organization.  Local and organization sessions therefore cannot collide
+    even when their display handles happen to match.
+    """
+    if not isinstance(principal, api_auth.ApiPrincipal) or principal.kind not in (
+        api_auth.ApiPrincipalKind.LOCAL_SESSION,
+        api_auth.ApiPrincipalKind.ORG_SESSION,
+    ):
+        raise ApprovalServiceError("unauthenticated")
+    subject = _bounded_principal_text(
+        principal.subject, label="session subject", maximum_bytes=512,
+    )
+    if principal.kind is api_auth.ApiPrincipalKind.LOCAL_SESSION:
+        if principal.org is not None:
+            raise ApprovalServiceError("unauthenticated", "local session cannot carry org")
+        org = None
+    else:
+        org = _bounded_principal_text(
+            principal.org, label="session organization", maximum_bytes=128,
+        )
+    canonical = json.dumps(
+        [_REQUESTER_DOMAIN, 1, principal.kind.value, org, subject],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(hashlib.sha256(canonical).digest()).decode(
+        "ascii",
+    ).rstrip("=")
+
+
 def resolve_personal_root_public_key() -> str:
     """Resolve the public personal root, including compatible armor-only rows."""
     try:
@@ -327,7 +381,9 @@ class ApprovalService:
         self._session_label = session_label_resolver or (lambda _subject: None)
         self._service_label = registered_service_label_resolver or (lambda _subject: None)
         self._clock = clock
-        self._id_factory = id_factory or (lambda: secrets.token_urlsafe(24))
+        self._id_factory = id_factory or (
+            lambda: _CENTRAL_ID_PREFIX + secrets.token_urlsafe(24)
+        )
         self._after_commit = after_commit
 
     def _registration(self, kind: str) -> ApprovalKindRegistration:
@@ -370,7 +426,10 @@ class ApprovalService:
                 api_auth.ApiPrincipalKind.ORG_SESSION,
             ) or not principal.subject:
                 raise ApprovalServiceError("unauthenticated")
-            requester = {"kind": "session", "id": principal.subject}
+            requester = {
+                "kind": "session",
+                "id": canonical_session_requester_id(principal),
+            }
             label = self._session_label(principal.subject)
         elif policy is RequesterPolicy.REGISTERED_SERVICE:
             if principal.kind is not api_auth.ApiPrincipalKind.MCP_SERVICE or not principal.subject:
@@ -651,6 +710,32 @@ class ApprovalService:
                 resolution=resolution,
             )
 
+    def status_for_principal(
+        self,
+        approval_id: str,
+        principal: api_auth.ApiPrincipal,
+        *,
+        now: float | None = None,
+    ) -> ApprovalStatus:
+        """Return requester status only after authenticating the frozen session.
+
+        This generic seam is deliberately session-only. Registered services
+        and internal producers keep status inside their already-authenticated
+        application routes.
+        """
+        with _ApprovalLocks.for_id(approval_id):
+            request = self._require_request(approval_id)
+            self._authorize_session_requester(request, principal)
+            resolution = self._store_call(self.store.get_resolution, approval_id)
+            resolution = resolution or self._reconcile_expiry_locked(
+                request, self._now(now),
+            )
+            return ApprovalStatus(
+                state="resolved" if resolution is not None else "open",
+                request=request,
+                resolution=resolution,
+            )
+
     def reconcile_expiry(
         self, approval_id: str, *, now: float | None = None,
     ) -> ApprovalRecord | None:
@@ -782,7 +867,45 @@ class ApprovalService:
             kind == "registered_service"
             and principal.kind is api_auth.ApiPrincipalKind.MCP_SERVICE
         )
-        if not valid_kind or not principal.subject or principal.subject != expected.get("id"):
+        if not valid_kind or not principal.subject:
+            raise ApprovalServiceError("wrong_requester")
+        if kind == "session":
+            try:
+                actual = canonical_session_requester_id(principal)
+            except ApprovalServiceError as exc:
+                raise ApprovalServiceError("wrong_requester") from exc
+        else:
+            actual = principal.subject
+        expected_id = expected.get("id")
+        if (
+            not isinstance(expected_id, str)
+            or not hmac.compare_digest(actual, expected_id)
+        ):
+            raise ApprovalServiceError("wrong_requester")
+
+    @staticmethod
+    def _authorize_session_requester(
+        request: ApprovalRecord, principal: api_auth.ApiPrincipal,
+    ) -> None:
+        expected = request.payload.get("requester_ref")
+        if (
+            not isinstance(expected, Mapping)
+            or expected.get("kind") != "session"
+            or principal.kind not in (
+                api_auth.ApiPrincipalKind.LOCAL_SESSION,
+                api_auth.ApiPrincipalKind.ORG_SESSION,
+            )
+        ):
+            raise ApprovalServiceError("wrong_requester")
+        try:
+            actual = canonical_session_requester_id(principal)
+        except ApprovalServiceError as exc:
+            raise ApprovalServiceError("wrong_requester") from exc
+        expected_id = expected.get("id")
+        if (
+            not isinstance(expected_id, str)
+            or not hmac.compare_digest(actual, expected_id)
+        ):
             raise ApprovalServiceError("wrong_requester")
 
     def _require_request(self, approval_id: str) -> ApprovalRecord:

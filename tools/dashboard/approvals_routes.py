@@ -29,7 +29,17 @@ from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
 
 from tools.dashboard import api_auth
+from tools.dashboard import attention_routes
 from tools.dashboard import web_push
+from tools.dashboard.approval_http_bridge import (
+    CENTRAL_APPROVAL_ID_PREFIX,
+    ApprovalHttpBridgeError,
+    has_central_approval_prefix,
+)
+from tools.dashboard.approval_service import (
+    ApprovalServiceError,
+    resolve_human_approval_actor,
+)
 from tools.dashboard.dao import approval_requests as ar
 from tools.dashboard.event_bus import event_bus
 
@@ -313,6 +323,11 @@ async def open_approval(
     ordinary callers always pass through the kind's preparation hook.
     """
     staged = prepared_staged
+    if (
+        isinstance(request_id, str)
+        and request_id.startswith(CENTRAL_APPROVAL_ID_PREFIX)
+    ):
+        raise ValueError("reserved central approval id")
     if staged is None:
         prepare = PREPARE_CREATE.get(kind)
         if prepare:
@@ -360,7 +375,7 @@ async def wait_for_approval(rid: str, wait_seconds: float) -> dict | None:
     return ar.get(rid) or row
 
 
-async def create_approval(request: Request) -> JSONResponse:
+async def _create_approval_legacy(request: Request) -> JSONResponse:
     """POST /api/approvals  {kind, session, request} -> {id}."""
     try:
         body = await request.json()
@@ -404,7 +419,7 @@ async def create_approval(request: Request) -> JSONResponse:
     return JSONResponse({"id": rid})
 
 
-async def get_approval(request: Request) -> JSONResponse:
+async def _get_approval_legacy(request: Request) -> JSONResponse:
     """GET /api/approvals/{id}[?wait=N] -> the request + decision state.
 
     ``result`` is null while pending, else the decision JSON
@@ -467,7 +482,7 @@ async def get_approval(request: Request) -> JSONResponse:
     })
 
 
-async def decide_approval(request: Request) -> JSONResponse:
+async def _decide_approval_legacy(request: Request) -> JSONResponse:
     """POST /api/approvals/{id}/decision  {approved: bool, ...} — the body IS the
     stored result: the operator's true/false plus kind-specific outputs (e.g. the
     armored ``signature``). The request itself is never modified by a decision —
@@ -539,9 +554,171 @@ async def decide_approval(request: Request) -> JSONResponse:
     })
 
 
+def _central_no_store(payload: dict, *, status_code: int = 200) -> JSONResponse:
+    return JSONResponse(
+        payload,
+        status_code=status_code,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _central_error(exc: ApprovalHttpBridgeError) -> JSONResponse:
+    if exc.code in {
+        "invalid_request", "unknown_kind", "kind_disabled", "request_conflict",
+        "source_expired",
+    }:
+        status_code = 400
+    elif exc.code == "unauthenticated":
+        status_code = 401
+    elif exc.code == "not_found":
+        status_code = 404
+    elif exc.code in {"expired", "approval_conflict"}:
+        status_code = 409
+    elif exc.code == "invalid_decision":
+        status_code = 422
+    else:
+        status_code = 503
+    public = (
+        "unavailable" if status_code == 503
+        else (
+            "not found" if exc.code == "not_found"
+            else (
+                "authentication required"
+                if exc.code == "unauthenticated"
+                else exc.code
+            )
+        )
+    )
+    return _central_no_store({"error": public}, status_code=status_code)
+
+
+def _approval_http_bridge():
+    runtime = attention_routes.approval_runtime()
+    assert runtime.approval_http is not None
+    return runtime.approval_http
+
+
+async def create_approval(request: Request) -> JSONResponse:
+    """Dispatch an exactly migrated kind to Settings; otherwise stay legacy."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    kind = body.get("kind") if isinstance(body, dict) else None
+    bridge = _approval_http_bridge()
+    if not bridge.claims_kind(kind):
+        return await _create_approval_legacy(request)
+    if (
+        set(body) != {"kind", "request"}
+        or not isinstance(kind, str)
+        or not isinstance(body.get("request"), dict)
+        or not body["request"]
+    ):
+        return _central_no_store({"error": "invalid_request"}, status_code=400)
+    try:
+        approval_id = await asyncio.to_thread(
+            bridge.create,
+            kind,
+            api_auth.principal_from_request(request),
+            body["request"],
+        )
+    except ApprovalHttpBridgeError as exc:
+        return _central_error(exc)
+    return _central_no_store({"id": approval_id})
+
+
+async def get_approval(request: Request) -> JSONResponse:
+    approval_id = request.path_params["id"]
+    if not has_central_approval_prefix(approval_id):
+        return await _get_approval_legacy(request)
+    principal = api_auth.principal_from_request(request)
+    try:
+        if "wait" in request.query_params:
+            raw_wait = request.query_params.get("wait")
+            try:
+                wait_seconds = float(raw_wait)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ApprovalHttpBridgeError("invalid_request") from exc
+            envelope = await _approval_http_bridge().held_envelope(
+                approval_id, principal, wait_seconds,
+            )
+        else:
+            envelope = await asyncio.to_thread(
+                _approval_http_bridge().envelope, approval_id, principal,
+            )
+    except ApprovalHttpBridgeError as exc:
+        return _central_error(exc)
+    return _central_no_store(envelope)
+
+
+async def decide_approval(request: Request) -> JSONResponse:
+    approval_id = request.path_params["id"]
+    if not has_central_approval_prefix(approval_id):
+        return await _decide_approval_legacy(request)
+    denied = attention_routes.operator_mutation_guard(request)
+    if denied is not None:
+        return denied
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict) or not isinstance(body.get("approved"), bool):
+        return _central_no_store({"error": "invalid_decision"}, status_code=422)
+    try:
+        actor = resolve_human_approval_actor(request)
+        await asyncio.to_thread(
+            _approval_http_bridge().decide_legacy,
+            approval_id,
+            actor,
+            body,
+        )
+    except ApprovalServiceError as exc:
+        code = (
+            "unavailable"
+            if exc.code == "not_configured"
+            else "authentication required"
+        )
+        status_code = 503 if code == "unavailable" else 401
+        return _central_no_store({"error": code}, status_code=status_code)
+    except ApprovalHttpBridgeError as exc:
+        if exc.code == "approval_conflict":
+            return _central_no_store(
+                {
+                    "ok": False,
+                    "error": "approval has a different terminal outcome",
+                },
+                status_code=409,
+            )
+        return _central_error(exc)
+    return _central_no_store({"ok": True})
+
+
+async def cancel_approval(request: Request) -> JSONResponse:
+    approval_id = request.path_params["id"]
+    if not has_central_approval_prefix(approval_id):
+        return _central_no_store({"error": "not found"}, status_code=404)
+    try:
+        raw = await request.body()
+        body = {} if not raw else await request.json()
+    except Exception:
+        body = None
+    if not isinstance(body, dict) or body:
+        return _central_no_store({"error": "invalid_request"}, status_code=400)
+    try:
+        envelope = await asyncio.to_thread(
+            _approval_http_bridge().cancel,
+            approval_id,
+            api_auth.principal_from_request(request),
+        )
+    except ApprovalHttpBridgeError as exc:
+        return _central_error(exc)
+    return _central_no_store(envelope)
+
+
 ROUTES = [
     Route("/api/approvals", create_approval, methods=["POST"]),
     Route("/api/approvals/{id}", get_approval, methods=["GET"]),
     Route("/api/approvals/{id}/decision", decide_approval, methods=["POST"]),
+    Route("/api/approvals/{id}/cancel", cancel_approval, methods=["POST"]),
     Route("/api/sign-key", get_sign_key, methods=["GET"]),
 ]

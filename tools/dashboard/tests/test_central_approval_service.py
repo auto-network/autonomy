@@ -33,6 +33,7 @@ from tools.dashboard.approval_service import (
     HumanApprovalActor,
     InMemoryApprovalStore,
     SettingsApprovalStore,
+    canonical_session_requester_id,
     normalize_unix_milliseconds_deadline,
     resolve_human_approval_actor,
     resolve_personal_root_public_key,
@@ -293,9 +294,12 @@ def test_create_read_grant_and_reopen_from_shared_store():
         (record_type, approval_id)
     ))
     created = service.create_from_principal("test_kind", _local(), {})
+    assert created.approval_id.startswith("central-")
     assert "approval_id" not in created.payload
     assert created.payload["requester_ref"] == {
-        "kind": "session", "id": "auto-1", "label": "Session auto-1",
+        "kind": "session",
+        "id": canonical_session_requester_id(_local()),
+        "label": "Session auto-1",
     }
     assert service.status(created.approval_id).state == "open"
     reopened = _service(store=store)
@@ -539,12 +543,47 @@ def test_org_session_requester_is_derived_from_authenticated_session_only():
     )
     row = service.create_from_principal("test_kind", principal, {})
     assert row.payload["requester_ref"] == {
-        "kind": "session", "id": "auto-org-1", "label": "Session auto-org-1",
+        "kind": "session",
+        "id": canonical_session_requester_id(principal),
+        "label": "Session auto-org-1",
     }
     assert "org" not in row.payload
     assert "organization" not in row.payload
     assert "audience" not in row.payload
     assert "credential" not in row.payload
+
+
+def test_session_requester_identity_is_scope_bound_and_authorized_before_status():
+    service = _service()
+    local = _local("same-subject")
+    org_a = api_auth.ApiPrincipal(
+        api_auth.ApiPrincipalKind.ORG_SESSION,
+        subject="same-subject",
+        org="org-a",
+    )
+    org_b = api_auth.ApiPrincipal(
+        api_auth.ApiPrincipalKind.ORG_SESSION,
+        subject="same-subject",
+        org="org-b",
+    )
+    ids = {
+        canonical_session_requester_id(local),
+        canonical_session_requester_id(org_a),
+        canonical_session_requester_id(org_b),
+    }
+    assert len(ids) == 3
+    assert all(len(value) == 43 and "=" not in value for value in ids)
+
+    row = service.create_from_principal("test_kind", org_a, {})
+    assert service.status_for_principal(row.approval_id, org_a).state == "open"
+    for wrong in (org_b, local):
+        with pytest.raises(ApprovalServiceError, match="wrong_requester"):
+            service.status_for_principal(row.approval_id, wrong)
+        with pytest.raises(ApprovalServiceError, match="wrong_requester"):
+            service.cancel_from_principal(row.approval_id, wrong)
+    assert row.payload["requester_ref"]["id"] == canonical_session_requester_id(org_a)
+    assert "same-subject" not in row.payload["requester_ref"]["id"]
+    assert "org-a" not in row.payload["requester_ref"]["id"]
 
 
 def test_staged_secret_shape_and_malformed_decision_fail_closed():
