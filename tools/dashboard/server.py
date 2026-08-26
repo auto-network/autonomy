@@ -3111,7 +3111,7 @@ async def api_workspace_local_create(request):
     ``/workspace/<id>`` path.  The platform checkout remains visible at
     ``/workspace/repo`` so built-in CLIs such as ``graph`` keep working.
     """
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     if not org:
         return JSONResponse(
             {"error": "X-Graph-Org header is required"}, status_code=400,
@@ -12264,10 +12264,10 @@ async def api_dao_recent_sessions(request):
     org = None
     if requested_org:
         # A selected organization is a server-side scope, never a raw
-        # client-controlled filter. Reuse the network route's token/org
-        # reconciliation so an org-stamped session cannot read another org.
-        from tools.dashboard.network_routes import _scoped_org
-        org, refused = _scoped_org(requested_org, request=request)
+        # client-controlled filter. The common-core resolver reconciles the
+        # token org against the selection so an org-stamped session cannot read
+        # another org.
+        org, refused = api_auth.resolve_scoped_org(requested_org, request=request)
         if refused is not None:
             return refused
     # Served from the background-refreshed cache — the request path NEVER
@@ -13367,7 +13367,7 @@ async def api_diag_settings_sets(request):
     auth_error = api_auth.require_authenticated_api_caller(request)
     if auth_error is not None:
         return auth_error
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     resolved_org, windows, rows = _settings_diag_rows(org=org)
     from tools.graph import settings_ops as _settings_ops
     try:
@@ -13389,7 +13389,7 @@ async def api_diag_settings_set_detail(request):
     if auth_error is not None:
         return auth_error
     set_id = request.path_params["set_id"]
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     resolved_org, windows, rows = _settings_diag_rows(org=org)
     summary = next((row for row in rows if row["set_id"] == set_id), None)
     if summary is None:
@@ -14450,24 +14450,6 @@ def _token_org_or_none(request) -> str | None:
     return org  # slug for a container, None for a genuine local caller
 
 
-def _caller_org(request) -> str | None:
-    """Resolve caller org for a dashboard write.
-
-    The authenticated session-token org wins when present (auto-h4kzx); else
-    the ``X-Graph-Org`` header; else ``None``. Per graph://bcce359d-a1d
-    §Cross-org write semantics, an explicit caller org selects the
-    destination DB.
-
-    .. note:: The Settings public API (auto-cfb8u) requires ``org=``, and
-       a literal ``None`` means *scopeless* — the bug this contract
-       prevents. Settings handlers should pass
-       ``_settings_caller_org(request)`` instead, which returns
-       :data:`graph_ops.CALLER_ORG` on no-token/no-header so the env-cascade
-       is used (matches pre-cfb8u behavior, just made explicit).
-    """
-    return _token_org_or_none(request) or request.headers.get("X-Graph-Org") or None
-
-
 def _graph_write_identity(request) -> tuple[str | None, str | None]:
     """Trusted `(persona_id, session_id)` for graph content writes.
 
@@ -14482,26 +14464,6 @@ def _graph_write_identity(request) -> tuple[str | None, str | None]:
         api_auth.ApiPrincipalKind.ORG_SESSION,
     ) else None
     return principal.persona_id, session_id
-
-
-def _settings_caller_org(request):
-    """Resolve caller org for a Settings public-API call.
-
-    The authenticated session-token org wins when present (auto-h4kzx); else
-    the ``X-Graph-Org`` header; else :data:`graph_ops.CALLER_ORG` — a
-    sentinel that opts the Settings call into the env-cascade resolver
-    (per-request contextvar → ``GRAPH_ORG`` env → scopeless default).
-
-    Forgetting this on a Settings write inside a handler used to land
-    the row silently in the scopeless DB while readers carrying
-    ``X-Graph-Org`` saw nothing (graph://53f7412f-51e). Required-org +
-    this helper makes the intent loud at every call site.
-    """
-    return (
-        _token_org_or_none(request)
-        or request.headers.get("X-Graph-Org")
-        or graph_ops.CALLER_ORG
-    )
 
 
 class _FallbackUpload:
@@ -14648,7 +14610,7 @@ async def api_graph_note(request):
     over the HttpClient path (see ``ops._resolve_note_provenance``).
     """
     content_type = request.headers.get("content-type", "")
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     persona_id, session_id = _graph_write_identity(request)
 
     if "multipart/form-data" in content_type:
@@ -14753,7 +14715,7 @@ async def api_graph_note_versions_list(request):
     e = _graph_validate_source_id(source_id)
     if e:
         return JSONResponse({"error": e}, status_code=400)
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
 
     src = await asyncio.to_thread(graph_ops.get_source, source_id, org=org)
     if src is None:
@@ -14791,7 +14753,7 @@ async def api_graph_note_version_read(request):
         return JSONResponse({"error": "version must be a positive integer"}, status_code=400)
     if version < 1:
         return JSONResponse({"error": "version must be a positive integer"}, status_code=400)
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
 
     src = await asyncio.to_thread(graph_ops.get_source, source_id, org=org)
     if src is None:
@@ -14857,7 +14819,7 @@ async def api_graph_note_update(request):
     must be provided; otherwise 400.
     """
     content_type = request.headers.get("content-type", "")
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     persona_id, session_id = _graph_write_identity(request)
 
     if "multipart/form-data" in content_type:
@@ -14978,7 +14940,7 @@ async def api_graph_note_withdraw(request):
     """
     if os.environ.get("DASHBOARD_MOCK"):
         return JSONResponse({"ok": True, "output": "  ✓ Mock: withdraw operation skipped"})
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     body = await request.json()
     source_id = body.get("source_id", "")
     e = _graph_validate_source_id(source_id)
@@ -15008,7 +14970,7 @@ async def api_graph_comment_get(request):
         return JSONResponse(
             {"error": f"malformed comment_id: {comment_id!r}"}, status_code=400,
         )
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     comment = graph_ops.get_comment(comment_id, org=org)
     if comment is None:
         return JSONResponse(
@@ -15035,7 +14997,7 @@ async def api_graph_turn_content(request):
         return JSONResponse(
             {"error": f"invalid turn: {turn_raw!r}"}, status_code=400,
         )
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     content = graph_ops.get_turn_content(source_id, turn, org=org)
     if content is None:
         return JSONResponse({"error": "turn not found"}, status_code=404)
@@ -15054,7 +15016,7 @@ async def api_graph_comment(request):
     if e:
         return JSONResponse({"error": e}, status_code=400)
 
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     persona_id, session_id = _graph_write_identity(request)
 
     # Source lookup goes through the full-surface cross-org resolver so
@@ -15120,7 +15082,7 @@ async def api_graph_comment_integrate(request):
     if e:
         return JSONResponse({"error": f"malformed comment_id: {comment_id!r}"}, status_code=400)
 
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     comment = graph_ops.get_comment(comment_id, org=org)
     if comment is None:
         return JSONResponse(
@@ -15175,7 +15137,7 @@ async def api_graph_bead(request):
     # Create bead via bd (tracker system), in the CALLER ORG's tracker
     # (per-org databases, autonomy@74585ba) with the org label applied
     # by convention (graph note 74e2b864).
-    caller_org = _caller_org(request)
+    caller_org = api_auth.organization_scope_from_request(request)
     labels = "readiness:idea" + (f",org:{caller_org}" if caller_org else "")
     bd_cmd = ["bd", "create", title, "-p", str(priority), "-l", labels]
     if desc:
@@ -15198,7 +15160,7 @@ async def api_graph_bead(request):
     # Create the provenance edge via ops.
     edge = None
     if source_id and body.get("turns"):
-        org = _caller_org(request)
+        org = api_auth.organization_scope_from_request(request)
         turns_arg = str(body["turns"])
         parts = turns_arg.split("-")
         try:
@@ -15246,7 +15208,7 @@ async def api_graph_link(request):
         return JSONResponse({"error": e}, status_code=400)
 
     relationship = body.get("relationship", "informed_by")
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
 
     turns: tuple[int, int] | None = None
     turns_arg = body.get("turn") or body.get("turns")
@@ -15492,7 +15454,7 @@ async def api_graph_docs(request):
     path = body.get("path")
     if not path:
         return JSONResponse({"error": "path required"}, status_code=400)
-    org = body.get("org") or _caller_org(request)
+    org = body.get("org") or api_auth.organization_scope_from_request(request)
     force = bool(body.get("force"))
 
     async with _ingest_lock:
@@ -15544,7 +15506,7 @@ async def api_graph_attach(request):
         tmp.write(contents)
         tmp_path = tmp.name
 
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     try:
         att = await asyncio.to_thread(
             graph_ops.attach_file,
@@ -15758,7 +15720,7 @@ async def api_graph_attachment_get(request):
         return JSONResponse({"error": f"malformed attachment_id: {attachment_id!r}"}, status_code=400)
     if request.query_params.get("strict"):
         resolved = graph_ops.resolve_attachment_strict(
-            attachment_id, org=_caller_org(request),
+            attachment_id, org=api_auth.organization_scope_from_request(request),
         )
         if isinstance(resolved, list):
             return JSONResponse({"matches": resolved})
@@ -15771,7 +15733,7 @@ async def api_graph_attachment_get(request):
 
 async def api_graph_collab_topics(request):
     """List tag taxonomy entries. Companion to HttpClient.list_collab_topics."""
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     return JSONResponse({"topics": graph_ops.list_collab_topics(org=org)})
 
 
@@ -15781,7 +15743,7 @@ async def api_graph_attention(request):
     Companion to ``HttpClient.list_attention`` (container ``graph attention``).
     """
     params = request.query_params
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     since = params.get("since") or None
     search = params.get("search") or None
     last_raw = params.get("last")
@@ -15798,13 +15760,13 @@ async def api_graph_attention(request):
 
 async def api_graph_stats(request):
     """GET /api/graph/stats — DB table counts."""
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     return JSONResponse(graph_ops.stats(org=org))
 
 
 async def api_graph_tree(request):
     """GET /api/graph/tree — knowledge hierarchy tree."""
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     params = request.query_params
     root = params.get("root") or None
     depth = int(params.get("depth", "3"))
@@ -15813,7 +15775,7 @@ async def api_graph_tree(request):
 
 async def api_graph_entities(request):
     """GET /api/graph/entities — list or search entities."""
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     params = request.query_params
     query = params.get("query") or None
     etype = params.get("type") or None
@@ -15830,7 +15792,7 @@ async def api_graph_entities(request):
 
 async def api_graph_entity_thoughts(request):
     """GET /api/graph/entity/{id}/thoughts — thoughts mentioning an entity."""
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     entity_id = request.path_params["id"]
     limit = int(request.query_params.get("limit", "20"))
     return JSONResponse(
@@ -16017,7 +15979,7 @@ async def api_graph_settings_list(request):
     target, minrev, stored, err = _parse_settings_read_params(request.query_params)
     if err:
         return JSONResponse({"error": err}, status_code=400)
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     # A caller-supplied ``peers`` lets the caller choose which orgs compose into
     # the read. Invariant 1: an org-bound caller does not select its own scope —
     # it gets its org's resolved peers (their published/canonical surface only).
@@ -16049,7 +16011,7 @@ async def api_graph_settings_get_by_key(request):
     target, minrev, stored, err = _parse_settings_read_params(request.query_params)
     if err:
         return JSONResponse({"error": err}, status_code=400)
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     members = graph_ops.read_set(
         set_id, target_revision=target, min_revision=minrev,
         org=org or graph_ops.CALLER_ORG,
@@ -16066,7 +16028,7 @@ async def api_graph_setting_get(request):
     target, _, _, err = _parse_settings_read_params(request.query_params)
     if err:
         return JSONResponse({"error": err}, status_code=400)
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     got = graph_ops.get_setting(
         sid, target_revision=target, org=org or graph_ops.CALLER_ORG,
     )
@@ -16085,7 +16047,7 @@ async def api_graph_setting_create(request):
         return JSONResponse(
             {"error": f"missing fields: {missing}"}, status_code=400,
         )
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     if os.environ.get("DASHBOARD_MOCK"):
         from tools.dashboard.dao import mock as dao_mock
         sid = dao_mock.add_setting_member(
@@ -16171,7 +16133,7 @@ async def api_graph_setting_override(request):
     body = await request.json()
     if "payload" not in body:
         return JSONResponse({"error": "payload required"}, status_code=400)
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     try:
         sid = graph_ops.override_setting(
             target_id, body["payload"], state=body.get("state", "raw"),
@@ -16200,7 +16162,7 @@ async def api_graph_setting_exclude(request):
         body = await request.json()
     except Exception:
         pass
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     try:
         sid = graph_ops.exclude_setting(
             target_id, state=body.get("state", "raw"),
@@ -16220,7 +16182,7 @@ async def api_graph_setting_promote(request):
     to_state = body.get("to_state") or body.get("to")
     if not to_state:
         return JSONResponse({"error": "to_state required"}, status_code=400)
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     try:
         graph_ops.promote_setting(sid, to_state, org=org or graph_ops.CALLER_ORG)
     except LookupError as e:
@@ -16274,7 +16236,7 @@ async def api_graph_source_promote(request):
     to_state = body.get("to_state") or body.get("to")
     if not to_state:
         return JSONResponse({"error": "to_state required"}, status_code=400)
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     try:
         result = await asyncio.to_thread(
             graph_ops.promote_source,
@@ -16300,7 +16262,7 @@ async def api_graph_setting_deprecate(request):
         body = await request.json()
     except Exception:
         pass
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     try:
         graph_ops.deprecate_setting(
             sid, successor_id=body.get("successor_id"),
@@ -16314,7 +16276,7 @@ async def api_graph_setting_deprecate(request):
 async def api_graph_setting_delete(request):
     """DELETE /api/graph/setting/<id> — hard-delete (raw only)."""
     sid = request.path_params["id"]
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     try:
         graph_ops.remove_setting(sid, org=org or graph_ops.CALLER_ORG)
     except LookupError as e:
@@ -16592,7 +16554,7 @@ def _settings_diag_rows(
 
 async def api_graph_set_ids(request):
     """GET /api/graph/sets — list known set_ids."""
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     set_ids = graph_ops.list_set_ids(org=org or graph_ops.CALLER_ORG)
     summary = request.query_params.get("summary", "").strip().lower() in (
         "1", "true", "yes", "on",
@@ -16623,7 +16585,7 @@ async def api_graph_settings_migrate(request):
             {"error": "to_rev (int) required"}, status_code=400,
         )
     dry_run = bool(body.get("dry_run", False))
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     try:
         report = graph_ops.migrate_setting_revisions(
             set_id, to_rev, dry_run=dry_run,
@@ -16648,7 +16610,7 @@ async def api_graph_setting_resolve(request):
     * 404 ``{"error": "no setting matches '<value>'"}`` — no match.
     """
     value = request.path_params["value"]
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     hit = graph_ops.resolve_setting_strict(value, org=org or graph_ops.CALLER_ORG)
     if hit is None:
         return JSONResponse(
@@ -16677,7 +16639,7 @@ async def api_graph_settings_chain(request):
         return auth_error
     set_id = request.path_params["set_id"]
     key = request.path_params["key"]
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     chain = graph_ops.chain_setting(set_id, key, org=org or graph_ops.CALLER_ORG)
     if chain is None:
         return JSONResponse(
@@ -16694,7 +16656,7 @@ async def api_graph_settings_check(request):
 
     set_id = request.path_params["set_id"]
     key = request.path_params["key"]
-    org = _settings_caller_org(request)
+    org = api_auth.settings_scope_from_request(request)
     try:
         findings, satisfied = _settings_ops.inspect_setting(
             set_id, key, org=org,
@@ -16721,7 +16683,7 @@ async def api_graph_settings_contested(request):
     from tools.graph import settings_ops as _settings_ops
 
     set_id = request.path_params["set_id"]
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     contested = _settings_ops.contested_keys(
         set_id, org=org or graph_ops.CALLER_ORG,
     )
@@ -18126,7 +18088,7 @@ async def api_graph_resolve(request):
             )
         tail_n = -from_val
 
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     source = await asyncio.to_thread(graph_ops.get_source, id, org=org)
     if source:
         source = await _refresh_graph_session_source(source)
@@ -18255,7 +18217,7 @@ async def api_graph_notes(request):
     tags_param = request.query_params.get("tags")
     tags = [t for t in tags_param.split(",") if t] if tags_param else None
     only_org = request.query_params.get("only_org")
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     notes = graph_ops.list_notes(
         org=org, only_org=only_org, since=since_iso, tags=tags, limit=limit,
     )
@@ -18576,7 +18538,7 @@ async def api_graph_journal_write(request):
         if field not in body:
             return JSONResponse({"error": f"missing required field: {field}"}, status_code=400)
 
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request)
     try:
         result = await asyncio.to_thread(
             graph_ops.write_journal_entry, body, org=org,

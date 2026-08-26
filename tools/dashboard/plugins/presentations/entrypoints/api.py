@@ -9,14 +9,11 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from tools.dashboard import api_auth
 from tools.dashboard.plugins.presentations.entrypoints.schemas import (
     PRESENTATION_DECK_SET_ID,
     SCHEMA_REVISION,
 )
-
-
-def _caller_org(request: Request) -> str:
-    return request.headers.get("X-Graph-Org") or "autonomy"
 
 
 def _iso_now() -> str:
@@ -275,7 +272,7 @@ def _force_requested(request: Request) -> bool:
 
 
 async def list_decks(request: Request) -> JSONResponse:
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request) or "autonomy"
     rows = _read_deck_members(org)
     decks = []
     for row in rows:
@@ -302,7 +299,7 @@ async def get_deck(request: Request) -> JSONResponse:
 
 
 async def mark_shown(request: Request) -> JSONResponse:
-    org = _caller_org(request)
+    org = api_auth.organization_scope_from_request(request) or "autonomy"
     raw_id = request.path_params["design_id"]
     design = _get_design_by_revision_or_design_id(raw_id)
     if not design:

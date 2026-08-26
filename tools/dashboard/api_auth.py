@@ -140,6 +140,58 @@ def caller_org_scope_hides(request: Request, resource_org: str | None) -> bool:
     return not (resource_org and principal.org and resource_org == principal.org)
 
 
+def settings_scope_from_request(request: Request) -> object:
+    """The org scope for an organization-homed Settings call.
+
+    Exactly :func:`organization_scope_from_request`, except that when no org is
+    selected it returns the ``CALLER_ORG`` sentinel instead of ``None``. A
+    Settings public-API call must be scoped (auto-cfb8u); ``None`` would land
+    the row in the scopeless DB while header-carrying readers see nothing
+    (graph://53f7412f-51e). The sentinel opts the call into the env-cascade
+    resolver (per-request contextvar → ``GRAPH_ORG`` → scopeless default),
+    which is the correct default for a caller that named no org.
+
+    This is the common-core replacement for the former per-module
+    ``_settings_caller_org``; a handler must call this, never re-derive the org
+    from headers.
+    """
+    from tools.graph import settings_ops
+    return organization_scope_from_request(request) or settings_ops.CALLER_ORG
+
+
+def resolve_scoped_org(
+    requested_org: str | None, *, request: Request,
+) -> tuple[object | None, JSONResponse | None]:
+    """Resolve the org a cross-org-sensitive route acts on, refusing a widening.
+
+    The network/sign-key pattern (auto-h4kzx, invariant 1). An org-bound caller
+    (an org session bearer) IS its org: an explicit ``requested_org`` (``?org=``
+    or a body field) is honored only when it names that same org; any other
+    value is a cross-org attempt and returns ``(None, 403)`` — nothing the
+    request carries can widen the token. A caller with no org-bound token is the
+    local operator, who holds every org's key: its ``requested_org`` is a
+    SELECTION of which org to act on, not an escalation, defaulting to the
+    ``CALLER_ORG`` env-cascade sentinel when absent.
+
+    Returns ``(org, None)`` on success or ``(None, JSONResponse)`` (403) on a
+    cross-org attempt — so a route can ``org, refusal = resolve_scoped_org(...)``
+    and return ``refusal`` if set. This is the common-core replacement for the
+    former per-module ``_scoped_org``; the scope comes from the middleware-
+    established principal, never from a re-read of the header here.
+    """
+    principal = principal_from_request(request)
+    if principal.org_bound:
+        if requested_org and requested_org != principal.org:
+            return None, JSONResponse(
+                {"error": "cross-org access to another org's resource is not "
+                          "permitted"},
+                status_code=403,
+            )
+        return principal.org, None
+    from tools.graph import settings_ops
+    return (requested_org or settings_ops.CALLER_ORG), None
+
+
 def require_authenticated_api_caller(request: Request) -> JSONResponse | None:
     """Refuse an API caller that presents no credential at all.
 

@@ -31,14 +31,10 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from tools.dashboard import api_auth
+
 
 logger = logging.getLogger(__name__)
-
-
-def _caller_org(request: Request) -> str | None:
-    """Return the ``X-Graph-Org`` slug or ``None`` if absent / empty."""
-    org = request.headers.get("X-Graph-Org")
-    return org if org else None
 
 
 def _workspace_metadata(workspace) -> dict[str, Any]:
@@ -81,7 +77,7 @@ async def list_workspaces(request: Request) -> JSONResponse:
             "warning": "load_workspaces failed — see server log",
         })
 
-    caller_org = _caller_org(request)
+    caller_org = api_auth.organization_scope_from_request(request)
     metadata = []
     for ws in workspaces.values():
         if caller_org and ws.graph_project != caller_org:
@@ -119,7 +115,7 @@ async def render_workspace(request: Request) -> JSONResponse:
             status_code=404,
         )
 
-    caller_org = _caller_org(request)
+    caller_org = api_auth.organization_scope_from_request(request)
     if caller_org and workspace.graph_project != caller_org:
         # Treat out-of-scope workspaces as not-found — same shape as the
         # unknown-id branch so the page can render a single error path.
