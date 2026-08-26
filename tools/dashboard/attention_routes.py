@@ -28,6 +28,11 @@ from tools.dashboard.approval_service import (
     ApprovalStatus,
     resolve_human_approval_actor,
 )
+from tools.dashboard.approval_http_bridge import (
+    ApprovalHttpBridge,
+    ApprovalHttpRegistry,
+    ApprovalWaitHub,
+)
 from tools.dashboard.attention_index_service import (
     AttentionIndexError,
     AttentionIndexService,
@@ -294,6 +299,23 @@ class AttentionRouteRuntime:
     presentation: AttentionPresentationService
     approvals: ApprovalService
     hub: PrivateAttentionHub
+    approval_http: ApprovalHttpBridge | None = None
+
+    def __post_init__(self) -> None:
+        if self.approval_http is None:
+            self.approval_http = ApprovalHttpBridge(
+                approvals=self.approvals,
+                registry=ApprovalHttpRegistry(
+                    approvals=self.approvals.registry,
+                    attention=self.index.registry,
+                ),
+            )
+        elif (
+            self.approval_http.approvals is not self.approvals
+            or self.approval_http.registry.approvals is not self.approvals.registry
+            or self.approval_http.registry.attention is not self.index.registry
+        ):
+            raise ValueError("Central route runtime must share one exact composition")
 
 
 def build_production_runtime() -> AttentionRouteRuntime:
@@ -302,11 +324,25 @@ def build_production_runtime() -> AttentionRouteRuntime:
         approval_registry=approval_registry,
     )
     index = AttentionIndexService(registry=attention_registry)
+    approval_waiters = ApprovalWaitHub()
+    approvals = ApprovalService(
+        registry=approval_registry,
+        after_commit=approval_waiters.notify,
+    )
+    approval_http = ApprovalHttpBridge(
+        approvals=approvals,
+        registry=ApprovalHttpRegistry(
+            approvals=approval_registry,
+            attention=attention_registry,
+        ),
+        wait_hub=approval_waiters,
+    )
     return AttentionRouteRuntime(
         index=index,
         presentation=AttentionPresentationService(),
-        approvals=ApprovalService(registry=approval_registry),
+        approvals=approvals,
         hub=PrivateAttentionHub(item_resolver=index.get_query_item),
+        approval_http=approval_http,
     )
 
 
@@ -329,6 +365,13 @@ async def start() -> None:
 
 async def stop() -> None:
     await _runtime.hub.stop()
+    assert _runtime.approval_http is not None
+    _runtime.approval_http.close()
+
+
+def approval_runtime() -> AttentionRouteRuntime:
+    """Return the one process-owned Central composition to route adapters."""
+    return _runtime
 
 
 def sync_registrations() -> int:
@@ -416,6 +459,11 @@ def _same_origin_guard(request: Request) -> JSONResponse | None:
     except Exception:
         return _no_store({"error": "same-origin request required"}, status_code=403)
     return None
+
+
+def operator_mutation_guard(request: Request) -> JSONResponse | None:
+    """Shared human-operator and exact same-origin mutation boundary."""
+    return _operator_guard(request) or _same_origin_guard(request)
 
 
 async def _strict_json_object(request: Request, *, allow_empty: bool = False) -> dict[str, Any]:
@@ -671,7 +719,7 @@ async def api_attention_item(request: Request):
 
 
 async def api_attention_decision(request: Request):
-    denied = _operator_guard(request) or _same_origin_guard(request)
+    denied = operator_mutation_guard(request)
     if denied is not None:
         return denied
     try:
@@ -741,7 +789,7 @@ async def api_attention_decision(request: Request):
 
 
 async def _presentation_mutation(request: Request, operation: str):
-    denied = _operator_guard(request) or _same_origin_guard(request)
+    denied = operator_mutation_guard(request)
     if denied is not None:
         return denied
     try:
