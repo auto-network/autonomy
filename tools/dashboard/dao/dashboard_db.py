@@ -1153,6 +1153,7 @@ def persist_tail_state(
     *,
     expect_path: str,
     expect_generation: str,
+    expect_offset: int | None = None,
     file_offset: int,
     last_activity: float | None = None,
     last_message: str | None = None,
@@ -1167,6 +1168,14 @@ def persist_tail_state(
     match what the drain pass read — a drain racing a rollover or re-link
     silently drops its ack instead of corrupting the successor's cursor
     (OffsetCoherent).
+
+    ``expect_offset`` (when given) extends the CAS to the row's cursor: the
+    ack lands only if ``file_offset`` is still where this window's read
+    began. revive_session resets the cursor to 0 for a resume's full
+    backfill WITHOUT claiming the drain gate; path and generation both
+    survive a revive (same file, same inode), so without this term an
+    in-flight pre-revive window's ack wrote its high ``new_offset`` back
+    over the reset and the backfill silently never happened.
 
     ``harness_state_patch`` is merged INTO the row inside the UPDATE via
     ``json_patch`` (B7): the patch carries only the keys this drain pass
@@ -1207,10 +1216,15 @@ def persist_tail_state(
         )
         vals.append(harness_state_patch)
     vals.extend([tmux_name, expect_path, expect_generation])
-    cur = conn.execute(
-        f"UPDATE tmux_sessions SET {', '.join(parts)}"
+    where = (
         " WHERE tmux_name=? AND jsonl_path=?"
-        "   AND COALESCE(jsonl_generation,'')=?",
+        "   AND COALESCE(jsonl_generation,'')=?"
+    )
+    if expect_offset is not None:
+        where += " AND COALESCE(file_offset,0)=?"
+        vals.append(expect_offset)
+    cur = conn.execute(
+        f"UPDATE tmux_sessions SET {', '.join(parts)}{where}",
         vals,
     )
     conn.commit()

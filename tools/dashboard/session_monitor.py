@@ -3350,6 +3350,11 @@ class SessionMonitor:
             tmux_name,
             expect_path=window["path"],
             expect_generation=window["expect_generation"],
+            # Cursor CAS: revive_session moves file_offset to 0 without the
+            # drain gate; same-path same-inode means the path/generation
+            # terms can't see it. Ack only if the cursor is still where this
+            # read began, so a pre-revive window can't undo a backfill reset.
+            expect_offset=window["start_offset"],
             file_offset=window["new_offset"],
             last_activity=window["mtime"],
             last_message=window["last_message"],

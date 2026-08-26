@@ -483,6 +483,38 @@ def test_stop_handler_reaches_dead_despite_step_errors(monkeypatch, tmp_path):
     assert row["startup_state"] is None
 
 
+def test_stop_handler_runs_vault_release_teardown(monkeypatch, tmp_path):
+    """STOP's cleaning phase calls vault_release_sweeper.on_session_end for
+    the stopping session — timely reclaim is the launcher's job; the 30s
+    periodic sweep is only the crash backstop (auto-pw9bs.5). Running it as
+    a stop step also orders it before a restart's re-provision."""
+    from tools.dashboard import server, vault_release_sweeper
+
+    _init_db(tmp_path)
+    dashboard_db.insert_session(
+        tmux_name="auto-life",
+        session_type="container",
+        project="autonomy",
+        harness="claude",
+    )
+
+    monkeypatch.setattr(server.subprocess, "run", lambda cmd, **kw: None)
+    monkeypatch.setattr(server.auth_db, "revoke_token", lambda _name: None)
+    torn_down = []
+    monkeypatch.setattr(
+        vault_release_sweeper, "on_session_end",
+        lambda session, **kw: torn_down.append(session) or {},
+    )
+
+    server._run_session_stop(
+        LifecycleJob("stop", "auto-life", {}),
+        SessionLifecycleStateWriter(),
+    )
+
+    assert torn_down == ["auto-life"]
+    assert dashboard_db.get_session("auto-life")["state"] == "ENDED"
+
+
 def test_restart_handler_waits_after_ended_before_relaunch(monkeypatch, tmp_path):
     """Restart must expose ENDED, settle, then start the same session."""
     from tools.dashboard import server
