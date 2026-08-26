@@ -34,18 +34,14 @@ There is no bead, no task directive, and no `decision.json` to write.
 ### Pulling fresh `{{ target_branch_default | default('master') }}` from host
 Your worktree fetches from a managed clone (`data/repos/.../<repo>.git`) that the host owns. When other beads merge to host master, the managed clone does **not** auto-update — it lags until either you push to GitHub origin (we don't, on every merge) or the host runs a sync. If your fetch can't see commits the host says are merged, the clone is stale.
 
-Self-serve sync via the dashboard API — pulls host's `{{ target_branch_default | default('master') }}` into the managed clone you fetch from. The `{repo}` path segment is the dashboard worktree row's `repo_name`, not the container mount basename. For the main Autonomy checkout this is normally `autonomy`, even though the repo is mounted inside the container at `/workspace/repo`. Do not substitute `repo` just because the local path is `/workspace/repo`; if the endpoint returns `worktree not found: .../<session>/repo`, you used the wrong path segment.
+Use the authenticated worktree command. It resolves the current session and repository from the Git worktree containing `PATH` (default: the current directory), refreshes the managed base, and rebases only when the worktree is clean:
 
 ```bash
-DASHBOARD=https://{{ 'localhost' if config.network_host else 'host.docker.internal' }}:8080
-REPO_NAME=$(curl -sk "$DASHBOARD/api/worktrees" | python3 -c 'import json, os, sys; rows=json.load(sys.stdin); print(next(r["repo_name"] for r in rows if r["session_name"] == os.environ["AUTONOMY_SESSION"]))')
-curl -sk -X POST "$DASHBOARD/api/worktrees/$AUTONOMY_SESSION/$REPO_NAME/sync-base"
-# Then your normal fetch+rebase will see the new commits:
-git fetch <autonomy-root>/data/repos/.../<repo>.git master:hostsync/master
-git rebase hostsync/master
+graph worktree status [PATH]
+graph worktree sync [PATH]
 ```
 
-The sync action is non-destructive — pure ref-update on the managed clone. Safe to call any time.
+If the worktree is dirty and needs a rebase, sync refuses and tells you to commit or stash first.
 {% endif %}
 
 ## Output Files — `/workspace/output` vs `/tmp`
@@ -175,6 +171,9 @@ graph set-label "title"               # set session working title
 graph set-topics "Line 1" "Line 2"    # set card status lines
 graph set-role researcher             # set session role
 graph set-nag --interval 10           # enable idle nag (--off to disable)
+graph worktree status [PATH]          # current base-sync and merge readiness
+graph worktree sync [PATH]            # refresh base and safely rebase when needed
+graph worktree merge [PATH]           # one command: sync, rebase, fast-forward merge
 graph share <file> --alt "..." --caption "..."  # render a file as an inline tile in the session viewer
 graph session-auth [--browser]        # mint an operator-approved dashboard UI session (cookie jar; --browser injects into agent-browser)
 graph mission status <surface> [-v]   # structured Mission Control: report, items, add/update/state/retire, style — see `graph mission --help`
