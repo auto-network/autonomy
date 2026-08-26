@@ -130,6 +130,15 @@ async function router(url, opts = {}) {
     S.passkeys = S.passkeys.filter((p) => p.credential_id !== id);
     return jsonResponse({ ok: true });
   }
+  // Optional factor-policy overlay — only when a test opts in via S.factorPolicy,
+  // so the armor-model tests above are untouched (their fetch returns {}).
+  if (url === '/api/identity/factor-policy') {
+    return jsonResponse(S.factorPolicy ? { generation: 1, factors: S.factorPolicy } : {});
+  }
+  if (url.includes('/metadata') && method === 'PATCH') {
+    (S.patches = S.patches || []).push({ url, body: JSON.parse(opts.body) });
+    return jsonResponse({ ok: true });
+  }
   throw new Error(`unrouted fetch: ${method} ${url}`);
 }
 
@@ -482,6 +491,34 @@ test('MFA → dual full-authority factors, no MFA (UI shows BOTH full)', async (
   const keyBadge = qa('.krow [data-k]').pop();
   assert.ok(keyBadge, 'passkey authority badge present');
   assert.match(keyBadge.textContent, /full authority/i, 'passkey badge full authority (not unlock only)');
+});
+
+test('inline rename PATCHes the factor metadata and updates the shown name', async () => {
+  const root = await mintRoot();
+  const armor = await aPassword(root, 'pw');
+  SERVER = makeServer({ armor, rootPub: root.rootPub, passkeys: [] });
+  // opt in to the factor-policy overlay so the row carries a factor_id + pencil
+  SERVER.factorPolicy = [{
+    factor_id: 'pw.a', type: 'password', label: 'Password',
+    root_role: 'individual', access: 'enabled',
+  }];
+  await openPanel();
+  await settle();
+  const edit = q('.krow .nm-edit');
+  assert.ok(edit, 'the rename pencil renders when factor-policy provides a factor id');
+  edit.click();
+  await settle();
+  const input = q('.rn-in');
+  assert.ok(input, 'an inline input appears in place of the name');
+  input.value = 'Work password';
+  input.dispatchEvent(new window.Event('input'));
+  q('.rn-ok').click();                       // save
+  await settle();
+  const patch = (SERVER.patches || []).pop();
+  assert.ok(patch, 'a metadata PATCH was sent');
+  assert.match(patch.url, /\/api\/identity\/factors\/pw\.a\/metadata/, 'to the right factor');
+  assert.equal(patch.body.label, 'Work password', 'with only the new label');
+  assert.match(q('.krow .nm-txt').textContent, /Work password/, 'and the shown name updates');
 });
 
 test('a failed ceremony reports diagnostics to the server with NO secrets', async () => {
