@@ -1,12 +1,19 @@
-"""The durable record of secret releases (auto-pw9bs.5).
+"""The durable record of secret releases (auto-pw9bs.5, auto-huzz3).
 
 Every ``delivered``-mode secret release is recorded here BEFORE the delivery
 layer materialises anything, so the only crash state is a record with no
 file, never a file with no record (design ``graph://0c206bd8-1c6`` §4.2).
 The record is a locator and a deadline — it never holds the plaintext, the
 sealed key, or the ciphertext body: those live in the session's ramfs
-subdirectory and nowhere else. A thief holding this database learns which
-secret went to which session and when it was destroyed, not what it was.
+subdirectory and nowhere else. A reader of this store learns which secret
+went to which session and when it was destroyed, not what it was.
+
+The rows are **machine-homed Settings** (``autonomy.vault.release-lease``
+in the machine store), per the mission ruling ``d-no-bespoke-stores``:
+machine-local operational state is a declared schema in ``machine.db``,
+never a bespoke database file. This module replaced its own SQLite file
+with that store; the first call drains any legacy ``vault_releases.db``
+left by the earlier code and deletes it.
 
 The sweeper (:mod:`tools.dashboard.vault_release_sweeper`) reads this store
 to destroy releases at their deadline and to reconcile across a dashboard
@@ -18,80 +25,143 @@ release was destroyed and why.
 
 from __future__ import annotations
 
-import sqlite3
+import logging
+import threading
 import time
 from pathlib import Path
 
-from tools.data_paths import resolve_store
+from tools.graph import settings_ops
+from tools.graph.schemas.vault_release_lease import (
+    RELEASE_LEASE_REVISION,
+    RELEASE_LEASE_SET_ID,
+    SHRED_REASONS,
+    VaultReleaseLeaseV1,
+)
 
-SCHEMA_VERSION = 1
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS vault_releases (
-    id             TEXT PRIMARY KEY,
-    session        TEXT NOT NULL,
-    setting_name   TEXT NOT NULL,
-    release_mode   TEXT NOT NULL,
-    delivered_at   INTEGER NOT NULL,
-    expires_at     INTEGER NOT NULL,
-    container_path TEXT NOT NULL,
-    host_path      TEXT NOT NULL,
-    shredded_at    INTEGER,
-    shred_reason   TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_vault_releases_outstanding
-    ON vault_releases(expires_at) WHERE shredded_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_vault_releases_session
-    ON vault_releases(session) WHERE shredded_at IS NULL;
-"""
+__all__ = [
+    "SHRED_REASONS",
+    "VaultReleaseStoreError",
+    "record_release",
+    "get",
+    "outstanding",
+    "outstanding_sessions",
+    "mark_shredded",
+]
 
-#: Valid values of ``shred_reason`` — a closed set so the audit vocabulary
-#: cannot drift. ``expired`` = the deadline passed; ``session_end`` = the
-#: session's whole subdirectory was reclaimed; ``reconciled`` = destroyed by
-#: start-up reconciliation after a restart; ``orphaned`` = the session no
-#: longer exists; ``delivery_failed`` = the record committed but materialising
-#: the ramfs file did not complete.
-SHRED_REASONS = frozenset({
-    "expired", "session_end", "reconciled", "orphaned", "delivery_failed",
-})
+logger = logging.getLogger(__name__)
+
+_ORG = "machine"
+
+#: Serialises read-modify-write transitions (``mark_shredded``) within this
+#: process. The executor, the launcher's session-end hook, and the sweeper
+#: all run in the one dashboard process; the lock preserves the
+#: first-destruction-wins property the old store enforced with a
+#: conditional UPDATE.
+_transition_lock = threading.Lock()
+
+_drained = False
 
 
 class VaultReleaseStoreError(RuntimeError):
     """The release record store could not be read or written."""
 
 
-def db_path() -> Path:
-    return resolve_store("vault_releases")
+def _legacy_db_path() -> Path:
+    """Where the retired bespoke SQLite file lived, if this machine ever ran
+    the earlier code. Resolved relative to the machine store so the drain
+    needs no registered Store entry for the dead file."""
+    import os
+
+    override = os.environ.get("VAULT_RELEASES_DB")
+    if override:
+        return Path(override)
+    from tools.data_paths import resolve_store
+
+    return resolve_store("machine").parent / "vault_releases.db"
 
 
-def init_db(path: Path | str | None = None) -> None:
-    target = Path(path) if path is not None else db_path()
+def _drain_legacy_file() -> None:
+    """One-time migration: copy any rows out of the retired SQLite file into
+    the machine store, then delete the file. Value-free rows (locators,
+    deadlines, shred outcomes), so a straight copy is safe; an existing
+    machine-store row wins so the drain is idempotent across crashes."""
+    global _drained
+    if _drained:
+        return
+    _drained = True
+    legacy = _legacy_db_path()
+    if not legacy.is_file():
+        return
+    import sqlite3
+
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(target, timeout=5) as conn:
-            version = conn.execute("PRAGMA user_version").fetchone()[0]
-            if version == 0:
-                conn.executescript(SCHEMA)
-                conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-            elif version != SCHEMA_VERSION:
-                raise VaultReleaseStoreError(
-                    f"unsupported vault-release schema v{version}; "
-                    f"expected v{SCHEMA_VERSION}"
-                )
-    except VaultReleaseStoreError:
-        raise
-    except (OSError, sqlite3.Error) as exc:
+        with sqlite3.connect(legacy, timeout=5) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("SELECT * FROM vault_releases").fetchall()
+    except sqlite3.Error as exc:
         raise VaultReleaseStoreError(
-            f"could not initialize vault-release store: {exc}"
+            f"legacy vault_releases.db exists but cannot be read: {exc}"
+        ) from exc
+    copied = 0
+    existing = {m["id"] for m in _members()}
+    for row in rows:
+        rec = dict(row)
+        release_id = rec.pop("id")
+        if release_id in existing:
+            continue
+        payload = {k: v for k, v in rec.items() if v is not None}
+        VaultReleaseLeaseV1.validate(payload)
+        _upsert(release_id, payload)
+        copied += 1
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            Path(str(legacy) + suffix).unlink(missing_ok=True)
+        except OSError as exc:
+            raise VaultReleaseStoreError(
+                f"drained legacy store but could not delete {legacy}{suffix}: {exc}"
+            ) from exc
+    logger.info(
+        "vault releases: drained %d row(s) from legacy %s into the machine "
+        "store and deleted the file", copied, legacy,
+    )
+
+
+def _upsert(release_id: str, payload: dict) -> None:
+    try:
+        settings_ops.upsert_by_key(
+            RELEASE_LEASE_SET_ID,
+            RELEASE_LEASE_REVISION,
+            release_id,
+            payload,
+            org=_ORG,
+        )
+    except Exception as exc:
+        raise VaultReleaseStoreError(
+            f"could not write release record: {exc}"
         ) from exc
 
 
-def _connect(path: Path | str | None = None) -> sqlite3.Connection:
-    target = Path(path) if path is not None else db_path()
-    init_db(target)
-    conn = sqlite3.connect(target, timeout=5)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=5000")
-    return conn
+def _members() -> list[dict]:
+    try:
+        members = settings_ops.read_owned_set(
+            RELEASE_LEASE_SET_ID,
+            org=_ORG,
+            target_revision=RELEASE_LEASE_REVISION,
+        ).members
+    except Exception as exc:
+        raise VaultReleaseStoreError(
+            f"could not read release records: {exc}"
+        ) from exc
+    rows = []
+    for member in members:
+        if not isinstance(member.payload, dict):
+            continue
+        rec = dict(member.payload)
+        rec.setdefault("shredded_at", None)
+        rec.setdefault("shred_reason", None)
+        rec["id"] = member.key
+        rows.append(rec)
+    return rows
 
 
 def record_release(
@@ -104,18 +174,17 @@ def record_release(
     container_path: str,
     host_path: str,
     delivered_at: int | None = None,
-    path: Path | str | None = None,
     now: int | None = None,
 ) -> dict:
     """Commit a release record. THIS RUNS BEFORE THE DELIVERY LAYER RETURNS.
 
     The ordering is the invariant the whole store exists for: the caller
-    must commit the record here and only then materialise the ramfs file, so a
-    crash between the two leaves a record with no file — a
-    state the sweeper cleans — and never a file with no record, which
-    nothing would ever find. A caller that materialises first and records
-    second has silently defeated the store; the delivery bead's contract
-    is record-then-deliver, asserted there.
+    must commit the record here and only then materialise the ramfs file, so
+    a crash between the two leaves a record with no file — a state the
+    sweeper cleans — and never a file with no record, which nothing would
+    ever find. A caller that materialises first and records second has
+    silently defeated the store; the delivery bead's contract is
+    record-then-deliver, asserted there.
 
     ``host_path`` is where the SWEEPER unlinks — the file's location on the
     host, inside the per-session ramfs subdirectory
@@ -123,6 +192,7 @@ def record_release(
     is the same file as the session sees it, carried for the audit only.
     Neither is the secret; both are paths.
     """
+    _drain_legacy_file()
     if release_mode != "delivered":
         # Only 'delivered' mode materialises a file that needs sweeping;
         # 'mediated' and 'client_operation' leave no host artifact, so a
@@ -141,80 +211,50 @@ def record_release(
         raise ValueError("expires_at must be an int (unix ms)")
     stamp = int(time.time() * 1000) if now is None else int(now)
     delivered = stamp if delivered_at is None else int(delivered_at)
-    try:
-        with _connect(path) as conn:
-            conn.execute(
-                """
-                INSERT INTO vault_releases(
-                    id, session, setting_name, release_mode, delivered_at,
-                    expires_at, container_path, host_path, shredded_at,
-                    shred_reason
-                ) VALUES(?,?,?,?,?,?,?,?,NULL,NULL)
-                """,
-                (
-                    id, session, setting_name, release_mode, delivered,
-                    int(expires_at), container_path, host_path,
-                ),
-            )
-    except sqlite3.IntegrityError as exc:
-        raise VaultReleaseStoreError(
-            f"release id {id!r} already recorded: {exc}"
-        ) from exc
-    except sqlite3.Error as exc:
-        raise VaultReleaseStoreError(
-            f"could not record release: {exc}"
-        ) from exc
-    return get(id, path=path)
+    payload = {
+        "session": session,
+        "setting_name": setting_name,
+        "release_mode": release_mode,
+        "delivered_at": delivered,
+        "expires_at": int(expires_at),
+        "container_path": container_path,
+        "host_path": host_path,
+    }
+    VaultReleaseLeaseV1.validate(payload)
+    with _transition_lock:
+        if get(id) is not None:
+            raise VaultReleaseStoreError(f"release id {id!r} already recorded")
+        _upsert(id, payload)
+    return get(id)
 
 
-def get(release_id: str, *, path: Path | str | None = None) -> dict | None:
-    try:
-        with _connect(path) as conn:
-            row = conn.execute(
-                "SELECT * FROM vault_releases WHERE id = ?", (release_id,),
-            ).fetchone()
-    except sqlite3.Error as exc:
-        raise VaultReleaseStoreError(f"could not read release: {exc}") from exc
-    return dict(row) if row is not None else None
+def get(release_id: str) -> dict | None:
+    _drain_legacy_file()
+    for rec in _members():
+        if rec["id"] == release_id:
+            return rec
+    return None
 
 
-def outstanding(*, path: Path | str | None = None) -> list[dict]:
+def outstanding() -> list[dict]:
     """Every release not yet shredded, oldest deadline first — the sweeper's
     and reconciliation's work-list."""
-    try:
-        with _connect(path) as conn:
-            rows = conn.execute(
-                "SELECT * FROM vault_releases WHERE shredded_at IS NULL "
-                "ORDER BY expires_at, id"
-            ).fetchall()
-    except sqlite3.Error as exc:
-        raise VaultReleaseStoreError(
-            f"could not list outstanding releases: {exc}"
-        ) from exc
-    return [dict(row) for row in rows]
+    _drain_legacy_file()
+    rows = [rec for rec in _members() if rec["shredded_at"] is None]
+    rows.sort(key=lambda rec: (rec["expires_at"], rec["id"]))
+    return rows
 
 
-def outstanding_sessions(*, path: Path | str | None = None) -> set[str]:
+def outstanding_sessions() -> set[str]:
     """The distinct sessions with any outstanding release — used to decide
     which per-session ramfs subdirectories are still live."""
-    try:
-        with _connect(path) as conn:
-            rows = conn.execute(
-                "SELECT DISTINCT session FROM vault_releases "
-                "WHERE shredded_at IS NULL"
-            ).fetchall()
-    except sqlite3.Error as exc:
-        raise VaultReleaseStoreError(
-            f"could not list outstanding sessions: {exc}"
-        ) from exc
-    return {row["session"] for row in rows}
+    return {rec["session"] for rec in outstanding()}
 
 
 def mark_shredded(
     release_id: str,
     *,
     reason: str,
-    path: Path | str | None = None,
     now: int | None = None,
 ) -> bool:
     """Record that a release's file was destroyed. Idempotent: a second
@@ -226,15 +266,16 @@ def mark_shredded(
             f"shred reason {reason!r} not in {sorted(SHRED_REASONS)}"
         )
     stamp = int(time.time() * 1000) if now is None else int(now)
-    try:
-        with _connect(path) as conn:
-            cur = conn.execute(
-                "UPDATE vault_releases SET shredded_at = ?, shred_reason = ? "
-                "WHERE id = ? AND shredded_at IS NULL",
-                (stamp, reason, release_id),
-            )
-            return cur.rowcount > 0
-    except sqlite3.Error as exc:
-        raise VaultReleaseStoreError(
-            f"could not mark release shredded: {exc}"
-        ) from exc
+    with _transition_lock:
+        rec = get(release_id)
+        if rec is None or rec["shredded_at"] is not None:
+            return False
+        payload = {
+            k: v for k, v in rec.items()
+            if k not in ("id", "shredded_at", "shred_reason")
+        }
+        payload["shredded_at"] = stamp
+        payload["shred_reason"] = reason
+        VaultReleaseLeaseV1.validate(payload)
+        _upsert(release_id, payload)
+    return True
