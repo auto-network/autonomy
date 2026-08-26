@@ -185,6 +185,16 @@ function fleetPage() {
       return `${bytes >= 10 ? bytes.toFixed(0) : bytes.toFixed(1)} ${units[unit]}`;
     },
 
+    durationLabel(value) {
+      const milliseconds = Math.max(0, Number(value || 0));
+      if (milliseconds < 1000) return `${Math.round(milliseconds)} ms`;
+      const seconds = milliseconds / 1000;
+      if (seconds < 60) return `${seconds >= 10 ? seconds.toFixed(0) : seconds.toFixed(1)} sec`;
+      const minutes = seconds / 60;
+      if (minutes < 60) return `${minutes >= 10 ? minutes.toFixed(0) : minutes.toFixed(1)} min`;
+      return `${(minutes / 60).toFixed(1)} hr`;
+    },
+
     async copyInvitation() {
       if (!this.invitation.url || !navigator.clipboard) return;
       await navigator.clipboard.writeText(this.invitation.url);

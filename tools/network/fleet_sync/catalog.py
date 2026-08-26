@@ -1386,6 +1386,51 @@ class MutationCatalog:
         ]
         return key, items
 
+    def next_journal_transaction_ref(
+        self,
+        after_transaction_ref: int = 0,
+    ) -> tuple[int, list[AuthoredMutation]] | None:
+        """Read the next retained transaction after one local journal position.
+
+        Transaction row ids are assigned monotonically when this database
+        learns a transaction, including a transaction imported from a peer.
+        They are therefore the serving database's compact resume position;
+        mutation timestamps remain convergence data and are not cursors.
+        """
+        if (
+            isinstance(after_transaction_ref, bool)
+            or not isinstance(after_transaction_ref, int)
+            or after_transaction_ref < 0
+        ):
+            raise WatermarkError("journal transaction cursor is malformed")
+        row = self.conn.execute(
+            "SELECT t.id,o.incarnation,t.transaction_id "
+            "FROM fleet_sync_transactions t "
+            "JOIN fleet_sync_origins o ON o.id=t.origin_id "
+            "WHERE t.id>? AND EXISTS(SELECT 1 FROM fleet_sync_journal j "
+            "WHERE j.transaction_ref=t.id) ORDER BY t.id LIMIT 1",
+            (after_transaction_ref,),
+        ).fetchone()
+        if row is None:
+            return None
+        transaction_ref = int(row[0])
+        origin = str(row[1])
+        transaction = str(row[2])
+        items = [
+            AuthoredMutation(
+                origin,
+                transaction,
+                int(operation),
+                decode_mutation_frame(_unpack_journal(bytes(frame))),
+            )
+            for operation, frame in self.conn.execute(
+                "SELECT operation_index,frame FROM fleet_sync_journal "
+                "WHERE transaction_ref=? ORDER BY operation_index",
+                (transaction_ref,),
+            )
+        ]
+        return transaction_ref, items
+
     def prune_journal(self, through_watermark: int) -> int:
         """Retire transaction frames only after an exact base ACK covers them."""
         if self._context is not None or self.conn.in_transaction:

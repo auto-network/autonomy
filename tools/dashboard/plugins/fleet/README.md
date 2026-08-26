@@ -13,10 +13,16 @@ approval surface.
 | Machine identity and assignment | `machines[].machineId`, `assignment` | Effective root-signed `RosterEntry` |
 | This machine | `machines[].isLocalMachine` | Roster machine ID compared with machine-local identity |
 | Serves auto.network | `machines[].isTunnelServer` | Temporary singular tunnel-server selection |
-| Sync counters and errors | `machines[]` observation fields | Current-roster-epoch peer state in personal.db |
+| Sync counters and errors | `machines[]` observation fields | Machine-local `autonomy.machine.fleet-sync-telemetry` Settings; never synchronized |
 | Pending / adding / failed | `machines[].standing` | Enrollment transport joined to the current generic approval by `sourceApprovalId` |
 | Invitation | `invitation` | Newest usable registered signed Fleet invitation; copied as the real `AUTONOMY_FLEET_INVITE` bootstrap value |
 | Observed activity | `activity` | Sum of current-roster peer observations on this Dashboard |
+
+Steady-state Fleet pulls run at most once every 10 seconds. Each receiver keeps
+the last fully verified source-journal transaction position in machine-local
+telemetry, so an idle poll transfers only its terminal summary. The position is
+advanced only after the stream count and digest verify; an interrupted stream
+is safely replayed from the prior completed position.
 
 An approval result never creates a machine. After the idempotent executor
 commits signed roster evidence, the admission candidate disappears and the

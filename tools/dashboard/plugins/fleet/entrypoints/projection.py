@@ -24,6 +24,7 @@ from tools.network import (
     fleet_machine_profile,
     fleet_roster,
     fleet_sync_scheduler,
+    fleet_sync_telemetry,
     fleet_tunnel_server,
     machine_boot,
 )
@@ -44,6 +45,7 @@ class ProjectionInputs:
     machine_names: Mapping[str, str] = field(default_factory=dict)
     invitation_publication: Mapping | None = None
     publishing_org: str = "personal"
+    telemetry_rows: Mapping[str, Mapping] = field(default_factory=dict)
 
 
 def _peer_rows(epoch: str | None) -> dict[str, dict]:
@@ -122,6 +124,7 @@ def _load_inputs(*, now_ms: int) -> ProjectionInputs:
         machine_names=fleet_machine_profile.names(org=None),
         invitation_publication=invitation_publication,
         publishing_org="personal",
+        telemetry_rows=fleet_sync_telemetry.read_peer_totals(org="machine"),
     )
 
 
@@ -136,15 +139,43 @@ def _milliseconds(value) -> int | None:
     return number // 1_000_000 if number > 1_000_000_000_000_000 else number
 
 
-def _observation(peer: Mapping | None) -> dict:
+def _observation(peer: Mapping | None, telemetry: Mapping | None = None) -> dict:
     peer = peer or {}
+    telemetry = telemetry or {}
+    has_telemetry = bool(telemetry.get("iterations"))
     return {
-        "lastSuccessfulSyncAt": _milliseconds(peer.get("last_success_ns")),
+        "lastSuccessfulSyncAt": max(
+            filter(
+                lambda value: value is not None,
+                (
+                    _milliseconds(peer.get("last_success_ns")),
+                    _milliseconds(telemetry.get("last_success_at_ns")),
+                ),
+            ),
+            default=None,
+        ),
         "transactionsApplied": int(peer.get("transactions_applied") or 0),
-        "bytesSent": int(peer.get("bytes_sent") or 0),
-        "bytesReceived": int(peer.get("bytes_received") or 0),
+        "bytesSent": int(
+            telemetry.get("bytes_sent") if has_telemetry
+            else peer.get("bytes_sent") or 0
+        ),
+        "bytesReceived": int(
+            telemetry.get("bytes_received") if has_telemetry
+            else peer.get("bytes_received") or 0
+        ),
         "retryCount": int(peer.get("retries") or 0),
         "lastErrorCode": peer.get("last_error_code"),
+        "syncIterations": int(telemetry.get("iterations") or 0),
+        "successfulIterations": int(
+            telemetry.get("successful_iterations") or 0
+        ),
+        "failedIterations": int(telemetry.get("failed_iterations") or 0),
+        "totalSyncDurationMs": int(telemetry.get("total_duration_ms") or 0),
+        "lastSyncDurationMs": int(telemetry.get("last_duration_ms") or 0),
+        "mutationFrames": int(telemetry.get("mutation_frames") or 0),
+        "transactionsTransferred": int(telemetry.get("transactions") or 0),
+        "checkpointBytes": int(telemetry.get("checkpoint_bytes") or 0),
+        "lastSyncOutcome": telemetry.get("last_outcome"),
     }
 
 
@@ -155,6 +186,7 @@ def _machine_row(
     local_machine_id: str | None,
     selected_machine_id: str | None,
     peer: Mapping | None,
+    telemetry: Mapping | None,
     display_name: str | None,
 ) -> dict:
     local = entry.machine_id == local_machine_id
@@ -173,7 +205,10 @@ def _machine_row(
         "assignment": entry.assignment,
         "standingChangedAt": entry.issued_at,
         "presence": "blocked" if standing == "revoked" else "unreported",
-        **_observation(peer if standing == "authorized" else None),
+        **_observation(
+            peer if standing == "authorized" else None,
+            telemetry if standing == "authorized" else None,
+        ),
         # The browser-root removal command is deliberately not invented by
         # this read-only slice.
         "canRemove": False,
@@ -265,6 +300,15 @@ def _admission_row(
         "bytesReceived": 0,
         "retryCount": 0,
         "lastErrorCode": error_code,
+        "syncIterations": 0,
+        "successfulIterations": 0,
+        "failedIterations": 0,
+        "totalSyncDurationMs": 0,
+        "lastSyncDurationMs": 0,
+        "mutationFrames": 0,
+        "transactionsTransferred": 0,
+        "checkpointBytes": 0,
+        "lastSyncOutcome": None,
         "canRemove": False,
     }
 
@@ -282,6 +326,7 @@ def project(inputs: ProjectionInputs) -> dict:
             local_machine_id=inputs.local_machine_id,
             selected_machine_id=inputs.selected_machine_id,
             peer=inputs.peer_rows.get(machine_pub),
+            telemetry=inputs.telemetry_rows.get(machine_pub),
             display_name=inputs.machine_names.get(entry.machine_id),
         )
         for machine_pub, entry in active.items()
@@ -298,6 +343,7 @@ def project(inputs: ProjectionInputs) -> dict:
                 local_machine_id=inputs.local_machine_id,
                 selected_machine_id=inputs.selected_machine_id,
                 peer=None,
+                telemetry=None,
                 display_name=inputs.machine_names.get(entry.machine_id),
             )
             for entry in _revoked_entries(
@@ -399,13 +445,18 @@ def project(inputs: ProjectionInputs) -> dict:
         "machines": [*roster_rows, *admission_rows, *revoked_rows],
         "invitation": invitation_view,
         "activity": {
-            "transactionsApplied": sum(
-                int(row.get("transactions_applied") or 0) for row in observations
+            "transactionsApplied": sum(row["transactionsApplied"] for row in roster_rows),
+            "bytesSent": sum(row["bytesSent"] for row in roster_rows),
+            "bytesReceived": sum(row["bytesReceived"] for row in roster_rows),
+            "syncIterations": sum(row["syncIterations"] for row in roster_rows),
+            "successfulIterations": sum(
+                row["successfulIterations"] for row in roster_rows
             ),
-            "bytesSent": sum(int(row.get("bytes_sent") or 0) for row in observations),
-            "bytesReceived": sum(
-                int(row.get("bytes_received") or 0) for row in observations
+            "failedIterations": sum(row["failedIterations"] for row in roster_rows),
+            "totalSyncDurationMs": sum(
+                row["totalSyncDurationMs"] for row in roster_rows
             ),
+            "mutationFrames": sum(row["mutationFrames"] for row in roster_rows),
             "scope": "this_dashboard_current_roster",
         },
     }

@@ -101,6 +101,13 @@ def test_scheduler_store_uses_the_catalog_row_shape(tmp_path: Path) -> None:
 
 def test_two_schedulers_transfer_once_and_resume_after_reconnect(tmp_path: Path) -> None:
     async def run() -> None:
+        telemetry = []
+        acknowledged = {}
+
+        def record(peer, **values):
+            telemetry.append({"peer": peer, **values})
+            if "acknowledged_transaction_ref" in values:
+                acknowledged[peer] = values["acknowledged_transaction_ref"]
         root = KeyPair.generate()
         left_key = KeyPair.generate()
         right_key = KeyPair.generate()
@@ -133,6 +140,8 @@ def test_two_schedulers_transfer_once_and_resume_after_reconnect(tmp_path: Path)
             poll_interval=0.03,
             min_backoff=0.01,
             max_backoff=0.05,
+            telemetry_recorder=record,
+            resume_cursor=lambda peer: acknowledged.get(peer, 0),
         )
         _insert(right_path, "first-crossing", "first")
         left = FleetSyncScheduler(left_config)
@@ -141,9 +150,13 @@ def test_two_schedulers_transfer_once_and_resume_after_reconnect(tmp_path: Path)
             await _eventually(lambda: _title(left_path, "first-crossing") == "first")
             await _eventually(lambda: _applied_transactions(left_path) >= 1)
             await _eventually(lambda: _acknowledgements(left_path) >= 1)
-            # Let at least one replay complete. Idempotent merge must not mint
-            # another authored transaction for the same remote row.
-            await asyncio.sleep(0.12)
+            # Observe one empty follow-up. The receiver's acknowledged source
+            # position must prevent a replay; don't encode scheduler timing in
+            # this assertion.
+            await _eventually(lambda: any(
+                row["outcome"] == "success" and row["mutation_frames"] == 0
+                for row in telemetry
+            ))
         finally:
             await left.stop()
 
@@ -163,6 +176,9 @@ def test_two_schedulers_transfer_once_and_resume_after_reconnect(tmp_path: Path)
             await _eventually(lambda: _title(left_path, "after-reconnect") == "second")
             await _eventually(lambda: _applied_transactions(left_path) >= 2)
             await _eventually(lambda: _acknowledgements(left_path) >= 2)
+            await _eventually(
+                lambda: acknowledged.get(right_key.public_hex, 0) >= 2
+            )
         finally:
             await left.stop()
             await right.stop()
@@ -181,6 +197,17 @@ def test_two_schedulers_transfer_once_and_resume_after_reconnect(tmp_path: Path)
         assert state[3] == 2
         assert state[4] >= 2
         assert state[5] == 0
+        successes = [row for row in telemetry if row["outcome"] == "success"]
+        assert successes
+        assert all(row["peer"] == right_key.public_hex for row in successes)
+        assert any(row["bytes_received"] > 0 for row in successes)
+        assert any(row["mutation_frames"] >= 1 for row in successes)
+        assert any(row["transactions"] >= 1 for row in successes)
+        assert any(row["mutation_frames"] == 0 for row in successes)
+        assert max(
+            row.get("acknowledged_transaction_ref", 0) for row in successes
+        ) >= 2
+        assert all(row["duration_ms"] >= 0 for row in successes)
 
     asyncio.run(run())
 
