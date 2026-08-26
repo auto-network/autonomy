@@ -121,6 +121,197 @@
     return type || null;
   }
 
+  // ── Recent history projection ──────────────────────────────────────────
+  //
+  // This belongs to the PWA shell, not an individual Sessions component.
+  // Hydrate it once after a full reload; organization/type/sort/since are
+  // local views, and registry SSE applies the only lifecycle deltas. Keeping
+  // the projection here also means desktop SPA remounts do not fetch history
+  // again merely because the operator left and returned to /sessions.
+  var _recentHistory = {
+    rows: [],
+    loaded: false,
+    loading: false,
+    error: '',
+    promise: null,
+    pendingRegistry: [],
+  };
+
+  function _mapRecentRow(r) {
+    var sessionId = r.tmux_session;
+    if (!sessionId) return null;
+    var lastTs = r.last_activity_at || r.created_at || '';
+    var label = r.title || '';
+    if (r.session_type === 'librarian') {
+      var libLabel = _librarianTitle(r);
+      if (libLabel) label = libLabel;
+    }
+    return {
+      id: r.id,
+      session_id: sessionId,
+      label: label,
+      session_type: r.session_type || 'interactive',
+      type: r.type || 'container',
+      is_live: !!r.is_live,
+      project: r.project || '',
+      topics: [],
+      latest: '',
+      entry_count: r.entry_count || r.total_turns || 0,
+      context_tokens: r.context_tokens || r.total_tokens || 0,
+      last_activity: lastTs ? Math.round(new Date(lastTs).getTime() / 1000) : 0,
+      created_at: r.created_at || '',
+      last_activity_at: r.last_activity_at || '',
+      ended_at: r.ended_at || r.last_activity_at || '',
+      tmux_session: sessionId,
+      nag_enabled: false,
+      dispatch_nag_enabled: false,
+      role: r.role || '',
+      resumable: r.resumable || false,
+      bead_id: r.bead_id || '',
+      org: r.org || null,
+      librarian_type: r.librarian_type || null,
+      librarian_target_bead_id: r.librarian_target_bead_id || null,
+      librarian_target_bead_title: r.librarian_target_bead_title || '',
+      harness: r.harness || null,
+      model: r.model || null,
+      disk_bytes: r.disk_bytes != null ? r.disk_bytes : null,
+      disk_detail: r.disk_detail || null,
+      setup_phase: r.setup_phase || 'pending',
+      harness_phase: r.harness_phase || 'pending',
+      harness_state: r.harness_state || {},
+      resolved: true,
+    };
+  }
+
+  function _recentRowFromEndedStore(store) {
+    var sessionId = store.session_id;
+    if (!sessionId || sessionId.indexOf('pending-') === 0) return null;
+    var project = store.project || '';
+    return {
+      id: store.graphSourceId || ('sse-ended:' + sessionId),
+      session_id: sessionId,
+      label: store.label || sessionId,
+      session_type: store.sessionType || 'interactive',
+      type: store.type || 'container',
+      is_live: false,
+      project: project ? '[' + project.replace(/^\[|\]$/g, '') + ']' : '',
+      topics: store.topics || [],
+      latest: store.lastMessage || '',
+      entry_count: store.entryCount || 0,
+      context_tokens: store.contextTokens || 0,
+      last_activity: store.lastActivity || Math.round(Date.now() / 1000),
+      created_at: store.startedAt || 0,
+      last_activity_at: store.lastActivity || 0,
+      ended_at: store.lastActivity || Math.round(Date.now() / 1000),
+      tmux_session: sessionId,
+      nag_enabled: false,
+      dispatch_nag_enabled: false,
+      role: store.role || '',
+      resumable: !!store.resumable && !!store.graphSourceId,
+      bead_id: store.beadId || '',
+      org: store.org || null,
+      harness: store.harness || null,
+      model: store.model || null,
+      setup_phase: store.setupPhase || 'pending',
+      harness_phase: store.harnessPhase || 'pending',
+      harness_state: store.harnessState || {},
+      resolved: true,
+    };
+  }
+
+  function _emitRecentHistoryChanged() {
+    window.dispatchEvent(new CustomEvent('recent-sessions:changed', {
+      detail: {
+        rows: _recentHistory.rows,
+        loaded: _recentHistory.loaded,
+        loading: _recentHistory.loading,
+        error: _recentHistory.error,
+      },
+    }));
+  }
+
+  function _applyRecentRegistry(detail) {
+    detail = detail || {};
+    var active = new Set(detail.activeSessionIds || []);
+    var next = _recentHistory.rows.filter(function(row) {
+      return !active.has(row.session_id);
+    });
+    (detail.endedSessions || []).forEach(function(store) {
+      var row = _recentRowFromEndedStore(store);
+      if (!row || active.has(row.session_id)) return;
+      next = next.filter(function(existing) { return existing.session_id !== row.session_id; });
+      next.unshift(row);
+    });
+    _recentHistory.rows = next;
+  }
+
+  function _applyOrBufferRecentRegistry(detail) {
+    // The Active-first sequencing window exists before the snapshot starts;
+    // retain lifecycle deltas there too so no session can disappear between
+    // the last roster event and the history response.
+    if (_recentHistory.loading || !_recentHistory.loaded) {
+      _recentHistory.pendingRegistry.push(detail || {});
+      return;
+    }
+    _applyRecentRegistry(detail);
+    _emitRecentHistoryChanged();
+  }
+
+  // Recent is a shared projection. Actions such as Resume must update this
+  // canonical array too, rather than only the mounted Alpine component, or a
+  // later registry event would resurrect the card that was just moved Active.
+  function _removeRecentHistoryRow(row) {
+    var index = _recentHistory.rows.indexOf(row);
+    if (index === -1) return -1;
+    _recentHistory.rows.splice(index, 1);
+    _emitRecentHistoryChanged();
+    return index;
+  }
+
+  function _restoreRecentHistoryRow(row, index) {
+    if (_recentHistory.rows.indexOf(row) !== -1) return;
+    if (index >= 0) _recentHistory.rows.splice(index, 0, row);
+    else _recentHistory.rows.unshift(row);
+    _emitRecentHistoryChanged();
+  }
+
+  function _loadRecentHistory() {
+    if (_recentHistory.loaded) return Promise.resolve(_recentHistory.rows);
+    if (_recentHistory.promise) return _recentHistory.promise;
+    _recentHistory.loading = true;
+    _recentHistory.error = '';
+    _emitRecentHistoryChanged();
+    _recentHistory.promise = fetch('/api/dao/recent_sessions?snapshot=1')
+      .then(function(response) {
+        if (!response.ok) throw new Error('history request failed (' + response.status + ')');
+        return response.json();
+      })
+      .then(function(data) {
+        if (!Array.isArray(data)) throw new Error('history response was not a list');
+        _recentHistory.rows = data.map(_mapRecentRow).filter(function(row) { return row !== null; });
+        _recentHistory.loaded = true;
+        var pending = _recentHistory.pendingRegistry;
+        _recentHistory.pendingRegistry = [];
+        pending.forEach(_applyRecentRegistry);
+        return _recentHistory.rows;
+      })
+      .catch(function(error) {
+        _recentHistory.error = error.message || 'Could not load history';
+        console.warn('[sessionsPage] recent history fetch error', error);
+        return _recentHistory.rows;
+      })
+      .finally(function() {
+        _recentHistory.loading = false;
+        _recentHistory.promise = null;
+        _emitRecentHistoryChanged();
+      });
+    return _recentHistory.promise;
+  }
+
+  window.addEventListener('sessions:registry-changed', function(event) {
+    _applyOrBufferRecentRegistry(event && event.detail);
+  });
+
   // Derive canonical session_type from store sessionType
   function _deriveSessionType(s) {
     var t = s.sessionType || 'terminal';
@@ -153,6 +344,7 @@
       interactive: [],
       recent: [],
       recentLoading: true,
+      recentError: '',
       loading: true,
       _creating: false,
       zoom: localStorage.getItem('sessionZoom') || 'normal',
@@ -444,7 +636,7 @@
       // --- Org filter (toolbar dropdown, between zoom + launch button) ---
       // '' means "All orgs" (default). Filters both the Active and Recent
       // sections by comparing against the resolved s.org.slug already
-      // present on every session row (see _updateFromStore / _fetchRecent).
+      // present on every session row (see _updateFromStore / history snapshot).
       selectedOrg: localStorage.getItem('sessionsOrgFilter') || '',
       orgFilterList: [],
       orgFilterOpen: false,
@@ -482,7 +674,6 @@
         if (slug === this.selectedOrg) return;
         this.selectedOrg = slug;
         localStorage.setItem('sessionsOrgFilter', slug);
-        this._fetchRecent();
       },
 
       _matchesOrg(s) {
@@ -713,9 +904,6 @@
         if (this.recentFilter === f) return;
         this.recentFilter = f;
         localStorage.setItem('recentSessionFilter', f);
-        // Server applies per-type quotas based on ?type=, so a chip change
-        // needs a refetch to rebalance the budget toward the selected group.
-        this._fetchRecent();
       },
 
       get filtered() {
@@ -723,8 +911,44 @@
         var base = this.recentFilter === 'all'
           ? this.recent
           : this.recent.filter(function(s) { return self._matchesFilter(s, self.recentFilter); });
-        if (!this.selectedOrg) return base;
-        return base.filter(function(s) { return self._matchesOrg(s); });
+        base = base.filter(function(s) {
+          return self._matchesOrg(s) && self._matchesRecentSince(s);
+        });
+        return this._capAndSortRecent(base);
+      },
+
+      _recentEpoch(value) {
+        if (value == null || value === '') return 0;
+        if (typeof value === 'number') return value > 1e12 ? value / 1000 : value;
+        var parsed = Date.parse(value);
+        return isNaN(parsed) ? 0 : parsed / 1000;
+      },
+      _matchesRecentSince(s) {
+        if (this.recentSince === 'all') return true;
+        var seconds = { '6h': 6 * 3600, '1d': 24 * 3600, '1w': 7 * 24 * 3600 }[this.recentSince] || 0;
+        return this._recentEpoch(s.last_activity_at || s.created_at || s.last_activity) >= (Date.now() / 1000) - seconds;
+      },
+      _recentSortValue(s) {
+        if (this.recentSort === 'created') return this._recentEpoch(s.created_at);
+        if (this.recentSort === 'turns') return Number(s.entry_count) || 0;
+        if (this.recentSort === 'ctx') return Number(s.context_tokens) || 0;
+        if (this.recentSort === 'duration') {
+          return this._recentEpoch(s.ended_at || s.last_activity_at || s.last_activity) - this._recentEpoch(s.created_at);
+        }
+        return this._recentEpoch(s.last_activity_at || s.last_activity || s.created_at);
+      },
+      _capAndSortRecent(rows) {
+        var self = this;
+        var sorted = rows.slice().sort(function(a, b) { return self._recentSortValue(b) - self._recentSortValue(a); });
+        if (this.recentFilter !== 'all') return sorted.slice(0, 50);
+        var quotas = { interactive: 20, dispatch: 10, librarian: 10 };
+        var counts = { interactive: 0, dispatch: 0, librarian: 0 };
+        return sorted.filter(function(row) {
+          var group = row.session_type === 'dispatch' ? 'dispatch' : (row.session_type === 'librarian' ? 'librarian' : 'interactive');
+          if (counts[group] >= quotas[group]) return false;
+          counts[group] += 1;
+          return true;
+        });
       },
 
       _matchesFilter(s, f) {
@@ -742,8 +966,7 @@
         this.resumeError[s.id] = '';
 
         // ── Optimistic UI: move card from Recent → Active ──
-        var recentIdx = this.recent.indexOf(s);
-        if (recentIdx !== -1) this.recent.splice(recentIdx, 1);
+        var recentIdx = _removeRecentHistoryRow(s);
 
         // Placeholder key — will be replaced by real tmux_name from API
         var placeholderKey = 'resume-' + s.id.slice(0, 8);
@@ -793,11 +1016,7 @@
 
           // ── Rollback: remove from store, re-insert into recent ──
           delete Alpine.store('sessions')[placeholderKey];
-          if (recentIdx !== -1) {
-            this.recent.splice(recentIdx, 0, s);
-          } else {
-            this.recent.unshift(s);
-          }
+          _restoreRecentHistoryRow(s, recentIdx);
 
           var self = this;
           setTimeout(function() { self.resumeError[s.id] = ''; }, 3000);
@@ -820,65 +1039,6 @@
           self._updateFromStore();
         });
       },
-      _recentQueryKey() {
-        return [this.selectedOrg, this.recentFilter, this.recentSort, this.recentSince].join('|');
-      },
-      _recentCap() {
-        // These are the server-side type quotas. The SSE-only tail is kept
-        // within the same bound until a deliberate foreground backfill.
-        return this.recentFilter === 'all' ? 40 : 50;
-      },
-      _applyEndedSessions(endedSessions) {
-        if (!Array.isArray(endedSessions) || !endedSessions.length) return;
-        var self = this;
-        endedSessions.forEach(function(store) {
-          var sessionId = store.session_id;
-          if (!sessionId || sessionId.indexOf('pending-') === 0) return;
-          var project = store.project || '';
-          var org = store.org || null;
-          var orgSlug = org && org.slug ? org.slug : project;
-          if (self.selectedOrg && self.selectedOrg !== orgSlug) return;
-          var row = {
-            // Eager source creation supplies an id for ordinary sessions.
-            // Keep a stable fallback for the rare pre-source failure row.
-            id: store.graphSourceId || ('sse-ended:' + sessionId),
-            session_id: sessionId,
-            label: store.label || sessionId,
-            session_type: store.sessionType || 'interactive',
-            type: store.type || 'container',
-            is_live: false,
-            project: project ? '[' + project.replace(/^\[|\]$/g, '') + ']' : '',
-            topics: store.topics || [],
-            latest: store.lastMessage || '',
-            entry_count: store.entryCount || 0,
-            context_tokens: store.contextTokens || 0,
-            last_activity: store.lastActivity || Math.round(Date.now() / 1000),
-            created_at: store.startedAt || 0,
-            last_activity_at: store.lastActivity || 0,
-            ended_at: store.lastActivity || Math.round(Date.now() / 1000),
-            tmux_session: sessionId,
-            nag_enabled: false,
-            dispatch_nag_enabled: false,
-            role: store.role || '',
-            // A source-backed row can safely expose Resume immediately. A
-            // rare unsourced failure remains visible but cannot offer an
-            // action with a made-up source id.
-            resumable: !!store.resumable && !!store.graphSourceId,
-            bead_id: store.beadId || '',
-            org: org,
-            harness: store.harness || null,
-            model: store.model || null,
-            setup_phase: store.setupPhase || 'pending',
-            harness_phase: store.harnessPhase || 'pending',
-            harness_state: store.harnessState || {},
-            resolved: true,
-          };
-          var existing = self.recent.findIndex(function(item) { return item.session_id === sessionId; });
-          if (existing >= 0) self.recent.splice(existing, 1);
-          self.recent.unshift(row);
-          if (self.recent.length > self._recentCap()) self.recent.length = self._recentCap();
-        });
-      },
       init() {
         this.$watch('activeSort', (v) => {
           localStorage.setItem('sessionsActiveSort', v);
@@ -887,11 +1047,9 @@
         });
         this.$watch('recentSort', (v) => {
           localStorage.setItem('recentSort', v);
-          this._fetchRecent();
         });
         this.$watch('recentSince', (v) => {
           localStorage.setItem('recentSince', v);
-          this._fetchRecent();
         });
 
         // Ensure global SSE handlers are registered
@@ -923,14 +1081,31 @@
         };
         document.addEventListener('visibilitychange', this._onSessionsVisible);
 
-        // Fetch the historical backfill once. Live registry SSE keeps the
-        // list current after that, including immediate ended-session cards;
-        // never query history merely because a label or topic changed.
-        this._fetchRecent();
-        this._onRegistryChanged = function(e) {
-          self._applyEndedSessions(e && e.detail && e.detail.endedSessions);
+        // Active has already painted above. Adopt the persistent Recent
+        // projection and start its one background snapshot only afterwards.
+        // The module-level registry listener buffers SSE deltas during this
+        // handoff and keeps the projection current even across SPA remounts.
+        this._onRecentHistoryChanged = function(e) {
+          var detail = (e && e.detail) || {};
+          self.recent = detail.rows || [];
+          self.recentLoading = !!detail.loading;
+          self.recentError = detail.error || '';
+          if (self.recent.length && window.Autonomy && window.Autonomy.sessionContributions) {
+            window.Autonomy.sessionContributions.load(
+              self.recent.map(function(s) { return s.session_id; })
+            );
+          }
         };
-        window.addEventListener('sessions:registry-changed', this._onRegistryChanged);
+        window.addEventListener('recent-sessions:changed', this._onRecentHistoryChanged);
+        this._onRecentHistoryChanged({ detail: _recentHistory });
+        // Active is the primary above-the-fold surface. Wait for its initial
+        // roster request to settle, then yield a frame for that list to paint
+        // before beginning the independent history bootstrap. This is a
+        // sequencing boundary, not polling or an arbitrary timer.
+        Promise.resolve(window.sessionStoreReady).finally(function() {
+          var nextPaint = window.requestAnimationFrame || function(callback) { setTimeout(callback, 0); };
+          nextPaint(function() { _loadRecentHistory(); });
+        });
 
         // Launching-tile sweep. _updateFromStore holds the placeholder
         // reconcile + TTL expiry, but it only runs on registry/store events —
@@ -1345,118 +1520,6 @@
         }
       },
 
-      async _fetchRecent() {
-        const queryKey = this._recentQueryKey();
-        if (this._recentRequest && this._recentRequest.key === queryKey) {
-          return this._recentRequest.promise;
-        }
-        const selectedOrg = this.selectedOrg;
-        this.recentLoading = true;
-        let warming = false;
-        const request = { key: queryKey, promise: null };
-        this._recentRequest = request;
-        request.promise = (async () => {
-          try {
-          const url = '/api/dao/recent_sessions?type=' + encodeURIComponent(this.recentFilter || 'all')
-            + '&sort=' + encodeURIComponent(this.recentSort)
-            + '&since=' + encodeURIComponent(this.recentSince)
-            + (selectedOrg ? '&org=' + encodeURIComponent(selectedOrg) : '');
-          const response = await fetch(url);
-          if (queryKey !== this._recentQueryKey()) return;
-          if (response.status === 202) {
-            warming = true;
-            clearTimeout(this._recentWarmTimer);
-            // The server refreshes this cache every five seconds. Respect its
-            // Retry-After hint rather than hammering a cold history key.
-            const retryAfter = Number(response.headers.get('Retry-After')) || 5;
-            this._recentWarmTimer = setTimeout(() => {
-              if (queryKey === this._recentQueryKey()) this._fetchRecent();
-            }, Math.max(1000, retryAfter * 1000));
-            return;
-          }
-          const data = await response.json();
-          if (!Array.isArray(data)) { this.recent = []; return; }
-          this.recent = data.map(function(r) {
-            // tmux_session is the viewer's keying field — the unified tail
-            // endpoint also resolves dispatch/librarian UUIDs, but tmux_name
-            // remains authoritative. Falling back to session_uuid or graph
-            // source id used to yield phantom Active cards (auto-ylj6r).
-            var sessionId = r.tmux_session;
-            if (!sessionId) return null;
-            var lastTs = r.last_activity_at || r.created_at || '';
-            // For librarian rows, the raw title is the process name
-            // ("librarian-review_report-$pid-$job_uuid"). Replace with a
-            // type + target formatting derived from librarian_jobs.payload.
-            var label = r.title || '';
-            if (r.session_type === 'librarian') {
-              var libLabel = _librarianTitle(r);
-              if (libLabel) label = libLabel;
-            }
-            return {
-              id: r.id,
-              session_id: sessionId,
-              label: label,
-              session_type: r.session_type || 'interactive',
-              type: r.type || 'container',
-              is_live: !!r.is_live,
-              project: r.project || '',
-              topics: [],
-              latest: '',
-              entry_count: r.entry_count || r.total_turns || 0,
-              context_tokens: r.context_tokens || r.total_tokens || 0,
-              last_activity: lastTs ? Math.round(new Date(lastTs).getTime() / 1000) : 0,
-              created_at: r.created_at || '',
-              last_activity_at: r.last_activity_at || '',
-              ended_at: r.ended_at || r.last_activity_at || '',
-              tmux_session: r.tmux_session,
-              nag_enabled: false,
-              dispatch_nag_enabled: false,
-              role: r.role || '',
-              resumable: r.resumable || false,
-              bead_id: r.bead_id || '',
-              org: r.org || null,
-              librarian_type: r.librarian_type || null,
-              librarian_target_bead_id: r.librarian_target_bead_id || null,
-              librarian_target_bead_title: r.librarian_target_bead_title || '',
-              // auto-ngis4 — pass harness + model through so dead recent
-              // cards still render the icon-rail badge.
-              harness: r.harness || null,
-              model: r.model || null,
-              // Final disk footprint persisted by the resource collector's
-              // death-path measure — drives the ended-card disk stat +
-              // breakdown tooltip with zero live polling.
-              disk_bytes: r.disk_bytes != null ? r.disk_bytes : null,
-              disk_detail: r.disk_detail || null,
-              // auto-yfcoc — dead recent rows carry setup_phase /
-              // harness_phase from the DAO; passthrough so the
-              // lifecycle derivation correctly classifies them as
-              // dead_resumable / dead_not_resumable. The chip
-              // self-suppresses on dead rows; the inline Resume
-              // action renders when resumable=true. Dead rows always
-              // have a JSONL on disk (that's how they were ingested),
-              // so resolved=true here is correct — irrelevant to dead
-              // classification but mirrors the live path's shape.
-              setup_phase: r.setup_phase || 'pending',
-              harness_phase: r.harness_phase || 'pending',
-              harness_state: r.harness_state || {},
-              resolved: true,
-            };
-          }).filter(function(x) { return x !== null; });
-          if (window.Autonomy && window.Autonomy.sessionContributions) {
-            window.Autonomy.sessionContributions.load(
-              this.recent.map(function(s) { return s.session_id; })
-            );
-          }
-          } catch (e) {
-          console.warn('[sessionsPage] recent fetch error', e);
-          } finally {
-            if (this._recentRequest === request) this._recentRequest = null;
-            if (queryKey === this._recentQueryKey() && !warming) this.recentLoading = false;
-          }
-        })();
-        return request.promise;
-      },
-
       navigate(s) {
         if (window.actionSheet.isOpen()) return;
         // Recent cards carry project wrapped in brackets for legacy display
@@ -1546,8 +1609,7 @@
       destroy() {
         if (this._launchSweep) { clearInterval(this._launchSweep); this._launchSweep = null; }
         if (this._onStoreChanged) window.removeEventListener('sessions:store-changed', this._onStoreChanged);
-        if (this._onRegistryChanged) window.removeEventListener('sessions:registry-changed', this._onRegistryChanged);
-        if (this._recentWarmTimer) clearTimeout(this._recentWarmTimer);
+        if (this._onRecentHistoryChanged) window.removeEventListener('recent-sessions:changed', this._onRecentHistoryChanged);
         if (this._onSessionsNavigated) window.removeEventListener('app:navigated', this._onSessionsNavigated);
         if (this._onSessionsVisible) document.removeEventListener('visibilitychange', this._onSessionsVisible);
         if (this._workspaceHandler && typeof window.unregisterHandler === 'function') {

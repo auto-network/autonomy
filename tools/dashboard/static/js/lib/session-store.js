@@ -105,7 +105,9 @@ document.addEventListener('alpine:init', function() {
 
   // Seed all session stores from HTTP on first page load (arch spec v9 §6e).
   // Runs once on SPA boot regardless of which page the user lands on.
-  fetch('/api/dao/active_sessions')
+  // Expose the initial roster boundary so slower, secondary surfaces can
+  // deliberately hydrate after Active has settled and painted.
+  window.sessionStoreReady = fetch('/api/dao/active_sessions')
     .then(function(r) { return r.json(); })
     .then(function(data) {
       if (!Array.isArray(data)) return;
@@ -523,13 +525,16 @@ function _emitSessionStoreChanged(reason) {
   }));
 }
 
-function _emitSessionRegistryChanged(endedSessions) {
+function _emitSessionRegistryChanged(endedSessions, activeSessionIds) {
   if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function' || typeof CustomEvent !== 'function') return;
   window.dispatchEvent(new CustomEvent('sessions:registry-changed', {
     // The registry itself contains live rows only. Preserve the row just
     // before it disappears so consumers can update an ended-session view
     // without re-querying a historical endpoint for every registry event.
-    detail: { endedSessions: endedSessions || [] },
+    detail: {
+      endedSessions: endedSessions || [],
+      activeSessionIds: activeSessionIds || [],
+    },
   }));
 }
 
@@ -1097,7 +1102,7 @@ window.ensureSessionMessages = function() {
       }
     }
     _emitSessionStoreChanged('registry');
-    _emitSessionRegistryChanged(endedSessions);
+    _emitSessionRegistryChanged(endedSessions, Object.keys(activeIds));
   });
 
   // Handle label_update events — update stored session's label field

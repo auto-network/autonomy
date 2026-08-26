@@ -12261,7 +12261,31 @@ async def api_dao_recent_sessions(request):
     since = request.query_params.get("since", "1d")
     type_group = request.query_params.get("type", "all")
     requested_org = request.query_params.get("org") or None
+    snapshot = request.query_params.get("snapshot") == "1"
     org = None
+    if snapshot:
+        # The complete history projection spans every org, just like the
+        # global session:registry SSE topic. An org-scoped agent must not be
+        # able to turn this facet bootstrap into a cross-org history read.
+        refused = api_auth.require_global_api_authority(request)
+        if refused is not None:
+            return refused
+        if requested_org:
+            return JSONResponse({"error": "history snapshot cannot be organization-scoped"}, status_code=400)
+        # The Sessions page reads this complete card projection once after a
+        # reload, behind the already-rendered Active list. From then on its
+        # organization/type/sort/since facets are local and lifecycle SSE
+        # events supply the deltas. Do not route this through the cache's
+        # timer-driven warmup protocol: that would turn one read into polling.
+        try:
+            sessions = await asyncio.to_thread(
+                dao_sessions.get_recent_sessions,
+                None, "lastActivity", "all", "all", None, True,
+            )
+        except Exception:
+            logger.exception("recent_sessions history snapshot failed")
+            return JSONResponse({"error": "recent sessions snapshot failed"}, status_code=503)
+        return JSONResponse(sessions)
     if requested_org:
         # A selected organization is a server-side scope, never a raw
         # client-controlled filter. The common-core resolver reconciles the
@@ -12278,7 +12302,7 @@ async def api_dao_recent_sessions(request):
     if sessions is None:
         # New scoped cache keys are warmed off the request path. Tell the UI
         # to retry without presenting a false "No recent sessions" state.
-        return JSONResponse([], status_code=202, headers={"Retry-After": "5"})
+        return JSONResponse([], status_code=202)
     return JSONResponse(sessions)
 
 

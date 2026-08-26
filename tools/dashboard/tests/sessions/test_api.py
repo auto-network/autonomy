@@ -8,6 +8,7 @@ No browser needed — uses TestClient.
 from pathlib import Path
 
 import pytest
+from starlette.responses import JSONResponse
 
 from tools.dashboard.tests.sessions.conftest import SESSIONS_PAGE_SESSIONS
 
@@ -132,14 +133,14 @@ class TestRecentSessionsAPI:
         for field in ("id", "type", "date", "title"):
             assert field in session, f"missing field: {field}"
 
-    def test_cold_history_response_advises_a_bounded_retry(self, test_client, monkeypatch):
-        """A cold cache should tell the async client when to retry, not invite rapid polling."""
+    def test_legacy_cache_miss_has_no_client_retry_contract(self, test_client, monkeypatch):
+        """Regression: Retry-After turned a cache miss into client-side polling."""
         from tools.dashboard import server
 
         monkeypatch.setattr(server.dao_sessions, "recent_sessions_cached", lambda *args: None)
         response = test_client.get("/api/dao/recent_sessions")
         assert response.status_code == 202
-        assert response.headers["retry-after"] == "5"
+        assert "retry-after" not in response.headers
 
     def test_limit_param_is_deprecated(self, test_client):
         """`limit` is retired in favour of server-side per-type quotas (auto-wyo79).
@@ -165,7 +166,7 @@ class TestRecentSessionsAPI:
         assert response.status_code == 403
 
     def test_selected_org_is_forwarded_to_the_scoped_cache(self, test_client, monkeypatch):
-        """The endpoint scopes the DAO cache key instead of post-filtering rows."""
+        """Legacy callers retain their server-scoped cache behavior."""
         from tools.dashboard import server
 
         captured = {}
@@ -180,12 +181,56 @@ class TestRecentSessionsAPI:
             "/api/dao/recent_sessions?org=dynbench&type=interactive&since=1d"
         )
         assert response.status_code == 200
+        assert response.json() == []
         assert captured == {
             "sort": "lastActivity",
             "since": "1d",
             "type_group": "interactive",
             "org": "dynbench",
         }
+
+    def test_history_snapshot_is_one_untrimmed_background_read(self, test_client, monkeypatch):
+        """Regression: history facets previously forced fresh endpoint requests and cache warmups."""
+        from tools.dashboard import server
+
+        captured = {}
+
+        def fake_recent(limit, sort, since, type_group, org, full_history=False):
+            captured.update(
+                limit=limit, sort=sort, since=since, type_group=type_group,
+                org=org, full_history=full_history,
+            )
+            return [{"id": "history-row"}]
+
+        monkeypatch.setattr(server.dao_sessions, "get_recent_sessions", fake_recent)
+        monkeypatch.setattr(
+            server.dao_sessions,
+            "recent_sessions_cached",
+            lambda *args: pytest.fail("the history snapshot must not enter the timed cache queue"),
+        )
+        response = test_client.get("/api/dao/recent_sessions?snapshot=1")
+        assert response.status_code == 200
+        assert response.json() == [{"id": "history-row"}]
+        assert captured == {
+            "limit": None,
+            "sort": "lastActivity",
+            "since": "all",
+            "type_group": "all",
+            "org": None,
+            "full_history": True,
+        }
+
+    def test_history_snapshot_requires_global_operator_authority(self, test_client, monkeypatch):
+        """Regression: the all-org bootstrap must not leak through an org token."""
+        from tools.dashboard import server
+
+        monkeypatch.setattr(
+            server.api_auth,
+            "require_global_api_authority",
+            lambda request: JSONResponse({"error": "global operator authority required"}, status_code=403),
+        )
+        response = test_client.get("/api/dao/recent_sessions?snapshot=1")
+        assert response.status_code == 403
 
 
 class TestSessionStatusAPI:
@@ -315,10 +360,12 @@ class TestSessionsJSWiring:
     def test_session_store_has_topics_default(self):
         assert "topics: []" in self.store_js
 
-    def test_org_selection_refetches_its_server_scoped_recent_history(self):
+    def test_org_selection_filters_the_shared_recent_history_locally(self):
         assert "this.selectedOrg = slug;" in self.sessions_js
-        assert "this._fetchRecent();" in self.sessions_js
-        assert "selectedOrg ? '&org=' + encodeURIComponent(selectedOrg) : ''" in self.sessions_js
+        assert "localStorage.setItem('sessionsOrgFilter', slug);" in self.sessions_js
+        assert "_loadRecentHistory" in self.sessions_js
+        assert "snapshot=1" in self.sessions_js
+        assert "_fetchRecent" not in self.sessions_js
 
     def test_recent_history_loading_is_visible_but_nonblocking(self):
         """Regression: a background history fetch had no visible progress state."""
@@ -327,19 +374,21 @@ class TestSessionsJSWiring:
         assert 'x-show="recentLoading"' in template
         assert "Loading history…" in template
 
-    def test_registry_events_update_ended_cards_without_refetching_history(self):
+    def test_registry_events_update_the_persistent_projection_without_refetching_history(self):
         """Regression: every registry event made an immediate and delayed DAO request."""
-        assert "_applyEndedSessions(e && e.detail && e.detail.endedSessions)" in self.sessions_js
+        assert "_applyOrBufferRecentRegistry(event && event.detail)" in self.sessions_js
+        assert "pendingRegistry" in self.sessions_js
+        assert "recent-sessions:changed" in self.sessions_js
         assert "_scheduleRecentRefresh" not in self.sessions_js
-        assert "_recentEchoTimer" not in self.sessions_js
-        assert "detail: { endedSessions: endedSessions || [] }" in self.store_js
+        assert "setTimeout(() => this._fetchRecent()" not in self.sessions_js
+        assert "activeSessionIds: activeSessionIds || []" in self.store_js
         assert "store.graphSourceId = s.graph_source_id || '';" in self.store_js
 
-    def test_duplicate_history_fetches_share_one_inflight_request(self):
-        """Regression: identical filter state could start redundant concurrent fetches."""
-        assert "this._recentRequest && this._recentRequest.key === queryKey" in self.sessions_js
-        assert "return this._recentRequest.promise;" in self.sessions_js
-        assert "response.headers.get('Retry-After')" in self.sessions_js
+    def test_active_projection_precedes_one_background_history_snapshot(self):
+        """Regression: Recent loading must not delay the Active section's first paint."""
+        assert "window.sessionStoreReady" in self.store_js
+        assert "Promise.resolve(window.sessionStoreReady).finally" in self.sessions_js
+        assert "nextPaint(function() { _loadRecentHistory(); });" in self.sessions_js
 
     def test_restart_action_precedes_close_and_calls_atomic_endpoint(self):
         restart = self.sessions_js.index("label: 'Restart Session'")
