@@ -16109,13 +16109,25 @@ CENTRAL_ATTENTION_MOBILE_CHECKS = r"""(async () => {
     const mobileCenterVisible = getComputedStyle(mobile).display !== 'none' &&
         mobile.getClientRects().length > 0;
     const navRect = nav.getBoundingClientRect();
-    const attentionRect = root.querySelector(
-        '[data-testid="central-attention-button"]'
-    ).getBoundingClientRect();
+    const attentionButton = root.querySelector('[data-testid="central-attention-button"]');
+    const attentionRect = attentionButton.getBoundingClientRect();
     const axisDelta = Math.abs(
         (navRect.top + navRect.height / 2) -
         (attentionRect.top + attentionRect.height / 2)
     );
+    const iconRemainsVisible = attentionButton.getClientRects().length > 0 &&
+        attentionRect.top >= 0 && attentionRect.bottom <= window.innerHeight;
+    const iconHasActiveStroke = attentionButton.classList.contains('text-indigo-300') &&
+        attentionButton.getAttribute('aria-expanded') === 'true' &&
+        attentionButton.getAttribute('aria-label') === 'Close attention center';
+    attentionButton.click();
+    await Alpine.nextTick(); await sleep(100);
+    const iconTogglesClosed = !data.inboxOpen && !data.fullInbox &&
+        mobile.classList.contains('hidden') &&
+        attentionButton.getAttribute('aria-expanded') === 'false' &&
+        attentionButton.getAttribute('aria-label') === 'Open attention center';
+    attentionButton.click();
+    await Alpine.nextTick(); await sleep(100);
     nav.click();
     await Alpine.nextTick(); await sleep(100);
     const sidebar = document.getElementById('sidebar');
@@ -16145,6 +16157,9 @@ CENTRAL_ATTENTION_MOBILE_CHECKS = r"""(async () => {
         button_on_same_axis: axisDelta <= 1,
         button_matches_nav_size: Math.abs(navRect.height - attentionRect.height) <= 1 &&
             Math.abs(navRect.width - attentionRect.width) <= 1,
+        icon_remains_visible_while_open: iconRemainsVisible,
+        icon_has_active_stroke: iconHasActiveStroke,
+        icon_toggles_closed: iconTogglesClosed,
         menu_opens: menuOpens,
         attention_closes_for_menu: attentionClosesForMenu,
         menu_opens_without_attention_overlay: menuOpens && attentionClosesForMenu,
@@ -16222,6 +16237,9 @@ class TestCentralAttentionSurface:
             "nav_rect": c.get("nav_rect"),
             "attention_rect": c.get("attention_rect"),
         }
+        assert c.get("icon_remains_visible_while_open"), c
+        assert c.get("icon_has_active_stroke"), c
+        assert c.get("icon_toggles_closed"), c
         assert c.get("category_deselects"), c
         assert c.get("no_horizontal_overflow"), c
         assert c.get("menu_opens"), c

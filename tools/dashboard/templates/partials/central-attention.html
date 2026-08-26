@@ -34,9 +34,9 @@
           @click.stop="window.closeSidebar(); toggleInbox()"
           :aria-expanded="inboxOpen || fullInbox ? 'true' : 'false'"
           aria-controls="central-attention-tray"
-          aria-label="Open attention center"
-          class="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border bg-gray-800 text-gray-200 hover:border-gray-500 hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 md:h-10 md:w-10"
-          :class="inboxOpen || fullInbox ? 'border-indigo-500 bg-gray-700' : 'border-gray-700'">
+          :aria-label="inboxOpen || fullInbox ? 'Close attention center' : 'Open attention center'"
+          class="relative z-50 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border bg-gray-800 hover:border-gray-500 hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 md:h-10 md:w-10"
+          :class="inboxOpen || fullInbox ? 'border-indigo-500 bg-gray-700 text-indigo-300' : 'border-gray-700 text-gray-200'">
     <svg aria-hidden="true" class="h-5 w-5" viewBox="0 0 24 24" fill="none"
          stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
          stroke-linejoin="round">
@@ -55,7 +55,7 @@
     <div>
       <aside id="central-attention-tray"
              data-testid="central-attention-tray"
-             @click.outside="inboxOpen=false"
+             @click.outside="if (inboxOpen && !fullInbox && window.matchMedia('(min-width: 768px)').matches) inboxOpen=false"
              :class="inboxOpen && !fullInbox ? 'hidden md:flex' : 'hidden'"
              class="fixed right-6 top-[4.35rem] z-50 max-h-[min(44rem,calc(100dvh-5.5rem))] w-[28rem] flex-col overflow-hidden rounded-2xl border border-gray-700 bg-gray-900 shadow-2xl">
         <header class="flex items-center justify-between border-b border-gray-800 px-4 py-3">
