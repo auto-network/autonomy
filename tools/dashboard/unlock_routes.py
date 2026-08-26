@@ -1012,6 +1012,45 @@ def _cookie_from_scope(scope) -> str | None:
     return None
 
 
+# ── TEMPORARY: Design Studio render surfaces admit an agent bearer ─────────
+# REMOVE when Design Studio moves to the full plugin format — the plugin's own
+# page-auth covers this and this special case goes (operator ruling, folded
+# into the Design-Studio-to-plugin migration). The /design and /present RENDER
+# pages are the one browser surface an AGENT (org bearer, no operator cookie)
+# legitimately needs — to view its OWN org's design. The page shell carries no
+# org secret; the design DATA it fetches is org-scoped at the /api layer
+# (api_auth.caller_org_scope_hides). The ApiIdentityMiddleware does not
+# authenticate non-/api paths, so the human gate validates the bearer itself.
+_BEARER_ELIGIBLE_PAGE_PREFIXES = ("/design", "/present")
+
+
+def _path_admits_agent_bearer(path: str) -> bool:
+    return any(
+        path == p or path.startswith(p + "/")
+        for p in _BEARER_ELIGIBLE_PAGE_PREFIXES
+    )
+
+
+def _valid_bearer_session(scope) -> bool:
+    """True when the request carries a valid, non-revoked session bearer."""
+    token = None
+    for name, value in scope.get("headers") or []:
+        if name == b"authorization":
+            parts = value.decode("latin-1").split(None, 1)
+            if len(parts) == 2 and parts[0].lower() == "bearer" and parts[1]:
+                token = parts[1]
+            break
+    if not token:
+        return False
+    try:
+        import hashlib
+        from tools.dashboard.dao import auth_db
+        return auth_db.resolve_token(
+            hashlib.sha256(token.encode()).hexdigest()) is not None
+    except Exception:
+        return False
+
+
 class HumanGateMiddleware:
     """Enforce the dashboard session on the human/browser path only.
 
@@ -1044,6 +1083,15 @@ class HumanGateMiddleware:
             await self.app(scope, receive, send)
             return
         if verify_session_token(_cookie_from_scope(scope)) is not None:
+            await self.app(scope, receive, send)
+            return
+
+        # TEMPORARY (see _BEARER_ELIGIBLE_PAGE_PREFIXES): the design/present
+        # render pages admit an authenticated agent's bearer so an agent can
+        # view its own org's design without the operator cookie. Removed with
+        # the Design-Studio-to-plugin migration.
+        if scope["type"] == "http" and _path_admits_agent_bearer(path) \
+                and _valid_bearer_session(scope):
             await self.app(scope, receive, send)
             return
 

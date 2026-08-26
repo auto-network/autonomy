@@ -95,6 +95,7 @@ def _build_app():
         Route("/unlock", _unlock_page),
         Route("/missions/{mission_id}", _page),
         Route("/mission-control", _page),
+        Route("/design/{rev}", _page),
         Route("/api/graph/search", _agent_api),
         Route("/api/worktrees", _agent_api, methods=["GET", "POST"]),
         WebSocketRoute("/ws/terminal", _ws_echo),
@@ -1611,3 +1612,45 @@ def test_root_releasing_unlock_routes_are_public_exceptions():
         "/api/identity/unlock/combined",
     ):
         assert ("POST", path) in route_policy.PUBLIC_EXCEPTIONS, path
+
+
+# ── TEMPORARY: Design Studio render pages admit an agent bearer ────────────
+# (Removed with the Design-Studio-to-full-plugin migration.)
+
+
+def test_design_render_admits_a_valid_agent_bearer(env, root, monkeypatch):
+    """An authenticated agent bearer (no operator cookie) reaches the /design
+    render page — so an agent can view its OWN org's design. The design DATA
+    stays org-scoped at the /api layer; the gate only opens the shell."""
+    from tools.dashboard.dao import auth_db
+    _store_identity(env, root)
+    env.cookies.clear()
+    monkeypatch.setattr(
+        auth_db, "resolve_token", lambda h: ("agent-1", "anchore") if h else None)
+
+    admitted = env.get(
+        "/design/rev-1", headers={"Authorization": "Bearer good-token"},
+        follow_redirects=False)
+    assert admitted.status_code == 200
+
+    # No bearer → still bounced to /unlock.
+    bounced = env.get("/design/rev-1", follow_redirects=False)
+    assert bounced.status_code == 302
+
+    # A bearer does NOT open a non-render gated page (an operator surface).
+    other = env.get(
+        "/mission-control", headers={"Authorization": "Bearer good-token"},
+        follow_redirects=False)
+    assert other.status_code == 302
+
+
+def test_design_render_rejects_an_invalid_or_revoked_bearer(env, root, monkeypatch):
+    from tools.dashboard.dao import auth_db
+    _store_identity(env, root)
+    env.cookies.clear()
+    monkeypatch.setattr(auth_db, "resolve_token", lambda h: None)
+
+    bounced = env.get(
+        "/design/rev-1", headers={"Authorization": "Bearer bad-token"},
+        follow_redirects=False)
+    assert bounced.status_code == 302
