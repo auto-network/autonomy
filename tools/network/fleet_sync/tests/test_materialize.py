@@ -62,8 +62,9 @@ def _seed_source_graph(db: GraphDB, blob: bytes, path: Path) -> str:
          "2026-08-19T10:00:01Z"),
     )
     db.conn.execute(
-        "INSERT INTO note_versions(source_id,version,content,created_at) VALUES(?,?,?,?)",
-        ("s1", 7, "body", "2026-08-19T10:00:02Z"),
+        "INSERT INTO note_versions(source_id,version,content,created_at,"
+        "persona_id,session_id) VALUES(?,?,?,?,?,?)",
+        ("s1", 7, "body", "2026-08-19T10:00:02Z", "persona-1", "session-1"),
     )
     db.conn.execute(
         "INSERT INTO attachments(id,hash,filename,mime_type,size_bytes,file_path,"
@@ -102,6 +103,50 @@ def test_canonical_stream_materializes_into_real_graphdb(tmp_path: Path) -> None
         assert target.conn.execute(
             "SELECT version FROM note_versions WHERE source_id='s1'"
         ).fetchone()[0] == 1
+    finally:
+        origin.close()
+        target.close()
+
+
+def test_note_version_winner_replaces_provenance_at_same_content_address(
+    tmp_path: Path,
+) -> None:
+    origin = GraphDB(tmp_path / "origin" / "personal.db")
+    target = GraphDB(tmp_path / "target" / "personal.db")
+    try:
+        for db in (origin, target):
+            db.conn.execute(
+                "INSERT INTO sources(id,type,title,metadata,created_at,ingested_at) "
+                "VALUES(?,?,?,?,?,?)",
+                ("s1", "note", "A note", "{}", "2026-08-19T10:00:00Z",
+                 "2026-08-19T10:00:00Z"),
+            )
+        origin.conn.execute(
+            "INSERT INTO note_versions(source_id,version,content,created_at,"
+            "persona_id,session_id) VALUES(?,?,?,?,?,?)",
+            ("s1", 1, "same body", "2026-08-19T10:00:02Z",
+             "winning-persona", "winning-session"),
+        )
+        target.conn.execute(
+            "INSERT INTO note_versions(source_id,version,content,created_at,"
+            "persona_id,session_id) VALUES(?,?,?,?,?,?)",
+            ("s1", 9, "same body", "2026-08-19T10:00:02Z",
+             "older-persona", "older-session"),
+        )
+        origin.conn.commit()
+        target.conn.commit()
+
+        mutation = next(
+            item for item in decode_stream(encode_snapshot(origin.conn))
+            if item.table == "note_versions"
+        )
+        materialize(target.conn, [mutation])
+
+        installed = target.conn.execute(
+            "SELECT version,persona_id,session_id FROM note_versions "
+            "WHERE source_id='s1'"
+        ).fetchone()
+        assert tuple(installed) == (1, "winning-persona", "winning-session")
     finally:
         origin.close()
         target.close()
