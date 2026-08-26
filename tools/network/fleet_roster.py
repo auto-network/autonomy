@@ -398,6 +398,18 @@ def current_roster(personal_root_pub: str, *, org=None) -> dict[str, RosterEntry
     return resolve(load_entries(org=org), anchor_root_pub=personal_root_pub)
 
 
+def own_entry(
+    machine_id: str, *, anchor_root_pub: str, org=None
+) -> RosterEntry | None:
+    """This already-known machine's own current roster entry, by identity --
+    not a scan for whichever row is left over after excluding everyone else.
+    None if this machine holds no current (non-kicked) roster standing."""
+    for entry in current_roster(anchor_root_pub, org=org).values():
+        if entry.machine_id == machine_id:
+            return entry
+    return None
+
+
 def active_machines(entries, *, anchor_root_pub: str) -> set[str]:
     """The set of machine authorization keys currently in the fleet — the
     thin read the sync layer's compaction frontier keys on (auto-q9ic5: one

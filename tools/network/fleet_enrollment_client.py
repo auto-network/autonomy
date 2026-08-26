@@ -216,17 +216,18 @@ class FleetJoinStateStore:
             fleet_roster.RosterEntry.from_dict(
                 delivery.roster_entry.to_dict()
             ),
-            tuple(
-                fleet_roster.RosterEntry.from_dict(entry.to_dict())
-                for entry in delivery.roster_entries
+            (
+                fleet_roster.RosterEntry.from_dict(delivery.origin_entry.to_dict())
+                if delivery.origin_entry is not None else None
             ),
         )
         wire = json.dumps({
             "approval": frozen.approval.to_dict(),
             "roster_entry": frozen.roster_entry.to_dict(),
-            "roster_entries": [
-                entry.to_dict() for entry in frozen.roster_entries
-            ],
+            "origin_entry": (
+                frozen.origin_entry.to_dict()
+                if frozen.origin_entry is not None else None
+            ),
         }, sort_keys=True, separators=(",", ":"))
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -254,17 +255,18 @@ class FleetJoinStateStore:
             return None
         payload = json.loads(row["delivery_json"])
         if not isinstance(payload, dict) or set(payload) != {
-            "approval", "roster_entry", "roster_entries"
+            "approval", "roster_entry", "origin_entry"
         }:
             raise FleetEnrollmentClientError(
                 "saved fleet delivery has unknown or missing fields"
             )
+        origin_payload = payload["origin_entry"]
         return fleet_enroll.EnrollmentDelivery(
             fleet_enroll.EnrollmentApproval.from_dict(payload["approval"]),
             fleet_roster.RosterEntry.from_dict(payload["roster_entry"]),
-            tuple(
-                fleet_roster.RosterEntry.from_dict(entry)
-                for entry in payload["roster_entries"]
+            (
+                fleet_roster.RosterEntry.from_dict(origin_payload)
+                if origin_payload is not None else None
             ),
         )
 
@@ -377,7 +379,7 @@ class FleetEnrollmentClient:
         if status in {"pending", "declined"} and set(reply) == base:
             return EnrollmentResult(status=status, recovery=frozen)
         approved_fields = base | {
-            "approval", "roster_entry", "roster_entries",
+            "approval", "roster_entry", "origin_entry",
             "personal_root_armor", "personal_root_created_at",
             "personal_root_updated_at",
         }
@@ -412,19 +414,12 @@ class FleetEnrollmentClient:
             )
         approval = fleet_enroll.EnrollmentApproval.from_dict(reply["approval"])
         roster_entry = fleet_roster.RosterEntry.from_dict(reply["roster_entry"])
-        roster_payload = reply["roster_entries"]
-        if not isinstance(roster_payload, list):
+        origin_payload = reply["origin_entry"]
+        if not isinstance(origin_payload, dict):
             raise FleetEnrollmentClientError(
-                "fleet delivery roster must be a list"
+                "fleet delivery names no origin roster entry"
             )
-        roster_entries = tuple(
-            fleet_roster.RosterEntry.from_dict(item)
-            for item in roster_payload
-        )
-        for entry in roster_entries:
-            fleet_roster.verify(
-                entry, anchor_root_pub=frozen.invite.personal_root_pub
-            )
+        origin_entry = fleet_roster.RosterEntry.from_dict(origin_payload)
         fleet_enroll.verify_approval(
             approval,
             frozen.request,
@@ -433,20 +428,18 @@ class FleetEnrollmentClient:
             roster_entry=roster_entry,
             anchor_root_pub=frozen.invite.personal_root_pub,
         )
-        active = fleet_roster.resolve(
-            roster_entries,
-            anchor_root_pub=frozen.invite.personal_root_pub,
+        delivery = fleet_enroll.EnrollmentDelivery(
+            approval, roster_entry, origin_entry
         )
-        if roster_entry.machine_pub not in active or len(active) < 2:
-            raise FleetEnrollmentClientError(
-                "fleet delivery lacks origin and joiner roster evidence"
-            )
+        fleet_enroll.verify_bootstrap_roster(
+            delivery,
+            anchor_root_pub=frozen.invite.personal_root_pub,
+            joining_machine_pub=roster_entry.machine_pub,
+        )
         return EnrollmentResult(
             status="approved",
             recovery=frozen,
-            delivery=fleet_enroll.EnrollmentDelivery(
-                approval, roster_entry, roster_entries
-            ),
+            delivery=delivery,
             personal_root_armor=armor,
             personal_root_created_at=timestamps[0],
             personal_root_updated_at=timestamps[1],

@@ -266,7 +266,7 @@ def test_generic_approval_commits_exact_request(operator_api, monkeypatch):
         fleet_enroll.EnrollmentDelivery(
             approval,
             roster_entry,
-            (local_roster_entry, roster_entry),
+            local_roster_entry,
         ),
         now_ms=NOW_MS,
     )

@@ -17,7 +17,7 @@ from tools.dashboard.dao import approval_requests as ar
 from tools.graph.db import GraphDB
 from tools.graph.schemas import network_identity
 from tools.graph.schemas.registry import validate_payload
-from tools.network import fleet_enroll, fleet_invite, fleet_roster
+from tools.network import fleet_enroll, fleet_invite, fleet_roster, machine_boot
 from tools.network.idkit import KeyPair
 
 
@@ -219,7 +219,7 @@ def test_invitation_caps_unresolved_requests_at_one_hundred(rendezvous):
 
 
 def test_approval_commits_roster_before_resume_delivers_unchanged_armor(
-    rendezvous,
+    rendezvous, tmp_path,
 ):
     root, invite, store, grant, request = rendezvous
     channel = {}
@@ -243,6 +243,13 @@ def test_approval_commits_roster_before_resume_delivers_unchanged_armor(
         issued_at=NOW_MS - 1,
     )
     fleet_roster.store_entry(origin_entry, org=None)
+    # This process is itself the already-enrolled Dashboard approving the
+    # join -- it must know its own machine id directly, the same way a real
+    # Dashboard does, so the server can hand over its own row without a scan.
+    GraphDB.create_org_db(
+        "machine", type_="personal", path=tmp_path / "machine-identity.db"
+    ).close()
+    machine_boot._write_row({"machine_id": origin_machine_id}, org="machine")
     machine_id = fleet_enroll.assigned_machine_id(request)
     machine_key = fleet_enroll.derive_machine_key(root_seed, machine_id)
     roster_entry = fleet_roster.enroll(
@@ -298,10 +305,7 @@ def test_approval_commits_roster_before_resume_delivers_unchanged_armor(
     assert delivered["status"] == "approved"
     assert delivered["approval"] == approval.to_dict()
     assert delivered["roster_entry"] == roster_entry.to_dict()
-    assert {entry["machine_id"] for entry in delivered["roster_entries"]} == {
-        origin_machine_id,
-        machine_id,
-    }
+    assert delivered["origin_entry"] == origin_entry.to_dict()
     assert delivered["personal_root_armor"] == armor
     assert delivered["personal_root_created_at"] == "2026-08-20T01:02:03Z"
     assert delivered["personal_root_updated_at"] == "2026-08-24T04:05:06Z"

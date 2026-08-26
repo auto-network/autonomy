@@ -145,12 +145,8 @@ def _runtime_context() -> tuple[str, fleet_roster.RosterEntry] | None:
     root_pub = fleet_tunnel_server._personal_root_pub()
     if machine_id_value is None or root_pub is None:
         return None
-    active = fleet_roster.resolve(
-        fleet_roster.load_entries(org=None), anchor_root_pub=root_pub
-    )
-    entry = next(
-        (item for item in active.values() if item.machine_id == machine_id_value),
-        None,
+    entry = fleet_roster.own_entry(
+        machine_id_value, anchor_root_pub=root_pub, org=None
     )
     if entry is None:
         return None
@@ -486,7 +482,10 @@ async def local_completion_context(request: Request) -> JSONResponse:
         "channel_binding": recovery.channel_binding,
         "approval": delivery.approval.to_dict(),
         "roster_entry": delivery.roster_entry.to_dict(),
-        "roster_entries": [entry.to_dict() for entry in delivery.roster_entries],
+        "origin_entry": (
+            delivery.origin_entry.to_dict()
+            if delivery.origin_entry is not None else None
+        ),
     })
 
 
