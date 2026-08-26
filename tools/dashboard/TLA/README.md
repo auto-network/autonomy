@@ -55,3 +55,16 @@ meaning something.
   wd identity is abstracted here).
 - Deadline/interval sizing (the model proves "eventually", not "within
   deadline + one tick").
+- Poller promotion VALIDITY.  `PollerSet` is an unconstrained
+  environment action: the model proves the drain machinery safe under
+  arbitrary composer promotion, but cannot check that the poller only
+  promotes when the CURRENT process's composer is actually ready.  The
+  grace-fallback timer reset in `arm_startup_state`
+  (`_harness_ready_grace` / `_screen_stuck_since` / `_self_repair_filed`
+  cleared at every launch entry) is therefore an implementation
+  requirement — a stale expired timer from a failed attempt instant-
+  promoted the next attempt (auto-0821-154759).
+- Per-window read size caps (`_TAIL_WINDOW_MAX_BYTES`) need no model
+  change: a capped complete-line read is indistinguishable from a read
+  that ran before the writer's last appends, an interleaving the model
+  already contains.
