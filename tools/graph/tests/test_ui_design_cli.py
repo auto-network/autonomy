@@ -36,6 +36,8 @@ def _args(tmp_path, **overrides):
         "api": "https://dashboard.example:8443",
         "present": False,
         "once": True,
+        "list": None,
+        "pull": None,
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -227,3 +229,80 @@ def test_force_flag_is_available_on_primary_and_legacy_commands(monkeypatch):
 
     assert primary["force"] is True
     assert legacy["force"] is True
+
+
+# ── Read modes: --list and --pull ─────────────────────────────────────────
+
+
+def test_list_mode_prints_the_org_scoped_library(tmp_path, monkeypatch, capsys):
+    def urlopen(req, *, context, timeout):
+        assert "/api/design-studio/designs" in req.full_url
+        return _Response({"designs": [
+            {"design_id": "d1", "status": "pending", "org": "autonomy", "title": "Alpha"},
+            {"design_id": "d2", "status": "completed", "org": "anchore", "title": "Beta"},
+        ]})
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    cli.cmd_ui_design(_args(tmp_path, list="", title=None, dir=None))
+
+    out = capsys.readouterr().out
+    assert "d1" in out and "Alpha" in out and "[autonomy]" in out
+    assert "d2" in out and "Beta" in out and "[anchore]" in out
+    assert "2 design(s)." in out
+
+
+def test_list_mode_forwards_the_query(tmp_path, monkeypatch, capsys):
+    seen = {}
+
+    def urlopen(req, *, context, timeout):
+        seen["url"] = req.full_url
+        return _Response({"designs": []})
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    cli.cmd_ui_design(_args(tmp_path, list="session wall", title=None, dir=None))
+
+    assert "q=session%20wall" in seen["url"]
+    assert "No designs match." in capsys.readouterr().out
+
+
+def test_pull_mode_materializes_variants_and_fixture(tmp_path, monkeypatch, capsys):
+    dest = tmp_path / "pulled"
+
+    def urlopen(req, *, context, timeout):
+        url = req.full_url
+        if url.endswith("/api/design-studio/designs/design-1"):
+            return _Response({"latest_revision_id": "rev-9", "title": "Alpha"})
+        if url.endswith("/api/design/rev-9/full"):
+            return _Response({
+                "variants": [
+                    {"id": "main", "html": "<h1>Main</h1>"},
+                    {"id": "alt", "html": "<h1>Alt</h1>"},
+                ],
+                "fixture": {"states": {"Default": {"count": 1}}},
+            })
+        raise AssertionError(f"unexpected GET {url}")
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    # The destination arrives via the first positional (argparse fills `title`
+    # before `dir` with two optional positionals); the command must still write
+    # to it. Pass it as `title` to prove that resolution.
+    cli.cmd_ui_design(_args(tmp_path, pull="design-1", title=str(dest), dir=None))
+
+    assert (dest / "main.html").read_text() == "<h1>Main</h1>"
+    assert (dest / "alt.html").read_text() == "<h1>Alt</h1>"
+    assert json.loads((dest / "fixture.json").read_text())["states"]["Default"]["count"] == 1
+    out = capsys.readouterr().out
+    assert "Pulled design design-1 (revision rev-9)" in out
+    assert "--design design-1" in out
+
+
+def test_pull_mode_reports_a_design_with_no_revisions(tmp_path, monkeypatch, capsys):
+    def urlopen(req, *, context, timeout):
+        return _Response({"latest_revision_id": ""})
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    with pytest.raises(SystemExit) as exc_info:
+        cli.cmd_ui_design(_args(tmp_path, pull="empty-design", title=str(tmp_path / "d"), dir=None))
+
+    assert exc_info.value.code == 2
+    assert "no revisions" in capsys.readouterr().err.lower()
