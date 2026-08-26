@@ -153,6 +153,47 @@ class TestActivityOrdering:
             f"Expected most-recent-active session first; got {ids}"
 
 
+class TestFullHistorySnapshot:
+    def test_snapshot_bypasses_the_recency_window_and_quota(self, isolated_dao):
+        """The one browser bootstrap must contain old rows for local facets.
+
+        This would have failed before the snapshot contract existed: the DAO
+        did not accept ``full_history`` and could only return a recency-windowed,
+        quota-trimmed server projection.
+        """
+        # Add enough dead interactive rows to cross the ordinary all-type
+        # quota (20). A page snapshot must retain all of them so selecting an
+        # organization or changing a local filter never needs another read.
+        db_path = Path(os.environ["AUTONOMY_ORGS_DIR"]) / "autonomy.db"
+        conn = sqlite3.connect(db_path)
+        try:
+            for index in range(21):
+                conn.execute(
+                    """INSERT INTO sources
+                    (id, type, platform, title, file_path, metadata, created_at,
+                     ingested_at, last_activity_at)
+                    VALUES (?, 'session', 'claude-code', ?, ?, ?, ?, ?, ?)""",
+                    (
+                        f"src-snapshot-{index}", f"Snapshot row {index}",
+                        f"/tmp/sessions/snapshot-{index}.jsonl",
+                        json.dumps({"session_uuid": f"uuid-snapshot-{index}"}),
+                        "2026-04-16T00:00:00Z", "2026-04-16T00:01:00Z",
+                        "2026-04-16T00:02:00Z",
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        rows = isolated_dao.get_recent_sessions(
+            sort="lastActivity", since="6h", full_history=True,
+        )
+        assert len(rows) == 23
+        assert {"src-fresh-stale", "src-with-label"}.issubset(
+            {row["id"] for row in rows}
+        )
+
+
 # ══════════════════════════════════════════════════════════════════════
 # TestDashboardOverlay — dashboard.db enriches graph.db rows
 # ══════════════════════════════════════════════════════════════════════

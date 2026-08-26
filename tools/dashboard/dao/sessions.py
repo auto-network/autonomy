@@ -460,6 +460,7 @@ def get_recent_sessions(
     since: str = "1d",
     type_group: str = "all",
     org: str | None = None,
+    full_history: bool = False,
 ) -> list[dict]:
     """Fetch recent session sources, ordered and filtered for the Recent list.
 
@@ -482,6 +483,9 @@ def get_recent_sessions(
       org: when set, read only this organization's history. Scoped views are
              count-capped by the same per-type quotas but deliberately ignore
              ``since`` so a quiet organization's older sessions remain visible.
+      full_history: return the untrimmed cross-org card projection. This is the
+             one bootstrap snapshot for the Sessions screen; the browser owns
+             its facets and thereafter applies SSE deltas locally.
 
     Strategy:
       1. Pull recent session rows from graph.db (the historical tail).
@@ -489,10 +493,10 @@ def get_recent_sessions(
          that registered with the session monitor, dashboard.db has richer
          metadata (label, entry_count, context_tokens, role) than graph.db.
       3. Filter out currently-live sessions (they belong on Active list).
-      4. Apply the ``since`` window.
-      5. Bucket rows by session-type group and trim each bucket to its
-         quota using the requested sort column.
-      6. Merge the buckets and sort the union by the same column.
+      4. Apply the ``since`` window unless this is the full snapshot.
+      5. For ordinary endpoint reads, bucket rows by session-type group and
+         trim each bucket to its quota using the requested sort column.
+      6. Sort the merged union (or full snapshot) by the same column.
     """
     if sort not in _VALID_RECENT_SORTS:
         sort = "lastActivity"
@@ -504,7 +508,7 @@ def get_recent_sessions(
 
     # Compute the since cutoff once (epoch seconds). ``all`` / unknown → None.
     since_cutoff: float | None = None
-    if not org and since and since != "all":
+    if not org and not full_history and since and since != "all":
         dur_str = _SINCE_WINDOWS.get(since, since)
         try:
             since_cutoff = time.time() - parse_duration(dur_str)
@@ -522,7 +526,9 @@ def get_recent_sessions(
     # The global firehose samples every store before applying its recency
     # window. A selected organization is different: it must be able to return
     # its full historical tail (then count-cap it), so query that one store
-    # without a pre-truncating SQL limit.
+    # without a pre-truncating SQL limit. The screen's one-time history
+    # projection likewise needs the full row set so local facets never cause
+    # another fetch.
     org_slugs = (org,) if org else all_store_slugs()
     for slug in org_slugs:
         slug_db = open_peer_db(slug)
@@ -531,8 +537,8 @@ def get_recent_sessions(
         # Pooled handle from open_peer_db — must NOT close.
         conn = slug_db.conn
         has_la = _graph_sources_have_last_activity_column(conn)
-        limit_clause = "" if org else " LIMIT ?"
-        params: tuple[int, ...] = () if org else (sample_limit,)
+        limit_clause = "" if (org or full_history) else " LIMIT ?"
+        params: tuple[int, ...] = () if (org or full_history) else (sample_limit,)
         if has_la:
             sql = (
                 "SELECT id, type, title, created_at, last_activity_at,"
@@ -711,23 +717,30 @@ def get_recent_sessions(
         def _sort_key(r: dict) -> float:
             return _iso_to_epoch(r.get("last_activity_at", ""))
 
-    # ── Step 5: bucket by type group and trim to quota ────────────
-    buckets: dict[str, list[dict]] = {"interactive": [], "dispatch": [], "librarian": []}
-    for row in rows:
-        group = _group_for_session_type(row.get("session_type"))
-        buckets[group].append(row)
+    if full_history:
+        # This is intentionally untrimmed. A client-side organization/type/
+        # sort/since facet can only be correct without another request when
+        # its one bootstrap snapshot contains the complete projection.
+        rows.sort(key=_sort_key, reverse=True)
+        out = rows if limit is None else rows[:limit]
+    else:
+        # ── Step 5: bucket by type group and trim to quota ────────
+        buckets: dict[str, list[dict]] = {"interactive": [], "dispatch": [], "librarian": []}
+        for row in rows:
+            group = _group_for_session_type(row.get("session_type"))
+            buckets[group].append(row)
 
-    trimmed: list[dict] = []
-    for group, bucket in buckets.items():
-        q = quotas.get(group, 0)
-        if q <= 0:
-            continue
-        bucket.sort(key=_sort_key, reverse=True)
-        trimmed.extend(bucket[:q])
+        trimmed: list[dict] = []
+        for group, bucket in buckets.items():
+            q = quotas.get(group, 0)
+            if q <= 0:
+                continue
+            bucket.sort(key=_sort_key, reverse=True)
+            trimmed.extend(bucket[:q])
 
-    # ── Step 6: sort the merged union by the requested column ─────
-    trimmed.sort(key=_sort_key, reverse=True)
-    out = trimmed if limit is None else trimmed[:limit]
+        # ── Step 6: sort the merged union by the requested column ─
+        trimmed.sort(key=_sort_key, reverse=True)
+        out = trimmed if limit is None else trimmed[:limit]
 
     # Annotate librarian rows with type + target so the UI can render a
     # meaningful title ('{type} · {target}') instead of the raw process name.
