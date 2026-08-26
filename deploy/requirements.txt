@@ -37,6 +37,8 @@ cbor2==6.1.3
 # operator-only iOS proof uses this instead of implementing content encryption
 # and VAPID signing in Dashboard code. MPL-2.0, web-push-libs/pywebpush.
 pywebpush==2.4.0
+# Explicit CNAME/A/AAAA resolution for Web Push DNS-pinned safe egress. ISC.
+dnspython==2.8.0
 # RaptorQ (RFC 6330) codec for swarmkit fountain transfer — PyO3
 # bindings of the Apache-2.0 cberner/raptorq crate. Attribution:
 # "raptorq — Copyright Christopher Berner — Apache-2.0,
@@ -61,6 +63,5 @@ av==17.1.0
 pylibsrtp==1.0.0
 pyee==13.0.1
 ifaddr==0.2.0
-dnspython==2.8.0
 google-crc32c==1.8.0
 pyOpenSSL==26.4.0
