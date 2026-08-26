@@ -9,6 +9,8 @@ sweep cannot silently regress into measuring an injected principal.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from starlette.testclient import TestClient
 
@@ -43,46 +45,88 @@ def test_an_undeclared_app_route_refuses_anonymous(gate_enforcing, test_app):
     assert r.status_code == 401
 
 
-import re as _re
 from starlette.routing import Route as _Route
 
 
-def _api_routes(app):
-    """Every ``/api`` Route on the app, as (path, method). Plugin routes are
-    extended into the app route list (not mounted), so they appear here too."""
-    for r in getattr(app, "routes", []):
-        if isinstance(r, _Route) and r.path.startswith("/api/"):
-            for m in sorted(r.methods or ["GET"]):
-                if m not in ("HEAD", "OPTIONS"):
-                    yield r.path, m
+def test_every_api_route_carries_the_default_deny_wrap(test_app):
+    """auto-so9hi 'no unauth endpoint', tested at THE ONE PLACE it is enforced.
 
+    ``route_policy.apply_default_deny`` wraps every ``/api`` route by
+    construction and stamps the wrapper ``_route_policy_wrapped``. The exception
+    check AND the auth refusal both live inside that single wrapper (public
+    exceptions are wrapped too — they pass through), so the whole invariant
+    reduces to one question: does every ``/api`` route on the assembled app
+    carry the marker? A route that does not was added AROUND the choke point,
+    which is the only way a no-credential hole can exist.
 
-def _concrete(path: str) -> str:
-    # Fill {param} and {param:path} with a dummy segment. A default-deny route
-    # refuses before the handler, so param validity is irrelevant to the refusal.
-    return _re.sub(r"\{[^}]+\}", "x", path)
-
-
-def test_no_api_route_serves_a_no_credential_caller(gate_enforcing, test_app):
-    """auto-so9hi, invariant 'no unauth endpoint': with the human gate enforced,
-    every ``/api`` route refuses an anonymous caller unless its ``(method, path)``
-    is a named public exception. A 2xx to a no-credential client is a leak — the
-    handler ran without authentication. Non-2xx (401/403/400/404/405/5xx) all
-    mean 'not served'. This sweeps the whole live route table, so a new route is
-    covered the moment it is added.
+    This is deliberately a structural pass over the route table, not 320
+    anonymous HTTP requests against every handler. We enforce in one place and
+    test THAT place: the wrap logic itself is proven once in
+    :func:`test_guarded_wrap_refuses_admits_and_serves_exceptions`, the org
+    scoping behaviorally in ``test_api_auth_middleware`` /
+    ``test_search_org_as_caller``. Re-deriving the refusal per route would test
+    the same common function hundreds of times.
     """
-    from tools.dashboard.route_policy import PUBLIC_EXCEPTIONS
-    exceptions = set(PUBLIC_EXCEPTIONS)
-    leaks = []
-    with TestClient(test_app) as client:
-        for path, method in _api_routes(test_app):
-            if (method, path) in exceptions:
-                continue
-            resp = client.request(method, _concrete(path))
-            if resp.status_code < 400:
-                leaks.append(f"{method} {path} -> {resp.status_code}")
-    assert not leaks, (
-        "these /api routes served a NO-CREDENTIAL caller (leak, or a genuinely "
-        "public route missing from route_policy.PUBLIC_EXCEPTIONS — classify and "
-        "add it there with a reason):\n  " + "\n  ".join(sorted(leaks))
+    unwrapped = []
+    for r in getattr(test_app, "routes", []):
+        if isinstance(r, _Route) and r.path.startswith("/api/"):
+            if not getattr(
+                getattr(r, "endpoint", None), "_route_policy_wrapped", False
+            ):
+                for m in sorted(r.methods or ["GET"]):
+                    if m not in ("HEAD", "OPTIONS"):
+                        unwrapped.append(f"{m} {r.path}")
+    assert not unwrapped, (
+        "these /api routes bypass route_policy.apply_default_deny (added around "
+        "the choke point — a no-credential hole):\n  " + "\n  ".join(sorted(unwrapped))
     )
+
+
+def test_the_structural_check_is_not_vacuous(test_app):
+    """Guard the guard: an empty route table would pass the wrap check by
+    examining nothing. Assert the population is real."""
+    count = sum(
+        1 for r in getattr(test_app, "routes", [])
+        if isinstance(r, _Route) and r.path.startswith("/api/")
+    )
+    assert count > 50, f"only {count} /api routes on the app; assembly changed"
+
+
+def test_guarded_wrap_refuses_admits_and_serves_exceptions(gate_enforcing):
+    """The wrap itself, tested ONCE (not per route): a non-exception app route
+    refuses an unauthenticated caller, admits an authenticated one, and a
+    PUBLIC_EXCEPTION path is served without a credential. This is the single
+    enforcement point the structural test trusts."""
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse
+    from tools.dashboard import api_auth, route_policy
+    from tools.dashboard.api_auth import ApiPrincipal, ApiPrincipalKind
+
+    ran = {"count": 0}
+
+    async def endpoint(request):
+        ran["count"] += 1
+        return JSONResponse({"ok": True})
+
+    def _req(path, principal):
+        return Request({
+            "type": "http", "method": "GET", "path": path, "headers": [],
+            "state": {"api_principal": principal},
+        })
+
+    anon = api_auth.COMPATIBILITY_PRINCIPAL
+    agent = ApiPrincipal(ApiPrincipalKind.ORG_SESSION, subject="auto-1", org="beta")
+
+    guarded = route_policy._guarded(endpoint, "/api/thing", plugin=False)
+    assert guarded._route_policy_wrapped is True
+
+    # Unauthenticated → refused, handler never runs.
+    resp = asyncio.run(guarded(_req("/api/thing", anon)))
+    assert resp.status_code == 401 and ran["count"] == 0
+    # Authenticated org session → served.
+    asyncio.run(guarded(_req("/api/thing", agent)))
+    assert ran["count"] == 1
+    # A PUBLIC_EXCEPTION path → served even unauthenticated.
+    exc = route_policy._guarded(endpoint, "/api/ping", plugin=False)
+    asyncio.run(exc(_req("/api/ping", anon)))
+    assert ran["count"] == 2
