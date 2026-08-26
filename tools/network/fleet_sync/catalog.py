@@ -1527,8 +1527,8 @@ class MutationCatalog:
                     raise WatermarkError(
                         "materialized row does not preserve canonical mutation bytes: "
                         f"table={mutation.table!r} address={mutation.address!r} "
-                        f"expected={mutation.candidate_hash[:16]} "
-                        f"installed={installed.candidate_hash[:16]}"
+                        f"expected={mutation.candidate_hash.hex()[:16]} "
+                        f"installed={installed.candidate_hash.hex()[:16]}"
                     )
             for authored, address_blob in winners:
                 mutation = authored.mutation

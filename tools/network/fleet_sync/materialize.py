@@ -198,23 +198,42 @@ def _apply_note_versions(conn: sqlite3.Connection, mutations: list[Mutation]) ->
             continue
         row = _row(mutation)
         duplicate = conn.execute(
-            "SELECT content FROM note_versions WHERE source_id=? AND created_at=?",
+            "SELECT id,content FROM note_versions WHERE source_id=? AND created_at=?",
             (row["source_id"], row["created_at"]),
         ).fetchall()
         digest = str(mutation.address[2])
-        if any(hashlib.sha256(str(item[0]).encode()).hexdigest() == digest
-               for item in duplicate):
+        matching_ids = [
+            int(item[0]) for item in duplicate
+            if hashlib.sha256(str(item[1]).encode()).hexdigest() == digest
+        ]
+        if matching_ids:
+            # The address deliberately excludes receiver-local id/version, but
+            # provenance remains canonical content and may differ between two
+            # candidates at the same logical address. Install the winning
+            # provenance instead of treating content identity alone as a full
+            # idempotency match.
+            keep_id = min(matching_ids)
+            for duplicate_id in matching_ids:
+                if duplicate_id != keep_id:
+                    conn.execute("DELETE FROM note_versions WHERE id=?", (duplicate_id,))
+            assignments = ",".join(f'"{column}"=?' for column in sorted(row))
+            conn.execute(
+                f"UPDATE note_versions SET {assignments} WHERE id=?",
+                [row[column] for column in sorted(row)] + [keep_id],
+            )
+            applied += 1
             continue
         # A temporary negative version cannot collide with authored versions.
         temporary_version = -1 - conn.execute(
             "SELECT COUNT(*) FROM note_versions WHERE source_id=?",
             (row["source_id"],),
         ).fetchone()[0]
-        conn.execute(
-            "INSERT INTO note_versions(source_id,version,content,created_at) "
-            "VALUES(?,?,?,?)",
-            (row["source_id"], temporary_version, row["content"], row["created_at"]),
-        )
+        # ``id`` and display ``version`` are intentionally receiver-local, but
+        # every other column is canonical replicated content. Build from the
+        # logical row so provenance columns added to the schema cannot be
+        # silently dropped by a hard-coded legacy column list.
+        row["version"] = temporary_version
+        _insert(conn, "note_versions", row)
         applied += 1
 
     source_ids = {str(m.address[0]) for m in mutations}
