@@ -693,7 +693,17 @@ class MutationCatalog:
             raise
 
     def _bootstrap_existing_rows(self, *, audit: bool = True) -> int:
-        """Give each untracked live row deterministic legacy winner metadata."""
+        """Give each untracked live row deterministic legacy winner metadata.
+
+        For a dry run, wrap the caller's transaction so this can commit or
+        roll back atomically — this function's own progress bookkeeping
+        (the temp table, transaction-batch counters) depends on its writes
+        actually landing as it iterates, so it cannot safely simulate
+        without writing; rollback-after-run is the only safe dry-run shape.
+        See ``fleet_doctor.py``'s ``--repair-catalog`` for the pattern:
+        ``BEGIN IMMEDIATE``, run this, inspect the still-open transaction,
+        then ``COMMIT`` or ``ROLLBACK``.
+        """
         self.conn.execute(
             "CREATE TEMP TABLE fleet_sync_bootstrap_progress("
             "timestamp_ns INTEGER PRIMARY KEY,next_operation INTEGER NOT NULL)"
