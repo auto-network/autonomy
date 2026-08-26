@@ -42,6 +42,14 @@ def delete_client(monkeypatch):
         return SimpleNamespace(to_dict=lambda: {"deleted": slug, "force": force})
 
     monkeypatch.setattr(org_ops, "remove_org", remove_org)
+    # Hermetic gate: the no-credential case asserts 401, which
+    # require_global_api_authority returns only when the human gate is enforced
+    # (otherwise it stands down for the fail-open recovery window). This fixture
+    # builds its own app — no test_app — so pin the enforced state rather than
+    # depend on ambient personal.db enrollment, which leaks in via the
+    # process-global AUTONOMY_ORGS_DIR and made the no-cred assertion flaky.
+    from tools.dashboard import unlock_routes
+    monkeypatch.setattr(unlock_routes, "gate_enforced", lambda: True)
     app = Starlette(
         routes=[
             Route(
