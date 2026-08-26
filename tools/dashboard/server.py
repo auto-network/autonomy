@@ -2725,7 +2725,7 @@ async def api_search(request):
     only_org = request.query_params.get("only_org")
     peers_param = request.query_params.get("peers")
     peers = [p for p in peers_param.split(",") if p] if peers_param is not None else None
-    org = request.headers.get("X-Graph-Org") or None
+    org = api_auth.organization_scope_from_request(request)
     # Auxiliary source types (currently 'agentic' agent-action runs) are
     # excluded from /api/search by default — the global surface should not
     # be polluted by short-lived dashboard-spawned agents. Pass
@@ -2909,7 +2909,7 @@ def _format_search_date(raw: str) -> str:
 async def api_sources(request):
     if os.environ.get("DASHBOARD_MOCK"):
         return JSONResponse({"results": "", "error": None})
-    org = request.headers.get("X-Graph-Org") or None
+    org = api_auth.organization_scope_from_request(request)
     stype = request.query_params.get("type")
     limit = int(request.query_params.get("limit", "30"))
     rows = await asyncio.to_thread(
@@ -2959,7 +2959,7 @@ async def api_source_read(request):
         window = int(request.query_params.get("window", "5"))
     except ValueError:
         return JSONResponse({"error": "invalid window"}, status_code=400)
-    org = request.headers.get("X-Graph-Org") or None
+    org = api_auth.organization_scope_from_request(request)
     result = await asyncio.to_thread(
         graph_ops.read_source_full, source_id, max_chars=max_chars, org=org,
         around_turn=around_turn, window=window,
@@ -3048,7 +3048,7 @@ async def api_context(request):
         window = int(request.query_params.get("window", "3"))
     except ValueError:
         return JSONResponse({"error": "turn/window must be integers"}, status_code=400)
-    org = request.headers.get("X-Graph-Org") or None
+    org = api_auth.organization_scope_from_request(request)
     result = await asyncio.to_thread(
         graph_ops.get_context, source_id, turn, window=window, org=org,
     )
@@ -3260,7 +3260,7 @@ async def api_workspace_local_create(request):
 async def api_stats(request):
     if os.environ.get("DASHBOARD_MOCK"):
         return JSONResponse({"results": "", "error": None})
-    org = request.headers.get("X-Graph-Org") or None
+    org = api_auth.organization_scope_from_request(request)
     data = await asyncio.to_thread(graph_ops.stats, org=org)
     lines = ["Knowledge Graph Stats:"]
     for table, count in data.items():
@@ -3294,7 +3294,7 @@ async def api_harness_usage(request):
 async def api_attention(request):
     if os.environ.get("DASHBOARD_MOCK"):
         return JSONResponse({"results": "", "error": None})
-    org = request.headers.get("X-Graph-Org") or None
+    org = api_auth.organization_scope_from_request(request)
     last = request.query_params.get("last")
     search = request.query_params.get("search")
     try:
@@ -4073,7 +4073,7 @@ async def api_primer(request):
         if not primer:
             return JSONResponse({"error": "bead not found"}, status_code=404)
         return JSONResponse(primer)
-    org = request.headers.get("X-Graph-Org") or None
+    org = api_auth.organization_scope_from_request(request)
     from tools.graph.primer import collect_primer_data, format_for_dashboard
     try:
         def _collect():
@@ -15606,7 +15606,7 @@ async def api_graph_search(request):
     only_org = request.query_params.get("only_org")
     peers_param = request.query_params.get("peers")
     peers = [p for p in peers_param.split(",") if p] if peers_param is not None else None
-    org = request.headers.get("X-Graph-Org")
+    org = api_auth.organization_scope_from_request(request)
     ssi_param = request.query_params.get("session_source_ids")
     session_source_ids = [s for s in ssi_param.split(",") if s] if ssi_param else None
     session_author_pattern = request.query_params.get("session_author_pattern")
@@ -15660,7 +15660,7 @@ async def api_graph_source_get(request):
     source_id = request.path_params["id"]
     if not _GRAPH_SOURCE_ID_RE.match(source_id):
         return JSONResponse({"error": f"malformed source_id: {source_id!r}"}, status_code=400)
-    org = request.headers.get("X-Graph-Org")
+    org = api_auth.organization_scope_from_request(request)
     peers_param = request.query_params.get("peers")
     peers = [p for p in peers_param.split(",") if p] if peers_param is not None else None
     src = await asyncio.to_thread(
@@ -15692,7 +15692,7 @@ async def api_graph_sources_list(request):
     only_org = request.query_params.get("only_org")
     peers_param = request.query_params.get("peers")
     peers = [p for p in peers_param.split(",") if p] if peers_param is not None else None
-    org = request.headers.get("X-Graph-Org")
+    org = api_auth.organization_scope_from_request(request)
     since = request.query_params.get("since")
     until = request.query_params.get("until")
     author = request.query_params.get("author")
