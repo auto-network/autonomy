@@ -8,9 +8,9 @@ program (spec ``graph://a17c8657-939`` §4.6, §6.2, §6.6; invariants I1, I9):
   ``autonomy.commit.signing-key``: the server only ever stores and serves
   the ENCRYPTED armor; plaintext exists solely in the operator's browser
   during ceremonies (invariant I1).
-* ``autonomy.network.binding#1`` — local record of the org's registry
-  binding state: org UUID, root public key, recovery policy, binding
-  expiry, registry URL, renewal state, signed endpoint hints.
+* ``autonomy.network.binding#1/#2`` — local record of the org's registry
+  binding state. Revision 2 adds the registry-generated binding incarnation
+  needed to distinguish expiry reclamation without inventing local authority.
 * ``autonomy.network.link-grant#1`` — the dashboard-side grant cache. The
   dashboard serves a shared target only against a valid row here
   (invariant I9); rows carry the token, target, meta, and the issuing
@@ -66,6 +66,7 @@ ORG_ROOT_ARMOR_PURPOSE = "autonomy/org-root-armor/v1"
 _SEALED_ROOT_KEY_HEX_LEN = 2 * (1 + 32 + 32 + 16)
 NETWORK_BINDING_SET_ID = "autonomy.network.binding"
 NETWORK_BINDING_REVISION = 1
+NETWORK_BINDING_REVISION_2 = 2
 #: Which persona this node holds the seed for, per org. Written org=None
 #: (personal.db), keyed by the org's genesis id. See NetworkPersonaV1 for why
 #: the scope is the load-bearing part.
@@ -401,6 +402,43 @@ class NetworkBindingV1(SettingSchema):
                         f"{cls.__name__}: endpoint_hints[{i}] must be an "
                         "object with a non-empty 'url'"
                     )
+
+
+@publication_band(min="raw", max="raw")
+@home("organization")
+@keyed_per_entity(key_strategy="registry_host")
+class NetworkBindingV2(NetworkBindingV1):
+    """Registry-authoritative binding incarnation.
+
+    Revision 2 deliberately has no V1 upconverter. ``binding_generation``
+    is minted by the registry and distinguishes an expired UUID reclaim even
+    when the replacement uses the same root key. A Dashboard may recover a
+    V1 row only by asking the frozen registry and persisting the generation it
+    returns; local migration must never invent this authority coordinate.
+    """
+
+    set_id = NETWORK_BINDING_SET_ID
+    schema_revision = NETWORK_BINDING_REVISION_2
+
+    binding_generation: str = field(
+        required=True,
+        description=(
+            "Registry-generated binding incarnation (32 CSPRNG bytes, "
+            "encoded as exactly 64 lowercase hexadecimal characters)."
+        ),
+    )
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        super().validate(payload)
+        if not isinstance(payload, dict):
+            return
+        _require_hex(
+            payload,
+            "binding_generation",
+            cls.__name__,
+            length=NETWORK_PUB_HEX_LEN,
+        )
 
 
 # ── autonomy.network.link-grant ───────────────────────────────

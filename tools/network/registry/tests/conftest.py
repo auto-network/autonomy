@@ -126,8 +126,26 @@ def persona_cert(session_key, session_cert, persona_key):
 
 def signed(client, method, path, key, payload, clock, cert=None, expect=None):
     """Send a signed envelope; assert *expect* status when given."""
-    envelope = sign_request(key, method, path, payload, ts=clock.now, cert=cert)
-    response = client.request(method, path, json=envelope)
+    if path == "/v1/link-operation-receipts":
+        # The public registry input is digest-bound transport context.  It is
+        # deliberately outside the envelope retained by Central.
+        signed_payload = dict(payload)
+        registry_input = signed_payload.pop("registry_input", None)
+        request_body = {
+            "envelope": sign_request(
+                key, method, path, signed_payload, ts=clock.now, cert=cert
+            )
+        }
+        if registry_input is not None:
+            request_body["registry_input"] = registry_input
+    else:
+        envelope = sign_request(
+            key, method, path, payload, ts=clock.now, cert=cert
+        )
+        request_body = envelope
+    response = client.request(
+        method, path, json=request_body
+    )
     if expect is not None:
         assert response.status_code == expect, (response.status_code, response.json())
     return response

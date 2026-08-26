@@ -35,6 +35,7 @@ from typing import Optional
 from tools.network.idkit import DelegationCert, KeyPair, canonical_json
 
 REQUEST_DOMAIN = b"autonomy.network.registry.request.v1\n"
+LINK_OPERATION_RECEIPT_DOMAIN = b"autonomy.network.link-operation-receipt.v1\n"
 ENVELOPE_VERSION = 1
 
 #: Domain for the OLD recovery key's co-signature authorizing its own
@@ -61,6 +62,15 @@ def request_signing_input(method: str, path: str, ts: int, signer: str, payload:
             "payload": payload,
         }
     )
+
+
+def link_operation_receipt_input(receipt: dict) -> bytes:
+    """Exact witness-signing bytes for an accepted Link operation."""
+    return LINK_OPERATION_RECEIPT_DOMAIN + canonical_json(receipt)
+
+
+def sign_link_operation_receipt(witness_key: KeyPair, receipt: dict) -> str:
+    return witness_key.sign_hex(link_operation_receipt_input(receipt))
 
 
 def recovery_succession_input(

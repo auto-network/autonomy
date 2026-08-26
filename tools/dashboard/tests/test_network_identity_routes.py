@@ -28,6 +28,7 @@ from tools.dashboard import network_routes
 from tools.graph import settings_ops
 from tools.graph.schemas.network_identity import (
     NETWORK_BINDING_REVISION,
+    NETWORK_BINDING_REVISION_2,
     NETWORK_BINDING_SET_ID,
     NETWORK_ORG_KEY_SET_ID,
     NETWORK_SERVE_CERT_SET_ID,
@@ -246,12 +247,15 @@ def test_register_end_to_end(env, root, registry_app):
 
     # The local binding row matches what was registered.
     binding = body["binding"]
+    assert body["outcome"] == "claimed"
     assert binding["org_uuid"] == ORG_UUID
     assert binding["root_pub"] == root.public_hex
     assert binding["registry_url"] == REGISTRY_URL
     assert binding["recovery_policy"] == {"mode": "none"}
+    assert len(binding["binding_generation"]) == 64
     members = settings_ops.read_set(NETWORK_BINDING_SET_ID, org=ORG).members
     assert [m.payload["org_uuid"] for m in members] == [ORG_UUID]
+    assert [m.stored_revision for m in members] == [NETWORK_BINDING_REVISION_2]
     served = env.get(f"/api/network/binding?org={ORG}").json()
     assert served["binding_expires_at"] == binding["binding_expires_at"]
 
@@ -270,6 +274,312 @@ def test_register_with_recovery_key_policy(env, root, registry_app):
         "mode": "recovery-key", "recovery_pub": recovery.public_hex}
     assert registry_app.state.store.get_org(ORG_UUID).recovery_pub \
         == recovery.public_hex
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"outcome": "invented"},
+        {"recovery_policy": {"mode": "none", "recovery_pub": "aa" * 32}},
+        {"recovery_policy": {"mode": "none", "extra": True}},
+        {"binding_generation": "not-authority"},
+        {"expires_at": 9_007_199_254_740_992},
+    ],
+)
+def test_register_rejects_malformed_authoritative_binding_response(
+    env, root, monkeypatch, change
+):
+    _store_key(env, root)
+    response = {
+        "outcome": "claimed",
+        "org_uuid": ORG_UUID,
+        "root_pub": root.public_hex,
+        "binding_generation": "aa" * 32,
+        "expires_at": int(time.time()) + 30 * 86400,
+        "recovery_policy": {"mode": "none"},
+    }
+    response.update(change)
+
+    class _Response:
+        status_code = 201
+        text = "response"
+
+        def json(self):
+            return response
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, *args, **kwargs):
+            return _Response()
+
+    monkeypatch.setattr(network_routes, "_registry_client", lambda url: _Client())
+    result = env.post(
+        "/api/network/register",
+        json={"org": ORG, "envelope": _registration_envelope(root)},
+    )
+    assert result.status_code == 502
+    assert settings_ops.read_set(NETWORK_BINDING_SET_ID, org=ORG).members == []
+
+
+@pytest.mark.parametrize(
+    "outcome, expected_status, expected_revision",
+    [
+        ("claimed", 502, NETWORK_BINDING_REVISION),
+        ("already_bound_self", 200, NETWORK_BINDING_REVISION_2),
+        ("reclaimed_expired", 200, NETWORK_BINDING_REVISION_2),
+    ],
+)
+def test_register_context_refuses_fresh_claim_for_existing_v1_binding(
+    env,
+    root,
+    monkeypatch,
+    outcome,
+    expected_status,
+    expected_revision,
+):
+    """Only a truly unbound local context may persist registry ``claimed``."""
+    _store_key(env, root)
+    settings_ops.add_setting(
+        NETWORK_BINDING_SET_ID,
+        NETWORK_BINDING_REVISION,
+        "registry.test",
+        {
+            "org_uuid": ORG_UUID,
+            "root_pub": root.public_hex,
+            "registry_url": REGISTRY_URL,
+            "recovery_policy": {"mode": "none"},
+            "binding_expires_at": "2026-09-26T00:00:00Z",
+        },
+        org=ORG,
+    )
+    response = {
+        "outcome": outcome,
+        "org_uuid": ORG_UUID,
+        "root_pub": root.public_hex,
+        "binding_generation": "aa" * 32,
+        "expires_at": int(time.time()) + 30 * 86400,
+        "recovery_policy": {"mode": "none"},
+    }
+
+    class _Response:
+        status_code = 201
+        text = "response"
+
+        def json(self):
+            return response
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, *args, **kwargs):
+            return _Response()
+
+    monkeypatch.setattr(network_routes, "_registry_client", lambda url: _Client())
+    result = env.post(
+        "/api/network/register",
+        json={"org": ORG, "envelope": _registration_envelope(root)},
+    )
+    assert result.status_code == expected_status
+    row = settings_ops.read_set(NETWORK_BINDING_SET_ID, org=ORG).members[0]
+    assert row.stored_revision == expected_revision
+    if expected_status == 200:
+        assert result.json()["outcome"] == outcome
+        assert row.payload["binding_generation"] == response["binding_generation"]
+    else:
+        assert "invalid for this binding context" in result.json()["error"]
+        assert "binding_generation" not in row.payload
+
+
+@pytest.mark.parametrize("mismatch", ["org_uuid", "root_pub", "policy", "registry_key"])
+def test_register_refresh_refuses_mismatched_frozen_binding_before_network(
+    env, root, monkeypatch, mismatch
+):
+    """A local binding freezes every refresh/reclaim coordinate."""
+    _store_key(env, root)
+    binding = {
+        "org_uuid": ORG_UUID,
+        "root_pub": root.public_hex,
+        "registry_url": "https://frozen.registry.example",
+        "recovery_policy": {"mode": "none"},
+        "binding_expires_at": "2026-09-26T00:00:00Z",
+    }
+    key = "frozen.registry.example"
+    if mismatch == "org_uuid":
+        binding["org_uuid"] = "44444444-4444-4444-8444-444444444444"
+    elif mismatch == "root_pub":
+        binding["root_pub"] = "ab" * 32
+    elif mismatch == "policy":
+        binding["recovery_policy"] = {
+            "mode": "recovery-key",
+            "recovery_pub": "cd" * 32,
+        }
+    else:
+        key = "wrong.registry.example"
+    settings_ops.add_setting(
+        NETWORK_BINDING_SET_ID,
+        NETWORK_BINDING_REVISION,
+        key,
+        binding,
+        org=ORG,
+    )
+    calls: list[str] = []
+
+    def forbidden_client(base_url):
+        calls.append(base_url)
+        raise AssertionError("mismatched local authority must not contact a registry")
+
+    monkeypatch.setattr(network_routes, "_registry_client", forbidden_client)
+    result = env.post(
+        "/api/network/register",
+        json={"org": ORG, "envelope": _registration_envelope(root)},
+    )
+    assert result.status_code == 409
+    assert calls == []
+    row = settings_ops.read_set(NETWORK_BINDING_SET_ID, org=ORG).members[0]
+    assert row.stored_revision == NETWORK_BINDING_REVISION
+    assert "binding_generation" not in row.payload
+
+
+def test_register_refresh_uses_nondefault_frozen_registry_and_exact_context(
+    env, root, monkeypatch
+):
+    """Refresh/reclaim never falls back to the deployment default registry."""
+    _store_key(env, root)
+    frozen_url = "https://frozen.registry.example"
+    settings_ops.add_setting(
+        NETWORK_BINDING_SET_ID,
+        NETWORK_BINDING_REVISION,
+        "frozen.registry.example",
+        {
+            "org_uuid": ORG_UUID,
+            "root_pub": root.public_hex,
+            "registry_url": frozen_url,
+            "recovery_policy": {"mode": "none"},
+            "binding_expires_at": "2026-09-26T00:00:00Z",
+        },
+        org=ORG,
+    )
+    response = {
+        "outcome": "already_bound_self",
+        "org_uuid": ORG_UUID,
+        "root_pub": root.public_hex,
+        "binding_generation": "ef" * 32,
+        "expires_at": int(time.time()) + 30 * 86400,
+        "recovery_policy": {"mode": "none"},
+    }
+    calls: list[str] = []
+
+    class _Response:
+        status_code = 201
+        text = "response"
+
+        def json(self):
+            return response
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, *args, **kwargs):
+            return _Response()
+
+    def frozen_client(base_url):
+        calls.append(base_url)
+        return _Client()
+
+    monkeypatch.setattr(network_routes, "_registry_client", frozen_client)
+    result = env.post(
+        "/api/network/register",
+        json={"org": ORG, "envelope": _registration_envelope(root)},
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["outcome"] == "already_bound_self"
+    assert calls == [frozen_url]
+    row = settings_ops.read_set(NETWORK_BINDING_SET_ID, org=ORG).members[0]
+    assert row.key == "frozen.registry.example"
+    assert row.stored_revision == NETWORK_BINDING_REVISION_2
+    assert row.payload["registry_url"] == frozen_url
+    assert row.payload["binding_generation"] == response["binding_generation"]
+
+
+def test_register_refuses_to_overwrite_binding_changed_during_registry_call(
+    env, root, monkeypatch
+):
+    """The response is not persisted across a local binding-state race."""
+    _store_key(env, root)
+    original = {
+        "org_uuid": ORG_UUID,
+        "root_pub": root.public_hex,
+        "registry_url": REGISTRY_URL,
+        "recovery_policy": {"mode": "none"},
+        "binding_expires_at": "2026-09-26T00:00:00Z",
+    }
+    settings_ops.add_setting(
+        NETWORK_BINDING_SET_ID,
+        NETWORK_BINDING_REVISION,
+        "registry.test",
+        original,
+        org=ORG,
+    )
+    response = {
+        "outcome": "already_bound_self",
+        "org_uuid": ORG_UUID,
+        "root_pub": root.public_hex,
+        "binding_generation": "ef" * 32,
+        "expires_at": int(time.time()) + 30 * 86400,
+        "recovery_policy": {"mode": "none"},
+    }
+
+    class _Response:
+        status_code = 201
+        text = "response"
+
+        def json(self):
+            return response
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, *args, **kwargs):
+            settings_ops.upsert_by_key(
+                NETWORK_BINDING_SET_ID,
+                NETWORK_BINDING_REVISION,
+                "registry.test",
+                {
+                    **original,
+                    "endpoint_hints": [{"url": "https://changed.example"}],
+                },
+                org=ORG,
+            )
+            return _Response()
+
+    monkeypatch.setattr(network_routes, "_registry_client", lambda url: _Client())
+    result = env.post(
+        "/api/network/register",
+        json={"org": ORG, "envelope": _registration_envelope(root)},
+    )
+    assert result.status_code == 409
+    assert "changed during registry registration" in result.json()["error"]
+    row = settings_ops.read_set(NETWORK_BINDING_SET_ID, org=ORG).members[0]
+    assert row.stored_revision == NETWORK_BINDING_REVISION
+    assert row.payload["endpoint_hints"] == [{"url": "https://changed.example"}]
+    assert "binding_generation" not in row.payload
 
 
 def _renew_envelope(root: KeyPair, org_uuid=ORG_UUID):
@@ -298,6 +608,76 @@ def test_renew_heartbeats_a_live_binding(env, root, registry_app):
     # The local binding row now reflects the registry's authoritative expiry.
     served = env.get(f"/api/network/binding?org={ORG}").json()
     assert served["binding_expires_at"] == r.json()["binding"]["binding_expires_at"]
+
+
+def test_renew_recovers_v1_only_from_authoritative_registry_generation(
+    env, root, registry_app
+):
+    """A V1 row can become V2 only through a matching registry response."""
+    now = int(time.time())
+    registry_app.state.store.create_org(
+        ORG_UUID,
+        root.public_hex,
+        "none",
+        None,
+        now=now,
+        expires_at=now + 30 * 86400,
+    )
+    settings_ops.add_setting(
+        NETWORK_BINDING_SET_ID,
+        NETWORK_BINDING_REVISION,
+        "registry.test",
+        {
+            "org_uuid": ORG_UUID,
+            "root_pub": root.public_hex,
+            "registry_url": REGISTRY_URL,
+            "recovery_policy": {"mode": "none"},
+            "binding_expires_at": time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + 30 * 86400)
+            ),
+        },
+        org=ORG,
+    )
+    response = env.post(
+        "/api/network/renew",
+        json={"org": ORG, "envelope": _renew_envelope(root)},
+    )
+    assert response.status_code == 200, response.text
+    row = settings_ops.read_set(NETWORK_BINDING_SET_ID, org=ORG).members[0]
+    assert row.stored_revision == NETWORK_BINDING_REVISION_2
+    assert row.payload["binding_generation"] == registry_app.state.store.get_org(
+        ORG_UUID
+    ).binding_generation
+
+
+def test_renew_policy_drift_extends_registry_but_writes_no_local_v2_change(
+    env, root, registry_app
+):
+    _store_key(env, root)
+    registered = env.post(
+        "/api/network/register",
+        json={"org": ORG, "envelope": _registration_envelope(root)},
+    )
+    assert registered.status_code == 200, registered.text
+    before = dict(registered.json()["binding"])
+    authority = registry_app.state.store.get_org(ORG_UUID)
+    recovery = KeyPair.generate()
+    assert registry_app.state.store.update_recovery_policy(
+        ORG_UUID,
+        "recovery-key",
+        recovery.public_hex,
+        expected_epoch=authority.policy_epoch,
+        new_epoch=authority.policy_epoch + 1,
+    )
+    response = env.post(
+        "/api/network/renew",
+        json={"org": ORG, "envelope": _renew_envelope(root)},
+    )
+    assert response.status_code == 502
+    assert "does not match" in response.json()["error"]
+    after = settings_ops.read_set(NETWORK_BINDING_SET_ID, org=ORG).members[0]
+    assert after.payload == before
+    assert registry_app.state.store.get_org(ORG_UUID).renewed_at is not None
 
 
 def test_renew_of_an_unregistered_org_is_404(env, root):
@@ -556,9 +936,10 @@ def test_provision_serve_cert_personal_scope(env, root, tmp_path, monkeypatch):
     # explicit scope on write, so it is stored under "personal" (post_register
     # does the same). `root` stands in for the personal root here.
     settings_ops.add_setting(
-        NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION, "auto.network",
+        NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION_2, "auto.network",
         {"org_uuid": PERSONAL_ORG_UUID, "root_pub": root.public_hex,
          "registry_url": REGISTRY_URL, "recovery_policy": {"mode": "none"},
+         "binding_generation": "aa" * 32,
          "binding_expires_at": time.strftime(
              "%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(time.time()) + 30 * 86400))},
         org="personal",
@@ -588,9 +969,10 @@ def test_register_treats_registry_409_as_idempotent_when_binding_matches(
     monkeypatch.delenv("GRAPH_ORG", raising=False)   # personal scope
     _store_personal_identity(root)
     settings_ops.add_setting(
-        NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION, "auto.network",
+        NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION_2, "auto.network",
         {"org_uuid": PERSONAL_ORG_UUID, "root_pub": root.public_hex,
          "registry_url": REGISTRY_URL, "recovery_policy": {"mode": "none"},
+         "binding_generation": "aa" * 32,
          "binding_expires_at": time.strftime(
              "%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(time.time()) + 30 * 86400))},
         org="personal",
