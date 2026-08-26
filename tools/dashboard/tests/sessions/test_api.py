@@ -156,11 +156,14 @@ class TestRecentSessionsAPI:
     def test_org_scoped_session_cannot_read_another_org(self, test_client, monkeypatch):
         """An org-stamped agent cannot turn ``?org=`` into a cross-org read."""
         from tools.dashboard import server
+        from tools.dashboard.api_auth import ApiPrincipal, ApiPrincipalKind
 
         monkeypatch.setattr(
-            server,
-            "authenticate_session_request",
-            lambda request: (("auto-dynbench", "dynbench"), None),
+            server.api_auth,
+            "principal_from_request",
+            lambda request: ApiPrincipal(
+                ApiPrincipalKind.ORG_SESSION, subject="auto-dynbench", org="dynbench",
+            ),
         )
         response = test_client.get("/api/dao/recent_sessions?org=anchore")
         assert response.status_code == 403
@@ -189,35 +192,38 @@ class TestRecentSessionsAPI:
             "org": "dynbench",
         }
 
-    def test_history_snapshot_is_one_untrimmed_background_read(self, test_client, monkeypatch):
-        """Regression: history facets previously forced fresh endpoint requests and cache warmups."""
+    def test_history_snapshot_reads_the_warmed_bounded_projection(self, test_client, monkeypatch):
+        """Regression: history must not compute thousands of rows on its request path."""
         from tools.dashboard import server
 
         captured = {}
 
-        def fake_recent(limit, sort, since, type_group, org, full_history=False):
+        def fake_cached(sort, since, type_group, org, include_org_floor=False):
             captured.update(
-                limit=limit, sort=sort, since=since, type_group=type_group,
-                org=org, full_history=full_history,
+                sort=sort, since=since, type_group=type_group,
+                org=org, include_org_floor=include_org_floor,
             )
             return [{"id": "history-row"}]
 
-        monkeypatch.setattr(server.dao_sessions, "get_recent_sessions", fake_recent)
         monkeypatch.setattr(
             server.dao_sessions,
             "recent_sessions_cached",
-            lambda *args: pytest.fail("the history snapshot must not enter the timed cache queue"),
+            fake_cached,
+        )
+        monkeypatch.setattr(
+            server.dao_sessions,
+            "get_recent_sessions",
+            lambda *args, **kwargs: pytest.fail("the snapshot must not compute on the request path"),
         )
         response = test_client.get("/api/dao/recent_sessions?snapshot=1")
         assert response.status_code == 200
         assert response.json() == [{"id": "history-row"}]
         assert captured == {
-            "limit": None,
             "sort": "lastActivity",
-            "since": "all",
+            "since": "1w",
             "type_group": "all",
             "org": None,
-            "full_history": True,
+            "include_org_floor": True,
         }
 
     def test_history_snapshot_requires_global_operator_authority(self, test_client, monkeypatch):

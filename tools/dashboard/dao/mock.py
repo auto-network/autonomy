@@ -551,7 +551,7 @@ def get_recent_sessions(
     since: str = "1d",
     type_group: str = "all",
     org: str | None = None,
-    full_history: bool = False,
+    include_org_floor: bool = False,
 ) -> list[dict]:
     """Mirror of ``dao.sessions.get_recent_sessions`` for DASHBOARD_MOCK fixtures.
 
@@ -592,7 +592,24 @@ def get_recent_sessions(
         except (ValueError, TypeError):
             return 0.0
 
-    if not org and not full_history and since and since != "all":
+    # Mirror the production snapshot's per-org, age-independent floor. It is
+    # selected before the normal time window so a quiet old org remains in the
+    # browser's one bounded history payload.
+    org_floor_rows = []
+    if include_org_floor and not org:
+        by_org: dict[str, list[dict]] = {}
+        for row in rows:
+            by_org.setdefault((row.get("project") or "").strip("[]"), []).append(row)
+        for bucket in by_org.values():
+            bucket.sort(
+                key=lambda row: _epoch(
+                    row.get("last_activity_at") or row.get("created_at") or ""
+                ),
+                reverse=True,
+            )
+            org_floor_rows.extend(bucket[:10])
+
+    if not org and since and since != "all":
         try:
             cutoff = _time.time() - parse_duration(since)
         except ValueError:
@@ -622,30 +639,31 @@ def get_recent_sessions(
         def _sort_key(r):
             return _epoch(r.get("last_activity_at", ""))
 
-    if full_history:
-        rows.sort(key=_sort_key, reverse=True)
-        out = rows if limit is None else rows[:limit]
-    else:
-        # ── bucket by type group and trim to quota ──
-        buckets: dict[str, list[dict]] = {"interactive": [], "dispatch": [], "librarian": []}
-        for row in rows:
-            buckets[_group_for_session_type(row.get("session_type"))].append(row)
+    # ── bucket by type group and trim to quota ──
+    buckets: dict[str, list[dict]] = {"interactive": [], "dispatch": [], "librarian": []}
+    for row in rows:
+        buckets[_group_for_session_type(row.get("session_type"))].append(row)
 
-        trimmed: list[dict] = []
-        for group, bucket in buckets.items():
-            q = quotas.get(group, 0)
-            if q <= 0:
-                continue
-            bucket.sort(key=_sort_key, reverse=True)
-            trimmed.extend(bucket[:q])
+    trimmed: list[dict] = []
+    for group, bucket in buckets.items():
+        q = quotas.get(group, 0)
+        if q <= 0:
+            continue
+        bucket.sort(key=_sort_key, reverse=True)
+        trimmed.extend(bucket[:q])
 
-        trimmed.sort(key=_sort_key, reverse=True)
-        out = trimmed if limit is None else trimmed[:limit]
+    if include_org_floor:
+        by_id = {row.get("id"): row for row in trimmed}
+        by_id.update({row.get("id"): row for row in org_floor_rows})
+        trimmed = list(by_id.values())
+    trimmed.sort(key=_sort_key, reverse=True)
+    out = trimmed if limit is None else trimmed[:limit]
     return _attach_org(out)
 
 
 def recent_sessions_cached(
     sort: str, since: str, type_group: str, org: str | None = None,
+    include_org_floor: bool = False,
 ) -> list[dict] | None:
     """Mock-mode companion to ``dao.sessions.recent_sessions_cached``.
 
@@ -653,7 +671,9 @@ def recent_sessions_cached(
     iterate org DBs. Mock mode is fixture-file backed, so compute immediately
     from the fixture to keep tests deterministic.
     """
-    return get_recent_sessions(None, sort, since, type_group, org)
+    return get_recent_sessions(
+        None, sort, since, type_group, org, include_org_floor,
+    )
 
 
 def refresh_recent_cache() -> int:
