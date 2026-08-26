@@ -19,7 +19,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-curl -sk "$DASH/api/jira/fields/$KEY?org=$ORG" \
+jira_curl -sk "$DASH/api/jira/fields/$KEY?org=$ORG" \
   | python3 -c 'import json, sys
 query, as_json = sys.argv[1], sys.argv[2] == "true"
 d = json.load(sys.stdin)

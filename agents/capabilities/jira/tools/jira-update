@@ -40,7 +40,7 @@ esac
 # Read-only preflight before staging approval. A typo used to reach editmeta
 # only after approval, leaving a junk failed-write audit row. Validate against
 # the same authoritative field list that powers jira-fields instead.
-curl -sk "$DASH/api/jira/fields/$KEY?org=$ORG" \
+jira_curl -sk "$DASH/api/jira/fields/$KEY?org=$ORG" \
   | python3 -c 'import json, sys
 field = sys.argv[1]
 d = json.load(sys.stdin)

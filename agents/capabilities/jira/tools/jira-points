@@ -28,7 +28,7 @@ context_file="$(mktemp)"; req_file="$(mktemp)"
 trap 'rm -f "$context_file" "$req_file"' EXIT
 query="org=$ORG"
 [ -z "$BOARD_ID" ] || query="$query&board_id=$BOARD_ID"
-curl -sk "$DASH/api/jira/estimation/$KEY?$query" > "$context_file"
+jira_curl -sk "$DASH/api/jira/estimation/$KEY?$query" > "$context_file"
 python3 - "$context_file" <<'PY' || exit 1
 import json, sys
 try:

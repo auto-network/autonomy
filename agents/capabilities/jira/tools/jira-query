@@ -13,7 +13,7 @@ set -uo pipefail
 [ -n "$SESSION" ] || jira_fail "jira-query: AUTONOMY_SESSION is not set"
 
 if [ "${1:-}" = "--list" ]; then
-  curl -sk "$DASH/api/jira/query?org=$ORG&session=$SESSION" \
+  jira_curl -sk "$DASH/api/jira/query?org=$ORG&session=$SESSION" \
     | python3 -c 'import sys, json
 d = json.load(sys.stdin)
 if "error" in d: sys.exit("jira: " + str(d["error"]))
@@ -59,7 +59,7 @@ for kv in sys.argv[7:]:
 print(f"{dash}/api/jira/query/{urllib.parse.quote(name)}?{urllib.parse.urlencode(pairs)}")' \
   "$DASH" "$ORG" "$SESSION" "$NAME" "$MAX" "$PAGE" ${PARAMS[@]+"${PARAMS[@]}"})" || exit 1
 
-curl -sk "$url" | python3 -c 'import sys, json
+jira_curl -sk "$url" | python3 -c 'import sys, json
 d = json.load(sys.stdin)
 if "error" in d: sys.exit("jira: " + str(d["error"]))
 print(json.dumps(d, indent=2))'

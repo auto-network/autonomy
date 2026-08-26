@@ -33,7 +33,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from agents.capabilities.jira.backend import api, queries
-from tools.dashboard import approvals_routes
+from tools.dashboard import api_auth, approvals_routes
 
 
 def _cfg(org: str | None) -> api.JiraConfig:
@@ -41,10 +41,19 @@ def _cfg(org: str | None) -> api.JiraConfig:
 
 
 def _org(request: Request) -> str | None:
-    """Org whose install Setting configures the broker — from ?org= (the
-    agent tools pass their container's GRAPH_ORG), same pattern as
-    /api/sign-key."""
-    return request.query_params.get("org") or None
+    """Org whose install Setting configures the broker — the caller's TRUSTED
+    org, and nothing the request body can name.
+
+    Bound by ApiIdentityMiddleware (``organization_scope_from_request``): for an
+    org session it is the bearer's org, authoritative and un-widenable; for a
+    global operator it is their explicit selection. This route deliberately does
+    NOT read a ``?org=`` query parameter — a client-supplied org is exactly the
+    spoofable, drift-prone input the org-scope standardization removed
+    everywhere else. The container tools stopped carrying ``GRAPH_ORG`` to pass
+    once the org became a property of the token, so there is nothing legitimate
+    to read from the query anyway.
+    """
+    return api_auth.organization_scope_from_request(request)
 
 
 async def get_issue(request: Request) -> JSONResponse:
@@ -309,7 +318,12 @@ async def _execute_jira_write(row: dict, _decision: dict) -> dict:
     stored as ``result.execution`` and wakes the agent's held GET)."""
     req = row["request"]
     op = req.get("op")
-    cfg = _cfg(req.get("org") or None)
+    # The org is the TRUSTED org of the approval's session — derived server-side
+    # from the session record (approvals_routes._org_for_approval → session_org_
+    # slug), never the client-supplied ``req["org"]``. Same standardization as
+    # the read routes' _org: a jira write executes against the org the caller
+    # actually belongs to, not one the request body names.
+    cfg = _cfg(approvals_routes._org_for_approval(row.get("id")))
 
     def run() -> dict:
         if op == "comment":

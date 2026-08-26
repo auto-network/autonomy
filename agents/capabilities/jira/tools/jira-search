@@ -23,7 +23,7 @@ b = {"jql": os.environ["JQL"], "max_results": int(os.environ["MAX"] or 50)}
 if os.environ.get("PAGE"): b["page_token"] = os.environ["PAGE"]
 print(json.dumps(b))')" || exit 1
 
-curl -sk -X POST "$DASH/api/jira/search?org=$ORG" \
+jira_curl -sk -X POST "$DASH/api/jira/search?org=$ORG" \
      -H 'Content-Type: application/json' --data-binary "$body" \
   | python3 -c 'import sys, json
 d = json.load(sys.stdin)
