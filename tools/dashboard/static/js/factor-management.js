@@ -61,6 +61,16 @@ const STYLE = `
 .tag.act{color:#c7d2fe;background:#312e81;border:1px solid #4f46e5;cursor:pointer}
 .tag.live{color:#a5b4fc;background:#1e1b4b;border:1px solid #4338ca;cursor:pointer}
 .tag.nop{color:#fca5a5;background:#3f1d1d}
+.aucell{display:flex;flex-direction:column;align-items:center;gap:5px;flex:none;width:74px;text-align:center}
+.aucell .au-ico{width:32px;height:32px;border-radius:9px;display:grid;place-items:center;background:#0b1220;border:1px solid #2b3240;color:#93a3bd}
+.aucell .au-ico svg{width:17px;height:17px}
+.aucell .au-word{font-size:10px;font-weight:600;line-height:1.15;color:#8b93a7}
+.aucell.au-full .au-ico{color:#34d399;border-color:rgba(52,211,153,.45);background:rgba(52,211,153,.08)}
+.aucell.au-full .au-word{color:#34d399}
+.aucell.au-multi .au-ico{color:#818cf8;border-color:rgba(129,140,248,.5);background:rgba(129,140,248,.08)}
+.aucell.au-multi .au-word{color:#818cf8}
+.aucell.au-unlock .au-ico{color:#93a3bd}.aucell.au-unlock .au-word{color:#93a3bd}
+.aucell.au-none .au-ico{color:#4b5563;background:transparent}.aucell.au-none .au-word{color:#5b6578}
 
 .tray{position:relative;display:flex;justify-content:center;gap:7px;margin:16px 0 15px}
 .fl{width:31px;height:31px;border-radius:8px;background:#161b26;border:1px solid #232a39;
@@ -284,6 +294,27 @@ export function authorityCls(rootRole, access) {
   if (rootRole === 'individual') return 'au-full';
   if (rootRole === 'mfa-member') return 'au-multi';
   return access === 'disabled' ? 'au-none' : 'au-unlock';   // root_role 'none'
+}
+const IC_KEY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="4.5"/><path d="M10.7 12.3 21 2m-4 0 3 3m-6 0 3 3"/></svg>';
+const IC_PK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="8" r="4"/><path d="M10.3 14C6 14 3 16.5 3 20m14-6v7m0-7 2.5 1.5M17 17l2.5-1.5M17 20l2.3 1.4"/></svg>';
+// The left authority cell (approved design): type icon + the authority word
+// beneath, colored by state. Prefers the server factor-policy role; falls back
+// to the local solver's level when factor-policy hasn't loaded. Keeps the same
+// data-p/data-k tap hook the authority editor already listens on.
+function auCell(role, access, oldLevel, isPasskey, dataAttr, noprf) {
+  const ico = isPasskey ? IC_PK : IC_KEY;
+  if (noprf) {
+    return '<div class="aucell au-none"><span class="au-ico">' + ico
+      + '</span><span class="au-word">' + (M.mfa ? 'Cannot pair' : 'No PRF') + '</span></div>';
+  }
+  let word;
+  let cls;
+  if (role) { word = authorityWord(role, access); cls = authorityCls(role, access); } else {
+    word = ({ a: 'Unlock only', b: 'Full authority', off: 'No authority' })[oldLevel] || 'Unlock only';
+    cls = ({ a: 'au-unlock', b: 'au-full', off: 'au-none' })[oldLevel] || 'au-unlock';
+  }
+  return '<div class="aucell ' + cls + '"' + (dataAttr || '') + (dataAttr ? ' style="cursor:pointer"' : '')
+    + '><span class="au-ico">' + ico + '</span><span class="au-word">' + word + '</span></div>';
 }
 function actionOn(k) {
   if (k === 'both') {
@@ -833,13 +864,12 @@ function keysScreen() {
     // no path back to password+passkey, so the badge stays tappable whenever an
     // alternative authority state exists.
     const canTap = hasAlternative();
-    const ptag = '<span class="tag ' + lv + '"' + (canTap ? ' data-p="1" style="cursor:pointer"' : '') + '>'
-      + ({ a: 'unlock only', b: 'full authority', off: 'disabled' })[lv] + '</span>';
     const weak = M.pw.mem < M.kdfNow.mem;
-    const pr = el('div', 'krow', '<div class="kmid"><div class="knm">Password'
+    const cell = auCell(M.pw.rootRole, M.pw.access, lv, false, canTap ? ' data-p="1"' : '', false);
+    const pr = el('div', 'krow', cell + '<div class="kmid"><div class="knm">Password'
       + (weak ? '<span class="weak">below current strength</span>' : '') + '</div>'
       + '<div class="kmeta">' + M.pw.kdf + ' &middot; ' + M.pw.itersLabel
-      + (M.pw.createdLabel ? ' &middot; ' + M.pw.createdLabel : '') + '</div></div>' + ptag
+      + (M.pw.createdLabel ? ' &middot; ' + M.pw.createdLabel : '') + '</div></div>'
       + '<div class="chg">Change</div><div class="kx">&times;</div>');
     const pb = pr.querySelector('[data-p]');
     if (pb) pb.onclick = (e) => { e.stopPropagation(); gatherThen('authorize', rootNeed()); };
@@ -850,13 +880,11 @@ function keysScreen() {
 
   p.appendChild(el('div', 'plab', 'Passkeys'));
   M.keys.forEach((k, i) => {
-    const tag = k.prf === false
-      ? '<span class="tag nop">' + (M.mfa ? 'cannot pair' : 'no prf') + '</span>'
-      : '<span class="tag ' + (k.auth === 'full' ? 'b' : 'a') + '" data-k="' + i + '" style="cursor:pointer">'
-        + (k.auth === 'full' ? 'full authority' : 'unlock only') + '</span>';
-    const r = el('div', 'krow', '<div class="kmid"><div class="knm">' + k.l
+    const cell = auCell(k.rootRole, k.access, k.auth === 'full' ? 'b' : 'a', true,
+      k.prf === false ? '' : ' data-k="' + i + '"', k.prf === false);
+    const r = el('div', 'krow', cell + '<div class="kmid"><div class="knm">' + k.l
       + (k.here ? '<span class="here">this device</span>' : '') + '</div><div class="kmeta">'
-      + k.v + ' &middot; added ' + k.w + '</div></div>' + tag + '<div class="kx">&times;</div>');
+      + k.v + ' &middot; added ' + k.w + '</div></div><div class="kx">&times;</div>');
     const kb = r.querySelector('[data-k]');
     // Under MFA a passkey cannot be raised on its own — a full standalone
     // passkey and require-both are contradictory — so tapping its authority
