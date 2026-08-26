@@ -14,6 +14,7 @@ from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
 from tools.dashboard import web_push
+from tools.dashboard import web_push_sender
 from tools.dashboard.dao import approval_requests
 
 
@@ -77,6 +78,43 @@ def test_endpoint_validation_accepts_browser_services_and_refuses_ssrf():
         web_push._validate_subscription(_subscription("127.0.0.1"))
     with pytest.raises(ValueError, match="allowed browser push service"):
         web_push._validate_subscription(_subscription("metadata.internal"))
+
+
+def test_worker_sender_uses_claimed_subscription_key_and_bounded_headers(monkeypatch):
+    captured = {}
+    immutable_key = object()
+    monkeypatch.setattr(web_push, "_load_vapid", lambda key_id: (
+        captured.setdefault("key_id", key_id), immutable_key,
+    )[1])
+
+    def send(**kwargs):
+        captured.update(kwargs)
+        return web_push_sender.SendResult(201, "accepted", False, False, None)
+
+    monkeypatch.setattr(web_push_sender, "send_encrypted_web_push", send)
+    monkeypatch.setattr(web_push.time, "time", lambda: 1_000.0)
+    status = web_push._send_push({
+        "event_id": "approval:opaque",
+        "event_version": 7,
+        "endpoint": "https://web.push.apple.com/Q/opaque",
+        "p256dh": "receiver-key",
+        "auth_secret": "auth-secret",
+        "vapid_key_id": "a" * 32,
+        "origin": "https://dashboard.example",
+        "expires_at": 91_000.0,
+        "created_at": 900.0,
+        "attention_class": "approval_pending",
+        "route": "/activity?focus=approval&id=opaque",
+    })
+    assert status == 201
+    assert captured["key_id"] == "a" * 32
+    assert captured["vapid_key"] is immutable_key
+    assert captured["endpoint"] == "https://web.push.apple.com/Q/opaque"
+    assert captured["vapid_subject"] == "https://dashboard.example"
+    assert captured["ttl"] == 86400
+    assert captured["urgency"] == "normal"
+    assert len(captured["topic"]) == 32
+    assert json.loads(captured["payload"])["class"] == "approval_pending"
 
 
 def test_enrollment_binds_to_server_owner_and_state(transport):

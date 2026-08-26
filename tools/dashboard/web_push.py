@@ -11,12 +11,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
-import ipaddress
 import json
 import logging
 import random
 import re
-import socket
 import sqlite3
 import threading
 import time
@@ -30,6 +28,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from tools.dashboard import api_auth
+from tools.dashboard import web_push_sender
 from tools.dashboard.dao import web_push as web_push_dao
 from tools.data_paths import resolve_store
 
@@ -653,23 +652,6 @@ def _claim_due(*, db_path: Path | str | None = None) -> dict | None:
         connection.close()
 
 
-def _host_has_only_public_addresses(host: str) -> bool:
-    try:
-        answers = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
-    except OSError:
-        return False
-    addresses = {answer[4][0].split("%", 1)[0] for answer in answers}
-    if not addresses:
-        return False
-    for address in addresses:
-        try:
-            if not ipaddress.ip_address(address).is_global:
-                return False
-        except ValueError:
-            return False
-    return True
-
-
 def _lease_still_sendable(
     row: dict, *, db_path: Path | str | None = None,
 ) -> bool:
@@ -742,43 +724,21 @@ def _payload_for(row: dict) -> str:
 
 
 def _send_push(row: dict) -> int:
-    try:
-        import requests
-        from pywebpush import webpush
-    except ImportError as exc:
-        raise RuntimeError(
-            "Web Push runtime is unavailable; install deploy/requirements.txt"
-        ) from exc
-    parsed = urlsplit(row["endpoint"])
-    host = (parsed.hostname or "").rstrip(".").lower()
-    if not _valid_push_host(host) or not _host_has_only_public_addresses(host):
-        raise PermissionError("push endpoint failed the public-service egress policy")
-
-    class NoRedirectSession(requests.Session):
-        def request(self, *args, **kwargs):
-            kwargs["allow_redirects"] = False
-            return super().request(*args, **kwargs)
-
-    session = NoRedirectSession()
-    session.trust_env = False
     topic = _b64url(hashlib.sha256(
         f"{row['event_id']}:{row['event_version']}".encode()
     ).digest())[:32]
-    response = webpush(
-        subscription_info={
-            "endpoint": row["endpoint"],
-            "keys": {"p256dh": row["p256dh"], "auth": row["auth_secret"]},
-        },
-        data=_payload_for(row),
-        vapid_private_key=_load_vapid(row["vapid_key_id"]),
-        vapid_claims={"sub": row["origin"]},
-        content_encoding="aes128gcm",
+    result = web_push_sender.send_encrypted_web_push(
+        endpoint=row["endpoint"],
+        p256dh=row["p256dh"],
+        auth_secret=row["auth_secret"],
+        payload=_payload_for(row),
+        vapid_key=_load_vapid(row["vapid_key_id"]),
+        vapid_subject=row["origin"],
         ttl=max(0, min(int(row["expires_at"] - time.time()), 86400)),
-        timeout=10,
-        headers={"Urgency": "normal", "Topic": topic},
-        requests_session=session,
+        urgency="normal",
+        topic=topic,
     )
-    return int(response.status_code)
+    return result.status
 
 
 def _failure_status(exc: Exception) -> tuple[int | None, str | None, float | None]:
