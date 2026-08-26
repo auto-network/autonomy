@@ -521,6 +521,27 @@ test('inline rename PATCHes the factor metadata and updates the shown name', asy
   assert.match(q('.krow .nm-txt').textContent, /Work password/, 'and the shown name updates');
 });
 
+test('inline verify: right password reads Verified, wrong reads Incorrect', async () => {
+  const root = await mintRoot();
+  const armor = await aPassword(root, 'rightpw');
+  SERVER = makeServer({ armor, rootPub: root.rootPub, passkeys: [] });
+  await openPanel();
+  await settle();
+  const vfy = q('.krow .vfy');
+  assert.ok(vfy, 'the Verify action is offered on a non-MFA password');
+  vfy.click();
+  await settle();
+  assert.ok(q('.vfy-in'), 'the card morphs to a password field');
+  q('.vfy-in').value = 'WRONGpw';
+  q('.vfy-in').dispatchEvent(new window.Event('input'));
+  q('.vfy-go').click();
+  assert.ok(await until(() => q('.vfy-fail')), 'a wrong password reports Incorrect');
+  q('.vfy-in').value = 'rightpw';
+  q('.vfy-in').dispatchEvent(new window.Event('input'));
+  q('.vfy-go').click();
+  assert.ok(await until(() => q('.vfy-ok')), 'the correct password verifies green (opened the armor client-side)');
+});
+
 test('a failed ceremony reports diagnostics to the server with NO secrets', async () => {
   const root = await mintRoot();
   const armor = await aPassword(root, 'realpw');
