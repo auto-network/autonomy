@@ -84,6 +84,35 @@ working node — session launch (`docker run`), topology discovery
 (`docker inspect`), and the in-memory secret-store provisioning
 (`agents/secret_ramfs.py`) all reach the daemon through it.
 
+### Choosing where the data lives on the host
+
+By default the three persistent volumes (`autonomy-code`, `autonomy-data`,
+`autonomy-orgs`; `dolt-data` too, under the `beads` profile) live in Docker's
+own internal volume storage (`/var/lib/docker/volumes/...`) — the operator
+never sees a path. To put them on a specific host directory instead — a
+separate disk, a location you back up directly, `/opt/autonomy` — layer
+`deploy/docker-compose.host-data.yml` on top of the base file and point
+`AUTONOMY_HOST_DATA_ROOT` at the parent directory:
+
+```bash
+mkdir -p /opt/autonomy/{code,data,orgs,dolt}   # root-owned parent (e.g. /opt) needs a one-time sudo mkdir+chown first
+AUTONOMY_HOST_DATA_ROOT=/opt/autonomy AUTONOMY_FIRST_ORG=myorg docker compose \
+  -f docker-compose.yml -f deploy/docker-compose.host-data.yml up -d
+```
+
+This still creates real, named Docker volumes (`docker volume inspect
+autonomy-code` works, `docker compose down` without `-v` still leaves them
+alone) — only their storage backing changes, via the `local` driver's bind
+option (`type: none, o: bind, device: <path>`). That distinction is not
+cosmetic: Docker auto-seeds an *empty named volume* from the image's baked-in
+`/app` content the first time it's mounted; a plain bind mount
+(`- /host/path:/app` written directly into the service's own `volumes:`)
+never gets this treatment — it just shadows the image's `/app` outright,
+hiding even the entrypoint, and the container fails to start. Verified live
+2026-08-25 both ways (see `deploy/docker-compose.host-data.yml`'s own
+header for the failure mode) — use the override file's `driver_opts` form
+to relocate these volumes, never a raw bind.
+
 The container entrypoint (`deploy/entrypoint.sh`) runs the idempotent
 migrate-on-mount initializer and then uvicorn, serving HTTPS when the
 init-generated keypair is present (`DASHBOARD_TLS=off` for plain HTTP behind

@@ -106,9 +106,16 @@ Template:
 > will: clone the source to `<path>`, build (or pull and verify) the node
 > image (~2 GB), and start one container serving `https://localhost:8080`.
 > It creates no account and sends no telemetry — I'll verify both claims on
-> this machine and show you. Shall I proceed?
+> this machine and show you. By default that volume lives in Docker's own
+> storage, not a path you'd see directly — if you'd rather it sit at a
+> specific directory (a separate disk, somewhere you back up yourself), say
+> so now and I'll use that instead. Shall I proceed?
 
-Nothing that mutates the system runs before an explicit yes.
+Nothing that mutates the system runs before an explicit yes. If they want a
+specific host directory for the data, use `deploy/docker-compose.host-data.yml`
+with `AUTONOMY_HOST_DATA_ROOT` (see DEPLOY.md, "Choosing where the data lives
+on the host") instead of the plain `docker compose up -d` in §4 — same first-run
+behavior, different storage backing.
 
 ## 4. Install and start the node
 
@@ -268,7 +275,11 @@ the floor; charm is optional.
   container). Back up the volume, you've backed up the deployment;
   `python3 -m tools.portability snapshot|restore` is the supported
   quiesced path, and restoring the volume elsewhere makes that machine
-  the same identity.
+  the same identity. By default the volume's bytes live in Docker's own
+  storage; to put it (and `autonomy-code`/`autonomy-orgs`) on a specific
+  host directory instead, see DEPLOY.md's "Choosing where the data lives
+  on the host" — `deploy/docker-compose.host-data.yml` +
+  `AUTONOMY_HOST_DATA_ROOT`.
 - TLS is self-signed by default; `DASHBOARD_TLS=off` behind your own
   proxy. Port: `DASHBOARD_PORT` (default 8080).
 - The optional beads issue-tracker backend is a separate compose profile
