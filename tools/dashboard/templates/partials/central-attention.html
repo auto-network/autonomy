@@ -1,0 +1,288 @@
+<style>
+  header[data-app-chrome] { display: flex; align-items: center; }
+  [data-testid="central-attention-root"] { order: 2; }
+  #nav-toggle,
+  [data-testid="central-attention-root"] > [data-testid="central-attention-button"] {
+    box-sizing: border-box;
+    display: flex;
+    flex: 0 0 2.25rem;
+    width: 2.25rem;
+    height: 2.25rem;
+    padding: 0;
+    align-items: center;
+    justify-content: center;
+  }
+  #global-search, #global-search-icon { order: 3; }
+  #app-topbar-slot, #page-title, #agent-actions-slot, #header-actions { order: 4; }
+  @media (min-width: 768px) {
+    [data-testid="central-attention-root"] { order: 3; }
+    [data-testid="central-attention-root"] > [data-testid="central-attention-button"] {
+      flex-basis: 2.5rem;
+      width: 2.5rem;
+      height: 2.5rem;
+    }
+    #global-search, #global-search-icon { order: 2; }
+  }
+</style>
+<div x-data="centralAttentionSurface()"
+     x-init="init()"
+     @keydown.escape.window="escape()"
+     class="relative order-2 flex-shrink-0 md:order-3"
+     data-testid="central-attention-root">
+  <button type="button"
+          data-testid="central-attention-button"
+          @click.stop="toggleInbox()"
+          :aria-expanded="inboxOpen || fullInbox ? 'true' : 'false'"
+          aria-controls="central-attention-tray"
+          aria-label="Open attention center"
+          class="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border bg-gray-800 text-gray-200 hover:border-gray-500 hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 md:h-10 md:w-10"
+          :class="inboxOpen || fullInbox ? 'border-indigo-500 bg-gray-700' : 'border-gray-700'">
+    <svg aria-hidden="true" class="h-5 w-5" viewBox="0 0 24 24" fill="none"
+         stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
+         stroke-linejoin="round">
+      <path d="M5.2 4.5h13.6l2.2 10.2v3.1a1.7 1.7 0 0 1-1.7 1.7H4.7A1.7 1.7 0 0 1 3 17.8v-3.1L5.2 4.5Z"></path>
+      <path d="M3.3 14.6h4.4l1.4 2.2h5.8l1.4-2.2h4.4"></path>
+    </svg>
+    <span x-show="badgeCount > 0"
+          x-cloak
+          data-testid="central-attention-badge"
+          x-text="badgeCount > 99 ? '99+' : badgeCount"
+          :class="badgePulse ? 'scale-125' : 'scale-100'"
+          class="absolute -right-1.5 -top-1.5 flex h-5 min-w-5 items-center justify-center rounded-full border-2 border-gray-800 bg-amber-400 px-1 text-[10px] font-black leading-none text-gray-950 transition-transform duration-300"></span>
+  </button>
+
+  <template x-teleport="body">
+    <div>
+      <aside id="central-attention-tray"
+             data-testid="central-attention-tray"
+             @click.outside="inboxOpen=false"
+             :class="inboxOpen && !fullInbox ? 'hidden md:flex' : 'hidden'"
+             class="fixed right-6 top-[4.35rem] z-50 max-h-[min(44rem,calc(100dvh-5.5rem))] w-[28rem] flex-col overflow-hidden rounded-2xl border border-gray-700 bg-gray-900 shadow-2xl">
+        <header class="flex items-center justify-between border-b border-gray-800 px-4 py-3">
+          <div>
+            <h2 class="text-sm font-semibold text-gray-100">Attention</h2>
+            <p class="mt-0.5 text-[11px] text-gray-500">
+              <span x-text="badgeCount"></span> need you across
+              <span x-text="apps.filter(app => app.needs > 0).length"></span> apps
+            </p>
+          </div>
+          <button type="button" @click="inboxOpen=false" aria-label="Close attention tray"
+                  class="flex h-9 w-9 items-center justify-center rounded-lg text-xl text-gray-500 hover:bg-gray-800 hover:text-white">×</button>
+        </header>
+
+        <div class="flex items-center gap-1 border-b border-gray-800 px-3 py-2">
+          <template x-for="category in categories" :key="category.key">
+            <button type="button" :aria-label="category.label" :title="category.label"
+                    :data-testid="'central-attention-tray-category-' + category.key"
+                    @click="toggleCategory(category.key, true)"
+                    class="flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-xs font-semibold"
+                    :class="categoryFilter===category.key ? 'bg-gray-800 text-white' : 'text-gray-400 hover:bg-gray-800/60 hover:text-gray-200'">
+              <span class="text-base" x-text="category.glyph"></span>
+              <span class="rounded-full bg-gray-950 px-1.5 py-0.5 text-[10px]"
+                    x-text="categoryCount(category.key)"></span>
+            </button>
+          </template>
+        </div>
+
+        <div class="min-h-0 flex-1 overflow-y-auto p-2">
+          <template x-if="unavailable">
+            <div class="px-5 py-8 text-center text-xs leading-5 text-amber-200" x-text="message"></div>
+          </template>
+          <template x-if="!unavailable && needsItems().length===0">
+            <div class="px-5 py-12 text-center">
+              <p class="text-sm font-semibold text-gray-200">Nothing needs you</p>
+              <p class="mt-1 text-xs leading-5 text-gray-500">Registered applications will add their own attention items here.</p>
+            </div>
+          </template>
+          <template x-for="item in needsItems().slice(0,4)" :key="item.id">
+            <button type="button" @click="openItem(item)"
+                    class="mb-1 grid w-full grid-cols-[2.5rem_minmax(0,1fr)] gap-3 rounded-xl border border-transparent p-3 text-left hover:border-gray-700 hover:bg-gray-800/80">
+              <span class="flex h-10 w-10 items-center justify-center rounded-xl text-sm font-black text-white"
+                    :class="toneClasses(item.appTone)">
+                <svg x-show="item.type==='message'" aria-hidden="true" class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="8" r="3.25"></circle><path d="M5.5 20c.5-4 2.7-6 6.5-6s6 2 6.5 6"></path></svg>
+                <span x-show="item.type!=='message'" x-text="item.glyph"></span>
+              </span>
+              <span class="min-w-0">
+                <span class="flex items-start justify-between gap-3">
+                  <strong class="line-clamp-2 text-sm font-semibold leading-5 text-gray-100" x-text="item.title"></strong>
+                  <time class="shrink-0 text-[10px] text-gray-600" x-text="item.timeLabel"></time>
+                </span>
+                <span class="mt-1 block line-clamp-2 text-xs leading-5 text-gray-400" x-text="item.summary"></span>
+                <span class="mt-2 block text-[10px] font-semibold uppercase tracking-wide text-indigo-300" x-text="item.statusLabel"></span>
+              </span>
+            </button>
+          </template>
+        </div>
+        <button type="button" @click="fullInbox=true; inboxOpen=false; categoryFilter='all'"
+                class="m-3 mt-1 h-11 shrink-0 rounded-xl border border-gray-700 bg-gray-950 text-sm font-semibold text-gray-200 hover:border-indigo-500">Open attention center</button>
+      </aside>
+
+      <section :class="inboxOpen || fullInbox ? 'block md:hidden' : 'hidden'"
+               data-testid="central-attention-mobile"
+               class="fixed inset-x-0 bottom-0 z-40 overflow-y-auto bg-gray-950"
+               style="top:4.05rem">
+        <header class="sticky top-0 z-10 flex items-center gap-2 border-b border-gray-800 bg-gray-900 px-3 py-2">
+          <button type="button" @click="closeInbox()" aria-label="Close attention center"
+                  class="flex h-10 w-10 shrink-0 items-center justify-center text-2xl leading-none text-gray-300">×</button>
+          <nav class="flex min-w-0 flex-1 items-center justify-center gap-1">
+            <template x-for="category in categories" :key="category.key">
+              <button type="button" :aria-label="category.label" :title="category.label"
+                      :data-testid="'central-attention-mobile-category-' + category.key"
+                      @click="toggleCategory(category.key, false)"
+                      class="relative flex h-10 min-w-[3.8rem] items-center justify-center rounded-xl"
+                      :class="categoryFilter===category.key ? 'bg-gray-800 text-white' : 'text-gray-300 hover:bg-gray-800/70'">
+                <span class="text-2xl leading-none" x-text="category.glyph"></span>
+                <span class="absolute right-1 top-0 rounded-full bg-amber-400 px-1.5 py-0.5 text-[10px] font-black leading-none text-gray-950"
+                      x-text="categoryCount(category.key)"></span>
+              </button>
+            </template>
+          </nav>
+          <button type="button" @click="settingsOpen=true" aria-label="Attention settings"
+                  title="Attention settings" class="flex h-10 w-10 items-center justify-center text-gray-300 hover:text-white">
+            <svg aria-hidden="true" class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <circle cx="12" cy="12" r="3.4"></circle>
+              <path d="M19.4 15a1.7 1.7 0 0 1-2.4 2.4l-1-.6a7 7 0 0 1-2 .8l-.3 1.2a1.7 1.7 0 0 1-3.4 0l-.3-1.2a7 7 0 0 1-2-.8l-1 .6A1.7 1.7 0 0 1 4.6 15l.6-1a7 7 0 0 1-.8-2l-1.2-.3a1.7 1.7 0 0 1 0-3.4L4.4 8a7 7 0 0 1 .8-2l-.6-1A1.7 1.7 0 0 1 7 2.6l1 .6a7 7 0 0 1 2-.8l.3-1.2a1.7 1.7 0 0 1 3.4 0l.3 1.2a7 7 0 0 1 2 .8l1-.6A1.7 1.7 0 0 1 19.4 5l-.6 1a7 7 0 0 1 .8 2l1.2.3a1.7 1.7 0 0 1 0 3.4l-1.2.3a7 7 0 0 1-.8 2l.6 1Z"></path>
+            </svg>
+          </button>
+        </header>
+        <div class="flex gap-1 overflow-x-auto border-b border-gray-800 px-4 py-2">
+          <button data-testid="central-attention-mobile-view-needs" @click="view='needs'" class="h-10 shrink-0 rounded-xl border px-3 text-xs font-semibold"
+                  :class="view==='needs' ? 'border-indigo-500/60 bg-gray-900 text-white' : 'border-gray-800 bg-gray-950 text-gray-500'">
+            Needs me <span class="ml-1 rounded-full bg-amber-400 px-1.5 py-0.5 text-[10px] font-bold text-gray-950" x-text="visibleNeedsCount()"></span>
+          </button>
+          <button data-testid="central-attention-mobile-view-waiting" @click="view='waiting'" class="h-10 shrink-0 rounded-xl border px-3 text-xs font-semibold"
+                  :class="view==='waiting' ? 'border-indigo-500/60 bg-gray-900 text-white' : 'border-gray-800 bg-gray-950 text-gray-500'">Waiting</button>
+          <button data-testid="central-attention-mobile-view-resolved" @click="view='recent'" class="h-10 shrink-0 rounded-xl border px-3 text-xs font-semibold"
+                  :class="view==='recent' ? 'border-indigo-500/60 bg-gray-900 text-white' : 'border-gray-800 bg-gray-950 text-gray-500'">Resolved</button>
+        </div>
+        <div class="space-y-2 p-3 pb-[calc(1rem+env(safe-area-inset-bottom))]">
+          <template x-if="unavailable">
+            <div class="px-5 py-12 text-center text-sm text-amber-200" x-text="message"></div>
+          </template>
+          <template x-if="!unavailable && filteredItems().length===0">
+            <div class="px-5 py-16 text-center"><p class="text-sm font-semibold text-gray-200">Nothing here</p><p class="mt-1 text-xs leading-5 text-gray-500">The application badges always reflect the same synchronized attention Settings.</p></div>
+          </template>
+          <template x-for="item in filteredItems()" :key="item.id">
+            <button type="button" @click="openItem(item)"
+                    :data-testid="'central-attention-mobile-item-' + item.id"
+                    class="grid w-full grid-cols-[3rem_minmax(0,1fr)] gap-3 rounded-2xl border border-gray-800 bg-gray-900/80 p-3 text-left">
+              <span class="flex h-12 w-12 self-center items-center justify-center rounded-[0.9rem] text-base font-black text-white"
+                    :class="toneClasses(item.appTone)"><svg x-show="item.type==='message'" aria-hidden="true" class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="8" r="3.25"></circle><path d="M5.5 20c.5-4 2.7-6 6.5-6s6 2 6.5 6"></path></svg><span x-show="item.type!=='message'" x-text="item.glyph"></span></span>
+              <span class="min-w-0"><span class="flex items-start justify-between gap-3"><span class="text-[10px] font-semibold uppercase tracking-wide text-indigo-300" x-text="item.statusLabel"></span><time class="shrink-0 text-[10px] text-gray-600" x-text="item.timeLabel"></time></span><strong class="mt-1 block text-sm font-semibold leading-5 text-gray-100" x-text="item.title"></strong><span class="mt-1 block text-xs leading-5 text-gray-400" x-text="item.summary"></span></span>
+            </button>
+          </template>
+        </div>
+      </section>
+
+      <section :class="fullInbox ? 'hidden md:block' : 'hidden'"
+               data-testid="central-attention-desktop"
+               class="fixed bottom-0 right-0 z-40 overflow-y-auto bg-gray-950 p-6"
+               style="left:14rem;top:4.05rem">
+        <div class="mx-auto max-w-6xl">
+          <header class="flex items-center gap-3 border-b border-gray-800 bg-gray-900/70 px-3 py-2">
+            <button type="button" @click="closeInbox()" aria-label="Close attention center"
+                    class="flex h-10 w-10 shrink-0 items-center justify-center text-2xl leading-none text-gray-300 hover:text-white">×</button>
+            <nav class="flex min-w-0 flex-1 items-center justify-center gap-1">
+              <template x-for="category in categories" :key="category.key">
+                <button type="button" :aria-label="category.label" :title="category.label"
+                        :data-testid="'central-attention-desktop-category-' + category.key"
+                        @click="toggleCategory(category.key, false)"
+                        class="relative flex h-10 min-w-[4.5rem] items-center justify-center rounded-xl"
+                        :class="categoryFilter===category.key ? 'bg-gray-800 text-white' : 'text-gray-300 hover:bg-gray-800/70'">
+                  <span class="text-2xl leading-none" x-text="category.glyph"></span>
+                  <span class="absolute right-2 top-0 rounded-full bg-amber-400 px-1.5 py-0.5 text-[10px] font-black leading-none text-gray-950" x-text="categoryCount(category.key)"></span>
+                </button>
+              </template>
+            </nav>
+            <button type="button" @click="settingsOpen=true" aria-label="Attention settings"
+                    title="Attention settings" class="flex h-10 w-10 shrink-0 items-center justify-center text-gray-200 hover:text-white">
+              <svg aria-hidden="true" class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                <circle cx="12" cy="12" r="3.4"></circle>
+                <path d="M19.4 15a1.7 1.7 0 0 1-2.4 2.4l-1-.6a7 7 0 0 1-2 .8l-.3 1.2a1.7 1.7 0 0 1-3.4 0l-.3-1.2a7 7 0 0 1-2-.8l-1 .6A1.7 1.7 0 0 1 4.6 15l.6-1a7 7 0 0 1-.8-2l-1.2-.3a1.7 1.7 0 0 1 0-3.4L4.4 8a7 7 0 0 1 .8-2l-.6-1A1.7 1.7 0 0 1 7 2.6l1 .6a7 7 0 0 1 2-.8l.3-1.2a1.7 1.7 0 0 1 3.4 0l.3 1.2a7 7 0 0 1 2 .8l1-.6A1.7 1.7 0 0 1 19.4 5l-.6 1a7 7 0 0 1 .8 2l1.2.3a1.7 1.7 0 0 1 0 3.4l-1.2.3a7 7 0 0 1-.8 2l.6 1Z"></path>
+              </svg>
+            </button>
+          </header>
+          <div class="mt-5 flex items-center gap-2 border-b border-gray-800 pb-3">
+            <button data-testid="central-attention-desktop-view-needs" @click="view='needs'" class="h-9 rounded-lg px-3 text-xs font-semibold" :class="view==='needs' ? 'bg-gray-800 text-white' : 'text-gray-500'">Needs me</button>
+            <button data-testid="central-attention-desktop-view-waiting" @click="view='waiting'" class="h-9 rounded-lg px-3 text-xs font-semibold" :class="view==='waiting' ? 'bg-gray-800 text-white' : 'text-gray-500'">Waiting on others</button>
+            <button data-testid="central-attention-desktop-view-active" @click="view='all_active'" class="h-9 rounded-lg px-3 text-xs font-semibold" :class="view==='all_active' ? 'bg-gray-800 text-white' : 'text-gray-500'">All active</button>
+            <button data-testid="central-attention-desktop-view-resolved" @click="view='recent'" class="h-9 rounded-lg px-3 text-xs font-semibold" :class="view==='recent' ? 'bg-gray-800 text-white' : 'text-gray-500'">Resolved</button>
+          </div>
+          <div class="mt-4 grid gap-2">
+            <template x-if="unavailable"><div class="rounded-2xl border border-amber-900 px-5 py-10 text-center text-sm text-amber-200" x-text="message"></div></template>
+            <template x-if="!unavailable && filteredItems().length===0"><div class="rounded-2xl border border-dashed border-gray-800 px-5 py-16 text-center"><p class="text-sm font-semibold text-gray-200">Nothing here</p><p class="mt-1 text-xs text-gray-500">Choose another application or attention state.</p></div></template>
+            <template x-for="item in filteredItems()" :key="item.id">
+              <button type="button" @click="openItem(item)"
+                      :data-testid="'central-attention-desktop-item-' + item.id"
+                      class="grid w-full grid-cols-[3rem_minmax(0,1fr)_auto] items-start gap-4 rounded-2xl border border-gray-800 bg-gray-900/80 p-4 text-left hover:border-gray-600">
+                <span class="flex h-12 w-12 self-center items-center justify-center rounded-[0.9rem] text-base font-black text-white" :class="toneClasses(item.appTone)"><svg x-show="item.type==='message'" aria-hidden="true" class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="8" r="3.25"></circle><path d="M5.5 20c.5-4 2.7-6 6.5-6s6 2 6.5 6"></path></svg><span x-show="item.type!=='message'" x-text="item.glyph"></span></span>
+                <span class="min-w-0"><span class="flex items-start justify-between gap-3"><span class="text-[10px] font-semibold uppercase tracking-wide text-indigo-300" x-text="item.statusLabel"></span></span><strong class="mt-1 block text-sm font-semibold text-gray-100" x-text="item.title"></strong><span class="mt-1 block text-sm leading-6 text-gray-400" x-text="item.summary"></span></span>
+                <time class="shrink-0 text-xs text-gray-600" x-text="item.timeLabel"></time>
+              </button>
+            </template>
+          </div>
+        </div>
+      </section>
+
+      <template x-if="selectedItem">
+        <div>
+          <div class="fixed inset-0 z-50 bg-black/70" @click="selectedItem=null"></div>
+          <section role="dialog" aria-modal="true" aria-labelledby="attention-item-title"
+                   data-testid="attention-item-sheet"
+                   class="fixed inset-x-0 bottom-0 z-[60] flex max-h-[calc(100dvh-2rem)] flex-col overflow-hidden rounded-t-2xl border-t border-gray-700 bg-gray-900 shadow-2xl md:inset-y-0 md:left-auto md:w-[30rem] md:rounded-none md:border-l md:border-t-0">
+            <header class="flex items-start gap-4 border-b border-gray-800 px-5 py-4 md:px-6 md:py-6">
+              <span class="flex h-12 w-12 shrink-0 items-center justify-center rounded-[0.9rem] text-base font-black text-white" :class="toneClasses(selectedItem.appTone)" x-text="selectedItem.glyph"></span>
+              <div class="min-w-0 flex-1"><p class="text-[10px] font-bold uppercase tracking-[0.16em] text-indigo-300" x-text="selectedItem.application"></p><h2 id="attention-item-title" class="mt-1 text-xl font-semibold text-white" x-text="selectedItem.title"></h2><p class="mt-1 text-xs text-gray-600" x-text="selectedItem.statusLabel"></p></div>
+              <button type="button" @click="selectedItem=null" aria-label="Close item" class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-2xl text-gray-500 hover:bg-gray-800 hover:text-white">×</button>
+            </header>
+            <div class="min-h-0 flex-1 overflow-y-auto px-5 py-5 md:px-6">
+              <div x-show="selectedItem.unavailable" role="status" class="mb-4 rounded-xl border border-amber-800 bg-amber-950/30 p-3 text-xs leading-5 text-amber-200">The destination application is temporarily unavailable. This item remains active and synchronized.</div>
+              <p class="text-sm leading-6 text-gray-300" x-text="selectedItem.detail"></p>
+              <template x-if="selectedItem.type==='approval' && selectedItem.applicationScope==='fleet' && selectedItem.role==='recipient' && selectedItem.attentionState==='needs_attention'">
+                <div class="mt-5">
+                  <div class="rounded-2xl border border-gray-700 bg-gray-950 p-4"><p class="text-xs leading-5 text-gray-400">Verify this code on both machines:</p><p class="mt-3 break-words font-mono text-lg font-semibold leading-8 tracking-[0.08em] text-white" x-text="selectedItem.comparisonCode || 'Unavailable'"></p></div>
+                  <label class="mt-5 block text-sm font-medium text-gray-200" for="fleet-machine-name">Machine name</label>
+                  <input id="fleet-machine-name" type="text" x-model="selectedItem.machine_name" placeholder="SJC dashboard" maxlength="120" autocomplete="off" @blur="selectedItem.machineNameTouched=true" :aria-invalid="machineNameError(selectedItem) ? 'true' : 'false'" class="mt-2 h-11 w-full rounded-xl border bg-gray-950 px-3 text-sm text-white outline-none placeholder:text-gray-600 focus:border-indigo-400" :class="selectedItem.machineNameTouched && machineNameError(selectedItem) ? 'border-red-700' : 'border-gray-700'">
+                  <p class="mt-2 text-xs leading-5 text-gray-500">Choose the name that will identify this machine in Fleet.</p>
+                  <p x-show="selectedItem.machineNameTouched && machineNameError(selectedItem)" class="mt-2 text-xs text-red-300" x-text="machineNameError(selectedItem)"></p>
+                </div>
+              </template>
+              <dl class="mt-5 border-y border-gray-800 text-sm"><div class="grid grid-cols-[6rem_minmax(0,1fr)] gap-3 border-b border-gray-800 py-3"><dt class="text-gray-600">Application</dt><dd class="font-medium text-gray-100" x-text="selectedItem.application"></dd></div><div class="grid grid-cols-[6rem_minmax(0,1fr)] gap-3 py-3"><dt class="text-gray-600">Source</dt><dd class="text-xs text-gray-400" x-text="selectedItem.sourceLabel"></dd></div></dl>
+              <p x-show="selectedItem.decisionError" class="mt-4 rounded-xl border border-red-900 bg-red-950/30 p-3 text-xs leading-5 text-red-200" x-text="selectedItem.decisionError"></p>
+            </div>
+            <footer class="border-t border-gray-800 px-5 py-4 md:px-6" style="padding-bottom:calc(1rem + env(safe-area-inset-bottom,0px))">
+              <template x-if="selectedItem.type==='approval' && selectedItem.attentionState==='needs_attention' && !selectedItem.unavailable && selectedItem.actions.length">
+                <div class="grid grid-cols-2 gap-2"><button data-testid="central-attention-decline" type="button" @click="declineConfirm=true" :disabled="selectedItem.decisionBusy" class="h-11 rounded-xl border border-red-900 text-sm font-semibold text-red-300 disabled:opacity-50">Decline</button><button data-testid="central-attention-grant" type="button" @click="grant(selectedItem)" :disabled="selectedItem.decisionBusy || (selectedItem.applicationScope==='fleet' && !!machineNameError(selectedItem))" class="h-11 rounded-xl bg-indigo-600 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-gray-700 disabled:text-gray-500" x-text="selectedItem.decisionBusy ? 'Working…' : 'Grant'"></button></div>
+              </template>
+              <template x-if="selectedItem.type!=='approval' || selectedItem.attentionState!=='needs_attention' || selectedItem.unavailable || !selectedItem.actions.length"><button type="button" @click="openDestination(selectedItem)" class="h-11 w-full rounded-xl bg-indigo-600 text-sm font-semibold text-white" x-text="selectedItem.actionLabel"></button></template>
+            </footer>
+          </section>
+        </div>
+      </template>
+
+      <template x-if="declineConfirm && selectedItem">
+        <div class="fixed inset-0 z-[70] flex items-end justify-center bg-black/75 md:items-center md:p-4">
+          <section role="alertdialog" aria-modal="true" class="w-full rounded-t-2xl border-t border-gray-700 bg-gray-900 p-5 shadow-2xl md:max-w-sm md:rounded-2xl md:border">
+            <h2 class="text-lg font-semibold text-white">Decline this approval?</h2><p class="mt-2 text-sm leading-6 text-gray-400">This sends an explicit negative answer to the requester. Closing this dialog does not answer it.</p>
+            <div class="mt-5 grid grid-cols-2 gap-2"><button data-testid="central-attention-keep-requested" @click="declineConfirm=false" class="h-11 rounded-xl border border-gray-700 text-sm font-semibold text-gray-300">Keep requested</button><button data-testid="central-attention-confirm-decline" @click="decline(selectedItem)" :disabled="selectedItem.decisionBusy" class="h-11 rounded-xl bg-red-700 text-sm font-semibold text-white disabled:opacity-50">Decline</button></div>
+          </section>
+        </div>
+      </template>
+
+      <template x-if="settingsOpen">
+        <div>
+          <div class="fixed inset-0 z-50 bg-black/70" @click="settingsOpen=false"></div>
+          <section role="dialog" aria-modal="true" aria-labelledby="attention-settings-title"
+                   data-testid="central-attention-settings"
+                   class="fixed inset-x-0 bottom-0 z-[60] max-h-[calc(100dvh-2rem)] overflow-y-auto rounded-t-2xl border-t border-gray-700 bg-gray-900 p-5 shadow-2xl md:inset-y-0 md:left-auto md:w-[29rem] md:rounded-none md:border-l md:border-t-0 md:p-6">
+            <div class="flex items-start gap-4"><div class="min-w-0 flex-1"><p class="text-[10px] font-bold uppercase tracking-[0.16em] text-indigo-300">Attention settings</p><h2 id="attention-settings-title" class="mt-1 text-xl font-semibold text-white">How applications can reach you</h2><p class="mt-3 text-sm leading-6 text-gray-400">Choose whether each application can show a quiet message, take over the Dashboard for a review, or reach this phone when no Dashboard is visible.</p></div><button @click="settingsOpen=false" class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-2xl text-gray-500 hover:bg-gray-800">×</button></div>
+            <div class="mt-5 flex items-center justify-between gap-3 rounded-xl border border-gray-800 bg-gray-950/60 px-4 py-3"><span class="text-xs text-gray-400" x-text="pushLabel"></span><button x-show="!['subscribed','active'].includes(pushState)" @click="enablePush()" :disabled="pushBusy || ['unsupported','needs_install','denied'].includes(pushState)" class="shrink-0 rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white disabled:opacity-40" x-text="pushState==='needs_install' ? 'How to install' : (pushBusy ? 'Working…' : 'Enable')"></button></div>
+            <div class="mt-6"><h3 class="text-xs font-semibold uppercase tracking-[0.14em] text-gray-500">Applications</h3><div class="mt-2 divide-y divide-gray-800 rounded-2xl border border-gray-800 bg-gray-950/40">
+              <template x-for="app in apps" :key="app.scope"><div class="px-4 py-4"><div class="flex items-center gap-3"><span class="flex h-8 w-8 items-center justify-center rounded-lg text-xs font-black text-white" :class="toneClasses(app.tone)" x-text="app.glyph"></span><span class="min-w-0 flex-1 text-sm text-gray-200" x-text="app.label"></span></div><div class="mt-3 grid grid-cols-2 gap-2"><label class="text-[11px] text-gray-500">In Dashboard<select value="quiet" disabled class="mt-1 w-full rounded-lg border border-gray-700 bg-gray-900 px-2 py-2 text-xs text-gray-400 opacity-70"><option value="quiet">Registered behavior</option></select></label><label class="text-[11px] text-gray-500">On this phone<select :value="app.pushMode" @change="setPushPreference(app,$event)" :disabled="!['subscribed','active'].includes(pushState) || app.pushBusy" class="mt-1 w-full rounded-lg border border-gray-700 bg-gray-900 px-2 py-2 text-xs text-gray-200 disabled:opacity-50"><option value="off">Never</option><option value="generic">Generic alert</option><option value="descriptive">Detailed when allowed</option></select></label></div></div></template>
+            </div></div>
+          </section>
+        </div>
+      </template>
+    </div>
+  </template>
+</div>
