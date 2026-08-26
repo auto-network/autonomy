@@ -46,6 +46,16 @@ logger = logging.getLogger(__name__)
 #: plus at most one interval — the acceptance bound.
 SWEEP_INTERVAL_S = 30
 
+#: Restart-race protection (host-ops finding, 2026-08-26): a stop-then-
+#: relaunch briefly looks identical to an orphan — the old instance is gone
+#: and the new instance's container/tmux is not up yet — and a sweep tick
+#: landing in that gap was reclaiming a directory the new launch had just
+#: re-provisioned, failing the launch closed a moment later. A per-session
+#: directory younger than this many seconds is never reclaimed on the
+#: "session_exists() is false" signal alone; the next tick catches a real
+#: orphan once it has aged past the window.
+RECLAIM_GRACE_S = 60
+
 
 def _delivery_root() -> Path:
     """The host ramfs root sessions receive their subdirectories under
@@ -89,6 +99,7 @@ def sweep(
     delivery_root: Path | None = None,
     now: int | None = None,
     overdue_reason: str = "expired",
+    reclaim_grace_s: float = RECLAIM_GRACE_S,
 ) -> dict:
     """One sweep pass. Destroys, in the store's own outstanding order:
 
@@ -127,9 +138,16 @@ def sweep(
             if not child.is_dir():
                 continue
             session = child.name
-            if session not in live and not session_exists(session):
-                if _reclaim_session_dir(root, session):
-                    reclaimed += 1
+            if session in live or session_exists(session):
+                continue
+            try:
+                age_s = time.time() - child.stat().st_mtime
+            except OSError:
+                continue  # vanished mid-scan: someone else reclaimed it
+            if age_s < reclaim_grace_s:
+                continue  # possibly a relaunch re-provisioning: not an orphan yet
+            if _reclaim_session_dir(root, session):
+                reclaimed += 1
 
     return {"shredded": shredded, "reclaimed_dirs": reclaimed}
 
@@ -174,6 +192,7 @@ def reconcile_on_startup(
     session_exists: Callable[[str], bool],
     delivery_root: Path | None = None,
     now: int | None = None,
+    reclaim_grace_s: float = RECLAIM_GRACE_S,
 ) -> dict:
     """The first pass after a (re)start. Same core as :func:`sweep`, but a
     release found already past its deadline is shredded with reason
@@ -187,6 +206,7 @@ def reconcile_on_startup(
         delivery_root=delivery_root,
         now=now,
         overdue_reason="reconciled",
+        reclaim_grace_s=reclaim_grace_s,
     )
     logger.info(
         "vault release reconciliation: %d destroyed, %d directories reclaimed",

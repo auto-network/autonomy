@@ -168,7 +168,7 @@ def test_session_end_reclaims_the_whole_subdirectory(store, delivery_root):
              now=0)
     session_dir = delivery_root / "ended"
     assert session_dir.is_dir()
-    sweeper.sweep(session_exists=lambda s: False, delivery_root=delivery_root, now=1)
+    sweeper.sweep(session_exists=lambda s: False, delivery_root=delivery_root, now=1, reclaim_grace_s=0)
     assert not session_dir.exists()
     for rid in ("a", "b"):
         assert vault_releases.get(rid)["shred_reason"] == "orphaned"
@@ -184,7 +184,7 @@ def test_a_release_whose_container_has_exited_is_still_destroyed(
              now=0)
     import shutil
     shutil.rmtree(delivery_root / "dead")  # container/dir removed
-    sweeper.sweep(session_exists=lambda s: False, delivery_root=delivery_root, now=100)
+    sweeper.sweep(session_exists=lambda s: False, delivery_root=delivery_root, now=100, reclaim_grace_s=0)
     assert vault_releases.get("r")["shred_reason"] == "orphaned"
 
 
@@ -198,7 +198,7 @@ def test_crash_residue_directory_with_no_record_is_reclaimed(
     stray = delivery_root / "ghost-session"
     stray.mkdir()
     (stray / "orphan.secret").write_bytes(b"leaked")
-    sweeper.sweep(session_exists=lambda s: False, delivery_root=delivery_root, now=1)
+    sweeper.sweep(session_exists=lambda s: False, delivery_root=delivery_root, now=1, reclaim_grace_s=0)
     assert not stray.exists()
 
 
@@ -309,9 +309,32 @@ def test_sweeper_first_then_on_session_end_is_inert(store, delivery_root):
     'orphaned', then a late launcher teardown call is a harmless no-op that
     does not rewrite the reason."""
     _deliver(delivery_root, id="r", session="s", expires_at=1, now=0)
-    sweeper.sweep(session_exists=lambda s: False, delivery_root=delivery_root, now=99)
+    sweeper.sweep(session_exists=lambda s: False, delivery_root=delivery_root, now=99, reclaim_grace_s=0)
     assert vault_releases.get("r")["shred_reason"] == "orphaned"
     out = sweeper.on_session_end("s", delivery_root=delivery_root, now=200)
     assert out == {"shredded": 0, "reclaimed_dir": False}
     # The first destruction stands; the reason is not rewritten.
     assert vault_releases.get("r")["shred_reason"] == "orphaned"
+
+
+def test_a_fresh_directory_is_never_reclaimed_on_liveness_alone(
+    store, delivery_root,
+):
+    """The restart race (host-ops, 2026-08-26): during a stop-then-relaunch
+    the old session reads gone while the new launch has just re-provisioned
+    its directory. A directory younger than the grace window survives a
+    sweep that cannot see the session; once aged (backdated here), the same
+    sweep reclaims it as a true orphan."""
+    import os
+
+    fresh = delivery_root / "relaunching"
+    fresh.mkdir()
+    sweeper.sweep(session_exists=lambda s: False, delivery_root=delivery_root,
+                  now=1)
+    assert fresh.is_dir(), "a just-provisioned directory must survive the gap"
+
+    old_stamp = 1_000_000  # long past any grace window
+    os.utime(fresh, (old_stamp, old_stamp))
+    sweeper.sweep(session_exists=lambda s: False, delivery_root=delivery_root,
+                  now=1)
+    assert not fresh.exists(), "an aged orphan is still reclaimed"
