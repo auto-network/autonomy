@@ -1919,7 +1919,7 @@
 <body class="bg-gray-900 text-gray-100 h-dvh flex">
   <!-- Sidebar overlay (mobile) -->
   <div id="sidebar-overlay" class="hidden fixed inset-0 bg-black/50 z-30 md:hidden"
-       onclick="document.getElementById('sidebar').classList.add('-translate-x-full'); this.classList.add('hidden')"></div>
+       onclick="closeSidebar()"></div>
 
   <!-- Toast container (global, all pages) -->
   <div id="toast-container"></div>
@@ -1972,6 +1972,20 @@
         document.getElementById('sidebar-overlay').classList.add('hidden');
       }
     }
+    function closeCentralAttention() {
+      const root = document.querySelector('[data-testid="central-attention-root"]');
+      if (!root || !window.Alpine || typeof window.Alpine.$data !== 'function') return;
+      const surface = window.Alpine.$data(root);
+      if (surface && typeof surface.closeInbox === 'function') surface.closeInbox();
+    }
+    function toggleSidebar() {
+      const sidebar = document.getElementById('sidebar');
+      const opening = sidebar.classList.contains('-translate-x-full');
+      if (opening && window.innerWidth < 768) {
+        closeCentralAttention();
+      }
+      sidebar.classList.toggle('-translate-x-full');
+    }
     // Show overlay when sidebar opens on mobile
     const sidebar = document.getElementById('sidebar');
     const observer = new MutationObserver(() => {
@@ -1991,7 +2005,7 @@
     <!-- Header -->
     <header data-app-chrome class="bg-gray-800 border-b border-gray-700 px-4 md:px-6 py-3 flex items-center gap-3 md:gap-4">
       <button id="nav-toggle" class="order-1 md:hidden relative z-50 bg-gray-800 p-2 rounded-lg border border-gray-700 flex-shrink-0"
-              onclick="document.getElementById('sidebar').classList.toggle('-translate-x-full')">
+              onclick="toggleSidebar()">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
         </svg>

@@ -16106,6 +16106,8 @@ CENTRAL_ATTENTION_MOBILE_CHECKS = r"""(async () => {
     const first = data.categoryFilter;
     apps.click(); await Alpine.nextTick();
     const rect = mobile.getBoundingClientRect();
+    const mobileCenterVisible = getComputedStyle(mobile).display !== 'none' &&
+        mobile.getClientRects().length > 0;
     const navRect = nav.getBoundingClientRect();
     const attentionRect = root.querySelector(
         '[data-testid="central-attention-button"]'
@@ -16114,10 +16116,22 @@ CENTRAL_ATTENTION_MOBILE_CHECKS = r"""(async () => {
         (navRect.top + navRect.height / 2) -
         (attentionRect.top + attentionRect.height / 2)
     );
+    nav.click();
+    await Alpine.nextTick(); await sleep(100);
+    const sidebar = document.getElementById('sidebar');
+    const menuOpens = !sidebar.classList.contains('-translate-x-full') &&
+        sidebar.getClientRects().length > 0;
+    const attentionClosesForMenu = !data.inboxOpen && !data.fullInbox &&
+        mobile.classList.contains('hidden');
+    closeSidebar();
+    root.querySelector('[data-testid="central-attention-button"]').click();
+    await Alpine.nextTick(); await sleep(100);
+    const inboxClosesSidebar = sidebar.classList.contains('-translate-x-full') &&
+        data.inboxOpen && !mobile.classList.contains('hidden');
+    data.closeInbox();
     return JSON.stringify({
         viewport_width: window.innerWidth,
-        mobile_center_visible: getComputedStyle(mobile).display !== 'none' &&
-            mobile.getClientRects().length > 0,
+        mobile_center_visible: mobileCenterVisible,
         header_order_menu_inbox_search:
             ordered.indexOf(nav) < ordered.indexOf(root) && ordered.indexOf(root) < ordered.indexOf(search),
         category_deselects: first === 'apps' && data.categoryFilter === 'all',
@@ -16131,6 +16145,10 @@ CENTRAL_ATTENTION_MOBILE_CHECKS = r"""(async () => {
         button_on_same_axis: axisDelta <= 1,
         button_matches_nav_size: Math.abs(navRect.height - attentionRect.height) <= 1 &&
             Math.abs(navRect.width - attentionRect.width) <= 1,
+        menu_opens: menuOpens,
+        attention_closes_for_menu: attentionClosesForMenu,
+        menu_opens_without_attention_overlay: menuOpens && attentionClosesForMenu,
+        inbox_and_sidebar_are_mutually_exclusive: inboxClosesSidebar,
     });
 })()"""
 
@@ -16206,3 +16224,7 @@ class TestCentralAttentionSurface:
         }
         assert c.get("category_deselects"), c
         assert c.get("no_horizontal_overflow"), c
+        assert c.get("menu_opens"), c
+        assert c.get("attention_closes_for_menu"), c
+        assert c.get("menu_opens_without_attention_overlay"), c
+        assert c.get("inbox_and_sidebar_are_mutually_exclusive"), c
