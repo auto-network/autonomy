@@ -65,6 +65,7 @@ from tools.graph import schemas, settings_ops
 # self-register on import).
 from tools.graph.schemas.network_identity import (  # noqa: F401
     NETWORK_BINDING_REVISION,
+    NETWORK_BINDING_REVISION_2,
     NETWORK_BINDING_SET_ID,
     NETWORK_ORG_KEY_REVISION,
     NETWORK_ORG_KEY_SET_ID,
@@ -76,6 +77,50 @@ from tools.graph.schemas.personal_identity import PERSONAL_IDENTITY_SET_ID
 
 DEFAULT_REGISTRY_URL = "https://registry.auto.network"
 _PERSONA_PUB_RE = re.compile(r"^[0-9a-f]{64}\Z")
+_BINDING_GENERATION_RE = re.compile(r"^[0-9a-f]{64}\Z")
+_BINDING_OUTCOMES = frozenset({"claimed", "already_bound_self", "reclaimed_expired"})
+
+
+def _canonical_binding_policy(value) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    if value == {"mode": "none"}:
+        return {"mode": "none"}
+    if (
+        set(value) == {"mode", "recovery_pub"}
+        and value.get("mode") == "recovery-key"
+        and isinstance(value.get("recovery_pub"), str)
+        and _PERSONA_PUB_RE.fullmatch(value["recovery_pub"])
+    ):
+        return {"mode": "recovery-key", "recovery_pub": value["recovery_pub"]}
+    return None
+
+
+def _validated_binding_response(value, *, registration: bool) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    expected = {
+        "org_uuid", "root_pub", "binding_generation", "expires_at", "recovery_policy"
+    }
+    if registration:
+        expected.add("outcome")
+    if set(value) != expected:
+        return None
+    if (
+        not isinstance(value.get("org_uuid"), str)
+        or not isinstance(value.get("root_pub"), str)
+        or _PERSONA_PUB_RE.fullmatch(value["root_pub"]) is None
+        or not isinstance(value.get("binding_generation"), str)
+        or _BINDING_GENERATION_RE.fullmatch(value["binding_generation"]) is None
+        or type(value.get("expires_at")) is not int
+        or value["expires_at"] < 0
+        or value["expires_at"] > 9_007_199_254_740_991
+        or _canonical_binding_policy(value.get("recovery_policy")) is None
+    ):
+        return None
+    if registration and value.get("outcome") not in _BINDING_OUTCOMES:
+        return None
+    return dict(value)
 
 # -- invite resolve (auto-yw5gz) ------------------------------------------------
 # The dashboard-origin half of the paste-into-your-own-dashboard flow: the page
@@ -181,6 +226,57 @@ def _first_member(set_id: str, org: str | None):
         if isinstance(m.payload, dict):
             return m
     return None
+
+
+def _registration_binding_context(org: str | None):
+    """Return the one exact local V1/V2 binding used by registration.
+
+    Registration is also the root-direct refresh/reclaim transport.  Once a
+    local binding exists, its coordinates and registry destination are the
+    server-owned context; mere row presence is not enough authority to replace
+    it.  Fail closed on partial, multiple, malformed, or key/payload-mismatched
+    state instead of choosing one row and contacting the default registry.
+    """
+    result = settings_ops.read_owned_set(NETWORK_BINDING_SET_ID, org=org)
+    if any(result.dropped.values()):
+        raise ValueError("binding query returned partial or dropped state")
+    if not result.members:
+        return None
+    if len(result.members) != 1:
+        raise ValueError("registration requires exactly one local binding")
+    member = result.members[0]
+    if member.stored_revision not in (
+        NETWORK_BINDING_REVISION,
+        NETWORK_BINDING_REVISION_2,
+    ):
+        raise ValueError("local binding has an unsupported schema revision")
+    if not isinstance(member.payload, dict):
+        raise ValueError("local binding payload is malformed")
+    schemas.validate_payload(
+        NETWORK_BINDING_SET_ID, member.stored_revision, member.payload
+    )
+    registry_url = member.payload.get("registry_url")
+    binding_key = (
+        urllib.parse.urlsplit(registry_url).netloc or registry_url
+        if isinstance(registry_url, str)
+        else None
+    )
+    if not binding_key or member.key != binding_key:
+        raise ValueError("local binding key does not match its registry URL")
+    if _canonical_binding_policy(member.payload.get("recovery_policy")) is None:
+        raise ValueError("local binding recovery policy is malformed")
+    return member
+
+
+def _same_registration_binding(left, right) -> bool:
+    if left is None or right is None:
+        return left is right
+    return (
+        left.id == right.id
+        and left.key == right.key
+        and left.stored_revision == right.stored_revision
+        and left.payload == right.payload
+    )
 
 
 def _root_pub_has_stored_armor(org: str | None, root_pub: str) -> bool:
@@ -1193,7 +1289,52 @@ async def post_register(request: Request) -> JSONResponse:
             "would be unrecoverable the moment this page closes"
         )}, status_code=409)
 
-    registry_url = _registry_url()
+    # A genuinely unbound organization uses the code-owned default registry.
+    # Once a binding exists, the exact validated row freezes the UUID, root,
+    # policy, destination and binding key for refresh/reclaim.  None of those
+    # coordinates is a caller-selectable replacement operation.
+    try:
+        existing_binding = _registration_binding_context(org)
+    except Exception as e:
+        return JSONResponse(
+            {"ok": False, "error": f"existing binding is unavailable: {e}"},
+            status_code=409,
+        )
+    claim_policy: dict = {"mode": payload.get("recovery_policy")}
+    if payload.get("recovery_pub") is not None:
+        claim_policy["recovery_pub"] = payload["recovery_pub"]
+    claim_policy = _canonical_binding_policy(claim_policy)
+    if claim_policy is None:
+        return JSONResponse(
+            {"ok": False, "error": "registration recovery policy is malformed"},
+            status_code=400,
+        )
+    if existing_binding is not None and (
+        payload["org_uuid"] != existing_binding.payload.get("org_uuid")
+        or payload["root_pub"] != existing_binding.payload.get("root_pub")
+        or claim_policy != existing_binding.payload.get("recovery_policy")
+    ):
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": (
+                    "signed registration coordinates do not match the existing "
+                    "binding — refresh/reclaim cannot replace local authority"
+                ),
+            },
+            status_code=409,
+        )
+    allowed_outcomes = (
+        _BINDING_OUTCOMES
+        if existing_binding is None
+        else frozenset({"already_bound_self", "reclaimed_expired"})
+    )
+
+    registry_url = (
+        _registry_url()
+        if existing_binding is None
+        else existing_binding.payload["registry_url"]
+    )
     try:
         async with _registry_client(registry_url) as client:
             resp = await client.post("/v1/orgs", json=envelope)
@@ -1212,16 +1353,20 @@ async def post_register(request: Request) -> JSONResponse:
         # depending on the production registry being redeployed, and it is the
         # reason registration must be safe to repeat: the personal org derives a
         # deterministic org_uuid, so every unlock re-attempts it.
-        existing = _first_member(NETWORK_BINDING_SET_ID, org)
         if (
-            existing is not None
-            and existing.payload.get("org_uuid") == payload["org_uuid"]
-            and existing.payload.get("root_pub") == payload["root_pub"]
+            existing_binding is not None
+            and existing_binding.payload.get("org_uuid") == payload["org_uuid"]
+            and existing_binding.payload.get("root_pub") == payload["root_pub"]
+            and isinstance(existing_binding.payload.get("binding_generation"), str)
+            and _BINDING_GENERATION_RE.fullmatch(
+                existing_binding.payload["binding_generation"]
+            ) is not None
         ):
             return JSONResponse({
                 "ok": True,
-                "registry": existing.key,
-                "binding": existing.payload,
+                "registry": existing_binding.key,
+                "binding": existing_binding.payload,
+                "outcome": "already_bound_self",
                 "already_registered": True,
             })
     if resp.status_code != 201:
@@ -1233,41 +1378,53 @@ async def post_register(request: Request) -> JSONResponse:
             f"registry refused the registration ({resp.status_code}): {detail}"
         )}, status_code=502)
 
-    reg = resp.json()
+    reg = _validated_binding_response(resp.json(), registration=True)
     # Persist the registry's AUTHORITATIVE 201 claim, never the caller's
     # echoed request: the binding the dashboard trusts must be what the
     # registry actually bound (org_uuid + root_pub come from the response,
     # not from payload).
-    reg_org_uuid = reg.get("org_uuid")
-    reg_root_pub = reg.get("root_pub")
-    expires_at = reg.get("expires_at")
-    if not isinstance(reg_org_uuid, str) or not isinstance(reg_root_pub, str) \
-            or type(expires_at) is not int:
+    if reg is None:
         return JSONResponse({"ok": False, "error": (
-            "registry returned an incomplete binding (org_uuid/root_pub/expiry) "
+            "registry returned a malformed authoritative binding "
             "— binding not persisted"
         )}, status_code=502)
+    if reg["outcome"] not in allowed_outcomes:
+        return JSONResponse({"ok": False, "error": (
+            f"registry outcome {reg['outcome']!r} is invalid for this binding context "
+            "— binding not persisted"
+        )}, status_code=502)
+    reg_org_uuid = reg["org_uuid"]
+    reg_root_pub = reg["root_pub"]
+    expires_at = reg["expires_at"]
     # The registry must bind the SAME root the operator just proved control
     # of. A different root_pub means the 201 is not an authoritative confirm
     # of that key — refuse rather than persist a binding for a foreign root.
-    if reg_root_pub != payload["root_pub"]:
+    if reg_org_uuid != payload["org_uuid"] or reg_root_pub != payload["root_pub"]:
         return JSONResponse({"ok": False, "error": (
-            "registry bound a different root key than the one signed — refusing "
-            "to persist a binding for a key we did not prove control of"
+            "registry bound different UUID/root coordinates than the signed claim — "
+            "refusing to persist authority we did not prove"
         )}, status_code=502)
-    policy: dict = {"mode": payload.get("recovery_policy")}
-    if payload.get("recovery_pub") is not None:
-        policy["recovery_pub"] = payload["recovery_pub"]
+    policy = claim_policy
+    if reg["recovery_policy"] != policy:
+        return JSONResponse({"ok": False, "error": (
+            "registry returned a different recovery policy than the frozen claim "
+            "— binding not persisted"
+        )}, status_code=502)
     binding = {
         "org_uuid": reg_org_uuid,
         "root_pub": reg_root_pub,
+        "binding_generation": reg["binding_generation"],
         "registry_url": registry_url,
         "recovery_policy": policy,
         "binding_expires_at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                             time.gmtime(expires_at)),
         "last_renewed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
-    binding_key = urllib.parse.urlsplit(registry_url).netloc or registry_url
+    binding_key = (
+        urllib.parse.urlsplit(registry_url).netloc or registry_url
+        if existing_binding is None
+        else existing_binding.key
+    )
     # NetworkBindingV1 is @home("organization"): an org-homed set refuses a
     # scopeless (org=None) WRITE — it must name a store (operator ruling
     # 2026-08-20, no default scope). The personal org's store is the operator's
@@ -1275,15 +1432,32 @@ async def post_register(request: Request) -> JSONResponse:
     # reads back via _load_binding(None). A named org keeps its own slug.
     write_org = "personal" if settings_ops._resolve_org_arg(org) is None else org
     try:
+        current_binding = _registration_binding_context(org)
+        if not _same_registration_binding(existing_binding, current_binding):
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": (
+                        "local binding changed during registry registration "
+                        "— authoritative response not persisted"
+                    ),
+                },
+                status_code=409,
+            )
         settings_ops.upsert_by_key(
-            NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION, binding_key,
+            NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION_2, binding_key,
             binding, org=write_org,
         )
     except Exception as e:
         return JSONResponse({"ok": False, "error": (
             f"registry accepted the binding but persisting it locally failed: {e}"
         )}, status_code=500)
-    return JSONResponse({"ok": True, "registry": binding_key, "binding": binding})
+    return JSONResponse({
+        "ok": True,
+        "registry": binding_key,
+        "binding": binding,
+        "outcome": reg["outcome"],
+    })
 
 
 async def post_renew(request: Request) -> JSONResponse:
@@ -1357,12 +1531,29 @@ async def post_renew(request: Request) -> JSONResponse:
             f"registry refused the renewal ({resp.status_code}): {detail}"
         )}, status_code=502)
 
-    reg = resp.json()
-    expires_at = reg.get("expires_at")
-    if type(expires_at) is not int:
+    reg = _validated_binding_response(resp.json(), registration=False)
+    if reg is None:
         return JSONResponse({"ok": False, "error": (
-            "registry returned no expiry — renewal not persisted"
+            "registry returned a malformed authoritative binding — renewal not persisted"
         )}, status_code=502)
+    local_policy = _canonical_binding_policy(binding.get("recovery_policy"))
+    if (
+        reg["org_uuid"] != org_uuid
+        or reg["root_pub"] != binding.get("root_pub")
+        or local_policy is None
+        or reg["recovery_policy"] != local_policy
+        or (
+            binding.get("binding_generation") is not None
+            and reg["binding_generation"] != binding.get("binding_generation")
+        )
+    ):
+        return JSONResponse({"ok": False, "error": (
+            "registry renewal authority does not match the frozen local binding "
+            "— no V2 binding was written"
+        )}, status_code=502)
+    expires_at = reg["expires_at"]
+    binding["binding_generation"] = reg["binding_generation"]
+    binding["recovery_policy"] = reg["recovery_policy"]
     binding["binding_expires_at"] = time.strftime(
         "%Y-%m-%dT%H:%M:%SZ", time.gmtime(expires_at))
     binding["last_renewed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -1371,7 +1562,7 @@ async def post_renew(request: Request) -> JSONResponse:
     write_org = "personal" if settings_ops._resolve_org_arg(org) is None else org
     try:
         settings_ops.upsert_by_key(
-            NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION, member.key,
+            NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION_2, member.key,
             binding, org=write_org,
         )
     except Exception as e:
