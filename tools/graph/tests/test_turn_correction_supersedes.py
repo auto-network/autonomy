@@ -376,9 +376,10 @@ def test_codex_no_uuid_event_msg_resolves_via_shared_id_rule(
             },
         }),
         json.dumps({
-            "type": "event_msg",
+            "type": "response_item",
             "timestamp": "2026-05-03T08:57:01Z",
-            "payload": {"type": "user_message", "message": raw_text},
+            "payload": {"type": "message", "role": "user",
+                        "content": [{"type": "input_text", "text": raw_text}]},
         }),
     ]) + "\n")
 

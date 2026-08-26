@@ -69,8 +69,9 @@ def _session_meta_line(rollout_uuid: str) -> str:
 def _agent_message_line(text: str) -> str:
     return json.dumps({
         "timestamp": "2026-08-10T12:00:01.000Z",
-        "type": "event_msg",
-        "payload": {"type": "agent_message", "message": text},
+        "type": "response_item",
+        "payload": {"type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": text}]},
     })
 
 

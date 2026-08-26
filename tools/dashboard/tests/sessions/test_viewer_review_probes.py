@@ -107,7 +107,7 @@ def _key(e):
 
 def _live_projection(data: bytes, split_offsets: list[int]) -> dict:
     """The monitor's per-window publication, client-merged by ref."""
-    ctx: dict = {"codex_cli_version": "0.148.0"}
+    ctx: dict = {}
     state = CODEX_HARNESS.new_postprocess_state()
     bounds = [0] + split_offsets + [len(data)]
     merged: dict = {}
@@ -131,7 +131,7 @@ def _live_projection(data: bytes, split_offsets: list[int]) -> dict:
 def _cold_projection(data: bytes, base_offset: int = 0) -> dict:
     batch = sh.parse_lines_with_refs(
         CODEX_HARNESS, data, stem=STEM, base_offset=base_offset,
-        ctx={"codex_cli_version": "0.148.0"},
+        ctx={},
     )
     batch = CODEX_HARNESS.postprocess_entries(
         batch, state=CODEX_HARNESS.new_postprocess_state(),

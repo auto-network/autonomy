@@ -26,7 +26,6 @@ import pytest
 from tools.graph.ingest import (
     ClaudeTurnExtractor,
     CodexTurnExtractor,
-    MissingCodexVersionError,
 )
 
 
@@ -234,11 +233,26 @@ def _x_session_meta(ts: str = "2026-05-01T09:00:00Z") -> dict:
 
 
 def _x_user(text: str, ts: str) -> dict:
-    return {"type": "event_msg", "timestamp": ts, "payload": {"type": "user_message", "message": text}}
+    return {
+        "type": "response_item", "timestamp": ts,
+        "payload": {"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": text}]},
+    }
 
 
 def _x_agent(text: str, ts: str) -> dict:
-    return {"type": "event_msg", "timestamp": ts, "payload": {"type": "agent_message", "message": text}}
+    return {
+        "type": "response_item", "timestamp": ts,
+        "payload": {"type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": text}]},
+    }
+
+
+def _x_event_msg_twin(text: str, role: str, ts: str) -> dict:
+    """The duplicate UI-view shape 0.148+ (and pre-0.147) codex also
+    writes for every chat message — must never become a second turn."""
+    kind = "user_message" if role == "user" else "agent_message"
+    return {"type": "event_msg", "timestamp": ts, "payload": {"type": kind, "message": text}}
 
 
 def _x_token_count(inp: int, out: int, ts: str) -> dict:
@@ -263,9 +277,11 @@ def _x_low_signal(ts: str) -> dict:
 CODEX_CORPUS = [
     _x_session_meta(),
     _x_user("Ship the fix for the offset bug", "2026-05-01T09:00:01Z"),
+    _x_event_msg_twin("Ship the fix for the offset bug", "user", "2026-05-01T09:00:01Z"),
     _x_response_item("2026-05-01T09:00:02Z"),
     _x_user('<crosstalk from="peer">ignore me</crosstalk>', "2026-05-01T09:00:03Z"),
     _x_agent("Done — committed as abc123.", "2026-05-01T09:00:04Z"),
+    _x_event_msg_twin("Done — committed as abc123.", "assistant", "2026-05-01T09:00:04Z"),
     _x_token_count(50, 12, "2026-05-01T09:00:05Z"),
     _x_low_signal("2026-05-01T09:00:06Z"),
     _x_compacted("2026-05-01T09:00:07Z"),
@@ -274,10 +290,14 @@ CODEX_CORPUS = [
 
 
 class TestCodexExtractorGoldenCorpus:
-    def test_missing_version_fails_closed_before_any_chat_is_dropped(self):
-        with pytest.raises(MissingCodexVersionError, match="version is unavailable"):
-            CodexTurnExtractor().feed(
-                _x_user("This must not disappear", "2026-05-01T09:00:01Z"))
+    def test_chat_extracts_without_any_version_context(self):
+        """The extractor is version-free: response_item chat is the one
+        source in every codex version, so a missing/unknown cli_version
+        (e.g. a repaired rollout) must not drop or defer any turn."""
+        turn = CodexTurnExtractor().feed(
+            _x_user("This must not disappear", "2026-05-01T09:00:01Z"))
+        assert turn is not None
+        assert turn["content"] == "This must not disappear"
 
     def test_batch_parse_matches_expected_turn_stream(self):
         turns = _feed_all(CodexTurnExtractor(), CODEX_CORPUS)
