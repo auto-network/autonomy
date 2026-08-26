@@ -56,6 +56,7 @@ from .settings_ops import (  # noqa: F401 — re-exported as ops.* surface
     exclude_setting,
     promote_setting,
     deprecate_setting,
+    undeprecate_setting,
     remove_setting,
     remove_settings_by_key_prefix,
     list_set_ids,

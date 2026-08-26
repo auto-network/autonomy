@@ -3630,6 +3630,56 @@ def deprecate_setting(
         _call_emit_hook(operation="deprecate", snapshot=snapshot, org=org)
 
 
+def undeprecate_setting(
+    setting_id: str,
+    *,
+    org: "str | None | _CallerOrgSentinel",
+) -> None:
+    """Reverse a previous :func:`deprecate_setting` -- put the row back into
+    the live, resolvable set and clear any successor pointer it carried.
+
+    Only reverses a deprecation; it does not restore a hard-deleted row (see
+    :func:`remove_setting`, which is not reversible). ``org`` is **required**
+    — see :func:`add_setting` for the contract.
+    """
+    org = _resolve_org_arg(org)
+    _guard_protected_setting_id(setting_id, org)
+    now = _now_iso()
+    db = _open(org)
+    snapshot = None
+    try:
+        pre = db.conn.execute(
+            "SELECT set_id, schema_revision FROM settings WHERE id = ?",
+            (setting_id,),
+        ).fetchone()
+        if pre is None:
+            _reject_peer_setting_target(setting_id, org)
+            raise LookupError(f"setting not found: {setting_id!r}")
+        expires_at = schemas.cache_expires_at(
+            pre["set_id"], int(pre["schema_revision"]), now,
+        )
+        db.conn.execute(
+            "UPDATE settings SET deprecated = 0, successor_id = NULL, "
+            "updated_at = ?, expires_at = ? WHERE id = ?",
+            (now, expires_at, setting_id),
+        )
+        post = db.conn.execute(
+            "SELECT set_id, schema_revision, key, publication_state, "
+            "deprecated FROM settings WHERE id = ?",
+            (setting_id,),
+        ).fetchone()
+        if post is not None:
+            snapshot = _make_snapshot(
+                post["set_id"], post["schema_revision"], post["key"],
+                post["publication_state"], post["deprecated"],
+            )
+        db.conn.commit()
+    finally:
+        db.close()
+    if snapshot is not None:
+        _call_emit_hook(operation="undeprecate", snapshot=snapshot, org=org)
+
+
 def remove_settings_by_key_prefix(
     set_id: str,
     *,

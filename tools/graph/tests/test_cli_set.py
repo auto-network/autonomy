@@ -206,6 +206,17 @@ def test_cli_deprecate(graph_db_env, example_schema, tmp_path):
     assert ops.get_setting(sid, org=ops.CALLER_ORG).deprecated is True
 
 
+def test_cli_undeprecate(graph_db_env, example_schema, tmp_path):
+    p = tmp_path / "p.json"
+    p.write_text(json.dumps({"v": 1}))
+    _run_cli(["set", "add", "autonomy.test.example#1", "--key", "k", "--from", str(p)])
+    sid = ops.read_set("autonomy.test.example", org=ops.CALLER_ORG).members[0].id
+    _run_cli(["set", "deprecate", sid])
+    rc, _, _ = _run_cli(["set", "undeprecate", sid])
+    assert rc == 0
+    assert ops.get_setting(sid, org=ops.CALLER_ORG).deprecated is False
+
+
 def test_cli_remove_raw(graph_db_env, example_schema, tmp_path):
     p = tmp_path / "p.json"
     p.write_text(json.dumps({"v": 1}))

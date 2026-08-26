@@ -348,6 +348,14 @@ def test_post_deprecate(graph_db_env, example_schema, client):
     assert ops.get_setting(sid, org=ops.CALLER_ORG).deprecated is True
 
 
+def test_post_undeprecate(graph_db_env, example_schema, client):
+    sid = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1}, org=ops.CALLER_ORG)
+    client.post(f"/api/graph/setting/{sid}/deprecate", json={})
+    r = client.post(f"/api/graph/setting/{sid}/undeprecate", json={})
+    assert r.status_code == 200
+    assert ops.get_setting(sid, org=ops.CALLER_ORG).deprecated is False
+
+
 def test_delete_setting(graph_db_env, example_schema, client):
     sid = ops.add_setting("autonomy.test.api", 1, "k", {"x": 1}, org=ops.CALLER_ORG)
     r = client.delete(f"/api/graph/setting/{sid}")
