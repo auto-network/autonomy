@@ -242,6 +242,7 @@ class SQLiteFleetSyncStore:
         import sqlite3
 
         conn = sqlite3.connect(self.path, factory=FleetSyncConnection)
+        conn.row_factory = sqlite3.Row
         catalog = attach_active_production_catalog(conn)
         if catalog is None:
             conn.close()
