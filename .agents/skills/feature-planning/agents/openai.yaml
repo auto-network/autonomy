@@ -1,0 +1,4 @@
+interface:
+  display_name: "Feature Planning"
+  short_description: "Turn feature ideas into testable designs"
+  default_prompt: "Use $feature-planning to turn this feature idea into a prior-art-grounded, testable design."

@@ -55,6 +55,22 @@ graph set-nag --dispatch          # Enable dispatch completion nag (--off to dis
 
 **Working with settings (`graph set`):** read the Setting Primitive signpost `graph://0d3f750f-f9c` and the rubric `graph://4d88c2ad-625` (crib `graph://8cd0ded4-7d9`) first. **You MUST read the rubric when deciding the org scope or publication state of a new setting** — the wrong org or state silently misfiles it or leaks it.
 
+## Prior-art gate
+
+Before designing or implementing non-trivial architecture, search the source
+and tests, graph notes/sessions/beads, open and closed `bd` work, and any
+relevant product catalog. Search for the problem, synonyms, predecessor names,
+and adjacent uses—not only the proposed component name. Read the strongest
+candidates fully and verify status in code or the running system; a design
+note may be aspirational.
+
+Record a compact comparison before adding a new primitive: candidate and
+evidence, current state, reusable seam, remaining gap, and the reason to
+consume, extend, replace, or reject it. One empty query does not prove absence,
+especially across graph org/publication boundaries. Prefer reuse, then a shared
+extension; create something new only when the comparison demonstrates the
+delta. The `prior-art-analysis` skill contains the complete workflow.
+
 ## Beads (`bd`)
 
 You are running in **read-only mode**. You cannot modify beads directly.
@@ -362,7 +378,7 @@ Note creation and update commands auto-save to `/tmp/graph-notes/{source_id}.md`
 
 - Work in `/workspace/repo` — edit files, commit your changes
 - Write decision and reports to `/workspace/output/` — this persists after container exit
-- Research before building — search the graph for context before writing code
+- Complete the prior-art gate before building non-trivial architecture
 - Drop trail markers — `graph note` for pitfalls, insights, operational discoveries
 - Commit your work — the dispatcher records your commit hash on the bead
 - Stay focused — complete the assigned bead, don't scope-creep

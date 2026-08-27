@@ -85,7 +85,8 @@ The agent runs as Claude Code with `--dangerously-skip-permissions --print`.
 
 **Agent responsibilities:**
 1. Read the task from the prompt
-2. Research context in the graph
+2. Complete the prior-art gate: search code/tests, graph, and beads; compare
+   candidates and identify the reusable seam before introducing a new primitive
 3. Do the work in `/workspace/repo`
 4. Commit changes on the worktree branch
 5. Write `/workspace/output/decision.json`

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Prior Art Analysis"
+  short_description: "Find and evaluate existing solutions first"
+  default_prompt: "Use $prior-art-analysis to find and evaluate existing solutions before designing this change."

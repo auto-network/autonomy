@@ -12,6 +12,12 @@ the manifest and the modules it names, nothing else. The `mission`
 plugin (`tools/dashboard/plugins/mission/`) is the worked example for
 every step here; read it alongside this skill.
 
+Before defining a new plugin, schema, route family, store, or shared UI
+mechanism, run the `prior-art-analysis` skill. Record which existing plugin or
+substrate seam will be consumed or extended and the exact delta that remains;
+do not mint a parallel plugin-private primitive because the existing mechanism
+was named for another product.
+
 Work the steps in order. Each one is verifiable before the next.
 
 ## 1. Scaffold, dormant
