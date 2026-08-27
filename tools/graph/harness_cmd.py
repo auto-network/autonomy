@@ -45,6 +45,13 @@ def _get_json(path: str, *, org: str | None = None, timeout: int = 30) -> Any:
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
     headers = {"X-Graph-Org": org} if org else {}
+    # The dashboard API is auth-gated; send the session bearer like the other
+    # graph subcommands (link/worktree/client) do. Without it every request
+    # 401s and _members() swallows it into [] — which this command then
+    # misreports as "no harness accounts are known".
+    token = os.environ.get("CROSSTALK_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(f"{_api_base()}{path}", headers=headers)
     return json.load(urllib.request.urlopen(req, context=ctx, timeout=timeout))
 
