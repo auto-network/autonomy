@@ -854,18 +854,21 @@ def _unsigned_envelope(envelope: Mapping) -> dict:
 _RECOVERY_ARMOR_PURPOSE = "autonomy/recovery-armor/v1"  # mirrors armor.RECOVERY_ARMOR_PURPOSE
 
 
-def recovery_slot(*, root_seed: bytes, recovery_recipient_pub: str, recovery_pub: str) -> dict:
+def recovery_slot(*, root_seed: bytes, recovery_recipient_pub: str, recovery_pub: str, created_at: str) -> dict:
     """Build one recovery slot dict (seals the root seed to the code recipient).
 
     HPKE sealing is randomized, so a slot must be built ONCE and used in both
     the set_recovery operation and the candidate armor — hence this helper, so
     the two carry byte-identical `sealed` material.
     """
+    if not isinstance(created_at, str) or not _ISO8601_Z_RE.match(created_at):
+        raise RootFactorPolicyError("recovery slot created_at must be ISO-8601 Z")
     recipient = _public_key(recovery_recipient_pub, "recovery recipient")
     return {
         "recipient_public_key": recipient,
         "recovery_pub": _public_key(recovery_pub, "recovery_pub"),
         "sealed": _b64(seal(bytes(root_seed), recipient, _RECOVERY_ARMOR_PURPOSE)),
+        "created_at": created_at,
     }
 
 
@@ -882,17 +885,24 @@ def recovery_recipient_public_key(recovery_code: bytes) -> str:
     return public
 
 
+_ISO8601_Z_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+
 def _parse_recovery(value: object) -> dict:
     if not isinstance(value, dict) or set(value) != {
-        "recipient_public_key", "recovery_pub", "sealed",
+        "recipient_public_key", "recovery_pub", "sealed", "created_at",
     }:
         raise RootFactorPolicyError("recovery slot has unknown or missing fields")
+    created_at = value.get("created_at")
+    if not isinstance(created_at, str) or not _ISO8601_Z_RE.match(created_at):
+        raise RootFactorPolicyError("recovery slot created_at must be ISO-8601 Z")
     return {
         "recipient_public_key": _public_key(
             value.get("recipient_public_key"), "recovery recipient",
         ),
         "recovery_pub": _public_key(value.get("recovery_pub"), "recovery_pub"),
         "sealed": _b64(_unb64(value.get("sealed"), length=81, what="recovery wrap")),
+        "created_at": created_at,
     }
 
 
@@ -941,6 +951,7 @@ def add_recovery_slot(
     root_seed: bytes,
     recovery_recipient_pub: str,
     recovery_pub: str,
+    created_at: str = "1970-01-01T00:00:00Z",
 ) -> dict:
     """Enroll a recovery slot into a v3 armor, re-signed by the root.
 
@@ -963,11 +974,12 @@ def add_recovery_slot(
         "recipient_public_key": recipient,
         "recovery_pub": _public_key(recovery_pub, "recovery_pub"),
         "sealed": _b64(sealed),
+        "created_at": created_at,
     }
     unsigned = {key: parsed[key] for key in (
         "v", "generation", "root_pub", "factors", "access", "policy", "wraps",
     )}
-    unsigned["recovery"] = recovery
+    unsigned["recovery"] = _parse_recovery(recovery)
     return {
         **unsigned,
         "signature": root.sign_hex(POLICY_SIGNATURE_DOMAIN + canonical_json(unsigned)),
@@ -981,6 +993,7 @@ def replace_recovery_slot(
     root_seed: bytes,
     recovery_recipient_pub: str,
     recovery_pub: str,
+    created_at: str = "1970-01-01T00:00:00Z",
 ) -> dict:
     """Rotate the recovery code: the OLD code AND root, per succession closure.
 
@@ -1003,11 +1016,12 @@ def replace_recovery_slot(
     unsigned = {key: parsed[key] for key in (
         "v", "generation", "root_pub", "factors", "access", "policy", "wraps",
     )}
-    unsigned["recovery"] = {
+    unsigned["recovery"] = _parse_recovery({
         "recipient_public_key": recipient,
         "recovery_pub": _public_key(recovery_pub, "recovery_pub"),
         "sealed": _b64(sealed),
-    }
+        "created_at": created_at,
+    })
     return {
         **unsigned,
         "signature": root.sign_hex(POLICY_SIGNATURE_DOMAIN + canonical_json(unsigned)),

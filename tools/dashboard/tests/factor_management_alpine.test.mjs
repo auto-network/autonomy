@@ -796,8 +796,24 @@ import {
 } from '../static/js/ceremony/root-factor-policy.js';
 
 test('walk: enrol a recovery code through the real commit flow, then it opens root', async () => {
-  await until(() => comp().generation >= 2 && !comp().loading, 'panel loaded');
-  const genBefore = comp().generation;
+  // a clean password-only armor with a KNOWN password, so the enrol ceremony
+  // authorizes deterministically
+  const pw = await createPasswordFactor(SERVER.root.rootPub, 'pw.rec', 'recov-pass-recov', 10000);
+  SERVER.passwordSeeds = SERVER.passwordSeeds || {};
+  SERVER.passwordSeeds['pw.rec'] = pw.seed;
+  SERVER.state = {
+    generation: SERVER.state.generation + 1,
+    factors: [pw.factor],
+    access: ['pw.rec'],
+    policy: canonicalExpression({ op: 'factor', factor_id: 'pw.rec' }),
+    recovery: null,
+  };
+  SERVER.armor = await buildFactorPolicyArmor({
+    rootSeed: SERVER.root.seed, rootPub: SERVER.root.rootPub, generation: SERVER.state.generation,
+    factors: SERVER.state.factors, access: SERVER.state.access, policy: SERVER.state.policy,
+  });
+  await comp().load();
+  await until(() => !comp().loading, 'clean armor loaded');
   const commitsBefore = SERVER.commits.length;
 
   // drive the component's real enrol methods (generate → present → confirm)
@@ -807,9 +823,12 @@ test('walk: enrol a recovery code through the real commit flow, then it opens ro
   assert.ok(savedCode && savedCode.length === 32, 'a 32-byte code was generated');
   assert.ok(comp().recoveryPrintable.length > 0, 'a printable form exists');
 
-  // confirmRecoverySaved opens root (password) then commits set_recovery
-  const done = comp().confirmRecoverySaved();
-  await authorizeWithPassword(PW2);
+  // "I've saved it" → mandatory verify step (no commit yet)
+  comp().confirmRecoverySaved();
+  await until(() => comp().cur === 'recovery-verify' && comp().top.wizard, 'verify step');
+  // verify with the matching code → commits; drive the password ceremony
+  const done = comp().submitVerifyRecovery(comp().recoveryPrintable);
+  await authorizeWithPassword('recov-pass-recov');
   await done;
   await until(() => SERVER.commits.length === commitsBefore + 1, 'recovery commit posted');
 
@@ -824,12 +843,22 @@ test('walk: enrol a recovery code through the real commit flow, then it opens ro
 });
 
 test('walk: a factor change can be authorized BY the recovery code', async () => {
-  // build a fresh armor that already carries a recovery slot, load it
+  // a fresh TWO-password armor (so a demote is committable) that already
+  // carries a recovery slot
   const code = generateRecoveryCode();
   const recipient = await recoveryRecipientPublicKey(code);
   const { recoveryPub } = await deriveRecoveryFactors(code);
-  const slot = await recoverySlot({ rootSeed: SERVER.root.seed, recoveryRecipientPub: recipient, recoveryPub });
-  SERVER.state.recovery = slot;
+  const slot = await recoverySlot({ rootSeed: SERVER.root.seed, recoveryRecipientPub: recipient, recoveryPub, createdAt: '2026-08-01T00:00:00Z' });
+  const pa = await createPasswordFactor(SERVER.root.rootPub, 'pw.a', 'aaaa-aaaa-aaaa', 10000);
+  const pb = await createPasswordFactor(SERVER.root.rootPub, 'pw.b', 'bbbb-bbbb-bbbb', 10000);
+  SERVER.state = {
+    generation: SERVER.state.generation + 1,
+    factors: [pa.factor, pb.factor].sort((x, y) => x.factor_id.localeCompare(y.factor_id)),
+    access: ['pw.a', 'pw.b'],
+    policy: canonicalExpression({ op: 'or', children: [
+      { op: 'factor', factor_id: 'pw.a' }, { op: 'factor', factor_id: 'pw.b' }] }),
+    recovery: slot,
+  };
   SERVER.armor = await buildFactorPolicyArmor({
     rootSeed: SERVER.root.seed, rootPub: SERVER.root.rootPub, generation: SERVER.state.generation,
     factors: SERVER.state.factors, access: SERVER.state.access, policy: SERVER.state.policy,
@@ -838,9 +867,9 @@ test('walk: a factor change can be authorized BY the recovery code', async () =>
   await comp().load();
   await until(() => comp().hasRecovery && !comp().loading, 'armor with recovery loaded');
 
-  // stage a change and commit — authorize with the RECOVERY CODE, not a factor
-  const pwCell = qa('.authcell').find((c) => c.querySelector('svg use').getAttribute('xlink:href') === '#i-key');
-  pwCell.click();   // toggle the password's authority to stage a change
+  // demote one password (the other keeps full authority) → a committable change
+  const pwCell = qa('.authcell')[0];
+  pwCell.click();
   await until(() => q('.commitbar') && visible(q('.commitbar')), 'commit bar');
   const commitsBefore = SERVER.commits.length;
   q('.commitbar .btn-primary').click();

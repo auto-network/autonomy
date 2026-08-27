@@ -454,7 +454,7 @@ export function credentialsPanel() {
     generation: 0, rootPub: null, armorText: null, envelope: null,
     _committedPolicy: null, _authSeeds: {}, _viewFactors: [],
     deviceName: '', newDevErr: null, authAutofilled: false,
-    _recovery: null, _recoveryCode: null, _recoveryPrintable: null, recoveryVerifyResult: null, recoveryInput: '',
+    _recovery: null, _recoveryCode: null, _recoveryPrintable: null, _recoveryQr: null, recoveryScanning: false, recoveryVerifyResult: null, recoveryInput: '', authRecoveryInput: '',
     authShowMissing: false, authDeadEnd: false,
 
     init() { this.load(); },
@@ -840,6 +840,7 @@ export function credentialsPanel() {
     },
     // ── recovery code (design graph://fd418706-97e) ──────────────────────
     get hasRecovery() { return !!this._recovery; },
+    get recoveryCreated() { return (this._recovery && this._recovery.created_at) || ''; },
     // Generate a fresh code, show it once, then enrol it through the SAME
     // root ceremony + commit path as any factor change: a set_recovery op
     // carrying the slot, and the same slot embedded in the candidate armor.
@@ -855,12 +856,116 @@ export function credentialsPanel() {
         this._recoveryCode = generateRecoveryCode();
         this._recoveryPrintable = await encodeRecoveryCode(this._recoveryCode);
       }
+      this._recoveryQr = '';
+      this._qrSvg(this._recoveryPrintable).then((svg) => { this._recoveryQr = svg; });
       this.push({ s: 'recovery-present' });
     },
     get recoveryPrintable() { return this._recoveryPrintable || ''; },
-    async confirmRecoverySaved() {
-      // authorize with the existing root authority (not the new code itself),
-      // build the slot with the opened root seed, commit one set_recovery op
+    get recoveryQr() { return this._recoveryQr || ''; },
+    // lazy-load a vendored UMD script once (qrcode-generator / jsQR)
+    _loadScript(src) {
+      return new Promise((resolve, reject) => {
+        if (typeof document === 'undefined') { reject(new Error('no document')); return; }
+        const existing = document.querySelector('script[data-fui="' + src + '"]');
+        if (existing) { resolve(); return; }
+        const el = document.createElement('script');
+        el.src = src; el.dataset.fui = src;
+        el.onload = () => resolve(); el.onerror = () => reject(new Error('failed to load ' + src));
+        setTimeout(() => reject(new Error('timed out loading ' + src)), 4000);
+        document.head.appendChild(el);
+      });
+    },
+    async _qrSvg(text) {
+      try {
+        if (typeof window === 'undefined' || !window.qrcode) {
+          await this._loadScript('/static/vendor/qrcode-generator-1.4.4.js');
+        }
+        const qr = window.qrcode(0, 'M');
+        qr.addData(text); qr.make();
+        return qr.createSvgTag({ cellSize: 4, margin: 0, scalable: true });
+      } catch (e) { return ''; }   // display-only; logic never depends on it
+    },
+    // Print an 8.5x11 recovery sheet: the QR + code + how-to-use, the generated
+    // date, NO account name, NO print timestamp. Print CSS hides everything else.
+    printRecovery() {
+      if (typeof document === 'undefined') return;
+      const gen = this.createdLocal(nowIso());
+      const sheet = document.createElement('div');
+      sheet.id = 'fui-print-sheet';
+      sheet.innerHTML =
+        '<div class="fui-print-inner">'
+        + '<h1>Autonomy Network — Recovery Code</h1>'
+        + '<div class="fui-print-qr">' + (this._recoveryQr || '') + '</div>'
+        + '<div class="fui-print-code">' + this._formatCodeBlocks(this._recoveryPrintable) + '</div>'
+        + '<p class="fui-print-gen">Generated ' + gen + '</p>'
+        + '<div class="fui-print-how"><h2>What this is</h2>'
+        + '<p>This is the recovery code for an Autonomy Network identity. It is the '
+        + 'last way to get back in if every password and passkey is lost, and it can '
+        + 're-secure the account if one is stolen.</p>'
+        + '<h2>How to use it</h2>'
+        + '<p>On the sign-in screen, choose “Use recovery code”, then scan this QR '
+        + 'code or type the words below. Keep this sheet somewhere safe and offline. '
+        + 'Anyone who has it can recover the identity, and it cannot be re-created if '
+        + 'it is lost.</p></div></div>';
+      const style = document.createElement('style');
+      style.id = 'fui-print-style';
+      style.textContent =
+        '@media print { body > *:not(#fui-print-sheet) { display:none !important; }'
+        + ' #fui-print-sheet { display:block !important; } }'
+        + ' #fui-print-sheet { display:none; position:fixed; inset:0; background:#fff; color:#000; z-index:99999; }'
+        + ' @page { size:letter; margin:0.75in; }'
+        + ' .fui-print-inner { font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; max-width:6.5in; margin:0 auto; padding:0.5in 0; }'
+        + ' .fui-print-inner h1 { font-size:20px; margin:0 0 18px; }'
+        + ' .fui-print-qr svg { width:2.2in; height:2.2in; }'
+        + ' .fui-print-code { font-family:ui-monospace,Menlo,monospace; font-size:20px; letter-spacing:2px; margin:16px 0; }'
+        + ' .fui-print-gen { color:#555; font-size:12px; margin:0 0 20px; }'
+        + ' .fui-print-how h2 { font-size:14px; margin:16px 0 4px; } .fui-print-how p { margin:0 0 10px; }';
+      document.body.appendChild(style); document.body.appendChild(sheet);
+      const cleanup = () => { sheet.remove(); style.remove(); window.removeEventListener('afterprint', cleanup); };
+      window.addEventListener('afterprint', cleanup);
+      window.print();
+    },
+    _formatCodeBlocks(printable) {
+      return String(printable || '').split(/[\s-]+/).filter(Boolean).join(' &nbsp; ');
+    },
+    // "I've saved it" → the confirm step, still BEFORE the point of no return:
+    // nothing is committed until they verify (or skip), so a mismatch can go
+    // back and see the code again.
+    confirmRecoverySaved() {
+      this.recoveryInput = ''; this.recoveryVerifyResult = null;
+      this.push({ s: 'recovery-verify', wizard: true });
+    },
+    seeCodeAgain() {
+      // from the wizard verify step back to the presentation (allowed until
+      // the enrolment completes)
+      if (this.top.s === 'recovery-verify') this.pop();
+    },
+    // Wizard verify: the typed/scanned copy must MATCH the code we still hold,
+    // then commit. Standalone verify (enrolled row): the code must OPEN the
+    // armor, read-only.
+    async submitVerifyRecovery(printable) {
+      this.recoveryVerifyResult = null;
+      let code;
+      try { code = await decodeRecoveryCode(String(printable || '').trim()); }
+      catch (e) { this.recoveryVerifyResult = 'malformed'; return; }
+      if (this.top.wizard) {
+        const want = this._recoveryCode;
+        const matches = want && code.length === want.length
+          && code.every((b, i) => b === want[i]);
+        if (!matches) { this.recoveryVerifyResult = 'fail'; return; }
+        this.recoveryVerifyResult = 'ok';
+        await this._enrolRecovery();
+        return;
+      }
+      try {
+        const opened = await openRootWithRecovery(this.armorText, code);
+        opened.seed.fill(0);
+        this.recoveryVerifyResult = 'ok';
+      } catch (e) { this.recoveryVerifyResult = 'fail'; }
+    },
+    // Commit the code: open the CURRENT root authority, build the slot with the
+    // opened seed, commit one set_recovery op (also embedded in the candidate).
+    async _enrolRecovery() {
       const opened = await this.requireRoot('Add a recovery code', '', ['Add a recovery code']);
       if (!opened) return;
       this.committing = true;
@@ -868,7 +973,7 @@ export function credentialsPanel() {
         const recipient = await recoveryRecipientPublicKey(this._recoveryCode);
         const { recoveryPub } = await deriveRecoveryFactors(this._recoveryCode);
         const slot = await recoverySlot({
-          rootSeed: opened.seed, recoveryRecipientPub: recipient, recoveryPub,
+          rootSeed: opened.seed, recoveryRecipientPub: recipient, recoveryPub, createdAt: nowIso(),
         });
         await this._commitOps([{ op: 'set_recovery', recovery: slot }], opened);
         this._recoveryCode = null; this._recoveryPrintable = null;
@@ -879,18 +984,44 @@ export function credentialsPanel() {
         this.flash((e && e.message) || String(e));
       } finally { opened.seed.fill(0); this.committing = false; }
     },
-    // Verify a code (read-only): it must open the root. Scan or type upstream.
-    startVerifyRecovery() { this.push({ s: 'recovery-verify' }); },
-    async submitVerifyRecovery(printable) {
-      this.recoveryVerifyResult = null;
-      let code;
-      try { code = await decodeRecoveryCode(String(printable || '').trim()); }
-      catch (e) { this.recoveryVerifyResult = 'malformed'; return; }
+    // Verify an already-enrolled code (from the enrolled row): read-only.
+    startVerifyRecovery() {
+      this.recoveryInput = ''; this.recoveryVerifyResult = null;
+      this.push({ s: 'recovery-verify', wizard: false });
+    },
+    // Camera QR scan (best-effort): the type field is always available as the
+    // fallback, so a browser without a camera loses nothing.
+    async startRecoveryScan() {
+      if (typeof navigator === 'undefined' || !navigator.mediaDevices) { this.flash('No camera on this device — type the code instead'); return; }
       try {
-        const opened = await openRootWithRecovery(this.armorText, code);
-        opened.seed.fill(0);
-        this.recoveryVerifyResult = 'ok';
-      } catch (e) { this.recoveryVerifyResult = 'fail'; }
+        if (!window.jsQR) await this._loadScript('/static/vendor/jsQR-1.4.0.js');
+        this._recoveryStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+        this.recoveryScanning = true;
+        const video = document.createElement('video');
+        video.setAttribute('playsinline', ''); video.srcObject = this._recoveryStream;
+        await video.play();
+        const canvas = document.createElement('canvas');
+        const tick = async () => {
+          if (!this.recoveryScanning) return;
+          if (video.readyState === video.HAVE_ENOUGH_DATA) {
+            canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const found = window.jsQR(img.data, img.width, img.height);
+            if (found && found.data) {
+              this.recoveryInput = found.data; this.stopRecoveryScan();
+              await this.submitVerifyRecovery(found.data); return;
+            }
+          }
+          requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      } catch (e) { this.recoveryScanning = false; this.flash('Could not open the camera — type the code instead'); }
+    },
+    stopRecoveryScan() {
+      this.recoveryScanning = false;
+      if (this._recoveryStream) { this._recoveryStream.getTracks().forEach((t) => t.stop()); this._recoveryStream = null; }
     },
     // The authorize ceremony's recovery path: the code opens the root and thus
     // authorizes the commit — a third way to satisfy the root ceremony.
@@ -1401,7 +1532,21 @@ const STYLE = `
 .fui-cred .scrhead .ttl{ min-width:0; } .fui-cred .scrhead h1{ margin:0; font-size:15.5px; font-weight:650; } .fui-cred .scrhead .sub{ font-size:12px; color:var(--dim); }
 .fui-cred .scrhead .step{ margin-left:auto; font-size:10.5px; font-weight:700; color:var(--accent2); background:#171e33; border:1px solid #33406b; border-radius:999px; padding:2px 8px; }
 .fui-cred .body{ overflow-y:auto; padding:6px 12px 16px; flex:1; }
+.fui-cred{ --rec:#f0b429; --recbg:#2a1f05; --recborder:#5a4410; }
 .fui-cred .mfacard{ margin:10px 6px 4px; border:1px solid var(--line2); border-radius:12px; padding:12px; display:flex; align-items:center; gap:11px; background:linear-gradient(180deg,#0c1626,#0b1220); }
+.fui-cred .reccard{ border-color:var(--recborder); background:linear-gradient(180deg,#251c07,#160f02); }
+.fui-cred .reccard .ficon{ color:var(--rec); border-color:var(--recborder); background:rgba(240,180,41,.08); }
+.fui-cred .reccard .mt{ color:#f7cf6b; }
+.fui-cred .addbtn.rec{ color:#f7cf6b; border-color:var(--recborder); }
+.fui-cred .authcell.au-rec .ac-ico{ color:var(--rec); border-color:var(--recborder); background:rgba(240,180,41,.08); } .fui-cred .authcell.au-rec .ac-lbl{ color:#f7cf6b; }
+.fui-cred .btn-rec{ background:var(--rec); color:#231a02; border-color:var(--rec); }
+.fui-cred .recwarn{ border:1px solid var(--recborder); background:var(--recbg); border-radius:12px; padding:12px 14px; font-size:12.5px; line-height:1.5; color:#e9d8a6; margin:14px 0 0; }
+.fui-cred .reccode{ font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:17px; letter-spacing:1px; text-align:center; background:#0b111b; border:1px solid var(--recborder); border-radius:12px; padding:14px 10px; color:#f7cf6b; line-height:1.9; word-spacing:6px; flex:1; }
+.fui-cred .recqr{ width:150px; height:150px; flex:none; background:#fff; padding:9px; border-radius:10px; }
+.fui-cred .recqr svg{ width:100%; height:100%; display:block; }
+.fui-cred .recrow{ display:flex; gap:14px; align-items:center; margin:6px 0 4px; }
+.fui-cred .exp p{ font-size:13.5px; color:#c5cbd6; margin:0 0 12px; } .fui-cred .exp p b{ color:var(--ink); }
+.fui-cred .choice{ display:flex; gap:10px; margin-top:6px; } .fui-cred .choice .btn{ flex:1; flex-direction:column; padding:18px 10px; gap:6px; }
 .fui-cred .mfacard.pending{ border-color:#5865e6; box-shadow:inset 0 0 0 1px rgba(88,101,230,.35); }
 .fui-cred .mfacard .mi{ min-width:0; flex:1; } .fui-cred .mfacard .mt{ font-weight:650; font-size:14px; white-space:nowrap; } .fui-cred .mfacard .md{ font-size:12px; color:var(--dim); margin-top:3px; }
 .fui-cred .mfaenabled{ font-size:10.5px; font-weight:700; color:var(--mfa); background:var(--mfabg); border:1px solid #1e5b7e; border-radius:999px; padding:1px 9px; margin-bottom:5px; }
@@ -1509,6 +1654,9 @@ const SYMBOLS = `<svg width="0" height="0" style="position:absolute"><defs>
   <symbol id="i-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13M10 11v6M14 11v6"/></symbol>
   <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 6.5"/></symbol>
   <symbol id="i-edit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></symbol>
+  <symbol id="i-hash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3 7 21M17 3l-2 18M4 8.5h16M3.5 15.5h16"/></symbol>
+  <symbol id="i-print" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><path d="M6 14h12v8H6z"/></symbol>
+  <symbol id="i-scan" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2"/><rect x="8" y="8" width="8" height="8" rx="1"/></symbol>
   <linearGradient id="armorGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#b3bcff"/><stop offset="1" stop-color="#4d59d6"/></linearGradient>
 </defs></svg>`;
 
@@ -1534,6 +1682,13 @@ const MARKUP = `
       <button class="addbtn" x-show="!mfaOn" @click="startMfaSetup()">Set up</button>
       <div class="mfaactions" x-show="mfaOn"><span class="mfaenabled">Enabled</span><button class="lnk lchange" @click="startMfaSetup()">Configure</button><button class="lnk ldisable" @click="disableMfa()">Disable</button></div>
     </div>
+
+    <template x-if="!hasRecovery"><div class="mfacard reccard">
+      <div class="ficon"><svg><use xlink:href="#i-hash"/></svg></div>
+      <div class="mi"><div class="mt">Recovery code</div>
+        <div class="md">Recovery codes are an essential means to protecting your account. Generate one now.</div></div>
+      <button class="addbtn rec" @click="startRecovery()">Set up</button>
+    </div></template>
 
     <div class="grouphead"><span class="grouplbl">Passwords</span>
       <button class="addbtn" @click="addPassword()"><svg><use xlink:href="#i-plus"/></svg> Add</button></div>
@@ -1590,6 +1745,16 @@ const MARKUP = `
         <div class="facts factcol" x-show="renameFor!==k.id"><template x-if="statusOf(k)==='removed'"><button class="lnk lchange" @click="undoRemove(k)">Undo</button></template>
           <template x-if="statusOf(k)!=='removed'"><button class="trashbtn" :class="{locked:!canRemove(k)}" @click="remove(passkeys,k,$event)" aria-label="Remove"><svg><use xlink:href="#i-trash"/></svg></button></template></div></div>
     </template>
+
+    <template x-if="hasRecovery"><div>
+      <div class="grouphead"><span class="grouplbl">Recovery code</span></div>
+      <div class="row">
+        <div class="authcell au-rec"><span class="ac-ico"><svg><use xlink:href="#i-hash"/></svg></span><span class="ac-lbl">Emergency</span></div>
+        <div class="fmid"><div class="fname">Recovery code</div>
+          <div class="fmeta"><span x-text="recoveryCreated ? ('Generated '+createdLocal(recoveryCreated)) : 'Enrolled'"></span></div></div>
+        <div class="facts factcol"><button class="lnk lverify" @click="startVerifyRecovery()">Verify</button></div>
+      </div>
+    </div></template>
   </div></template>
 
   <!-- ADD PASSKEY -->
@@ -1670,6 +1835,61 @@ const MARKUP = `
     </div>
   </div></template>
 
+  <!-- RECOVERY: explanation -->
+  <template x-if="ready && cur==='recovery-explain'"><div style="display:flex;flex-direction:column;min-height:0">
+    <div class="scrhead"><button class="back" @click="back()"><svg style="width:16px;height:16px"><use xlink:href="#i-chev"/></svg></button>
+      <div class="ttl"><h1>Recovery code</h1><div class="sub">Your last way back in</div></div></div>
+    <div class="deep exp">
+      <p>Autonomy is <b>self-sovereign</b>: no company holds your keys, and no support line can reset your password. That is what keeps your data yours — and it means <b>you</b> are the only one who can get back in.</p>
+      <p>Your <b>recovery code</b> is the last way in if you ever lose every password and passkey. Printed and kept offline, it opens your identity again and lets you set a new password.</p>
+      <p>It also <b>protects you from takeover</b>: because the code lives offline — not on any device an attacker can reach — it can re-secure your account even if someone steals a password or passkey.</p>
+      <div class="recwarn"><b>Keep it offline.</b> Print it and store it somewhere safe. Anyone who has it can recover your identity, and it cannot be re-created if you lose it.</div>
+      <button class="btn btn-rec" style="width:100%;margin-top:14px" @click="generateRecoveryCode()">Generate recovery code</button>
+    </div>
+  </div></template>
+
+  <!-- RECOVERY: present the code once -->
+  <template x-if="ready && cur==='recovery-present'"><div style="display:flex;flex-direction:column;min-height:0">
+    <div class="scrhead"><div class="ttl"><h1>Your recovery code</h1><div class="sub">Print it and keep it offline</div></div></div>
+    <div class="deep">
+      <p class="lead">Print this and keep it somewhere safe and offline.</p>
+      <div class="recrow">
+        <div class="recqr" x-html="recoveryQr"></div>
+        <div class="reccode" x-text="recoveryPrintable"></div>
+      </div>
+      <div class="authrow">
+        <button class="btn btn-ghost" @click="printRecovery()"><svg><use xlink:href="#i-print"/></svg> Print</button>
+        <button class="btn btn-rec" @click="confirmRecoverySaved()">I've saved it</button>
+      </div>
+      <div class="recwarn"><b>Important:</b> This code cannot be shown again after this enrollment process completes, and you will <b><i>not</i></b> be able to create a new recovery code if you lose this one!</div>
+    </div>
+  </div></template>
+
+  <!-- RECOVERY: verify (mandatory in the wizard; read-only for an enrolled code) -->
+  <template x-if="ready && cur==='recovery-verify'"><div style="display:flex;flex-direction:column;min-height:0">
+    <div class="scrhead"><button class="back" @click="back()"><svg style="width:16px;height:16px"><use xlink:href="#i-chev"/></svg></button>
+      <div class="ttl"><h1>Verify your recovery code</h1><div class="sub" x-text="top.wizard ? 'Confirm the copy you saved' : 'Confirm it still works'"></div></div></div>
+    <div class="deep">
+      <template x-if="recoveryVerifyResult==='ok' && !top.wizard"><div class="inlineok" style="justify-content:center;padding:20px 0"><svg><use xlink:href="#i-check"/></svg> Recovery code verified</div></template>
+      <template x-if="!(recoveryVerifyResult==='ok' && !top.wizard)"><div>
+        <p class="lead" x-text="top.wizard ? 'Scan or type the copy you just saved. You must verify it before it is enrolled.' : 'Scan or type your recovery code. Nothing changes — this only checks it.'"></p>
+        <div class="choice" x-show="!recoveryScanning">
+          <button class="btn btn-ghost" @click="startRecoveryScan()"><svg><use xlink:href="#i-scan"/></svg> Scan the QR code</button>
+        </div>
+        <div class="field" style="margin-top:12px"><label>Enter the code</label>
+          <input type="text" x-model="recoveryInput" spellcheck="false" autocapitalize="off" placeholder="Recovery code"
+            @keydown.enter="submitVerifyRecovery(recoveryInput)"></div>
+        <template x-if="recoveryVerifyResult==='fail'"><p class="lead" style="color:var(--danger);margin-top:10px" x-text="top.wizard ? 'That does not match the code shown. Check your saved copy.' : 'That code did not open your identity — check it and try again.'"></p></template>
+        <template x-if="recoveryVerifyResult==='malformed'"><p class="lead" style="color:var(--danger);margin-top:10px">That is not a valid recovery code — check the characters.</p></template>
+        <div class="authrow">
+          <template x-if="top.wizard"><button class="btn btn-ghost" @click="seeCodeAgain()">Show my code again</button></template>
+          <template x-if="!top.wizard"><button class="btn btn-ghost" @click="back()">Cancel</button></template>
+          <button class="btn btn-rec" :disabled="!recoveryInput || committing" @click="submitVerifyRecovery(recoveryInput)">Verify</button>
+        </div>
+      </div></template>
+    </div>
+  </div></template>
+
   <!-- AUTHORIZE (commit) -->
   <template x-if="ready && cur==='authorize'"><div style="display:flex;flex-direction:column;min-height:0">
     <div class="scrhead"><button class="back" @click="back()" x-show="!verifying"><svg style="width:16px;height:16px"><use xlink:href="#i-chev"/></svg></button>
@@ -1698,8 +1918,13 @@ const MARKUP = `
           <template x-for="mp in authMissingPasskeys" :key="mp.label">
             <div style="margin-top:5px">“<span x-text="mp.label"></span>” — enrolled on: <span x-text="mp.devices"></span></div>
           </template>
+          <template x-if="hasRecovery"><div style="margin-top:8px">Or authorize with your <b>recovery code</b> below.</div></template>
         </div></template>
+        <template x-if="hasRecovery"><div class="field" style="margin-top:12px"><label>Or enter your recovery code</label>
+          <input type="text" x-model="authRecoveryInput" spellcheck="false" autocapitalize="off" placeholder="Recovery code"
+            @keydown.enter="authWithRecovery(authRecoveryInput)"></div></template>
         <div class="authrow"><button class="btn btn-ghost" @click="back()">Cancel</button>
+          <template x-if="hasRecovery && authRecoveryInput"><button class="btn btn-rec" @click="authWithRecovery(authRecoveryInput)">Use recovery code</button></template>
           <button class="btn btn-primary" :disabled="!password || authPwDone" @click="authWithPassword()">Authorize</button></div>
       </div></template>
       <template x-if="verifying"><div class="verifying"><span class="spin"></span> Verifying with your root key…</div></template>
