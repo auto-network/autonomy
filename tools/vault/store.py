@@ -29,6 +29,7 @@ from pathlib import Path
 from tools.network.fleet_sync_connection import FleetSyncConnection
 from tools.network.idkit.canonical import canonical_json
 
+from .recipients import PERSONAL_ROOT_RECIPIENT
 from .errors import ConcurrencyError, PolicyClassError, VaultError
 from .factors import PublishedFactor
 from .policy_class import PolicyClassRecord
@@ -173,6 +174,17 @@ class VaultStore:
         under an IMMEDIATE write lock so the read-modify-write is atomic against
         other writers; the caller retries on conflict.
         """
+        # Widen-only invariant (operator ruling 2026-08-27): every persisted
+        # class carries the root in every generation — a policy class widens
+        # access beyond root, it never narrows below it. A record whose
+        # generations lack a personal-root wrap cannot become real.
+        for gen in record.generations:
+            if not any(w.factor_type == PERSONAL_ROOT_RECIPIENT for w in gen.wraps):
+                raise PolicyClassError(
+                    f"class {record.class_id!r} generation {gen.gen_id!r} has no "
+                    f"personal-root recipient; classes widen access beyond root, "
+                    f"never narrow below it"
+                )
         wire = canonical_json(record.to_dict()).decode("ascii")
         self.db.execute("BEGIN IMMEDIATE")
         try:
@@ -210,6 +222,17 @@ class VaultStore:
         application-level check before ``put_class`` would still permit two
         independently keyed classes to land between those operations.
         """
+        # Widen-only invariant (operator ruling 2026-08-27): every persisted
+        # class carries the root in every generation — a policy class widens
+        # access beyond root, it never narrows below it. A record whose
+        # generations lack a personal-root wrap cannot become real.
+        for gen in record.generations:
+            if not any(w.factor_type == PERSONAL_ROOT_RECIPIENT for w in gen.wraps):
+                raise PolicyClassError(
+                    f"class {record.class_id!r} generation {gen.gen_id!r} has no "
+                    f"personal-root recipient; classes widen access beyond root, "
+                    f"never narrow below it"
+                )
         wire = canonical_json(record.to_dict()).decode("ascii")
         self.db.execute("BEGIN IMMEDIATE")
         try:

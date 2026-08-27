@@ -18,11 +18,14 @@ import pytest
 from tools.vault import service
 from tools.vault.errors import ClassOpenError, VaultError
 from tools.vault.store import VaultStore
+from tools.vault.testkit import enroll_test_anchor
 from tools.vault.testkit import make_test_genesis, make_test_identity
 
 
 def _store():
-    return VaultStore(":memory:")
+    s = VaultStore(":memory:")
+    enroll_test_anchor(s)
+    return s
 
 
 def _seeds(store, *identities):
@@ -47,7 +50,7 @@ def test_full_headless_lifecycle():
     service.enroll_into_class(store, class_id, _seeds(store, a), "pw-2", new_password="bravo")
     b = make_test_identity(factor_id="pw-2", password="bravo")  # id/password match the enrolled one
     assert store.get_secret("s.a").sealed_cek == before
-    assert len(store.get_class(class_id).current().wraps) == 2
+    assert len(store.get_class(class_id).current().wraps) == 3   # pw-1 + pw-2 + root anchor
 
     # the enrolled factor opens both settings (shared class key)
     seeds_b = {"pw-2": service.password_seed(store, "pw-2", "bravo")}

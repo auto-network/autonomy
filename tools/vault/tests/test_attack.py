@@ -36,6 +36,7 @@ from tools.vault.factors import (
     random_seed,
 )
 from tools.vault.store import VaultStore
+from tools.vault.testkit import enroll_test_anchor
 
 GENESIS = "genesis-1"
 
@@ -87,16 +88,17 @@ def test_single_wrap_class_also_rejects_duplicate_key_material():
 
 def _seed_store():
     store = VaultStore(":memory:")
-    return store
+    _, anchor = enroll_test_anchor(store)
+    return store, anchor
 
 
 def test_stale_extend_cannot_undo_a_revocation():
     """Writer A revokes pw-1; writer B, from a pre-revocation snapshot, extends.
     B's write drops A's appended generation and must be refused."""
-    store = _seed_store()
+    store, anchor = _seed_store()
     pub1, seed1 = pw_factor("alpha", "pw-1")
     pub2, seed2 = pw_factor("bravo", "pw-2")
-    rec = create_class(PASSWORD_POLICY, [pub1], created_at="t0")
+    rec = create_class(PASSWORD_POLICY, [pub1], created_at="t0", recovery=anchor)
     rec = extend_class(rec, {"pw-1": seed1}, pub2)
     store.put_class(rec)
 
@@ -117,9 +119,9 @@ def test_stale_extend_cannot_undo_a_revocation():
 
 
 def test_stale_extend_cannot_lose_a_concurrent_enrollment():
-    store = _seed_store()
+    store, anchor = _seed_store()
     pub1, seed1 = pw_factor("alpha", "pw-1")
-    rec = create_class(PASSWORD_POLICY, [pub1], created_at="t0")
+    rec = create_class(PASSWORD_POLICY, [pub1], created_at="t0", recovery=anchor)
     store.put_class(rec)
 
     base = store.get_class(rec.class_id)  # both writers read this
@@ -134,9 +136,9 @@ def test_stale_extend_cannot_lose_a_concurrent_enrollment():
 
 
 def test_append_only_successor_allows_legitimate_growth():
-    store = _seed_store()
+    store, anchor = _seed_store()
     pub1, seed1 = pw_factor("alpha", "pw-1")
-    rec = create_class(PASSWORD_POLICY, [pub1], created_at="t0")
+    rec = create_class(PASSWORD_POLICY, [pub1], created_at="t0", recovery=anchor)
     store.put_class(rec)
     pub2, _ = pw_factor("bravo", "pw-2")
     store.put_class(extend_class(store.get_class(rec.class_id), {"pw-1": seed1}, pub2))

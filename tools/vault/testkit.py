@@ -80,3 +80,23 @@ def make_test_genesis() -> str:
     """A throwaway genesis id — a stand-in for an org object genesis or a
     personal-domain store id."""
     return f"test-genesis-{secrets.token_hex(8)}"
+
+
+def enroll_test_anchor(store, *, anchor_id: str = "personal-root-default"):
+    """Enroll a real root anchor into *store*; returns (anchor_seed, recipient).
+
+    The widen-only invariant (operator ruling 2026-08-27) means every member
+    class carries the personal root, so most store-backed tests need one.
+    """
+    from tools.network.idkit.keys import KeyPair
+    from tools.vault import service as _service
+    from tools.vault.root_anchor import create_root_anchor
+
+    record, seed = create_root_anchor(
+        KeyPair.generate(),
+        anchor_id=anchor_id,
+        display_name="Test personal root",
+        created_at="2026-08-27T00:00:00Z",
+    )
+    _service.enroll_root_anchor(store, record.to_dict())
+    return seed, record.published_recipient()

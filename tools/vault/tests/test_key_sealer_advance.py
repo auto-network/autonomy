@@ -118,10 +118,12 @@ def test_secured_write_uses_named_class_public_key_without_an_opener(world):
     from tools.vault import service
     from tools.vault.key_holder import _scoped_db
     from tools.vault.store import VaultStore
+    from tools.vault.testkit import enroll_test_anchor
     from tools.graph.schemas.vault_policy_class import VAULT_POLICY_CLASS_SET_ID
 
     class_db = _scoped_db(VAULT_POLICY_CLASS_SET_ID, "acme")
     with VaultStore(class_db) as classes:
+        enroll_test_anchor(classes)
         service.enroll_password_factor(classes, "pw-1", "fake-password")
         class_id = service.create_policy_class(
             classes, "password", ["pw-1"], created_at="t0"

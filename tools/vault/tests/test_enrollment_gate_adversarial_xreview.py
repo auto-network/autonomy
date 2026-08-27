@@ -34,6 +34,7 @@ from tools.network.idkit import KeyPair
 from tools.network.idkit.enrollment import EnrollmentError, SignatureError, mint
 from tools.vault import service
 from tools.vault.store import VaultStore
+from tools.vault.testkit import enroll_test_anchor
 
 _KW = dict(
     credential_id="Y3JlZGVudGlhbA",
@@ -50,7 +51,9 @@ _ATTACKER_PROV = "bb" * 32
 
 @pytest.fixture
 def store():
-    return VaultStore(":memory:")
+    s = VaultStore(":memory:")
+    enroll_test_anchor(s)
+    return s
 
 
 @pytest.fixture

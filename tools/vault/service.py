@@ -161,11 +161,32 @@ def unique_passkey_choices(store: VaultStore, credential_rows: list[dict]) -> li
 
 
 def create_policy_class(
-    store: VaultStore, policy: str, factor_ids: list[str], *, created_at: str
+    store: VaultStore,
+    policy: str,
+    factor_ids: list[str],
+    *,
+    created_at: str,
+    recovery: "PublishedRecipient | None" = None,
 ) -> str:
-    """Create a class over already-enrolled factors (uses their pubs only)."""
+    """Create a class over already-enrolled factors (uses their pubs only).
+
+    The personal root is ALWAYS sealed in alongside the members (widen-only
+    invariant): *recovery* names the anchor recipient explicitly, or the
+    store's sole enrolled root anchor is used. With no anchor enrolled the
+    class cannot be created — vault bring-up comes first.
+    """
     factors = [store.get_published_factor(fid) for fid in factor_ids]
-    record = create_class(policy, factors, created_at=created_at)
+    if recovery is None:
+        anchor_ids = [row[0] for row in store.db.execute(
+            "SELECT anchor_id FROM root_anchors ORDER BY anchor_id"
+        ).fetchall()]
+        if len(anchor_ids) != 1:
+            raise VaultError(
+                "a policy class needs the personal root sealed in: pass "
+                f"recovery= explicitly ({len(anchor_ids)} anchors enrolled)"
+            )
+        recovery = store.get_root_anchor(anchor_ids[0]).published_recipient()
+    record = create_class(policy, factors, created_at=created_at, recovery=recovery)
     store.put_class(record)
     return record.class_id
 
