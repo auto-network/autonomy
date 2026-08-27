@@ -135,12 +135,23 @@ test('the solver refuses removing the last full-authority factor', () => {
   assert.notEqual(c.passwords[0].pending, 'removed');   // refused, not staged
 });
 
-test('unpaired factors cannot be granted authority', () => {
+test('unpaired tap: refuses with an explanation, never silently reduces access', () => {
   const view = orView();
   view.factors.push(pkFactorView('pk.2', 'credB', [], { root_role: 'none' }));
   const c = panelFrom(view);
   const row = c.passkeys.find((k) => k.unpaired);
-  c.toggleAuthority(row, null);
+  assert.equal(row.authority, 'unlock');
+  // outside MFA the tap must NOT move unlock → none: it explains itself and stays
+  c.authCellClick(row, null);
+  assert.equal(row.authority, 'unlock', 'tap does not silently drop sign-in');
+  assert.ok(c.warnAt && /[Ee]nroll/.test(c.warnAt.text), 'refusal explains the enrollment path');
+  // recovery: a server-presented none can always come back up to unlock…
+  row.authority = 'none';
+  c.warnAt = null;
+  c.authCellClick(row, null);
+  assert.equal(row.authority, 'unlock', 'none recovers to unlock');
+  // …and full stays unreachable without a device slot
+  c.authCellClick(row, null);
   assert.notEqual(row.authority, 'full');
 });
 

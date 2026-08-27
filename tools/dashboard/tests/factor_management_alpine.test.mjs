@@ -733,3 +733,33 @@ test('walk: an autofilled password auto-submits the ceremony', async () => {
   await until(() => SERVER.commits.length === commitsBefore + 1, 'auto-submitted commit posted');
   await until(() => comp().cur === 'credentials', 'landed back on the list');
 });
+
+test('post-migration tap: the unpaired passkey cell never drops to No authority (jsdom DOM tap)', async () => {
+  // the operator's exact live state after the v2→v3 migration: the passkey
+  // factor carried over sign-in-only with ZERO device slots
+  const credId = SERVER.passkeyRows[0].credential_id;
+  const pk = SERVER.state.factors.find((f) => f.type === 'passkey');
+  const savedRecipients = pk.recipients;
+  pk.recipients = [];
+  SERVER.state.policy = canonicalExpression({ op: 'factor', factor_id: 'pw.main' });
+  try {
+    await comp().load();
+    await until(() => comp().passkeys.some((k) => k.unpaired), 'unpaired row rendered');
+    await until(() => qa('.ac-lbl').some((e) => e.textContent === 'Unlock only'), 'Unlock only label');
+    const cell = qa('.authcell').find((c) => c.querySelector('.ac-lbl').textContent === 'Unlock only');
+    cell.click();
+    await flush(); await flush();
+    const row = comp().passkeys.find((k) => k.unpaired);
+    assert.notEqual(row.authority, 'none', 'tap must not silently drop to No authority');
+    assert.equal(row.authority, 'unlock', 'stays Unlock only');
+    assert.ok(q('.warnbubble'), 'the refusal explains itself in the DOM');
+    assert.match(q('.warnbubble').textContent, /[Ee]nroll/);
+  } finally {
+    pk.recipients = savedRecipients;
+    SERVER.state.policy = canonicalExpression({
+      op: 'or',
+      children: [{ op: 'factor', factor_id: 'pw.main' }, { op: 'factor', factor_id: 'pk.mac' }],
+    });
+    await comp().load();
+  }
+});
