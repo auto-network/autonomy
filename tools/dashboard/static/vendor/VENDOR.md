@@ -54,3 +54,8 @@ lifetime only to a request that names a version.
 `highlightjs/` (syntax highlighting) and `openpgp-6.3.1.min.js` (commit
 signing) predate this table and were listed here in prose, with no version,
 source or checksum recorded, until they were added above.
+
+## jsQR 1.4.0
+Pure-JS QR decoder for the recovery-code "scan" verify path. MIT (Cosmo Wolfe),
+version-pinned, sha256 bc40c8a15196236b2314db0856f72ca0b49980cd5413b8c852a7349f5fee0859.
+Lazy-loaded only when the camera scanner opens.
