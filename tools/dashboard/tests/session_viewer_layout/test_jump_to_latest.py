@@ -61,8 +61,11 @@ process.stdout.write(JSON.stringify({
     css = BASE_HTML.read_text()
     assert 'data-testid="session-jump-to-bottom"' in page
     assert 'x-show="showJumpToBottom && !showTerminal"' in page
+    assert '<div class="sv-transcript" x-show="!showTerminal">' in page
     assert "_mode !== 'page' && !autoScroll" in entries
     jump_css = css.split(".sv-jump-to-bottom {", 1)[1].split("}", 1)[0]
-    assert "grid-row: 2" in jump_css
+    assert "position: absolute" in jump_css
+    assert "right: max(14px" in jump_css and "bottom: 14px" in jump_css
     assert "width: 44px" in jump_css and "height: 44px" in jump_css
     assert "border-radius: 9999px" in jump_css
+    assert "opacity: 0.86" in jump_css
