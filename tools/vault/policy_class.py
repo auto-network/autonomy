@@ -194,7 +194,11 @@ class Generation:
             raise PolicyClassError(f"malformed generation: {exc}") from exc
 
     def factor_ids(self) -> tuple[str, ...]:
-        return tuple(w.factor_id for w in self.wraps)
+        seen = []
+        for w in self.wraps:
+            if w.factor_id not in seen:
+                seen.append(w.factor_id)
+        return tuple(seen)
 
 
 @dataclass(frozen=True)
@@ -257,8 +261,21 @@ class PolicyClassRecord:
         raise PolicyClassError(f"no generation {gen_id!r} in class {self.class_id!r}")
 
     def factor_ids(self) -> tuple[str, ...]:
-        """Factor ids admitted to the CURRENT generation (the live factor set)."""
-        return self.current().factor_ids()
+        """Factor ids admitted to the CURRENT generation (the live factor set).
+
+        For a member class the root recovery recipient is NOT a factor — it is
+        the always-present widen-only floor — so it is excluded here; the
+        anchor-only governance class's identity IS its anchor, which stays.
+        """
+        if is_root_reachable(self):
+            return self.current().factor_ids()
+        return tuple(
+            fid for fid in self.current().factor_ids()
+            if not any(
+                w.factor_id == fid and w.factor_type == PERSONAL_ROOT_RECIPIENT
+                for w in self.current().wraps
+            )
+        )
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
@@ -566,10 +583,17 @@ def enable_public_sealing(
     """
     if record.current().sealing_public_key is not None:
         return record
-    factors = [
-        PublishedFactor(w.factor_id, w.factor_type, w.public_key)
-        for w in record.current().wraps
-    ]
+    seen: set[tuple[str, str]] = set()
+    factors = []
+    for w in record.current().wraps:
+        if (w.factor_id, w.public_key) in seen:
+            continue   # a 'both' recovery anchor holds two role wraps — one recipient
+        seen.add((w.factor_id, w.public_key))
+        factors.append(
+            PublishedRecipient(w.factor_id, w.factor_type, w.public_key)
+            if w.factor_type == PERSONAL_ROOT_RECIPIENT
+            else PublishedFactor(w.factor_id, w.factor_type, w.public_key)
+        )
     new_gen = _mint_generation(
         record.policy,
         factors,
@@ -680,6 +704,13 @@ def revoke_factor(
             "root factors are changed on the personal armor, not on this class"
         )
     current = record.current()
+    for w in current.wraps:
+        if w.factor_id == factor_id and w.factor_type == PERSONAL_ROOT_RECIPIENT:
+            raise PolicyClassError(
+                "the personal root can never be removed from a class (a class "
+                "widens access beyond root, never narrows below it); root "
+                "rotation re-wraps the anchor through its continuity path"
+            )
     seen: set[tuple[str, str]] = set()
     survivors = []
     for w in current.wraps:

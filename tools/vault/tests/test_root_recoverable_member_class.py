@@ -103,3 +103,46 @@ def test_without_recovery_root_stays_locked_out():
     record = create_class("prf", [pk], created_at=NOW)
     with pytest.raises(ClassOpenError):
         open_class(record, {"anchor.root": anchor_seed})
+
+
+# ── the confirmed invariant: widen-only, root always present, never removable ─
+
+def test_store_refuses_a_member_class_without_the_root_anchor():
+    from tools.vault.store import VaultStore
+    store = VaultStore(":memory:")
+    _, pk = factor("pk.solo")
+    record = create_class("prf", [pk], created_at=NOW)   # no recovery
+    with pytest.raises(PolicyClassError):
+        store.put_class(record)
+
+
+def test_store_accepts_member_classes_with_the_anchor_and_the_root_class():
+    from tools.vault.store import VaultStore
+    from tools.vault.policy_class import create_root_reachable_class
+    store = VaultStore(":memory:")
+    _, pk = factor("pk.solo")
+    anchor_seed, root = anchor()
+    store.put_class(create_class("prf", [pk], created_at=NOW, recovery=root))
+    store.put_class(create_root_reachable_class(root, display_name="Personal", created_at=NOW))
+
+
+def test_the_root_anchor_can_never_be_revoked():
+    _, pk_a = factor("pk.a")
+    _, pk_b = factor("pk.b")
+    _, root = anchor()
+    record = create_class("prf", [pk_a, pk_b], created_at=NOW, recovery=root)
+    with pytest.raises(PolicyClassError):
+        revoke_factor(record, "anchor.root", created_at=NOW)
+
+
+def test_service_supplies_the_stores_sole_anchor_automatically():
+    from tools.vault.store import VaultStore
+    from tools.vault import service
+    from tools.vault.testkit import enroll_test_anchor
+    store = VaultStore(":memory:")
+    service.enroll_password_factor(store, "pw.main", "hunter2-hunter2")
+    enroll_test_anchor(store)
+    cid = service.create_policy_class(store, "password", ["pw.main"], created_at=NOW)
+    record = store.get_class(cid)
+    kinds = {w.factor_type for g in record.generations for w in g.wraps}
+    assert PERSONAL_ROOT_RECIPIENT in kinds

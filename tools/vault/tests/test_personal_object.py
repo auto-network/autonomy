@@ -23,6 +23,7 @@ from tools.vault.factors import create_password_factor, open_password_seed
 from tools.vault import key_holder
 from tools.vault.personal_object import is_personal_locator
 from tools.vault.store import VaultStore
+from tools.vault.testkit import enroll_test_anchor
 
 
 SET_ID = "autonomy.test.personal-secured"
@@ -66,10 +67,12 @@ def personal_world(tmp_path, monkeypatch):
     password = "operator-held-test-password"
     factor = create_password_factor(password, factor_id="operator-password")
     seed = open_password_seed(factor.armor, password)
-    policy_class = create_class(
-        PASSWORD_POLICY, [factor.published], created_at="2026-08-24T00:00:00Z"
-    )
     with VaultStore(db_path) as store:
+        _, anchor = enroll_test_anchor(store)
+        policy_class = create_class(
+            PASSWORD_POLICY, [factor.published],
+            created_at="2026-08-24T00:00:00Z", recovery=anchor,
+        )
         store.put_class(policy_class)
     return db_path, policy_class, seed
 
