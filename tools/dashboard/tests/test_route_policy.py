@@ -121,6 +121,15 @@ async def test_dropbox_enrollment_transport_is_public_but_contents_are_not(
     )).status_code == 401
 
 
+@pytest.mark.asyncio
+async def test_restart_notice_transport_reaches_its_token_guard(gate_enforced):
+    route = _wrap("/api/internal/restart-notice", method="POST")
+    compat = api_auth.COMPATIBILITY_PRINCIPAL
+    assert (await _call(
+        route, _req("POST", "/api/internal/restart-notice", compat),
+    )).status_code == 200
+
+
 def test_every_exception_carries_a_justification():
     for key, reason in route_policy.PUBLIC_EXCEPTIONS.items():
         assert isinstance(reason, str) and len(reason.strip()) >= 20, key
