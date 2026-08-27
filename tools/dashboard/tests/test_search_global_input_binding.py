@@ -1,4 +1,4 @@
-"""Browser smoke test for the global search input two-way binding (auto-zvu3z).
+"""Browser behavior tests for the compact global search control.
 
 The global "Search graph…" input in the top header is now the canonical
 query input. Two contracts:
@@ -9,8 +9,12 @@ query input. Two contracts:
     dispatches ``global-search:enter`` so the page can flush the debounce.
   - Off /search: existing nav behaviour — Enter navigates to /search?q=…
 
-This test boots a real uvicorn process against a DASHBOARD_MOCK fixture
-and exercises both routes through agent-browser at iPhone width.
+The shared shell keeps the canonical input collapsed behind a magnifier and
+pins personal identity at the right edge. Search mode temporarily owns the
+whole bar, while immersive and app-owned surfaces expose neither utility.
+
+These tests boot a real uvicorn process against a DASHBOARD_MOCK fixture and
+exercise the shell through agent-browser at iPhone and desktop widths.
 
 Skipped when the ``agent-browser`` binary is not available.
 """
@@ -151,7 +155,6 @@ def harness(tmp_path_factory):
 
 
 def _open(path):
-    ab_raw("close")
     ab_raw(
         "open",
         f"http://localhost:{TEST_PORT}{path}",
@@ -162,7 +165,158 @@ def _open(path):
     time.sleep(0.5)
 
 
-# ── 1. /search — input event drives the page's query ──────────────────
+# ── 1. Compact shell lifecycle ────────────────────────────────────────
+
+
+class TestCompactGlobalSearchChrome:
+
+    def test_mobile_starts_collapsed_with_profile_pinned_right(self, harness):
+        _open("/sessions")
+        state = ab_eval("""
+            var header = document.querySelector('header[data-app-chrome]');
+            var control = document.getElementById('global-search-control');
+            var input = document.getElementById('global-search');
+            var profile = document.getElementById('identity-indicator');
+            var icon = document.getElementById('global-search-icon');
+            var hr = header.getBoundingClientRect();
+            var pr = profile.getBoundingClientRect();
+            return {
+                collapsed: !header.classList.contains('global-search-open') &&
+                    !control.classList.contains('is-open'),
+                input_hidden: input.getAttribute('aria-hidden') === 'true' &&
+                    input.tabIndex === -1 && input.getBoundingClientRect().width <= 1,
+                icon_visible: icon.offsetParent !== null,
+                profile_visible: profile.offsetParent !== null,
+                profile_on_right: Math.abs(hr.right - pr.right) <= 18,
+                no_overflow: document.documentElement.scrollWidth <= window.innerWidth + 1,
+            };
+        """)
+        assert state == {
+            "collapsed": True,
+            "input_hidden": True,
+            "icon_visible": True,
+            "profile_visible": True,
+            "profile_on_right": True,
+            "no_overflow": True,
+        }
+
+    def test_open_search_owns_bar_and_toggle_restores_shell(self, harness):
+        _open("/sessions")
+        state = ab_eval("""
+            var header = document.querySelector('header[data-app-chrome]');
+            var icon = document.getElementById('global-search-icon');
+            var input = document.getElementById('global-search');
+            icon.click();
+            return new Promise(function(resolve) {
+                requestAnimationFrame(function() { requestAnimationFrame(function() {
+                    var open = {
+                        active: header.classList.contains('global-search-open'),
+                        focused: document.activeElement === input,
+                        expanded: icon.getAttribute('aria-expanded') === 'true',
+                        nav_hidden: document.getElementById('nav-toggle').offsetParent === null,
+                        attention_hidden: document.querySelector('[data-testid="central-attention-root"]').offsetParent === null,
+                        profile_hidden: document.getElementById('identity-indicator').offsetParent === null,
+                        no_overflow: document.documentElement.scrollWidth <= window.innerWidth + 1,
+                    };
+                    icon.click();
+                    requestAnimationFrame(function() {
+                        resolve({
+                            open: open,
+                            closed: !header.classList.contains('global-search-open') &&
+                                icon.getAttribute('aria-expanded') === 'false' &&
+                                document.getElementById('identity-indicator').offsetParent !== null,
+                        });
+                    });
+                }); });
+            });
+        """)
+        assert state["open"] == {
+            "active": True,
+            "focused": True,
+            "expanded": True,
+            "nav_hidden": True,
+            "attention_hidden": True,
+            "profile_hidden": True,
+            "no_overflow": True,
+        }
+        assert state["closed"] is True
+
+    def test_escape_collapses_and_returns_focus_to_magnifier(self, harness):
+        _open("/sessions")
+        state = ab_eval("""
+            var header = document.querySelector('header[data-app-chrome]');
+            var icon = document.getElementById('global-search-icon');
+            var input = document.getElementById('global-search');
+            icon.click();
+            return new Promise(function(resolve) {
+                requestAnimationFrame(function() { requestAnimationFrame(function() {
+                    input.dispatchEvent(new KeyboardEvent('keydown', {
+                        key: 'Escape', bubbles: true, cancelable: true
+                    }));
+                    resolve({
+                        collapsed: !header.classList.contains('global-search-open'),
+                        focused_icon: document.activeElement === icon,
+                    });
+                }); });
+            });
+        """)
+        assert state == {"collapsed": True, "focused_icon": True}
+
+    def test_desktop_profile_and_search_fit_without_overflow(self, harness):
+        _open("/sessions")
+        ab_raw("set", "viewport", "1280", "800")
+        time.sleep(0.4)
+        state = ab_eval("""
+            var profile = document.getElementById('identity-indicator');
+            var icon = document.getElementById('global-search-icon');
+            return {
+                profile_visible: profile.offsetParent !== null,
+                icon_visible: icon.offsetParent !== null,
+                no_overflow: document.documentElement.scrollWidth <= window.innerWidth + 1,
+            };
+        """)
+        assert state == {
+            "profile_visible": True,
+            "icon_visible": True,
+            "no_overflow": True,
+        }
+
+    def test_app_owned_and_session_routes_hide_shell_utilities(self, harness):
+        _open("/sessions")
+        state = ab_eval("""
+            var header = document.querySelector('header[data-app-chrome]');
+            window.Autonomy.setTopbar({html: '<div>App tools</div>'});
+            var appOwned = {
+                search_hidden: document.getElementById('global-search-control').offsetParent === null,
+                profile_hidden: document.getElementById('identity-indicator').offsetParent === null,
+            };
+            window.Autonomy.resetTopbar();
+            window.history.pushState({}, '', '/session/autonomy/not-running');
+            return route().then(function() {
+                return new Promise(function(resolve) {
+                  setTimeout(function() {
+                    resolve({
+                        app_owned: appOwned,
+                        route_immersive: document.body.classList.contains('route-immersive'),
+                        search_hidden: document.getElementById('global-search-control').offsetParent === null,
+                        profile_hidden: document.getElementById('identity-indicator').offsetParent === null,
+                        header_present: !!header,
+                    });
+                  }, 100);
+                });
+            });
+        """)
+        assert state["app_owned"] == {
+            "search_hidden": True,
+            "profile_hidden": True,
+        }
+        assert state["route_immersive"] is True
+        assert state["search_hidden"] is True
+        assert state["profile_hidden"] is True
+        assert state["header_present"] is True
+
+
+# ── 2. /search — input event drives the page's query ──────────────────
 
 
 class TestGlobalInputOnSearchPage:
@@ -206,6 +360,7 @@ class TestGlobalInputOnSearchPage:
         result = ab_eval("""
             var path_before = window.location.pathname;
             var gs = document.getElementById('global-search');
+            document.getElementById('global-search-icon').click();
             gs.value = 'baz';
             gs.dispatchEvent(new Event('input', { bubbles: true }));
             var ev = new KeyboardEvent('keydown', {
@@ -218,6 +373,10 @@ class TestGlobalInputOnSearchPage:
                         path_before: path_before,
                         path_after: window.location.pathname,
                         q_param: new URL(window.location.href).searchParams.get('q'),
+                        collapsed: !document.querySelector('header[data-app-chrome]')
+                            .classList.contains('global-search-open'),
+                        profile_visible: document.getElementById('identity-indicator')
+                            .offsetParent !== null,
                     });
                 }, 400);
             });
@@ -228,6 +387,8 @@ class TestGlobalInputOnSearchPage:
             f"global input must not navigate while on /search, got {result!r}"
         )
         assert result.get("q_param") == "baz"
+        assert result.get("collapsed") is True
+        assert result.get("profile_visible") is True
 
     def test_global_input_initial_value_synced_from_url_q(self, harness):
         """Landing on /search?q=foo populates #global-search with ``foo`` —
@@ -244,7 +405,7 @@ class TestGlobalInputOnSearchPage:
         )
 
 
-# ── 2. Off /search — Enter still navigates to /search?q=… ─────────────
+# ── 3. Off /search — Enter still navigates to /search?q=… ─────────────
 
 
 class TestGlobalInputOffSearchPage:

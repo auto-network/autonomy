@@ -193,20 +193,98 @@
     .nav-badge-gray { background: #4b5563; color: #d1d5db; }
     .nav-badge-purple { background: #7c3aed; color: white; }
     .nav-badge-pink { background: #db2777; color: white; }
-    header.app-topbar-active #global-search {
-      display: none;
+    #global-search-control {
+      position: relative;
+      display: flex;
+      align-items: center;
+      width: 2.5rem;
+      min-width: 2.5rem;
+      overflow: hidden;
+      border: 1px solid #374151;
+      border-radius: 0.5rem;
+      background: #1f2937;
+      transition: width 160ms ease, flex 160ms ease,
+                  border-color 160ms ease, background-color 160ms ease;
     }
-    header.app-topbar-active #global-search-icon {
-      display: none;
+    #global-search-control.is-open {
+      width: 100%;
+      flex: 1 1 auto;
+      border-color: #4f46e5;
+      background: #111827;
     }
-    header.app-topbar-active.app-topbar-has-search #global-search-icon {
+    #global-search {
+      width: 0;
+      min-width: 0;
+      height: 2.5rem;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: #f3f4f6;
+      font-size: 0.875rem;
+      opacity: 0;
+      pointer-events: none;
+      transition: width 160ms ease, opacity 120ms ease, padding 160ms ease;
+    }
+    #global-search-control.is-open #global-search {
+      width: 100%;
+      padding: 0 0.75rem;
+      opacity: 1;
+      pointer-events: auto;
+    }
+    #global-search:focus {
+      outline: none;
+    }
+    #global-search-icon {
       display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 2.5rem;
+      height: 2.5rem;
+      flex: 0 0 2.5rem;
+      border: 0;
+      border-left: 1px solid transparent;
+      background: transparent;
+      color: #d1d5db;
+      cursor: pointer;
+    }
+    #global-search-control.is-open #global-search-icon {
+      border-left-color: #374151;
+      background: #1f2937;
+    }
+    #global-search-icon:hover {
+      background: #374151;
+      color: #fff;
+    }
+    #global-search-icon:focus-visible {
+      outline: 2px solid rgba(99, 102, 241, 0.75);
+      outline-offset: -2px;
+    }
+    header.global-search-open {
+      gap: 0;
+    }
+    header.global-search-open > :not(#global-search-control) {
+      display: none !important;
+    }
+    header[data-app-chrome] > #identity-indicator {
+      order: 5;
+    }
+    header.app-topbar-active #global-search-control,
+    header.app-topbar-active #identity-indicator,
+    body.route-immersive header[data-app-chrome] #global-search-control,
+    body.route-immersive header[data-app-chrome] #identity-indicator {
+      display: none;
     }
     header.app-topbar-active #app-topbar-slot {
       display: flex;
     }
     header.app-topbar-active #page-title {
       display: none;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      #global-search-control,
+      #global-search {
+        transition-duration: 0.01ms;
+      }
     }
     #app-topbar-slot {
       min-width: 0;
@@ -1979,13 +2057,6 @@
     </div>
     <div class="identity-brand-row">
       <h1 class="identity-brand-name text-lg font-bold text-indigo-400">Autonomy</h1>
-      <div id="identity-indicator" class="identity-indicator" data-testid="identity-indicator"
-           aria-live="polite" aria-busy="true">
-        <button type="button" class="identity-trigger identity-trigger-loading"
-                aria-label="Loading identity" disabled>
-          <span class="identity-loading-dot" aria-hidden="true"></span>
-        </button>
-      </div>
     </div>
     <div class="sidebar-main">
       <div class="space-y-1">
@@ -2054,16 +2125,17 @@
         </svg>
       </button>
       {% include 'partials/central-attention.html' %}
-      <button type="button" id="global-search-icon"
-              class="order-3 md:order-2 hidden bg-gray-800 p-2 rounded-lg border border-gray-700 flex-shrink-0 text-gray-300 hover:text-white hover:border-gray-500"
-              aria-label="Search" title="Search">
-        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m21 21-4.35-4.35M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15Z"/>
-        </svg>
-      </button>
-      <input type="text" id="global-search" placeholder="Search..."
-             class="order-3 md:order-2 min-w-0 bg-gray-700 text-gray-100 px-3 md:px-4 py-2 rounded-lg flex-1 max-w-xl text-sm
-                    focus:outline-none focus:ring-2 focus:ring-indigo-500">
+      <div id="global-search-control" class="order-3 md:order-2" data-testid="global-search-control">
+        <input type="search" id="global-search" placeholder="Search..."
+               aria-hidden="true" tabindex="-1">
+        <button type="button" id="global-search-icon"
+                aria-label="Open search" aria-expanded="false"
+                aria-controls="global-search" title="Open search">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m21 21-4.35-4.35M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15Z"/>
+          </svg>
+        </button>
+      </div>
       <div id="app-topbar-slot" class="order-4 hidden items-center gap-2"></div>
       <span class="order-4 text-sm text-gray-400 hidden md:inline" id="page-title"></span>
       {# Persistent slot for the agentic-actions dropdown — never cleared by the SPA
@@ -2207,6 +2279,13 @@
 
       </div>
       <div id="header-actions" class="order-4 flex items-center gap-2"></div>
+      <div id="identity-indicator" class="identity-indicator" data-testid="identity-indicator"
+           aria-live="polite" aria-busy="true">
+        <button type="button" class="identity-trigger identity-trigger-loading"
+                aria-label="Loading identity" disabled>
+          <span class="identity-loading-dot" aria-hidden="true"></span>
+        </button>
+      </div>
     </header>
 
     <!-- SSE interruption banner — restart state survives the server gap itself. -->

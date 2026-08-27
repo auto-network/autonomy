@@ -1,8 +1,8 @@
 /* Shell-owned personal identity chrome.
  *
- * The indicator shares the Autonomy brand row at both breakpoints. The app
- * top bar remains plugin-owned. Desktop uses a compact popover; the mobile
- * drawer uses the same control and promotes its panel to a bottom sheet.
+ * The indicator is pinned to the right edge of the global top bar. App-owned
+ * and immersive top bars hide the stable host through base.html. Desktop uses
+ * a compact popover; mobile promotes the same panel to a bottom sheet.
  */
 
 .identity-brand-row {
@@ -29,6 +29,16 @@
   flex: 0 0 auto;
   align-items: center;
   justify-content: flex-end;
+}
+
+header[data-app-chrome] .identity-trigger {
+  min-width: 2rem;
+  height: 2rem;
+}
+
+header[data-app-chrome] .identity-avatar {
+  width: 1.875rem;
+  height: 1.875rem;
 }
 
 .identity-trigger {
@@ -306,16 +316,6 @@
 @media (max-width: 767px) {
   .identity-brand-name {
     font-size: 1rem;
-  }
-
-  .identity-brand-row[data-identity-state="bootstrap"] {
-    padding-bottom: 2.125rem;
-  }
-
-  .identity-brand-row[data-identity-state="bootstrap"] .identity-indicator {
-    position: absolute;
-    right: 0;
-    bottom: 0;
   }
 
   .identity-panel {
