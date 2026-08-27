@@ -608,11 +608,16 @@ test('walk: on a second device the synced credential is detected as not enrolled
   globalThis.__deviceB = deviceB;
 });
 
-test('walk: enroll-this-device repairs the second device, third device still refused', async () => {
+test('walk: the design\'s +Add pivot repairs the second device, third device still refused', async () => {
   const credId = SERVER.passkeyRows[0].credential_id;
   const deviceB = globalThis.__deviceB;
-  await until(() => q('.enrollbtn'), 'Enroll this device offered on the synced slot');
-  q('.enrollbtn').click();
+  // the design's path: "+ Add" in Passkeys — its ceremony finds the synced
+  // credential with no local slot and pivots to enrolling THIS device's slot
+  // ("the user only ever sees success + a new row"); no row badge exists
+  const pkHead = qa('.grouphead').find((h) => h.querySelector('.grouplbl').textContent.trim().toLowerCase() === 'passkeys');
+  pkHead.querySelector('.addbtn').click();
+  await until(() => q('.pkbtn'), 'add-passkey screen');
+  q('.pkbtn').click();
   await until(() => comp().passkeys.some((k) => k._addRecipient), 'device slot staged');
   await until(() => q('.commitbar') && visible(q('.commitbar')), 'commit bar');
   q('.commitbar .btn-primary').click();
