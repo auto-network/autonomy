@@ -1,7 +1,6 @@
 ---
 name: feature-planning
 description: Use BEFORE designing or beading any non-trivial feature. Turns "we should build X" into a decided, testable design a different engineer can implement without re-deciding anything. The rule is requirements-as-testable-scenarios before solutions — no library, tool, or design is named until the quality-attribute scenarios (with numbers) that decide it are written. Output is a decision-note in the graph plus a polished bead.
-user_invocable: true
 ---
 
 # Feature planning
@@ -34,7 +33,10 @@ Not every requirement needs this. Write full scenarios for the **architecturally
 ## The process (a loop, documented as an order)
 
 1. **Problem.** What problem, for whom, why now, cost of not doing it. One line a user would care about (Amazon's working-backwards test). Interrogate it; the thin bead is often an *unresolved* problem, not a lazy author.
-2. **Prior art & reuse.** Search existing decision-notes and the codebase first. Don't re-decide or rebuild what exists; name what you'll consume.
+2. **Prior art & reuse.** Run the `prior-art-analysis` skill's full gate before
+   naming a solution. Carry its candidate/state/reusable-seam/delta comparison
+   into the decision-note. Don't re-decide or rebuild what exists; name what
+   you'll consume or extend and why each rejected candidate fails a driver.
 3. **Use cases.** Concrete scenarios: who, for what, when, where. "CI provisions one clean machine per PR with no cloud credentials" is a use case; "we might need VMs" is not.
 4. **Appetite.** The budget you *choose* — time/effort/complexity this is worth — set before you explore options, so it bounds them.
 5. **Requirements.** Functional (what it must do) and **quality requirements** as scenarios. Walk the ISO/IEC 25010 quality characteristics as a checklist so you skip none that matter: performance efficiency, reliability, security, compatibility, interaction capability, maintainability, flexibility/portability, safety. Write a full six-part scenario for each architecturally significant one. **Interaction capability**, when the feature includes a plugin/dashboard front page, is underspecified by a scenario alone — a page can meet every quality-attribute scenario written for it and still show the wrong things to the wrong audience. Apply the four-question method (aspiration → viewer → knowable universe → presentation by recency/changes/presence/activity/state) at `graph://97ace518-788` §0 before designing that surface's components; treat its output as this step's concrete answer for interaction capability, not a separate pass done later.
@@ -125,4 +127,7 @@ Hand it to a different engineer who knows the product but not this job. Could th
 
 ## Persisting edits to this skill
 
-`.claude/` is gitignored by default but this file is already tracked (`cee0bf03`) — edit it, then `git add -f .claude/skills/feature-planning/SKILL.md` and commit normally; bare `git add` will refuse it and that refusal is not a sign the edit is ephemeral.
+`.agents/skills/feature-planning/` is the canonical repository-owned skill
+directory used by Codex. `.claude/skills/feature-planning` is a tracked symlink
+to the same directory so Claude receives identical instructions. Edit only the
+canonical file; never replace the symlink with a harness-specific copy.

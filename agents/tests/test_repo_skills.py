@@ -12,10 +12,12 @@ from agents.session_launcher import _skill_frontmatter
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_design_and_present_skills_are_discoverable_by_both_harnesses():
+def test_repo_workflow_skills_are_discoverable_by_both_harnesses():
     expected_terms = {
         "design-studio": {"create", "revise", "pull down", "design studio"},
         "present": {"publish", "revise", "pull down", "present app"},
+        "prior-art-analysis": {"existing", "before", "designing", "implementing"},
+        "feature-planning": {"before", "non-trivial", "testable", "decision-note"},
     }
 
     for name, terms in expected_terms.items():
@@ -37,10 +39,14 @@ def test_design_and_present_skills_are_discoverable_by_both_harnesses():
         assert f"${name}" in interface["default_prompt"]
 
 
-def test_workspace_primer_points_to_both_repo_skills():
+def test_workspace_primer_points_to_repo_workflow_skills():
     primer = (REPO_ROOT / "agents" / "primers" / "workspace.md.j2").read_text()
 
     assert "### Design Studio and Present" in primer
     assert "`design-studio`" in primer
     assert "`present`" in primer
+    assert "`prior-art-analysis`" in primer
+    assert "`feature-planning`" in primer
+    assert "Prior-art gate" in primer
+    assert "consume" in primer and "extend" in primer
     assert "--force" in primer

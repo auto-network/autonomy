@@ -196,6 +196,31 @@ duplicate. Use `--force` only when a same-named new artifact is intentional.
 
 **Search heuristic.** Lead with the single highest-signal term. Multi-term queries and `--or` widen the candidate set and tend to score the obvious hit *down*, not up. If a multi-term AND query has no hits, the interactive CLI automatically shows clearly labelled any-term fallback results; quoted phrases and `--json` stay strict. If the row you want is buried, scope before widening: `--type session` / `--type note` / `--only-org` / `--tag` all compose. Output is compact by default (one excerpt per source); use `--verbose` only when you need every matching excerpt.
 
+### Prior-art gate — search before design
+
+Use the `prior-art-analysis` skill before designing or implementing any
+non-trivial feature, service, schema, store, protocol, control plane, auth or
+cryptographic mechanism, reusable UI primitive, workflow abstraction, or
+agent skill. This gate applies even when another skill is active.
+
+Search source/tests, graph notes/sessions/beads, open and closed `bd` work, and
+the relevant product catalog. Search the problem plus synonyms and predecessor
+names, then read the strongest candidates fully and verify their present state
+in code or the running system. A design note is not evidence that its design
+landed, and one empty query is not evidence that nothing exists.
+
+Before authoring a design note, bead, or architectural implementation, record
+a concise **Prior art** result: candidates, evidence, current state, reusable
+seam, remaining delta, and a reasoned `consume` / `extend` / `replace` /
+`reject` decision. Do not create a new primitive until this comparison shows
+why an existing one cannot be consumed or extended.
+
+For a non-trivial feature, continue with the `feature-planning` skill after
+the prior-art pass. It turns the resulting reuse boundary into measurable
+requirements, evaluated options, a decision note, and implementation-ready
+beads. Both skills are repository-owned and available to Codex and Claude from
+one canonical directory each; do not maintain harness-specific copies.
+
 **Reading notes — comments and the trailer.** `graph read <note>` shows open (non-integrated) comments by default; `--all-comments` adds the ones already rolled into the body — only needed for synthesis passes / audits. Every read ends with a trailer like `── 14,328 chars · 287 lines · 19 comments (14 open, 5 integrated) ──`. If you don't see it, you didn't read to the end. If the comment count there exceeds what you rendered, your `--max-chars` or shell pipe (`head`, `tail`) hid feedback — re-read without the cap before drawing conclusions.
 
 **Sharing files with the operator (`graph share`)**

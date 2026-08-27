@@ -56,6 +56,11 @@ Write the product vision, sprint north star, why now, sprint appetite, concrete 
 
 ### 2. Survey and challenge
 
+Run the `prior-art-analysis` skill at sprint breadth before choosing entries.
+The survey must distinguish live/landed mechanisms from partial, design-only,
+and stale records, and identify reusable seams rather than merely collecting
+similarly named work.
+
 Read current graph notes, source documents, code boundaries, landed commits, beads, dependency trees, runbooks, designs, and acceptance evidence. Survey by outcome, not prefix. For each candidate record:
 
 - user/operator/system outcome and why omission matters;
