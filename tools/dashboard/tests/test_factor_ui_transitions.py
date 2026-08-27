@@ -1,10 +1,12 @@
-"""Run the JSDOM factor-management transition suite under pytest.
+"""Run the JSDOM factor-management suites under pytest.
 
-The real coverage lives in ``factor_management_transitions.test.mjs`` — it drives
-the actual panel UI in JSDOM against the real re-arm crypto (node webcrypto), no
-browser. This wrapper makes that suite part of the ordinary Python test run so a
-UI-wiring regression (a transition that no longer reaches the backend, or reaches
-it with the wrong opener) fails CI the same as any other test.
+The real coverage lives in the ``.mjs`` suites — ``factor_panel_units`` (the
+pure model/ops seams) and ``factor_management_alpine`` (the design's Alpine
+panel rendered in JSDOM, driven through its real handlers against real
+factor-policy crypto on node webcrypto), no browser. This wrapper makes those
+suites part of the ordinary Python test run so a UI-wiring regression (a
+transition that no longer reaches the backend, or reaches it with the wrong
+opener) fails CI the same as any other test.
 """
 
 from __future__ import annotations
@@ -23,7 +25,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 @pytest.mark.parametrize("mjs", [
-    "factor_management_transitions.test.mjs",
+    "factor_panel_units.test.mjs",
+    "factor_management_alpine.test.mjs",
     "open_root.test.mjs",
 ])
 def test_ui_ceremony_jsdom(mjs):

@@ -1,0 +1,474 @@
+/* JSDOM integration smoke for the Manage-credentials panel (the design's
+ * Alpine component, verbatim, with real hooks).
+ *
+ * Drives the REAL rendered panel — vendored Alpine 3.15.12 in jsdom — against
+ * REAL crypto: a v3 factor-policy armor built with buildFactorPolicyArmor, a
+ * virtual WebAuthn authenticator (ceremony/authenticator-node.js) behind a
+ * navigator.credentials adapter, and the real ceremony modules under every
+ * handler. The server is a thin in-process stub that mirrors the
+ * preview/commit contract; each committed armor is PROVEN by opening it with
+ * the factors the target state must accept and refusing the ones it must not.
+ * (The exhaustive transition matrix against the real Python backend is the
+ * follow-up suite; this file is the fast regression gate.)
+ *
+ *   node --test tools/dashboard/tests/factor_management_alpine.test.mjs
+ */
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const { JSDOM } = createRequire(import.meta.url)('jsdom');
+
+import { VirtualAuthenticator } from '../static/js/ceremony/authenticator-node.js';
+import { deriveEncapsulationKeypair, bytesToHex } from '../static/js/ceremony/primitives.js';
+import { prfOutputFromResults, prfEvalExtension } from '../static/js/ceremony/enrollment.js';
+import {
+  FACTOR_RECIPIENT_PURPOSE, canonicalExpression, createPasswordFactor,
+  openPasswordFactor, parseFactorPolicyArmor, buildFactorPolicyArmor,
+  openFactorPolicyArmor,
+} from '../static/js/ceremony/root-factor-policy.js';
+
+const PW = 'correct-horse-battery';
+const PW2 = 'new-armor-password-9';
+const IT = 10000;
+const RP = 'localhost';
+const ORIGIN = 'https://localhost/';
+
+function b64uToBytes(s) {
+  let b = s.replace(/-/g, '+').replace(/_/g, '/'); while (b.length % 4) b += '=';
+  const bin = atob(b); const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i += 1) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function bytesToB64u(bytes) {
+  const v = new Uint8Array(bytes); let bin = '';
+  for (let i = 0; i < v.length; i += 1) bin += String.fromCharCode(v[i]);
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function toBuf(x) {
+  const b = typeof x === 'string' ? b64uToBytes(x) : new Uint8Array(x);
+  return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
+}
+
+async function mintRoot() {
+  const kp = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
+  const pk8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', kp.privateKey));
+  const rawPub = new Uint8Array(await crypto.subtle.exportKey('raw', kp.publicKey));
+  return { seed: pk8.slice(-32), rootPub: bytesToHex(rawPub) };
+}
+
+// ── the in-process server (mirrors the preview/commit contract) ────────────
+const SERVER = {
+  root: null,
+  state: null,        // { generation, factors, access, policy }
+  armor: null,
+  passkeyRows: [],    // dashboard passkey registrations
+  commits: [],
+};
+
+function applyOps(state, operations) {
+  const factors = new Map(state.factors.map((f) => [f.factor_id, JSON.parse(JSON.stringify(f))]));
+  const access = new Set(state.access);
+  let policy = state.policy;
+  for (const op of operations) {
+    if (op.op === 'enroll_password' || op.op === 'enroll_passkey') {
+      if (factors.has(op.factor.factor_id)) throw new Error('already enrolled');
+      factors.set(op.factor.factor_id, op.factor);
+      if (op.access) access.add(op.factor.factor_id);
+    } else if (op.op === 'change_password') {
+      factors.set(op.factor_id, op.factor);
+    } else if (op.op === 'add_passkey_recipient') {
+      factors.get(op.factor_id).recipients.push(op.recipient);
+    } else if (op.op === 'remove_passkey_recipient') {
+      const f = factors.get(op.factor_id);
+      f.recipients = f.recipients.filter((r) => r.recipient_public_key !== op.recipient_public_key);
+    } else if (op.op === 'remove_factor') {
+      factors.delete(op.factor_id); access.delete(op.factor_id);
+    } else if (op.op === 'set_access') {
+      if (op.enabled) access.add(op.factor_id); else access.delete(op.factor_id);
+    } else if (op.op === 'set_root_policy') {
+      policy = canonicalExpression(op.policy);
+    } else throw new Error('unknown op ' + op.op);
+  }
+  return {
+    generation: state.generation + 1,
+    factors: [...factors.values()].sort((a, b) => a.factor_id.localeCompare(b.factor_id)),
+    access: [...access].sort(),
+    policy,
+  };
+}
+
+function viewFrom(state) {
+  const memberIds = new Set((function walk(n, acc) {
+    if (n.op === 'factor') acc.push(n.factor_id);
+    else n.children.forEach((c) => walk(c, acc));
+    return acc;
+  }(state.policy, [])));
+  const anyOne = state.policy.op !== 'and';
+  return {
+    version: 1,
+    armor_version: 3,
+    generation: state.generation,
+    root_pub: SERVER.root.rootPub,
+    root_policy: state.policy,
+    migration_required: false,
+    factors: state.factors.map((f) => {
+      const member = memberIds.has(f.factor_id);
+      const row = {
+        factor_id: f.factor_id,
+        type: f.type,
+        label: f.type === 'password' ? 'Password' : 'Passkey',
+        purpose: null,
+        access: state.access.includes(f.factor_id) ? 'enabled' : 'disabled',
+        root_role: member ? (anyOne ? 'individual' : 'mfa-member') : 'none',
+        capabilities: {},
+      };
+      if (f.type === 'password') {
+        row.kdf = { name: 'PBKDF2', hash: 'SHA-256', iterations: f.protector.kdf.iterations };
+      } else {
+        const reg = SERVER.passkeyRows.find((p) => p.credential_id === f.credential_id) || {};
+        Object.assign(row, {
+          credential_id: f.credential_id,
+          rp_id: RP,
+          transports: reg.transports || ['internal'],
+          created_at: '2026-08-01T00:00:00Z',
+          backup_eligible: false,
+          backed_up: false,
+          recipients: f.recipients,
+        });
+      }
+      return row;
+    }),
+  };
+}
+
+function jsonResponse(data) { return { ok: true, json: async () => data }; }
+
+async function router(url, opts) {
+  const u = String(url);
+  const body = opts && opts.body ? JSON.parse(opts.body) : null;
+  if (u.includes('/api/identity/status')) {
+    return jsonResponse({
+      rp_id: RP,
+      personal_identity: { display_name: 'Jeremy Spilman' },
+      passkeys: SERVER.passkeyRows,
+    });
+  }
+  if (u.includes('/api/identity/personal')) {
+    return jsonResponse({ armored_private_key: SERVER.armor });
+  }
+  if (u.includes('/factor-policy/preview')) {
+    try {
+      if (body.base_generation !== SERVER.state.generation) {
+        return jsonResponse({ ok: false, error: 'factor policy changed while you were editing' });
+      }
+      const p = applyOps(SERVER.state, body.operations);
+      return jsonResponse({
+        ok: true, base_generation: SERVER.state.generation, generation: p.generation,
+        root_policy: p.policy, factors: p.factors, access: p.access, change_count: 1,
+      });
+    } catch (e) { return jsonResponse({ ok: false, error: e.message }); }
+  }
+  if (u.includes('/factor-policy/commit')) {
+    try {
+      if (body.base_generation !== SERVER.state.generation) {
+        return jsonResponse({ ok: false, error: 'stale generation' });
+      }
+      const p = applyOps(SERVER.state, body.operations);
+      const cand = await parseFactorPolicyArmor(body.candidate_armor);
+      assert.equal(cand.generation, p.generation, 'candidate encodes the projected generation');
+      assert.equal(JSON.stringify(cand.policy), JSON.stringify(canonicalExpression(p.policy)),
+        'candidate encodes the projected policy');
+      SERVER.state = p;
+      SERVER.armor = body.candidate_armor;
+      SERVER.commits.push({ operations: body.operations, armor: body.candidate_armor });
+      return jsonResponse({ ok: true, ...viewFrom(SERVER.state) });
+    } catch (e) { return jsonResponse({ ok: false, error: e.message }); }
+  }
+  if (u.includes('/api/identity/factor-policy')) {
+    return jsonResponse(viewFrom(SERVER.state));
+  }
+  if (u.includes('/metadata')) return jsonResponse({ ok: true });
+  if (u.includes('/passkey/register-options')) {
+    return jsonResponse({
+      ok: true, rp_id: RP, origin: ORIGIN, nonce: 'n-' + SERVER.passkeyRows.length,
+      options: {
+        challenge: bytesToB64u(crypto.getRandomValues(new Uint8Array(16))),
+        user: { id: bytesToB64u(new Uint8Array(8)) },
+        excludeCredentials: SERVER.passkeyRows.map((p) => ({ id: p.credential_id })),
+      },
+    });
+  }
+  if (u.includes('/passkey/register')) {
+    SERVER.passkeyRows.push({
+      credential_id: body.credential.rawId, rp_id: RP,
+      transports: body.credential.response.transports, label: body.label,
+    });
+    return jsonResponse({ ok: true });
+  }
+  if (u.includes('/ceremony-error')) return jsonResponse({ ok: true });
+  throw new Error('unrouted fetch: ' + u);
+}
+
+// ── navigator.credentials adapter over the virtual authenticator ───────────
+const authenticator = new VirtualAuthenticator();
+
+function browserCredential(sim) {
+  return {
+    id: sim.id,
+    rawId: toBuf(sim.rawId),
+    type: sim.type,
+    authenticatorAttachment: sim.authenticatorAttachment,
+    getClientExtensionResults() {
+      const out = JSON.parse(JSON.stringify(sim.clientExtensionResults || {}));
+      if (out.prf && out.prf.results && typeof out.prf.results.first === 'string') {
+        out.prf.results.first = toBuf(out.prf.results.first);
+      }
+      return out;
+    },
+    response: {
+      clientDataJSON: toBuf(sim.response.clientDataJSON),
+      ...(sim.response.attestationObject
+        ? { attestationObject: toBuf(sim.response.attestationObject) } : {}),
+      ...(sim.response.authenticatorData && typeof sim.response.authenticatorData === 'string'
+        ? { authenticatorData: toBuf(sim.response.authenticatorData) } : {}),
+      ...(sim.response.getAuthenticatorData
+        ? { getAuthenticatorData: () => toBuf(sim.response.getAuthenticatorData()) } : {}),
+      getTransports: () => ['internal'],
+      ...(sim.response.signature ? { signature: toBuf(sim.response.signature) } : {}),
+    },
+  };
+}
+
+function installWebAuthn(win) {
+  win.PublicKeyCredential = function PublicKeyCredential() {};
+  const credentials = {
+    async create({ publicKey }) {
+      for (const ex of publicKey.excludeCredentials || []) {
+        const id = typeof ex.id === 'string' ? ex.id : bytesToB64u(ex.id);
+        if (authenticator.credentials.has(id)) {
+          const err = new Error('credential already registered');
+          err.name = 'InvalidStateError';
+          throw err;
+        }
+      }
+      const sim = await authenticator.createCredential({
+        rpId: RP,
+        origin: ORIGIN,
+        challenge: bytesToB64u(publicKey.challenge),
+        prf: publicKey.extensions && publicKey.extensions.prf,
+        evalAtCreate: true,
+      });
+      return browserCredential(sim);
+    },
+    async get({ publicKey }) {
+      const allow = publicKey.allowCredentials || [];
+      let chosen = null;
+      for (const c of allow) {
+        const id = typeof c.id === 'string' ? c.id : bytesToB64u(c.id);
+        if (authenticator.credentials.has(id)) { chosen = id; break; }
+      }
+      if (!chosen) { const e = new Error('no credential'); e.name = 'NotAllowedError'; throw e; }
+      const sim = await authenticator.getAssertion({
+        rpId: RP,
+        origin: ORIGIN,
+        challenge: bytesToB64u(publicKey.challenge),
+        credentialId: chosen,
+        prf: publicKey.extensions && publicKey.extensions.prf,
+      });
+      return browserCredential(sim);
+    },
+  };
+  Object.defineProperty(win.navigator, 'credentials', { value: credentials, configurable: true });
+}
+
+// ── boot: jsdom + Alpine + the panel ───────────────────────────────────────
+let panel;
+let dom;
+// No wall-clock sleeps: poll on event-loop turns (setImmediate), so a wait
+// resolves the same turn its condition lands and only real work (crypto,
+// promise chains) spends time. Time-bounded + loud so a dead wait fails at
+// its own line instead of surfacing as a null three lines later.
+const flush = () => new Promise((r) => setImmediate(r));
+async function until(fn, what = 'condition', ms = 15000) {
+  const t0 = Date.now();
+  for (;;) {
+    const v = fn(); if (v) return v;
+    if (Date.now() - t0 > ms) throw new Error('timed out waiting for ' + what);
+    await flush();
+  }
+}
+function root() { return document.querySelector('.fui-cred'); }
+function q(sel) { const r = root(); return r ? r.querySelector(sel) : null; }
+function qa(sel) { const r = root(); return r ? [...r.querySelectorAll(sel)] : []; }
+function visible(el) {
+  for (let n = el; n && n.style; n = n.parentElement) {
+    if (n.style.display === 'none') return false;
+  }
+  return true;
+}
+function setInput(el, value) {
+  el.value = value;
+  el.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+}
+
+test.before(async () => {
+  // identity: one password factor + one passkey factor (this device), OR policy
+  SERVER.root = await mintRoot();
+  const pw = await createPasswordFactor(SERVER.root.rootPub, 'pw.main', PW, IT);
+  pw.seed.fill(0);
+  const cred = await authenticator.createCredential({
+    rpId: RP, origin: ORIGIN, challenge: 'c0', prf: prfEvalExtension().prf, evalAtCreate: true,
+  });
+  const prf = prfOutputFromResults(cred.clientExtensionResults);
+  const recip = await deriveEncapsulationKeypair(new Uint8Array(prf), FACTOR_RECIPIENT_PURPOSE);
+  const pk = {
+    factor_id: 'pk.mac',
+    type: 'passkey',
+    credential_id: cred.rawId,
+    recipients: [{ recipient_public_key: recip.publicKeyHex, label: 'This Mac', created_at: '2026-08-01T00:00:00Z' }],
+  };
+  SERVER.passkeyRows = [{ credential_id: cred.rawId, rp_id: RP, transports: ['internal'], label: 'This Mac' }];
+  SERVER.state = {
+    generation: 1,
+    factors: [pw.factor, pk].sort((a, b) => a.factor_id.localeCompare(b.factor_id)),
+    access: ['pk.mac', 'pw.main'],
+    policy: canonicalExpression({
+      op: 'or',
+      children: [{ op: 'factor', factor_id: 'pw.main' }, { op: 'factor', factor_id: 'pk.mac' }],
+    }),
+  };
+  SERVER.armor = await buildFactorPolicyArmor({
+    rootSeed: SERVER.root.seed, rootPub: SERVER.root.rootPub,
+    generation: 1, factors: SERVER.state.factors,
+    access: SERVER.state.access, policy: SERVER.state.policy,
+  });
+
+  dom = new JSDOM('<!doctype html><html><body></body></html>', {
+    url: 'https://localhost/', pretendToBeVisual: true, runScripts: 'dangerously',
+  });
+  global.window = dom.window;
+  global.document = dom.window.document;
+  global.HTMLElement = dom.window.HTMLElement;
+  global.getComputedStyle = dom.window.getComputedStyle;
+  Object.defineProperty(globalThis, 'navigator', { value: dom.window.navigator, configurable: true });
+  installWebAuthn(dom.window);
+  global.fetch = router;
+  dom.window.fetch = router;
+
+  panel = await import('../static/js/factor-management.js');
+  await panel.open({});
+  const alpine = fs.readFileSync(
+    path.join(here, '..', 'static', 'vendor', 'alpine-3.15.12.min.js'), 'utf8',
+  );
+  dom.window.eval(alpine);
+  await until(() => qa('.row').length >= 2, 'initial rows');
+});
+
+test('the panel renders one row per factor slot from the live view', async () => {
+  assert.equal(qa('.row').length, 2);
+  const words = qa('.authcell .ac-lbl').map((e) => e.textContent);
+  assert.deepEqual(words.sort(), ['Full authority', 'Full authority']);
+  assert.ok(!visible(q('.commitbar')) || q('.commitbar') === null, 'no commit bar before edits');
+});
+
+test('demoting a passkey stages one change and offers the commit bar', async () => {
+  const cells = qa('.authcell');
+  const pkCell = cells[1];   // second row = passkeys group (password renders first)
+  pkCell.click();
+  await until(() => qa('.ac-lbl').some((e) => e.textContent === 'Unlock only'), 'demoted label');
+  await until(() => q('.commitbar') && visible(q('.commitbar')), 'commit bar');
+  assert.match(q('.commitbar .btn-primary').textContent, /Commit\s*1/);
+});
+
+test('commit authorizes on the CURRENT policy and writes an armor that proves the new one', async () => {
+  q('.commitbar .btn-primary').click();
+  await until(() => q('input[autocomplete=current-password]'), 'authorize screen');
+  // gen-1 policy is OR(password, passkey): both openers offered
+  assert.ok(q('.pkbtn'), 'passkey opener offered');
+  setInput(q('input[autocomplete=current-password]'), PW);
+  await until(() => { const b = qa('.authrow .btn-primary').pop(); return b && !b.disabled; }, 'Authorize enabled');
+  qa('.authrow .btn-primary').pop().click();
+  await until(() => SERVER.commits.length === 1, 'first commit posted');
+  assert.equal(SERVER.commits.length, 1);
+  const committed = SERVER.commits[0];
+  assert.deepEqual(committed.operations.map((o) => o.op), ['set_root_policy']);
+
+  // crypto proof: the new armor opens with the password factor…
+  const envelope = await parseFactorPolicyArmor(committed.armor);
+  assert.equal(envelope.generation, 2);
+  assert.deepEqual(envelope.policy, { op: 'factor', factor_id: 'pw.main' });
+  const pwFactor = envelope.factors.find((f) => f.factor_id === 'pw.main');
+  const seed = await openPasswordFactor(envelope.root_pub, pwFactor, PW);
+  const opened = await openFactorPolicyArmor(committed.armor, { 'pw.main': seed });
+  assert.equal(opened.rootPub, SERVER.root.rootPub);
+  opened.seed.fill(0);
+
+  // …and REFUSES the demoted passkey alone.
+  const asrt = await authenticator.getAssertion({
+    rpId: RP, origin: ORIGIN, challenge: 'c9',
+    credentialId: SERVER.passkeyRows[0].credential_id, prf: prfEvalExtension().prf,
+  });
+  const pkSeed = prfOutputFromResults(asrt.clientExtensionResults);
+  await assert.rejects(
+    () => openFactorPolicyArmor(committed.armor, { 'pk.mac': new Uint8Array(pkSeed) }),
+  );
+
+  // the panel reloaded onto the committed generation
+  const comp = dom.window.Alpine.$data(document.querySelector('.fui-cred'));
+  await until(() => comp.generation === 2 && !comp.loading, 'reload onto generation 2');
+  await until(() => qa('.ac-lbl').some((e) => e.textContent === 'Unlock only'), 'demoted label after reload');
+  assert.ok(!visible(q('.commitbar')) || !q('.commitbar'), 'commit bar cleared after commit');
+});
+
+test('a staged password change commits and re-keys the armor', async () => {
+  // Change → type → Continue → re-enter → Confirm (the design's inline flow)
+  await until(() => qa('.lnk.lchange').some((b) => b.textContent.trim() === 'Change'), 'Change link');
+  // keep the staged-change KDF cheap in tests (the server sets the real floor)
+  dom.window.Alpine.$data(document.querySelector('.fui-cred')).minIterations = IT;
+  const change = qa('.lnk.lchange').find((b) => b.textContent.trim() === 'Change');
+  change.click();
+  await until(() => q('.inlineinput') && visible(q('.inlineinput')), 'inline password input');
+  setInput(qa('.inlineinput')[0], PW2);
+  await until(() => !q('.inlinego').disabled, 'Continue enabled');
+  q('.inlinego').click();
+  await until(() => qa('.inlineinput')[1] && visible(qa('.inlineinput')[1]), 'confirm input');
+  setInput(qa('.inlineinput')[1], PW2);
+  await until(() => !q('.inlinego').disabled, 'Confirm enabled');
+  q('.inlinego').click();
+  await until(() => q('.inlineok'), 'inline ok');
+  await until(() => q('.commitbar') && visible(q('.commitbar')), 'commit bar (change staged)');
+
+  q('.commitbar .btn-primary').click();
+  await until(() => q('input[autocomplete=current-password]'), 'authorize screen (2nd commit)');
+  // gen-2 policy is password-only: no passkey opener on the authorize screen
+  assert.equal(q('.pkbtn'), null);
+  setInput(q('input[autocomplete=current-password]'), PW);   // the CURRENT password authorizes
+  await until(() => { const b = qa('.authrow .btn-primary').pop(); return b && !b.disabled; }, 'Authorize enabled (2nd)');
+  qa('.authrow .btn-primary').pop().click();
+  await until(() => SERVER.commits.length === 2, 'second commit posted');
+
+  const committed = SERVER.commits[1];
+  assert.deepEqual(committed.operations.map((o) => o.op), ['change_password']);
+  const envelope = await parseFactorPolicyArmor(committed.armor);
+  assert.equal(envelope.generation, 3);
+  const pwFactor = envelope.factors.find((f) => f.factor_id === 'pw.main');
+  // the NEW password opens the new generation; the old one no longer does
+  const seed = await openPasswordFactor(envelope.root_pub, pwFactor, PW2);
+  (await openFactorPolicyArmor(committed.armor, { 'pw.main': seed })).seed.fill(0);
+  await assert.rejects(() => openPasswordFactor(envelope.root_pub, pwFactor, PW));
+});
+
+test('the solver blocks deleting the last full-authority factor in the DOM', async () => {
+  await until(() => qa('.lnk.ldelete').some((b) => b.textContent.trim() === 'Delete'), 'Delete link');
+  const del = qa('.lnk.ldelete').find((b) => b.textContent.trim() === 'Delete');
+  assert.ok(del.classList.contains('locked'), 'delete renders locked');
+  del.click();
+  await flush();
+  assert.ok(q('.warnbubble'), 'warning bubble shown');
+  assert.equal(SERVER.commits.length, 2, 'nothing new committed');
+});
