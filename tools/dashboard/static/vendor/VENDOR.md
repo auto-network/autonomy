@@ -59,3 +59,8 @@ source or checksum recorded, until they were added above.
 Pure-JS QR decoder for the recovery-code "scan" verify path. MIT (Cosmo Wolfe),
 version-pinned, sha256 bc40c8a15196236b2314db0856f72ca0b49980cd5413b8c852a7349f5fee0859.
 Lazy-loaded only when the camera scanner opens.
+
+## qrcode-generator 1.4.4
+Compact pure-JS QR encoder (Kazuhiko Arase) for rendering the recovery code as
+a printable SVG QR. MIT, version-pinned, sha256
+18ae399f81182bc9de916e9c77b195df20cc58d6f2d55a62b085a299f1bf1780.
