@@ -84,14 +84,19 @@ def load_items(org: str, mission_id: str) -> list[dict]:
         pillar_id, _, item_id = rest.partition(":")
         if not item_id:
             continue
+        # THE KEY IS TRUTH: identity and store timestamps are derived
+        # and must WIN over any payload copies (migrated rows carried
+        # item_id/surface_id/key fields — sometimes null — and the old
+        # payload-last spread stomped the derived values, rendering an
+        # all-None item_id column downstream).
         item = {
+            **{k: v for k, v in dict(m.payload).items()
+               if v not in ("", [], {}, 0, 0.0, False, None)},
             "surface_id": pillar_id,
             "item_id": item_id,
             "key": rest,
             "created_at": m.created_at,
             "updated_at": m.updated_at,
-            **{k: v for k, v in dict(m.payload).items()
-               if v not in ("", [], {}, 0, 0.0, False)},
         }
         items.append(item)
     # Historical duplicates (same key, split rows from the pre-upsert

@@ -194,3 +194,24 @@ def test_chat_bake_is_bounded_per_pillar(monkeypatch, rows):
     assert chat["relay"][0]["text"] == "msg 20"      # oldest 20 dropped
     assert chat["relay"][-1]["text"] == f"msg {n - 1}"
     assert len(chat["crypto"]) == 1
+
+
+def test_payload_identity_copies_never_stomp_the_key(monkeypatch, rows):
+    """Migrated rows carried item_id/surface_id/key payload fields —
+    sometimes null — and the payload-last spread rendered an all-None
+    item_id column. The key-derived identity and store timestamps win."""
+    rows[compose.ITEM_SET_ID].append(
+        Member(f"{MID}:relay:cp-cas-single",
+               {"kind": "checkpoint", "state": "pending",
+                "title": "CAS single",
+                "item_id": None, "surface_id": "somewhere-else",
+                "key": "cp-cas-single",
+                "created_at": "1999-01-01T00:00:00Z"},
+               "2026-08-20T00:00:00Z", "2026-08-21T00:00:00Z"))
+    _members(monkeypatch, rows)
+    items = compose.load_items("autonomy", MID)
+    it = next(i for i in items if i["title"] == "CAS single")
+    assert it["item_id"] == "cp-cas-single"
+    assert it["surface_id"] == "relay"
+    assert it["key"] == "relay:cp-cas-single"
+    assert it["created_at"] == "2026-08-20T00:00:00Z"
