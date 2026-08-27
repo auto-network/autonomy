@@ -402,12 +402,23 @@ header[data-app-chrome] .identity-avatar {
     top: 0;
     height: auto;
     max-height: none;
-    padding-top: max(env(safe-area-inset-top, 0px), 0.5rem);
+    /* Full bleed: no drawer padding or border showing as a frame around the
+     * credentials surface; the surface's own background runs edge to edge and
+     * the safe areas are applied INSIDE (on the mount) so content clears the
+     * notch and home bar. */
+    padding: 0;
+    border: 0;
     border-radius: 0;
+    background: #111827;
   }
 
   .identity-panel--credentials::before {
     display: none;
+  }
+
+  .identity-panel--credentials .identity-credentials-mount {
+    padding-top: max(env(safe-area-inset-top, 0px), 0.5rem);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
   }
 
   .identity-mobile-backdrop {
