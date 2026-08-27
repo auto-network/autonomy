@@ -683,6 +683,7 @@ export function credentialsPanel() {
     pop() { if (this.stack.length > 1) this.stack.pop(); },
     closeAll() { if (hostCallbacks.onClose) hostCallbacks.onClose(); },
     back() {
+      this.stopRecoveryScan();   // leaving any screen closes the camera
       const t = this.top;
       if (t.s === 'authorize') {
         if (t.resolve) t.resolve(false);
@@ -876,16 +877,26 @@ export function credentialsPanel() {
     get recoveryQr() { return this._recoveryQr || ''; },
     // lazy-load a vendored UMD script once (qrcode-generator / jsQR)
     _loadScript(src) {
-      return new Promise((resolve, reject) => {
+      // Cache the in-flight/settled promise; a FAILED load removes its tag and
+      // clears the cache so a retry actually re-fetches (a lone tag check made
+      // one failure permanent).
+      this._scripts = this._scripts || {};
+      if (this._scripts[src]) return this._scripts[src];
+      this._scripts[src] = new Promise((resolve, reject) => {
         if (typeof document === 'undefined') { reject(new Error('no document')); return; }
-        const existing = document.querySelector('script[data-fui="' + src + '"]');
-        if (existing) { resolve(); return; }
         const el = document.createElement('script');
+        let settled = false;
+        const ok = () => { if (!settled) { settled = true; resolve(); } };
+        const fail = (err) => {
+          if (settled) return; settled = true;
+          delete this._scripts[src]; el.remove(); reject(err);
+        };
         el.src = src; el.dataset.fui = src;
-        el.onload = () => resolve(); el.onerror = () => reject(new Error('failed to load ' + src));
-        setTimeout(() => reject(new Error('timed out loading ' + src)), 4000);
+        el.onload = ok; el.onerror = () => fail(new Error('failed to load ' + src));
+        setTimeout(() => fail(new Error('timed out loading ' + src)), 4000);
         document.head.appendChild(el);
       });
+      return this._scripts[src];
     },
     async _qrSvg(text) {
       try {
@@ -931,9 +942,25 @@ export function credentialsPanel() {
         + ' .fui-print-qr svg { width:2.2in; height:2.2in; }'
         + ' .fui-print-code { font-family:ui-monospace,Menlo,monospace; font-size:20px; letter-spacing:2px; margin:16px 0; }'
         + ' .fui-print-gen { color:#555; font-size:12px; margin:0 0 20px; }'
-        + ' .fui-print-how h2 { font-size:14px; margin:16px 0 4px; } .fui-print-how p { margin:0 0 10px; }';
+        + ' .fui-print-how h2 { font-size:14px; margin:16px 0 4px; } .fui-print-how p { margin:0 0 10px; }'
+        + ' .fui-print-done { position:fixed; top:calc(env(safe-area-inset-top, 0px) + 10px); right:14px;'
+        + ' padding:10px 18px; border-radius:10px; border:1px solid #cbd5e1; background:#111827; color:#fff; font-size:15px; }'
+        + ' @media print { .fui-print-done { display:none !important; } }';
       document.body.appendChild(style); document.body.appendChild(sheet);
       const cleanup = () => { sheet.remove(); style.remove(); window.removeEventListener('afterprint', cleanup); };
+      if (typeof navigator !== 'undefined' && navigator.standalone === true) {
+        // iOS home-screen app: window.print() is a documented no-op. Show the
+        // printable sheet itself — readable, screenshottable — with Done to
+        // dismiss.
+        const doneBtn = document.createElement('button');
+        doneBtn.className = 'fui-print-done'; doneBtn.textContent = 'Done';
+        doneBtn.addEventListener('click', cleanup);
+        sheet.style.display = 'block'; sheet.style.overflow = 'auto';
+        sheet.style.webkitOverflowScrolling = 'touch';
+        sheet.style.paddingTop = 'env(safe-area-inset-top, 0px)';
+        sheet.appendChild(doneBtn);
+        return;
+      }
       window.addEventListener('afterprint', cleanup);
       window.print();
     },
@@ -1010,8 +1037,16 @@ export function credentialsPanel() {
         this._recoveryStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
         this.recoveryScanning = true;
         const video = document.createElement('video');
-        video.setAttribute('playsinline', ''); video.srcObject = this._recoveryStream;
+        video.setAttribute('playsinline', ''); video.muted = true;
+        video.srcObject = this._recoveryStream;
         await video.play();
+        this._recoveryVideo = video;
+        const attach = (n) => {
+          const m = document.querySelector('.fui-cred .scanmount');
+          if (m) { m.innerHTML = ''; m.appendChild(video); return; }
+          if (n > 0) requestAnimationFrame(() => attach(n - 1));
+        };
+        attach(20);
         const canvas = document.createElement('canvas');
         const tick = async () => {
           if (!this.recoveryScanning) return;
@@ -1033,6 +1068,10 @@ export function credentialsPanel() {
     },
     stopRecoveryScan() {
       this.recoveryScanning = false;
+      if (this._recoveryVideo) {
+        try { this._recoveryVideo.pause(); } catch (e) { /* already stopped */ }
+        this._recoveryVideo.remove(); this._recoveryVideo = null;
+      }
       if (this._recoveryStream) { this._recoveryStream.getTracks().forEach((t) => t.stop()); this._recoveryStream = null; }
     },
     async _registerStaged(row, opened) {
@@ -1491,7 +1530,7 @@ export function credentialsPanel() {
       this.mfaOn = true; this.mfaMode = this.pickMode;
       if (this.pickMode === 'specific') { this.mfaPws = [...this.pickPws]; this.mfaPks = [...this.pickPks]; } else { this.mfaPws = []; this.mfaPks = []; }
       this._live().forEach((f) => { if (f.authority === 'full' && !this.inMfaRoot(f)) f.authority = 'unlock'; });
-      this.pop(); this.flash('Multi-factor staged');
+      this.pop();
     },
     disableMfa() {
       const keepFull = this._live().find((f) => this.passwords.includes(f)) || this._live()[0];
@@ -1503,7 +1542,6 @@ export function credentialsPanel() {
         if (f.authority === 'none') f.authority = 'unlock';
         delete f.signin;
       });
-      this.flash('Multi-factor turned off — this credential now holds full authority');
     },
 
     flash(m) { this.toast = m; setTimeout(() => { if (this.toast === m) this.toast = ''; }, 2600); },
@@ -1615,6 +1653,10 @@ const STYLE = `
 .fui-cred .btn-primary:disabled, .fui-cred .btn-primary:disabled:hover{ background:#232941; border-color:#232941; color:#5c6478; opacity:1; }
 .fui-cred .locked{ opacity:.38; cursor:not-allowed; }
 .fui-cred .commitbar{ display:flex; gap:10px; padding:12px 14px; border-top:1px solid var(--line2); background:#0d1420; flex:none; } .fui-cred .commitbar .btn-primary{ flex:1; }
+.fui-cred .scanwrap{ margin-top:12px; }
+.fui-cred .scanmount{ position:relative; border-radius:12px; overflow:hidden; background:#000; aspect-ratio:3/4; }
+.fui-cred .scanmount video{ width:100%; height:100%; object-fit:cover; display:block; }
+.fui-cred .scanhint{ font-size:12px; color:var(--dim); margin-top:8px; text-align:center; }
 .fui-cred .deep{ padding:16px 16px 18px; overflow-y:auto; } .fui-cred .deep .lead{ font-size:13px; color:var(--dim); margin:0 0 14px; }
 .fui-cred .modeseg{ display:flex; gap:8px; margin:2px 0 14px; }
 .fui-cred .modeopt{ flex:1; border:1px solid var(--line2); border-radius:12px; padding:12px; cursor:pointer; }
@@ -1877,6 +1919,11 @@ const MARKUP = `
         <div class="choice" x-show="!recoveryScanning">
           <button class="btn btn-ghost" @click="startRecoveryScan()"><svg><use xlink:href="#i-scan"/></svg> Scan the QR code</button>
         </div>
+        <template x-if="recoveryScanning"><div class="scanwrap">
+          <div class="scanmount"></div>
+          <div class="scanhint">Hold the printed code inside the frame.</div>
+          <div class="authrow"><button class="btn btn-ghost" @click="stopRecoveryScan()">Cancel</button></div>
+        </div></template>
         <div class="field" style="margin-top:12px"><label>Enter the code</label>
           <input type="text" x-model="recoveryInput" spellcheck="false" autocapitalize="off" placeholder="Recovery code"
             @keydown.enter="submitVerifyRecovery(recoveryInput)"></div>

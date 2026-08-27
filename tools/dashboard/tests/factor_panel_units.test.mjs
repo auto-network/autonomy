@@ -337,3 +337,18 @@ test('policyWithFactorGranted restores authority for every legal shape', () => {
   // idempotent
   assert.deepEqual(policyWithFactorGranted(or3, 'pk.2', t), or3);
 });
+
+test('leaving a screen closes the camera: back() stops the scan stream and detaches the preview', () => {
+  const c = panelFrom(orView());
+  let stopped = 0;
+  let removed = false;
+  c.recoveryScanning = true;
+  c._recoveryStream = { getTracks: () => [{ stop: () => { stopped += 1; } }] };
+  c._recoveryVideo = { pause: () => {}, remove: () => { removed = true; } };
+  c.push({ s: 'recovery-verify' });
+  c.back();
+  assert.equal(c.recoveryScanning, false, 'scanning flag cleared');
+  assert.equal(stopped, 1, 'camera track stopped');
+  assert.ok(removed, 'preview video detached');
+  assert.equal(c._recoveryStream, null);
+});
