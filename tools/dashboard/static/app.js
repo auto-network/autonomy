@@ -248,7 +248,7 @@ window.Autonomy.topbar.set = function (initialOptions) {
         + ' aria-hidden="' + (open ? 'false' : 'true') + '"'
         + ' tabindex="' + (open ? '0' : '-1') + '"'
         + ' placeholder="' + _escapeTopbarHtml(control.placeholder || 'Search') + '">'
-        + '<button type="button" class="app-topbar-search-button"'
+        + '<button type="button" class="toolbar-icon-button app-topbar-search-button"'
         + ' data-topbar-search-action="' + _escapeTopbarHtml(id) + '"'
         + ' data-testid="' + _escapeTopbarHtml((control.testId || id) + '-toggle') + '"'
         + ' aria-expanded="' + (open ? 'true' : 'false') + '"'
