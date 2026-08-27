@@ -943,6 +943,46 @@ def add_recovery_slot(
     }
 
 
+def replace_recovery_slot(
+    envelope: object,
+    *,
+    old_code: bytes,
+    root_seed: bytes,
+    recovery_recipient_pub: str,
+    recovery_pub: str,
+) -> dict:
+    """Rotate the recovery code: the OLD code AND root, per succession closure.
+
+    Requires proving possession of the current code (it must open the existing
+    slot) and reaching root (the seed re-signs). Replaces the slot in place.
+    The lost-code path (no old code) is the timelocked-regeneration substrate,
+    deferred.
+    """
+    parsed = parse_envelope(envelope)
+    if "recovery" not in parsed:
+        raise RootFactorPolicyError("this armor carries no recovery code to replace")
+    opened = open_root_with_recovery(parsed, old_code)  # proves possession of the old code
+    if opened.public_hex != parsed["root_pub"]:
+        raise RootFactorPolicyError("the old recovery code did not open this armor")
+    root = KeyPair.from_private_hex(bytes(root_seed).hex())
+    if root.public_hex != parsed["root_pub"]:
+        raise RootFactorPolicyError("the supplied root seed does not match root_pub")
+    recipient = _public_key(recovery_recipient_pub, "recovery recipient")
+    sealed = seal(bytes(root_seed), recipient, _RECOVERY_ARMOR_PURPOSE)
+    unsigned = {key: parsed[key] for key in (
+        "v", "generation", "root_pub", "factors", "access", "policy", "wraps",
+    )}
+    unsigned["recovery"] = {
+        "recipient_public_key": recipient,
+        "recovery_pub": _public_key(recovery_pub, "recovery_pub"),
+        "sealed": _b64(sealed),
+    }
+    return {
+        **unsigned,
+        "signature": root.sign_hex(POLICY_SIGNATURE_DOMAIN + canonical_json(unsigned)),
+    }
+
+
 def open_root_with_recovery(envelope: object, recovery_code: bytes) -> KeyPair:
     """Open the root seed with the printed code alone (the emergency floor)."""
     from .recovery import derive_recovery_factors
