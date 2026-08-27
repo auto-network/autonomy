@@ -35,6 +35,10 @@ services:
     # Unset remains the sovereign checkout build above; no registry required.
     image: ${AUTONOMY_IMAGE:-autonomy-node:local}
     restart: unless-stopped
+    # Explicit, matching the Dockerfile CMD default — spelled out here because
+    # the entrypoint is now shared with the dispatcher service below (it execs
+    # whatever command it's given), so this is no longer implicit.
+    command: sh /app/deploy/serve.sh
     # Every session the node launches joins THIS network (the launcher discovers
     # it via `docker inspect` self — agents/mount_plan.discover_topology) and
     # reaches the dashboard by the `dashboard` alias. That is the only path a
@@ -117,6 +121,37 @@ services:
         bind:
           propagation: rslave
           create_host_path: true
+
+  # Polls for approved beads and launches session containers for them
+  # (agents/dispatcher.py). Was host-only prior to this (agents/start-dispatcher.sh,
+  # a bare `nohup ... &` with no supervisor) — a disk-full crash on 2026-08-25 killed
+  # it silently and nothing restarted it for 33+ hours. Same image as dashboard
+  # (built once, shared — compose recognizes the identical build+image and does not
+  # rebuild twice), same entrypoint (deploy/entrypoint.sh execs whatever command
+  # it's given), different command and a trimmed volume set: no ramfs/keycache
+  # binds, because the dispatcher never decrypts a secret itself — it only shells
+  # out to agents/launch.sh, which provisions each launched session's own secrets
+  # independently, the same way whether the launch was dispatcher- or
+  # dashboard-triggered.
+  dispatcher:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+      args:
+        BASE_IMAGE: ${AUTONOMY_BASE_IMAGE:-python:3.12-slim}
+        TAILWIND_URL: ${AUTONOMY_TAILWIND_URL:-}
+    image: ${AUTONOMY_IMAGE:-autonomy-node:local}
+    restart: unless-stopped
+    command: sh /app/deploy/dispatch.sh
+    environment:
+      DISPATCH_INTERVAL: ${DISPATCH_INTERVAL:-5}
+      DISPATCH_MAX_CONCURRENT: ${DISPATCH_MAX_CONCURRENT:-2}
+      DOLT_SQL_HOST: dolt
+    volumes:
+      - autonomy-code:/app
+      - autonomy-data:/app/data
+      - autonomy-orgs:/app/orgs
+      - /var/run/docker.sock:/var/run/docker.sock
 
   # Optional: dolt SQL server backing the beads issue tracker. Image
   # source is operator-chosen via DOLT_IMAGE; the beads schema itself is

@@ -73,6 +73,11 @@ python3 -m agents.secret_ramfs || \
 # launcher-assigned ownership and mode 0700.
 chown autonomy:autonomy /run/autonomy-keycache /run/autonomy-secrets 2>/dev/null || true
 
-# Drop to autonomy and serve. The data volume is now autonomy-owned, so schema
-# init + everything the server does runs as the session-agent uid.
-exec gosu autonomy sh /app/deploy/serve.sh
+# Drop to autonomy and run whatever this container's command is (the
+# dashboard's deploy/serve.sh by default — see the Dockerfile CMD — or the
+# dispatcher's deploy/dispatch.sh, via the compose service's own command:
+# override). The data volume is now autonomy-owned, so schema init +
+# everything either process does runs as the session-agent uid. All of the
+# setup above (docker-group grant, ramfs/keycache provisioning, SSH key
+# staging) is identical for both; only the final process differs.
+exec gosu autonomy "$@"
