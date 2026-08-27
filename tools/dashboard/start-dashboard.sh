@@ -41,6 +41,8 @@ CSS_OUTPUT="$SCRIPT_DIR/static/tailwind.css"
 
 PORT="${DASHBOARD_PORT:-8080}"
 HOST="${DASHBOARD_HOST:-0.0.0.0}"
+DASHBOARD_RESTART_TOKEN="${DASHBOARD_RESTART_TOKEN:-$($VENV -c 'import secrets; print(secrets.token_urlsafe(32))')}"
+export DASHBOARD_RESTART_TOKEN
 
 ensure_tailwindcss() {
     if [[ ! -x "$TAILWIND_BIN" ]]; then
@@ -164,7 +166,7 @@ setsid bash -c "
   if (( $PORT < 1024 )) && command -v authbind >/dev/null 2>&1; then
     AUTHBIND=(authbind --deep)
   fi
-  \"\${AUTHBIND[@]}\" \"$VENV\" -m uvicorn tools.dashboard.server:app \
+  \"\${AUTHBIND[@]}\" \"$VENV\" -m tools.dashboard.reload_with_notice tools.dashboard.server:app \
     --host \"$HOST\" \
     --port \"$PORT\" \
     --reload \

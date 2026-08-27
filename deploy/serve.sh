@@ -30,7 +30,8 @@ if [ -x /usr/local/bin/tailwindcss ]; then
 fi
 
 # Hot-reload the code from the autonomy-code volume, same as the dev box.
-exec python3 -m uvicorn tools.dashboard.server:app \
+export DASHBOARD_RESTART_TOKEN="${DASHBOARD_RESTART_TOKEN:-$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')}"
+exec python3 -m tools.dashboard.reload_with_notice tools.dashboard.server:app \
     --host "${DASHBOARD_HOST:-0.0.0.0}" \
     --port "${DASHBOARD_PORT:-8080}" \
     --reload \
