@@ -428,6 +428,22 @@
         {% include "partials/session-entries.html" %}
       </div>
 
+      <button type="button"
+              class="sv-jump-to-bottom"
+              x-show="showJumpToBottom && !showTerminal"
+              x-transition.opacity
+              @click="jumpToBottom()"
+              data-testid="session-jump-to-bottom"
+              aria-label="Jump to latest"
+              title="Jump to latest"
+              style="display:none;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"
+             aria-hidden="true">
+          <path d="m6 9 6 6 6-6"></path>
+        </svg>
+      </button>
+
       <!-- Terminal region — full-screen xterm.js view; swaps the chat body when showTerminal is true -->
       <div class="sv-terminal" x-show="showTerminal" x-ref="termContainer"></div>
 
