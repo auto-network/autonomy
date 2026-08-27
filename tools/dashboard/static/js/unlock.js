@@ -469,39 +469,22 @@
     var fp = U.factorPolicy;
     if (!fp || fp.armor_version === 3 || !fp.migration_required) return;
     var R = await import('./ceremony/root-factor-policy.js');
-    var factors = []; var access = []; var leaves = [];
-    var nowIso = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
-    for (var i = 0; i < (fp.factors || []).length; i += 1) {
-      var f = fp.factors[i];
-      if (f.type === 'password') {
-        if (!material.password) continue;   // no typed password ⇒ the factor cannot be re-derived
-        var made = await R.createPasswordFactor(fp.root_pub, f.factor_id, material.password);
-        made.seed.fill(0);
-        factors.push(made.factor); access.push(f.factor_id);
-        leaves.push({ op: 'factor', factor_id: f.factor_id });
-      } else if (f.type === 'passkey') {
-        var recips = [];
-        if (material.passkeyRecipient
-            && material.passkeyRecipient.credentialId === f.credential_id) {
-          recips = [{
-            recipient_public_key: material.passkeyRecipient.publicKeyHex,
-            label: 'This device',
-            created_at: nowIso,
-          }];
-          leaves.push({ op: 'factor', factor_id: f.factor_id });
-        }
-        factors.push({
-          factor_id: f.factor_id, type: 'passkey',
-          credential_id: f.credential_id, recipients: recips,
-        });
-        access.push(f.factor_id);
-      }
-    }
-    if (!leaves.length) return;   // nothing root-capable in hand — leave v2 intact
-    var policy = leaves.length === 1 ? leaves[0] : { op: 'or', children: leaves };
-    var operations = [{
-      op: 'migrate_legacy', factors: factors, access: access, root_policy: policy,
-    }];
+    var M = await import('./ceremony/armor-migration.js');
+    // Armor wraps whose credentials have no dashboard registration row are
+    // dead weight (cannot sign in) and the server's binding check refuses a
+    // v3 factor list naming them — the builder drops them.
+    var registered = [];
+    try {
+      var st = await _fetchJson('/api/identity/status');
+      registered = (st.passkeys || []).map(function (p) { return p.credential_id; })
+        .filter(function (c) { return typeof c === 'string'; });
+    } catch (e) { registered = null; }
+    var operations = await M.buildMigrationOperations(fp, {
+      password: material.password,
+      passkeyRecipient: material.passkeyRecipient,
+      registeredCredentialIds: registered,
+    });
+    if (!operations) return;   // nothing root-capable in hand — leave v2 intact
     var pv = await _postJson('/api/identity/factor-policy/preview', {
       base_generation: 0, operations: operations,
     });
