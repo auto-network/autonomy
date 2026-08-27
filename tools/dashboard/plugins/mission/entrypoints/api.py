@@ -392,6 +392,7 @@ def session_contributions(session_ids: list[str],
             pillars = graph_ops.read_set(PILLAR_SET_ID, org=org, peers=[])
         except Exception:
             continue
+        badged: set[tuple[str, str]] = set()   # (session, mission_id)
         for m in pillars:
             payload = dict(m.payload or {})
             coord = str(payload.get("coordinator_session") or "")
@@ -399,10 +400,12 @@ def session_contributions(session_ids: list[str],
                 continue
             mission_id, _, pillar_id = m.key.partition(":")
             mission = missions.get(mission_id)
-            if not mission or (mission.get("status") or "active") ==                     "complete":
+            if not mission or (mission.get("status") or "active") == \
+                    "complete":
                 continue
             mission_name = str(mission.get("name") or "Mission Control")
             pillar_name = str(payload.get("name") or "pillar")
+            badged.add((coord, mission_id))
             result[coord].append({
                 "id": f"mission-pillar:{m.key}",
                 "kind": "action",
@@ -413,6 +416,31 @@ def session_contributions(session_ids: list[str],
                 "href": f"/mission/{mission_id}",
                 "icon_svg": _SESSION_ICON,
                 "accent": str(payload.get("color") or "#8b85ff"),
+                "hard_reload": False,
+            })
+        # The MISSION coordinator badges too: the registry row's own
+        # coordinator_session is what mission-surface chat/question
+        # relays target, so after the allocation-truth fix (pillars
+        # naming the sessions actually driving them, mission-level
+        # coordination on the registry) it showed no icon while pillar
+        # coordinators did. Deduped: a session already badged for this
+        # mission via a pillar keeps its pillar-accented entry.
+        for mission_id, mission in missions.items():
+            coord = str((mission or {}).get("coordinator_session") or "")
+            if (coord not in wanted
+                    or (mission.get("status") or "active") == "complete"
+                    or (coord, mission_id) in badged):
+                continue
+            mission_name = str(mission.get("name") or "Mission Control")
+            result[coord].append({
+                "id": f"mission-coordinator:{mission_id}",
+                "kind": "action",
+                "label": mission_name,
+                "title": f"Open {mission_name} \u2014 mission "
+                         "coordinator in Mission Control",
+                "href": f"/mission/{mission_id}",
+                "icon_svg": _SESSION_ICON,
+                "accent": "#8b85ff",
                 "hard_reload": False,
             })
     return result
