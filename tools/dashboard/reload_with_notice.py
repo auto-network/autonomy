@@ -2,6 +2,9 @@
 
 This changes only Uvicorn's ``BaseReload.restart`` seam. File watching,
 process management, and worker startup remain Uvicorn's implementation.
+
+This module is itself watched so a committed probe can exercise the complete
+preflight path without changing dashboard behaviour.
 """
 
 from __future__ import annotations
