@@ -734,32 +734,48 @@ test('walk: an autofilled password auto-submits the ceremony', async () => {
   await until(() => comp().cur === 'credentials', 'landed back on the list');
 });
 
-test('post-migration tap: the unpaired passkey cell never drops to No authority (jsdom DOM tap)', async () => {
+test('post-migration tap: Full authority staged, commit acquires the slot, armor proves it (jsdom DOM taps)', async () => {
   // the operator's exact live state after the v2→v3 migration: the passkey
-  // factor carried over sign-in-only with ZERO device slots
+  // factor is ENROLLED (credential + public key on record) with ZERO device
+  // slots; the policy is password-only
   const credId = SERVER.passkeyRows[0].credential_id;
   const pk = SERVER.state.factors.find((f) => f.type === 'passkey');
-  const savedRecipients = pk.recipients;
   pk.recipients = [];
   SERVER.state.policy = canonicalExpression({ op: 'factor', factor_id: 'pw.main' });
-  try {
-    await comp().load();
-    await until(() => comp().passkeys.some((k) => k.unpaired), 'unpaired row rendered');
-    await until(() => qa('.ac-lbl').some((e) => e.textContent === 'Unlock only'), 'Unlock only label');
-    const cell = qa('.authcell').find((c) => c.querySelector('.ac-lbl').textContent === 'Unlock only');
-    cell.click();
-    await flush(); await flush();
-    const row = comp().passkeys.find((k) => k.unpaired);
-    assert.notEqual(row.authority, 'none', 'tap must not silently drop to No authority');
-    assert.equal(row.authority, 'unlock', 'stays Unlock only');
-    assert.ok(q('.warnbubble'), 'the refusal explains itself in the DOM');
-    assert.match(q('.warnbubble').textContent, /[Ee]nroll/);
-  } finally {
-    pk.recipients = savedRecipients;
-    SERVER.state.policy = canonicalExpression({
-      op: 'or',
-      children: [{ op: 'factor', factor_id: 'pw.main' }, { op: 'factor', factor_id: 'pk.mac' }],
-    });
-    await comp().load();
-  }
+  SERVER.armor = null;   // panel verify/authorize consult the view + envelope from commit responses
+  SERVER.armor = await buildFactorPolicyArmor({
+    rootSeed: SERVER.root.seed, rootPub: SERVER.root.rootPub,
+    generation: SERVER.state.generation, factors: SERVER.state.factors,
+    access: SERVER.state.access, policy: SERVER.state.policy,
+  });
+  await comp().load();
+  await until(() => comp().passkeys.some((k) => k.unpaired), 'slotless row rendered');
+  await until(() => qa('.ac-lbl').some((e) => e.textContent === 'Unlock only'), 'Unlock only label');
+
+  // 1. the tap stages Full authority — the single ladder, no invented states
+  const cell = qa('.authcell').find((c) => c.querySelector('.ac-lbl').textContent === 'Unlock only');
+  cell.click();
+  await until(() => qa('.ac-lbl').filter((e) => e.textContent === 'Full authority').length >= 2, 'staged Full authority');
+  const row = comp().passkeys.find((k) => k.factorId === 'pk.mac');
+  assert.equal(row.authority, 'full');
+  assert.notEqual(row.authority, 'none', 'never a silent demote');
+
+  // 2. commit: the ceremony acquires the slot (a real get()+PRF through the
+  //    adapter) and the authorize screen signs the ending state
+  await until(() => q('.commitbar') && visible(q('.commitbar')), 'commit bar');
+  const commitsBefore = SERVER.commits.length;
+  q('.commitbar .btn-primary').click();
+  await authorizeWithPassword(PW2);
+  await until(() => SERVER.commits.length === commitsBefore + 1, 'commit posted');
+
+  // 3. the committed armor holds the ending state: slot minted, FULL AUTHORITY
+  const committed = SERVER.commits[SERVER.commits.length - 1];
+  const kinds = committed.operations.map((o) => o.op).sort();
+  assert.deepEqual(kinds, ['add_passkey_recipient', 'set_root_policy']);
+  const envelope = await parseFactorPolicyArmor(committed.armor);
+  const pkFactor = envelope.factors.find((f) => f.factor_id === 'pk.mac');
+  assert.equal(pkFactor.recipients.length, 1, 'slot acquired during commit');
+  const seed = await pkSeedFor(currentDevice, credId);
+  (await openFactorPolicyArmor(committed.armor, { 'pk.mac': seed })).seed.fill(0);
+  await until(() => !comp().loading && comp().passkeys.some((k) => !k.unpaired), 'reloaded with the slot');
 });

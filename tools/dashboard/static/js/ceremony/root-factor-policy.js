@@ -542,8 +542,42 @@ async function signFactorPolicyTransition({
   return bytesToHex(await webCrypto.subtle.sign('Ed25519', signingKey, message));
 }
 
+/* The policy tree with one more factor granted authority: idempotent, and
+ * deterministic for every legal shape — a lone leaf or an OR gains the leaf
+ * at the top; an AND (multi-factor) extends the class group matching the
+ * factor's type. Used by the re-enrollment flows to RESTORE a factor's
+ * authority together with its freshly acquired device slot. */
+function policyWithFactorGranted(policy, factorId, typeOf) {
+  const canonical = canonicalExpression(policy);
+  if (policyFactorIds(canonical).includes(factorId)) return canonical;
+  const leaf = { op: 'factor', factor_id: factorId };
+  if (canonical.op === 'factor') {
+    return canonicalExpression({ op: 'or', children: [canonical, leaf] });
+  }
+  if (canonical.op === 'or') {
+    return canonicalExpression({ op: 'or', children: [...canonical.children, leaf] });
+  }
+  const t = typeOf(factorId);
+  let extended = false;
+  const children = canonical.children.map((child) => {
+    if (extended) return child;
+    const ids = policyFactorIds(child);
+    if (ids.length && ids.every((id) => typeOf(id) === t)) {
+      extended = true;
+      return child.op === 'or'
+        ? { op: 'or', children: [...child.children, leaf] }
+        : { op: 'or', children: [child, leaf] };
+    }
+    return child;
+  });
+  return canonicalExpression(extended
+    ? { op: 'and', children }
+    : { op: 'or', children: [canonical, leaf] });
+}
+
 export {
   FACTOR_RECIPIENT_PURPOSE,
+  policyWithFactorGranted,
   canonicalExpression,
   policyFactorIds,
   policySatisfied,

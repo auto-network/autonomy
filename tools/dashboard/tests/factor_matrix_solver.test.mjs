@@ -28,7 +28,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  credentialsPanel, buildModelV3, stagedOperations,
+  credentialsPanel, buildModelV3, stagedOperations, requiredSlotEnrollments,
 } from '../static/js/factor-management.js';
 import { canonicalExpression } from '../static/js/ceremony/root-factor-policy.js';
 import { applyOps, viewFrom } from './factor_test_helpers.mjs';
@@ -243,6 +243,12 @@ function step(state, edge) {
   const { c, committed } = componentFrom(state);
   edge.apply(c);
   if (c.changeCount === 0) return { refused: true };
+  // what commit() does before building operations: acquire a device slot for
+  // every factor the ending state grants authority to without material —
+  // through the REAL staging path, with synthetic ceremony material
+  requiredSlotEnrollments(c).forEach((row, i) => {
+    c._stageSlotRow(row, hex64('minted-' + row.factorId + '-' + i));
+  });
   let ops;
   try {
     ops = stagedOperations(c);
@@ -260,12 +266,17 @@ function step(state, edge) {
 
 // ── the valid-state generator (for the completeness claim) ─────────────────
 function* allValidStates() {
+  // Valid committed display states per the operator's ruling: outside MFA a
+  // factor is Full authority or Unlock only — 'No authority' exists ONLY
+  // under MFA (a member whose sign-in is off). A slotless factor can hold
+  // Unlock only (enrolled, material pending); a committed policy MEMBER
+  // always holds material (the commit ceremony acquires it), so slotless
+  // full/member states do not exist as committed states.
   const pkOff = [null,
-    { slot: true, authority: 'full' }, { slot: true, authority: 'unlock' }, { slot: true, authority: 'none' },
-    { slot: false, authority: 'unlock' }, { slot: false, authority: 'none' }];
+    { slot: true, authority: 'full' }, { slot: true, authority: 'unlock' },
+    { slot: false, authority: 'unlock' }];
   const pkOn = [null,
-    { slot: true, signinOff: false }, { slot: true, signinOff: true },
-    { slot: false, authority: 'unlock' }, { slot: false, authority: 'none' }];
+    { slot: true, signinOff: false }, { slot: true, signinOff: true }];
   // mfa off. A password's ladder outside MFA is full↔unlock only (the design's
   // single-ladder cell), and disableMfa always restores the password to full —
   // so password-'none' without MFA is deliberately never offered (were the

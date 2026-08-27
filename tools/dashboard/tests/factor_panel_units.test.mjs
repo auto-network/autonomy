@@ -13,8 +13,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildModelV3, stagedOperations, desiredPolicy, factorAuthority, credentialsPanel,
-  satisfyingSets, describeStagedChanges,
+  satisfyingSets, describeStagedChanges, requiredSlotEnrollments,
 } from '../static/js/factor-management.js';
+import { policyWithFactorGranted } from '../static/js/ceremony/root-factor-policy.js';
+import { applyOps } from './factor_test_helpers.mjs';
 
 const HEXA = 'a'.repeat(64);
 const HEXB = 'b'.repeat(64);
@@ -70,13 +72,13 @@ test('buildModelV3: one slot row per passkey recipient', () => {
   assert.ok(rows.every((r) => r.credId === 'credA'));
 });
 
-test('buildModelV3: a recipient-less factor renders one unpaired row without authority', () => {
+test('buildModelV3: a recipient-less factor renders one row at its server authority', () => {
   const view = orView();
   view.factors.push(pkFactorView('pk.2', 'credB', [], { root_role: 'none' }));
   const m = buildModelV3(view, { rp_id: 'localhost' });
   const row = m.passkeys.find((k) => k.factorId === 'pk.2');
-  assert.ok(row.unpaired);
-  assert.notEqual(row.authority, 'full');
+  assert.ok(row.unpaired, 'display detail: no device column');
+  assert.equal(row.authority, 'unlock', 'enrolled + sign-in = Unlock only');
 });
 
 test('buildModelV3: mfaMode reads the TREE, not role presence', () => {
@@ -135,24 +137,37 @@ test('the solver refuses removing the last full-authority factor', () => {
   assert.notEqual(c.passwords[0].pending, 'removed');   // refused, not staged
 });
 
-test('unpaired tap: refuses with an explanation, never silently reduces access', () => {
+test('slotless tap: stages Full authority; commit acquires the slot', () => {
+  // the operator's post-migration state: enrolled credential, no PRF slot yet
   const view = orView();
   view.factors.push(pkFactorView('pk.2', 'credB', [], { root_role: 'none' }));
   const c = panelFrom(view);
-  const row = c.passkeys.find((k) => k.unpaired);
+  const row = c.passkeys.find((k) => k.factorId === 'pk.2');
   assert.equal(row.authority, 'unlock');
-  // outside MFA the tap must NOT move unlock → none: it explains itself and stays
+  // the single ladder applies to every enrolled factor: tap → Full authority
   c.authCellClick(row, null);
-  assert.equal(row.authority, 'unlock', 'tap does not silently drop sign-in');
-  assert.ok(c.warnAt && /[Ee]nroll/.test(c.warnAt.text), 'refusal explains the enrollment path');
-  // recovery: a server-presented none can always come back up to unlock…
-  row.authority = 'none';
-  c.warnAt = null;
-  c.authCellClick(row, null);
-  assert.equal(row.authority, 'unlock', 'none recovers to unlock');
-  // …and full stays unreachable without a device slot
-  c.authCellClick(row, null);
-  assert.notEqual(row.authority, 'full');
+  assert.equal(row.authority, 'full', 'tap stages full — no invented refusal, no silent demote');
+  assert.equal(c.changeCount, 1);
+  // the ending state needs key material this factor lacks → commit must mint it
+  const need = requiredSlotEnrollments(c);
+  assert.deepEqual(need.map((r) => r.factorId), ['pk.2']);
+  // simulate exactly what the commit ceremony does: stage the derived slot…
+  c._stageSlotRow(need[0], 'd'.repeat(64));
+  assert.deepEqual(requiredSlotEnrollments(c), [], 'material acquired');
+  // …and the batch now expresses the ending state in one committable step
+  const ops = stagedOperations(c);
+  assert.deepEqual(ops.map((o) => o.op).sort(), ['add_passkey_recipient', 'set_root_policy']);
+  const projected = applyOps({ generation: 3,
+    factors: view.factors.map((f) => (f.type === 'password' ? {
+      factor_id: f.factor_id, type: 'password',
+      recipient_public_key: HEXB, access_public_key: HEXC,
+      protector: { kdf: { name: 'PBKDF2', hash: 'SHA-256', iterations: 600000, salt: 'AAAAAAAAAAAAAAAAAAAAAA==' },
+        cipher: 'AES-256-GCM', iv: 'AAAAAAAAAAAAAAAA', wrapped_seed: 'A'.repeat(64) },
+    } : { factor_id: f.factor_id, type: 'passkey', credential_id: f.credential_id, recipients: f.recipients })),
+    access: ['pk.1', 'pk.2', 'pw.1'],
+    policy: view.root_policy }, ops);
+  const leaves = JSON.stringify(projected.policy);
+  assert.ok(leaves.includes('pk.2'), 'full authority landed in the committed policy');
 });
 
 test('a changed password stages change_password with its derived factor', () => {
@@ -192,15 +207,18 @@ test('desiredPolicy refuses an empty root', () => {
   assert.throws(() => desiredPolicy(c), /full authority/);
 });
 
-test('MFA cannot be enabled around a slotless class member', () => {
+test('MFA enables around a slotless member; commit acquires its slot', () => {
   const view = orView();
-  view.factors[1].recipients = [];   // the only passkey has no device slot
+  view.factors[1].recipients = [];   // enrolled passkey, no device slot yet
   const c = panelFrom(view);
   c.startMfaSetup();
-  assert.equal(c.canEnableMfa, false, 'setup screen refuses');
+  assert.equal(c.canEnableMfa, true, 'an enrolled factor anchors MFA');
   c.enableMfa();
-  assert.equal(c.mfaOn, false, 'enable is a no-op');
-  assert.equal(c.changeCount, 0, 'nothing staged');
+  assert.equal(c.mfaOn, true);
+  assert.deepEqual(requiredSlotEnrollments(c).map((r) => r.factorId), ['pk.1']);
+  c._stageSlotRow(requiredSlotEnrollments(c)[0], 'd'.repeat(64));
+  const ops = stagedOperations(c);
+  assert.ok(ops.some((o) => o.op === 'set_root_policy' && o.policy.op === 'and'));
 });
 
 test('satisfyingSets: every policy shape the armor can hold', () => {
@@ -278,4 +296,23 @@ test('describeStagedChanges narrates the staged diff in words', () => {
   c.enableMfa();
   const lines = describeStagedChanges(c);
   assert.ok(lines.some((l) => l.startsWith('Turn on multi-factor — any one password')), lines.join('|'));
+});
+
+test('policyWithFactorGranted restores authority for every legal shape', () => {
+  const F = (id) => ({ op: 'factor', factor_id: id });
+  const t = (id) => (id.startsWith('pk') ? 'passkey' : 'password');
+  // lone leaf → OR of both
+  assert.deepEqual(
+    policyWithFactorGranted(F('pw.1'), 'pk.1', t).children.map((n) => n.factor_id).sort(),
+    ['pk.1', 'pw.1']);
+  // OR → gains the leaf
+  const or3 = policyWithFactorGranted({ op: 'or', children: [F('pw.1'), F('pk.1')] }, 'pk.2', t);
+  assert.equal(or3.children.length, 3);
+  // AND (MFA) → the passkey CLASS gains the leaf
+  const and2 = policyWithFactorGranted({ op: 'and', children: [F('pw.1'), F('pk.1')] }, 'pk.2', t);
+  assert.equal(and2.op, 'and');
+  const pkClass = and2.children.find((c) => c.op === 'or');
+  assert.deepEqual(pkClass.children.map((n) => n.factor_id).sort(), ['pk.1', 'pk.2']);
+  // idempotent
+  assert.deepEqual(policyWithFactorGranted(or3, 'pk.2', t), or3);
 });
