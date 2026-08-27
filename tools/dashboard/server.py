@@ -19925,6 +19925,7 @@ async def _on_shutdown():
     global _settings_mediator_started, _serving_bootstrap_task
     global _event_proxy_task
     global _vault_release_sweeper_task
+    # Reload probe marker: keep this graceful path observable in live testing.
     # Tell connected browsers before uvicorn tears their sockets down.  This
     # is best-effort for abrupt kills, but graceful reloads (the ordinary code
     # change path) get a full three seconds to paint the notice and countdown.
