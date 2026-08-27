@@ -408,6 +408,9 @@ test('commit authorizes on the CURRENT policy and writes an armor that proves th
   await until(() => q('input[autocomplete=current-password]'), 'authorize screen');
   // gen-1 policy is OR(password, passkey): both openers offered
   assert.ok(q('.pkbtn'), 'passkey opener offered');
+  // the ceremony states in words exactly what it is signing
+  await until(() => q('.authchanges'), 'change description shown');
+  assert.match(q('.authchanges').textContent, /Full authority → Unlock only/);
   setInput(q('input[autocomplete=current-password]'), PW);
   await until(() => { const b = qa('.authrow .btn-primary').pop(); return b && !b.disabled; }, 'Authorize enabled');
   qa('.authrow .btn-primary').pop().click();
@@ -572,7 +575,7 @@ test('walk: disabling MFA authorizes with BOTH factors of the current policy', a
   await until(() => comp().password === '', 'password half accepted');
   assert.equal(SERVER.commits.length, 3, 'AND not satisfied by the password alone');
   // the accepted half shows its green state; its input is gone, in either order
-  await until(() => qa('.inlineok').some((e) => e.textContent.includes('Password entered')), 'password ✓ shown');
+  await until(() => qa('.inlineok').some((e) => e.textContent.includes('Password verified')), 'password ✓ shown');
   assert.equal(q('input[autocomplete=current-password]'), null, 'password input retired');
   assert.ok(q('.pkbtn'), 'passkey still offered');
   // …and the passkey half settles it

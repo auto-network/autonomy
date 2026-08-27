@@ -133,6 +133,7 @@ export function buildModelV3(view, status) {
     const authority = factorAuthority(f.root_role, f.access);
     const shared = {
       factorId: f.factor_id,
+      factorLabel: f.label || 'Passkey',
       credId: f.credential_id,
       synced: !!f.backed_up,
       transports: f.transports || [],
@@ -352,6 +353,68 @@ export function satisfyingSets(policy) {
   return walk(canonical);
 }
 
+// ── what exactly is being authorized, in words ─────────────────────────────
+// The same baseline diff stagedOperations commits, rendered as a bulleted
+// human description for the ceremony screen: the operator sees precisely what
+// their root authority is about to sign.
+const AUTH_WORD = { full: 'Full authority', unlock: 'Unlock only', none: 'No authority' };
+export function describeStagedChanges(m) {
+  const lines = [];
+  const b = m._baseline;
+  if (!b) return lines;
+  const live = (rows) => rows.filter((r) => r.pending !== 'removed');
+  const authLine = (label, from, to) => '“' + label + '”: ' + AUTH_WORD[from] + ' → ' + AUTH_WORD[to];
+  const signinLine = (label, off) => (off ? 'Turn sign-in off for “' : 'Turn sign-in back on for “') + label + '”';
+
+  b.p.forEach((bp) => {
+    const cur = m.passwords.find((x) => x.id === bp.id);
+    if (!cur || cur.pending === 'removed') lines.push('Remove password “' + (bp.label || 'Password') + '”');
+  });
+  live(m.passwords).forEach((p) => {
+    const base = b.p.find((x) => x.id === p.id);
+    if (!base) { lines.push('Add password “' + (p.label || 'Password') + '”'); return; }
+    if (p.pwChanged) lines.push('Change password “' + (p.label || 'Password') + '”');
+    if (base.authority !== p.authority) lines.push(authLine(p.label || 'Password', base.authority, p.authority));
+    if ((base.signin === false) !== (p.signin === false)) lines.push(signinLine(p.label || 'Password', p.signin === false));
+  });
+
+  const fids = [...new Set([...b.k.map((r) => r.factorId), ...m.passkeys.map((r) => r.factorId)])];
+  fids.forEach((fid) => {
+    const had = b.k.filter((r) => r.factorId === fid);
+    const have = live(m.passkeys.filter((r) => r.factorId === fid));
+    const first = (have[0] || had[0]) || {};
+    const label = first.factorLabel || first.label || 'Passkey';
+    if (had.length && !have.length) { lines.push('Remove passkey “' + label + '”'); return; }
+    if (!had.length && have.length) {
+      lines.push('Enroll passkey “' + label + '” on this device');
+    } else {
+      had.forEach((br) => {
+        if (!have.find((r) => r.id === br.id)) {
+          lines.push('Remove device “' + (br.device || br.label || 'device') + '” from “' + label + '”');
+        }
+      });
+      have.forEach((r) => {
+        if (r._addRecipient) lines.push('Enroll this device (“' + r._addRecipient.recipient.label + '”) for “' + label + '”');
+      });
+    }
+    const b0 = had[0]; const c0 = have[0];
+    if (b0 && c0) {
+      if (b0.authority !== c0.authority) lines.push(authLine(label, b0.authority, c0.authority));
+      if ((b0.signin === false) !== (c0.signin === false)) lines.push(signinLine(label, c0.signin === false));
+    }
+  });
+
+  if (m.mfaChanged) {
+    if (m.mfaOn && !b.on) {
+      lines.push(m.mfaMode === 'any'
+        ? 'Turn on multi-factor — any one password and any one passkey, together'
+        : 'Turn on multi-factor — the selected password and passkey, together');
+    } else if (!m.mfaOn && b.on) lines.push('Turn off multi-factor');
+    else lines.push('Change the multi-factor selection');
+  }
+  return lines;
+}
+
 // ── the Alpine component: the design's script, verbatim except the hooks ────
 let hostCallbacks = { onBack: null, onClose: null };
 
@@ -471,7 +534,8 @@ export function credentialsPanel() {
       // ceremony control (the same authorize screen commit uses — reusable,
       // policy-aware, passkey or password per the current policy)
       this.newDevErr = null;
-      const opened = await this.requireRoot('Enroll “' + name + '”');
+      const opened = await this.requireRoot('Enroll “' + name + '”', '',
+        ['Enroll this device (“' + name + '”) for your passkey']);
       if (!opened) return;
       this.committing = true;
       try {
@@ -693,7 +757,9 @@ export function credentialsPanel() {
       const n = this.changeCount; if (!n || this.committing) return;
       let ops;
       try { ops = stagedOperations(this); } catch (e) { this.flash((e && e.message) || String(e)); return; }
-      const opened = await this.requireRoot('Commit ' + n + (n === 1 ? ' change' : ' changes'));
+      let lines = [];
+      try { lines = describeStagedChanges(this); } catch (e) { lines = []; }
+      const opened = await this.requireRoot('Commit ' + n + (n === 1 ? ' change' : ' changes'), '', lines);
       if (!opened) return;
       this.committing = true;
       try {
@@ -769,10 +835,10 @@ export function credentialsPanel() {
     },
 
     // ── the authorize screen: the design's requireRoot, real crypto ───────
-    requireRoot(detail, step) {
+    requireRoot(detail, step, lines) {
       return new Promise((r) => {
         this.password = ''; this._authSeeds = {}; this.authShowMissing = false; this.authDeadEnd = false;
-        this.push({ s: 'authorize', detail, step: step || '', resolve: r });
+        this.push({ s: 'authorize', detail, step: step || '', lines: lines || [], resolve: r });
         // no WebAuthn at all + every route needs a passkey: dead end, known now
         const hasWebAuthn = typeof window !== 'undefined' && !!window.PublicKeyCredential
           && typeof navigator !== 'undefined' && !!navigator.credentials;
@@ -1292,6 +1358,7 @@ const STYLE = `
 .fui-cred .unlockbadge:hover{ background:rgba(52,211,153,.22); }
 .fui-cred .unlockbadge.off{ background:#161c2a; color:#8b93a7; border-color:var(--line2); }
 .fui-cred .mfadyn{ border:1px solid #1e5b7e; background:#0b1a28; border-radius:12px; padding:13px; font-size:12.5px; line-height:1.5; color:#bfe3f5; margin:12px 0 4px; }
+.fui-cred .authchanges{ border:1px solid #33406b; background:#0f1a2e; border-radius:12px; padding:13px; font-size:12.5px; line-height:1.5; color:#dbe4ff; margin:2px 0 14px; }
 .fui-cred .pkbtn{ width:100%; display:flex; align-items:center; justify-content:center; gap:10px; background:#0f1a2e; border:1px solid #33406b; color:#dbe4ff; font-weight:650; border-radius:12px; padding:14px; cursor:pointer; } .fui-cred .pkbtn:hover{ background:#14213a; } .fui-cred .pkbtn svg{ width:17px; height:17px; }
 .fui-cred .or{ display:flex; align-items:center; gap:10px; color:var(--faint); font-size:11px; text-transform:uppercase; letter-spacing:.1em; margin:12px 2px; } .fui-cred .or::before,.fui-cred .or::after{ content:""; height:1px; background:var(--line); flex:1; }
 .fui-cred .field label{ font-size:12px; color:var(--dim); } .fui-cred .field input{ width:100%; margin-top:5px; background:var(--panel2); border:1px solid var(--line2); color:var(--ink); border-radius:10px; padding:11px 12px; font:inherit; } .fui-cred .field input:focus{ outline:none; border-color:var(--accent2); }
@@ -1477,15 +1544,20 @@ const MARKUP = `
   <!-- AUTHORIZE (commit) -->
   <template x-if="ready && cur==='authorize'"><div style="display:flex;flex-direction:column;min-height:0">
     <div class="scrhead"><button class="back" @click="back()" x-show="!verifying"><svg style="width:16px;height:16px"><use xlink:href="#i-chev"/></svg></button>
-      <div class="ttl"><h1>Authorize with your root key</h1><div class="sub" x-text="top.detail"></div></div>
+      <div class="ttl"><h1>Authorize with your root authority</h1><div class="sub" x-text="top.detail"></div></div>
       <template x-if="top.step"><span class="step" x-text="top.step"></span></template></div>
     <div class="deep">
       <template x-if="!verifying"><div>
+        <template x-if="top.lines && top.lines.length"><div class="authchanges">
+          <div style="font-weight:700;margin-bottom:4px">You are authorizing:</div>
+          <template x-for="ln in top.lines" :key="ln"><div style="margin:2px 0">• <span x-text="ln"></span></div></template>
+        </div></template>
         <template x-if="authBoth"><p class="lead">Multi-factor is on — approve with your passkey <b>and</b> your password.</p></template>
-        <template x-if="authPkDone"><div class="inlineok"><svg><use xlink:href="#i-check"/></svg> Passkey authorized</div></template>
+        <template x-if="authPkDone"><div class="inlineok" style="width:100%;justify-content:center;padding:14px 0"><svg><use xlink:href="#i-check"/></svg> Passkey authorized</div></template>
         <template x-if="authPk && !authPkDone"><button class="pkbtn" @click="authWithPasskey()"><svg><use xlink:href="#i-passkey"/></svg> Use your passkey</button></template>
-        <template x-if="authPk && authPw && !authPkDone && !authPwDone"><div class="or" x-text="authBoth?'and':'or'"></div></template>
-        <template x-if="authPwDone"><div class="inlineok"><svg><use xlink:href="#i-check"/></svg> Password entered</div></template>
+        <template x-if="(authPk || authPkDone) && (authPw || authPwDone)"><div class="or" x-text="authBoth?'and':'or'"></div></template>
+        <template x-if="authPwDone"><div class="field"><label style="visibility:hidden">Enter your current password</label>
+          <div class="inlineok" style="margin-top:5px;padding:11px 0"><svg><use xlink:href="#i-check"/></svg> Password verified</div></div></template>
         <template x-if="authPw && !authPwDone"><div class="field"><label>Enter your current password</label>
           <input type="password" x-model="password" autocomplete="current-password" placeholder="Current password"
             @animationstart="if($event.animationName==='fui-afstart'){ authAutofilled=true; setTimeout(()=>authWithPassword(),0); }"
