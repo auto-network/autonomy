@@ -104,6 +104,9 @@
   }
 
   function fragments(rawText, correctedText) {
+    // Ignore transport noise around the message (e.g. a trailing space).
+    rawText = (rawText || '').trim();
+    correctedText = (correctedText || '').trim();
     if (rawText === correctedText) {
       return rawText ? [{ kind: 'same', text: rawText }] : [];
     }

@@ -93,6 +93,10 @@ def diff_fragments(raw_text: str, corrected_text: str) -> list[dict[str, str]]:
     Merges adjacent same-kind ops. Used both to score a candidate and (in the
     browser, via a parallel JS implementation) to render the inline diff.
     """
+    # Outer whitespace is transport noise (for example, a trailing space from
+    # dictation). Trim it before token diffing so it never becomes an edit.
+    raw_text = raw_text.strip()
+    corrected_text = corrected_text.strip()
     if raw_text == corrected_text:
         return [{"kind": "same", "text": raw_text}] if raw_text else []
     if not raw_text:
