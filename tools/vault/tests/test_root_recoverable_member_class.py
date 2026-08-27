@@ -96,22 +96,31 @@ def test_revocation_generations_carry_the_recovery_anchor_forward():
         revoke_factor(revoked, "pk.a", created_at=NOW)
 
 
-def test_without_recovery_root_stays_locked_out():
-    # the opt-out shape (no recovery recipient) keeps today's enclave behavior
-    pk_seed, pk = factor("pk.only")
-    anchor_seed, root = anchor()
-    record = create_class("prf", [pk], created_at=NOW)
-    with pytest.raises(ClassOpenError):
-        open_class(record, {"anchor.root": anchor_seed})
+def test_enclave_is_unbuildable():
+    # operator ruling 2026-08-27: no enclaves. A member class the root cannot
+    # reach cannot be built at all — create_class refuses without a root anchor,
+    # because you could never move keys onto a new device without the enclave's
+    # own factor present.
+    _, pk = factor("pk.only")
+    with pytest.raises(PolicyClassError):
+        create_class("prf", [pk], created_at=NOW)
 
 
 # ── the confirmed invariant: widen-only, root always present, never removable ─
 
 def test_store_refuses_a_member_class_without_the_root_anchor():
+    # belt-and-braces: even a record hand-built past create_class's guard (via
+    # the low-level mint) is refused at persistence — the store is the second,
+    # independent gate on the widen-only invariant.
+    import secrets
     from tools.vault.store import VaultStore
+    from tools.vault.policy_class import _mint_generation, PolicyClassRecord, _CLASS_KEY_LEN
     store = VaultStore(":memory:")
     _, pk = factor("pk.solo")
-    record = create_class("prf", [pk], created_at=NOW)   # no recovery
+    gen = _mint_generation(
+        "prf", [pk], "cid.enclave", secrets.token_hex(12), secrets.token_bytes(_CLASS_KEY_LEN)
+    )
+    record = PolicyClassRecord("cid.enclave", "prf", (gen,), NOW)
     with pytest.raises(PolicyClassError):
         store.put_class(record)
 

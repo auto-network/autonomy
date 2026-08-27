@@ -21,7 +21,12 @@ from tools.network.storagekit.store import ContentStore
 from tools.network.storagekit.tests.conftest import World
 from tools.vault import policy_class as policy_class_mod
 from tools.vault.errors import ClassOpenError, VaultError
-from tools.vault.factors import open_password_seed
+from tools.vault.factors import open_password_seed, random_seed
+from tools.vault.recipients import (
+    PERSONAL_ROOT_RECIPIENT,
+    PublishedRecipient,
+    recipient_public_from_seed,
+)
 from tools.vault.storage_object import (
     AUDITED,
     LOCATOR_PREFIX,
@@ -85,11 +90,21 @@ def no_network():
         socket.create_connection = real_connection
 
 
+def _anchor(aid="anchor.root"):
+    seed = random_seed()
+    public = recipient_public_from_seed(seed, PERSONAL_ROOT_RECIPIENT)
+    return seed, PublishedRecipient(aid, PERSONAL_ROOT_RECIPIENT, public)
+
+
+_ANCHOR_SEED, _ANCHOR = _anchor()
+
+
 def a_policy_class():
     """A password policy class plus the seeds that open it."""
     identity = make_test_identity()
     record = policy_class_mod.create_class(
-        "password", [identity.published], created_at="2026-08-16T00:00:00Z"
+        "password", [identity.published], created_at="2026-08-16T00:00:00Z",
+        recovery=_ANCHOR,
     )
     seed = open_password_seed(identity.armor, identity.password)
     return record, {identity.factor_id: seed}

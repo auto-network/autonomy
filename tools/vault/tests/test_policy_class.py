@@ -34,8 +34,22 @@ from tools.vault.factors import (
     open_password_seed,
     random_seed,
 )
+from tools.vault.recipients import (
+    PERSONAL_ROOT_RECIPIENT,
+    PublishedRecipient,
+    recipient_public_from_seed,
+)
 
 GENESIS = "genesis-1"
+
+
+def _anchor(aid="anchor.root"):
+    seed = random_seed()
+    public = recipient_public_from_seed(seed, PERSONAL_ROOT_RECIPIENT)
+    return seed, PublishedRecipient(aid, PERSONAL_ROOT_RECIPIENT, public)
+
+
+_ANCHOR_SEED, _ANCHOR = _anchor()
 
 
 def pw_factor(pw: str, fid: str):
@@ -52,7 +66,7 @@ def pw_factor(pw: str, fid: str):
 def test_data_key_opens_only_through_its_class():
     pub, seed = pw_factor("alpha", "pw-1")
     seeds = {"pw-1": seed}
-    rec = create_class(PASSWORD_POLICY, [pub], created_at="t0")
+    rec = create_class(PASSWORD_POLICY, [pub], created_at="t0", recovery=_ANCHOR)
     cek = os.urandom(32)
     sealed = seal_cek(rec, cek, genesis_id=GENESIS, setting_name="s1", required_policy=PASSWORD_POLICY)
 
@@ -60,7 +74,7 @@ def test_data_key_opens_only_through_its_class():
 
     # a different class (its own key) cannot open it
     opub, oseed = pw_factor("beta", "pw-x")
-    other = create_class(PASSWORD_POLICY, [opub], created_at="t0")
+    other = create_class(PASSWORD_POLICY, [opub], created_at="t0", recovery=_ANCHOR)
     with pytest.raises(PolicyClassError):
         open_cek(other, {"pw-x": oseed}, sealed, genesis_id=GENESIS, setting_name="s1", required_policy=PASSWORD_POLICY)
 
@@ -68,7 +82,7 @@ def test_data_key_opens_only_through_its_class():
 def test_cek_bound_to_setting_and_genesis():
     pub, seed = pw_factor("alpha", "pw-1")
     seeds = {"pw-1": seed}
-    rec = create_class(PASSWORD_POLICY, [pub], created_at="t0")
+    rec = create_class(PASSWORD_POLICY, [pub], created_at="t0", recovery=_ANCHOR)
     sealed = seal_cek(rec, os.urandom(32), genesis_id=GENESIS, setting_name="s1", required_policy=PASSWORD_POLICY)
     with pytest.raises(PolicyClassError):
         open_cek(rec, seeds, sealed, genesis_id=GENESIS, setting_name="OTHER", required_policy=PASSWORD_POLICY)
@@ -81,7 +95,7 @@ def test_cek_bound_to_setting_and_genesis():
 
 def test_two_settings_share_one_class_key_and_follow_rotation():
     pub1, seed1 = pw_factor("alpha", "pw-1")
-    rec = create_class(PASSWORD_POLICY, [pub1], created_at="t0")
+    rec = create_class(PASSWORD_POLICY, [pub1], created_at="t0", recovery=_ANCHOR)
     cek1, cek2 = os.urandom(32), os.urandom(32)
     s1 = seal_cek(rec, cek1, genesis_id=GENESIS, setting_name="a", required_policy=PASSWORD_POLICY)
     s2 = seal_cek(rec, cek2, genesis_id=GENESIS, setting_name="b", required_policy=PASSWORD_POLICY)
@@ -113,7 +127,7 @@ def test_two_settings_share_one_class_key_and_follow_rotation():
 def test_create_requires_no_factor_only_public_keys():
     # only the published pub is used — no seed, no password, no prior class
     pub, _seed = pw_factor("alpha", "pw-1")
-    rec = create_class(PASSWORD_POLICY, [pub], created_at="t0")
+    rec = create_class(PASSWORD_POLICY, [pub], created_at="t0", recovery=_ANCHOR)
     assert rec.factor_ids() == ("pw-1",)
     assert len(rec.current().sealing_public_key) == 64
 
@@ -131,7 +145,7 @@ def test_generation_refuses_a_malformed_public_sealing_key():
 
 def test_sealing_uses_only_the_class_public_key_and_opening_needs_the_factor():
     pub, seed = pw_factor("alpha", "pw-1")
-    rec = create_class(PASSWORD_POLICY, [pub], created_at="t0")
+    rec = create_class(PASSWORD_POLICY, [pub], created_at="t0", recovery=_ANCHOR)
     cek = os.urandom(32)
 
     # There is deliberately no opener argument on the seal operation.
@@ -157,7 +171,7 @@ def test_legacy_aes_gcm_siv_cek_remains_readable_and_migrates_without_an_opener(
     from tools.vault import policy_class as policy_mod
 
     pub, seed = pw_factor("alpha", "pw-1")
-    modern = create_class(PASSWORD_POLICY, [pub], created_at="t0")
+    modern = create_class(PASSWORD_POLICY, [pub], created_at="t0", recovery=_ANCHOR)
     legacy_gen = replace(modern.current(), sealing_public_key=None)
     legacy = replace(modern, generations=(legacy_gen,))
     cek = os.urandom(32)
@@ -185,7 +199,7 @@ def test_legacy_aes_gcm_siv_cek_remains_readable_and_migrates_without_an_opener(
 
 def test_extend_requires_opening_the_class():
     pub1, seed1 = pw_factor("alpha", "pw-1")
-    rec = create_class(PASSWORD_POLICY, [pub1], created_at="t0")
+    rec = create_class(PASSWORD_POLICY, [pub1], created_at="t0", recovery=_ANCHOR)
     pub2, _seed2 = pw_factor("bravo", "pw-2")
 
     # with the factor: succeeds
@@ -205,7 +219,7 @@ def test_extend_requires_opening_the_class():
 
 def test_enroll_adds_one_wrap_and_leaves_ciphertext_byte_identical():
     pub1, seed1 = pw_factor("alpha", "pw-1")
-    rec = create_class(PASSWORD_POLICY, [pub1], created_at="t0")
+    rec = create_class(PASSWORD_POLICY, [pub1], created_at="t0", recovery=_ANCHOR)
     cek = os.urandom(32)
     sealed = seal_cek(rec, cek, genesis_id=GENESIS, setting_name="s", required_policy=PASSWORD_POLICY)
     before = dict(sealed)
@@ -226,7 +240,7 @@ def test_enroll_adds_one_wrap_and_leaves_ciphertext_byte_identical():
 
 def test_policy_mismatch_is_refused_at_seal_and_open():
     pub, seed = pw_factor("alpha", "pw-1")
-    rec = create_class(PASSWORD_POLICY, [pub], created_at="t0")
+    rec = create_class(PASSWORD_POLICY, [pub], created_at="t0", recovery=_ANCHOR)
     # a setting that requires `both` cannot be sealed under a `password` class
     with pytest.raises(PolicyMismatchError):
         seal_cek(rec, os.urandom(32), genesis_id=GENESIS, setting_name="s", required_policy=BOTH_POLICY)
@@ -239,7 +253,7 @@ def test_both_policy_needs_both_factors():
     pub_pw, seed_pw = pw_factor("alpha", "b-pw")
     pk_seed = random_seed()
     pub_pk = create_passkey_factor(pk_seed, factor_id="b-pk")
-    rec = create_class(BOTH_POLICY, [pub_pw, pub_pk], created_at="t0")
+    rec = create_class(BOTH_POLICY, [pub_pw, pub_pk], created_at="t0", recovery=_ANCHOR)
 
     cek = os.urandom(32)
     sealed = seal_cek(rec, cek, genesis_id=GENESIS, setting_name="s", required_policy=BOTH_POLICY)
@@ -258,14 +272,16 @@ def test_both_policy_needs_both_factors():
 def test_revocation_mints_new_key_applied_at_next_write():
     pub1, seed1 = pw_factor("alpha", "pw-1")
     pub2, seed2 = pw_factor("bravo", "pw-2")
-    rec = create_class(PASSWORD_POLICY, [pub1], created_at="t0")
+    rec = create_class(PASSWORD_POLICY, [pub1], created_at="t0", recovery=_ANCHOR)
     rec = extend_class(rec, {"pw-1": seed1}, pub2)
     gen_before = rec.current().gen_id
 
     rec = revoke_factor(rec, "pw-1", created_at="t1")
-    # a NEW current generation exists, sealed only to the survivor
+    # a NEW current generation exists, sealed only to the surviving member
+    # (plus the ever-present root anchor floor, which the record-level
+    # factor_ids() excludes as the widen-only floor, not a live factor).
     assert rec.current().gen_id != gen_before
-    assert rec.current().factor_ids() == ("pw-2",)
+    assert rec.factor_ids() == ("pw-2",)
     # the new key applies at the next write; that write excludes the revoked factor
     sealed = seal_cek(rec, os.urandom(32), genesis_id=GENESIS, setting_name="s", required_policy=PASSWORD_POLICY)
     assert sealed["gen_id"] == rec.current().gen_id
@@ -274,7 +290,7 @@ def test_revocation_mints_new_key_applied_at_next_write():
 def test_revocation_leaves_old_generations_untouched():
     pub1, seed1 = pw_factor("alpha", "pw-1")
     pub2, seed2 = pw_factor("bravo", "pw-2")
-    rec = create_class(PASSWORD_POLICY, [pub1], created_at="t0")
+    rec = create_class(PASSWORD_POLICY, [pub1], created_at="t0", recovery=_ANCHOR)
     rec = extend_class(rec, {"pw-1": seed1}, pub2)
     old_gens = tuple(g.to_dict() for g in rec.generations)
 
