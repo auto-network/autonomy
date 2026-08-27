@@ -475,6 +475,15 @@
     panel.setAttribute('aria-label', 'Dashboard identity');
     panel.setAttribute('data-testid', 'identity-panel');
 
+    // Manage credentials takes the WHOLE panel: full screen on mobile, no
+    // drawer chrome — the frame carries its own header and close. The drawer's
+    // person header (name + unlock state) would only duplicate it.
+    if (credentialsOpen && status && status.signed_in === true) {
+      panel.classList.add('identity-panel--credentials');
+      panel.appendChild(el('div', 'identity-credentials-mount'));
+      return panel;
+    }
+
     var header = el('div', 'identity-panel-header');
     header.appendChild(avatar(status, true));
     var person = el('div', 'identity-panel-person');
@@ -485,14 +494,6 @@
     person.appendChild(stateLine);
     header.appendChild(person);
     panel.appendChild(header);
-
-    // Credentials sub-view: the SAME designed Factors screens render right here
-    // in the drawer (wider than the old modal), with their own "Back" returning
-    // to this org list. No separate frame.
-    if (credentialsOpen && status && status.signed_in === true) {
-      panel.appendChild(el('div', 'identity-credentials-mount'));
-      return panel;
-    }
 
     // Status flag tray — the identity band, directly under the header (same strip
     // that appears on the locked screen). Loads its own state; absent -> all dim.

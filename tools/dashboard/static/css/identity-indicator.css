@@ -398,6 +398,18 @@ header[data-app-chrome] .identity-avatar {
     line-height: 1rem;
   }
 
+  .identity-panel--credentials {
+    top: 0;
+    height: auto;
+    max-height: none;
+    padding-top: max(env(safe-area-inset-top, 0px), 0.5rem);
+    border-radius: 0;
+  }
+
+  .identity-panel--credentials::before {
+    display: none;
+  }
+
   .identity-mobile-backdrop {
     position: fixed;
     inset: 0;
