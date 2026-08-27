@@ -122,7 +122,8 @@
     var target = _nextPath();
     try {
       if (sessionStorage.getItem('autonomy.factor.pending-slot')
-          || sessionStorage.getItem('autonomy.factor.slot-enrolled')) {
+          || sessionStorage.getItem('autonomy.factor.slot-enrolled')
+          || sessionStorage.getItem('autonomy.factor.open-credentials')) {
         // A first-device enrollment greeting is pending. Its dialog lives in
         // the shell's profile drawer, which immersive surfaces (sessions,
         // Mission Control, …) do not render — so suppress the next-redirect
@@ -844,6 +845,39 @@
     }
   }
 
+  // Recover access with the printed code: it opens the root ALONE (the
+  // emergency floor), signs the same root-authorized unlock the password path
+  // signs, and lands the person on their credentials so they can set a new
+  // password or add a passkey — authorized by the very code they just used.
+  async function _unlockWithRecovery(printable) {
+    var R = await import('./ceremony/root-factor-policy.js');
+    var recovery = await import('./ceremony/recovery.js');
+    var code;
+    try { code = await recovery.decodeRecoveryCode(String(printable || '').trim()); }
+    catch (e) { throw new Error('That is not a valid recovery code — check the characters.'); }
+    var stored = await _fetchJson('/api/identity/personal');
+    var opened;
+    try { opened = await R.openRootWithRecovery(stored.armored_private_key, code); }
+    catch (e) { throw new Error('That recovery code did not open your identity — check it and try again.'); }
+    var rootSeed = new Uint8Array(opened.seed);
+    opened.seed.fill(0);
+    try {
+      var minted = await _postJson('/api/identity/unlock/password/options', {});
+      var message = new TextEncoder().encode(
+        UNLOCK_DOMAIN + _signonI().canonicalJson({
+          v: 1, challenge: minted.challenge, origin: minted.origin,
+        }));
+      var sig = _signonI().bytesToHex(await crypto.subtle.sign('Ed25519', opened.signingKey, message));
+      await _postJson('/api/identity/unlock/password', { challenge: minted.challenge, signature: sig });
+      // land straight on the credentials screen to re-establish factors
+      try { sessionStorage.setItem('autonomy.factor.open-credentials', '1'); } catch (e) { /* best-effort */ }
+      try { await _signonI().wakeVault({ personalRootSeed: new Uint8Array(rootSeed) }); }
+      catch (e) { if (window.console && console.warn) console.warn('vault wake failed:', (e && e.message) || e); }
+      try { await _fleetCompleteOrMint(rootSeed); rootSeed = null; }
+      catch (e) { if (window.console && console.warn) console.warn('fleet after recovery unlock failed:', (e && e.message) || e); }
+    } finally { if (rootSeed) rootSeed.fill(0); }
+  }
+
   // ── rendering (markup mirrors the mockup's Unlock state) ───────────
 
   var _BOX_CLS = 'bg-gray-800 md:bg-gray-900 border border-gray-700 rounded-xl';
@@ -873,9 +907,9 @@
         'Use another device you’ve enrolled</button>';
     }
     rows +=
-      '<button class="' + _ROW_CLS + '" disabled>' +
+      '<button id="unlock-use-recovery" data-testid="unlock-use-recovery" class="' + _ROW_CLS + '">' +
       '<svg class="w-4.5 h-4.5 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="1.7" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M21 2l-2 2m-7.6 7.6a5.5 5.5 0 1 1-7.78 7.78 5.5 5.5 0 0 1 7.78-7.78zm0 0L15.5 7.5m0 0 3 3L22 7l-3-3"/></svg>' +
-      'Recover access <span class="ml-auto text-[10px] text-amber-400 bg-amber-400/10 border border-amber-400/30 rounded-full px-2 py-0.5 whitespace-nowrap">not yet designed</span></button>';
+      'Use a recovery code</button>';
     return '<div id="unlock-trouble" data-testid="unlock-trouble" class="mt-4 ' + _BOX_CLS + ' p-4 text-left">' +
       '<div class="text-sm font-semibold mb-2">' +
       (U.mode === 'passkey' ? 'Face&nbsp;ID not working?' : 'Trouble signing in?') +
@@ -923,6 +957,42 @@
       if (retry) retry.addEventListener('click', function () {
         U.mode = 'loading'; _render(); _init();
       });
+      return;
+    }
+
+    if (U.mode === 'recovery') {
+      card.innerHTML =
+        '<div class="flex flex-col items-center flex-1 md:flex-none justify-center md:justify-start">' +
+        '<h1 class="text-2xl md:text-xl font-semibold">Use a recovery code</h1>' +
+        '<p class="text-gray-400 mt-2">Enter your recovery code to get back in. You’ll be taken ' +
+        'straight to your credentials so you can set a new password or add a passkey.</p>' +
+        '<input id="unlock-recovery-input" data-testid="unlock-recovery-input" type="text" spellcheck="false" ' +
+        'autocapitalize="off" placeholder="Recovery code" class="mt-6 w-full bg-gray-900 border border-gray-700 ' +
+        'rounded-xl px-4 py-3 text-white">' +
+        '</div>' +
+        '<div class="md:mt-7 pt-7 md:pt-0">' +
+        '<button id="unlock-recovery-submit" data-testid="unlock-recovery-submit" class="w-full bg-amber-500 ' +
+        'hover:bg-amber-400 text-black font-semibold rounded-xl py-4 md:py-3">Recover access</button>' +
+        '<div class="flex justify-center mt-4 text-sm">' +
+        '<button id="unlock-recovery-back" class="text-indigo-400 hover:underline">Back</button></div>' +
+        '<div id="unlock-error" data-testid="unlock-error" class="' + (U.error ? '' : 'hidden ') +
+        'text-sm text-red-400 mt-4">' + _esc(U.error || '') + '</div>' +
+        '<div id="unlock-busy" class="' + (U.busy ? '' : 'hidden ') + 'text-xs text-gray-500 mt-3">working&hellip;</div>' +
+        '</div>';
+      var recInput = card.querySelector('#unlock-recovery-input');
+      var recSubmit = card.querySelector('#unlock-recovery-submit');
+      var recBack = card.querySelector('#unlock-recovery-back');
+      var runRecovery = function () {
+        var code = recInput ? recInput.value : '';
+        if (!code) return;
+        _run(function () { return _unlockWithRecovery(code); });
+      };
+      if (recSubmit) recSubmit.addEventListener('click', runRecovery);
+      if (recInput) {
+        recInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') runRecovery(); });
+        recInput.focus();
+      }
+      if (recBack) recBack.addEventListener('click', function () { _switchMode('password'); });
       return;
     }
 
@@ -1062,6 +1132,7 @@
         }
       });
     }
+    on('unlock-use-recovery', function () { _switchMode('recovery'); });
     on('unlock-trouble-toggle', function () {
       U.troubleOpen = !U.troubleOpen;
       U.techOpen = false;
