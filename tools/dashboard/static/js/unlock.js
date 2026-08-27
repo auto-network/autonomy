@@ -272,6 +272,24 @@
                 return slot.recipient_public_key === rootRecipient.publicKeyHex;
               });
           });
+          // PRF mismatch on a KNOWN credential: this device holds a synced
+          // passkey whose slot lives elsewhere. Remember the derived recipient
+          // (public data only) — the next root opening enrolls it silently.
+          if (!rootFactor) {
+            var knownFactor = rootEnvelope.factors.find(function (row) {
+              return row.type === 'passkey' && row.credential_id === credentialId;
+            });
+            if (knownFactor) {
+              try {
+                sessionStorage.setItem('autonomy.factor.pending-slot', JSON.stringify({
+                  factor_id: knownFactor.factor_id,
+                  credential_id: credentialId,
+                  recipient_public_key: rootRecipient.publicKeyHex,
+                  label: 'New device',
+                }));
+              } catch (e) { /* storage unavailable — detection stays best-effort */ }
+            }
+          }
           if (rootFactor && rootPolicy.policySatisfied(
             rootEnvelope.policy, [rootFactor.factor_id],
           )) {
@@ -348,6 +366,16 @@
         }
         var rootSeed = new Uint8Array(opened.seed);
         opened.seed.fill(0);
+        // best-effort: a root-opening passkey login can also enroll a pending
+        // device slot stashed for ANOTHER of this browser's credentials
+        if (U.factorPolicy && U.factorPolicy.armor_version === 3) {
+          try { await _completePendingSlot(rootSeed); }
+          catch (e) {
+            if (window.console && console.warn) {
+              console.warn('pending device slot not enrolled:', (e && e.message) || e);
+            }
+          }
+        }
         // ONE-SHOT v2→v3 armor upgrade (see _migrateArmorV2Once). Best-effort.
         try {
           await _migrateArmorV2Once({ rootSeed: rootSeed, passkeyRecipient: migRecipient });
@@ -502,6 +530,63 @@
     }
   }
 
+  // A synced passkey signed in earlier from a device whose PRF slot is not
+  // enrolled (detected + stashed above, public data only). The armor's
+  // recipient set is root-sealed, so the slot can only be written under a root
+  // proof — do it silently the moment a login opens the root. The factor panel
+  // then greets the arrival with the name-this-device dialog.
+  async function _completePendingSlot(rootSeed) {
+    var raw = null;
+    try { raw = sessionStorage.getItem('autonomy.factor.pending-slot'); } catch (e) { return; }
+    if (!raw) return;
+    var pending = JSON.parse(raw);
+    var R = await import('./ceremony/root-factor-policy.js');
+    var fp = await _fetchJson('/api/identity/factor-policy');
+    var factor = (fp.factors || []).find(function (f) {
+      return f.type === 'passkey' && f.credential_id === pending.credential_id;
+    });
+    if (!factor) { sessionStorage.removeItem('autonomy.factor.pending-slot'); return; }
+    var already = (factor.recipients || []).some(function (s) {
+      return s.recipient_public_key === pending.recipient_public_key;
+    });
+    if (!already) {
+      var operations = [{
+        op: 'add_passkey_recipient',
+        factor_id: factor.factor_id,
+        recipient: {
+          recipient_public_key: pending.recipient_public_key,
+          label: pending.label || 'New device',
+          created_at: new Date().toISOString().replace(/\.\d+Z$/, 'Z'),
+        },
+      }];
+      var pv = await _postJson('/api/identity/factor-policy/preview', {
+        base_generation: fp.generation, operations: operations,
+      });
+      var armor = await R.buildFactorPolicyArmor({
+        rootSeed: rootSeed, rootPub: fp.root_pub, generation: pv.generation,
+        factors: pv.factors, access: pv.access, policy: pv.root_policy,
+      });
+      var seedCopy = new Uint8Array(rootSeed);
+      var signingKey;
+      try { signingKey = await _identityI().importSigningKey(seedCopy); }
+      finally { seedCopy.fill(0); }
+      var signature = await R.signFactorPolicyTransition({
+        signingKey: signingKey, baseGeneration: fp.generation,
+        operations: operations, candidateArmor: armor,
+      });
+      await _postJson('/api/identity/factor-policy/commit', {
+        base_generation: fp.generation, operations: operations,
+        candidate_armor: armor, root_signature: signature,
+      });
+    }
+    sessionStorage.removeItem('autonomy.factor.pending-slot');
+    sessionStorage.setItem('autonomy.factor.slot-enrolled', JSON.stringify({
+      factor_id: factor.factor_id,
+      recipient_public_key: pending.recipient_public_key,
+      label: pending.label || 'New device',
+    }));
+  }
+
   async function _unlockWithPassword(password) {
     if (!password) throw new Error('enter your password');
     var S = _signonI();
@@ -598,6 +683,10 @@
           challenge: mintedV3.challenge, signature: rootSignatureV3,
         });
         try {
+          // best-effort: enroll a detected-but-pending device slot now that
+          // the root is open (never blocks the unlock)
+          try { await _completePendingSlot(rootSeed); }
+          catch (e) { if (window.console && console.warn) console.warn('pending device slot not enrolled:', (e && e.message) || e); }
           try { await _signonI().wakeVault({ personalRootSeed: new Uint8Array(rootSeed) }); }
           catch (e) { if (window.console && console.warn) console.warn('vault wake failed:', e); }
           await _fleetCompleteOrMint(rootSeed);
