@@ -103,3 +103,36 @@ def test_session_contributions_link_the_new_app(monkeypatch):
     assert "Relay" in out["auto-relay"][0]["title"]
     assert out["auto-old"] == []      # completed mission: no badge
     assert out["auto-none"] == []
+
+
+def test_mission_coordinator_badges_too_deduped(monkeypatch):
+    """The registry row's own coordinator_session gets a badge (it is
+    what mission-surface relays target); a session already badged via a
+    pillar of the same mission keeps only its pillar entry."""
+    from collections import namedtuple
+    Member = namedtuple("Member", "key payload")
+    rows = {
+        "mission.registry": [
+            Member("mid-1", {"name": "Vault", "status": "active",
+                             "coordinator_session": "auto-mc"}),
+            Member("mid-2", {"name": "Both", "status": "active",
+                             "coordinator_session": "auto-dual"}),
+            Member("mid-3", {"name": "Done", "status": "complete",
+                             "coordinator_session": "auto-mc"}),
+        ],
+        "mission.pillar": [
+            Member("mid-2:relay", {"name": "Relay",
+                                   "coordinator_session": "auto-dual",
+                                   "color": "#3987e5"}),
+        ],
+    }
+    from tools.graph import ops as graph_ops
+    monkeypatch.setattr(
+        graph_ops, "read_set",
+        lambda set_id, org=None, peers=None: rows.get(set_id, []))
+    monkeypatch.setattr(api, "_org_scopes", lambda request: ["autonomy"])
+    out = api.session_contributions(["auto-mc", "auto-dual"], request=None)
+    assert [c["id"] for c in out["auto-mc"]] == ["mission-coordinator:mid-1"]
+    assert "mission coordinator" in out["auto-mc"][0]["title"]
+    # dual: pillar badge only — deduped against the registry badge
+    assert [c["id"] for c in out["auto-dual"]] == ["mission-pillar:mid-2:relay"]
