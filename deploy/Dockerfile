@@ -171,3 +171,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=25s --retries=3 \
     CMD curl -fsk https://127.0.0.1:8080/api/ping || curl -fs http://127.0.0.1:8080/api/ping || exit 1
 
 ENTRYPOINT ["/app/deploy/entrypoint.sh"]
+# Default command: serve the dashboard. The dispatcher service (docker-compose.yml)
+# overrides this to run deploy/dispatch.sh instead, reusing the same entrypoint
+# setup (docker-group grant, ramfs/keycache provisioning, ownership fixes).
+CMD ["sh", "/app/deploy/serve.sh"]
