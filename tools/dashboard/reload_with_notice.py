@@ -58,6 +58,7 @@ def _notify_dashboard(config: SimpleNamespace) -> bool:
 
 def _restart_with_notice(self: BaseReload) -> None:
     if _notify_dashboard(self.config):
+        logger.info("reload warning accepted; waiting %ss before restart", _COUNTDOWN_SECONDS)
         time.sleep(_COUNTDOWN_SECONDS)
     _original_restart(self)
 

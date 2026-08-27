@@ -93,6 +93,10 @@ PUBLIC_EXCEPTIONS: dict[tuple[str, str], str] = {
         "A generic signed iPhone Shortcut begins with only this dashboard "
         "origin. This bounded route creates an operator approval but grants no "
         "authority until the operator decides it.",
+    ("POST", "/api/internal/restart-notice"):
+        "The Uvicorn reload parent has no dashboard session, but this exact "
+        "route independently requires its per-parent high-entropy restart token "
+        "before it can broadcast a restart warning.",
     ("GET", "/api/dropbox/enrollments/{id}"):
         "The high-entropy enrollment id is the one-time reply capability used "
         "by the Shortcut while it waits for the operator-approved upload token.",
