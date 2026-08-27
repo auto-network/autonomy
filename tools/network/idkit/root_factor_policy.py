@@ -854,6 +854,21 @@ def _unsigned_envelope(envelope: Mapping) -> dict:
 _RECOVERY_ARMOR_PURPOSE = "autonomy/recovery-armor/v1"  # mirrors armor.RECOVERY_ARMOR_PURPOSE
 
 
+def recovery_slot(*, root_seed: bytes, recovery_recipient_pub: str, recovery_pub: str) -> dict:
+    """Build one recovery slot dict (seals the root seed to the code recipient).
+
+    HPKE sealing is randomized, so a slot must be built ONCE and used in both
+    the set_recovery operation and the candidate armor — hence this helper, so
+    the two carry byte-identical `sealed` material.
+    """
+    recipient = _public_key(recovery_recipient_pub, "recovery recipient")
+    return {
+        "recipient_public_key": recipient,
+        "recovery_pub": _public_key(recovery_pub, "recovery_pub"),
+        "sealed": _b64(seal(bytes(root_seed), recipient, _RECOVERY_ARMOR_PURPOSE)),
+    }
+
+
 def recovery_recipient_public_key(recovery_code: bytes) -> str:
     """The KEM recipient the root seed is sealed to, from the printed code.
 

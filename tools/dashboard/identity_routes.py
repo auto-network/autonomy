@@ -961,6 +961,9 @@ async def post_factor_policy_preview(request: Request) -> JSONResponse:
         "factors": projected["factors"],
         "access": projected["access"],
         "roles": projected["roles"],
+        # Echo the projected recovery slot so the client builds a candidate
+        # armor whose (randomized-seal) recovery field matches byte-for-byte.
+        "recovery": projected.get("recovery"),
         "change_count": 1,
     })
 
