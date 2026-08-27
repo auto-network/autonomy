@@ -454,7 +454,7 @@ export function credentialsPanel() {
     generation: 0, rootPub: null, armorText: null, envelope: null,
     _committedPolicy: null, _authSeeds: {}, _viewFactors: [],
     deviceName: '', newDevErr: null, authAutofilled: false,
-    _recovery: null, _recoveryCode: null, _recoveryPrintable: null, _recoveryQr: null, recoveryScanning: false, recoveryVerifyResult: null, recoveryInput: '', authRecoveryInput: '',
+    _recovery: null, _recoveryCode: null, _recoveryPrintable: null, _recoveryQr: null, recoveryScanning: false, recoveryVerifyResult: null, recoveryInput: '',
     authShowMissing: false, authDeadEnd: false,
 
     init() { this.load(); },
@@ -1022,26 +1022,6 @@ export function credentialsPanel() {
     stopRecoveryScan() {
       this.recoveryScanning = false;
       if (this._recoveryStream) { this._recoveryStream.getTracks().forEach((t) => t.stop()); this._recoveryStream = null; }
-    },
-    // The authorize ceremony's recovery path: the code opens the root and thus
-    // authorizes the commit — a third way to satisfy the root ceremony.
-    async authWithRecovery(printable) {
-      if (this.top.s !== 'authorize' || this.verifying) return;
-      let code;
-      try { code = await decodeRecoveryCode(String(printable || '').trim()); }
-      catch (e) { this.flash('That recovery code is malformed'); return; }
-      this.verifying = true;
-      try {
-        const opened = await openRootWithRecovery(this.armorText, code);
-        const t = this.top; this.verifying = false;
-        if (t.s === 'authorize') {
-          const res = t.resolve; this.pop(); this._clearAuthSeeds();
-          if (res) res(opened);
-        } else { opened.seed.fill(0); }
-      } catch (e) {
-        this.verifying = false;
-        this.flash('That recovery code did not open your root — check it and try again');
-      }
     },
     async _registerStaged(row, opened) {
       const en = row._enroll;
@@ -1918,13 +1898,8 @@ const MARKUP = `
           <template x-for="mp in authMissingPasskeys" :key="mp.label">
             <div style="margin-top:5px">“<span x-text="mp.label"></span>” — enrolled on: <span x-text="mp.devices"></span></div>
           </template>
-          <template x-if="hasRecovery"><div style="margin-top:8px">Or authorize with your <b>recovery code</b> below.</div></template>
         </div></template>
-        <template x-if="hasRecovery"><div class="field" style="margin-top:12px"><label>Or enter your recovery code</label>
-          <input type="text" x-model="authRecoveryInput" spellcheck="false" autocapitalize="off" placeholder="Recovery code"
-            @keydown.enter="authWithRecovery(authRecoveryInput)"></div></template>
         <div class="authrow"><button class="btn btn-ghost" @click="back()">Cancel</button>
-          <template x-if="hasRecovery && authRecoveryInput"><button class="btn btn-rec" @click="authWithRecovery(authRecoveryInput)">Use recovery code</button></template>
           <button class="btn btn-primary" :disabled="!password || authPwDone" @click="authWithPassword()">Authorize</button></div>
       </div></template>
       <template x-if="verifying"><div class="verifying"><span class="spin"></span> Verifying with your root key…</div></template>
