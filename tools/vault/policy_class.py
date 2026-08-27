@@ -380,20 +380,38 @@ def _reject_shared_public_keys(factors) -> None:
 def _mint_generation(
     policy: str, factors, class_id: str, gen_id: str, class_key: bytes
 ) -> Generation:
-    """Seal *class_key* (or its shares) to *factors* for a new generation."""
+    """Seal *class_key* (or its shares) to *factors* for a new generation.
+
+    A ``PERSONAL_ROOT_RECIPIENT`` among *factors* is a RECOVERY recipient
+    (operator ruling 2026-08-27: root authority is always sufficient — a
+    class scopes its day-to-day factors, it never locks out the root). It is
+    sealed the full class key under single-key policies and BOTH shares under
+    ``both`` (extension needs the shares), so a root opening can both read
+    and enroll a replacement device with no member factor present.
+    """
     _reject_shared_public_keys(factors)
+    recovery = [f for f in factors if getattr(f, "factor_type", None) == PERSONAL_ROOT_RECIPIENT
+                or getattr(f, "recipient_kind", None) == PERSONAL_ROOT_RECIPIENT]
+    members = [f for f in factors if f not in recovery]
+    recovery = [
+        f if hasattr(f, "factor_type")
+        else PublishedFactor(f.factor_id, f.recipient_kind, f.public_key)
+        for f in recovery
+    ]
     if policy in (PASSWORD_POLICY, PRF_POLICY):
         want = _SINGLE_TYPE[policy]
         wraps = []
-        for f in factors:
+        for f in members:
             if f.factor_type != want:
                 raise PolicyClassError(
                     f"{policy} class admits only {want} factors, got {f.factor_type!r}"
                 )
             wraps.append(_seal_wrap(class_key, f, class_id, gen_id, policy, ROLE_SINGLE))
+        for r in recovery:
+            wraps.append(_seal_wrap(class_key, r, class_id, gen_id, policy, ROLE_SINGLE))
     else:  # both
-        pw = [f for f in factors if f.factor_type == PASSWORD]
-        pk = [f for f in factors if f.factor_type == PASSKEY]
+        pw = [f for f in members if f.factor_type == PASSWORD]
+        pk = [f for f in members if f.factor_type == PASSKEY]
         if not pw or not pk:
             raise PolicyClassError(
                 "a both class needs at least one password and one passkey factor"
@@ -402,6 +420,9 @@ def _mint_generation(
         share_b = _xor(class_key, share_a)
         wraps = [_seal_wrap(share_a, f, class_id, gen_id, policy, ROLE_A) for f in pw]
         wraps += [_seal_wrap(share_b, f, class_id, gen_id, policy, ROLE_B) for f in pk]
+        for r in recovery:
+            wraps.append(_seal_wrap(share_a, r, class_id, gen_id, policy, ROLE_A))
+            wraps.append(_seal_wrap(share_b, r, class_id, gen_id, policy, ROLE_B))
     _, sealing_public_key = derive_encapsulation_keypair(
         class_key, _class_seal_key_purpose(class_id, gen_id)
     )
@@ -475,6 +496,7 @@ def create_class(
     *,
     class_id: str | None = None,
     created_at: str,
+    recovery: "PublishedRecipient | None" = None,
 ) -> PolicyClassRecord:
     """Mint a class: a first generation sealed to *factors*' public keys.
 
@@ -482,12 +504,18 @@ def create_class(
     factors' published public keys (crib §18). Returns the record; the
     class secret is not persisted or returned. Its derived public sealing key
     is persisted so :func:`seal_cek` can write without a factor.
+
+    *recovery* (a personal-root anchor recipient) additionally seals every
+    generation to the root: the default for member classes, so root authority
+    always reads and always enrolls a replacement device (a class WITHOUT it
+    is a deliberate enclave the root cannot recover).
     """
     _require_policy(policy)
     if not factors:
         raise PolicyClassError("a class needs at least one factor")
     class_id = class_id or secrets.token_hex(16)
-    gen = _mint_generation(policy, factors, class_id, secrets.token_hex(12), secrets.token_bytes(_CLASS_KEY_LEN))
+    minted = list(factors) + ([recovery] if recovery is not None else [])
+    gen = _mint_generation(policy, minted, class_id, secrets.token_hex(12), secrets.token_bytes(_CLASS_KEY_LEN))
     return PolicyClassRecord(class_id, policy, (gen,), created_at)
 
 
@@ -652,14 +680,22 @@ def revoke_factor(
             "root factors are changed on the personal armor, not on this class"
         )
     current = record.current()
-    survivors = [
-        PublishedFactor(w.factor_id, w.factor_type, w.public_key)
-        for w in current.wraps
-        if w.factor_id != factor_id
-    ]
-    if len(survivors) == len(current.wraps):
+    seen: set[tuple[str, str]] = set()
+    survivors = []
+    for w in current.wraps:
+        if w.factor_id == factor_id:
+            continue
+        if (w.factor_id, w.public_key) in seen:
+            continue   # a 'both' recovery anchor holds two role wraps — one factor
+        seen.add((w.factor_id, w.public_key))
+        survivors.append(
+            PublishedRecipient(w.factor_id, w.factor_type, w.public_key)
+            if w.factor_type == PERSONAL_ROOT_RECIPIENT
+            else PublishedFactor(w.factor_id, w.factor_type, w.public_key)
+        )
+    if len(seen) == len({(w.factor_id, w.public_key) for w in current.wraps}):
         raise PolicyClassError(f"factor {factor_id!r} is not in the current generation")
-    if not survivors:
+    if not [s for s in survivors if s.factor_type != PERSONAL_ROOT_RECIPIENT]:
         raise PolicyClassError("cannot revoke the last factor of a class")
 
     new_gen = _mint_generation(
