@@ -25,11 +25,13 @@ Tests cover:
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import sqlite3
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from starlette.testclient import TestClient
@@ -454,6 +456,112 @@ def test_dispatch_creates_agentic_source(client, per_org_universe):
     assert md["target_org"] == "autonomy"
     # Browser-initiated dispatch → server-side sentinel sender.
     assert md["dispatched_by_session"] == "dashboard"
+
+
+def test_dispatch_registers_agentic_container_with_live_monitor(
+    client, per_org_universe, monkeypatch,
+):
+    """Agentic runs become resource-visible without waiting for dispatcher."""
+    from tools.dashboard import server
+
+    asset_id = "33333333-3333-3333-3333-333333333333"
+    _insert_note_source(
+        org="autonomy", source_id=asset_id, title="Monitor registration target",
+    )
+    registered = AsyncMock()
+    monkeypatch.setattr(server.session_monitor, "register_session", registered)
+
+    response = client.post("/api/agent-actions/dispatch", json={
+        "member_key": "note.update-summary",
+        "asset_id": asset_id,
+    })
+
+    assert response.status_code == 201, response.text
+    kwargs = registered.await_args.kwargs
+    assert kwargs["tmux_name"] == response.json()["slug"]
+    assert kwargs["type"] == "agentic"
+    assert kwargs["run_dir"]
+    assert kwargs["project"] == "autonomy-rig"
+    assert kwargs["harness"] == "claude"
+
+
+def test_agentic_monitor_rows_are_hidden_from_interactive_sessions(
+    client, per_org_universe,
+):
+    """Agentic telemetry rows belong to Activity, never graph sessions."""
+    from tools.dashboard.dao import dashboard_db
+
+    dashboard_db.insert_session(
+        "agentic-hidden-from-session-list", "agentic", "autonomy-rig",
+    )
+    interactive = {
+        row["tmux_name"] for row in dashboard_db.get_live_sessions()
+    }
+    monitored = {
+        row["tmux_name"]
+        for row in dashboard_db.get_live_sessions(include_agentic=True)
+    }
+    assert "agentic-hidden-from-session-list" not in interactive
+    assert "agentic-hidden-from-session-list" in monitored
+
+
+def test_dispatch_card_uses_monitored_agentic_activity_when_poller_lags(
+    monkeypatch,
+):
+    """The Activity payload reuses SessionMonitor data without new counters."""
+    from agents import dispatcher
+    from tools.dashboard import server
+
+    run_id = "agentic-live-fallback"
+    monkeypatch.setattr(server.dao_dispatch, "get_running_with_stats", lambda: [{
+        "id": run_id,
+        "kind": "agentic",
+        "status": "RUNNING",
+        "started_at": "2026-08-27T10:00:00Z",
+        "container_name": run_id,
+        "output_dir": "/tmp/agentic-live-fallback",
+        "agentic_source_id": "source-id",
+        "token_count": None,
+        "tool_count": None,
+        "turn_count": None,
+        "last_snippet": None,
+        "last_activity": None,
+    }])
+    monkeypatch.setattr(server.dao_beads, "get_dispatch_beads", lambda: {
+        "approved_waiting": [], "approved_blocked": [],
+    })
+    monkeypatch.setattr(server.dao_beads, "get_bead_title_priority", lambda _ids: {})
+    monkeypatch.setattr(server.resource_monitor, "snapshot", lambda: {"sessions": {}})
+    monkeypatch.setattr(server.dashboard_db, "get_session", lambda _id: {
+        "context_tokens": 2048,
+        "entry_count": 7,
+        "last_message": "Working through the change",
+        "last_activity": 1_787_825_000.0,
+        "harness": "codex",
+        "model": "gpt-5.6-terra",
+    })
+    monkeypatch.setattr(server, "_resolve_agentic_identity", lambda _id: {
+        "title": "Live agentic action", "action_label": "Review",
+        "member_key": "bead.review", "target_kind": "bead",
+        "target_source_id": "auto-test", "target_org": "autonomy",
+        "dispatched_by_session": "dashboard", "harness": "claude",
+        "model": "fallback",
+    })
+    monkeypatch.setattr(dispatcher, "_find_jsonl_file", lambda _dir: None)
+    monkeypatch.setattr(
+        dispatcher, "_agentic_jsonl_metrics",
+        lambda _path: ("", 0, 3, None),
+    )
+
+    active = asyncio.run(server._collect_dispatch_data())["active"]
+
+    assert len(active) == 1
+    row = active[0]
+    assert row["token_count"] == 2048
+    assert row["turn_count"] == 7
+    assert row["tool_count"] == 3
+    assert row["last_snippet"] == "Working through the change"
+    assert row["last_activity"] == 1_787_825_000.0
 
 
 def test_dispatch_design_action_uses_design_asset_context(

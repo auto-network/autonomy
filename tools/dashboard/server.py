@@ -13747,12 +13747,43 @@ async def _collect_dispatch_data() -> dict:
         }
         if agentic_ident is not None:
             monitored = dashboard_db.get_session(run.get("id", "")) or {}
+            monitored_last_activity = monitored.get("last_activity")
+            tool_count = run.get("tool_count")
+            if tool_count is None:
+                # SessionMonitor intentionally does not maintain a separate
+                # tool-use counter. Reuse the dispatcher's established JSONL
+                # parser for that one field rather than creating another
+                # monitor metric.
+                from agents.dispatcher import _agentic_jsonl_metrics, _find_jsonl_file
+                jsonl_file = _find_jsonl_file(str(run.get("output_dir") or ""))
+                _snippet, _turns, tool_count, _activity = _agentic_jsonl_metrics(jsonl_file)
+            if monitored_last_activity is not None:
+                monitored_last_activity = float(monitored_last_activity)
             active_row["action_label"] = agentic_ident["action_label"]
             active_row["member_key"] = agentic_ident["member_key"]
             active_row["target_kind"] = agentic_ident["target_kind"]
             active_row["target_source_id"] = agentic_ident["target_source_id"]
             active_row["target_org"] = agentic_ident["target_org"]
             active_row["dispatched_by_session"] = agentic_ident["dispatched_by_session"]
+            active_row["last_snippet"] = (
+                active_row["last_snippet"] or monitored.get("last_message") or None
+            )
+            active_row["token_count"] = (
+                active_row["token_count"]
+                if active_row["token_count"] is not None
+                else monitored.get("context_tokens")
+            )
+            active_row["turn_count"] = (
+                active_row["turn_count"]
+                if active_row["turn_count"] is not None
+                else monitored.get("entry_count")
+            )
+            active_row["tool_count"] = tool_count
+            active_row["last_activity"] = (
+                active_row["last_activity"]
+                if active_row["last_activity"] is not None
+                else monitored_last_activity
+            )
             # Provider identity belongs to the monitored session.  The eager
             # agentic source metadata is the launch-time fallback for the
             # short interval before the JSONL registration arrives.
@@ -17926,6 +17957,21 @@ async def api_agent_action_dispatch(request):
         except Exception:
             logger.exception("agent-actions: launch_session crashed")
             container_id = None
+
+    # Agentic actions originate here, outside the dispatcher's in-memory run
+    # list. Register immediately so ResourceMonitor can resolve the container
+    # cgroup on its next tick, while SessionMonitor waits for its JSONL to
+    # arrive in the run directory. The dispatcher's later registration is
+    # idempotent and becomes a refresh rather than the first chance at stats.
+    if container_id:
+        await session_monitor.register_session(
+            tmux_name=run_id,
+            type="agentic",
+            run_dir=output_dir,
+            project=workspace.id,
+            harness=workspace.harness,
+            model=model,
+        )
 
     # ── Step 7: record the dispatch_runs row ─────────────────────
     try:

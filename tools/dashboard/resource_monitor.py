@@ -350,7 +350,9 @@ class ResourceMonitor:
     async def _loop(self) -> None:
         while True:
             try:
-                rows = get_live_sessions()
+                # Agentic actions are deliberately absent from interactive
+                # session lists but still need cgroup telemetry for Activity.
+                rows = get_live_sessions(include_agentic=True)
                 await asyncio.to_thread(self._tick, rows, time.time())
                 # Push the latest samples (no history — the frontend keeps
                 # its own ring buffer by appending these) over the shared
