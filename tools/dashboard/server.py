@@ -7,6 +7,7 @@ Every view the dashboard shows, an agent can also produce via CLI.
 import asyncio
 import fcntl
 import hashlib
+import hmac
 import json
 import logging
 import mimetypes
@@ -402,6 +403,9 @@ RESTART_NOTICE_STATE_PATH = Path(
 )
 _RESTART_WARNING_SECONDS = 3
 _RESTART_EXPECTED_MS = 30_000
+_RESTART_TOKEN_HEADER = "x-dashboard-restart-token"
+_restart_notice_lock = asyncio.Lock()
+_restart_notice_payload: dict[str, int] | None = None
 
 
 def _write_restart_notice(payload: dict[str, int]) -> None:
@@ -448,6 +452,13 @@ def _current_headline_context() -> dict[str, str]:
         return {}
 
 
+def _discard_restart_event_cache() -> None:
+    """Restart messages are for clients present at the time, never new tabs."""
+    discard = getattr(event_bus, "discard_cached", None)
+    if callable(discard):
+        discard(lambda topic, _data, _decoded_ok: topic == "server:restart")
+
+
 async def _emit_restart_complete() -> None:
     """Publish a durable restart completion only after this process is ready."""
     restart_notice = _read_restart_notice()
@@ -464,12 +475,33 @@ async def _emit_restart_complete() -> None:
     }
     payload.update(_current_headline_context())
     await event_bus.broadcast("server:restart", payload, dedup=False)
+    _discard_restart_event_cache()
     try:
         RESTART_NOTICE_STATE_PATH.unlink()
     except FileNotFoundError:
         pass
     except OSError:
         logger.warning("could not clear restart notice state", exc_info=True)
+
+
+async def _announce_restart() -> dict[str, int]:
+    """Persist and broadcast the restart countdown exactly once per worker."""
+    global _restart_notice_payload
+    async with _restart_notice_lock:
+        if _restart_notice_payload is not None:
+            return _restart_notice_payload
+        started_at_ms = int(time.time() * 1000)
+        payload = {
+            "phase": "countdown",
+            "started_at_ms": started_at_ms,
+            "countdown_ends_at_ms": started_at_ms + _RESTART_WARNING_SECONDS * 1000,
+            "expected_ms": _RESTART_EXPECTED_MS,
+        }
+        _write_restart_notice({"started_at_ms": started_at_ms})
+        await event_bus.broadcast("server:restart", payload, dedup=False)
+        _discard_restart_event_cache()
+        _restart_notice_payload = payload
+        return payload
 # Resource collector ring buffers survive hot reloads the same way the
 # event bus does: snapshot on shutdown, restore on boot. Env-overridable
 # for tests, mirroring DASHBOARD_EVENT_BUS_STATE.
@@ -12570,6 +12602,23 @@ async def api_dao_bead(request):
 
 # ── SSE EventBus endpoint ─────────────────────────────────────
 
+async def api_internal_restart_notice(request):
+    """Accept the reloader's authenticated warning before it stops this worker."""
+    expected = os.environ.get("DASHBOARD_RESTART_TOKEN")
+    presented = request.headers.get(_RESTART_TOKEN_HEADER)
+    if not expected or not presented or not hmac.compare_digest(presented, expected):
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    try:
+        payload = await _announce_restart()
+    except Exception:
+        logger.exception("could not announce pending restart")
+        return JSONResponse({"error": "restart announcement failed"}, status_code=500)
+    return JSONResponse({
+        "ok": True,
+        "started_at_ms": payload["started_at_ms"],
+        "countdown_seconds": _RESTART_WARNING_SECONDS,
+    })
+
 async def api_events(request):
     """Server-Sent Events endpoint — global broadcast.
 
@@ -19018,6 +19067,7 @@ routes = [
     WebSocketRoute("/ws/voice", ws_voice),
 
     # Events (SSE)
+    Route("/api/internal/restart-notice", api_internal_restart_notice, methods=["POST"]),
     Route("/api/events", api_events),
     Route("/api/events/replay", api_events_replay),
     Route("/api/web-push/proof/config", web_push_proof.api_config),
@@ -19615,6 +19665,9 @@ async def _on_startup():
             restore_fn(EVENT_BUS_STATE_PATH)
         except Exception:
             logger.exception("event_bus.restore() raised unexpectedly; continuing")
+    # A restart status is a live interruption, not application state. Drop a
+    # notice left by an older process before any fresh browser can subscribe.
+    _discard_restart_event_cache()
     _mark("event_bus.restore")
     try:
         scrubbed = attention_routes.scrub_private_cached_events(event_bus)
@@ -19925,30 +19978,12 @@ async def _on_shutdown():
     global _settings_mediator_started, _serving_bootstrap_task
     global _event_proxy_task
     global _vault_release_sweeper_task
-    # Reload probe marker: keep this graceful path observable in live testing.
-    # Tell connected browsers before uvicorn tears their sockets down.  This
-    # is best-effort for abrupt kills, but graceful reloads (the ordinary code
-    # change path) get a full three seconds to paint the notice and countdown.
-    started_at_ms = int(time.time() * 1000)
-    _write_restart_notice({"started_at_ms": started_at_ms})
-    try:
-        await event_bus.broadcast(
-            "server:restart",
-            {
-                "phase": "countdown",
-                "started_at_ms": started_at_ms,
-                "countdown_ends_at_ms": started_at_ms + _RESTART_WARNING_SECONDS * 1000,
-                "expected_ms": _RESTART_EXPECTED_MS,
-            },
-            dedup=False,
-        )
-        await asyncio.sleep(_RESTART_WARNING_SECONDS)
-    except asyncio.CancelledError:
-        # Uvicorn may cancel a forced shutdown before the notice can flush;
-        # retain the durable record so the next boot can still report timing.
-        raise
-    except Exception:
-        logger.warning("restart warning broadcast failed", exc_info=True)
+    # Uvicorn closes SSE sockets before it calls this lifespan hook. Its parent
+    # watcher has already called the authenticated endpoint and waited three
+    # seconds. Direct shutdowns cannot warn a browser, but still leave timing
+    # state for the next process.
+    if _restart_notice_payload is None:
+        _write_restart_notice({"started_at_ms": int(time.time() * 1000)})
     try:
         await web_push_worker.stop_worker()
     except Exception:
