@@ -1815,7 +1815,7 @@ const MARKUP = `
   <!-- NEW DEVICE (a synced passkey's first sign-in from this device) -->
   <template x-if="ready && cur==='newdevice'"><div style="display:flex;flex-direction:column;min-height:0">
     <div class="scrhead"><button class="back" @click="back()"><svg style="width:16px;height:16px"><use xlink:href="#i-chev"/></svg></button>
-      <div class="ttl"><h1>First-time login on this device</h1><div class="sub">New device recognized</div></div></div>
+      <div class="ttl"><h1>Authorized device detected</h1><div class="sub">A new device with your authorized Cloud passkey has been detected. You must approve full enrollment before this device can access your secure data.</div></div></div>
     <div class="deep">
       <p class="lead" x-show="top.enrolled">Your factor has already been upgraded and is available for secure vault access.</p>
       <p class="lead" x-show="!top.enrolled">A new authorized device has been detected. You must approve full enrollment before this device can access your secure data.</p>

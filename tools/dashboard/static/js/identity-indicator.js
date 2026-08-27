@@ -635,7 +635,11 @@
           || root.sessionStorage.getItem('autonomy.factor.slot-enrolled')
           || root.sessionStorage.getItem('autonomy.factor.open-credentials')));
     } catch (e) { pending = false; }
-    if (!pending) { greetAttempted = true; return; }
+    // An empty check must NOT burn the one-shot: on a PWA-restored shell the
+    // first refreshes run before any login writes the stash, and a stash that
+    // appears later (login elsewhere, app resume) must still greet. Only an
+    // actual greeting consumes greetAttempted.
+    if (!pending) { return; }
     var state = loadError && !status ? 'error' : deriveIdentityState(status);
     if (state === 'loading' || state === 'bootstrap' || state === 'locked' || state === 'error') {
       return;   // not yet — retry on the next refresh

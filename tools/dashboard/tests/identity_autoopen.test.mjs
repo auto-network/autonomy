@@ -91,3 +91,23 @@ test('the greeting is STICKY: a cold-start status failure delays it, the next re
   assert.equal(indicator._state().panelOpen, true, 'greeting arrives with the working refresh');
   assert.ok(win.document.querySelector('.identity-credentials-mount'));
 });
+
+test('a stash that appears AFTER an empty check still greets on the next refresh (PWA-restored shell)', async () => {
+  // The live iPhone bug: the shell page ran a status refresh before any stash
+  // existed (restored from cache / loaded pre-login), and the one-shot greeter
+  // consumed itself on "nothing pending" — so a stash written later (login in
+  // another page, app resume) never greeted. The empty check must not burn the
+  // one-shot; only an actual greeting does.
+  const { win, indicator } = bootShell({});
+  indicator.init();
+  await settle();
+  assert.equal(indicator._state().panelOpen, false, 'nothing pending yet — closed');
+  win.sessionStorage.setItem('autonomy.factor.pending-slot', JSON.stringify({
+    factor_id: 'pk.mac', credential_id: 'Y3JlZC1B',
+    recipient_public_key: 'a'.repeat(64), label: 'New device',
+  }));
+  await indicator.refresh();
+  await settle();
+  assert.equal(indicator._state().panelOpen, true, 'the late stash greets on the next refresh');
+  assert.ok(win.document.querySelector('.identity-credentials-mount'));
+});
