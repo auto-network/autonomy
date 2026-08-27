@@ -615,15 +615,26 @@ def project_operations(
         operation = dict(raw)
         op = operation["op"]
         if op == "set_recovery":
-            # Enroll / rotate / clear the recovery slot. The recovery field
-            # itself is the cryptographic object (built by add/replace_recovery
-            # _slot with the code's public halves); the succession rule "replace
-            # needs the OLD code" is enforced by the client ceremony that built
-            # it. Here we only carry it into the projected state so the
-            # candidate armor matches.
+            # Enroll the recovery slot — ENROLL-ONLY. The recovery field is the
+            # cryptographic object (built by add_recovery_slot with the code's
+            # public halves). Per the operator ruling the code is NOT replaceable
+            # once generated, so this op refuses to clear an existing slot and
+            # refuses to overwrite one: "replacement needs the OLD code" holds by
+            # construction — there is no clear-then-re-enroll path here. Actual
+            # replacement lands later with the timelocked-regeneration substrate.
             if set(operation) != {"op", "recovery"}:
                 raise RootFactorPolicyError("set_recovery must carry exactly op and recovery")
-            recovery = _parse_recovery(operation["recovery"]) if operation["recovery"] is not None else None
+            if operation["recovery"] is None:
+                raise RootFactorPolicyError(
+                    "set_recovery cannot clear the recovery slot; the recovery "
+                    "code is not removable once generated"
+                )
+            if recovery is not None:
+                raise RootFactorPolicyError(
+                    "a recovery slot already exists and is not replaceable once "
+                    "generated; replacement requires the old code (not yet built)"
+                )
+            recovery = _parse_recovery(operation["recovery"])
             applied.append(op)
             continue
         if op in {"enroll_password", "enroll_passkey"}:

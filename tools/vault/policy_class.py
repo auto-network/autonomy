@@ -407,14 +407,10 @@ def _mint_generation(
     and enroll a replacement device with no member factor present.
     """
     _reject_shared_public_keys(factors)
-    recovery = [f for f in factors if getattr(f, "factor_type", None) == PERSONAL_ROOT_RECIPIENT
-                or getattr(f, "recipient_kind", None) == PERSONAL_ROOT_RECIPIENT]
-    members = [f for f in factors if f not in recovery]
-    recovery = [
-        f if hasattr(f, "factor_type")
-        else PublishedFactor(f.factor_id, f.recipient_kind, f.public_key)
-        for f in recovery
-    ]
+    # PublishedRecipient exposes factor_type (== its recipient_kind), so members
+    # and the root anchor are told apart by factor_type alone — no normalization.
+    recovery = [f for f in factors if f.factor_type == PERSONAL_ROOT_RECIPIENT]
+    members = [f for f in factors if f.factor_type != PERSONAL_ROOT_RECIPIENT]
     if policy in (PASSWORD_POLICY, PRF_POLICY):
         want = _SINGLE_TYPE[policy]
         wraps = []
