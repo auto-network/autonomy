@@ -1081,6 +1081,7 @@
     :root {
       --sat: env(safe-area-inset-top, 0px);
       --sab: env(safe-area-inset-bottom, 0px);
+      --sal: env(safe-area-inset-left, 0px);
     }
 
     /* Fullscreen page mode: hide dashboard chrome so the viewer owns the viewport.
@@ -1112,6 +1113,19 @@
     @media (min-width: 768px) {
       body.fullscreen-page main#content { padding: 0 !important; overflow: hidden; }
       body.fullscreen-page .session-viewer[data-mode="page"] { height: 100%; }
+    }
+
+    /* In landscape, an iPhone notch can occupy the viewer's left edge. The
+       transcript already places its colored entry rails 0.75rem inside the
+       viewer, so apply only the remainder of the hardware safe area: the
+       rails land exactly at the unobstructed edge instead of gaining a
+       second, oversized gutter. env() becomes 0 when the notch is on the
+       other side. */
+    @media (max-height: 500px) and (orientation: landscape) and (hover: none) and (pointer: coarse) {
+      .session-viewer[data-mode="page"] {
+        box-sizing: border-box;
+        padding-left: max(0px, calc(var(--sal) - 0.75rem));
+      }
     }
 
     /* When session viewer is active, main#content lets the viewer fill it */
