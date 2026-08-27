@@ -1151,11 +1151,14 @@ export function credentialsPanel() {
       return f.authority === 'unlock' || this._othersFull(f);
     },
     toggleAuthority(f, ev) {
-      if (f.unpaired) {
-        // a factor with no device slot cannot derive root material (per-device
-        // slots), so its ladder is sign-in on/off only; "Enroll this device"
-        // is the path back to authority
-        f.authority = f.authority === 'none' ? 'unlock' : 'none';
+      if (f.unpaired && !this.mfaOn) {
+        // A factor with no device slot cannot derive root material, so full
+        // authority is unreachable — but outside MFA a tap must NEVER
+        // silently reduce access either ('No authority' is not offered on
+        // the single ladder). Refuse with the path forward; a
+        // server-presented 'none' recovers upward to unlock.
+        if (f.authority === 'none') { f.authority = 'unlock'; return; }
+        this.warnHere(ev, 'Enroll a device for this passkey before giving it authority.');
         return;
       }
       if (this.mfaOn) { f.authority = f.authority === 'none' ? 'unlock' : 'none'; return; }
