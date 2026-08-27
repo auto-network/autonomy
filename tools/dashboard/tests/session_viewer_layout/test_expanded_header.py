@@ -126,3 +126,13 @@ def test_phone_landscape_keeps_session_viewer_fullscreen():
     assert phone_landscape in base_html
     assert phone_landscape in app_js
     assert "window.matchMedia(_COMPACT_SESSION_VIEWPORT_QUERY).matches" in app_js
+
+
+def test_phone_landscape_aligns_entry_rail_to_left_safe_area():
+    """The notch inset should replace, rather than compound, the entry gutter."""
+    base_html = (
+        Path(__file__).resolve().parents[2] / "templates" / "base.html"
+    ).read_text(encoding="utf-8")
+
+    assert "--sal: env(safe-area-inset-left, 0px)" in base_html
+    assert "padding-left: max(0px, calc(var(--sal) - 0.75rem))" in base_html
