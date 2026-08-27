@@ -604,6 +604,9 @@ def project_operations(
     factors = {factor["factor_id"]: factor for factor in state["factors"]}
     access = set(state["access"])
     policy = state["policy"]
+    # The recovery slot rides through unchanged unless a set_recovery op touches
+    # it — it is outside the policy, so ordinary factor ops carry it forward.
+    recovery = _parse_recovery(current["recovery"]) if current.get("recovery") is not None else None
     applied = []
 
     for raw in operations:
@@ -611,6 +614,18 @@ def project_operations(
             raise RootFactorPolicyError("each transition operation must name an op")
         operation = dict(raw)
         op = operation["op"]
+        if op == "set_recovery":
+            # Enroll / rotate / clear the recovery slot. The recovery field
+            # itself is the cryptographic object (built by add/replace_recovery
+            # _slot with the code's public halves); the succession rule "replace
+            # needs the OLD code" is enforced by the client ceremony that built
+            # it. Here we only carry it into the projected state so the
+            # candidate armor matches.
+            if set(operation) != {"op", "recovery"}:
+                raise RootFactorPolicyError("set_recovery must carry exactly op and recovery")
+            recovery = _parse_recovery(operation["recovery"]) if operation["recovery"] is not None else None
+            applied.append(op)
+            continue
         if op in {"enroll_password", "enroll_passkey"}:
             if set(operation) != {"op", "factor", "access"} \
                     or not isinstance(operation.get("access"), bool):
@@ -740,6 +755,7 @@ def project_operations(
         "access": projected["access"],
         "root_policy": projected["policy"],
         "roles": projected["roles"],
+        "recovery": recovery,
         "operations": applied,
         # A staged batch is one root-signed generation regardless of how many
         # rows the operator changed before pressing Apply.

@@ -156,3 +156,36 @@ def test_workflow_update_refuses_when_no_slot_exists():
             recovery_recipient_pub=recovery_recipient_public_key(code),
             recovery_pub=derive_recovery_factors(code)["recovery_pub"],
         )
+
+
+# ── set_recovery operation (server commit flow) ─────────────────────────────
+def test_set_recovery_op_projects_the_slot_and_carries_it_forward():
+    root, env, code, seeds = _armor_with_recovery()
+    # a base v3 armor with NO recovery, projected with a set_recovery op
+    base_root = KeyPair.generate()
+    pw, seed = create_password_factor(base_root.public_hex, "pw", "base-pass-pass", iterations=10_000)
+    base = build_envelope(base_root, generation=1, factors=[pw], access={"pw": seed}, policy=factor_leaf("pw"))
+    slot = env["recovery"]  # a real slot to plant
+    projected = project_operations(
+        {"generation": 1, "root_pub": base["root_pub"], "factors": base["factors"],
+         "access": base["access"], "policy": base["policy"]},
+        [{"op": "set_recovery", "recovery": slot}],
+    )
+    assert projected["recovery"] == slot
+    # an ordinary op batch on an armor that HAS a slot carries it forward untouched
+    carried = project_operations(
+        {"generation": env["generation"], "root_pub": env["root_pub"], "factors": env["factors"],
+         "access": env["access"], "policy": env["policy"], "recovery": env["recovery"]},
+        [{"op": "set_access", "factor_id": "pw.old", "enabled": False}],
+    )
+    assert carried["recovery"] == env["recovery"]
+
+
+def test_set_recovery_op_can_clear_the_slot():
+    root, env, code, seeds = _armor_with_recovery()
+    projected = project_operations(
+        {"generation": env["generation"], "root_pub": env["root_pub"], "factors": env["factors"],
+         "access": env["access"], "policy": env["policy"], "recovery": env["recovery"]},
+        [{"op": "set_recovery", "recovery": None}],
+    )
+    assert projected["recovery"] is None

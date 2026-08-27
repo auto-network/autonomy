@@ -723,6 +723,7 @@ def _factor_policy_state(member) -> dict:
             "roles": factor_roles(
                 envelope["policy"], envelope["factors"], envelope["access"],
             ),
+            "recovery": envelope.get("recovery"),
             "envelope": envelope,
             "migration_required": False,
         }
@@ -820,6 +821,7 @@ def _factor_policy_view(state: dict) -> dict:
                 "recipients": recipients,
             })
         factors.append(row)
+    recovery = state.get("recovery")
     return {
         "version": 1,
         "armor_version": state["armor_version"],
@@ -828,11 +830,17 @@ def _factor_policy_view(state: dict) -> dict:
         "root_policy": state["root_policy"],
         "factors": factors,
         "migration_required": state["migration_required"],
+        # The recovery code is the emergency floor, surfaced (presence + the
+        # code's declared signing key) so the panel can show it enrolled and
+        # hide the "set up" banner. The sealed material stays in the armor.
+        "recovery": None if recovery is None else {
+            "recovery_pub": recovery["recovery_pub"],
+        },
         "allowed_operations": (
             ["migrate_legacy"] if state["migration_required"] else [
                 "enroll_password", "enroll_passkey", "change_password",
                 "add_passkey_recipient", "remove_passkey_recipient",
-                "remove_factor", "set_access", "set_root_policy",
+                "remove_factor", "set_access", "set_root_policy", "set_recovery",
             ]
         ),
     }
@@ -853,6 +861,7 @@ def _project_factor_policy(state: dict, operations: object) -> dict:
             "factors": state["factors"],
             "access": state["access"],
             "policy": state["root_policy"],
+            "recovery": state.get("recovery"),
         }, operations)
     if len(operations) != 1 or not isinstance(operations[0], dict) \
             or set(operations[0]) != {"op", "factors", "access", "root_policy"} \
@@ -1013,10 +1022,15 @@ async def post_factor_policy_commit(request: Request) -> JSONResponse:
             "factors": projected["factors"],
             "access": projected["access"],
             "policy": projected["root_policy"],
+            "recovery": projected.get("recovery"),
         }
         candidate_state = {
-            key: candidate[key] for key in
-            ("generation", "root_pub", "factors", "access", "policy")
+            "generation": candidate["generation"],
+            "root_pub": candidate["root_pub"],
+            "factors": candidate["factors"],
+            "access": candidate["access"],
+            "policy": candidate["policy"],
+            "recovery": candidate.get("recovery"),
         }
         if canonical_json(candidate_state) != canonical_json(expected_state):
             raise ValueError(
