@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -74,12 +75,69 @@ def test_metrics_prefers_related_long_message_over_unrelated_short_one():
     assert good["score_key"] < bad["score_key"]
 
 
+def _extract(frags: list[dict[str, str]], kind: str) -> str:
+    return "".join(f["text"] for f in frags if f["kind"] == kind)
+
+
 def test_diff_fragments_single_word_typo():
     frags = tc.diff_fragments("Plese review", "Please review")
     kinds = {f["kind"] for f in frags}
     assert "delete" in kinds and "insert" in kinds
-    assert "".join(f["text"] for f in frags if f["kind"] == "delete") == "Plese"
-    assert "".join(f["text"] for f in frags if f["kind"] == "insert") == "Please"
+    assert _extract(frags, "delete") == "Plese"
+    assert _extract(frags, "insert") == "Please"
+
+
+def test_diff_fragments_curly_apostrophe_vs_straight_is_no_op_when_normalized():
+    """Normalize curly/straight apostrophe variants as non-substantive style edits."""
+    frags = tc.diff_fragments("I won’t go", "I won't go")
+    assert {f["kind"] for f in frags} == {"same"}
+    assert _extract(frags, "delete") == ""
+    assert _extract(frags, "insert") == ""
+    assert "".join(f["text"] for f in frags) == "I won’t go"
+
+
+def test_diff_fragments_comma_insertion_highlights_punctuation_only():
+    """Comma insertion should be highlighted as comma-only punctuation."""
+    frags = tc.diff_fragments("Please review this", "Please review this,")
+    assert _extract(frags, "insert") == ","
+    assert _extract(frags, "delete") == ""
+    assert "".join(f["text"] for f in frags) == "Please review this,"
+
+
+def test_diff_fragments_curly_quotes_are_equivalent_to_straight():
+    """Normalize smart quotes to plain quote variants in correction matching."""
+    frags = tc.diff_fragments('“Hello”', '"Hello"')
+    assert {f["kind"] for f in frags} == {"same"}
+    assert _extract(frags, "delete") == ""
+    assert _extract(frags, "insert") == ""
+
+
+def test_correction_metrics_small_punctuation_style_change():
+    """Punctuation-style-only edits should not look like user corrections."""
+    metrics = tc.correction_metrics("I won’t go", "I won't go")
+    assert metrics["acceptable"] is True
+    assert metrics["edit_chars"] == 0
+    assert metrics["edit_fragments"] == 0
+    assert len(metrics["fragments"]) == 1
+
+
+def test_host_exported_correction_with_only_punctuation_delta_flags_only_punctuation_ops():
+    """Use a real correction sample that differs by a slash/spacing style edit."""
+    # Host-exported pending row:
+    # raw: "... capture /current tmux state?"
+    # corrected: "... capture / current tmux state?"
+    frags = tc.diff_fragments(
+        "Is there an API you can use to see the tmux screen capture /current tmux state?",
+        "Is there an API you can use to see the tmux screen capture / current tmux state?",
+    )
+    assert frags, "expected diff fragments to be computed"
+    punctuation_only_ops = all(
+        not re.search(r"[A-Za-z0-9]", part["text"])
+        for part in frags
+        if part["kind"] != "same"
+    )
+    assert punctuation_only_ops is True
+
 
 
 # ── read_recent_canonical_user_turns (Claude + Codex) ──────────
@@ -204,6 +262,18 @@ def test_resolve_picks_best_similarity_match():
         users=users, corrected_text="Please review the corrections API")
     assert target is not None
     assert target["message_id"] == "m2"
+
+
+def test_resolve_normalizes_punctuation_style_variants_in_similarity():
+    """Punctuation-style-only differences should not block matching the intended turn."""
+    users = [
+        _user("m1", "I won’t send this in a second."),
+        _user("m2", "I can't send this in a second."),
+    ]
+    target = tc.resolve_best_correction_target(
+        users=users, corrected_text="I won't send this in a second.")
+    assert target is not None
+    assert target["message_id"] == "m1"
 
 
 def test_resolve_returns_none_for_unrelated_text():

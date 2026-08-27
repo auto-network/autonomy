@@ -47,7 +47,26 @@ ACCEPT_SIMILARITY = 0.55
 HISTORY_SIMILARITY = 0.85
 RECENT_USER_WINDOW = 5
 
-_TOKEN_RE = re.compile(r"(\s+|\S+)")
+_TOKEN_RE = re.compile(r"(\s+|\w+|[^\w\s])", re.UNICODE)
+
+_PUNCTUATION_NORMALIZE_TABLE = str.maketrans({
+    "\u2019": "'",
+    "\u2018": "'",
+    "\u201a": "'",
+    "\u201b": "'",
+    "\u201c": '"',
+    "\u201d": '"',
+    "\u201e": '"',
+    "\u201f": '"',
+    "\ufe41": '"',
+    "\ufe42": '"',
+    "\xab": '"',
+    "\xbb": '"',
+})
+
+
+def _normalized_token(token: str) -> str:
+    return token.translate(_PUNCTUATION_NORMALIZE_TABLE)
 
 
 def _tokenize(text: str) -> list[str]:
@@ -61,7 +80,7 @@ def _lcs(a: list[str], b: list[str]) -> list[list[int]]:
     dp = [[0] * (m + 1) for _ in range(n + 1)]
     for i in range(1, n + 1):
         for j in range(1, m + 1):
-            if a[i - 1] == b[j - 1]:
+            if _normalized_token(a[i - 1]) == _normalized_token(b[j - 1]):
                 dp[i][j] = dp[i - 1][j - 1] + 1
             else:
                 dp[i][j] = dp[i - 1][j] if dp[i - 1][j] >= dp[i][j - 1] else dp[i][j - 1]
@@ -86,7 +105,7 @@ def diff_fragments(raw_text: str, corrected_text: str) -> list[dict[str, str]]:
     ops: list[dict[str, str]] = []
     i, j = len(a), len(b)
     while i > 0 and j > 0:
-        if a[i - 1] == b[j - 1]:
+        if _normalized_token(a[i - 1]) == _normalized_token(b[j - 1]):
             ops.append({"kind": "same", "text": a[i - 1]})
             i -= 1
             j -= 1
