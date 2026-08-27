@@ -27,6 +27,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 @pytest.mark.parametrize("mjs", [
     "factor_panel_units.test.mjs",
     "factor_management_alpine.test.mjs",
+    "factor_matrix_solver.test.mjs",
+    "unlock_login.test.mjs",
     "open_root.test.mjs",
 ])
 def test_ui_ceremony_jsdom(mjs):

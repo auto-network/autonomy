@@ -261,7 +261,37 @@ async function enrollPasskey({
   return result;
 }
 
+/** The first-device detection decision, pure: given the factor list (view or
+ *  envelope — both carry credential_id + recipients), the credential that just
+ *  signed in, and the recipient key derived from ITS live PRF, classify:
+ *  'enrolled' (this device holds a slot), 'pending-slot' (a KNOWN credential
+ *  with no slot here — the first-device re-enrollment flow's trigger, with
+ *  the stash payload ready), or 'unknown-credential'. Deliberately
+ *  independent of any existing root authority: the flow exists precisely to
+ *  RESTORE authority a migrated or newly synced device does not hold yet. */
+function detectPendingSlot(factors, credentialIdB64u, recipientPublicKeyHex) {
+  const known = (factors || []).find(
+    (f) => f.type === 'passkey' && f.credential_id === credentialIdB64u,
+  );
+  if (!known) return { kind: 'unknown-credential' };
+  const enrolled = (known.recipients || []).some(
+    (s) => s.recipient_public_key === recipientPublicKeyHex,
+  );
+  if (enrolled) return { kind: 'enrolled', factor: known };
+  return {
+    kind: 'pending-slot',
+    factor: known,
+    pending: {
+      factor_id: known.factor_id,
+      credential_id: credentialIdB64u,
+      recipient_public_key: recipientPublicKeyHex,
+      label: 'New device',
+    },
+  };
+}
+
 export {
+  detectPendingSlot,
   ENROLLMENT_DOMAIN,
   ENROLLMENT_VERSION,
   VAULT_FACTOR_PURPOSE,
