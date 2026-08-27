@@ -3,7 +3,7 @@
 This changes only Uvicorn's ``BaseReload.restart`` seam. File watching,
 process management, and worker startup remain Uvicorn's implementation.
 
-This module is itself watched so committed probe commits can exercise the complete
+This module is itself watched so committed probe commits can exercise the full
 preflight path without changing dashboard behaviour.
 """
 
