@@ -329,13 +329,33 @@
           var prf = enroll.prfOutputFromResults(
             (cred.getClientExtensionResults && cred.getClientExtensionResults()) || {});
           if (!prf) throw new Error('this passkey supplied no PRF root material');
+          var migRecipient = null;
           try {
             var Pp = await import('./ceremony/primitives.js');
             opened = await Pp.decryptArmorWithPasskey(U.armorText, prf);
+            // For the one-shot v2→v3 upgrade below: this device's v3
+            // root-recipient key, derived while the PRF is still live.
+            try {
+              var Rm = await import('./ceremony/root-factor-policy.js');
+              migRecipient = {
+                credentialId: bytesToB64u(cred.rawId),
+                publicKeyHex: (await Pp.deriveEncapsulationKeypair(
+                  prf, Rm.FACTOR_RECIPIENT_PURPOSE,
+                )).publicKeyHex,
+              };
+            } catch (e) { migRecipient = null; }
           } finally { prf.fill(0); }
         }
         var rootSeed = new Uint8Array(opened.seed);
         opened.seed.fill(0);
+        // ONE-SHOT v2→v3 armor upgrade (see _migrateArmorV2Once). Best-effort.
+        try {
+          await _migrateArmorV2Once({ rootSeed: rootSeed, passkeyRecipient: migRecipient });
+        } catch (e) {
+          if (window.console && console.warn) {
+            console.warn('one-shot armor upgrade failed (v2 stays):', (e && e.message) || e);
+          }
+        }
         try {
           // Warm the vault, then mint the Fleet runtime + reachability
           // credential — the SAME root release the password path runs (shared
@@ -403,6 +423,85 @@
 
   // The plaintext seed exists only inside this function — zeroed the
   // moment the signing key is imported (I1).
+  // ═══ ONE-SHOT v2→v3 ARMOR UPGRADE — DELETE THIS FUNCTION (and its two call
+  // sites) AFTER THE OPERATOR'S FIRST POST-DEPLOY LOGIN. ═══════════════════
+  //
+  // Runs only while the stored armor is still v2 (migration_required). It
+  // migrates ONLY the factor material live at this login: the typed password
+  // re-derives its v3 factor under its legacy factor id (so metadata labels
+  // survive); the passkey used to sign in (if any) gets THIS device's v3
+  // root-recipient, derived under FACTOR_RECIPIENT_PURPOSE — the legacy
+  // vault-purpose kem_pub must never be carried into a v3 recipient (different
+  // HKDF purpose ⇒ a key no device could ever re-derive ⇒ permanent lockout).
+  // Factors with no live material keep dashboard access but leave the root
+  // policy; they re-gain authority per device via "Enroll this device" in
+  // Manage credentials. Knowingly not a general migration (operator ruling
+  // 2026-08-27: sole pre-deployment identity, delete after use).
+  async function _migrateArmorV2Once(material) {
+    var fp = U.factorPolicy;
+    if (!fp || fp.armor_version === 3 || !fp.migration_required) return;
+    var R = await import('./ceremony/root-factor-policy.js');
+    var factors = []; var access = []; var leaves = [];
+    var nowIso = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
+    for (var i = 0; i < (fp.factors || []).length; i += 1) {
+      var f = fp.factors[i];
+      if (f.type === 'password') {
+        if (!material.password) continue;   // no typed password ⇒ the factor cannot be re-derived
+        var made = await R.createPasswordFactor(fp.root_pub, f.factor_id, material.password);
+        made.seed.fill(0);
+        factors.push(made.factor); access.push(f.factor_id);
+        leaves.push({ op: 'factor', factor_id: f.factor_id });
+      } else if (f.type === 'passkey') {
+        var recips = [];
+        if (material.passkeyRecipient
+            && material.passkeyRecipient.credentialId === f.credential_id) {
+          recips = [{
+            recipient_public_key: material.passkeyRecipient.publicKeyHex,
+            label: 'This device',
+            created_at: nowIso,
+          }];
+          leaves.push({ op: 'factor', factor_id: f.factor_id });
+        }
+        factors.push({
+          factor_id: f.factor_id, type: 'passkey',
+          credential_id: f.credential_id, recipients: recips,
+        });
+        access.push(f.factor_id);
+      }
+    }
+    if (!leaves.length) return;   // nothing root-capable in hand — leave v2 intact
+    var policy = leaves.length === 1 ? leaves[0] : { op: 'or', children: leaves };
+    var operations = [{
+      op: 'migrate_legacy', factors: factors, access: access, root_policy: policy,
+    }];
+    var pv = await _postJson('/api/identity/factor-policy/preview', {
+      base_generation: 0, operations: operations,
+    });
+    var armor = await R.buildFactorPolicyArmor({
+      rootSeed: material.rootSeed, rootPub: fp.root_pub, generation: pv.generation,
+      factors: pv.factors, access: pv.access, policy: pv.root_policy,
+    });
+    var seedCopy = new Uint8Array(material.rootSeed);
+    var signingKey;
+    try { signingKey = await _identityI().importSigningKey(seedCopy); }
+    finally { seedCopy.fill(0); }
+    var signature = await R.signFactorPolicyTransition({
+      signingKey: signingKey, baseGeneration: 0,
+      operations: operations, candidateArmor: armor,
+    });
+    await _postJson('/api/identity/factor-policy/commit', {
+      base_generation: 0, operations: operations,
+      candidate_armor: armor, root_signature: signature,
+    });
+    U.factorPolicy = null;
+    try { U.factorPolicy = await _fetchJson('/api/identity/factor-policy'); }
+    catch (e) { U.factorPolicy = null; }
+    if (window.console && console.info) {
+      console.info('armor upgraded to v3 (one-shot migration): generation '
+        + pv.generation);
+    }
+  }
+
   async function _unlockWithPassword(password) {
     if (!password) throw new Error('enter your password');
     var S = _signonI();
@@ -557,6 +656,17 @@
     await _postJson(unlockRoute, {
       challenge: minted.challenge, signature: sig,
     });
+
+    // ONE-SHOT v2→v3 armor upgrade (see _migrateArmorV2Once). Best-effort: a
+    // failed upgrade leaves the v2 armor intact and never turns a successful
+    // unlock into a lockout.
+    try {
+      await _migrateArmorV2Once({ rootSeed: wakeSeed, password: password });
+    } catch (e) {
+      if (window.console && console.warn) {
+        console.warn('one-shot armor upgrade failed (v2 stays):', (e && e.message) || e);
+      }
+    }
 
     // Wake the vault now that the session exists: publish the KEM credential
     // and hand its private half so this sign-in warms the vault durably — the
