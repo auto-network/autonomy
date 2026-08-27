@@ -109,3 +109,20 @@ def test_session_overlay_layer_is_not_fixed_or_safe_area_padded():
     assert "position: fixed" not in rule
     assert "padding-top" not in rule
     assert "padding-bottom" not in rule
+
+
+def test_phone_landscape_keeps_session_viewer_fullscreen():
+    """A rotated phone must not cross the desktop session-view breakpoint."""
+    dashboard_dir = Path(__file__).resolve().parents[2]
+    base_html = (dashboard_dir / "templates" / "base.html").read_text(encoding="utf-8")
+    app_js = (dashboard_dir / "static" / "app.js").read_text(encoding="utf-8")
+    phone_landscape = (
+        "(max-height: 500px) and (orientation: landscape) "
+        "and (hover: none) and (pointer: coarse)"
+    )
+
+    # CSS keeps the dashboard sidebar/header hidden after rotation, while the
+    # router uses the same posture to choose the persistent mobile viewer.
+    assert phone_landscape in base_html
+    assert phone_landscape in app_js
+    assert "window.matchMedia(_COMPACT_SESSION_VIEWPORT_QUERY).matches" in app_js
