@@ -1520,7 +1520,8 @@ const STYLE = `
 .fui-cred .credcontent{ flex:1; min-height:0; display:flex; flex-direction:column; }
 .fui-cred .credcontent > template + div, .fui-cred .credcontent > div{ flex:1; min-height:0; display:flex; flex-direction:column; }
 .fui-cred .scrhead{ display:flex; align-items:center; gap:10px; padding:13px 14px 12px; border-bottom:1px solid var(--line); }
-.fui-cred .scrhead .back{ background:none; border:none; color:var(--accent2); cursor:pointer; display:flex; align-items:center; padding:2px 4px; }
+.fui-cred .scrhead .back{ background:none; border:none; color:var(--accent2); cursor:pointer; display:flex; align-items:center; justify-content:center; min-width:44px; min-height:44px; padding:10px 12px; margin:-10px 0 -10px -12px; border-radius:10px; }
+.fui-cred .scrhead.tapback{ cursor:pointer; -webkit-tap-highlight-color:transparent; }
 .fui-cred .scrhead .ttl{ min-width:0; } .fui-cred .scrhead h1{ margin:0; font-size:15.5px; font-weight:650; } .fui-cred .scrhead .sub{ font-size:12px; color:var(--dim); }
 .fui-cred .scrhead .step{ margin-left:auto; font-size:10.5px; font-weight:700; color:var(--accent2); background:#171e33; border:1px solid #33406b; border-radius:999px; padding:2px 8px; }
 .fui-cred .body{ overflow-y:auto; padding:6px 12px 16px; flex:1; }
@@ -1751,7 +1752,7 @@ const MARKUP = `
 
   <!-- ADD PASSKEY -->
   <template x-if="ready && cur==='addpk'"><div style="display:flex;flex-direction:column;min-height:0">
-    <div class="scrhead"><button class="back" @click="back()"><svg style="width:16px;height:16px"><use xlink:href="#i-chev"/></svg></button>
+    <div class="scrhead tapback" @click="back()"><button class="back" @click.stop="back()"><svg style="width:16px;height:16px"><use xlink:href="#i-chev"/></svg></button>
       <div class="ttl"><h1>Add a passkey</h1><div class="sub">On this device</div></div></div>
     <div class="deep">
       <p class="lead">Approve with this device’s screen lock — fingerprint, face, or PIN.</p>
@@ -1762,7 +1763,7 @@ const MARKUP = `
 
   <!-- MFA SETUP (two modes) -->
   <template x-if="ready && cur==='mfa-setup'"><div style="display:flex;flex-direction:column;min-height:0">
-    <div class="scrhead"><button class="back" @click="back()"><svg style="width:16px;height:16px"><use xlink:href="#i-chev"/></svg></button>
+    <div class="scrhead tapback" @click="back()"><button class="back" @click.stop="back()"><svg style="width:16px;height:16px"><use xlink:href="#i-chev"/></svg></button>
       <div class="ttl"><h1>Set up multi-factor</h1><div class="sub">Full authority will require a password and a passkey</div></div></div>
     <div class="deep">
       <div class="modeseg">
@@ -1800,7 +1801,7 @@ const MARKUP = `
 
   <!-- NEW PASSWORD -->
   <template x-if="ready && cur==='newpw'"><div style="display:flex;flex-direction:column;min-height:0">
-    <div class="scrhead"><button class="back" @click="back()"><svg style="width:16px;height:16px"><use xlink:href="#i-chev"/></svg></button>
+    <div class="scrhead tapback" @click="back()"><button class="back" @click.stop="back()"><svg style="width:16px;height:16px"><use xlink:href="#i-chev"/></svg></button>
       <div class="ttl"><h1 x-text="top.title"></h1></div></div>
     <div class="deep">
       <p class="lead">Enter your new password. It’s staged with your other changes — you’ll commit and authorize them together.</p>
@@ -1813,7 +1814,7 @@ const MARKUP = `
 
   <!-- NEW DEVICE (a synced passkey's first sign-in from this device) -->
   <template x-if="ready && cur==='newdevice'"><div style="display:flex;flex-direction:column;min-height:0">
-    <div class="scrhead"><button class="back" @click="back()"><svg style="width:16px;height:16px"><use xlink:href="#i-chev"/></svg></button>
+    <div class="scrhead tapback" @click="back()"><button class="back" @click.stop="back()"><svg style="width:16px;height:16px"><use xlink:href="#i-chev"/></svg></button>
       <div class="ttl"><h1>Authorized device detected</h1><div class="sub">A new device with your authorized Cloud passkey has been detected. You must approve full enrollment before this device can access your secure data.</div></div></div>
     <div class="deep">
       <p class="lead" x-show="top.enrolled">Your factor has already been upgraded and is available for secure vault access.</p>
@@ -1829,7 +1830,7 @@ const MARKUP = `
 
   <!-- RECOVERY: explanation -->
   <template x-if="ready && cur==='recovery-explain'"><div style="display:flex;flex-direction:column;min-height:0">
-    <div class="scrhead"><button class="back" @click="back()"><svg style="width:16px;height:16px"><use xlink:href="#i-chev"/></svg></button>
+    <div class="scrhead tapback" @click="back()"><button class="back" @click.stop="back()"><svg style="width:16px;height:16px"><use xlink:href="#i-chev"/></svg></button>
       <div class="ttl"><h1>Recovery code</h1><div class="sub">Your last way back in</div></div></div>
     <div class="deep exp">
       <p>Autonomy is <b>self-sovereign</b>: no company holds your keys, and no support line can reset your password. That is what keeps your data yours — and it means <b>you</b> are the only one who can get back in.</p>
@@ -1859,7 +1860,7 @@ const MARKUP = `
 
   <!-- RECOVERY: verify (mandatory in the wizard; read-only for an enrolled code) -->
   <template x-if="ready && cur==='recovery-verify'"><div style="display:flex;flex-direction:column;min-height:0">
-    <div class="scrhead"><button class="back" @click="back()"><svg style="width:16px;height:16px"><use xlink:href="#i-chev"/></svg></button>
+    <div class="scrhead tapback" @click="back()"><button class="back" @click.stop="back()"><svg style="width:16px;height:16px"><use xlink:href="#i-chev"/></svg></button>
       <div class="ttl"><h1>Verify your recovery code</h1><div class="sub" x-text="top.wizard ? 'Confirm the copy you saved' : 'Confirm it still works'"></div></div></div>
     <div class="deep">
       <template x-if="recoveryVerifyResult==='ok' && !top.wizard"><div class="inlineok" style="justify-content:center;padding:20px 0"><svg><use xlink:href="#i-check"/></svg> Recovery code verified</div></template>
@@ -1884,7 +1885,7 @@ const MARKUP = `
 
   <!-- AUTHORIZE (commit) -->
   <template x-if="ready && cur==='authorize'"><div style="display:flex;flex-direction:column;min-height:0">
-    <div class="scrhead"><button class="back" @click="back()" x-show="!verifying"><svg style="width:16px;height:16px"><use xlink:href="#i-chev"/></svg></button>
+    <div class="scrhead tapback" @click="!verifying && back()"><button class="back" @click.stop="back()" x-show="!verifying"><svg style="width:16px;height:16px"><use xlink:href="#i-chev"/></svg></button>
       <div class="ttl"><h1>Authorize with your root authority</h1><div class="sub" x-text="top.detail"></div></div>
       <template x-if="top.step"><span class="step" x-text="top.step"></span></template></div>
     <div class="deep">
