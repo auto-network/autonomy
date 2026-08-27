@@ -1039,10 +1039,11 @@
         font-size: 16px !important;
       }
     }
-    /* SSE interruption banner — fixed, overlays the grid header */
+    /* Restart notice is a system-level surface: it must remain above the
+       page-mode viewer (90), review overlay (120), and voice controls. */
     .sse-banner {
       position: fixed;
-      z-index: 20;
+      z-index: 10002;
       top: calc(env(safe-area-inset-top, 0px) + 3rem);
       left: 0;
       right: 0;

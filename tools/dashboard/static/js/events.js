@@ -100,7 +100,7 @@
       if (!_restartTicker) _restartTicker = setInterval(_restartTick, 250);
       // Completion is kept visible briefly as useful timing evidence, then
       // clears itself without forcing the operator to dismiss a banner.
-      if (payload.phase === 'complete') {
+      if (payload.phase === 'complete' || payload.phase === 'recovered') {
         setTimeout(function() {
           try {
             var current = Alpine.store('app').restartStatus;
@@ -130,6 +130,13 @@
         if (epoch > 0 && _serverEpoch !== null && epoch !== _serverEpoch) {
           console.warn('[EventBus] server restarted, epoch ' + _serverEpoch + ' → ' + epoch);
           _onInterruption('Server restarted');
+          // An abrupt restart has no graceful countdown. Use the same rich
+          // restart notice instead of reviving a second plain-text banner.
+          _showRestart({
+            phase: 'recovered',
+            started_at_ms: Date.now(),
+            expected_ms: 30000,
+          });
           // The restart (uvicorn hot-reload) also dropped the voice audio WS.
           // Re-establish it the moment the server is confirmed back, rather than
           // letting the voice backoff blindly guess — buffer recovery is automatic.
@@ -553,6 +560,7 @@
         if (status.phase === 'complete') {
           return 'Restart complete in ' + ((status.duration_ms || 0) / 1000).toFixed(1) + 's';
         }
+        if (status.phase === 'recovered') return 'Server just restarted';
         var elapsed = Math.max(0, now - (status.started_at_ms || now));
         return 'Server is restarting · ' + Math.floor(elapsed / 1000) + 's elapsed';
       },
@@ -560,7 +568,7 @@
         var status = this.restartStatus;
         if (!status) return 0;
         if (status.phase === 'countdown') return 0;
-        if (status.phase === 'complete') return 100;
+        if (status.phase === 'complete' || status.phase === 'recovered') return 100;
         var elapsed = Math.max(0, (this.restartNowMs || Date.now()) - (status.started_at_ms || Date.now()));
         return Math.min(100, Math.round(elapsed * 100 / (status.expected_ms || 30000)));
       },

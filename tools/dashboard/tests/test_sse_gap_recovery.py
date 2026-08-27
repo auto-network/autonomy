@@ -582,10 +582,10 @@ class TestBufferOverflow:
 # ═══════════════════════════════════════════════════════════════════════
 
 class TestServerRestart:
-    """Epoch change during disconnect triggers interruption. Test 9."""
+    """Epoch change during disconnect uses the unified restart notice. Test 9."""
 
     def test_epoch_change_resets(self, harness):
-        """Restart server → new epoch → sseInterrupted shows 'Server restarted'."""
+        """Restart server → new epoch → rich notice says it just restarted."""
         harness.open_session_page()
         time.sleep(2)
 
@@ -604,7 +604,7 @@ class TestServerRestart:
 
         # Reconnect SSE (to new server with different epoch)
         # The subscribe() sends cached events with the NEW epoch in the id field.
-        # Client detects epoch mismatch and fires _onInterruption('Server restarted').
+        # Client detects epoch mismatch and shows the unified restart notice.
         ab_eval("window._connect(); return 'reconnecting';")
 
         # Write a trigger event to ensure the client receives something from
@@ -613,10 +613,9 @@ class TestServerRestart:
         harness.write_gap_events([trigger])
         time.sleep(4)
 
-        # Check for "Server restarted" interruption
-        result = ab_eval("return Alpine.store('app').sseInterrupted;")
-        assert result, (
-            f"Expected sseInterrupted after epoch change, got {result}"
+        result = ab_eval("return Alpine.store('app').restartStatus;")
+        assert result and result.get("phase") in {"recovered", "complete"}, (
+            f"Expected restartStatus after epoch change, got {result}"
         )
 
         # Verify _lastSeq was reset by _onInterruption
