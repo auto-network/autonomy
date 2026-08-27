@@ -2017,6 +2017,18 @@ async function _maybeRestoreLastSession() {
   // other page) is left untouched.
   const home = window.location.pathname;
   if (home !== '/' && home !== '/beads') return;
+  // A pending device enrollment OWNS this landing: the unlock flow routed here
+  // deliberately so the profile drawer can greet with the enrollment dialog,
+  // which immersive session views do not render. Jumping into the last session
+  // would bury the greeting — the exact ruled flow: a locked system unlocked by
+  // an under-enrolled passkey goes to credentials, not the session.
+  try {
+    if (sessionStorage.getItem('autonomy.factor.pending-slot')
+        || sessionStorage.getItem('autonomy.factor.slot-enrolled')
+        || sessionStorage.getItem('autonomy.factor.open-credentials')) {
+      return;
+    }
+  } catch (_e) { /* storage unavailable — restore normally */ }
   let stored;
   try { stored = localStorage.getItem(_LAST_SESSION_KEY); } catch (_e) { return; }
   if (!stored || !_isSessionPath(stored)) return;
