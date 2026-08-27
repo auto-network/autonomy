@@ -34,8 +34,10 @@ const { JSDOM } = createRequire(import.meta.url)('jsdom');
 import { VirtualAuthenticator } from '../static/js/ceremony/authenticator-node.js';
 import { deriveEncapsulationKeypair, bytesToHex } from '../static/js/ceremony/primitives.js';
 import { prfOutputFromResults, prfEvalExtension } from '../static/js/ceremony/enrollment.js';
+import { generateRecoveryCode, deriveRecoveryFactors, encodeRecoveryCode } from '../static/js/ceremony/recovery.js';
 import {
   canonicalExpression, createPasswordFactor, buildFactorPolicyArmor,
+  addRecoverySlot, recoveryRecipientPublicKey,
   FACTOR_RECIPIENT_PURPOSE,
 } from '../static/js/ceremony/root-factor-policy.js';
 
@@ -87,6 +89,7 @@ async function buildFixture() {
     factors: SERVER.state.factors, access: SERVER.state.access, policy: SERVER.state.policy,
   });
   SERVER.rootPub = rootPub;
+  SERVER.rootSeed = new Uint8Array(rootSeed);
 }
 
 function view() {
@@ -131,7 +134,13 @@ async function router(url, opts) {
       },
     });
   }
+  if (u.includes('/unlock/password/options')) {
+    return ok({ ok: true, challenge: bytesToB64u(crypto.getRandomValues(new Uint8Array(16))), origin: ORIGIN });
+  }
+  if (u.includes('/unlock/password')) { SERVER.posts.push({ route: 'password', ...body }); return ok({ ok: true }); }
   if (u.includes('/unlock/passkey')) { SERVER.posts.push(body); return ok({ ok: true }); }
+  if (u.includes('/fleet/enrollment/local-completion')) return ok({ pending: false });
+  if (u.includes('/fleet/runtime')) return ok({ enabled: false });
   if (u.includes('/unlock/vault-keys') || u.includes('/api/session')) return ok({ ok: true });
   return ok({ ok: false, error: 'unrouted: ' + u });
 }
@@ -182,7 +191,12 @@ async function bootUnlock(sourcePath, { search = '' } = {}) {
   };
   Object.defineProperty(win.navigator, 'credentials', { value: credentials, configurable: true });
   win.PublicKeyCredential = function PublicKeyCredential() {};
-  win.AutonomyNetworkSession = { _internals: {} };
+  win.AutonomyNetworkSession = { _internals: {
+    canonicalJson: (v) => JSON.stringify(v, Object.keys(v).sort()),
+    bytesToHex,
+    wakeVault: async () => ({}),
+    ready: async () => {},
+  } };
   win.AutonomyNetworkIdentity = { _internals: {} };
   win.fetch = router;
 
@@ -274,4 +288,35 @@ test('a login that detects a pending enrollment lands on the shell home, never t
   // the first-device dialog lives in the shell's profile drawer — an immersive
   // session surface has no profile control, so the greeting could never show
   assert.equal(nav.target, '/', 'redirect suppressed in favor of the shell home');
+});
+
+
+test('unlock with a recovery code: opens root, posts unlock, lands on credentials', async () => {
+  SERVER.posts.length = 0;
+  await buildFixture();
+  // add a recovery slot to the fixture armor
+  const code = generateRecoveryCode();
+  const recipient = await recoveryRecipientPublicKey(code);
+  const { recoveryPub } = await deriveRecoveryFactors(code);
+  SERVER.armor = await addRecoverySlot(SERVER.armor, {
+    rootSeed: SERVER.rootSeed, recoveryRecipientPub: recipient, recoveryPub,
+    createdAt: '2026-08-01T00:00:00Z',
+  });
+  const { win } = await bootUnlock(process.env.UNLOCK_JS || path.join(JS_DIR, 'unlock.js'));
+  const card = win.document.getElementById('unlock-card');
+  await until(() => card.querySelector('#unlock-primary'), 'unlock button');
+
+  // Trouble → Use a recovery code → recovery input
+  card.querySelector('#unlock-trouble-toggle').click();
+  const useRec = await until(() => card.querySelector('#unlock-use-recovery'), 'use-recovery link');
+  useRec.click();
+  const input = await until(() => card.querySelector('#unlock-recovery-input'), 'recovery input');
+  input.value = await encodeRecoveryCode(code);
+  card.querySelector('#unlock-recovery-submit').click();
+
+  // the root-signed unlock posts, and the land-on-credentials flag is set
+  await until(() => SERVER.posts.some((p) => p.route === 'password'), 'unlock posted');
+  const posted = SERVER.posts.find((p) => p.route === 'password');
+  assert.ok(posted.signature && /^[0-9a-f]{128}$/.test(posted.signature), 'a root signature was posted');
+  await until(() => win.sessionStorage.getItem('autonomy.factor.open-credentials') === '1', 'open-credentials flag set');
 });

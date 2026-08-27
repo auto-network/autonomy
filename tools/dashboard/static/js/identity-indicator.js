@@ -632,7 +632,8 @@
     try {
       pending = !!(root.sessionStorage
         && (root.sessionStorage.getItem('autonomy.factor.pending-slot')
-          || root.sessionStorage.getItem('autonomy.factor.slot-enrolled')));
+          || root.sessionStorage.getItem('autonomy.factor.slot-enrolled')
+          || root.sessionStorage.getItem('autonomy.factor.open-credentials')));
     } catch (e) { pending = false; }
     if (!pending) { greetAttempted = true; return; }
     var state = loadError && !status ? 'error' : deriveIdentityState(status);
@@ -641,6 +642,9 @@
     }
     greetAttempted = true;
     panelOpen = true;
+    // the recovery-landing flag is a one-shot "open credentials" with no
+    // dialog; consume it so a later reload doesn't reopen the panel.
+    try { root.sessionStorage.removeItem('autonomy.factor.open-credentials'); } catch (e) { /* ignore */ }
     openCredentials();
   }
 
