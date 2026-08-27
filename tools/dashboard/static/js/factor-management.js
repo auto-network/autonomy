@@ -1285,8 +1285,7 @@ const MARKUP = `
             <input class="renameinput" x-model="renameVal" @keydown.enter="saveRename(k)" @keydown.escape="cancelRename()" x-effect="renameFor===k.id&&setTimeout(()=>$el.focus(),0)">
             <button class="renameok" @click="saveRename(k)" aria-label="Save"><svg><use xlink:href="#i-check"/></svg></button>
             <button class="renamecancel" @click="cancelRename()" aria-label="Cancel"><svg><use xlink:href="#i-x"/></svg></button></span></div>
-          <div class="fmeta"><div x-text="transportHuman(k)"></div><div x-text="createdLocal(k.created)"></div>
-            <template x-if="offerEnroll(k)"><button class="enrollbtn" @click="enrollThisDevice(k)"><svg><use xlink:href="#i-passkey"/></svg> Enroll this device</button></template></div></div>
+          <div class="fmeta"><div x-text="transportHuman(k)"></div><div x-text="createdLocal(k.created)"></div></div></div>
         <div class="facts factcol" x-show="renameFor!==k.id"><template x-if="statusOf(k)==='removed'"><button class="lnk lchange" @click="undoRemove(k)">Undo</button></template>
           <template x-if="statusOf(k)!=='removed'"><button class="trashbtn" :class="{locked:!canRemove(k)}" @click="remove(passkeys,k,$event)" aria-label="Remove"><svg><use xlink:href="#i-trash"/></svg></button></template></div></div>
     </template>
