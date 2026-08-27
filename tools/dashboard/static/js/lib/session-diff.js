@@ -17,12 +17,36 @@
     // tokens collapse into one fragment in the merge step.
     if (!text) return [];
     var out = [];
-    var re = /(\s+|\S+)/g;
+    var re = /(\s+|\w+|[^\w\s])/g;
     var m;
     while ((m = re.exec(text)) !== null) {
       out.push(m[0]);
     }
     return out;
+  }
+
+  var PUNCTUATION_NORMALIZE_TABLE = {
+    "\u2019": "'",
+    "\u2018": "'",
+    "\u201a": "'",
+    "\u201b": "'",
+    "\u201c": '"',
+    "\u201d": '"',
+    "\u201e": '"',
+    "\u201f": '"',
+    "\ufe41": '"',
+    "\ufe42": '"',
+    "\xab": '"',
+    "\xbb": '"',
+  };
+
+  function _normalizedToken(token) {
+    if (token == null || token.length === 0) {
+      return token;
+    }
+    return token.replace(/[\u2019\u2018\u201a\u201b\u201c\u201d\u201e\u201f\ufe41\ufe42\xab\xbb]/g, function (ch) {
+      return PUNCTUATION_NORMALIZE_TABLE[ch] || ch;
+    });
   }
 
   function _lcs(a, b) {
@@ -33,7 +57,7 @@
     }
     for (var i = 1; i <= n; i++) {
       for (var j = 1; j <= m; j++) {
-        if (a[i - 1] === b[j - 1]) {
+        if (_normalizedToken(a[i - 1]) === _normalizedToken(b[j - 1])) {
           dp[i][j] = dp[i - 1][j - 1] + 1;
         } else {
           dp[i][j] = dp[i - 1][j] >= dp[i][j - 1] ? dp[i - 1][j] : dp[i][j - 1];
@@ -47,7 +71,7 @@
     var ops = [];
     var i = a.length, j = b.length;
     while (i > 0 && j > 0) {
-      if (a[i - 1] === b[j - 1]) {
+      if (_normalizedToken(a[i - 1]) === _normalizedToken(b[j - 1])) {
         ops.push({ kind: 'same', text: a[i - 1] });
         i--; j--;
       } else if (dp[i - 1][j] >= dp[i][j - 1]) {
