@@ -1391,8 +1391,12 @@ export function credentialsPanel() {
       const factorId = 'pw.' + randHex(6);
       const made = await createPasswordFactor(this.rootPub, factorId, v, this.minIterations);
       made.seed.fill(0);
+      // Default name is unique: "Password", then "Password 2", "Password 3", …
+      const taken = new Set(this.passwords.map((p) => p.label));
+      let label = 'Password';
+      for (let n = 2; taken.has(label); n += 1) label = 'Password ' + n;
       this.passwords.push({
-        id: factorId, factorId, label: 'Password', kdf: 'PBKDF2',
+        id: factorId, factorId, label, kdf: 'PBKDF2',
         iterations: this.minIterations, created: nowIso(), authority: 'full',
         _factor: made.factor,
       });
@@ -1456,6 +1460,9 @@ export function credentialsPanel() {
       return a.slice(0, -1).join(', ') + ', and ' + a[a.length - 1];
     },
     mfaSetupText() {
+      if (!this.canEnableMfa) {
+        return 'You must choose at least one password and at least one passkey to support multi-factor.';
+      }
       const pwM = this.passwords.filter((p) => this.pickedPw(p));
       const pkM = this.passkeys.filter((k) => this.pickedPk(k));
       const req = this.pickMode === 'any'
@@ -1605,6 +1612,7 @@ const STYLE = `
 .fui-cred .btn{ font:inherit; font-weight:600; cursor:pointer; border-radius:10px; padding:9px 13px; border:1px solid var(--line2); display:inline-flex; align-items:center; gap:7px; justify-content:center; } .fui-cred .btn svg{ width:15px; height:15px; }
 .fui-cred .btn-ghost{ background:#0d1420; color:var(--ink); } .fui-cred .btn-ghost:hover{ background:#131c2c; }
 .fui-cred .btn-primary{ background:var(--accent); color:#fff; border-color:var(--accent); } .fui-cred .btn-primary:hover{ background:#5457e6; } .fui-cred .btn:disabled{ opacity:.45; cursor:default; }
+.fui-cred .btn-primary:disabled, .fui-cred .btn-primary:disabled:hover{ background:#232941; border-color:#232941; color:#5c6478; opacity:1; }
 .fui-cred .locked{ opacity:.38; cursor:not-allowed; }
 .fui-cred .commitbar{ display:flex; gap:10px; padding:12px 14px; border-top:1px solid var(--line2); background:#0d1420; flex:none; } .fui-cred .commitbar .btn-primary{ flex:1; }
 .fui-cred .deep{ padding:16px 16px 18px; overflow-y:auto; } .fui-cred .deep .lead{ font-size:13px; color:var(--dim); margin:0 0 14px; }
