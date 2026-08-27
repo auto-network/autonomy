@@ -29,9 +29,9 @@ import {
 } from './ceremony/enrollment.js';
 import {
   FACTOR_RECIPIENT_PURPOSE, canonicalExpression, policyFactorIds,
-  policySatisfied, createPasswordFactor, openPasswordFactor,
-  parseFactorPolicyArmor, buildFactorPolicyArmor, openFactorPolicyArmor,
-  signFactorPolicyTransition,
+  policySatisfied, policyWithFactorGranted, createPasswordFactor,
+  openPasswordFactor, parseFactorPolicyArmor, buildFactorPolicyArmor,
+  openFactorPolicyArmor, signFactorPolicyTransition,
 } from './ceremony/root-factor-policy.js';
 
 // ── small helpers ──────────────────────────────────────────────────────────
@@ -150,7 +150,6 @@ export function buildModelV3(view, status) {
         created: f.created_at || '',
         recipientPub: null,
         unpaired: true,
-        authority: authority === 'full' ? 'unlock' : authority,
       });
       return;
     }
@@ -292,29 +291,41 @@ export function stagedOperations(m) {
 export function desiredPolicy(m) {
   const livePw = m.passwords.filter((p) => p.pending !== 'removed');
   const livePk = m.passkeys.filter((k) => k.pending !== 'removed');
-  const slotted = new Set();
-  [...new Set(livePk.map((r) => r.factorId))].forEach((fid) => {
-    if (livePk.some((r) => r.factorId === fid && (r.recipientPub || (r._enroll && r._enroll.recipient) || r._addRecipient))) {
-      slotted.add(fid);
-    }
-  });
   if (m.mfaOn) {
     const pwIds = (m.mfaMode === 'any' ? livePw : livePw.filter((p) => m.mfaPws.includes(p.id)))
       .map((p) => p.factorId);
     const pkIds = [...new Set(
       (m.mfaMode === 'any' ? livePk : livePk.filter((k) => m.mfaPks.includes(k.id)))
         .map((k) => k.factorId),
-    )].filter((fid) => slotted.has(fid));
+    )];
     if (!pwIds.length || !pkIds.length) {
-      throw new Error('Multi-factor needs at least one enrolled password and one passkey with a device slot');
+      throw new Error('Multi-factor needs at least one enrolled password and one enrolled passkey');
     }
     return canonicalExpression({ op: 'and', children: [orOfLeaves([...new Set(pwIds)]), orOfLeaves(pkIds)] });
   }
   const leaves = new Set();
   livePw.forEach((p) => { if (p.authority === 'full') leaves.add(p.factorId); });
-  livePk.forEach((k) => { if (k.authority === 'full' && slotted.has(k.factorId)) leaves.add(k.factorId); });
+  livePk.forEach((k) => { if (k.authority === 'full') leaves.add(k.factorId); });
   if (!leaves.size) throw new Error('Keep at least one credential with full authority — otherwise you could never unlock your root.');
   return canonicalExpression(orOfLeaves([...leaves]));
+}
+
+// Passkey factors whose STAGED ending state makes them policy members while
+// they hold no key material yet: the commit ceremony must acquire a device
+// slot for each (one get()+PRF tap) before the operations can build.
+export function requiredSlotEnrollments(m) {
+  let leaves;
+  try { leaves = policyFactorIds(desiredPolicy(m)); } catch (e) { return []; }
+  const need = [];
+  [...new Set(m.passkeys.filter((k) => k.pending !== 'removed').map((k) => k.factorId))]
+    .forEach((fid) => {
+      if (!leaves.includes(fid)) return;
+      const rows = m.passkeys.filter((k) => k.factorId === fid && k.pending !== 'removed');
+      const hasMaterial = rows.some((r) => r.recipientPub
+        || (r._enroll && r._enroll.recipient) || r._addRecipient);
+      if (!hasMaterial) need.push(rows[0]);
+    });
+  return need;
 }
 
 // ── the root ceremony's discovery: what opens the armor, from the armor ────
@@ -540,7 +551,7 @@ export function credentialsPanel() {
       this.committing = true;
       try {
         try {
-          await this._commitOps([{
+          const ops = [{
             op: 'add_passkey_recipient',
             factor_id: t.slot.factor_id,
             recipient: {
@@ -548,7 +559,17 @@ export function credentialsPanel() {
               label: name,
               created_at: nowIso(),
             },
-          }], opened);
+          }];
+          // re-enrollment restores the factor's AUTHORITY, not just its slot
+          const typeOf = (fid) => {
+            const f = this.envelope.factors.find((x) => x.factor_id === fid);
+            return f ? f.type : null;
+          };
+          const granted = policyWithFactorGranted(this.envelope.policy, t.slot.factor_id, typeOf);
+          if (stableJson(granted) !== stableJson(canonicalExpression(this.envelope.policy))) {
+            ops.push({ op: 'set_root_policy', policy: granted });
+          }
+          await this._commitOps(ops, opened);
         } finally { opened.seed.fill(0); }
         this._dropStore('autonomy.factor.pending-slot');
         await this.load();
@@ -602,17 +623,17 @@ export function credentialsPanel() {
     factorById(id) { return this.passwords.find((p) => p.id === id) || this.passkeys.find((k) => k.id === id) || null; },
     labelOf(id) { const f = this.factorById(id); return f ? (f.label || 'Password') : ''; },
 
-    // is this factor part of the multi-factor ROOT? (any mode = every factor —
-    // except an unpaired one, which has no device slot and cannot derive root
-    // material, so it is never a member whatever the mode says)
+    // is this factor part of the multi-factor ROOT? (any mode = every factor)
+    // A factor without a local PRF slot is STILL a member: its slot is
+    // acquired by the commit ceremony, not modeled as a UI state.
     inMfaRoot(f) {
-      if (!this.mfaOn || f.unpaired) return false;
+      if (!this.mfaOn) return false;
       return this.mfaMode === 'any' ? true : (this.mfaPws.includes(f.id) || this.mfaPks.includes(f.id));
     },
     _isPw(f) { return this.passwords.includes(f); },
     rootMembers(isPw) {
       const arr = isPw ? this.passwords : this.passkeys;
-      return arr.filter((f) => f.pending !== 'removed' && !f.unpaired
+      return arr.filter((f) => f.pending !== 'removed'
         && (this.mfaMode === 'any' || (isPw ? this.mfaPws : this.mfaPks).includes(f.id)));
     },
     roleOf(f) {
@@ -755,6 +776,18 @@ export function credentialsPanel() {
     // ── HOOK: commit — the ONE root-authorized write ──────────────────────
     async commit() {
       const n = this.changeCount; if (!n || this.committing) return;
+      // The staged ending state may grant authority to a passkey with no key
+      // material on record: acquire each missing device slot NOW (one tap per
+      // factor), so the ending state is reached in this one commit.
+      for (const row of requiredSlotEnrollments(this)) {
+        let minted;
+        try { minted = await this._mintSlotFor(row); }
+        catch (e) { this.flash((e && e.message) || String(e)); return; }
+        if (!minted) {
+          this.flash('Enrolling “' + (row.factorLabel || row.label) + '” was cancelled — your edits are still staged');
+          return;
+        }
+      }
       let ops;
       try { ops = stagedOperations(this); } catch (e) { this.flash((e && e.message) || String(e)); return; }
       let lines = [];
@@ -1001,44 +1034,62 @@ export function credentialsPanel() {
     // honest-optimistic, and tapping it runs the ceremony that resolves it.
     offerEnroll(k) { return (k.synced || k.unpaired) && k.device !== this.thisDevice() && !this.enrolledHere(k); },
     sib(k) { return this.passkeys.some((x) => x.id !== k.id && x.credId === k.credId); },
+    // The physical half of a slot enrollment: one get()+PRF on the factor's
+    // credential, staging its _addRecipient row. Returns the row, 'already',
+    // or null (cancelled); throws on real errors. Used by the row action, the
+    // +Add pivot, AND the commit ceremony when the staged ending state needs
+    // a slot this factor doesn't have yet.
+    async _mintSlotFor(k) {
+      const asrt = await navigator.credentials.get({ publicKey: {
+        challenge: crypto.getRandomValues(new Uint8Array(32)),
+        rpId: this.currentRpId || undefined,
+        allowCredentials: [{ type: 'public-key', id: b64uToBytes(k.credId) }],
+        userVerification: 'required',
+        extensions: prfEvalExtension(),
+      } }).catch((e) => { if (e && e.name === 'NotAllowedError') return null; throw e; });
+      if (!asrt) return null;
+      const prf = prfOutputFromResults(asrt.getClientExtensionResults());
+      if (!prf) throw new Error('this passkey has no PRF and cannot hold a device slot');
+      const rec = await primitives.deriveEncapsulationKeypair(prf, FACTOR_RECIPIENT_PURPOSE);
+      prf.fill(0);
+      const already = this.passkeys.some((x) => x.factorId === k.factorId && x.recipientPub === rec.publicKeyHex);
+      if (already) return 'already';
+      return this._stageSlotRow(k, rec.publicKeyHex);
+    },
+    // The staging half, ceremony-free: what the freshly derived recipient key
+    // becomes in the model. Split out so the transition matrix can drive the
+    // REAL staging with synthetic material the way commit drives it with
+    // ceremony material.
+    _stageSlotRow(k, recipientPubHex) {
+      const row = {
+        id: 'pk-new-' + (this._newId++),
+        factorId: k.factorId,
+        factorLabel: k.factorLabel || k.label,
+        credId: k.credId,
+        device: this.thisDevice(),
+        synced: k.synced,
+        label: this.thisDevice(),
+        transports: (k.transports || []).slice(),
+        created: nowIso(),
+        authority: k.authority,
+        recipientPub: recipientPubHex,
+        _addRecipient: {
+          factorId: k.factorId,
+          recipient: { recipient_public_key: recipientPubHex, label: this.thisDevice(), created_at: nowIso() },
+        },
+      };
+      this.passkeys.push(row);
+      // an unpaired placeholder row is replaced by its first real slot
+      if (k.unpaired) { const i = this.passkeys.indexOf(k); if (i > -1) this.passkeys.splice(i, 1); }
+      return row;
+    },
     async enrollThisDevice(k) {
       // HOOK: the real get()+PRF here → a new device slot for the credential.
       try {
-        const asrt = await navigator.credentials.get({ publicKey: {
-          challenge: crypto.getRandomValues(new Uint8Array(32)),
-          rpId: this.currentRpId || undefined,
-          allowCredentials: [{ type: 'public-key', id: b64uToBytes(k.credId) }],
-          userVerification: 'required',
-          extensions: prfEvalExtension(),
-        } });
-        const prf = prfOutputFromResults(asrt.getClientExtensionResults());
-        if (!prf) throw new Error('this passkey has no PRF and cannot hold a device slot');
-        const rec = await primitives.deriveEncapsulationKeypair(prf, FACTOR_RECIPIENT_PURPOSE);
-        prf.fill(0);
-        const already = this.passkeys.some((x) => x.factorId === k.factorId && x.recipientPub === rec.publicKeyHex);
-        if (already) { this.flash('Already enrolled on this device'); return; }
-        const row = {
-          id: 'pk-new-' + (this._newId++),
-          factorId: k.factorId,
-          credId: k.credId,
-          device: this.thisDevice(),
-          synced: k.synced,
-          label: this.thisDevice(),
-          transports: (k.transports || []).slice(),
-          created: nowIso(),
-          authority: k.authority,
-          recipientPub: rec.publicKeyHex,
-          _addRecipient: {
-            factorId: k.factorId,
-            recipient: { recipient_public_key: rec.publicKeyHex, label: this.thisDevice(), created_at: nowIso() },
-          },
-        };
-        this.passkeys.push(row);
-        // an unpaired placeholder row is replaced by its first real slot
-        if (k.unpaired) { const i = this.passkeys.indexOf(k); if (i > -1) this.passkeys.splice(i, 1); }
-        this.flash(this.thisDevice() + ' enrolled');
+        const r = await this._mintSlotFor(k);
+        if (r === 'already') { this.flash('Already enrolled on this device'); return; }
+        if (r) this.flash(this.thisDevice() + ' enrolled');
       } catch (e) {
-        if (e && e.name === 'NotAllowedError') return;
         this.flash((e && e.message) || String(e));
       }
     },
@@ -1151,16 +1202,6 @@ export function credentialsPanel() {
       return f.authority === 'unlock' || this._othersFull(f);
     },
     toggleAuthority(f, ev) {
-      if (f.unpaired && !this.mfaOn) {
-        // A factor with no device slot cannot derive root material, so full
-        // authority is unreachable — but outside MFA a tap must NEVER
-        // silently reduce access either ('No authority' is not offered on
-        // the single ladder). Refuse with the path forward; a
-        // server-presented 'none' recovers upward to unlock.
-        if (f.authority === 'none') { f.authority = 'unlock'; return; }
-        this.warnHere(ev, 'Enroll a device for this passkey before giving it authority.');
-        return;
-      }
       if (this.mfaOn) { f.authority = f.authority === 'none' ? 'unlock' : 'none'; return; }
       if (!this.canToggle(f)) {
         this.warnHere(ev, 'Keep at least one credential with full authority — otherwise you could never unlock your root.');
@@ -1224,13 +1265,11 @@ export function credentialsPanel() {
       return req + ' ' + unl;
     },
     get canEnableMfa() {
-      // Tightened vs the design's row counts for two production realities the
-      // fixture never mixed: a staged-removed factor cannot anchor MFA, and a
-      // passkey with no device slot cannot derive root material — either would
-      // stage a batch the commit must refuse, and the UI never stages an
-      // uncommittable state.
+      // Live rows only (a staged-removed factor cannot anchor MFA). A factor
+      // without a local PRF slot still counts: the commit ceremony acquires
+      // its slot on the way to the ending state.
       const livePw = this.passwords.filter((p) => p.pending !== 'removed');
-      const livePk = this.passkeys.filter((k) => k.pending !== 'removed' && !k.unpaired);
+      const livePk = this.passkeys.filter((k) => k.pending !== 'removed');
       return this.pickMode === 'any'
         ? (livePw.length >= 1 && livePk.length >= 1)
         : (livePw.some((p) => this.pickPws.includes(p.id))
@@ -1247,6 +1286,12 @@ export function credentialsPanel() {
       const keepFull = this._live().find((f) => this.passwords.includes(f)) || this._live()[0];
       this.mfaOn = false; this.mfaMode = 'any'; this.mfaPws = []; this.mfaPks = [];
       if (keepFull) keepFull.authority = 'full';
+      // 'No authority' is not a valid state outside MFA: rows whose sign-in
+      // was off under MFA land on Unlock only, deterministically
+      this._live().forEach((f) => {
+        if (f.authority === 'none') f.authority = 'unlock';
+        delete f.signin;
+      });
       this.flash('Multi-factor turned off — this credential now holds full authority');
     },
 

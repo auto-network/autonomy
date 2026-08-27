@@ -542,6 +542,18 @@
           created_at: new Date().toISOString().replace(/\.\d+Z$/, 'Z'),
         },
       }];
+      // Re-enrollment RESTORES the factor's authority, not just its slot: the
+      // policy is still "this factor holds full authority" in intent (it was a
+      // root member before its material was lost/migrated), so the same
+      // generation grants it back.
+      var typeOf = function (fid) {
+        var row = (fp.factors || []).find(function (x) { return x.factor_id === fid; });
+        return row ? row.type : null;
+      };
+      var granted = R.policyWithFactorGranted(fp.root_policy, factor.factor_id, typeOf);
+      if (JSON.stringify(granted) !== JSON.stringify(R.canonicalExpression(fp.root_policy))) {
+        operations.push({ op: 'set_root_policy', policy: granted });
+      }
       var pv = await _postJson('/api/identity/factor-policy/preview', {
         base_generation: fp.generation, operations: operations,
       });
