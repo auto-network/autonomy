@@ -291,7 +291,7 @@
 
           <!-- Hamburger: shown mobile, hidden desktop -->
           <button data-testid="toolbar-hamburger"
-                  @click="document.getElementById('sidebar').classList.toggle('-translate-x-full')"
+                  @click="window.toggleSidebar()"
                   class="md:hidden w-9 h-11 flex items-center justify-center bg-transparent border-none text-gray-500 cursor-pointer rounded-lg flex-shrink-0"
                   title="Toggle sidebar">
             <svg class="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><line x1="2" y1="4" x2="14" y2="4"/><line x1="2" y1="8" x2="14" y2="8"/><line x1="2" y1="12" x2="14" y2="12"/></svg>

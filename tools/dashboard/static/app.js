@@ -2042,8 +2042,7 @@ window.Autonomy.openNav = function () {
   const sb = document.getElementById('sidebar');
   if (!sb || window.innerWidth >= 768) return false;
   document.body.classList.add('nav-above-mission');
-  sb.classList.remove('-translate-x-full');
-  return true;
+  return window.AutonomyShellChrome.setNavOpen(true);
 };
 
 function navigateTo(path) {
@@ -2291,6 +2290,7 @@ function setGlobalSearchOpen(open, options = {}) {
 function closeGlobalSearch() {
   setGlobalSearchOpen(false, { focus: false });
 }
+window.closeGlobalSearch = closeGlobalSearch;
 
 globalSearch.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
@@ -2323,9 +2323,12 @@ globalSearch.addEventListener('keydown', (e) => {
 if (globalSearchIcon) {
   globalSearchIcon.addEventListener('click', () => {
     const opening = !globalSearchControl.classList.contains('is-open');
-    if (opening && window.AutonomyIdentityIndicator
-        && typeof window.AutonomyIdentityIndicator.close === 'function') {
-      window.AutonomyIdentityIndicator.close();
+    if (opening) {
+      window.AutonomyShellChrome.activate('search');
+      if (window.AutonomyIdentityIndicator
+          && typeof window.AutonomyIdentityIndicator.close === 'function') {
+        window.AutonomyIdentityIndicator.close();
+      }
     }
     setGlobalSearchOpen(opening);
   });

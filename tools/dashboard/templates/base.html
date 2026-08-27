@@ -215,11 +215,13 @@
       color: #d1d5db;
       cursor: pointer;
     }
-    .toolbar-icon-button:hover,
-    .app-topbar-icon-button:hover {
-      border-color: #4b5563;
-      background: #374151;
-      color: #fff;
+    @media (hover: hover) and (pointer: fine) {
+      .toolbar-icon-button:hover,
+      .app-topbar-icon-button:hover {
+        border-color: #4b5563;
+        background: #374151;
+        color: #fff;
+      }
     }
     .toolbar-icon-button:focus-visible,
     .app-topbar-icon-button:focus-visible {
@@ -284,11 +286,8 @@
     #global-search:focus {
       outline: none;
     }
-    #global-search-icon {
-      height: 100%;
-      border-left: 1px solid transparent;
-    }
     #global-search-control.is-open #global-search-icon {
+      height: 100%;
       border-top: 0;
       border-right: 0;
       border-bottom: 0;
@@ -301,6 +300,11 @@
     }
     header.global-search-open > :not(#global-search-control) {
       display: none !important;
+    }
+    @media (max-width: 767px) {
+      body.mobile-nav-open header[data-app-chrome] [data-testid="central-attention-root"] {
+        display: none;
+      }
     }
     header[data-app-chrome] > #identity-indicator {
       order: 5;
@@ -442,7 +446,6 @@
     }
     .app-topbar-search-button {
       height: 100%;
-      border-left: 1px solid transparent;
       transition: color 140ms ease, background-color 140ms ease, border-color 140ms ease;
     }
     .app-topbar-search-control.is-open .app-topbar-search-button {
@@ -453,9 +456,11 @@
       border-radius: 0;
       background: #1f2937;
     }
-    .app-topbar-search-button:hover {
-      color: #f9fafb;
-      background: #374151;
+    @media (hover: hover) and (pointer: fine) {
+      .app-topbar-search-button:hover {
+        color: #f9fafb;
+        background: #374151;
+      }
     }
     .app-topbar-search-button:focus-visible {
       outline: 2px solid rgba(99, 102, 241, 0.75);
@@ -484,10 +489,12 @@
       font-size: 1rem;
       line-height: 1;
     }
-    .app-topbar-icon-button:hover,
-    .app-topbar-button:hover {
-      border-color: #64748b;
-      color: #f9fafb;
+    @media (hover: hover) and (pointer: fine) {
+      .app-topbar-icon-button:hover,
+      .app-topbar-button:hover {
+        border-color: #64748b;
+        color: #f9fafb;
+      }
     }
     @media (max-width: 640px) {
       .app-structured-topbar {
@@ -2115,38 +2122,66 @@
   </nav>
 
   <script>
-    function closeSidebar() {
-      if (window.innerWidth < 768) {
-        document.getElementById('sidebar').classList.add('-translate-x-full');
-        document.getElementById('sidebar-overlay').classList.add('hidden');
-      }
-    }
     function closeCentralAttention() {
       const root = document.querySelector('[data-testid="central-attention-root"]');
       if (!root || !window.Alpine || typeof window.Alpine.$data !== 'function') return;
       const surface = window.Alpine.$data(root);
       if (surface && typeof surface.closeInbox === 'function') surface.closeInbox();
     }
+    function renderMobileNavState() {
+      const sidebar = document.getElementById('sidebar');
+      const overlay = document.getElementById('sidebar-overlay');
+      const toggle = document.getElementById('nav-toggle');
+      const open = window.innerWidth < 768
+        && !sidebar.classList.contains('-translate-x-full');
+      document.body.classList.toggle('mobile-nav-open', open);
+      overlay.classList.toggle('hidden', !open);
+      if (toggle) {
+        toggle.classList.toggle('toolbar-icon-button-active', open);
+        toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+        toggle.setAttribute('aria-label', open ? 'Close navigation' : 'Open navigation');
+      }
+      if (!open) document.body.classList.remove('nav-above-mission');
+      return open;
+    }
+    function setMobileNavOpen(open) {
+      const sidebar = document.getElementById('sidebar');
+      if (!sidebar || window.innerWidth >= 768) return false;
+      sidebar.classList.toggle('-translate-x-full', !open);
+      renderMobileNavState();
+      return !!open;
+    }
+    function closeSidebar() {
+      setMobileNavOpen(false);
+    }
+    function activateShellControl(control) {
+      if (control !== 'nav') closeSidebar();
+      if (control !== 'inbox') closeCentralAttention();
+      if (control !== 'search' && typeof window.closeGlobalSearch === 'function') {
+        window.closeGlobalSearch();
+      }
+    }
     function toggleSidebar() {
       const sidebar = document.getElementById('sidebar');
       const opening = sidebar.classList.contains('-translate-x-full');
-      if (opening && window.innerWidth < 768) {
-        closeCentralAttention();
-      }
-      sidebar.classList.toggle('-translate-x-full');
+      if (opening) activateShellControl('nav');
+      setMobileNavOpen(opening);
     }
-    // Show overlay when sidebar opens on mobile
+    window.AutonomyShellChrome = {
+      activate: activateShellControl,
+      closeNav: closeSidebar,
+      setNavOpen: setMobileNavOpen,
+      syncNav: renderMobileNavState,
+    };
+    window.closeSidebar = closeSidebar;
+    window.toggleSidebar = toggleSidebar;
+    // Keep state derived from the drawer itself so legacy callers cannot leave
+    // the overlay, active button, and toolbar visibility out of sync.
     const sidebar = document.getElementById('sidebar');
-    const observer = new MutationObserver(() => {
-      const overlay = document.getElementById('sidebar-overlay');
-      if (!sidebar.classList.contains('-translate-x-full') && window.innerWidth < 768) {
-        overlay.classList.remove('hidden');
-      } else {
-        overlay.classList.add('hidden');
-        document.body.classList.remove('nav-above-mission');
-      }
-    });
+    const observer = new MutationObserver(renderMobileNavState);
     observer.observe(sidebar, { attributes: true, attributeFilter: ['class'] });
+    window.addEventListener('resize', renderMobileNavState);
+    renderMobileNavState();
   </script>
 
   <!-- Main -->
@@ -2154,7 +2189,8 @@
     <!-- Header -->
     <header data-app-chrome class="bg-gray-800 border-b border-gray-700 px-4 md:px-6 py-3 flex items-center gap-3 md:gap-4">
       <button id="nav-toggle" class="toolbar-icon-button order-1 md:hidden relative z-50 flex-shrink-0"
-              onclick="toggleSidebar()">
+              type="button" aria-expanded="false" aria-label="Open navigation"
+              aria-controls="sidebar" onclick="toggleSidebar()">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
         </svg>
