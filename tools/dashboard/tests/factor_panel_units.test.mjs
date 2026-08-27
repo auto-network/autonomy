@@ -180,11 +180,13 @@ test('desiredPolicy refuses an empty root', () => {
   assert.throws(() => desiredPolicy(c), /full authority/);
 });
 
-test('MFA cannot commit with a slotless class member', () => {
+test('MFA cannot be enabled around a slotless class member', () => {
   const view = orView();
   view.factors[1].recipients = [];   // the only passkey has no device slot
   const c = panelFrom(view);
-  c.pickMode = 'any';
+  c.startMfaSetup();
+  assert.equal(c.canEnableMfa, false, 'setup screen refuses');
   c.enableMfa();
-  assert.throws(() => stagedOperations(c), /device slot/);
+  assert.equal(c.mfaOn, false, 'enable is a no-op');
+  assert.equal(c.changeCount, 0, 'nothing staged');
 });

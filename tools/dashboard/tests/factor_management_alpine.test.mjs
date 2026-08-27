@@ -136,8 +136,8 @@ function viewFrom(state) {
           rp_id: RP,
           transports: reg.transports || ['internal'],
           created_at: '2026-08-01T00:00:00Z',
-          backup_eligible: false,
-          backed_up: false,
+          backup_eligible: !!reg.backed_up,
+          backed_up: !!reg.backed_up,
           recipients: f.recipients,
         });
       }
@@ -215,7 +215,24 @@ async function router(url, opts) {
 }
 
 // ── navigator.credentials adapter over the virtual authenticator ───────────
+// One VirtualAuthenticator = one device. The adapter always talks to the
+// CURRENT device, so a test can move the "browser" between devices — the
+// iCloud case: the same credential synced to two devices, each with its OWN
+// PRF secret (the operator's iPhone/MacBook reality).
 const authenticator = new VirtualAuthenticator();
+let currentDevice = authenticator;
+function switchDevice(auth) { currentDevice = auth; }
+function cloneCredentialToDevice(fromAuth, credIdB64u) {
+  const src = fromAuth.credentials.get(credIdB64u);
+  const dev = new VirtualAuthenticator();
+  dev.credentials.set(credIdB64u, {
+    privateKey: src.privateKey,               // the credential syncs…
+    hmacSecret: crypto.getRandomValues(new Uint8Array(32)),   // …its PRF does not
+    signCount: 0,
+    rpId: src.rpId,
+  });
+  return dev;
+}
 
 function browserCredential(sim) {
   return {
@@ -250,13 +267,13 @@ function installWebAuthn(win) {
     async create({ publicKey }) {
       for (const ex of publicKey.excludeCredentials || []) {
         const id = typeof ex.id === 'string' ? ex.id : bytesToB64u(ex.id);
-        if (authenticator.credentials.has(id)) {
+        if (currentDevice.credentials.has(id)) {
           const err = new Error('credential already registered');
           err.name = 'InvalidStateError';
           throw err;
         }
       }
-      const sim = await authenticator.createCredential({
+      const sim = await currentDevice.createCredential({
         rpId: RP,
         origin: ORIGIN,
         challenge: bytesToB64u(publicKey.challenge),
@@ -270,10 +287,10 @@ function installWebAuthn(win) {
       let chosen = null;
       for (const c of allow) {
         const id = typeof c.id === 'string' ? c.id : bytesToB64u(c.id);
-        if (authenticator.credentials.has(id)) { chosen = id; break; }
+        if (currentDevice.credentials.has(id)) { chosen = id; break; }
       }
       if (!chosen) { const e = new Error('no credential'); e.name = 'NotAllowedError'; throw e; }
-      const sim = await authenticator.getAssertion({
+      const sim = await currentDevice.getAssertion({
         rpId: RP,
         origin: ORIGIN,
         challenge: bytesToB64u(publicKey.challenge),
@@ -471,4 +488,148 @@ test('the solver blocks deleting the last full-authority factor in the DOM', asy
   await flush();
   assert.ok(q('.warnbubble'), 'warning bubble shown');
   assert.equal(SERVER.commits.length, 2, 'nothing new committed');
+});
+
+// ── the ceremony walk: MFA round-trip and the two-device iCloud arc ────────
+async function pkSeedFor(device, credId) {
+  const asrt = await device.getAssertion({
+    rpId: RP, origin: ORIGIN, challenge: 'walk', credentialId: credId, prf: prfEvalExtension().prf,
+  });
+  return new Uint8Array(prfOutputFromResults(asrt.clientExtensionResults));
+}
+function comp() { return dom.window.Alpine.$data(document.querySelector('.fui-cred')); }
+async function authorizeWithPassword(pw) {
+  await until(() => q('input[autocomplete=current-password]'), 'authorize screen');
+  setInput(q('input[autocomplete=current-password]'), pw);
+  await until(() => { const b = qa('.authrow .btn-primary').pop(); return b && !b.disabled; }, 'Authorize enabled');
+  qa('.authrow .btn-primary').pop().click();
+}
+
+test('walk: re-promote the passkey and enable MFA — the committed armor is a real AND', async () => {
+  const credId = SERVER.passkeyRows[0].credential_id;
+  await until(() => comp().generation === 3 && !comp().loading, 'gen 3 loaded');
+  await until(() => qa('.ac-lbl').some((e) => e.textContent === 'Unlock only'), 'demoted passkey row');
+  // promote the passkey back to full…
+  const pkCell = qa('.authcell').find((c) => c.querySelector('.ac-lbl').textContent === 'Unlock only');
+  pkCell.click();
+  await until(() => qa('.ac-lbl').filter((e) => e.textContent === 'Full authority').length === 2, 'both full');
+  // …and enable MFA (any) through the real setup screen
+  q('.mfacard .addbtn').click();
+  await until(() => q('.modeseg'), 'MFA setup screen');
+  const enable = qa('.authrow .btn-primary').pop();
+  assert.equal(enable.disabled, false, 'any-mode MFA enableable');
+  enable.click();
+  await until(() => q('.commitbar') && visible(q('.commitbar')), 'commit bar (MFA staged)');
+
+  q('.commitbar .btn-primary').click();
+  await authorizeWithPassword(PW2);   // gen-3 policy is password-only
+  await until(() => SERVER.commits.length === 3, 'MFA commit posted');
+
+  const committed = SERVER.commits[2];
+  const envelope = await parseFactorPolicyArmor(committed.armor);
+  assert.equal(envelope.policy.op, 'and', 'root policy is an AND');
+  const pwFactor = envelope.factors.find((f) => f.factor_id === 'pw.main');
+  const pwSeed = await openPasswordFactor(envelope.root_pub, pwFactor, PW2);
+  const pkSeed = await pkSeedFor(authenticator, credId);
+  // each factor ALONE is refused; both together open
+  await assert.rejects(() => openFactorPolicyArmor(committed.armor, { 'pw.main': new Uint8Array(pwSeed) }));
+  await assert.rejects(() => openFactorPolicyArmor(committed.armor, { 'pk.mac': new Uint8Array(pkSeed) }));
+  const opened = await openFactorPolicyArmor(committed.armor, {
+    'pw.main': pwSeed, 'pk.mac': pkSeed,
+  });
+  assert.equal(opened.rootPub, SERVER.root.rootPub);
+  opened.seed.fill(0);
+  await until(() => comp().generation === 4 && !comp().loading, 'gen 4 loaded');
+});
+
+test('walk: under MFA the last password of its class cannot be removed', async () => {
+  await until(() => qa('.lnk.ldelete').some((b) => b.textContent.trim() === 'Delete'), 'Delete link');
+  const del = qa('.lnk.ldelete').find((b) => b.textContent.trim() === 'Delete');
+  assert.ok(del.classList.contains('locked'), 'delete locked under MFA');
+  del.click();
+  await flush();
+  assert.ok(q('.warnbubble'), 'refusal explains itself');
+  assert.equal(comp().changeCount, 0, 'nothing staged');
+  comp().warnAt = null;
+});
+
+test('walk: disabling MFA authorizes with BOTH factors of the current policy', async () => {
+  qa('.lnk.ldisable').find((b) => b.textContent.trim() === 'Disable').click();
+  await until(() => !comp().mfaOn, 'MFA staged off');
+  // promote the passkey too, so the OR keeps both factors
+  const pkCell = qa('.authcell').find((c) => c.querySelector('.ac-lbl').textContent !== 'Full authority');
+  pkCell.click();
+  await until(() => q('.commitbar') && visible(q('.commitbar')), 'commit bar (disable staged)');
+
+  q('.commitbar .btn-primary').click();
+  await until(() => q('input[autocomplete=current-password]'), 'authorize screen (AND)');
+  assert.ok(q('.pkbtn'), 'passkey half offered');
+  // password half…
+  setInput(q('input[autocomplete=current-password]'), PW2);
+  await until(() => { const b = qa('.authrow .btn-primary').pop(); return b && !b.disabled; }, 'Authorize enabled');
+  qa('.authrow .btn-primary').pop().click();
+  await until(() => comp().password === '', 'password half accepted');
+  assert.equal(SERVER.commits.length, 3, 'AND not satisfied by the password alone');
+  // …and the passkey half settles it
+  q('.pkbtn').click();
+  await until(() => SERVER.commits.length === 4, 'disable-MFA commit posted');
+
+  const envelope = await parseFactorPolicyArmor(SERVER.commits[3].armor);
+  assert.equal(envelope.policy.op, 'or', 'back to any-one');
+  const pwFactor = envelope.factors.find((f) => f.factor_id === 'pw.main');
+  const seed = await openPasswordFactor(envelope.root_pub, pwFactor, PW2);
+  (await openFactorPolicyArmor(SERVER.commits[3].armor, { 'pw.main': seed })).seed.fill(0);
+  await until(() => comp().generation === 5 && !comp().loading, 'gen 5 loaded');
+});
+
+test('walk: on a second device the synced credential is detected as not enrolled', async () => {
+  const credId = SERVER.passkeyRows[0].credential_id;
+  SERVER.passkeyRows[0].backed_up = true;   // iCloud-synced
+  const deviceB = cloneCredentialToDevice(authenticator, credId);
+  switchDevice(deviceB);
+  await comp().load();
+  await until(() => !comp().loading, 'reloaded on device B');
+
+  // stage any edit, then try to authorize with the passkey from device B
+  const pwCell = qa('.authcell').find((c) => c.querySelector('svg use').getAttribute('xlink:href') === '#i-key');
+  pwCell.click();   // full → unlock (allowed: the passkey holds full)
+  await until(() => q('.commitbar') && visible(q('.commitbar')), 'commit bar');
+  q('.commitbar .btn-primary').click();
+  await until(() => q('.pkbtn'), 'authorize screen offers the passkey');
+  q('.pkbtn').click();
+  await until(() => comp().toast.includes('not enrolled to authorize'), 'PRF mismatch detected');
+
+  // cancel out and drop the staged edit
+  q('.scrhead .back').click();
+  await until(() => comp().cur === 'credentials', 'back to the list');
+  comp().cancelChanges();
+  await until(() => comp().changeCount === 0, 'staged edit dropped');
+  globalThis.__deviceB = deviceB;
+});
+
+test('walk: enroll-this-device repairs the second device, third device still refused', async () => {
+  const credId = SERVER.passkeyRows[0].credential_id;
+  const deviceB = globalThis.__deviceB;
+  await until(() => q('.enrollbtn'), 'Enroll this device offered on the synced slot');
+  q('.enrollbtn').click();
+  await until(() => comp().passkeys.some((k) => k._addRecipient), 'device slot staged');
+  await until(() => q('.commitbar') && visible(q('.commitbar')), 'commit bar');
+  q('.commitbar .btn-primary').click();
+  await authorizeWithPassword(PW2);
+  await until(() => SERVER.commits.length === 5, 'enroll commit posted');
+
+  const committed = SERVER.commits[4];
+  const envelope = await parseFactorPolicyArmor(committed.armor);
+  const pkFactor = envelope.factors.find((f) => f.factor_id === 'pk.mac');
+  assert.equal(pkFactor.recipients.length, 2, 'two device slots on one credential');
+  // device B's PRF now opens the armor…
+  const seedB = await pkSeedFor(deviceB, credId);
+  (await openFactorPolicyArmor(committed.armor, { 'pk.mac': seedB })).seed.fill(0);
+  // …device A's still does…
+  const seedA = await pkSeedFor(authenticator, credId);
+  (await openFactorPolicyArmor(committed.armor, { 'pk.mac': seedA })).seed.fill(0);
+  // …and an unenrolled third device with the same synced credential is refused.
+  const deviceC = cloneCredentialToDevice(authenticator, credId);
+  const seedC = await pkSeedFor(deviceC, credId);
+  await assert.rejects(() => openFactorPolicyArmor(committed.armor, { 'pk.mac': seedC }));
 });

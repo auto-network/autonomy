@@ -418,15 +418,18 @@ export function credentialsPanel() {
     factorById(id) { return this.passwords.find((p) => p.id === id) || this.passkeys.find((k) => k.id === id) || null; },
     labelOf(id) { const f = this.factorById(id); return f ? (f.label || 'Password') : ''; },
 
-    // is this factor part of the multi-factor ROOT? (any mode = every factor)
+    // is this factor part of the multi-factor ROOT? (any mode = every factor —
+    // except an unpaired one, which has no device slot and cannot derive root
+    // material, so it is never a member whatever the mode says)
     inMfaRoot(f) {
-      if (!this.mfaOn) return false;
+      if (!this.mfaOn || f.unpaired) return false;
       return this.mfaMode === 'any' ? true : (this.mfaPws.includes(f.id) || this.mfaPks.includes(f.id));
     },
     _isPw(f) { return this.passwords.includes(f); },
     rootMembers(isPw) {
       const arr = isPw ? this.passwords : this.passkeys;
-      return arr.filter((f) => f.pending !== 'removed' && (this.mfaMode === 'any' || (isPw ? this.mfaPws : this.mfaPks).includes(f.id)));
+      return arr.filter((f) => f.pending !== 'removed' && !f.unpaired
+        && (this.mfaMode === 'any' || (isPw ? this.mfaPws : this.mfaPks).includes(f.id)));
     },
     roleOf(f) {
       if (this.mfaOn) return f.authority === 'none' ? 'none' : 'unlock';
@@ -891,10 +894,11 @@ export function credentialsPanel() {
       return f.authority === 'unlock' || this._othersFull(f);
     },
     toggleAuthority(f, ev) {
-      if (f.unpaired && f.authority !== 'full') {
+      if (f.unpaired) {
         // a factor with no device slot cannot derive root material (per-device
-        // slots): authority requires enrolling a device first
-        this.warnHere(ev, 'Enroll a device for this passkey before giving it authority.');
+        // slots), so its ladder is sign-in on/off only; "Enroll this device"
+        // is the path back to authority
+        f.authority = f.authority === 'none' ? 'unlock' : 'none';
         return;
       }
       if (this.mfaOn) { f.authority = f.authority === 'none' ? 'unlock' : 'none'; return; }
@@ -960,9 +964,17 @@ export function credentialsPanel() {
       return req + ' ' + unl;
     },
     get canEnableMfa() {
+      // Tightened vs the design's row counts for two production realities the
+      // fixture never mixed: a staged-removed factor cannot anchor MFA, and a
+      // passkey with no device slot cannot derive root material — either would
+      // stage a batch the commit must refuse, and the UI never stages an
+      // uncommittable state.
+      const livePw = this.passwords.filter((p) => p.pending !== 'removed');
+      const livePk = this.passkeys.filter((k) => k.pending !== 'removed' && !k.unpaired);
       return this.pickMode === 'any'
-        ? (this.passwords.length >= 1 && this.passkeys.length >= 1)
-        : (this.pickPws.length >= 1 && this.pickPks.length >= 1);
+        ? (livePw.length >= 1 && livePk.length >= 1)
+        : (livePw.some((p) => this.pickPws.includes(p.id))
+          && livePk.some((k) => this.pickPks.includes(k.id)));
     },
     enableMfa() {
       if (!this.canEnableMfa) return;
