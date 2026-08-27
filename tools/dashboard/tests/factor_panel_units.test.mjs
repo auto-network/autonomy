@@ -13,6 +13,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildModelV3, stagedOperations, desiredPolicy, factorAuthority, credentialsPanel,
+  satisfyingSets,
 } from '../static/js/factor-management.js';
 
 const HEXA = 'a'.repeat(64);
@@ -189,4 +190,61 @@ test('MFA cannot be enabled around a slotless class member', () => {
   c.enableMfa();
   assert.equal(c.mfaOn, false, 'enable is a no-op');
   assert.equal(c.changeCount, 0, 'nothing staged');
+});
+
+test('satisfyingSets: every policy shape the armor can hold', () => {
+  const F = (id) => ({ op: 'factor', factor_id: id });
+  // one password
+  assert.deepEqual(satisfyingSets(F('pw.1')), [['pw.1']]);
+  // any one of N passwords
+  assert.deepEqual(satisfyingSets({ op: 'or', children: [F('pw.1'), F('pw.2')] }),
+    [['pw.1'], ['pw.2']]);
+  // either a password or a passkey
+  assert.deepEqual(satisfyingSets({ op: 'or', children: [F('pw.1'), F('pk.1')] }),
+    [['pk.1'], ['pw.1']]);
+  // one of each (MFA any): AND of the class ORs
+  assert.deepEqual(satisfyingSets({ op: 'and', children: [
+    { op: 'or', children: [F('pw.1'), F('pw.2')] },
+    { op: 'or', children: [F('pk.1'), F('pk.2')] },
+  ] }).length, 4);
+  // specific ones of each
+  assert.deepEqual(satisfyingSets({ op: 'and', children: [F('pw.2'), F('pk.1')] }),
+    [['pk.1', 'pw.2']]);
+  // nested: a lone master password OR a pair
+  assert.deepEqual(satisfyingSets({ op: 'or', children: [
+    F('pw.master'), { op: 'and', children: [F('pw.day'), F('pk.mac')] },
+  ] }).map((s) => s.join('+')).sort(), ['pk.mac+pw.day', 'pw.master']);
+});
+
+test('dead-end detection: passkey-only policy on a device with no WebAuthn', () => {
+  const c = credentialsPanel();
+  c.envelope = {
+    policy: { op: 'factor', factor_id: 'pk.1' },
+    factors: [{ factor_id: 'pk.1', type: 'passkey', credential_id: 'credA', recipients: [recipA] }],
+  };
+  c._viewFactors = [pkFactorView('pk.1', 'credA', [recipA], { label: 'iCloud Passkey' })];
+  c.requireRoot('Commit 1 change');   // node has no window.PublicKeyCredential
+  assert.equal(c.authDeadEnd, true, 'known dead end immediately');
+  assert.equal(c.authShowMissing, true);
+  assert.deepEqual(c.authMissingPasskeys, [{ label: 'iCloud Passkey', devices: 'This Mac' }]);
+  assert.match(c.authMissingLead, /required but missing/);
+});
+
+test('dead-end phrasing: any-one of several passkeys', () => {
+  const c = credentialsPanel();
+  c.envelope = {
+    policy: { op: 'or', children: [{ op: 'factor', factor_id: 'pk.1' }, { op: 'factor', factor_id: 'pk.2' }] },
+    factors: [
+      { factor_id: 'pk.1', type: 'passkey', credential_id: 'credA', recipients: [recipA] },
+      { factor_id: 'pk.2', type: 'passkey', credential_id: 'credB', recipients: [recipB] },
+    ],
+  };
+  c._viewFactors = [
+    pkFactorView('pk.1', 'credA', [recipA], { label: 'Work passkey' }),
+    pkFactorView('pk.2', 'credB', [recipB], { label: 'Home passkey' }),
+  ];
+  c.requireRoot('Commit 1 change');
+  assert.equal(c.authDeadEnd, true);
+  assert.match(c.authMissingLead, /At least one of the following/);
+  assert.deepEqual(c.authMissingPasskeys.map((m) => m.devices), ['This Mac', 'iPhone']);
 });

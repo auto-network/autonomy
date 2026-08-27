@@ -571,6 +571,10 @@ test('walk: disabling MFA authorizes with BOTH factors of the current policy', a
   qa('.authrow .btn-primary').pop().click();
   await until(() => comp().password === '', 'password half accepted');
   assert.equal(SERVER.commits.length, 3, 'AND not satisfied by the password alone');
+  // the accepted half shows its green state; its input is gone, in either order
+  await until(() => qa('.inlineok').some((e) => e.textContent.includes('Password entered')), 'password ✓ shown');
+  assert.equal(q('input[autocomplete=current-password]'), null, 'password input retired');
+  assert.ok(q('.pkbtn'), 'passkey still offered');
   // …and the passkey half settles it
   q('.pkbtn').click();
   await until(() => SERVER.commits.length === 4, 'disable-MFA commit posted');
@@ -599,6 +603,11 @@ test('walk: on a second device the synced credential is detected as not enrolled
   await until(() => q('.pkbtn'), 'authorize screen offers the passkey');
   q('.pkbtn').click();
   await until(() => comp().toast.includes('not enrolled to authorize'), 'PRF mismatch detected');
+  // the failed tap surfaces the requirement list: which factor, which devices
+  await until(() => q('.mfadyn'), 'missing-factor explanation shown');
+  assert.match(q('.mfadyn').textContent, /enrolled on: .*This Mac/, 'lists the enrolled device');
+  assert.ok(!q('.mfadyn').textContent.includes('can’t authorize'),
+    'not a dead end — the password route remains');
 
   // cancel out and drop the staged edit
   q('.scrhead .back').click();
@@ -700,4 +709,24 @@ test('walk: a slot already enrolled at login only asks for its name', async () =
   await until(() => comp().cur === 'credentials', 'back on the list');
   assert.equal(dom.window.sessionStorage.getItem('autonomy.factor.slot-enrolled'), null, 'flag consumed');
   assert.equal(SERVER.commits.length, 6, 'renaming is metadata, not a generation');
+});
+
+test('walk: an autofilled password auto-submits the ceremony', async () => {
+  // stage one edit so the commit bar offers a ceremony (policy is OR: password alone settles)
+  await until(() => qa('.authcell').length >= 2, 'rows present');
+  const pwCell = qa('.authcell').find((c) => c.querySelector('svg use').getAttribute('xlink:href') === '#i-key');
+  pwCell.click();   // full → unlock (the passkey holds full)
+  await until(() => q('.commitbar') && visible(q('.commitbar')), 'commit bar');
+  const commitsBefore = SERVER.commits.length;
+  q('.commitbar .btn-primary').click();
+  await until(() => q('input[autocomplete=current-password]'), 'authorize screen');
+  // the browser autofills: value lands and the autofill animation hook fires
+  const input = q('input[autocomplete=current-password]');
+  setInput(input, PW2);
+  const ev = new dom.window.Event('animationstart', { bubbles: true });
+  Object.defineProperty(ev, 'animationName', { value: 'fui-afstart' });
+  input.dispatchEvent(ev);
+  // no Authorize click: the ceremony runs to completion on its own
+  await until(() => SERVER.commits.length === commitsBefore + 1, 'auto-submitted commit posted');
+  await until(() => comp().cur === 'credentials', 'landed back on the list');
 });

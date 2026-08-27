@@ -83,10 +83,11 @@ export function viewFrom(state, rootPub, passkeyMeta = {}) {
     migration_required: false,
     factors: state.factors.map((f) => {
       const member = memberIds.has(f.factor_id);
+      const meta0 = f.type === 'passkey' ? (passkeyMeta[f.credential_id] || {}) : {};
       const row = {
         factor_id: f.factor_id,
         type: f.type,
-        label: f.type === 'password' ? 'Password' : 'Passkey',
+        label: f.type === 'password' ? 'Password' : (meta0.label || 'Passkey'),
         purpose: null,
         access: state.access.includes(f.factor_id) ? 'enabled' : 'disabled',
         root_role: member ? (anyOne ? 'individual' : 'mfa-member') : 'none',
