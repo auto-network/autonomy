@@ -32,7 +32,11 @@ import {
   policySatisfied, policyWithFactorGranted, createPasswordFactor,
   openPasswordFactor, parseFactorPolicyArmor, buildFactorPolicyArmor,
   openFactorPolicyArmor, signFactorPolicyTransition,
+  recoverySlot, recoveryRecipientPublicKey, openRootWithRecovery,
 } from './ceremony/root-factor-policy.js';
+import {
+  generateRecoveryCode, deriveRecoveryFactors, encodeRecoveryCode, decodeRecoveryCode,
+} from './ceremony/recovery.js';
 
 // ── small helpers ──────────────────────────────────────────────────────────
 function b64uToBytes(s) {
@@ -450,6 +454,7 @@ export function credentialsPanel() {
     generation: 0, rootPub: null, armorText: null, envelope: null,
     _committedPolicy: null, _authSeeds: {}, _viewFactors: [],
     deviceName: '', newDevErr: null, authAutofilled: false,
+    _recovery: null, _recoveryCode: null, _recoveryPrintable: null, recoveryVerifyResult: null, recoveryInput: '',
     authShowMissing: false, authDeadEnd: false,
 
     init() { this.load(); },
@@ -480,6 +485,7 @@ export function credentialsPanel() {
         this.envelope = await parseFactorPolicyArmor(this.armorText);
         this._committedPolicy = fp.root_policy;
         this._viewFactors = fp.factors || [];
+        this._recovery = fp.recovery || null;
         this.initBaseline();
         this.loading = false;
         this._greetNewDevice();
@@ -820,6 +826,7 @@ export function credentialsPanel() {
       const armor = await buildFactorPolicyArmor({
         rootSeed: opened.seed, rootPub: this.rootPub, generation: pv.generation,
         factors: pv.factors, access: pv.access, policy: pv.root_policy,
+        recovery: pv.recovery || undefined,
       });
       const signature = await signFactorPolicyTransition({
         signingKey: opened.signingKey, baseGeneration: this.generation,
@@ -830,6 +837,80 @@ export function credentialsPanel() {
         candidate_armor: armor, root_signature: signature,
       });
       if (!res.ok) throw new Error(res.error || 'the authorization was refused');
+    },
+    // ── recovery code (design graph://fd418706-97e) ──────────────────────
+    get hasRecovery() { return !!this._recovery; },
+    // Generate a fresh code, show it once, then enrol it through the SAME
+    // root ceremony + commit path as any factor change: a set_recovery op
+    // carrying the slot, and the same slot embedded in the candidate armor.
+    async startRecovery() {
+      const code = generateRecoveryCode();
+      this._recoveryCode = code;
+      this._recoveryPrintable = await encodeRecoveryCode(code);
+      this.push({ s: 'recovery-explain' });
+    },
+    async generateRecoveryCode() {
+      // move from the explanation to the one-time presentation
+      if (!this._recoveryCode) {
+        this._recoveryCode = generateRecoveryCode();
+        this._recoveryPrintable = await encodeRecoveryCode(this._recoveryCode);
+      }
+      this.push({ s: 'recovery-present' });
+    },
+    get recoveryPrintable() { return this._recoveryPrintable || ''; },
+    async confirmRecoverySaved() {
+      // authorize with the existing root authority (not the new code itself),
+      // build the slot with the opened root seed, commit one set_recovery op
+      const opened = await this.requireRoot('Add a recovery code', '', ['Add a recovery code']);
+      if (!opened) return;
+      this.committing = true;
+      try {
+        const recipient = await recoveryRecipientPublicKey(this._recoveryCode);
+        const { recoveryPub } = await deriveRecoveryFactors(this._recoveryCode);
+        const slot = await recoverySlot({
+          rootSeed: opened.seed, recoveryRecipientPub: recipient, recoveryPub,
+        });
+        await this._commitOps([{ op: 'set_recovery', recovery: slot }], opened);
+        this._recoveryCode = null; this._recoveryPrintable = null;
+        await this.load();
+        this.stack = [{ s: 'credentials' }];
+        this.flash('Recovery code saved');
+      } catch (e) {
+        this.flash((e && e.message) || String(e));
+      } finally { opened.seed.fill(0); this.committing = false; }
+    },
+    // Verify a code (read-only): it must open the root. Scan or type upstream.
+    startVerifyRecovery() { this.push({ s: 'recovery-verify' }); },
+    async submitVerifyRecovery(printable) {
+      this.recoveryVerifyResult = null;
+      let code;
+      try { code = await decodeRecoveryCode(String(printable || '').trim()); }
+      catch (e) { this.recoveryVerifyResult = 'malformed'; return; }
+      try {
+        const opened = await openRootWithRecovery(this.armorText, code);
+        opened.seed.fill(0);
+        this.recoveryVerifyResult = 'ok';
+      } catch (e) { this.recoveryVerifyResult = 'fail'; }
+    },
+    // The authorize ceremony's recovery path: the code opens the root and thus
+    // authorizes the commit — a third way to satisfy the root ceremony.
+    async authWithRecovery(printable) {
+      if (this.top.s !== 'authorize' || this.verifying) return;
+      let code;
+      try { code = await decodeRecoveryCode(String(printable || '').trim()); }
+      catch (e) { this.flash('That recovery code is malformed'); return; }
+      this.verifying = true;
+      try {
+        const opened = await openRootWithRecovery(this.armorText, code);
+        const t = this.top; this.verifying = false;
+        if (t.s === 'authorize') {
+          const res = t.resolve; this.pop(); this._clearAuthSeeds();
+          if (res) res(opened);
+        } else { opened.seed.fill(0); }
+      } catch (e) {
+        this.verifying = false;
+        this.flash('That recovery code did not open your root — check it and try again');
+      }
     },
     async _registerStaged(row, opened) {
       const en = row._enroll;

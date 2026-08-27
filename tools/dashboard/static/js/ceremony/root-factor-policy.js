@@ -475,6 +475,14 @@ function parseRecoverySlot(value) {
   };
 }
 
+// Build one recovery slot dict (seals the root seed to the code recipient).
+// HPKE sealing is randomized, so build ONCE and use in both the set_recovery
+// op and the candidate armor.
+async function recoverySlot({ rootSeed, recoveryRecipientPub, recoveryPub }) {
+  const sealed = await sealToEncapsulationKey(new Uint8Array(rootSeed), recoveryRecipientPub, RECOVERY_ARMOR_PURPOSE);
+  return { recipient_public_key: recoveryRecipientPub, recovery_pub: recoveryPub, sealed: bytesToB64(sealed) };
+}
+
 async function recoveryRecipientPublicKey(recoveryCode) {
   const { kekRecoverySeed } = await deriveRecoveryFactors(recoveryCode);
   const { publicKeyHex } = await deriveEncapsulationKeypair(kekRecoverySeed, RECOVERY_ARMOR_PURPOSE);
@@ -690,6 +698,7 @@ export {
   importFactorAccessSigningKey,
   parseFactorPolicyArmor,
   recoveryRecipientPublicKey,
+  recoverySlot,
   addRecoverySlot,
   replaceRecoverySlot,
   openRootWithRecovery,

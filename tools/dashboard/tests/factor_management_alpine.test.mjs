@@ -74,7 +74,9 @@ function applyOps(state, operations) {
   const factors = new Map(state.factors.map((f) => [f.factor_id, JSON.parse(JSON.stringify(f))]));
   const access = new Set(state.access);
   let policy = state.policy;
+  let recovery = state.recovery || null;
   for (const op of operations) {
+    if (op.op === 'set_recovery') { recovery = op.recovery; continue; }
     if (op.op === 'enroll_password' || op.op === 'enroll_passkey') {
       if (factors.has(op.factor.factor_id)) throw new Error('already enrolled');
       factors.set(op.factor.factor_id, op.factor);
@@ -99,6 +101,7 @@ function applyOps(state, operations) {
     factors: [...factors.values()].sort((a, b) => a.factor_id.localeCompare(b.factor_id)),
     access: [...access].sort(),
     policy,
+    recovery,
   };
 }
 
@@ -116,6 +119,7 @@ function viewFrom(state) {
     root_pub: SERVER.root.rootPub,
     root_policy: state.policy,
     migration_required: false,
+    recovery: state.recovery ? { recovery_pub: state.recovery.recovery_pub } : null,
     factors: state.factors.map((f) => {
       const member = memberIds.has(f.factor_id);
       const row = {
@@ -169,7 +173,8 @@ async function router(url, opts) {
       const p = applyOps(SERVER.state, body.operations);
       return jsonResponse({
         ok: true, base_generation: SERVER.state.generation, generation: p.generation,
-        root_policy: p.policy, factors: p.factors, access: p.access, change_count: 1,
+        root_policy: p.policy, factors: p.factors, access: p.access,
+        recovery: p.recovery || null, change_count: 1,
       });
     } catch (e) { return jsonResponse({ ok: false, error: e.message }); }
   }
@@ -183,6 +188,8 @@ async function router(url, opts) {
       assert.equal(cand.generation, p.generation, 'candidate encodes the projected generation');
       assert.equal(JSON.stringify(cand.policy), JSON.stringify(canonicalExpression(p.policy)),
         'candidate encodes the projected policy');
+      assert.equal(JSON.stringify(cand.recovery || null), JSON.stringify(p.recovery || null),
+        'candidate encodes the projected recovery slot');
       SERVER.state = p;
       SERVER.armor = body.candidate_armor;
       SERVER.commits.push({ operations: body.operations, armor: body.candidate_armor });
@@ -778,4 +785,68 @@ test('post-migration tap: Full authority staged, commit acquires the slot, armor
   const seed = await pkSeedFor(currentDevice, credId);
   (await openFactorPolicyArmor(committed.armor, { 'pk.mac': seed })).seed.fill(0);
   await until(() => !comp().loading && comp().passkeys.some((k) => !k.unpaired), 'reloaded with the slot');
+});
+
+// ── recovery code: enrol through the commit path, then authorize with it ────
+import {
+  generateRecoveryCode, deriveRecoveryFactors, encodeRecoveryCode,
+} from '../static/js/ceremony/recovery.js';
+import {
+  recoveryRecipientPublicKey, recoverySlot, openRootWithRecovery,
+} from '../static/js/ceremony/root-factor-policy.js';
+
+test('walk: enrol a recovery code through the real commit flow, then it opens root', async () => {
+  await until(() => comp().generation >= 2 && !comp().loading, 'panel loaded');
+  const genBefore = comp().generation;
+  const commitsBefore = SERVER.commits.length;
+
+  // drive the component's real enrol methods (generate → present → confirm)
+  await comp().startRecovery();          // stashes a code + printable
+  await comp().generateRecoveryCode();   // to the present screen
+  const savedCode = comp()._recoveryCode;
+  assert.ok(savedCode && savedCode.length === 32, 'a 32-byte code was generated');
+  assert.ok(comp().recoveryPrintable.length > 0, 'a printable form exists');
+
+  // confirmRecoverySaved opens root (password) then commits set_recovery
+  const done = comp().confirmRecoverySaved();
+  await authorizeWithPassword(PW2);
+  await done;
+  await until(() => SERVER.commits.length === commitsBefore + 1, 'recovery commit posted');
+
+  const committed = SERVER.commits[SERVER.commits.length - 1];
+  assert.deepEqual(committed.operations.map((o) => o.op), ['set_recovery']);
+  // PROOF: the committed armor's recovery slot opens the root with that code
+  const opened = await openRootWithRecovery(committed.armor, savedCode);
+  assert.equal(opened.rootPub, SERVER.root.rootPub);
+  opened.seed.fill(0);
+  // the panel now reports a recovery code enrolled
+  await until(() => comp().hasRecovery, 'panel shows recovery enrolled');
+});
+
+test('walk: a factor change can be authorized BY the recovery code', async () => {
+  // build a fresh armor that already carries a recovery slot, load it
+  const code = generateRecoveryCode();
+  const recipient = await recoveryRecipientPublicKey(code);
+  const { recoveryPub } = await deriveRecoveryFactors(code);
+  const slot = await recoverySlot({ rootSeed: SERVER.root.seed, recoveryRecipientPub: recipient, recoveryPub });
+  SERVER.state.recovery = slot;
+  SERVER.armor = await buildFactorPolicyArmor({
+    rootSeed: SERVER.root.seed, rootPub: SERVER.root.rootPub, generation: SERVER.state.generation,
+    factors: SERVER.state.factors, access: SERVER.state.access, policy: SERVER.state.policy,
+    recovery: slot,
+  });
+  await comp().load();
+  await until(() => comp().hasRecovery && !comp().loading, 'armor with recovery loaded');
+
+  // stage a change and commit — authorize with the RECOVERY CODE, not a factor
+  const pwCell = qa('.authcell').find((c) => c.querySelector('svg use').getAttribute('xlink:href') === '#i-key');
+  pwCell.click();   // toggle the password's authority to stage a change
+  await until(() => q('.commitbar') && visible(q('.commitbar')), 'commit bar');
+  const commitsBefore = SERVER.commits.length;
+  q('.commitbar .btn-primary').click();
+  await until(() => comp().cur === 'authorize', 'authorize screen');
+  // authorize by recovery code (the code opens root, so it authorizes)
+  await comp().authWithRecovery(await encodeRecoveryCode(code));
+  await until(() => SERVER.commits.length === commitsBefore + 1, 'commit authorized by the code');
+  await until(() => !comp().loading, 'reloaded');
 });
