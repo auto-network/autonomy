@@ -15330,6 +15330,13 @@ async def api_graph_bead(request):
     caller_org = api_auth.organization_scope_from_request(request)
     labels = "readiness:idea" + (f",org:{caller_org}" if caller_org else "")
     bd_cmd = ["bd", "create", title, "-p", str(priority), "-l", labels]
+    # Attribute to the authenticated caller from the request's bearer/crosstalk
+    # token, never to this server process's own ambient BD_ACTOR env var — the
+    # dashboard is a single long-lived process shared by every session, so its
+    # environment reflects whichever shell last started it, not who's asking.
+    principal = api_auth.principal_from_request(request)
+    if principal.subject:
+        bd_cmd += ["--actor", f"session:{principal.subject}"]
     if desc:
         bd_cmd += ["-d", desc]
     if body.get("type"):
