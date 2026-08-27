@@ -104,6 +104,62 @@ def password_seed(store: VaultStore, factor_id: str, password: str) -> bytes:
 # ── class lifecycle ────────────────────────────────────────────────────────
 
 
+def unique_passkey_choices(store: VaultStore, credential_rows: list[dict]) -> list[dict]:
+    """The policy-class chooser's passkey list: ONE entry per credential.
+
+    An iCloud (synced) passkey is one logical key however many machines hold
+    PRF slots for it, so the chooser groups the vault's per-device passkey
+    factors by their WebAuthn credential and offers each credential once.
+
+    *credential_rows* comes from the identity layer: each row carries
+    ``credential_id``, ``label``, and either ``provisioning_public_keys``
+    (every known device slot) or the current single ``provisioning_public_key``
+    shape. Passwords never appear; a vault passkey factor with no known
+    credential linkage is listed honestly on its own (label = its factor id)
+    rather than hidden; credentials with no enrolled vault factor are omitted.
+    """
+    key_to_row: dict[str, dict] = {}
+    for row in credential_rows or []:
+        keys = row.get("provisioning_public_keys")
+        if keys is None:
+            single = row.get("provisioning_public_key")
+            keys = [single] if single else []
+        for key in keys:
+            if isinstance(key, str) and key:
+                key_to_row[key] = row
+
+    grouped: dict[str, dict] = {}
+    orphans: list[dict] = []
+    for factor in store.factors():
+        if factor.factor_type != "passkey":
+            continue
+        row = key_to_row.get(factor.public_key)
+        if row is None:
+            orphans.append({
+                "credential_id": None,
+                "label": factor.factor_id,
+                "factor_ids": [factor.factor_id],
+                "public_keys": [factor.public_key],
+            })
+            continue
+        entry = grouped.setdefault(row["credential_id"], {
+            "credential_id": row["credential_id"],
+            "label": row.get("label") or "Passkey",
+            "factor_ids": [],
+            "public_keys": [],
+        })
+        entry["factor_ids"].append(factor.factor_id)
+        entry["public_keys"].append(factor.public_key)
+
+    choices = list(grouped.values()) + orphans
+    for entry in choices:
+        paired = sorted(zip(entry["factor_ids"], entry["public_keys"]))
+        entry["factor_ids"] = [fid for fid, _ in paired]
+        entry["public_keys"] = [key for _, key in paired]
+    choices.sort(key=lambda e: (e["credential_id"] is None, (e["label"] or "").casefold(), e["credential_id"] or ""))
+    return choices
+
+
 def create_policy_class(
     store: VaultStore, policy: str, factor_ids: list[str], *, created_at: str
 ) -> str:
