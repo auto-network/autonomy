@@ -411,7 +411,7 @@
 </template>
 
 <!-- Resume auto-scroll button -->
-<button x-show="!autoScroll && entries.length > 0"
+<button x-show="_mode !== 'page' && !autoScroll && entries.length > 0"
         @click="resumeScroll()"
         class="live-resume-btn" style="display:block;">
   Resume auto-scroll

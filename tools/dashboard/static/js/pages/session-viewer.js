@@ -546,6 +546,7 @@
       _displayedRev: 0,
       _displayedLen: 0,
       autoScroll: true,
+      showJumpToBottom: false,
       loadingOlder: false,
       _workspaceStatus: null,
       // True from the moment the ⌥ button is tapped until the worktree
@@ -867,6 +868,7 @@
 
       refreshViewportWidth() {
         this.viewportWidth = (window.visualViewport && window.visualViewport.width) || window.innerWidth || 0;
+        this._scheduleJumpToBottomUpdate();
       },
 
       getVoiceStore() {
@@ -1774,6 +1776,8 @@
             self._syncDisplayNow();
             if (self.autoScroll) {
               self._scrollToBottom();
+            } else {
+              self._scheduleJumpToBottomUpdate();
             }
             // Update overlay header if in overlay mode
             if (self._mode === 'overlay') self._updateHeader();
@@ -2193,6 +2197,7 @@
             requestAnimationFrame(function() {
               var el = self.$refs.entriesContainer;
               if (el) el.scrollTop = el.scrollHeight;
+              self.showJumpToBottom = false;
             });
           });
         });
@@ -2243,11 +2248,34 @@
 
       onScroll() {
         window.SessionRenderer.onScroll.call(this);
+        this._updateJumpToBottom();
         var el = this.$refs.entriesContainer;
         if (!el) return;
         if (el.scrollTop < 80 && this.hasMoreHistory && !this.loadingOlder) {
           this.loadOlder();
         }
+      },
+
+      _updateJumpToBottom() {
+        var el = this.$refs.entriesContainer;
+        if (!el || this._mode !== 'page' || this.showTerminal || !this.entries.length) {
+          this.showJumpToBottom = false;
+          return;
+        }
+        var distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+        this.showJumpToBottom = el.clientHeight > 0 && distance > el.clientHeight * 3;
+      },
+
+      _scheduleJumpToBottomUpdate() {
+        var self = this;
+        this.$nextTick(function () {
+          requestAnimationFrame(function () { self._updateJumpToBottom(); });
+        });
+      },
+
+      jumpToBottom() {
+        this.showJumpToBottom = false;
+        this.resumeScroll();
       },
 
       // ── Screenshot injection indicator ──────────────────────────
@@ -2883,6 +2911,7 @@
         this._correctionDisplayMode = {};
         this._correctionHydrateToken = 0;
         this.autoScroll = true;
+        this.showJumpToBottom = false;
         this._runDir = '';
         this._tailUrl = '';
         this._tick = 0;
