@@ -567,10 +567,20 @@
       restartProgress: function() {
         var status = this.restartStatus;
         if (!status) return 0;
-        if (status.phase === 'countdown') return 0;
+        if (status.phase === 'countdown') return 100;
         if (status.phase === 'complete' || status.phase === 'recovered') return 100;
-        var elapsed = Math.max(0, (this.restartNowMs || Date.now()) - (status.started_at_ms || Date.now()));
+        var progressStartedAt = status.countdown_ends_at_ms || status.started_at_ms || Date.now();
+        var elapsed = Math.max(0, (this.restartNowMs || Date.now()) - progressStartedAt);
         return Math.min(100, Math.round(elapsed * 100 / (status.expected_ms || 30000)));
+      },
+      restartCountdownProgress: function() {
+        var status = this.restartStatus;
+        if (!status || status.phase !== 'countdown') return 0;
+        var now = this.restartNowMs || Date.now();
+        var startedAt = status.started_at_ms || now;
+        var endsAt = status.countdown_ends_at_ms || now;
+        var duration = Math.max(1, endsAt - startedAt);
+        return Math.max(0, Math.min(100, Math.round((endsAt - now) * 100 / duration)));
       },
     });
     Alpine.store('pinned', { beads: [] });
