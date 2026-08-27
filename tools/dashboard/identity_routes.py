@@ -1617,8 +1617,102 @@ async def get_ceremony_errors(request: Request) -> JSONResponse:
     return JSONResponse({"errors": [m.payload for m in members[:limit]]})
 
 
+async def get_unlock_state(request: Request) -> JSONResponse:
+    """Pre-auth status for the profile/locked-screen flag tray.
+
+    Six live indicators the tray (static/js/identity-indicator.js) renders, each
+    ``{needs: bool, detail: str}``. ``needs`` lights the tile amber; ``detail`` is
+    the balloon text. The three cold-vault signals (identity, delegate, session)
+    are read directly; the infra signals (certificate, tunnel, approvals) are
+    best-effort and degrade to a non-alarming "unavailable" rather than fabricate
+    a state — a false green here would be worse than a dim tile.
+    """
+    from tools.dashboard.unlock_routes import _agent_delegate, session_from_request
+
+    flags: dict = {}
+
+    # domain — the personal identity is anchored to this dashboard.
+    try:
+        personal = _personal_member()
+        anchored = bool(personal is not None
+                        and personal.payload.get("armored_private_key"))
+    except Exception:
+        anchored = False
+    flags["domain"] = {
+        "needs": not anchored,
+        "detail": ("Your personal identity is anchored to this dashboard."
+                   if anchored else "No personal identity is set up yet."),
+    }
+
+    # agent — the delegate signing key that keeps the fleet running. A cold
+    # vault holds none, so this lights until you unlock with your root.
+    try:
+        delegate = _agent_delegate()
+    except Exception:
+        delegate = None
+    flags["agent"] = {
+        "needs": delegate is None,
+        "detail": ("Running — it can fetch your secrets without asking again."
+                   if delegate is not None
+                   else "Not running. Unlock with your root to start it."),
+    }
+
+    # ttl — how long this dashboard session stays open.
+    try:
+        session = session_from_request(request)
+    except Exception:
+        session = None
+    if not session:
+        flags["ttl"] = {"needs": True,
+                        "detail": "Signed out — unlock again to open a session."}
+    else:
+        remaining = int(session.get("exp") or 0) - int(_now())
+        low = remaining < 3600
+        hours = max(0, remaining // 3600)
+        flags["ttl"] = {
+            "needs": low,
+            "detail": (f"About {hours} hour(s) left; it renews while you are signed in."
+                       if not low else "Running low — unlock again to extend it."),
+        }
+
+    # certificates — this org's serving certificate (best-effort).
+    try:
+        from tools.dashboard.api_auth import resolve_scoped_org
+        from tools.dashboard.link_serving_supervisor import serve_cert_state
+        org, _refused = resolve_scoped_org(request.query_params.get("org"))
+        status = serve_cert_state(org).get("status", "missing")
+        ok = status == "ok"
+        flags["certificates"] = {
+            "needs": not ok,
+            "detail": ("All current; the next renewal is months away." if ok
+                       else "Needs renewing — that needs your root key."),
+        }
+    except Exception:
+        flags["certificates"] = {"needs": False,
+                                 "detail": "Certificate state is unavailable."}
+
+    # tunnel — is the dashboard reachable from outside (best-effort live probe).
+    try:
+        from tools.dashboard.link_serving_supervisor import get_supervisor
+        serving = bool(get_supervisor().serving())
+        flags["tunnel"] = {
+            "needs": not serving,
+            "detail": ("Reachable from outside." if serving
+                       else "Not reachable from outside — bringing it back needs your root key."),
+        }
+    except Exception:
+        flags["tunnel"] = {"needs": False, "detail": "Tunnel state is unavailable."}
+
+    # approvals — requests waiting on you. Not yet wired to a live pending count
+    # (there is no clean count accessor); honest no-alert default until it is.
+    flags["approvals"] = {"needs": False, "detail": "Nothing is waiting on you."}
+
+    return JSONResponse(flags)
+
+
 ROUTES = [
     Route("/api/identity/status", get_status, methods=["GET"]),
+    Route("/api/identity/unlock-state", get_unlock_state, methods=["GET"]),
     Route("/api/identity/personal", get_personal, methods=["GET"]),
     Route("/api/identity/personal", post_personal, methods=["POST"]),
     Route("/api/identity/personal/armor", post_rearmor, methods=["POST"]),
