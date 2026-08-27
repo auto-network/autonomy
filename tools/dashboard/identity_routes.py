@@ -835,6 +835,7 @@ def _factor_policy_view(state: dict) -> dict:
         # hide the "set up" banner. The sealed material stays in the armor.
         "recovery": None if recovery is None else {
             "recovery_pub": recovery["recovery_pub"],
+            "created_at": recovery.get("created_at"),
         },
         "allowed_operations": (
             ["migrate_legacy"] if state["migration_required"] else [

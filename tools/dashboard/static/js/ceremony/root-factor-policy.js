@@ -462,25 +462,27 @@ async function parseFactorPolicyArmor(armorText) {
 const RECOVERY_ARMOR_PURPOSE = 'autonomy/recovery-armor/v1';
 
 function parseRecoverySlot(value) {
-  if (!sameKeys(value, ['recipient_public_key', 'recovery_pub', 'sealed'])
+  if (!sameKeys(value, ['recipient_public_key', 'recovery_pub', 'sealed', 'created_at'])
       || !/^[0-9a-f]{64}$/.test(value.recipient_public_key)
       || !/^[0-9a-f]{64}$/.test(value.recovery_pub)
-      || b64ToBytes(value.sealed).length !== 81) {
+      || b64ToBytes(value.sealed).length !== 81
+      || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(value.created_at)) {
     throw new Error('recovery slot is malformed');
   }
   return {
     recipient_public_key: value.recipient_public_key,
     recovery_pub: value.recovery_pub,
     sealed: value.sealed,
+    created_at: value.created_at,
   };
 }
 
 // Build one recovery slot dict (seals the root seed to the code recipient).
 // HPKE sealing is randomized, so build ONCE and use in both the set_recovery
 // op and the candidate armor.
-async function recoverySlot({ rootSeed, recoveryRecipientPub, recoveryPub }) {
+async function recoverySlot({ rootSeed, recoveryRecipientPub, recoveryPub, createdAt }) {
   const sealed = await sealToEncapsulationKey(new Uint8Array(rootSeed), recoveryRecipientPub, RECOVERY_ARMOR_PURPOSE);
-  return { recipient_public_key: recoveryRecipientPub, recovery_pub: recoveryPub, sealed: bytesToB64(sealed) };
+  return { recipient_public_key: recoveryRecipientPub, recovery_pub: recoveryPub, sealed: bytesToB64(sealed), created_at: createdAt };
 }
 
 async function recoveryRecipientPublicKey(recoveryCode) {
@@ -491,7 +493,7 @@ async function recoveryRecipientPublicKey(recoveryCode) {
 
 // Enroll a recovery slot into a v3 armor, re-signed by the root. Requires the
 // root seed (reach root) + the code's public halves; refuses to replace one.
-async function addRecoverySlot(armorText, { rootSeed, recoveryRecipientPub, recoveryPub }) {
+async function addRecoverySlot(armorText, { rootSeed, recoveryRecipientPub, recoveryPub, createdAt = '1970-01-01T00:00:00Z' }) {
   const envelope = await parseFactorPolicyArmor(armorText);
   if (envelope.recovery) throw new Error('this armor already carries a recovery code');
   const sealed = await sealToEncapsulationKey(new Uint8Array(rootSeed), recoveryRecipientPub, RECOVERY_ARMOR_PURPOSE);
@@ -499,6 +501,7 @@ async function addRecoverySlot(armorText, { rootSeed, recoveryRecipientPub, reco
     recipient_public_key: recoveryRecipientPub,
     recovery_pub: recoveryPub,
     sealed: bytesToB64(sealed),
+    created_at: createdAt,
   };
   const unsigned = {
     v: POLICY_VERSION, generation: envelope.generation, root_pub: envelope.root_pub,
@@ -516,7 +519,7 @@ async function addRecoverySlot(armorText, { rootSeed, recoveryRecipientPub, reco
 // Rotate the recovery code: the OLD code AND root (succession closure). The
 // old code must open the existing slot; the root seed re-signs. Lost-code
 // regeneration (no old code) is the deferred timelock path.
-async function replaceRecoverySlot(armorText, { oldCode, rootSeed, recoveryRecipientPub, recoveryPub }) {
+async function replaceRecoverySlot(armorText, { oldCode, rootSeed, recoveryRecipientPub, recoveryPub, createdAt = '1970-01-01T00:00:00Z' }) {
   const envelope = await parseFactorPolicyArmor(armorText);
   if (!envelope.recovery) throw new Error('this armor carries no recovery code to replace');
   const opened = await openRootWithRecovery(armorText, oldCode);   // proves possession
@@ -527,7 +530,7 @@ async function replaceRecoverySlot(armorText, { oldCode, rootSeed, recoveryRecip
     v: POLICY_VERSION, generation: envelope.generation, root_pub: envelope.root_pub,
     factors: envelope.factors, access: envelope.access, policy: envelope.policy,
     wraps: envelope.wraps,
-    recovery: { recipient_public_key: recoveryRecipientPub, recovery_pub: recoveryPub, sealed: bytesToB64(sealed) },
+    recovery: { recipient_public_key: recoveryRecipientPub, recovery_pub: recoveryPub, sealed: bytesToB64(sealed), created_at: createdAt },
   };
   const signingKey = await importEd25519RootSigningKey(new Uint8Array(rootSeed));
   const signature = bytesToHex(await webCrypto.subtle.sign(
