@@ -1360,7 +1360,7 @@ const MARKUP = `
       <div class="ttl"><h1>First-time login on this device</h1><div class="sub">New device recognized</div></div></div>
     <div class="deep">
       <p class="lead" x-show="top.enrolled">Your factor has already been upgraded and is available for secure vault access.</p>
-      <p class="lead" x-show="!top.enrolled">A new authorized device has been detected. You must authorize full enrollment before this device can access your secure data.</p>
+      <p class="lead" x-show="!top.enrolled">A new authorized device has been detected. You must approve full enrollment before this device can access your secure data.</p>
       <div class="field"><label>Device name</label>
         <input type="text" x-model="deviceName" @keydown.enter="newDeviceOk()"
           x-effect="cur==='newdevice'&&setTimeout(()=>$el.select(),0)"></div>
