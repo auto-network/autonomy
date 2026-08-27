@@ -178,3 +178,35 @@ def test_update_refs_append_never_wipe(parser, monkeypatch):
                 monkeypatch, canned)
     put = next(b for m, p2, b in fake.calls if m == "PUT")
     assert put["refs"] == ["bead:auto-9"]
+
+
+def test_retire_flags_item_and_coverage_ignores_it(parser, monkeypatch,
+                                                  capsys):
+    """The first legitimate retirement need: converging parallel
+    bookings. Retire is a flag (record kept), restore undoes it, and a
+    retired checkpoint stops counting toward coverage."""
+    canned = dict(BASE)
+    canned[("GET", f"/api/mission/items/{MID}")] = {"items": [
+        {"surface_id": "relay", "item_id": "dup", "kind": "checkpoint",
+         "state": "pending", "title": "duplicate", "key": "relay:dup",
+         "created_at": "c", "updated_at": "u",
+         "refs": ["bead:auto-1"]}]}
+    fake = _run(parser, ["mission", "retire", MID, "relay", "dup"],
+                monkeypatch, canned)
+    put = next(b for m, p2, b in fake.calls if m == "PUT")
+    assert put["retired"] is True
+    assert put["title"] == "duplicate"          # full record survives
+
+    fake = _run(parser, ["mission", "retire", MID, "relay", "dup",
+                         "--restore"], monkeypatch, canned)
+    put = next(b for m, p2, b in fake.calls if m == "PUT")
+    assert put["retired"] is False
+
+    # coverage: the retired checkpoint neither counts nor covers
+    canned[("GET", f"/api/mission/items/{MID}")] = {"items": [
+        {"surface_id": "relay", "item_id": "dup", "kind": "checkpoint",
+         "state": "pending", "title": "duplicate", "retired": True,
+         "refs": ["bead:auto-1"]}]}
+    fake = _run(parser, ["mission", "coverage", MID], monkeypatch, canned)
+    out = capsys.readouterr().out
+    assert "0 criteria covering 0" in out
