@@ -316,6 +316,42 @@ export function desiredPolicy(m) {
   return canonicalExpression(orOfLeaves([...leaves]));
 }
 
+// ── the root ceremony's discovery: what opens the armor, from the armor ────
+// The policy tree is deterministic and discoverable: expand it into its
+// MINIMAL satisfying factor-sets. Every prompt the authorize screen shows is
+// derived from these sets and from what has been collected so far — never
+// from an assumed shape. Handles every legal tree: one password, any-one of
+// N, either-of-mixed, one-of-each (MFA any), specific-of-each, and nested
+// combinations.
+export function satisfyingSets(policy) {
+  const canonical = canonicalExpression(policy);
+  function minimize(sets) {
+    const uniq = [];
+    const seen = new Set();
+    for (const raw of sets) {
+      const s = [...new Set(raw)].sort();
+      const k = s.join(',');
+      if (!seen.has(k)) { seen.add(k); uniq.push(s); }
+    }
+    return uniq.filter((s) => !uniq.some(
+      (t) => t !== s && t.length < s.length && t.every((id) => s.includes(id)),
+    ));
+  }
+  function walk(n) {
+    if (n.op === 'factor') return [[n.factor_id]];
+    if (n.op === 'or') return minimize(n.children.flatMap(walk));
+    let acc = [[]];
+    for (const child of n.children) {
+      const cs = walk(child);
+      const next = [];
+      for (const a of acc) for (const c of cs) next.push([...a, ...c]);
+      acc = next;
+    }
+    return minimize(acc);
+  }
+  return walk(canonical);
+}
+
 // ── the Alpine component: the design's script, verbatim except the hooks ────
 let hostCallbacks = { onBack: null, onClose: null };
 
@@ -338,8 +374,9 @@ export function credentialsPanel() {
     // production state (hooks only)
     loading: true, loadError: null, migrationPending: false, committing: false,
     generation: 0, rootPub: null, armorText: null, envelope: null,
-    _committedPolicy: null, _authSeeds: {},
-    deviceName: '', newDevErr: null,
+    _committedPolicy: null, _authSeeds: {}, _viewFactors: [],
+    deviceName: '', newDevErr: null, authAutofilled: false,
+    authShowMissing: false, authDeadEnd: false,
 
     init() { this.load(); },
 
@@ -368,6 +405,7 @@ export function credentialsPanel() {
         this.armorText = pj.armored_private_key;
         this.envelope = await parseFactorPolicyArmor(this.armorText);
         this._committedPolicy = fp.root_policy;
+        this._viewFactors = fp.factors || [];
         this.initBaseline();
         this.loading = false;
         this._greetNewDevice();
@@ -733,16 +771,73 @@ export function credentialsPanel() {
     // ── the authorize screen: the design's requireRoot, real crypto ───────
     requireRoot(detail, step) {
       return new Promise((r) => {
-        this.password = ''; this._authSeeds = {};
+        this.password = ''; this._authSeeds = {}; this.authShowMissing = false; this.authDeadEnd = false;
         this.push({ s: 'authorize', detail, step: step || '', resolve: r });
+        // no WebAuthn at all + every route needs a passkey: dead end, known now
+        const hasWebAuthn = typeof window !== 'undefined' && !!window.PublicKeyCredential
+          && typeof navigator !== 'undefined' && !!navigator.credentials;
+        if (!hasWebAuthn && this.authNeedsPasskeyOnly) {
+          this.authDeadEnd = true; this.authShowMissing = true;
+        }
       });
     },
-    // What the CURRENT (committed) policy accepts — the authorize screen offers
-    // exactly these, independent of the staged edits it is about to authorize.
+    // What the CURRENT (committed) policy accepts — discovered from the armor,
+    // never assumed: the minimal satisfying factor-sets, filtered by what has
+    // been collected so far. The screen prompts for exactly what is still
+    // NEEDED, in any order, and each supplied factor validates independently
+    // (password: its protector's authenticated decryption; passkey: enrolled
+    // recipient membership) before the joint open.
     get authLeaves() { return this.envelope ? policyFactorIds(this.envelope.policy) : []; },
-    get authPw() { return this.envelope && this.envelope.factors.some((f) => f.type === 'password' && this.authLeaves.includes(f.factor_id)); },
-    get authPk() { return this.envelope && this.envelope.factors.some((f) => f.type === 'passkey' && this.authLeaves.includes(f.factor_id)); },
-    get authBoth() { return !!(this.envelope && this.envelope.policy.op === 'and'); },
+    get authSets() { return this.envelope ? satisfyingSets(this.envelope.policy) : []; },
+    _authType(id) {
+      const f = this.envelope && this.envelope.factors.find((x) => x.factor_id === id);
+      return f ? f.type : null;
+    },
+    get authCollected() { return Object.keys(this._authSeeds); },
+    get authAchievable() {
+      const col = this.authCollected;
+      return this.authSets.filter((s) => col.every((id) => s.includes(id)));
+    },
+    get authNeeded() {
+      const col = new Set(this.authCollected);
+      const out = new Set();
+      this.authAchievable.forEach((s) => s.forEach((id) => { if (!col.has(id)) out.add(id); }));
+      return [...out];
+    },
+    get authPw() { return this.authNeeded.some((id) => this._authType(id) === 'password'); },
+    get authPk() { return this.authNeeded.some((id) => this._authType(id) === 'passkey'); },
+    get authBoth() {
+      const sets = this.authAchievable;
+      return sets.length > 0 && sets.every((s) => s.some((id) => this._authType(id) === 'password')
+        && s.some((id) => this._authType(id) === 'passkey'));
+    },
+    get authPwDone() { return this.authCollected.some((id) => this._authType(id) === 'password'); },
+    get authPkDone() { return this.authCollected.some((id) => this._authType(id) === 'passkey'); },
+    // Dead-end detection: this device cannot complete ANY achievable set —
+    // every route still open requires a passkey it cannot produce. Definitive
+    // when the browser has no WebAuthn at all; inferred after a tap proves the
+    // available credential is not enrolled here. The explanation lists the
+    // required factors and the enrolled devices that WOULD get you in.
+    get authNeedsPasskeyOnly() {
+      const sets = this.authAchievable;
+      return sets.length > 0 && sets.every((s) => s.some((id) => this._authType(id) === 'passkey'
+        && !this._authSeeds[id]));
+    },
+    get authMissingPasskeys() {
+      const needed = new Set(this.authNeeded);
+      const rows = (this._viewFactors || []).filter((f) => f.type === 'passkey' && needed.has(f.factor_id));
+      return rows.map((f) => ({
+        label: f.label || 'Passkey',
+        devices: (f.recipients || []).map((r) => r.label).join(', ') || 'no device enrolled',
+      }));
+    },
+    get authMissingLead() {
+      // one required factor everywhere vs. alternatives
+      const single = this.authMissingPasskeys.length === 1;
+      return single
+        ? 'The following factor is required but missing on this device:'
+        : 'At least one of the following factors must be provided:';
+    },
     _clearAuthSeeds() {
       Object.values(this._authSeeds).forEach((s) => { if (s && s.fill) s.fill(0); });
       this._authSeeds = {};
@@ -751,8 +846,9 @@ export function credentialsPanel() {
     async _authPasskey() {
       if (this.top.s !== 'authorize' || this.verifying) return;
       try {
+        const needed = new Set(this.authNeeded);
         const pkFactors = this.envelope.factors.filter((f) => f.type === 'passkey'
-          && this.authLeaves.includes(f.factor_id) && !this._authSeeds[f.factor_id]);
+          && needed.has(f.factor_id));
         const allow = pkFactors.map((f) => ({ type: 'public-key', id: b64uToBytes(f.credential_id) }));
         const asrt = await navigator.credentials.get({ publicKey: {
           challenge: crypto.getRandomValues(new Uint8Array(32)),
@@ -769,20 +865,29 @@ export function credentialsPanel() {
           && f.recipients.some((s) => s.recipient_public_key === rec.publicKeyHex));
         if (!match) {
           prf.fill(0);
+          // the tap proved this device holds no enrolled slot: surface the
+          // requirement list; a hard dead end when no other route remains
+          this.authShowMissing = true;
+          if (this.authNeedsPasskeyOnly) this.authDeadEnd = true;
           throw new Error('This passkey works for sign-in, but this device is not enrolled to authorize your root.');
         }
-        this._authSeeds[match.factor_id] = prf;
+        this._authSeeds = { ...this._authSeeds, [match.factor_id]: prf };
         await this._settle();
       } catch (e) {
-        if (e && e.name === 'NotAllowedError') return;
+        if (e && e.name === 'NotAllowedError') {
+          // cancelled or no usable credential here — show what WOULD work
+          this.authShowMissing = true;
+          return;
+        }
         this.flash((e && e.message) || String(e));
       }
     },
     authWithPassword() { if (this.password) this._authPassword(); },
     async _authPassword() {
       if (this.top.s !== 'authorize' || this.verifying) return;
+      const needed = new Set(this.authNeeded);
       const pwFactors = this.envelope.factors.filter((f) => f.type === 'password'
-        && this.authLeaves.includes(f.factor_id) && !this._authSeeds[f.factor_id]);
+        && needed.has(f.factor_id));
       let opened = null;
       for (const f of pwFactors) {
         try {
@@ -792,7 +897,7 @@ export function credentialsPanel() {
       }
       if (!opened) { this.flash('Incorrect — try again'); return; }
       this.password = '';
-      this._authSeeds[opened.fid] = opened.seed;
+      this._authSeeds = { ...this._authSeeds, [opened.fid]: opened.seed };
       await this._settle();
     },
     async _settle() {
@@ -1377,12 +1482,24 @@ const MARKUP = `
     <div class="deep">
       <template x-if="!verifying"><div>
         <template x-if="authBoth"><p class="lead">Multi-factor is on — approve with your passkey <b>and</b> your password.</p></template>
-        <template x-if="authPk"><button class="pkbtn" @click="authWithPasskey()"><svg><use xlink:href="#i-passkey"/></svg> Use your passkey</button></template>
-        <template x-if="authPk && authPw"><div class="or" x-text="authBoth?'and':'or'"></div></template>
-        <template x-if="authPw"><div class="field"><label>Enter your current password</label>
-          <input type="password" x-model="password" autocomplete="current-password" placeholder="Current password" @keydown.enter="authWithPassword()"></div></template>
+        <template x-if="authPkDone"><div class="inlineok"><svg><use xlink:href="#i-check"/></svg> Passkey authorized</div></template>
+        <template x-if="authPk && !authPkDone"><button class="pkbtn" @click="authWithPasskey()"><svg><use xlink:href="#i-passkey"/></svg> Use your passkey</button></template>
+        <template x-if="authPk && authPw && !authPkDone && !authPwDone"><div class="or" x-text="authBoth?'and':'or'"></div></template>
+        <template x-if="authPwDone"><div class="inlineok"><svg><use xlink:href="#i-check"/></svg> Password entered</div></template>
+        <template x-if="authPw && !authPwDone"><div class="field"><label>Enter your current password</label>
+          <input type="password" x-model="password" autocomplete="current-password" placeholder="Current password"
+            @animationstart="if($event.animationName==='fui-afstart'){ authAutofilled=true; setTimeout(()=>authWithPassword(),0); }"
+            @keydown="if($event.key&&$event.key.length===1) authAutofilled=false"
+            @keydown.enter="authWithPassword()"></div></template>
+        <template x-if="authShowMissing || authDeadEnd"><div class="mfadyn">
+          <template x-if="authDeadEnd"><div style="font-weight:700;margin-bottom:6px">You can’t authorize on this device.</div></template>
+          <div x-text="authMissingLead"></div>
+          <template x-for="mp in authMissingPasskeys" :key="mp.label">
+            <div style="margin-top:5px">“<span x-text="mp.label"></span>” — enrolled on: <span x-text="mp.devices"></span></div>
+          </template>
+        </div></template>
         <div class="authrow"><button class="btn btn-ghost" @click="back()">Cancel</button>
-          <button class="btn btn-primary" :disabled="!password" @click="authWithPassword()">Authorize</button></div>
+          <button class="btn btn-primary" :disabled="!password || authPwDone" @click="authWithPassword()">Authorize</button></div>
       </div></template>
       <template x-if="verifying"><div class="verifying"><span class="spin"></span> Verifying with your root key…</div></template>
     </div>
