@@ -523,11 +523,12 @@
                    oninput="Alpine.$data(this.closest('[x-data]')).onInput(this)"
                    onkeydown="if((event.metaKey||event.ctrlKey)&&event.key==='Enter'){event.preventDefault();Alpine.$data(this.closest('[x-data]')).sendMessage()}"
                    onpaste="var e=event; e.preventDefault(); document.execCommand('insertText', false, (e.clipboardData||window.clipboardData).getData('text/plain'));"></div>
-              <button class="sv-send"
+              <button type="button"
+                      class="sv-send"
                       id="sendBtn"
-                      ontouchend="event.preventDefault(); Alpine.$data(this.closest('[x-data]')).sendMessage()"
                       @click="sendMessage()"
                       onmousedown="event.preventDefault()"
+                      aria-label="Send message"
                       :disabled="!canSendComposer || sending || uploading">
                 <template x-if="!sending">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M3.478 2.405a.75.75 0 00-.926.94l2.432 7.905H13.5a.75.75 0 010 1.5H4.984l-2.432 7.905a.75.75 0 00.926.94l18.04-8.5a.75.75 0 000-1.38l-18.04-8.5z"/></svg>

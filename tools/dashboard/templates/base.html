@@ -1782,7 +1782,7 @@
       border: 1.5px solid transparent;
       min-height: 36px;
       max-height: 120px;
-      overflow: hidden;
+      overflow: visible;
     }
     .sv-input-bubble:focus-within { border-color: rgba(99, 102, 241, 0.5); }
 
@@ -1803,12 +1803,16 @@
       margin: 3px; flex-shrink: 0;
       transition: opacity 0.15s, transform 0.1s;
       position: relative;
+      z-index: 1;
+      touch-action: manipulation;
+      -webkit-tap-highlight-color: transparent;
     }
-    /* Invisible 2px overlay extends the tap target without affecting layout. */
+    /* Invisible 44x44 touch target; the visible 32x30 button is unchanged. */
     .sv-send::before {
       content: '';
       position: absolute;
-      inset: -2px;
+      inset: -7px -6px;
+      pointer-events: auto;
     }
     .sv-send:disabled {
       opacity: 0.3;
