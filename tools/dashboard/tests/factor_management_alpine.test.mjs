@@ -842,9 +842,11 @@ test('walk: enrol a recovery code through the real commit flow, then it opens ro
   await until(() => comp().hasRecovery, 'panel shows recovery enrolled');
 });
 
-test('walk: a factor change can be authorized BY the recovery code', async () => {
-  // a fresh TWO-password armor (so a demote is committable) that already
-  // carries a recovery slot
+test('walk: the in-session authorize screen never offers the recovery code', async () => {
+  // Even an armor that DOES carry a recovery slot must not present it inside a
+  // ceremony: the recovery code is offered in exactly one place, the unlock
+  // "Trouble logging in" path. Factor discovery ignores the slot; the authorize
+  // screen is satisfied only by a real factor.
   const code = generateRecoveryCode();
   const recipient = await recoveryRecipientPublicKey(code);
   const { recoveryPub } = await deriveRecoveryFactors(code);
@@ -867,6 +869,9 @@ test('walk: a factor change can be authorized BY the recovery code', async () =>
   await comp().load();
   await until(() => comp().hasRecovery && !comp().loading, 'armor with recovery loaded');
 
+  // the removed in-session authorize path is really gone
+  assert.equal(typeof comp().authWithRecovery, 'undefined', 'authWithRecovery removed');
+
   // demote one password (the other keeps full authority) → a committable change
   const pwCell = qa('.authcell')[0];
   pwCell.click();
@@ -874,8 +879,16 @@ test('walk: a factor change can be authorized BY the recovery code', async () =>
   const commitsBefore = SERVER.commits.length;
   q('.commitbar .btn-primary').click();
   await until(() => comp().cur === 'authorize', 'authorize screen');
-  // authorize by recovery code (the code opens root, so it authorizes)
-  await comp().authWithRecovery(await encodeRecoveryCode(code));
-  await until(() => SERVER.commits.length === commitsBefore + 1, 'commit authorized by the code');
+
+  // NO recovery affordance anywhere on the authorize screen
+  assert.equal(q('input[placeholder="Recovery code"]'), null, 'no recovery input on authorize');
+  assert.ok(!qa('button').some((b) => (b.textContent || '').includes('Use recovery code')),
+    'no Use-recovery-code button on authorize');
+
+  // the screen still authorizes by a real factor (a password of the current policy)
+  setInput(q('input[autocomplete=current-password]'), 'aaaa-aaaa-aaaa');
+  await until(() => { const b = qa('.authrow .btn-primary').pop(); return b && !b.disabled; }, 'Authorize enabled');
+  qa('.authrow .btn-primary').pop().click();
+  await until(() => SERVER.commits.length === commitsBefore + 1, 'commit authorized by a factor, not the code');
   await until(() => !comp().loading, 'reloaded');
 });
