@@ -268,6 +268,11 @@ def _do_install_full(args: argparse.Namespace) -> int:
     except OAuthError as e:
         logger.error("claude install: consumer flow failed alias=%r: %s", args.alias, e)
         print(f"Error during consumer login: {e}", file=sys.stderr)
+        print(
+            "This hand-rolled OAuth path is known broken for Max/consumer "
+            "accounts. Use the container-driven recovery instead: "
+            "graph read 5ab13dd5-570", file=sys.stderr,
+        )
         return 1
 
     org_uuid = consumer.token.organization_uuid
@@ -282,6 +287,11 @@ def _do_install_full(args: argparse.Namespace) -> int:
     except OAuthError as e:
         logger.error("claude install: console flow failed alias=%r: %s", args.alias, e)
         print(f"Error during console login: {e}", file=sys.stderr)
+        print(
+            "This hand-rolled OAuth path is known broken for Max/consumer "
+            "accounts. Use the container-driven recovery instead: "
+            "graph read 5ab13dd5-570", file=sys.stderr,
+        )
         return 1
 
     if console.token.organization_uuid != org_uuid:
@@ -307,6 +317,11 @@ def _do_install_full(args: argparse.Namespace) -> int:
         logger.error("claude install: mint failed alias=%r org=%s: %s",
                      args.alias, org_uuid, e)
         print(f"Error minting setup token: {e}", file=sys.stderr)
+        print(
+            "This hand-rolled OAuth path is known broken for Max/consumer "
+            "accounts. Use the container-driven recovery instead: "
+            "graph read 5ab13dd5-570", file=sys.stderr,
+        )
         return 1
 
     payload = _build_credentials_payload(
@@ -355,6 +370,11 @@ def _do_install_refresh_setup_token(args: argparse.Namespace) -> int:
             args.alias, e,
         )
         print(f"Error during console login: {e}", file=sys.stderr)
+        print(
+            "This hand-rolled OAuth path is known broken for Max/consumer "
+            "accounts. Use the container-driven recovery instead: "
+            "graph read 5ab13dd5-570", file=sys.stderr,
+        )
         return 1
     if console.token.organization_uuid != expected_org_uuid:
         logger.error(
@@ -380,6 +400,11 @@ def _do_install_refresh_setup_token(args: argparse.Namespace) -> int:
             args.alias, expected_org_uuid, e,
         )
         print(f"Error minting setup token: {e}", file=sys.stderr)
+        print(
+            "This hand-rolled OAuth path is known broken for Max/consumer "
+            "accounts. Use the container-driven recovery instead: "
+            "graph read 5ab13dd5-570", file=sys.stderr,
+        )
         return 1
     _write_setup_token_row(org_uuid=expected_org_uuid, raw_key=raw_key)
     logger.info(
@@ -600,7 +625,10 @@ def attach_claude_subparser(sub: Any) -> None:
         "install",
         help=(
             "Run the consumer + console OAuth flows and write the credentials "
-            "and setup-token rows. With --refresh-setup-token, only re-mint."
+            "and setup-token rows. With --refresh-setup-token, only re-mint. "
+            "KNOWN BROKEN for Max/consumer accounts (wrong authorize host/scope "
+            "vs what the real Claude binary uses) — see graph://5ab13dd5-570 "
+            "for the working container-driven recovery procedure."
         ),
     )
     p_install.add_argument(
