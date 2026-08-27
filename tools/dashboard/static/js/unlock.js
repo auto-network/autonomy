@@ -119,7 +119,18 @@
   }
 
   function _done() {
-    location.replace(_nextPath());
+    var target = _nextPath();
+    try {
+      if (sessionStorage.getItem('autonomy.factor.pending-slot')
+          || sessionStorage.getItem('autonomy.factor.slot-enrolled')) {
+        // A first-device enrollment greeting is pending. Its dialog lives in
+        // the shell's profile drawer, which immersive surfaces (sessions,
+        // Mission Control, …) do not render — so suppress the next-redirect
+        // and land on the shell home, where the drawer auto-opens into it.
+        target = '/';
+      }
+    } catch (e) { /* storage unavailable — normal redirect */ }
+    location.replace(target);
   }
 
   function _esc(s) {

@@ -615,7 +615,33 @@
       loadError = (error && error.message) || String(error);
     }
     render();
+    maybeGreetPendingEnrollment();
     return status;
+  }
+
+  // A passkey login detected this device needs enrollment (unlock.js stashed
+  // it and landed on the shell home). The drawer must greet WITHOUT a click —
+  // and stick: render() force-closes the panel for bootstrap/locked/error
+  // states, so attempt only once the status state can host a panel, retrying
+  // on later refreshes until it takes. One-shot per page load; the stash is
+  // consumed by the enrollment itself.
+  var greetAttempted = false;
+  function maybeGreetPendingEnrollment() {
+    if (greetAttempted || panelOpen) return;
+    var pending = false;
+    try {
+      pending = !!(root.sessionStorage
+        && (root.sessionStorage.getItem('autonomy.factor.pending-slot')
+          || root.sessionStorage.getItem('autonomy.factor.slot-enrolled')));
+    } catch (e) { pending = false; }
+    if (!pending) { greetAttempted = true; return; }
+    var state = loadError && !status ? 'error' : deriveIdentityState(status);
+    if (state === 'loading' || state === 'bootstrap' || state === 'locked' || state === 'error') {
+      return;   // not yet — retry on the next refresh
+    }
+    greetAttempted = true;
+    panelOpen = true;
+    openCredentials();
   }
 
   // Threads the already-known personal display_name into the globals
@@ -666,17 +692,6 @@
       if (panelOpen) render();
     });
     refresh();
-    // A passkey login just recognized this device as a new PRF slot (stashed
-    // by unlock.js). Greet the arrival: open straight into Manage credentials,
-    // where the name-this-device dialog completes or confirms the enrollment.
-    try {
-      if (root.sessionStorage
-          && (root.sessionStorage.getItem('autonomy.factor.pending-slot')
-            || root.sessionStorage.getItem('autonomy.factor.slot-enrolled'))) {
-        panelOpen = true;
-        openCredentials();
-      }
-    } catch (e) { /* storage unavailable — the panel still offers enrollment */ }
   }
 
   function identityMenuPlugins(plugins) {

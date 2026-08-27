@@ -159,10 +159,10 @@ function browserCredential(sim) {
 }
 
 // ── the harness: run the REAL unlock.js against a jsdom window ─────────────
-async function bootUnlock(sourcePath) {
+async function bootUnlock(sourcePath, { search = '' } = {}) {
   const dom = new JSDOM(
     '<!doctype html><html><body><div class="unlock-shell"><div id="unlock-card" class="unlock-card"></div></div></body></html>',
-    { url: 'https://localhost/unlock', pretendToBeVisual: true },
+    { url: 'https://localhost/unlock' + search, pretendToBeVisual: true },
   );
   const win = dom.window;
   const credentials = {
@@ -191,6 +191,13 @@ async function bootUnlock(sourcePath) {
   // specifiers to the same real modules through the test's ESM loader
   src = src.replace(/\bimport\(/g, '__dynImport(');
   const dynImport = (spec) => import(pathToFileURL(path.join(JS_DIR, spec)).href);
+  const nav = { target: null };
+  const location = {
+    href: 'https://localhost/unlock' + search,
+    search,
+    assign(t) { nav.target = t; },
+    replace(t) { nav.target = t; },
+  };
   const run = new Function(
     'window', 'document', 'navigator', 'sessionStorage', 'fetch', 'crypto',
     'location', '__dynImport', 'PublicKeyCredential',
@@ -198,10 +205,9 @@ async function bootUnlock(sourcePath) {
   );
   run(
     win, win.document, win.navigator, win.sessionStorage, router, crypto,
-    { href: 'https://localhost/unlock', assign() {}, replace() {} },
-    dynImport, win.PublicKeyCredential,
+    location, dynImport, win.PublicKeyCredential,
   );
-  return { dom, win };
+  return { dom, win, nav };
 }
 
 const flush = () => new Promise((r) => setImmediate(r));
@@ -253,4 +259,19 @@ test('passkey login on a slotless (post-migration) device: PRF requested, access
   assert.equal(pending.recipient_public_key, expected,
     'stash holds the v3 recipient derived from this device\'s PRF');
   assert.equal(pending.label, 'New device');
+});
+
+test('a login that detects a pending enrollment lands on the shell home, never the last session', async () => {
+  SERVER.posts.length = 0; SERVER.getRequests.length = 0;
+  await buildFixture();
+  const { win, nav } = await bootUnlock(process.env.UNLOCK_JS || path.join(JS_DIR, 'unlock.js'),
+    { search: '?next=/session/auto-1234' });
+  const card = win.document.getElementById('unlock-card');
+  const button = await until(() => card.querySelector('#unlock-primary'), 'unlock button rendered');
+  button.click();
+  await until(() => win.sessionStorage.getItem('autonomy.factor.pending-slot'), 'pending-slot stash');
+  await until(() => nav.target !== null, 'post-login navigation');
+  // the first-device dialog lives in the shell's profile drawer — an immersive
+  // session surface has no profile control, so the greeting could never show
+  assert.equal(nav.target, '/', 'redirect suppressed in favor of the shell home');
 });
