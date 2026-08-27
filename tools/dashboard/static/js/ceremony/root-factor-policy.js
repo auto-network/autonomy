@@ -12,6 +12,7 @@ import {
   bytesToHex,
   importEd25519RootSigningKey,
 } from './primitives.js';
+import { deriveRecoveryFactors } from './recovery.js';
 import {
   deriveEncapsulationKeypair,
   openWithEncapsulationPrivateKey,
@@ -429,12 +430,16 @@ async function parseFactorPolicyArmor(armorText) {
     throw new Error('factor policy armor is not canonical v3');
   }
   const envelope = body.factor_policy;
-  if (!sameKeys(envelope, ['v', 'generation', 'root_pub', 'factors', 'access',
-    'policy', 'wraps', 'signature']) || envelope.v !== POLICY_VERSION
+  const baseKeys = ['v', 'generation', 'root_pub', 'factors', 'access', 'policy', 'wraps', 'signature'];
+  const keys = Object.keys(envelope);
+  const hasRecovery = keys.includes('recovery');
+  if (!sameKeys(envelope, hasRecovery ? [...baseKeys, 'recovery'] : baseKeys)
+      || envelope.v !== POLICY_VERSION
       || !Number.isSafeInteger(envelope.generation) || envelope.generation < 1
       || !/^[0-9a-f]{128}$/.test(envelope.signature)) {
     throw new Error('factor policy envelope is malformed');
   }
+  if (hasRecovery) parseRecoverySlot(envelope.recovery);
   const state = validateState(
     envelope.root_pub, envelope.factors, envelope.access, envelope.policy,
   );
@@ -442,11 +447,108 @@ async function parseFactorPolicyArmor(armorText) {
     v: POLICY_VERSION, generation: envelope.generation, root_pub: envelope.root_pub,
     factors: state.factors, access: state.access, policy: state.policy, wraps: envelope.wraps,
   };
+  if (hasRecovery) unsigned.recovery = parseRecoverySlot(envelope.recovery);
   if (!await verifyRootSignature(
     envelope.root_pub, envelope.signature,
     concatBytes(textEncoder.encode(POLICY_SIGNATURE_DOMAIN), textEncoder.encode(canonicalJson(unsigned))),
   )) throw new Error('factor policy signature does not verify');
   return { ...unsigned, signature: envelope.signature };
+}
+
+// ── recovery slot (design graph://fd418706-97e) — the byte-identical mirror of
+// root_factor_policy.py's recovery slot. The code opens root ALONE, outside the
+// policy tree. Recipient derives from the code via the SAME RECOVERY_ARMOR
+// purpose the v2 path uses, so one printed code opens both v2 and v3 armors.
+const RECOVERY_ARMOR_PURPOSE = 'autonomy/recovery-armor/v1';
+
+function parseRecoverySlot(value) {
+  if (!sameKeys(value, ['recipient_public_key', 'recovery_pub', 'sealed'])
+      || !/^[0-9a-f]{64}$/.test(value.recipient_public_key)
+      || !/^[0-9a-f]{64}$/.test(value.recovery_pub)
+      || b64ToBytes(value.sealed).length !== 81) {
+    throw new Error('recovery slot is malformed');
+  }
+  return {
+    recipient_public_key: value.recipient_public_key,
+    recovery_pub: value.recovery_pub,
+    sealed: value.sealed,
+  };
+}
+
+async function recoveryRecipientPublicKey(recoveryCode) {
+  const { kekRecoverySeed } = await deriveRecoveryFactors(recoveryCode);
+  const { publicKeyHex } = await deriveEncapsulationKeypair(kekRecoverySeed, RECOVERY_ARMOR_PURPOSE);
+  return publicKeyHex;
+}
+
+// Enroll a recovery slot into a v3 armor, re-signed by the root. Requires the
+// root seed (reach root) + the code's public halves; refuses to replace one.
+async function addRecoverySlot(armorText, { rootSeed, recoveryRecipientPub, recoveryPub }) {
+  const envelope = await parseFactorPolicyArmor(armorText);
+  if (envelope.recovery) throw new Error('this armor already carries a recovery code');
+  const sealed = await sealToEncapsulationKey(new Uint8Array(rootSeed), recoveryRecipientPub, RECOVERY_ARMOR_PURPOSE);
+  const recovery = {
+    recipient_public_key: recoveryRecipientPub,
+    recovery_pub: recoveryPub,
+    sealed: bytesToB64(sealed),
+  };
+  const unsigned = {
+    v: POLICY_VERSION, generation: envelope.generation, root_pub: envelope.root_pub,
+    factors: envelope.factors, access: envelope.access, policy: envelope.policy,
+    wraps: envelope.wraps, recovery,
+  };
+  const signingKey = await importEd25519RootSigningKey(new Uint8Array(rootSeed));
+  const signature = bytesToHex(await webCrypto.subtle.sign(
+    'Ed25519', signingKey,
+    concatBytes(textEncoder.encode(POLICY_SIGNATURE_DOMAIN), textEncoder.encode(canonicalJson(unsigned))),
+  ));
+  return emitFactorPolicyArmor({ ...unsigned, signature });
+}
+
+// Rotate the recovery code: the OLD code AND root (succession closure). The
+// old code must open the existing slot; the root seed re-signs. Lost-code
+// regeneration (no old code) is the deferred timelock path.
+async function replaceRecoverySlot(armorText, { oldCode, rootSeed, recoveryRecipientPub, recoveryPub }) {
+  const envelope = await parseFactorPolicyArmor(armorText);
+  if (!envelope.recovery) throw new Error('this armor carries no recovery code to replace');
+  const opened = await openRootWithRecovery(armorText, oldCode);   // proves possession
+  if (opened.rootPub !== envelope.root_pub) throw new Error('the old recovery code did not open this armor');
+  opened.seed.fill(0);
+  const sealed = await sealToEncapsulationKey(new Uint8Array(rootSeed), recoveryRecipientPub, RECOVERY_ARMOR_PURPOSE);
+  const unsigned = {
+    v: POLICY_VERSION, generation: envelope.generation, root_pub: envelope.root_pub,
+    factors: envelope.factors, access: envelope.access, policy: envelope.policy,
+    wraps: envelope.wraps,
+    recovery: { recipient_public_key: recoveryRecipientPub, recovery_pub: recoveryPub, sealed: bytesToB64(sealed) },
+  };
+  const signingKey = await importEd25519RootSigningKey(new Uint8Array(rootSeed));
+  const signature = bytesToHex(await webCrypto.subtle.sign(
+    'Ed25519', signingKey,
+    concatBytes(textEncoder.encode(POLICY_SIGNATURE_DOMAIN), textEncoder.encode(canonicalJson(unsigned))),
+  ));
+  return emitFactorPolicyArmor({ ...unsigned, signature });
+}
+
+// Open the root seed with the printed code alone.
+async function openRootWithRecovery(armorText, recoveryCode) {
+  const envelope = await parseFactorPolicyArmor(armorText);
+  if (!envelope.recovery) throw new Error('this armor carries no recovery code');
+  const { kekRecoverySeed } = await deriveRecoveryFactors(recoveryCode);
+  const recipient = await deriveEncapsulationKeypair(kekRecoverySeed, RECOVERY_ARMOR_PURPOSE);
+  if (recipient.publicKeyHex !== envelope.recovery.recipient_public_key) {
+    throw new Error('that recovery code does not match this armor');
+  }
+  const seed = await openWithEncapsulationPrivateKey(
+    b64ToBytes(envelope.recovery.sealed), recipient.privateKeyHex, RECOVERY_ARMOR_PURPOSE,
+  );
+  const signingKey = await importEd25519RootSigningKey(seed);
+  const probe = textEncoder.encode('autonomy.identity.root-factor-open-check.v1\n');
+  const signature = new Uint8Array(await webCrypto.subtle.sign('Ed25519', signingKey, probe));
+  if (!await verifyRootSignature(envelope.root_pub, bytesToHex(signature), probe)) {
+    seed.fill(0);
+    throw new Error('opened root seed does not match root_pub');
+  }
+  return { seed, signingKey, rootPub: envelope.root_pub, envelope };
 }
 
 function emitFactorPolicyArmor(envelope) {
@@ -455,7 +557,7 @@ function emitFactorPolicyArmor(envelope) {
   return [ARMOR_BEGIN, ...encoded, ARMOR_END].join('\n');
 }
 
-async function buildFactorPolicyArmor({ rootSeed, rootPub, generation, factors, access, policy }) {
+async function buildFactorPolicyArmor({ rootSeed, rootPub, generation, factors, access, policy, recovery }) {
   const state = validateState(rootPub, factors, access, policy);
   const digest = await policyDigest(generation, rootPub, state.factors, state.access, state.policy);
   const recipients = Object.fromEntries(
@@ -468,6 +570,7 @@ async function buildFactorPolicyArmor({ rootSeed, rootPub, generation, factors, 
     v: POLICY_VERSION, generation, root_pub: rootPub,
     factors: state.factors, access: state.access, policy: state.policy, wraps,
   };
+  if (recovery) unsigned.recovery = parseRecoverySlot(recovery);
   const signingKey = await importEd25519RootSigningKey(rootSeed);
   const signature = bytesToHex(await webCrypto.subtle.sign(
     'Ed25519', signingKey,
@@ -586,6 +689,10 @@ export {
   openPasswordFactor,
   importFactorAccessSigningKey,
   parseFactorPolicyArmor,
+  recoveryRecipientPublicKey,
+  addRecoverySlot,
+  replaceRecoverySlot,
+  openRootWithRecovery,
   buildFactorPolicyArmor,
   openFactorPolicyArmor,
   signFactorPolicyTransition,
