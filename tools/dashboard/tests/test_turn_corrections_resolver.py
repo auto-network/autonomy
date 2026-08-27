@@ -87,6 +87,12 @@ def test_diff_fragments_single_word_typo():
     assert _extract(frags, "insert") == "Please"
 
 
+def test_normalize_correction_text_turns_literal_newlines_into_line_breaks():
+    """Double-escaped shell input should render and persist as real paragraphs."""
+    assert tc.normalize_correction_text("First\\n\\nSecond") == "First\n\nSecond"
+    assert tc.normalize_correction_text("First\\r\\nSecond") == "First\nSecond"
+
+
 def test_diff_fragments_curly_apostrophe_vs_straight_is_no_op_when_normalized():
     """Normalize curly/straight apostrophe variants as non-substantive style edits."""
     frags = tc.diff_fragments("I won’t go", "I won't go")

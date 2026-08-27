@@ -65,6 +65,18 @@ _PUNCTUATION_NORMALIZE_TABLE = str.maketrans({
 })
 
 
+def normalize_correction_text(text: str) -> str:
+    """Canonicalize escaped line breaks from shell/JSON construction mistakes.
+
+    Turn-correction suggestions are prose replacements. Agents should submit
+    multiline text through ``--stdin``, but an escaped ``\\n`` occasionally
+    arrives when a model double-escapes a nested JavaScript/shell command.
+    Treat those sequences as the paragraph separators they were intended to
+    be, before matching and persistence.
+    """
+    return text.replace("\\r\\n", "\n").replace("\\n", "\n")
+
+
 def _normalized_token(token: str) -> str:
     return token.translate(_PUNCTUATION_NORMALIZE_TABLE)
 

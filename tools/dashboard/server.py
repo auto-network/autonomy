@@ -7082,6 +7082,7 @@ def _validate_turn_correction_suggestion(
             {"error": "corrected_text is required and must be a non-empty string"},
             status_code=400,
         )
+    corrected = turn_corrections_mod.normalize_correction_text(corrected)
     mode = body.get("mode")
     if mode is not None and mode not in _TURN_CORRECTION_SUGGEST_MODES:
         return None, JSONResponse(

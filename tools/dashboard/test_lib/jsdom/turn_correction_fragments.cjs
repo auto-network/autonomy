@@ -27,6 +27,12 @@ if (!window.SessionDiff || typeof window.SessionDiff.fragments !== "function") {
   throw new Error("SessionDiff.fragments is not loaded");
 }
 
+assert.strictEqual(
+  window.SessionDiff.normalizeCorrectionText("First\\n\\nSecond"),
+  "First\n\nSecond",
+  "Literal escaped newlines should become paragraph breaks",
+);
+
 function collect(frags, kind) {
   return frags.filter((f) => f.kind === kind).map((f) => f.text).join("");
 }
