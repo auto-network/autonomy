@@ -181,11 +181,16 @@ def test_set_recovery_op_projects_the_slot_and_carries_it_forward():
     assert carried["recovery"] == env["recovery"]
 
 
-def test_set_recovery_op_can_clear_the_slot():
+def test_set_recovery_op_is_enroll_only_refusing_clear_and_overwrite():
+    # operator ruling: the recovery code is NOT replaceable once generated.
+    # set_recovery therefore refuses to clear an existing slot and refuses to
+    # overwrite one — the only clear/re-enroll path (replacement without the old
+    # code) is forbidden by construction.
     root, env, code, seeds = _armor_with_recovery()
-    projected = project_operations(
-        {"generation": env["generation"], "root_pub": env["root_pub"], "factors": env["factors"],
-         "access": env["access"], "policy": env["policy"], "recovery": env["recovery"]},
-        [{"op": "set_recovery", "recovery": None}],
-    )
-    assert projected["recovery"] is None
+    state = {"generation": env["generation"], "root_pub": env["root_pub"],
+             "factors": env["factors"], "access": env["access"],
+             "policy": env["policy"], "recovery": env["recovery"]}
+    with pytest.raises(RootFactorPolicyError):
+        project_operations(state, [{"op": "set_recovery", "recovery": None}])
+    with pytest.raises(RootFactorPolicyError):
+        project_operations(state, [{"op": "set_recovery", "recovery": env["recovery"]}])
