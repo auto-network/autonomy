@@ -15,7 +15,7 @@
      data-testid="central-attention-root">
   <button type="button"
           data-testid="central-attention-button"
-          @click.stop="window.closeSidebar(); toggleInbox()"
+          @click.stop="window.AutonomyShellChrome.activate('inbox'); toggleInbox()"
           :aria-expanded="inboxOpen || fullInbox ? 'true' : 'false'"
           aria-controls="central-attention-tray"
           :aria-label="inboxOpen || fullInbox ? 'Close attention center' : 'Open attention center'"

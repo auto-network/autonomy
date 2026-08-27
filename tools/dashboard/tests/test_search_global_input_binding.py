@@ -192,7 +192,12 @@ class TestCompactGlobalSearchChrome:
                     height: rect.height,
                     radius: css.borderTopLeftRadius,
                     appearance: css.appearance,
-                    border_color: css.borderTopColor,
+                    borders: [
+                        css.borderTopWidth + ' ' + css.borderTopStyle + ' ' + css.borderTopColor,
+                        css.borderRightWidth + ' ' + css.borderRightStyle + ' ' + css.borderRightColor,
+                        css.borderBottomWidth + ' ' + css.borderBottomStyle + ' ' + css.borderBottomColor,
+                        css.borderLeftWidth + ' ' + css.borderLeftStyle + ' ' + css.borderLeftColor,
+                    ],
                     background: css.backgroundColor,
                 };
             }
@@ -212,7 +217,7 @@ class TestCompactGlobalSearchChrome:
                         value.radius === shapes[0].radius &&
                         value.tag === shapes[0].tag &&
                         value.appearance === shapes[0].appearance &&
-                        value.border_color === shapes[0].border_color &&
+                        JSON.stringify(value.borders) === JSON.stringify(shapes[0].borders) &&
                         value.background === shapes[0].background;
                 }),
                 toolbar_icon_shape: shapes[0],
@@ -232,7 +237,12 @@ class TestCompactGlobalSearchChrome:
                 "height": 40,
                 "radius": "8px",
                 "appearance": "none",
-                "border_color": "rgb(55, 65, 81)",
+                "borders": [
+                    "1px solid rgb(55, 65, 81)",
+                    "1px solid rgb(55, 65, 81)",
+                    "1px solid rgb(55, 65, 81)",
+                    "1px solid rgb(55, 65, 81)",
+                ],
                 "background": "rgb(31, 41, 55)",
             },
         }
@@ -277,6 +287,62 @@ class TestCompactGlobalSearchChrome:
             "no_overflow": True,
         }
         assert state["closed"] is True
+
+    def test_mobile_shell_controls_are_mutually_exclusive(self, harness):
+        _open("/sessions")
+        state = ab_eval("""
+            var header = document.querySelector('header[data-app-chrome]');
+            var sidebar = document.getElementById('sidebar');
+            var nav = document.getElementById('nav-toggle');
+            var attentionRoot = document.querySelector(
+                '[data-testid="central-attention-root"]');
+            var inbox = attentionRoot.querySelector(
+                '[data-testid="central-attention-button"]');
+            var attention = Alpine.$data(attentionRoot);
+            var search = document.getElementById('global-search-icon');
+            inbox.click();
+            return new Promise(function(resolve) {
+                requestAnimationFrame(function() { requestAnimationFrame(function() {
+                    var inboxOwnsShell = attention.inboxOpen &&
+                        sidebar.classList.contains('-translate-x-full') &&
+                        !header.classList.contains('global-search-open');
+                    search.click();
+                    requestAnimationFrame(function() { requestAnimationFrame(function() {
+                        var searchOwnsShell = !attention.inboxOpen &&
+                            sidebar.classList.contains('-translate-x-full') &&
+                            header.classList.contains('global-search-open');
+                        nav.click();
+                        requestAnimationFrame(function() { requestAnimationFrame(function() {
+                            var navOwnsShell = !attention.inboxOpen &&
+                                !header.classList.contains('global-search-open') &&
+                                !sidebar.classList.contains('-translate-x-full') &&
+                                getComputedStyle(attentionRoot).display === 'none' &&
+                                nav.classList.contains('toolbar-icon-button-active') &&
+                                nav.getAttribute('aria-expanded') === 'true';
+                            nav.click();
+                            requestAnimationFrame(function() {
+                                resolve({
+                                    inbox_owns_shell: inboxOwnsShell,
+                                    search_owns_shell: searchOwnsShell,
+                                    nav_owns_shell: navOwnsShell,
+                                    close_restores_default:
+                                        sidebar.classList.contains('-translate-x-full') &&
+                                        getComputedStyle(attentionRoot).display !== 'none' &&
+                                        !nav.classList.contains('toolbar-icon-button-active') &&
+                                        nav.getAttribute('aria-expanded') === 'false',
+                                });
+                            });
+                        }); });
+                    }); });
+                }); });
+            });
+        """)
+        assert state == {
+            "inbox_owns_shell": True,
+            "search_owns_shell": True,
+            "nav_owns_shell": True,
+            "close_restores_default": True,
+        }
 
     def test_escape_collapses_and_returns_focus_to_magnifier(self, harness):
         _open("/sessions")

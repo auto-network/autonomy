@@ -16200,6 +16200,7 @@ CENTRAL_ATTENTION_MOBILE_CHECKS = r"""(async () => {
     const root = document.querySelector('[data-testid="central-attention-root"]');
     const data = root ? Alpine.$data(root) : null;
     if (!data) return JSON.stringify({error: 'central attention root missing'});
+    window.AutonomyShellChrome.setNavOpen(false);
     data.settingsOpen = false;
     data.selectedItem = null;
     data.fullInbox = false;
@@ -16248,7 +16249,17 @@ CENTRAL_ATTENTION_MOBILE_CHECKS = r"""(async () => {
         sidebar.getClientRects().length > 0;
     const attentionClosesForMenu = !data.inboxOpen && !data.fullInbox &&
         mobile.classList.contains('hidden');
-    closeSidebar();
+    const inboxHiddenForMenu = getComputedStyle(root).display === 'none';
+    const menuActiveWhileOpen = nav.classList.contains('toolbar-icon-button-active') &&
+        nav.getAttribute('aria-expanded') === 'true' &&
+        nav.getAttribute('aria-label') === 'Close navigation';
+    nav.click();
+    await Alpine.nextTick(); await sleep(100);
+    const menuCloses = sidebar.classList.contains('-translate-x-full');
+    const inboxReturnsAfterMenu = getComputedStyle(root).display !== 'none';
+    const menuClearsActiveOnClose = !nav.classList.contains('toolbar-icon-button-active') &&
+        nav.getAttribute('aria-expanded') === 'false' &&
+        nav.getAttribute('aria-label') === 'Open navigation';
     root.querySelector('[data-testid="central-attention-button"]').click();
     await Alpine.nextTick(); await sleep(100);
     const inboxClosesSidebar = sidebar.classList.contains('-translate-x-full') &&
@@ -16275,7 +16286,13 @@ CENTRAL_ATTENTION_MOBILE_CHECKS = r"""(async () => {
         icon_toggles_closed: iconTogglesClosed,
         menu_opens: menuOpens,
         attention_closes_for_menu: attentionClosesForMenu,
-        menu_opens_without_attention_overlay: menuOpens && attentionClosesForMenu,
+        inbox_hidden_for_menu: inboxHiddenForMenu,
+        menu_active_while_open: menuActiveWhileOpen,
+        menu_closes: menuCloses,
+        inbox_returns_after_menu: inboxReturnsAfterMenu,
+        menu_clears_active_on_close: menuClearsActiveOnClose,
+        menu_opens_without_attention_overlay:
+            menuOpens && attentionClosesForMenu && inboxHiddenForMenu,
         inbox_and_sidebar_are_mutually_exclusive: inboxClosesSidebar,
     });
 })()"""
@@ -16364,5 +16381,10 @@ class TestCentralAttentionSurface:
         assert c.get("no_horizontal_overflow"), c
         assert c.get("menu_opens"), c
         assert c.get("attention_closes_for_menu"), c
+        assert c.get("inbox_hidden_for_menu"), c
+        assert c.get("menu_active_while_open"), c
+        assert c.get("menu_closes"), c
+        assert c.get("inbox_returns_after_menu"), c
+        assert c.get("menu_clears_active_on_close"), c
         assert c.get("menu_opens_without_attention_overlay"), c
         assert c.get("inbox_and_sidebar_are_mutually_exclusive"), c
