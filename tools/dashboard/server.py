@@ -19905,10 +19905,19 @@ async def _on_startup():
     # moved when some unrelated event happened to broadcast.
     _lifecycle_loop = asyncio.get_running_loop()
 
-    def _lifecycle_transition_hook(_transition) -> None:
+    def _lifecycle_transition_hook(transition) -> None:
+        async def _publish_transition() -> None:
+            # A terminal transition carries its own card.  The registry is a
+            # live-only roster, so making the browser infer an ended card from
+            # an omission loses the transition whenever its local Active view
+            # is stale or reconnecting.
+            if transition.state in ("ENDED", "FAILED"):
+                await session_monitor.broadcast_terminal_session(transition.tmux_name)
+            await session_monitor._broadcast_registry()
+
         try:
             asyncio.run_coroutine_threadsafe(
-                session_monitor._broadcast_registry(), _lifecycle_loop,
+                _publish_transition(), _lifecycle_loop,
             )
         except Exception:
             logger.debug("session_lifecycle: transition broadcast failed", exc_info=True)

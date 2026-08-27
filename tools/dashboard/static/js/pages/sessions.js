@@ -135,6 +135,7 @@
     error: '',
     promise: null,
     pendingRegistry: [],
+    pendingEnded: [],
   };
 
   function _mapRecentRow(r) {
@@ -183,42 +184,6 @@
     };
   }
 
-  function _recentRowFromEndedStore(store) {
-    var sessionId = store.session_id;
-    if (!sessionId || sessionId.indexOf('pending-') === 0) return null;
-    var project = store.project || '';
-    return {
-      id: store.graphSourceId || ('sse-ended:' + sessionId),
-      session_id: sessionId,
-      label: store.label || sessionId,
-      session_type: store.sessionType || 'interactive',
-      type: store.type || 'container',
-      is_live: false,
-      project: project ? '[' + project.replace(/^\[|\]$/g, '') + ']' : '',
-      topics: store.topics || [],
-      latest: store.lastMessage || '',
-      entry_count: store.entryCount || 0,
-      context_tokens: store.contextTokens || 0,
-      last_activity: store.lastActivity || Math.round(Date.now() / 1000),
-      created_at: store.startedAt || 0,
-      last_activity_at: store.lastActivity || 0,
-      ended_at: store.lastActivity || Math.round(Date.now() / 1000),
-      tmux_session: sessionId,
-      nag_enabled: false,
-      dispatch_nag_enabled: false,
-      role: store.role || '',
-      resumable: !!store.resumable && !!store.graphSourceId,
-      bead_id: store.beadId || '',
-      org: store.org || null,
-      harness: store.harness || null,
-      model: store.model || null,
-      setup_phase: store.setupPhase || 'pending',
-      harness_phase: store.harnessPhase || 'pending',
-      harness_state: store.harnessState || {},
-      resolved: true,
-    };
-  }
-
   function _emitRecentHistoryChanged() {
     window.dispatchEvent(new CustomEvent('recent-sessions:changed', {
       detail: {
@@ -236,13 +201,16 @@
     var next = _recentHistory.rows.filter(function(row) {
       return !active.has(row.session_id);
     });
-    (detail.endedSessions || []).forEach(function(store) {
-      var row = _recentRowFromEndedStore(store);
-      if (!row || active.has(row.session_id)) return;
-      next = next.filter(function(existing) { return existing.session_id !== row.session_id; });
-      next.unshift(row);
-    });
     _recentHistory.rows = next;
+  }
+
+  function _applyRecentEnded(payload) {
+    var row = _mapRecentRow(payload || {});
+    if (!row) return;
+    _recentHistory.rows = _recentHistory.rows.filter(function(existing) {
+      return existing.session_id !== row.session_id;
+    });
+    _recentHistory.rows.unshift(row);
   }
 
   function _applyOrBufferRecentRegistry(detail) {
@@ -254,6 +222,18 @@
       return;
     }
     _applyRecentRegistry(detail);
+    _emitRecentHistoryChanged();
+  }
+
+  function _applyOrBufferRecentEnded(payload) {
+    // Do not let an in-flight bootstrap overwrite a terminal transition. Once
+    // the request has settled, an explicit lifecycle event always renders,
+    // even if the bootstrap itself failed.
+    if (_recentHistory.loading) {
+      _recentHistory.pendingEnded.push(payload || {});
+      return;
+    }
+    _applyRecentEnded(payload);
     _emitRecentHistoryChanged();
   }
 
@@ -293,11 +273,17 @@
         var pending = _recentHistory.pendingRegistry;
         _recentHistory.pendingRegistry = [];
         pending.forEach(_applyRecentRegistry);
+        var pendingEnded = _recentHistory.pendingEnded;
+        _recentHistory.pendingEnded = [];
+        pendingEnded.forEach(_applyRecentEnded);
         return _recentHistory.rows;
       })
       .catch(function(error) {
         _recentHistory.error = error.message || 'Could not load history';
         console.warn('[sessionsPage] recent history fetch error', error);
+        var pendingEnded = _recentHistory.pendingEnded;
+        _recentHistory.pendingEnded = [];
+        pendingEnded.forEach(_applyRecentEnded);
         return _recentHistory.rows;
       })
       .finally(function() {
@@ -311,6 +297,9 @@
   window.addEventListener('sessions:registry-changed', function(event) {
     _applyOrBufferRecentRegistry(event && event.detail);
   });
+  if (typeof window.registerHandler === 'function') {
+    window.registerHandler('session:ended', _applyOrBufferRecentEnded);
+  }
 
   // Derive canonical session_type from store sessionType
   function _deriveSessionType(s) {

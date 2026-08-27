@@ -34,7 +34,7 @@ import subprocess
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -1847,6 +1847,82 @@ class SessionMonitor:
         if self._event_bus is None:
             return
         await self._event_bus.broadcast("session:registry", self.get_registry())
+
+    def terminal_session_payload(self, tmux_name: str) -> dict[str, Any] | None:
+        """Return the final Recent-card payload for one terminal session.
+
+        ``session:registry`` is deliberately live-only, so absence from that
+        roster cannot be the wire representation of an end transition.  This
+        projection is built from the durable dashboard row immediately after
+        the lifecycle writer commits ``ENDED``/``FAILED`` and is sent as the
+        explicit ``session:ended`` event consumed by the Sessions page.
+        """
+        from tools.dashboard.org_identity import resolve_session_org
+
+        row = get_session(tmux_name)
+        if row is None or derive_lifecycle_state(row) not in ("ENDED", "FAILED"):
+            return None
+
+        def iso_timestamp(value: object) -> str:
+            try:
+                timestamp = float(value or 0)
+            except (TypeError, ValueError):
+                timestamp = 0.0
+            if not timestamp:
+                return ""
+            return datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+
+        if row.get("bead_id"):
+            session_type = "dispatch"
+        elif row.get("role") == "librarian" or row.get("type") == "librarian":
+            session_type = "librarian"
+        else:
+            session_type = "interactive"
+
+        created_at = iso_timestamp(row.get("created_at"))
+        last_activity_at = iso_timestamp(
+            row.get("last_activity") or row.get("ended_at") or row.get("created_at")
+        )
+        project = row.get("project") or ""
+        payload = {
+            "id": row.get("graph_source_id") or f"sse-ended:{tmux_name}",
+            "tmux_session": tmux_name,
+            "title": row.get("label") or tmux_name,
+            "session_type": session_type,
+            "type": row.get("type") or "container",
+            "is_live": False,
+            "project": f"[{project}]" if project else "",
+            "created_at": created_at,
+            "last_activity_at": last_activity_at,
+            "ended_at": last_activity_at,
+            "entry_count": int(row.get("entry_count") or 0),
+            "context_tokens": int(row.get("context_tokens") or 0),
+            "role": row.get("role") or "",
+            "resumable": bool(
+                row.get("graph_source_id")
+                and row.get("jsonl_path")
+                and Path(str(row["jsonl_path"])).exists()
+            ),
+            "bead_id": row.get("bead_id") or "",
+            "harness": row.get("harness") or None,
+            "model": row.get("model") or None,
+            "disk_bytes": row.get("disk_bytes"),
+            "disk_detail": row.get("disk_detail") or None,
+            "state": derive_lifecycle_state(row),
+            "lifecycle_state": derive_lifecycle_state(row),
+        }
+        payload["org"] = resolve_session_org(payload)
+        return payload
+
+    async def broadcast_terminal_session(self, tmux_name: str) -> None:
+        """Publish one explicit terminal-session card, if this is terminal."""
+        if self._event_bus is None:
+            return
+        payload = self.terminal_session_payload(tmux_name)
+        if payload is not None:
+            await self._event_bus.broadcast("session:ended", payload)
 
     # ── inotify watch management ─────────────────────────────────
 

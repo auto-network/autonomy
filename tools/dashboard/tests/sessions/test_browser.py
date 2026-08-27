@@ -997,3 +997,47 @@ class TestEmptyState:
         time.sleep(2)
         count = h.card_count()
         assert count >= 5
+
+
+class TestRecentSessionEndedEvent:
+    """A closing card moves directly from Active to Recent over SSE."""
+
+    def test_terminal_event_inserts_the_closed_card_at_recent_top(self, h):
+        assert "auto-test-alpha" in h.card_session_ids()
+
+        fixtures.append_mock_event(
+            h.events_file,
+            "session:ended",
+            {
+                "id": "src-ended-alpha",
+                "tmux_session": "auto-test-alpha",
+                "title": "Alpha — card redesign",
+                "session_type": "interactive",
+                "type": "container",
+                "is_live": False,
+                "project": "[autonomy]",
+                "org": "autonomy",
+                "created_at": _iso_inline(minutes_ago=10),
+                "last_activity_at": _iso_inline(),
+                "ended_at": _iso_inline(),
+                "entry_count": 150,
+                "context_tokens": 80000,
+                "resumable": True,
+            },
+        )
+
+        deadline = time.time() + 5
+        recent_ids = []
+        while time.time() < deadline:
+            recent_ids = ab_eval("""
+                return Array.from(document.querySelectorAll('[data-testid="recent-session-row"]'))
+                  .map(function(row) { return row.dataset.sessionId; });
+            """) or []
+            if recent_ids and recent_ids[0] == "auto-test-alpha":
+                break
+            time.sleep(0.25)
+
+        assert recent_ids and recent_ids[0] == "auto-test-alpha", (
+            "The terminal SSE payload did not place the closed session first in Recent; "
+            f"got {recent_ids!r}"
+        )

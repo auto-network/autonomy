@@ -43,6 +43,44 @@ def _project():
     )
 
 
+@pytest.mark.asyncio
+async def test_terminal_transition_publishes_a_complete_recent_card(monkeypatch, tmp_path):
+    """A terminal lifecycle transition is an explicit card event, not an omission."""
+    from tools.dashboard.session_monitor import SessionMonitor
+
+    _init_db(tmp_path)
+    dashboard_db.insert_session(
+        tmux_name="auto-ended-card",
+        session_type="container",
+        project="autonomy",
+        harness="claude",
+    )
+    dashboard_db.update_label("auto-ended-card", "Ended card")
+    SessionLifecycleStateWriter().set_state("auto-ended-card", "dead")
+    monkeypatch.setattr(
+        "tools.dashboard.org_identity.resolve_session_org",
+        lambda _row: {"slug": "autonomy", "name": "Autonomy"},
+    )
+
+    seen = []
+
+    class EventBus:
+        async def broadcast(self, topic, payload):
+            seen.append((topic, payload))
+
+    monitor = SessionMonitor()
+    monitor._event_bus = EventBus()
+    await monitor.broadcast_terminal_session("auto-ended-card")
+
+    assert seen and seen[0][0] == "session:ended"
+    payload = seen[0][1]
+    assert payload["tmux_session"] == "auto-ended-card"
+    assert payload["title"] == "Ended card"
+    assert payload["session_type"] == "interactive"
+    assert payload["is_live"] is False
+    assert payload["org"]["slug"] == "autonomy"
+
+
 def test_worker_first_message_appends_one_sentence_for_degraded_workspace(monkeypatch):
     from tools.dashboard import server
 

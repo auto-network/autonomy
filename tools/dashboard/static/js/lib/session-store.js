@@ -525,14 +525,13 @@ function _emitSessionStoreChanged(reason) {
   }));
 }
 
-function _emitSessionRegistryChanged(endedSessions, activeSessionIds) {
+function _emitSessionRegistryChanged(activeSessionIds) {
   if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function' || typeof CustomEvent !== 'function') return;
   window.dispatchEvent(new CustomEvent('sessions:registry-changed', {
-    // The registry itself contains live rows only. Preserve the row just
-    // before it disappears so consumers can update an ended-session view
-    // without re-querying a historical endpoint for every registry event.
+    // The registry is live-only. Terminal sessions arrive over the explicit
+    // session:ended event; this remains solely a notification that rows have
+    // entered Active again and should no longer appear in Recent.
     detail: {
-      endedSessions: endedSessions || [],
       activeSessionIds: activeSessionIds || [],
     },
   }));
@@ -1083,26 +1082,17 @@ window.ensureSessionMessages = function() {
     // lingering as a stale "Ended + Resume" ghost; the Recent list renders
     // its true FAILED state (Setup failed + Retry) from the DAO.
     var allSessions = Alpine.store('sessions');
-    var endedSessions = [];
     for (var id in allSessions) {
       if (!activeIds[id] && allSessions[id].isLive) {
-        // Snapshot before mutating the reactive store. This is intentionally
-        // the existing registry shape, not a second backend payload: the
-        // Sessions page can render it immediately while its next foreground
-        // history backfill remains asynchronous.
-        if (id.indexOf('pending-') !== 0) {
-          endedSessions.push(Object.assign({ session_id: id }, allSessions[id]));
-        }
         allSessions[id].isLive = false;
-        // The row WAS live and is now gone — the launch/session is over
-        // (dead, or failed with is_live=0). Never-live placeholder tiles
-        // (pending-* / source-id keys) are deliberately untouched: they
-        // bridge the create/resume POST round-trip.
+        // Terminal rows are rendered by the explicit session:ended payload.
+        // Never-live placeholders remain untouched: they bridge the
+        // create/resume POST round-trip.
         allSessions[id]._resuming = false;
       }
     }
     _emitSessionStoreChanged('registry');
-    _emitSessionRegistryChanged(endedSessions, Object.keys(activeIds));
+    _emitSessionRegistryChanged(Object.keys(activeIds));
   });
 
   // Handle label_update events — update stored session's label field
