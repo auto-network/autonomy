@@ -666,6 +666,17 @@
       if (panelOpen) render();
     });
     refresh();
+    // A passkey login just recognized this device as a new PRF slot (stashed
+    // by unlock.js). Greet the arrival: open straight into Manage credentials,
+    // where the name-this-device dialog completes or confirms the enrollment.
+    try {
+      if (root.sessionStorage
+          && (root.sessionStorage.getItem('autonomy.factor.pending-slot')
+            || root.sessionStorage.getItem('autonomy.factor.slot-enrolled'))) {
+        panelOpen = true;
+        openCredentials();
+      }
+    } catch (e) { /* storage unavailable — the panel still offers enrollment */ }
   }
 
   function identityMenuPlugins(plugins) {

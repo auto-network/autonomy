@@ -339,6 +339,7 @@ export function credentialsPanel() {
     loading: true, loadError: null, migrationPending: false, committing: false,
     generation: 0, rootPub: null, armorText: null, envelope: null,
     _committedPolicy: null, _authSeeds: {},
+    deviceName: '', newDevErr: null,
 
     init() { this.load(); },
 
@@ -369,10 +370,91 @@ export function credentialsPanel() {
         this._committedPolicy = fp.root_policy;
         this.initBaseline();
         this.loading = false;
+        this._greetNewDevice();
       } catch (e) {
         this.loadError = (e && e.message) || String(e);
         this.loading = false;
       }
+    },
+    // A passkey login recognized this device as a new PRF slot for a synced
+    // credential (stashed by unlock.js — public data only). Greet it with the
+    // name-this-device dialog: if a root-opening login already wrote the slot,
+    // the dialog only names it; otherwise one password confirmation in the
+    // dialog completes the enrollment.
+    _readStore(key) {
+      try {
+        const raw = (typeof sessionStorage !== 'undefined') && sessionStorage.getItem(key);
+        return raw ? JSON.parse(raw) : null;
+      } catch (e) { return null; }
+    },
+    _dropStore(key) {
+      try { if (typeof sessionStorage !== 'undefined') sessionStorage.removeItem(key); } catch (e) { /* gone is gone */ }
+    },
+    _greetNewDevice() {
+      if (this.cur === 'newdevice') return;
+      const enrolled = this._readStore('autonomy.factor.slot-enrolled');
+      if (enrolled) {
+        this.deviceName = enrolled.label || 'New device'; this.newDevErr = null;
+        this.push({ s: 'newdevice', enrolled: true, slot: enrolled });
+        return;
+      }
+      const pending = this._readStore('autonomy.factor.pending-slot');
+      if (!pending) return;
+      const factor = this.envelope.factors.find((f) => f.type === 'passkey'
+        && f.credential_id === pending.credential_id);
+      if (!factor) { this._dropStore('autonomy.factor.pending-slot'); return; }
+      if (factor.recipients.some((s) => s.recipient_public_key === pending.recipient_public_key)) {
+        // another root ceremony already wrote the slot — just name it
+        this._dropStore('autonomy.factor.pending-slot');
+        this.deviceName = pending.label || 'New device'; this.newDevErr = null;
+        this.push({
+          s: 'newdevice',
+          enrolled: true,
+          slot: { factor_id: factor.factor_id, recipient_public_key: pending.recipient_public_key, label: pending.label },
+        });
+        return;
+      }
+      this.deviceName = pending.label || 'New device'; this.newDevErr = null;
+      this.push({ s: 'newdevice', enrolled: false, slot: { ...pending, factor_id: factor.factor_id } });
+    },
+    async newDeviceOk() {
+      const t = this.top; if (t.s !== 'newdevice' || this.committing) return;
+      const name = (this.deviceName || '').trim() || 'New device';
+      if (t.enrolled) {
+        this._patchLabel({ factorId: t.slot.factor_id, recipientPub: t.slot.recipient_public_key }, name);
+        const row = this.passkeys.find((k) => k.recipientPub === t.slot.recipient_public_key);
+        if (row) { row.label = name; row.device = name; }
+        this._dropStore('autonomy.factor.slot-enrolled');
+        this.pop();
+        this.flash('This device now has full secure access');
+        return;
+      }
+      // the one root proof the armor demands, through the STANDARD root
+      // ceremony control (the same authorize screen commit uses — reusable,
+      // policy-aware, passkey or password per the current policy)
+      this.newDevErr = null;
+      const opened = await this.requireRoot('Enroll “' + name + '”');
+      if (!opened) return;
+      this.committing = true;
+      try {
+        try {
+          await this._commitOps([{
+            op: 'add_passkey_recipient',
+            factor_id: t.slot.factor_id,
+            recipient: {
+              recipient_public_key: t.slot.recipient_public_key,
+              label: name,
+              created_at: nowIso(),
+            },
+          }], opened);
+        } finally { opened.seed.fill(0); }
+        this._dropStore('autonomy.factor.pending-slot');
+        await this.load();
+        if (this.cur === 'newdevice') this.pop();
+        this.flash('Your passkey is enrolled — this device now has full secure access');
+      } catch (e) {
+        this.newDevErr = (e && e.message) || String(e);
+      } finally { this.committing = false; }
     },
     get ready() { return !this.loading && !this.loadError && !this.migrationPending; },
 
@@ -577,27 +659,7 @@ export function credentialsPanel() {
       if (!opened) return;
       this.committing = true;
       try {
-        // register staged WebAuthn credentials first (their statement needs the root)
-        for (const r of this.passkeys) {
-          if (r._enroll && !r._enroll.registered) await this._registerStaged(r, opened);
-        }
-        const pv = await postJson('/api/identity/factor-policy/preview', {
-          base_generation: this.generation, operations: ops,
-        });
-        if (!pv.ok) throw new Error(pv.error || 'the staged changes were refused');
-        const armor = await buildFactorPolicyArmor({
-          rootSeed: opened.seed, rootPub: this.rootPub, generation: pv.generation,
-          factors: pv.factors, access: pv.access, policy: pv.root_policy,
-        });
-        const signature = await signFactorPolicyTransition({
-          signingKey: opened.signingKey, baseGeneration: this.generation,
-          operations: ops, candidateArmor: armor,
-        });
-        const res = await postJson('/api/identity/factor-policy/commit', {
-          base_generation: this.generation, operations: ops,
-          candidate_armor: armor, root_signature: signature,
-        });
-        if (!res.ok) throw new Error(res.error || 'the authorization was refused');
+        await this._commitOps(ops, opened);
         await this.load();
         this.flash('Committed ' + n + (n === 1 ? ' change' : ' changes'));
       } catch (e) {
@@ -607,6 +669,30 @@ export function credentialsPanel() {
         opened.seed.fill(0);
         this.committing = false;
       }
+    },
+    // the one write path: register staged credentials, preview the batch,
+    // build + sign the candidate armor, commit the generation
+    async _commitOps(ops, opened) {
+      for (const r of this.passkeys) {
+        if (r._enroll && !r._enroll.registered) await this._registerStaged(r, opened);
+      }
+      const pv = await postJson('/api/identity/factor-policy/preview', {
+        base_generation: this.generation, operations: ops,
+      });
+      if (!pv.ok) throw new Error(pv.error || 'the staged changes were refused');
+      const armor = await buildFactorPolicyArmor({
+        rootSeed: opened.seed, rootPub: this.rootPub, generation: pv.generation,
+        factors: pv.factors, access: pv.access, policy: pv.root_policy,
+      });
+      const signature = await signFactorPolicyTransition({
+        signingKey: opened.signingKey, baseGeneration: this.generation,
+        operations: ops, candidateArmor: armor,
+      });
+      const res = await postJson('/api/identity/factor-policy/commit', {
+        base_generation: this.generation, operations: ops,
+        candidate_armor: armor, root_signature: signature,
+      });
+      if (!res.ok) throw new Error(res.error || 'the authorization was refused');
     },
     async _registerStaged(row, opened) {
       const en = row._enroll;
@@ -1265,6 +1351,22 @@ const MARKUP = `
         <input type="password" x-model="newPw" autocomplete="new-password" placeholder="New password" @keydown.enter="newpwContinue()"></div>
       <div class="authrow"><button class="btn btn-ghost" @click="back()">Cancel</button>
         <button class="btn btn-primary" :disabled="!newPw" @click="newpwContinue()">Set password</button></div>
+    </div>
+  </div></template>
+
+  <!-- NEW DEVICE (a synced passkey's first sign-in from this device) -->
+  <template x-if="ready && cur==='newdevice'"><div style="display:flex;flex-direction:column;min-height:0">
+    <div class="scrhead"><button class="back" @click="back()"><svg style="width:16px;height:16px"><use xlink:href="#i-chev"/></svg></button>
+      <div class="ttl"><h1>First-time login on this device</h1><div class="sub">New device recognized</div></div></div>
+    <div class="deep">
+      <p class="lead" x-show="top.enrolled">Your factor has already been upgraded and is available for secure vault access.</p>
+      <p class="lead" x-show="!top.enrolled">A new authorized device has been detected. You must authorize full enrollment before this device can access your secure data.</p>
+      <div class="field"><label>Device name</label>
+        <input type="text" x-model="deviceName" @keydown.enter="newDeviceOk()"
+          x-effect="cur==='newdevice'&&setTimeout(()=>$el.select(),0)"></div>
+      <template x-if="newDevErr"><p class="lead" style="color:var(--danger);margin-top:12px" x-text="newDevErr"></p></template>
+      <div class="authrow"><button class="btn btn-ghost" @click="back()">Not now</button>
+        <button class="btn btn-primary" :disabled="committing || !deviceName" @click="newDeviceOk()" x-text="top.enrolled ? 'OK' : 'Enroll factor'"></button></div>
     </div>
   </div></template>
 

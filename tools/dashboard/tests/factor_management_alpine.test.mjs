@@ -376,6 +376,7 @@ test.before(async () => {
   installWebAuthn(dom.window);
   global.fetch = router;
   dom.window.fetch = router;
+  global.sessionStorage = dom.window.sessionStorage;
 
   panel = await import('../static/js/factor-management.js');
   await panel.open({});
@@ -632,4 +633,66 @@ test('walk: enroll-this-device repairs the second device, third device still ref
   const deviceC = cloneCredentialToDevice(authenticator, credId);
   const seedC = await pkSeedFor(deviceC, credId);
   await assert.rejects(() => openFactorPolicyArmor(committed.armor, { 'pk.mac': seedC }));
+});
+
+test('walk: a stashed login detection greets with the name-this-device dialog and enrolls under one password', async () => {
+  const credId = SERVER.passkeyRows[0].credential_id;
+  // a fourth device signed in with the synced credential; unlock.js stashed
+  // the mismatch (public data only) — simulate exactly that stash
+  const deviceD = cloneCredentialToDevice(authenticator, credId);
+  const prfD = await pkSeedFor(deviceD, credId);
+  const recipD = await deriveEncapsulationKeypair(new Uint8Array(prfD), FACTOR_RECIPIENT_PURPOSE);
+  dom.window.sessionStorage.setItem('autonomy.factor.pending-slot', JSON.stringify({
+    factor_id: 'pk.mac', credential_id: credId,
+    recipient_public_key: recipD.publicKeyHex, label: 'New device',
+  }));
+  switchDevice(deviceD);
+  await comp().load();
+  await until(() => comp().cur === 'newdevice', 'name-this-device dialog');
+  assert.equal(comp().top.enrolled, false, 'needs the one root proof');
+  assert.equal(comp().deviceName, 'New device');
+
+  const nameInput = q('input[type=text]');
+  setInput(nameInput, 'Kitchen iPad');
+  await until(() => { const b = qa('.authrow .btn-primary').pop(); return b && !b.disabled; }, 'Enroll factor enabled');
+  const enrollBtn = qa('.authrow .btn-primary').pop();
+  assert.equal(enrollBtn.textContent, 'Enroll factor');
+  enrollBtn.click();
+  // the STANDARD root ceremony control takes over — same authorize screen
+  await authorizeWithPassword(PW2);
+  await until(() => SERVER.commits.length === 6, 'device-slot commit posted');
+  await until(() => comp().cur === 'credentials', 'landed on the factor list');
+
+  const committed = SERVER.commits[5];
+  assert.deepEqual(committed.operations.map((o) => o.op), ['add_passkey_recipient']);
+  const envelope = await parseFactorPolicyArmor(committed.armor);
+  const pkFactor = envelope.factors.find((f) => f.factor_id === 'pk.mac');
+  const slot = pkFactor.recipients.find((r) => r.recipient_public_key === recipD.publicKeyHex);
+  assert.equal(slot.label, 'Kitchen iPad', 'named right in the armor');
+  // the new device's PRF now opens the root
+  const seedD = await pkSeedFor(deviceD, credId);
+  (await openFactorPolicyArmor(committed.armor, { 'pk.mac': seedD })).seed.fill(0);
+  assert.equal(dom.window.sessionStorage.getItem('autonomy.factor.pending-slot'), null, 'stash consumed');
+  // the list shows it as its own device row, sib-tied to the credential
+  await until(() => qa('.row').some((r) => r.textContent.includes('Kitchen iPad')), 'device row rendered');
+});
+
+test('walk: a slot already enrolled at login only asks for its name', async () => {
+  const credId = SERVER.passkeyRows[0].credential_id;
+  const envelope = await parseFactorPolicyArmor(SERVER.armor);
+  const anySlot = envelope.factors.find((f) => f.factor_id === 'pk.mac').recipients[0];
+  dom.window.sessionStorage.setItem('autonomy.factor.slot-enrolled', JSON.stringify({
+    factor_id: 'pk.mac', recipient_public_key: anySlot.recipient_public_key, label: 'New device',
+  }));
+  await comp().load();
+  await until(() => comp().cur === 'newdevice', 'dialog opens');
+  assert.equal(comp().top.enrolled, true, 'no password asked');
+  assert.equal(q('input[autocomplete=current-password]'), null, 'no password field');
+  setInput(q('input[type=text]'), 'Named at login');
+  await until(() => { const b = qa('.authrow .btn-primary').pop(); return b && !b.disabled; }, 'OK enabled');
+  assert.equal(qa('.authrow .btn-primary').pop().textContent, 'OK');
+  qa('.authrow .btn-primary').pop().click();
+  await until(() => comp().cur === 'credentials', 'back on the list');
+  assert.equal(dom.window.sessionStorage.getItem('autonomy.factor.slot-enrolled'), null, 'flag consumed');
+  assert.equal(SERVER.commits.length, 6, 'renaming is metadata, not a generation');
 });
