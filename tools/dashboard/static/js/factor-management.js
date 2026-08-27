@@ -1,675 +1,89 @@
-/* Factor management — the "Manage my factors" surface.
+/* Manage credentials — the production mount of the approved design.
  *
- * This is the operator's design VERBATIM: revision 32 of the Design Studio
- * design "Unlock screen — root-required flags". The CSS and every screen's
- * markup (keysScreen / authScreen / progScreen / setpwScreen / panelScreen /
- * lockScreen / sheet / tray) are the design's own, byte-for-byte. ONLY the mock
- * hooks are swapped for the real backend: the fake `preset()` model → a real
- * load from /api/identity/status + the armor; the local `commit()` mutations →
- * real re-arm ceremonies (signArmorUpdate → POST /api/identity/personal/armor);
- * the fake "············" password inputs and the WebAuthn sheets → real
- * password capture and real Face ID / PRF. The design's flow already IS the
- * ceremony flow (gather the root in progScreen/the sheet, then apply), so the
- * wiring maps straight onto it. The preview harness (chrome/preset tabs/boot)
- * is removed; the entry screen is the Factors screen and Back closes.
+ * The Alpine component, markup, and styles below are the Design Studio design
+ * of record (design f27e2660-c2cf-46ba-b71b-5285b058311d, final revision
+ * 0dcfd62e-c2ef-415b-85ba-175c2e813d75) taken VERBATIM: the same staging model
+ * (edit freely, ONE root-authorized commit at the end, change count is a NET
+ * diff vs the committed baseline), the same solver that refuses invalid states
+ * (always ≥1 way to reach the root), the same screens and strings.
  *
- * Authority policy (rootReachable / level / actionOn / applyAuthority / …) is
- * the design's own, identical to tools/network/idkit/TLA/FactorAuth.tla and the
- * node-tested ceremony/factor-policy.js.
+ * Exactly these hooks are real instead of the design's fakes:
+ *   load       — GET /api/identity/{status,personal,factor-policy} → the
+ *                design's model shape (buildModelV3)
+ *   rename     — factor / recipient metadata PATCH (instant, personal
+ *                metadata, outside the batch)
+ *   verify     — the typed password opens its v3 password factor client-side
+ *   passkey    — real WebAuthn create()/get() + PRF; the design's one-button
+ *                ceremony stays, the button now runs the real thing
+ *   commit     — baseline diff → factor-policy operations → authorize screen
+ *                collects the CURRENT policy's factors → preview →
+ *                buildFactorPolicyArmor → signFactorPolicyTransition → commit
+ *
+ * v3 ONLY. A migration_required identity renders a notice; the one-time
+ * v2→v3 upgrade lives in the login path (unlock.js), nowhere else.
  */
 import * as primitives from './ceremony/primitives.js';
 import {
-  prfEvalExtension, prfOutputFromResults, deriveProvisioningKey, enrollPasskey,
+  prfEvalExtension, prfOutputFromResults, evaluatePrf, attestedCredential,
+  deriveProvisioningKey, mintEnrollmentStatement,
 } from './ceremony/enrollment.js';
+import {
+  FACTOR_RECIPIENT_PURPOSE, canonicalExpression, policyFactorIds,
+  policySatisfied, createPasswordFactor, openPasswordFactor,
+  parseFactorPolicyArmor, buildFactorPolicyArmor, openFactorPolicyArmor,
+  signFactorPolicyTransition,
+} from './ceremony/root-factor-policy.js';
 
-// ── the design's CSS, verbatim (only the `body{}` rule is rehomed onto the
-//    modal overlay so it cannot restyle the host page) ──────────────────────
-const STYLE = `
-.fui-overlay{position:fixed;inset:0;z-index:1000;overflow:auto;display:flex;
-  align-items:center;justify-content:center;background:#080a0f;
-  padding:max(32px,calc(env(safe-area-inset-top) + 24px)) max(16px,env(safe-area-inset-right))
-    max(32px,calc(env(safe-area-inset-bottom) + 24px)) max(16px,env(safe-area-inset-left));
-  color:#e5e7eb;font:15px/1.55 ui-sans-serif,-apple-system,"Segoe UI",Roboto,sans-serif}
-*{box-sizing:border-box}
-.card{position:relative;max-width:360px;margin:0 auto;width:100%}
-.hide{display:none!important}
-
-.screen{position:relative;background:#11141c;border:1px solid #1e2432;border-radius:14px;
-  padding:26px 20px 20px}
-.hd{text-align:center;font-size:14px;font-weight:600;color:#8b93a3;margin:0 0 15px}
-.av{width:52px;height:52px;border-radius:50%;margin:0 auto 9px;
-  background:linear-gradient(150deg,#6366f1,#8b5cf6);display:flex;align-items:center;
-  justify-content:center;font:600 21px/1 inherit;color:#fff}
-.nm{text-align:center;font-size:15.5px;font-weight:600;margin-bottom:19px}
-.ttl{font-size:16px;font-weight:600;text-align:center;margin:2px 0 16px}
-
-.opt{display:flex;align-items:center;gap:11px;padding:11px 12px;margin-bottom:7px;
-  background:#161b26;border:1px solid #232a39;border-radius:10px;cursor:pointer}
-.opt.sel{border-color:#5b57e8;background:#191a2e}
-.opt.dim{opacity:.62;cursor:default}
-.ic{width:29px;height:29px;flex:0 0 29px;color:#38bdf8}
-.ic svg{width:100%;height:100%;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linejoin:round}
-.ic.root{color:#f59e0b}.ic.off{color:#3f4756}
-.ot{font-size:13.5px;font-weight:500;white-space:nowrap;display:flex;align-items:center;
-  justify-content:space-between;gap:8px;width:100%}
-.ot.off{color:#5b6472}
-.tag{font:600 8px/1 ui-monospace,monospace;letter-spacing:.07em;text-transform:uppercase;
-  padding:4px 6px;border-radius:4px;white-space:nowrap}
-.tag.a{color:#38bdf8;background:#0d2f42}
-.tag.b{color:#f59e0b;background:#3a2708}
-.tag.off{color:#4b5563;background:#191d26}
-.tag.act{color:#c7d2fe;background:#312e81;border:1px solid #4f46e5;cursor:pointer}
-.tag.live{color:#a5b4fc;background:#1e1b4b;border:1px solid #4338ca;cursor:pointer}
-.tag.nop{color:#fca5a5;background:#3f1d1d}
-.aucell{display:flex;flex-direction:column;align-items:center;gap:5px;flex:none;width:74px;text-align:center}
-.aucell .au-ico{width:32px;height:32px;border-radius:9px;display:grid;place-items:center;background:#0b1220;border:1px solid #2b3240;color:#93a3bd}
-.aucell .au-ico svg{width:17px;height:17px}
-.aucell .au-word{font-size:10px;font-weight:600;line-height:1.15;color:#8b93a7}
-.aucell.au-full .au-ico{color:#34d399;border-color:rgba(52,211,153,.45);background:rgba(52,211,153,.08)}
-.aucell.au-full .au-word{color:#34d399}
-.aucell.au-multi .au-ico{color:#818cf8;border-color:rgba(129,140,248,.5);background:rgba(129,140,248,.08)}
-.aucell.au-multi .au-word{color:#818cf8}
-.aucell.au-unlock .au-ico{color:#93a3bd}.aucell.au-unlock .au-word{color:#93a3bd}
-.aucell.au-none .au-ico{color:#4b5563;background:transparent}.aucell.au-none .au-word{color:#5b6578}
-.nm-edit{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;padding:0;margin-left:5px;background:none;border:none;color:#5b6578;cursor:pointer;vertical-align:middle}
-.nm-edit svg{width:14px;height:14px}.nm-edit:hover{color:#cbd5e1}
-.rn{display:inline-flex;align-items:center;gap:3px}
-.rn-in{background:#0b111b;border:1px solid #4f46e5;border-radius:6px;color:#e5e7eb;font:inherit;padding:2px 6px;max-width:150px}
-.rn-in:focus{outline:none}
-.rn-ok,.rn-x{display:inline-flex;align-items:center;justify-content:center;width:19px;height:19px;padding:0;background:none;border:none;cursor:pointer}
-.rn-ok svg,.rn-x svg{width:14px;height:14px}.rn-ok{color:#34d399}.rn-x{color:#f87171}
-.vfy{color:#34d399;cursor:pointer;font-size:12px}.vfy:hover{text-decoration:underline}
-.vfy-morph{display:flex;flex-direction:column;gap:6px;flex:1}
-.vfy-ttl{font-weight:600;color:#e5e7eb}
-.vfy-row{display:flex;align-items:center;gap:7px}
-.vfy-in{flex:1;min-width:0;background:#0b111b;border:1px solid #2b3240;border-radius:7px;color:#e5e7eb;font:inherit;padding:6px 9px}
-.vfy-in:focus{outline:none;border-color:#4f46e5}
-.vfy-go{padding:6px 13px}
-.vfy-cancel{color:#8b93a7;background:none;border:none;cursor:pointer;font:inherit}
-.vfy-ok{display:flex;align-items:center;gap:7px;color:#34d399;font-weight:600}.vfy-ok svg{width:18px;height:18px}
-.vfy-fail{display:flex;align-items:center;gap:5px;color:#f87171;font-size:12px}.vfy-fail svg{width:13px;height:13px}
-
-.tray{position:relative;display:flex;justify-content:center;gap:7px;margin:16px 0 15px}
-.fl{width:31px;height:31px;border-radius:8px;background:#161b26;border:1px solid #232a39;
-  display:flex;align-items:center;justify-content:center;color:#3f4756;cursor:pointer}
-.fl svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.7;
-  stroke-linecap:round;stroke-linejoin:round}
-.fl.needs{color:#f59e0b;border-color:#4a3a13;background:#221a08}
-.balloon{position:absolute;bottom:calc(100% + 11px);width:214px;background:#1d232f;
-  border:1px solid #333c4d;border-radius:10px;padding:10px 12px;
-  box-shadow:0 12px 30px -8px #000;z-index:9}
-.balloon .bt{font-size:12.5px;font-weight:600;margin-bottom:2px}
-.balloon .bc{font:600 8.5px/1 ui-monospace,monospace;letter-spacing:.06em;
-  text-transform:uppercase;color:#f59e0b;margin-bottom:5px}
-.balloon .bc.clear{color:#6b7280}
-.balloon .bd{font-size:11.5px;line-height:1.45;color:#9aa3b2}
-.notch{position:absolute;top:100%;width:11px;height:11px;background:#1d232f;
-  border-right:1px solid #333c4d;border-bottom:1px solid #333c4d;
-  transform:translate(-50%,-6px) rotate(45deg)}
-
-.btn{background:#5b57e8;color:#fff;text-align:center;padding:12px;border-radius:9px;
-  font-size:14px;font-weight:600;margin-top:15px;cursor:pointer}
-.btn.flat{margin-top:8px}
-.olab{display:block;font-size:14px;color:#9ca3af;margin:4px 0 6px}
-.oin{width:100%;background:#1f2937;border:1px solid #374151;border-radius:8px;padding:12px;
-  font-size:16px;color:#e5e7eb;outline:none;font-family:inherit;margin-bottom:10px}
-
-.st{display:flex;align-items:center;gap:11px;padding:12px;margin-bottom:8px;
-  background:#161b26;border:1px solid #232a39;border-radius:10px}
-.st.wait{opacity:.45}
-.st.busy{border-color:#4a3a13;background:#1d1808}
-.sic{width:29px;height:29px;flex:0 0 29px;color:#4b5563}
-.st.busy .sic{color:#f59e0b}.st.done .sic{color:#34d399}
-.sic svg{width:100%;height:100%;fill:none;stroke:currentColor;stroke-width:1.6}
-.snm{font-size:13.5px;font-weight:500;flex:1}
-.spin{width:15px;height:15px;border:2px solid #3a2708;border-top-color:#f59e0b;
-  border-radius:50%;animation:sp .7s linear infinite}
-@keyframes sp{to{transform:rotate(360deg)}}
-.tick{width:17px;height:17px;color:#34d399}
-.tick svg{width:100%;height:100%;fill:none;stroke:currentColor;stroke-width:3;
-  stroke-linecap:round;stroke-linejoin:round}
-
-.pick{display:flex;align-items:center;gap:11px;padding:12px;margin-bottom:7px;
-  background:#161b26;border:1px solid #232a39;border-radius:10px;cursor:pointer}
-.pick.on{border-color:#f59e0b;background:#1d1808}
-.pick.forced{opacity:.4;cursor:not-allowed}
-.chk{width:18px;height:18px;flex:0 0 18px;border-radius:5px;border:1.6px solid #3f4756;
-  display:flex;align-items:center;justify-content:center}
-.pick.on .chk{background:#f59e0b;border-color:#f59e0b}
-.pick.lim.on .chk{background:#38bdf8;border-color:#38bdf8}
-.chk svg{width:12px;height:12px;fill:none;stroke:#11141c;stroke-width:3;
-  stroke-linecap:round;stroke-linejoin:round;opacity:0}
-.pick.on .chk svg{opacity:1}
-.pn{font-size:13.5px;font-weight:500;flex:1}
-.note{font-size:11.5px;color:#8b93a3;line-height:1.5;margin:12px 0 0;padding:10px 12px;
-  background:#161b26;border-radius:9px;border:1px solid #232a39}
-
-.panel{position:relative;background:#1f2430;border:1px solid #374151;border-radius:14px;
-  box-shadow:0 16px 36px rgba(0,0,0,.48);overflow:hidden}
-.ph{display:flex;align-items:center;gap:10px;padding:12px;border-bottom:1px solid #374151}
-.pav{width:32px;height:32px;flex:0 0 32px;border-radius:50%;background:#3f8f7c;color:#fff;
-  display:flex;align-items:center;justify-content:center;font:600 13px/1 inherit}
-.pnm{font-size:14px;font-weight:600}
-.pst{font-size:12px;color:#9ca3af;display:flex;align-items:center;gap:6px;margin-top:1px}
-.dot{width:7px;height:7px;border-radius:50%;background:#34d399}
-.band{padding:9px 12px 8px}.band .tray{margin:0}
-.plab{font:600 11px/1 inherit;letter-spacing:.04em;text-transform:uppercase;color:#9ca3af;
-  padding:8px 12px 6px;border-top:1px solid #374151}
-.porg,.pact{display:flex;align-items:center;gap:10px;padding:8px 12px;cursor:pointer}
-.pact:hover,.porg:hover{background:#252b38}
-.pmk{width:26px;height:26px;flex:0 0 26px;border-radius:7px;display:flex;align-items:center;
-  justify-content:center;font:600 12px/1 inherit;color:#fff}
-.pl{font-size:13.5px}.pd{font-size:11.5px;color:#9ca3af}
-.pico{width:26px;height:26px;flex:0 0 26px;display:flex;align-items:center;justify-content:center}
-.pico:before{content:'';width:13px;height:15px;border:1.6px solid #9ca3af;border-radius:2px;
-  border-top-left-radius:7px;border-top-right-radius:7px;box-sizing:border-box}
-.pico.key:before{width:15px;height:15px;border-radius:50% 50% 2px 50%}
-.pico.plus:before{width:14px;height:14px;border-radius:2px;border-style:dashed}
-.krow{display:flex;align-items:center;gap:9px;padding:9px 12px;border-top:1px solid #2b3240}
-.kmid{flex:1;min-width:0}
-.knm{font-size:13.5px;display:flex;align-items:center;gap:6px}
-.kmeta{font-size:11.5px;color:#9ca3af;margin-top:1px}
-.chg{font:600 9px/1 ui-monospace,monospace;letter-spacing:.06em;text-transform:uppercase;
-  color:#c7d2fe;background:#312e81;border:1px solid #4f46e5;padding:5px 7px;border-radius:5px;
-  cursor:pointer}
-.chg:hover{background:#3f3aa0}
-.kx{width:24px;height:24px;flex:0 0 24px;border-radius:6px;color:#6b7280;cursor:pointer;
-  display:flex;align-items:center;justify-content:center;font-size:17px;line-height:1}
-.kx:hover{background:#3f2226;color:#f87171}
-.weak{font:600 8px/1 ui-monospace,monospace;letter-spacing:.06em;text-transform:uppercase;
-  color:#fbbf24;background:#3a2708;padding:3px 5px;border-radius:3px;margin-left:6px}
-.here{font:600 8px/1 ui-monospace,monospace;letter-spacing:.06em;text-transform:uppercase;
-  color:#34d399;background:#0d2f22;padding:3px 5px;border-radius:3px}
-#s-auth .fui-warn,.screen .fui-warn{margin-top:10px;border-radius:9px;border:1px solid #4b2222}
-.fui-warn{font-size:11.5px;color:#fca5a5;background:#2b1616;border-top:1px solid #4b2222;
-  padding:10px 12px;line-height:1.5}
-.back{font-size:12px;color:#8b93a3;padding:10px 12px;cursor:pointer;
-  border-top:1px solid #374151}
-.back:hover{color:#e5e7eb}
-
-.sheet{position:absolute;inset:0;border-radius:14px;overflow:hidden;z-index:30}
-.shdim{position:absolute;inset:0;background:rgba(0,0,0,.55)}
-.shbox{position:absolute;left:0;right:0;bottom:0;background:#e8e8ed;color:#1c1c1e;
-  border-radius:14px 14px 0 0;padding:20px 18px 16px;text-align:center}
-.shic{width:42px;height:42px;margin:0 auto 10px;color:#1c1c1e}
-.shic svg{width:100%;height:100%;fill:none;stroke:currentColor;stroke-width:1.5}
-.shttl{font-size:16px;font-weight:600}
-.shsub{font-size:13px;color:#6b6b70;margin:2px 0 16px}
-.shbtn{background:#0a84ff;color:#fff;border-radius:10px;padding:11px;font-size:15px;
-  font-weight:600;cursor:pointer}
-.shcancel{font-size:15px;color:#0a84ff;padding:11px;cursor:pointer}
-
-/* ── Manage-credentials screen — the design VERBATIM (factor-ui-restart mock).
-   Every var + rule is the mock's, scoped under .credpanel so the tokens
-   (--accent/--panel/…) cannot leak onto the host dashboard. ──────────────── */
-.credpanel{ --bg:#0b0f17; --panel:#111827; --panel2:#0d1420; --line:#1f2937; --line2:#374151;
-  --ink:#e5e7eb; --dim:#9ca3af; --faint:#6b7280; --accent:#6366f1; --accent2:#818cf8;
-  --good:#34d399; --goodbg:#064e3b; --warn:#fbbf24; --warnbg:#4d3908; --danger:#f87171;
-  --mfa:#38bdf8; --mfabg:#0c2c40;
-  display:flex; flex-direction:column; background:var(--panel); color:var(--ink); }
-.credpanel .credbody{ overflow-y:auto; padding:6px 12px 16px }
-.credpanel .scrhead{ display:flex; align-items:center; gap:10px; padding:13px 14px 12px;
-  border-bottom:1px solid var(--line) }
-.credpanel .scrhead .ttl{ min-width:0 }
-.credpanel .scrhead h1{ margin:0; font-size:15.5px; font-weight:650 }
-.credpanel .scrhead .sub{ font-size:12px; color:var(--dim) }
-.credpanel .closex{ margin-left:auto; background:none; border:none; color:var(--faint);
-  font-size:22px; line-height:1; cursor:pointer; padding:2px 8px; border-radius:8px }
-.credpanel .closex:hover{ background:#0d1420; color:var(--ink) }
-.credpanel .mfacard{ margin:10px 6px 4px; border:1px solid var(--line2); border-radius:12px;
-  padding:12px; display:flex; align-items:center; gap:11px;
-  background:linear-gradient(180deg,#0c1626,#0b1220) }
-.credpanel .mfacard .mi{ min-width:0; flex:1 }
-.credpanel .mfacard .mt{ font-weight:650; font-size:14px; white-space:nowrap }
-.credpanel .mfacard .md{ font-size:12px; color:var(--dim); margin-top:3px }
-.credpanel .ficon{ position:relative; width:34px; height:34px; border-radius:9px; flex:none;
-  display:grid; place-items:center; background:#0b1220; border:1px solid var(--line2);
-  color:var(--accent2) }
-.credpanel .ficon svg{ width:18px; height:18px }
-.credpanel .grouphead{ display:flex; align-items:center; padding:14px 8px 6px }
-.credpanel .grouplbl{ padding:0; font-size:11px; letter-spacing:.12em; text-transform:uppercase;
-  color:var(--faint) }
-.credpanel .addbtn{ margin-left:auto; background:none; border:1px solid var(--line2);
-  color:var(--accent2); border-radius:8px; padding:4px 11px; font:inherit; font-size:12px;
-  font-weight:650; cursor:pointer; display:inline-flex; align-items:center; gap:5px }
-.credpanel .addbtn:hover{ background:#12203b }
-.credpanel .addbtn svg{ width:12px; height:12px }
-.credpanel .row{ display:flex; align-items:center; gap:12px; padding:12px; border:1px solid var(--line);
-  background:var(--panel2); border-radius:12px; margin:6px 0 }
-.credpanel .authcell{ width:80px; flex:none; display:flex; flex-direction:column; align-items:center;
-  gap:6px; cursor:pointer; text-align:center }
-.credpanel .authcell .ac-ico{ position:relative; width:34px; height:34px; border-radius:9px;
-  display:grid; place-items:center; background:#0b1220; border:1px solid var(--line2);
-  color:var(--accent2); overflow:visible }
-.credpanel .authcell .ac-ico svg{ width:18px; height:18px }
-.credpanel .authcell .ac-lbl{ font-size:10.5px; line-height:1.15; font-weight:600; color:var(--dim) }
-.credpanel .authcell.au-full .ac-ico{ color:#34d399; border-color:rgba(52,211,153,.45);
-  background:rgba(52,211,153,.08) }
-.credpanel .authcell.au-full .ac-lbl{ color:#34d399 }
-.credpanel .authcell.au-multi .ac-ico{ color:var(--mfa); border-color:rgba(120,130,240,.5);
-  background:rgba(120,130,240,.08) }
-.credpanel .authcell.au-multi .ac-lbl{ color:var(--mfa) }
-.credpanel .authcell.au-unlock .ac-ico{ color:var(--accent2) }
-.credpanel .authcell.au-unlock .ac-lbl{ color:#93a3bd }
-.credpanel .authcell.au-none .ac-ico{ color:var(--line2); background:transparent }
-.credpanel .authcell.au-none .ac-lbl{ color:#5b6578 }
-.credpanel .fmid{ min-width:0; flex:1 }
-.credpanel .fname{ font-weight:600; display:flex; align-items:center; gap:8px; flex-wrap:wrap }
-.credpanel .fmeta{ font-size:12px; color:var(--dim); margin-top:2px; overflow-wrap:break-word }
-.credpanel .fmeta>div{ line-height:1.5 }
-.credpanel .facts{ display:flex; align-items:center; gap:2px; margin-left:auto }
-.credpanel .factcol{ display:flex; flex-direction:column; align-items:flex-end; gap:1px; margin-left:auto }
-.credpanel .lnk{ background:none; border:none; color:var(--dim); font-size:12px; cursor:pointer;
-  padding:6px 8px; border-radius:8px }
-.credpanel .lnk:hover{ color:var(--ink); background:#0d1420 }
-.credpanel .lnk.lchange{ color:var(--accent2) }
-.credpanel .lnk.lverify{ color:#34d399 }
-.credpanel .lnk.ldelete{ color:var(--danger) }
-.credpanel .lnk.lcancel{ color:var(--dim); margin-left:auto }
-.credpanel .lnk.lchange:hover,.credpanel .lnk.lverify:hover,.credpanel .lnk.ldelete:hover,
-.credpanel .lnk.lcancel:hover{ text-decoration:underline; background:none }
-.credpanel .trashbtn{ width:30px; height:30px; border-radius:8px; border:1px solid var(--line2);
-  background:#0e1420; color:var(--faint); display:grid; place-items:center; cursor:pointer }
-.credpanel .trashbtn svg{ width:15px; height:15px }
-@media (hover:hover){ .credpanel .trashbtn:hover{ color:var(--danger); border-color:var(--danger);
-  background:#3b1414 } }
-.credpanel .namewrap{ display:inline-flex; align-items:center; gap:5px }
-.credpanel .editbtn{ display:inline-flex; align-items:center; justify-content:center; width:16px;
-  height:16px; padding:0; background:none; border:none; color:var(--dim); cursor:pointer }
-.credpanel .editbtn svg{ width:16px; height:16px }
-.credpanel .editbtn:hover{ color:#fff }
-.credpanel .renamewrap{ display:inline-flex; align-items:center; gap:2px }
-.credpanel .renameinput{ background:#0b111b; border:1px solid var(--accent); border-radius:6px;
-  color:var(--ink); font-size:inherit; font-weight:inherit; font-family:inherit; padding:2px 7px;
-  max-width:170px }
-.credpanel .renameinput:focus{ outline:none }
-.credpanel .renameok,.credpanel .renamecancel{ display:inline-flex; align-items:center;
-  justify-content:center; width:20px; height:20px; padding:0; background:none; border:none;
-  cursor:pointer }
-.credpanel .renameok svg,.credpanel .renamecancel svg{ width:16px; height:16px }
-.credpanel .renameok{ color:#34d399 }
-.credpanel .renamecancel{ color:var(--danger) }
-.credpanel .inlinepw{ flex:1; min-width:0; display:flex; flex-direction:column; gap:8px }
-.credpanel .inlinepw .fname{ font-weight:600 }
-.credpanel .inlinerow{ display:flex; gap:8px; align-items:center }
-.credpanel .inlineinput{ flex:1; min-width:0; background:#0b111b; border:1px solid var(--line2);
-  border-radius:8px; color:var(--ink); padding:8px 10px; font-size:14px }
-.credpanel .inlineinput:focus{ outline:none; border-color:var(--accent) }
-.credpanel .inlinego{ flex:none; padding:8px 16px }
-.credpanel .inlinefoot{ display:flex; align-items:center; gap:12px; min-height:16px }
-.credpanel .inlinemsg{ display:inline-flex; align-items:center; gap:5px; font-size:12px }
-.credpanel .inlinemsg svg{ width:14px; height:14px }
-.credpanel .inlinemsg.fail{ color:var(--danger) }
-.credpanel .inlineok{ display:inline-flex; align-items:center; gap:8px; color:#34d399;
-  font-weight:600; font-size:14px; padding:4px 0 }
-.credpanel .inlineok svg{ width:20px; height:20px }
-.credpanel .btn{ font:inherit; font-weight:600; cursor:pointer; border-radius:10px; padding:9px 13px;
-  border:1px solid var(--line2); display:inline-flex; align-items:center; gap:7px;
-  justify-content:center }
-.credpanel .btn-primary{ background:var(--accent); color:#fff; border-color:var(--accent) }
-.credpanel .btn-primary:hover{ background:#5457e6 }
-.credpanel .weak{ font:600 8px/1 ui-monospace,monospace; letter-spacing:.06em; text-transform:uppercase;
-  color:var(--warn); background:var(--warnbg); padding:3px 5px; border-radius:3px; margin-left:6px }
-`;
-
-// ── module state ───────────────────────────────────────────────────────────
-let host = null;        // the overlay element (null when mounted inside a host drawer)
-let cardEl = null;      // the #card the design renders into
-let onClosed = null;
-let onBackFn = null;    // when set (drawer mode), "Back" returns instead of closing
-let M, S;               // M = the backend model (design shape); S = UI state
-let armorText = null;   // the current armor, as fetched
-let statusData = null;  // /api/identity/status
-let trayWired = false;
-
-// ── design constants (verbatim) ──────────────────────────────────────────
-const G = {
-  face: '<svg viewBox="0 0 24 24"><path d="M4 8.6V6.2A2.2 2.2 0 0 1 6.2 4h2.4M15.4 4h2.4A2.2 2.2 0 0 1 20 6.2v2.4M20 15.4v2.4a2.2 2.2 0 0 1-2.2 2.2h-2.4M8.6 20H6.2A2.2 2.2 0 0 1 4 17.8v-2.4" stroke-linecap="round"/><path d="M9.2 10.2v1.6M14.8 10.2v1.6M12 10.2v3.2M10 15.4a3.6 3.6 0 0 0 4 0" stroke-linecap="round"/></svg>',
-  pass: '<svg viewBox="0 0 24 24"><rect x="2.6" y="6.6" width="18.8" height="10.8" rx="2.6"/><circle cx="8" cy="12" r="1.15" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.15" fill="currentColor" stroke="none"/><circle cx="16" cy="12" r="1.15" fill="currentColor" stroke="none"/></svg>',
-  both: '<svg viewBox="0 0 24 24"><path d="M4 8.6V6.2A2.2 2.2 0 0 1 6.2 4h2.4M15.4 4h2.4A2.2 2.2 0 0 1 20 6.2v2.4M20 15.4v2.4a2.2 2.2 0 0 1-2.2 2.2h-2.4M8.6 20H6.2A2.2 2.2 0 0 1 4 17.8v-2.4" stroke-linecap="round"/><circle cx="8.4" cy="12" r="1.15" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.15" fill="currentColor" stroke="none"/><circle cx="15.6" cy="12" r="1.15" fill="currentColor" stroke="none"/></svg>',
-};
-const NAME = { face: 'Passkey', pass: 'Password', both: 'Multi-Factor' };
-const K = ['face', 'pass', 'both'];
-const TICK = '<div class="tick"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7"/></svg></div>';
-
-const FLAGS = [
-  { t: 'Background agent', d: 'Nothing is running to fetch your secrets. Unlocking with your root starts it.',
-    ok: 'Running. It can fetch secrets without asking you again.',
-    g: '<rect x="7.5" y="7.5" width="9" height="9" rx="1.6"/><path d="M10 4v3.5M14 4v3.5M10 16.5V20M14 16.5V20M4 10h3.5M4 14h3.5M16.5 10H20M16.5 14H20"/>' },
-  { t: 'Its permission', d: 'Ran out 4 hours ago. Time-limited on purpose, so this is expected.',
-    ok: 'Valid for another 3 hours. It renews itself while you are signed in.',
-    g: '<path d="M6.5 3h11M6.5 21h11M8 3v3.6c0 1.4 4 3.4 4 5.4 0-2 4-4 4-5.4V3M8 21v-3.6c0-1.4 4-3.4 4-5.4 0 2 4 4 4 5.4V21"/>' },
-  { t: 'Your own store', d: 'Not set up yet. Your personal secrets have nowhere to live until it is.',
-    ok: 'Set up and working. It follows you to any machine you sign in on.',
-    g: '<rect x="3.5" y="4.5" width="17" height="15" rx="2.2"/><circle cx="12" cy="12" r="3.4"/><path d="M12 8.6V6.8M12 17.2v-1.8M15.4 12h1.8M6.8 12h1.8"/>' },
-  { t: 'Certificates', d: 'One expires in 6 days. Renewing it needs your root key.',
-    ok: 'All current. The next renewal is months away.',
-    g: '<circle cx="12" cy="9.2" r="5.2"/><path d="M9 13.6L8 21l4-2.2L16 21l-1-7.4"/>' },
-  { t: 'Serving', d: 'Not reachable from outside. Bringing it back needs your root key.',
-    ok: 'Reachable from outside. Nothing to do here.',
-    g: '<path d="M5 19v-6a7 7 0 0 1 14 0v6"/><path d="M9.5 19v-6a2.5 2.5 0 0 1 5 0v6"/><path d="M3 19h18"/>' },
-  { t: 'Approvals', d: 'One request is waiting for you to approve it.',
-    ok: 'Nothing is waiting on you.',
-    g: '<path d="M4.5 5.5h15a1.5 1.5 0 0 1 1.5 1.5v8a1.5 1.5 0 0 1-1.5 1.5H12l-4.5 3.5v-3.5H4.5A1.5 1.5 0 0 1 3 15V7a1.5 1.5 0 0 1 1.5-1.5z"/><path d="M8.8 11l2.1 2.1 4.3-4.3"/>' },
-];
-
-// ── authority policy (verbatim from the design) ──────────────────────────
-function rootReachable(m) {
-  const capable = m.keys.some((k) => k.prf);
-  if (m.mfa) return capable && m.pass.on;
-  return m.keys.some((k) => k.prf && k.auth === 'full') || (m.pass.on && m.pass.full);
+// ── small helpers ──────────────────────────────────────────────────────────
+function b64uToBytes(s) {
+  let b = s.replace(/-/g, '+').replace(/_/g, '/'); while (b.length % 4) b += '=';
+  const bin = atob(b); const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i += 1) out[i] = bin.charCodeAt(i);
+  return out;
 }
-function unlockWays(m) {
-  const w = [];
-  if (m.mfa) {
-    if (m.face.canUnlock && m.keys.length) w.push('face');
-    if (m.pass.canUnlock && m.pass.on) w.push('pass');
-    if (rootReachable(m)) w.push('both');
-  } else { if (m.keys.length) w.push('face'); if (m.pass.on) w.push('pass'); }
-  return w;
+function bytesToB64u(bytes) {
+  const v = new Uint8Array(bytes); let bin = '';
+  for (let i = 0; i < v.length; i += 1) bin += String.fromCharCode(v[i]);
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
-function invalid(m) {
-  if (!rootReachable(m)) return 'Nothing would be able to reach your root.';
-  if (m.keys.some((k) => !k.prf && k.auth === 'full')) return 'A passkey that cannot derive cannot hold full authority.';
-  if (!unlockWays(m).length) return 'Nothing would be able to unlock the dashboard.';
-  return null;
+function randHex(n) {
+  const b = crypto.getRandomValues(new Uint8Array(n));
+  return Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
 }
-function applyAuthority(n, f, p, b) {
-  n.mfa = !!b;
-  if (n.mfa) {
-    n.pass.full = false; n.face.canUnlock = !!f; n.pass.canUnlock = !!p;
-    n.keys.forEach((k) => { k.auth = 'unlock'; });
-  } else {
-    n.pass.full = !!p; n.face.canUnlock = true; n.pass.canUnlock = true;
-    if (!f) n.keys.forEach((k) => { k.auth = 'unlock'; });
-    else if (!n.keys.some((k) => k.prf && k.auth === 'full')) n.keys.forEach((k) => { if (k.prf) k.auth = 'full'; });
+function nowIso() { return new Date().toISOString().replace(/\.\d+Z$/, 'Z'); }
+// Canonical-order JSON for policy-tree comparison (keys sorted recursively).
+function stableJson(v) {
+  if (Array.isArray(v)) return '[' + v.map(stableJson).join(',') + ']';
+  if (v && typeof v === 'object') {
+    return '{' + Object.keys(v).sort().map((k) => JSON.stringify(k) + ':' + stableJson(v[k])).join(',') + '}';
   }
-  return n;
+  return JSON.stringify(v);
 }
-function authoritySig(m) {
-  return [m.mfa, m.keys.some((k) => k.prf && k.auth === 'full'), m.pass.full, m.face.canUnlock, m.pass.canUnlock].join('|');
-}
-function hasAlternative() {
-  const cur = authoritySig(M); const pairOK = M.pass.on && M.keys.some((k) => k.prf);
-  for (let f = 0; f < 2; f += 1) for (let p = 0; p < 2; p += 1) for (let b = 0; b < 2; b += 1) {
-    if (b && !pairOK) continue;
-    if (!b && f && !M.face.on) continue;
-    if (!b && p && !M.pass.on) continue;
-    const n = applyAuthority(JSON.parse(JSON.stringify(M)), f, p, b);
-    if (invalid(n)) continue;
-    if (authoritySig(n) !== cur) return true;
-  }
-  return false;
-}
-function anyKeyFull() { return M.keys.some((x) => x.auth === 'full' && x.prf === true); }
-function level(k) {
-  if (k === 'both') return M.mfa ? 'b' : 'off';
-  if (!M[k].on) return 'en';
-  if (M.mfa) return M[k].canUnlock ? 'a' : 'off';
-  if (k === 'face') return anyKeyFull() ? 'b' : 'a';
-  return M.pass.full ? 'b' : 'a';
-}
-
-// ── authority cell (approved design): the single word a factor shows, derived
-// from the SERVER's factor-policy root_role + access (GET /api/identity/
-// factor-policy) — the authoritative version of what the local solver computes.
-// One ladder, five states; sign-in folds in for the multi-factor and none rows.
-export function authorityWord(rootRole, access) {
-  if (rootRole === 'individual') return 'Full authority';
-  if (rootRole === 'mfa-member') return access === 'disabled' ? 'Multi-factor only' : 'Multi-factor w/ unlock';
-  return access === 'disabled' ? 'No authority' : 'Unlock only';   // root_role 'none'
-}
-export function authorityCls(rootRole, access) {
-  if (rootRole === 'individual') return 'au-full';
-  if (rootRole === 'mfa-member') return 'au-multi';
-  return access === 'disabled' ? 'au-none' : 'au-unlock';   // root_role 'none'
-}
-const IC_KEY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="4.5"/><path d="M10.7 12.3 21 2m-4 0 3 3m-6 0 3 3"/></svg>';
-const IC_PK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="8" r="4"/><path d="M10.3 14C6 14 3 16.5 3 20m14-6v7m0-7 2.5 1.5M17 17l2.5-1.5M17 20l2.3 1.4"/></svg>';
-// The left authority cell (approved design): type icon + the authority word
-// beneath, colored by state. Prefers the server factor-policy role; falls back
-// to the local solver's level when factor-policy hasn't loaded. Keeps the same
-// data-p/data-k tap hook the authority editor already listens on.
-function auCell(role, access, oldLevel, isPasskey, dataAttr, noprf) {
-  const ico = isPasskey ? IC_PK : IC_KEY;
-  if (noprf) {
-    return '<div class="authcell au-none"><span class="ac-ico">' + ico
-      + '</span><span class="ac-lbl">' + (M.mfa ? 'Cannot pair' : 'No PRF') + '</span></div>';
-  }
-  let word;
-  let cls;
-  if (role) { word = authorityWord(role, access); cls = authorityCls(role, access); } else {
-    word = ({ a: 'Unlock only', b: 'Full authority', off: 'No authority' })[oldLevel] || 'Unlock only';
-    cls = ({ a: 'au-unlock', b: 'au-full', off: 'au-none' })[oldLevel] || 'au-unlock';
-  }
-  return '<div class="authcell ' + cls + '"' + (dataAttr || '') + (dataAttr ? ' style="cursor:pointer"' : '')
-    + '><span class="ac-ico">' + ico + '</span><span class="ac-lbl">' + word + '</span></div>';
-}
-
-// ── inline rename (approved design): tap the pencil, edit in place, save.
-// A factor name is personal metadata (PATCH /api/identity/factors/{id}/metadata)
-// — instant, no root, no generation. Only offered when the factor-policy id is
-// known (fallback rows without one are not renameable).
-const IC_EDIT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>';
-const IC_OK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 6.5"/></svg>';
-const IC_XX = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>';
-const IC_SHIELD = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/></svg>';
-const IC_PLUS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>';
-const IC_TRASH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13M10 11v6M14 11v6"/></svg>';
-function escAttr(s) { return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
-function nameHtml(factorId, label, suffix) {
-  suffix = suffix || '';
-  if (!factorId) return '<span>' + label + '</span>' + suffix;
-  if (S.renaming === factorId) {
-    return '<span class="renamewrap"><input class="renameinput" value="' + escAttr(S.renameVal != null ? S.renameVal : label) + '">'
-      + '<button class="renameok" aria-label="Save">' + IC_OK + '</button>'
-      + '<button class="renamecancel" aria-label="Cancel">' + IC_XX + '</button></span>';
-  }
-  return '<span class="namewrap"><span>' + label + '</span>'
-    + '<button class="editbtn" data-edit="' + escAttr(factorId) + '" aria-label="Rename">' + IC_EDIT + '</button></span>'
-    + suffix;
-}
-function wireName(row, factorId, label) {
-  if (!factorId) return;
-  const edit = row.querySelector('.editbtn');
-  if (edit) edit.onclick = (e) => { e.stopPropagation(); S.renaming = factorId; S.renameVal = label; render(); };
-  const inp = row.querySelector('.renameinput');
-  if (inp) {
-    inp.oninput = () => { S.renameVal = inp.value; };
-    inp.onkeydown = (e) => {
-      e.stopPropagation();
-      if (e.key === 'Enter') saveName(factorId);
-      else if (e.key === 'Escape') { S.renaming = null; render(); }
-    };
-    inp.onclick = (e) => e.stopPropagation();
-    setTimeout(() => { inp.focus(); inp.select(); }, 0);
-  }
-  const ok = row.querySelector('.renameok'); if (ok) ok.onclick = (e) => { e.stopPropagation(); saveName(factorId); };
-  const x = row.querySelector('.renamecancel'); if (x) x.onclick = (e) => { e.stopPropagation(); S.renaming = null; render(); };
-}
-function applyLabel(factorId, label) {
-  if (M.pw && M.pw.factorId === factorId) M.pw.label = label;
-  M.keys.forEach((k) => { if (k.factorId === factorId) k.l = label; });
-}
-async function saveName(factorId) {
-  const label = (S.renameVal != null ? S.renameVal : '').trim();
-  S.renaming = null;
-  if (!label) { render(); return; }
-  applyLabel(factorId, label);   // optimistic — instant, personal metadata
-  render();
-  try {
-    await fetch('/api/identity/factors/' + encodeURIComponent(factorId) + '/metadata', {
-      method: 'PATCH', credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({ label }),
-    });
-  } catch (e) { /* best-effort; server truth reappears on next load */ }
-}
-
-// ── inline verify (approved design): the card morphs to a password field; the
-// password is checked CLIENT-SIDE by opening the armor with it (read-only, no
-// server call, no write). Green check on success (auto-reverts), red X to retry.
-function verifyBlock() {
-  if (S.vfyResult === 'ok') {
-    return '<div class="inlinepw"><div class="fname">Verify your password</div>'
-      + '<div class="inlineok">' + IC_OK + '<span>Verified</span></div></div>';
-  }
-  return '<div class="inlinepw"><div class="fname">Verify your password</div><div>'
-    + '<div class="inlinerow"><input class="inlineinput" type="password" autocomplete="current-password" placeholder="Password">'
-    + '<button class="btn btn-primary inlinego">Verify</button></div>'
-    + '<div class="inlinefoot">'
-    + (S.vfyResult === 'fail' ? '<span class="inlinemsg fail">' + IC_XX + '<span>Incorrect — try again</span></span>' : '')
-    + '<button class="lnk lcancel">Cancel</button></div></div></div>';
-}
-async function doVerify() {
-  const pw = S.vfyVal || '';
-  if (!pw) return;
-  const target = S.verifying;
-  try {
-    await primitives.decryptArmor(armorText, pw);   // opens => the password is correct
-    S.vfyResult = 'ok'; render();
-    setTimeout(() => {
-      if (S.verifying === target) { S.verifying = null; S.vfyResult = null; S.vfyVal = ''; render(); }
-    }, 1500);
-  } catch (e) { S.vfyResult = 'fail'; render(); }
-}
-function wireVerify(row) {
-  const inp = row.querySelector('.inlineinput');
-  if (inp) {
-    inp.value = S.vfyVal || '';
-    inp.oninput = () => { S.vfyVal = inp.value; };
-    inp.onkeydown = (e) => { e.stopPropagation(); if (e.key === 'Enter') doVerify(); else if (e.key === 'Escape') { S.verifying = null; S.vfyResult = null; render(); } };
-    inp.onclick = (e) => e.stopPropagation();
-    setTimeout(() => inp.focus(), 0);
-  }
-  const go = row.querySelector('.inlinego'); if (go) go.onclick = (e) => { e.stopPropagation(); doVerify(); };
-  const cx = row.querySelector('.lcancel'); if (cx) cx.onclick = (e) => { e.stopPropagation(); S.verifying = null; S.vfyResult = null; S.vfyVal = ''; render(); };
-}
-function actionOn(k) {
-  if (k === 'both') {
-    if (M.mfa) return hasAlternative() ? 'change' : null;
-    return (M.face.on && M.pass.on && M.keys.some((x) => x.prf)) ? 'enable' : null;
-  }
-  if (!M[k].on) return 'enroll';
-  if (M.mfa) return null;
-  if (!hasAlternative()) return null;
-  return M[k].full ? 'change' : 'upgrade';
-}
-function rootFactor() {
-  if (M.mfa) return 'both';
-  if (M.face.on && level('face') === 'b') return 'face';
-  if (M.pass.on && level('pass') === 'b') return 'pass';
-  return null;
-}
-function narrowest() {
-  if (M.face.on && level('face') !== 'off') return 'face';
-  if (M.pass.on && level('pass') !== 'off') return 'pass';   // (design's k= global removed for strict mode)
-  return M.mfa ? 'both' : null;
-}
-
-// ── real-identity helpers ────────────────────────────────────────────────
-function displayName() {
-  return (statusData && statusData.personal_identity && statusData.personal_identity.display_name) || '';
-}
-function initial() { return (displayName() || '?').trim().charAt(0).toUpperCase(); }
-
-// Friendly factor metadata, verbatim from the design's transportHuman/createdLocal:
-// a passkey's transports become human tokens (Built-in / Security key / Cloud-Sync /
-// This device) joined with " · "; a timestamp renders in the viewer's local zone.
-function transportHuman(p, here) {
-  const t = (p && p.transports) || [];
-  const has = (x) => t.indexOf(x) !== -1;
-  const parts = [];
-  if (has('internal')) parts.push('Built-in');
-  if (has('usb') || has('nfc') || has('ble')) parts.push('Security key');
-  if (p && (p.backed_up || has('hybrid'))) parts.push('Cloud-Sync');   // backed-up flag is authoritative (BE/BS)
-  if (here) parts.push('This device');
-  return parts.join(' · ') || 'Passkey';
-}
-function createdLocal(iso) { return iso ? new Date(iso).toLocaleString().replace(', ', ' ') : ''; }
-
-// Build the design's M shape from the real /status + parsed armor.
-async function loadModel() {
-  const st = await (await fetch('/api/identity/status', {
+async function fetchJson(path) {
+  const r = await fetch(path, {
     credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'application/json' },
-  })).json();
-  const pj = await (await fetch('/api/identity/personal', {
-    credentials: 'same-origin', headers: { Accept: 'application/json' },
-  })).json();
-  if (pj && pj.error) throw new Error(pj.error);
-  armorText = pj.armored_private_key;
-  statusData = st;
-  const data = primitives.parseArmor(armorText);
-  const factors = data.factors || [];
-  const combined = factors.find((f) => f.type === 'combined') || null;
-  const mfa = !!combined;
-  const pwF = factors.find((f) => f.type === 'password') || null;
-  const rootIds = {};
-  factors.filter((f) => f.type === 'passkey').forEach((f) => { rootIds[f.credential_id] = 1; });
-  const keys = (st.passkeys || []).map((p) => ({
-    l: p.label || 'Passkey',
-    v: transportHuman(p, p.rp_id === st.rp_id),
-    prf: !!p.provisioning_public_key,
-    w: createdLocal(p.created_at),
-    here: p.rp_id === st.rp_id ? 1 : 0,
-    auth: rootIds[p.credential_id] ? 'full' : 'unlock',
-    credentialId: p.credential_id,
-    provisioningPub: p.provisioning_public_key || null,
-  }));
-  const iters = (pwF && pwF.kdf && pwF.kdf.iterations)
-    || (combined && combined.kdf && combined.kdf.iterations) || 0;
-  M = {
-    face: { on: keys.length > 0, full: keys.some((k) => k.prf && k.auth === 'full'), canUnlock: true },
-    pass: { on: !!pwF || mfa, full: !!pwF && !mfa, canUnlock: !mfa },
-    mfa,
-    lit: [],
-    pw: {
-      kdf: 'PBKDF2',
-      mem: iters,
-      // 600000 is the PBKDF2 iteration COUNT, not a memory size — label it as
-      // iterations, grouped (600,000). created_at is a creation time, not a
-      // change; render it in the viewer's local time zone, never raw UTC.
-      itersLabel: (Number(iters) || 0).toLocaleString() + ' iterations',
-      createdLabel: createdLocal(pj.created_at),
-    },
-    kdfNow: { mem: 600000 },
-    keys,
-    rootCached: false,
-  };
-  // Overlay the SERVER's authoritative factor-policy roles (root_role + access)
-  // onto the model for the authority cell. Optional/best-effort: if the endpoint
-  // is absent the panel still renders from the armor-derived model above.
-  try {
-    const fp = await (await fetch('/api/identity/factor-policy', {
-      credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'application/json' },
-    })).json();
-    if (fp && Array.isArray(fp.factors)) {
-      M.fpGeneration = fp.generation;
-      const byCred = {};
-      fp.factors.forEach((f) => {
-        if (f.type === 'passkey' && f.credential_id) byCred[f.credential_id] = f;
-        else if (f.type === 'password' && M.pw) {
-          M.pw.rootRole = f.root_role; M.pw.access = f.access;
-          M.pw.factorId = f.factor_id; if (f.label) M.pw.label = f.label;
-        }
-      });
-      M.keys.forEach((k) => {
-        const f = byCred[k.credentialId];
-        if (f) {
-          k.rootRole = f.root_role; k.access = f.access; k.factorId = f.factor_id;
-          if (f.label) k.l = f.label;   // the factor-policy label overlays the raw passkey name
-        }
-      });
-    }
-  } catch (e) { /* factor-policy is optional for display; armor model already rendered */ }
-  if (!S) S = { screen: 'keys', method: null, act: null, need: [], si: 0, after: null, sheet: null, pick: null, primed: 0, renaming: null, renameVal: '', verifying: null, vfyVal: '', vfyResult: null };
+  });
+  return r.json();
 }
-
-// ── real ceremony layer (replaces the mock commit()) ─────────────────────
-// Report a client-side ceremony failure to the server so it survives past the
-// browser (the crypto runs here, so these never reach the dashboard log on their
-// own). DIAGNOSTIC ONLY — error text + non-secret context; NEVER a password,
-// PRF, seed, or armor. Best-effort: telemetry must never break a ceremony.
+async function postJson(path, body) {
+  const r = await fetch(path, {
+    method: 'POST', credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return r.json().catch(() => ({ ok: false, error: 'unreadable server response' }));
+}
+function deviceLabel() {
+  const p = (navigator.userAgentData && navigator.userAgentData.platform)
+    || navigator.platform || '';
+  if (/mac/i.test(p)) return 'This Mac';
+  if (/iphone/i.test(p)) return 'iPhone';
+  if (/ipad/i.test(p)) return 'iPad';
+  if (/win/i.test(p)) return 'This PC';
+  if (/android/i.test(p)) return 'This phone';
+  return 'This device';
+}
+// Diagnostics only — error text + non-secret context; never key material.
 function reportCeremonyError(ceremony, action, err) {
   try {
     fetch('/api/identity/ceremony-error', {
@@ -681,640 +95,1257 @@ function reportCeremonyError(ceremony, action, err) {
         name: (err && err.name) || '',
         message: (err && err.message) || String(err),
         stack: (err && err.stack) || '',
-        context: {
-          mfa: !!(M && M.mfa),
-          passwordOn: !!(M && M.pass && M.pass.on),
-          passkeys: (M && M.keys) ? M.keys.length : 0,
-          screen: (S && S.screen) || null,
-        },
+        context: {},
       }),
     }).catch(() => {});
   } catch (e) { /* diagnostics must never throw */ }
 }
 
-async function doRearm(opener, action, requirePair) {
-  try {
-    const body = await primitives.signArmorUpdate(armorText, opener, action, requirePair);
-    const r = await fetch('/api/identity/personal/armor', {
-      method: 'POST', credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-    });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok || j.ok === false) throw new Error(j.error || ('re-arm failed (' + r.status + ')'));
-    return true;
-  } catch (err) {
-    S.warn = (err && err.message) || String(err);
-    reportCeremonyError('rearm', action && action.kind, err);
-    return false;
-  }
+// ── the read seam: server v3 factor-policy view → the design's model shape ──
+// (Consumed from session/auto-0812-211339 commit 33c09cce, with the mfaMode
+// inference replaced by a policy-tree comparison and the per-device slot rows
+// added: one row per passkey RECIPIENT, exactly the design's slot model.)
+export function factorAuthority(rootRole, access) {
+  if (rootRole === 'individual') return 'full';
+  return access === 'enabled' ? 'unlock' : 'none';
 }
-
-// The opener a root-mutating ceremony must present is the one the re-arm
-// primitive actually unwraps with. Under MFA that is BOTH halves (the combined
-// factor). Off MFA, EVERY re-arm the panel issues — set/remove password, add a
-// passkey factor, enable MFA, promote/demote — unwraps the master KEK through
-// the PASSWORD when one exists (the passkey-native re-arms are only reachable on
-// a passkey-only armor); so prefer the password, and fall back to the passkey
-// only when there is no password. Preferring rootFactor() here (which is the
-// passkey on a password+passkey armor) handed the password primitives no
-// passphrase — the wiring gap behind "can't upgrade / can't add a password".
-function rootNeed() {
-  if (M.mfa) return ['face', 'pass'];
-  if (M.pass.on) return ['pass'];
-  return ['face'];
+function orOfLeaves(ids) {
+  const leaves = ids.map((id) => ({ op: 'factor', factor_id: id }));
+  return leaves.length === 1 ? leaves[0] : { op: 'or', children: leaves };
 }
-function rootOpener() {
-  if (M.mfa) return { password: S.password, prf: S.prf };
-  if (S.password) return { password: S.password };
-  return { prf: S.prf };
-}
-
-// A WebAuthn PRF assertion; `credentialId` (base64url) scopes it to one device.
-async function getPrf(credentialId) {
-  if (!window.PublicKeyCredential || !navigator.credentials) throw new Error('this browser cannot use Face ID');
-  const rpId = statusData.rp_id || undefined;
-  const allow = credentialId
-    ? [{ type: 'public-key', id: b64u(credentialId) }]
-    : (statusData.passkeys || []).filter((p) => p.credential_id && (!rpId || p.rp_id === rpId))
-      .map((p) => ({ type: 'public-key', id: b64u(p.credential_id) }));
-  let asrt;
-  try {
-    asrt = await navigator.credentials.get({ publicKey: {
-      challenge: crypto.getRandomValues(new Uint8Array(32)),
-      rpId, allowCredentials: allow, userVerification: 'required', extensions: prfEvalExtension(),
-    } });
-  } catch (e) { if (e && e.name === 'NotAllowedError') throw new Error('Face ID was cancelled — try again'); throw e; }
-  const prf = prfOutputFromResults(asrt.getClientExtensionResults());
-  if (!prf) throw new Error('this passkey has no PRF and cannot hold or pair a key');
-  return prf;
-}
-function b64u(s) {
-  let b = s.replace(/-/g, '+').replace(/_/g, '/'); while (b.length % 4) b += '=';
-  const bin = atob(b); const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i += 1) out[i] = bin.charCodeAt(i); return out;
-}
-
-// authScreen Save → the real re-arm the chosen authority state implies.
-async function saveAuthorityReal(pick) {
-  const wasMfa = M.mfa;
-  const prfKey = M.keys.filter((x) => x.prf)[0];
-  if (!wasMfa && pick.both) {
-    if (!prfKey) { S.warn = 'A passkey that can derive a key is required to pair.'; return false; }
-    return doRearm(rootOpener(), { kind: 'enableMfa', credentialId: prfKey.credentialId, provisioningPub: prfKey.provisioningPub }, true);
-  }
-  if (wasMfa && !pick.both) {
-    return doRearm(rootOpener(), { kind: 'disableMfa', credentialId: prfKey && prfKey.credentialId }, false);
-  }
-  if (!wasMfa && !pick.both) {
-    const wantFace = pick.face; const haveFace = anyKeyFull();
-    if (wantFace !== haveFace && prfKey) {
-      return wantFace
-        ? doRearm(rootOpener(), { kind: 'promote', credentialId: prfKey.credentialId, provisioningPub: prfKey.provisioningPub }, false)
-        : doRearm(rootOpener(), { kind: 'demote', credentialId: prfKey.credentialId }, false);
-    }
-    if (M.pass.on && !pick.pass) { S.warn = 'A password without Multi-Factor always reaches the root; it cannot be unlock-only.'; return false; }
-    return true;   // no effective change
-  }
-  // MFA on, staying on: per-single canUnlock changes have no backend op yet.
-  S.warn = 'Per-factor unlock settings under Multi-Factor are not yet supported.'; return false;
-}
-async function changeKeyReal(idx, to) {
-  const k = M.keys[idx];
-  if (to === 'full') {
-    let pub = k.provisioningPub;
-    if (S.prf) pub = (await deriveProvisioningKey(S.prf)).publicKeyHex;
-    if (!pub) { S.warn = 'This passkey has no provisioning key to promote.'; return false; }
-    return doRearm(rootOpener(), { kind: 'promote', credentialId: k.credentialId, provisioningPub: pub }, false);
-  }
-  return doRearm(rootOpener(), { kind: 'demote', credentialId: k.credentialId }, false);
-}
-async function setPasswordReal(next) { return doRearm(rootOpener(), { kind: 'setPassword', newPassword: next }, false); }
-async function addPasswordReal(next) { return doRearm(rootOpener(), { kind: 'addPassword', newPassword: next }, false); }
-// On a combined (MFA) armor there is no standalone password to set or change —
-// the password lives INSIDE the require-both pair. A password that opens on its
-// own is the opposite of require-both, so establishing one dissolves the pair:
-// disable_mfa yields a standalone password (this new value) AND a standalone
-// passkey, either of which then opens the root.
-async function disableMfaSetPasswordReal(next) { return doRearm(rootOpener(), { kind: 'disableMfa', newPassword: next }, false); }
-async function removePasswordReal() { return doRearm(rootOpener(), { kind: 'removePassword' }, false); }
-async function removeDeviceReal(idx) {
-  const k = M.keys[idx];
-  try {
-    const r = await fetch('/api/identity/passkey/' + encodeURIComponent(k.credentialId), {
-      method: 'DELETE', credentials: 'same-origin',
-    });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok || j.ok === false) throw new Error(j.error || ('remove failed (' + r.status + ')'));
-    return true;
-  } catch (err) {
-    S.warn = (err && err.message) || String(err);
-    reportCeremonyError('removeDevice', 'delete', err);
-    return false;
-  }
-}
-async function addDeviceReal() {
-  let opened;
-  try {
-    // Open with the CURRENT state's root factor — under MFA that is the
-    // combined (password + passkey), not the password alone. Opening with the
-    // password alone is exactly what stopped "add a passkey" working under MFA.
-    opened = M.mfa
-      ? await primitives.decryptArmorWithCombined(armorText, S.password, S.prf)
-      : S.password
-        ? await primitives.decryptArmor(armorText, S.password)
-        : await primitives.decryptArmorWithPasskey(armorText, S.prf);
-  } catch (e) {
-    S.warn = 'that root proof did not open your identity — try again';
-    reportCeremonyError('enroll', 'open', e);
-    return false;
-  }
-  const seed = opened.seed;
-  try {
-    const signingKey = await primitives.importEd25519RootSigningKey(seed);
-    await enrollPasskey({ root: { signingKey, publicHex: opened.rootPub } });
-    return true;
-  } catch (err) {
-    S.warn = (err && err.message) || String(err);
-    reportCeremonyError('enroll', 'create', err);
-    return false;
-  }
-  finally { seed.fill(0); }
-}
-
-// After a successful ceremony: refresh from the server and show the Factors screen.
-async function afterCommit(nextScreen) {
-  await loadModel();
-  S.prf = null; S.act = null; S.method = null; S.pick = null; S.warn = null;
-  S.screen = nextScreen || 'keys';
-  render();
-}
-
-// Gather the root (password and/or Face ID) then run `after`. `need` is the
-// explicit list of factors to prove (['pass'], ['face'], or ['face','pass']).
-function gatherThen(after, need, extra) {
-  if (extra) Object.assign(S, extra);
-  S.warn = null;
-  const have = need.every((n) => (n === 'pass' ? !!S.password : !!S.prf));
-  if (have) { runAfter(after); return; }
-  S.need = need; S.si = 0; S.after = after; S.screen = 'prog';
-  S.sheet = (S.need[0] === 'face') ? 'use' : null;
-  render();
-}
-function runAfter(after) {
-  if (after === 'authorize') { S.screen = 'authorize'; S.primed = 0; render(); return; }
-  if (after === 'setpw') { S.screen = 'setpw'; render(); return; }
-  if (after === 'create') { S.screen = 'keys'; S.sheet = 'create'; render(); return; }
-  if (after === 'applykey') { applyKey(); return; }
-  if (after === 'removepw') { removePasswordReal().then((ok) => { if (ok) afterCommit('keys'); else render(); }); return; }
-  if (after === 'removekey') { removeDeviceReal(S.keyIdx).then((ok) => { if (ok) afterCommit('keys'); else render(); }); return; }
-}
-
-// ── the flag tray, shared by both surfaces (verbatim) ──────────────────────
-function tray() {
-  const t = document.createElement('div'); t.className = 'tray';
-  FLAGS.forEach((f, i) => {
-    const e = document.createElement('div');
-    e.className = 'fl' + (M.lit.indexOf(i) >= 0 ? ' needs' : '');
-    e.innerHTML = '<svg viewBox="0 0 24 24">' + f.g + '</svg>';
-    e.onclick = (ev) => {
-      ev.stopPropagation();
-      const open = t.querySelector('.balloon');
-      if (open && t.dataset.at === String(i)) { t.dataset.at = ''; open.remove(); return; }
-      if (open) open.remove(); t.dataset.at = i;
-      const on = M.lit.indexOf(i) >= 0;
-      const b = document.createElement('div'); b.className = 'balloon';
-      b.innerHTML = '<div class="bt">' + f.t + '</div><div class="bc' + (on ? '' : ' clear') + '">'
-        + (on ? '1 alert' : 'no alerts') + '</div><div class="bd">' + (on ? f.d : f.ok)
-        + '</div><div class="notch"></div>';
-      t.appendChild(b);
-      const hostEl = t.closest('.screen') || t.closest('.panel');
-      const c = e.offsetLeft + e.offsetWidth / 2; let left = c - b.offsetWidth / 2; const base = t.offsetLeft;
-      left = Math.max(-base + 8, Math.min(left, hostEl.clientWidth - b.offsetWidth - base - 8));
-      b.style.left = left + 'px'; b.querySelector('.notch').style.left = (c - left) + 'px';
-    };
-    t.appendChild(e);
-  });
-  return t;
-}
-
-function el(tag, cls, html) {
-  const n = document.createElement(tag);
-  if (cls) n.className = cls; if (html != null) n.innerHTML = html; return n;
-}
-
-// ── screens (markup verbatim; only mock hooks swapped) ─────────────────────
-function lockScreen() {
-  const s = el('div', 'screen');
-  s.appendChild(el('div', 'hd', 'Dashboard locked'));
-  s.appendChild(el('div', 'av', initial()));
-  s.appendChild(el('div', 'nm', displayName()));
-  if (!S.method) S.method = narrowest();
-  K.forEach((k) => {
-    const lv = level(k); const act = actionOn(k); const sel = (S.method === k && !S.act);
-    const pickable = (k === 'both') ? M.mfa : (M[k].on && level(k) !== 'off');
-    const row = el('div', 'opt' + (sel ? ' sel' : '') + (pickable ? '' : ' dim'));
-    const LV = { a: 'unlock only', b: 'full authority', off: 'disabled', en: 'not set up' };
-    let tag; const creates = (act === 'enroll' || act === 'enable');
-    if (S.act === k) tag = '<span class="tag live" data-a="' + k + '">' + ({ enroll: 'enrolling', enable: 'enabling', upgrade: 'upgrading', change: 'changing' })[act] + '&hellip;</span>';
-    else if (creates) tag = '<span class="tag act" data-a="' + k + '">' + act + '</span>';
-    else if (act) tag = '<span class="tag ' + lv + '" data-a="' + k + '" style="cursor:pointer">' + LV[lv] + '</span>';
-    else tag = '<span class="tag ' + lv + '">' + LV[lv] + '</span>';
-    row.innerHTML = '<div class="ic ' + (lv === 'b' ? 'root' : (lv === 'a' ? '' : 'off')) + '">' + G[k] + '</div>'
-      + '<div class="ot' + (pickable ? '' : ' off') + '">' + NAME[k] + tag + '</div>';
-    if (pickable) row.onclick = (e) => { e.stopPropagation(); S.act = null; S.method = k; render(); };
-    const b = row.querySelector('[data-a]');
-    if (b) b.onclick = (e) => { e.stopPropagation(); S.act = (S.act === k) ? null : k; render(); };
-    s.appendChild(row);
-  });
-  s.appendChild(tray());
-  const btn = el('div', 'btn');
-  if (S.act) {
-    const a = actionOn(S.act); const cap = a.charAt(0).toUpperCase() + a.slice(1);
-    btn.textContent = (a === 'change') ? 'Unlock to Change Authority' : ('Unlock to ' + cap + ' ' + NAME[S.act]);
-  } else btn.textContent = S.method ? ('Unlock with ' + NAME[S.method]) : 'Unlock';
-  btn.onclick = (e) => { e.stopPropagation(); begin(); };
-  s.appendChild(btn);
-  return s;
-}
-
-function begin() {
-  const m = S.act || S.method;
-  if (!m) return;
-  if (S.act) {
-    const a = actionOn(S.act); const root = rootFactor();
-    S.need = root === 'both' ? ['face', 'pass'] : (root ? [root] : ['pass']);
-    S.after = (a === 'enroll' && S.act === 'pass') ? 'setpw' : (a === 'enroll' && S.act === 'face') ? 'create' : 'authorize';
-  } else { S.need = (m === 'both') ? ['face', 'pass'] : [m]; S.after = 'unlocked'; }
-  S.si = 0; S.screen = 'prog';
-  S.sheet = (S.need[0] === 'face') ? 'use' : null;
-  render();
-}
-
-function stepDone() {
-  S.si += 1;
-  if (S.si < S.need.length) { S.sheet = (S.need[S.si] === 'face') ? 'use' : null; render(); return; }
-  S.sheet = null;
-  if (S.after === 'unlocked') { finishUnlock(); }
-  else runAfter(S.after);
-}
-
-function finishUnlock() { S.screen = 'keys'; S.act = null; render(); }
-
-// The concise 2–3 word status for the current ceremony step, shown as a header
-// so the operator always knows which step is happening — especially the
-// two-prompt passkey enroll (Authorizing → Enrolling).
-function ceremonyPhase() {
-  if (S.sheet === 'create') return 'Enrolling';
-  if (S.sheet === 'present') return 'Confirming';
-  if (S.after === 'unlocked') return 'Unlocking';
-  return 'Authorizing';
-}
-
-function progScreen() {
-  const s = el('div', 'screen');
-  s.appendChild(el('div', 'hd', ceremonyPhase()));
-  S.need.forEach((k, i) => {
-    const st = i < S.si ? 'done' : (i === S.si ? 'busy' : 'wait');
-    const r = el('div', 'st ' + st, '<div class="sic">' + G[k] + '</div><div class="snm">' + NAME[k] + '</div>'
-      + (st === 'done' ? TICK : st === 'busy' ? '<div class="spin"></div>' : ''));
-    s.appendChild(r);
-    if (k === 'pass' && st === 'busy' && !S.sheet) {
-      s.appendChild(el('label', 'olab', 'Enter your password'));
-      const i2 = el('input', 'oin'); i2.type = 'password'; i2.autocomplete = 'current-password'; s.appendChild(i2);
-      const b = el('div', 'btn flat', 'Continue');
-      b.onclick = (e) => { e.stopPropagation(); if (!i2.value) { i2.focus(); return; } S.password = i2.value; stepDone(); };
-      s.appendChild(b);
-      setTimeout(() => i2.focus(), 0);
-    }
-  });
-  return s;
-}
-
-function setpwScreen() {
-  const s = el('div', 'screen');
-  const title = M.mfa ? 'New password'
-    : (S.pwMode === 'changepw') ? 'Change password' : 'Set password';
-  s.appendChild(el('div', 'ttl', title));
-  if (M.mfa) {
-    s.appendChild(el('div', 'note', 'This password will open your identity on its own. '
-      + 'Because a password that opens on its own is the opposite of require-both, saving it '
-      + 'turns off Multi-Factor — your passkey will then also open on its own.'));
-  }
-  s.appendChild(el('label', 'olab', 'Choose a password'));
-  const a = el('input', 'oin'); a.type = 'password'; a.autocomplete = 'new-password'; s.appendChild(a);
-  s.appendChild(el('label', 'olab', 'Confirm password'));
-  const b = el('input', 'oin'); b.type = 'password'; b.autocomplete = 'new-password'; s.appendChild(b);
-  const go = el('div', 'btn', M.mfa ? 'Save & turn off Multi-Factor' : 'Continue');
-  go.onclick = async (e) => {
-    e.stopPropagation();
-    if (!a.value) { a.focus(); return; }
-    if (a.value !== b.value) { S.warn = 'Passwords do not match.'; render(); return; }
-    const ok = M.mfa
-      ? await disableMfaSetPasswordReal(a.value)
-      : (S.pwMode === 'changepw') ? await setPasswordReal(a.value) : await addPasswordReal(a.value);
-    if (!ok) { render(); return; }
-    S.pwMode = null; await afterCommit('keys');
-  };
-  s.appendChild(go);
-  if (S.warn) s.appendChild(el('div', 'fui-warn', S.warn));
-  return s;
-}
-
-function authScreen() {
-  const s = el('div', 'screen');
-  s.appendChild(el('div', 'ttl', 'Authorize your factors'));
-  if (!S.pick || !S.primed) {
-    S.pick = M.mfa
-      ? { face: M.face.canUnlock, pass: M.pass.canUnlock, both: true }
-      : { face: anyKeyFull(), pass: M.pass.on && M.pass.full, both: false };
-    if (S.act === 'face' || S.act === 'pass') { S.pick[S.act] = true; S.pick.both = false; }
-    if (S.act === 'both' && !M.mfa) { S.pick.both = true; S.pick.face = true; S.pick.pass = true; }
-    if (!S.pick.face && !S.pick.pass && !S.pick.both) S.pick[narrowest()] = true;
-    S.primed = 1;
-  }
-  K.forEach((k) => {
-    if (k !== 'both' && !M[k].on) return;
-    if (k === 'both' && !(M.pass.on && M.keys.some((x) => x.prf))) return;
-    const on = S.pick[k]; const lim = S.pick.both && k !== 'both';
-    const lbl = k === 'both' ? (on ? 'full authority' : 'disabled')
-      : lim ? (on ? 'unlock only' : 'disabled') : (on ? 'full authority' : 'unlock only');
-    const cls = k === 'both' ? (on ? 'b' : 'off') : (lim ? (on ? 'a' : 'off') : (on ? 'b' : 'a'));
-    const r = el('div', 'pick' + (on ? ' on' : '') + (lim ? ' lim' : ''),
-      '<div class="chk"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7"/></svg></div>'
-      + '<div class="pn">' + NAME[k] + '</div><span class="tag ' + cls + '">' + lbl + '</span>');
-    r.onclick = (e) => {
-      e.stopPropagation();
-      if (k === 'both') {
-        S.pick.both = !S.pick.both;
-        if (S.pick.both) { S.pick.face = M.face.on; S.pick.pass = M.pass.on; }
-        else { S.pick.face = M.face.on; S.pick.pass = false; if (!S.pick.face) S.pick.pass = M.pass.on; }
-      } else {
-        S.pick[k] = !S.pick[k];
-        if (!S.pick.both && !S.pick.face && !S.pick.pass) S.pick[k] = true;
-      }
-      render();
-    };
-    s.appendChild(r);
-  });
-  let note;
-  if (S.pick.both) {
-    note = 'Enabling Multi-Factor will require both your password and your passkey in order to grant full authority.';
-    const dead = []; if (M.face.on && !S.pick.face) dead.push('passkey'); if (M.pass.on && !S.pick.pass) dead.push('password');
-    if (dead.length === 2) note += ' Neither will unlock the dashboard on its own.';
-    else if (dead.length) note += ' Your ' + dead[0] + ' will not unlock the dashboard on its own.';
-  } else {
-    note = (S.pick.face && S.pick.pass) ? 'Either your password or your passkey can individually grant full authority.'
-      : S.pick.face ? 'Only your passkey will grant full authority.' : 'Only your password will grant full authority.';
-  }
-  s.appendChild(el('div', 'note', note));
-  if (S.warn) s.appendChild(el('div', 'fui-warn', S.warn));
-  const save = el('div', 'btn', 'Save');
-  save.onclick = async (e) => {
-    e.stopPropagation();
-    const pk = S.pick;
-    const ok = await saveAuthorityReal(pk);
-    if (!ok) { render(); return; }
-    await afterCommit('keys');
-  };
-  s.appendChild(save);
-  return s;
-}
-
-function panelScreen() {
-  const p = el('div', 'panel');
-  p.appendChild(el('div', 'ph', '<div class="pav">' + initial() + '</div><div><div class="pnm">' + displayName()
-    + '</div><div class="pst"><span class="dot"></span>Unlocked</div></div>'));
-  const band = el('div', 'band'); band.appendChild(tray()); p.appendChild(band);
-  const mk = el('div', 'pact', '<div class="pico key"></div><div><div class="pl">Manage my factors'
-    + '</div><div class="pd">Change your password, add or remove a device</div></div>');
-  mk.onclick = (e) => { e.stopPropagation(); S.screen = 'keys'; render(); };
-  p.appendChild(mk);
-  return p;
-}
-
-function keysScreen() {
-  const p = el('div', 'panel credpanel');
-  const n = M.keys.length + (M.pass.on ? 1 : 0);
-  const head = el('div', 'scrhead',
-    '<div class="ttl"><h1>Manage credentials</h1><div class="sub">'
-    + escAttr(displayName()) + ' &middot; ' + n + ' factor' + (n === 1 ? '' : 's') + '</div></div>'
-    + '<button class="closex" aria-label="Close">&times;</button>');
-  head.querySelector('.closex').onclick = (e) => { e.stopPropagation(); if (onBackFn) onBackFn(); else close(); };
-  p.appendChild(head);
-
-  const body = el('div', 'credbody');
-
-  const mfa = el('div', 'mfacard',
-    '<div class="ficon">' + IC_SHIELD + '</div>'
-    + '<div class="mi"><div class="mt">Multi-factor authentication</div><div class="md">'
-    + (M.mfa ? 'Full authority requires both a password and a passkey together.'
-      : 'Require multiple factors to allow full authority.')
-    + '</div></div><button class="addbtn mfaset">' + (M.mfa ? 'Configure' : 'Set up') + '</button>');
-  mfa.querySelector('.mfaset').onclick = (e) => { e.stopPropagation(); gatherThen('authorize', rootNeed()); };
-  body.appendChild(mfa);
-
-  // A personal identity holds a single password, so "+ Add" is offered only
-  // when none exists; once set, Change/Verify/Delete on the row are the controls.
-  body.appendChild(groupHead('Passwords', M.pass.on ? null : () => {
-    S.pwMode = 'enrollpw'; gatherThen('setpw', rootNeed());
+export function buildModelV3(view, status) {
+  const factors = (view && view.factors) || [];
+  const passwords = factors.filter((f) => f.type === 'password').map((f) => ({
+    id: f.factor_id,
+    factorId: f.factor_id,
+    label: f.label || 'Password',
+    kdf: (f.kdf && f.kdf.name) || 'PBKDF2',
+    iterations: (f.kdf && f.kdf.iterations) || 0,
+    created: f.created_at || '',
+    authority: factorAuthority(f.root_role, f.access),
+    signin: f.root_role === 'mfa-member' && f.access !== 'enabled' ? false : undefined,
   }));
-  if (M.pass.on) body.appendChild(pwRow());
-
-  body.appendChild(groupHead('Passkeys', () => gatherThen('create', rootNeed())));
-  M.keys.forEach((k, i) => body.appendChild(pkRow(k, i)));
-
-  if (S.warn) body.appendChild(el('div', 'fui-warn', S.warn));
-  p.appendChild(body);
-  return p;
-}
-
-function groupHead(label, onAdd) {
-  const g = el('div', 'grouphead', '<span class="grouplbl">' + label + '</span>'
-    + (onAdd ? '<button class="addbtn">' + IC_PLUS + ' Add</button>' : ''));
-  const add = g.querySelector('.addbtn');
-  if (add) add.onclick = (e) => { e.stopPropagation(); onAdd(); };
-  return g;
-}
-
-function pwRow() {
-  const lv = level('pass');
-  // The authority cell is the single common control for every authority change,
-  // in EVERY state — including MFA (where the only legal move is dissolving the
-  // pair) — so it stays tappable whenever an alternative authority state exists.
-  const canTap = hasAlternative();
-  const weak = M.pw.mem < M.kdfNow.mem;
-  const cell = auCell(M.pw.rootRole, M.pw.access, lv, false, canTap ? ' data-p="1"' : '', false);
-  const pwLabel = M.pw.label || 'Password';
-  if (S.verifying === 'pw') {
-    const rv = el('div', 'row', cell + verifyBlock());
-    wireVerify(rv);
-    return rv;
-  }
-  const pwRenaming = !!M.pw.factorId && S.renaming === M.pw.factorId;
-  const meta = '<div class="fmeta"><div>' + M.pw.kdf + ' &middot; ' + M.pw.itersLabel + '</div>'
-    + (M.pw.createdLabel ? '<div>' + M.pw.createdLabel + '</div>' : '') + '</div>';
-  const actions = pwRenaming ? ''
-    : '<div class="facts factcol"><button class="lnk lchange">Change</button>'
-      + (M.mfa ? '' : '<button class="lnk lverify">Verify</button>')
-      + '<button class="lnk ldelete">Delete</button></div>';
-  const r = el('div', 'row', cell + '<div class="fmid"><div class="fname">'
-    + nameHtml(M.pw.factorId, pwLabel, weak ? '<span class="weak">below current strength</span>' : '')
-    + '</div>' + meta + '</div>' + actions);
-  const pb = r.querySelector('[data-p]');
-  if (pb) pb.onclick = (e) => { e.stopPropagation(); gatherThen('authorize', rootNeed()); };
-  const pchg = r.querySelector('.lchange');
-  if (pchg) pchg.onclick = (e) => { e.stopPropagation(); S.pwMode = 'changepw'; gatherThen('setpw', rootNeed()); };
-  const pvfy = r.querySelector('.lverify');
-  if (pvfy) pvfy.onclick = (e) => { e.stopPropagation(); S.verifying = 'pw'; S.vfyVal = ''; S.vfyResult = null; render(); };
-  const pdel = r.querySelector('.ldelete');
-  if (pdel) pdel.onclick = (e) => { e.stopPropagation(); gatherThen('removepw', rootNeed()); };
-  wireName(r, M.pw.factorId, pwLabel);
-  return r;
-}
-
-function pkRow(k, i) {
-  const cell = auCell(k.rootRole, k.access, k.auth === 'full' ? 'b' : 'a', true,
-    k.prf === false ? '' : ' data-k="' + i + '"', k.prf === false);
-  const kRenaming = !!k.factorId && S.renaming === k.factorId;
-  const meta = '<div class="fmeta"><div>' + k.v + '</div>' + (k.w ? '<div>' + k.w + '</div>' : '') + '</div>';
-  const del = kRenaming ? '' : '<button class="trashbtn" aria-label="Remove">' + IC_TRASH + '</button>';
-  const r = el('div', 'row', cell + '<div class="fmid"><div class="fname">'
-    + nameHtml(k.factorId, k.l, '')
-    + '</div>' + meta + '</div>' + del);
-  wireName(r, k.factorId, k.l);
-  const kb = r.querySelector('[data-k]');
-  // Under MFA a passkey can't be raised on its own; tapping opens the authority
-  // editor (where dissolving the pair makes it full). Off MFA, direct promote/demote.
-  if (kb) kb.onclick = (e) => {
-    e.stopPropagation();
-    if (M.mfa) gatherThen('authorize', rootNeed()); else changeKey(i);
-  };
-  const kt = r.querySelector('.trashbtn');
-  if (kt) kt.onclick = (e) => { e.stopPropagation(); gatherThen('removekey', rootNeed(), { keyIdx: i }); };
-  return r;
-}
-
-// Changing a factor's authority needs the root proven; then land on authorize.
-function changeKey(i) {
-  const k = M.keys[i];
-  if (k.prf === false) return;
-  const want = (k.auth === 'full') ? 'unlock' : 'full';
-  const probe = JSON.parse(JSON.stringify(M)); probe.keys[i].auth = want;
-  const why = invalid(probe);
-  if (why) { S.warn = why; render(); return; }
-  S.warn = null; S.keyIdx = i; S.keyTo = want;
-  gatherThen('applykey', rootNeed());
-}
-function applyKey() {
-  if (S.keyTo === 'full' && !S.presented) { S.presented = 1; S.sheet = 'present'; render(); return; }
-  const idx = S.keyIdx; const to = S.keyTo;
-  changeKeyReal(idx, to).then((ok) => {
-    S.presented = 0; S.keyIdx = null;
-    if (ok) afterCommit('keys'); else { S.screen = 'keys'; render(); }
-  });
-}
-
-function sheet() {
-  const creating = S.sheet === 'create'; const presenting = S.sheet === 'present';
-  // 2–3 word phase label so a two-step enroll reads clearly: Authorizing (use)
-  // → Enrolling (create). Present = confirming the specific key being raised.
-  const title = creating ? 'Enrolling' : presenting ? 'Confirming' : 'Authorizing';
-  const sub = creating ? 'Create a passkey'
-    : presenting ? ('Present ' + M.keys[S.keyIdx].l)
-      : 'Use your passkey' + ((statusData && statusData.rp_id) ? ' for ' + statusData.rp_id : '');
-  const s = el('div', 'sheet', '<div class="shdim"></div><div class="shbox">'
-    + '<div class="shic">' + G.face + '</div><div class="shttl">' + title + '</div>'
-    + '<div class="shsub">' + sub + '</div><div class="shbtn">Continue</div>'
-    + '<div class="shcancel">Cancel</div>');
-  s.querySelector('.shbtn').onclick = async (e) => {
-    e.stopPropagation();
-    if (creating) {
-      const ok = await addDeviceReal();
-      S.sheet = null;
-      if (ok) afterCommit('keys'); else render();
+  // A row is a SLOT, keyed by (credential, device recipient) — the design's
+  // per-device model. A factor with no recipients yet renders one "unpaired"
+  // row: it can sign in, but cannot hold authority until a device enrolls.
+  const passkeys = [];
+  factors.filter((f) => f.type === 'passkey').forEach((f) => {
+    const authority = factorAuthority(f.root_role, f.access);
+    const shared = {
+      factorId: f.factor_id,
+      credId: f.credential_id,
+      synced: !!f.backed_up,
+      transports: f.transports || [],
+      authority,
+      signin: f.root_role === 'mfa-member' && f.access !== 'enabled' ? false : undefined,
+    };
+    const recips = f.recipients || [];
+    if (!recips.length) {
+      passkeys.push({
+        ...shared,
+        id: f.factor_id + '@unpaired',
+        label: f.label || 'Passkey',
+        device: null,
+        created: f.created_at || '',
+        recipientPub: null,
+        unpaired: true,
+        authority: authority === 'full' ? 'unlock' : authority,
+      });
       return;
     }
-    // 'use' (a passkey root step) or 'present' (the key being promoted): real PRF.
-    try {
-      S.prf = await getPrf(presenting ? M.keys[S.keyIdx].credentialId : null);
-    } catch (err) {
-      S.warn = (err && err.message) || String(err);
-      reportCeremonyError('prf', presenting ? 'present' : 'authorize', err);
-      S.sheet = null; render(); return;
-    }
-    if (presenting) { S.sheet = null; applyKey(); return; }
-    S.sheet = null; stepDone();
-  };
-  s.querySelector('.shcancel').onclick = (e) => {
-    e.stopPropagation();
-    S.sheet = null; S.presented = 0;
-    if (presenting) { S.keyIdx = null; S.screen = 'keys'; }
-    else if (S.screen === 'prog') { S.screen = 'keys'; S.act = null; }
-    render();
-  };
-  return s;
-}
-
-function render() {
-  if (!cardEl) return;
-  cardEl.innerHTML = '';
-  if (!M) { cardEl.appendChild(el('div', 'panel', '<div class="ph"><div><div class="pnm">Factors</div><div class="pst">' + (S && S.warn ? S.warn : 'Loading…') + '</div></div></div>')); return; }
-  const body = S.screen === 'lock' ? lockScreen()
-    : S.screen === 'prog' ? progScreen()
-      : S.screen === 'setpw' ? setpwScreen()
-        : S.screen === 'authorize' ? authScreen()
-          : S.screen === 'panel' ? panelScreen()
-            : keysScreen();
-  cardEl.appendChild(body);
-  if (S.sheet) cardEl.appendChild(sheet());
-}
-
-// ── entry / plumbing ──────────────────────────────────────────────────────
-function injectStyles() {
-  if (document.getElementById('factor-ui-styles')) return;
-  const el2 = document.createElement('style'); el2.id = 'factor-ui-styles'; el2.textContent = STYLE;
-  document.head.appendChild(el2);
-}
-function close() {
-  if (S) S.password = null;
-  if (host && host.parentNode) host.parentNode.removeChild(host);
-  if (cardEl && cardEl.parentNode) cardEl.parentNode.removeChild(cardEl);
-  host = null; cardEl = null; onBackFn = null;
-  if (typeof onClosed === 'function') onClosed();
-}
-// open({onClose}) → full-screen overlay (default). open({mount, onBack, onClose})
-// → render the SAME designed screens inside `mount` (e.g. the profile-settings
-//   drawer), filling its width; "Back" calls onBack instead of closing.
-async function open(opts) {
-  onClosed = (opts && opts.onClose) || null;
-  onBackFn = (opts && opts.onBack) || null;
-  injectStyles();
-  M = null; S = null;
-  const mount = opts && opts.mount;
-  cardEl = document.createElement('div'); cardEl.className = 'card';
-  if (mount) {
-    host = null;
-    cardEl.style.maxWidth = 'none';   // the drawer is wider than the modal card
-    mount.appendChild(cardEl);
-  } else {
-    host = document.createElement('div');
-    host.className = 'fui-overlay';
-    host.setAttribute('data-testid', 'factor-management');
-    host.addEventListener('click', (e) => { if (e.target === host) close(); });
-    host.appendChild(cardEl);
-    document.body.appendChild(host);
-  }
-  if (!trayWired) {
-    trayWired = true;
-    document.addEventListener('click', () => {
-      [].forEach.call(document.querySelectorAll('.fui-overlay .tray'), (t) => {
-        const b = t.querySelector('.balloon'); if (b) { t.dataset.at = ''; b.remove(); }
+    recips.forEach((r) => {
+      passkeys.push({
+        ...shared,
+        id: f.factor_id + '@' + r.recipient_public_key.slice(0, 12),
+        label: r.label,
+        device: r.label,
+        created: r.created_at || f.created_at || '',
+        recipientPub: r.recipient_public_key,
       });
     });
+  });
+  const mfaPws = passwords.filter((p) => factors.find((f) => f.factor_id === p.factorId).root_role === 'mfa-member').map((p) => p.id);
+  const mfaPks = passkeys.filter((k) => factors.find((f) => f.factor_id === k.factorId).root_role === 'mfa-member').map((k) => k.id);
+  const mfaOn = mfaPws.length > 0 || mfaPks.length > 0;
+  // Mode is read from the TREE SHAPE, never inferred from role presence: 'any'
+  // iff the current policy equals AND[OR(all passwords), OR(all slot-bearing
+  // passkeys)] — otherwise a specific selection.
+  let mfaMode = 'any';
+  if (mfaOn) {
+    const pwIds = passwords.map((p) => p.factorId);
+    const pkIds = [...new Set(passkeys.filter((k) => !k.unpaired).map((k) => k.factorId))];
+    let anyTree = null;
+    if (pwIds.length && pkIds.length) {
+      try {
+        anyTree = canonicalExpression({ op: 'and', children: [orOfLeaves(pwIds), orOfLeaves(pkIds)] });
+      } catch (e) { anyTree = null; }
+    }
+    let current = null;
+    try { current = canonicalExpression(view.root_policy); } catch (e) { current = null; }
+    mfaMode = (anyTree && current && stableJson(anyTree) === stableJson(current)) ? 'any' : 'specific';
   }
-  render();
-  try { await loadModel(); } catch (e) { if (!S) S = { screen: 'keys' }; S.warn = (e && e.message) || String(e); }
-  render();
+  return {
+    passwords,
+    passkeys,
+    mfaOn,
+    mfaMode,
+    mfaPws,
+    mfaPks,
+    generation: view ? view.generation : 0,
+    rootPub: view ? view.root_pub : null,
+    currentRpId: (status && status.rp_id) || '',
+    minIterations: 600000,
+  };
 }
 
-export { open };
+// ── the write seam: baseline diff → the frozen factor-policy operation union ─
+// Pure over (model-like, baseline-like) so the transition matrix can drive it
+// directly. Order matters for server-side projection: enrolls first, policy last.
+export function stagedOperations(m) {
+  const b = m._baseline;
+  const ops = { enroll: [], change: [], addRec: [], removeRec: [], removeFactor: [], access: [], policy: [] };
+  const liveOf = (rows) => rows.filter((r) => r.pending !== 'removed');
+  const accessOf = (rows) => rows.some((r) => (m.inMfaRoot(r) ? r.signin !== false : r.authority !== 'none'));
+
+  // passwords
+  b.p.forEach((bp) => {
+    const live = m.passwords.find((x) => x.id === bp.id);
+    if (!live || live.pending === 'removed') ops.removeFactor.push({ op: 'remove_factor', factor_id: bp.factorId });
+  });
+  liveOf(m.passwords).forEach((p) => {
+    const base = b.p.find((x) => x.id === p.id);
+    if (!base) {
+      if (!p._factor) throw new Error('a new password is missing its staged key material — remove and re-add it');
+      ops.enroll.push({ op: 'enroll_password', factor: p._factor, access: accessOf([p]) });
+    } else if (p.pwChanged) {
+      if (!p._factor) throw new Error('a changed password is missing its staged key material — re-enter it');
+      ops.change.push({ op: 'change_password', factor_id: p.factorId, factor: p._factor });
+    }
+  });
+
+  // passkeys, grouped to factor level (rows are per-device slots)
+  const factorIds = [...new Set([...b.k.map((r) => r.factorId), ...m.passkeys.map((r) => r.factorId)])];
+  factorIds.forEach((fid) => {
+    const had = b.k.filter((r) => r.factorId === fid);
+    const have = liveOf(m.passkeys.filter((r) => r.factorId === fid));
+    if (had.length && !have.length) {
+      ops.removeFactor.push({ op: 'remove_factor', factor_id: fid });
+      return;
+    }
+    if (!had.length && have.length) {
+      const en = have.find((r) => r._enroll);
+      if (!en) throw new Error('a new passkey is missing its staged ceremony — remove and re-add it');
+      ops.enroll.push({
+        op: 'enroll_passkey',
+        factor: {
+          factor_id: fid,
+          type: 'passkey',
+          credential_id: en.credId,
+          recipients: en._enroll.recipient ? [en._enroll.recipient] : [],
+        },
+        access: accessOf(have),
+      });
+      return;
+    }
+    had.forEach((br) => {
+      if (!have.find((r) => r.id === br.id) && br.recipientPub) {
+        ops.removeRec.push({ op: 'remove_passkey_recipient', factor_id: fid, recipient_public_key: br.recipientPub });
+      }
+    });
+    have.forEach((r) => {
+      if (r._addRecipient) ops.addRec.push({ op: 'add_passkey_recipient', factor_id: fid, recipient: r._addRecipient.recipient });
+    });
+  });
+
+  // dashboard access — surviving, pre-existing factors whose derived access moved
+  const groups = [];
+  b.p.forEach((bp) => {
+    const rows = liveOf(m.passwords.filter((x) => x.id === bp.id));
+    if (rows.length) groups.push({ fid: bp.factorId, rows, base: bp.access !== false && bp.authority !== 'none' && !(bp.signin === false) });
+  });
+  [...new Set(b.k.map((r) => r.factorId))].forEach((fid) => {
+    const rows = liveOf(m.passkeys.filter((r) => r.factorId === fid));
+    const baseRows = b.k.filter((r) => r.factorId === fid);
+    if (rows.length) groups.push({ fid, rows, base: baseRows.some((r) => r.authority !== 'none' && !(r.signin === false)) });
+  });
+  groups.forEach((g) => {
+    const want = accessOf(g.rows);
+    if (want !== g.base) ops.access.push({ op: 'set_access', factor_id: g.fid, enabled: want });
+  });
+
+  // root policy — the model's desired tree vs the committed one
+  const desired = desiredPolicy(m);
+  const current = canonicalExpression(m._committedPolicy);
+  if (stableJson(desired) !== stableJson(current)) {
+    ops.policy.push({ op: 'set_root_policy', policy: desired });
+  }
+
+  return [...ops.enroll, ...ops.change, ...ops.addRec, ...ops.removeRec,
+    ...ops.removeFactor, ...ops.access, ...ops.policy];
+}
+
+// The root-policy tree the model's current state means. Mirrors the design:
+// no MFA → OR over full-authority factors; MFA 'any' → AND of the two class
+// ORs over every enrolled factor; 'specific' → AND over the checked ones.
+// A passkey factor participates only when it has ≥1 device slot.
+export function desiredPolicy(m) {
+  const livePw = m.passwords.filter((p) => p.pending !== 'removed');
+  const livePk = m.passkeys.filter((k) => k.pending !== 'removed');
+  const slotted = new Set();
+  [...new Set(livePk.map((r) => r.factorId))].forEach((fid) => {
+    if (livePk.some((r) => r.factorId === fid && (r.recipientPub || (r._enroll && r._enroll.recipient) || r._addRecipient))) {
+      slotted.add(fid);
+    }
+  });
+  if (m.mfaOn) {
+    const pwIds = (m.mfaMode === 'any' ? livePw : livePw.filter((p) => m.mfaPws.includes(p.id)))
+      .map((p) => p.factorId);
+    const pkIds = [...new Set(
+      (m.mfaMode === 'any' ? livePk : livePk.filter((k) => m.mfaPks.includes(k.id)))
+        .map((k) => k.factorId),
+    )].filter((fid) => slotted.has(fid));
+    if (!pwIds.length || !pkIds.length) {
+      throw new Error('Multi-factor needs at least one enrolled password and one passkey with a device slot');
+    }
+    return canonicalExpression({ op: 'and', children: [orOfLeaves([...new Set(pwIds)]), orOfLeaves(pkIds)] });
+  }
+  const leaves = new Set();
+  livePw.forEach((p) => { if (p.authority === 'full') leaves.add(p.factorId); });
+  livePk.forEach((k) => { if (k.authority === 'full' && slotted.has(k.factorId)) leaves.add(k.factorId); });
+  if (!leaves.size) throw new Error('Keep at least one credential with full authority — otherwise you could never unlock your root.');
+  return canonicalExpression(orOfLeaves([...leaves]));
+}
+
+// ── the Alpine component: the design's script, verbatim except the hooks ────
+let hostCallbacks = { onBack: null, onClose: null };
+
+export function credentialsPanel() {
+  return {
+    identity: { name: '', initial: '' },
+    stack: [{ s: 'credentials' }],
+    passwords: [], passkeys: [],
+    mfaOn: false, mfaMode: 'any', mfaPws: [], mfaPks: [],
+    currentRpId: '', minIterations: 600000,
+
+    // transient (design verbatim)
+    password: '', newPw: '', verifying: false, toast: '', _baseline: null, _newId: 0,
+    warnAt: null, _wt: null,
+    inlineFor: null, inlineMode: null, inlineVal: '', inlineVal2: '', inlineResult: null,
+    inlineAutofilled: false, _revT: null,
+    renameFor: null, renameVal: '',
+    pickMode: 'any', pickPws: [], pickPks: [],
+
+    // production state (hooks only)
+    loading: true, loadError: null, migrationPending: false, committing: false,
+    generation: 0, rootPub: null, armorText: null, envelope: null,
+    _committedPolicy: null, _authSeeds: {},
+
+    init() { this.load(); },
+
+    // ── HOOK: load — the real preset() ────────────────────────────────────
+    async load() {
+      this.loading = true; this.loadError = null; this.migrationPending = false;
+      try {
+        const [st, pj, fp] = await Promise.all([
+          fetchJson('/api/identity/status'),
+          fetchJson('/api/identity/personal'),
+          fetchJson('/api/identity/factor-policy'),
+        ]);
+        if (pj && pj.error) throw new Error(pj.error);
+        if (fp && fp.error) throw new Error(fp.error);
+        this.identity = {
+          name: (st.personal_identity && st.personal_identity.display_name) || '',
+          initial: (((st.personal_identity && st.personal_identity.display_name) || '?').trim().charAt(0) || '?').toUpperCase(),
+        };
+        if (fp.migration_required) { this.migrationPending = true; this.loading = false; return; }
+        const m = buildModelV3(fp, st);
+        this.passwords = m.passwords; this.passkeys = m.passkeys;
+        this.mfaOn = m.mfaOn; this.mfaMode = m.mfaMode;
+        this.mfaPws = m.mfaPws; this.mfaPks = m.mfaPks;
+        this.generation = m.generation; this.rootPub = m.rootPub;
+        this.currentRpId = m.currentRpId; this.minIterations = m.minIterations;
+        this.armorText = pj.armored_private_key;
+        this.envelope = await parseFactorPolicyArmor(this.armorText);
+        this._committedPolicy = fp.root_policy;
+        this.initBaseline();
+        this.loading = false;
+      } catch (e) {
+        this.loadError = (e && e.message) || String(e);
+        this.loading = false;
+      }
+    },
+    get ready() { return !this.loading && !this.loadError && !this.migrationPending; },
+
+    // ── derived (design verbatim) ─────────────────────────────────────────
+    get top() { return this.stack[this.stack.length - 1]; },
+    get cur() { return this.top.s; },
+    get factorCount() { return this.passwords.length + this.passkeys.length; },
+    get hasFullPasskey() { return this.passkeys.some((k) => k.authority === 'full'); },
+    get hasFullPassword() { return this.passwords.some((p) => p.authority === 'full'); },
+    createdLocal(iso) { return iso ? new Date(iso).toLocaleString().replace(', ', ' ') : ''; },
+    itersLabel(n) { return (Number(n) || 0).toLocaleString() + ' iterations'; },
+    transportHuman(k) {
+      const t = (k && k.transports) || []; const has = (x) => t.includes(x);
+      const parts = [];
+      if (has('internal')) parts.push('Built-in');
+      if (has('usb') || has('nfc') || has('ble')) parts.push('Security key');
+      if ((k && k.synced) || has('hybrid')) parts.push('Cloud-Sync');
+      if (k && k.device === this.thisDevice()) parts.push('This device');
+      return parts.join(' · ') || 'Passkey';
+    },
+
+    // ── inline tap-to-rename: local metadata PATCH, instant, no root, no commit ──
+    startRename(f) { this.renameFor = f.id; this.renameVal = f.label; },
+    saveRename(f) {
+      if (this.renameFor !== f.id) return;
+      const v = this.renameVal.trim(); if (v) { f.label = v; this._patchLabel(f, v); }
+      this.renameFor = null;
+    },
+    cancelRename() { this.renameFor = null; },
+    // HOOK: the real metadata write behind the design's instant rename.
+    _patchLabel(f, label) {
+      const path = f.recipientPub
+        ? '/api/identity/factors/' + encodeURIComponent(f.factorId) + '/recipients/'
+          + encodeURIComponent(f.recipientPub) + '/metadata'
+        : '/api/identity/factors/' + encodeURIComponent(f.factorId) + '/metadata';
+      fetch(path, {
+        method: 'PATCH', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ label }),
+      }).catch(() => { /* best-effort; server truth reappears on next load */ });
+      if (f.recipientPub && f.device) f.device = label;
+    },
+    factorById(id) { return this.passwords.find((p) => p.id === id) || this.passkeys.find((k) => k.id === id) || null; },
+    labelOf(id) { const f = this.factorById(id); return f ? (f.label || 'Password') : ''; },
+
+    // is this factor part of the multi-factor ROOT? (any mode = every factor)
+    inMfaRoot(f) {
+      if (!this.mfaOn) return false;
+      return this.mfaMode === 'any' ? true : (this.mfaPws.includes(f.id) || this.mfaPks.includes(f.id));
+    },
+    _isPw(f) { return this.passwords.includes(f); },
+    rootMembers(isPw) {
+      const arr = isPw ? this.passwords : this.passkeys;
+      return arr.filter((f) => f.pending !== 'removed' && (this.mfaMode === 'any' || (isPw ? this.mfaPws : this.mfaPks).includes(f.id)));
+    },
+    roleOf(f) {
+      if (this.mfaOn) return f.authority === 'none' ? 'none' : 'unlock';
+      return f.authority;
+    },
+    unlockOn(f) { return f.authority !== 'none'; },
+    fullState(f) { if (this.inMfaRoot(f)) return 'multi'; if (f.authority === 'full') return 'single'; return 'none'; },
+    toggleUnlock(f, ev) {
+      if (this.statusOf(f) === 'removed') return;
+      if (this.fullState(f) !== 'none') { this.warnHere(ev, 'A factor with full authority can always sign in.'); return; }
+      f.authority = f.authority === 'none' ? 'unlock' : 'none';
+    },
+    // single-ladder authority word (sign-in + root fold into one): the readable badge
+    authWord(f) {
+      if (this.inMfaRoot(f)) return this.signinOff(f) ? 'Multi-factor only' : 'Multi-factor w/ unlock';
+      return { full: 'Full authority', unlock: 'Unlock only', none: 'No authority' }[f.authority];
+    },
+    authCellClick(f, ev) {
+      if (this.statusOf(f) === 'removed') return;
+      if (this.inMfaRoot(f)) { f.signin = (f.signin === false); return; }
+      this.toggleAuthority(f, ev);
+    },
+    authCls(f) {
+      if (this.inMfaRoot(f)) return 'au-multi';
+      return { full: 'au-full', unlock: 'au-unlock', none: 'au-none' }[f.authority];
+    },
+    signinOff(f) { return f.signin === false; },
+
+    // ── navigation stack ──────────────────────────────────────────────────
+    push(e) { this.stack.push(e); },
+    pop() { if (this.stack.length > 1) this.stack.pop(); },
+    closeAll() { if (hostCallbacks.onClose) hostCallbacks.onClose(); },
+    back() {
+      const t = this.top;
+      if (t.s === 'authorize') {
+        if (t.resolve) t.resolve(false);
+        this.password = ''; this.verifying = false; this._clearAuthSeeds(); this.pop();
+      } else if (t.s === 'newpw') {
+        if (t.resolve) t.resolve(null); this.newPw = ''; this.pop();
+      } else if (this.stack.length > 1) {
+        this.pop();
+      } else if (hostCallbacks.onBack) hostCallbacks.onBack();
+      else this.closeAll();
+    },
+
+    // ── inline verify / change: the card itself becomes the input ─────────
+    verifyPassword(p) { this._inlineOpen(p.id, 'verify'); },
+    changePassword(p) { this._inlineOpen(p.id, 'change'); },
+    _inlineOpen(id, mode) {
+      clearTimeout(this._revT); this.inlineFor = id; this.inlineMode = mode;
+      this.inlineVal = ''; this.inlineVal2 = ''; this.inlineResult = null; this.inlineAutofilled = false;
+    },
+    cancelInline() {
+      clearTimeout(this._revT); this.inlineFor = null; this.inlineMode = null;
+      this.inlineVal = ''; this.inlineVal2 = ''; this.inlineResult = null; this.inlineAutofilled = false;
+    },
+    inlineTitle() {
+      return this.inlineMode === 'verify' ? 'Verify your password'
+        : this.inlineMode === 'confirm' ? 'Confirm your new password' : 'Change your password';
+    },
+    inlineBtnText() {
+      return this.inlineMode === 'verify' ? 'Verify'
+        : this.inlineMode === 'confirm' ? 'Confirm' : (this.inlineAutofilled ? 'Change' : 'Continue');
+    },
+    async submitInline(p) {
+      if (this.inlineMode === 'verify') {
+        if (!this.inlineVal) return;
+        // HOOK: the real check — the typed password must open its own factor.
+        try {
+          const factor = this.envelope.factors.find((f) => f.factor_id === p.factorId);
+          const seed = await openPasswordFactor(this.rootPub, factor, this.inlineVal);
+          seed.fill(0);
+          this.inlineResult = 'ok';
+          this._revT = setTimeout(() => this.cancelInline(), 1600);
+        } catch (e) { this.inlineResult = 'fail'; }
+        return;
+      }
+      if (this.inlineMode === 'change') {
+        if (!this.inlineVal) return;
+        if (this.inlineAutofilled) { await this._applyChange(p); return; }
+        this.inlineMode = 'confirm'; this.inlineResult = null; return;
+      }
+      if (this.inlineMode === 'confirm') {
+        if (!this.inlineVal2) return;
+        if (this.inlineVal2 !== this.inlineVal) { this.inlineResult = 'mismatch'; return; }
+        await this._applyChange(p);
+      }
+    },
+    async _applyChange(p) {
+      // HOOK: derive the replacement factor NOW (fresh salt), stage it; the
+      // plaintext never leaves this handler. STAGE; commit later with root.
+      const made = await createPasswordFactor(this.rootPub, p.factorId, this.inlineVal, this.minIterations);
+      made.seed.fill(0);
+      p._factor = made.factor;
+      p.pwChanged = true; p.created = nowIso();
+      this.inlineResult = 'ok';
+      this._revT = setTimeout(() => this.cancelInline(), 1300);
+    },
+
+    // ── change tracking: NET diff vs the committed baseline ───────────────
+    initBaseline() {
+      this._baseline = JSON.parse(JSON.stringify({
+        p: this.passwords, k: this.passkeys, on: this.mfaOn, mode: this.mfaMode,
+        pws: this.mfaPws, pks: this.mfaPks,
+      }));
+    },
+    _baseFactor(id) {
+      if (!this._baseline) return null;
+      return this._baseline.p.find((x) => x.id === id) || this._baseline.k.find((x) => x.id === id) || null;
+    },
+    statusOf(f) {
+      if (f.pending === 'removed') return 'removed';
+      const b = this._baseFactor(f.id); if (!b) return 'new';
+      if (f.pwChanged) return 'changed';
+      if (b.authority !== f.authority) return 'changed';
+      if ((b.signin === false) !== (f.signin === false)) return 'changed';
+      return null;
+    },
+    get mfaChanged() {
+      return !this._baseline || this._baseline.on !== this.mfaOn || this._baseline.mode !== this.mfaMode
+        || JSON.stringify(this._baseline.pws) !== JSON.stringify(this.mfaPws)
+        || JSON.stringify(this._baseline.pks) !== JSON.stringify(this.mfaPks);
+    },
+    get changeCount() {
+      let n = 0;
+      this.passwords.forEach((p) => { if (this.statusOf(p)) n += 1; });
+      this.passkeys.forEach((k) => { if (this.statusOf(k)) n += 1; });
+      if (this.mfaChanged) n += 1;
+      return n;
+    },
+    cancelChanges() {
+      if (this._baseline) {
+        const b = JSON.parse(JSON.stringify(this._baseline));
+        this.passwords = b.p; this.passkeys = b.k; this.mfaOn = b.on; this.mfaMode = b.mode;
+        this.mfaPws = b.pws; this.mfaPks = b.pks;
+      }
+    },
+
+    // ── HOOK: commit — the ONE root-authorized write ──────────────────────
+    async commit() {
+      const n = this.changeCount; if (!n || this.committing) return;
+      let ops;
+      try { ops = stagedOperations(this); } catch (e) { this.flash((e && e.message) || String(e)); return; }
+      const opened = await this.requireRoot('Commit ' + n + (n === 1 ? ' change' : ' changes'));
+      if (!opened) return;
+      this.committing = true;
+      try {
+        // register staged WebAuthn credentials first (their statement needs the root)
+        for (const r of this.passkeys) {
+          if (r._enroll && !r._enroll.registered) await this._registerStaged(r, opened);
+        }
+        const pv = await postJson('/api/identity/factor-policy/preview', {
+          base_generation: this.generation, operations: ops,
+        });
+        if (!pv.ok) throw new Error(pv.error || 'the staged changes were refused');
+        const armor = await buildFactorPolicyArmor({
+          rootSeed: opened.seed, rootPub: this.rootPub, generation: pv.generation,
+          factors: pv.factors, access: pv.access, policy: pv.root_policy,
+        });
+        const signature = await signFactorPolicyTransition({
+          signingKey: opened.signingKey, baseGeneration: this.generation,
+          operations: ops, candidateArmor: armor,
+        });
+        const res = await postJson('/api/identity/factor-policy/commit', {
+          base_generation: this.generation, operations: ops,
+          candidate_armor: armor, root_signature: signature,
+        });
+        if (!res.ok) throw new Error(res.error || 'the authorization was refused');
+        await this.load();
+        this.flash('Committed ' + n + (n === 1 ? ' change' : ' changes'));
+      } catch (e) {
+        reportCeremonyError('factor-commit', 'commit', e);
+        this.flash((e && e.message) || String(e));
+      } finally {
+        opened.seed.fill(0);
+        this.committing = false;
+      }
+    },
+    async _registerStaged(row, opened) {
+      const en = row._enroll;
+      const statement = await mintEnrollmentStatement({
+        credentialId: en.credId,
+        credentialPublicKey: en.credentialPublicKeyHex,
+        rpId: en.minted.rp_id,
+        origin: en.minted.origin,
+        nonce: en.minted.nonce,
+        createdHlc: [Date.now(), 0],
+        signer: opened.rootPub,
+        initialSignCount: en.signCount,
+        provisioningPublicKey: en.provisioningPublicKey,
+        label: row.label,
+        transports: en.transports,
+      }, opened.signingKey);
+      const result = await postJson('/api/identity/passkey/register', {
+        label: row.label,
+        credential: {
+          id: en.credId,
+          rawId: en.credId,
+          type: 'public-key',
+          authenticatorAttachment: en.attachment || undefined,
+          // PRF support only — never the PRF OUTPUT, which derives key material.
+          clientExtensionResults: en.prfSupported ? { prf: { enabled: true } } : {},
+          response: {
+            clientDataJSON: en.clientDataJSON,
+            attestationObject: en.attestationObject,
+            transports: en.transports,
+          },
+        },
+        statement,
+      });
+      if (!result.ok) throw new Error(result.error || 'passkey registration was refused');
+      en.registered = true;
+    },
+
+    // ── the authorize screen: the design's requireRoot, real crypto ───────
+    requireRoot(detail, step) {
+      return new Promise((r) => {
+        this.password = ''; this._authSeeds = {};
+        this.push({ s: 'authorize', detail, step: step || '', resolve: r });
+      });
+    },
+    // What the CURRENT (committed) policy accepts — the authorize screen offers
+    // exactly these, independent of the staged edits it is about to authorize.
+    get authLeaves() { return this.envelope ? policyFactorIds(this.envelope.policy) : []; },
+    get authPw() { return this.envelope && this.envelope.factors.some((f) => f.type === 'password' && this.authLeaves.includes(f.factor_id)); },
+    get authPk() { return this.envelope && this.envelope.factors.some((f) => f.type === 'passkey' && this.authLeaves.includes(f.factor_id)); },
+    get authBoth() { return !!(this.envelope && this.envelope.policy.op === 'and'); },
+    _clearAuthSeeds() {
+      Object.values(this._authSeeds).forEach((s) => { if (s && s.fill) s.fill(0); });
+      this._authSeeds = {};
+    },
+    authWithPasskey() { this._authPasskey(); },
+    async _authPasskey() {
+      if (this.top.s !== 'authorize' || this.verifying) return;
+      try {
+        const pkFactors = this.envelope.factors.filter((f) => f.type === 'passkey'
+          && this.authLeaves.includes(f.factor_id) && !this._authSeeds[f.factor_id]);
+        const allow = pkFactors.map((f) => ({ type: 'public-key', id: b64uToBytes(f.credential_id) }));
+        const asrt = await navigator.credentials.get({ publicKey: {
+          challenge: crypto.getRandomValues(new Uint8Array(32)),
+          rpId: this.currentRpId || undefined,
+          allowCredentials: allow,
+          userVerification: 'required',
+          extensions: prfEvalExtension(),
+        } });
+        const prf = prfOutputFromResults(asrt.getClientExtensionResults());
+        if (!prf) throw new Error('this passkey has no PRF and cannot authorize your root');
+        const rec = await primitives.deriveEncapsulationKeypair(prf, FACTOR_RECIPIENT_PURPOSE);
+        const credId = bytesToB64u(asrt.rawId);
+        const match = pkFactors.find((f) => f.credential_id === credId
+          && f.recipients.some((s) => s.recipient_public_key === rec.publicKeyHex));
+        if (!match) {
+          prf.fill(0);
+          throw new Error('This passkey works for sign-in, but this device is not enrolled to authorize your root.');
+        }
+        this._authSeeds[match.factor_id] = prf;
+        await this._settle();
+      } catch (e) {
+        if (e && e.name === 'NotAllowedError') return;
+        this.flash((e && e.message) || String(e));
+      }
+    },
+    authWithPassword() { if (this.password) this._authPassword(); },
+    async _authPassword() {
+      if (this.top.s !== 'authorize' || this.verifying) return;
+      const pwFactors = this.envelope.factors.filter((f) => f.type === 'password'
+        && this.authLeaves.includes(f.factor_id) && !this._authSeeds[f.factor_id]);
+      let opened = null;
+      for (const f of pwFactors) {
+        try {
+          opened = { fid: f.factor_id, seed: await openPasswordFactor(this.rootPub, f, this.password) };
+          break;
+        } catch (e) { /* this password may name another enrolled factor */ }
+      }
+      if (!opened) { this.flash('Incorrect — try again'); return; }
+      this.password = '';
+      this._authSeeds[opened.fid] = opened.seed;
+      await this._settle();
+    },
+    async _settle() {
+      if (!policySatisfied(this.envelope.policy, Object.keys(this._authSeeds))) return;   // AND: await the other factor
+      this.verifying = true;
+      try {
+        const opened = await openFactorPolicyArmor(this.armorText, this._authSeeds);
+        const t = this.top; this.verifying = false;
+        if (t.s === 'authorize') {
+          const res = t.resolve; this.pop(); this.password = ''; this._clearAuthSeeds();
+          if (res) res(opened);
+        } else { opened.seed.fill(0); }
+      } catch (e) {
+        this.verifying = false; this._clearAuthSeeds();
+        this.flash((e && e.message) || 'Those factors did not open your root — try again');
+      }
+    },
+    collectNewPassword(title) {
+      return new Promise((r) => { this.newPw = ''; this.push({ s: 'newpw', title, resolve: r }); });
+    },
+    newpwContinue() {
+      const t = this.top;
+      if (t.s === 'newpw' && this.newPw) {
+        const res = t.resolve; const v = this.newPw; this.pop(); this.newPw = '';
+        if (res) res(v);
+      }
+    },
+
+    // ── actions (all STAGE) ───────────────────────────────────────────────
+    // ── per-device slots for one credential ───────────────────────────────
+    thisDevice() { return deviceLabel(); },
+    enrolledHere(k) { return this.passkeys.some((x) => x.credId === k.credId && x.device === this.thisDevice()); },
+    // Offer enrollment on a SYNCED credential with no slot on this device. We
+    // can't know it's usable here without a ceremony — the offer is
+    // honest-optimistic, and tapping it runs the ceremony that resolves it.
+    offerEnroll(k) { return (k.synced || k.unpaired) && k.device !== this.thisDevice() && !this.enrolledHere(k); },
+    sib(k) { return this.passkeys.some((x) => x.id !== k.id && x.credId === k.credId); },
+    async enrollThisDevice(k) {
+      // HOOK: the real get()+PRF here → a new device slot for the credential.
+      try {
+        const asrt = await navigator.credentials.get({ publicKey: {
+          challenge: crypto.getRandomValues(new Uint8Array(32)),
+          rpId: this.currentRpId || undefined,
+          allowCredentials: [{ type: 'public-key', id: b64uToBytes(k.credId) }],
+          userVerification: 'required',
+          extensions: prfEvalExtension(),
+        } });
+        const prf = prfOutputFromResults(asrt.getClientExtensionResults());
+        if (!prf) throw new Error('this passkey has no PRF and cannot hold a device slot');
+        const rec = await primitives.deriveEncapsulationKeypair(prf, FACTOR_RECIPIENT_PURPOSE);
+        prf.fill(0);
+        const already = this.passkeys.some((x) => x.factorId === k.factorId && x.recipientPub === rec.publicKeyHex);
+        if (already) { this.flash('Already enrolled on this device'); return; }
+        const row = {
+          id: 'pk-new-' + (this._newId++),
+          factorId: k.factorId,
+          credId: k.credId,
+          device: this.thisDevice(),
+          synced: k.synced,
+          label: this.thisDevice(),
+          transports: (k.transports || []).slice(),
+          created: nowIso(),
+          authority: k.authority,
+          recipientPub: rec.publicKeyHex,
+          _addRecipient: {
+            factorId: k.factorId,
+            recipient: { recipient_public_key: rec.publicKeyHex, label: this.thisDevice(), created_at: nowIso() },
+          },
+        };
+        this.passkeys.push(row);
+        // an unpaired placeholder row is replaced by its first real slot
+        if (k.unpaired) { const i = this.passkeys.indexOf(k); if (i > -1) this.passkeys.splice(i, 1); }
+        this.flash(this.thisDevice() + ' enrolled');
+      } catch (e) {
+        if (e && e.name === 'NotAllowedError') return;
+        this.flash((e && e.message) || String(e));
+      }
+    },
+
+    startAddPasskey() { this.push({ s: 'addpk' }); },
+    // The recovery the whole thread is about: if a synced credential exists but
+    // has no slot on this device, create() throws InvalidStateError — we catch
+    // that and pivot to get()+PRF, adding THIS device's slot. The user only
+    // ever sees success + a new row.
+    get pendingEnroll() { return this.passkeys.find((k) => this.offerEnroll(k)) || null; },
+    async usePasskey() {
+      const p = this.pendingEnroll;
+      if (p) { await this.enrollThisDevice(p); this.pop(); return; }
+      try {
+        await this._createPasskey();
+        this.pop(); this.flash('Passkey enrolled');
+      } catch (e) {
+        if (e && e.name === 'NotAllowedError') return;
+        if (e && e.name === 'InvalidStateError') {
+          // an existing credential answered — enroll this device's slot instead
+          const any = this.passkeys[0];
+          if (any) { await this.enrollThisDevice(any); this.pop(); return; }
+        }
+        this.flash((e && e.message) || String(e));
+      }
+    },
+    // HOOK: phase A of enrollment — the physical ceremony, staged locally.
+    // Phase B (root-signed statement + server registration) runs inside commit.
+    async _createPasskey() {
+      const minted = await postJson('/api/identity/passkey/register-options', {});
+      if (!minted.ok) throw new Error(minted.error || 'could not start enrollment');
+      const pk = minted.options;
+      pk.challenge = b64uToBytes(pk.challenge);
+      pk.user.id = b64uToBytes(pk.user.id);
+      (pk.excludeCredentials || []).forEach((c) => { c.id = b64uToBytes(c.id); });
+      pk.extensions = prfEvalExtension();
+      const cred = await navigator.credentials.create({ publicKey: pk });
+      if (!cred) throw new Error('enrollment was cancelled');
+      const createResults = (cred.getClientExtensionResults && cred.getClientExtensionResults()) || {};
+      const prf = await evaluatePrf(createResults, async () => {
+        const asrt = await navigator.credentials.get({ publicKey: {
+          challenge: crypto.getRandomValues(new Uint8Array(32)),
+          rpId: minted.rp_id,
+          allowCredentials: [{ type: 'public-key', id: cred.rawId }],
+          userVerification: 'required',
+          extensions: prfEvalExtension(),
+        } });
+        return asrt.getClientExtensionResults();
+      });
+      const authData = new Uint8Array(cred.response.getAuthenticatorData());
+      const { credentialPublicKeyHex, signCount } = attestedCredential(authData);
+      const flags = authData[32];
+      const backedUp = !!(flags & 0x10);
+      let recipient = null; let provisioningPublicKey = null;
+      if (prf) {
+        const rec = await primitives.deriveEncapsulationKeypair(new Uint8Array(prf), FACTOR_RECIPIENT_PURPOSE);
+        recipient = { recipient_public_key: rec.publicKeyHex, label: this.thisDevice(), created_at: nowIso() };
+        provisioningPublicKey = (await deriveProvisioningKey(prf)).publicKeyHex;
+        new Uint8Array(prf).fill(0);
+      }
+      const transports = (cred.response.getTransports && cred.response.getTransports()) || [];
+      const credId = bytesToB64u(cred.rawId);
+      const factorId = 'pk.' + randHex(6);
+      this.passkeys.push({
+        id: 'pk-new-' + (this._newId++),
+        factorId,
+        credId,
+        device: this.thisDevice(),
+        synced: backedUp,
+        label: this.thisDevice(),
+        transports,
+        created: nowIso(),
+        authority: recipient ? 'full' : 'unlock',
+        unpaired: !recipient,
+        recipientPub: recipient ? recipient.recipient_public_key : null,
+        _enroll: {
+          minted: { rp_id: minted.rp_id, origin: minted.origin, nonce: minted.nonce },
+          credId,
+          clientDataJSON: bytesToB64u(cred.response.clientDataJSON),
+          attestationObject: bytesToB64u(cred.response.attestationObject),
+          credentialPublicKeyHex,
+          signCount,
+          transports,
+          attachment: cred.authenticatorAttachment || null,
+          prfSupported: !!prf || !!(createResults.prf && createResults.prf.enabled),
+          recipient,
+          provisioningPublicKey,
+          registered: false,
+        },
+      });
+    },
+    async addPassword() {
+      const v = await this.collectNewPassword('Add a password'); if (v === null) return;
+      // HOOK: PBKDF2(v, fresh salt) HERE; stage the derived factor.
+      const factorId = 'pw.' + randHex(6);
+      const made = await createPasswordFactor(this.rootPub, factorId, v, this.minIterations);
+      made.seed.fill(0);
+      this.passwords.push({
+        id: factorId, factorId, label: 'Password', kdf: 'PBKDF2',
+        iterations: this.minIterations, created: nowIso(), authority: 'full',
+        _factor: made.factor,
+      });
+    },
+
+    // ── solver: never allow an invalid state ──────────────────────────────
+    _live() { return [...this.passwords, ...this.passkeys].filter((f) => f.pending !== 'removed'); },
+    _othersFull(f) { return this._live().some((x) => x !== f && x.authority === 'full'); },
+    canToggle(f) {
+      if (this.mfaOn) return true;
+      return f.authority === 'unlock' || this._othersFull(f);
+    },
+    toggleAuthority(f, ev) {
+      if (f.unpaired && f.authority !== 'full') {
+        // a factor with no device slot cannot derive root material (per-device
+        // slots): authority requires enrolling a device first
+        this.warnHere(ev, 'Enroll a device for this passkey before giving it authority.');
+        return;
+      }
+      if (this.mfaOn) { f.authority = f.authority === 'none' ? 'unlock' : 'none'; return; }
+      if (!this.canToggle(f)) {
+        this.warnHere(ev, 'Keep at least one credential with full authority — otherwise you could never unlock your root.');
+        return;
+      }
+      f.authority = f.authority === 'full' ? 'unlock' : 'full';
+    },
+    // a warning bubble anchored at the tap point (not a bottom-centered toast)
+    warnHere(ev, text) {
+      this.warnAt = { text, x: ev ? ev.clientX : 0, y: ev ? ev.clientY : 0 };
+      clearTimeout(this._wt); this._wt = setTimeout(() => { this.warnAt = null; }, 3200);
+    },
+    canRemove(f) {
+      if (this.mfaOn) {
+        if (!this.inMfaRoot(f)) return this._live().length > 1;
+        const remaining = this.rootMembers(this._isPw(f)).filter((x) => x !== f).length;
+        return remaining >= 1;
+      }
+      const s = this._live().filter((x) => x !== f); if (!s.length) return false;
+      return f.authority !== 'full' || s.some((x) => x.authority === 'full');
+    },
+    remove(list, f, ev) {
+      if (!this.canRemove(f)) {
+        this.warnHere(ev, this.mfaOn
+          ? 'Multi-factor needs at least one enrolled password and one passkey — this is the last of its kind.'
+          : (this._live().length <= 1 ? 'You can’t remove your only credential.' : 'Keep at least one credential with full authority — removing this would lock you out of your root.'));
+        return;
+      }
+      const b = this._baseFactor(f.id);
+      if (!b) { const i = list.indexOf(f); if (i > -1) list.splice(i, 1); return; }
+      f.pending = 'removed';
+    },
+    undoRemove(f) { delete f.pending; },
+
+    // ── multi-factor setup (two modes) ────────────────────────────────────
+    startMfaSetup() {
+      this.pickMode = this.mfaOn ? this.mfaMode : 'any';
+      this.pickPws = (this.mfaOn && this.mfaMode === 'specific') ? [...this.mfaPws] : this.passwords.map((p) => p.id);
+      this.pickPks = (this.mfaOn && this.mfaMode === 'specific') ? [...this.mfaPks] : this.passkeys.map((k) => k.id);
+      this.push({ s: 'mfa-setup' });
+    },
+    togglePick(which, id) { const a = this[which]; const i = a.indexOf(id); if (i >= 0) a.splice(i, 1); else a.push(id); },
+    pickedPw(p) { return this.pickMode === 'any' || this.pickPws.includes(p.id); },
+    pickedPk(k) { return this.pickMode === 'any' || this.pickPks.includes(k.id); },
+    _join(a) {
+      if (a.length <= 1) return a[0] || '';
+      if (a.length === 2) return a[0] + ' and ' + a[1];
+      return a.slice(0, -1).join(', ') + ', and ' + a[a.length - 1];
+    },
+    mfaSetupText() {
+      const pwM = this.passwords.filter((p) => this.pickedPw(p));
+      const pkM = this.passkeys.filter((k) => this.pickedPk(k));
+      const req = this.pickMode === 'any'
+        ? 'Full authority will require any one of your passwords and any one of your passkeys, together.'
+        : 'Full authority will require one of the checked passwords and one of the checked passkeys, together.';
+      const unlockers = [...pwM, ...pkM].filter((f) => f.signin !== false).map((f) => '“' + f.label + '”');
+      const total = pwM.length + pkM.length;
+      let unl;
+      if (unlockers.length === 0) unl = (total === 2 ? 'Neither' : 'None of them') + ' will unlock the dashboard on ' + (total === 2 ? 'its' : 'their') + ' own.';
+      else unl = this._join(unlockers) + (unlockers.length === 1 ? ' will unlock the dashboard on its own.' : ' will unlock the dashboard on their own.');
+      return req + ' ' + unl;
+    },
+    get canEnableMfa() {
+      return this.pickMode === 'any'
+        ? (this.passwords.length >= 1 && this.passkeys.length >= 1)
+        : (this.pickPws.length >= 1 && this.pickPks.length >= 1);
+    },
+    enableMfa() {
+      if (!this.canEnableMfa) return;
+      this.mfaOn = true; this.mfaMode = this.pickMode;
+      if (this.pickMode === 'specific') { this.mfaPws = [...this.pickPws]; this.mfaPks = [...this.pickPks]; } else { this.mfaPws = []; this.mfaPks = []; }
+      this._live().forEach((f) => { if (f.authority === 'full' && !this.inMfaRoot(f)) f.authority = 'unlock'; });
+      this.pop(); this.flash('Multi-factor staged');
+    },
+    disableMfa() {
+      const keepFull = this._live().find((f) => this.passwords.includes(f)) || this._live()[0];
+      this.mfaOn = false; this.mfaMode = 'any'; this.mfaPws = []; this.mfaPks = [];
+      if (keepFull) keepFull.authority = 'full';
+      this.flash('Multi-factor turned off — this credential now holds full authority');
+    },
+
+    flash(m) { this.toast = m; setTimeout(() => { if (this.toast === m) this.toast = ''; }, 2600); },
+  };
+}
+
+// ── styles: the design's stylesheet, scoped under .fui-cred ────────────────
+const STYLE = `
+.fui-cred{ --bg:#0b0f17; --panel:#111827; --panel2:#0d1420; --line:#1f2937; --line2:#374151;
+  --ink:#e5e7eb; --dim:#9ca3af; --faint:#6b7280; --accent:#6366f1; --accent2:#818cf8;
+  --good:#34d399; --goodbg:#064e3b; --warn:#fbbf24; --warnbg:#4d3908; --danger:#f87171; --mfa:#38bdf8; --mfabg:#0c2c40;
+  position:relative; display:flex; flex-direction:column; min-height:0; flex:1; background:var(--panel); color:var(--ink);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; -webkit-font-smoothing:antialiased; }
+.fui-cred *{ box-sizing:border-box; } .fui-cred [x-cloak]{ display:none!important; }
+.fui-cred .closex{ margin-left:auto; background:none; border:none; color:var(--faint); font-size:22px; line-height:1; cursor:pointer; padding:2px 8px; border-radius:8px; } .fui-cred .closex:hover{ background:#0d1420; color:var(--ink); }
+.fui-cred .lnk.lchange{ color:var(--accent2); } .fui-cred .lnk.lverify{ color:#34d399; } .fui-cred .lnk.ldisable{ color:var(--danger); }
+.fui-cred .lnk.lchange:hover, .fui-cred .lnk.lverify:hover, .fui-cred .lnk.ldisable:hover{ text-decoration:underline; background:none; }
+.fui-cred .mfaactions{ display:flex; flex-direction:column; align-items:flex-end; margin-left:auto; flex:none; }
+.fui-cred .fmeta>div{ line-height:1.5; }
+.fui-cred .credframe{ display:flex; flex-direction:column; flex:1; min-height:0; }
+.fui-cred .credcontent{ flex:1; min-height:0; display:flex; flex-direction:column; }
+.fui-cred .credcontent > template + div, .fui-cred .credcontent > div{ flex:1; min-height:0; display:flex; flex-direction:column; }
+.fui-cred .scrhead{ display:flex; align-items:center; gap:10px; padding:13px 14px 12px; border-bottom:1px solid var(--line); }
+.fui-cred .scrhead .back{ background:none; border:none; color:var(--accent2); cursor:pointer; display:flex; align-items:center; padding:2px 4px; }
+.fui-cred .scrhead .ttl{ min-width:0; } .fui-cred .scrhead h1{ margin:0; font-size:15.5px; font-weight:650; } .fui-cred .scrhead .sub{ font-size:12px; color:var(--dim); }
+.fui-cred .scrhead .step{ margin-left:auto; font-size:10.5px; font-weight:700; color:var(--accent2); background:#171e33; border:1px solid #33406b; border-radius:999px; padding:2px 8px; }
+.fui-cred .body{ overflow-y:auto; padding:6px 12px 16px; flex:1; }
+.fui-cred .mfacard{ margin:10px 6px 4px; border:1px solid var(--line2); border-radius:12px; padding:12px; display:flex; align-items:center; gap:11px; background:linear-gradient(180deg,#0c1626,#0b1220); }
+.fui-cred .mfacard.pending{ border-color:#5865e6; box-shadow:inset 0 0 0 1px rgba(88,101,230,.35); }
+.fui-cred .mfacard .mi{ min-width:0; flex:1; } .fui-cred .mfacard .mt{ font-weight:650; font-size:14px; white-space:nowrap; } .fui-cred .mfacard .md{ font-size:12px; color:var(--dim); margin-top:3px; }
+.fui-cred .mfaenabled{ font-size:10.5px; font-weight:700; color:var(--mfa); background:var(--mfabg); border:1px solid #1e5b7e; border-radius:999px; padding:1px 9px; margin-bottom:5px; }
+.fui-cred .grouphead{ display:flex; align-items:center; padding:14px 8px 6px; } .fui-cred .grouphead .grouplbl{ padding:0; }
+.fui-cred .grouplbl{ font-size:11px; letter-spacing:.12em; text-transform:uppercase; color:var(--faint); }
+.fui-cred .addbtn{ margin-left:auto; background:none; border:1px solid var(--line2); color:var(--accent2); border-radius:8px; padding:4px 11px; font:inherit; font-size:12px; font-weight:650; cursor:pointer; display:inline-flex; align-items:center; gap:5px; } .fui-cred .addbtn:hover{ background:#12203b; } .fui-cred .addbtn svg{ width:12px; height:12px; }
+.fui-cred .row{ display:flex; align-items:center; gap:12px; padding:12px; border:1px solid var(--line); background:var(--panel2); border-radius:12px; margin:6px 0; }
+.fui-cred .ficon{ position:relative; width:34px; height:34px; border-radius:9px; flex:none; display:grid; place-items:center; background:#0b1220; border:1px solid var(--line2); color:var(--accent2); } .fui-cred .ficon svg{ width:18px; height:18px; }
+.fui-cred .authcell{ width:80px; flex:none; display:flex; flex-direction:column; align-items:center; gap:6px; cursor:pointer; text-align:center; }
+.fui-cred .authcell .ac-ico{ position:relative; width:34px; height:34px; border-radius:9px; display:grid; place-items:center; background:#0b1220; border:1px solid var(--line2); color:var(--accent2); overflow:visible; }
+.fui-cred .authcell .ac-ico svg{ width:18px; height:18px; }
+.fui-cred .authcell .ac-lbl{ font-size:10.5px; line-height:1.15; font-weight:600; color:var(--dim); }
+.fui-cred .mfab{ position:absolute; top:-6px; right:-6px; width:16px; height:16px; line-height:0; }
+.fui-cred .mfab .armor{ width:16px; height:16px; overflow:visible; }
+.fui-cred .mfab .armor path{ fill:url(#armorGrad); stroke:#cdd3ff; stroke-width:1.3; stroke-linejoin:round; filter:drop-shadow(0 0 3px rgba(124,134,255,.9)); }
+.fui-cred .mfab.dim .armor path{ fill:#39415a; stroke:#727c96; filter:none; }
+.fui-cred .authcell.au-full .ac-ico{ color:#34d399; border-color:rgba(52,211,153,.45); background:rgba(52,211,153,.08); } .fui-cred .authcell.au-full .ac-lbl{ color:#34d399; }
+.fui-cred .authcell.au-multi .ac-ico{ color:var(--mfa); border-color:rgba(120,130,240,.5); background:rgba(120,130,240,.08); } .fui-cred .authcell.au-multi .ac-lbl{ color:var(--mfa); }
+.fui-cred .authcell.au-unlock .ac-ico{ color:var(--accent2); } .fui-cred .authcell.au-unlock .ac-lbl{ color:#93a3bd; }
+.fui-cred .authcell.au-none .ac-ico{ color:var(--line2); background:transparent; } .fui-cred .authcell.au-none .ac-lbl{ color:#5b6578; }
+.fui-cred .fmid{ min-width:0; flex:1; } .fui-cred .fname{ font-weight:600; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.fui-cred .fmeta{ font-size:12px; color:var(--dim); margin-top:2px; overflow-wrap:break-word; }
+.fui-cred .row.removing{ opacity:.6; border:1px dashed var(--danger); } .fui-cred .row.removing .fname{ text-decoration:line-through; }
+.fui-cred .row.pending{ border-color:#5865e6; box-shadow:inset 0 0 0 1px rgba(88,101,230,.35); }
+.fui-cred .factcol{ display:flex; flex-direction:column; align-items:flex-end; gap:1px; margin-left:auto; }
+.fui-cred .lnk.ldelete{ color:var(--danger); } .fui-cred .lnk.ldelete:hover{ text-decoration:underline; background:none; }
+@keyframes fui-afstart{ from{opacity:1;} to{opacity:1;} }
+.fui-cred input:-webkit-autofill{ animation-name:fui-afstart; animation-duration:.01s; }
+.fui-cred input:autofill{ animation-name:fui-afstart; animation-duration:.01s; }
+.fui-cred .inlinepw{ flex:1; min-width:0; display:flex; flex-direction:column; gap:8px; }
+.fui-cred .inlinepw .fname{ font-weight:600; }
+.fui-cred .inlinerow{ display:flex; gap:8px; align-items:center; }
+.fui-cred .inlineinput{ flex:1; min-width:0; background:#0b111b; border:1px solid var(--line2); border-radius:8px; color:var(--ink); padding:8px 10px; font-size:14px; }
+.fui-cred .inlineinput:focus{ outline:none; border-color:var(--accent); }
+.fui-cred .inlinego{ flex:none; padding:8px 16px; }
+.fui-cred .inlinefoot{ display:flex; align-items:center; gap:12px; min-height:16px; }
+.fui-cred .inlinemsg{ display:inline-flex; align-items:center; gap:5px; font-size:12px; }
+.fui-cred .inlinemsg svg{ width:14px; height:14px; }
+.fui-cred .inlinemsg.fail{ color:var(--danger); }
+.fui-cred .inlineok{ display:inline-flex; align-items:center; gap:8px; color:#34d399; font-weight:600; font-size:14px; padding:4px 0; }
+.fui-cred .inlineok svg{ width:20px; height:20px; }
+.fui-cred .lnk.lcancel{ color:var(--dim); margin-left:auto; } .fui-cred .lnk.lcancel:hover{ text-decoration:underline; background:none; }
+.fui-cred .namewrap{ display:inline-flex; align-items:center; gap:5px; }
+.fui-cred .editbtn{ display:inline-flex; align-items:center; justify-content:center; width:16px; height:16px; padding:0; background:none; border:none; color:var(--dim); cursor:pointer; }
+.fui-cred .editbtn svg{ width:16px; height:16px; }
+.fui-cred .editbtn:hover{ color:#fff; }
+.fui-cred .renameinput{ background:#0b111b; border:1px solid var(--accent); border-radius:6px; color:var(--ink); font-size:inherit; font-weight:inherit; font-family:inherit; padding:2px 7px; max-width:170px; }
+.fui-cred .renameinput:focus{ outline:none; }
+.fui-cred .renamewrap{ display:inline-flex; align-items:center; gap:2px; }
+.fui-cred .renameok, .fui-cred .renamecancel{ display:inline-flex; align-items:center; justify-content:center; width:20px; height:20px; padding:0; background:none; border:none; cursor:pointer; }
+.fui-cred .renameok svg, .fui-cred .renamecancel svg{ width:16px; height:16px; }
+.fui-cred .renameok{ color:#34d399; } .fui-cred .renameok:hover{ color:#4ade80; }
+.fui-cred .renamecancel{ color:var(--danger); }
+.fui-cred .sibtie{ display:inline-flex; align-items:center; gap:5px; margin-top:3px; color:#8b93a7; font-size:11px; }
+.fui-cred .sibtie svg{ width:12px; height:12px; opacity:.8; }
+.fui-cred .enrollbtn{ display:inline-flex; align-items:center; gap:5px; white-space:nowrap; background:rgba(52,211,153,.12); color:#34d399; border:1px solid rgba(52,211,153,.4); border-radius:7px; padding:5px 9px; font-size:12px; font-weight:600; cursor:pointer; }
+.fui-cred .enrollbtn:hover{ background:rgba(52,211,153,.2); }
+.fui-cred .enrollbtn svg{ width:13px; height:13px; }
+.fui-cred .trashbtn{ width:30px; height:30px; border-radius:8px; border:1px solid var(--line2); background:#0e1420; color:var(--faint); display:grid; place-items:center; cursor:pointer; } .fui-cred .trashbtn svg{ width:15px; height:15px; } .fui-cred .trashbtn.locked{ opacity:.38; cursor:not-allowed; }
+@media (hover:hover){ .fui-cred .trashbtn:hover{ color:var(--danger); border-color:var(--danger); background:#3b1414; } }
+.fui-cred .facts{ display:flex; align-items:center; gap:2px; margin-left:auto; }
+.fui-cred .lnk{ background:none; border:none; color:var(--dim); font-size:12px; cursor:pointer; padding:6px 8px; border-radius:8px; } .fui-cred .lnk:hover{ color:var(--ink); background:#0d1420; }
+.fui-cred .btn{ font:inherit; font-weight:600; cursor:pointer; border-radius:10px; padding:9px 13px; border:1px solid var(--line2); display:inline-flex; align-items:center; gap:7px; justify-content:center; } .fui-cred .btn svg{ width:15px; height:15px; }
+.fui-cred .btn-ghost{ background:#0d1420; color:var(--ink); } .fui-cred .btn-ghost:hover{ background:#131c2c; }
+.fui-cred .btn-primary{ background:var(--accent); color:#fff; border-color:var(--accent); } .fui-cred .btn-primary:hover{ background:#5457e6; } .fui-cred .btn:disabled{ opacity:.45; cursor:default; }
+.fui-cred .locked{ opacity:.38; cursor:not-allowed; }
+.fui-cred .commitbar{ display:flex; gap:10px; padding:12px 14px; border-top:1px solid var(--line2); background:#0d1420; flex:none; } .fui-cred .commitbar .btn-primary{ flex:1; }
+.fui-cred .deep{ padding:16px 16px 18px; overflow-y:auto; } .fui-cred .deep .lead{ font-size:13px; color:var(--dim); margin:0 0 14px; }
+.fui-cred .modeseg{ display:flex; gap:8px; margin:2px 0 14px; }
+.fui-cred .modeopt{ flex:1; border:1px solid var(--line2); border-radius:12px; padding:12px; cursor:pointer; }
+.fui-cred .modeopt.sel{ border-color:var(--mfa); background:#0b1a28; }
+.fui-cred .modeopt .mo-t{ font-weight:650; font-size:13px; } .fui-cred .modeopt .mo-d{ font-size:11.5px; color:var(--dim); margin-top:3px; }
+.fui-cred .pickgroup{ margin:4px 0 10px; } .fui-cred .pickgroup .lbl{ font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--faint); margin:10px 2px 6px; }
+.fui-cred .pickrow{ display:flex; align-items:center; gap:10px; padding:9px 10px; border:1px solid var(--line2); border-radius:11px; margin:6px 0; }
+.fui-cred .pkchk{ width:18px; height:18px; flex:none; cursor:pointer; }
+.fui-cred .pkchk.locked{ cursor:default; opacity:.9; }
+.fui-cred .pkchk .check{ width:18px; height:18px; border-radius:5px; border:2px solid var(--line2); display:grid; place-items:center; }
+.fui-cred .pkchk.sel .check{ border-color:var(--mfa); background:var(--mfa); }
+.fui-cred .pkchk.sel .check::after{ content:""; width:5px; height:9px; border:2px solid #04121c; border-top:0; border-left:0; transform:rotate(45deg) translate(-1px,-1px); }
+.fui-cred .pkicon{ width:30px; height:30px; border-radius:8px; flex:none; display:grid; place-items:center; background:#0b1220; border:1px solid var(--line2); color:var(--accent2); } .fui-cred .pkicon svg{ width:16px; height:16px; }
+.fui-cred .pkname{ font-weight:600; font-size:14px; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.fui-cred .unlockbadge{ flex:none; white-space:nowrap; font-size:12px; font-weight:600; border-radius:999px; padding:6px 12px; cursor:pointer; background:rgba(52,211,153,.14); color:#34d399; border:1px solid rgba(52,211,153,.45); }
+.fui-cred .unlockbadge:hover{ background:rgba(52,211,153,.22); }
+.fui-cred .unlockbadge.off{ background:#161c2a; color:#8b93a7; border-color:var(--line2); }
+.fui-cred .mfadyn{ border:1px solid #1e5b7e; background:#0b1a28; border-radius:12px; padding:13px; font-size:12.5px; line-height:1.5; color:#bfe3f5; margin:12px 0 4px; }
+.fui-cred .pkbtn{ width:100%; display:flex; align-items:center; justify-content:center; gap:10px; background:#0f1a2e; border:1px solid #33406b; color:#dbe4ff; font-weight:650; border-radius:12px; padding:14px; cursor:pointer; } .fui-cred .pkbtn:hover{ background:#14213a; } .fui-cred .pkbtn svg{ width:17px; height:17px; }
+.fui-cred .or{ display:flex; align-items:center; gap:10px; color:var(--faint); font-size:11px; text-transform:uppercase; letter-spacing:.1em; margin:12px 2px; } .fui-cred .or::before,.fui-cred .or::after{ content:""; height:1px; background:var(--line); flex:1; }
+.fui-cred .field label{ font-size:12px; color:var(--dim); } .fui-cred .field input{ width:100%; margin-top:5px; background:var(--panel2); border:1px solid var(--line2); color:var(--ink); border-radius:10px; padding:11px 12px; font:inherit; } .fui-cred .field input:focus{ outline:none; border-color:var(--accent2); }
+.fui-cred .authrow{ display:flex; gap:8px; margin-top:16px; } .fui-cred .authrow .btn{ flex:1; }
+.fui-cred .spin{ width:15px; height:15px; border-radius:50%; border:2px solid rgba(255,255,255,.35); border-top-color:#fff; display:inline-block; animation:fui-sp .7s linear infinite; } @keyframes fui-sp{ to{ transform:rotate(360deg); } }
+.fui-cred .verifying{ display:flex; align-items:center; justify-content:center; gap:9px; padding:30px 0; color:var(--dim); }
+.fui-cred .toast{ position:absolute; left:50%; bottom:16px; transform:translateX(-50%); z-index:40; max-width:88%; text-align:center; background:#0f1a2e; border:1px solid #33406b; color:#dbe4ff; font-size:12.5px; padding:8px 14px; border-radius:14px; }
+.fui-cred .warnbubble{ position:fixed; z-index:60; transform:translate(-50%,calc(-100% - 12px)); background:#2b1616; border:1px solid #5b2626; color:#fca5a5; font-size:11.5px; font-weight:600; line-height:1.35; padding:7px 11px; border-radius:10px; max-width:230px; box-shadow:0 8px 24px rgba(0,0,0,.55); cursor:pointer; }
+.fui-cred .warnbubble::after{ content:""; position:absolute; left:50%; bottom:-5px; transform:translateX(-50%) rotate(45deg); width:8px; height:8px; background:#2b1616; border-right:1px solid #5b2626; border-bottom:1px solid #5b2626; }
+`;
+
+const SYMBOLS = `<svg width="0" height="0" style="position:absolute"><defs>
+  <symbol id="i-key" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="4.5"/><path d="M10.7 12.3 21 2m-4 0 3 3m-6 0 3 3"/></symbol>
+  <symbol id="i-passkey" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="8" r="4"/><path d="M10.3 14C6 14 3 16.5 3 20m14-6v7m0-7 2.5 1.5M17 17l2.5-1.5M17 20l2.3 1.4"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13M10 11v6M14 11v6"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 6.5"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></symbol>
+  <linearGradient id="armorGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#b3bcff"/><stop offset="1" stop-color="#4d59d6"/></linearGradient>
+</defs></svg>`;
+
+// ── markup: the design's credentials frame, verbatim ───────────────────────
+const MARKUP = `
+<div class="credframe">
+  <div class="scrhead">
+    <div class="ttl"><h1>Manage credentials</h1><div class="sub"><span x-text="identity.name"></span> · <span x-text="factorCount"></span> factors</div></div>
+    <button class="closex" @click="back()" aria-label="Close">&times;</button></div>
+  <div class="credcontent">
+
+  <template x-if="loading"><div class="body"><p class="deep lead">Loading…</p></div></template>
+  <template x-if="loadError"><div class="body"><p class="deep lead" x-text="loadError"></p></div></template>
+  <template x-if="migrationPending"><div class="body"><p class="deep lead">Your credentials need a one-time upgrade. Sign out and sign back in with your password to finish it, then come back here.</p></div></template>
+
+  <template x-if="ready && cur==='credentials'"><div class="body">
+    <div class="mfacard" :class="{pending:mfaChanged}">
+      <div class="ficon"><svg><use xlink:href="#i-shield"/></svg></div>
+      <div class="mi"><div class="mt">Multi-factor authentication</div>
+        <div class="md" x-show="!mfaOn">Require multiple factors to allow full authority.</div>
+        <div class="md" x-show="mfaOn && mfaMode==='any'">Any one of your passwords <b>and</b> any one of your passkeys together provide full authority.</div>
+        <div class="md" x-show="mfaOn && mfaMode==='specific'">Any <b>selected</b> password <b>and</b> any <b>selected</b> passkey together provide full authority.</div></div>
+      <button class="addbtn" x-show="!mfaOn" @click="startMfaSetup()">Set up</button>
+      <div class="mfaactions" x-show="mfaOn"><span class="mfaenabled">Enabled</span><button class="lnk lchange" @click="startMfaSetup()">Configure</button><button class="lnk ldisable" @click="disableMfa()">Disable</button></div>
+    </div>
+
+    <div class="grouphead"><span class="grouplbl">Passwords</span>
+      <button class="addbtn" @click="addPassword()"><svg><use xlink:href="#i-plus"/></svg> Add</button></div>
+    <template x-for="p in passwords" :key="p.id">
+      <div class="row" :class="{removing:statusOf(p)==='removed', pending:statusOf(p)==='new'||statusOf(p)==='changed'}">
+        <div class="authcell" :class="authCls(p)" @click="authCellClick(p,$event)"><span class="ac-ico"><svg><use xlink:href="#i-key"/></svg><template x-if="inMfaRoot(p)"><span class="mfab" :class="{dim:signinOff(p)}"><svg class="armor" viewBox="0 0 24 24"><path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/></svg></span></template></span><span class="ac-lbl" x-text="authWord(p)"></span></div>
+        <div class="fmid" x-show="inlineFor!==p.id"><div class="fname">
+          <span class="namewrap" x-show="renameFor!==p.id"><span x-text="p.label"></span><button class="editbtn" @click="startRename(p)" aria-label="Rename"><svg><use xlink:href="#i-edit"/></svg></button></span>
+          <span class="renamewrap" x-show="renameFor===p.id">
+            <input class="renameinput" x-model="renameVal" @keydown.enter="saveRename(p)" @keydown.escape="cancelRename()" x-effect="renameFor===p.id&&setTimeout(()=>$el.focus(),0)">
+            <button class="renameok" @click="saveRename(p)" aria-label="Save"><svg><use xlink:href="#i-check"/></svg></button>
+            <button class="renamecancel" @click="cancelRename()" aria-label="Cancel"><svg><use xlink:href="#i-x"/></svg></button></span></div>
+          <div class="fmeta"><div x-text="p.kdf+' · '+itersLabel(p.iterations)"></div><div x-text="createdLocal(p.created)"></div></div></div>
+        <div class="facts factcol" x-show="inlineFor!==p.id && renameFor!==p.id"><template x-if="statusOf(p)==='removed'"><button class="lnk lchange" @click="undoRemove(p)">Undo</button></template>
+          <template x-if="statusOf(p)!=='removed'"><span style="display:flex;flex-direction:column;align-items:flex-end">
+            <button class="lnk lchange" @click="changePassword(p)">Change</button>
+            <button class="lnk lverify" @click="verifyPassword(p)">Verify</button>
+            <button class="lnk ldelete" :class="{locked:!canRemove(p)}" @click="remove(passwords,p,$event)">Delete</button></span></template></div>
+        <div class="inlinepw" x-show="inlineFor===p.id">
+          <div class="fname" x-text="inlineTitle()"></div>
+          <template x-if="inlineResult==='ok'">
+            <div class="inlineok"><svg><use xlink:href="#i-check"/></svg> <span x-text="inlineMode==='verify'?'Verified':'Password changed'"></span></div></template>
+          <template x-if="inlineResult!=='ok'"><div>
+            <div class="inlinerow">
+              <input x-show="inlineMode!=='confirm'" type="password" class="inlineinput" x-model="inlineVal"
+                :autocomplete="inlineMode==='verify'?'current-password':'new-password'"
+                :placeholder="inlineMode==='verify'?'Password':'New password'"
+                @animationstart="if($event.animationName==='fui-afstart') inlineAutofilled=true"
+                @keydown="if($event.key&&$event.key.length===1) inlineAutofilled=false"
+                @keydown.enter="submitInline(p)"
+                x-effect="inlineFor===p.id&&inlineMode!=='confirm'&&setTimeout(()=>$el.focus(),0)">
+              <input x-show="inlineMode==='confirm'" type="password" class="inlineinput" x-model="inlineVal2"
+                autocomplete="new-password" placeholder="Re-enter new password" @keydown.enter="submitInline(p)"
+                x-effect="inlineFor===p.id&&inlineMode==='confirm'&&setTimeout(()=>$el.focus(),0)">
+              <button class="btn btn-primary inlinego" :disabled="inlineMode==='confirm'?!inlineVal2:!inlineVal" @click="submitInline(p)" x-text="inlineBtnText()"></button></div>
+            <div class="inlinefoot">
+              <template x-if="inlineResult==='fail'"><span class="inlinemsg fail"><svg><use xlink:href="#i-x"/></svg> Incorrect — try again</span></template>
+              <template x-if="inlineResult==='mismatch'"><span class="inlinemsg fail"><svg><use xlink:href="#i-x"/></svg> Those don't match — re-enter</span></template>
+              <button class="lnk lcancel" @click="cancelInline()">Cancel</button></div></div></template></div></div>
+    </template>
+
+    <div class="grouphead"><span class="grouplbl">Passkeys</span>
+      <button class="addbtn" @click="startAddPasskey()"><svg><use xlink:href="#i-plus"/></svg> Add</button></div>
+    <template x-for="k in passkeys" :key="k.id">
+      <div class="row" :class="{removing:statusOf(k)==='removed', pending:statusOf(k)==='new'||statusOf(k)==='changed'}">
+        <div class="authcell" :class="authCls(k)" @click="authCellClick(k,$event)"><span class="ac-ico"><svg><use xlink:href="#i-passkey"/></svg><template x-if="inMfaRoot(k)"><span class="mfab" :class="{dim:signinOff(k)}"><svg class="armor" viewBox="0 0 24 24"><path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/></svg></span></template></span><span class="ac-lbl" x-text="authWord(k)"></span></div>
+        <div class="fmid"><div class="fname">
+          <span class="namewrap" x-show="renameFor!==k.id"><span x-text="k.label"></span><button class="editbtn" @click="startRename(k)" aria-label="Rename"><svg><use xlink:href="#i-edit"/></svg></button></span>
+          <span class="renamewrap" x-show="renameFor===k.id">
+            <input class="renameinput" x-model="renameVal" @keydown.enter="saveRename(k)" @keydown.escape="cancelRename()" x-effect="renameFor===k.id&&setTimeout(()=>$el.focus(),0)">
+            <button class="renameok" @click="saveRename(k)" aria-label="Save"><svg><use xlink:href="#i-check"/></svg></button>
+            <button class="renamecancel" @click="cancelRename()" aria-label="Cancel"><svg><use xlink:href="#i-x"/></svg></button></span></div>
+          <div class="fmeta"><div x-text="transportHuman(k)"></div><div x-text="createdLocal(k.created)"></div>
+            <template x-if="offerEnroll(k)"><button class="enrollbtn" @click="enrollThisDevice(k)"><svg><use xlink:href="#i-passkey"/></svg> Enroll this device</button></template></div></div>
+        <div class="facts factcol" x-show="renameFor!==k.id"><template x-if="statusOf(k)==='removed'"><button class="lnk lchange" @click="undoRemove(k)">Undo</button></template>
+          <template x-if="statusOf(k)!=='removed'"><button class="trashbtn" :class="{locked:!canRemove(k)}" @click="remove(passkeys,k,$event)" aria-label="Remove"><svg><use xlink:href="#i-trash"/></svg></button></template></div></div>
+    </template>
+  </div></template>
+
+  <!-- ADD PASSKEY -->
+  <template x-if="ready && cur==='addpk'"><div style="display:flex;flex-direction:column;min-height:0">
+    <div class="scrhead"><button class="back" @click="back()"><svg style="width:16px;height:16px"><use xlink:href="#i-chev"/></svg></button>
+      <div class="ttl"><h1>Add a passkey</h1><div class="sub">On this device</div></div></div>
+    <div class="deep">
+      <p class="lead">Approve with this device’s screen lock — fingerprint, face, or PIN.</p>
+      <button class="pkbtn" @click="usePasskey()"><svg><use xlink:href="#i-passkey"/></svg> Use your passkey</button>
+      <div class="authrow"><button class="btn btn-ghost" @click="back()">Cancel</button></div>
+    </div>
+  </div></template>
+
+  <!-- MFA SETUP (two modes) -->
+  <template x-if="ready && cur==='mfa-setup'"><div style="display:flex;flex-direction:column;min-height:0">
+    <div class="scrhead"><button class="back" @click="back()"><svg style="width:16px;height:16px"><use xlink:href="#i-chev"/></svg></button>
+      <div class="ttl"><h1>Set up multi-factor</h1><div class="sub">Full authority will require a password and a passkey</div></div></div>
+    <div class="deep">
+      <div class="modeseg">
+        <div class="modeopt" :class="{sel:pickMode==='any'}" @click="pickMode='any'"><div class="mo-t">Any one of each</div><div class="mo-d">Any password + any passkey</div></div>
+        <div class="modeopt" :class="{sel:pickMode==='specific'}" @click="pickMode='specific'"><div class="mo-t">Specific one(s) of each</div><div class="mo-d">Only the ones you check</div></div>
+      </div>
+
+      <div class="pickgroup"><div class="lbl">Passwords</div>
+        <template x-for="p in passwords" :key="p.id">
+          <div class="pickrow">
+            <div class="pkchk" :class="{sel:pickedPw(p), locked:pickMode==='any'}" @click="pickMode==='specific'&&togglePick('pickPws',p.id)"><div class="check"></div></div>
+            <span class="pkicon"><svg><use xlink:href="#i-key"/></svg></span>
+            <span class="pkname" x-text="p.label"></span>
+            <button class="unlockbadge" :class="{off:p.signin===false}" @click.stop="p.signin=(p.signin===false)" x-text="p.signin===false?'No Dashboard Unlock':'Unlocks Dashboard'"></button>
+          </div>
+        </template>
+      </div>
+      <div class="pickgroup"><div class="lbl">Passkeys</div>
+        <template x-for="k in passkeys" :key="k.id">
+          <div class="pickrow">
+            <div class="pkchk" :class="{sel:pickedPk(k), locked:pickMode==='any'}" @click="pickMode==='specific'&&togglePick('pickPks',k.id)"><div class="check"></div></div>
+            <span class="pkicon"><svg><use xlink:href="#i-passkey"/></svg></span>
+            <span class="pkname" x-text="k.label"></span>
+            <button class="unlockbadge" :class="{off:k.signin===false}" @click.stop="k.signin=(k.signin===false)" x-text="k.signin===false?'No Dashboard Unlock':'Unlocks Dashboard'"></button>
+          </div>
+        </template>
+      </div>
+
+      <div class="mfadyn" x-text="mfaSetupText()"></div>
+
+      <div class="authrow"><button class="btn btn-ghost" @click="back()">Cancel</button>
+        <button class="btn btn-primary" :disabled="!canEnableMfa" @click="enableMfa()">Enable multi-factor</button></div>
+    </div>
+  </div></template>
+
+  <!-- NEW PASSWORD -->
+  <template x-if="ready && cur==='newpw'"><div style="display:flex;flex-direction:column;min-height:0">
+    <div class="scrhead"><button class="back" @click="back()"><svg style="width:16px;height:16px"><use xlink:href="#i-chev"/></svg></button>
+      <div class="ttl"><h1 x-text="top.title"></h1></div></div>
+    <div class="deep">
+      <p class="lead">Enter your new password. It’s staged with your other changes — you’ll commit and authorize them together.</p>
+      <div class="field"><label>New password</label>
+        <input type="password" x-model="newPw" autocomplete="new-password" placeholder="New password" @keydown.enter="newpwContinue()"></div>
+      <div class="authrow"><button class="btn btn-ghost" @click="back()">Cancel</button>
+        <button class="btn btn-primary" :disabled="!newPw" @click="newpwContinue()">Set password</button></div>
+    </div>
+  </div></template>
+
+  <!-- AUTHORIZE (commit) -->
+  <template x-if="ready && cur==='authorize'"><div style="display:flex;flex-direction:column;min-height:0">
+    <div class="scrhead"><button class="back" @click="back()" x-show="!verifying"><svg style="width:16px;height:16px"><use xlink:href="#i-chev"/></svg></button>
+      <div class="ttl"><h1>Authorize with your root key</h1><div class="sub" x-text="top.detail"></div></div>
+      <template x-if="top.step"><span class="step" x-text="top.step"></span></template></div>
+    <div class="deep">
+      <template x-if="!verifying"><div>
+        <template x-if="authBoth"><p class="lead">Multi-factor is on — approve with your passkey <b>and</b> your password.</p></template>
+        <template x-if="authPk"><button class="pkbtn" @click="authWithPasskey()"><svg><use xlink:href="#i-passkey"/></svg> Use your passkey</button></template>
+        <template x-if="authPk && authPw"><div class="or" x-text="authBoth?'and':'or'"></div></template>
+        <template x-if="authPw"><div class="field"><label>Enter your current password</label>
+          <input type="password" x-model="password" autocomplete="current-password" placeholder="Current password" @keydown.enter="authWithPassword()"></div></template>
+        <div class="authrow"><button class="btn btn-ghost" @click="back()">Cancel</button>
+          <button class="btn btn-primary" :disabled="!password" @click="authWithPassword()">Authorize</button></div>
+      </div></template>
+      <template x-if="verifying"><div class="verifying"><span class="spin"></span> Verifying with your root key…</div></template>
+    </div>
+  </div></template>
+  </div>
+  <template x-if="ready && cur==='credentials'"><div class="commitbar" x-show="changeCount>0" style="display:none">
+    <button class="btn btn-ghost" @click="cancelChanges()">Cancel</button>
+    <button class="btn btn-primary" :disabled="committing" @click="commit()">Commit <span x-text="changeCount"></span>&nbsp;<span x-text="changeCount===1?'change':'changes'"></span></button></div></template>
+
+  <template x-if="warnAt"><div class="warnbubble" :style="'left:'+warnAt.x+'px;top:'+warnAt.y+'px'" x-text="warnAt.text" @click="warnAt=null"></div></template>
+  <div class="toast" x-show="toast" x-text="toast" x-transition style="display:none"></div>
+</div>`;
+
+// ── mount ──────────────────────────────────────────────────────────────────
+let overlay = null;
+let card = null;
+let registered = false;
+
+function injectStyles() {
+  if (!document.getElementById('fui-cred-styles')) {
+    const el = document.createElement('style');
+    el.id = 'fui-cred-styles'; el.textContent = STYLE;
+    document.head.appendChild(el);
+  }
+  if (!document.getElementById('fui-cred-symbols')) {
+    const holder = document.createElement('div');
+    holder.id = 'fui-cred-symbols'; holder.innerHTML = SYMBOLS;
+    document.body.appendChild(holder);
+  }
+}
+
+function registerComponent() {
+  if (registered || !window.Alpine) return;
+  window.Alpine.data('fuiCredentials', credentialsPanel);
+  registered = true;
+}
+
+function close() {
+  const cb = hostCallbacks.onClose;
+  if (card && card.parentNode) card.parentNode.removeChild(card);
+  if (overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay);
+  card = null; overlay = null;
+  hostCallbacks = { onBack: null, onClose: null };
+  if (cb) cb();
+}
+
+async function open(opts) {
+  hostCallbacks = {
+    onBack: (opts && opts.onBack) || null,
+    onClose: (opts && opts.onClose) || close,
+  };
+  injectStyles();
+  if (window.Alpine) registerComponent();
+  else document.addEventListener('alpine:init', registerComponent, { once: true });
+
+  card = document.createElement('div');
+  card.className = 'fui-cred';
+  card.setAttribute('data-testid', 'factor-management');
+  card.setAttribute('x-data', 'fuiCredentials');
+  card.innerHTML = MARKUP;
+
+  const mount = opts && opts.mount;
+  if (mount) {
+    overlay = null;
+    mount.appendChild(card);
+  } else {
+    overlay = document.createElement('div');
+    overlay.className = 'fui-overlay';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:1100;display:flex;align-items:center;justify-content:center;background:rgba(4,6,11,.72);padding:24px 16px;';
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    card.style.cssText = 'width:100%;max-width:460px;max-height:86vh;border:1px solid #374151;border-radius:14px;overflow:hidden;';
+    overlay.appendChild(card);
+    document.body.appendChild(overlay);
+  }
+  // Alpine (already started on dashboard pages) initializes injected trees via
+  // its MutationObserver; nothing further to do here.
+}
+
+export { open, close };
