@@ -16230,7 +16230,7 @@ CENTRAL_ATTENTION_MOBILE_CHECKS = r"""(async () => {
     );
     const iconRemainsVisible = attentionButton.getClientRects().length > 0 &&
         attentionRect.top >= 0 && attentionRect.bottom <= window.innerHeight;
-    const iconHasActiveStroke = attentionButton.classList.contains('text-indigo-300') &&
+    const iconHasActiveStroke = attentionButton.classList.contains('toolbar-icon-button-active') &&
         attentionButton.getAttribute('aria-expanded') === 'true' &&
         attentionButton.getAttribute('aria-label') === 'Close attention center';
     attentionButton.click();

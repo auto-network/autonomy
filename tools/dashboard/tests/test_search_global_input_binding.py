@@ -187,12 +187,16 @@ class TestCompactGlobalSearchChrome:
                 var rect = el.getBoundingClientRect();
                 var css = getComputedStyle(el);
                 return {
+                    tag: el.tagName,
                     width: rect.width,
                     height: rect.height,
                     radius: css.borderTopLeftRadius,
+                    appearance: css.appearance,
+                    border_color: css.borderTopColor,
+                    background: css.backgroundColor,
                 };
             }
-            var shapes = [shape(menu), shape(inbox), shape(control)];
+            var shapes = [shape(menu), shape(inbox), shape(icon)];
             return {
                 collapsed: !header.classList.contains('global-search-open') &&
                     !control.classList.contains('is-open'),
@@ -205,7 +209,11 @@ class TestCompactGlobalSearchChrome:
                 toolbar_icons_uniform: shapes.every(function(value) {
                     return Math.abs(value.width - shapes[0].width) <= 0.5 &&
                         Math.abs(value.height - shapes[0].height) <= 0.5 &&
-                        value.radius === shapes[0].radius;
+                        value.radius === shapes[0].radius &&
+                        value.tag === shapes[0].tag &&
+                        value.appearance === shapes[0].appearance &&
+                        value.border_color === shapes[0].border_color &&
+                        value.background === shapes[0].background;
                 }),
                 toolbar_icon_shape: shapes[0],
             };
@@ -218,7 +226,15 @@ class TestCompactGlobalSearchChrome:
             "profile_on_right": True,
             "no_overflow": True,
             "toolbar_icons_uniform": True,
-            "toolbar_icon_shape": {"width": 40, "height": 40, "radius": "8px"},
+            "toolbar_icon_shape": {
+                "tag": "BUTTON",
+                "width": 40,
+                "height": 40,
+                "radius": "8px",
+                "appearance": "none",
+                "border_color": "rgb(55, 65, 81)",
+                "background": "rgb(31, 41, 55)",
+            },
         }
 
     def test_open_search_owns_bar_and_toggle_restores_shell(self, harness):

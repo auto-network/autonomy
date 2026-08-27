@@ -19,8 +19,8 @@
           :aria-expanded="inboxOpen || fullInbox ? 'true' : 'false'"
           aria-controls="central-attention-tray"
           :aria-label="inboxOpen || fullInbox ? 'Close attention center' : 'Open attention center'"
-          class="relative z-50 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border bg-gray-800 hover:border-gray-500 hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 md:h-10 md:w-10"
-          :class="inboxOpen || fullInbox ? 'border-indigo-500 bg-gray-700 text-indigo-300' : 'border-gray-700 text-gray-200'">
+          class="toolbar-icon-button relative z-50 shrink-0"
+          :class="inboxOpen || fullInbox ? 'toolbar-icon-button-active' : ''">
     <svg aria-hidden="true" class="h-5 w-5" viewBox="0 0 24 24" fill="none"
          stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
          stroke-linejoin="round">

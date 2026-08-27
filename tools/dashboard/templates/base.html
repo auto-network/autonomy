@@ -197,21 +197,39 @@
       --toolbar-icon-size: 2.5rem;
       --toolbar-icon-radius: 0.5rem;
     }
-    header[data-app-chrome] > #nav-toggle,
-    header[data-app-chrome] [data-testid="central-attention-root"]
-      > [data-testid="central-attention-button"],
-    #global-search-control,
+    .toolbar-icon-button,
     .app-topbar-icon-button {
+      appearance: none;
+      -webkit-appearance: none;
       box-sizing: border-box;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
       width: var(--toolbar-icon-size);
       height: var(--toolbar-icon-size);
       flex: 0 0 var(--toolbar-icon-size);
-      border-radius: var(--toolbar-icon-radius);
-    }
-    header[data-app-chrome] > #nav-toggle,
-    header[data-app-chrome] [data-testid="central-attention-root"]
-      > [data-testid="central-attention-button"] {
       padding: 0;
+      border: 1px solid #374151;
+      border-radius: var(--toolbar-icon-radius);
+      background: #1f2937;
+      color: #d1d5db;
+      cursor: pointer;
+    }
+    .toolbar-icon-button:hover,
+    .app-topbar-icon-button:hover {
+      border-color: #4b5563;
+      background: #374151;
+      color: #fff;
+    }
+    .toolbar-icon-button:focus-visible,
+    .app-topbar-icon-button:focus-visible {
+      outline: 2px solid rgba(99, 102, 241, 0.75);
+      outline-offset: -2px;
+    }
+    .toolbar-icon-button-active {
+      border-color: #6366f1;
+      background: #374151;
+      color: #a5b4fc;
     }
     header[data-app-chrome] [data-testid="central-attention-root"] {
       display: flex;
@@ -222,20 +240,26 @@
       justify-content: center;
     }
     #global-search-control {
+      box-sizing: border-box;
       position: relative;
       display: flex;
       align-items: center;
+      width: var(--toolbar-icon-size);
+      height: var(--toolbar-icon-size);
+      flex: 0 0 var(--toolbar-icon-size);
       min-width: var(--toolbar-icon-size);
-      overflow: hidden;
-      border: 1px solid #374151;
-      background: #1f2937;
+      overflow: visible;
+      border: 0;
+      border-radius: var(--toolbar-icon-radius);
+      background: transparent;
       transition: width 160ms ease, flex 160ms ease,
                   border-color 160ms ease, background-color 160ms ease;
     }
     #global-search-control.is-open {
       width: 100%;
       flex: 1 1 auto;
-      border-color: #4f46e5;
+      overflow: hidden;
+      border: 1px solid #4f46e5;
       background: #111827;
     }
     #global-search {
@@ -261,29 +285,16 @@
       outline: none;
     }
     #global-search-icon {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: var(--toolbar-icon-size);
       height: 100%;
-      flex: 0 0 var(--toolbar-icon-size);
-      border: 0;
       border-left: 1px solid transparent;
-      background: transparent;
-      color: #d1d5db;
-      cursor: pointer;
     }
     #global-search-control.is-open #global-search-icon {
+      border-top: 0;
+      border-right: 0;
+      border-bottom: 0;
       border-left-color: #374151;
+      border-radius: 0;
       background: #1f2937;
-    }
-    #global-search-icon:hover {
-      background: #374151;
-      color: #fff;
-    }
-    #global-search-icon:focus-visible {
-      outline: 2px solid rgba(99, 102, 241, 0.75);
-      outline-offset: -2px;
     }
     header.global-search-open {
       gap: 0;
@@ -399,14 +410,16 @@
       gap: 0;
       width: var(--toolbar-icon-size);
       height: var(--toolbar-icon-size);
-      overflow: hidden;
-      border: 1px solid #374151;
+      overflow: visible;
+      border: 0;
       border-radius: var(--toolbar-icon-radius);
-      background: #1f2937;
+      background: transparent;
       transition: width 160ms ease, border-color 160ms ease, background-color 160ms ease;
     }
     .app-topbar-search-control.is-open {
       width: min(19rem, 36vw);
+      overflow: hidden;
+      border: 1px solid #4f46e5;
       border-color: #4f46e5;
       background: #111827;
     }
@@ -428,23 +441,16 @@
       padding: 0 0.5rem 0 0.625rem;
     }
     .app-topbar-search-button {
-      flex: 0 0 auto;
-      width: var(--toolbar-icon-size);
       height: 100%;
-      flex-basis: var(--toolbar-icon-size);
-      border: 0;
       border-left: 1px solid transparent;
-      border-radius: 0;
-      background: transparent;
-      color: #d1d5db;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      cursor: pointer;
       transition: color 140ms ease, background-color 140ms ease, border-color 140ms ease;
     }
     .app-topbar-search-control.is-open .app-topbar-search-button {
+      border-top: 0;
+      border-right: 0;
+      border-bottom: 0;
       border-left-color: #374151;
+      border-radius: 0;
       background: #1f2937;
     }
     .app-topbar-search-button:hover {
@@ -459,7 +465,6 @@
     .app-topbar-search-input:focus {
       outline: none;
     }
-    .app-topbar-icon-button,
     .app-topbar-button {
       display: inline-flex;
       align-items: center;
@@ -476,9 +481,6 @@
       font-weight: 600;
     }
     .app-topbar-icon-button {
-      width: var(--toolbar-icon-size);
-      height: var(--toolbar-icon-size);
-      border-radius: var(--toolbar-icon-radius);
       font-size: 1rem;
       line-height: 1;
     }
@@ -2151,7 +2153,7 @@
   <div class="flex-1 flex flex-col overflow-hidden">
     <!-- Header -->
     <header data-app-chrome class="bg-gray-800 border-b border-gray-700 px-4 md:px-6 py-3 flex items-center gap-3 md:gap-4">
-      <button id="nav-toggle" class="order-1 md:hidden relative z-50 bg-gray-800 p-2 rounded-lg border border-gray-700 flex-shrink-0"
+      <button id="nav-toggle" class="toolbar-icon-button order-1 md:hidden relative z-50 flex-shrink-0"
               onclick="toggleSidebar()">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
@@ -2161,7 +2163,7 @@
       <div id="global-search-control" class="order-3 md:order-2" data-testid="global-search-control">
         <input type="search" id="global-search" placeholder="Search..."
                aria-hidden="true" tabindex="-1">
-        <button type="button" id="global-search-icon"
+        <button type="button" id="global-search-icon" class="toolbar-icon-button"
                 aria-label="Open search" aria-expanded="false"
                 aria-controls="global-search" title="Open search">
           <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
