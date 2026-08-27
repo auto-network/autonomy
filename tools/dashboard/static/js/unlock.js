@@ -249,9 +249,17 @@
     // the server grants access. This keeps dashboard access and root authority
     // genuinely independent: an access-disabled passkey succeeds only when its
     // PRF actually opened the current root policy.
+    //
+    // This block runs for EVERY v3 passkey login — not only when some passkey
+    // already holds root authority — because it is also the DETECTION for the
+    // first-device re-enrollment flow: a known credential whose PRF matches no
+    // enrolled slot stashes a pending slot, and the factor panel greets it
+    // with the enrollment dialog. Gating this on passkeyOpensRoot made the
+    // designed flow unreachable in exactly its primary scenario (a migrated
+    // or newly synced device whose factor holds no authority yet).
     var openedForWarm = null;
     var rootSignature = null;
-    if (U.passkeyOpensRoot && enroll && U.armorText
+    if (enroll && U.armorText
         && U.factorPolicy && U.factorPolicy.armor_version === 3) {
       var rootPrf = null;
       try {
@@ -265,30 +273,19 @@
             rootPrf, rootPolicy.FACTOR_RECIPIENT_PURPOSE,
           );
           var credentialId = bytesToB64u(new Uint8Array(cred.rawId));
-          var rootFactor = rootEnvelope.factors.find(function (row) {
-            return row.type === 'passkey'
-              && row.credential_id === credentialId
-              && row.recipients.some(function (slot) {
-                return slot.recipient_public_key === rootRecipient.publicKeyHex;
-              });
-          });
+          var detection = enroll.detectPendingSlot(
+            rootEnvelope.factors, credentialId, rootRecipient.publicKeyHex,
+          );
+          var rootFactor = detection.kind === 'enrolled' ? detection.factor : null;
           // PRF mismatch on a KNOWN credential: this device holds a synced
           // passkey whose slot lives elsewhere. Remember the derived recipient
-          // (public data only) — the next root opening enrolls it silently.
-          if (!rootFactor) {
-            var knownFactor = rootEnvelope.factors.find(function (row) {
-              return row.type === 'passkey' && row.credential_id === credentialId;
-            });
-            if (knownFactor) {
-              try {
-                sessionStorage.setItem('autonomy.factor.pending-slot', JSON.stringify({
-                  factor_id: knownFactor.factor_id,
-                  credential_id: credentialId,
-                  recipient_public_key: rootRecipient.publicKeyHex,
-                  label: 'New device',
-                }));
-              } catch (e) { /* storage unavailable — detection stays best-effort */ }
-            }
+          // (public data only) — the factor panel greets it with the
+          // first-device enrollment dialog, which restores full authority.
+          if (detection.kind === 'pending-slot') {
+            try {
+              sessionStorage.setItem('autonomy.factor.pending-slot',
+                JSON.stringify(detection.pending));
+            } catch (e) { /* storage unavailable — detection stays best-effort */ }
           }
           if (rootFactor && rootPolicy.policySatisfied(
             rootEnvelope.policy, [rootFactor.factor_id],
