@@ -112,6 +112,14 @@ def test_diff_fragments_curly_quotes_are_equivalent_to_straight():
     assert _extract(frags, "insert") == ""
 
 
+def test_diff_fragments_ignores_trailing_whitespace():
+    """Trailing transport whitespace must not render as a correction."""
+    frags = tc.diff_fragments("Please review this", "Please review this ")
+    assert {f["kind"] for f in frags} == {"same"}
+    assert _extract(frags, "delete") == ""
+    assert _extract(frags, "insert") == ""
+
+
 def test_correction_metrics_small_punctuation_style_change():
     """Punctuation-style-only edits should not look like user corrections."""
     metrics = tc.correction_metrics("I won’t go", "I won't go")
@@ -119,6 +127,12 @@ def test_correction_metrics_small_punctuation_style_change():
     assert metrics["edit_chars"] == 0
     assert metrics["edit_fragments"] == 0
     assert len(metrics["fragments"]) == 1
+
+
+def test_correction_metrics_trailing_whitespace_is_not_an_edit():
+    metrics = tc.correction_metrics("Please review this", "Please review this ")
+    assert metrics["edit_chars"] == 0
+    assert metrics["edit_fragments"] == 0
 
 
 def test_host_exported_correction_with_only_punctuation_delta_flags_only_punctuation_ops():

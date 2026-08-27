@@ -58,4 +58,11 @@ function asString(frags) {
   assert.strictEqual(asString(frags), "“Hello”", "Render text should preserve original raw text");
 }
 
+{
+  const frags = window.SessionDiff.fragments("Please review this", "Please review this ");
+  assert.deepStrictEqual([...new Set(frags.map((f) => f.kind))].sort(), ["same"], "Trailing whitespace should be ignored");
+  assert.strictEqual(collect(frags, "delete"), "", "No deletion for trailing whitespace");
+  assert.strictEqual(collect(frags, "insert"), "", "No insertion for trailing whitespace");
+}
+
 console.log("PASS: turn-correction punctuation fragment behavior");
