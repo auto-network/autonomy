@@ -70,8 +70,8 @@ agent-browser eval 'Alpine.store("app").sseInterrupted = "Server restarted"; "ok
 sleep 1
 
 RESULT=$(agent-browser eval 'var el = document.querySelector(".sse-banner"); el ? getComputedStyle(el).zIndex + " " + getComputedStyle(el).position : "missing"')
-if echo "$RESULT" | grep -q "20 fixed"; then
-  pass "Banner is fixed with z-index 20"
+if echo "$RESULT" | grep -q "10002 fixed"; then
+  pass "Banner is fixed above viewer overlays"
 else
   fail "Banner positioning: $RESULT"
 fi
