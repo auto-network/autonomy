@@ -1044,9 +1044,20 @@ function _isSessionPath(path) {
   return /^\/session\/[^/]+\/.+$/.test(path || '');
 }
 
+// Keep this media query aligned with the session-viewer fullscreen rule in
+// templates/base.html. Width alone is not enough: a phone rotated to
+// landscape is commonly 800-950 CSS px wide, which used to make the desktop
+// sidebar appear and consume the extra reading width. The short landscape +
+// coarse pointer clauses identify that phone posture without treating a
+// narrow or short mouse-driven desktop window as a phone.
+const _COMPACT_SESSION_VIEWPORT_QUERY = [
+  '(max-width: 767px)',
+  '(max-height: 500px) and (orientation: landscape) and (hover: none) and (pointer: coarse)',
+].join(', ');
+
 function _isMobileOverlayViewport() {
   if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false;
-  return window.matchMedia('(max-width: 767px)').matches;
+  return window.matchMedia(_COMPACT_SESSION_VIEWPORT_QUERY).matches;
 }
 
 function _sessionOverlayCanHandle(path) {
