@@ -298,6 +298,27 @@ test('describeStagedChanges narrates the staged diff in words', () => {
   assert.ok(lines.some((l) => l.startsWith('Turn on multi-factor — any one password')), lines.join('|'));
 });
 
+test('narration: a placeholder replaced by its first slot is an enrollment, never a removal', () => {
+  // The bug from the first live iPhone screenshot: a recipient-less passkey
+  // (one "unpaired" placeholder row) promoted to authority gets its device
+  // slot staged at commit; the placeholder swap must narrate as ONE enroll
+  // line — no fictional "Remove device" (stagedOperations stages no remove
+  // for a row with no recipientPub), and no redundant "for" clause when the
+  // device name equals the credential label.
+  const view = orView();
+  view.factors[1].recipients = [];          // no key material on record
+  view.factors[1].label = 'iPhone';
+  const c = panelFrom(view);
+  const placeholder = c.passkeys.find((k) => k.unpaired);
+  assert.ok(placeholder, 'recipient-less factor renders one placeholder row');
+  placeholder.authority = 'full';
+  c.thisDevice = () => 'iPhone';            // device name == credential label
+  c._stageSlotRow(placeholder, 'ab'.repeat(32));
+  const lines = describeStagedChanges(c);
+  assert.ok(!lines.some((l) => l.startsWith('Remove device')), lines.join('|'));
+  assert.ok(lines.includes('Enroll this device (\u201ciPhone\u201d)'), lines.join('|'));
+});
+
 test('policyWithFactorGranted restores authority for every legal shape', () => {
   const F = (id) => ({ op: 'factor', factor_id: id });
   const t = (id) => (id.startsWith('pk') ? 'passkey' : 'password');

@@ -404,12 +404,22 @@ export function describeStagedChanges(m) {
       lines.push('Enroll passkey “' + label + '” on this device');
     } else {
       had.forEach((br) => {
-        if (!have.find((r) => r.id === br.id)) {
-          lines.push('Remove device “' + (br.device || br.label || 'device') + '” from “' + label + '”');
+        // A recipient-less placeholder row being replaced by its first real
+        // slot is not a removal — stagedOperations stages no remove op for it.
+        if (!have.find((r) => r.id === br.id) && br.recipientPub) {
+          const dev = br.device || br.label || 'device';
+          lines.push(dev === label
+            ? 'Remove device “' + dev + '”'
+            : 'Remove device “' + dev + '” from “' + label + '”');
         }
       });
       have.forEach((r) => {
-        if (r._addRecipient) lines.push('Enroll this device (“' + r._addRecipient.recipient.label + '”) for “' + label + '”');
+        if (r._addRecipient) {
+          const dev = r._addRecipient.recipient.label;
+          lines.push(dev === label
+            ? 'Enroll this device (“' + dev + '”)'
+            : 'Enroll this device (“' + dev + '”) for “' + label + '”');
+        }
       });
     }
     const b0 = had[0]; const c0 = have[0];
@@ -798,7 +808,10 @@ export function credentialsPanel() {
       try { ops = stagedOperations(this); } catch (e) { this.flash((e && e.message) || String(e)); return; }
       let lines = [];
       try { lines = describeStagedChanges(this); } catch (e) { lines = []; }
-      const opened = await this.requireRoot('Commit ' + n + (n === 1 ? ' change' : ' changes'), '', lines);
+      // Title counts what the ceremony actually narrates: slot acquisition may
+      // have staged more operations than the rows the user edited.
+      const nn = lines.length || n;
+      const opened = await this.requireRoot('Commit ' + nn + (nn === 1 ? ' change' : ' changes'), '', lines);
       if (!opened) return;
       this.committing = true;
       try {
