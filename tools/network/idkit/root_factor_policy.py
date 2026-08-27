@@ -829,6 +829,42 @@ def _unsigned_envelope(envelope: Mapping) -> dict:
     return {key: deepcopy(value) for key, value in envelope.items() if key != "signature"}
 
 
+# ── recovery slot (operator ruling 2026-08-27; design graph://fd418706-97e) ──
+# The recovery code opens the root ALONE, outside the policy tree — the
+# emergency floor. Its field on the envelope seals the ROOT SEED to the code's
+# recovery recipient (the same RECOVERY_ARMOR seal the v2 factor uses, so one
+# printed code works identically), and carries the code's Ed25519 signing half
+# (recovery_pub) for future rotation. Optional: no armor version bump.
+_RECOVERY_ARMOR_PURPOSE = "autonomy/recovery-armor/v1"  # mirrors armor.RECOVERY_ARMOR_PURPOSE
+
+
+def recovery_recipient_public_key(recovery_code: bytes) -> str:
+    """The KEM recipient the root seed is sealed to, from the printed code.
+
+    Reuses the v2 derivation verbatim (kek_recovery_seed under the recovery
+    armor purpose) so one code opens both v2 and v3 armors.
+    """
+    from .recovery import derive_recovery_factors
+
+    kek_seed = derive_recovery_factors(recovery_code)["kek_recovery_seed"]
+    _private, public = derive_encapsulation_keypair(kek_seed, _RECOVERY_ARMOR_PURPOSE)
+    return public
+
+
+def _parse_recovery(value: object) -> dict:
+    if not isinstance(value, dict) or set(value) != {
+        "recipient_public_key", "recovery_pub", "sealed",
+    }:
+        raise RootFactorPolicyError("recovery slot has unknown or missing fields")
+    return {
+        "recipient_public_key": _public_key(
+            value.get("recipient_public_key"), "recovery recipient",
+        ),
+        "recovery_pub": _public_key(value.get("recovery_pub"), "recovery_pub"),
+        "sealed": _b64(_unb64(value.get("sealed"), length=81, what="recovery wrap")),
+    }
+
+
 def build_envelope(
     root: KeyPair,
     *,
@@ -836,6 +872,7 @@ def build_envelope(
     factors: Iterable[Mapping],
     access: Iterable[str],
     policy: object,
+    recovery: Mapping | None = None,
 ) -> dict:
     if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
         raise RootFactorPolicyError("generation must be a positive integer")
@@ -859,10 +896,84 @@ def build_envelope(
         "policy": state["policy"],
         "wraps": wraps,
     }
+    if recovery is not None:
+        unsigned["recovery"] = _parse_recovery(recovery)
     return {
         **unsigned,
         "signature": root.sign_hex(POLICY_SIGNATURE_DOMAIN + canonical_json(unsigned)),
     }
+
+
+def add_recovery_slot(
+    envelope: object,
+    *,
+    root_seed: bytes,
+    recovery_recipient_pub: str,
+    recovery_pub: str,
+) -> dict:
+    """Enroll a recovery slot into a v3 armor, re-signed by the root.
+
+    Requires the ROOT SEED (reach root) and the code's PUBLIC halves only — the
+    code itself stays cold. Refuses to replace an existing slot: replacement
+    requires the old code and is not built (operator ruling).
+    """
+    parsed = parse_envelope(envelope)
+    if "recovery" in parsed:
+        raise RootFactorPolicyError(
+            "this armor already carries a recovery code; replacing one needs the "
+            "old code and is not yet supported"
+        )
+    root = KeyPair.from_private_hex(bytes(root_seed).hex())
+    if root.public_hex != parsed["root_pub"]:
+        raise RootFactorPolicyError("the supplied root seed does not match root_pub")
+    recipient = _public_key(recovery_recipient_pub, "recovery recipient")
+    sealed = seal(bytes(root_seed), recipient, _RECOVERY_ARMOR_PURPOSE)
+    recovery = {
+        "recipient_public_key": recipient,
+        "recovery_pub": _public_key(recovery_pub, "recovery_pub"),
+        "sealed": _b64(sealed),
+    }
+    unsigned = {key: parsed[key] for key in (
+        "v", "generation", "root_pub", "factors", "access", "policy", "wraps",
+    )}
+    unsigned["recovery"] = recovery
+    return {
+        **unsigned,
+        "signature": root.sign_hex(POLICY_SIGNATURE_DOMAIN + canonical_json(unsigned)),
+    }
+
+
+def open_root_with_recovery(envelope: object, recovery_code: bytes) -> KeyPair:
+    """Open the root seed with the printed code alone (the emergency floor)."""
+    from .recovery import derive_recovery_factors
+
+    parsed = parse_envelope(envelope)
+    recovery = parsed.get("recovery")
+    if recovery is None:
+        raise RootFactorPolicyError(
+            "this armor carries no recovery code; a code cannot open it"
+        )
+    kek_seed = derive_recovery_factors(recovery_code)["kek_recovery_seed"]
+    private_hex, public_hex = derive_encapsulation_keypair(kek_seed, _RECOVERY_ARMOR_PURPOSE)
+    if public_hex != recovery["recipient_public_key"]:
+        raise RootFactorPolicyError("that recovery code does not match this armor")
+    try:
+        seed = open_sealed(
+            _unb64(recovery["sealed"], length=81, what="recovery wrap"),
+            private_hex, _RECOVERY_ARMOR_PURPOSE,
+        )
+    except RootFactorPolicyError:
+        raise
+    except Exception as exc:
+        raise RootFactorPolicyError("the recovery slot does not open with that code") from exc
+    seed = bytearray(seed)
+    try:
+        root = KeyPair.from_private_hex(bytes(seed).hex())
+        if root.public_hex != parsed["root_pub"]:
+            raise RootFactorPolicyError("opened root seed does not match root_pub")
+        return root
+    finally:
+        seed[:] = b"\x00" * len(seed)
 
 
 def _validate_wrap_tree(
@@ -911,10 +1022,11 @@ def _validate_wrap_tree(
 
 
 def parse_envelope(value: object) -> dict:
-    if not isinstance(value, dict) or set(value) != {
+    base = {
         "v", "generation", "root_pub", "factors", "access", "policy", "wraps",
         "signature",
-    }:
+    }
+    if not isinstance(value, dict) or set(value) - {"recovery"} != base:
         raise RootFactorPolicyError("root-factor envelope has unknown or missing fields")
     if value.get("v") != POLICY_VERSION:
         raise RootFactorPolicyError("unsupported root-factor policy version")
@@ -943,6 +1055,8 @@ def parse_envelope(value: object) -> dict:
         "wraps": wraps,
         "signature": signature,
     }
+    if "recovery" in value:
+        parsed["recovery"] = _parse_recovery(value.get("recovery"))
     try:
         verify_signature(
             root_pub,
