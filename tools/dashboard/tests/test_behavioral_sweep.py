@@ -16043,7 +16043,7 @@ CENTRAL_ATTENTION_DESKTOP_CHECKS = r"""(async () => {
             .filter(el => getComputedStyle(el).display !== 'none')
             .sort((a, b) => Number(getComputedStyle(a).order) - Number(getComputedStyle(b).order));
         result.header_attention_after_search = ordered.indexOf(root) >
-            ordered.findIndex(el => el.id === 'global-search');
+            ordered.findIndex(el => el.id === 'global-search-control');
         result.badge_text = document.querySelector('[data-testid="central-attention-badge"]')?.textContent.trim();
         result.count_math = data.badgeCount === 5 &&
             ['apps','comms','approvals'].reduce((sum, key) => sum + data.categoryCount(key), 0) === 5;
@@ -16209,7 +16209,7 @@ CENTRAL_ATTENTION_MOBILE_CHECKS = r"""(async () => {
     await Alpine.nextTick(); await sleep(100);
     const mobile = document.querySelector('[data-testid="central-attention-mobile"]');
     const nav = document.getElementById('nav-toggle');
-    const search = document.getElementById('global-search');
+    const search = document.getElementById('global-search-control');
     const header = document.querySelector('[data-app-chrome]');
     const ordered = Array.from(header.children)
         .filter(el => getComputedStyle(el).display !== 'none')

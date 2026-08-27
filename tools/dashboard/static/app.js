@@ -7,6 +7,7 @@ const statsSummary = document.getElementById('stats-summary');
 const harnessUsage = document.getElementById('harness-usage');
 const globalSearch = document.getElementById('global-search');
 const globalSearchIcon = document.getElementById('global-search-icon');
+const globalSearchControl = document.getElementById('global-search-control');
 const appTopbarSlot = document.getElementById('app-topbar-slot');
 const sessionViewLayer = document.getElementById('session-view-layer');
 const sessionViewHost = document.getElementById('session-view-host');
@@ -124,7 +125,8 @@ function _escapeTopbarHtml(value) {
 }
 
 function _setTopbarHtml(opts) {
-  const header = document.querySelector('header');
+  closeGlobalSearch();
+  const header = document.querySelector('header[data-app-chrome]');
   if (!header || !appTopbarSlot) return;
   appTopbarSlot.innerHTML = opts && opts.html ? opts.html : '';
   header.classList.add('app-topbar-active');
@@ -138,7 +140,7 @@ window.Autonomy.resetTopbar = function () {
     window.Autonomy._activeTopbarHandle = null;
     handle.destroy();
   }
-  const header = document.querySelector('header');
+  const header = document.querySelector('header[data-app-chrome]');
   if (header) {
     header.classList.remove('app-topbar-active');
     header.classList.remove('app-topbar-has-search');
@@ -157,7 +159,7 @@ window.Autonomy.setTopbar = function (opts) {
   return {
     update(nextOpts) { window.Autonomy.setTopbar(nextOpts || opts || {}); },
     destroy() {
-      const header = document.querySelector('header');
+      const header = document.querySelector('header[data-app-chrome]');
       if (header) header.classList.remove('app-topbar-has-search');
       if (appTopbarSlot) appTopbarSlot.innerHTML = '';
     },
@@ -401,7 +403,7 @@ window.Autonomy.topbar.set = function (initialOptions) {
       // destroying after another page has taken the topbar (via topbar.set)
       // must not blank the destination page's slot.
       if (window.Autonomy._activeTopbarHandle === handle) {
-        const header = document.querySelector('header');
+        const header = document.querySelector('header[data-app-chrome]');
         if (header) header.classList.remove('app-topbar-has-search');
         if (appTopbarSlot) appTopbarSlot.innerHTML = '';
         window.Autonomy._activeTopbarHandle = null;
@@ -2086,6 +2088,11 @@ function renderMissionScreenFragment() {
 }
 
 async function route() {
+  closeGlobalSearch();
+  if (window.AutonomyIdentityIndicator
+      && typeof window.AutonomyIdentityIndicator.close === 'function') {
+    window.AutonomyIdentityIndicator.close();
+  }
   // Drop any plugin-org context from the previous render so non-plugin
   // routes (and plugin pages whose load_enabled state changed) don't
   // inherit a stale X-Graph-Org. The plugin handler resets it below
@@ -2128,7 +2135,9 @@ async function route() {
   const isDesignPage = path.startsWith('/design/');
   const isPresentDeckPage = path.startsWith('/present/')
     || /^\/presentations\/[^/]+/.test(path);
-  const globalHeader = document.querySelector('header');
+  const isImmersiveUtilityPage = isSessionViewPage
+    || /^\/(?:missions?|design|present(?:ations)?)(?:\/|$)/.test(path);
+  const globalHeader = document.querySelector('header[data-app-chrome]');
   if (globalHeader) {
     globalHeader.style.display = isDesignPage ? 'none' : '';
   }
@@ -2147,6 +2156,7 @@ async function route() {
   // caused by main's pt-6 baseline). See bead auto-kvka6 §7.
   document.body.classList.toggle('route-search', path === '/search');
   document.body.classList.toggle('route-present-deck', isPresentDeckPage);
+  document.body.classList.toggle('route-immersive', isImmersiveUtilityPage);
 
   // Clear header action buttons from previous page
   const headerActions = document.getElementById('header-actions');
@@ -2245,7 +2255,7 @@ async function route() {
 
 // ── Event Handlers ───────────────────────────────────────────
 
-// Global search — context-sensitive.
+// Global search — compact shell control with route-sensitive submission.
 //   - On /search: broadcast every input change as a ``global-search:input``
 //     CustomEvent so the search-page Alpine component can two-way bind to
 //     ``query``, debounce a refetch, and replaceState() the q= in the URL.
@@ -2262,27 +2272,62 @@ globalSearch.addEventListener('input', () => {
     }));
   }
 });
+function setGlobalSearchOpen(open, options = {}) {
+  if (!globalSearchControl || !globalSearchIcon || !globalSearch) return;
+  const header = document.querySelector('header[data-app-chrome]');
+  const nextOpen = !!open;
+  globalSearchControl.classList.toggle('is-open', nextOpen);
+  if (header) header.classList.toggle('global-search-open', nextOpen);
+  globalSearchIcon.setAttribute('aria-expanded', nextOpen ? 'true' : 'false');
+  globalSearchIcon.setAttribute('aria-label', nextOpen ? 'Close search' : 'Open search');
+  globalSearchIcon.title = nextOpen ? 'Close search' : 'Open search';
+  globalSearch.setAttribute('aria-hidden', nextOpen ? 'false' : 'true');
+  globalSearch.tabIndex = nextOpen ? 0 : -1;
+  if (nextOpen && options.focus !== false) {
+    requestAnimationFrame(() => globalSearch.focus({ preventScroll: true }));
+  }
+}
+
+function closeGlobalSearch() {
+  setGlobalSearchOpen(false, { focus: false });
+}
+
 globalSearch.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    closeGlobalSearch();
+    globalSearchIcon.focus({ preventScroll: true });
+    return;
+  }
   if (e.key !== 'Enter') return;
+  e.preventDefault();
   const q = globalSearch.value.trim();
   const path = window.location.pathname;
   if (path === '/search') {
     window.dispatchEvent(new CustomEvent('global-search:enter', {
       detail: { value: globalSearch.value },
     }));
+    closeGlobalSearch();
     return;
   }
   if (path === '/' || path === '/beads') {
     // On beads page: Alpine component reacts to input events — no extra action needed
+    closeGlobalSearch();
     return;
   }
+  closeGlobalSearch();
   if (!q) return;
   navigateTo('/search?q=' + encodeURIComponent(q));
 });
 
 if (globalSearchIcon) {
   globalSearchIcon.addEventListener('click', () => {
-    navigateTo('/search');
+    const opening = !globalSearchControl.classList.contains('is-open');
+    if (opening && window.AutonomyIdentityIndicator
+        && typeof window.AutonomyIdentityIndicator.close === 'function') {
+      window.AutonomyIdentityIndicator.close();
+    }
+    setGlobalSearchOpen(opening);
   });
 }
 
