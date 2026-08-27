@@ -403,6 +403,7 @@
       </div>
 
       <!-- Row 2: Scrollable entries (tap to dismiss keyboard) -->
+      <div class="sv-transcript" x-show="!showTerminal">
       <div class="sv-entries" x-show="!showTerminal" x-ref="entriesContainer"
            @scroll="onScroll()"
            onclick="var el = document.querySelector('.sv-editable'); if (el) el.blur()">
@@ -443,6 +444,7 @@
           <path d="m6 9 6 6 6-6"></path>
         </svg>
       </button>
+      </div>
 
       <!-- Terminal region — full-screen xterm.js view; swaps the chat body when showTerminal is true -->
       <div class="sv-terminal" x-show="showTerminal" x-ref="termContainer"></div>
