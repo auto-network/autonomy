@@ -1460,18 +1460,22 @@ def delete_session(tmux_name: str) -> None:
 _TERMINAL_STATES_SQL = "('ENDED','FAILED')"
 
 
-def get_live_sessions() -> list[dict]:
-    """Return all non-terminal sessions (LAUNCHING/ACTIVE/STOPPING).
+def get_live_sessions(*, include_agentic: bool = False) -> list[dict]:
+    """Return non-terminal interactive sessions by default.
 
     The NULL-state arm is the compat belt for rows written by raw INSERTs
     that bypass the sanctioned birth helpers (test fixtures, external
     writers); the migration backfill means production rows carry state.
+    Agentic-action containers are monitored for Activity/dispatch telemetry,
+    but are non-interactive and therefore excluded unless a system consumer
+    explicitly requests them.
     """
     conn = get_conn()
-    rows = conn.execute(
-        f"SELECT * FROM tmux_sessions WHERE state NOT IN {_TERMINAL_STATES_SQL}"
-        " OR state IS NULL"
-    ).fetchall()
+    where = (
+        f"(state NOT IN {_TERMINAL_STATES_SQL} OR state IS NULL)"
+        + ("" if include_agentic else " AND (type IS NULL OR type != 'agentic')")
+    )
+    rows = conn.execute(f"SELECT * FROM tmux_sessions WHERE {where}").fetchall()
     return [dict(r) for r in rows]
 
 
