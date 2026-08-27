@@ -178,8 +178,21 @@ class TestCompactGlobalSearchChrome:
             var input = document.getElementById('global-search');
             var profile = document.getElementById('identity-indicator');
             var icon = document.getElementById('global-search-icon');
+            var menu = document.getElementById('nav-toggle');
+            var inbox = document.querySelector(
+                '[data-testid="central-attention-button"]');
             var hr = header.getBoundingClientRect();
             var pr = profile.getBoundingClientRect();
+            function shape(el) {
+                var rect = el.getBoundingClientRect();
+                var css = getComputedStyle(el);
+                return {
+                    width: rect.width,
+                    height: rect.height,
+                    radius: css.borderTopLeftRadius,
+                };
+            }
+            var shapes = [shape(menu), shape(inbox), shape(control)];
             return {
                 collapsed: !header.classList.contains('global-search-open') &&
                     !control.classList.contains('is-open'),
@@ -189,6 +202,12 @@ class TestCompactGlobalSearchChrome:
                 profile_visible: profile.offsetParent !== null,
                 profile_on_right: Math.abs(hr.right - pr.right) <= 18,
                 no_overflow: document.documentElement.scrollWidth <= window.innerWidth + 1,
+                toolbar_icons_uniform: shapes.every(function(value) {
+                    return Math.abs(value.width - shapes[0].width) <= 0.5 &&
+                        Math.abs(value.height - shapes[0].height) <= 0.5 &&
+                        value.radius === shapes[0].radius;
+                }),
+                toolbar_icon_shape: shapes[0],
             };
         """)
         assert state == {
@@ -198,6 +217,8 @@ class TestCompactGlobalSearchChrome:
             "profile_visible": True,
             "profile_on_right": True,
             "no_overflow": True,
+            "toolbar_icons_uniform": True,
+            "toolbar_icon_shape": {"width": 40, "height": 40, "radius": "8px"},
         }
 
     def test_open_search_owns_bar_and_toggle_restores_shell(self, harness):

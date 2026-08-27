@@ -1,26 +1,10 @@
 <style>
   header[data-app-chrome] { display: flex; align-items: center; }
   [data-testid="central-attention-root"] { order: 2; }
-  #nav-toggle,
-  [data-testid="central-attention-root"] > [data-testid="central-attention-button"] {
-    box-sizing: border-box;
-    display: flex;
-    flex: 0 0 2.25rem;
-    width: 2.25rem;
-    height: 2.25rem;
-    padding: 0;
-    align-items: center;
-    justify-content: center;
-  }
   #global-search-control { order: 3; }
   #app-topbar-slot, #page-title, #agent-actions-slot, #header-actions { order: 4; }
   @media (min-width: 768px) {
     [data-testid="central-attention-root"] { order: 3; }
-    [data-testid="central-attention-root"] > [data-testid="central-attention-button"] {
-      flex-basis: 2.5rem;
-      width: 2.5rem;
-      height: 2.5rem;
-    }
     #global-search-control { order: 2; }
   }
 </style>
