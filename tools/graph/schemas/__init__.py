@@ -111,6 +111,7 @@ from . import bootstrap_allowlist  # noqa: F401 — autonomy.org.bootstrap-allow
 from . import harness_bootstrap  # noqa: F401 — autonomy.harness.bootstrap#1
 from . import vault_policy_class  # noqa: F401 — autonomy.vault.policy-class#1
 from . import vault_credential  # noqa: F401 — autonomy.vault.audited#1 + .secured#1
+from . import sealed_row  # noqa: F401 — autonomy.sealed-settings.row#1
 from . import secure_setting  # noqa: F401 — autonomy.secure.setting#1
 from . import commit_signing_key  # noqa: F401 — autonomy.commit.signing-key#1
 from . import credential_file  # noqa: F401 — autonomy.credential-file#1
