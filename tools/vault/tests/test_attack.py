@@ -35,10 +35,24 @@ from tools.vault.factors import (
     open_password_seed,
     random_seed,
 )
+from tools.vault.recipients import (
+    PERSONAL_ROOT_RECIPIENT,
+    PublishedRecipient,
+    recipient_public_from_seed,
+)
 from tools.vault.store import VaultStore
 from tools.vault.testkit import enroll_test_anchor
 
 GENESIS = "genesis-1"
+
+
+def _anchor(aid="anchor.root"):
+    seed = random_seed()
+    public = recipient_public_from_seed(seed, PERSONAL_ROOT_RECIPIENT)
+    return seed, PublishedRecipient(aid, PERSONAL_ROOT_RECIPIENT, public)
+
+
+_ANCHOR_SEED, _ANCHOR = _anchor()
 
 
 def pw_factor(pw: str, fid: str):
@@ -58,14 +72,14 @@ def test_both_class_rejects_two_factors_sharing_key_material():
     assert fake_passkey.public_key == pub_pw.public_key  # the collapse precondition
 
     with pytest.raises(FactorIndependenceError):
-        create_class(BOTH_POLICY, [pub_pw, fake_passkey], created_at="t0")
+        create_class(BOTH_POLICY, [pub_pw, fake_passkey], created_at="t0", recovery=_ANCHOR)
 
 
 def test_extend_rejects_a_factor_reusing_existing_key_material():
     pub_pw, seed_pw = pw_factor("alpha", "b-pw")
     pk_seed = random_seed()
     pub_pk = create_passkey_factor(pk_seed, factor_id="b-pk")
-    rec = create_class(BOTH_POLICY, [pub_pw, pub_pk], created_at="t0")
+    rec = create_class(BOTH_POLICY, [pub_pw, pub_pk], created_at="t0", recovery=_ANCHOR)
     # try to enroll a passkey whose seed is the password factor's seed
     collider = create_passkey_factor(seed_pw, factor_id="b-pk2")
     with pytest.raises(FactorIndependenceError):
@@ -80,7 +94,7 @@ def test_single_wrap_class_also_rejects_duplicate_key_material():
 
     dup_same = PublishedFactor("pw-2", "password", pub.public_key)
     with pytest.raises(FactorIndependenceError):
-        create_class(PASSWORD_POLICY, [pub, dup_same], created_at="t0")
+        create_class(PASSWORD_POLICY, [pub, dup_same], created_at="t0", recovery=_ANCHOR)
 
 
 # ── BROKEN-2 / BROKEN-3: stale writes must be refused, not clobber ─────────
@@ -167,7 +181,7 @@ def test_held_cross_class_wrap_lifting_is_refused():
     import dataclasses
 
     pubA, seedA = pw_factor("alpha", "pw-1")
-    recA = create_class(PASSWORD_POLICY, [pubA], created_at="t0")
+    recA = create_class(PASSWORD_POLICY, [pubA], created_at="t0", recovery=_ANCHOR)
     forged = dataclasses.replace(recA, class_id="different-class-id")
     with pytest.raises(ClassOpenError):
         open_class(forged, {"pw-1": seedA})
@@ -179,7 +193,7 @@ def test_held_both_downgrade_via_policy_tamper_is_refused():
     pub_pw, seed_pw = pw_factor("alpha", "b-pw")
     pk_seed = random_seed()
     pub_pk = create_passkey_factor(pk_seed, factor_id="b-pk")
-    rec = create_class(BOTH_POLICY, [pub_pw, pub_pk], created_at="t0")
+    rec = create_class(BOTH_POLICY, [pub_pw, pub_pk], created_at="t0", recovery=_ANCHOR)
     forged = dataclasses.replace(rec, policy=PASSWORD_POLICY)  # lie: both→password
     with pytest.raises(ClassOpenError):
         open_class(forged, {"b-pw": seed_pw})  # a single factor must not open it
@@ -187,7 +201,7 @@ def test_held_both_downgrade_via_policy_tamper_is_refused():
 
 def test_held_suite_id_type_confusion_is_refused():
     pub, seed = pw_factor("alpha", "pw-1")
-    rec = create_class(PASSWORD_POLICY, [pub], created_at="t0")
+    rec = create_class(PASSWORD_POLICY, [pub], created_at="t0", recovery=_ANCHOR)
     sealed = seal_cek(rec, os.urandom(32), genesis_id=GENESIS, setting_name="s", required_policy=PASSWORD_POLICY)
     sealed["format"] = "unknown-public-seal"
     with pytest.raises(Exception):  # SuiteError / PolicyClassError — never opens
@@ -196,7 +210,7 @@ def test_held_suite_id_type_confusion_is_refused():
 
 def test_held_sealed_cek_tamper_is_refused():
     pub, seed = pw_factor("alpha", "pw-1")
-    rec = create_class(PASSWORD_POLICY, [pub], created_at="t0")
+    rec = create_class(PASSWORD_POLICY, [pub], created_at="t0", recovery=_ANCHOR)
     cek = os.urandom(32)
     sealed = seal_cek(rec, cek, genesis_id=GENESIS, setting_name="s", required_policy=PASSWORD_POLICY)
     ct = bytearray(bytes.fromhex(sealed["ciphertext"]))
@@ -210,13 +224,13 @@ def test_held_generation_public_key_substitution_is_refused():
     import dataclasses
 
     pub, seed = pw_factor("alpha", "pw-1")
-    rec = create_class(PASSWORD_POLICY, [pub], created_at="t0")
+    rec = create_class(PASSWORD_POLICY, [pub], created_at="t0", recovery=_ANCHOR)
     sealed = seal_cek(
         rec, os.urandom(32), genesis_id=GENESIS, setting_name="s",
         required_policy=PASSWORD_POLICY,
     )
     other_pub, _ = pw_factor("beta", "pw-2")
-    other = create_class(PASSWORD_POLICY, [other_pub], created_at="t0")
+    other = create_class(PASSWORD_POLICY, [other_pub], created_at="t0", recovery=_ANCHOR)
     forged_gen = dataclasses.replace(
         rec.current(), sealing_public_key=other.current().sealing_public_key,
     )

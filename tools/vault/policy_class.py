@@ -515,7 +515,8 @@ def create_class(
     created_at: str,
     recovery: "PublishedRecipient | None" = None,
 ) -> PolicyClassRecord:
-    """Mint a class: a first generation sealed to *factors*' public keys.
+    """Mint a member class: a first generation sealed to *factors*' public keys
+    AND to the personal-root anchor.
 
     Requires NO existing factor and opens nothing — it consumes only the
     factors' published public keys (crib §18). Returns the record; the
@@ -523,15 +524,34 @@ def create_class(
     is persisted so :func:`seal_cek` can write without a factor.
 
     *recovery* (a personal-root anchor recipient) additionally seals every
-    generation to the root: the default for member classes, so root authority
-    always reads and always enrolls a replacement device (a class WITHOUT it
-    is a deliberate enclave the root cannot recover).
+    generation to the root, so root authority always reads and always enrolls
+    a replacement device. It is MANDATORY: root is a member of every class
+    specifically so root can always grant access to any policy class for any
+    new credential (operator ruling 2026-08-27). Enclaves — classes the root
+    cannot reach — are unbuildable: without a root anchor there is no way to
+    move keys onto a new device without the enclave's own factor present.
+    (The root-reachable governance class is minted by
+    :func:`create_root_reachable_class`, where the anchor IS the sole member.)
     """
     _require_policy(policy)
     if not factors:
         raise PolicyClassError("a class needs at least one factor")
-    class_id = class_id or secrets.token_hex(16)
     minted = list(factors) + ([recovery] if recovery is not None else [])
+    if not any(f.factor_type == PERSONAL_ROOT_RECIPIENT for f in minted):
+        raise PolicyClassError(
+            "a member class must seal to the personal-root anchor (enclaves are "
+            "unbuildable): pass recovery=<root anchor>. Root is a member of every "
+            "class so it can always grant access for a new credential."
+        )
+    anchor_ids = {
+        f.factor_id for f in minted if f.factor_type == PERSONAL_ROOT_RECIPIENT
+    }
+    if any(f.factor_id in anchor_ids for f in factors):
+        raise PolicyClassError(
+            "a member factor_id collides with the root anchor factor_id; the "
+            "collision would hide the member and make it irrevocable"
+        )
+    class_id = class_id or secrets.token_hex(16)
     gen = _mint_generation(policy, minted, class_id, secrets.token_hex(12), secrets.token_bytes(_CLASS_KEY_LEN))
     return PolicyClassRecord(class_id, policy, (gen,), created_at)
 
