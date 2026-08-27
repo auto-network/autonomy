@@ -939,14 +939,19 @@ export function credentialsPanel() {
         + ' @page { size:letter; margin:0.75in; }'
         + ' .fui-print-inner { font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; max-width:6.5in; margin:0 auto; padding:0.5in 0; }'
         + ' .fui-print-inner h1 { font-size:20px; margin:0 0 18px; }'
-        + ' .fui-print-qr svg { width:2.2in; height:2.2in; }'
-        + ' .fui-print-code { font-family:ui-monospace,Menlo,monospace; font-size:20px; letter-spacing:2px; margin:16px 0; }'
+        + ' .fui-print-qr { text-align:center; }'
+        + ' .fui-print-qr svg { width:2.2in; height:2.2in; display:block; margin:0 auto; }'
+        + ' .fui-print-code { font-family:ui-monospace,Menlo,monospace; font-size:20px; letter-spacing:2px; margin:16px 0; text-align:center; }'
         + ' .fui-print-gen { color:#555; font-size:12px; margin:0 0 20px; }'
         + ' .fui-print-how h2 { font-size:14px; margin:16px 0 4px; } .fui-print-how p { margin:0 0 10px; }'
         + ' .fui-print-done { position:fixed; top:calc(env(safe-area-inset-top, 0px) + 10px); right:14px;'
         + ' padding:10px 18px; border-radius:10px; border:1px solid #cbd5e1; background:#111827; color:#fff; font-size:15px; }'
         + ' @media print { .fui-print-done { display:none !important; } }';
       document.body.appendChild(style); document.body.appendChild(sheet);
+      // The sheet lives on <body>, OUTSIDE the identity panel — without this,
+      // any tap on it (Done included) bubbles to the drawer's click-outside
+      // handler, which closes the panel and kills the enrollment wizard.
+      sheet.addEventListener('click', (e) => e.stopPropagation());
       const cleanup = () => { sheet.remove(); style.remove(); window.removeEventListener('afterprint', cleanup); };
       if (typeof navigator !== 'undefined' && navigator.standalone === true) {
         // iOS home-screen app: window.print() is a documented no-op. Show the
