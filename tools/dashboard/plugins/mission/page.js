@@ -22,6 +22,8 @@ window.missionPage = function () {
     loading: false,
     progress: 0,            // 0..100, real signal: stages, bytes, render
     loadNote: "",           // italic sub-status narrated by the server
+    peeps: [],              // presence rows for the OPEN mission's surface
+    _peepTimer: null,
     win: {key: "30d", secs: 30 * 86400, buckets: 30},
     sparkTick: 0,           // bumped on resize: cards redraw at new width
     screen: "missions",       // missions | sessions
@@ -62,7 +64,11 @@ window.missionPage = function () {
           || (this.orgs[0] || {}).slug || "";
       }
       const m = window.location.pathname.match(/^\/mission\/([0-9a-f-]{8,})/);
-      if (m) { this.current = m[1]; this.loadScreen(m[1]); }
+      if (m) {
+        this.current = m[1];
+        this.loadScreen(m[1]);
+        this.startPresence(m[1]);
+      }
       // The inner screen reports its position (pillar/tab); the URL
       // mirrors it via replaceState — copyable, but NEVER a history
       // entry: the back button stays a pure exit from the plugin.
@@ -314,6 +320,7 @@ window.missionPage = function () {
       this.current = m.mission_id;
       history.replaceState(null, "", "/mission/" + m.mission_id);
       this.loadScreen(m.mission_id);
+      this.startPresence(m.mission_id);
     },
 
     counts(m) {
@@ -363,6 +370,7 @@ window.missionPage = function () {
       this.current = m.mission_id;
       history.replaceState(null, "", "/mission/" + m.mission_id);
       this.loadScreen(m.mission_id);
+      this.startPresence(m.mission_id);
     },
 
     lifeTapCur(m) {
@@ -401,6 +409,47 @@ window.missionPage = function () {
       this.current = m.mission_id;
       history.replaceState(null, "", "/mission/" + m.mission_id);
       this.loadScreen(m.mission_id);
+      this.startPresence(m.mission_id);
+    },
+
+    // The toolbar slot is the org selector on the list and the
+    // PRESENCE indicator inside a mission (standard surface-presence
+    // rows, surface "mission:<id>", read via the same Schema proxy the
+    // shared mixin uses; display-only, aged by heartbeat_at).
+    async startPresence(id) {
+      this.stopPresence();
+      const load = async () => {
+        try {
+          if (!window.Schema || !window.Presence) return;
+          this._presProxy = this._presProxy || await window.Schema.of(
+            "dashboard.surface.presence", {revision: 1});
+          const rows = await this._presProxy.all() || [];
+          const want = "mission:" + id;
+          this.peeps = rows
+            .map((r) => (r && r.payload) ? r.payload : r)
+            .filter((p) => p && (p.surface_id === want
+              || String(p.surface_id || "").indexOf(want + ":") === 0));
+        } catch (e) { /* presence is chrome, never breaks the page */ }
+      };
+      await load();
+      this._peepTimer = setInterval(load, 15000);
+    },
+
+    stopPresence() {
+      if (this._peepTimer) clearInterval(this._peepTimer);
+      this._peepTimer = null;
+      this.peeps = [];
+    },
+
+    peepColor(p) {
+      return (window.Presence && window.Presence.participantColor)
+        ? window.Presence.participantColor(p.participant_id || "")
+        : "#8b85ff";
+    },
+
+    peepStale(p) {
+      const t = Date.parse(p.heartbeat_at || 0);
+      return !t || (Date.now() - t) > 120000;
     },
 
     // The interstitial is honest twice over: the server streams stage
@@ -481,6 +530,7 @@ window.missionPage = function () {
     back() {
       this.current = null;
       this._focus = null;
+      this.stopPresence();
       history.replaceState(null, "", "/mission");
       this.refresh();
     },

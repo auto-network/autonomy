@@ -188,6 +188,16 @@ setTimeout(() => {
         check("org menu names render", d.querySelector("#app-topbar-slot")
           .textContent.includes("Autonomy Network"));
 
+        // inside a mission the org slot becomes the presence stack
+        const slotEl = d.querySelector("#app-topbar-slot");
+        const orgBox = slotEl.querySelector('[aria-label="Organization"]')
+          .closest("div.relative");
+        check("org selector hidden inside a mission",
+          orgBox.style.display === "none");
+        check("presence stack mounted inside a mission",
+          !!slotEl.querySelector(".nx-avatar-stack")
+          && slotEl.querySelector(".nx-avatar-stack").style.display !== "none");
+
         // the toolbar title is a back target, not just the chevron
         const title = Array.from(
           d.querySelectorAll("#app-topbar-slot span"))
