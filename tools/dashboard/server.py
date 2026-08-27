@@ -393,6 +393,83 @@ EVENT_BUS_STATE_PATH = Path(
     os.environ.get("DASHBOARD_EVENT_BUS_STATE")
     or str(DATA_ROOT / "event_bus.state")
 )
+# A tiny hand-off record for the user-visible reload notice.  It deliberately
+# lives beside the EventBus snapshot rather than inside it: the state needs to
+# survive even if snapshotting the (much larger) replay buffer fails.
+RESTART_NOTICE_STATE_PATH = Path(
+    os.environ.get("DASHBOARD_RESTART_NOTICE_STATE")
+    or str(DATA_ROOT / "restart_notice.state")
+)
+_RESTART_WARNING_SECONDS = 3
+_RESTART_EXPECTED_MS = 30_000
+
+
+def _write_restart_notice(payload: dict[str, int]) -> None:
+    """Atomically persist the one datum the next process needs for timing."""
+    try:
+        RESTART_NOTICE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = RESTART_NOTICE_STATE_PATH.with_suffix(
+            RESTART_NOTICE_STATE_PATH.suffix + ".tmp"
+        )
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(RESTART_NOTICE_STATE_PATH)
+    except OSError:
+        logger.warning("could not persist restart notice state", exc_info=True)
+
+
+def _read_restart_notice() -> dict[str, int] | None:
+    try:
+        payload = json.loads(RESTART_NOTICE_STATE_PATH.read_text(encoding="utf-8"))
+        started_at_ms = int(payload["started_at_ms"])
+        if started_at_ms <= 0:
+            raise ValueError("non-positive started_at_ms")
+        return {"started_at_ms": started_at_ms}
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        logger.warning("invalid restart notice state; ignoring it", exc_info=True)
+        return None
+
+
+def _current_headline_context() -> dict[str, str]:
+    """Return the head SHA and subject without allowing a git hiccup to delay boot."""
+    try:
+        result = subprocess.run(
+            ["git", "log", "-1", "--format=%H%x00%s"],
+            cwd=_REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=1,
+            check=True,
+        )
+        commit_hash, headline = result.stdout.rstrip("\n").split("\x00", 1)
+        return {"commit_hash": commit_hash, "commit_headline": headline}
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return {}
+
+
+async def _emit_restart_complete() -> None:
+    """Publish a durable restart completion only after this process is ready."""
+    restart_notice = _read_restart_notice()
+    if restart_notice is None:
+        return
+    completed_at_ms = int(time.time() * 1000)
+    started_at_ms = restart_notice["started_at_ms"]
+    payload: dict[str, Any] = {
+        "phase": "complete",
+        "started_at_ms": started_at_ms,
+        "completed_at_ms": completed_at_ms,
+        "duration_ms": max(0, completed_at_ms - started_at_ms),
+        "expected_ms": _RESTART_EXPECTED_MS,
+    }
+    payload.update(_current_headline_context())
+    await event_bus.broadcast("server:restart", payload, dedup=False)
+    try:
+        RESTART_NOTICE_STATE_PATH.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logger.warning("could not clear restart notice state", exc_info=True)
 # Resource collector ring buffers survive hot reloads the same way the
 # event bus does: snapshot on shutdown, restore on boot. Env-overridable
 # for tests, mirroring DASHBOARD_EVENT_BUS_STATE.
@@ -19590,6 +19667,7 @@ async def _on_startup():
         if os.environ.get("DASHBOARD_MOCK_EVENTS"):
             from tools.dashboard.dao.mock import mock_event_watcher
             _mock_event_watcher_task = asyncio.create_task(mock_event_watcher())
+        await _emit_restart_complete()
         return
 
     # Materialize Setting *schema* meta rows (autonomy.schema#1 +
@@ -19835,6 +19913,11 @@ async def _on_startup():
         "startup phase: TOTAL %.1fms", (time.monotonic() - _startup_t0) * 1000,
     )
 
+    # The final lifecycle event is intentionally last: receiving it means this
+    # process has completed its synchronous warm-up and can serve the browser,
+    # not merely that a Python process has bound the port.
+    await _emit_restart_complete()
+
 async def _on_shutdown():
     global _dispatch_watcher_task, _mock_event_watcher_task
     global _harness_usage_poller_task, _claude_credentials_refresh_task
@@ -19842,6 +19925,29 @@ async def _on_shutdown():
     global _settings_mediator_started, _serving_bootstrap_task
     global _event_proxy_task
     global _vault_release_sweeper_task
+    # Tell connected browsers before uvicorn tears their sockets down.  This
+    # is best-effort for abrupt kills, but graceful reloads (the ordinary code
+    # change path) get a full three seconds to paint the notice and countdown.
+    started_at_ms = int(time.time() * 1000)
+    _write_restart_notice({"started_at_ms": started_at_ms})
+    try:
+        await event_bus.broadcast(
+            "server:restart",
+            {
+                "phase": "countdown",
+                "started_at_ms": started_at_ms,
+                "countdown_ends_at_ms": started_at_ms + _RESTART_WARNING_SECONDS * 1000,
+                "expected_ms": _RESTART_EXPECTED_MS,
+            },
+            dedup=False,
+        )
+        await asyncio.sleep(_RESTART_WARNING_SECONDS)
+    except asyncio.CancelledError:
+        # Uvicorn may cancel a forced shutdown before the notice can flush;
+        # retain the durable record so the next boot can still report timing.
+        raise
+    except Exception:
+        logger.warning("restart warning broadcast failed", exc_info=True)
     try:
         await web_push_worker.stop_worker()
     except Exception:

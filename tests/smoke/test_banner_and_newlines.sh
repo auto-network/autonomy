@@ -120,7 +120,27 @@ else
   fail "Main content did not return to baseline: base=$BASE_TOP after=$TOP_AFTER"
 fi
 
-echo "=== Test 3: User message newlines preserved ==="
+echo "=== Test 3: Restart notice shows timing progress ==="
+agent-browser eval 'Alpine.store("app").restartStatus = {phase:"restarting", started_at_ms:Date.now()-5000, expected_ms:30000}; Alpine.store("app").restartNowMs = Date.now(); "shown"'
+sleep 1
+
+RESULT=$(agent-browser eval 'var el = document.querySelector(".sse-banner [style*=width]"); el ? el.style.width : "missing"')
+if echo "$RESULT" | grep -Eq '1[0-9]%|2[0-9]%'; then
+  pass "Restart notice renders elapsed-time progress ($RESULT)"
+else
+  fail "Restart notice progress: $RESULT"
+fi
+
+RESULT=$(agent-browser eval 'document.querySelector(".sse-banner").textContent.includes("Server is restarting")')
+if echo "$RESULT" | grep -q "true"; then
+  pass "Restart notice names the current phase"
+else
+  fail "Restart notice phase text missing: $RESULT"
+fi
+
+agent-browser eval 'Alpine.store("app").restartStatus = null; "cleared"'
+
+echo "=== Test 4: User message newlines preserved ==="
 printf '%s\n' '{"topic":"session:messages","data":{"session_id":"test-session","entries":[{"type":"user","content":"Line one\n\nLine three\n\n\n\nLine seven","timestamp":"2026-03-22T00:00:00Z"}]}}' >> "$EVENTS"
 sleep 2
 

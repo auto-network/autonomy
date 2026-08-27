@@ -31,6 +31,7 @@
   var _lastUserInteractionTs = Date.now();
   var _lastSeenTs = Date.now();   // last SSE message of ANY kind (event or heartbeat)
   var _watchdogTimer = null;
+  var _restartTicker = null;
 
   function _dispatch(topic, data) {
     var set = _handlers[topic];
@@ -62,8 +63,53 @@
     // Show banner via Alpine store
     if (window.Alpine) {
       try {
-        Alpine.store('app').sseInterrupted = reason || 'Connection interrupted';
+        var app = Alpine.store('app');
+        // A structured restart notice is more useful than the generic epoch
+        // warning. Keep it on screen through the first event from the new
+        // process, which otherwise arrives after the completion event's cache.
+        if (!app.restartStatus) app.sseInterrupted = reason || 'Connection interrupted';
       } catch (e) { /* store not initialised yet */ }
+    }
+  }
+
+  function _restartTick() {
+    if (!window.Alpine) return;
+    try {
+      var app = Alpine.store('app');
+      var now = Date.now();
+      if (!app.restartStatus) {
+        if (_restartTicker) clearInterval(_restartTicker);
+        _restartTicker = null;
+        return;
+      }
+      if (app.restartStatus && app.restartStatus.phase === 'countdown' &&
+          now >= (app.restartStatus.countdown_ends_at_ms || now)) {
+        app.restartStatus.phase = 'restarting';
+      }
+      app.restartNowMs = now;
+    } catch (e) { /* Alpine not initialised yet */ }
+  }
+
+  function _showRestart(payload) {
+    if (!payload || typeof payload !== 'object' || !window.Alpine) return;
+    try {
+      var app = Alpine.store('app');
+      app.sseInterrupted = false;
+      app.restartStatus = payload;
+      _restartTick();
+      if (!_restartTicker) _restartTicker = setInterval(_restartTick, 250);
+      // Completion is kept visible briefly as useful timing evidence, then
+      // clears itself without forcing the operator to dismiss a banner.
+      if (payload.phase === 'complete') {
+        setTimeout(function() {
+          try {
+            var current = Alpine.store('app').restartStatus;
+            if (current === payload) Alpine.store('app').restartStatus = null;
+          } catch (e) { /* page may have navigated */ }
+        }, 8000);
+      }
+    } catch (e) {
+      console.warn('[EventBus] restart notice could not be shown', e);
     }
   }
 
@@ -492,9 +538,39 @@
 
   // Register Alpine stores
   document.addEventListener('alpine:init', function() {
-    Alpine.store('app', { sseInterrupted: false });
+    Alpine.store('app', {
+      sseInterrupted: false,
+      restartStatus: null,
+      restartNowMs: Date.now(),
+      restartMessage: function() {
+        var status = this.restartStatus;
+        if (!status) return '';
+        var now = this.restartNowMs || Date.now();
+        if (status.phase === 'countdown') {
+          var left = Math.max(0, Math.ceil(((status.countdown_ends_at_ms || now) - now) / 1000));
+          return 'Server restarting in ' + left + '…';
+        }
+        if (status.phase === 'complete') {
+          return 'Restart complete in ' + ((status.duration_ms || 0) / 1000).toFixed(1) + 's';
+        }
+        var elapsed = Math.max(0, now - (status.started_at_ms || now));
+        return 'Server is restarting · ' + Math.floor(elapsed / 1000) + 's elapsed';
+      },
+      restartProgress: function() {
+        var status = this.restartStatus;
+        if (!status) return 0;
+        if (status.phase === 'countdown') return 0;
+        if (status.phase === 'complete') return 100;
+        var elapsed = Math.max(0, (this.restartNowMs || Date.now()) - (status.started_at_ms || Date.now()));
+        return Math.min(100, Math.round(elapsed * 100 / (status.expected_ms || 30000)));
+      },
+    });
     Alpine.store('pinned', { beads: [] });
   });
+
+  // This is registered by the shared EventSource client, not a page. It is
+  // therefore listening before a route's own scripts load and on every screen.
+  registerHandler('server:restart', _showRestart);
 
   // Defer connection to next microtask so synchronous handler registrations
   // in app.js (loaded immediately after this script) are in place.

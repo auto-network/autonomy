@@ -2166,15 +2166,27 @@
       <div id="header-actions" class="order-4 flex items-center gap-2"></div>
     </header>
 
-    <!-- SSE interruption banner — shown on server restart or unrecoverable gap -->
-    <div x-data x-show="$store.app.sseInterrupted"
-         x-effect="document.body.classList.toggle('sse-banner-visible', !!$store.app.sseInterrupted)"
+    <!-- SSE interruption banner — restart state survives the server gap itself. -->
+    <div x-data x-show="$store.app.restartStatus || $store.app.sseInterrupted"
+         x-effect="document.body.classList.toggle('sse-banner-visible', !!($store.app.restartStatus || $store.app.sseInterrupted))"
          x-cloak
          class="sse-banner bg-amber-700 text-white text-sm px-4 py-2 flex items-center justify-between flex-shrink-0 min-h-[44px]"
          style="display:none;">
-      <span x-text="$store.app.sseInterrupted"></span>
+      <div class="min-w-0 flex-1">
+        <span x-show="$store.app.restartStatus" x-text="$store.app.restartMessage()"></span>
+        <span x-show="!$store.app.restartStatus" x-text="$store.app.sseInterrupted"></span>
+        <template x-if="$store.app.restartStatus">
+          <div class="mt-1 h-1.5 w-full overflow-hidden rounded bg-amber-950/40">
+            <div class="h-full rounded bg-amber-100 transition-[width] duration-200"
+                 :style="'width:' + $store.app.restartProgress() + '%'"></div>
+          </div>
+        </template>
+        <span class="block mt-1 text-xs text-amber-100"
+              x-show="$store.app.restartStatus && $store.app.restartStatus.commit_headline"
+              x-text="$store.app.restartStatus && $store.app.restartStatus.commit_headline ? 'Now running: ' + $store.app.restartStatus.commit_headline : ''"></span>
+      </div>
       <div class="flex gap-2 ml-4">
-        <button @click="$store.app.sseInterrupted = false"
+        <button @click="$store.app.sseInterrupted = false; $store.app.restartStatus = null"
                 class="px-3 py-1 bg-amber-600 hover:bg-amber-500 rounded text-xs font-medium">
           Continue
         </button>
