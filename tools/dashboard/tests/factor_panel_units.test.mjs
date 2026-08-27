@@ -13,7 +13,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildModelV3, stagedOperations, desiredPolicy, factorAuthority, credentialsPanel,
-  satisfyingSets,
+  satisfyingSets, describeStagedChanges,
 } from '../static/js/factor-management.js';
 
 const HEXA = 'a'.repeat(64);
@@ -247,4 +247,24 @@ test('dead-end phrasing: any-one of several passkeys', () => {
   assert.equal(c.authDeadEnd, true);
   assert.match(c.authMissingLead, /At least one of the following/);
   assert.deepEqual(c.authMissingPasskeys.map((m) => m.devices), ['This Mac', 'iPhone']);
+});
+
+test('describeStagedChanges narrates the staged diff in words', () => {
+  let c = panelFrom(orView());
+  c.passkeys[0].authority = 'unlock';
+  assert.deepEqual(describeStagedChanges(c), ['“Passkey”: Full authority → Unlock only']);
+
+  c = panelFrom(orView());
+  c.remove(c.passkeys, c.passkeys[0], null);
+  assert.deepEqual(describeStagedChanges(c), ['Remove passkey “Passkey”']);
+
+  c = panelFrom(orView());
+  c.passwords[0].pwChanged = true;
+  assert.deepEqual(describeStagedChanges(c), ['Change password “Password”']);
+
+  c = panelFrom(orView());
+  c.pickMode = 'any';
+  c.enableMfa();
+  const lines = describeStagedChanges(c);
+  assert.ok(lines.some((l) => l.startsWith('Turn on multi-factor — any one password')), lines.join('|'));
 });
