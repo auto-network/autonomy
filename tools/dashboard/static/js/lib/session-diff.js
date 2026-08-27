@@ -49,6 +49,12 @@
     });
   }
 
+  function normalizeCorrectionText(text) {
+    return String(text == null ? '' : text)
+      .replace(/\\r\\n/g, '\n')
+      .replace(/\\n/g, '\n');
+  }
+
   function _lcs(a, b) {
     var n = a.length, m = b.length;
     var dp = new Array(n + 1);
@@ -299,5 +305,9 @@
     return parts.join('');
   }
 
-  window.SessionDiff = { fragments: fragments, editDiffHTML: editDiffHTML };
+  window.SessionDiff = {
+    fragments: fragments,
+    normalizeCorrectionText: normalizeCorrectionText,
+    editDiffHTML: editDiffHTML,
+  };
 })();

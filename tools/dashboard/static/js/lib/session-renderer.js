@@ -736,7 +736,7 @@
       var c = this._correctionFor(entry);
       if (c && c.status === 'accepted') {
         if (this.isShowingRawCorrection(entry)) return entry.content || '';
-        return c.corrected_text || '';
+        return window.SessionDiff.normalizeCorrectionText(c.corrected_text || '');
       }
       return entry.content || '';
     },
@@ -765,7 +765,8 @@
     correctionFragmentsFor(entry) {
       var c = this._correctionFor(entry);
       if (!c) return [];
-      return window.SessionDiff.fragments(entry.content || '', c.corrected_text || '');
+      return window.SessionDiff.fragments(
+        entry.content || '', window.SessionDiff.normalizeCorrectionText(c.corrected_text || ''));
     },
 
   };
