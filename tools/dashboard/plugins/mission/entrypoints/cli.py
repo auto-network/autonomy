@@ -206,6 +206,29 @@ def cmd_add(args):
           f"  [{payload.get('kind', '?')}] {payload.get('title', '')}")
 
 
+def cmd_retire(args):
+    """Retirement is a flag, never a delete: the record survives as
+    history while live rendering and coverage stop counting it. Born
+    from the first legitimate need — converging parallel bookings."""
+    call = _api()
+    m = _resolve_mission(call, args.mission)
+    items = call("GET", f"/api/mission/items/{m['mission_id']}"
+                        f"?pillar={args.pillar}").get("items", [])
+    current = next((i for i in items if i["item_id"] == args.item_id), None)
+    if current is None:
+        print(f"mission retire: no item {args.item_id!r} on {args.pillar}",
+              file=sys.stderr)
+        sys.exit(1)
+    payload = {k: v for k, v in current.items()
+               if k not in ("key", "surface_id", "item_id",
+                            "created_at", "updated_at")}
+    payload["retired"] = not args.restore
+    call("PUT", f"/api/mission/item/{m['mission_id']}/{args.pillar}/"
+                f"{args.item_id}", payload)
+    print(f"  ✓ {args.pillar}:{args.item_id} "
+          f"{'restored' if args.restore else 'retired'}")
+
+
 def cmd_update(args):
     call = _api()
     m = _resolve_mission(call, args.mission)
@@ -282,7 +305,7 @@ def cmd_coverage(args):
     covered = set()
     checkpoints = 0
     for it in items:
-        if it.get("kind") != "checkpoint":
+        if it.get("kind") != "checkpoint" or it.get("retired"):
             continue
         checkpoints += 1
         for ref in it.get("refs") or []:
@@ -381,6 +404,16 @@ def register(sub) -> None:
     q = ms.add_parser("update", help="Patch fields on an existing item")
     item_flags(q)
     q.set_defaults(func=cmd_update)
+
+    q = ms.add_parser("retire", help="Retire an item (kept as history, "
+                                     "dropped from live rendering and "
+                                     "coverage); --restore un-retires")
+    q.add_argument("mission")
+    q.add_argument("pillar")
+    q.add_argument("item_id")
+    q.add_argument("--restore", action="store_true",
+                   help="Clear the retired flag instead of setting it")
+    q.set_defaults(func=cmd_retire)
 
     q = ms.add_parser("state", help="Transition a checkpoint (history "
                                     "appended, confirmation stamped)")
