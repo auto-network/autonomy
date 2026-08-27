@@ -4,6 +4,7 @@ behavior against a recorded fake dashboard API.
 from __future__ import annotations
 
 import argparse
+import json
 
 import pytest
 
@@ -210,3 +211,31 @@ def test_retire_flags_item_and_coverage_ignores_it(parser, monkeypatch,
     fake = _run(parser, ["mission", "coverage", MID], monkeypatch, canned)
     out = capsys.readouterr().out
     assert "0 criteria covering 0" in out
+
+
+def test_items_json_carries_pillar_alias(parser, monkeypatch, capsys):
+    canned = dict(BASE)
+    canned[("GET", f"/api/mission/items/{MID}")] = {"items": [
+        {"surface_id": "relay", "item_id": "c1", "kind": "checkpoint",
+         "state": "pending", "title": "t"}]}
+    _run(parser, ["mission", "items", MID, "--json"], monkeypatch, canned)
+    out = json.loads(capsys.readouterr().out)
+    assert out[0]["pillar"] == "relay"
+
+
+def test_status_resolves_pillar_by_display_name_or_errors(
+        parser, monkeypatch, capsys):
+    """'graph mission status <m> \"Display Name\"' silently returned
+    only the header; it now resolves the name to the slug, and an
+    unknown pillar errors listing the real ones."""
+    canned = dict(BASE)
+    _run(parser, ["mission", "status", MID, "Relay"],
+         monkeypatch, canned)
+    out = capsys.readouterr().out
+    assert "Relay" in out and "delivery" in out
+
+    with pytest.raises(SystemExit):
+        _run(parser, ["mission", "status", MID, "No Such Pillar"],
+             monkeypatch, canned)
+    err = capsys.readouterr().err
+    assert "no pillar" in err and "relay" in err

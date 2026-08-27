@@ -111,9 +111,22 @@ def cmd_status(args):
     pillars = call("GET", f"/api/mission/pillars/{mid}").get("pillars", [])
     items = call("GET", f"/api/mission/items/{mid}").get("items", [])
     tasks = call("GET", f"/api/mission/tasks/{mid}").get("tasks", {})
+    want = None
+    if args.pillar:
+        ref = args.pillar.lower()
+        hits = [p for p in pillars
+                if p["pillar_id"] == args.pillar
+                or (p.get("name") or "").lower() == ref]
+        if not hits:
+            print(f"mission status: no pillar {args.pillar!r} — "
+                  "pillars: " + ", ".join(
+                      f"{p['pillar_id']} ({p.get('name', '')})"
+                      for p in pillars), file=sys.stderr)
+            sys.exit(1)
+        want = hits[0]["pillar_id"]
     print(f"{m['name']}  [{m.get('status', 'active')}]")
     for p in pillars:
-        if args.pillar and args.pillar != p["pillar_id"]:
+        if want and want != p["pillar_id"]:
             continue
         pid = p["pillar_id"]
         mine = [i for i in items
@@ -160,6 +173,10 @@ def cmd_items(args):
     if args.kind:
         items = [i for i in items if i.get("kind") == args.kind]
     if args.json_output:
+        # surface_id IS the pillar slug; carry the explicit alias so
+        # callers grouping by "pillar" don't get an all-None column
+        for i in items:
+            i.setdefault("pillar", i.get("surface_id"))
         print(json.dumps(items, indent=2))
         return
     for i in items:
