@@ -604,14 +604,13 @@ export function credentialsPanel() {
     get hasFullPasskey() { return this.passkeys.some((k) => k.authority === 'full'); },
     get hasFullPassword() { return this.passwords.some((p) => p.authority === 'full'); },
     createdLocal(iso) { return iso ? new Date(iso).toLocaleString().replace(', ', ' ') : ''; },
-    itersLabel(n) { return (Number(n) || 0).toLocaleString() + ' iterations'; },
+    itersLabel(n) { return (Number(n) || 0).toLocaleString(); },
     transportHuman(k) {
       const t = (k && k.transports) || []; const has = (x) => t.includes(x);
       const parts = [];
       if (has('internal')) parts.push('Built-in');
       if (has('usb') || has('nfc') || has('ble')) parts.push('Security key');
       if ((k && k.synced) || has('hybrid')) parts.push('Cloud-Sync');
-      if (k && k.device === this.thisDevice()) parts.push('This device');
       return parts.join(' · ') || 'Passkey';
     },
 
@@ -1729,7 +1728,7 @@ const MARKUP = `
       <div class="row" :class="{removing:statusOf(k)==='removed', pending:statusOf(k)==='new'||statusOf(k)==='changed'}">
         <div class="authcell" :class="authCls(k)" @click="authCellClick(k,$event)"><span class="ac-ico"><svg><use xlink:href="#i-passkey"/></svg><template x-if="inMfaRoot(k)"><span class="mfab" :class="{dim:signinOff(k)}"><svg class="armor" viewBox="0 0 24 24"><path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/></svg></span></template></span><span class="ac-lbl" x-text="authWord(k)"></span></div>
         <div class="fmid"><div class="fname">
-          <span class="namewrap" x-show="renameFor!==k.id"><span x-text="k.label"></span><button class="editbtn" @click="startRename(k)" aria-label="Rename"><svg><use xlink:href="#i-edit"/></svg></button></span>
+          <span class="namewrap" x-show="renameFor!==k.id"><span x-text="(k.device===thisDevice()?'⭐️ ':'')+k.label"></span><button class="editbtn" @click="startRename(k)" aria-label="Rename"><svg><use xlink:href="#i-edit"/></svg></button></span>
           <span class="renamewrap" x-show="renameFor===k.id">
             <input class="renameinput" x-model="renameVal" @keydown.enter="saveRename(k)" @keydown.escape="cancelRename()" x-effect="renameFor===k.id&&setTimeout(()=>$el.focus(),0)">
             <button class="renameok" @click="saveRename(k)" aria-label="Save"><svg><use xlink:href="#i-check"/></svg></button>
