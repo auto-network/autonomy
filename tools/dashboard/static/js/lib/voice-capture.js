@@ -21,7 +21,7 @@
   function staticVersion() {
     // Called at import time, and this module is imported by tests that run
     // outside a browser, where there is no document to read.
-    if (typeof document === 'undefined') return '';
+    if (typeof document === 'undefined' || typeof document.querySelector !== 'function') return '';
     var meta = document.querySelector('meta[name="autonomy-static-version"]');
     var v = meta && meta.getAttribute('content');
     return v ? '?v=' + encodeURIComponent(v) : '';
@@ -53,10 +53,21 @@
     serverEpoch: 0,         // #43: highest transcript-acceptance epoch seen from the server
     acceptEpoch: 0,         // #43: drop transcript/buffer_state frames whose epoch < this
     wakeLock: null,
+    wakeLockRequest: null,
+    releasingWakeLock: false,
+    wakeLockNeedsGesture: false,
     reconnectAttempt: 0,    // backoff index for the auto-reconnect loop
     reconnectTimer: null,
     stabilityTimer: null,   // resets the backoff once a fresh link survives a beat
     lastFrameAt: 0,         // last worklet audio frame — audio-stall watchdog baseline
+    connectionId: '',       // server identity for the current /ws/voice connection
+    serverFsm: '',          // last acknowledged canonical server voice state
+    serverUpstream: '',     // last acknowledged WhisperLive readiness
+    voiceStateAt: 0,        // receipt time of the current connection's state ack
+    lastFlowAt: 0,          // last advancing, current-connection audio_flow ack
+    lastLocalSendAt: 0,     // last PCM frame handed to the current WebSocket
+    lastForwarded: 0,       // cumulative server-forwarded count on this connection
+    flowRepairAttempted: false,
     trace: [],              // failure-trace ring (debug only)
     traceOn: false,
     traceExpiresAt: 0,
@@ -220,8 +231,31 @@
   // ("stalled listening", recoverable only by a manual disconnect/reconnect —
   // confirmed in the server log: audio frames stop while state stays listening).
   // This time-based watchdog catches it and restarts capture, surfaced via the
-  // SAME `reconnecting` state (spinny ring) used for a backend reconnect.
+  // SAME `reconnecting` state used for a backend reconnect.
   var AUDIO_STALL_MS = 4000;
+  var AUDIO_FLOW_STALL_MS = 3000;
+
+  function _replaceVoiceSocket(reason) {
+    var st = store();
+    var bind = s.bind || (st && st.boundSessionId) || '';
+    if (!bind || s.starting) return;
+    _diag(reason + ' — replacing voice socket');
+    var old = s.ws;
+    s.ws = null;
+    s.wsOpen = false;
+    s.started = false;
+    s.requiresReconnect = false;
+    s.connectionId = '';
+    s.serverFsm = '';
+    s.serverUpstream = '';
+    s.voiceStateAt = 0;
+    s.lastFlowAt = 0;
+    s.lastForwarded = 0;
+    try { if (old) old.close(1000, 'health-repair'); } catch (_e) {}
+    _setConn('reconnecting');
+    startListening(bind);
+  }
+
   function _audioWatchdogTick() {
     var st = store();
     if (!st || st.micMode !== 'listening') return;       // only while actively capturing
@@ -240,12 +274,32 @@
       }
     } catch (_e) {}
     var noFrames = !!s.lastFrameAt && (_nowMs() - s.lastFrameAt) > AUDIO_STALL_MS;
-    if (!trackDead && !noFrames) return;
+    if (!trackDead && !noFrames) {
+      // A live worklet and open WebSocket do not prove the server received the
+      // PCM. Once this connection has demonstrated flow, require cumulative
+      // acknowledgements to keep advancing while local sends continue.
+      var now = _nowMs();
+      var localStillSending = s.lastLocalSendAt && now - s.lastLocalSendAt <= AUDIO_STALL_MS;
+      var flowBaseline = s.lastFlowAt || s.voiceStateAt;
+      var flowStalled = flowBaseline && now - flowBaseline > AUDIO_FLOW_STALL_MS;
+      if (localStillSending && flowStalled && s.serverFsm === 'listening') {
+        if (!s.flowRepairAttempted) {
+          s.flowRepairAttempted = true;
+          _replaceVoiceSocket('server audio flow stalled');
+        } else {
+          s.requiresReconnect = true;
+          s.talkActive = false;
+          _setConn('disconnected');
+          if (st) st.sheetError = 'Microphone needs to be enabled again.';
+        }
+      }
+      return;
+    }
     var bind = s.bind || st.boundSessionId || '';
     if (!bind) return;
     _diag('audio stall (' + (trackDead ? 'mic track ended' : 'no frames') + ') — restarting capture');
     teardown();                 // teardown resets connState to 'ok' …
-    _setConn('reconnecting');   // … so re-assert the spinny recon ring for the restart
+    _setConn('reconnecting');   // … so re-assert the visible recovery state
     s.starting = false; s.started = false; s.lastFrameAt = 0;
     startListening(bind);
   }
@@ -304,18 +358,80 @@
   // Keep the screen awake while capturing (iOS auto-lock cuts off dictation).
   function _acquireWakeLock() {
     try {
-      if (navigator.wakeLock && typeof navigator.wakeLock.request === 'function' && !s.wakeLock) {
-        navigator.wakeLock.request('screen').then(function (sentinel) {
-          s.wakeLock = sentinel;
-          if (sentinel && typeof sentinel.addEventListener === 'function') {
-            sentinel.addEventListener('release', function () { s.wakeLock = null; });
-          }
-        }).catch(function () {});
+      if (!navigator.wakeLock || typeof navigator.wakeLock.request !== 'function') {
+        return Promise.resolve(false);
       }
-    } catch (_e) {}
+      if (s.wakeLock) return Promise.resolve(true);
+      if (s.wakeLockRequest) return s.wakeLockRequest;
+      s.wakeLockRequest = navigator.wakeLock.request('screen').then(function (sentinel) {
+          if (!_wantsConnection()) {
+            try { sentinel.release(); } catch (_e) {}
+            return false;
+          }
+          s.wakeLock = sentinel;
+          s.wakeLockNeedsGesture = false;
+          if (s.lastFlowAt && s.serverFsm === 'listening') _setConn('ok');
+          if (sentinel && typeof sentinel.addEventListener === 'function') {
+            sentinel.addEventListener('release', function () {
+              if (s.wakeLock === sentinel) s.wakeLock = null;
+              if (!s.releasingWakeLock && _wantsConnection() &&
+                  (typeof document === 'undefined' || document.visibilityState === 'visible')) {
+                _acquireWakeLock();
+              }
+            });
+          }
+          return true;
+        }).catch(function () {
+          s.wakeLockNeedsGesture = true;
+          _setConn('disconnected');
+          var st = store();
+          if (st) st.sheetError = 'Screen may lock. Tap the microphone to allow keep-awake.';
+          return false;
+        }).finally(function () { s.wakeLockRequest = null; });
+      return s.wakeLockRequest;
+    } catch (_e) { return Promise.resolve(false); }
   }
   function _releaseWakeLock() {
-    try { if (s.wakeLock) { s.wakeLock.release(); s.wakeLock = null; } } catch (_e) {}
+    try {
+      if (!s.wakeLock) return;
+      var sentinel = s.wakeLock;
+      s.wakeLock = null;
+      s.releasingWakeLock = true;
+      Promise.resolve(sentinel.release()).finally(function () {
+        s.releasingWakeLock = false;
+      });
+    } catch (_e) { s.releasingWakeLock = false; }
+  }
+
+  // Called directly from pointer/keyboard handlers. WebKit can require transient
+  // user activation for the document's first wake-lock authorization, so this
+  // cannot be deferred to the later Alpine effect that observes micMode.
+  function activateFromGesture() {
+    _acquireWakeLock();
+    try {
+      if (s.ctx && s.ctx.state === 'suspended' && typeof s.ctx.resume === 'function') {
+        s.ctx.resume().catch(function () {});
+      }
+    } catch (_e) {}
+    return true;
+  }
+
+  // The large red recovery action uses one direct gesture to discard stale
+  // browser/server state, request current-document permissions, and start a
+  // fresh pipeline. getUserMedia is invoked synchronously inside startListening.
+  function enableFromGesture() {
+    var st = store();
+    var bind = (st && st.boundSessionId) || s.bind || '';
+    if (!bind) return false;
+    teardown();
+    s.reconnectAttempt = 0;
+    s.flowRepairAttempted = false;
+    s.requiresReconnect = false;
+    if (st && typeof st.setMicMode === 'function') st.setMicMode('listening');
+    _setConn('reconnecting');
+    activateFromGesture();
+    startListening(bind);
+    return true;
   }
 
   // On returning to the foreground (screen unlock / tab refocus): re-acquire the
@@ -453,7 +569,16 @@
       // fresh connection's epoch baseline.
       s.acceptEpoch = 0;
       s.serverEpoch = 0;
-      _setConn('ok');
+      s.connectionId = '';
+      s.serverFsm = '';
+      s.serverUpstream = '';
+      s.voiceStateAt = 0;
+      s.lastFlowAt = 0;
+      s.lastLocalSendAt = 0;
+      s.lastForwarded = 0;
+      // An open socket is not proof of working dictation. Keep the recovery
+      // treatment until this connection acknowledges actual forwarded audio.
+      _setConn('reconnecting');
       // Only declare full recovery (reset the backoff) once the link has been
       // STABLE for a beat — an open-then-close flap must not keep resetting it.
       if (s.stabilityTimer) clearTimeout(s.stabilityTimer);
@@ -466,6 +591,38 @@
       try { frame = JSON.parse(event.data); } catch (_e) { return; }
       _traceRec('in', frame);   // record the real inbound frame for replay
       var type = String(frame.type || '');
+      if (type === 'voice_state') {
+        var stateConnection = String(frame.connection_id || '');
+        if (!stateConnection) return;
+        if (s.connectionId && stateConnection !== s.connectionId) return;
+        s.connectionId = stateConnection;
+        s.serverFsm = String(frame.fsm_state || '');
+        s.serverUpstream = String(frame.upstream || '');
+        s.voiceStateAt = _nowMs();
+        if (s.serverUpstream === 'unavailable') {
+          s.requiresReconnect = true;
+          _setConn('disconnected');
+        } else if (s.serverFsm === 'muted') {
+          // Muted is a verified control state and intentionally has no flow.
+          _setConn('ok');
+        } else if (s.serverFsm === 'listening') {
+          // Start/unmute is only control-plane truth. Stay unverified until a
+          // later audio_flow proves current PCM crossed the data plane too.
+          _setConn('reconnecting');
+        }
+        return;
+      }
+      if (type === 'audio_flow') {
+        if (!s.connectionId || String(frame.connection_id || '') !== s.connectionId) return;
+        var forwarded = Number(frame.forwarded);
+        if (!Number.isSafeInteger(forwarded) || forwarded <= s.lastForwarded) return;
+        s.lastForwarded = forwarded;
+        s.lastFlowAt = _nowMs();
+        s.flowRepairAttempted = false;
+        s.requiresReconnect = false;
+        _setConn(s.wakeLockNeedsGesture ? 'disconnected' : 'ok');
+        return;
+      }
       // Mute-gate: while muted, the operator wants the box FROZEN. WhisperLive
       // keeps re-transcribing its buffered pre-mute speech and emits a churn of
       // variants (NOT noise — pure silence/white-noise emit nothing); ignore
@@ -593,7 +750,10 @@
           s.lastFrameAt = _nowMs();   // worklet alive (mic + AudioContext producing)
           if (!s.talkActive || !s.wsOpen || !s.ws || s.ws.readyState !== WebSocket.OPEN) return;
           if (!s.started || s.requiresReconnect) return;
-          try { s.ws.send(payload.buffer); } catch (_e) {}
+          try {
+            s.ws.send(payload.buffer);
+            s.lastLocalSendAt = _nowMs();
+          } catch (_e) {}
         };
         sourceNode.connect(workletNode);
         workletNode.connect(sinkNode);
@@ -674,6 +834,9 @@
     _releaseWakeLock();
     try { if (s.ws) s.ws.close(1000, 'end'); } catch (_e) {}
     s.ws = null; s.wsOpen = false; s.started = false; s.bind = ''; s.starting = false; s.finals = '';
+    s.connectionId = ''; s.serverFsm = ''; s.serverUpstream = ''; s.voiceStateAt = 0;
+    s.lastFlowAt = 0; s.lastLocalSendAt = 0; s.lastForwarded = 0;
+    s.flowRepairAttempted = false;
     // Invalidate the live pipeline FIRST so its worklet goes inert immediately —
     // ctx.close() is async (and unreliable on iOS), so don't depend on it to stop
     // frames. Detach the worklet's port + disconnect the graph synchronously.
@@ -757,6 +920,8 @@
   window.Autonomy.voiceCapture = {
     teardown: teardown,
     retryReconnect: retryReconnectNow,
+    activateFromGesture: activateFromGesture,
+    enableFromGesture: enableFromGesture,
     onServerRecovered: onServerRecovered,
     resetEpoch: resetEpoch,   // #43: explicit Send/Clear reset hook (voice-shell.js calls this)
     dumpTrace: function () { return _traceDump('manual'); },

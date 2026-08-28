@@ -134,6 +134,11 @@
     if (state === 'dead' || state === 'flag_off') return false;
     if (_dotInteractionSuppressed(sessionId)) return false;
     _markDiscoverabilitySeen();
+    if ((state === 'idle' || state === 'muted') && window.Autonomy &&
+        window.Autonomy.voiceCapture &&
+        typeof window.Autonomy.voiceCapture.activateFromGesture === 'function') {
+      window.Autonomy.voiceCapture.activateFromGesture();
+    }
     if (state === 'idle') {
       return voice.requestBind(sessionId, { isLive: true }).ok === true;
     }

@@ -857,14 +857,33 @@ describe('voice shell helpers', () => {
       .component.capsuleIcon('mic').indexOf(slash) !== -1);
   });
 
-  it('tapping the red mic retries the connection (not toggle)', () => {
-    let retries = 0, toggles = 0;
+  it('tapping the red mic re-enables capture from the user gesture (not toggle)', () => {
+    let enables = 0, retries = 0, toggles = 0;
     const h = loadVoiceShell({ voiceStore: { connState: 'disconnected', toggleMic() { toggles++; return true; } } });
     h.window.Autonomy = h.window.Autonomy || {};
-    h.window.Autonomy.voiceCapture = { retryReconnect() { retries++; return true; } };
+    h.window.Autonomy.voiceCapture = {
+      enableFromGesture() { enables++; return true; },
+      retryReconnect() { retries++; return true; },
+    };
     h.component.runCapsuleAction('mic');
-    assert.equal(retries, 1);
+    assert.equal(enables, 1);
+    assert.equal(retries, 0);
     assert.equal(toggles, 0);
+  });
+
+  it('unmute requests Wake Lock from the same user gesture', () => {
+    let activations = 0, toggles = 0;
+    const h = loadVoiceShell({ voiceStore: {
+      connState: 'ok', micMode: 'muted',
+      toggleMic() { toggles++; return true; },
+    } });
+    h.window.Autonomy = {
+      voice: {},
+      voiceCapture: { activateFromGesture() { activations++; return true; } },
+    };
+    h.component.runCapsuleAction('mic');
+    assert.equal(activations, 1);
+    assert.equal(toggles, 1);
   });
 
   it('tapping the mic when connected toggles mute (not retry)', () => {
