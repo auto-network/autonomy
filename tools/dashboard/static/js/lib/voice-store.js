@@ -358,6 +358,13 @@
     return {
       boundSessionId: resumeIntent ? resumeIntent.sessionId : '',
       micMode: resumeIntent ? resumeIntent.micMode : 'idle',
+      // micMode is the persisted operator intent kept for API compatibility.
+      // These fields are current-document observations and are never persisted.
+      captureStatus: 'absent',
+      transportStatus: 'disconnected',
+      actionRequiredReason: null,
+      wakeStatus: 'released',
+      recoveryIncident: null,
       // Voice-socket health, driven by voice-capture's reconnect loop:
       //   'ok'            — connected (or not yet needed)
       //   'reconnecting'  — dropped, auto-retrying with backoff (mic shows red+spin)
@@ -393,6 +400,22 @@
 
       get active() {
         return !!this.boundSessionId && this.micMode !== 'idle';
+      },
+
+      get desiredMode() {
+        return this.micMode;
+      },
+
+      get effectiveState() {
+        if (this.micMode === 'idle' || !this.boundSessionId) return 'off';
+        if (this.actionRequiredReason) return 'enable_required';
+        if (this.recoveryIncident && this.recoveryIncident.active) return 'repairing';
+        if (this.micMode === 'muted') return 'muted';
+        if (this.micMode === 'vad_paused') return 'vad_paused';
+        if (this.captureStatus === 'live' && this.transportStatus === 'flowing') {
+          return 'listening';
+        }
+        return 'checking';
       },
 
       get voiceoverEnabled() {
@@ -440,10 +463,15 @@
         // Switch-takes-buffer (#23): a rebind deliberately PRESERVES bufferText so
         // an in-flight dictation cuts over to the new target instead of being
         // stranded. Do NOT reset bufferText here — only a full unbind clears it.
+        var priorActionRequired = this.boundSessionId ? this.actionRequiredReason : null;
         this.boundSessionId = sessionId || '';
         this.pendingRebindTarget = '';
         this.awayEventSessionId = '';
         this.micMode = this.boundSessionId ? 'listening' : 'idle';
+        this.captureStatus = 'absent';
+        this.transportStatus = this.boundSessionId ? 'connecting' : 'disconnected';
+        this.actionRequiredReason = priorActionRequired || null;
+        this.recoveryIncident = null;
         _writeResumeIntent(this.boundSessionId, this.micMode);
       },
 
@@ -462,14 +490,10 @@
       toggleMic() {
         if (!this.boundSessionId) return false;
         if (this.micMode === 'listening' || this.micMode === 'vad_paused') {
-          this.micMode = 'muted';
-          _writeResumeIntent(this.boundSessionId, this.micMode);
-          return true;
+          return this.setMicMode('muted');
         }
         if (this.micMode === 'muted') {
-          this.micMode = 'listening';
-          _writeResumeIntent(this.boundSessionId, this.micMode);
-          return true;
+          return this.setMicMode('listening');
         }
         return false;
       },
@@ -480,9 +504,47 @@
           return false;
         }
         this.micMode = mode;
+        if (mode === 'listening') {
+          if (this.captureStatus === 'absent') this.captureStatus = 'acquiring';
+          if (this.transportStatus === 'disconnected') this.transportStatus = 'connecting';
+        }
         // A push-to-talk pause is transient.  Reloading resumes ordinary
         // listening rather than preserving a stale pressed-button state.
         _writeResumeIntent(this.boundSessionId, mode === 'vad_paused' ? 'listening' : mode);
+        return true;
+      },
+
+      setCaptureStatus(state) {
+        if (state !== 'absent' && state !== 'acquiring' &&
+            state !== 'live' && state !== 'interrupted') return false;
+        this.captureStatus = state;
+        return true;
+      },
+
+      setTransportStatus(state) {
+        if (state !== 'disconnected' && state !== 'connecting' &&
+            state !== 'flowing' && state !== 'stalled' &&
+            state !== 'upstream_error') return false;
+        this.transportStatus = state;
+        return true;
+      },
+
+      setActionRequired(reason) {
+        this.actionRequiredReason = reason ? String(reason) : null;
+        return true;
+      },
+
+      setWakeStatus(state) {
+        if (state !== 'unsupported' && state !== 'acquiring' &&
+            state !== 'held' && state !== 'released' && state !== 'denied') return false;
+        this.wakeStatus = state;
+        return true;
+      },
+
+      setRecoveryIncident(incident) {
+        this.recoveryIncident = incident && typeof incident === 'object'
+          ? incident
+          : null;
         return true;
       },
 
@@ -550,6 +612,10 @@
         this.pendingRebindTarget = '';
         this.setBufferText('', { update: 'end' });
         this.micMode = 'idle';
+        this.captureStatus = 'absent';
+        this.transportStatus = 'disconnected';
+        this.actionRequiredReason = null;
+        this.recoveryIncident = null;
         _writeResumeIntent('', 'idle');
         this.awayEventSessionId = '';
         this.sheetOpen = false;

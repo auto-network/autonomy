@@ -871,6 +871,21 @@ describe('voice shell helpers', () => {
     assert.equal(toggles, 0);
   });
 
+  it('action-required health invokes direct gesture recovery even before legacy conn state updates', () => {
+    let enables = 0, toggles = 0;
+    const h = loadVoiceShell({ voiceStore: {
+      effectiveState: 'enable_required', connState: 'ok',
+      toggleMic() { toggles++; return true; },
+    } });
+    h.window.Autonomy = {
+      voice: {},
+      voiceCapture: { enableFromGesture() { enables++; return true; } },
+    };
+    h.component.runCapsuleAction('mic');
+    assert.equal(enables, 1);
+    assert.equal(toggles, 0);
+  });
+
   it('unmute requests Wake Lock from the same user gesture', () => {
     let activations = 0, toggles = 0;
     const h = loadVoiceShell({ voiceStore: {

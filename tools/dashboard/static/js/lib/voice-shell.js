@@ -786,7 +786,8 @@
           if (!this.voice) return false;
           if (action === 'mic') {
             var conn = this.voice.connState;
-            if (conn === 'disconnected' || conn === 'reconnecting') {
+            var health = this.voice.effectiveState || '';
+            if (health === 'enable_required' || conn === 'disconnected' || conn === 'reconnecting') {
               // One user gesture reauthorizes iOS capture + Wake Lock and
               // replaces stale browser/server state.
               if (typeof window !== 'undefined' && window.Autonomy && window.Autonomy.voiceCapture &&

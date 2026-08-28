@@ -57,30 +57,55 @@ function makeHarness() {
   };
   stores.voice = voice;
 
+  class FakeAudioContext {
+    constructor() {
+      this.state = 'running'; this.destination = {};
+      this.audioWorklet = { addModule: () => Promise.resolve() };
+    }
+    createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
+    createGain() { return { gain: { value: 1 }, connect() {} }; }
+    close() { this.state = 'closed'; return Promise.resolve(); }
+  }
+  class FakeWorkletNode {
+    constructor() { this.port = { onmessage: null }; }
+    connect() {}
+    disconnect() {}
+  }
+  const navigator = {
+    mediaDevices: {
+      getUserMedia: () => Promise.resolve({
+        getTracks: () => [{
+          readyState: 'live', enabled: true, muted: false,
+          addEventListener() {}, stop() { this.readyState = 'ended'; },
+        }],
+      }),
+    },
+  };
+
   const sandbox = {
     console, setTimeout, clearTimeout, Promise, JSON, Math, Date, Object, Array, String,
     WebSocket: FakeWS,
     location: { protocol: 'https:', host: 'localhost:8080' },
-    navigator: {},                    // no wakeLock / mediaDevices
+    navigator,
+    AudioContext: FakeAudioContext,
+    AudioWorkletNode: FakeWorkletNode,
     document,
-    window: { console, Autonomy: {}, addEventListener() {}, removeEventListener() {} },
+    window: {
+      console, Autonomy: {}, navigator,
+      AudioContext: FakeAudioContext, AudioWorkletNode: FakeWorkletNode,
+      addEventListener() {}, removeEventListener() {},
+    },
   };
   sandbox.window.document = document;
   sandbox.window.Alpine = alpine;
   sandbox.Alpine = alpine;
   sandbox.globalThis = sandbox;
-  // AudioContext / AudioWorkletNode intentionally absent → ensureMicReady rejects,
-  // but the socket + message handler are attached BEFORE the mic path, so the
-  // transcript/render logic under test runs fully.
   vm.createContext(sandbox);
   vm.runInContext(fs.readFileSync(CAPTURE_JS, 'utf8'), sandbox, { filename: 'voice-capture.js' });
 
   for (const cb of (docListeners['alpine:init'] || [])) cb();
 
   function runEffects() { for (const fn of effects) fn(); }
-  // startListening sets s.starting=true and only clears it once ensureMicReady's
-  // promise settles (it rejects here — no audio in the harness). Flush microtasks
-  // so a follow-up switch isn't blocked by the stale starting guard.
   const flush = () => new Promise((r) => setImmediate(r));
 
   return {

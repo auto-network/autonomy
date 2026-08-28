@@ -32,7 +32,7 @@
   var s = {
     ws: null, wsOpen: false, started: false, talkActive: false, requiresReconnect: false,
     bind: '',
-    stream: null, ctx: null, sourceNode: null, workletNode: null, sinkNode: null, micGranted: false,
+    stream: null, ctx: null, primedContext: null, sourceNode: null, workletNode: null, sinkNode: null, micGranted: false,
     captureGen: 0,          // monotonic id of the LIVE capture pipeline. Only the
                             // worklet whose gen === captureGen may post audio; every
                             // superseded/torn-down worklet goes inert. Without this,
@@ -42,6 +42,8 @@
                             // shred the audio into gibberish (proven from a captured
                             // WAV: 4 same-mic streams interleaved frame-by-frame).
     starting: false,
+    startGen: 0,            // invalidates asynchronous capture/socket startup work
+    desiredBind: '',        // target for the current start generation
     finals: '',
     lastRendered: '',       // last text actually shown in the box (incl. in-flight
                             // partial) — what a Clear/Send must remember to suppress,
@@ -54,7 +56,7 @@
     acceptEpoch: 0,         // #43: drop transcript/buffer_state frames whose epoch < this
     wakeLock: null,
     wakeLockRequest: null,
-    releasingWakeLock: false,
+    wakeGen: 0,             // stale acquire/release completions cannot change status
     wakeLockNeedsGesture: false,
     reconnectAttempt: 0,    // backoff index for the auto-reconnect loop
     reconnectTimer: null,
@@ -68,11 +70,174 @@
     lastLocalSendAt: 0,     // last PCM frame handed to the current WebSocket
     lastForwarded: 0,       // cumulative server-forwarded count on this connection
     flowRepairAttempted: false,
+    trackMuted: false,
+    trackMuteTimer: null,
+    incident: null,
+    incidentSeq: 0,
+    incidentTimer: null,
+    verificationTimer: null,
+    resetBoundaryPending: false,
+    resetBoundaryTimer: null,
+    resetBoundaryGen: 0,
+    resetBoundaryExpectedEpoch: 0,
+    serverStateRepairAttempted: false,
+    actionCooldownUntil: 0,
     trace: [],              // failure-trace ring (debug only)
     traceOn: false,
     traceExpiresAt: 0,
     traceDumpTimer: null,
   };
+
+  var RECOVERY_VERIFY_MS = 8000;
+  var RECOVERY_COOLDOWN_MS = 30000;
+  var RESTORE_VERIFY_MS = 22000;
+  var RECONNECT_VERIFY_MS = 90000;
+  var RESET_BOUNDARY_VERIFY_MS = 22000;
+
+  function _storeSet(method, field, value) {
+    var st = store();
+    if (!st) return;
+    if (typeof st[method] === 'function') st[method](value);
+    else st[field] = value;
+  }
+  function _setCapture(state) { _storeSet('setCaptureStatus', 'captureStatus', state); }
+  function _setTransport(state) { _storeSet('setTransportStatus', 'transportStatus', state); }
+  function _setAction(reason) { _storeSet('setActionRequired', 'actionRequiredReason', reason || null); }
+  function _setWake(state) { _storeSet('setWakeStatus', 'wakeStatus', state); }
+  function _publishIncident() {
+    var value = s.incident ? {
+      id: s.incident.id,
+      active: !!s.incident.active,
+      reason: s.incident.reason,
+      captureAttempts: s.incident.captureAttempts,
+      transportAttempts: s.incident.transportAttempts,
+      startedAt: s.incident.startedAt,
+    } : null;
+    _storeSet('setRecoveryIncident', 'recoveryIncident', value);
+  }
+
+  function _clearIncidentTimer() {
+    if (s.incidentTimer) clearTimeout(s.incidentTimer);
+    s.incidentTimer = null;
+  }
+
+  function _clearVerificationTimer() {
+    if (s.verificationTimer) clearTimeout(s.verificationTimer);
+    s.verificationTimer = null;
+  }
+
+  function _armIncidentDeadline(incident, deadlineAt) {
+    if (!incident || !incident.active) return;
+    incident.deadlineAt = Math.max(incident.deadlineAt || 0, deadlineAt);
+    _clearIncidentTimer();
+    var incidentId = incident.id;
+    s.incidentTimer = setTimeout(function () {
+      if (s.incident && s.incident.active && s.incident.id === incidentId) {
+        _requireAction('recovery_failed');
+      }
+    }, Math.max(0, incident.deadlineAt - _nowMs()));
+    if (s.incidentTimer && typeof s.incidentTimer.unref === 'function') s.incidentTimer.unref();
+  }
+
+  function _armHealthVerification(force) {
+    if (force && s.verificationTimer) _clearVerificationTimer();
+    if (s.verificationTimer || (!force && s.lastFlowAt)) return;
+    s.verificationTimer = setTimeout(function () {
+      s.verificationTimer = null;
+      var st = store();
+      if (st && st.micMode === 'listening' &&
+          (!s.lastFlowAt || st.transportStatus !== 'flowing') &&
+          !(s.incident && s.incident.active)) {
+        _requireAction('recovery_failed');
+      }
+    }, RESTORE_VERIFY_MS);
+    if (s.verificationTimer && typeof s.verificationTimer.unref === 'function') s.verificationTimer.unref();
+  }
+
+  function _joinIncident(reason, verifyMs) {
+    var now = _nowMs();
+    var st = store();
+    if (st && (st.actionRequiredReason === 'mic_denied' ||
+               st.actionRequiredReason === 'mic_gesture')) return null;
+    if (st && st.actionRequiredReason && now < s.actionCooldownUntil) return null;
+    if (s.incident && s.incident.active) return s.incident;
+    s.incident = {
+      id: ++s.incidentSeq,
+      active: true,
+      reason: reason || 'unknown',
+      captureAttempts: 0,
+      transportAttempts: 0,
+      startedAt: now,
+      deadlineAt: now + (verifyMs || RECOVERY_VERIFY_MS),
+    };
+    _setAction(null);
+    _setConn('reconnecting');
+    _publishIncident();
+    _armIncidentDeadline(s.incident, s.incident.deadlineAt);
+    return s.incident;
+  }
+
+  function _requireAction(reason) {
+    _clearIncidentTimer();
+    _clearVerificationTimer();
+    if (s.reconnectTimer) { clearTimeout(s.reconnectTimer); s.reconnectTimer = null; }
+    if (s.stabilityTimer) { clearTimeout(s.stabilityTimer); s.stabilityTimer = null; }
+    if (s.resetBoundaryTimer) { clearTimeout(s.resetBoundaryTimer); s.resetBoundaryTimer = null; }
+    s.resetBoundaryPending = false;
+    if (s.incident) s.incident.active = false;
+    _publishIncident();
+    s.actionCooldownUntil = _nowMs() + RECOVERY_COOLDOWN_MS;
+    s.requiresReconnect = true;
+    s.talkActive = false;
+    s.startGen++;
+    s.starting = false;
+    var failedSocket = s.ws;
+    s.ws = null;
+    s.wsOpen = false;
+    s.started = false;
+    s.connectionId = '';
+    try { if (failedSocket) failedSocket.close(1000, 'action-required'); } catch (_e) {}
+    _disposeCapturePipeline();
+    _releaseWakeLock();
+    _setAction(reason || 'recovery_failed');
+    _setTransport('disconnected');
+    _setConn('disconnected');
+    var st = store();
+    if (st && !st.sheetError) st.sheetError = 'Microphone needs to be enabled again.';
+  }
+
+  function _verifyHealthyFlow() {
+    var captureHealthy = !!(
+      _currentTrackIsLive() && s.ctx && s.ctx.state === 'running' &&
+      s.lastFrameAt && s.lastLocalSendAt &&
+      (!s.incident || s.lastLocalSendAt >= s.incident.startedAt)
+    );
+    var transportHealthy = s.serverFsm === 'listening' && s.serverUpstream === 'ready';
+    _setTransport(transportHealthy ? 'flowing' : 'connecting');
+    _setCapture(captureHealthy ? 'live' : 'interrupted');
+    var healthStore = store();
+    if (!captureHealthy || !transportHealthy || (healthStore && healthStore.actionRequiredReason)) {
+      _setConn(healthStore && healthStore.actionRequiredReason ? 'disconnected' : 'reconnecting');
+      return;
+    }
+    _clearIncidentTimer();
+    _clearVerificationTimer();
+    s.incident = null;
+    s.actionCooldownUntil = 0;
+    s.serverStateRepairAttempted = false;
+    _publishIncident();
+    _setAction(null);
+    _setConn('ok');
+  }
+
+  function _resetRecoveryForGesture() {
+    _clearIncidentTimer();
+    _clearVerificationTimer();
+    s.incident = null;
+    s.actionCooldownUntil = 0;
+    _publishIncident();
+    _setAction(null);
+  }
 
   // ── Failure-trace recorder (clearing reliability) ───────────────────────
   // Capture REAL frames so a flaky clear can be replayed deterministically in the
@@ -176,10 +341,21 @@
     return !!(st && st.boundSessionId && (st.micMode === 'listening' || st.micMode === 'vad_paused'));
   }
   function _scheduleReconnect() {
+    var incident = _joinIncident('socket_closed', RECONNECT_VERIFY_MS);
+    if (!incident) return;
+    if (!incident.reconnectDeadlineAt) {
+      incident.reconnectDeadlineAt = _nowMs() + RECONNECT_VERIFY_MS;
+      _armIncidentDeadline(incident, incident.reconnectDeadlineAt);
+    }
+    if (incident.transportAttempts === 0) {
+      incident.transportAttempts = 1;
+      _publishIncident();
+    }
+    _setTransport('connecting');
     _setConn('reconnecting');
-    if (s.reconnectTimer) clearTimeout(s.reconnectTimer);
+    if (s.reconnectTimer) return;
     if (s.reconnectAttempt >= RECONNECT_BACKOFF.length) {
-      _setConn('disconnected');            // give up → manual retry only (no loop)
+      _requireAction('recovery_failed');   // give up → manual retry only (no loop)
       _diag('reconnect: gave up after ' + RECONNECT_BACKOFF.length + ' attempts');
       return;
     }
@@ -200,8 +376,11 @@
   function retryReconnectNow() {
     var st = store();
     if (!st || !st.boundSessionId) return false;
+    _resetRecoveryForGesture();
     if (s.reconnectTimer) { clearTimeout(s.reconnectTimer); s.reconnectTimer = null; }
     s.reconnectAttempt = 0;
+    _joinIncident('manual_retry', RESTORE_VERIFY_MS);
+    _setTransport('connecting');
     _setConn('reconnecting');
     s.starting = false; s.started = false;
     startListening(st.boundSessionId);
@@ -215,12 +394,20 @@
   function onServerRecovered() {
     if (!_wantsConnection()) return;          // muted/unbound → nothing to re-establish
     if (s.ws && s.wsOpen) return;             // connection survived → leave it alone
-    if (s.reconnectTimer) { clearTimeout(s.reconnectTimer); s.reconnectTimer = null; }
+    if (s.reconnectTimer) {
+      clearTimeout(s.reconnectTimer);
+      s.reconnectTimer = null;
+      s.reconnectAttempt = 0;
+      s.starting = false;
+      s.started = false;
+      var pendingStore = store();
+      if (pendingStore && pendingStore.boundSessionId) {
+        startListening(pendingStore.boundSessionId);
+      }
+      return;
+    }
     s.reconnectAttempt = 0;
-    _setConn('reconnecting');
-    s.starting = false; s.started = false;
-    var st = store();
-    if (st && st.boundSessionId) startListening(st.boundSessionId);
+    _requestTransportRepair('server_recovered');
   }
 
   // ── Audio-capture liveness watchdog ─────────────────────────────────────
@@ -235,11 +422,67 @@
   var AUDIO_STALL_MS = 4000;
   var AUDIO_FLOW_STALL_MS = 3000;
 
+  function _disposeCapturePipeline() {
+    s.captureGen++;
+    if (s.trackMuteTimer) clearTimeout(s.trackMuteTimer);
+    s.trackMuteTimer = null;
+    s.trackMuted = false;
+    try { if (s.workletNode) { s.workletNode.port.onmessage = null; s.workletNode.disconnect(); } } catch (_e) {}
+    try { if (s.sourceNode) s.sourceNode.disconnect(); } catch (_e) {}
+    try { if (s.stream) s.stream.getTracks().forEach(function (t) { t.stop(); }); } catch (_e) {}
+    try { if (s.ctx && typeof s.ctx.close === 'function') s.ctx.close(); } catch (_e) {}
+    try { if (s.primedContext && typeof s.primedContext.close === 'function') s.primedContext.close(); } catch (_e) {}
+    s.stream = null;
+    s.ctx = null;
+    s.primedContext = null;
+    s.sourceNode = null;
+    s.workletNode = null;
+    s.sinkNode = null;
+    s.micGranted = false;
+    s.lastFrameAt = 0;
+    s.lastLocalSendAt = 0;
+    _setCapture('absent');
+  }
+
+  function _requestCaptureRepair(reason) {
+    var st = store();
+    var bind = s.bind || (st && st.boundSessionId) || '';
+    if (!bind) return false;
+    var incident = _joinIncident(reason);
+    // A cumulative audio_flow acknowledgement on the same socket cannot prove
+    // that PCM came from the rebuilt browser capture rather than the old one.
+    // Spend the incident's single capture AND transport repair together so the
+    // new capture is verified only on a fresh, independently identified socket.
+    if (!incident || incident.captureAttempts > 0) return false;
+    incident.captureAttempts += 1;
+    if (incident.transportAttempts === 0) incident.transportAttempts = 1;
+    _publishIncident();
+    _setCapture('acquiring');
+    _disposeCapturePipeline();
+    _setCapture('acquiring');
+    _replaceVoiceSocket(reason);
+    return true;
+  }
+
+  function _requestTransportRepair(reason) {
+    var incident = _joinIncident(reason, RESTORE_VERIFY_MS);
+    if (!incident || incident.transportAttempts > 0) return false;
+    incident.transportAttempts += 1;
+    s.flowRepairAttempted = true;
+    _publishIncident();
+    _setTransport('connecting');
+    _replaceVoiceSocket(reason);
+    return true;
+  }
+
   function _replaceVoiceSocket(reason) {
     var st = store();
     var bind = s.bind || (st && st.boundSessionId) || '';
-    if (!bind || s.starting) return;
+    if (!bind) return;
     _diag(reason + ' — replacing voice socket');
+    s.startGen++;
+    s.starting = false;
+    s.desiredBind = bind;
     var old = s.ws;
     s.ws = null;
     s.wsOpen = false;
@@ -252,6 +495,7 @@
     s.lastFlowAt = 0;
     s.lastForwarded = 0;
     try { if (old) old.close(1000, 'health-repair'); } catch (_e) {}
+    _setTransport('connecting');
     _setConn('reconnecting');
     startListening(bind);
   }
@@ -260,19 +504,27 @@
     var st = store();
     if (!st || st.micMode !== 'listening') return;       // only while actively capturing
     if (!s.talkActive || !s.ctx || s.starting) return;   // not streaming / mid-(re)start
-    if (st.connState === 'reconnecting' || st.connState === 'disconnected') return;
+    if (st.actionRequiredReason || (s.incident && s.incident.active)) return;
     // Two silent-death modes: (a) the worklet stops posting frames (AudioContext
     // suspended/died), and (b) the mic TRACK ends but the context keeps posting
     // silent buffers — iOS turned the mic OFF (no notch indicator) while the app
     // still thinks it's listening. Frame-presence alone misses (b), so also check
     // the track readyState.
     var trackDead = false;
+    var trackMuted = s.trackMuted;
     try {
       if (s.stream && typeof s.stream.getTracks === 'function') {
         var tks = s.stream.getTracks();
         trackDead = (tks.length === 0) || tks.some(function (t) { return t.readyState === 'ended'; });
+        trackMuted = trackMuted || tks.some(function (t) { return t.muted === true; });
       }
     } catch (_e) {}
+    var contextInterrupted = !!(s.ctx && s.ctx.state && s.ctx.state !== 'running');
+    if ((trackMuted || contextInterrupted) && !s.trackMuteTimer) {
+      _setCapture('interrupted');
+      _requestCaptureRepair(trackMuted ? 'track_muted' : 'audio_context_suspended');
+      return;
+    }
     var noFrames = !!s.lastFrameAt && (_nowMs() - s.lastFrameAt) > AUDIO_STALL_MS;
     if (!trackDead && !noFrames) {
       // A live worklet and open WebSocket do not prove the server received the
@@ -282,26 +534,15 @@
       var localStillSending = s.lastLocalSendAt && now - s.lastLocalSendAt <= AUDIO_STALL_MS;
       var flowBaseline = s.lastFlowAt || s.voiceStateAt;
       var flowStalled = flowBaseline && now - flowBaseline > AUDIO_FLOW_STALL_MS;
-      if (localStillSending && flowStalled && s.serverFsm === 'listening') {
-        if (!s.flowRepairAttempted) {
-          s.flowRepairAttempted = true;
-          _replaceVoiceSocket('server audio flow stalled');
-        } else {
-          s.requiresReconnect = true;
-          s.talkActive = false;
-          _setConn('disconnected');
-          if (st) st.sheetError = 'Microphone needs to be enabled again.';
-        }
+      if (!s.resetBoundaryPending && localStillSending && flowStalled && s.serverFsm === 'listening') {
+        _setTransport('stalled');
+        _requestTransportRepair('server audio flow stalled');
       }
       return;
     }
-    var bind = s.bind || st.boundSessionId || '';
-    if (!bind) return;
     _diag('audio stall (' + (trackDead ? 'mic track ended' : 'no frames') + ') — restarting capture');
-    teardown();                 // teardown resets connState to 'ok' …
-    _setConn('reconnecting');   // … so re-assert the visible recovery state
-    s.starting = false; s.started = false; s.lastFrameAt = 0;
-    startListening(bind);
+    _setCapture('interrupted');
+    _requestCaptureRepair(trackDead ? 'track_ended' : 'frames_stalled');
   }
 
   // ── Look-back suppression of re-emitted cleared/sent text ───────────────
@@ -356,61 +597,85 @@
   }
 
   // Keep the screen awake while capturing (iOS auto-lock cuts off dictation).
-  function _acquireWakeLock() {
+  function _acquireWakeLock(forceFresh) {
     try {
       if (!navigator.wakeLock || typeof navigator.wakeLock.request !== 'function') {
+        _setWake('unsupported');
         return Promise.resolve(false);
       }
-      if (s.wakeLock) return Promise.resolve(true);
-      if (s.wakeLockRequest) return s.wakeLockRequest;
-      s.wakeLockRequest = navigator.wakeLock.request('screen').then(function (sentinel) {
-          if (!_wantsConnection()) {
+      if (s.wakeLock) { _setWake('held'); return Promise.resolve(true); }
+      if (!forceFresh && s.wakeLockRequest) return s.wakeLockRequest;
+      var wakeGen = ++s.wakeGen;
+      _setWake('acquiring');
+      var request = navigator.wakeLock.request('screen').then(function (sentinel) {
+          if (wakeGen !== s.wakeGen || !_wantsConnection()) {
             try { sentinel.release(); } catch (_e) {}
             return false;
           }
+          var previous = s.wakeLock;
           s.wakeLock = sentinel;
           s.wakeLockNeedsGesture = false;
-          if (s.lastFlowAt && s.serverFsm === 'listening') _setConn('ok');
+          _setWake('held');
           if (sentinel && typeof sentinel.addEventListener === 'function') {
             sentinel.addEventListener('release', function () {
-              if (s.wakeLock === sentinel) s.wakeLock = null;
-              if (!s.releasingWakeLock && _wantsConnection() &&
+              if (wakeGen !== s.wakeGen || s.wakeLock !== sentinel) return;
+              s.wakeLock = null;
+              _setWake('released');
+              if (_wantsConnection() &&
                   (typeof document === 'undefined' || document.visibilityState === 'visible')) {
                 _acquireWakeLock();
               }
             });
           }
+          if (previous && previous !== sentinel) {
+            try { previous.release(); } catch (_e) {}
+          }
           return true;
         }).catch(function () {
+          if (wakeGen !== s.wakeGen) return false;
           s.wakeLockNeedsGesture = true;
-          _setConn('disconnected');
+          _setWake('denied');
           var st = store();
           if (st) st.sheetError = 'Screen may lock. Tap the microphone to allow keep-awake.';
           return false;
-        }).finally(function () { s.wakeLockRequest = null; });
-      return s.wakeLockRequest;
-    } catch (_e) { return Promise.resolve(false); }
+        }).finally(function () {
+          if (s.wakeLockRequest === request) s.wakeLockRequest = null;
+        });
+      s.wakeLockRequest = request;
+      return request;
+    } catch (_e) { _setWake('denied'); return Promise.resolve(false); }
   }
   function _releaseWakeLock() {
+    var releaseGen = ++s.wakeGen;
+    s.wakeLockRequest = null;
     try {
-      if (!s.wakeLock) return;
+      if (!s.wakeLock) { _setWake('released'); return; }
       var sentinel = s.wakeLock;
       s.wakeLock = null;
-      s.releasingWakeLock = true;
       Promise.resolve(sentinel.release()).finally(function () {
-        s.releasingWakeLock = false;
+        if (releaseGen === s.wakeGen && !s.wakeLock) _setWake('released');
       });
-    } catch (_e) { s.releasingWakeLock = false; }
+    } catch (_e) { if (releaseGen === s.wakeGen) _setWake('released'); }
   }
 
   // Called directly from pointer/keyboard handlers. WebKit can require transient
   // user activation for the document's first wake-lock authorization, so this
   // cannot be deferred to the later Alpine effect that observes micMode.
   function activateFromGesture() {
-    _acquireWakeLock();
+    // Always issue a request in this gesture. An older asynchronous request may
+    // have been made after visibility recovery and cannot borrow this activation.
+    _acquireWakeLock(true);
     try {
       if (s.ctx && s.ctx.state === 'suspended' && typeof s.ctx.resume === 'function') {
         s.ctx.resume().catch(function () {});
+      } else if ((!s.ctx || s.ctx.state === 'closed') && !s.primedContext && window.AudioContext) {
+        // Construct the context inside the pointer call stack. WebKit may allow
+        // getUserMedia later while still refusing an asynchronously-created
+        // AudioContext; ensureMicReady adopts this primed context.
+        s.primedContext = new AudioContext({ sampleRate: 16000, latencyHint: 'interactive' });
+        if (s.primedContext.state === 'suspended' && typeof s.primedContext.resume === 'function') {
+          s.primedContext.resume().catch(function () {});
+        }
       }
     } catch (_e) {}
     return true;
@@ -423,13 +688,20 @@
     var st = store();
     var bind = (st && st.boundSessionId) || s.bind || '';
     if (!bind) return false;
+    if (s.bind && s.bind !== bind && st) {
+      var carried = String(st.bufferText || '').trim();
+      if (carried) s.carryPrefix = carried;
+    }
+    _resetRecoveryForGesture();
     teardown();
     s.reconnectAttempt = 0;
     s.flowRepairAttempted = false;
     s.requiresReconnect = false;
     if (st && typeof st.setMicMode === 'function') st.setMicMode('listening');
-    _setConn('reconnecting');
+    _setCapture('acquiring');
+    _setTransport('connecting');
     activateFromGesture();
+    _setConn('reconnecting');
     startListening(bind);
     return true;
   }
@@ -449,22 +721,43 @@
     if (!(s.talkActive || (s.bind && s.ws) || wantsListening)) return;
     _acquireWakeLock();
     var dead = false;
+    var muted = s.trackMuted;
     try {
       if (s.stream) {
-        s.stream.getTracks().forEach(function (t) { if (t.readyState === 'ended') dead = true; });
+        s.stream.getTracks().forEach(function (t) {
+          if (t.readyState === 'ended') dead = true;
+          if (t.muted === true) muted = true;
+        });
       } else if (s.micGranted) {
         dead = true; // mic was granted earlier but the stream is gone
       }
     } catch (_e) {}
+    if (!dead && muted) {
+      s.trackMuted = true;
+      _setCapture('interrupted');
+      if (s.trackMuteTimer) clearTimeout(s.trackMuteTimer);
+      var wakeGen = s.captureGen;
+      s.trackMuteTimer = setTimeout(function () {
+        s.trackMuteTimer = null;
+        if (wakeGen === s.captureGen && s.trackMuted) {
+          _requestCaptureRepair('track_muted');
+        }
+      }, 1000);
+      return;
+    }
     if (dead) {
-      var bind = s.bind || (st && st.boundSessionId) || '';
       _diag('mic stream died while locked — restarting capture');
-      teardown();
-      if (bind && wantsListening) startListening(bind);
+      _setCapture('interrupted');
+      if (wantsListening) _requestCaptureRepair('track_ended');
       return;
     }
     if (s.ctx && s.ctx.state === 'suspended' && typeof s.ctx.resume === 'function') {
-      s.ctx.resume().then(function () { _diag('resumed after unlock'); }).catch(function () {});
+      s.ctx.resume().then(function () {
+        _diag('resumed after unlock');
+      }).catch(function () {
+        _setCapture('interrupted');
+        _requestCaptureRepair('audio_context_suspended');
+      });
     }
   }
   if (typeof document !== 'undefined') {
@@ -527,6 +820,67 @@
     });
   }
 
+  function _boundListeningDisagrees() {
+    var st = store();
+    if (!st || st.micMode !== 'listening' || s.resetBoundaryPending) return false;
+    s.lastFlowAt = 0;
+    _setTransport('connecting');
+    _setConn('reconnecting');
+    _armHealthVerification(false);
+    if (!s.serverStateRepairAttempted) {
+      s.serverStateRepairAttempted = true;
+      if (!s.started) {
+        if (sendControl('start')) s.started = true;
+      } else {
+        sendControl('unmute');
+      }
+      s.talkActive = true;
+    }
+    return true;
+  }
+
+  function _clearResetBoundary(expectedGen) {
+    if (expectedGen != null && expectedGen !== s.resetBoundaryGen) return false;
+    if (s.resetBoundaryTimer) clearTimeout(s.resetBoundaryTimer);
+    s.resetBoundaryTimer = null;
+    s.resetBoundaryPending = false;
+    s.resetBoundaryExpectedEpoch = 0;
+    return true;
+  }
+
+  function _finishResetBoundary(expectedGen) {
+    if (!_clearResetBoundary(expectedGen)) return false;
+    var st = store();
+    if (st && st.micMode === 'listening') {
+      // The reset deliberately paused intake, so pre-reset flow is no longer
+      // proof for the resumed interval. Give the completed reset a fresh,
+      // bounded verification window.
+      s.lastFlowAt = 0;
+      _setTransport('connecting');
+      _armHealthVerification(true);
+    }
+    return true;
+  }
+
+  function _beginResetBoundary(expectedEpoch) {
+    // A health deadline started before this intentional protocol pause must not
+    // abort the reset. Completion below starts a fresh bounded window.
+    _clearVerificationTimer();
+    _clearResetBoundary();
+    var resetGen = ++s.resetBoundaryGen;
+    s.resetBoundaryPending = true;
+    s.resetBoundaryExpectedEpoch = expectedEpoch | 0;
+    s.resetBoundaryTimer = setTimeout(function () {
+      if (resetGen !== s.resetBoundaryGen) return;
+      s.resetBoundaryTimer = null;
+      if (!s.resetBoundaryPending) return;
+      s.resetBoundaryPending = false;
+      s.resetBoundaryExpectedEpoch = 0;
+      _requestTransportRepair('reset_timeout');
+    }, RESET_BOUNDARY_VERIFY_MS);
+    if (s.resetBoundaryTimer && typeof s.resetBoundaryTimer.unref === 'function') s.resetBoundaryTimer.unref();
+  }
+
   // #43: explicit Send/Clear reset hook. Called by the viewer's Send/Clear handlers
   // (voice-shell.js), the SOLE callers — never inferred from an empty buffer. It
   // (a) raises acceptEpoch so every in-flight pre-reset frame (the re-emit of the
@@ -538,7 +892,7 @@
   function resetEpoch(reason) {
     if (!_resetMode()) return false;
     var why = reason || '';
-    s.acceptEpoch = s.serverEpoch + 1;
+    s.acceptEpoch = Math.max(s.acceptEpoch, s.serverEpoch) + 1;
     s.finals = '';
     // A target switch can preserve text here. Send/Clear are terminal
     // boundaries for that text, so it must not survive the reset and
@@ -547,7 +901,9 @@
     s.lastRendered = '';
     _traceRec('reset', { reason: why, acceptEpoch: s.acceptEpoch });
     if (why === 'clear') _traceScheduleDump();
-    return sendControl('reset', { reason: why });
+    var sent = sendControl('reset', { reason: why });
+    if (sent) _beginResetBoundary(s.acceptEpoch);
+    return sent;
   }
 
   function _renderBuffer(text, meta) {
@@ -570,6 +926,7 @@
     s.ws = ws; s.bind = bind; ws.binaryType = 'arraybuffer';
     ws.addEventListener('open', function () {
       if (ws !== s.ws) return;
+      _clearResetBoundary();
       s.wsOpen = true; s.started = false; s.requiresReconnect = false;
       // #43: the server's transcript epoch is PER-CONNECTION and starts at 0 on
       // every fresh ws_voice connection. acceptEpoch/serverEpoch live in module
@@ -586,8 +943,10 @@
       s.lastFlowAt = 0;
       s.lastLocalSendAt = 0;
       s.lastForwarded = 0;
+      s.serverStateRepairAttempted = false;
       // An open socket is not proof of working dictation. Keep the recovery
       // treatment until this connection acknowledges actual forwarded audio.
+      _setTransport('connecting');
       _setConn('reconnecting');
       // Only declare full recovery (reset the backoff) once the link has been
       // STABLE for a beat — an open-then-close flap must not keep resetting it.
@@ -612,14 +971,23 @@
         s.voiceStateAt = _nowMs();
         if (s.serverUpstream === 'unavailable') {
           s.requiresReconnect = true;
-          _setConn('disconnected');
+          _setTransport('upstream_error');
+          _requestTransportRepair('upstream_unavailable');
         } else if (s.serverFsm === 'muted') {
-          // Muted is a verified control state and intentionally has no flow.
-          _setConn('ok');
+          // Muted is healthy only when it matches operator intent. If the
+          // operator wants listening, retry the control once and bound the wait.
+          if (!_boundListeningDisagrees()) {
+            _clearVerificationTimer();
+            _setTransport('connecting');
+            _setConn('ok');
+          }
         } else if (s.serverFsm === 'listening') {
           // Start/unmute is only control-plane truth. Stay unverified until a
           // later audio_flow proves current PCM crossed the data plane too.
+          _setTransport('connecting');
           _setConn('reconnecting');
+        } else {
+          _boundListeningDisagrees();
         }
         return;
       }
@@ -631,12 +999,21 @@
         s.lastFlowAt = _nowMs();
         s.flowRepairAttempted = false;
         s.requiresReconnect = false;
-        _setConn(s.wakeLockNeedsGesture ? 'disconnected' : 'ok');
+        _verifyHealthyFlow();
         return;
       }
       if (type === 'committed' || type === 'commit_error') {
         _ackAudioReady(s.serverEpoch, frame.audio_ready_token);
         return;
+      }
+      var resetBoundaryAcked = false;
+      if (type === 'buffer_state' && s.resetBoundaryPending) {
+        var boundaryEpoch = (frame.epoch == null) ? 0 : (frame.epoch | 0);
+        if (boundaryEpoch >= s.resetBoundaryExpectedEpoch) {
+          _ackAudioReady(boundaryEpoch, frame.audio_ready_token);
+          _finishResetBoundary(s.resetBoundaryGen);
+          resetBoundaryAcked = true;
+        }
       }
       // Mute-gate: while muted, the operator wants the box FROZEN. WhisperLive
       // keeps re-transcribing its buffered pre-mute speech and emits a churn of
@@ -700,14 +1077,17 @@
         _renderBuffer(s.finals, {
           update: 'restore', kind: 'buffer_state', epoch: frame.epoch,
         });
-        _ackAudioReady(frame.epoch, frame.audio_ready_token);
+        if (!resetBoundaryAcked) _ackAudioReady(frame.epoch, frame.audio_ready_token);
         return;
       }
       if (type === 'error') {
+        _clearResetBoundary();
         var code = String(frame.code || '');
         _diag('server ERROR: ' + code + ' ' + String(frame.message || ''));
         if (code === 'whisperlive_connect_failed' || code === 'whisperlive_session_error') {
           s.requiresReconnect = true;
+          _setTransport('upstream_error');
+          _requestTransportRepair('upstream_error');
           var st2 = store();
           if (st2) st2.sheetError = 'Transcription service unavailable. Reconnect and retry.';
         }
@@ -716,7 +1096,11 @@
     });
     ws.addEventListener('close', function () {
       if (ws !== s.ws) return;   // intentional teardown nulls s.ws first → ignored here
+      _clearResetBoundary();
       s.wsOpen = false; s.started = false; s.ws = null;
+      s.starting = false;
+      s.startGen++;
+      _setTransport('disconnected');
       if (s.stabilityTimer) { clearTimeout(s.stabilityTimer); s.stabilityTimer = null; }
       if (_wantsConnection()) {
         _scheduleReconnect();   // unexpected drop while we still want to be live
@@ -727,7 +1111,28 @@
     ws.addEventListener('error', function () { /* surfaced by close */ });
   }
 
-  function ensureMicReady() {
+  function _currentTrackIsLive() {
+    try {
+      if (!s.stream || typeof s.stream.getTracks !== 'function') return false;
+      var tracks = s.stream.getTracks();
+      if (!tracks.length || s.trackMuted) return false;
+      return tracks.every(function (track) {
+        return track.readyState === 'live' && track.enabled !== false && track.muted !== true;
+      });
+    } catch (_e) { return false; }
+  }
+
+  var STALE_START = { staleStart: true };
+
+  function _cleanupUninstalledCapture(stream, ctx, sourceNode, workletNode) {
+    try { if (workletNode) { workletNode.port.onmessage = null; workletNode.disconnect(); } } catch (_e) {}
+    try { if (sourceNode) sourceNode.disconnect(); } catch (_e) {}
+    try { if (stream) stream.getTracks().forEach(function (track) { track.stop(); }); } catch (_e) {}
+    try { if (ctx && typeof ctx.close === 'function' && ctx.state !== 'closed') ctx.close(); } catch (_e) {}
+  }
+
+  function ensureMicReady(startGen, bind) {
+    _setCapture('acquiring');
     if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
       return Promise.reject(new Error('microphone is unavailable in this browser'));
     }
@@ -736,29 +1141,48 @@
     }
     if (s.micGranted) {
       if (s.ctx && s.ctx.state === 'suspended') return s.ctx.resume();
+      if (s.ctx && s.ctx.state === 'running' && s.lastFrameAt) _setCapture('live');
       return Promise.resolve();
     }
     // Claim a fresh pipeline generation. Any worklet created by an earlier (or a
     // racing-later) call will have a gen that no longer equals s.captureGen and is
     // refused below — so at most ONE worklet ever streams to the socket.
     var myGen = ++s.captureGen;
+    function stale() {
+      return myGen !== s.captureGen || startGen !== s.startGen || bind !== s.desiredBind;
+    }
     return navigator.mediaDevices.getUserMedia({
       audio: { channelCount: 1, sampleRate: 16000, echoCancellation: true },
       video: false,
     }).then(function (stream) {
-      var ctx = new AudioContext({ sampleRate: 16000, latencyHint: 'interactive' });
+      if (stale()) {
+        _cleanupUninstalledCapture(stream, null, null, null);
+        throw STALE_START;
+      }
+      var ctx = (s.primedContext && s.primedContext.state !== 'closed')
+        ? s.primedContext
+        : new AudioContext({ sampleRate: 16000, latencyHint: 'interactive' });
+      s.primedContext = null;
       return ctx.audioWorklet.addModule(WORKLET_URL).then(function () {
+        if (stale()) {
+          _cleanupUninstalledCapture(stream, ctx, null, null);
+          throw STALE_START;
+        }
         var sourceNode = ctx.createMediaStreamSource(stream);
         var workletNode = new AudioWorkletNode(ctx, 'voice-smoke-pcm', {
           processorOptions: { targetSampleRate: 16000, frameSamples: 1600 },
         });
         var sinkNode = ctx.createGain();
         sinkNode.gain.value = 0;
+        if (stale()) {
+          _cleanupUninstalledCapture(stream, ctx, sourceNode, workletNode);
+          throw STALE_START;
+        }
         workletNode.port.onmessage = function (event) {
           // Superseded pipeline: a teardown/restart happened after this worklet was
           // built. Detach + dismantle it the moment it next fires so it can never
           // interleave its frames with the live pipeline's, then stay silent.
-          if (myGen !== s.captureGen) {
+          if (stale()) {
             try { workletNode.port.onmessage = null; workletNode.disconnect(); sourceNode.disconnect(); } catch (_e) {}
             try { stream.getTracks().forEach(function (t) { t.stop(); }); } catch (_e) {}
             try { if (ctx && typeof ctx.close === 'function' && ctx.state !== 'closed') ctx.close(); } catch (_e) {}
@@ -767,6 +1191,8 @@
           var payload = event.data || {};
           if (payload.type !== 'audio' || !(payload.buffer instanceof ArrayBuffer)) return;
           s.lastFrameAt = _nowMs();   // worklet alive (mic + AudioContext producing)
+          if (_currentTrackIsLive() && ctx.state === 'running') _setCapture('live');
+          else _setCapture('interrupted');
           if (!s.talkActive || !s.wsOpen || !s.ws || s.ws.readyState !== WebSocket.OPEN) return;
           if (!s.started || s.requiresReconnect) return;
           try {
@@ -777,14 +1203,54 @@
         sourceNode.connect(workletNode);
         workletNode.connect(sinkNode);
         sinkNode.connect(ctx.destination);
-        // If iOS ends the track (screen-lock), the queued 'ended' event fires
-        // the instant we're foregrounded — recover immediately rather than
-        // waiting on the visibility check.
+        // Track events are the browser's authoritative source-availability
+        // signals. A temporary mute gets one second to clear after foreground;
+        // ended is permanent and repairs immediately.
         try {
           stream.getTracks().forEach(function (t) {
-            t.addEventListener('ended', function () { _diag('mic track ended'); _onWake(); });
+            t.addEventListener('mute', function () {
+              if (myGen !== s.captureGen) return;
+              s.trackMuted = true;
+              _setCapture('interrupted');
+              if (s.trackMuteTimer) clearTimeout(s.trackMuteTimer);
+              s.trackMuteTimer = setTimeout(function () {
+                s.trackMuteTimer = null;
+                if (myGen !== s.captureGen || !s.trackMuted) return;
+                if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+                _requestCaptureRepair('track_muted');
+              }, 1000);
+            });
+            t.addEventListener('unmute', function () {
+              if (myGen !== s.captureGen) return;
+              s.trackMuted = false;
+              if (s.trackMuteTimer) clearTimeout(s.trackMuteTimer);
+              s.trackMuteTimer = null;
+              _setCapture('acquiring');
+            });
+            t.addEventListener('ended', function () {
+              if (myGen !== s.captureGen) return;
+              _diag('mic track ended');
+              _setCapture('interrupted');
+              _requestCaptureRepair('track_ended');
+            });
           });
         } catch (_e) {}
+        try {
+          ctx.onstatechange = function () {
+            if (myGen !== s.captureGen) return;
+            if (ctx.state === 'running') {
+              // A running context is not current audio evidence. The next
+              // worklet frame is the only event that may restore `live`.
+              _setCapture('acquiring');
+            } else if (ctx.state === 'suspended' || ctx.state === 'interrupted') {
+              _setCapture('interrupted');
+            }
+          };
+        } catch (_e) {}
+        if (stale()) {
+          _cleanupUninstalledCapture(stream, ctx, sourceNode, workletNode);
+          throw STALE_START;
+        }
         // Dismantle whatever pipeline we're replacing so a torn-down-but-never-
         // refired worklet can't linger with a live mic track (the gen guard only
         // fires on the next frame; a dead-track worklet would otherwise leak).
@@ -796,20 +1262,41 @@
         if (s.ctx && s.ctx !== ctx && typeof s.ctx.close === 'function' && s.ctx.state !== 'closed') { try { s.ctx.close(); } catch (_e) {} }
         s.stream = stream; s.ctx = ctx; s.sourceNode = sourceNode;
         s.workletNode = workletNode; s.sinkNode = sinkNode; s.micGranted = true;
+        // Baseline the watchdog at pipeline installation so a worklet that
+        // never emits its *first* frame is detected after the same four-second
+        // bound as one that stops later. lastLocalSendAt remains zero, so this
+        // timestamp alone can never verify listening.
+        s.lastFrameAt = _nowMs();
+        _setCapture('acquiring');
       });
     });
   }
 
   function startListening(bind) {
+    bind = String(bind || '');
+    if (!bind) return;
+    if (s.starting && s.desiredBind === bind) return;
+    // A bind change is a privacy boundary. Invalidate the pending acquisition
+    // before starting the new target so a late getUserMedia/addModule result for
+    // the old session can neither install itself nor send a control frame.
+    if ((s.bind && s.bind !== bind) || (s.starting && s.desiredBind !== bind)) teardown();
     if (s.starting) return;
-    if (s.bind && s.bind !== bind) teardown();
     s.bind = bind;
+    s.desiredBind = bind;
     s.starting = true;
+    var myStartGen = ++s.startGen;
+    _armHealthVerification(false);
+    _setCapture(s.micGranted ? 'live' : 'acquiring');
+    _setTransport('connecting');
+    _setConn('reconnecting');
     if (!s.ws) attachSocket(new WebSocket(wsUrl(bind)), bind);
-    ensureMicReady().then(function () {
+    var startSocket = s.ws;
+    ensureMicReady(myStartGen, bind).then(function () {
+      if (myStartGen !== s.startGen || bind !== s.desiredBind || startSocket !== s.ws) return;
       // wait briefly for the socket to open, then start the upstream
       var waited = 0;
       (function waitOpen() {
+        if (myStartGen !== s.startGen || bind !== s.desiredBind || startSocket !== s.ws) return;
         if (s.wsOpen || waited >= 5000) {
           if (s.wsOpen) {
             if (!s.started) { if (sendControl('start')) s.started = true; }
@@ -820,25 +1307,39 @@
           } else {
             _diag('FAILED: socket never opened after 5s');
           }
-          s.starting = false;
+          if (myStartGen === s.startGen) s.starting = false;
           return;
         }
         waited += 100;
         setTimeout(waitOpen, 100);
       })();
     }).catch(function (e) {
+      if (e === STALE_START || (e && e.staleStart)) return;
+      if (myStartGen !== s.startGen || bind !== s.desiredBind) return;
       s.starting = false;
+      _setCapture('interrupted');
+      var code = e && e.name === 'NotAllowedError' ? 'mic_denied' : 'mic_gesture';
+      _requireAction(code);
       var st = store();
       if (st) st.sheetError = 'Mic error: ' + (e && e.message ? e.message : 'could not start');
     });
   }
 
   function muteListening() {
+    _clearVerificationTimer();
+    s.serverStateRepairAttempted = false;
     sendControl('mute');
     s.talkActive = false;
+    _setTransport('connecting');
   }
 
   function resumeListening() {
+    // Prior flow proves only the pre-mute interval. Bound this new attempt even
+    // if the server never emits a state or flow frame.
+    s.lastFlowAt = 0;
+    s.serverStateRepairAttempted = false;
+    _setTransport('connecting');
+    _armHealthVerification(true);
     if (!s.started) { if (sendControl('start')) s.started = true; }
     else { sendControl('unmute'); }
     s.talkActive = true;
@@ -848,23 +1349,25 @@
     if (s.reconnectTimer) { clearTimeout(s.reconnectTimer); s.reconnectTimer = null; }
     if (s.stabilityTimer) { clearTimeout(s.stabilityTimer); s.stabilityTimer = null; }
     s.reconnectAttempt = 0;
+    _clearIncidentTimer();
+    _clearVerificationTimer();
+    _clearResetBoundary();
+    s.incident = null;
+    _publishIncident();
+    _setAction(null);
     _setConn('ok');
     s.talkActive = false;
+    s.startGen++;
+    s.desiredBind = '';
     _releaseWakeLock();
     try { if (s.ws) s.ws.close(1000, 'end'); } catch (_e) {}
     s.ws = null; s.wsOpen = false; s.started = false; s.bind = ''; s.starting = false; s.finals = '';
     s.connectionId = ''; s.serverFsm = ''; s.serverUpstream = ''; s.voiceStateAt = 0;
     s.lastFlowAt = 0; s.lastLocalSendAt = 0; s.lastForwarded = 0;
     s.flowRepairAttempted = false;
-    // Invalidate the live pipeline FIRST so its worklet goes inert immediately —
-    // ctx.close() is async (and unreliable on iOS), so don't depend on it to stop
-    // frames. Detach the worklet's port + disconnect the graph synchronously.
-    s.captureGen++;
-    try { if (s.workletNode) { s.workletNode.port.onmessage = null; s.workletNode.disconnect(); } } catch (_e) {}
-    try { if (s.sourceNode) s.sourceNode.disconnect(); } catch (_e) {}
-    try { if (s.stream) s.stream.getTracks().forEach(function (t) { t.stop(); }); } catch (_e) {}
-    try { if (s.ctx && typeof s.ctx.close === 'function') s.ctx.close(); } catch (_e) {}
-    s.stream = null; s.ctx = null; s.sourceNode = null; s.workletNode = null; s.sinkNode = null; s.micGranted = false;
+    _setTransport('disconnected');
+    // Invalidate the live pipeline FIRST so its worklet goes inert immediately.
+    _disposeCapturePipeline();
   }
 
   function react() {
@@ -874,6 +1377,10 @@
     // arrive.  Do not acquire the microphone until the voice client is enabled.
     if (!st.enabled) {
       if (s.ws || s.stream) teardown();
+      return;
+    }
+    if (st.actionRequiredReason) {
+      s.talkActive = false;
       return;
     }
     var bound = st.boundSessionId;
