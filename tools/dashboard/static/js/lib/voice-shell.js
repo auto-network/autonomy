@@ -787,12 +787,21 @@
           if (action === 'mic') {
             var conn = this.voice.connState;
             if (conn === 'disconnected' || conn === 'reconnecting') {
-              // Tap the red mic to retry the connection now.
+              // One user gesture reauthorizes iOS capture + Wake Lock and
+              // replaces stale browser/server state.
               if (typeof window !== 'undefined' && window.Autonomy && window.Autonomy.voiceCapture &&
-                  typeof window.Autonomy.voiceCapture.retryReconnect === 'function') {
+                  typeof window.Autonomy.voiceCapture.enableFromGesture === 'function') {
+                window.Autonomy.voiceCapture.enableFromGesture();
+              } else if (typeof window !== 'undefined' && window.Autonomy && window.Autonomy.voiceCapture &&
+                         typeof window.Autonomy.voiceCapture.retryReconnect === 'function') {
                 window.Autonomy.voiceCapture.retryReconnect();
               }
               return true;
+            }
+            if (this.voice.micMode === 'muted' && typeof window !== 'undefined' &&
+                window.Autonomy && window.Autonomy.voiceCapture &&
+                typeof window.Autonomy.voiceCapture.activateFromGesture === 'function') {
+              window.Autonomy.voiceCapture.activateFromGesture();
             }
             if (typeof this.voice.toggleMic === 'function') return this.voice.toggleMic();  // tap = mute ⇄ unmute
             return false;

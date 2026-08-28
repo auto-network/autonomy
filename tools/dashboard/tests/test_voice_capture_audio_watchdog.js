@@ -2,7 +2,7 @@
 // visibilitychange, so the worklet stops producing frames while the UI still
 // shows "listening" — dictation stalls until a manual reconnect. The watchdog
 // detects "listening but no frame for AUDIO_STALL_MS" and restarts capture,
-// surfaced via the SAME connState:'reconnecting' (spinny ring) as a backend
+// surfaced via the SAME connState:'reconnecting' (calm red pulse) as a backend
 // reconnect. These tests drive the real watchdog tick through mocked WS/Alpine.
 
 const { describe, it } = require('node:test');
@@ -68,7 +68,7 @@ describe('#17 audio-stall watchdog', () => {
     const before = h.sockets.length;
     makeListening(h, 9000);            // 9s since last frame → stalled
     h.tick();
-    assert.equal(h.voice.connState, 'reconnecting', 'shows the spinny recon state');
+    assert.equal(h.voice.connState, 'reconnecting', 'shows the recovery state');
     assert.ok(h.sockets.length > before, 'a fresh capture/socket was started');
   });
 
@@ -78,7 +78,7 @@ describe('#17 audio-stall watchdog', () => {
     h.state.stream = { getTracks: () => [{ readyState: 'ended' }] };
     const before = h.sockets.length;
     h.tick();
-    assert.equal(h.voice.connState, 'reconnecting', 'recon ring on a dead track');
+    assert.equal(h.voice.connState, 'reconnecting', 'recovery state on a dead track');
     assert.ok(h.sockets.length > before, 'restarted despite fresh frames');
   });
 
@@ -108,5 +108,42 @@ describe('#17 audio-stall watchdog', () => {
     const before = h.sockets.length;
     h.tick();
     assert.equal(h.sockets.length, before, 'leaves an in-progress reconnect alone');
+  });
+
+  it('replaces only the voice socket when acknowledged server flow stalls', () => {
+    const h = makeHarness();
+    makeListening(h, 200);
+    h.state.connectionId = 'connection-a';
+    h.state.serverFsm = 'listening';
+    h.state.voiceStateAt = Date.now() - 5000;
+    h.state.lastFlowAt = Date.now() - 5000;
+    h.state.lastLocalSendAt = Date.now() - 100;
+    const stream = h.state.stream;
+    const before = h.sockets.length;
+
+    h.tick();
+
+    assert.equal(h.voice.connState, 'reconnecting');
+    assert.equal(h.state.stream, stream, 'healthy capture pipeline is preserved');
+    assert.ok(h.sockets.length > before, 'transport gets one fresh socket');
+    assert.equal(h.state.flowRepairAttempted, true);
+  });
+
+  it('requires a tap when the one transport repair also stops flowing', () => {
+    const h = makeHarness();
+    makeListening(h, 200);
+    h.state.connectionId = 'connection-b';
+    h.state.serverFsm = 'listening';
+    h.state.voiceStateAt = Date.now() - 5000;
+    h.state.lastLocalSendAt = Date.now() - 100;
+    h.state.flowRepairAttempted = true;
+    const before = h.sockets.length;
+
+    h.tick();
+
+    assert.equal(h.voice.connState, 'disconnected');
+    assert.equal(h.state.talkActive, false);
+    assert.match(h.voice.sheetError, /enabled again/i);
+    assert.equal(h.sockets.length, before, 'does not loop through another repair');
   });
 });

@@ -50,6 +50,7 @@ function loadVoiceUi(initialVoiceStore) {
   return {
     ui: sandbox.window.Autonomy.voice.ui,
     voice: stores.voice,
+    window: sandbox.window,
   };
 }
 
@@ -96,11 +97,16 @@ describe('voice dot UI helpers', () => {
 
   it('binds on idle click and marks discoverability seen', () => {
     const h = loadVoiceUi({ enabled: true, discoverabilitySeen: false });
+    let activations = 0;
+    h.window.Autonomy.voiceCapture = {
+      activateFromGesture() { activations++; return true; },
+    };
     const event = { currentTarget: {} };
     assert.equal(h.ui.onClick(event, 'session-a', { isLive: true }), true);
     assert.equal(h.voice.boundSessionId, 'session-a');
     assert.equal(h.voice.micMode, 'listening');
     assert.equal(h.voice.discoverabilitySeen, true);
+    assert.equal(activations, 1);
   });
 
   it('toggles mute on active click', () => {
@@ -108,6 +114,17 @@ describe('voice dot UI helpers', () => {
     const event = { currentTarget: {} };
     assert.equal(h.ui.onClick(event, 'session-a', { isLive: true }), true);
     assert.equal(h.voice.micMode, 'muted');
+  });
+
+  it('unmute activates capture and Wake Lock inside the dot click gesture', () => {
+    const h = loadVoiceUi({ enabled: true, boundSessionId: 'session-a', micMode: 'muted' });
+    let activations = 0;
+    h.window.Autonomy.voiceCapture = {
+      activateFromGesture() { activations++; return true; },
+    };
+    assert.equal(h.ui.onClick({ currentTarget: {} }, 'session-a', { isLive: true }), true);
+    assert.equal(activations, 1);
+    assert.equal(h.voice.micMode, 'listening');
   });
 
   it('treats the bound session dot as status-only while the compose sheet is open', () => {

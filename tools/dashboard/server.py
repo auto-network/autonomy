@@ -10151,6 +10151,9 @@ def _open_voice_audio_capture(bind: str):
         return None
 
 
+_voice_flow_monotonic = time.monotonic
+
+
 async def ws_voice(websocket: WebSocket):
     """WebSocket endpoint for the voice pipe canary (S3).
 
@@ -10251,6 +10254,7 @@ async def ws_voice(websocket: WebSocket):
         )
 
     session = voice_mod.VoiceSession(tmux_name=bind)
+    connection_id = uuid.uuid4().hex
     end_was_explicit = False
     # WhisperLive client is created on the first 'start' frame
     # (sync connect + SERVER_READY wait), then reused for the
@@ -10266,6 +10270,29 @@ async def ws_voice(websocket: WebSocket):
     # draining from the pre-reset WhisperLive buffer. Stays 0 (harmless) when the
     # voice.reset_suppression flag is off.
     voice_epoch = 0
+    audio_received = 0
+    audio_forwarded = 0
+    last_audio_flow_at: float | None = None
+
+    def _upstream_state() -> str:
+        """Project the existing WhisperLive client into the wire contract."""
+        if whisperlive_unavailable:
+            return "unavailable"
+        if whisperlive_client is not None:
+            if whisperlive_client.is_ready():
+                return "ready"
+            if whisperlive_client.is_unavailable():
+                return "unavailable"
+        return "not_ready"
+
+    def _voice_state_frame() -> dict:
+        return {
+            "type": "voice_state",
+            "connection_id": connection_id,
+            "fsm_state": session.state,
+            "upstream": _upstream_state(),
+            "epoch": voice_epoch,
+        }
 
     async def _on_partial(text: str) -> None:
         # Partials are operator-visible feedback but not persisted
@@ -10457,6 +10484,9 @@ async def ws_voice(websocket: WebSocket):
                 logger.info("ws_voice DIAG: ctrl=%s → state=%s bind=%s", frame_type, session.state, bind)
                 for resp in responses:
                     await websocket.send_json(resp)
+                control_accepted = not any(
+                    resp.get("type") == "error" for resp in responses
+                )
                 # 'start' from IDLE triggered the LISTENING
                 # transition — that's when we connect WhisperLive
                 # (sync wait for SERVER_READY so subsequent audio
@@ -10464,8 +10494,15 @@ async def ws_voice(websocket: WebSocket):
                 # typed error frame from inside the helper; the WS
                 # stays open so the operator can still mute / end
                 # the session cleanly.
-                if frame_type == "start" and session.state == voice_mod.LISTENING:
+                if (
+                    frame_type == "start"
+                    and control_accepted
+                    and session.state == voice_mod.LISTENING
+                ):
                     await _ensure_whisperlive_connected()
+                    await websocket.send_json(_voice_state_frame())
+                elif frame_type in ("mute", "unmute") and control_accepted:
+                    await websocket.send_json(_voice_state_frame())
                 # Real commit path (S3-5): when the state machine
                 # transitioned into COMMITTING, read the accumulated
                 # buffer and dispatch via tmux_send.
@@ -10543,6 +10580,7 @@ async def ws_voice(websocket: WebSocket):
             elif "bytes" in msg and msg["bytes"] is not None:
                 should_forward = session.handle_audio(msg["bytes"])
                 _audio_frames += 1
+                audio_received += 1
                 # Debug: capture the RAW browser PCM (real mic, ambient room tone)
                 # to a WAV when enabled at WS start. Never consult Settings from
                 # the per-frame path.
@@ -10565,6 +10603,24 @@ async def ws_voice(websocket: WebSocket):
                     and whisperlive_client.is_ready()
                 ):
                     await whisperlive_client.send_audio(msg["bytes"])
+                    # send_audio owns its failure path and marks the wrapper
+                    # unavailable before returning. Count/ack only a frame that
+                    # left through a still-ready upstream client.
+                    if whisperlive_client.is_ready():
+                        audio_forwarded += 1
+                        now = _voice_flow_monotonic()
+                        if (
+                            last_audio_flow_at is None
+                            or now - last_audio_flow_at >= 1.0
+                        ):
+                            await websocket.send_json({
+                                "type": "audio_flow",
+                                "connection_id": connection_id,
+                                "received": audio_received,
+                                "forwarded": audio_forwarded,
+                                "ts_ms": int(time.time() * 1000),
+                            })
+                            last_audio_flow_at = now
                 # else: state machine said no (muted / committing /
                 # ended) or wrapper not ready / unavailable.
                 # Silently drop — spec says audio outside LISTENING
