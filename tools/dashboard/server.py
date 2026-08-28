@@ -7960,7 +7960,9 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
                 if build is None or build.action != "built":
                     raise RuntimeError(
                         f"workspace image {proj.image} could not be built: "
-                        f"{build.detail if build else 'no dockerfile resolved'}")
+                        f"{build.detail if build else 'no dockerfile resolved'}"
+                        f" (full build status: autonomy.workspace.image-build"
+                        f" row {proj.graph_project}:{proj.id}, machine store)")
 
         phase = "launching"
         writer.set_state(tmux_name, "launching")
@@ -8248,7 +8250,10 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
                         raise RuntimeError(
                             f"workspace image {proj.image} could not be "
                             f"built: "
-                            f"{build.detail if build else 'no dockerfile resolved'}")
+                            f"{build.detail if build else 'no dockerfile resolved'}"
+                            f" (full build status: autonomy.workspace."
+                            f"image-build row {proj.graph_project}:{proj.id},"
+                            f" machine store)")
         else:
             proj = None
             mounts = None
