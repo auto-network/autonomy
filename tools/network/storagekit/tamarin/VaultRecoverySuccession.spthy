@@ -1,0 +1,141 @@
+/*
+  VaultRecoverySuccession — recovery-code succession over the witness
+  chain (the regenerate-with-lost-code flow). Bead auto-loov7. Tracker
+  8277c76c. Crib graph://1e005d5c-c11 §9 recovery-code FINAL STATE:
+  "a root-signed declaration binding the NEW recovery_pub enters the
+  witnessed head-set at time t_D; every enrolled device raises a
+  blocking alert; a cancellation signed by the old code, or a root veto,
+  at any chain position before completion kills it; completion is a
+  witness attestation at t >= t_D + W (default 7d) over a chain
+  containing the declaration and no cancellation. The witness IS the
+  trustless clock ... entry time never decreases (chain rule)."
+
+  This is the FULLY UNBUILT (🪦) flow — design verification before code.
+  It ALSO absorbs the recovery_pub-succession swap-resistance deferred
+  from model 4: a completed succession is exactly a valid recovery-key
+  swap, and here it requires the window + no-cancellation, so a thief
+  cannot silently swap the recovery key.
+
+  MONOTONIC CLOCK: Tamarin's trace order (#i < #j) is the witness chain's
+  never-decreasing entry time; a WitnessTick action is one chain
+  position, and the window W is modeled as "at least two ticks strictly
+  between the declaration and the completion" (W=2 for the finite check;
+  the property is qualitative, not the literal 7 days).
+
+  ACCOUNTABILITY SCOPE (honesty): this model proves the WINDOW SAFETY —
+  fast-forward resistance, cancellation-wins, root-veto-wins. The
+  split-view-as-self-contained-fraud-proof property (a dishonest witness
+  showing two conflicting chains is caught) is a genuine accountability
+  property (Künnemann et al.) and is left as the next increment; here
+  the witness chain is modeled as an honest monotonic log.
+
+  CALIBRATION: VaultRecoverySuccessionNoCancel.spthy drops the
+  no-cancellation precondition on completion. cancellation_blocks_
+  completion falsifies — the true owner's cancel no longer stops a
+  malicious regeneration, the core failure this window defends against.
+*/
+
+theory VaultRecoverySuccession
+begin
+
+builtins: signing
+
+restriction Eq:
+  "All x y #i. Equal(x, y)@i ==> x = y"
+
+/* Enrollment: persona P with an OLD recovery key (whose code may be
+   lost) and a root. The old recovery public key and root public key are
+   published; the secrets are held honestly. */
+rule Enroll:
+  [ Fr(~P), Fr(~oldrk), Fr(~root) ]
+  --[ Enrolled(~P), OldRecoveryPub(~P, pk(~oldrk)), RootPub(~P, pk(~root)) ]->
+  [ !Persona(~P)
+  , !OldRecovery(~P, ~oldrk)
+  , !RootKey(~P, ~root)
+  , Out(pk(~oldrk)), Out(pk(~root))
+  ]
+
+/* The witness chain advances one position. Trace order is the clock. */
+rule WitnessTick:
+  [ ] --[ Tick() ]-> [ ]
+
+/* DECLARE: a root-signed declaration binding a NEW recovery_pub enters
+   the witnessed head-set (at "time" t_D = this trace position). */
+rule Declare_Succession:
+  [ !RootKey(P, ~root), In(new_rk_pub) ]
+  --[ Declared(P, new_rk_pub) ]->
+  [ !Declaration(P, new_rk_pub) ]
+
+/* CANCEL: the OLD recovery code signs a cancellation of the pending
+   declaration (only the old-code holder can). */
+rule Cancel_Succession:
+  [ !OldRecovery(P, ~oldrk), !Declaration(P, new_rk_pub) ]
+  --[ Cancelled(P, new_rk_pub) ]->
+  [ ]
+
+/* ROOT VETO: the root vetoes the pending declaration. */
+rule Root_Veto:
+  [ !RootKey(P, ~root), !Declaration(P, new_rk_pub) ]
+  --[ Vetoed(P, new_rk_pub) ]->
+  [ ]
+
+/* COMPLETE: a witness attestation finalises the succession, but ONLY
+   when (a) a declaration exists, (b) at least W=2 witness ticks lie
+   strictly between the declaration and now (the window elapsed —
+   fast-forward resistance), and (c) no cancellation and no veto of THIS
+   declaration occurred before completion. */
+rule Complete_Succession:
+  [ !Declaration(P, new_rk_pub) ]
+  --[ Completed(P, new_rk_pub)
+    , WindowOK(P, new_rk_pub)
+    , NoCancel(P, new_rk_pub)
+    , NoVeto(P, new_rk_pub) ]->
+  [ !EffectiveRecoveryPub(P, new_rk_pub) ]
+
+/* window: at least two ticks strictly between declaration and completion */
+restriction window_elapsed:
+  "All P nrk #c. WindowOK(P, nrk)@c ==>
+     Ex #d #t1 #t2. Declared(P, nrk)@d
+       & Tick()@t1 & Tick()@t2
+       & d < t1 & t1 < t2 & t2 < c"
+
+/* no cancellation of this declaration before completion */
+restriction no_cancel_before_complete:
+  "All P nrk #c. NoCancel(P, nrk)@c ==> not(Ex #x. Cancelled(P, nrk)@x & #x < #c)"
+
+/* no root veto of this declaration before completion */
+restriction no_veto_before_complete:
+  "All P nrk #c. NoVeto(P, nrk)@c ==> not(Ex #x. Vetoed(P, nrk)@x & #x < #c)"
+
+/* ═══ Lemmas ═══ */
+
+/* Executability: a succession completes when the window elapses and no
+   one objects. */
+lemma executable:
+  exists-trace
+  "Ex P nrk #c. Completed(P, nrk)@c"
+
+/* MAIN A — fast-forward resistance: every completion is preceded by its
+   declaration AND a full window of witness ticks. The window cannot be
+   skipped. */
+lemma window_cannot_be_fast_forwarded:
+  "All P nrk #c. Completed(P, nrk)@c ==>
+     Ex #d #t1 #t2. Declared(P, nrk)@d
+       & Tick()@t1 & Tick()@t2 & d < t1 & t1 < t2 & t2 < c"
+
+/* MAIN B — cancellation wins: no succession completes if the old code
+   cancelled its declaration first. The true owner (old-code holder)
+   always stops a malicious regeneration inside the window. */
+lemma cancellation_blocks_completion:
+  "not(Ex P nrk #x #c. Cancelled(P, nrk)@x & Completed(P, nrk)@c & #x < #c)"
+
+/* MAIN C — root veto wins: same for a root veto. */
+lemma veto_blocks_completion:
+  "not(Ex P nrk #x #c. Vetoed(P, nrk)@x & Completed(P, nrk)@c & #x < #c)"
+
+/* MAIN D — announcement cannot be hidden: a completed succession always
+   has a declaration that entered the chain (was witnessed) before it. */
+lemma completion_implies_witnessed_declaration:
+  "All P nrk #c. Completed(P, nrk)@c ==> Ex #d. Declared(P, nrk)@d & #d < #c"
+
+end
