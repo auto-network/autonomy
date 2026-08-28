@@ -1,0 +1,124 @@
+/*
+  VaultRekeyF001 — CALIBRATION theory. Must FAIL, and fail correctly.
+
+  This is VaultRekeyMarker.spthy with exactly one design element
+  deleted: the FrontierMarker. The re-key mints C_new citing the SAME
+  frontier C_old cites — the pre-F-001 design. select_current_credential
+  then sees two candidates at equal (concurrent) frontiers, drops
+  neither, and falls to the max(kem_key_id) tie-break — "a hash carrying
+  no recency" (crib §1d), modeled here as an adversarial choice, which
+  any fixed hash order is a special case of.
+
+  EXPECTED RESULTS (enforced by run_tamarin.py):
+    exclusion_forward             FALSIFIED  <- the prover rediscovers
+      F-001: the writer's grant lands on C_old; the removed machine
+      opens it with the kem_priv it retained; G_new is compromised and
+      the re-key achieved nothing.
+    executable_end_to_end         verified   (flow still runs)
+    root_secret                   verified   (the root never leaks even
+      in the broken design — F-001 is an ordering bug, not a key leak)
+    old_generation_stays_readable verified   (unchanged non-claim)
+
+  If exclusion_forward VERIFIES here, the green proof in
+  VaultRekeyMarker.spthy is worthless — the model lost the very
+  behaviour the marker exists to kill. Treat that as a broken harness,
+  never as good news.
+*/
+
+theory VaultRekeyF001
+begin
+
+builtins: asymmetric-encryption, symmetric-encryption
+
+functions: kemsk/2, kdf/1
+
+rule Setup:
+  let sk1 = kemsk(~root, '1')
+      pk1 = pk(sk1)
+  in
+  [ Fr(~root), Fr(~f0), Fr(~g0) ]
+  --[ Genesis(~root)
+    , MintedCred('c1', ~f0)
+    , NewGen(~g0, 'old')
+    , OnceSetup() ]->
+  [ !Root(~root)
+  , !Cred('c1', pk1, ~f0)
+  , !FrontierHead(~f0)
+  , !OldGen(~g0)
+  , RemovedMachineState(sk1, ~g0)
+  , Out(pk1)
+  , Out(aenc(~g0, pk1))
+  ]
+
+restriction once_setup:
+  "All #i #j. OnceSetup()@i & OnceSetup()@j ==> #i = #j"
+
+rule RevealRemovedMachine:
+  [ RemovedMachineState(sk, g) ]
+  --[ Removed() ]->
+  [ Out(sk), Out(g) ]
+
+/* THE DELETED DESIGN ELEMENT: no marker. C_new cites f_old — the same
+   frontier C_old cites. Nothing strictly descends anything. */
+rule Rekey_NoMarker:
+  let sk2 = kemsk(~root, '2')
+      pk2 = pk(sk2)
+  in
+  [ !Root(~root), !FrontierHead(f_old) ]
+  --[ MintedCred('c2', f_old)
+    , RekeyDone()
+    , OnceRekey() ]->
+  [ !Cred('c2', pk2, f_old)
+  , !HonestSk('c2', sk2)
+  , Out(pk2)
+  ]
+
+restriction once_rekey:
+  "All #i #j. OnceRekey()@i & OnceRekey()@j ==> #i = #j"
+
+rule Advance_And_Grant:
+  [ !Cred(cid, pkC, frC), !OldGen(gold), Fr(~gnew) ]
+  --[ NewGen(~gnew, 'new')
+    , GrantTo(cid, frC)
+    , OnceGrant() ]->
+  [ Out(aenc(~gnew, pkC))
+  , Out(senc(gold, kdf(~gnew)))
+  ]
+
+restriction once_grant:
+  "All #i #j. OnceGrant()@i & OnceGrant()@j ==> #i = #j"
+
+/* Identical drop-step restriction as the green theory — vacuous here,
+   because no MarkerWritten action ever occurs. That vacuity IS F-001. */
+restriction selector_drops_descended:
+  "All cid fr #i. GrantTo(cid, fr)@i ==>
+     not(Ex f2 #j. MarkerWritten(f2, fr)@j & #j < #i)"
+
+rule Honest_Open:
+  [ !HonestSk(cid, sk)
+  , In(aenc(g, pk(sk)))
+  , In(senc(gold, kdf(g)))
+  ]
+  --[ HonestRead(g, gold) ]->
+  []
+
+lemma executable_end_to_end:
+  exists-trace
+  "Ex g gold #a #b #c #d.
+     Removed()@a & RekeyDone()@b & NewGen(g, 'new')@c & HonestRead(g, gold)@d
+     & #a < #b & #b < #c"
+
+lemma exclusion_forward:
+  "not(Ex g cid fr #r #j #k.
+        RekeyDone()@r
+      & NewGen(g, 'new')@j & GrantTo(cid, fr)@j & #r < #j
+      & K(g)@k)"
+
+lemma root_secret:
+  "not(Ex r #i #k. Genesis(r)@i & K(r)@k)"
+
+lemma old_generation_stays_readable:
+  exists-trace
+  "Ex g #i #k. NewGen(g, 'old')@i & K(g)@k"
+
+end
