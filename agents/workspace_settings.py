@@ -437,7 +437,6 @@ class WorkspaceV1:
     model: str | None = None
     repos: tuple[RepoMount, ...] = ()
     working_dir: str | None = None
-    startup: str | None = None
     needs_nested_docker: bool = False
     session_runtime: str | None = None
     network_host: bool = True
@@ -576,7 +575,6 @@ def _workspace_from_setting(
         model=model,
         repos=repos,
         working_dir=(setting_payload.get("working_dir") or None),
-        startup=(setting_payload.get("startup") or None),
         needs_nested_docker=needs_nested_docker,
         session_runtime=session_runtime,
         # Default mirrors the schema (False). Every stored row now states
@@ -662,25 +660,24 @@ def resolve_provision(workspace_id: str, *, org: str | None) -> dict:
     return merged
 
 
-def materialize_startup_script(
-    proj, run_dir: Path, *, repo_root: Path,
-) -> Path | None:
+def materialize_startup_script(proj, run_dir: Path) -> Path | None:
     """The host path to mount read-only at ``/startup.sh``, or None.
 
     A provision row's ``startup_script`` is written to the session's run
-    dir and wins; otherwise the legacy repo-relative ``startup`` path
-    field resolves as before (transition fallback — removed with the
-    field once every workspace has a provision row).
+    dir; no row, no startup script. (The legacy repo-relative ``startup``
+    path field is dead: every workspace that had one was ported to
+    ``autonomy.workspace.provision`` on 2026-08-28 and proven with a real
+    launch.)
     """
     content = resolve_provision(
         proj.id, org=proj.graph_project,
     ).get("startup_script")
-    if content:
-        path = Path(run_dir) / "startup.sh"
-        path.write_text(content)
-        path.chmod(0o755)
-        return path
-    return (repo_root / proj.startup) if proj.startup else None
+    if not content:
+        return None
+    path = Path(run_dir) / "startup.sh"
+    path.write_text(content)
+    path.chmod(0o755)
+    return path
 
 
 def _artifacts_for_workspace(

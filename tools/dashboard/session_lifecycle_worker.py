@@ -21,6 +21,7 @@ LifecycleAction = Literal["start", "stop", "retry", "restart"]
 LifecycleState = Literal[
     "requested",
     "preparing",
+    "building_image",
     "launching",
     "setup",
     "waiting_ready",
@@ -77,6 +78,11 @@ STEP_TIMEOUTS_S: dict[str, float] = {
     # serialize on one worker thread and may sit behind a slow setup.
     "requesting": 900.0,
     "preparing_workspace": 120.0,
+    # A docker build of the workspace's Settings-sourced image, entered
+    # ONLY when the resolved dockerfile is stale or the image is absent —
+    # the common path never visits it. Budget = the builder's own 1800s
+    # docker timeout plus margin, so the builder's failure fires first.
+    "building_image": 1860.0,
     "launching_container": 60.0,
     "setup_running": 600.0,
     "harness_starting": 60.0,
@@ -99,6 +105,7 @@ REAPER_BELT_MARGIN_S = 60.0
 _SESSION_STATE_FOR_LIFECYCLE: dict[str, tuple[str, str | None]] = {
     "requested": ("LAUNCHING", "requesting"),
     "preparing": ("LAUNCHING", "preparing_workspace"),
+    "building_image": ("LAUNCHING", "building_image"),
     "launching": ("LAUNCHING", "launching_container"),
     "setup": ("LAUNCHING", "setup_running"),
     "waiting_ready": ("LAUNCHING", "harness_starting"),

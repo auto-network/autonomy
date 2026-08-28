@@ -205,7 +205,6 @@ class WorkspaceV1(SettingSchema):
         "harness": str,
         "model": str,
         "working_dir": str,
-        "startup": str,
         "dind": bool,
         "needs_nested_docker": bool,
         "session_runtime": str,
@@ -249,10 +248,6 @@ class WorkspaceV1(SettingSchema):
         "working_dir": {
             "type": "string",
             "description": "Working directory inside the container at agent start",
-        },
-        "startup": {
-            "type": "string",
-            "description": "Shell command(s) to run before launching the harness",
         },
         "dind": {
             "type": "boolean",

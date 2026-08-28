@@ -16,11 +16,24 @@ timeout. The worker is the only thing that writes state.
 
 ## The states (FSM)
 ```
-requested → preparing → launching → setup → waiting_ready → injecting → running
+requested → preparing → [building_image] → launching → setup → waiting_ready → injecting → running
    (any step times out / errors) → failed(phase, reason)
 running → stopping → cleaning → dead
 retry = cleanup pass, then re-enqueue
 ```
+
+`building_image` (added 2026-08-28, beads auto-31uis/auto-8dehx) is
+conditional: entered only when the workspace launches its own
+Settings-built `<org>/<workspace-id>` image AND the resolved
+`autonomy.workspace.provision` dockerfile is stale (hash mismatch vs the
+machine-homed image-build status row) or the image is absent on this
+machine. The common path skips it entirely — the background image-build
+worker builds within seconds of a provision write, so this stage covers
+the race window and the fresh-machine case. Its budget (1860s) is the
+builder's own 1800s docker timeout plus margin; a failed build fails the
+launch loudly (`failed("building_image", reason)`) rather than launching
+a stale image silently. UI chip: "Rebuilding image". The resume path
+(`_run_session_resume_start`, kind == "project") runs the same gate.
 The worker still sets the existing granular `startup_state` values for the UI chip as
 it passes through `waiting_ready` (harness_starting → composer_ready).
 

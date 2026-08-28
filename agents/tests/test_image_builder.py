@@ -20,9 +20,10 @@ SHA_OF = lambda text: __import__("hashlib").sha256(text.encode()).hexdigest()
 class FakeDocker:
     """Records docker invocations; scripted to fail builds on demand."""
 
-    def __init__(self, fail_build: bool = False):
+    def __init__(self, fail_build: bool = False, image_missing: bool = False):
         self.calls: list[list[str]] = []
         self.fail_build = fail_build
+        self.image_missing = image_missing
 
     def __call__(self, cmd, capture_output, text, timeout):
         self.calls.append(cmd)
@@ -30,6 +31,9 @@ class FakeDocker:
             return SimpleNamespace(returncode=1, stdout="",
                                    stderr="pull access denied")
         if cmd[1] == "image":
+            if self.image_missing:
+                return SimpleNamespace(returncode=1, stdout="",
+                                       stderr="No such image")
             return SimpleNamespace(returncode=0, stdout="sha256:feed\n",
                                    stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -155,6 +159,48 @@ def test_built_result_reports_workspace_image_drift(stores, tmp_path):
         "anchore", "ng", repo_root=tmp_path, runner=FakeDocker())
     assert "DRIFT" in result.detail
     assert "autonomy-session-dind" in result.detail
+
+
+def test_staleness_none_without_dockerfile(stores):
+    stores.provision[("autonomy", "dev")] = {"startup_script": "echo hi"}
+    assert image_builder.image_staleness(
+        "autonomy", "dev", runner=FakeDocker()) is None
+
+
+def test_staleness_current_image_is_none(stores):
+    stores.provision[("anchore", "ng")] = {"dockerfile": "FROM a"}
+    stores.status["anchore:ng"] = {
+        "content_hash": SHA_OF("FROM a"), "digest": "sha256:feed",
+        "built_at": "x",
+    }
+    assert image_builder.image_staleness(
+        "anchore", "ng", runner=FakeDocker()) is None
+
+
+def test_staleness_reports_changed_dockerfile(stores):
+    stores.provision[("anchore", "ng")] = {"dockerfile": "FROM b"}
+    stores.status["anchore:ng"] = {
+        "content_hash": SHA_OF("FROM a"), "digest": "sha256:feed",
+        "built_at": "x",
+    }
+    assert "changed" in image_builder.image_staleness(
+        "anchore", "ng", runner=FakeDocker())
+
+
+def test_staleness_reports_never_built(stores):
+    stores.provision[("anchore", "ng")] = {"dockerfile": "FROM a"}
+    assert "changed" in image_builder.image_staleness(
+        "anchore", "ng", runner=FakeDocker())
+
+
+def test_staleness_reports_absent_image(stores):
+    stores.provision[("anchore", "ng")] = {"dockerfile": "FROM a"}
+    stores.status["anchore:ng"] = {
+        "content_hash": SHA_OF("FROM a"), "digest": "sha256:feed",
+        "built_at": "x",
+    }
+    assert "absent" in image_builder.image_staleness(
+        "anchore", "ng", runner=FakeDocker(image_missing=True))
 
 
 def test_sweep_covers_every_org_row(stores, tmp_path, monkeypatch):
