@@ -1,0 +1,201 @@
+/*
+  VaultFleetDistNoGuard — CALIBRATION theory. Must FAIL, and fail correctly.
+
+  VaultFleetDist.spthy with exactly one design element deleted: the
+  "kick stops FUTURE distribution" guard (crib §1d: fleet∖removed).
+  Distribution now reaches every enrolled machine, kicked included.
+
+  EXPECTED (enforced by run_tamarin.py):
+    kicked_machine_excluded                  FALSIFIED — the kicked
+      machine receives aenc(kem_priv(C_new), its machine_pub) and opens
+      every post-re-key grant: the fleet re-key achieves nothing.
+    machine_key_yields_nothing_undistributed verified — still true by
+      its own conditional (the leak routes THROUGH a distribution).
+    everything else                          verified as in green.
+
+  If kicked_machine_excluded VERIFIES here, the model lost the
+  behaviour the guard defends — broken harness, never good news.
+*/
+
+theory VaultFleetDistNoGuard
+begin
+
+builtins: asymmetric-encryption, symmetric-encryption
+
+functions: kemsk/2, machkey/2, kdf/1
+
+/* ── Setup: root, genesis frontier, C1, G_old granted to C1 ───────── */
+rule Setup:
+  let sk1 = kemsk(~root, '1')
+      pk1 = pk(sk1)
+  in
+  [ Fr(~root), Fr(~f0), Fr(~g0) ]
+  --[ Genesis(~root)
+    , NewGen(~g0, 'old')
+    , OnceSetup() ]->
+  [ !Root(~root)
+  , !Cred('c1', pk1, ~f0)
+  , !FrontierHead(~f0)
+  , !OldGen(~g0)
+  , Out(pk1)
+  , Out(aenc(~g0, pk1))
+  ]
+
+restriction once_setup:
+  "All #i #j. OnceSetup()@i & OnceSetup()@j ==> #i = #j"
+
+/* ── Roster: enroll and kick (root-signed acts; honest here) ──────── */
+rule Enroll:
+  let msk = machkey(~root, ~mid)
+      pkM = pk(msk)
+  in
+  [ Fr(~mid), !Root(~root) ]
+  --[ Enrolled(~mid) ]->
+  [ !MachineSt(~mid, msk)
+  , !EnrolledM(~mid, pkM)
+  , Out(~mid)
+  , Out(pkM)
+  ]
+
+rule Kick:
+  [ !EnrolledM(mid, pkM) ]
+  --[ Kicked(mid), OnceKick() ]->
+  []
+
+restriction once_kick:
+  "All #i #j. OnceKick()@i & OnceKick()@j ==> #i = #j"
+
+/* ── §1d re-key with the frontier marker (as in VaultRekeyMarker) ── */
+rule Rekey_Disenrollment:
+  let sk2 = kemsk(~root, '2')
+      pk2 = pk(sk2)
+  in
+  [ !Root(~root), !FrontierHead(f_old), Fr(~f1) ]
+  --[ MarkerWritten(~f1, f_old)
+    , RekeyDone()
+    , OnceRekey() ]->
+  [ !Cred('c2', pk2, ~f1)
+  , !FrontierHead(~f1)
+  , Out(pk2)
+  ]
+
+restriction once_rekey:
+  "All #i #j. OnceRekey()@i & OnceRekey()@j ==> #i = #j"
+
+/* ── Fleet distribution: seal kem_priv(C_new) to an enrolled machine.
+   THE GUARD IS THE DESIGN: never to a kicked machine. ─────────────── */
+rule Distribute:
+  [ !Root(~root), !Cred('c2', pk2, fr), !EnrolledM(mid, pkM) ]
+  --[ DistributeTo(mid) ]->
+  [ Out(aenc(kemsk(~root, '2'), pkM)) ]
+
+/* THE DELETED DESIGN ELEMENT: no kick guard. Distribution proceeds to
+   every enrolled machine, kicked or not. */
+
+/* ── The writer: G_new under the post-re-key state, granted to the
+   selector's current credential (drop-step restriction as pilot). ── */
+rule Advance_And_Grant:
+  [ !Cred(cid, pkC, frC), !OldGen(gold), Fr(~gnew) ]
+  --[ NewGen(~gnew, 'new')
+    , GrantTo(cid, frC)
+    , OnceGrant() ]->
+  [ Out(aenc(~gnew, pkC))
+  , Out(senc(gold, kdf(~gnew)))
+  ]
+
+restriction once_grant:
+  "All #i #j. OnceGrant()@i & OnceGrant()@j ==> #i = #j"
+
+restriction selector_drops_descended:
+  "All cid fr #i. GrantTo(cid, fr)@i ==>
+     not(Ex f2 #j. MarkerWritten(f2, fr)@j & #j < #i)"
+
+/* ── A machine warms up from a distribution and reads a grant ─────── */
+rule Machine_Open:
+  [ !MachineSt(mid, msk)
+  , In(aenc(sk, pk(msk)))
+  , In(aenc(g, pk(sk)))
+  ]
+  --[ MachineRead(mid, g) ]->
+  []
+
+/* ── Reveal rules — one per §9 key class under test ───────────────── */
+
+/* disk/warm theft of ONE machine's operating key */
+rule Reveal_MachineKey:
+  [ !MachineSt(mid, msk) ]
+  --[ MKeyRevealed(mid) ]->
+  [ Out(msk) ]
+
+/* the kicked machine's full §1d snapshot: it also held the OLD persona
+   KEM secret (identical on every machine, §14) and G_old */
+rule Reveal_OldPersonaState:
+  [ !Root(~root), !OldGen(g0) ]
+  --[ OldSkRevealed() ]->
+  [ Out(kemsk(~root, '1')), Out(g0) ]
+
+/* the persona KEM contrast case — CURRENT secret (snapshot TOTAL) */
+rule Reveal_CurrentPersonaSk:
+  [ !Root(~root) ]
+  --[ CurSkRevealed() ]->
+  [ Out(kemsk(~root, '2')) ]
+
+/* ═══ Lemmas ═══════════════════════════════════════════════════════ */
+
+/* Sanity: kick one machine, re-key, distribute to a survivor, grant —
+   and the surviving machine reads G_new via its distribution. */
+lemma executable_end_to_end:
+  exists-trace
+  "Ex mid1 mid2 g #e1 #e2 #k #r #d #j #m.
+     Enrolled(mid1)@e1 & Enrolled(mid2)@e2 & not(mid1 = mid2)
+   & Kicked(mid1)@k & RekeyDone()@r & #k < #r
+   & DistributeTo(mid2)@d
+   & NewGen(g, 'new')@j & #r < #j
+   & MachineRead(mid2, g)@m"
+
+/* §9 SNAPSHOT ZERO, mechanized: a stolen machine key plus the full
+   visible record set yields a generation secret ONLY through a
+   distribution addressed to that same machine. No distribution, no
+   plaintext — the key "decrypts no existing record" on its own. */
+lemma machine_key_yields_nothing_undistributed:
+  "not(Ex g mid tag #s #r #k.
+        NewGen(g, tag)@s & MKeyRevealed(mid)@r & K(g)@k
+      & not(Ex #p. OldSkRevealed()@p)
+      & not(Ex #q. CurSkRevealed()@q)
+      & not(Ex mid2 #d #r2. DistributeTo(mid2)@d & MKeyRevealed(mid2)@r2))"
+
+/* THE FLEET EXCLUSION THEOREM: the kicked machine's complete snapshot
+   — its machine key, the old persona KEM secret, G_old, every public
+   record and every distribution ciphertext addressed to OTHERS —
+   cannot reach a post-re-key generation secret. */
+lemma kicked_machine_excluded:
+  "not(Ex mid g #a #b #c #k.
+        Kicked(mid)@a & RekeyDone()@b & #a < #b
+      & NewGen(g, 'new')@c & #b < #c & K(g)@k
+      & not(Ex #q. CurSkRevealed()@q)
+      & not(Ex mid2 #r2. MKeyRevealed(mid2)@r2 & not(mid2 = mid)))"
+
+/* §9 CONTRAST (persona KEM = snapshot TOTAL), stated so the class gap
+   stays visible: reveal the CURRENT persona secret and the adversary
+   reaches the new generation. Exists-trace, deliberately. */
+lemma persona_kem_snapshot_total:
+  exists-trace
+  "Ex g #q #j #k. CurSkRevealed()@q & NewGen(g, 'new')@j & K(g)@k"
+
+lemma root_secret:
+  "not(Ex r #i #k. Genesis(r)@i & K(r)@k)"
+
+/* The §9 "reaches" line is REAL reach, not vacuous: a machine key
+   theft plus a distribution addressed to that machine does open the
+   new generation. This is the bounded damage the DISK class accepts —
+   bounded by fleet membership (the kick), which is exactly what the
+   calibration theory breaks. */
+lemma machine_key_reach_via_distribution:
+  exists-trace
+  "Ex mid g #r #d #j #k.
+     MKeyRevealed(mid)@r & DistributeTo(mid)@d
+   & NewGen(g, 'new')@j & K(g)@k
+   & not(Ex #p. OldSkRevealed()@p)
+   & not(Ex #q. CurSkRevealed()@q)"
+
+end

@@ -13,9 +13,11 @@ against.
 
 | file | role | expectation |
 |---|---|---|
-| `VaultRekeyMarker.spthy` | green theory: re-key **with** the frontier marker | all lemmas verified |
-| `VaultRekeyF001.spthy` | calibration: identical, marker **deleted** | `exclusion_forward` falsified (the F-001 attack), rest verified |
-| `run_tamarin.py` | harness enforcing both expectations | exit 0 iff both hold |
+| `VaultRekeyMarker.spthy` | model 1 green: re-key **with** the frontier marker | all lemmas verified |
+| `VaultRekeyF001.spthy` | model 1 calibration: identical, marker **deleted** | `exclusion_forward` falsified (the F-001 attack), rest verified |
+| `VaultFleetDist.spthy` | model 2 green: fleet KEM distribution + §9 snapshot lemmas (bead auto-loxsf) | all lemmas verified |
+| `VaultFleetDistNoGuard.spthy` | model 2 calibration: **kick guard deleted** from distribution | `kicked_machine_excluded` falsified, rest verified |
+| `run_tamarin.py` | harness enforcing every expectation above | exit 0 iff all hold |
 
 The pairing is the point: a green proof is only trusted because the
 calibration variant demonstrably fails. If the calibration ever starts
@@ -88,20 +90,59 @@ Verified 2026-08-28 with tamarin-prover 1.12.0 + Maude 3.5.1: green
 theory 4/4 verified (0.7 s), calibration falsifies `exclusion_forward`
 with a 9-step attack trace (0.6 s).
 
-## Roadmap (next models, in value order)
+## Model 2 — fleet distribution + §9 snapshot lemmas
 
-1. **§1e concurrent re-key** — two honest re-keys from the same view;
-   prove the winner/loser convergence claim and that the deterministic
-   tie-break is safe *because both are honest* (the marker supplies
-   recency only in the incumbent case).
-2. **Snapshot lemmas per §9 descriptor** — one adversary-knowledge lemma
-   per key class (per-machine key snapshot ZERO vs persona KEM snapshot
-   TOTAL), mechanizing the classification rubric that has already been
-   wrong twice by analogy.
-3. **Transitive frontier descent** — replace the one-edge abstraction
-   with chain ancestry + induction lemmas.
-4. **D-006 window** — between accepting a disenrollment fact unattended
-   and the next root-present login, prove HALT preserves confidentiality
-   and CONTINUE leaks exactly the new content, no more.
-5. **SAPIC+ port** for the equivalence-shaped properties (unlinkability,
-   §23/§24 deniability) where ProVerif/DeepSec are the stronger backends.
+Extends model 1 with the fleet layer BEFORE the KEM-distribution record
+(auto-pw9bs.6) is built: machine keypairs `machkey(root, machine_id)`
+(§10: derived, never stored; machine_id public), an honest roster
+(enroll/kick), and the §1d distribution rule
+`seal(kem_priv(C_new), m.machine_public_key)` for `m ∈ fleet∖removed` —
+the guard *is* the design element under test. Distribution ciphertexts
+are globally visible (conservative; the real records ride fleet_sync).
+
+Proved (green, 1.2 s, 6/6):
+- **`machine_key_yields_nothing_undistributed`** — §9 snapshot ZERO
+  mechanized: a stolen machine key + every visible record yields a
+  generation secret ONLY via a distribution addressed to that machine.
+- **`kicked_machine_excluded`** — the kicked machine's complete
+  snapshot (machine key + old persona KEM secret + G_old + all public
+  records + distributions addressed to others) cannot reach any
+  post-re-key generation.
+- **`machine_key_reach_via_distribution`** (exists-trace) — the §9
+  "reaches" line is real: key theft + an addressed distribution DOES
+  open the new generation. The accepted DISK-class damage, bounded by
+  fleet membership; proves the ZERO lemma's conditional isn't vacuous.
+- **`persona_kem_snapshot_total`** (exists-trace) — the §9 contrast
+  class: reveal the current persona KEM secret and everything opens.
+- Executability (kick → re-key → distribute → survivor machine reads
+  G_new) and root secrecy.
+
+Calibration (`VaultFleetDistNoGuard.spthy`): delete only the kick
+guard → `kicked_machine_excluded` falsified (11-step trace: the kicked
+machine receives `aenc(kem_priv(C_new), machine_pub)` like any fleet
+member and opens every new grant); every other lemma unchanged.
+
+Design-feedback note for auto-pw9bs.6: the whole exclusion property of
+the fleet layer rests on the distribution writer consulting the roster
+at seal time. The record format matters less than that check — and the
+check must read the roster's post-kick state, not a cached fleet list.
+
+## Roadmap (tracker note graph://8277c76c-ad1; beads filed)
+
+1. ~~Model 2: snapshot lemmas + F4 distribution~~ — DONE (above),
+   bead auto-loxsf.
+2. **Model 3 (auto-djh2m): B1 open-write-store adversary** vs the armor
+   + Tier-2 enrollment — "protect the decision, never the table" as a
+   theorem; adversary writes arbitrary store rows, ceremonies
+   verify-at-use.
+3. **Model 4 (auto-cpbkf): member.rekey three doors** — "a stolen key
+   cannot outrun its own recovery" as a race analysis.
+4. **Model 5 (auto-veal7): §1e concurrent re-key** — honest-concurrency
+   convergence; requires transitive/branching frontier descent.
+5. **Model 6 (auto-loov7): recovery-code succession witness window** —
+   accountability formulation, monotonic time.
+6. **TLA+ side-track (auto-xtt5v)**: c6z70 settings-resolution
+   discriminator + fleet-roster OR-set convergence.
+7. Later: transitive frontier descent w/ induction; D-006 halt/continue
+   window; SAPIC+ port for equivalence properties (unlinkability,
+   §23/§24 deniability) on ProVerif/DeepSec backends.
