@@ -64,3 +64,12 @@ Lazy-loaded only when the camera scanner opens.
 Compact pure-JS QR encoder (Kazuhiko Arase) for rendering the recovery code as
 a printable SVG QR. MIT, version-pinned, sha256
 18ae399f81182bc9de916e9c77b195df20cc58d6f2d55a62b085a299f1bf1780.
+
+## jspdf-2.5.2.min.js
+- Version: 2.5.2 (pinned) — MIT (see jspdf-2.5.2.min.js.LICENSE)
+- Source: https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js
+- sha256: 85ba2cc3ff858a20fa49fe6e457bec863ea40b55a9f3725e58a940e62f6f61a4
+- Purpose: builds the recovery-code sheet as an in-memory PDF so the installed
+  PWA can print via the iOS share sheet (window.print() is a no-op there).
+- Loading: lazy — fetched only when the recovery enrollment wizard starts;
+  referenced by no page template.
