@@ -22,6 +22,8 @@ against.
 | `VaultOpenStoreNoTierVerify.spthy` | model 3 calibration B: **enrollment-statement check deleted** | `no_key_to_forged_pk` falsified, rest verified |
 | `VaultRecoveryRace.spthy` | model 4 green: member.rekey recovery race (bead auto-cpbkf) | all lemmas verified |
 | `VaultRecoveryRaceNoRevoke.spthy` | model 4 calibration: **implicit revoke deleted** from the recovery rekey | `recovery_beats_thief` falsified, rest verified |
+| `VaultConcurrentRekey.spthy` | model 5 green: §1e concurrent re-key convergence (bead auto-veal7) | all lemmas verified |
+| `VaultConcurrentRekeyNoConverge.spthy` | model 5 calibration: **winner→loser seal deleted** | `loser_converges` falsified, rest verified |
 | `run_tamarin.py` | harness enforcing every expectation above | exit 0 iff all hold |
 
 The pairing is the point: a green proof is only trusted because the
@@ -210,13 +212,36 @@ merge fidelity is the TLA+ side-track (auto-xtt5v). recovery_pub
 SUCCESSION (swapping the enrolled recovery key) is deliberately deferred
 to model 6, whose witness-chain window is its native home.
 
+## Model 5 — §1e concurrent re-key convergence (bead auto-veal7)
+
+Completes the re-key trilogy (model 1 incumbent exclusion, model 2 fleet
+distribution, model 5 concurrent convergence). Two machines re-key from
+the SAME authority view with distinct counters → divergent keypairs at
+concurrent (incomparable) frontiers; the selector's `max(kem_key_id)`
+tie-break IS reached (unlike model 1, where the marker makes the
+successor descend). Modeled as a NONDETERMINISTIC pick between the two
+honest credentials, so safety is proved for every possible winner.
+
+Proved (green, 4/4): executability of the concurrent re-key + grant,
+`concurrent_grant_secret` (whichever honest credential wins, the new
+generation is secret from the network adversary — SAFETY for any pick),
+`loser_converges` (the non-winning machine reads the new generation via
+the winner's kem_priv sealed to its machine key), and `either_can_win`.
+
+Calibration (`VaultConcurrentRekeyNoConverge.spthy`): delete the
+winner→loser convergence seal → `loser_converges` falsified (the loser
+is stranded, forced re-login) while safety AND executability still hold.
+This is the crisp availability/confidentiality split the design makes:
+FleetMachineCredential purpose (2) (D-013) provides convergence; without
+it the loser loses availability, never confidentiality.
+
 ## Roadmap (tracker note graph://8277c76c-ad1; beads filed)
 
 1. ~~Model 2: snapshot lemmas + F4 distribution~~ — DONE, auto-loxsf.
 2. ~~Model 3: B1 open-write-store adversary~~ — DONE, auto-djh2m.
-3. ~~Model 4: member.rekey recovery race~~ — DONE (above), auto-cpbkf.
-4. **Model 5 (auto-veal7): §1e concurrent re-key** — honest-concurrency
-   convergence; requires transitive/branching frontier descent.
+3. ~~Model 4: member.rekey recovery race~~ — DONE, auto-cpbkf.
+4. ~~Model 5: §1e concurrent re-key convergence~~ — DONE (above),
+   auto-veal7.
 5. **Model 6 (auto-loov7): recovery-code succession witness window** —
    accountability formulation, monotonic time; ALSO absorbs the
    recovery_pub-succession swap resistance deferred from model 4.

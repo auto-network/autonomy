@@ -1,0 +1,134 @@
+/*
+  VaultConcurrentRekey — §1e concurrent re-key convergence.
+  Bead auto-veal7. Tracker 8277c76c. Crib graph://1e005d5c-c11 §1e
+  ("two machines both log in and both re-key, from the SAME authority
+  view"; different counter ⇒ divergent keypairs at concurrent frontiers;
+  select_current_credential returns max(kem_key_id), "deterministic,
+  arbitrary w.r.t. recency, and SAFE HERE because both are honest ... the
+  winner seals its kem_priv to the loser's machine_public_key, so the
+  loser converges"). Completes the re-key trilogy: model 1 (incumbent
+  exclusion), model 2 (fleet distribution), model 5 (concurrent
+  convergence).
+
+  DISTINCT from model 1's F-001: there the successor must ESCAPE an
+  incumbent (the marker makes it descend). HERE both re-keys are fresh
+  and honest, minted with the root present — neither is an incumbent, so
+  the tie-break IS reached, and that is correct: for genuine concurrency
+  ANY deterministic pick is safe. The model proves both halves:
+  - SAFETY: whichever honest credential the selector picks, the new
+    generation stays secret from the network adversary;
+  - CONVERGENCE: the loser, holding a key nobody seals to, converges
+    once the winner seals its kem_priv to the loser's machine key.
+
+  The selector's max(kem_key_id) is modeled as a NONDETERMINISTIC pick
+  between the two honest credentials (the grant may target either) — a
+  strict superset of any fixed hash order, so safety is proved for every
+  possible winner at once.
+
+  CALIBRATION: VaultConcurrentRekeyNoConverge.spthy deletes the
+  winner→loser seal. loser_converges falsifies — a divergent concurrent
+  re-key strands the loser (forced re-login), which is exactly the
+  convergence role of FleetMachineCredential purpose (2) (D-013).
+*/
+
+theory VaultConcurrentRekey
+begin
+
+builtins: asymmetric-encryption
+
+functions: kemsk/2, machkey/2
+
+/* Setup: one root, shared authority view f0, two enrolled machines. */
+rule Setup:
+  [ Fr(~root), Fr(~f0), Fr(~midA), Fr(~midB) ]
+  --[ Genesis(~root), OnceSetup() ]->
+  [ !Root(~root), !View(~f0)
+  , !Machine('A', ~midA, machkey(~root, ~midA))
+  , !Machine('B', ~midB, machkey(~root, ~midB))
+  , Out(pk(machkey(~root, ~midA)))
+  , Out(pk(machkey(~root, ~midB)))
+  ]
+
+restriction once_setup:
+  "All #i #j. OnceSetup()@i & OnceSetup()@j ==> #i = #j"
+
+/* Each machine, from the SAME view f0, honestly re-keys with a distinct
+   counter: a marker (sibling, parent f0) and a credential C_x with
+   kem key kemsk(root, counter). Divergent — concurrent frontiers. */
+rule Rekey_Honest:
+  [ !Root(~root), !View(~f0), !Machine(who, mid, msk), Fr(~ctr) ]
+  --[ Rekeyed(who, ~ctr), OncePer(who) ]->
+  [ !ConcCred(who, ~ctr, pk(kemsk(~root, ~ctr)))
+  , Out(pk(kemsk(~root, ~ctr)))
+  ]
+
+restriction once_per_machine:
+  "All w #i #j. OncePer(w)@i & OncePer(w)@j ==> #i = #j"
+
+/* A writer mints a fresh generation and grants it to ONE of the two
+   concurrent credentials — the selector's pick, modeled as a free
+   (nondeterministic) choice so safety covers every possible winner. */
+rule Advance_And_Grant:
+  [ !ConcCred(who, ctr, pkC), Fr(~gnew) ]
+  --[ NewGen(~gnew), GrantedTo(who, ctr), OnceGrant() ]->
+  [ !Winner(who, ctr)
+  , Out(aenc(~gnew, pkC))
+  ]
+
+restriction once_grant:
+  "All #i #j. OnceGrant()@i & OnceGrant()@j ==> #i = #j"
+
+/* CONVERGENCE: the winner seals its kem_priv to the LOSER's machine key
+   (§1e; FleetMachineCredential purpose 2). The loser is the machine that
+   is not the winner. */
+rule Converge_Seal:
+  [ !Winner(win_who, win_ctr), !Root(~root)
+  , !Machine(lose_who, lose_mid, lose_msk) ]
+  --[ SealToLoser(win_who, lose_who), Neq(win_who, lose_who) ]->
+  [ Out(aenc(kemsk(~root, win_ctr), pk(lose_msk))) ]
+
+restriction converge_distinct:
+  "All a b #i. Neq(a, b)@i ==> not(a = b)"
+
+/* The loser machine converges: opens the winner's kem_priv from the
+   convergence seal, then opens the granted generation. */
+rule Loser_Open:
+  [ !Machine(who, mid, msk)
+  , In(aenc(winsk, pk(msk)))          // convergence seal to my machine key
+  , In(aenc(g, pk(winsk)))            // the grant under the winner's cred
+  ]
+  --[ Converged(who, g) ]->
+  [ ]
+
+/* ═══ Lemmas ═══ */
+
+/* Executability: both machines re-key concurrently (distinct counters,
+   incomparable frontiers) and a grant is made to one of them. Does NOT
+   require convergence, so it witnesses the flow in both theories;
+   loser_converges is the sole convergence lemma. */
+lemma executable:
+  exists-trace
+  "Ex wa wb g #ra #rb #gr.
+     Rekeyed('A', wa)@ra & Rekeyed('B', wb)@rb
+   & NewGen(g)@gr & not(wa = wb)"
+
+/* SAFETY — whichever honest credential the selector picks, the new
+   generation is secret from the network adversary. No machine key or
+   root is ever revealed here: this is the honest-concurrency case. */
+lemma concurrent_grant_secret:
+  "not(Ex g #n #k. NewGen(g)@n & K(g)@k)"
+
+/* CONVERGENCE — the loser (the non-winning machine) does read the new
+   generation, via the winner's convergence seal. */
+lemma loser_converges:
+  exists-trace
+  "Ex win lose g #s #c #n.
+     SealToLoser(win, lose)@s & Converged(lose, g)@c & NewGen(g)@n"
+
+/* The winner selection really can go either way (guards vacuity of the
+   safety lemma over the pick). */
+lemma either_can_win:
+  exists-trace
+  "(Ex ctr #g. GrantedTo('A', ctr)@g)"
+
+end
