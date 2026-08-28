@@ -2780,3 +2780,42 @@ def test_host_root_opt_in_conflicts_with_repo_at_platform_path(tmp_path, monkeyp
             project, "sess-ops",
             repos_dir=tmp_path / "repos", worktrees_dir=tmp_path / "worktrees",
         )
+
+
+def test_declared_local_repo_created_at_first_launch(tmp_path):
+    # the declaration is the authority: a missing local_path is created
+    # (bare, main, initial commit) wherever it was declared
+    path = tmp_path / "org-mounts" / "insights-data"
+    repo = RepoMount(host=None, repo=None, local_path=str(path),
+                     mount="/workspace/data", writable=True)
+    wm._ensure_declared_local_repo(repo)
+    assert path.exists()
+    out = subprocess.run(
+        ["git", "rev-parse", "--is-bare-repository"], cwd=path,
+        capture_output=True, text=True)
+    assert out.stdout.strip() == "true"
+    branches = subprocess.run(
+        ["git", "branch", "--list", "main"], cwd=path,
+        capture_output=True, text=True).stdout
+    assert "main" in branches
+    # idempotent: second call is a no-op on the now-existing repo
+    wm._ensure_declared_local_repo(repo)
+
+
+def test_declared_local_repo_existing_non_repo_is_an_error(tmp_path):
+    path = tmp_path / "plain-dir"
+    path.mkdir()
+    (path / "file.txt").write_text("not a repo")
+    repo = RepoMount(host=None, repo=None, local_path=str(path),
+                     mount="/workspace/data", writable=True)
+    # existing path is left alone by the hook (only MISSING paths create) —
+    # but create_local_repository on it reports the real problem
+    wm._ensure_declared_local_repo(repo)  # no-op, no exception
+    with pytest.raises(wm.WorkspaceError, match="not a bare Git repository"):
+        wm.create_local_repository(path)
+
+
+def test_remote_repo_entries_are_untouched(tmp_path):
+    repo = RepoMount(host="github.com", repo="o/r",
+                     mount="/workspace/r", writable=False)
+    wm._ensure_declared_local_repo(repo)   # nothing to do, no exception

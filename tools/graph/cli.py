@@ -939,23 +939,31 @@ def _print_source_not_found(source_arg: str, *, client=None, display_arg: str | 
         # home org even if the graph locate probe can't (older dashboard).
         hit = {"org": _LAST_TMUX_RESOLVED_ORG, "id": source_arg, "type": "session"}
     if hit and hit.get("org"):
-        import shlex
         kind = "Session" if hit.get("type") == "session" else "Source"
         print(f"Source not found in the caller's scope: {shown}")
         print(
             f"  {kind} {hit['id'][:12]} exists in org '{hit['org']}' — "
             f"outside this session's org scope."
         )
-        argv0_path = Path(sys.argv[0]) if sys.argv and sys.argv[0] else None
-        is_graph_cli = argv0_path is not None and (
-            argv0_path.name.startswith("graph")
-            or (argv0_path.name == "__main__.py" and argv0_path.parent.name == "graph")
-        )
-        if is_graph_cli:
-            retry = shlex.join(["graph", *sys.argv[1:]])
-            print(f"  To read it anyway: {retry} --only-org {hit['org']}")
+        # No bypass flag exists, deliberately: publication state governs
+        # cross-org visibility. Explain the model instead of suggesting a
+        # remedy the reader cannot run.
+        if hit.get("type") == "session":
+            print(
+                "  Session records are always org-local (publication state "
+                "raw, by design); read it from a seat in that org."
+            )
         else:
-            print(f"  To read it anyway, re-run with --only-org {hit['org']}")
+            print(
+                f"  Cross-org reads see only published/canonical sources; "
+                f"this one's publication state keeps it local to "
+                f"'{hit['org']}'."
+            )
+            print(
+                f"  Remedy: a member of '{hit['org']}' promotes it "
+                f"(graph promote {hit['id'][:12]} published) — or read it "
+                f"from a seat in that org."
+            )
         return
     print(f"Source not found: {shown}")
 
