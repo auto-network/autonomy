@@ -94,15 +94,18 @@ EXPECTATIONS = {
         "concurrent_grant_secret": "verified",
         "loser_converges": "verified",
         "either_can_win": "verified",
+        "b_can_win": "verified",
     },
     "VaultConcurrentRekeyNoConverge.spthy": {
         "executable": "verified",
         "concurrent_grant_secret": "verified",
         "loser_converges": "falsified",
         "either_can_win": "verified",
+        "b_can_win": "verified",
     },
     "VaultRecoverySuccession.spthy": {
         "executable": "verified",
+        "veto_possible": "verified",
         "window_cannot_be_fast_forwarded": "verified",
         "cancellation_blocks_completion": "verified",
         "veto_blocks_completion": "verified",
@@ -110,6 +113,7 @@ EXPECTATIONS = {
     },
     "VaultRecoverySuccessionNoCancel.spthy": {
         "executable": "verified",
+        "veto_possible": "verified",
         "window_cannot_be_fast_forwarded": "verified",
         "cancellation_blocks_completion": "falsified",
         "veto_blocks_completion": "verified",

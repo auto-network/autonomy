@@ -126,9 +126,14 @@ lemma loser_converges:
      SealToLoser(win, lose)@s & Converged(lose, g)@c & NewGen(g)@n"
 
 /* The winner selection really can go either way (guards vacuity of the
-   safety lemma over the pick). */
+   safety lemma over the pick). One grant per trace, so each winner
+   needs its own witness trace. */
 lemma either_can_win:
   exists-trace
   "(Ex ctr #g. GrantedTo('A', ctr)@g)"
+
+lemma b_can_win:
+  exists-trace
+  "(Ex ctr #g. GrantedTo('B', ctr)@g)"
 
 end
