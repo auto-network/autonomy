@@ -861,6 +861,11 @@ export function credentialsPanel() {
       const code = generateRecoveryCode();
       this._recoveryCode = code;
       this._recoveryPrintable = await encodeRecoveryCode(code);
+      // Pre-load the PDF generator (used only by this wizard's Print): the
+      // share must fire synchronously inside the tap's user gesture, so the
+      // library has to already be here. Fire-and-forget; Print falls back to
+      // the visible sheet if it never arrives.
+      this._loadScript('/static/vendor/jspdf-2.5.2.min.js').catch(() => {});
       this.push({ s: 'recovery-explain' });
     },
     async generateRecoveryCode() {
@@ -901,7 +906,7 @@ export function credentialsPanel() {
     async _qrSvg(text) {
       try {
         if (typeof window === 'undefined' || !window.qrcode) {
-          await this._loadScript('/static/vendor/qrcode-generator-1.4.4.js');
+          await this._loadScript('/static/vendor/qrcode-generator-1.4.4.min.js');
         }
         const qr = window.qrcode(0, 'M');
         qr.addData(text); qr.make();
@@ -913,6 +918,20 @@ export function credentialsPanel() {
     printRecovery() {
       if (typeof document === 'undefined') return;
       const gen = this.createdLocal(nowIso());
+      // Installed-app path: share a generated PDF — the iOS share sheet's
+      // Print action IS AirPrint (window.print() cannot present there). All
+      // in-memory; the code never leaves the device. Falls through to the
+      // visible sheet / print dialog when file-share or the library is absent.
+      try {
+        const J = (typeof window !== 'undefined' && window.jspdf && window.jspdf.jsPDF) || null;
+        if (J && typeof navigator !== 'undefined' && navigator.canShare) {
+          const file = this._recoveryPdfFile(J, gen);
+          if (file && navigator.canShare({ files: [file] })) {
+            navigator.share({ files: [file] }).catch(() => { /* user closed the sheet */ });
+            return;
+          }
+        }
+      } catch (e) { /* fall through to the DOM sheet */ }
       const sheet = document.createElement('div');
       sheet.id = 'fui-print-sheet';
       sheet.innerHTML =
@@ -927,7 +946,7 @@ export function credentialsPanel() {
         + 're-secure the account if one is stolen.</p>'
         + '<h2>How to use it</h2>'
         + '<p>On the sign-in screen, choose “Use recovery code”, then scan this QR '
-        + 'code or type the words below. Keep this sheet somewhere safe and offline. '
+        + 'code or type the code below. Keep this sheet somewhere safe and offline. '
         + 'Anyone who has it can recover the identity, and it cannot be re-created if '
         + 'it is lost.</p></div></div>';
       const style = document.createElement('style');
@@ -968,6 +987,43 @@ export function credentialsPanel() {
       }
       window.addEventListener('afterprint', cleanup);
       window.print();
+    },
+    _recoveryPdfFile(J, gen) {
+      if (typeof window === 'undefined' || !window.qrcode || !this._recoveryPrintable
+          || typeof File === 'undefined') return null;
+      const doc = new J({ unit: 'pt', format: 'letter' });
+      const W = 612;
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(20);
+      doc.text('Autonomy Network \u2014 Recovery Code', W / 2, 88, { align: 'center' });
+      const qr = window.qrcode(0, 'M'); qr.addData(this._recoveryPrintable); qr.make();
+      const n = qr.getModuleCount(); const size = 158.4; const cell = size / n;
+      const x0 = (W - size) / 2; const y0 = 118;
+      doc.setFillColor(0, 0, 0);
+      for (let r = 0; r < n; r += 1) {
+        for (let c = 0; c < n; c += 1) {
+          if (qr.isDark(r, c)) doc.rect(x0 + c * cell, y0 + r * cell, cell + 0.4, cell + 0.4, 'F');
+        }
+      }
+      const words = String(this._recoveryPrintable).split(/[\s-]+/).filter(Boolean);
+      const lines = [];
+      for (let i = 0; i < words.length; i += 4) lines.push(words.slice(i, i + 4).join('   '));
+      doc.setFont('courier', 'bold'); doc.setFontSize(16);
+      let y = y0 + size + 38;
+      lines.forEach((ln) => { doc.text(ln, W / 2, y, { align: 'center' }); y += 22; });
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(85, 85, 85);
+      doc.text('Generated ' + gen, W / 2, y + 2, { align: 'center' }); y += 30;
+      doc.setTextColor(0, 0, 0);
+      const heading = (t) => { doc.setFont('helvetica', 'bold'); doc.setFontSize(12); doc.text(t, 72, y); y += 16; };
+      const para = (t) => {
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(10.5);
+        const ls = doc.splitTextToSize(t, W - 144); doc.text(ls, 72, y); y += ls.length * 14 + 10;
+      };
+      heading('What this is');
+      para('This is the recovery code for an Autonomy Network identity. It is the last way to get back in if every password and passkey is lost, and it can re-secure the account if one is stolen.');
+      heading('How to use it');
+      para('On the sign-in screen, choose \u201cUse recovery code\u201d, then scan this QR code or type the code below. Keep this sheet somewhere safe and offline. Anyone who has it can recover the identity, and it cannot be re-created if it is lost.');
+      const blob = doc.output('blob');
+      return new File([blob], 'autonomy-recovery-code.pdf', { type: 'application/pdf' });
     },
     _formatCodeBlocks(printable) {
       return String(printable || '').split(/[\s-]+/).filter(Boolean).join(' &nbsp; ');
@@ -1038,7 +1094,7 @@ export function credentialsPanel() {
     async startRecoveryScan() {
       if (typeof navigator === 'undefined' || !navigator.mediaDevices) { this.flash('No camera on this device — type the code instead'); return; }
       try {
-        if (!window.jsQR) await this._loadScript('/static/vendor/jsQR-1.4.0.js');
+        if (!window.jsQR) await this._loadScript('/static/vendor/jsQR-1.4.0.min.js');
         this._recoveryStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
         this.recoveryScanning = true;
         const video = document.createElement('video');
