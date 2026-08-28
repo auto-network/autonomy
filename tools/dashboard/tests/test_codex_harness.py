@@ -1507,3 +1507,57 @@ def test_parse_codex_functions_exec_enriches_nested_graph_result(
     assert semantic["title"] == "Codex Tile Enrichment"
     assert semantic["preview"] == "Graph metadata reaches the session viewer."
     assert semantic["tags"] == ["codex", "viewer"]
+
+
+def test_single_weekly_window_lands_in_long_slot():
+    """Codex reporting only its 7-day window must not render under '5h'.
+
+    Slots classify by DURATION, not list position (2026-08-28 handoff
+    bug 2): a 10080-minute window is 'long' even with no companion.
+    """
+    from tools.dashboard.session_harness import extract_codex_harness_state
+    entry = {
+        "timestamp": "2026-08-28T22:00:00Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "token_count",
+            "rate_limits": {
+                "primary": {
+                    "used_percent": 9.0,
+                    "window_minutes": 10080,
+                    "resets_in_seconds": 500000,
+                },
+            },
+        },
+    }
+    state = extract_codex_harness_state(entry, None)
+    assert state is not None
+    assert "long" in state["windows"]
+    assert "short" not in state["windows"]
+    assert state["windows"]["long"]["window_minutes"] == 10080
+
+
+def test_two_windows_classify_short_and_long():
+    from tools.dashboard.session_harness import extract_codex_harness_state
+    entry = {
+        "timestamp": "2026-08-28T22:00:00Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "token_count",
+            "rate_limits": {
+                "primary": {
+                    "used_percent": 51.0,
+                    "window_minutes": 300,
+                    "resets_in_seconds": 3600,
+                },
+                "secondary": {
+                    "used_percent": 9.0,
+                    "window_minutes": 10080,
+                    "resets_in_seconds": 500000,
+                },
+            },
+        },
+    }
+    state = extract_codex_harness_state(entry, None)
+    assert state["windows"]["short"]["window_minutes"] == 300
+    assert state["windows"]["long"]["window_minutes"] == 10080

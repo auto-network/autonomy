@@ -2931,10 +2931,25 @@ def extract_codex_harness_state(
             item[0],
         ),
     )
-    windows: dict[str, dict[str, float | int | None]] = {
-        "short": windows_found[0][1],
-    }
-    if len(windows_found) > 1:
+    # Classify by DURATION, never by list position: Codex often reports
+    # only its weekly window ("primary", window_minutes 10080), and
+    # positional assignment put that 7-day reading in the "short" slot —
+    # rendered under the strip's "5h" label and the CLI's SHORT WINDOW
+    # column. A day or longer is a long window whether or not a short
+    # one accompanies it; when both windows land on the same side of the
+    # boundary, duration order still decides (shortest -> short,
+    # longest -> long).
+    _LONG_WINDOW_MIN_MINUTES = 24 * 60
+    windows: dict[str, dict[str, float | int | None]] = {}
+    if len(windows_found) == 1:
+        only = windows_found[0][1]
+        minutes = only.get("window_minutes")
+        is_long = minutes is not None and minutes >= _LONG_WINDOW_MIN_MINUTES
+        windows["long" if is_long else "short"] = only
+    else:
+        # Two or more: the sort above is ascending by duration, so the
+        # shortest is the short window and the longest the long one.
+        windows["short"] = windows_found[0][1]
         windows["long"] = windows_found[-1][1]
 
     updated_state: dict[str, Any] = dict(current_state or {})
