@@ -129,7 +129,7 @@ async function rootPasskeyPrf(root, credentials, cryptoApi, currentHostname) {
   if (!prf || prf.length !== 32) {
     throw new Error('This passkey did not return the root PRF output.');
   }
-  return prf;
+  return { prf, credentialId };
 }
 
 async function gatherRootAnchor(ceremony, password, dependencies) {
@@ -147,25 +147,48 @@ async function gatherRootAnchor(ceremony, password, dependencies) {
   }
   let prf = null;
   let opened = null;
+  const seedBuffers = [];
   try {
+    let assertedCredentialId = null;
     if (method === 'passkey' || method === 'both') {
-      prf = await rootPasskeyPrf(
+      const asserted = await rootPasskeyPrf(
         root,
         dependencies.credentials,
         dependencies.cryptoApi,
         dependencies.currentHostname,
       );
+      prf = asserted.prf;
+      assertedCredentialId = asserted.credentialId;
     }
-    if (method === 'both') {
-      if (!password) throw new Error('Enter your personal password.');
-      opened = await dependencies.decryptArmorWithCombined(root.armor, password, prf);
-    } else if (method === 'passkey') {
-      opened = await dependencies.decryptArmorWithPasskey(root.armor, prf);
-    } else if (method === 'password') {
-      if (!password) throw new Error('Enter your personal password.');
-      opened = await dependencies.decryptArmor(root.armor, password);
+    if (root.armor_version === 3) {
+      // The root-factor-policy armor: collect one seed per participating
+      // factor and open the envelope's AND/OR policy with them.
+      const rfp = await import('./root-factor-policy.js');
+      const envelope = await rfp.parseFactorPolicyArmor(root.armor);
+      const seeds = {};
+      if (method === 'passkey' || method === 'both') {
+        const pk = envelope.factors.find(
+          (f) => f.type === 'passkey' && f.credential_id === assertedCredentialId,
+        );
+        if (!pk) throw new Error('This passkey is not a factor of your root policy.');
+        seeds[pk.factor_id] = prf;
+      }
+      if (method === 'password' || method === 'both') {
+        if (!password) throw new Error('Enter your personal password.');
+        let anyPassword = false;
+        for (const f of envelope.factors.filter((x) => x.type === 'password')) {
+          try {
+            const seed = await rfp.openPasswordFactor(envelope.root_pub, f, password);
+            seedBuffers.push(seed);
+            seeds[f.factor_id] = seed;
+            anyPassword = true;
+          } catch (e) { /* this password does not open this factor */ }
+        }
+        if (!anyPassword) throw new Error('That password did not open your root.');
+      }
+      opened = await rfp.openFactorPolicyArmor(root.armor, seeds);
     } else {
-      throw new Error('This personal-root opener is unsupported.');
+      throw new Error('This personal-root armor format is unsupported.');
     }
     if (opened.rootPub && opened.rootPub !== root.root_pub) {
       throw new Error('The opened root does not match the frozen vault anchor.');
@@ -177,6 +200,7 @@ async function gatherRootAnchor(ceremony, password, dependencies) {
     };
   } finally {
     if (prf) prf.fill(0);
+    seedBuffers.forEach((b) => { if (b && b.fill) b.fill(0); });
     if (opened && opened.seed) opened.seed.fill(0);
   }
 }
@@ -186,8 +210,6 @@ export async function gatherVaultOpeners(
   password,
   {
     decryptArmor = primitives.decryptArmor,
-    decryptArmorWithPasskey = primitives.decryptArmorWithPasskey,
-    decryptArmorWithCombined = primitives.decryptArmorWithCombined,
     openAnchor = openRootAnchorEnvelope,
     credentials = globalThis.navigator && globalThis.navigator.credentials,
     cryptoApi = globalThis.crypto,
@@ -197,8 +219,6 @@ export async function gatherVaultOpeners(
 ) {
   const dependencies = {
     decryptArmor,
-    decryptArmorWithPasskey,
-    decryptArmorWithCombined,
     openAnchor,
     credentials,
     cryptoApi,

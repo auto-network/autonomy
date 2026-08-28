@@ -101,52 +101,6 @@ test('a passkey from another rp id is never offered', async () => {
   assert.equal(called, false);
 });
 
-test('root-reachable ceremony opens the stable anchor and returns only its opener', async () => {
-  const rootSeed = new Uint8Array(32).fill(0x31);
-  const anchorSeed = new Uint8Array(32).fill(0x52);
-  let openedAnchor = false;
-  const ceremony = {
-    v: 2,
-    governance: {
-      v: 1, form: 'root-reachable', anchor_id: 'personal-root-anchor-1',
-      display_name: 'Personal root vault',
-    },
-    anchor: {
-      v: 1, anchor_id: 'personal-root-anchor-1', root_pub: 'ab'.repeat(32),
-      public_key: 'cd'.repeat(32), sealed_seed: { ciphertext: 'unused' },
-      display_name: 'Personal root vault', created_at: '2026-08-24T00:00:00Z',
-      signature: 'ef'.repeat(64),
-    },
-    root: {
-      armor: 'root-armor', root_pub: 'ab'.repeat(32), methods: ['password'],
-      passkeys: [],
-    },
-  };
-  const gathered = await gatherVaultOpeners(ceremony, 'root password', {
-    rootMethod: 'password',
-    decryptArmor: async (armor, password) => {
-      assert.equal(armor, 'root-armor');
-      assert.equal(password, 'root password');
-      return { seed: rootSeed, rootPub: 'ab'.repeat(32) };
-    },
-    openAnchor: async (anchor, suppliedRootSeed) => {
-      openedAnchor = true;
-      assert.equal(anchor.anchor_id, 'personal-root-anchor-1');
-      assert.equal(suppliedRootSeed, rootSeed);
-      return anchorSeed;
-    },
-  });
-
-  assert.equal(openedAnchor, true);
-  assert.ok(rootSeed.every((byte) => byte === 0));
-  assert.deepEqual(gathered.openers, {
-    'personal-root-anchor-1': '52'.repeat(32),
-  });
-  clearVaultOpeners(gathered);
-  assert.ok(anchorSeed.every((byte) => byte === 0));
-  assert.deepEqual(gathered.openers, { 'personal-root-anchor-1': '' });
-});
-
 test('root-reachable ceremony requires an informed choice when root has alternatives', async () => {
   await assert.rejects(
     gatherVaultOpeners({
@@ -166,4 +120,94 @@ test('root-reachable ceremony requires an informed choice when root has alternat
     }),
     /Choose how to open your personal root/,
   );
+});
+
+test('v3 armor: MFA policy opens with password + passkey PRF and yields only the anchor opener', async () => {
+  // Real v3 crypto end to end: a password factor and a passkey factor under an
+  // AND policy (multi-factor), the armor built by buildFactorPolicyArmor, the
+  // gatherer opening it via openFactorPolicyArmor with the typed password and
+  // the asserted PRF — the exact live shape that 500'd on the operator's vault
+  // request before the v3 support landed.
+  const { createHash, createPrivateKey, createPublicKey } = await import('node:crypto');
+  const rfp = await import('../root-factor-policy.js');
+  const rootSeed = new Uint8Array(32).fill(0x31);
+  const pkcs8 = Buffer.concat([
+    Buffer.from('302e020100300506032b657004220420', 'hex'), Buffer.from(rootSeed),
+  ]);
+  const priv = createPrivateKey({ key: pkcs8, format: 'der', type: 'pkcs8' });
+  const jwk = createPublicKey(priv).export({ format: 'jwk' });
+  const rootPub = Buffer.from(jwk.x, 'base64url').toString('hex');
+
+  const made = await rfp.createPasswordFactor(rootPub, 'pw.1', 'root password', 10000);
+  const prfSeed = new Uint8Array(32).fill(0x22);
+  const prfRecipient = await (await import('../sealing.js')).deriveEncapsulationKeypair(
+    prfSeed, rfp.FACTOR_RECIPIENT_PURPOSE,
+  );
+  const pkFactor = {
+    factor_id: 'pk.1',
+    type: 'passkey',
+    credential_id: b64u(credentialId),
+    recipients: [{
+      recipient_public_key: prfRecipient.publicKeyHex,
+      label: 'Test device', created_at: '2026-08-27T00:00:00Z',
+    }],
+  };
+  const armor = await rfp.buildFactorPolicyArmor({
+    rootSeed, rootPub, generation: 1,
+    factors: [made.factor, pkFactor],
+    access: ['pw.1', 'pk.1'],
+    policy: {
+      op: 'and',
+      children: [
+        { op: 'factor', factor_id: 'pw.1' },
+        { op: 'factor', factor_id: 'pk.1' },
+      ],
+    },
+  });
+
+  const anchorSeed = new Uint8Array(32).fill(0x52);
+  let openedWithRoot = null;
+  const ceremony = {
+    v: 2,
+    governance: {
+      v: 1, form: 'root-reachable', anchor_id: 'personal-root-anchor-1',
+      display_name: 'Personal root vault',
+    },
+    anchor: {
+      v: 1, anchor_id: 'personal-root-anchor-1', root_pub: rootPub,
+      public_key: 'cd'.repeat(32), sealed_seed: { ciphertext: 'unused' },
+      display_name: 'Personal root vault', created_at: '2026-08-24T00:00:00Z',
+      signature: 'ef'.repeat(64),
+    },
+    root: {
+      armor, armor_version: 3, root_pub: rootPub, methods: ['both'],
+      passkeys: [{
+        credential_id: b64u(credentialId), label: 'Test device',
+        rp_id: 'dashboard.example.test', transports: ['internal'],
+      }],
+    },
+  };
+  const gathered = await gatherVaultOpeners(ceremony, 'root password', {
+    rootMethod: 'both',
+    credentials: {
+      get: async () => ({
+        rawId: credentialId,
+        getClientExtensionResults: () => ({
+          prf: { results: { first: prfSeed.buffer.slice(0) } },
+        }),
+      }),
+    },
+    cryptoApi: { getRandomValues: (array) => array.fill(7) },
+    currentHostname: 'dashboard.example.test',
+    openAnchor: async (anchor, suppliedRootSeed) => {
+      openedWithRoot = Buffer.from(suppliedRootSeed).toString('hex');
+      return anchorSeed;
+    },
+  });
+
+  assert.equal(openedWithRoot, Buffer.from(rootSeed).toString('hex'),
+    'the v3 armor opened to the real root seed');
+  assert.deepEqual(Object.keys(gathered.openers), ['personal-root-anchor-1'],
+    'only the anchor opener leaves the gatherer');
+  assert.equal(gathered.openers['personal-root-anchor-1'], '52'.repeat(32));
 });

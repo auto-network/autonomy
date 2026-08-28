@@ -235,8 +235,22 @@ class VaultWorld:
         """A throwaway password class, plus the seed that opens it."""
         identity = make_test_identity()
         self.identity = identity
+        # Root membership is mandatory (enclaves are unbuildable): every member
+        # class seals to a personal-root anchor.
+        from tools.network.idkit.keys import KeyPair
+        from tools.vault.root_anchor import create_root_anchor
+        anchor, anchor_seed = create_root_anchor(
+            KeyPair.generate(),
+            anchor_id="personal-root-default",
+            display_name="Test root",
+            created_at="2026-08-17T00:00:00Z",
+        )
+        self.root_anchor = anchor
+        self.root_anchor_seed = anchor_seed
         self.policy_class = policy_class_mod.create_class(
-            "password", [identity.published], created_at="2026-08-17T00:00:00Z",
+            "password", [identity.published],
+            recovery=anchor.published_recipient(),
+            created_at="2026-08-17T00:00:00Z",
         )
         self.opener_seeds = {
             identity.factor_id: open_password_seed(identity.armor, identity.password)
