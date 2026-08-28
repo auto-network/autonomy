@@ -40,6 +40,22 @@ EXPECTATIONS = {
         "root_secret": "verified",
         "old_generation_stays_readable": "verified",
     },
+    "VaultFleetDist.spthy": {
+        "executable_end_to_end": "verified",
+        "machine_key_yields_nothing_undistributed": "verified",
+        "kicked_machine_excluded": "verified",
+        "persona_kem_snapshot_total": "verified",
+        "root_secret": "verified",
+        "machine_key_reach_via_distribution": "verified",
+    },
+    "VaultFleetDistNoGuard.spthy": {
+        "executable_end_to_end": "verified",
+        "machine_key_yields_nothing_undistributed": "verified",
+        "kicked_machine_excluded": "falsified",
+        "persona_kem_snapshot_total": "verified",
+        "root_secret": "verified",
+        "machine_key_reach_via_distribution": "verified",
+    },
 }
 
 SUMMARY_RE = re.compile(
@@ -86,10 +102,11 @@ def main() -> int:
             print(out[idx : idx + 3000])
     if failures:
         print(f"\nHARNESS FAILED: {len(failures)} expectation(s) violated.")
-        if any(f[0] == "VaultRekeyF001.spthy" and f[1] == "exclusion_forward" for f in failures):
+        if any(want == "falsified" and got == "verified" for _, _, want, got in failures):
             print(
-                "NOTE: if the calibration's exclusion_forward VERIFIED, the model has\n"
-                "lost the F-001 behaviour and the green proof is not trustworthy."
+                "NOTE: a calibration lemma VERIFIED where an attack was expected — the\n"
+                "model has lost the defended behaviour and the green proof is not\n"
+                "trustworthy. Fix the model, do not celebrate."
             )
         return 1
     print("\nAll expectations hold: green proves, calibration rediscovers F-001.")
