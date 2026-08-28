@@ -124,7 +124,7 @@ RUN userdel -r ubuntu 2>/dev/null; useradd -m -s /bin/bash -u 1000 agent \
 # ── Codex CLI + agent-browser (needs node + agent user to exist) ──
 # Codex is an npm package plus platform-specific optional dependency, not a
 # standalone host ELF like Claude, so install it inside the image directly.
-ARG CODEX_VERSION=0.147.0
+ARG CODEX_VERSION=0.149.0
 # jsdom: a DOM-in-Node implementation used by the dashboard's browser-free
 # (Category B) UI tests — those that assert data->render->interact->DOM state
 # without a real browser or layout engine. Installed globally alongside the
