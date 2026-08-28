@@ -360,8 +360,20 @@ def _seed_every_logical_table(db: GraphDB, blob: bytes, local_root: Path) -> str
           "2026-08-19T10:00:08Z")),
         ("INSERT INTO node_refs(node_id,ref_id,ref_type,metadata) VALUES(?,?,?,?)",
          ("n1", "s1", "source", '{}')),
-        ("INSERT INTO note_comments(id,source_id,content,created_at) VALUES(?,?,?,?)",
-         ("comment1", "s1", "Review", "2026-08-19T10:00:09Z")),
+        ("INSERT INTO note_comments(id,source_id,content,anchor_json,created_at) "
+         "VALUES(?,?,?,?,?)",
+         (
+             "comment1", "s1", "Review",
+             json.dumps({
+                 "v": 1,
+                 "kind": "text_quote",
+                 "note_version": 1,
+                 "projection": "visible_text_v1",
+                 "quote": {"exact": "Review", "prefix": "", "suffix": ""},
+                 "position": {"start": 0, "end": 6},
+             }, sort_keys=True, separators=(",", ":")),
+             "2026-08-19T10:00:09Z",
+         )),
         ("INSERT INTO note_reads(source_id,actor,ts) VALUES(?,?,?)",
          ("s1", "operator", "2026-08-19T10:00:10Z")),
         ("INSERT INTO tags(name,description,created_at,updated_at) VALUES(?,?,?,?)",
@@ -408,6 +420,17 @@ def test_every_logical_table_round_trips_as_one_canonical_graph(tmp_path: Path) 
             assert target.conn.execute(
                 f'SELECT COUNT(*) FROM "{table}"'
             ).fetchone()[0] >= 1, table
+        anchor_json = target.conn.execute(
+            "SELECT anchor_json FROM note_comments WHERE id='comment1'"
+        ).fetchone()[0]
+        assert json.loads(anchor_json) == {
+            "v": 1,
+            "kind": "text_quote",
+            "note_version": 1,
+            "projection": "visible_text_v1",
+            "quote": {"exact": "Review", "prefix": "", "suffix": ""},
+            "position": {"start": 0, "end": 6},
+        }
     finally:
         origin.close()
         target.close()
