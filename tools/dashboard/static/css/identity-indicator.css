@@ -413,6 +413,11 @@ header[data-app-chrome] .identity-avatar {
     top: 0;
     height: auto;
     max-height: none;
+    /* Reset the desktop fixed width (line 184) so mobile honors left:0/right:0
+     * edge to edge — otherwise the fixed width wins, right:0 is dropped, and a
+     * strip of the page shows through on the right. */
+    width: auto;
+    max-width: none;
     /* Full bleed: no drawer padding or border showing as a frame around the
      * credentials surface; the surface's own background runs edge to edge and
      * the safe areas are applied INSIDE (on the mount) so content clears the
