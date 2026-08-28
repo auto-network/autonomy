@@ -1332,6 +1332,17 @@ export function credentialsPanel() {
     // ── actions (all STAGE) ───────────────────────────────────────────────
     // ── per-device slots for one credential ───────────────────────────────
     thisDevice() { return deviceLabel(); },
+    // The recipient PUBLIC key of the passkey that opened root this session
+    // (stashed by unlock.js). The "you are here" pin matches on this — key
+    // material, never a device-name string.
+    signedInRecipient() {
+      try { return sessionStorage.getItem('autonomy.factor.signed-in-recipient') || null; }
+      catch (e) { return null; }
+    },
+    isSignedInSlot(k) {
+      const r = this.signedInRecipient();
+      return !!r && k.recipientPub === r;
+    },
     enrolledHere(k) { return this.passkeys.some((x) => x.credId === k.credId && x.device === this.thisDevice()); },
     // Offer enrollment on a SYNCED credential with no slot on this device. We
     // can't know it's usable here without a ceremony — the offer is
@@ -1842,7 +1853,7 @@ const MARKUP = `
       <div class="row" :class="{removing:statusOf(k)==='removed', pending:statusOf(k)==='new'||statusOf(k)==='changed'}">
         <div class="authcell" :class="authCls(k)" @click="authCellClick(k,$event)"><span class="ac-ico"><svg><use xlink:href="#i-passkey"/></svg><template x-if="inMfaRoot(k)"><span class="mfab" :class="{dim:signinOff(k)}"><svg class="armor" viewBox="0 0 24 24"><path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/></svg></span></template></span><span class="ac-lbl" x-text="authWord(k)"></span></div>
         <div class="fmid"><div class="fname">
-          <span class="namewrap" x-show="renameFor!==k.id"><template x-if="k.device===thisDevice()"><svg class="youpin"><use xlink:href="#i-pin"/></svg></template><span x-text="k.label"></span><button class="editbtn" @click="startRename(k)" aria-label="Rename"><svg><use xlink:href="#i-edit"/></svg></button></span>
+          <span class="namewrap" x-show="renameFor!==k.id"><template x-if="isSignedInSlot(k)"><svg class="youpin"><use xlink:href="#i-pin"/></svg></template><span x-text="k.label"></span><button class="editbtn" @click="startRename(k)" aria-label="Rename"><svg><use xlink:href="#i-edit"/></svg></button></span>
           <span class="renamewrap" x-show="renameFor===k.id">
             <input class="renameinput" x-model="renameVal" @keydown.enter="saveRename(k)" @keydown.escape="cancelRename()" x-effect="renameFor===k.id&&setTimeout(()=>$el.focus(),0)">
             <button class="renameok" @click="saveRename(k)" aria-label="Save"><svg><use xlink:href="#i-check"/></svg></button>

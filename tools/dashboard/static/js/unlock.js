@@ -289,6 +289,16 @@
             rootEnvelope.factors, credentialId, rootRecipient.publicKeyHex,
           );
           var rootFactor = detection.kind === 'enrolled' ? detection.factor : null;
+          // Cryptographic "you are here": remember the recipient PUBLIC key of
+          // the passkey that actually opened root, so the credentials panel can
+          // pin the matching slot by key material, not a device-name guess.
+          if (detection.kind === 'enrolled') {
+            try {
+              sessionStorage.setItem(
+                'autonomy.factor.signed-in-recipient', rootRecipient.publicKeyHex,
+              );
+            } catch (e) { /* best-effort */ }
+          }
           // PRF mismatch on a KNOWN credential: this device holds a synced
           // passkey whose slot lives elsewhere. Remember the derived recipient
           // (public data only) — the factor panel greets it with the
