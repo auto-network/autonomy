@@ -24,6 +24,8 @@ against.
 | `VaultRecoveryRaceNoRevoke.spthy` | model 4 calibration: **implicit revoke deleted** from the recovery rekey | `recovery_beats_thief` falsified, rest verified |
 | `VaultConcurrentRekey.spthy` | model 5 green: §1e concurrent re-key convergence (bead auto-veal7) | all lemmas verified |
 | `VaultConcurrentRekeyNoConverge.spthy` | model 5 calibration: **winner→loser seal deleted** | `loser_converges` falsified, rest verified |
+| `VaultRecoverySuccession.spthy` | model 6 green: recovery-code succession witness window (bead auto-loov7) | all lemmas verified |
+| `VaultRecoverySuccessionNoCancel.spthy` | model 6 calibration: **no-cancellation precondition deleted** | `cancellation_blocks_completion` falsified, rest verified |
 | `run_tamarin.py` | harness enforcing every expectation above | exit 0 iff all hold |
 
 The pairing is the point: a green proof is only trusted because the
@@ -93,9 +95,11 @@ export PATH=/tmp/maude-dist:/tmp/tamarin:$PATH
 python3 tools/network/storagekit/tamarin/run_tamarin.py
 ```
 
-Verified 2026-08-28 with tamarin-prover 1.12.0 + Maude 3.5.1: green
-theory 4/4 verified (0.7 s), calibration falsifies `exclusion_forward`
-with a 9-step attack trace (0.6 s).
+Verified 2026-08-28 with tamarin-prover 1.12.0 + Maude 3.5.1: all six
+models (12 theories, 51 lemma expectations) green — each green theory
+fully verifies and each calibration falsifies exactly its headline
+lemma. Whole suite runs in a few seconds. NOTE: the toolchain needs a
+UTF-8 locale (`LC_ALL=C.UTF-8`); `run_tamarin.py` sets it.
 
 ## Model 2 — fleet distribution + §9 snapshot lemmas
 
@@ -235,18 +239,53 @@ This is the crisp availability/confidentiality split the design makes:
 FleetMachineCredential purpose (2) (D-013) provides convergence; without
 it the loser loses availability, never confidentiality.
 
+## Model 6 — recovery-code succession witness window (bead auto-loov7)
+
+The fully-unbuilt (🪦) regenerate-with-lost-code flow (crib §9 FINAL
+STATE): a root-signed declaration of a NEW recovery_pub enters the
+witnessed head-set at t_D; completion requires a witness attestation at
+t ≥ t_D + W over a chain containing the declaration and no cancellation;
+a cancellation by the old code or a root veto before completion kills
+it. Design verification before code exists.
+
+MONOTONIC CLOCK: Tamarin's trace order is the witness chain's never-
+decreasing entry time; a `Tick` action is one chain position and the
+window W is "at least two ticks strictly between declaration and
+completion" (qualitative, not the literal 7 days).
+
+Proved (green, 5/5): executability, `window_cannot_be_fast_forwarded`
+(every completion is preceded by its declaration + a full window of
+ticks), `cancellation_blocks_completion` (an old-code cancel before
+completion always stops it), `veto_blocks_completion`, and
+`completion_implies_witnessed_declaration` (the announcement cannot be
+hidden).
+
+Calibration (`VaultRecoverySuccessionNoCancel.spthy`): delete the
+no-cancellation precondition → `cancellation_blocks_completion` falsified
+(6-step trace: completion proceeds despite the true owner's cancel)
+while window and veto lemmas still hold.
+
+ACCOUNTABILITY SCOPE (honesty): this proves the WINDOW SAFETY. The
+split-view-as-self-contained-fraud-proof property (a dishonest witness
+showing two conflicting chains is caught) is a genuine accountability
+property (Künnemann et al.) modeled here only as an honest monotonic
+log; the adversarial-witness increment is the next step. Model 6 also
+absorbs the recovery_pub-succession swap-resistance deferred from model
+4: a completed succession IS a recovery-key swap, and here it requires
+the window + no cancellation, so a thief cannot silently swap it.
+
 ## Roadmap (tracker note graph://8277c76c-ad1; beads filed)
 
-1. ~~Model 2: snapshot lemmas + F4 distribution~~ — DONE, auto-loxsf.
-2. ~~Model 3: B1 open-write-store adversary~~ — DONE, auto-djh2m.
-3. ~~Model 4: member.rekey recovery race~~ — DONE, auto-cpbkf.
-4. ~~Model 5: §1e concurrent re-key convergence~~ — DONE (above),
-   auto-veal7.
-5. **Model 6 (auto-loov7): recovery-code succession witness window** —
-   accountability formulation, monotonic time; ALSO absorbs the
-   recovery_pub-succession swap resistance deferred from model 4.
-6. **TLA+ side-track (auto-xtt5v)**: c6z70 settings-resolution
-   discriminator + fleet-roster OR-set convergence.
-7. Later: transitive frontier descent w/ induction; D-006 halt/continue
-   window; SAPIC+ port for equivalence properties (unlinkability,
-   §23/§24 deniability) on ProVerif/DeepSec backends.
+All six Tamarin models DONE (auto-loxsf, -djh2m, -cpbkf, -veal7, -loov7,
+plus the pilot). Remaining:
+
+1. **TLA+ side-track (auto-xtt5v)**: c6z70 settings-resolution
+   discriminator + fleet-roster OR-set convergence — attacker-free
+   convergence, belongs in the existing TLA+ practice, parallelizable.
+2. **Model 6 increment**: adversarial-witness split-view accountability
+   (Künnemann et al.) over the honest-log base here.
+3. **Transitive frontier descent** w/ induction (relaxes the one-edge
+   abstraction shared by models 1-2).
+4. **D-006 halt/continue window** (unattended disenrollment-fact window).
+5. **SAPIC+ port** for equivalence properties (unlinkability, §23/§24
+   deniability) on ProVerif/DeepSec backends.

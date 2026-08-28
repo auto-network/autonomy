@@ -101,6 +101,20 @@ EXPECTATIONS = {
         "loser_converges": "falsified",
         "either_can_win": "verified",
     },
+    "VaultRecoverySuccession.spthy": {
+        "executable": "verified",
+        "window_cannot_be_fast_forwarded": "verified",
+        "cancellation_blocks_completion": "verified",
+        "veto_blocks_completion": "verified",
+        "completion_implies_witnessed_declaration": "verified",
+    },
+    "VaultRecoverySuccessionNoCancel.spthy": {
+        "executable": "verified",
+        "window_cannot_be_fast_forwarded": "verified",
+        "cancellation_blocks_completion": "falsified",
+        "veto_blocks_completion": "verified",
+        "completion_implies_witnessed_declaration": "verified",
+    },
 }
 
 SUMMARY_RE = re.compile(
@@ -154,7 +168,11 @@ def main() -> int:
                 "trustworthy. Fix the model, do not celebrate."
             )
         return 1
-    print("\nAll expectations hold: green proves, calibration rediscovers F-001.")
+    n = sum(len(v) for v in EXPECTATIONS.values())
+    print(
+        f"\nAll {n} expectations hold across {len(EXPECTATIONS)} theories: "
+        "every green theory proves, every calibration falsifies its headline lemma."
+    )
     return 0
 
 
