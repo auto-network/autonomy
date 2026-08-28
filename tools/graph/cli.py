@@ -660,26 +660,22 @@ def _resolve_tmux_name_to_source_id(tmux_name: str) -> str | None:
         except sqlite3.Error:
             pass
 
-    api_base = os.environ.get("GRAPH_API")
-    if not api_base:
+    # Container mode must use GraphClient's authenticated request path. The
+    # old raw urlopen call omitted the session bearer, so the dashboard quite
+    # correctly rejected the lookup and `graph tail <tmux-name>` then tried to
+    # parse the tmux name as a source UUID.
+    client = get_client()
+    resolver = getattr(client, "get_session_record", None)
+    if not callable(resolver):
         return None
-    import ssl
-    import urllib.error
-    import urllib.parse
-    import urllib.request
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    url = f"{api_base}/api/session/{urllib.parse.quote(tmux_name)}"
     try:
-        resp = urllib.request.urlopen(url, timeout=5, context=ctx)
-        data = json.loads(resp.read())
+        data = resolver(tmux_name)
         org_val = data.get("org")
         if isinstance(org_val, dict):  # org-identity payload → slug
             org_val = org_val.get("slug")
         _LAST_TMUX_RESOLVED_ORG = org_val or None
         return data.get("graph_source_id") or None
-    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError):
+    except (LookupError, ValueError, OSError):
         return None
 
 
