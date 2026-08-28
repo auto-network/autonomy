@@ -20,6 +20,8 @@ against.
 | `VaultOpenStore.spthy` | model 3 green: open-write-store adversary vs armor + Tier-2 (bead auto-djh2m) | all lemmas verified |
 | `VaultOpenStoreNoArmorVerify.spthy` | model 3 calibration A: **envelope check deleted** | `session_only_for_enrolled_factor` falsified, rest verified |
 | `VaultOpenStoreNoTierVerify.spthy` | model 3 calibration B: **enrollment-statement check deleted** | `no_key_to_forged_pk` falsified, rest verified |
+| `VaultRecoveryRace.spthy` | model 4 green: member.rekey recovery race (bead auto-cpbkf) | all lemmas verified |
+| `VaultRecoveryRaceNoRevoke.spthy` | model 4 calibration: **implicit revoke deleted** from the recovery rekey | `recovery_beats_thief` falsified, rest verified |
 | `run_tamarin.py` | harness enforcing every expectation above | exit 0 iff all hold |
 
 The pairing is the point: a green proof is only trusted because the
@@ -173,17 +175,51 @@ class: jh59f (forged `excludes`/base row wins selection) and c6z70
 (crib §17) — the settings resolver branching on unsigned fields is the
 same "trust presence" mistake this model isolates.
 
+## Model 4 — member.rekey recovery race (bead auto-cpbkf)
+
+The crib §9 claim "the recovery-authorized path additionally REVOKES the
+key it moves away from, so a stolen key cannot outrun its own recovery"
+as a race. Grounded in `ledger/fold.py:_h_member_rekey` (three doors;
+Item 4's implicit revoke; `_rekey_alive`). Two parts:
+- crypto authorization — the enrolled recovery key never leaks, so the
+  thief (holding the stolen current signing key + all public material)
+  cannot forge a recovery-authorized rekey;
+- the causal winner-rule — once a recovery rekey revokes old_pub, no
+  self-authorized rekey off old_pub is ever the effective authority.
+
+Signature checks use the Eq idiom (`Equal(verify(sig,m,pk), true)` + a
+generic `Equal(x,y) ⇒ x=y` restriction), because the fold verifies
+against a public key whose secret it does not hold — unlike models 1-3.
+
+Proved (green, 4/4): executability of a recovery rekey, the thief-can-
+self-rekey sanity trace (guards vacuity), `recovery_key_secret`, and
+**`recovery_beats_thief`** — no trace has both a recovery rekey revoking
+k and an effective self-rekey off k.
+
+Calibration (`VaultRecoveryRaceNoRevoke.spthy`): delete the implicit
+revoke → `recovery_beats_thief` falsified (11-step trace: the thief's
+self-rekey survives concurrently with recovery — Item 4's exact
+failure). The thief-sanity and executability traces still verify, so the
+falsification is the revoke's absence, not a broken model.
+
+FOLD ABSTRACTION (honesty): the fold's partial-order resolution is
+abstracted to `self_rekey_loses_to_revoke` — a self-rekey off k cannot
+occur in any trace where k is recovery-revoked. Order-independent, so it
+covers the concurrent case the crib specifically claims. Full causal-
+merge fidelity is the TLA+ side-track (auto-xtt5v). recovery_pub
+SUCCESSION (swapping the enrolled recovery key) is deliberately deferred
+to model 6, whose witness-chain window is its native home.
+
 ## Roadmap (tracker note graph://8277c76c-ad1; beads filed)
 
 1. ~~Model 2: snapshot lemmas + F4 distribution~~ — DONE, auto-loxsf.
-2. ~~Model 3: B1 open-write-store adversary~~ — DONE (above),
-   auto-djh2m.
-3. **Model 4 (auto-cpbkf): member.rekey three doors** — "a stolen key
-   cannot outrun its own recovery" as a race analysis.
+2. ~~Model 3: B1 open-write-store adversary~~ — DONE, auto-djh2m.
+3. ~~Model 4: member.rekey recovery race~~ — DONE (above), auto-cpbkf.
 4. **Model 5 (auto-veal7): §1e concurrent re-key** — honest-concurrency
    convergence; requires transitive/branching frontier descent.
 5. **Model 6 (auto-loov7): recovery-code succession witness window** —
-   accountability formulation, monotonic time.
+   accountability formulation, monotonic time; ALSO absorbs the
+   recovery_pub-succession swap resistance deferred from model 4.
 6. **TLA+ side-track (auto-xtt5v)**: c6z70 settings-resolution
    discriminator + fleet-roster OR-set convergence.
 7. Later: transitive frontier descent w/ induction; D-006 halt/continue
