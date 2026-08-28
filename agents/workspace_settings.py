@@ -637,6 +637,52 @@ def _artifact_from_setting(
 # ── Public read path ───────────────────────────────────────
 
 
+PROVISION_SET_ID = "autonomy.workspace.provision"
+
+
+def resolve_provision(workspace_id: str, *, org: str | None) -> dict:
+    """Merged ``autonomy.workspace.provision#1`` payload for a workspace.
+
+    The org row is the shared definition; a personal-store row under the
+    same key shadows it PER FIELD (present fields win, absent fields fall
+    through). This deliberate second read is the only personal-override
+    channel — the set's publication band pins ``max=curated``, so a
+    personal or machine row can never enter a federated resolution.
+    """
+    merged: dict[str, Any] = {}
+    stores = [org] if org == "personal" else [org, "personal"]
+    for store in stores:
+        row = ops.read_set_key(
+            PROVISION_SET_ID, workspace_id, org=store, peers=[],
+        )
+        payload = (row or {}).get("payload") or {}
+        for name, value in payload.items():
+            if value is not None:
+                merged[name] = value
+    return merged
+
+
+def materialize_startup_script(
+    proj, run_dir: Path, *, repo_root: Path,
+) -> Path | None:
+    """The host path to mount read-only at ``/startup.sh``, or None.
+
+    A provision row's ``startup_script`` is written to the session's run
+    dir and wins; otherwise the legacy repo-relative ``startup`` path
+    field resolves as before (transition fallback — removed with the
+    field once every workspace has a provision row).
+    """
+    content = resolve_provision(
+        proj.id, org=proj.graph_project,
+    ).get("startup_script")
+    if content:
+        path = Path(run_dir) / "startup.sh"
+        path.write_text(content)
+        path.chmod(0o755)
+        return path
+    return (repo_root / proj.startup) if proj.startup else None
+
+
 def _artifacts_for_workspace(
     workspace_id: str, *, org: str | None,
 ) -> tuple[ArtifactSpec, ...]:

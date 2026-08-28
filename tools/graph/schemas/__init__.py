@@ -73,6 +73,9 @@ from . import org  # noqa: F401
 from . import org_member_profile  # noqa: F401 — autonomy.org.member-profile#1
 from . import workspace  # noqa: F401
 from . import workspace_artifact  # noqa: F401 — autonomy.workspace.artifact#1
+from . import vault_release_lease  # noqa: F401 — autonomy.vault.release-lease#1
+from . import workspace_provision  # noqa: F401 — autonomy.workspace.provision#1
+from . import workspace_image_build  # noqa: F401 — autonomy.workspace.image-build#1
 from . import artifact_path  # noqa: F401 — autonomy.artifact-path#1
 from . import org_peer_subscription  # noqa: F401 — autonomy.org.peer-subscription#1
 from . import mount  # noqa: F401 — autonomy.workspace.mount#1
