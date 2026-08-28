@@ -1731,6 +1731,7 @@ const STYLE = `
 .fui-cred .pkchk.sel .check{ border-color:var(--mfa); background:var(--mfa); }
 .fui-cred .pkchk.sel .check::after{ content:""; width:5px; height:9px; border:2px solid #04121c; border-top:0; border-left:0; transform:rotate(45deg) translate(-1px,-1px); }
 .fui-cred .pkicon{ width:30px; height:30px; border-radius:8px; flex:none; display:grid; place-items:center; background:#0b1220; border:1px solid var(--line2); color:var(--accent2); } .fui-cred .pkicon svg{ width:16px; height:16px; }
+.fui-cred .youpin{ width:15px; height:15px; color:#3b82f6; flex:none; display:inline-block; vertical-align:-2px; margin-right:3px; }
 .fui-cred .pkname{ font-weight:600; font-size:14px; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .fui-cred .unlockbadge{ flex:none; white-space:nowrap; font-size:12px; font-weight:600; border-radius:999px; padding:6px 12px; cursor:pointer; background:rgba(52,211,153,.14); color:#34d399; border:1px solid rgba(52,211,153,.45); }
 .fui-cred .unlockbadge:hover{ background:rgba(52,211,153,.22); }
@@ -1759,6 +1760,7 @@ const SYMBOLS = `<svg width="0" height="0" style="position:absolute"><defs>
   <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 6.5"/></symbol>
   <symbol id="i-edit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></symbol>
   <symbol id="i-hash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3 7 21M17 3l-2 18M4 8.5h16M3.5 15.5h16"/></symbol>
+  <symbol id="i-pin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/></symbol>
   <symbol id="i-print" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><path d="M6 14h12v8H6z"/></symbol>
   <symbol id="i-scan" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2"/><rect x="8" y="8" width="8" height="8" rx="1"/></symbol>
   <linearGradient id="armorGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#b3bcff"/><stop offset="1" stop-color="#4d59d6"/></linearGradient>
@@ -1840,7 +1842,7 @@ const MARKUP = `
       <div class="row" :class="{removing:statusOf(k)==='removed', pending:statusOf(k)==='new'||statusOf(k)==='changed'}">
         <div class="authcell" :class="authCls(k)" @click="authCellClick(k,$event)"><span class="ac-ico"><svg><use xlink:href="#i-passkey"/></svg><template x-if="inMfaRoot(k)"><span class="mfab" :class="{dim:signinOff(k)}"><svg class="armor" viewBox="0 0 24 24"><path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/></svg></span></template></span><span class="ac-lbl" x-text="authWord(k)"></span></div>
         <div class="fmid"><div class="fname">
-          <span class="namewrap" x-show="renameFor!==k.id"><span x-text="(k.device===thisDevice()?'⭐️ ':'')+k.label"></span><button class="editbtn" @click="startRename(k)" aria-label="Rename"><svg><use xlink:href="#i-edit"/></svg></button></span>
+          <span class="namewrap" x-show="renameFor!==k.id"><template x-if="k.device===thisDevice()"><svg class="youpin"><use xlink:href="#i-pin"/></svg></template><span x-text="k.label"></span><button class="editbtn" @click="startRename(k)" aria-label="Rename"><svg><use xlink:href="#i-edit"/></svg></button></span>
           <span class="renamewrap" x-show="renameFor===k.id">
             <input class="renameinput" x-model="renameVal" @keydown.enter="saveRename(k)" @keydown.escape="cancelRename()" x-effect="renameFor===k.id&&setTimeout(()=>$el.focus(),0)">
             <button class="renameok" @click="saveRename(k)" aria-label="Save"><svg><use xlink:href="#i-check"/></svg></button>
@@ -1853,7 +1855,7 @@ const MARKUP = `
     <template x-if="hasRecovery"><div>
       <div class="grouphead"><span class="grouplbl">Recovery code</span></div>
       <div class="row">
-        <div class="authcell au-rec"><span class="ac-ico"><svg><use xlink:href="#i-hash"/></svg></span><span class="ac-lbl">Emergency</span></div>
+        <div class="authcell au-rec"><span class="ac-ico"><svg><use xlink:href="#i-hash"/></svg></span><span class="ac-lbl">Recovery</span></div>
         <div class="fmid"><div class="fname">Recovery code</div>
           <div class="fmeta"><span x-text="recoveryCreated ? ('Generated '+createdLocal(recoveryCreated)) : 'Enrolled'"></span></div></div>
         <div class="facts factcol"><button class="lnk lverify" @click="startVerifyRecovery()">Verify</button></div>
