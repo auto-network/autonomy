@@ -67,10 +67,17 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 _SCHEMA_USER_VERSION = 10
 DEFAULT_ORGS_DIR = DATA_ROOT / "orgs"
 
-# Keep SQLite's existing default lock wait explicit so contention tests can
-# shorten it without changing production behavior.  An rw open gets three
-# additional attempts after the first failure.
-_SQLITE_CONNECT_TIMEOUT_S = 5.0
+# Lock wait, explicit so contention tests can shorten it. Raised 5s -> 15s
+# after the 2026-08-28 mass-dispatch storm: with WAL + BEGIN IMMEDIATE the
+# busy timeout genuinely applies, and the observed instant-looking failures
+# were writers exhausting 5s behind long-held locks (batch appender commits
+# and WAL checkpoints under IO pressure), 500ing note/link/source writes.
+# 15s absorbs those transients while staying bounded — a request thread
+# blocked longer than that should fail rather than starve the pool (the
+# same storm proved threadpool starvation escalates to a full stall).
+# Deeper levers (appender transaction sizing, checkpoint strategy, a
+# retryable 503 contract) are tracked separately.
+_SQLITE_CONNECT_TIMEOUT_S = 15.0
 _RW_OPEN_BACKOFF_S = (0.05, 0.1, 0.2)
 
 VALID_ORG_TYPES = ("shared", "personal")
