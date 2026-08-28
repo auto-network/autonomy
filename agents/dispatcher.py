@@ -1776,22 +1776,85 @@ def _dashboard_base_url() -> str:
     return os.environ.get("GRAPH_API") or "https://localhost:8080"
 
 
+def _effective_bead_max_concurrent(cli_value: int) -> int:
+    """Bead-launch concurrency: the dispatch-page Setting, else the CLI value.
+
+    Operator-tunable live from the dashboard (autonomy.dispatch.limits#1,
+    machine store) without a dispatcher restart; read once per cycle. Any
+    read failure falls back to the CLI value — the limit must never be
+    the thing that stops the dispatcher.
+    """
+    try:
+        from tools.graph import ops as _graph_ops
+        from tools.graph.schemas import dispatch_limits as _dl
+        row = _graph_ops.read_set_key(
+            _dl.SET_ID, "default", org="machine", peers=[],
+        )
+        value = ((row or {}).get("payload") or {}).get("bead_max_concurrent")
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return value
+    except Exception:
+        pass
+    return cli_value
+
+
+_monitor_token_warned = False
+
+
+def _monitor_service_token() -> str | None:
+    """The dashboard-provisioned scoped bearer for /api/monitor/* calls.
+
+    The dashboard mints it at startup (scoped to exactly the two monitor
+    routes) and writes the secret to data/.dispatch_token;
+    read per call so a dashboard restart's rotation takes effect without
+    restarting the dispatcher. Absent file -> no header (the call then
+    401s and the dashboard's in-process reconciler is the safety net).
+    """
+    global _monitor_token_warned
+    try:
+        token = (REPO_ROOT / "data" / ".dispatch_token").read_text().strip()
+        if token:
+            return token
+    except OSError:
+        pass
+    if not _monitor_token_warned:
+        _monitor_token_warned = True
+        print(
+            "  WARNING: no dispatcher token at data/.dispatch_token — "
+            "monitor calls will 401 until the dashboard (which mints it "
+            "at startup) has run. NEVER fall back to ambient env tokens: "
+            "CROSSTALK_TOKEN in this process is an inherited session "
+            "credential, absent in Compose and revoked with its session.",
+            file=sys.stderr,
+        )
+    return None
+
+
 def _monitor_post(path: str, body: dict, *, tmux_name: str) -> None:
     """POST to a dashboard /api/monitor/* endpoint. Best-effort — if the
     dashboard is unreachable, log a warning and continue. Direct DB writes
     are NOT an acceptable fallback: they bypass session_monitor's in-process
-    state (inotify watches + SSE broadcasts). See graph://f4b1bb26-a1."""
+    state (inotify watches + SSE broadcasts). See graph://f4b1bb26-a1.
+
+    Sends the dashboard-provisioned scoped service bearer: the API is
+    authenticated (commit 8066651 removed auth back when the surface was
+    open; the authenticated-API work made bare calls 401 — 2026-08-28
+    handoff item 4)."""
     import json as _json
     import ssl
     import urllib.request
 
     url = _dashboard_base_url().rstrip("/") + path
     data = _json.dumps(body).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    token = _monitor_service_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(
         url,
         data=data,
         method="POST",
-        headers={"Content-Type": "application/json"},
+        headers=headers,
     )
     ctx = ssl.create_default_context()
     if url.startswith(("https://localhost", "https://127.0.0.1")):
@@ -2933,9 +2996,10 @@ def dispatch_cycle(
 
     # ── Phase 3: Launch new bead agents ─────────────────────────
     dispatched = 0
-    slots = config.max_concurrent - len(running)
+    effective_max = _effective_bead_max_concurrent(config.max_concurrent)
+    slots = effective_max - len(running)
     if slots <= 0:
-        print(f"  At capacity ({len(running)}/{config.max_concurrent})")
+        print(f"  At capacity ({len(running)}/{effective_max})")
         slots = 0
 
     available = []
@@ -3370,7 +3434,8 @@ def reconcile_stale_monitor_rows() -> None:
     rows — their lifecycle is dispatcher-owned. This pass closes the gap.
 
     Idempotent. POSTs /api/monitor/deregister via the existing helper
-    (auth-free post commit 8066651 — do not re-add Authorization headers).
+    (authenticated via the dashboard-provisioned scoped bearer; see
+    _monitor_service_token — the 8066651 auth-free note is obsolete).
     """
     import sqlite3 as _sq
 

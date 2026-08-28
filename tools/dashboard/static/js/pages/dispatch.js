@@ -33,6 +33,10 @@
       paused: {},          // { label: bool } — plain object for Alpine reactivity
       reasons: {},         // { label: string } — why each label is paused (e.g. smoke failure)
       dispatcherState: { paused: false, reason: null },  // SQLite dispatcher pause (auth failure etc.)
+      // Settings-backed concurrency limits (autonomy.dispatch.limits#1);
+      // loaded on init, saved on change, live-updated via SSE.
+      limits: { bead_max_concurrent: 2, agentic_max_concurrent: 10 },
+      _limitsHandler: null,
       _dispatchHandler: null,
       _pauseHandler: null,
       _dispatcherStateHandler: null,
@@ -89,6 +93,31 @@
         }
       },
 
+      async loadLimits() {
+        try {
+          const resp = await fetch('/api/dispatch/limits');
+          if (resp.ok) this.limits = await resp.json();
+        } catch (_) { /* keep defaults; inputs still editable */ }
+      },
+
+      async saveLimits() {
+        const body = {
+          bead_max_concurrent: this.limits.bead_max_concurrent,
+          agentic_max_concurrent: this.limits.agentic_max_concurrent,
+        };
+        try {
+          const resp = await fetch('/api/dispatch/limits', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          if (resp.ok) this.limits = await resp.json();
+          else this.loadLimits();   // revert to server truth on rejection
+        } catch (_) {
+          this.loadLimits();
+        }
+      },
+
       // Alpine lifecycle — called automatically when the component initialises.
       // Reads from the global SSE cache for an instant render, then registers
       // for live updates. Does NOT open a new SSE connection.
@@ -104,10 +133,16 @@
         registerHandler('dispatch', this._dispatchHandler);
         registerHandler('dispatch_pause', this._pauseHandler);
         registerHandler('dispatcher_state', this._dispatcherStateHandler);
+        this._limitsHandler = data => { this.limits = { ...data }; };
+        registerHandler('dispatch_limits', this._limitsHandler);
+        this.loadLimits();
       },
 
       destroy() {
         // Unregister only — do NOT close the shared SSE connection.
+        if (this._limitsHandler) {
+          unregisterHandler('dispatch_limits', this._limitsHandler);
+        }
         if (this._dispatchHandler) {
           unregisterHandler('dispatch', this._dispatchHandler);
           this._dispatchHandler = null;
