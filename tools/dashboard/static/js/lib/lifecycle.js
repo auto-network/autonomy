@@ -83,6 +83,7 @@
     pending: "",
     requesting: "Queued",
     preparing_workspace: "Preparing workspace",  // augmented in phaseChip() with N/M
+    building_image: "Rebuilding image",
     launching_container: "Starting container",
     container_starting: "Starting container",
     entrypoint_running: "Initializing container",

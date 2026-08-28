@@ -31,6 +31,7 @@ import hashlib
 import subprocess
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -80,6 +81,49 @@ def _docker(args: list[str], *, runner, timeout: int = BUILD_TIMEOUT_S):
     )
 
 
+# The background sweep worker and the launch-time building_image stage
+# share one process; a per-image lock coalesces their build attempts —
+# the second caller waits, re-reads the freshly-written status row, and
+# its hash gate turns the duplicate build into a skip.
+_image_locks: dict[str, threading.Lock] = {}
+_image_locks_guard = threading.Lock()
+
+
+def _lock_for(image: str) -> threading.Lock:
+    with _image_locks_guard:
+        return _image_locks.setdefault(image, threading.Lock())
+
+
+def image_staleness(
+    org: str,
+    workspace_id: str,
+    *,
+    runner=subprocess.run,
+) -> str | None:
+    """Why this workspace's built image can't launch as-is, or None.
+
+    None means either "current" or "this workspace doesn't build an
+    image at all" — in both cases launch proceeds without the
+    building_image stage. The check is cheap (two settings reads and a
+    docker inspect), so the launch path can afford it every time.
+    """
+    dockerfile = resolve_provision(workspace_id, org=org).get("dockerfile")
+    if not dockerfile:
+        return None
+    last = _status_row(org, workspace_id)
+    content_hash = hashlib.sha256(dockerfile.encode()).hexdigest()
+    if last.get("content_hash") != content_hash or not last.get("digest"):
+        return "dockerfile changed since the last successful build here"
+    image = derive_image_name(org, workspace_id)
+    inspect = _docker(
+        ["image", "inspect", "--format", "{{.Id}}", image],
+        runner=runner, timeout=60,
+    )
+    if inspect.returncode != 0:
+        return "image absent on this machine"
+    return None
+
+
 def build_workspace(
     org: str,
     workspace_id: str,
@@ -96,7 +140,23 @@ def build_workspace(
     if not dockerfile:
         return None
     image = derive_image_name(org, workspace_id)
+    with _lock_for(image):
+        return _build_locked(
+            org, workspace_id, image, dockerfile,
+            repo_root=repo_root, force=force, runner=runner,
+        )
 
+
+def _build_locked(
+    org: str,
+    workspace_id: str,
+    image: str,
+    dockerfile: str,
+    *,
+    repo_root: Path,
+    force: bool,
+    runner,
+) -> BuildResult:
     disk = repo_root / "agents" / "projects" / workspace_id / "Dockerfile"
     if disk.exists():
         detail = (

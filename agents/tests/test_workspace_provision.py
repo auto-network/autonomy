@@ -33,7 +33,6 @@ def _proj(**kw):
     return SimpleNamespace(
         id=kw.get("id", "ai-recon"),
         graph_project=kw.get("graph_project", "autonomy"),
-        startup=kw.get("startup"),
     )
 
 
@@ -60,26 +59,19 @@ def test_personal_org_reads_once(monkeypatch):
     assert calls == [("personal", "mine")]
 
 
-def test_materialize_writes_run_dir_and_wins_over_path(monkeypatch, tmp_path):
+def test_materialize_writes_run_dir(monkeypatch, tmp_path):
     _stub_rows(monkeypatch, {"autonomy": {"startup_script": "#!/bin/bash\nhi"}})
-    proj = _proj(startup="agents/projects/ai-recon/startup.sh")
-    path = workspace_settings.materialize_startup_script(
-        proj, tmp_path, repo_root=tmp_path / "repo")
+    path = workspace_settings.materialize_startup_script(_proj(), tmp_path)
     assert path == tmp_path / "startup.sh"
     assert path.read_text() == "#!/bin/bash\nhi"
     assert path.stat().st_mode & 0o111, "materialized script is executable"
 
 
-def test_no_rows_falls_back_to_legacy_path(monkeypatch, tmp_path):
-    _stub_rows(monkeypatch, {})
-    proj = _proj(startup="agents/projects/legacy/startup.sh")
-    path = workspace_settings.materialize_startup_script(
-        proj, tmp_path, repo_root=tmp_path / "repo")
-    assert path == tmp_path / "repo" / "agents/projects/legacy/startup.sh"
-    assert not (tmp_path / "startup.sh").exists()
-
-
-def test_no_rows_no_path_is_none(monkeypatch, tmp_path):
+def test_no_provision_row_means_no_startup(monkeypatch, tmp_path):
+    # the legacy repo-relative `startup` path field is DELETED (rows were
+    # stripped 2026-08-28); a workspace without a provision row simply
+    # has no startup script
     _stub_rows(monkeypatch, {})
     assert workspace_settings.materialize_startup_script(
-        _proj(), tmp_path, repo_root=tmp_path) is None
+        _proj(), tmp_path) is None
+    assert not (tmp_path / "startup.sh").exists()

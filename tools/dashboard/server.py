@@ -139,6 +139,7 @@ from tools.dashboard import api_auth, route_policy
 from tools.dashboard import network_routes
 from tools.dashboard import web_push, web_push_proof, web_push_routes, web_push_worker
 from tools.dashboard import image_build_worker
+from agents import image_builder
 if os.environ.get("DASHBOARD_MOCK"):
     from tools.dashboard.dao import mock as dao_beads
     from tools.dashboard.dao import mock as dao_dispatch
@@ -7936,6 +7937,31 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
         _remaining_step_timeout(prepare_deadline, "preparing")
         project_mounts.update(workspace_settings.artifact_mounts(proj))
 
+        # Settings-built image freshness. Entered ONLY when this workspace
+        # launches its own <org>/<workspace-id> image AND the resolved
+        # dockerfile is stale or the image is absent here — the background
+        # builder normally builds within seconds of a provision write, so
+        # this stage covers the race window and the fresh-machine case.
+        # A stale image never launches silently; a failed build fails the
+        # launch with the builder's error.
+        if proj.image == image_builder.derive_image_name(
+                proj.graph_project, proj.id):
+            staleness = image_builder.image_staleness(
+                proj.graph_project, proj.id)
+            if staleness:
+                phase = "building_image"
+                writer.set_state(tmux_name, "building_image")
+                logger.info(
+                    "session_lifecycle: building_image tmux=%s image=%s (%s)",
+                    tmux_name, proj.image, staleness)
+                build = image_builder.build_workspace(
+                    proj.graph_project, proj.id,
+                    repo_root=_REPO_ROOT, force=True)
+                if build is None or build.action != "built":
+                    raise RuntimeError(
+                        f"workspace image {proj.image} could not be built: "
+                        f"{build.detail if build else 'no dockerfile resolved'}")
+
         phase = "launching"
         writer.set_state(tmux_name, "launching")
         launch_deadline = time.monotonic() + _LIFECYCLE_LAUNCHING_TIMEOUT_S
@@ -7961,7 +7987,7 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
         primer_path = run_dir / ".claude_md"
         primer_path.write_text(render_workspace_primer(proj))
         startup_script = workspace_settings.materialize_startup_script(
-            proj, run_dir, repo_root=_REPO_ROOT)
+            proj, run_dir)
         working_dir = proj.working_dir or "/workspace/repo"
 
         cmd_str = launch_session(
@@ -8202,6 +8228,27 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
             )
             _remaining_step_timeout(prepare_deadline, "preparing")
             mounts.update(workspace_settings.artifact_mounts(proj))
+            # Same freshness gate as the primary start path: a resume
+            # relaunches the container, so a stale Settings-built image
+            # is rebuilt here too, under its own stage and budget.
+            if proj.image == image_builder.derive_image_name(
+                    proj.graph_project, proj.id):
+                staleness = image_builder.image_staleness(
+                    proj.graph_project, proj.id)
+                if staleness:
+                    phase = "building_image"
+                    writer.set_state(tmux_name, "building_image")
+                    logger.info(
+                        "session_lifecycle: building_image tmux=%s image=%s (%s)",
+                        tmux_name, proj.image, staleness)
+                    build = image_builder.build_workspace(
+                        proj.graph_project, proj.id,
+                        repo_root=_REPO_ROOT, force=True)
+                    if build is None or build.action != "built":
+                        raise RuntimeError(
+                            f"workspace image {proj.image} could not be "
+                            f"built: "
+                            f"{build.detail if build else 'no dockerfile resolved'}")
         else:
             proj = None
             mounts = None
@@ -8231,7 +8278,7 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
             primer_path = run_dir / ".claude_md"
             primer_path.write_text(render_workspace_primer(proj))
             startup_script = workspace_settings.materialize_startup_script(
-                proj, run_dir, repo_root=_REPO_ROOT)
+                proj, run_dir)
             cmd_str = launch_session(
                 session_type="terminal",
                 name=tmux_name,
@@ -18200,7 +18247,7 @@ async def api_agent_action_dispatch(request):
             "extra_env": extra_env or None,
             "global_claude_md": primer_path,
             "startup_script": workspace_settings.materialize_startup_script(
-                workspace, output_dir_path, repo_root=_REPO_ROOT),
+                workspace, output_dir_path),
             "needs_nested_docker": workspace.needs_nested_docker,
             "runtime": workspace.session_runtime,
             "network_host": workspace.network_host,
