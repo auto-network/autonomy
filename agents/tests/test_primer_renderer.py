@@ -201,7 +201,28 @@ def test_host_network_section_when_enabled():
     assert "`--network=host`" in out
     assert "`https://localhost:8080`" in out
     assert "bridge mode" not in out
-    assert "host.docker.internal" not in out
+    assert "Reach host services via `host.docker.internal`" not in out
+
+
+def test_operator_dashboard_url_prefers_configured_tailnet_domain(monkeypatch):
+    monkeypatch.setenv("DASHBOARD_DOMAIN", "dash.tail1234.ts.net")
+    out = render_workspace_primer(_cfg(network_host=True))
+    assert (
+        "OPERATOR-FACING LINKS MUST USE "
+        "`https://dash.tail1234.ts.net:8080`" in out
+    )
+    assert "NEVER `localhost` OR `host.docker.internal`" in out
+
+
+def test_operator_dashboard_url_derives_magicdns_name(monkeypatch):
+    from agents import primer_renderer
+
+    monkeypatch.delenv("DASHBOARD_DOMAIN", raising=False)
+    assert primer_renderer._operator_dashboard_url(
+        configured_domain="",
+        hostname="DESKTOP-EXAMPLE",
+        resolv_text="nameserver 100.100.100.100\nsearch tailabcd.ts.net\n",
+    ) == "https://desktop-example.tailabcd.ts.net:8080"
 
 
 def test_bridge_network_section_when_disabled():
@@ -573,34 +594,30 @@ def test_writable_session_branch_uses_session_prefix():
     assert "agent/<session>" not in out
 
 
-def test_sync_snippet_assignment_and_curl_on_separate_lines():
-    """The DASHBOARD assignment and the curl call must render on separate
-    lines — the earlier template glued them together because Jinja's
-    `trim_blocks=True` ate the trailing newline of the inline ``{% if %}``.
-    """
+def test_host_dashboard_and_operator_link_rule_render_on_separate_lines():
+    """Jinja trimming must not join the internal URL to the link rule."""
     out = render_workspace_primer(_cfg(
         repos=(RepoMount(host="example.com", repo="o/r", mount="/workspace/foo", writable=True),),
         network_host=True,
     ))
-    # Valid shell — DASHBOARD value followed by a real newline before the
-    # next command (the template now interposes a REPO_NAME=$(curl ...)
-    # lookup between the assignment and the sync-base curl).
-    assert "DASHBOARD=https://localhost:8080\nREPO_NAME=$(curl " in out
-    # Sanity: the broken concatenation must not appear.
-    assert "https://localhost:8080REPO_NAME" not in out
-    assert "https://localhost:8080curl" not in out
+    assert (
+        "- Dashboard: `https://localhost:8080`\n\n"
+        "**OPERATOR-FACING LINKS MUST USE" in out
+    )
+    assert "https://localhost:8080`**OPERATOR" not in out
 
 
-def test_sync_snippet_renders_for_bridge_network():
-    """Bridge-network workspaces resolve to host.docker.internal but the
-    rendered shell must still place `curl` on its own line."""
+def test_bridge_dashboard_and_operator_link_rule_render_on_separate_lines():
+    """Bridge-network internal and operator URLs remain distinct lines."""
     out = render_workspace_primer(_cfg(
         repos=(RepoMount(host="example.com", repo="o/r", mount="/workspace/foo", writable=True),),
         network_host=False,
     ))
-    assert "DASHBOARD=https://host.docker.internal:8080\nREPO_NAME=$(curl " in out
-    assert "host.docker.internal:8080REPO_NAME" not in out
-    assert "host.docker.internal:8080curl" not in out
+    assert (
+        "- Dashboard: `https://host.docker.internal:8080`\n\n"
+        "**OPERATOR-FACING LINKS MUST USE" in out
+    )
+    assert "host.docker.internal:8080`**OPERATOR" not in out
 
 
 def test_capability_with_missing_primer_file_still_renders_heading(tmp_path, monkeypatch):

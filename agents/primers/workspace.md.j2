@@ -372,6 +372,13 @@ graph crosstalk broadcast "message to all live sessions"
 Container is on a bridge network. Reach host services via `host.docker.internal`:
 - Dashboard: `https://host.docker.internal:8080`
 {% endif %}
+{% if operator_dashboard_url %}
+
+**OPERATOR-FACING LINKS MUST USE `{{ operator_dashboard_url }}` — NEVER `localhost` OR `host.docker.internal`.** Those internal names are for agent tool calls only. Build every clickable dashboard, Design Studio, Present, session, or artifact URL by appending its path to this Tailnet base URL.
+{% else %}
+
+**OPERATOR-FACING LINKS MUST NEVER USE `localhost` OR `host.docker.internal`.** Resolve this node's Tailnet MagicDNS name before giving the operator a clickable dashboard URL; configure `DASHBOARD_DOMAIN` when automatic discovery is unavailable.
+{% endif %}
 {% for cap in capability_blocks %}
 
 ### {{ cap.implementation }} — {{ cap.contract }}@{{ cap.contract_version }}
