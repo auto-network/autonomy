@@ -475,19 +475,34 @@ describe('verified dictation health coordinator', () => {
     await startRestored(h);
     h.verifyFlow('connection-current', 1);
     const socketCount = h.sockets.length;
+    const captureStream = h.stream;
+    const captureContext = h.contexts.at(-1);
+    const captureWorklet = h.worklets.at(-1);
+    assert.equal(h.voice.effectiveState, 'listening');
+    assert.equal(h.voice.transportStatus, 'flowing');
 
     assert.equal(h.api.resetEpoch('send'), true);
+    assert.equal(h.voice.effectiveState, 'listening', 'Send does not flap verified health while reset is pending');
     await h.advance(4000);
     h.frame();
     h.api._audioWatchdogTick();
     assert.equal(h.sockets.length, socketCount, 'reset wait does not replace the socket');
     assert.equal(h.api._state.resetBoundaryPending, true);
+    assert.equal(h.voice.effectiveState, 'listening', 'intentional reset wait stays healthy');
 
     h.socket.deliver({
       type: 'buffer_state', text: '', epoch: 1,
       audio_ready_token: 'reset-ready-token',
     });
     assert.equal(h.api._state.resetBoundaryPending, false);
+    assert.equal(h.voice.effectiveState, 'listening', 'Send preserves verified microphone health');
+    assert.equal(h.voice.transportStatus, 'flowing', 'Send does not flap the audio transport state');
+    assert.equal(h.stream, captureStream, 'Send keeps the current microphone stream');
+    assert.equal(h.contexts.at(-1), captureContext, 'Send keeps the current AudioContext');
+    assert.equal(h.worklets.at(-1), captureWorklet, 'Send keeps the current audio worklet');
+    await h.advance(22000);
+    assert.equal(h.voice.actionRequiredReason, null, 'Send does not arm a false recovery deadline');
+    assert.equal(h.socket.readyState, 1, 'healthy browser voice socket remains open after Send');
   });
 
   it('keeps a newer reset pending when an older reset result arrives', async () => {
