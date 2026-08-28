@@ -63,7 +63,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # and the duplicate-base self-heal groups by the same columns (the pair moves
 # as one).
 # v9: first-class persona_id/session_id on authored graph content.
-_SCHEMA_USER_VERSION = 9
+# v10 (auto-52j7e): optional durable selected-text anchors on note comments.
+_SCHEMA_USER_VERSION = 10
 DEFAULT_ORGS_DIR = DATA_ROOT / "orgs"
 
 # Keep SQLite's existing default lock wait explicit so contention tests can
@@ -521,6 +522,7 @@ class GraphDB:
         self.conn.executescript(schema)
         self._migrate_attachments_alt_text()
         self._migrate_content_attribution()
+        self._migrate_comment_anchors()
         self._backfill_content_persona()
         self._migrate_sources_last_activity()
         self._migrate_publication_state()
@@ -590,6 +592,18 @@ class GraphDB:
                 if column not in cols:
                     self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
         self.conn.commit()
+
+    def _migrate_comment_anchors(self):
+        """Add optional selected-text metadata to existing comment tables."""
+        cols = {
+            row[1]
+            for row in self.conn.execute("PRAGMA table_info(note_comments)")
+        }
+        if "anchor_json" not in cols:
+            self.conn.execute(
+                "ALTER TABLE note_comments ADD COLUMN anchor_json TEXT"
+            )
+            self.conn.commit()
 
     def _backfill_content_persona(self):
         """Provision legacy authored rows from one cached Settings lookup.
@@ -2552,12 +2566,25 @@ class GraphDB:
 
     # ── Note Comments ───────────────────────────────────────
 
-    def insert_comment(self, source_id: str, content: str, actor: str = "user", *, persona_id: str | None = None, session_id: str | None = None) -> dict:
+    def insert_comment(
+        self,
+        source_id: str,
+        content: str,
+        actor: str = "user",
+        *,
+        persona_id: str | None = None,
+        session_id: str | None = None,
+        anchor_json: str | None = None,
+    ) -> dict:
         cid = new_id()
         self.conn.execute(
-            """INSERT INTO note_comments (id, source_id, content, actor, persona_id, session_id)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (cid, source_id, content, actor, persona_id, session_id),
+            """INSERT INTO note_comments
+               (id, source_id, content, actor, persona_id, session_id, anchor_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                cid, source_id, content, actor, persona_id, session_id,
+                anchor_json,
+            ),
         )
         self.conn.commit()
         row = self.conn.execute("SELECT * FROM note_comments WHERE id = ?", (cid,)).fetchone()

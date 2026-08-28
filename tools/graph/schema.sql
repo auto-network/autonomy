@@ -236,6 +236,7 @@ CREATE TABLE IF NOT EXISTS note_comments (
     id                TEXT PRIMARY KEY,
     source_id         TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
     content           TEXT NOT NULL,
+    anchor_json       TEXT,                  -- optional v1 selected-text anchor (canonical JSON)
     actor             TEXT DEFAULT 'user',
     integrated        INTEGER DEFAULT 0,    -- 0=active, 1=integrated (content rolled into note body)
     created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),

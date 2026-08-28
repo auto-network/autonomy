@@ -15241,6 +15241,7 @@ async def api_graph_comment(request):
 
     org = api_auth.organization_scope_from_request(request)
     persona_id, session_id = _graph_write_identity(request)
+    anchor = body.get("anchor")
 
     # Source lookup goes through the full-surface cross-org resolver so
     # peer-raw notes still produce the correct CrossOrgWriteError
@@ -15260,14 +15261,18 @@ async def api_graph_comment(request):
                 persona_id=persona_id,
                 session_id=session_id,
                 org=org,
+                anchor=anchor,
             )
         except graph_ops.CrossOrgWriteError as ex:
             return _cross_org_error_response(ex)
+        except ValueError as ex:
+            return JSONResponse({"error": str(ex)}, status_code=400)
         _checkpoint_graph()
         return JSONResponse({
             "ok": True,
             "comment_id": comment["id"],
             "source_id": source_id,
+            "comment": comment,
         })
 
     if resolved.get("type") != "note":
@@ -15284,15 +15289,19 @@ async def api_graph_comment(request):
             persona_id=persona_id,
             session_id=session_id,
             org=org,
+            anchor=anchor,
         )
     except graph_ops.CrossOrgWriteError as ex:
         return _cross_org_error_response(ex)
+    except ValueError as ex:
+        return JSONResponse({"error": str(ex)}, status_code=400)
 
     _checkpoint_graph()
     return JSONResponse({
         "ok": True,
         "comment_id": comment["id"],
         "source_id": resolved["id"],
+        "comment": comment,
     })
 
 
@@ -18391,6 +18400,7 @@ async def api_graph_resolve(request):
             "actor": comment.get("actor", "user"),
             "created_at": comment.get("created_at", ""),
             "integrated": bool(comment.get("integrated", 0)),
+            "anchor": comment.get("anchor"),
             "redirect": f"/graph/{comment['source_id'][:12]}?highlight={comment['id'][:12]}",
         })
     body = await asyncio.to_thread(_graph_not_found_body, id, org)

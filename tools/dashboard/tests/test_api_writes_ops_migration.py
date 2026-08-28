@@ -20,7 +20,6 @@ from pathlib import Path
 import pytest
 from starlette.testclient import TestClient
 
-from tools.graph import db as graph_db_mod
 from tools.graph import ops
 from tools.graph.db import GraphDB
 
@@ -31,11 +30,9 @@ from tools.graph.db import GraphDB
 @pytest.fixture
 def orgs_root(tmp_path, monkeypatch):
     root = tmp_path / "orgs"
-    legacy = tmp_path / "legacy.db"
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(root))
     monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.delenv("GRAPH_ORG", raising=False)
-    monkeypatch.setattr(graph_db_mod, "DEFAULT_DB", legacy)
     GraphDB.close_all_pooled()
     try:
         yield root
@@ -92,6 +89,116 @@ def _make_peer_note(db_path: Path, *, title: str, state: str = "raw") -> str:
         return src.id
     finally:
         db.close()
+
+
+def _text_anchor():
+    return {
+        "v": 1,
+        "kind": "text_quote",
+        "note_version": 1,
+        "projection": "visible_text_v1",
+        "quote": {
+            "exact": "selected passage",
+            "prefix": "before ",
+            "suffix": " after",
+        },
+        "position": {"start": 7, "end": 23},
+    }
+
+
+class TestAnchoredGraphCommentAPI:
+    def _create_note(self, client):
+        response = client.post(
+            "/api/graph/note",
+            json={"content": "before selected passage after"},
+            headers={"X-Graph-Org": "anchore"},
+        )
+        assert response.status_code == 200
+        return response.json()["source_id"]
+
+    def test_anchor_is_public_on_every_comment_read_path(self, dashboard_client):
+        note_id = self._create_note(dashboard_client)
+        anchor = _text_anchor()
+        created = dashboard_client.post(
+            "/api/graph/comment",
+            json={"source_id": note_id, "content": "explain this", "anchor": anchor},
+            headers={"X-Graph-Org": "anchore"},
+        )
+        assert created.status_code == 200, created.text
+        body = created.json()
+        comment_id = body["comment_id"]
+        assert body["comment"]["anchor"] == anchor
+        assert "anchor_json" not in body["comment"]
+
+        direct = dashboard_client.get(
+            f"/api/graph/comment/{comment_id}",
+            headers={"X-Graph-Org": "anchore"},
+        ).json()
+        assert direct["anchor"] == anchor
+        assert "anchor_json" not in direct
+
+        note = dashboard_client.get(
+            f"/api/graph/{note_id}",
+            headers={"X-Graph-Org": "anchore"},
+        ).json()
+        saved = next(c for c in note["comments"] if c["id"] == comment_id)
+        assert saved["anchor"] == anchor
+        assert "anchor_json" not in saved
+
+        redirect = dashboard_client.get(
+            f"/api/graph/{comment_id}",
+            headers={"X-Graph-Org": "anchore"},
+        ).json()
+        assert redirect["type"] == "comment"
+        assert redirect["anchor"] == anchor
+        assert "anchor_json" not in redirect
+
+    def test_invalid_anchor_writes_no_row(self, dashboard_client, orgs_root):
+        note_id = self._create_note(dashboard_client)
+        anchor = _text_anchor()
+        anchor["position"]["end"] = 999
+        response = dashboard_client.post(
+            "/api/graph/comment",
+            json={"source_id": note_id, "content": "invalid", "anchor": anchor},
+            headers={"X-Graph-Org": "anchore"},
+        )
+        assert response.status_code == 400
+
+        conn = sqlite3.connect(str(orgs_root / "anchore.db"))
+        try:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM note_comments WHERE source_id = ?",
+                (note_id,),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert count == 0
+
+    def test_plain_comment_remains_compatible(self, dashboard_client):
+        note_id = self._create_note(dashboard_client)
+        response = dashboard_client.post(
+            "/api/graph/comment",
+            json={"source_id": note_id, "content": "plain"},
+            headers={"X-Graph-Org": "anchore"},
+        )
+        assert response.status_code == 200
+        assert response.json()["comment"]["anchor"] is None
+
+    def test_anchored_cross_org_comment_is_rejected(self, dashboard_client, orgs_root):
+        autonomy_id = _make_peer_note(
+            orgs_root / "autonomy.db", title="autonomy anchor target",
+        )
+        response = dashboard_client.post(
+            "/api/graph/comment",
+            json={
+                "source_id": autonomy_id,
+                "content": "peer attempt",
+                "anchor": _text_anchor(),
+            },
+            headers={"X-Graph-Org": "anchore"},
+        )
+        assert response.status_code == 409
+        assert response.json()["origin_org"] == "autonomy"
 
 
 # ── Note create: X-Graph-Org routes to that DB ──────────────────
