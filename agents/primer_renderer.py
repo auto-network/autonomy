@@ -15,6 +15,9 @@ Design refs:
 
 from __future__ import annotations
 
+import os
+import re
+import socket
 from pathlib import Path
 
 import jinja2
@@ -60,6 +63,55 @@ _env = jinja2.Environment(
     lstrip_blocks=True,
     undefined=jinja2.StrictUndefined,
 )
+
+
+_DNS_NAME_RE = re.compile(
+    r"^(?=.{1,253}\.?$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.?$"
+)
+
+
+def _operator_dashboard_url(
+    *,
+    configured_domain: str | None = None,
+    hostname: str | None = None,
+    resolv_text: str | None = None,
+) -> str | None:
+    """Return this node's operator-reachable Tailnet dashboard URL.
+
+    ``DASHBOARD_DOMAIN`` is authoritative when configured. Otherwise a
+    host-networked container inherits the host's MagicDNS search suffix in
+    ``/etc/resolv.conf``; combining it with the inherited hostname gives the
+    same fully-qualified name the operator uses from another Tailnet device.
+    """
+    domain = (
+        os.environ.get("DASHBOARD_DOMAIN", "")
+        if configured_domain is None
+        else configured_domain
+    ).strip().rstrip(".")
+    if not domain:
+        host = (hostname if hostname is not None else socket.gethostname())
+        host = host.strip().split(".", 1)[0].lower()
+        if resolv_text is None:
+            try:
+                resolv_text = Path("/etc/resolv.conf").read_text()
+            except OSError:
+                resolv_text = ""
+        suffix = next(
+            (
+                token.rstrip(".")
+                for line in resolv_text.splitlines()
+                if line.strip().startswith(("search ", "domain "))
+                for token in line.split()[1:]
+                if token.rstrip(".").endswith(".ts.net")
+            ),
+            "",
+        )
+        if host and suffix:
+            domain = f"{host}.{suffix}"
+    if not domain or not _DNS_NAME_RE.fullmatch(domain):
+        return None
+    return f"https://{domain}:8080"
 
 
 def _workspace_queries_block(cap, workspace_id: str) -> str:
@@ -441,5 +493,6 @@ def render_workspace_primer(config: WorkspaceV1) -> str:
         plugin_blocks=plugin_blocks,
         turn_correction=turn_correction,
         commit_policy=commit_policy,
+        operator_dashboard_url=_operator_dashboard_url(),
         primer_customization_note=PRIMER_CUSTOMIZATION_NOTE,
     )
