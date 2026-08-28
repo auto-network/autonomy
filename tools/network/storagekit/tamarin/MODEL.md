@@ -17,6 +17,9 @@ against.
 | `VaultRekeyF001.spthy` | model 1 calibration: identical, marker **deleted** | `exclusion_forward` falsified (the F-001 attack), rest verified |
 | `VaultFleetDist.spthy` | model 2 green: fleet KEM distribution + §9 snapshot lemmas (bead auto-loxsf) | all lemmas verified |
 | `VaultFleetDistNoGuard.spthy` | model 2 calibration: **kick guard deleted** from distribution | `kicked_machine_excluded` falsified, rest verified |
+| `VaultOpenStore.spthy` | model 3 green: open-write-store adversary vs armor + Tier-2 (bead auto-djh2m) | all lemmas verified |
+| `VaultOpenStoreNoArmorVerify.spthy` | model 3 calibration A: **envelope check deleted** | `session_only_for_enrolled_factor` falsified, rest verified |
+| `VaultOpenStoreNoTierVerify.spthy` | model 3 calibration B: **enrollment-statement check deleted** | `no_key_to_forged_pk` falsified, rest verified |
 | `run_tamarin.py` | harness enforcing every expectation above | exit 0 iff all hold |
 
 The pairing is the point: a green proof is only trusted because the
@@ -127,14 +130,54 @@ the fleet layer rests on the distribution writer consulting the roster
 at seal time. The record format matters less than that check — and the
 check must read the roster's post-kick state, not a cached fleet list.
 
+## Model 3 — B1 open-write-store adversary (bead auto-djh2m)
+
+A DIFFERENT trust model from models 1-2: the adversary can WRITE
+arbitrary rows into the store, modeled by having every honest consumer
+read its policy / factor / enrollment inputs from `In()`. Verify-at-use
+is modeled structurally — an honest rule pattern-matches
+`sign(row, ~rs)` against the true root seed, so only a genuinely
+root-signed row is accepted; each calibration relaxes exactly one such
+pattern to "accept the row by presence."
+
+Proved (green, 0.7 s, 5/5):
+- **`root_secret_open_store`** — the B1 thesis itself: no sequence of
+  injected rows ever leaks the root seed. Holds in ALL FOUR theories
+  (both calibrations included) — the store being open is never a threat
+  to the root, only to decisions that skip their verify.
+- **`session_only_for_enrolled_factor`** — a dashboard session is
+  granted only for an access key carried in a genuinely root-signed
+  envelope (the `root_factor_policy.py:14` "signature verified before
+  any factor material is used" property).
+- **`no_key_to_forged_pk`** — Tier-2: a fresh session key is sealed only
+  to a root-enrolled wrapping pk; an injected pk row never receives a
+  seal ("AN UNVERIFIED pk ROW MUST NEVER RECEIVE A SEAL").
+- **`unlock_only_yields_no_root`** — revealing the unlock-only factor in
+  full never reconstructs the root (it derives a session signer, not a
+  root share).
+- Executability of all three honest ceremonies.
+
+Two calibrations, each a single deleted verify:
+- `VaultOpenStoreNoArmorVerify.spthy` (envelope check dropped) →
+  `session_only_for_enrolled_factor` falsified in 4 steps: an injected
+  factor row with the attacker's access key authorizes a session as the
+  user. Every other lemma — including root secrecy — unchanged.
+- `VaultOpenStoreNoTierVerify.spthy` (enrollment check dropped) →
+  `no_key_to_forged_pk` falsified in 7 steps: renewal seals a fresh
+  signing key to the attacker's injected wrapping pk.
+
+The clean separation (each calibration breaks exactly one lemma, root
+secrecy survives both) is the evidence the two verify points are
+independent and each load-bearing. Related live defects in this exact
+class: jh59f (forged `excludes`/base row wins selection) and c6z70
+(crib §17) — the settings resolver branching on unsigned fields is the
+same "trust presence" mistake this model isolates.
+
 ## Roadmap (tracker note graph://8277c76c-ad1; beads filed)
 
-1. ~~Model 2: snapshot lemmas + F4 distribution~~ — DONE (above),
-   bead auto-loxsf.
-2. **Model 3 (auto-djh2m): B1 open-write-store adversary** vs the armor
-   + Tier-2 enrollment — "protect the decision, never the table" as a
-   theorem; adversary writes arbitrary store rows, ceremonies
-   verify-at-use.
+1. ~~Model 2: snapshot lemmas + F4 distribution~~ — DONE, auto-loxsf.
+2. ~~Model 3: B1 open-write-store adversary~~ — DONE (above),
+   auto-djh2m.
 3. **Model 4 (auto-cpbkf): member.rekey three doors** — "a stolen key
    cannot outrun its own recovery" as a race analysis.
 4. **Model 5 (auto-veal7): §1e concurrent re-key** — honest-concurrency

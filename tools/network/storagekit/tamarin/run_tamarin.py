@@ -56,6 +56,27 @@ EXPECTATIONS = {
         "root_secret": "verified",
         "machine_key_reach_via_distribution": "verified",
     },
+    "VaultOpenStore.spthy": {
+        "executable": "verified",
+        "root_secret_open_store": "verified",
+        "no_key_to_forged_pk": "verified",
+        "unlock_only_yields_no_root": "verified",
+        "session_only_for_enrolled_factor": "verified",
+    },
+    "VaultOpenStoreNoArmorVerify.spthy": {
+        "executable": "verified",
+        "root_secret_open_store": "verified",
+        "no_key_to_forged_pk": "verified",
+        "unlock_only_yields_no_root": "verified",
+        "session_only_for_enrolled_factor": "falsified",
+    },
+    "VaultOpenStoreNoTierVerify.spthy": {
+        "executable": "verified",
+        "root_secret_open_store": "verified",
+        "no_key_to_forged_pk": "falsified",
+        "unlock_only_yields_no_root": "verified",
+        "session_only_for_enrolled_factor": "verified",
+    },
 }
 
 SUMMARY_RE = re.compile(

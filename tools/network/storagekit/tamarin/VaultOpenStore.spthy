@@ -1,0 +1,147 @@
+/*
+  VaultOpenStore — the B1 bet as a theorem: "the store is open to agents
+  BY DESIGN; protect the DECISION, never the table" (crib
+  graph://1e005d5c-c11 §0, §11). Bead auto-djh2m. Tracker 8277c76c.
+
+  DIFFERENT TRUST MODEL from models 1-2: the adversary can WRITE
+  arbitrary rows into the replicated store. Modeled by having every
+  honest consumer read its policy / factor / enrollment inputs from
+  In() — an open-write store is exactly a channel the attacker can
+  populate. The defence is verify-AT-USE: a root signature over the row,
+  checked before the row is trusted or sealed to.
+
+  Verify-at-use is modeled STRUCTURALLY (the idiomatic Tamarin way): an
+  honest consumer pattern-matches sign(row, ~rs) against the true root
+  seed, so only a genuinely root-signed row is ever accepted. The two
+  calibration theories relax exactly one such pattern to In(<row, sig>)
+  with sig unconstrained — "accept the row by presence" — which is the
+  precise defect the crib forbids.
+
+  Grounded in code:
+  - root_factor_policy.py:14 "The signature is verified *before* any
+    factor material is used, so an open-write store cannot substitute
+    its own policy or recipient."
+  - crib §2 Tier-2 "AN UNVERIFIED pk ROW MUST NEVER RECEIVE A SEAL".
+  - crib §2 UNLOCK-ONLY vs FULL AUTHORITY: a factor seed derives BOTH a
+    dashboard-access signer AND (full-authority only) a recipient the
+    root seed's share is sealed to.
+
+  Calibrations:
+  - VaultOpenStoreNoArmorVerify.spthy: Session_Authorize accepts an
+    unsigned envelope -> session_only_for_enrolled_factor falsified.
+  - VaultOpenStoreNoTierVerify.spthy: Tier2_Renew accepts an unsigned
+    enrollment statement -> no_key_to_forged_pk falsified.
+
+  Abstraction: HPKE seal -> aenc; root signature -> sign/verify. One
+  full + one unlock factor, one wrapping pk. Enrollment once.
+*/
+
+theory VaultOpenStore
+begin
+
+builtins: asymmetric-encryption, signing
+
+functions: accesskey/1, recipientkey/1
+
+rule Enroll:
+  let root_pub = pk(~rs)
+      f_recip_pub = pk(recipientkey(~fpw))
+      f_access_pub = pk(accesskey(~fpw))
+      u_access_pub = pk(accesskey(~upk))
+      wrap_pub = pk(~wrapsk)
+      envelope = <f_recip_pub, f_access_pub, u_access_pub>
+      stmt = <'wrapping', wrap_pub>
+  in
+  [ Fr(~rs), Fr(~fpw), Fr(~upk), Fr(~wrapsk) ]
+  --[ Enrolled(~rs), RootPub(root_pub)
+    , FullFactor(~fpw), UnlockFactor(~upk)
+    , GoodEnvelope(envelope), GoodWrap(wrap_pub)
+    , OnceEnroll() ]->
+  [ !RootSeed(~rs)
+  , !FullSeed(~fpw), !UnlockSeed(~upk)
+  , Out(root_pub)
+  , Out(<envelope, sign(envelope, ~rs)>)
+  , Out(aenc(~rs, f_recip_pub))
+  , Out(wrap_pub)
+  , Out(<stmt, sign(stmt, ~rs)>)
+  ]
+
+restriction once_enroll:
+  "All #i #j. OnceEnroll()@i & OnceEnroll()@j ==> #i = #j"
+
+/* Honest full-authority open: envelope + share read from the open
+   store; the signature is verified-at-use by matching sign(env, ~rs)
+   before the share is opened with the full factor. */
+rule Full_Open:
+  [ !RootSeed(~rs), !FullSeed(~fpw)
+  , In(<envelope, sign(envelope, ~rs)>)
+  , In(aenc(~rs, pk(recipientkey(~fpw))))
+  ]
+  --[ RootReconstructed(~rs) ]->
+  [ ]
+
+/* Honest session authorization: accept a session only for an access
+   key carried in a genuinely root-signed envelope (structural
+   verify-at-use). Grants a session; never the root. */
+rule Session_Authorize:
+  [ !RootSeed(~rs)
+  , In(<envelope, sign(envelope, ~rs)>)
+  , In(access_pub)
+  ]
+  --[ AccessIn(access_pub, envelope)
+    , SessionGranted(access_pub) ]->
+  [ Out('session_cookie') ]
+
+restriction access_in_envelope:
+  "All ap e #i. AccessIn(ap, e)@i ==> (Ex a b. e = <a, ap, b>) | (Ex a b. e = <a, b, ap>)"
+
+/* Tier-2 renewal: seal a fresh session key to a wrapping pk only where
+   a genuinely root-signed enrollment statement binds it. */
+rule Tier2_Renew:
+  [ !RootSeed(~rs), Fr(~sesskey)
+  , In(<<'wrapping', wrap_pub>, sign(<'wrapping', wrap_pub>, ~rs)>)
+  ]
+  --[ SealedTo(wrap_pub, ~sesskey) ]->
+  [ Out(aenc(~sesskey, wrap_pub)) ]
+
+/* The B1 adversary owns the store (writes = In). It may also steal the
+   unlock-only factor outright. The full factor and wrap seeds stay
+   honest (stealing those is device compromise, a different model). */
+rule Reveal_UnlockFactor:
+  [ !UnlockSeed(~upk) ]
+  --[ UnlockRevealed(~upk) ]->
+  [ Out(~upk) ]
+
+/* ═══ Lemmas ═══ */
+
+lemma executable:
+  exists-trace
+  "(Ex rs #o. RootReconstructed(rs)@o)
+     & (Ex ap #s. SessionGranted(ap)@s)
+     & (Ex wp k #t. SealedTo(wp, k)@t)"
+
+/* MAIN A — root secrecy under an open-write store. */
+lemma root_secret_open_store:
+  "not(Ex rs #i #k. Enrolled(rs)@i & K(rs)@k)"
+
+/* MAIN B — Tier-2: a fresh session key sealed to a wrapping pk never
+   reaches the adversary; either the pk was the enrolled one, or the
+   sealed key stays secret. */
+lemma no_key_to_forged_pk:
+  "All wp k #s. SealedTo(wp, k)@s ==>
+      (Ex #g. GoodWrap(wp)@g) | not(Ex #k2. K(k)@k2)"
+
+/* MAIN C — unlock-only stays unlock-only. */
+lemma unlock_only_yields_no_root:
+  "not(Ex upk rs #u #r #k.
+        UnlockRevealed(upk)@u & Enrolled(rs)@r & K(rs)@k
+      & not(Ex fpw #f. FullFactor(fpw)@f & K(fpw)@f))"
+
+/* MAIN D — a session is granted only for an access key in a genuine
+   (root-enrolled) envelope. */
+lemma session_only_for_enrolled_factor:
+  "All ap #s. SessionGranted(ap)@s ==>
+      Ex e #g. GoodEnvelope(e)@g
+        & ((Ex a b. e = <a, ap, b>) | (Ex a b. e = <a, b, ap>))"
+
+end
