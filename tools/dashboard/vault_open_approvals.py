@@ -29,7 +29,10 @@ from tools.dashboard.dao import dashboard_db
 from tools.graph import schemas, settings_ops
 from tools.graph.schemas.personal_identity import PASSKEY_SET_ID
 from tools.graph.schemas.vault_policy_class import VAULT_POLICY_CLASS_SET_ID
-from tools.network.idkit.armor import armor_factor_types, parse_armor
+from tools.network.idkit.root_factor_policy import (
+    parse_armored_envelope,
+    policy_satisfied,
+)
 from tools.network.idkit.canonical import canonical_json
 from tools.vault.errors import VaultError
 from tools.vault.key_holder import _scoped_db
@@ -133,12 +136,23 @@ def _ceremony_bootstrap(class_snapshot: dict, org: str | None) -> dict:
         armor = personal.payload.get("armored_private_key")
         if not isinstance(armor, str) or not armor:
             raise VaultError("the personal root has no canonical armor")
-        armor_data = parse_armor(armor)
+        # A v3 root-factor-policy armor: factors + AND/OR policy in the
+        # envelope. The browser opens it with openFactorPolicyArmor; here we
+        # freeze the passkey roster and which opener methods can satisfy the
+        # policy (password alone, passkey alone, or one of each).
+        try:
+            envelope = parse_armored_envelope(armor)
+        except Exception as exc:
+            raise VaultError(
+                "the personal root armor is not a root-factor-policy armor"
+            ) from exc
+        if envelope.get("root_pub") != anchor.root_pub:
+            raise VaultError("the vault anchor is not carried by the current personal root")
+        types = {f["factor_id"]: f["type"] for f in envelope["factors"]}
         root_credential_ids = {
-            factor.get("credential_id")
-            for factor in armor_data.get("factors", [])
-            if factor.get("type") in {"passkey", "combined"}
-            and isinstance(factor.get("credential_id"), str)
+            f.get("credential_id")
+            for f in envelope["factors"]
+            if f.get("type") == "passkey" and isinstance(f.get("credential_id"), str)
         }
         passkeys = []
         for member in _passkey_rows():
@@ -151,15 +165,21 @@ def _ceremony_bootstrap(class_snapshot: dict, org: str | None) -> dict:
                 "rp_id": payload.get("rp_id"),
                 "transports": payload.get("transports") or [],
             })
-        factor_types = armor_factor_types(armor)
-        methods = (
-            ["both"]
-            if "combined" in factor_types
-            else [kind for kind in ("password", "passkey") if kind in factor_types]
-        )
+        pw_ids = [fid for fid, t in types.items() if t == "password"]
+        pk_ids = [fid for fid, t in types.items() if t == "passkey"]
+        methods = []
+        if any(policy_satisfied(envelope["policy"], [fid]) for fid in pw_ids):
+            methods.append("password")
+        if any(policy_satisfied(envelope["policy"], [fid]) for fid in pk_ids):
+            methods.append("passkey")
+        if not methods and any(
+            policy_satisfied(envelope["policy"], [p, k])
+            for p in pw_ids for k in pk_ids
+        ):
+            methods.append("both")
         if not methods:
             raise VaultError("the personal root has no interactive opener")
-        if any(method in {"passkey", "both"} for method in methods) and not passkeys:
+        if any(m in {"passkey", "both"} for m in methods) and not passkeys:
             raise VaultError("the personal root passkey has no enrolled credential")
         return {
             "v": 2,
@@ -167,13 +187,13 @@ def _ceremony_bootstrap(class_snapshot: dict, org: str | None) -> dict:
             "anchor": anchor.to_dict(),
             "root": {
                 "armor": armor,
+                "armor_version": 3,
                 "root_pub": anchor.root_pub,
-                "require_pair": bool(personal.payload.get("require_pair", False)),
+                "require_pair": False,
                 "passkeys": passkeys,
                 "methods": methods,
             },
         }
-
     factors = []
     seen: set[str] = set()
     with VaultStore(_scoped_db(VAULT_POLICY_CLASS_SET_ID, org)) as store:
@@ -183,6 +203,10 @@ def _ceremony_bootstrap(class_snapshot: dict, org: str | None) -> dict:
             if not isinstance(factor_id, str) or factor_id in seen:
                 continue
             seen.add(factor_id)
+            if factor_type == PERSONAL_ROOT_RECIPIENT:
+                # The widen-only anchor wrap: opened by the root ceremony, not
+                # an interactive factor of this sheet.
+                continue
             factor = {"factor_id": factor_id, "type": factor_type}
             if factor_type == "password":
                 factor["armor"] = store.get_password_armor(factor_id)

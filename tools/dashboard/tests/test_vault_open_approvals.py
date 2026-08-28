@@ -30,7 +30,12 @@ from tools.graph.schemas.personal_identity import (
 )
 from tools.graph.tests.vault_read_harness import VaultWorld, clear_seams
 from tools.network.idkit import KeyPair
-from tools.network.idkit.armor import encrypt_root_key
+from tools.network.idkit.root_factor_policy import (
+    build_envelope,
+    create_password_factor,
+    emit_armored_envelope,
+    factor_leaf,
+)
 from tools.vault.policy_class import (
     create_root_reachable_class,
     extend_class,
@@ -302,7 +307,18 @@ def test_root_reachable_fake_ssh_key_uses_personal_root_anchor(vault_open_env):
     graph_db, world, client = vault_open_env
     root = KeyPair.generate()
     root_password = "disposable-root-password"
-    root_armor = encrypt_root_key(root, root_password, iterations=10_000)
+    pw_factor, pw_seed = create_password_factor(
+        root.public_hex, "pw.test", root_password, iterations=10_000,
+    )
+    pw_seed[:] = b"\x00" * len(pw_seed)
+    envelope = build_envelope(
+        root,
+        generation=1,
+        factors=[pw_factor],
+        access=["pw.test"],
+        policy=factor_leaf("pw.test"),
+    )
+    root_armor = emit_armored_envelope(envelope)
     with settings_ops.identity_write_context():
         settings_ops.upsert_by_key(
             PERSONAL_IDENTITY_SET_ID,
@@ -366,6 +382,7 @@ def test_root_reachable_fake_ssh_key_uses_personal_root_anchor(vault_open_env):
         assert ceremony["governance"] == root_class.governance
         assert ceremony["anchor"] == anchor.to_dict()
         assert ceremony["root"]["armor"] == root_armor
+        assert ceremony["root"]["armor_version"] == 3
         assert ceremony["root"]["root_pub"] == root.public_hex
         assert ceremony["root"]["methods"] == ["password"]
 
