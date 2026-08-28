@@ -42,7 +42,7 @@ REAL_BD="$(_real_bd)"
 # the guide note's id prefix when that note is published. Empty = gate
 # disabled. As with the close gate below, there is deliberately no
 # override flag: reading the short guide is the intended cost.
-BEAD_GUIDE_NOTE=""
+BEAD_GUIDE_NOTE="294ae4a8"
 
 if [ -n "$BEAD_GUIDE_NOTE" ]; then
     _needs_guide=0

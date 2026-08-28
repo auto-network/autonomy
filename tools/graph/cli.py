@@ -471,9 +471,8 @@ def _require_read(source_id_prefix: str, label: str):
 
 # Bead-writing-guide gate (twin: tools/beads/bd, the cap-bin shim that
 # gates direct `bd create`/`bd update` calls). An empty prefix disables
-# the gate; fill it with the guide note's id prefix once that note is
-# published, in BOTH places.
-BEAD_WRITING_GUIDE_NOTE = ""
+# the gate. Keep both constants in sync.
+BEAD_WRITING_GUIDE_NOTE = "294ae4a8"
 
 
 def _resolve_source(db, source_arg, first=False):
