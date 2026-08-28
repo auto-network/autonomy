@@ -139,7 +139,19 @@
                 <template x-if="orgLabel">
                   <span data-testid="sv-org-label" style="color:#64748b; flex-shrink:0" x-text="orgLabel"></span>
                 </template>
-                <span class="ml-auto" style="white-space:nowrap"><span style="color:#3d4f63; cursor:pointer" @click="copyGraphLink()" x-text="(src.id || '').slice(0, 12)"></span><template x-if="noteVersion"><span style="color:#94a3b8; background:rgba(255,255,255,0.04); padding:1px 0; border-radius:3px" x-text="'@' + noteVersion"></span></template></span>
+                <span class="ml-auto" style="white-space:nowrap">
+                  <button type="button"
+                          aria-label="Copy graph source reference"
+                          title="Copy graph source reference"
+                          @click="copyGraphLink()"
+                          :style="`color:${copiedGraphPart === 'source' ? '#34d399' : '#3d4f63'}; cursor:pointer; background:none; border:0; padding:0; font:inherit; transition:color 140ms ease`"
+                          x-text="(src.id || '').slice(0, 12)"></button><template x-if="noteVersion"><button type="button"
+                          aria-label="Copy this note revision reference"
+                          title="Copy this note revision reference"
+                          @click="copyGraphVersion()"
+                          :style="`color:${copiedGraphPart === 'version' ? '#34d399' : '#94a3b8'}; cursor:pointer; background:rgba(255,255,255,0.04); border:0; padding:1px 0; border-radius:3px; font:inherit; transition:color 140ms ease`"
+                          x-text="'@' + noteVersion"></button></template>
+                </span>
               </div>
 
               <!-- Row 2: org glyph + title -->

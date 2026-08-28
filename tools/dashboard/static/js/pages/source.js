@@ -41,6 +41,8 @@
       noteMeta: null,
       noteComments: [],
       noteVersionCount: 1,
+      copiedGraphPart: '',
+      _copyFlashTimer: null,
       noteProvenanceId: null,
       noteProvenanceType: null,
       attachments: [],
@@ -118,7 +120,7 @@
       // Note version
       get noteVersion() {
         if (!this.isNote) return null;
-        return this.noteVersionCount > 1 ? this.noteVersionCount : null;
+        return Math.max(1, Number(this.noteVersionCount) || 1);
       },
 
       // Comment count
@@ -327,17 +329,35 @@
         );
       },
 
-      // Copy graph:// link to clipboard with visual feedback
+      _copyGraphReference(reference, part) {
+        try {
+          navigator.clipboard.writeText(reference);
+        } catch (_e) {
+          return false;
+        }
+        if (this._copyFlashTimer) clearTimeout(this._copyFlashTimer);
+        this.copiedGraphPart = part;
+        this._copyFlashTimer = setTimeout(() => {
+          this.copiedGraphPart = '';
+          this._copyFlashTimer = null;
+        }, 700);
+        return true;
+      },
+
+      // Copy stable graph references with quiet, in-place color feedback.
       copyGraphLink() {
-        navigator.clipboard.writeText('graph://' + (this.src.id || '').slice(0, 12));
-        const btn = this.$el;
-        const origText = (this.src.id || '').slice(0, 12);
-        btn.textContent = 'copied!';
-        btn.style.color = '#34d399';
-        setTimeout(() => {
-          btn.textContent = origText;
-          btn.style.color = '#3d4f63';
-        }, 1000);
+        return this._copyGraphReference(
+          'graph://' + (this.src.id || '').slice(0, 12),
+          'source',
+        );
+      },
+
+      copyGraphVersion() {
+        if (!this.noteVersion) return false;
+        return this._copyGraphReference(
+          'graph://' + (this.src.id || '').slice(0, 12) + '@' + this.noteVersion,
+          'version',
+        );
       },
 
       _updateVisibleEntries() {
