@@ -1693,6 +1693,90 @@ def _local_workspace_target_for_clone(clone: Path) -> Path | None:
     return target
 
 
+_platform_identity_memo: dict = {}
+
+
+def _platform_checkout_identity():
+    """Comparable identity of the live platform checkout's origin.
+
+    Memoized per REPO_ROOT value (tests repoint REPO_ROOT; production
+    resolves it once per process).
+    """
+    key = str(Path(REPO_ROOT).resolve())
+    if key not in _platform_identity_memo:
+        rc, out, _ = _git_output(
+            ["remote", "get-url", "origin"], REPO_ROOT, timeout=15,
+        )
+        _platform_identity_memo[key] = (
+            _repo_identity(out.strip()) if rc == 0 and out.strip() else None
+        )
+    return _platform_identity_memo[key]
+
+
+_clone_target_repo_memo: dict[Path, "Path | None"] = {}
+_clone_target_repo_lock = threading.Lock()
+
+
+def _worktree_target_repo(clone: Path | None) -> Path | None:
+    """The host-side repo whose head is this clone's merge target.
+
+    Generic — no repo-name test: an API-managed local workspace resolves
+    to its bare backing repo under ``LOCAL_WORKSPACE_REPOS_DIR``; a clone
+    of the platform repo resolves to the live platform checkout
+    (``REPO_ROOT``), recognized by origin identity or a local origin path
+    equal to the checkout — the platform repo is simply the instance of
+    "based on a host live checkout" that ships by default. Clones with a
+    plain remote origin and no host-side base have no moving local
+    target and return None (their base ref uses the static fallback).
+
+    Read-only companion to :func:`_local_workspace_target_for_clone` —
+    that function's restriction to the backing-repo directory is MERGE
+    authority (the dashboard must not become a write primitive for
+    arbitrary host repos) and is unchanged; resolving a target here only
+    ever reads its HEAD for cache keying and verdicts.
+    """
+    if clone is None:
+        return None
+    with _clone_target_repo_lock:
+        if clone in _clone_target_repo_memo:
+            return _clone_target_repo_memo[clone]
+    resolved = _resolve_worktree_target_repo(clone)
+    with _clone_target_repo_lock:
+        _clone_target_repo_memo[clone] = resolved
+    return resolved
+
+
+def _resolve_worktree_target_repo(clone: Path) -> Path | None:
+    backing = _local_workspace_target_for_clone(clone)
+    if backing is not None:
+        return backing
+    rc, out, _ = _git_output(["remote", "get-url", "origin"], clone, timeout=15)
+    if rc != 0 or not out.strip():
+        return None
+    origin = out.strip()
+    if origin.startswith("/"):
+        try:
+            if Path(origin).resolve() == Path(REPO_ROOT).resolve():
+                return REPO_ROOT
+        except OSError:
+            return None
+    # A clone that tracks the SAME upstream as the platform checkout has
+    # the checkout as its merge target — identity compares origins, so
+    # both URL-shaped and path-shaped remotes resolve.
+    platform_identity = _platform_checkout_identity()
+    if platform_identity is not None and _repo_identity(origin) == platform_identity:
+        return REPO_ROOT
+    return None
+
+
+def _target_repo_branch_and_head(target: Path) -> tuple[str | None, str | None]:
+    """(default branch, its head SHA) of a resolved target repo."""
+    branch = _repo_default_branch(target)
+    if branch is None:
+        return None, None
+    return branch, _repo_branch_head(target, branch)
+
+
 def _managed_clone_synced_source_ref(branch: str) -> str:
     """Ref that records an explicit non-origin source for ``branch``."""
     return f"refs/dashboard/synced-source/{branch}"
@@ -1822,39 +1906,32 @@ def _worktree_dashboard_base_ref(
 ) -> str | None:
     """Return the review base ref used by the dashboard for a worktree.
 
-    ``target_branch_and_head`` lets a caller that already resolved
-    :func:`_autonomy_target_branch_and_head` once (e.g. ``scan_all_worktrees``
-    doing it once per sweep instead of once per row) pass it in; standalone
-    callers omit it and it's resolved internally, unchanged.
+    Generic — no repo-name test: the base is the head of the worktree's
+    target repo (resolved by :func:`_worktree_target_repo`: the platform
+    checkout, or a local-workspace backing repo), when that head is an
+    ancestor of the worktree HEAD; otherwise the static merge-base
+    fallback. ``target_branch_and_head`` lets a caller that already
+    resolved THIS row's target head (``scan_all_worktrees`` memoizes one
+    lookup per distinct target per sweep) pass it in; standalone callers
+    omit it and the target resolves internally.
     """
     fallback = _worktree_merge_base_ref(worktree)
-    if repo_name != "autonomy":
+    if target_branch_and_head is not None:
+        _target_branch, target_head = target_branch_and_head
+    else:
         clone = _find_managed_clone_for_worktree(worktree)
-        target = _local_workspace_target_for_clone(clone) if clone else None
+        target = _worktree_target_repo(clone)
         if target is None:
             return fallback
-        branch = _repo_default_branch(target)
-        target_head = _repo_branch_head(target, branch) if branch else None
-        if not target_head:
-            return fallback
-        rc, _, _ = _git_output(
-            ["merge-base", "--is-ancestor", target_head, "HEAD"],
-            worktree,
-            timeout=15,
-        )
-        return target_head if rc == 0 else fallback
-
-    _target_branch, target_head = (
-        target_branch_and_head if target_branch_and_head is not None
-        else _autonomy_target_branch_and_head()
-    )
+        _target_branch, target_head = _target_repo_branch_and_head(target)
     if not target_head:
         return fallback
-
-    rc, _, _ = _git_output(["merge-base", "--is-ancestor", target_head, "HEAD"], worktree, timeout=15)
-    if rc == 0:
-        return target_head
-    return fallback
+    rc, _, _ = _git_output(
+        ["merge-base", "--is-ancestor", target_head, "HEAD"],
+        worktree,
+        timeout=15,
+    )
+    return target_head if rc == 0 else fallback
 
 
 def _shares_history_with_base(worktree: Path, base_ref: str) -> bool:
@@ -2172,14 +2249,22 @@ def _worktree_clone_stale(
     *,
     target_branch_and_head: tuple[str | None, str | None] | None = None,
 ) -> bool:
-    """Return True when the managed clone lags the host integration branch."""
-    if repo_name != "autonomy" or clone is None:
-        return False
+    """Return True when the managed clone lags its target repo's branch.
 
-    target_branch, target_head = (
-        target_branch_and_head if target_branch_and_head is not None
-        else _autonomy_target_branch_and_head()
-    )
+    Generic — no repo-name test: any clone with a host-side target (the
+    platform checkout, or a local-workspace backing repo) can lag it; a
+    clone with no local target has nothing to lag. ``repo_name`` is kept
+    for caller compatibility only.
+    """
+    if clone is None:
+        return False
+    target = _worktree_target_repo(clone)
+    if target is None:
+        return False
+    if target_branch_and_head is not None:
+        target_branch, target_head = target_branch_and_head
+    else:
+        target_branch, target_head = _target_repo_branch_and_head(target)
     if target_branch is None or target_head is None:
         return False
 
@@ -2197,14 +2282,24 @@ def _worktree_rebase_required(
     clone_stale: bool,
     target_branch_and_head: tuple[str | None, str | None] | None = None,
 ) -> bool:
-    """Return True when the target branch has advanced past the worktree fork point."""
-    if repo_name != "autonomy" or not has_pending_commits or clone_stale:
+    """True when the target branch has advanced past the worktree fork point.
+
+    Generic — no repo-name test: the verdict compares against the head of
+    the worktree's target repo (platform checkout or local-workspace
+    backing repo); a worktree with no local target never requires rebase
+    through the dashboard.
+    """
+    if not has_pending_commits or clone_stale:
         return False
 
-    _target_branch, target_head = (
-        target_branch_and_head if target_branch_and_head is not None
-        else _autonomy_target_branch_and_head()
-    )
+    if target_branch_and_head is not None:
+        _target_branch, target_head = target_branch_and_head
+    else:
+        clone = _find_managed_clone_for_worktree(worktree)
+        target = _worktree_target_repo(clone)
+        if target is None:
+            return False
+        _target_branch, target_head = _target_repo_branch_and_head(target)
     if not target_head:
         return False
 
@@ -2648,11 +2743,12 @@ def _clone_master_sha(clone: Path | None) -> str | None:
 
 # path → (fingerprint, row-with-stale-liveness). Guarded by a plain
 # lock: scans run on worker threads (asyncio.to_thread).
-_row_cache: dict[Path, tuple[tuple, "WorktreeState"]] = {}
+# worktree -> (fingerprint, target head the row was computed against, row)
+_row_cache: dict[Path, tuple[tuple, "str | None", "WorktreeState"]] = {}
 _row_cache_lock = threading.Lock()
 _scan_cache_hits = 0
 _scan_cache_misses = 0
-_ROW_CACHE_SNAPSHOT_VERSION = 1
+_ROW_CACHE_SNAPSHOT_VERSION = 2   # v2: entries carry target_head
 
 
 def _json_compatible(value):
@@ -2722,9 +2818,10 @@ def save_row_cache(path: Path | str) -> None:
                 {
                     "worktree": str(worktree),
                     "fingerprint": _json_compatible(fingerprint),
+                    "target_head": target_head,
                     "row": _json_compatible(asdict(row)),
                 }
-                for worktree, (fingerprint, row) in _row_cache.items()
+                for worktree, (fingerprint, target_head, row) in _row_cache.items()
             ]
         # A reload can interrupt its replacement while that process is still
         # doing its first sweep.  Its cache is empty at shutdown, but replacing
@@ -2754,7 +2851,7 @@ def load_row_cache(path: Path | str) -> bool:
                 or state.get("version") != _ROW_CACHE_SNAPSHOT_VERSION
                 or not isinstance(state.get("entries"), list)):
             return False
-        restored: dict[Path, tuple[tuple, WorktreeState]] = {}
+        restored: dict[Path, tuple[tuple, str | None, WorktreeState]] = {}
         for entry in state["entries"]:
             if not isinstance(entry, dict) or not isinstance(entry.get("fingerprint"), list):
                 raise ValueError("worktree cache entry is malformed")
@@ -2762,7 +2859,10 @@ def load_row_cache(path: Path | str) -> bool:
             worktree = Path(entry["worktree"])
             if worktree != row.worktree_path:
                 raise ValueError("worktree cache key does not match row path")
-            restored[worktree] = (tuple(entry["fingerprint"]), row)
+            target_head = entry.get("target_head")
+            if target_head is not None and not isinstance(target_head, str):
+                raise ValueError("worktree cache target_head is malformed")
+            restored[worktree] = (tuple(entry["fingerprint"]), target_head, row)
         with _row_cache_lock:
             _row_cache.clear()
             _row_cache.update(restored)
@@ -2793,6 +2893,11 @@ def invalidate_row_cache(worktree: Path | None = None) -> None:
             _row_cache.clear()
         else:
             _row_cache.pop(worktree, None)
+    # The clone->target mapping is stable in production (an origin is not
+    # repointed under a running dashboard) but tests repoint REPO_ROOT and
+    # rebuild fixtures — clear it whenever rows are invalidated.
+    with _clone_target_repo_lock:
+        _clone_target_repo_memo.clear()
 
 
 def scan_all_worktrees(
@@ -2828,11 +2933,25 @@ def scan_all_worktrees(
     # ``target_branch_and_head`` below with no git.
     clone_target_memo: dict[Path, tuple[bool, str | None]] = {}
 
-    # Resolved once per sweep rather than once per row (previously ~2-4
-    # identical git spawns per row just to answer "what's the host
-    # integration branch/head" — the same answer for every row in this
-    # pass since it's a single host-side value, not per-worktree state).
-    target_branch_and_head = _autonomy_target_branch_and_head()
+    # Per-sweep target memos — generic, no repo-name test: each clone
+    # resolves its target repo once (platform checkout or local backing
+    # repo), and each distinct target repo's (branch, head) resolves once
+    # per sweep. One git head-read per target per sweep is what makes the
+    # target head usable as a cache key below.
+    target_repo_memo: dict[Path, Path | None] = {}
+    target_pair_memo: dict[Path, tuple[str | None, str | None]] = {}
+
+    def _row_target_pair(clone: Path | None) -> tuple[str | None, str | None]:
+        if clone is None:
+            return (None, None)
+        if clone not in target_repo_memo:
+            target_repo_memo[clone] = _worktree_target_repo(clone)
+        target = target_repo_memo[clone]
+        if target is None:
+            return (None, None)
+        if target not in target_pair_memo:
+            target_pair_memo[target] = _target_repo_branch_and_head(target)
+        return target_pair_memo[target]
 
     try:
         session_dirs = sorted(worktrees_dir.iterdir())
@@ -2873,6 +2992,8 @@ def scan_all_worktrees(
 
             # ── Fingerprint gate (auto-0peos Phase 1) ────────────────
             row_is_live = session_dir.name in live
+            target_branch_and_head = _row_target_pair(clone)
+            row_target_head = target_branch_and_head[1]
             fp = None
             if use_cache:
                 if clone not in clone_sha_memo:
@@ -2882,18 +3003,21 @@ def scan_all_worktrees(
                     with _row_cache_lock:
                         cached = _row_cache.get(repo_dir)
                     if cached is not None and cached[0] == fp:
-                        # The host autonomy HEAD is irrelevant to non-autonomy
-                        # rows.  For autonomy rows already known to require a
-                        # rebase, forward-only mainline movement cannot make
-                        # that verdict false; their base ref is static too.
-                        # A caught-up autonomy row may derive its base ref from
-                        # the moving HEAD, so deliberately recompute only it.
+                        # A row's verdicts depend on its target repo's head
+                        # (base ref, ff-eligibility), which moves without
+                        # touching anything the fingerprint hashes — so the
+                        # target head the row was computed against is part
+                        # of the reuse key: rows recompute only on sweeps
+                        # where their target actually moved. Rows already
+                        # requiring rebase stay reusable across forward
+                        # target movement (monotonic — it cannot become
+                        # false; their base ref is the static fallback).
                         reusable = (
-                            logical_name != "autonomy"
-                            or cached[1].rebase_required
+                            cached[1] == row_target_head
+                            or cached[2].rebase_required
                         )
                         if reusable:
-                            row = replace(cached[1], session_live=row_is_live)
+                            row = replace(cached[2], session_live=row_is_live)
                             if row_is_live:
                                 # Unstaged edits touch neither HEAD nor index —
                                 # live rows re-check dirt every pass.
@@ -3020,7 +3144,7 @@ def scan_all_worktrees(
                 if store_fp is not None:
                     with _row_cache_lock:
                         _row_cache[repo_dir] = (
-                            store_fp, row,
+                            store_fp, row_target_head, row,
                         )
             out.append(row)
 
