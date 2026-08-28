@@ -469,6 +469,13 @@ def _require_read(source_id_prefix: str, label: str):
         sys.exit(1)
 
 
+# Bead-writing-guide gate (twin: tools/beads/bd, the cap-bin shim that
+# gates direct `bd create`/`bd update` calls). An empty prefix disables
+# the gate; fill it with the guide note's id prefix once that note is
+# published, in BOTH places.
+BEAD_WRITING_GUIDE_NOTE = ""
+
+
 def _resolve_source(db, source_arg, first=False):
     """Resolve a source by ID, prefix, or title search. Returns dict or None."""
     source = db.get_source(source_arg)
@@ -2557,6 +2564,12 @@ def cmd_playbooks(args):
 
 def cmd_bead(args):
     """Create a bead with provenance — links to the source conversation turns that inspired it."""
+    if BEAD_WRITING_GUIDE_NOTE:
+        _require_read(
+            BEAD_WRITING_GUIDE_NOTE,
+            "Agents must read the Bead Writing Guide before creating beads.\n"
+            f"  See: graph://{BEAD_WRITING_GUIDE_NOTE}",
+        )
     client = get_client()
     if isinstance(client, HttpClient):
         # Container mode: dashboard creates the bead + provenance server-side.
