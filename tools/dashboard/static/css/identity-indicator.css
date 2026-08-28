@@ -178,6 +178,17 @@ header[data-app-chrome] .identity-avatar {
   min-height: 0;
 }
 
+/* Manage credentials replaces the whole popover: at desktop it becomes a wide
+ * right-anchored drawer (the designed frame is ~30rem), bounded so its inner
+ * scroll surfaces work; the mobile block below overrides to full screen. */
+.identity-panel--credentials {
+  display: flex;
+  flex-direction: column;
+  width: 30rem;
+  max-width: calc(100vw - 2rem);
+  max-height: calc(100vh - 5.5rem);
+}
+
 .identity-panel-header {
   display: flex;
   align-items: center;
