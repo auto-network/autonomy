@@ -851,12 +851,11 @@
   function _finishResetBoundary(expectedGen) {
     if (!_clearResetBoundary(expectedGen)) return false;
     var st = store();
-    if (st && st.micMode === 'listening') {
-      // The reset deliberately paused intake, so pre-reset flow is no longer
-      // proof for the resumed interval. Give the completed reset a fresh,
-      // bounded verification window.
-      s.lastFlowAt = 0;
-      _setTransport('connecting');
+    if (st && st.micMode === 'listening' && st.transportStatus !== 'flowing') {
+      // A reset acknowledgment proves the replacement WhisperLive session is
+      // ready. Preserve an already-verified browser capture/transport path so
+      // Send never flashes recovery or arms a false failure. If health was not
+      // verified before the boundary, keep its bounded verification instead.
       _armHealthVerification(true);
     }
     return true;

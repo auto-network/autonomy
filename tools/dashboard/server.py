@@ -10584,6 +10584,12 @@ async def ws_voice(websocket: WebSocket):
             ) = await incoming.get()
             msg_type = msg.get("type")
             if msg_type == "websocket.disconnect":
+                logger.info(
+                    "ws_voice: disconnected bind=%s code=%s reason=%r",
+                    bind,
+                    msg.get("code"),
+                    msg.get("reason", ""),
+                )
                 break
             if msg_type == "voice.receive.error":
                 raise msg["error"]
@@ -10797,8 +10803,13 @@ async def ws_voice(websocket: WebSocket):
                 # whisperlive_connect_failed / whisperlive_session_error
                 # frame already informed the operator if the upstream
                 # is the reason.
-    except WebSocketDisconnect:
-        pass
+    except WebSocketDisconnect as exc:
+        logger.info(
+            "ws_voice: disconnected bind=%s code=%s reason=%r",
+            bind,
+            getattr(exc, "code", None),
+            getattr(exc, "reason", ""),
+        )
     except Exception:
         logger.exception("ws_voice: unexpected error bind=%s", bind)
     finally:
