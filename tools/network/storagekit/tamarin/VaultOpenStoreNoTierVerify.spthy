@@ -132,11 +132,15 @@ lemma no_key_to_forged_pk:
   "All wp k #s. SealedTo(wp, k)@s ==>
       (Ex #g. GoodWrap(wp)@g) | not(Ex #k2. K(k)@k2)"
 
-/* MAIN C — unlock-only stays unlock-only. */
+/* MAIN C — unlock-only stays unlock-only. NOTE (audit 2026-08-28): in
+   this bounded model the full factor has no reveal rule, so the
+   exception clause is unsatisfiable and MAIN C is a labeled corollary
+   of MAIN A; its independent content needs a full-factor-compromise
+   variant. Kept because it names the design claim it corresponds to. */
 lemma unlock_only_yields_no_root:
   "not(Ex upk rs #u #r #k.
         UnlockRevealed(upk)@u & Enrolled(rs)@r & K(rs)@k
-      & not(Ex fpw #f. FullFactor(fpw)@f & K(fpw)@f))"
+      & not(Ex fpw #f #k2. FullFactor(fpw)@f & K(fpw)@k2))"
 
 /* MAIN D — a session is granted only for an access key in a genuine
    (root-enrolled) envelope. */

@@ -96,10 +96,29 @@ python3 tools/network/storagekit/tamarin/run_tamarin.py
 ```
 
 Verified 2026-08-28 with tamarin-prover 1.12.0 + Maude 3.5.1: all six
-models (12 theories, 51 lemma expectations) green — each green theory
+models (13 theories, 65 lemma expectations) green — each green theory
 fully verifies and each calibration falsifies exactly its headline
 lemma. Whole suite runs in a few seconds. NOTE: the toolchain needs a
 UTF-8 locale (`LC_ALL=C.UTF-8`); `run_tamarin.py` sets it.
+
+INDEPENDENT RE-AUDIT (2026-08-28, session auto-0828-112630): models 3-6
+were re-audited from a fresh seat for lemma non-vacuity and abstraction
+fidelity against the crib + `idkit/root_factor_policy.py` +
+`ledger/fold.py` (models 1-2 already had same-seat review). Verdict:
+sound; the abstraction registers below were sharpened, three vacuity /
+statement gaps were fixed in place (model 5 `b_can_win`, model 6
+`veto_possible`, model 3 MAIN C quantifier), and one framing point now
+stated explicitly: in models 4 and 6 the ordering/precedence lemmas are
+CONTRACT-CONSISTENCY checks — the fold winner-rule and the completion
+guards are encoded as restrictions, so those lemmas certify that the
+stated contract entails the claim (and the calibrations certify which
+element is load-bearing), not that the property emerges from a modeled
+mechanism. The genuinely derived (Dolev-Yao) results are the secrecy
+lemmas: `root_secret_open_store`, `no_key_to_forged_pk`,
+`session_only_for_enrolled_factor` (model 3), `recovery_key_secret`
+(model 4), `concurrent_grant_secret` (model 5). Mechanism-level
+derivation of the fold's causal-merge behaviour is the TLA+ side-track
+(auto-xtt5v).
 
 ## Model 2 — fleet distribution + §9 snapshot lemmas
 
@@ -150,7 +169,7 @@ pattern to "accept the row by presence."
 
 Proved (green, 0.7 s, 5/5):
 - **`root_secret_open_store`** — the B1 thesis itself: no sequence of
-  injected rows ever leaks the root seed. Holds in ALL FOUR theories
+  injected rows ever leaks the root seed. Holds in all three theories
   (both calibrations included) — the store being open is never a threat
   to the root, only to decisions that skip their verify.
 - **`session_only_for_enrolled_factor`** — a dashboard session is
@@ -162,7 +181,12 @@ Proved (green, 0.7 s, 5/5):
   seal ("AN UNVERIFIED pk ROW MUST NEVER RECEIVE A SEAL").
 - **`unlock_only_yields_no_root`** — revealing the unlock-only factor in
   full never reconstructs the root (it derives a session signer, not a
-  root share).
+  root share). AUDIT NOTE: in this bounded model the full factor has no
+  reveal rule, so this is a labeled corollary of `root_secret_open_store`
+  — it would only ever fail together with it. Its independent content
+  (root survives unlock-reveal even when the full factor is separately
+  compromised) needs a full-factor-compromise variant, where root
+  secrecy itself intentionally falls. Kept as the named design claim.
 - Executability of all three honest ceremonies.
 
 Two calibrations, each a single deleted verify:
@@ -208,13 +232,26 @@ self-rekey survives concurrently with recovery — Item 4's exact
 failure). The thief-sanity and executability traces still verify, so the
 falsification is the revoke's absence, not a broken model.
 
-FOLD ABSTRACTION (honesty): the fold's partial-order resolution is
-abstracted to `self_rekey_loses_to_revoke` — a self-rekey off k cannot
-occur in any trace where k is recovery-revoked. Order-independent, so it
-covers the concurrent case the crib specifically claims. Full causal-
-merge fidelity is the TLA+ side-track (auto-xtt5v). recovery_pub
-SUCCESSION (swapping the enrolled recovery key) is deliberately deferred
-to model 6, whose witness-chain window is its native home.
+FOLD ABSTRACTION (honesty, sharpened by the 2026-08-28 re-audit): the
+fold's partial-order resolution is abstracted to
+`self_rekey_loses_to_revoke` — a self-rekey off k cannot occur in any
+trace where k is recovery-revoked. That one restriction bundles THREE
+code paths verified against `fold.py`: an ancestral revoke refuses the
+rekey at issuance (`R_REKEY_REVOKED_KEY`), a causally CONCURRENT revoke
+race-kills it (`_rekey_alive`), and the revoke-strictly-after case
+cannot arise because by then old_pub is no longer current
+(`R_REKEY_WRONG_KEY` refuses the recovery rekey citing it) — so the
+order-independent restriction matches the code's net observable
+behaviour, covering the concurrent case the crib specifically claims.
+CONSEQUENCE: `recovery_beats_thief` is a one-step corollary of this
+restriction plus the revoke marking on the recovery rule — a contract-
+consistency check whose calibration shows the implicit revoke is the
+load-bearing trigger; the independently DERIVED result in this model is
+`recovery_key_secret`. Mechanism-level fold fidelity is the TLA+
+side-track (auto-xtt5v). Door 2 (root-authorized rekey) is not modeled
+— the race under test is door 1 vs door 3. recovery_pub SUCCESSION
+(swapping the enrolled recovery key) is deliberately deferred to model
+6, whose witness-chain window is its native home.
 
 ## Model 5 — §1e concurrent re-key convergence (bead auto-veal7)
 
@@ -226,11 +263,14 @@ tie-break IS reached (unlike model 1, where the marker makes the
 successor descend). Modeled as a NONDETERMINISTIC pick between the two
 honest credentials, so safety is proved for every possible winner.
 
-Proved (green, 4/4): executability of the concurrent re-key + grant,
+Proved (green, 5/5): executability of the concurrent re-key + grant,
 `concurrent_grant_secret` (whichever honest credential wins, the new
 generation is secret from the network adversary — SAFETY for any pick),
 `loser_converges` (the non-winning machine reads the new generation via
-the winner's kem_priv sealed to its machine key), and `either_can_win`.
+the winner's kem_priv sealed to its machine key), and the two winner
+witnesses `either_can_win` + `b_can_win` (one grant per trace, so each
+winner needs its own exists-trace; added by the 2026-08-28 re-audit —
+the original single witness only showed A could win).
 
 Calibration (`VaultConcurrentRekeyNoConverge.spthy`): delete the
 winner→loser convergence seal → `loser_converges` falsified (the loser
@@ -253,12 +293,26 @@ decreasing entry time; a `Tick` action is one chain position and the
 window W is "at least two ticks strictly between declaration and
 completion" (qualitative, not the literal 7 days).
 
-Proved (green, 5/5): executability, `window_cannot_be_fast_forwarded`
+Proved (green, 6/6): executability, `veto_possible` (a vacuity witness
+that the root veto can fire — added by the 2026-08-28 re-audit; the
+cancel's fireability was already witnessed by the calibration's attack
+trace, the veto's by nothing), `window_cannot_be_fast_forwarded`
 (every completion is preceded by its declaration + a full window of
 ticks), `cancellation_blocks_completion` (an old-code cancel before
 completion always stops it), `veto_blocks_completion`, and
 `completion_implies_witnessed_declaration` (the announcement cannot be
 hidden).
+
+CONTRACT-CONSISTENCY framing (re-audit): the window / cancel / veto
+guards are encoded as restrictions on the completion rule, so the three
+corresponding lemmas certify that the specified completion contract
+entails the safety claims — the right shape for a fully-unbuilt flow,
+where the model IS the spec. The non-trivial content is: `executable`
+(the guarded contract is satisfiable — over-restriction would dead-end
+the flow), `completion_implies_witnessed_declaration` (derived from
+fact flow, not a restriction), and the calibration (the no-cancel guard
+alone carries MAIN B). Authorization is by possession of the secret
+facts, not signature terms — equivalent at this level of abstraction.
 
 Calibration (`VaultRecoverySuccessionNoCancel.spthy`): delete the
 no-cancellation precondition → `cancellation_blocks_completion` falsified

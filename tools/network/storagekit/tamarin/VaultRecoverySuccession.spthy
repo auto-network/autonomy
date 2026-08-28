@@ -38,10 +38,11 @@
 theory VaultRecoverySuccession
 begin
 
-builtins: signing
-
-restriction Eq:
-  "All x y #i. Equal(x, y)@i ==> x = y"
+builtins: signing  // for pk/1 only — no sign/verify terms appear:
+/* authorization is modeled by POSSESSION of the persistent secret
+   facts (!RootKey, !OldRecovery) — only their holder rules can fire,
+   which is the same authorization content the "root-signed" /
+   "old-code-signed" prose carries at this level. */
 
 /* Enrollment: persona P with an OLD recovery key (whose code may be
    lost) and a root. The old recovery public key and root public key are
@@ -114,6 +115,13 @@ restriction no_veto_before_complete:
 lemma executable:
   exists-trace
   "Ex P nrk #c. Completed(P, nrk)@c"
+
+/* Sanity: a root veto CAN fire (guards veto_blocks_completion against
+   vacuous truth — cancellation's fireability is witnessed by the
+   calibration's attack trace; the veto needs its own witness). */
+lemma veto_possible:
+  exists-trace
+  "Ex P nrk #x. Vetoed(P, nrk)@x"
 
 /* MAIN A — fast-forward resistance: every completion is preceded by its
    declaration AND a full window of witness ticks. The window cannot be
