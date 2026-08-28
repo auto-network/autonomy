@@ -68,6 +68,129 @@ def _make_peer_note(db_path: Path, *, title: str, state: str = "raw") -> str:
         db.close()
 
 
+def _text_anchor(*, exact="A😀B", start=10):
+    return {
+        "v": 1,
+        "kind": "text_quote",
+        "note_version": 1,
+        "projection": "visible_text_v1",
+        "quote": {"exact": exact, "prefix": "before ", "suffix": " after"},
+        "position": {
+            "start": start,
+            "end": start + len(exact.encode("utf-16-le")) // 2,
+        },
+    }
+
+
+class TestAnchoredGraphComments:
+    def test_plain_and_anchored_comments_round_trip(self, orgs_root):
+        GraphDB.create_org_db("personal", type_="personal").close()
+        note = ops.create_note("before A😀B after")
+        plain = ops.add_comment(note["id"], "plain")
+        anchor = _text_anchor()
+        anchored = ops.add_comment(note["id"], "anchored", anchor=anchor)
+
+        assert plain["anchor"] is None
+        assert anchored["anchor"] == anchor
+        assert "anchor_json" not in anchored
+
+        conn = sqlite3.connect(str(orgs_root.parent / "personal.db"))
+        try:
+            stored = conn.execute(
+                "SELECT anchor_json FROM note_comments WHERE id = ?",
+                (anchored["id"],),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert stored == json.dumps(
+            anchor, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        )
+
+        full = ops.read_source_full(note["id"])
+        by_id = {comment["id"]: comment for comment in full["comments"]}
+        assert by_id[plain["id"]]["anchor"] is None
+        assert by_id[anchored["id"]]["anchor"] == anchor
+        assert all("anchor_json" not in comment for comment in by_id.values())
+
+    @pytest.mark.parametrize(
+        "mutate, message",
+        [
+            (lambda a: a.update(extra=True), "unknown or missing"),
+            (lambda a: a["quote"].update(exact=""), "non-empty"),
+            (lambda a: a["quote"].update(prefix="x" * 65), "64 UTF-16"),
+            (lambda a: a["quote"].update(exact="😀" * 2049), "4096 UTF-16"),
+            (lambda a: a["position"].update(end=999), "must match exact"),
+            (lambda a: a.update(note_version=True), "integer >= 1"),
+        ],
+    )
+    def test_invalid_anchor_is_rejected(self, orgs_root, mutate, message):
+        GraphDB.create_org_db("personal", type_="personal").close()
+        note = ops.create_note("comment target")
+        anchor = _text_anchor()
+        mutate(anchor)
+
+        with pytest.raises(ValueError, match=message):
+            ops.add_comment(note["id"], "not written", anchor=anchor)
+
+        db = sqlite3.connect(str(orgs_root.parent / "personal.db"))
+        try:
+            count = db.execute(
+                "SELECT COUNT(*) FROM note_comments WHERE source_id = ?",
+                (note["id"],),
+            ).fetchone()[0]
+        finally:
+            db.close()
+        assert count == 0
+
+    def test_migrates_v9_comment_table_idempotently(self, tmp_path):
+        path = tmp_path / "v9.db"
+        conn = sqlite3.connect(path)
+        conn.executescript(
+            """
+            CREATE TABLE note_comments (
+                id TEXT PRIMARY KEY,
+                source_id TEXT NOT NULL,
+                content TEXT NOT NULL,
+                actor TEXT DEFAULT 'user',
+                integrated INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            PRAGMA user_version = 9;
+            """
+        )
+        conn.close()
+
+        GraphDB(path).close()
+        GraphDB(path).close()
+
+        conn = sqlite3.connect(path)
+        try:
+            columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(note_comments)")
+            }
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+        finally:
+            conn.close()
+        assert "anchor_json" in columns
+        assert version == 10
+
+    def test_malformed_stored_anchor_degrades_to_null(self, orgs_root):
+        GraphDB.create_org_db("personal", type_="personal").close()
+        note = ops.create_note("comment target")
+        comment = ops.add_comment(note["id"], "legacy")
+        conn = sqlite3.connect(str(orgs_root.parent / "personal.db"))
+        try:
+            conn.execute(
+                "UPDATE note_comments SET anchor_json = ? WHERE id = ?",
+                ("{not-json", comment["id"]),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        assert ops.get_comment(comment["id"])["anchor"] is None
+
+
 # ── create_note ──────────────────────────────────────────────
 
 

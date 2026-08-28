@@ -1556,7 +1556,7 @@ def get_comment(
             "SELECT * FROM note_comments WHERE id = ? OR id LIKE ?",
             (comment_id, f"{comment_id}%"),
         ).fetchone()
-        return dict(row) if row else None
+        return _public_comment(dict(row)) if row else None
 
     resolved_org = _resolve_org(org)
     if _global_scope_active(resolved_org, None):
@@ -1747,6 +1747,96 @@ def withdraw_note(
         db.close()
 
 
+_COMMENT_ANCHOR_TOP_FIELDS = {
+    "v", "kind", "note_version", "projection", "quote", "position",
+}
+_COMMENT_ANCHOR_QUOTE_FIELDS = {"exact", "prefix", "suffix"}
+_COMMENT_ANCHOR_POSITION_FIELDS = {"start", "end"}
+
+
+def _utf16_code_units(value: str) -> int:
+    return len(value.encode("utf-16-le")) // 2
+
+
+def _validated_comment_anchor(anchor: object) -> dict | None:
+    """Validate and normalize the selected-text anchor v1 contract."""
+    if anchor is None:
+        return None
+    if not isinstance(anchor, dict):
+        raise ValueError("comment anchor must be an object")
+    if set(anchor) != _COMMENT_ANCHOR_TOP_FIELDS:
+        raise ValueError("comment anchor has unknown or missing fields")
+    if anchor.get("v") != 1 or anchor.get("kind") != "text_quote":
+        raise ValueError("comment anchor must be text_quote v1")
+    if anchor.get("projection") != "visible_text_v1":
+        raise ValueError("comment anchor projection must be visible_text_v1")
+
+    note_version = anchor.get("note_version")
+    if (
+        isinstance(note_version, bool)
+        or not isinstance(note_version, int)
+        or note_version < 1
+    ):
+        raise ValueError("comment anchor note_version must be an integer >= 1")
+
+    quote = anchor.get("quote")
+    if not isinstance(quote, dict) or set(quote) != _COMMENT_ANCHOR_QUOTE_FIELDS:
+        raise ValueError("comment anchor quote has unknown or missing fields")
+    exact = quote.get("exact")
+    prefix = quote.get("prefix")
+    suffix = quote.get("suffix")
+    if not isinstance(exact, str) or not exact.strip():
+        raise ValueError("comment anchor exact quote must be non-empty text")
+    if _utf16_code_units(exact) > 4096:
+        raise ValueError("comment anchor exact quote exceeds 4096 UTF-16 code units")
+    for label, value in (("prefix", prefix), ("suffix", suffix)):
+        if not isinstance(value, str):
+            raise ValueError(f"comment anchor {label} must be text")
+        if _utf16_code_units(value) > 64:
+            raise ValueError(
+                f"comment anchor {label} exceeds 64 UTF-16 code units"
+            )
+
+    position = anchor.get("position")
+    if (
+        not isinstance(position, dict)
+        or set(position) != _COMMENT_ANCHOR_POSITION_FIELDS
+    ):
+        raise ValueError("comment anchor position has unknown or missing fields")
+    start = position.get("start")
+    end = position.get("end")
+    if any(isinstance(value, bool) or not isinstance(value, int)
+           for value in (start, end)):
+        raise ValueError("comment anchor positions must be integers")
+    if start < 0 or end <= start:
+        raise ValueError("comment anchor position must satisfy 0 <= start < end")
+    if end - start != _utf16_code_units(exact):
+        raise ValueError("comment anchor position length must match exact quote")
+
+    return {
+        "v": 1,
+        "kind": "text_quote",
+        "note_version": note_version,
+        "projection": "visible_text_v1",
+        "quote": {"exact": exact, "prefix": prefix, "suffix": suffix},
+        "position": {"start": start, "end": end},
+    }
+
+
+def _public_comment(comment: dict) -> dict:
+    """Return the stable API shape and hide the storage representation."""
+    out = dict(comment)
+    raw_anchor = out.pop("anchor_json", None)
+    anchor = None
+    if isinstance(raw_anchor, str) and raw_anchor:
+        try:
+            anchor = _validated_comment_anchor(json.loads(raw_anchor))
+        except (ValueError, TypeError, json.JSONDecodeError):
+            anchor = None
+    out["anchor"] = anchor
+    return out
+
+
 def add_comment(
     source_id: str,
     content: str,
@@ -1755,6 +1845,7 @@ def add_comment(
     actor: str = "user",
     persona_id: str | None = None,
     session_id: str | None = None,
+    anchor: dict | None = None,
 ) -> dict:
     """Add a comment to a note. Returns the inserted row.
 
@@ -1763,12 +1854,23 @@ def add_comment(
     :class:`CrossOrgWriteError`.
     """
     write_org = _write_org_for_source(source_id, org=org)
+    normalized_anchor = _validated_comment_anchor(anchor)
+    anchor_json = (
+        json.dumps(
+            normalized_anchor, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"),
+        )
+        if normalized_anchor is not None
+        else None
+    )
     db = _open(write_org)
     try:
-        return db.insert_comment(
+        comment = db.insert_comment(
             source_id, content, actor=actor,
             persona_id=persona_id, session_id=session_id,
+            anchor_json=anchor_json,
         )
+        return _public_comment(comment)
     finally:
         db.close()
 
@@ -4211,7 +4313,8 @@ def read_source_full(
         "entry_count": entry_count,
         "turn_count": turn_count,
         "comments": sorted(
-            [dict(c) for c in comments_src] + extra_comments,
+            [_public_comment(dict(c)) for c in comments_src]
+            + [_public_comment(dict(c)) for c in extra_comments],
             key=lambda c: c.get("created_at") or "",
         ),
     }
