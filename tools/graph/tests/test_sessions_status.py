@@ -191,6 +191,29 @@ def test_resolve_tmux_name_lookup(tmp_path, monkeypatch):
     assert cli._resolve_tmux_name_to_source_id("auto-missing") is None
 
 
+def test_resolve_tmux_name_uses_authenticated_graph_client(tmp_path, monkeypatch):
+    """Container resolution goes through GraphClient, which attaches auth."""
+    from tools.graph import cli
+
+    (tmp_path / "tools" / "graph").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(cli, "__file__", str(tmp_path / "tools" / "graph" / "cli.py"))
+    calls = []
+
+    class _Client:
+        def get_session_record(self, tmux_name):
+            calls.append(tmux_name)
+            return {
+                "graph_source_id": "1234567890abcdef",
+                "org": {"slug": "autonomy"},
+            }
+
+    monkeypatch.setattr(cli, "get_client", lambda: _Client())
+
+    assert cli._resolve_tmux_name_to_source_id("auto-0827-115548") == "1234567890abcdef"
+    assert calls == ["auto-0827-115548"]
+    assert cli._LAST_TMUX_RESOLVED_ORG == "autonomy"
+
+
 def test_looks_like_tmux_name_heuristic():
     """Hex-only source-id prefixes do NOT trigger tmux lookup."""
     from tools.graph import cli

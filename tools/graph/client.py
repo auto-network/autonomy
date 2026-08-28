@@ -474,6 +474,11 @@ class HttpClient:
             return result["rows"]
         return result if isinstance(result, list) else []
 
+    def get_session_record(self, tmux_name: str):
+        """Resolve one dashboard session through the authenticated client."""
+        quoted = urllib.parse.quote(tmux_name, safe="")
+        return self._get(f"/api/session/{quoted}")
+
     def resolve_source_strict(self, source_id, *, org=None, peers=None):
         # Server's GET /api/graph/source/{id} already does own-first +
         # peer-public-surface resolve. The dashboard never returns
