@@ -1,0 +1,137 @@
+/*
+  VaultRecoveryRace — "a stolen key cannot outrun its own recovery."
+  Bead auto-cpbkf. Tracker 8277c76c. Crib graph://1e005d5c-c11 §9
+  (member recovery key: "the recovery-authorized path additionally
+  REVOKES the key it moves away from, so a stolen key cannot outrun its
+  own recovery"). Code: ledger/fold.py:_h_member_rekey — three doors
+  (self / root / recovery), R_REKEY_WRONG_KEY, R_REKEY_REVOKED_KEY, and
+  Item 4 "a recovery-authorized rekey implicitly REVOKES the key it
+  moved away from ... a concurrent self-authorized rekey the attacker
+  forks off old_pub loses via _rekey_alive".
+
+  Signature verification uses the standard Tamarin Eq idiom
+  (Eq(verify(sig,msg,pk), true) + a generic Eq restriction) because the
+  FOLD verifies against a public key it does not itself hold the secret
+  of — unlike models 1-3, where the verifier possessed the signing key
+  and could match sign(...) structurally.
+
+  TWO provable parts:
+  (A) crypto authorization — the thief, holding the persona's current
+      (stolen) signing key and everything public, cannot forge a
+      recovery-authorized rekey (needs the enrolled recovery key, which
+      never leaks) and cannot swap the enrolled recovery_pub (needs the
+      OLD recovery key).
+  (B) causal winner-rule — once the owner issues a recovery rekey
+      (which revokes old_pub), NO self-authorized rekey off old_pub is
+      ever the effective authority, in ANY interleaving.
+
+  FOLD ABSTRACTION (honesty): the fold's partial-order resolution is
+  abstracted to `self_rekey_loses_to_revoke`: a self-authorized rekey
+  off a key cannot occur in any trace where that key is recovery-
+  revoked. Order-independent, so it covers the prior AND concurrent
+  cases uniformly (the crib's claim is recovery wins even against a
+  CONCURRENT thief rekey). Full causal-merge fidelity is the TLA+
+  side-track (auto-xtt5v).
+
+  THIS IS THE CALIBRATION. The implicit revoke is deleted; the thief
+  self-rekey now survives concurrently and recovery_beats_thief
+  falsifies — Item 4's exact failure (a stolen key outruns recovery).
+*/
+
+theory VaultRecoveryRaceNoRevoke
+begin
+
+builtins: signing
+
+restriction Eq:
+  "All x y #i. Equal(x, y)@i ==> x = y"
+
+/* Enrollment: persona P, current key k0 (secret handed to the THIEF),
+   enrolled recovery key rk (owner-held, never revealed). */
+rule Enroll:
+  [ Fr(~P), Fr(~k0), Fr(~rk) ]
+  --[ Enrolled(~P)
+    , RecoveryPub(~P, pk(~rk))
+    , OnceEnroll() ]->
+  [ !Persona(~P)
+  , !CurrentKey(~P, pk(~k0))
+  , !RecoveryKey(~P, ~rk)
+  , !EnrolledRecoveryPub(~P, pk(~rk))
+  , Out(~P)                       // persona id is public
+  , Out(pk(~k0)), Out(pk(~rk))
+  , Out(~k0)                      // the stolen current key -> adversary
+  ]
+
+restriction once_enroll:
+  "All #i #j. OnceEnroll()@i & OnceEnroll()@j ==> #i = #j"
+
+/* The owner issues a recovery-rekey: signs, with the enrolled recovery
+   key, a move of the (public, possibly-stolen) old key to a fresh owner
+   key. This is the ONLY producer of a valid recovery signature — the
+   recovery key itself never leaves. */
+rule Owner_Sign_Recovery:
+  [ !RecoveryKey(P, ~rk), In(oldkey), Fr(~newk) ]
+  --[ OwnerRecovers(P, oldkey, pk(~newk)) ]->
+  [ Out(<pk(~newk), sign(<'recovery-rekey', P, oldkey, pk(~newk)>, ~rk)>) ]
+
+/* Door 1 — self-authorized rekey: a request signed by the CURRENT key.
+   The thief holds ~k0, so the thief can produce this off k0. */
+rule Rekey_Self:
+  [ !CurrentKey(P, kpub), In(newkey), In(sig) ]
+  --[ Equal(verify(sig, <'rekey', P, kpub, newkey>, kpub), true)
+    , RekeySelf(P, kpub, newkey)
+    , Effective(P, newkey) ]->
+  [ ]
+
+/* Door 3 — recovery-authorized rekey: co-signed by the ENROLLED
+   recovery key. Implicitly REVOKES old_pub (Item 4). Only a holder of
+   the recovery key can produce the signature. */
+rule Rekey_Recovery:
+  [ !EnrolledRecoveryPub(P, rkpub), In(oldkey), In(newkey), In(sig) ]
+  /* CALIBRATION: the implicit revoke is DELETED. The recovery rekey no
+     longer revokes old_pub, so a concurrent thief self-rekey survives. */
+  --[ Equal(verify(sig, <'recovery-rekey', P, oldkey, newkey>, rkpub), true)
+    , RekeyRecovery(P, oldkey, newkey)
+    , Effective(P, newkey) ]->
+  [ ]
+
+/* NOTE — recovery_pub SUCCESSION (swapping the enrolled recovery key)
+   is deliberately NOT modeled here. Its defence (registry refuses
+   succession without the OLD recovery key's signature) is the same
+   signature-authorization shape as recovery_key_secret, but its full
+   treatment — regenerate-with-lost-code, the witness-chain t_D+W
+   window, cancellation and root veto — is the charter of model 6
+   (VaultRecoverySuccession, bead auto-loov7). This model proves the
+   RACE (a stolen key cannot outrun a recovery that DOES fire); model 6
+   proves the succession that establishes a new recovery key. */
+
+/* THE FOLD WINNER RULE (abstracted): a self-authorized rekey off a key
+   cannot occur in any trace where that key is recovery-revoked. */
+restriction self_rekey_loses_to_revoke:
+  "All P k nk #s. RekeySelf(P, k, nk)@s ==> not(Ex #r. RevokeKey(P, k)@r)"
+
+/* ═══ Lemmas ═══ */
+
+lemma executable:
+  exists-trace
+  "Ex P ok nk #r. RekeyRecovery(P, ok, nk)@r & Effective(P, nk)@r"
+
+/* Sanity: a thief CAN self-rekey absent recovery (guards vacuity). */
+lemma thief_self_rekey_possible:
+  exists-trace
+  "Ex P k nk #s. RekeySelf(P, k, nk)@s & Effective(P, nk)@s"
+
+/* MAIN A — the enrolled recovery key never leaks, so the thief cannot
+   forge a recovery-authorized rekey. */
+lemma recovery_key_secret:
+  "not(Ex P rk #i #k. RecoveryPub(P, pk(rk))@i & K(rk)@k)"
+
+/* MAIN B — the race: no trace has both a recovery rekey revoking k and
+   an effective self-rekey off k. The stolen key cannot outrun its own
+   recovery, in ANY interleaving. */
+lemma recovery_beats_thief:
+  "not(Ex P k nk1 nk2 #r #s.
+        RekeyRecovery(P, k, nk1)@r
+      & RekeySelf(P, k, nk2)@s & Effective(P, nk2)@s)"
+
+end

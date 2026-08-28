@@ -77,6 +77,18 @@ EXPECTATIONS = {
         "unlock_only_yields_no_root": "verified",
         "session_only_for_enrolled_factor": "verified",
     },
+    "VaultRecoveryRace.spthy": {
+        "executable": "verified",
+        "thief_self_rekey_possible": "verified",
+        "recovery_key_secret": "verified",
+        "recovery_beats_thief": "verified",
+    },
+    "VaultRecoveryRaceNoRevoke.spthy": {
+        "executable": "verified",
+        "thief_self_rekey_possible": "verified",
+        "recovery_key_secret": "verified",
+        "recovery_beats_thief": "falsified",
+    },
 }
 
 SUMMARY_RE = re.compile(
