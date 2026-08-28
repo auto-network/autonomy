@@ -12,7 +12,9 @@ const appTopbarSlot = document.getElementById('app-topbar-slot');
 const sessionViewLayer = document.getElementById('session-view-layer');
 const sessionViewHost = document.getElementById('session-view-host');
 const HARNESS_USAGE_SETTINGS_SET_ID = 'dashboard.harness.usage';
-const HARNESS_USAGE_STALE_MS = 15 * 60 * 1000;
+// (The 15-minute HARNESS_USAGE_STALE_MS account filter is gone —
+// operator directive: never hide accounts by age; see
+// freshHarnessUsageSettings and harnessWindowStale.)
 let _currentContentPath = null;
 let _sessionOverlayBasePath = null;
 
@@ -743,6 +745,7 @@ function renderHarnessUsage(data) {
               <div class="harness-strip-head">
                 <span class="harness-strip-label">${_esc(item.harness || 'unknown')}</span>
                 ${renderHarnessUsageDots(items.length, _harnessUsagePage)}
+                ${harnessWindowStale(windows.short) ? '<span class="harness-strip-stale">stale</span>' : ''}
               </div>
               <div class="harness-strip-bars">
                 ${renderHarnessStripWindow(windows.short, '5h')}
@@ -759,29 +762,37 @@ function renderHarnessUsage(data) {
   syncHarnessUsageScroll();
 }
 
+function harnessWindowStale(win) {
+  // Stale = the window's reset moment has already elapsed — the reading
+  // predates a reset, so the percentages describe a finished window. A
+  // missing or unparsable resets_at is NOT stale (renders '--').
+  const ts = win && Number(win.resets_at);
+  if (!Number.isFinite(ts) || ts <= 0) return false;
+  return (ts * 1000) - Date.now() <= 0;
+}
+
 function freshHarnessUsageSettings(members) {
-  const now = Date.now();
+  // NEVER hide an account (operator directive, 2026-08-28): time-based
+  // staleness filtering made the strip look arbitrary — idle accounts
+  // aged out and "spontaneously switched", and the account nearest its
+  // limit is exactly the one most likely idle. Non-ok status rows stay
+  // too: an exhausted account is the one you most want on screen (its
+  // countdown renders '--'). The ONLY staleness signal is the per-window
+  // elapsed-reset badge in the tile head.
   const items = [];
   (Array.isArray(members) ? members : []).forEach(member => {
     const payload = member && member.payload;
     if (!payload || typeof payload !== 'object') return;
-    if (payload.status && payload.status !== 'ok') return;
     const updatedAt = member.updated_at || payload.updated_at;
-    const ts = updatedAt ? Date.parse(updatedAt) : NaN;
-    if (!Number.isFinite(ts)) return;
-    if ((now - ts) > HARNESS_USAGE_STALE_MS) return;
     items.push({ ...payload, updated_at: updatedAt });
   });
+  // Stable identity-first sort: a page position always means the same
+  // account. Sorting by updated_at churned the order as accounts
+  // refreshed, so page 0 kept showing a different identity.
   items.sort((a, b) => {
     const order = { claude: 0, codex: 1 };
     const byHarness = (order[a.harness] ?? 99) - (order[b.harness] ?? 99);
     if (byHarness) return byHarness;
-    const statusOrder = { ok: 0, unknown: 1, unavailable: 2 };
-    const byStatus = (statusOrder[a.status] ?? 99) - (statusOrder[b.status] ?? 99);
-    if (byStatus) return byStatus;
-    const tsA = Date.parse(a.updated_at || a.updatedAt || '');
-    const tsB = Date.parse(b.updated_at || b.updatedAt || '');
-    if (Number.isFinite(tsA) && Number.isFinite(tsB) && tsA !== tsB) return tsB - tsA;
     return String(a.identity_label || '').localeCompare(String(b.identity_label || ''));
   });
   return items;
