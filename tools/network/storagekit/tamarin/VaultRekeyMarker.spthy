@@ -1,0 +1,176 @@
+/*
+  VaultRekeyMarker — machine-checked exclusion-forward for the §1d re-key.
+
+  Design of record: crib sheet graph://1e005d5c-c11 §1d (re-key + frontier
+  marker), §3 (governing crypto invariant), §6 (grants, ParentBridge),
+  §14 (byte-identical per-machine derivation).
+  Code ground truth: select_current_credential, credentials.py:285-312 —
+  a candidate whose cited frontier is strictly causally descended by
+  another's is dropped BEFORE the kem_key_id tie-break.
+
+  THE CLAIM PROVED HERE (exclusion_forward): after a disenrollment re-key
+  that writes a frontier marker and mints C_new citing the advanced
+  frontier, a generation secret minted-and-granted AFTER that re-key is
+  unreachable to the removed machine — even though the removed machine
+  keeps kem_priv(C_old), G_old, and a full copy of the replicated store.
+
+  THE RENOUNCED NON-CLAIM (old_generation_stays_readable): the removed
+  machine keeps everything it already had, permanently (§3: "revocation"
+  is exclusion from FUTURE seals, never loss of synced data). Stated as
+  an exists-trace lemma so nobody "fixes" it later.
+
+  CALIBRATION: VaultRekeyF001.spthy is this theory with the marker
+  deleted (C_new cites the SAME frontier as C_old). exclusion_forward
+  must be FALSIFIED there, and the attack trace is exactly finding
+  F-001: the selector's tie-break can land the grant on C_old, which the
+  removed machine still opens. A green proof here is only trusted
+  because the calibration variant fails.
+
+  Abstraction register: see MODEL.md. Headline abstractions:
+  - HPKE -> aenc/adec (builtin asymmetric encryption).
+  - Frontier ancestry -> one explicit marker edge (single-step descent;
+    the pilot scenario needs no transitive closure).
+  - max(kem_key_id) tie-break -> adversarial choice: the grant rule may
+    target ANY credential the selector would keep (restriction
+    selector_drops_descended models ONLY the drop step, never the
+    tie-break order — so a surviving tie is resolved by the adversary,
+    which is strictly stronger than any fixed hash order).
+  - Single persona, one removed machine, one re-key, one new generation
+    (once-restrictions) — the minimal state exhibiting F-001.
+*/
+
+theory VaultRekeyMarker
+begin
+
+builtins: asymmetric-encryption, symmetric-encryption
+
+functions: kemsk/2, kdf/1
+
+/* ── Setup: genesis state of the store before the kick ──────────────
+   One persona (root ~root). Frontier head ~f0. Current credential C1
+   cites ~f0; every fleet machine derives the identical sk1 (§14).
+   G_old exists and is granted to C1 — the replicated store is public,
+   so both the credential public half and the sealed grant go Out. */
+rule Setup:
+  let sk1 = kemsk(~root, '1')
+      pk1 = pk(sk1)
+  in
+  [ Fr(~root), Fr(~f0), Fr(~g0) ]
+  --[ Genesis(~root)
+    , MintedCred('c1', ~f0)
+    , NewGen(~g0, 'old')
+    , OnceSetup() ]->
+  [ !Root(~root)
+  , !Cred('c1', pk1, ~f0)
+  , !FrontierHead(~f0)
+  , !OldGen(~g0)
+  , RemovedMachineState(sk1, ~g0)
+  , Out(pk1)
+  , Out(aenc(~g0, pk1))
+  ]
+
+restriction once_setup:
+  "All #i #j. OnceSetup()@i & OnceSetup()@j ==> #i = #j"
+
+/* ── The kick: the adversary owns the removed machine ───────────────
+   Everything that machine held at removal time: the persona KEM secret
+   (identical on every machine) and the old generation secret. */
+rule RevealRemovedMachine:
+  [ RemovedMachineState(sk, g) ]
+  --[ Removed() ]->
+  [ Out(sk), Out(g) ]
+
+/* ── §1d re-key at a root-present login (THE MARKER VARIANT) ────────
+   STEP A: the FrontierMarker — a purpose-built, fold-inert ledger
+   event whose parents are the locally-current authority heads. It
+   exists so that ancestry(C_new) strictly contains C_old's frontier.
+   STEP B: C_new minted citing the advanced frontier. kem_priv(C_new)
+   is re-derived from the root (counter+1); the removed machine cannot
+   derive it (no root) and receives no distribution (kicked). */
+rule Rekey_Disenrollment:
+  let sk2 = kemsk(~root, '2')
+      pk2 = pk(sk2)
+  in
+  [ !Root(~root), !FrontierHead(f_old), Fr(~f1) ]
+  --[ MarkerWritten(~f1, f_old)
+    , MintedCred('c2', ~f1)
+    , RekeyDone()
+    , OnceRekey() ]->
+  [ !Marker(~f1, f_old)
+  , !Cred('c2', pk2, ~f1)
+  , !FrontierHead(~f1)
+  , !HonestSk('c2', sk2)
+  , Out(pk2)
+  ]
+
+restriction once_rekey:
+  "All #i #j. OnceRekey()@i & OnceRekey()@j ==> #i = #j"
+
+/* ── The writer: mint G_new, bridge it to G_old, grant it ───────────
+   Models storage:state:advance + storage:capability:grant (crib §6):
+   fresh state secret, ParentBridge child->parent (AEAD of G_old under
+   a key derived from G_new), and the CEK-carrying CapabilityGrant
+   sealed to a credential the SELECTOR deems current. The rule may pick
+   ANY stored credential; the restriction below applies exactly the
+   drop-step of credentials.py:302-311. */
+rule Advance_And_Grant:
+  [ !Cred(cid, pkC, frC), !OldGen(gold), Fr(~gnew) ]
+  --[ NewGen(~gnew, 'new')
+    , GrantTo(cid, frC)
+    , OnceGrant() ]->
+  [ Out(aenc(~gnew, pkC))
+  , Out(senc(gold, kdf(~gnew)))
+  ]
+
+restriction once_grant:
+  "All #i #j. OnceGrant()@i & OnceGrant()@j ==> #i = #j"
+
+/* selector semantics — the DROP, not the tie-break: a grant never
+   targets a credential whose cited frontier a marker has advanced
+   past. Surviving ties stay adversarially resolvable. */
+restriction selector_drops_descended:
+  "All cid fr #i. GrantTo(cid, fr)@i ==>
+     not(Ex f2 #j. MarkerWritten(f2, fr)@j & #j < #i)"
+
+/* ── Honest reader: a remaining machine opens the grant and walks the
+   bridge backward (crib §6 READ: hold any head -> every ancestor). */
+rule Honest_Open:
+  [ !HonestSk(cid, sk)
+  , In(aenc(g, pk(sk)))
+  , In(senc(gold, kdf(g)))
+  ]
+  --[ HonestRead(g, gold) ]->
+  []
+
+/* ═══ Lemmas ═══════════════════════════════════════════════════════ */
+
+/* Sanity: the whole flow runs — kick, re-key, grant, and an honest
+   remaining machine reads G_new AND recovers G_old through the bridge.
+   Guards every security lemma against vacuous truth. */
+lemma executable_end_to_end:
+  exists-trace
+  "Ex g gold #a #b #c #d.
+     Removed()@a & RekeyDone()@b & NewGen(g, 'new')@c & HonestRead(g, gold)@d
+     & #a < #b & #b < #c"
+
+/* MAIN — exclusion-forward (§1d, F-001 fixed): a generation secret
+   minted after the marker-writing re-key never reaches the adversary,
+   despite the removed machine's full snapshot. */
+lemma exclusion_forward:
+  "not(Ex g cid fr #r #j #k.
+        RekeyDone()@r
+      & NewGen(g, 'new')@j & GrantTo(cid, fr)@j & #r < #j
+      & K(g)@k)"
+
+/* Root never leaks (the armor is out of scope here; the point is the
+   protocol itself never exposes derivation material). */
+lemma root_secret:
+  "not(Ex r #i #k. Genesis(r)@i & K(r)@k)"
+
+/* RENOUNCED NON-CLAIM, stated so it stays renounced (§3, §22): the
+   removed machine keeps what it already had — G_old IS reachable. */
+lemma old_generation_stays_readable:
+  exists-trace
+  "Ex g #i #k. NewGen(g, 'old')@i & K(g)@k"
+
+end
