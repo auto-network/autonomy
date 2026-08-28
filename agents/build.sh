@@ -2,7 +2,12 @@
 # Build the autonomy-session container images (base + dashboard).
 # Stages tool binaries into a temp dir, then builds.
 #
-# Usage: ./agents/build.sh [--no-cache] [--pull] [--core-only]
+# Usage: ./agents/build.sh [--no-cache] [--pull] [--core-only] [--from-settings]
+#
+# --from-settings skips the base family entirely and builds the
+# per-workspace <org>/<workspace-id> images from their
+# autonomy.workspace.provision rows (agents/image_builder.py) — the
+# always-works manual path behind the dashboard's build worker.
 #
 # Always builds both autonomy-session (base) and autonomy-session-platform
 # (base + Python deps). Docker layer cache makes repeat builds near-instant
@@ -22,6 +27,8 @@ for arg in "$@"; do
         --no-cache) NO_CACHE="--no-cache" ;;
         --pull) PULL="--pull" ;;
         --core-only) BUILD_PROJECTS=0 ;;
+        --from-settings)
+            exec "$REPO_ROOT/.venv/bin/python" -m agents.image_builder ;;
         *) echo "Unknown flag: $arg"; exit 1 ;;
     esac
 done

@@ -138,6 +138,7 @@ from tools.dashboard import vault_routes
 from tools.dashboard import api_auth, route_policy
 from tools.dashboard import network_routes
 from tools.dashboard import web_push, web_push_proof, web_push_routes, web_push_worker
+from tools.dashboard import image_build_worker
 if os.environ.get("DASHBOARD_MOCK"):
     from tools.dashboard.dao import mock as dao_beads
     from tools.dashboard.dao import mock as dao_dispatch
@@ -19922,6 +19923,8 @@ async def _on_startup():
         _mark("web_push.start_worker")
         await web_push_worker.start_worker()
         _mark("web_push_worker.start_worker")
+        await image_build_worker.start_worker()
+        _mark("image_build_worker.start_worker")
         try:
             await web_push.reconcile_approval_attention(
                 approvals_routes.push_eligible_kind,
@@ -20307,6 +20310,10 @@ async def _on_shutdown():
         await web_push_worker.stop_worker()
     except Exception:
         logger.exception("error stopping the Central Web Push delivery worker")
+    try:
+        await image_build_worker.stop_worker()
+    except Exception:
+        logger.exception("error stopping the workspace image build worker")
     try:
         await web_push.stop_worker()
     except Exception:
