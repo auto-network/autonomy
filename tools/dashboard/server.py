@@ -7959,7 +7959,8 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
         run_dir.mkdir(parents=True, exist_ok=True)
         primer_path = run_dir / ".claude_md"
         primer_path.write_text(render_workspace_primer(proj))
-        startup_script = (_REPO_ROOT / proj.startup) if proj.startup else None
+        startup_script = workspace_settings.materialize_startup_script(
+            proj, run_dir, repo_root=_REPO_ROOT)
         working_dir = proj.working_dir or "/workspace/repo"
 
         cmd_str = launch_session(
@@ -8228,7 +8229,8 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
             run_dir.mkdir(parents=True, exist_ok=True)
             primer_path = run_dir / ".claude_md"
             primer_path.write_text(render_workspace_primer(proj))
-            startup_script = (_REPO_ROOT / proj.startup) if proj.startup else None
+            startup_script = workspace_settings.materialize_startup_script(
+                proj, run_dir, repo_root=_REPO_ROOT)
             cmd_str = launch_session(
                 session_type="terminal",
                 name=tmux_name,
@@ -18196,7 +18198,8 @@ async def api_agent_action_dispatch(request):
             "working_dir": workspace.working_dir or "/workspace/repo",
             "extra_env": extra_env or None,
             "global_claude_md": primer_path,
-            "startup_script": (_REPO_ROOT / workspace.startup) if workspace.startup else None,
+            "startup_script": workspace_settings.materialize_startup_script(
+                workspace, output_dir_path, repo_root=_REPO_ROOT),
             "needs_nested_docker": workspace.needs_nested_docker,
             "runtime": workspace.session_runtime,
             "network_host": workspace.network_host,
