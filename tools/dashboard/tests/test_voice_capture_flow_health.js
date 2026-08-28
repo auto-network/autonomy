@@ -10,9 +10,9 @@ const CAPTURE_JS = path.join(REPO_ROOT, 'tools/dashboard/static/js/lib/voice-cap
 function makeHarness(options = {}) {
   const sockets = [];
   class FakeWS {
-    constructor() { this.readyState = 0; this.listeners = {}; sockets.push(this); }
+    constructor() { this.readyState = 0; this.listeners = {}; this.sent = []; sockets.push(this); }
     addEventListener(type, callback) { (this.listeners[type] ||= []).push(callback); }
-    send() {}
+    send(payload) { this.sent.push(payload); }
     close() { this.readyState = 3; }
     fire(type, event) { for (const callback of this.listeners[type] || []) callback(event || {}); }
     open() { this.readyState = 1; this.fire('open'); }
@@ -73,6 +73,7 @@ function makeHarness(options = {}) {
 describe('voice flow health acknowledgements', () => {
   it('does not claim a newly opened or merely state-acknowledged socket is healthy', () => {
     const h = makeHarness();
+    h.state.talkActive = true;
     assert.equal(h.voice.connState, 'reconnecting');
 
     h.socket.deliver({
@@ -80,6 +81,7 @@ describe('voice flow health acknowledgements', () => {
       fsm_state: 'listening', upstream: 'ready', epoch: 0,
     });
     assert.equal(h.voice.connState, 'reconnecting');
+    assert.equal(h.socket.sent.length, 0);
 
     h.socket.deliver({
       type: 'audio_flow', connection_id: 'current',
@@ -87,6 +89,28 @@ describe('voice flow health acknowledgements', () => {
     });
     assert.equal(h.voice.connState, 'ok');
     assert.equal(h.state.lastForwarded, 1);
+  });
+
+  it('reopens audio in wire order after reset and commit results', () => {
+    const h = makeHarness();
+    h.state.talkActive = true;
+    h.socket.deliver({
+      type: 'voice_state', connection_id: 'current',
+      fsm_state: 'listening', upstream: 'ready', epoch: 0,
+    });
+    h.socket.deliver({
+      type: 'buffer_state', text: '', epoch: 1,
+      audio_ready_token: 'reset-token',
+    });
+    assert.deepEqual(JSON.parse(h.socket.sent.at(-1)), {
+      type: 'audio_ready', connection_id: 'current', epoch: 1,
+      token: 'reset-token',
+    });
+    h.socket.deliver({ type: 'committed', audio_ready_token: 'commit-token' });
+    assert.deepEqual(JSON.parse(h.socket.sent.at(-1)), {
+      type: 'audio_ready', connection_id: 'current', epoch: 1,
+      token: 'commit-token',
+    });
   });
 
   it('ignores stale connection IDs and non-advancing flow counters', () => {
