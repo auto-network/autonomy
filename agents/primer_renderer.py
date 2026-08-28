@@ -22,6 +22,7 @@ from pathlib import Path
 
 import jinja2
 
+from agents import workspace_settings
 from agents.workspace_settings import REPO_ROOT, WorkspaceV1
 from tools.graph import ops as graph_ops
 from tools.graph.schemas.turn_correction import (
@@ -482,8 +483,17 @@ def render_workspace_primer(config: WorkspaceV1) -> str:
     plugin_blocks = _plugin_skill_blocks(config)
     turn_correction = _turn_correction_block(config)
     commit_policy = _commit_policy_block(config)
+    try:
+        has_startup = bool(workspace_settings.resolve_provision(
+            config.id, org=config.graph_project,
+        ).get("startup_script"))
+    except Exception:
+        # The Background Setup section is guidance, not launch input; a
+        # settings hiccup here must not take the primer (and launch) down.
+        has_startup = False
     return template.render(
         config=config,
+        has_startup=has_startup,
         writable_repos=writable_repos,
         readonly_repos=readonly_repos,
         workspace_primer=workspace_primer,

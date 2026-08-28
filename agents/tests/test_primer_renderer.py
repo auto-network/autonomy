@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from agents import primer_renderer
 from agents.primer_renderer import render_workspace_primer
 from agents.workspace_settings import (
     CAPABILITIES_MOUNT_DIR,
@@ -36,7 +37,6 @@ def _cfg(**overrides) -> WorkspaceV1:
         graph_project="sample-org",
         repos=(),
         working_dir="/workspace/repo",
-        startup=None,
         needs_nested_docker=False,
         default_tags=(),
         dispatch_labels=(),
@@ -149,15 +149,21 @@ def test_no_repos_defaults_to_readonly_autonomy():
 
 # ── Background setup ─────────────────────────────────────────────────
 
-def test_background_setup_section_when_startup_defined():
-    out = render_workspace_primer(_cfg(startup="agents/projects/ng/startup.sh"))
+def test_background_setup_section_when_startup_defined(monkeypatch):
+    monkeypatch.setattr(
+        primer_renderer.workspace_settings, "resolve_provision",
+        lambda wid, *, org: {"startup_script": "#!/bin/bash\necho hi"})
+    out = render_workspace_primer(_cfg())
     assert "## Background Setup" in out
     assert ".setup-exit" in out
     assert ".setup.log" in out
 
 
-def test_background_setup_section_omitted_when_no_startup():
-    out = render_workspace_primer(_cfg(startup=None))
+def test_background_setup_section_omitted_when_no_startup(monkeypatch):
+    monkeypatch.setattr(
+        primer_renderer.workspace_settings, "resolve_provision",
+        lambda wid, *, org: {})
+    out = render_workspace_primer(_cfg())
     assert "## Background Setup" not in out
     assert ".setup-exit" not in out
 
@@ -235,9 +241,18 @@ def test_bridge_network_section_when_disabled():
 
 # ── End-to-end parity with real project configs ──────────────────────
 
+def _seed_provision(workspace_id, org):
+    from tools.graph import ops as _graph_ops
+    _graph_ops.add_setting(
+        "autonomy.workspace.provision", 1, key=workspace_id,
+        payload={"startup_script": "#!/bin/bash\necho provision"},
+        org=org, state="raw")
+
+
 def test_enterprise_ng_shape(shipped_workspaces):
     """Full integration: render for the real enterprise-ng workspace config
     and verify every acceptance-criterion-bearing section is present."""
+    _seed_provision("enterprise-ng", "anchore")
     out = render_workspace_primer(get_workspace("enterprise-ng"))
 
     # 1. Full Autonomy tooling
@@ -285,6 +300,7 @@ def test_autonomy_shape(shipped_workspaces):
 
 def test_enterprise_v5_shape(shipped_workspaces):
     """Enterprise v5 workspace: single writable enterprise repo, DinD, startup."""
+    _seed_provision("enterprise-v5", "anchore")
     out = render_workspace_primer(get_workspace("enterprise-v5"))
 
     assert "## Docker-in-Docker" in out
@@ -310,7 +326,7 @@ def test_enterprise_commit_policy_does_not_report_false_issue_tracker_error(
 def test_no_unrendered_template_syntax():
     """No `{{ }}`, `{%`, or other Jinja syntax should leak into the output."""
     out = render_workspace_primer(_cfg(
-        startup="x", needs_nested_docker=True,
+        needs_nested_docker=True,
         default_tags=("a", "b"),
         repos=(
             RepoMount(host="example.com", repo="o/r", mount="/workspace/a", writable=True),
