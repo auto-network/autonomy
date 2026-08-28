@@ -38,6 +38,22 @@
     Agent: 'sc-border-agent',
   };
 
+  // Resolve the scrollable transcript element for a viewer component.
+  // Alpine's $refs magic builds its proxy once per evaluation context and
+  // caches it forever — a read that happens before any x-ref directive has
+  // initialized (the ready-state subtree is conditionally rendered) caches
+  // an EMPTY proxy, and every later $refs read through that context
+  // silently returns undefined even though the ref is registered on the
+  // root. So a $refs miss must not be treated as "no element": fall back
+  // to querying this viewer's own root. Graph note efb90d5d-f5b.
+  function entriesEl(ctx) {
+    var el = ctx.$refs && ctx.$refs.entriesContainer;
+    if (el) return el;
+    var root = null;
+    try { root = ctx.$root; } catch (e) { root = null; }
+    return root && root.querySelector ? root.querySelector('.sv-entries') : null;
+  }
+
   window.SessionRenderer = {
 
     // ── Render helpers ─────────────────────────────────────────
@@ -657,8 +673,12 @@
       return null;
     },
 
+    _entriesEl() {
+      return entriesEl(this);
+    },
+
     onScroll() {
-      const el = this.$refs.entriesContainer;
+      const el = entriesEl(this);
       if (!el) return;
       const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 50;
       // `autoScroll` is a user-intent latch, not a fresh distance reading.
@@ -679,7 +699,7 @@
 
     resumeScroll() {
       this.autoScroll = true;
-      const el = this.$refs.entriesContainer;
+      const el = entriesEl(this);
       if (el) {
         el.scrollTop = el.scrollHeight;
         this._lastScrollTop = el.scrollTop;

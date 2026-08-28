@@ -2191,17 +2191,26 @@
         // Double-RAF after $nextTick: ensures Alpine has processed the x-for
         // template AND the browser has laid out all entries before we measure
         // scrollHeight. Critical for initial loads with 1000+ entries.
+        // The container can legitimately be missing for a few frames while
+        // the ready-state subtree renders, so retry briefly rather than
+        // dropping the pin — a silent no-op here is exactly what shipped
+        // the open-at-top regression.
         var self = this;
+        var attempts = 0;
+        function pin() {
+          var el = self._entriesEl();
+          if (!el) {
+            if (attempts++ < 10) { requestAnimationFrame(pin); return; }
+            console.warn('[sessionViewer] scroll-to-bottom skipped: entries container never appeared');
+            return;
+          }
+          el.scrollTop = el.scrollHeight;
+          self._lastScrollTop = el.scrollTop;
+          self.showJumpToBottom = false;
+        }
         this.$nextTick(function() {
           requestAnimationFrame(function() {
-            requestAnimationFrame(function() {
-              var el = self.$refs.entriesContainer;
-              if (el) {
-                el.scrollTop = el.scrollHeight;
-                self._lastScrollTop = el.scrollTop;
-              }
-              self.showJumpToBottom = false;
-            });
+            requestAnimationFrame(pin);
           });
         });
       },
@@ -2210,7 +2219,7 @@
         if (this.loadingOlder || !this.hasMoreHistory || !this.olderCursor || !this._tailUrl) return;
         var store = Alpine.store('sessions')[this.sessionKey];
         if (!store) return;
-        var el = this.$refs.entriesContainer;
+        var el = this._entriesEl();
         var prevHeight = el ? el.scrollHeight : 0;
         var prevTop = el ? el.scrollTop : 0;
         this.loadingOlder = true;
@@ -2235,7 +2244,7 @@
             var self = this;
             this.$nextTick(function() {
               requestAnimationFrame(function() {
-                var scroller = self.$refs.entriesContainer;
+                var scroller = self._entriesEl();
                 if (!scroller) return;
                 var delta = scroller.scrollHeight - prevHeight;
                 scroller.scrollTop = prevTop + delta;
@@ -2252,7 +2261,7 @@
       onScroll() {
         window.SessionRenderer.onScroll.call(this);
         this._updateJumpToBottom();
-        var el = this.$refs.entriesContainer;
+        var el = this._entriesEl();
         if (!el) return;
         if (el.scrollTop < 80 && this.hasMoreHistory && !this.loadingOlder) {
           this.loadOlder();
@@ -2260,7 +2269,18 @@
       },
 
       _updateJumpToBottom() {
-        var el = this.$refs.entriesContainer;
+        // The state guard must come before any $refs read: this runs from
+        // init() (via refreshViewportWidth), and touching $refs before the
+        // ready subtree has rendered its first x-ref permanently caches an
+        // empty $refs proxy for this component's root context — every later
+        // read (scroll pin, composer, terminal) then silently fails. That
+        // cache poisoning was the open-at-top regression (graph note
+        // efb90d5d-f5b).
+        if (this.state !== 'ready') {
+          this.showJumpToBottom = false;
+          return;
+        }
+        var el = this._entriesEl();
         if (!el || this._mode !== 'page' || this.showTerminal || !this.entries.length) {
           this.showJumpToBottom = false;
           return;
