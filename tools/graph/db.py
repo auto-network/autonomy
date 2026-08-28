@@ -67,17 +67,16 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 _SCHEMA_USER_VERSION = 10
 DEFAULT_ORGS_DIR = DATA_ROOT / "orgs"
 
-# Lock wait, explicit so contention tests can shorten it. Raised 5s -> 15s
-# after the 2026-08-28 mass-dispatch storm: with WAL + BEGIN IMMEDIATE the
-# busy timeout genuinely applies, and the observed instant-looking failures
-# were writers exhausting 5s behind long-held locks (batch appender commits
-# and WAL checkpoints under IO pressure), 500ing note/link/source writes.
-# 15s absorbs those transients while staying bounded — a request thread
-# blocked longer than that should fail rather than starve the pool (the
-# same storm proved threadpool starvation escalates to a full stall).
-# Deeper levers (appender transaction sizing, checkpoint strategy, a
-# retryable 503 contract) are tracked separately.
-_SQLITE_CONNECT_TIMEOUT_S = 15.0
+# Lock wait, explicit so contention tests can shorten it. KEEP THIS SHORT.
+# Measured 2026-08-28, both directions: at 5s, storm-level contention
+# produced fail-fast 500s on write endpoints while the API stayed
+# responsive; raised to 15s (3ee380d), the same load flapped the entire
+# dashboard into ~60s dead windows — threads parked on lock waits starve
+# the pool, and an unresponsive dashboard is strictly worse than a 500
+# that names its cause. Contention is fixed by removing long lock
+# HOLDERS and by client retries (bead auto-8sksz), never by parking
+# request threads longer.
+_SQLITE_CONNECT_TIMEOUT_S = 5.0
 _RW_OPEN_BACKOFF_S = (0.05, 0.1, 0.2)
 
 VALID_ORG_TYPES = ("shared", "personal")
