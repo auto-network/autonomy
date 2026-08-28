@@ -89,6 +89,18 @@ EXPECTATIONS = {
         "recovery_key_secret": "verified",
         "recovery_beats_thief": "falsified",
     },
+    "VaultConcurrentRekey.spthy": {
+        "executable": "verified",
+        "concurrent_grant_secret": "verified",
+        "loser_converges": "verified",
+        "either_can_win": "verified",
+    },
+    "VaultConcurrentRekeyNoConverge.spthy": {
+        "executable": "verified",
+        "concurrent_grant_secret": "verified",
+        "loser_converges": "falsified",
+        "either_can_win": "verified",
+    },
 }
 
 SUMMARY_RE = re.compile(
