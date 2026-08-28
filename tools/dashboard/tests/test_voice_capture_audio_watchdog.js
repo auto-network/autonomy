@@ -65,21 +65,22 @@ function makeListening(h, lastFrameAgoMs) {
 describe('#17 audio-stall watchdog', () => {
   it('restarts capture + shows reconnecting when no frame for >stall window', () => {
     const h = makeHarness();
-    const before = h.sockets.length;
+    const beforeGen = h.state.captureGen;
     makeListening(h, 9000);            // 9s since last frame → stalled
     h.tick();
     assert.equal(h.voice.connState, 'reconnecting', 'shows the recovery state');
-    assert.ok(h.sockets.length > before, 'a fresh capture/socket was started');
+    assert.ok(h.state.captureGen > beforeGen, 'a fresh capture generation was started');
+    assert.equal(h.state.incident.captureAttempts, 1);
   });
 
   it('restarts when the mic track has ENDED even if frames still flow (iOS mic off)', () => {
     const h = makeHarness();
     makeListening(h, 200);             // frames fresh — frame-presence alone would miss this
     h.state.stream = { getTracks: () => [{ readyState: 'ended' }] };
-    const before = h.sockets.length;
+    const beforeGen = h.state.captureGen;
     h.tick();
     assert.equal(h.voice.connState, 'reconnecting', 'recovery state on a dead track');
-    assert.ok(h.sockets.length > before, 'restarted despite fresh frames');
+    assert.ok(h.state.captureGen > beforeGen, 'restarted despite fresh frames');
   });
 
   it('does NOT fire while frames are still flowing', () => {
@@ -105,6 +106,10 @@ describe('#17 audio-stall watchdog', () => {
     const h = makeHarness();
     makeListening(h, 9000);
     h.voice.connState = 'reconnecting';
+    h.state.incident = {
+      id: 1, active: true, reason: 'socket_closed',
+      captureAttempts: 0, transportAttempts: 1, startedAt: Date.now(),
+    };
     const before = h.sockets.length;
     h.tick();
     assert.equal(h.sockets.length, before, 'leaves an in-progress reconnect alone');
@@ -129,7 +134,7 @@ describe('#17 audio-stall watchdog', () => {
     assert.equal(h.state.flowRepairAttempted, true);
   });
 
-  it('requires a tap when the one transport repair also stops flowing', () => {
+  it('joins repeated transport symptoms to the in-flight repair incident', () => {
     const h = makeHarness();
     makeListening(h, 200);
     h.state.connectionId = 'connection-b';
@@ -137,13 +142,17 @@ describe('#17 audio-stall watchdog', () => {
     h.state.voiceStateAt = Date.now() - 5000;
     h.state.lastLocalSendAt = Date.now() - 100;
     h.state.flowRepairAttempted = true;
+    h.state.incident = {
+      id: 1, active: true, reason: 'server audio flow stalled',
+      captureAttempts: 0, transportAttempts: 1, startedAt: Date.now(),
+    };
     const before = h.sockets.length;
 
     h.tick();
 
-    assert.equal(h.voice.connState, 'disconnected');
-    assert.equal(h.state.talkActive, false);
-    assert.match(h.voice.sheetError, /enabled again/i);
+    assert.equal(h.voice.connState, 'ok');
+    assert.equal(h.state.talkActive, true);
+    assert.equal(h.state.incident.transportAttempts, 1);
     assert.equal(h.sockets.length, before, 'does not loop through another repair');
   });
 });

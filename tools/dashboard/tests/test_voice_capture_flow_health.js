@@ -20,6 +20,38 @@ function makeHarness(options = {}) {
   }
   FakeWS.OPEN = 1;
 
+  class FakeAudioContext {
+    constructor() {
+      this.state = 'running';
+      this.destination = {};
+      this.audioWorklet = { addModule() { return Promise.resolve(); } };
+    }
+    createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
+    createGain() { return { gain: { value: 1 }, connect() {} }; }
+    resume() { this.state = 'running'; return Promise.resolve(); }
+    close() { this.state = 'closed'; return Promise.resolve(); }
+  }
+  class FakeWorkletNode {
+    constructor() { this.port = { onmessage: null }; }
+    connect() {}
+    disconnect() {}
+  }
+  const baseNavigator = {
+    mediaDevices: {
+      getUserMedia() {
+        return Promise.resolve({
+          getTracks() {
+            return [{
+              readyState: 'live', enabled: true, muted: false,
+              addEventListener() {}, stop() {},
+            }];
+          },
+        });
+      },
+    },
+  };
+  const navigator = Object.assign(baseNavigator, options.navigator || {});
+
   const effects = [];
   const stores = {};
   const voice = {
@@ -42,13 +74,15 @@ function makeHarness(options = {}) {
   const noop = () => {};
   const sandbox = {
     console, WebSocket: FakeWS, Alpine, document,
-    navigator: options.navigator || {}, location: { protocol: 'https:', host: 'localhost:8080' },
+    navigator, location: { protocol: 'https:', host: 'localhost:8080' },
+    AudioContext: FakeAudioContext, AudioWorkletNode: FakeWorkletNode, ArrayBuffer,
     setTimeout: () => 0, clearTimeout: noop,
     setInterval: () => ({ unref: noop }), clearInterval: noop,
     Promise, JSON, Math, Date, Number, Object, Array, String,
   };
   sandbox.window = {
     console, Alpine, document, Autonomy: {},
+    AudioContext: FakeAudioContext, AudioWorkletNode: FakeWorkletNode,
     addEventListener: noop, removeEventListener: noop,
   };
   sandbox.globalThis = sandbox;
@@ -70,9 +104,21 @@ function makeHarness(options = {}) {
   };
 }
 
+function makeCaptureHealthy(h) {
+  h.state.ctx = { state: 'running' };
+  h.state.stream = {
+    getTracks() {
+      return [{ readyState: 'live', enabled: true, muted: false }];
+    },
+  };
+  h.state.lastFrameAt = Date.now();
+  h.state.lastLocalSendAt = Date.now();
+}
+
 describe('voice flow health acknowledgements', () => {
   it('does not claim a newly opened or merely state-acknowledged socket is healthy', () => {
     const h = makeHarness();
+    makeCaptureHealthy(h);
     h.state.talkActive = true;
     assert.equal(h.voice.connState, 'reconnecting');
 
@@ -115,6 +161,7 @@ describe('voice flow health acknowledgements', () => {
 
   it('ignores stale connection IDs and non-advancing flow counters', () => {
     const h = makeHarness();
+    makeCaptureHealthy(h);
     h.socket.deliver({
       type: 'voice_state', connection_id: 'current',
       fsm_state: 'listening', upstream: 'ready', epoch: 0,
@@ -136,8 +183,9 @@ describe('voice flow health acknowledgements', () => {
     assert.equal(h.state.lastForwarded, 1);
   });
 
-  it('accepts verified mute but exposes an unavailable upstream as disconnected', () => {
+  it('accepts verified mute but repairs an unavailable upstream', () => {
     const h = makeHarness();
+    h.voice.micMode = 'muted';
     h.socket.deliver({
       type: 'voice_state', connection_id: 'current',
       fsm_state: 'muted', upstream: 'ready', epoch: 0,
@@ -148,8 +196,9 @@ describe('voice flow health acknowledgements', () => {
       type: 'voice_state', connection_id: 'current',
       fsm_state: 'listening', upstream: 'unavailable', epoch: 0,
     });
-    assert.equal(h.voice.connState, 'disconnected');
-    assert.equal(h.state.requiresReconnect, true);
+    assert.equal(h.voice.connState, 'reconnecting');
+    assert.equal(h.voice.transportStatus, 'connecting');
+    assert.equal(h.voice.recoveryIncident.transportAttempts, 1);
   });
 
   it('keeps automatic restore tappable when iPhone denies the wake lock', async () => {
@@ -160,6 +209,7 @@ describe('voice flow health acknowledgements', () => {
     });
     h.api.activateFromGesture();
     await new Promise((resolve) => setImmediate(resolve));
+    makeCaptureHealthy(h);
     assert.equal(h.state.wakeLockNeedsGesture, true);
 
     h.socket.deliver({
@@ -170,7 +220,8 @@ describe('voice flow health acknowledgements', () => {
       type: 'audio_flow', connection_id: 'current',
       received: 1, forwarded: 1, ts_ms: Date.now(),
     });
-    assert.equal(h.voice.connState, 'disconnected');
+    assert.equal(h.voice.connState, 'ok');
+    assert.equal(h.voice.wakeStatus, 'denied');
     assert.match(h.voice.sheetError, /keep-awake/i);
   });
 
@@ -181,8 +232,10 @@ describe('voice flow health acknowledgements', () => {
     });
     h.api.activateFromGesture();
     await new Promise((resolve) => setImmediate(resolve));
+    makeCaptureHealthy(h);
     assert.equal(h.state.wakeLock, sentinel);
     assert.equal(h.state.wakeLockNeedsGesture, false);
+    assert.equal(h.voice.wakeStatus, 'held');
 
     h.socket.deliver({
       type: 'voice_state', connection_id: 'current',

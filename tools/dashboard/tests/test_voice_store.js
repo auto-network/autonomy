@@ -135,6 +135,11 @@ describe('voice store substrate', () => {
       'sheetMode',
       'sheetError',
       'sheetResumeListeningOnDismiss',
+      'captureStatus',
+      'transportStatus',
+      'actionRequiredReason',
+      'wakeStatus',
+      'recoveryIncident',
     ]) {
       assert.ok(Object.prototype.hasOwnProperty.call(h.store, field), field);
     }
@@ -227,6 +232,45 @@ describe('voice store substrate', () => {
 
     reloaded.store.endSession();
     assert.equal(reloaded.sessionStorageData['autonomy.voice.resumeIntent'], undefined);
+  });
+
+  it('restores listening intent as checking until capture and flow are observed', () => {
+    const h = loadVoiceStore({
+      sessionStorage: {
+        'autonomy.voice.resumeIntent': JSON.stringify({
+          sessionId: 'session-a', micMode: 'listening',
+        }),
+      },
+    });
+
+    assert.equal(h.store.desiredMode, 'listening');
+    assert.equal(h.store.captureStatus, 'absent');
+    assert.equal(h.store.transportStatus, 'disconnected');
+    assert.equal(h.store.effectiveState, 'checking');
+
+    h.store.setCaptureStatus('live');
+    assert.equal(h.store.effectiveState, 'checking');
+    h.store.setTransportStatus('flowing');
+    assert.equal(h.store.effectiveState, 'listening');
+    h.store.setActionRequired('mic_gesture');
+    assert.equal(h.store.effectiveState, 'enable_required');
+    h.store.setMicMode('listening');
+    assert.equal(h.store.actionRequiredReason, 'mic_gesture', 'intent alone cannot fake a gesture recovery');
+  });
+
+  it('derives recovery and intentional modes before observed health', () => {
+    const h = loadVoiceStore();
+    h.store.boundSessionId = 'session-a';
+    h.store.setMicMode('listening');
+    h.store.setRecoveryIncident({ id: 1, active: true, reason: 'track_ended' });
+    assert.equal(h.store.effectiveState, 'repairing');
+    h.store.setRecoveryIncident(null);
+    h.store.setMicMode('muted');
+    assert.equal(h.store.effectiveState, 'muted');
+    h.store.setMicMode('vad_paused');
+    assert.equal(h.store.effectiveState, 'vad_paused');
+    h.store.endSession();
+    assert.equal(h.store.effectiveState, 'off');
   });
 
   it('treats voice as disabled when the flags store is absent', () => {

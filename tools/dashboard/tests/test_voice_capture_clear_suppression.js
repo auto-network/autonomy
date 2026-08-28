@@ -59,13 +59,44 @@ function makeHarness() {
   };
   stores.voice = voice;
 
+  class FakeAudioContext {
+    constructor() {
+      this.state = 'running'; this.destination = {};
+      this.audioWorklet = { addModule: () => Promise.resolve() };
+    }
+    createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
+    createGain() { return { gain: { value: 1 }, connect() {} }; }
+    close() { this.state = 'closed'; return Promise.resolve(); }
+  }
+  class FakeWorkletNode {
+    constructor() { this.port = { onmessage: null }; }
+    connect() {}
+    disconnect() {}
+  }
+  const navigator = {
+    mediaDevices: {
+      getUserMedia: () => Promise.resolve({
+        getTracks: () => [{
+          readyState: 'live', enabled: true, muted: false,
+          addEventListener() {}, stop() { this.readyState = 'ended'; },
+        }],
+      }),
+    },
+  };
+
   const sandbox = {
     console, setTimeout, clearTimeout, Promise, JSON, Math, Date, Object, Array, String,
     WebSocket: FakeWS,
     location: { protocol: 'https:', host: 'localhost:8080' },
-    navigator: {},
+    navigator,
+    AudioContext: FakeAudioContext,
+    AudioWorkletNode: FakeWorkletNode,
     document,
-    window: { console, Autonomy: {}, addEventListener() {}, removeEventListener() {} },
+    window: {
+      console, Autonomy: {}, navigator,
+      AudioContext: FakeAudioContext, AudioWorkletNode: FakeWorkletNode,
+      addEventListener() {}, removeEventListener() {},
+    },
   };
   sandbox.window.document = document;
   sandbox.window.Alpine = alpine;
