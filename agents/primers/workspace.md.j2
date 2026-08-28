@@ -60,7 +60,7 @@ Two filesystem locations, two very different lifetimes:
 **Rule:** if a future you or a future operator might want the file, write it to
 `/workspace/output/`. If it's a stepping stone you'll delete in this session
 anyway, `/tmp/` is fine. Default to `/workspace/output/` when in doubt.
-{% if config.startup %}
+{% if has_startup %}
 
 ## Background Setup
 
