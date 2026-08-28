@@ -661,13 +661,29 @@
       const el = this.$refs.entriesContainer;
       if (!el) return;
       const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 50;
-      this.autoScroll = atBottom;
+      // `autoScroll` is a user-intent latch, not a fresh distance reading.
+      // Appending/layout of a new tile can increase scrollHeight and dispatch a
+      // scroll event before the viewer's scheduled scroll-to-bottom runs. The
+      // old distance-only assignment mistook that transient gap for a user
+      // scroll and permanently unlatched. Keep the latch through content growth
+      // and programmatic downward motion; only real upward movement disengages
+      // it. Once the operator reaches the bottom again, latch back on.
+      const priorTop = Number.isFinite(this._lastScrollTop)
+        ? this._lastScrollTop
+        : el.scrollTop;
+      const movedUp = el.scrollTop < priorTop - 1;
+      if (atBottom) this.autoScroll = true;
+      else if (movedUp) this.autoScroll = false;
+      this._lastScrollTop = el.scrollTop;
     },
 
     resumeScroll() {
       this.autoScroll = true;
       const el = this.$refs.entriesContainer;
-      if (el) el.scrollTop = el.scrollHeight;
+      if (el) {
+        el.scrollTop = el.scrollHeight;
+        this._lastScrollTop = el.scrollTop;
+      }
     },
 
     removeAttachment(id) {

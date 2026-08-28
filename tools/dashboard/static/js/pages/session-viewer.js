@@ -2196,7 +2196,10 @@
           requestAnimationFrame(function() {
             requestAnimationFrame(function() {
               var el = self.$refs.entriesContainer;
-              if (el) el.scrollTop = el.scrollHeight;
+              if (el) {
+                el.scrollTop = el.scrollHeight;
+                self._lastScrollTop = el.scrollTop;
+              }
               self.showJumpToBottom = false;
             });
           });
