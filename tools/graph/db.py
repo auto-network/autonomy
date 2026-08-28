@@ -611,6 +611,14 @@ class GraphDB:
         This is deliberately a migration, not a schema default: the personal
         Settings value is read once, then each table is updated in bulk. It
         never embeds an operator-specific value in source code.
+
+        Read-first, because this runs on every version-mismatch open: an
+        UPDATE takes the write lock even when zero rows match, and under
+        mass-dispatch contention these five unconditional writes were the
+        statistically losing writer — each loss 500'd the open BEFORE the
+        version stamp could land, so every subsequent open retried the
+        whole chain (2026-08-28 incident, host session 9bfefa6d t3565).
+        A backfilled table now costs one indexed read and no lock.
         """
         org_row = self.conn.execute("SELECT type FROM orgs LIMIT 1").fetchone()
         if not org_row or org_row["type"] != "shared":
@@ -619,7 +627,17 @@ class GraphDB:
         persona_id = local_persona_pub()
         if not persona_id:
             return
-        for table in ("sources", "thoughts", "note_comments", "note_versions", "attachments"):
+        pending = [
+            table
+            for table in ("sources", "thoughts", "note_comments",
+                          "note_versions", "attachments")
+            if self.conn.execute(
+                f"SELECT 1 FROM {table} WHERE persona_id IS NULL LIMIT 1"
+            ).fetchone()
+        ]
+        if not pending:
+            return
+        for table in pending:
             self.conn.execute(
                 f"UPDATE {table} SET persona_id = ? WHERE persona_id IS NULL",
                 (persona_id,),
