@@ -116,6 +116,21 @@ def ensure_local_workspace_repository(
     Existing paths are accepted only when they are bare Git repositories.
     """
     target = local_workspace_repo_path(org, workspace_id, root=root)
+    return create_local_repository(target, name=name or workspace_id)
+
+
+def create_local_repository(
+    target: Path,
+    *,
+    name: str | None = None,
+) -> tuple[Path, bool]:
+    """Create a bare local backing repository at ``target``, idempotently.
+
+    The initial commit carries a small README so Git has a real ``main``
+    ref from which session worktrees can branch. Returns
+    ``(path, created)``. An existing path is accepted only when it is a
+    bare Git repository.
+    """
     if target.exists():
         rc, out, _ = _git_output(
             ["rev-parse", "--is-bare-repository"], target, timeout=15,
@@ -126,6 +141,7 @@ def ensure_local_workspace_repository(
             )
         return target, False
 
+    workspace_id = target.name
     target.parent.mkdir(parents=True, exist_ok=True)
     display_name = str(name or workspace_id).strip() or workspace_id
     try:
@@ -775,6 +791,29 @@ def _install_signoff_hook(worktree: Path) -> bool:
         return False
 
 
+def _ensure_declared_local_repo(repo) -> None:
+    """Create a declared-but-missing local repository at first launch.
+
+    The declaration itself is the authority: ``local_path`` says this is
+    a local-first repository, so a missing path can only mean "not
+    created yet" — the launcher creates it (bare, ``main``, initial
+    commit) exactly as the workspace-create API does, wherever it was
+    declared. A path that exists but is not a bare repository stays a
+    hard error.
+    """
+    if not repo.local_path:
+        return
+    path = Path(repo.local_path)
+    if path.exists():
+        return
+    created_path, created = create_local_repository(path)
+    if created:
+        logger.info(
+            "workspace: created declared local repo %s at first launch",
+            created_path,
+        )
+
+
 def prepare_session_mounts(
     workspace: WorkspaceV1,
     session_name: str,
@@ -812,6 +851,7 @@ def prepare_session_mounts(
     mounts: dict[str, str] = {}
     total = len(workspace.repos)
     for idx, repo in enumerate(workspace.repos):
+        _ensure_declared_local_repo(repo)
         clone = ensure_managed_clone(
             repo.url,
             repos_dir=repos_dir,

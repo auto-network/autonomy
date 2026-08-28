@@ -352,18 +352,28 @@ def test_locate_source_org_unknown_id_returns_none(orgs_root):
 
 
 def test_cmd_context_not_found_hint_names_home_org(orgs_root, capsys, monkeypatch):
-    """A peer-raw miss names the org that holds the ID and the exact retry,
-    without leaking any of the content itself. The ambient env is ignored:
-    the caller's scope comes from nothing but its own arguments."""
+    """A peer-raw miss names the org that holds the ID and explains the
+    visibility model — publication state governs cross-org reads; there is
+    deliberately no bypass flag to suggest — without leaking any of the
+    content itself. The ambient env is ignored: the caller's scope comes
+    from nothing but its own arguments."""
     ids = _seed_anchore_and_autonomy(orgs_root)
 
-    args = _make_args(source=ids["autonomy_raw"], turn="1", window=3)
-    graph_cli.cmd_context(args)
+    # Bind scope the way production does: the session credential ->
+    # contextvar. The env channel is deliberately dead (78d0157a).
+    token = ops.set_caller_org("anchore")
+    try:
+        args = _make_args(source=ids["autonomy_raw"], turn="1", window=3)
+        graph_cli.cmd_context(args)
+    finally:
+        ops.reset_caller_org(token)
 
     out = capsys.readouterr().out
     assert "Source not found in the caller's scope" in out
     assert "exists in org 'autonomy'" in out
-    assert "--only-org autonomy" in out
+    assert "publication state" in out
+    assert "graph promote" in out
+    assert "--only-org" not in out      # the old, non-runnable remedy
     assert "internal raw" not in out
 
 

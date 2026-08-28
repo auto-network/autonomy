@@ -110,7 +110,12 @@ class WorkspaceRepoV1(SettingSchema):
         remediation=RemediationRef("workspace.declared-path.v1"),
         description=(
             "Absolute host path of a local-first repository that has no "
-            "remote. Mutually exclusive with host and repo"
+            "remote. Mutually exclusive with host and repo. The "
+            "declaration is the authority: a missing path is created at "
+            "first launch (bare repository, main branch, initial commit) "
+            "— so a missing_path finding here means 'will be created', "
+            "not 'blocked'. Convention home: data/workspace-repos/"
+            "<org>/<workspace-id>."
         ),
     )
     mount: str = field(
