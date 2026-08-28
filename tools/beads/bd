@@ -32,6 +32,46 @@ _real_bd() {
 
 REAL_BD="$(_real_bd)"
 
+# ── Bead-writing-guide gate ──────────────────────────────────────────
+# Creating a bead, or rewriting its text, requires having read the bead
+# writing guide in this container (the same marker mechanism the graph
+# CLI's note-revision gate uses: `graph read` drops a file under
+# ~/.graph/reads/). Structural operations — dep, label, status, close,
+# show — pass through ungated. Twin gate for `graph bead` lives in
+# tools/graph/cli.py (BEAD_WRITING_GUIDE_NOTE); fill BOTH constants with
+# the guide note's id prefix when that note is published. Empty = gate
+# disabled. As with the close gate below, there is deliberately no
+# override flag: reading the short guide is the intended cost.
+BEAD_GUIDE_NOTE=""
+
+if [ -n "$BEAD_GUIDE_NOTE" ]; then
+    _needs_guide=0
+    case "${1:-}" in
+        create|new)
+            _needs_guide=1 ;;
+        update)
+            for _a in "$@"; do
+                case "$_a" in
+                    -d|--description|--description=*|--body-file|--body-file=*|\
+                    --title|--title=*|--acceptance|--acceptance=*|\
+                    --design|--design=*|--design-file|--design-file=*|\
+                    --notes|--notes=*|--append-notes|--append-notes=*|\
+                    --context|--context=*)
+                        _needs_guide=1; break ;;
+                esac
+            done ;;
+    esac
+    if [ "$_needs_guide" -eq 1 ] \
+        && ! ls "$HOME/.graph/reads/$BEAD_GUIDE_NOTE"* >/dev/null 2>&1; then
+        echo "bd guide gate: REQUIRED READING before writing bead text" >&2
+        echo "  Read the bead writing guide first:" >&2
+        echo "      graph read $BEAD_GUIDE_NOTE" >&2
+        echo "  then re-run this command. Structural operations (dep," >&2
+        echo "  label, status, close) are not gated." >&2
+        exit 2
+    fi
+fi
+
 if [ "${1:-}" != "close" ]; then
     exec "$REAL_BD" "$@"
 fi
