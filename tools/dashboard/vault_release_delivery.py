@@ -24,7 +24,6 @@ from agents.secret_ramfs import (
     DELIVERY_MOUNT,
     SESSION_SECRET_DST,
     SESSION_SECRET_UID,
-    provision_session_dir,
 )
 from tools.dashboard.dao import vault_releases
 from tools.network.storagekit.memory_cache import assert_memory_backed
@@ -97,20 +96,7 @@ def deliver_payload(
     root = Path(delivery_root) if delivery_root is not None else _delivery_root()
     session_dir = root / session
     if not session_dir.is_dir() or session_dir.is_symlink():
-        # The launcher provisioned this directory at session start; a sweeper
-        # or host hiccup can remove it while the session is still live. The
-        # provisioning helper is idempotent — re-create it rather than fail
-        # the release. (A container whose bind was orphaned by the removal
-        # still fails visibly: the receipt path never materialises inside it.)
-        if delivery_root is None:
-            try:
-                provision_session_dir(session, SESSION_SECRET_UID)
-            except Exception as exc:
-                raise VaultDeliveryError(
-                    "the requesting session has no secret ramfs"
-                ) from exc
-        if not session_dir.is_dir() or session_dir.is_symlink():
-            raise VaultDeliveryError("the requesting session has no secret ramfs")
+        raise VaultDeliveryError("the requesting session has no secret ramfs")
     directory_stat = session_dir.stat()
     if stat.S_IMODE(directory_stat.st_mode) != 0o700:
         raise VaultDeliveryError("the requesting session secret ramfs is not mode 0700")
