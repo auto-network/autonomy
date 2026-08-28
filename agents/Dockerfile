@@ -81,7 +81,9 @@ RUN chmod +x /usr/local/bin/commit-sign-shim
 # The repo is bind-mounted at /workspace/repo by session_launcher, so there is
 # no need to bake a second copy of tools/graph/ into the image — see
 # graph://af0deb88-d86 for the baked-subtree anti-pattern.
-RUN echo '#!/usr/bin/env bash\nexec python3 -m tools.graph "$@"' > /usr/local/bin/graph \
+# Pinned interpreter: a workspace image that puts a venv python3 first on
+# PATH must not capture the platform CLI (broke ai-recon 2026-08-28).
+RUN echo '#!/usr/bin/env bash\nexec /usr/bin/python3 -m tools.graph "$@"' > /usr/local/bin/graph \
     && chmod +x /usr/local/bin/graph
 
 # Point PYTHONPATH at the runtime mount so `tools.graph` and `agents` both resolve.
