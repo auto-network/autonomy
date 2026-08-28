@@ -253,8 +253,15 @@ def insert_launch_run(
     librarian_type: str | None = None,
     kind: str = "bead",
     agentic_source_id: str | None = None,
+    status: str = "RUNNING",
 ) -> None:
-    """Insert a RUNNING row at agent launch time.
+    """Insert a run row at launch time (or, for agentic accepts, QUEUED).
+
+    ``status`` defaults to RUNNING (the bead path launches synchronously
+    before inserting). The agent-actions endpoint inserts QUEUED at
+    accept time and promotes the row through PREPARING -> RUNNING via
+    :func:`update_run_status` as its background task progresses — the
+    row IS the status surface the creator polls.
 
     Only the fields known at launch are populated. Completion fields
     (decision, commit_hash, exit_code, completed_at, etc.) are left NULL
@@ -282,10 +289,10 @@ def insert_launch_run(
                 id, bead_id, started_at, status,
                 branch, branch_base, image, container_name, output_dir, librarian_type,
                 kind, agentic_source_id
-            ) VALUES (?, ?, ?, 'RUNNING', ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                run_id, bead_id, started_dt,
+                run_id, bead_id, started_dt, status,
                 branch or None, branch_base or None,
                 image or None, container_name or None, output_dir or None,
                 librarian_type,
@@ -820,6 +827,135 @@ def update_live_stats(
             conn.close()
     except Exception:
         pass
+
+
+def update_run_status(run_id: str, status: str) -> None:
+    """Promote a pre-launch run row (QUEUED -> PREPARING -> RUNNING).
+
+    Forward-only launch-phase transitions; terminal outcomes go through
+    insert_run / record_dispatch_failure, never here.
+    """
+    if not run_id or status not in ("QUEUED", "PREPARING", "RUNNING"):
+        return
+    conn = _get_conn()
+    try:
+        conn.execute(
+            "UPDATE dispatch_runs SET status = ? WHERE id = ? "
+            "AND status IN ('QUEUED', 'PREPARING', 'RUNNING')",
+            (status, run_id),
+        )
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        conn.close()
+
+
+def get_active_agentic_runs() -> list[dict]:
+    """Agentic rows occupying launch capacity: QUEUED/PREPARING/RUNNING."""
+    conn = _get_conn()
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "SELECT * FROM dispatch_runs WHERE kind = 'agentic' "
+            "AND status IN ('QUEUED', 'PREPARING', 'RUNNING')"
+        ).fetchall()
+        return [_row_to_dict(r) for r in rows]
+    except sqlite3.OperationalError as e:
+        # A fresh DB has no table until init_db: no table, no active runs.
+        if "no such table" in str(e):
+            return []
+        raise
+    finally:
+        conn.close()
+
+
+def fail_stale_prelaunch_runs() -> int:
+    """FAIL agentic rows stranded in QUEUED/PREPARING by a process restart.
+
+    The accept-then-work launch task lives in the dashboard process; a
+    restart (WatchFiles bounces it on every merge) kills in-flight preps,
+    and their containers never existed — so at startup any pre-launch row
+    is an orphan by definition. Returns the number of rows failed.
+    """
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            "UPDATE dispatch_runs SET status = 'FAILED', "
+            "failure_class = 'orphaned-prelaunch', "
+            "reason = 'dashboard restarted during queued/preparing launch', "
+            "completed_at = datetime('now') "
+            "WHERE kind = 'agentic' AND status IN ('QUEUED', 'PREPARING')",
+        )
+        conn.commit()
+        return cur.rowcount or 0
+    except Exception:
+        return 0
+    finally:
+        conn.close()
+
+
+def fail_orphaned_running_agentic(
+    *,
+    min_age_seconds: float = 600.0,
+    container_exists=None,
+) -> list[str]:
+    """FAIL RUNNING agentic rows whose container no longer exists.
+
+    The dispatcher's collector only finalizes a run when docker inspect
+    catches the container in "exited" — a killed container (or one reaped
+    by --rm, or one that never started) returns nothing and the row stays
+    RUNNING forever (2026-08-28 handoff item 3; four rows hand-finalized
+    that night). This sweep is the timer-driven belt the operator asked
+    for: any RUNNING agentic row older than ``min_age_seconds`` whose
+    container is gone is finalized as orphaned-no-exit, matching the
+    hand-applied category. Returns the failed run ids.
+
+    ``container_exists`` is injectable for tests; the default probes
+    ``docker inspect`` per candidate (bounded, host-side).
+    """
+    if container_exists is None:
+        import subprocess as _subprocess
+
+        def container_exists(name: str) -> bool:
+            if not name:
+                return False
+            try:
+                probe = _subprocess.run(
+                    ["docker", "inspect", "--format", "{{.State.Status}}", name],
+                    capture_output=True, text=True, timeout=15,
+                )
+            except Exception:
+                # A docker hiccup must not mass-orphan live runs.
+                return True
+            return probe.returncode == 0
+
+    now = datetime.now(timezone.utc)
+    failed: list[str] = []
+    for row in get_active_agentic_runs():
+        if row.get("status") != "RUNNING":
+            continue
+        raw = row.get("started_at")
+        try:
+            started = datetime.strptime(
+                str(raw), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            age = (now - started).total_seconds()
+        except (TypeError, ValueError):
+            age = min_age_seconds + 1
+        if age < min_age_seconds:
+            continue
+        if container_exists(row.get("container_name") or ""):
+            continue
+        record_dispatch_failure(
+            row["id"],
+            failure_class="orphaned-no-exit",
+            reason=(
+                "container gone without an observed exit; finalized by the "
+                "orphan sweep"
+            ),
+        )
+        failed.append(row["id"])
+    return failed
 
 
 def record_dispatch_failure(

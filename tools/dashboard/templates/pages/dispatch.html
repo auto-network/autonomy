@@ -61,6 +61,23 @@
         <span x-show="isPaused && reasons[label]" x-cloak class="text-xs text-red-400" x-text="reasons[label]"></span>
       </span>
     </template>
+    <!-- Settings-backed concurrency limits (autonomy.dispatch.limits#1) -->
+    <span class="inline-flex items-center gap-1.5 text-sm text-gray-400"
+          title="Concurrent bead-agent launches (0 pauses bead launches). Applies next dispatcher cycle.">
+      beads &le;
+      <input type="number" min="0" max="64"
+             class="w-14 px-1.5 py-0.5 rounded bg-gray-800 border border-gray-600 text-gray-200 text-sm"
+             x-model.number="limits.bead_max_concurrent"
+             @change="saveLimits()">
+    </span>
+    <span class="inline-flex items-center gap-1.5 text-sm text-gray-400"
+          title="Concurrent agentic (agent-action) runs; dispatches 429 at the cap (0 pauses agentic launches). Applies immediately.">
+      agentic &le;
+      <input type="number" min="0" max="64"
+             class="w-14 px-1.5 py-0.5 rounded bg-gray-800 border border-gray-600 text-gray-200 text-sm"
+             x-model.number="limits.agentic_max_concurrent"
+             @change="saveLimits()">
+    </span>
     <span class="text-gray-500 text-sm" x-show="active.length > 0">
       running: <span class="text-green-400" x-text="active.length"></span>
     </span>
@@ -84,7 +101,7 @@
   <div class="mb-8">
     <h2 class="text-lg font-semibold mb-3 text-blue-400">Approved — Waiting for Dispatch</h2>
     <template x-if="waiting.length === 0">
-      <div class="text-gray-500 text-sm">No unblocked beads waiting</div>
+      <div class="text-gray-500 text-sm">No unblocked beads or queued agent actions waiting</div>
     </template>
     <template x-for="b in waiting" :key="b.id">
       {% include 'partials/bead-card.html' %}

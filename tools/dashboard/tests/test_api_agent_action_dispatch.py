@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import time
 import json
 import sqlite3
 from pathlib import Path
@@ -101,7 +102,6 @@ def per_org_universe(tmp_path, monkeypatch):
         payload_overrides={
             "working_dir": "/workspace/repo/tools/dashboard",
             "env": {"FEATURE_FLAG": "1"},
-            "startup": "scripts/bootstrap.sh",
             "dind": True,
             "network_host": False,
             "tags": ["operator", "agent-actions"],
@@ -337,7 +337,11 @@ def client(
     isolated_dispatch_db,
     patch_launch_session,
     reset_idempotency_cache,
+    monkeypatch,
 ):
+    # Deterministic accept-then-work: the background launch task completes
+    # before the 202 is written, so post-conditions are assertable inline.
+    monkeypatch.setenv("AGENT_ACTIONS_SYNC_LAUNCH", "1")
     with TestClient(test_app) as c:
         from tools.dashboard import unlock_routes
         c.cookies.set(
@@ -436,7 +440,7 @@ def test_dispatch_creates_agentic_source(client, per_org_universe):
         "member_key": "note.update-summary",
         "asset_id": asset_id,
     })
-    assert r.status_code == 201
+    assert r.status_code == 202
     body = r.json()
     assert body["agentic_source_id"]
     assert body["target_workspace"] == "autonomy-rig"
@@ -476,7 +480,7 @@ def test_dispatch_registers_agentic_container_with_live_monitor(
         "asset_id": asset_id,
     })
 
-    assert response.status_code == 201, response.text
+    assert response.status_code == 202, response.text
     kwargs = registered.await_args.kwargs
     assert kwargs["tmux_name"] == response.json()["slug"]
     assert kwargs["type"] == "agentic"
@@ -596,7 +600,7 @@ def test_dispatch_design_action_uses_design_asset_context(
         "asset_id": "series-design",
     })
 
-    assert r.status_code == 201, r.json()
+    assert r.status_code == 202, r.json()
     body = r.json()
     assert body["target_org"] == "autonomy"
     assert body["target_workspace"] == "autonomy-rig"
@@ -632,7 +636,7 @@ def test_dispatch_dispatched_by_session_is_server_sentinel(
         # specific session id here, the server overrides.
         "dispatched_by_session": "auto-spoofed-sender",
     })
-    assert r.status_code == 201
+    assert r.status_code == 202
     src = graph_ops.get_source(r.json()["agentic_source_id"])
     md = src["metadata"]
     if isinstance(md, str):
@@ -649,7 +653,7 @@ def test_dispatch_writes_dispatch_runs_row(
         "member_key": "note.update-summary",
         "asset_id": asset_id,
     })
-    assert r.status_code == 201
+    assert r.status_code == 202
     body = r.json()
 
     db_path = isolated_dispatch_db.DB_PATH
@@ -691,7 +695,7 @@ def test_dispatch_uses_target_asset_workspace(
         # by the asset's owning org (anchore).
         headers={"X-Graph-Org": "autonomy"},
     )
-    assert r.status_code == 201, r.json()
+    assert r.status_code == 202, r.json()
     assert r.json()["target_org"] == "anchore"
     assert r.json()["target_workspace"] == "anchore-rig"
     assert patch_launch_session, "launch_session was not called"
@@ -733,7 +737,7 @@ def test_dispatch_explicit_workspace_materializes_workspace_settings(
         "member_key": "note.full-workspace",
         "asset_id": asset_id,
     })
-    assert r.status_code == 201, r.json()
+    assert r.status_code == 202, r.json()
     body = r.json()
     assert body["target_workspace"] == "operator"
     assert body["target_org"] == "autonomy"
@@ -743,11 +747,11 @@ def test_dispatch_explicit_workspace_materializes_workspace_settings(
     assert call["mounts"] == {"/tmp/operator-worktree": "/workspace/repo"}
     assert call["working_dir"] == "/workspace/repo/tools/dashboard"
     assert call["extra_env"] == {"FEATURE_FLAG": "1"}
-    # HOST path: the launcher passes it to `docker run -v <src>:/startup.sh:ro`
-    # and a -v source resolves on the host, never inside the container.
-    assert call["startup_script"] == (
-        Path(__file__).resolve().parents[3] / "scripts/bootstrap.sh"
-    )
+    # Startup scripts come from the workspace's provision Setting row
+    # (autonomy.workspace.provision#1), materialized into the run dir —
+    # the legacy repo-relative ``startup`` path field is deleted. With no
+    # provision row seeded, no /startup.sh mounts.
+    assert call["startup_script"] is None
     assert call["needs_nested_docker"] is True
     assert call["runtime"] == "privileged"
     assert call["network_host"] is False
@@ -847,7 +851,7 @@ def test_dispatch_accepts_same_org_workspace_unaffected(
         "asset_id": asset_id,
     })
 
-    assert r.status_code == 201, r.json()
+    assert r.status_code == 202, r.json()
 
 
 def test_dispatch_bead_action_creates_agentic_source(
@@ -869,7 +873,7 @@ def test_dispatch_bead_action_creates_agentic_source(
         "member_key": "bead.dry-run-implement",
         "asset_id": bead["id"],
     })
-    assert r.status_code == 201, r.json()
+    assert r.status_code == 202, r.json()
     body = r.json()
     assert body["target_org"] == "autonomy"
     assert body["target_workspace"] == "autonomy-rig"
@@ -986,7 +990,7 @@ def test_dispatch_idempotency_window(
         "member_key": "note.update-summary",
         "asset_id": asset_id,
     })
-    assert first.status_code == 201, first.json()
+    assert first.status_code == 202, first.json()
     second = client.post("/api/agent-actions/dispatch", json={
         "member_key": "note.update-summary",
         "asset_id": asset_id,
@@ -1034,7 +1038,7 @@ def test_dispatch_request_body_is_minimal(client, per_org_universe):
         "/api/agent-actions/dispatch",
         json={"member_key": "note.update-summary", "asset_id": asset_id},
     )
-    assert r.status_code == 201, r.json()
+    assert r.status_code == 202, r.json()
     src = graph_ops.get_source(r.json()["agentic_source_id"])
     md = src["metadata"]
     if isinstance(md, str):
@@ -1074,7 +1078,7 @@ def test_api_dispatch_runs_surfaces_agentic_identity(
         "/api/agent-actions/dispatch",
         json={"member_key": "note.update-summary", "asset_id": asset_id},
     )
-    assert r.status_code == 201, r.json()
+    assert r.status_code == 202, r.json()
     agentic_source_id = r.json()["agentic_source_id"]
 
     runs_resp = client.get("/api/dispatch/runs")
@@ -1134,7 +1138,7 @@ def test_api_dispatch_runs_surfaces_agentic_bead_identity(
         "/api/agent-actions/dispatch",
         json={"member_key": "bead.dry-run-implement", "asset_id": bead["id"]},
     )
-    assert r.status_code == 201, r.json()
+    assert r.status_code == 202, r.json()
     agentic_source_id = r.json()["agentic_source_id"]
 
     runs_resp = client.get("/api/dispatch/runs")
@@ -1168,7 +1172,7 @@ def test_dispatch_canonicalises_prefix_asset_id(client, per_org_universe):
         "/api/agent-actions/dispatch",
         json={"member_key": "note.update-summary", "asset_id": prefix},
     )
-    assert r.status_code == 201, r.json()
+    assert r.status_code == 202, r.json()
     src = graph_ops.get_source(r.json()["agentic_source_id"])
     md = src["metadata"]
     if isinstance(md, str):
@@ -1203,7 +1207,7 @@ def test_dispatch_trace_agentic_shape(
             "/api/agent-actions/dispatch",
             json={"member_key": "note.update-summary", "asset_id": asset_id},
         )
-        assert r.status_code == 201, r.json()
+        assert r.status_code == 202, r.json()
         run_id = r.json()["slug"]
 
         trace = client.get(f"/api/dispatch/trace/{run_id}")
@@ -1264,7 +1268,7 @@ def test_dispatch_trace_agentic_bead_shape(
                 "asset_id": bead["id"],
             },
         )
-        assert r.status_code == 201, r.json()
+        assert r.status_code == 202, r.json()
         run_id = r.json()["slug"]
 
         trace = client.get(f"/api/dispatch/trace/{run_id}")
@@ -1320,7 +1324,7 @@ async def test_live_active_resolves_agentic_target_title(
             "/api/agent-actions/dispatch",
             json={"member_key": "note.update-summary", "asset_id": asset_id},
         )
-    assert r.status_code == 201, r.json()
+    assert r.status_code == 202, r.json()
     agentic_source_id = r.json()["agentic_source_id"]
 
     # Sanity: the agentic source's own title is the action label, not
@@ -1385,7 +1389,7 @@ def test_dispatch_custom_input_renders_into_template(
         "asset_id": bead["id"],
         "custom_input": "Why does this dispatch use Haiku?",
     })
-    assert r.status_code == 201, r.json()
+    assert r.status_code == 202, r.json()
 
     prompt = patch_launch_session[-1]["kwargs"]["prompt"]
     assert "Question: Why does this dispatch use Haiku?" in prompt
@@ -1440,7 +1444,7 @@ def test_dispatch_custom_input_ignored_for_non_input_prompt_actions(
         "asset_id": asset_id,
         "custom_input": "this should be ignored — template doesn't reference it",
     })
-    assert r.status_code == 201, r.json()
+    assert r.status_code == 202, r.json()
 
 
 def test_dispatch_template_validates_custom_input_placeholder(
@@ -1469,7 +1473,7 @@ def test_dispatch_template_validates_custom_input_placeholder(
     })
     # 201 implies the strict template validator accepted ``{custom_input}``.
     # Pre-fix this would have been a 500 with "undefined placeholder".
-    assert r.status_code == 201, r.json()
+    assert r.status_code == 202, r.json()
 
 
 def test_render_rejects_unknown_template_root():
@@ -1513,3 +1517,215 @@ def _list_agentic_sources() -> list[dict]:
                     md = {}
             out.append({"id": r["id"], "metadata": md, "project": ref.slug})
     return out
+
+
+# ── Agentic launch cap (2026-08-28 incident, handoff item 2) ─────────
+
+def test_agentic_running_count_ignores_stale_and_foreign_rows(monkeypatch):
+    """Only recent RUNNING agentic rows count toward the launch cap.
+
+    Wedged rows (killed/--rm'd containers stuck RUNNING forever) age out
+    of the window instead of starving dispatching; bead rows and rows
+    with unparsable start times never count.
+    """
+    from datetime import datetime, timedelta, timezone
+    from tools.dashboard import server as server_mod
+
+    now = datetime.now(timezone.utc)
+    fmt = "%Y-%m-%d %H:%M:%S"
+    # Shapes as get_active_agentic_runs returns them: agentic-only (the
+    # SQL prefilters kind), across QUEUED/PREPARING/RUNNING.
+    rows = [
+        {"status": "RUNNING", "started_at": (now - timedelta(minutes=5)).strftime(fmt)},
+        {"status": "QUEUED", "started_at": (now - timedelta(minutes=59)).strftime(fmt)},
+        {"status": "RUNNING", "started_at": (now - timedelta(hours=26)).strftime(fmt)},  # wedged
+        {"status": "PREPARING", "started_at": None},                                     # wedged
+    ]
+    import agents.dispatch_db as dispatch_db_mod
+    monkeypatch.setattr(dispatch_db_mod, "get_active_agentic_runs", lambda: rows)
+    assert server_mod._agentic_running_count_recent() == 2
+
+
+def test_dispatch_rejects_at_agentic_cap(
+    client, per_org_universe, patch_launch_session, monkeypatch,
+):
+    """At the cap the endpoint 429s BEFORE creating the agentic source
+    row and before any container spawn."""
+    from tools.dashboard import server as server_mod
+
+    monkeypatch.setattr(
+        server_mod, "_agentic_running_count_recent", lambda: 10,
+    )
+    monkeypatch.setattr(
+        server_mod, "_resolved_dispatch_limits",
+        lambda: {"bead_max_concurrent": 2, "agentic_max_concurrent": 10},
+    )
+    asset_id = "44444444-4444-4444-4444-444444444444"
+    _insert_note_source(org="autonomy", source_id=asset_id, title="capped")
+    pre_sources = _list_agentic_sources()
+
+    r = client.post("/api/agent-actions/dispatch", json={
+        "member_key": "note.update-summary",
+        "asset_id": asset_id,
+    })
+    assert r.status_code == 429, r.json()
+    body = r.json()
+    assert body["cap"] == 10
+    assert body["running"] == 10
+    assert _list_agentic_sources() == pre_sources, (
+        "no agentic source row may be created for a rejected dispatch")
+    assert patch_launch_session == [], "no container spawn at the cap"
+
+
+def test_dispatch_under_cap_proceeds(
+    client, per_org_universe, patch_launch_session, monkeypatch,
+):
+    """One below the cap, the dispatch flows normally end to end."""
+    from tools.dashboard import server as server_mod
+
+    monkeypatch.setattr(
+        server_mod, "_agentic_running_count_recent", lambda: 9,
+    )
+    monkeypatch.setattr(
+        server_mod, "_resolved_dispatch_limits",
+        lambda: {"bead_max_concurrent": 2, "agentic_max_concurrent": 10},
+    )
+    asset_id = "55555555-5555-5555-5555-555555555555"
+    _insert_note_source(org="autonomy", source_id=asset_id, title="undercap")
+    r = client.post("/api/agent-actions/dispatch", json={
+        "member_key": "note.update-summary",
+        "asset_id": asset_id,
+    })
+    assert r.status_code == 202, r.json()
+    assert len(patch_launch_session) == 1
+
+
+def test_dispatch_limits_settings_round_trip(client, per_org_universe):
+    """GET serves schema defaults untouched; POST persists to the machine
+    store and GET reflects it; out-of-range values 400 without persisting."""
+    r = client.get("/api/dispatch/limits")
+    assert r.status_code == 200
+    assert r.json() == {"bead_max_concurrent": 2, "agentic_max_concurrent": 10}
+
+    r = client.post("/api/dispatch/limits", json={"agentic_max_concurrent": 3})
+    assert r.status_code == 200, r.json()
+    assert r.json()["agentic_max_concurrent"] == 3
+    assert r.json()["bead_max_concurrent"] == 2
+
+    r = client.get("/api/dispatch/limits")
+    assert r.json()["agentic_max_concurrent"] == 3
+
+    r = client.post("/api/dispatch/limits", json={"bead_max_concurrent": 999})
+    assert r.status_code == 400
+    assert client.get("/api/dispatch/limits").json()["bead_max_concurrent"] == 2
+
+
+def test_prelaunch_row_lifecycle_and_orphan_sweep(isolated_dispatch_db):
+    """QUEUED rows promote forward-only and restart-sweep to FAILED."""
+    from agents.dispatch_db import (
+        fail_stale_prelaunch_runs,
+        get_active_agentic_runs,
+        init_db,
+        insert_launch_run,
+        update_run_status,
+    )
+    init_db()
+    insert_launch_run(
+        run_id="agent-q-1", bead_id="", started_at=time.time(),
+        branch="", branch_base="", image="img", container_name="agent-q-1",
+        output_dir="/tmp/run-q1", kind="agentic",
+        agentic_source_id="src-1", status="QUEUED",
+    )
+    rows = get_active_agentic_runs()
+    assert [r["status"] for r in rows] == ["QUEUED"]
+
+    update_run_status("agent-q-1", "PREPARING")
+    assert get_active_agentic_runs()[0]["status"] == "PREPARING"
+    update_run_status("agent-q-1", "RUNNING")
+    assert get_active_agentic_runs()[0]["status"] == "RUNNING"
+    # terminal states never come through this updater
+    update_run_status("agent-q-1", "DONE")
+    assert get_active_agentic_runs()[0]["status"] == "RUNNING"
+
+    insert_launch_run(
+        run_id="agent-q-2", bead_id="", started_at=time.time(),
+        branch="", branch_base="", image="img", container_name="agent-q-2",
+        output_dir="/tmp/run-q2", kind="agentic",
+        agentic_source_id="src-2", status="QUEUED",
+    )
+    assert fail_stale_prelaunch_runs() == 1     # q-2 only; RUNNING q-1 kept
+    statuses = {r["id"]: r["status"] for r in get_active_agentic_runs()}
+    assert statuses == {"agent-q-1": "RUNNING"}
+
+
+def test_orphan_sweep_finalizes_dead_container_runs(isolated_dispatch_db):
+    """A RUNNING agentic row whose container vanished finalizes as
+    orphaned-no-exit after the age threshold; young or alive rows stay."""
+    from agents.dispatch_db import (
+        fail_orphaned_running_agentic,
+        get_active_agentic_runs,
+        init_db,
+        insert_launch_run,
+    )
+    init_db()
+    old = time.time() - 3600
+    insert_launch_run(
+        run_id="agent-dead", bead_id="", started_at=old, branch="",
+        branch_base="", image="img", container_name="agent-dead",
+        output_dir="/tmp/rd", kind="agentic", agentic_source_id="s1",
+    )
+    insert_launch_run(
+        run_id="agent-alive", bead_id="", started_at=old, branch="",
+        branch_base="", image="img", container_name="agent-alive",
+        output_dir="/tmp/ra", kind="agentic", agentic_source_id="s2",
+    )
+    insert_launch_run(
+        run_id="agent-young", bead_id="", started_at=time.time(), branch="",
+        branch_base="", image="img", container_name="agent-young",
+        output_dir="/tmp/ry", kind="agentic", agentic_source_id="s3",
+    )
+    failed = fail_orphaned_running_agentic(
+        container_exists=lambda name: name == "agent-alive",
+    )
+    assert failed == ["agent-dead"]
+    remaining = {r["id"] for r in get_active_agentic_runs()}
+    assert remaining == {"agent-alive", "agent-young"}
+
+
+def test_queued_agentic_rows_render_in_waiting_section(
+    client, per_org_universe, monkeypatch,
+):
+    """A QUEUED/PREPARING agentic run appears in the dispatch payload's
+    waiting section (the approved-waiting-for-dispatch surface) with its
+    status and routing fields — visible backpressure, not an open HTTP
+    request."""
+    from tools.dashboard import server as server_mod
+    from agents.dispatch_db import init_db, insert_launch_run
+
+    init_db()
+    insert_launch_run(
+        run_id="agent-wait-1", bead_id="", started_at=time.time(),
+        branch="", branch_base="", image="img",
+        container_name="agent-wait-1", output_dir="/tmp/rw", kind="agentic",
+        agentic_source_id="src-wait", status="QUEUED",
+    )
+    monkeypatch.setattr(
+        server_mod, "_resolve_agentic_identity",
+        lambda sid: {
+            "action_label": "note.analyze", "member_key": "note.analyze",
+            "target_kind": "source", "target_source_id": "tgt-1",
+            "target_org": "autonomy", "dispatched_by_session": "",
+            "harness": "claude", "model": None, "title": "Analyze the note",
+        },
+    )
+    data = asyncio.run(server_mod._collect_dispatch_data())
+    queued = [w for w in data["waiting"] if w.get("kind") == "agentic"]
+    assert len(queued) == 1
+    entry = queued[0]
+    assert entry["id"] == "agent-wait-1"
+    assert entry["status"] == "queued"
+    assert entry["title"] == "Analyze the note"
+    assert entry["agentic_source_id"] == "src-wait"
+    assert entry["target_source_id"] == "tgt-1"
+    # and it is NOT double-listed as active
+    assert all(a.get("id") != "agent-wait-1" for a in data["active"])

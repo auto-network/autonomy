@@ -6,6 +6,7 @@ Every view the dashboard shows, an agent can also produce via CLI.
 
 import asyncio
 import fcntl
+import functools
 import hashlib
 import hmac
 import json
@@ -934,6 +935,42 @@ async def api_dispatch_pause_post(request):
     # Broadcast updated pause state + reasons via SSE
     await event_bus.broadcast("dispatch_pause", {"paused": new_pause, "reasons": new_reasons})
     return JSONResponse({"paused": new_pause, "reasons": new_reasons})
+
+
+async def api_dispatch_limits_get(request):
+    """GET /api/dispatch/limits — effective dispatch concurrency limits."""
+    limits = await asyncio.to_thread(_resolved_dispatch_limits)
+    return JSONResponse(limits)
+
+
+async def api_dispatch_limits_post(request):
+    """POST /api/dispatch/limits — operator-tunable, settings-backed.
+
+    Body: {"bead_max_concurrent": int?, "agentic_max_concurrent": int?}.
+    Persists to the machine-homed autonomy.dispatch.limits#1 singleton;
+    the dispatcher picks the bead limit up next cycle, the agentic cap
+    applies on the next dispatch request.
+    """
+    from tools.graph.schemas import dispatch_limits as _dl
+    from tools.graph.schemas.registry import (
+        SchemaValidationError, validate_payload,
+    )
+    body = await request.json()
+    current = await asyncio.to_thread(_resolved_dispatch_limits)
+    payload = dict(current)
+    for name in ("bead_max_concurrent", "agentic_max_concurrent"):
+        if name in body:
+            payload[name] = body[name]
+    try:
+        validate_payload(_dl.SET_ID, _dl.SCHEMA_REVISION, payload)
+    except SchemaValidationError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    await asyncio.to_thread(
+        graph_ops.upsert_by_key,
+        _dl.SET_ID, _dl.SCHEMA_REVISION, "default", payload, org="machine",
+    )
+    await event_bus.broadcast("dispatch_limits", payload, dedup=False)
+    return JSONResponse(payload)
 
 
 async def api_dispatch_resume(request):
@@ -3683,6 +3720,54 @@ def authenticate_mcp_service(request) -> "api_auth.ApiPrincipal | None":
     return api_auth.ApiPrincipal(
         api_auth.ApiPrincipalKind.MCP_SERVICE, subject=name,
     )
+
+
+DISPATCHER_TOKEN_FILE = DATA_ROOT / ".dispatch_token"
+
+
+def _ensure_dispatcher_service_token() -> None:
+    """Provision the dispatcher's route-scoped bearer (handoff item 4).
+
+    Commit 8066651 stripped monitor auth as "localhost, no trust
+    boundary"; the authenticated-API work then made every unadorned call
+    401 and no credential was ever handed back — so the dispatcher's
+    register/deregister silently failed on every dispatch. This mints a
+    scoped service token good for EXACTLY the two monitor routes, stores
+    only its hash (machine-local auth.db), and writes the secret to a
+    0600 file under data/ that the host-side dispatcher reads per call.
+    Re-minted on every dashboard start with a 7-day expiry, so restarts
+    rotate it and superseded tokens age out.
+    """
+    import secrets as _secrets
+    token = _secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    auth_db.insert_scoped_service_token(
+        token_hash,
+        "dispatcher-monitor",
+        capabilities=[
+            {"method": "POST", "path": "/api/monitor/register"},
+            {"method": "POST", "path": "/api/monitor/deregister"},
+        ],
+        application_scope="dispatcher-monitor",
+        resource_audience="dashboard-local",
+        source_approval_id="dashboard-startup-provisioned",
+        expires_at=time.time() + 7 * 24 * 3600,
+    )
+    DISPATCHER_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    # Created 0600 atomically (house pattern, unlock_routes) — never a
+    # window where the plaintext exists with default-umask permissions.
+    fd = os.open(
+        DISPATCHER_TOKEN_FILE,
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+        0o600,
+    )
+    try:
+        os.write(fd, token.encode())
+    finally:
+        os.close(fd)
+    os.chmod(DISPATCHER_TOKEN_FILE, 0o600)
+    logger.info("dispatcher monitor token provisioned at %s",
+                DISPATCHER_TOKEN_FILE)
 
 
 def authenticate_service(request) -> "api_auth.ApiPrincipal | None":
@@ -13948,10 +14033,12 @@ async def _collect_dispatch_data() -> dict:
     Waiting/blocked come from Dolt (readiness:approved beads), with
     currently-running beads excluded to avoid double-counting.
     """
-    # Get bead data and running runs concurrently
-    bead_data, running_runs = await asyncio.gather(
+    # Get bead data, running runs, and pre-launch agentic rows concurrently
+    from agents.dispatch_db import get_active_agentic_runs
+    bead_data, running_runs, active_agentic = await asyncio.gather(
         asyncio.to_thread(dao_beads.get_dispatch_beads),
         asyncio.to_thread(dao_dispatch.get_running_with_stats),
+        asyncio.to_thread(get_active_agentic_runs),
     )
 
     # Look up Dolt metadata for all running beads in a single query
@@ -14105,6 +14192,32 @@ async def _collect_dispatch_data() -> dict:
         for b in bead_data["approved_waiting"]
         if b["id"] not in running_ids
     ]
+
+    # Accepted-but-not-launched agentic dispatches belong in the same
+    # section: QUEUED rows wait on the launch queue, PREPARING rows are
+    # in workspace prep behind the semaphore. This is where the 202
+    # restructure's backpressure becomes VISIBLE — before it, a dispatch
+    # in prep existed only as an open HTTP request.
+    for run in active_agentic:
+        run_status = run.get("status")
+        if run_status not in ("QUEUED", "PREPARING"):
+            continue
+        ident = _resolve_agentic_identity(run.get("agentic_source_id"))
+        waiting.append({
+            "id": run.get("id", ""),
+            "title": run.get("title") or ident.get("title")
+                     or ident.get("action_label") or run.get("id", ""),
+            "priority": None,
+            "labels": [],
+            "status": run_status.lower(),
+            "kind": "agentic",
+            "action_label": ident.get("action_label"),
+            # routeForRun() resolves the card link from these, exactly as
+            # the active agentic cards do.
+            "agentic_source_id": run.get("agentic_source_id"),
+            "target_kind": ident.get("target_kind"),
+            "target_source_id": ident.get("target_source_id"),
+        })
 
     # Blocked: rename open_blockers → blockers, exclude currently-running beads
     blocked = [
@@ -14807,6 +14920,86 @@ async def _vault_release_sweeper() -> None:
         await asyncio.sleep(_vault_sweeper.SWEEP_INTERVAL_S)
 
 
+# Run-ids already reconciled this process — repeat work is harmless but
+# noisy, so both sets are per-process memos, rebuilt from the run table
+# after a restart (which is exactly the catch-up sweep that demotes any
+# card stranded while the dashboard was down).
+_dispatch_sessions_registered: set = set()
+_dispatch_sessions_demoted: set = set()
+_last_orphan_sweep: float = 0.0
+
+
+def _dispatch_run_session_name(row: dict) -> str | None:
+    """The monitor tmux_name a dispatch run's session was registered under."""
+    kind = (row.get("kind") or "bead")
+    if kind == "agentic":
+        return row.get("id") or None
+    output_dir = row.get("output_dir")
+    if output_dir:
+        return Path(output_dir).name
+    return row.get("bead_id") or None
+
+
+async def _reconcile_dispatch_sessions() -> None:
+    """Make dispatch-born session cards follow their run rows, in-process.
+
+    The dispatcher's HTTP /api/monitor/register + /deregister calls send
+    no bearer and 401 against the authenticated API (2026-08-28 handoff
+    148ead24 item 4: 158 finished agentic sessions stranded ACTIVE, every
+    dispatch affected). Rather than teaching a host daemon to hold a
+    credential, the dashboard — which OWNS the monitor and already polls
+    dispatch.db here — registers sessions when their run row appears and
+    demotes them when it turns terminal. One missed HTTP call can no
+    longer strand a card, and a dashboard restart replays the recent run
+    table, sweeping up anything stranded while it was down.
+    """
+    from agents.dispatch_db import get_currently_running, list_runs
+    running, recent = await asyncio.gather(
+        asyncio.to_thread(get_currently_running),
+        asyncio.to_thread(list_runs, 100),
+    )
+    for row in running:
+        run_id = row.get("id")
+        name = _dispatch_run_session_name(row)
+        if not run_id or not name or run_id in _dispatch_sessions_registered:
+            continue
+        _dispatch_sessions_registered.add(run_id)
+        if session_monitor.get_one(name) is not None:
+            continue
+        kind = (row.get("kind") or "bead")
+        try:
+            await session_monitor.register_session(
+                tmux_name=name,
+                type="agentic" if kind == "agentic" else "dispatch",
+                run_dir=row.get("output_dir") or None,
+                bead_id=row.get("bead_id") or None,
+            )
+        except Exception:
+            _dispatch_sessions_registered.discard(run_id)
+            logger.exception(
+                "dispatch-session reconcile: register failed for %s", name)
+    for row in recent:
+        if (row.get("status") or "RUNNING") in ("RUNNING", "QUEUED", "PREPARING"):
+            continue
+        run_id = row.get("id")
+        name = _dispatch_run_session_name(row)
+        if not run_id or not name or run_id in _dispatch_sessions_demoted:
+            continue
+        _dispatch_sessions_demoted.add(run_id)
+        existing = session_monitor.get_one(name)
+        if existing is None or existing.get("state") in ("ENDED", "FAILED"):
+            continue
+        try:
+            await session_monitor.deregister_session(name)
+            logger.info(
+                "dispatch-session reconcile: demoted %s (run %s %s)",
+                name, run_id, row.get("status"))
+        except Exception:
+            _dispatch_sessions_demoted.discard(run_id)
+            logger.exception(
+                "dispatch-session reconcile: demote failed for %s", name)
+
+
 async def _dispatch_watcher():
     """Background task: poll dispatch state and broadcast to SSE topics.
 
@@ -14873,6 +15066,29 @@ async def _dispatch_watcher():
             await event_bus.broadcast("dispatch", dispatch_data)
             await event_bus.broadcast("nav", nav_data)
             await event_bus.broadcast("dispatcher_state", dispatcher_state)
+
+            try:
+                await _reconcile_dispatch_sessions()
+            except Exception:
+                logger.exception("dispatch-session reconcile pass failed")
+
+            # Orphan sweep on a ~5-minute cadence (operator directive):
+            # RUNNING agentic rows whose container is gone finalize as
+            # orphaned-no-exit instead of wedging forever. The watcher
+            # ticks every few seconds; this gates itself by wall clock.
+            global _last_orphan_sweep
+            if time.monotonic() - _last_orphan_sweep >= 300.0:
+                _last_orphan_sweep = time.monotonic()
+                try:
+                    from agents.dispatch_db import fail_orphaned_running_agentic
+                    orphaned = await asyncio.to_thread(
+                        fail_orphaned_running_agentic)
+                    if orphaned:
+                        logger.warning(
+                            "orphan sweep finalized %d agentic run(s): %s",
+                            len(orphaned), ", ".join(orphaned))
+                except Exception:
+                    logger.exception("agentic orphan sweep failed")
 
             # Per-row worktree state — drives the ⌥ workspace-changes
             # indicator on session cards / page-mode header. Emit only
@@ -17736,6 +17952,213 @@ def _render_agent_action_prompt(
         ) from e
 
 
+# ── Agent-action spawn throttles + off-loop workspace prep ──────────
+# Operator directives from the 2026-08-28 incident (host handoff 148ead24):
+# item 1 (the event-loop freeze) and item 2 (nothing caps agentic spawns).
+# Limits are operator-tunable on the dispatch page, backed by the
+# machine-homed autonomy.dispatch.limits#1 singleton; schema defaults
+# apply when no row has been written.
+_AGENTIC_CAP_WINDOW_S = 3600.0
+
+
+def _resolved_dispatch_limits() -> dict:
+    """Effective dispatch limits: the Settings row, else schema defaults."""
+    from tools.graph.schemas import dispatch_limits as _dl
+    limits = {
+        "bead_max_concurrent": _dl.DEFAULT_BEAD_MAX_CONCURRENT,
+        "agentic_max_concurrent": _dl.DEFAULT_AGENTIC_MAX_CONCURRENT,
+    }
+    try:
+        row = graph_ops.read_set_key(
+            _dl.SET_ID, "default", org="machine", peers=[],
+        )
+    except Exception:
+        return limits
+    payload = (row or {}).get("payload") or {}
+    for name in limits:
+        value = payload.get(name)
+        if isinstance(value, int) and not isinstance(value, bool):
+            limits[name] = value
+    return limits
+# Bounds how many workspace preps (git clone-sync + worktree checkout, ~20s
+# each) may occupy executor threads at once — a burst of dispatches must not
+# consume the default thread pool that every other to_thread caller shares.
+_agentic_prep_semaphore = asyncio.Semaphore(3)
+
+
+def _agentic_running_count_recent() -> int:
+    """RUNNING agentic rows started within the cap window.
+
+    Rows with missing/unparsable start times are excluded on purpose:
+    wedged rows (a killed container with --rm never reaches "exited", so
+    its row stays RUNNING forever — handoff item 3) must not starve new
+    dispatches once they age out of the window.
+    """
+    from agents.dispatch_db import get_active_agentic_runs
+    now = datetime.now(timezone.utc)
+    count = 0
+    for row in get_active_agentic_runs():
+        raw = row.get("started_at")
+        try:
+            started = datetime.strptime(
+                str(raw), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            continue
+        if (now - started).total_seconds() <= _AGENTIC_CAP_WINDOW_S:
+            count += 1
+    return count
+
+
+def _prepare_agent_action_workspace(
+    workspace,
+    container_name: str,
+    output_dir_path: Path,
+    base_metadata: dict,
+):
+    """Blocking half of an explicit-workspace agentic dispatch.
+
+    Runs on a worker thread (never the event loop): artifact existence
+    checks, git clone-sync + worktree creation, env resolution, primer
+    render, and startup-script materialization. Returns
+    ``(missing_artifacts, error, launch_kwargs_update)`` — exactly one of
+    the three carries the outcome, so the async handler keeps its exact
+    response shapes without doing any blocking work itself.
+    """
+    missing_artifacts = workspace_settings.validate_artifacts(workspace)
+    if missing_artifacts:
+        return missing_artifacts, None, {}
+    try:
+        project_mounts = prepare_session_mounts(
+            workspace,
+            container_name,
+            refresh_existing_worktree=True,
+        )
+    except WorkspaceError as exc:
+        return [], exc, {}
+    project_mounts.update(workspace_settings.artifact_mounts(workspace))
+    extra_env: dict[str, str] = dict(workspace.env) if workspace.env else {}
+    _apply_env_from_host(
+        workspace.env_from_host, extra_env,
+        context=f"workspace {getattr(workspace, 'id', None) or workspace.graph_project}",
+    )
+    output_dir_path.mkdir(parents=True, exist_ok=True)
+    primer_path = output_dir_path / ".claude_md"
+    primer_path.write_text(render_workspace_primer(workspace))
+    launch_metadata = dict(base_metadata)
+    # Canonical org key only — see the launch_kwargs metadata at the call.
+    launch_metadata["org"] = workspace.graph_project
+    if workspace.default_tags:
+        launch_metadata["graph_tags"] = list(workspace.default_tags)
+    return [], None, {
+        "mounts": project_mounts or None,
+        "metadata": launch_metadata,
+        "working_dir": workspace.working_dir or "/workspace/repo",
+        "extra_env": extra_env or None,
+        "global_claude_md": primer_path,
+        "startup_script": workspace_settings.materialize_startup_script(
+            workspace, output_dir_path),
+        "needs_nested_docker": workspace.needs_nested_docker,
+        "runtime": workspace.session_runtime,
+        "network_host": workspace.network_host,
+        "capabilities": workspace.capabilities,
+    }
+
+
+async def _agentic_launch_task(
+    *,
+    run_id: str,
+    workspace,
+    container_name: str,
+    output_dir_path: Path,
+    output_dir: str,
+    launch_kwargs: dict,
+    explicit_workspace: bool,
+    model: str | None,
+) -> None:
+    """Background half of an agentic dispatch: prep, launch, register.
+
+    Owns every status transition after QUEUED. Independent of the HTTP
+    request that accepted the dispatch — a client disconnect can no
+    longer orphan a half-created run. A dashboard restart mid-flight is
+    swept by fail_stale_prelaunch_runs() at the next startup.
+    """
+    from agents.dispatch_db import record_dispatch_failure, update_run_status
+    try:
+        if explicit_workspace:
+            async with _agentic_prep_semaphore:
+                await asyncio.to_thread(update_run_status, run_id, "PREPARING")
+                # DO NOT move this back onto the event loop. Beyond git
+                # cost, _resolve_org_mount's path probes inside
+                # prepare_session_mounts will sit on a hard-mounted NFS
+                # pool (timeo=600) once org-mounts move to the NAS — a
+                # network hiccup there must block a worker thread, never
+                # the loop (2026-08-28 incident: this work ran bare on the
+                # loop, freezing the dashboard ~20s per dispatch, 131x).
+                missing_artifacts, prep_error, prep_update = await asyncio.to_thread(
+                    _prepare_agent_action_workspace,
+                    workspace, container_name, output_dir_path,
+                    dict(launch_kwargs["metadata"]),
+                )
+            if missing_artifacts:
+                first = missing_artifacts[0]
+                await asyncio.to_thread(
+                    record_dispatch_failure, run_id,
+                    failure_class="missing-artifacts",
+                    reason=workspace_settings.format_missing_artifact_error(
+                        first, workspace),
+                )
+                return
+            if prep_error is not None:
+                logger.error(
+                    "agent-actions: workspace prep failed workspace=%s err=%s",
+                    workspace.id, prep_error,
+                )
+                await asyncio.to_thread(
+                    record_dispatch_failure, run_id,
+                    failure_class="workspace-prep",
+                    reason=str(prep_error),
+                )
+                return
+            launch_kwargs.update(prep_update)
+        else:
+            await asyncio.to_thread(update_run_status, run_id, "PREPARING")
+
+        try:
+            from agents.session_launcher import launch_session
+        except Exception:
+            launch_session = None  # type: ignore[assignment]
+        container_id: str | None = None
+        if launch_session is not None and not os.environ.get("AGENT_ACTIONS_NO_LAUNCH"):
+            try:
+                container_id = await asyncio.to_thread(launch_session, **launch_kwargs)
+            except Exception as exc:
+                logger.exception("agent-actions: launch_session crashed")
+                await asyncio.to_thread(
+                    record_dispatch_failure, run_id,
+                    failure_class="launch-crashed", reason=str(exc)[:400],
+                )
+                return
+        await asyncio.to_thread(update_run_status, run_id, "RUNNING")
+        if container_id:
+            await session_monitor.register_session(
+                tmux_name=run_id,
+                type="agentic",
+                run_dir=output_dir,
+                project=workspace.id,
+                harness=workspace.harness,
+                model=model,
+            )
+    except Exception as exc:
+        logger.exception("agent-actions: launch task failed run_id=%s", run_id)
+        try:
+            await asyncio.to_thread(
+                record_dispatch_failure, run_id,
+                failure_class="launch-task", reason=str(exc)[:400],
+            )
+        except Exception:
+            pass
+
+
 async def api_agent_action_dispatch(request):
     """POST /api/agent-actions/dispatch — spawn an agentic action.
 
@@ -17909,7 +18332,13 @@ async def api_agent_action_dispatch(request):
         })
 
     # ── Step 1: resolve the target asset and its owning org ──────
-    source = None if requested_asset_kind == "design" else graph_ops.get_source(asset_id)
+    # to_thread: a captured 23.7s event-loop stall bottomed out in this
+    # exact SELECT under lock contention (host handoff 148ead24 item 1) —
+    # the bead/design lookups beside it were already wrapped.
+    source = (
+        None if requested_asset_kind == "design"
+        else await asyncio.to_thread(graph_ops.get_source, asset_id)
+    )
     bead = None
     design = None
     target_kind = "source"
@@ -17952,7 +18381,8 @@ async def api_agent_action_dispatch(request):
         return auth_error
 
     # ── Step 2: look up the action member in target_org's DB ─────
-    payload = _resolve_agent_action_member(
+    payload = await asyncio.to_thread(
+        _resolve_agent_action_member,
         set_id=set_id, member_key=member_key, target_org=target_org,
     )
     if payload is None:
@@ -18125,10 +18555,37 @@ async def api_agent_action_dispatch(request):
             status_code=500,
         )
 
+    # ── Agentic launch cap (operator directive, host handoff 148ead24
+    # item 2): nothing else limits agentic spawns — the dispatcher's
+    # --max-concurrent gates only its own bead phase, and 59 launches in
+    # 30 minutes went out tonight. Enforced here because this endpoint is
+    # where agentic containers actually spawn. Only recently-started
+    # RUNNING rows count, so wedged rows (handoff item 3: kill/--rm races
+    # leave rows RUNNING forever) cannot starve dispatching.
+    running_agentic, agentic_cap = await asyncio.to_thread(
+        lambda: (_agentic_running_count_recent(),
+                 _resolved_dispatch_limits()["agentic_max_concurrent"]),
+    )
+    if running_agentic >= agentic_cap:
+        return JSONResponse(
+            {
+                "error": (
+                    f"agentic launch cap reached: {running_agentic} runs "
+                    f"started within the last hour are still RUNNING "
+                    f"(cap {agentic_cap}). Retry when one completes, or "
+                    f"raise the limit on the dispatch page."
+                ),
+                "running": running_agentic,
+                "cap": agentic_cap,
+            },
+            status_code=429,
+        )
+
     # ── Step 5: eager-create the agentic source row in target_org ─
     title = str(payload.get("label") or member_key)
     try:
-        src = graph_ops.insert_agentic_session(
+        src = await asyncio.to_thread(
+            graph_ops.insert_agentic_session,
             org=target_org,
             set_id=set_id,
             set_revision=int(payload.get("set_revision") or 1),
@@ -18193,7 +18650,12 @@ async def api_agent_action_dispatch(request):
         "model": model,
     }
     if explicit_workspace:
-        missing_artifacts = workspace_settings.validate_artifacts(workspace)
+        # The artifact-contract check stays synchronous (cheap stat calls,
+        # still off-loop) so a missing artifact remains a crisp 400 at
+        # dispatch time. Everything heavier happens in the background task.
+        missing_artifacts = await asyncio.to_thread(
+            workspace_settings.validate_artifacts, workspace,
+        )
         if missing_artifacts:
             first = missing_artifacts[0]
             message = workspace_settings.format_missing_artifact_error(first, workspace)
@@ -18213,108 +18675,68 @@ async def api_agent_action_dispatch(request):
                 },
                 status_code=400,
             )
-        try:
-            project_mounts = prepare_session_mounts(
-                workspace,
-                container_name,
-                refresh_existing_worktree=True,
-            )
-        except WorkspaceError as exc:
-            logger.error(
-                "agent-actions: workspace prep failed workspace=%s err=%s",
-                workspace.id, exc,
-            )
-            return JSONResponse(
-                {
-                    "error": f"Workspace prep failed: {exc}",
-                    "workspace": workspace.id,
-                },
-                status_code=500,
-            )
-        project_mounts.update(workspace_settings.artifact_mounts(workspace))
-        extra_env: dict[str, str] = dict(workspace.env) if workspace.env else {}
-        _apply_env_from_host(
-            workspace.env_from_host, extra_env,
-            context=f"workspace {getattr(workspace, 'id', None) or workspace.graph_project}",
-        )
-        output_dir_path.mkdir(parents=True, exist_ok=True)
-        primer_path = output_dir_path / ".claude_md"
-        primer_path.write_text(render_workspace_primer(workspace))
-        launch_metadata = dict(launch_kwargs["metadata"])
-        # Canonical org key only — see the launch_kwargs metadata above.
-        launch_metadata["org"] = workspace.graph_project
-        if workspace.default_tags:
-            launch_metadata["graph_tags"] = list(workspace.default_tags)
-        launch_kwargs.update({
-            "mounts": project_mounts or None,
-            "metadata": launch_metadata,
-            "working_dir": workspace.working_dir or "/workspace/repo",
-            "extra_env": extra_env or None,
-            "global_claude_md": primer_path,
-            "startup_script": workspace_settings.materialize_startup_script(
-                workspace, output_dir_path),
-            "needs_nested_docker": workspace.needs_nested_docker,
-            "runtime": workspace.session_runtime,
-            "network_host": workspace.network_host,
-            "capabilities": workspace.capabilities,
-        })
 
-    container_id: str | None = None
-    if launch_session is not None and not os.environ.get("AGENT_ACTIONS_NO_LAUNCH"):
-        try:
-            container_id = await asyncio.to_thread(launch_session, **launch_kwargs)
-        except Exception:
-            logger.exception("agent-actions: launch_session crashed")
-            container_id = None
-
-    # Agentic actions originate here, outside the dispatcher's in-memory run
-    # list. Register immediately so ResourceMonitor can resolve the container
-    # cgroup on its next tick, while SessionMonitor waits for its JSONL to
-    # arrive in the run directory. The dispatcher's later registration is
-    # idempotent and becomes a refresh rather than the first chance at stats.
-    if container_id:
-        await session_monitor.register_session(
-            tmux_name=run_id,
-            type="agentic",
-            run_dir=output_dir,
-            project=workspace.id,
-            harness=workspace.harness,
-            model=model,
-        )
-
-    # ── Step 7: record the dispatch_runs row ─────────────────────
+    # ── Accept: the run row is born QUEUED and IS the status surface ──
+    # (operator directive, 2026-08-28: never hold the POST open across
+    # prep + launch — the event loop got frozen behind exactly that, the
+    # semaphore wait was invisible, and a client disconnect orphaned the
+    # half-created dispatch. Active Dispatches + /api/dispatch/runs show
+    # QUEUED -> PREPARING -> RUNNING/FAILED as the background task moves.)
     try:
         from agents.dispatch_db import init_db, insert_launch_run
-        init_db()
-        insert_launch_run(
-            run_id=run_id,
-            bead_id="",
-            started_at=started_at,
-            branch="",
-            branch_base="",
-            image=workspace.image,
-            container_name=container_name,
-            output_dir=output_dir,
-            kind="agentic",
-            agentic_source_id=src["id"],
+        await asyncio.to_thread(init_db)
+        await asyncio.to_thread(
+            functools.partial(
+                insert_launch_run,
+                run_id=run_id,
+                bead_id="",
+                started_at=started_at,
+                branch="",
+                branch_base="",
+                image=workspace.image,
+                container_name=container_name,
+                output_dir=output_dir,
+                kind="agentic",
+                agentic_source_id=src["id"],
+                status="QUEUED",
+            )
         )
     except Exception:
         logger.exception(
             "agent-actions: dispatch_runs insert failed run_id=%s", run_id,
         )
 
+    launch_task = asyncio.create_task(
+        _agentic_launch_task(
+            run_id=run_id,
+            workspace=workspace,
+            container_name=container_name,
+            output_dir_path=output_dir_path,
+            output_dir=output_dir,
+            launch_kwargs=launch_kwargs,
+            explicit_workspace=explicit_workspace,
+            model=model,
+        ),
+        name=f"agentic-launch-{run_id}",
+    )
+    if os.environ.get("AGENT_ACTIONS_SYNC_LAUNCH"):
+        # Deterministic mode for tests: the accepted contract is identical,
+        # the work just completes before the response is written.
+        await launch_task
+
     response = {
+        "queued": True,
+        "run_id": run_id,
         "agentic_source_id": src["id"],
         "dispatched_at": datetime.now(timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         ),
         "target_workspace": workspace.id,
         "target_org": target_org,
-        "container_id": container_id,
         "slug": src["slug"],
     }
     _agent_action_idempotency_remember(idem_key, response)
-    return JSONResponse(response, status_code=201)
+    return JSONResponse(response, status_code=202)
 
 
 # ── Org registry (graph://d970d946-f95) ──────────────────────
@@ -19460,6 +19882,8 @@ routes = [
     Route("/api/librarians/jobs", api_librarian_enqueue, methods=["POST"]),
     Route("/api/dispatch/pause", api_dispatch_pause_get),
     Route("/api/dispatch/pause", api_dispatch_pause_post, methods=["POST"]),
+    Route("/api/dispatch/limits", api_dispatch_limits_get),
+    Route("/api/dispatch/limits", api_dispatch_limits_post, methods=["POST"]),
     Route("/api/dispatch/resume", api_dispatch_resume, methods=["POST"]),
     Route("/api/dispatch/resume/{bead_id}", api_dispatch_resume_bead, methods=["POST"]),
     Route("/api/dispatch/pause-state", api_dispatch_pause_state),
@@ -20161,6 +20585,19 @@ async def _on_startup():
         resource_monitor.load_state(RESOURCE_MONITOR_STATE_PATH)
         await resource_monitor.start(event_bus=event_bus)
     _mark("resource_monitor.start")
+    try:
+        _ensure_dispatcher_service_token()
+    except Exception:
+        logger.exception("dispatcher monitor token provisioning failed")
+    try:
+        from agents.dispatch_db import fail_stale_prelaunch_runs
+        swept = await asyncio.to_thread(fail_stale_prelaunch_runs)
+        if swept:
+            logger.warning(
+                "failed %d agentic run(s) stranded in QUEUED/PREPARING by "
+                "the previous process", swept)
+    except Exception:
+        logger.exception("stale prelaunch sweep failed")
     _dispatch_watcher_task = asyncio.create_task(_dispatch_watcher())
     _event_loop_watchdog_task = asyncio.create_task(_event_loop_watchdog())
     global _stall_sampler_started
