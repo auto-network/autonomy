@@ -301,7 +301,7 @@ async def test_send_audio_silently_dropped_when_not_ready():
     after a connect failure) must not crash on send_audio."""
     client = _new_client("ws://127.0.0.1:1")
     # No connect attempted — state remains DISCONNECTED.
-    await client.send_audio(b"\x00" * 100)
+    assert await client.send_audio(b"\x00" * 100) is False
     # Still DISCONNECTED; nothing thrown.
     assert client.state == vwl.DISCONNECTED
 
@@ -319,7 +319,7 @@ async def test_send_audio_drops_empty_bytes(fake_whisperlive):
     fake = await fake_whisperlive(on_connect)
     client = _new_client(fake.url)
     await client.connect_and_wait_ready(ready_timeout=2.0)
-    await client.send_audio(b"")
+    assert await client.send_audio(b"") is False
     await asyncio.sleep(0.05)
     await client.close()
     assert received == []
@@ -1002,7 +1002,7 @@ async def test_send_audio_malformed_frame_routes_to_unavailable():
     client._ws = _FakeWS()
     client.state = vwl.READY
 
-    await client.send_audio(b"\x00" * 3)  # odd length -> conversion ValueError
+    assert await client.send_audio(b"\x00" * 3) is False  # odd int16 frame
 
     assert client.state == vwl.UNAVAILABLE
     assert errors and "send failed" in errors[0]

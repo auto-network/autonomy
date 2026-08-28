@@ -419,7 +419,7 @@ class WhisperLiveClient:
             await self._safe_close_ws()
             raise WhisperLiveConnectError(err)
 
-    async def send_audio(self, audio_bytes: bytes) -> None:
+    async def send_audio(self, audio_bytes: bytes) -> bool:
         """Forward an audio frame to upstream. No-op when the
         wrapper isn't READY (transient pre-ready frames are
         impossible because of the sync connect-and-wait; this
@@ -435,12 +435,14 @@ class WhisperLiveClient:
         is constructed with ``wire_format=WIRE_INT16_LE`` and the
         conversion is skipped.
 
-        Logs only byte counts, never content, per spec privacy rule.
+        Returns ``True`` only after the payload was written to the upstream
+        socket; defensive drops and send failures return ``False``. Logs only
+        byte counts, never content, per spec privacy rule.
         """
         if self.state != READY or self._ws is None:
-            return
+            return False
         if not isinstance(audio_bytes, (bytes, bytearray)) or not audio_bytes:
-            return
+            return False
         # Conversion is INSIDE the try: an odd/truncated frame fails the
         # int16->float32 conversion (np.frombuffer needs an even length), and
         # that must flow to the same UNAVAILABLE/on_error path as a send
@@ -458,6 +460,7 @@ class WhisperLiveClient:
             # set_cutoff() seals to this so audio sent before a Send/Clear but
             # transcribed after it still gets dropped.
             self._audio_sent_ms += len(audio_bytes) / 32.0
+            return True
         except Exception as exc:
             log.warning(
                 "WhisperLiveClient[%s] send_audio failed bytes_in=%d "
@@ -468,6 +471,7 @@ class WhisperLiveClient:
             self.state = UNAVAILABLE
             await self.on_error(f"upstream send failed: {exc}")
             await self._safe_close_ws()
+            return False
 
     async def close(self) -> None:
         """Idempotent teardown. Cancels the recv loop and closes the

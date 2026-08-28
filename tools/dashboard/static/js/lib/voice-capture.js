@@ -507,7 +507,7 @@
 
   function wsUrl(bind) {
     var proto = (typeof location !== 'undefined' && location.protocol === 'https:') ? 'wss:' : 'ws:';
-    return proto + '//' + location.host + '/ws/voice?bind=' + encodeURIComponent(bind);
+    return proto + '//' + location.host + '/ws/voice?bind=' + encodeURIComponent(bind) + '&audio_ack=1';
   }
 
   function sendControl(type, extra) {
@@ -515,6 +515,16 @@
     var frame = { type: type };
     if (extra) { for (var k in extra) { if (Object.prototype.hasOwnProperty.call(extra, k)) frame[k] = extra[k]; } }
     try { s.ws.send(JSON.stringify(frame)); return true; } catch (_e) { return false; }
+  }
+
+  function _ackAudioReady(epoch, token) {
+    if (!s.connectionId || !s.talkActive || s.serverFsm !== 'listening' ||
+        s.serverUpstream !== 'ready' || !token) return false;
+    return sendControl('audio_ready', {
+      connection_id: s.connectionId,
+      epoch: (epoch == null) ? s.serverEpoch : (epoch | 0),
+      token: String(token),
+    });
   }
 
   // #43: explicit Send/Clear reset hook. Called by the viewer's Send/Clear handlers
@@ -598,6 +608,7 @@
         s.connectionId = stateConnection;
         s.serverFsm = String(frame.fsm_state || '');
         s.serverUpstream = String(frame.upstream || '');
+        if (frame.epoch != null) s.serverEpoch = frame.epoch | 0;
         s.voiceStateAt = _nowMs();
         if (s.serverUpstream === 'unavailable') {
           s.requiresReconnect = true;
@@ -621,6 +632,10 @@
         s.flowRepairAttempted = false;
         s.requiresReconnect = false;
         _setConn(s.wakeLockNeedsGesture ? 'disconnected' : 'ok');
+        return;
+      }
+      if (type === 'committed' || type === 'commit_error') {
+        _ackAudioReady(s.serverEpoch, frame.audio_ready_token);
         return;
       }
       // Mute-gate: while muted, the operator wants the box FROZEN. WhisperLive
@@ -679,9 +694,13 @@
         var bsKept = _rmode ? bsRaw : _stripRemoved(bsRaw);
         if (!_rmode && bsRaw) _vlog('BUFFER_STATE raw="' + bsRaw.slice(0, 70) + '" removedN=' + s.removed.length + ' kept="' + bsKept.slice(0, 70) + '"');
         s.finals = bsKept;
+        if (frame.epoch != null && (frame.epoch | 0) > s.serverEpoch) {
+          s.serverEpoch = frame.epoch | 0;
+        }
         _renderBuffer(s.finals, {
           update: 'restore', kind: 'buffer_state', epoch: frame.epoch,
         });
+        _ackAudioReady(frame.epoch, frame.audio_ready_token);
         return;
       }
       if (type === 'error') {

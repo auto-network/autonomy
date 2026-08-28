@@ -13,7 +13,10 @@ tests land alongside S3-3 / S3-4 / S3-5.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
+import time
 
 import pytest
 
@@ -55,9 +58,11 @@ class _StubWhisperLiveClient:
     def is_unavailable(self) -> bool:
         return False
 
-    async def send_audio(self, audio_bytes: bytes) -> None:
-        if self._ready and not self._closed:
+    async def send_audio(self, audio_bytes: bytes) -> bool:
+        if self._ready and not self._closed and audio_bytes:
             self.audio_frames.append(bytes(audio_bytes))
+            return True
+        return False
 
     def set_cutoff(self) -> None:
         # Mirrors WhisperLiveClient.set_cutoff (sync no-op for the stub);
@@ -146,6 +151,16 @@ def _receive_voice_state(ws, *, fsm_state="listening", upstream="ready"):
     assert frame["upstream"] == upstream
     assert frame["connection_id"]
     return frame
+
+
+def _send_audio_ready(ws, state_frame, *, epoch=None, token):
+    """Acknowledge a server recovery boundary in client wire order."""
+    ws.send_text(json.dumps({
+        "type": "audio_ready",
+        "connection_id": state_frame["connection_id"],
+        "epoch": state_frame["epoch"] if epoch is None else epoch,
+        "token": token,
+    }))
 
 
 # ── Connection-acceptance gates ─────────────────────────────
@@ -768,6 +783,7 @@ def test_ws_voice_audio_forwards_to_whisperlive_when_listening(voice_route_env):
     payload_b = b"\x02\x03" * 1600
     with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
         ws.send_text(json.dumps({"type": "start"}))
+        _receive_voice_state(ws)
         ws.send_bytes(payload_a)
         ws.send_bytes(payload_b)
         ws.send_text(json.dumps({"type": "end"}))
@@ -783,9 +799,12 @@ def test_ws_voice_audio_not_forwarded_when_muted(voice_route_env):
     client = voice_route_env["client"]
     with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
         ws.send_text(json.dumps({"type": "start"}))
+        _receive_voice_state(ws)
         ws.send_text(json.dumps({"type": "mute"}))
+        _receive_voice_state(ws, fsm_state="muted")
         ws.send_bytes(b"\x00" * 100)  # dropped at state-machine layer
         ws.send_text(json.dumps({"type": "unmute"}))
+        _receive_voice_state(ws)
         ws.send_bytes(b"\xff" * 100)  # forwarded
         ws.send_text(json.dumps({"type": "end"}))
     stub = voice_route_env["stub_instances"][0]
@@ -961,7 +980,9 @@ class TestVoiceFlowAcknowledgements:
         from tools.dashboard import voice_whisperlive
 
         client = voice_route_env["client"]
-        with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
+        with client.websocket_connect(
+            "/ws/voice?bind=auto-test-designer&audio_ack=1",
+        ) as ws:
             ws.send_text(json.dumps({"type": "start"}))
             ready = ws.receive_json()
             self._assert_state(
@@ -976,7 +997,9 @@ class TestVoiceFlowAcknowledgements:
 
         _FailingClient.instances = []
         monkeypatch.setattr(voice_whisperlive, "WhisperLiveClient", _FailingClient)
-        with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
+        with client.websocket_connect(
+            "/ws/voice?bind=auto-test-designer&audio_ack=1",
+        ) as ws:
             ws.send_text(json.dumps({"type": "start"}))
             error = ws.receive_json()
             unavailable = ws.receive_json()
@@ -1053,6 +1076,316 @@ class TestVoiceFlowAcknowledgements:
             assert resumed["type"] == "voice_state"
             assert resumed["fsm_state"] == "listening"
             ws.send_text(json.dumps({"type": "end"}))
+
+    def test_empty_audio_is_not_forwarded_or_acknowledged(self, voice_route_env):
+        client = voice_route_env["client"]
+        with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
+            ws.send_text(json.dumps({"type": "start"}))
+            ws.receive_json()
+            ws.send_bytes(b"")
+            ws.send_bytes(b"\x00\x01" * 32)
+            flow = ws.receive_json()
+            assert flow["type"] == "audio_flow"
+            assert (flow["received"], flow["forwarded"]) == (2, 1)
+            assert _StubWhisperLiveClient.instances[0].audio_frames == [
+                b"\x00\x01" * 32,
+            ]
+            ws.send_text(json.dumps({"type": "end"}))
+
+    def test_audio_arriving_before_delayed_start_ready_is_dropped(
+        self, voice_route_env, monkeypatch,
+    ):
+        from tools.dashboard import voice_whisperlive
+
+        connecting = threading.Event()
+        release = threading.Event()
+
+        class _DelayedReadyClient(_StubWhisperLiveClient):
+            async def connect_and_wait_ready(self, *, ready_timeout=15.0):
+                connecting.set()
+                await asyncio.to_thread(release.wait, 2.0)
+                self._ready = True
+
+        monkeypatch.setattr(
+            voice_whisperlive, "WhisperLiveClient", _DelayedReadyClient,
+        )
+        client = voice_route_env["client"]
+        with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
+            ws.send_text(json.dumps({"type": "start"}))
+            assert connecting.wait(1.0)
+            ws.send_bytes(b"\x00\x01" * 32)
+            release.set()
+            ready = ws.receive_json()
+            assert ready["type"] == "voice_state"
+            assert ready["upstream"] == "ready"
+            ws.send_text(json.dumps({"type": "mute"}))
+            # The pre-ready binary frame remains ineligible even though the
+            # processor reaches it after the ready handshake completes.
+            muted = ws.receive_json()
+            assert muted["type"] == "voice_state"
+            assert _StubWhisperLiveClient.instances[0].audio_frames == []
+            ws.send_text(json.dumps({"type": "end"}))
+
+    def test_later_mute_boundary_wins_over_slow_start_completion(
+        self, voice_route_env, monkeypatch,
+    ):
+        from tools.dashboard import voice_whisperlive
+
+        connecting = threading.Event()
+        release = threading.Event()
+
+        class _DelayedReadyClient(_StubWhisperLiveClient):
+            async def connect_and_wait_ready(self, *, ready_timeout=15.0):
+                connecting.set()
+                await asyncio.to_thread(release.wait, 2.0)
+                self._ready = True
+
+        monkeypatch.setattr(
+            voice_whisperlive, "WhisperLiveClient", _DelayedReadyClient,
+        )
+        client = voice_route_env["client"]
+        with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
+            ws.send_text(json.dumps({"type": "start"}))
+            assert connecting.wait(1.0)
+            ws.send_text(json.dumps({"type": "mute"}))
+            release.set()
+            started = ws.receive_json()
+            assert started["fsm_state"] == "listening"
+            ws.send_bytes(b"\x00\x01" * 32)
+            muted = ws.receive_json()
+            assert muted["fsm_state"] == "muted"
+            ws.send_text(json.dumps({"type": "unmute"}))
+            resumed = ws.receive_json()
+            assert resumed["fsm_state"] == "listening"
+            ws.send_bytes(b"\x02\x03" * 32)
+            flow = ws.receive_json()
+            assert (flow["received"], flow["forwarded"]) == (2, 1)
+            assert _StubWhisperLiveClient.instances[0].audio_frames == [
+                b"\x02\x03" * 32,
+            ]
+            ws.send_text(json.dumps({"type": "end"}))
+
+    def test_audio_arriving_during_commit_is_not_forwarded_later(
+        self, voice_route_env, monkeypatch,
+    ):
+        from tools.dashboard import tmux_send as tmux_send_mod
+
+        committing = threading.Event()
+        release = threading.Event()
+
+        async def delayed_tmux_send(_target, _text):
+            committing.set()
+            await asyncio.to_thread(release.wait, 2.0)
+
+        monkeypatch.setattr(
+            tmux_send_mod, "tmux_send_awaited", delayed_tmux_send,
+        )
+        client = voice_route_env["client"]
+        manager = voice_route_env["manager"]
+        with client.websocket_connect(
+            "/ws/voice?bind=auto-test-designer&audio_ack=1",
+        ) as ws:
+            ws.send_text(json.dumps({"type": "start"}))
+            state = ws.receive_json()
+            manager.append_final("auto-test-designer", "send this")
+            ws.send_text(json.dumps({"type": "commit"}))
+            assert committing.wait(1.0)
+            ws.send_bytes(b"\x00\x01" * 32)
+            release.set()
+            committed = ws.receive_json()
+            assert committed["type"] == "committed"
+            # Even after commit completes, audio stays closed until the client
+            # acknowledges that it observed the result. This orders the reopen
+            # after all bytes sent during the commit window.
+            ws.send_bytes(b"\x02\x03" * 32)
+            _send_audio_ready(
+                ws, state, token=committed["audio_ready_token"],
+            )
+            ws.send_bytes(b"\x04\x05" * 32)
+            flow = ws.receive_json()
+            assert (flow["received"], flow["forwarded"]) == (3, 1)
+            ws.send_text(json.dumps({"type": "mute"}))
+            muted = ws.receive_json()
+            assert muted["type"] == "voice_state"
+            assert _StubWhisperLiveClient.instances[0].audio_frames == [
+                b"\x04\x05" * 32,
+            ]
+            ws.send_text(json.dumps({"type": "end"}))
+
+    def test_stale_audio_ready_cannot_reopen_a_newer_commit_boundary(
+        self, voice_route_env, monkeypatch,
+    ):
+        """A prior commit token cannot acknowledge a later commit.
+
+        The processor is deliberately held inside the first audio write while
+        the receiver observes commit -> stale acknowledgement -> PCM.  This
+        reproduces the duplex race where connection ID and epoch still match,
+        but the acknowledgement belongs to an older recovery boundary.
+        """
+        from tools.dashboard import server, voice_whisperlive
+
+        sending = threading.Event()
+        release = threading.Event()
+
+        class _BlockingFirstSendClient(_StubWhisperLiveClient):
+            async def send_audio(self, audio_bytes):
+                if not self.audio_frames:
+                    sending.set()
+                    await asyncio.to_thread(release.wait, 2.0)
+                return await super().send_audio(audio_bytes)
+
+        clock = iter((10.0, 11.1))
+        monkeypatch.setattr(server, "_voice_flow_monotonic", lambda: next(clock))
+        monkeypatch.setattr(
+            voice_whisperlive, "WhisperLiveClient", _BlockingFirstSendClient,
+        )
+        client = voice_route_env["client"]
+        manager = voice_route_env["manager"]
+        first_audio = b"\x00\x01" * 32
+        closed_audio = b"\x02\x03" * 32
+        final_audio = b"\x04\x05" * 32
+
+        with client.websocket_connect(
+            "/ws/voice?bind=auto-test-designer&audio_ack=1",
+        ) as ws:
+            ws.send_text(json.dumps({"type": "start"}))
+            state = ws.receive_json()
+
+            manager.append_final("auto-test-designer", "first commit")
+            ws.send_text(json.dumps({"type": "commit"}))
+            first_commit = ws.receive_json()
+            old_token = first_commit["audio_ready_token"]
+            _send_audio_ready(ws, state, token=old_token)
+
+            ws.send_bytes(first_audio)
+            assert sending.wait(1.0)
+            manager.append_final("auto-test-designer", "second commit")
+            ws.send_text(json.dumps({"type": "commit"}))
+            _send_audio_ready(ws, state, token=old_token)
+            ws.send_bytes(closed_audio)
+            release.set()
+
+            first_flow = ws.receive_json()
+            assert first_flow["type"] == "audio_flow"
+            assert (first_flow["received"], first_flow["forwarded"]) == (2, 1)
+            second_commit = ws.receive_json()
+            assert second_commit["type"] == "committed"
+            assert second_commit["audio_ready_token"] != old_token
+
+            _send_audio_ready(
+                ws, state, token=second_commit["audio_ready_token"],
+            )
+            ws.send_bytes(final_audio)
+            final_flow = ws.receive_json()
+            assert (final_flow["received"], final_flow["forwarded"]) == (3, 2)
+            assert _StubWhisperLiveClient.instances[0].audio_frames == [
+                first_audio,
+                final_audio,
+            ]
+            ws.send_text(json.dumps({"type": "end"}))
+
+    def test_reset_drops_inflight_audio_and_advances_epoch(
+        self, voice_route_env, monkeypatch,
+    ):
+        from tools.dashboard import voice_whisperlive
+
+        reconnecting = threading.Event()
+        release = threading.Event()
+        connect_count = 0
+
+        class _DelayedResetClient(_StubWhisperLiveClient):
+            async def connect_and_wait_ready(self, *, ready_timeout=15.0):
+                nonlocal connect_count
+                connect_count += 1
+                if connect_count == 2:
+                    reconnecting.set()
+                    await asyncio.to_thread(release.wait, 2.0)
+                self._ready = True
+
+        monkeypatch.setattr(
+            voice_whisperlive, "WhisperLiveClient", _DelayedResetClient,
+        )
+        voice_route_env["flag_state"]["voice.reset_suppression"] = True
+        client = voice_route_env["client"]
+        with client.websocket_connect(
+            "/ws/voice?bind=auto-test-designer&audio_ack=1",
+        ) as ws:
+            ws.send_text(json.dumps({"type": "start"}))
+            initial = ws.receive_json()
+            assert initial["epoch"] == 0
+            ws.send_text(json.dumps({"type": "reset"}))
+            assert reconnecting.wait(1.0)
+            ws.send_bytes(b"\x00\x01" * 32)
+            release.set()
+            reset = ws.receive_json()
+            assert reset["type"] == "buffer_state"
+            assert reset["epoch"] == 1
+            ws.send_bytes(b"\x02\x03" * 32)
+            _send_audio_ready(
+                ws, initial, epoch=1, token=reset["audio_ready_token"],
+            )
+            ws.send_bytes(b"\x04\x05" * 32)
+            flow = ws.receive_json()
+            assert (flow["received"], flow["forwarded"]) == (3, 1)
+            ws.send_text(json.dumps({"type": "mute"}))
+            muted = ws.receive_json()
+            assert muted["type"] == "voice_state"
+            assert muted["epoch"] == 1
+            assert _StubWhisperLiveClient.instances[0].audio_frames == []
+            assert _StubWhisperLiveClient.instances[1].audio_frames == [
+                b"\x04\x05" * 32,
+            ]
+            ws.send_text(json.dumps({"type": "end"}))
+
+    def test_bounded_queue_drops_excess_pcm_but_preserves_control_order(
+        self, voice_route_env, monkeypatch,
+    ):
+        from tools.dashboard import server, voice_whisperlive
+
+        sending = threading.Event()
+        release = threading.Event()
+
+        class _BlockingSendClient(_StubWhisperLiveClient):
+            async def send_audio(self, audio_bytes):
+                if not self.audio_frames:
+                    sending.set()
+                    await asyncio.to_thread(release.wait, 2.0)
+                return await super().send_audio(audio_bytes)
+
+        monkeypatch.setattr(server, "_VOICE_INCOMING_MAX_MESSAGES", 2)
+        monkeypatch.setattr(
+            voice_whisperlive, "WhisperLiveClient", _BlockingSendClient,
+        )
+        client = voice_route_env["client"]
+        with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
+            ws.send_text(json.dumps({"type": "start"}))
+            ws.receive_json()
+            ws.send_bytes(b"\x00\x01" * 32)
+            assert sending.wait(1.0)
+            for index in range(10):
+                ws.send_bytes(bytes((index, index + 1)) * 32)
+            ws.send_text(json.dumps({"type": "mute"}))
+            # Give the receiver time to reach the mute behind all ten PCM
+            # frames while the processor is deliberately blocked.
+            time.sleep(0.05)
+            release.set()
+            first = ws.receive_json()
+            assert first["type"] == "audio_flow"
+            assert first["received"] == 11
+            muted = ws.receive_json()
+            assert muted["type"] == "voice_state"
+            assert muted["fsm_state"] == "muted"
+            assert len(_StubWhisperLiveClient.instances[0].audio_frames) == 3
+            ws.send_text(json.dumps({"type": "end"}))
+
+    def test_audio_after_end_never_forwards(self, voice_route_env):
+        client = voice_route_env["client"]
+        with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
+            ws.send_text(json.dumps({"type": "start"}))
+            ws.receive_json()
+            ws.send_text(json.dumps({"type": "end"}))
+            ws.send_bytes(b"\x00\x01" * 32)
+        assert _StubWhisperLiveClient.instances[0].audio_frames == []
 
     def test_reconnect_changes_connection_and_resets_flow_counters_after_restore(
         self, voice_route_env,

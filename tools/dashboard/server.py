@@ -10152,6 +10152,8 @@ def _open_voice_audio_capture(bind: str):
 
 
 _voice_flow_monotonic = time.monotonic
+_VOICE_INCOMING_MAX_MESSAGES = 64
+_VOICE_AUDIO_MAX_FRAME_BYTES = 64 * 1024
 
 
 async def ws_voice(websocket: WebSocket):
@@ -10199,6 +10201,11 @@ async def ws_voice(websocket: WebSocket):
         })
         await websocket.close(code=1008, reason="missing bind param")
         return
+
+    # New clients advertise the ordered recovery acknowledgement. Legacy PWA
+    # tabs omit this query parameter and retain the old automatic reopen path
+    # until they reload the versioned static bundle.
+    audio_ready_required = websocket.query_params.get("audio_ack") == "1"
 
     if not _tmux_session_exists(bind):
         await websocket.send_json({
@@ -10273,6 +10280,124 @@ async def ws_voice(websocket: WebSocket):
     audio_received = 0
     audio_forwarded = 0
     last_audio_flow_at: float | None = None
+    # Audio intake and processing are deliberately separate. Control work such
+    # as reset/reconnect or tmux commit may await for long enough that more
+    # browser frames arrive. A serial receive/process loop cannot tell that
+    # those frames arrived while capture was suppressed: ASGI queues them and
+    # hands them to us only after the await finishes. The receiver below tags
+    # each binary frame with the gate state at arrival time, preserving wire
+    # order while preventing stale queued audio from becoming "healthy" later.
+    audio_intake_open = False
+    audio_intake_generation = 0
+    pending_audio_ready_token: str | None = None
+    incoming: asyncio.Queue[tuple[dict, bool, int, str | None]] = asyncio.Queue(
+        maxsize=_VOICE_INCOMING_MAX_MESSAGES,
+    )
+
+    def _close_audio_intake() -> None:
+        nonlocal audio_intake_open, audio_intake_generation
+        audio_intake_open = False
+        audio_intake_generation += 1
+
+    def _sync_audio_intake(
+        *, allow_open: bool = False, expected_generation: int | None = None,
+    ) -> None:
+        nonlocal audio_intake_open
+        can_open = bool(
+            session.state == voice_mod.LISTENING
+            and whisperlive_client is not None
+            and whisperlive_client.is_ready()
+        )
+        if not can_open:
+            audio_intake_open = False
+        elif (
+            allow_open
+            and expected_generation is not None
+            and audio_intake_generation == expected_generation
+        ):
+            audio_intake_open = True
+
+    async def _receive_voice_messages() -> None:
+        """Continuously receive and tag frames with arrival-time eligibility."""
+        nonlocal audio_intake_open, audio_received, pending_audio_ready_token
+        try:
+            while True:
+                msg = await websocket.receive()
+                msg_type = msg.get("type")
+                accepted_at_intake = False
+                boundary_token: str | None = None
+                if "bytes" in msg and msg["bytes"] is not None:
+                    audio_received += 1
+                    audio_bytes = msg["bytes"]
+                    accepted_at_intake = bool(
+                        audio_bytes
+                        and len(audio_bytes) <= _VOICE_AUDIO_MAX_FRAME_BYTES
+                        and audio_intake_open
+                    )
+                    # Closed/empty/oversized audio is accounted for but never
+                    # retained. If the bounded processor queue is saturated,
+                    # drop this audio frame rather than removing backpressure
+                    # for controls or growing PCM memory without limit.
+                    if not accepted_at_intake or incoming.full():
+                        continue
+                elif "text" in msg and msg["text"] is not None:
+                    try:
+                        control = json.loads(msg["text"])
+                    except Exception:
+                        control = None
+                    # Close on receipt, not after the potentially blocking
+                    # control handler. Start/unmute never open here: only the
+                    # canonical processor may reopen after upstream readiness.
+                    if (
+                        isinstance(control, dict)
+                        and control.get("type")
+                        in {"mute", "commit", "reset", "end"}
+                    ):
+                        _close_audio_intake()
+                        if control.get("type") in {"commit", "reset"}:
+                            boundary_token = uuid.uuid4().hex
+                            pending_audio_ready_token = boundary_token
+                        else:
+                            pending_audio_ready_token = None
+                    # Reset/commit reopen only after the browser has observed
+                    # the server result. This client acknowledgement is ordered
+                    # after every binary frame the browser sent during the
+                    # closed interval, so ASGI backlog cannot be reclassified
+                    # as post-recovery audio.
+                    if isinstance(control, dict) and control.get("type") == "audio_ready":
+                        epoch = control.get("epoch")
+                        connection = control.get("connection_id")
+                        token = control.get("token")
+                        if (
+                            connection == connection_id
+                            and isinstance(token, str)
+                            and token == pending_audio_ready_token
+                            and isinstance(epoch, int)
+                            and not isinstance(epoch, bool)
+                            and epoch == voice_epoch
+                            and session.state == voice_mod.LISTENING
+                            and whisperlive_client is not None
+                            and whisperlive_client.is_ready()
+                        ):
+                            audio_intake_open = True
+                            pending_audio_ready_token = None
+                        continue
+                await incoming.put((
+                    msg, accepted_at_intake, audio_intake_generation,
+                    boundary_token,
+                ))
+                if msg_type == "websocket.disconnect":
+                    return
+        except WebSocketDisconnect:
+            await incoming.put((
+                {"type": "websocket.disconnect"}, False,
+                audio_intake_generation, None,
+            ))
+        except Exception as exc:
+            await incoming.put((
+                {"type": "voice.receive.error", "error": exc},
+                False, audio_intake_generation, None,
+            ))
 
     def _upstream_state() -> str:
         """Project the existing WhisperLive client into the wire contract."""
@@ -10331,6 +10456,7 @@ async def ws_voice(websocket: WebSocket):
     async def _on_whisperlive_error(message: str) -> None:
         nonlocal whisperlive_unavailable
         whisperlive_unavailable = True
+        _close_audio_intake()
         try:
             await websocket.send_json({
                 "type": "error",
@@ -10393,7 +10519,9 @@ async def ws_voice(websocket: WebSocket):
         logger.info("ws_voice DIAG: WhisperLive READY bind=%s", bind)
         return True
 
-    async def _handle_voice_reset() -> None:
+    async def _handle_voice_reset(
+        arrival_generation: int, boundary_token: str | None,
+    ) -> None:
         """#43: explicit Send/Clear suppression control. Flag-gated.
 
         ON (``voice.reset_suppression``): flush the WhisperLive session at the
@@ -10409,7 +10537,14 @@ async def ws_voice(websocket: WebSocket):
         nonlocal voice_epoch, whisperlive_client
         voice_buffer_mod.MANAGER.clear(bind)
         if not feature_flags.is_enabled("voice.reset_suppression"):
-            await websocket.send_json(voice_buffer_mod.buffer_state_frame(""))
+            frame = voice_buffer_mod.buffer_state_frame("")
+            if audio_ready_required and boundary_token:
+                frame["audio_ready_token"] = boundary_token
+            await websocket.send_json(frame)
+            _sync_audio_intake(
+                allow_open=not audio_ready_required,
+                expected_generation=arrival_generation,
+            )
             return
         voice_epoch += 1
         old = whisperlive_client
@@ -10424,7 +10559,13 @@ async def ws_voice(websocket: WebSocket):
         await _ensure_whisperlive_connected()
         frame = voice_buffer_mod.buffer_state_frame("")
         frame["epoch"] = voice_epoch
+        if audio_ready_required and boundary_token:
+            frame["audio_ready_token"] = boundary_token
         await websocket.send_json(frame)
+        _sync_audio_intake(
+            allow_open=not audio_ready_required,
+            expected_generation=arrival_generation,
+        )
         logger.info("ws_voice DIAG: reset → epoch=%d bind=%s", voice_epoch, bind)
 
     logger.info(
@@ -10435,12 +10576,17 @@ async def ws_voice(websocket: WebSocket):
     _audio_capture_enabled = _voice_audio_capture_enabled()
     _audio_capture_wav = None   # debug WAV writer (lazily opened if capture flag set)
 
+    receiver_task = asyncio.create_task(_receive_voice_messages())
     try:
         while True:
-            msg = await websocket.receive()
+            (
+                msg, accepted_at_intake, arrival_generation, boundary_token,
+            ) = await incoming.get()
             msg_type = msg.get("type")
             if msg_type == "websocket.disconnect":
                 break
+            if msg_type == "voice.receive.error":
+                raise msg["error"]
             if "text" in msg and msg["text"] is not None:
                 # #43: 'reset' is the explicit Send/Clear suppression control. It is
                 # NOT a state-machine control, so intercept it before
@@ -10452,7 +10598,9 @@ async def ws_voice(websocket: WebSocket):
                 except Exception:
                     _ctrl = None
                 if isinstance(_ctrl, dict) and _ctrl.get("type") == "reset":
-                    await _handle_voice_reset()
+                    await _handle_voice_reset(
+                        arrival_generation, boundary_token,
+                    )
                     continue
                 frame_type, payload = voice_mod.parse_control_frame(msg["text"])
                 if frame_type is None:
@@ -10501,8 +10649,16 @@ async def ws_voice(websocket: WebSocket):
                 ):
                     await _ensure_whisperlive_connected()
                     await websocket.send_json(_voice_state_frame())
+                    _sync_audio_intake(
+                        allow_open=True,
+                        expected_generation=arrival_generation,
+                    )
                 elif frame_type in ("mute", "unmute") and control_accepted:
                     await websocket.send_json(_voice_state_frame())
+                    _sync_audio_intake(
+                        allow_open=True,
+                        expected_generation=arrival_generation,
+                    )
                 # Real commit path (S3-5): when the state machine
                 # transitioned into COMMITTING, read the accumulated
                 # buffer and dispatch via tmux_send.
@@ -10562,7 +10718,14 @@ async def ws_voice(websocket: WebSocket):
                                 committed_text=pending_text,
                             )
                     for resp in finish:
+                        if audio_ready_required and boundary_token:
+                            resp = dict(resp)
+                            resp["audio_ready_token"] = boundary_token
                         await websocket.send_json(resp)
+                    _sync_audio_intake(
+                        allow_open=not audio_ready_required,
+                        expected_generation=arrival_generation,
+                    )
                 if frame_type == "end":
                     # Explicit operator 'end' — drop the buffer
                     # immediately (no TTL grace), regardless of what
@@ -10578,9 +10741,13 @@ async def ws_voice(websocket: WebSocket):
                 if session.state == voice_mod.ENDED:
                     break
             elif "bytes" in msg and msg["bytes"] is not None:
-                should_forward = session.handle_audio(msg["bytes"])
+                audio_bytes = msg["bytes"]
+                if not audio_bytes:
+                    continue
+                should_forward = (
+                    accepted_at_intake and session.handle_audio(audio_bytes)
+                )
                 _audio_frames += 1
-                audio_received += 1
                 # Debug: capture the RAW browser PCM (real mic, ambient room tone)
                 # to a WAV when enabled at WS start. Never consult Settings from
                 # the per-frame path.
@@ -10588,7 +10755,7 @@ async def ws_voice(websocket: WebSocket):
                     _audio_capture_wav = _open_voice_audio_capture(bind)
                 if _audio_capture_wav is not None:
                     try:
-                        _audio_capture_wav.writeframes(msg["bytes"])
+                        _audio_capture_wav.writeframes(audio_bytes)
                     except Exception:
                         pass
                 if _audio_frames % 50 == 1:
@@ -10602,11 +10769,11 @@ async def ws_voice(websocket: WebSocket):
                     and whisperlive_client is not None
                     and whisperlive_client.is_ready()
                 ):
-                    await whisperlive_client.send_audio(msg["bytes"])
-                    # send_audio owns its failure path and marks the wrapper
-                    # unavailable before returning. Count/ack only a frame that
-                    # left through a still-ready upstream client.
-                    if whisperlive_client.is_ready():
+                    was_forwarded = await whisperlive_client.send_audio(audio_bytes)
+                    # send_audio reports the actual upstream write. Readiness
+                    # alone is insufficient: empty/invalid frames may be a
+                    # deliberate no-op while the wrapper remains READY.
+                    if was_forwarded:
                         audio_forwarded += 1
                         now = _voice_flow_monotonic()
                         if (
@@ -10621,6 +10788,8 @@ async def ws_voice(websocket: WebSocket):
                                 "ts_ms": int(time.time() * 1000),
                             })
                             last_audio_flow_at = now
+                    elif not whisperlive_client.is_ready():
+                        _close_audio_intake()
                 # else: state machine said no (muted / committing /
                 # ended) or wrapper not ready / unavailable.
                 # Silently drop — spec says audio outside LISTENING
@@ -10633,6 +10802,12 @@ async def ws_voice(websocket: WebSocket):
     except Exception:
         logger.exception("ws_voice: unexpected error bind=%s", bind)
     finally:
+        if not receiver_task.done():
+            receiver_task.cancel()
+            try:
+                await receiver_task
+            except (asyncio.CancelledError, Exception):
+                pass
         if _audio_capture_wav is not None:
             try:
                 _audio_capture_wav.close()

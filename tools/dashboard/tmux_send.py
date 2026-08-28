@@ -82,15 +82,18 @@ async def tmux_send_awaited(target: str, text: str) -> None:
     """
     lock = _session_locks.setdefault(target, asyncio.Lock())
     async with lock:
-        _tmux_paste_checked(target, text)
+        # The checked helpers use synchronous subprocess.run. Keep them off the
+        # event loop so WebSocket receivers (notably /ws/voice's immediate
+        # mute/commit/reset gate) continue draining while tmux is working.
+        await asyncio.to_thread(_tmux_paste_checked, target, text)
         await asyncio.sleep(0.3)
-        _tmux_enter_checked(target)
+        await asyncio.to_thread(_tmux_enter_checked, target)
         await asyncio.sleep(0.5)
         # Retry enter — best-effort, do not raise even on failure.
         # If the first enter succeeded, this hits an empty prompt;
         # if it failed, we already raised above.
         try:
-            _tmux_enter_checked(target)
+            await asyncio.to_thread(_tmux_enter_checked, target)
         except TmuxSendError:
             pass
 
@@ -98,11 +101,13 @@ async def tmux_send_awaited(target: str, text: str) -> None:
 async def _tmux_send_worker(target: str, text: str) -> None:
     lock = _session_locks.setdefault(target, asyncio.Lock())
     async with lock:
-        _tmux_paste(target, text)
+        await asyncio.to_thread(_tmux_paste, target, text)
         await asyncio.sleep(0.3)
-        _tmux_enter(target)
+        await asyncio.to_thread(_tmux_enter, target)
         await asyncio.sleep(0.5)
-        _tmux_enter(target)  # retry — harmless if already submitted
+        await asyncio.to_thread(
+            _tmux_enter, target,
+        )  # retry — harmless if already submitted
 
 
 def tmux_send_sync(target: str, text: str) -> None:
