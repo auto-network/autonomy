@@ -1,0 +1,154 @@
+/*
+  VaultPolicyClass — model 8: revoking a vault factor excludes it from
+  future writes only, and the root anchor opens every class (crib
+  graph://1e005d5c-c11 §3, §18). Bead auto-ncokx. Tracker 8277c76c.
+
+  One password-policy class (policy_class.py:PolicyClassRecord) with
+  two member factors and the mandatory personal-root anchor. Each
+  Generation is a fresh class_key sealed to the members admitted at
+  mint time plus the anchor (_mint_generation); the generation also
+  publishes the sealing public key derived from the class_key
+  (derive_encapsulation_keypair under CLASS_SEAL_KEY_PURPOSE ->
+  sealkey/1 here), so writes seal a setting's CEK with NO factor
+  present (seal_cek) and only opening derives the private half.
+  revoke_factor APPENDS generation 2 sealed to the survivor and the
+  anchor; generation 1 is left byte-identical (bulk re-wrap is a
+  correctness defect — policy_class.py:revoke_factor).
+
+  Scenario: enroll {f1, f2, anchor} -> write cek1 under generation 1
+  -> revoke f2 -> write cek2 under generation 2. Reveal rules hand the
+  adversary the revoked seed, the survivor seed, or the anchor seed;
+  the whole store (every wrap, every sealed CEK, every public key) is
+  Out at mint time, so a revealed seed models a factor holder with a
+  full replicated copy — the crib §9 snapshot discipline.
+
+  Calibrations:
+  - VaultPolicyClassNoReseal.spthy: the revocation reuses the old
+    class_key instead of minting a fresh one ->
+    revoked_factor_excluded_forward falsified.
+  - VaultPolicyClassNoAnchor.spthy: generation 2 is minted without the
+    anchor wrap -> root_reaches_every_generation falsified — exactly
+    the record VaultStore.put_class refuses to persist.
+*/
+
+theory VaultPolicyClass
+begin
+
+builtins: asymmetric-encryption
+
+functions: recipientkey/1, sealkey/1
+
+/* Mint the class: generation 1's fresh class_key ~k1 sealed to both
+   member factors and the anchor; its sealing public key published.
+   The full record is public — confidentiality lives in the seals. */
+rule Enroll_Class:
+  [ Fr(~k1), Fr(~f1), Fr(~f2), Fr(~anchor) ]
+  --[ ClassMinted(~k1), OnceEnroll() ]->
+  [ !F1Seed(~f1), !F2Seed(~f2), !AnchorSeed(~anchor)
+  , !Gen1Key(~k1)
+  , Out(aenc(~k1, pk(recipientkey(~f1))))
+  , Out(aenc(~k1, pk(recipientkey(~f2))))
+  , Out(aenc(~k1, pk(recipientkey(~anchor))))
+  , Out(pk(sealkey(~k1)))
+  ]
+
+restriction once_enroll:
+  "All #i #j. OnceEnroll()@i & OnceEnroll()@j ==> #i = #j"
+
+/* A write under generation 1: seal a fresh CEK to the generation's
+   public sealing key (seal_cek — factor-free by design). */
+rule Write_Gen1:
+  [ !Gen1Key(~k1), Fr(~cek) ]
+  --[ WroteOld(~cek) ]->
+  [ Out(aenc(~cek, pk(sealkey(~k1)))) ]
+
+/* Revoke f2: APPEND generation 2 — a fresh class_key sealed to the
+   survivor and the anchor only, using nothing but their public keys
+   (revoke_factor is ceremony-free). Generation 1 is untouched. */
+rule Revoke_F2:
+  [ !F1Seed(~f1), !AnchorSeed(~anchor), !Gen1Key(~k1), Fr(~k2) ]
+  --[ Revoked(), Gen2Minted(~k2), OnceRevoke() ]->
+  [ !Gen2Key(~k2)
+  , Out(aenc(~k2, pk(recipientkey(~f1))))
+  , Out(aenc(~k2, pk(recipientkey(~anchor))))
+  , Out(pk(sealkey(~k2)))
+  ]
+
+restriction once_revoke:
+  "All #i #j. OnceRevoke()@i & OnceRevoke()@j ==> #i = #j"
+
+/* A write under generation 2 — structurally after the revocation,
+   because only Revoke_F2 produces !Gen2Key. */
+rule Write_Gen2:
+  [ !Gen2Key(~k2), Fr(~cek) ]
+  --[ WroteNew(~cek) ]->
+  [ Out(aenc(~cek, pk(sealkey(~k2)))) ]
+
+/* Honest read as the survivor (open_cek): open the factor wrap of the
+   generation the CEK names, derive the private sealing key from the
+   recovered class_key, open the CEK. */
+rule Read_As_Survivor:
+  [ !F1Seed(~f1)
+  , In(aenc(k, pk(recipientkey(~f1))))
+  , In(aenc(cek, pk(sealkey(k))))
+  ]
+  --[ SurvivorRead(cek) ]->
+  [ ]
+
+/* Compromise: any principal's seed may fall. RevealedRevoked models
+   the revoked machine's complete snapshot (its seed plus the public
+   store the Out()s above already gave the adversary). */
+rule Reveal_Survivor:
+  [ !F1Seed(~f1) ]         --[ RevealedSurvivor() ]-> [ Out(~f1) ]
+
+rule Reveal_Revoked:
+  [ !F2Seed(~f2) ]         --[ RevealedRevoked() ]->  [ Out(~f2) ]
+
+rule Reveal_Anchor:
+  [ !AnchorSeed(~anchor) ] --[ RevealedAnchor() ]->   [ Out(~anchor) ]
+
+/* ═══ Lemmas ═══ */
+
+/* Enroll -> write -> revoke -> write again, and the survivor reads
+   BOTH: the pre-revocation CEK through generation 1 and the new CEK
+   through generation 2 (open_cek's "a survivor still reads a secret
+   sealed before a revocation"). */
+lemma executable:
+  exists-trace
+  "Ex kc c1 c2 #m #w1 #r #w2 #s1 #s2.
+      ClassMinted(kc)@m & WroteOld(c1)@w1 & Revoked()@r & WroteNew(c2)@w2
+    & SurvivorRead(c1)@s1 & SurvivorRead(c2)@s2"
+
+/* MAIN — forward exclusion: the revoked factor's seed plus the full
+   public store never opens a CEK sealed under generation 2, unless a
+   surviving credential (survivor factor or anchor) also leaked. */
+lemma revoked_factor_excluded_forward:
+  "not(Ex c #w #r #k.
+        WroteNew(c)@w & RevealedRevoked()@r & K(c)@k
+      & not(Ex #q1. RevealedSurvivor()@q1)
+      & not(Ex #q2. RevealedAnchor()@q2))"
+
+/* The §3 renounced non-claim, stated so it stays renounced (the model
+   1 old_generation_stays_readable move): the revoked factor still
+   opens material sealed under the generation it belonged to. Also the
+   vacuity guard for the MAIN premise: RevealedRevoked genuinely
+   arms the adversary. */
+lemma revoked_factor_keeps_old:
+  exists-trace
+  "Ex c #w #r #k.
+      WroteOld(c)@w & RevealedRevoked()@r & K(c)@k
+    & not(Ex #q1. RevealedSurvivor()@q1)
+    & not(Ex #q2. RevealedAnchor()@q2)"
+
+/* An open personal root reaches every generation — current and past —
+   through the anchor wrap alone, with no member factor present
+   (crib §18 widen-only; the wrap put_class refuses to drop). */
+lemma root_reaches_every_generation:
+  exists-trace
+  "Ex c1 c2 #w1 #w2 #r #k1 #k2.
+      WroteOld(c1)@w1 & WroteNew(c2)@w2 & RevealedAnchor()@r
+    & K(c1)@k1 & K(c2)@k2
+    & not(Ex #q1. RevealedSurvivor()@q1)
+    & not(Ex #q2. RevealedRevoked()@q2)"
+
+end

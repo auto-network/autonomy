@@ -28,6 +28,9 @@ against.
 | `VaultRecoverySuccessionNoCancel.spthy` | model 6 calibration: **no-cancellation precondition deleted** | `cancellation_blocks_completion` falsified, rest verified |
 | `VaultFactorPolicy.spthy` | model 7 green: root-factor-policy AND/OR share algebra (bead auto-5wpjm) | all lemmas verified |
 | `VaultFactorPolicyNoSplit.spthy` | model 7 calibration: **AND node's fresh blind deleted** | `password_alone_no_root` falsified, rest verified |
+| `VaultPolicyClass.spthy` | model 8 green: policy-class generation lifecycle (bead auto-ncokx) | all lemmas verified |
+| `VaultPolicyClassNoReseal.spthy` | model 8 calibration A: **revocation reuses the old class_key** | `revoked_factor_excluded_forward` falsified, rest verified |
+| `VaultPolicyClassNoAnchor.spthy` | model 8 calibration B: **anchor wrap deleted from the new generation** | `root_reaches_every_generation` falsified, rest verified |
 | `run_tamarin.py` | harness enforcing every expectation above | exit 0 iff all hold |
 
 The pairing is the point: a green proof is only trusted because the
@@ -97,8 +100,8 @@ export PATH=/tmp/maude-dist:/tmp/tamarin:$PATH
 python3 tools/network/storagekit/tamarin/run_tamarin.py
 ```
 
-Verified 2026-08-29 with tamarin-prover 1.12.0 + Maude 3.5.1: all seven
-models (15 theories, 81 lemma expectations) green — each green theory
+Verified 2026-08-29 with tamarin-prover 1.12.0 + Maude 3.5.1: all eight
+models (18 theories, 93 lemma expectations) green — each green theory
 fully verifies and each calibration falsifies exactly its headline
 lemma. Whole suite runs in a few seconds. NOTE: the toolchain needs a
 UTF-8 locale (`LC_ALL=C.UTF-8`); `run_tamarin.py` sets it.
@@ -424,10 +427,91 @@ Abstraction register:
    root_factor_policy.py:25) keeps the elementary XOR construction
    sound at any depth.
 
+## Model 8 — policy-class generation lifecycle (bead auto-ncokx)
+
+The vault policy-class key-generation discipline (crib §3, §18;
+`tools/vault/policy_class.py`): one password-policy class with two
+member factors and the mandatory personal-root anchor. Each Generation
+is a fresh class_key sealed to the members admitted at mint time plus
+the anchor (`_mint_generation`); the generation publishes the sealing
+public key derived from the class_key (`CLASS_SEAL_KEY_PURPOSE` →
+`sealkey/1`), so `seal_cek` writes with no factor present and only
+reads derive the private half. `revoke_factor` APPENDS the next
+generation sealed to the survivor plus the anchor; generation 1 stays
+byte-identical. Scenario: enroll → write cek1 → revoke f2 → write
+cek2; every wrap, sealed CEK, and public key is Out at mint time, so a
+revealed seed models a holder with a full replicated store copy (the
+§9 snapshot discipline).
+
+Proved (green, 1.0 s, 4/4):
+- **`revoked_factor_excluded_forward`** (MAIN, derived Dolev-Yao) —
+  the revoked factor's seed plus the full public store never opens a
+  CEK sealed under the post-revocation generation, unless a surviving
+  credential also leaked. "Applies at the next write" mechanized.
+- **`revoked_factor_keeps_old`** (exists-trace, deliberately) — the
+  §3 renounced non-claim as a theorem, the model-1
+  `old_generation_stays_readable` move: the revoked seed alone opens
+  pre-revocation content. Doubles as the MAIN premise's vacuity guard.
+- **`root_reaches_every_generation`** (exists-trace) — the anchor seed
+  alone, no member factor revealed, reaches CEKs under BOTH
+  generations: crib §18 widen-only, the wrap `put_class` refuses to
+  drop.
+- Executability: enroll → write → revoke → write, survivor reads both
+  CEKs (`open_cek`'s survivor-still-reads-old behaviour included).
+  Post-revocation ordering is structural: `Write_Gen2` needs
+  `!Gen2Key`, which only the revocation mints.
+
+Two calibrations, each deleting one element of the revocation mint:
+- `VaultPolicyClassNoReseal.spthy` (old class_key reused) →
+  `revoked_factor_excluded_forward` falsified in 7 steps: the revoked
+  factor opens its generation-1 wrap, recovers the still-current key,
+  derives the sealing private key, reads every new write. Everything
+  else holds.
+- `VaultPolicyClassNoAnchor.spthy` (anchor wrap deleted from the new
+  generation) → `root_reaches_every_generation` falsified: the root
+  opens generation 1 but has no route into generation 2 — exactly the
+  enclave record `put_class` refuses to persist. Forward exclusion and
+  old-readability are anchor-independent and hold.
+
+The split is the evidence the two mint-time elements are independent
+and each load-bearing: fresh key ⇒ forward exclusion; anchor wrap ⇒
+root reach.
+
+Abstraction register:
+
+1. **HPKE seal → `aenc`** (builtin), both for factor wraps
+   (`idkit.sealing.seal`) and the class→CEK public seal — the suite's
+   standard §5 abstraction.
+2. **Wrap purposes omitted.** `_wrap_purpose` /
+   `_cek_public_seal_purpose` bind class, generation, policy, role,
+   and setting into every HPKE info string against cross-context
+   replay; with one class, distinct per-generation keys, and no role
+   split there is nothing to confuse. Cross-class/cross-role confusion
+   is a purpose-label property consumed from the sealing layer, not
+   re-derived here.
+3. **Password policy only (single wrap).** The `both` policy's XOR
+   split is exactly model 7's AND-node algebra — proved there, not
+   repeated. One member survives, one is revoked; more members add
+   symmetric copies of the same wraps.
+4. **The derived sealing keypair is `pk(sealkey(k))`.** Faithful to
+   `derive_encapsulation_keypair(class_key, ...)`: knowing the
+   class_key yields the private half (the adversary can apply
+   `sealkey`), publishing the public half lets anyone write.
+5. **Revocation is ceremony-free** as in code: the mint consumes only
+   public keys; the model's premise on seed facts is scope-binding
+   only, nothing secret flows into the new generation's outputs.
+6. **`created_at`, governance records, store refusal logic**: out of
+   scope. `put_class`'s refusal is mechanized by its consequence — the
+   NoAnchor calibration shows what the refused record would cost — not
+   by modeling the store.
+7. **Bounded scenario:** one class, two generations, one revocation,
+   one write per generation (`Once*` on enroll/revoke; writes may
+   repeat). Longer generation chains repeat the same mint shape.
+
 ## Roadmap (tracker note graph://8277c76c-ad1; beads filed)
 
-All seven Tamarin models DONE (auto-loxsf, -djh2m, -cpbkf, -veal7,
--loov7, -5wpjm, plus the pilot). Remaining:
+All eight Tamarin models DONE (auto-loxsf, -djh2m, -cpbkf, -veal7,
+-loov7, -5wpjm, -ncokx, plus the pilot). Remaining:
 
 1. **TLA+ side-track (auto-xtt5v)**: c6z70 settings-resolution
    discriminator + fleet-roster OR-set convergence — attacker-free

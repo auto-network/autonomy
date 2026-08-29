@@ -139,6 +139,24 @@ EXPECTATIONS = {
         "passkeys_both_no_root": "verified",
         "unlock_only_no_root": "verified",
     },
+    "VaultPolicyClass.spthy": {
+        "executable": "verified",
+        "revoked_factor_excluded_forward": "verified",
+        "revoked_factor_keeps_old": "verified",
+        "root_reaches_every_generation": "verified",
+    },
+    "VaultPolicyClassNoReseal.spthy": {
+        "executable": "verified",
+        "revoked_factor_excluded_forward": "falsified",
+        "revoked_factor_keeps_old": "verified",
+        "root_reaches_every_generation": "verified",
+    },
+    "VaultPolicyClassNoAnchor.spthy": {
+        "executable": "verified",
+        "revoked_factor_excluded_forward": "verified",
+        "revoked_factor_keeps_old": "verified",
+        "root_reaches_every_generation": "falsified",
+    },
 }
 
 SUMMARY_RE = re.compile(
