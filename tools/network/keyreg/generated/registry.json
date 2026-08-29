@@ -17,7 +17,7 @@
       "descriptor": {
         "bound": "The delegating persona's own membership; the fold rejects any overreach.",
         "live": "Yes \u2014 records must reach honest nodes, which verify them against the fold.",
-        "reaches": "Exactly two execution scopes, storage:state:advance and storage:capability:grant, and nothing else. It signs; it opens nothing.",
+        "reaches": "Exactly two execution scopes, storage:state:advance and storage:capability:grant, and nothing else. It signs; it opens nothing. It authorizes only by resolving its delegation chain to a member persona: a chain terminating outside the member roster is void, and generic scope-holding is never consulted for these two scopes.",
         "revoke": "RevocationRecord plus TTL. Not a ceremony.",
         "snapshot": "Nothing."
       },
@@ -678,7 +678,8 @@
         "revoke": "Root-signed RevocationRecord, plus the seven-day TTL. Not a ceremony.",
         "snapshot": "Nothing \u2014 it never leaves the browser."
       },
-      "kind": "signing"
+      "kind": "signing",
+      "notes": "The crib sheet's section 9 register calls this the browser session key."
     }
   },
   "mutations": {

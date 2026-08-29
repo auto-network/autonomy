@@ -184,7 +184,7 @@ The layout mirrors the crib sheet's section 9 register (graph note
 ### agent_delegate_signing_key — signing, memory (Passes the crib's Q2: scope-attenuated, TTL-bounded, fold-enforced at acceptance, revocable, and required for unattended operation.)
 
 - **minted** at random
-- **reaches** Exactly two execution scopes, storage:state:advance and storage:capability:grant, and nothing else. It signs; it opens nothing.
+- **reaches** Exactly two execution scopes, storage:state:advance and storage:capability:grant, and nothing else. It signs; it opens nothing. It authorizes only by resolving its delegation chain to a member persona: a chain terminating outside the member roster is void, and generic scope-holding is never consulted for these two scopes.
 - **snapshot** Nothing.
 - **live?** Yes — records must reach honest nodes, which verify them against the fold.
 - **revoke** RevocationRecord plus TTL. Not a ceremony.
