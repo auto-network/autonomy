@@ -13,7 +13,6 @@ it, or GAP. Gap rows feed the formal-modeling queue on tracker note
 | factor_seed | key | VaultFactorPolicy: password_alone_no_root<br>VaultFactorPolicy: passkeys_both_no_root<br>VaultFactorPolicy: unlock_only_no_root |
 | generation_secret | key | VaultRekeyMarker: exclusion_forward<br>VaultConcurrentRekey: concurrent_grant_secret |
 | k_index_k_meta | key | **GAP** |
-| master_kek | key | **GAP** |
 | member_recovery_key | key | VaultRecoveryRace: recovery_key_secret<br>VaultRecoveryRace: recovery_beats_thief<br>RecoveryUnlink: Observational_equivalence |
 | object_cek | key | **GAP** |
 | object_wrap_key | key | **GAP** |
@@ -67,4 +66,4 @@ it, or GAP. Gap rows feed the formal-modeling queue on tracker note
 | vault.create_class | mutation | VaultPolicyClass: root_reaches_every_generation |
 | vault.revoke_class_factor | mutation | VaultPolicyClass: revoked_factor_excluded_forward<br>VaultPolicyClass: revoked_factor_keeps_old |
 
-26 of 60 entries carry at least one proof; 34 gaps.
+26 of 59 entries carry at least one proof; 33 gaps.
