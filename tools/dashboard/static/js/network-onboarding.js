@@ -164,7 +164,8 @@
       var stored = await _fetchJson('/api/identity/personal');
       var opened;
       try {
-        opened = await S.decryptArmor(stored.armored_private_key, pw);
+        var policyMod = await import('/static/js/ceremony/root-factor-policy.js');
+        opened = await policyMod.openArmorWithPassword(stored.armored_private_key, pw);
       } catch (e) {
         throw new Error('that password does not open your identity — check it and try again');
       }

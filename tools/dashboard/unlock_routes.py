@@ -815,7 +815,7 @@ async def post_unlock_combined(request: Request) -> JSONResponse:
     An MFA identity has no standalone password or passkey factor — only the
     combined factor — so neither the password path nor the passkey path can
     open it. The browser gathers both, opens the armor with
-    ``decryptArmorWithCombined`` (locally — I1), and signs the challenge minted
+    the factor-policy ceremony (locally — I1), and signs the challenge minted
     by ``…/unlock/password/options`` (the challenge is factor-agnostic). The
     server verifies the resulting root signature identically to the password
     path and mints a ``combined`` session. Without a combined unlock an MFA
