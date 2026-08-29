@@ -226,6 +226,20 @@ EXPECTATIONS = {
         "cancel_possible": "verified",
         "veto_possible": "verified",
     },
+    "VaultRekeyMarkerChain.spthy": {
+        "root_secret": "verified",
+        "key_only_via_removal": "verified",
+        "executable_chain": "verified",
+        "exclusion_through_chain": "verified",
+        "later_removal_reads_earlier_grant": "verified",
+    },
+    "VaultRekeyMarkerChainOneHop.spthy": {
+        "root_secret": "verified",
+        "key_only_via_removal": "verified",
+        "executable_chain": "verified",
+        "exclusion_through_chain": "falsified",
+        "later_removal_reads_earlier_grant": "verified",
+    },
 }
 
 SUMMARY_RE = re.compile(
