@@ -10,9 +10,10 @@ open the armor, or a passkey ceremony to produce the PRF output.
 
 Two factor types exist:
 
-* ``password`` — the seed is armored (``idkit.armor``: PBKDF2-HMAC-SHA256,
-  600,000 iterations, into AES-256-GCM). The armor is the persisted material;
-  the password never is. This is the ONLY factor phase one builds.
+* ``password`` — the seed is wrapped under the password
+  (``tools/vault/password_wrap``: PBKDF2-HMAC-SHA256, 600,000 iterations,
+  into AES-256-GCM). The wrap is the persisted material; the password never
+  is. This is the ONLY factor phase one builds.
 * ``passkey`` — the seed IS the WebAuthn PRF extension output. The PRF library
   is out of this epic (crib §18), so this module accepts a raw seed directly so
   the ``prf`` / ``both`` constructions can be *attacked* headlessly with a
@@ -28,7 +29,7 @@ from __future__ import annotations
 import secrets
 from dataclasses import dataclass
 
-from tools.network.idkit.armor import decrypt_root_key, encrypt_root_key
+from .password_wrap import open_password_factor, wrap_password_factor
 from tools.network.idkit.keys import KeyPair
 from tools.network.idkit.sealing import derive_encapsulation_keypair
 
@@ -116,7 +117,7 @@ def create_password_factor(password: str, *, factor_id: str) -> PasswordFactor:
         raise FactorError("factor_id must be a non-empty string")
     keypair = KeyPair.generate()
     seed = bytes.fromhex(keypair.private_hex)
-    armor = encrypt_root_key(keypair, password)
+    armor = wrap_password_factor(keypair, password)
     return PasswordFactor(
         published=PublishedFactor(factor_id, PASSWORD, _public_from_seed(seed)),
         armor=armor,
@@ -130,7 +131,7 @@ def open_password_seed(armor: str, password: str) -> bytes:
     idkit taxonomy failure is normalized so callers cannot distinguish the two.
     """
     try:
-        keypair = decrypt_root_key(armor, password)
+        keypair = open_password_factor(armor, password)
     except Exception as exc:  # noqa: BLE001 — normalize to one failure shape
         raise FactorError("password factor did not open") from exc
     return bytes.fromhex(keypair.private_hex)
