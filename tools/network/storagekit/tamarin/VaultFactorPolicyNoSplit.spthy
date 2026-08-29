@@ -1,0 +1,148 @@
+/*
+  VaultFactorPolicyNoSplit — model 7 calibration: the AND node stops
+  splitting. Identical to VaultFactorPolicy.spthy except the AND
+  node's fresh blind is DELETED — `zero` (the XOR identity) replaces
+  ~x — so the password's sealed "share" normalizes to the node secret
+  itself while the OR branch carries the identity. Expected:
+  password_alone_no_root falsified (the password leaf alone opens the
+  root — see the falsification trace via
+  `tamarin-prover --prove VaultFactorPolicyNoSplit.spthy`), every
+  other lemma unchanged.
+
+  WHY THIS ENCODING of "shares its node secret with both children":
+  handing BOTH children the literal node secret would falsify FIVE
+  lemmas at once — passkey1_alone / passkey2_alone / passkeys_both
+  (either passkey leaf would then open straight to the root seed) and
+  executable (the honest opener XORs its two shares, and
+  s XOR s = zero, so no honest open reconstructs the root at all).
+  A calibration that breaks everything demonstrates nothing about
+  WHICH element is load-bearing. Deleting only the blind's freshness
+  (`os.urandom(32)` degrading to a zero buffer in
+  root_factor_policy.py:_compile_node) is the minimal single-element
+  deletion under which the AND no longer splits knowledge — one child
+  holds everything — and it isolates the headline failure to exactly
+  the password branch, keeping the passkey branches and the honest
+  opener as live controls.
+*/
+
+theory VaultFactorPolicyNoSplit
+begin
+
+builtins: asymmetric-encryption, xor
+
+functions: recipientkey/1, accesskey/1
+
+/* CALIBRATION: the fresh blind ~x is deleted; zero takes its place in
+   the same XOR-split lines. share_pw normalizes to ~s. */
+rule Enroll_Policy:
+  let share_or = zero
+      share_pw = ~s XOR zero
+      c_pw  = aenc(share_pw, pk(recipientkey(~pw)))
+      c_pk1 = aenc(share_or, pk(recipientkey(~pk1)))
+      c_pk2 = aenc(share_or, pk(recipientkey(~pk2)))
+  in
+  [ Fr(~s), Fr(~pw), Fr(~pk1), Fr(~pk2), Fr(~ul) ]
+  --[ Enrolled(~s), OnceEnroll() ]->
+  [ !RootSeed(~s)
+  , !PwSeed(~pw), !Pk1Seed(~pk1), !Pk2Seed(~pk2), !UnlockSeed(~ul)
+  , !Armor(c_pw, c_pk1, c_pk2)
+  , Out(<c_pw, c_pk1, c_pk2>)
+  , Out(<pk(recipientkey(~pw)), pk(recipientkey(~pk1)), pk(recipientkey(~pk2))>)
+  , Out(<pk(accesskey(~pw)), pk(accesskey(~ul))>)
+  ]
+
+restriction once_enroll:
+  "All #i #j. OnceEnroll()@i & OnceEnroll()@j ==> #i = #j"
+
+/* Honest opens (root_factor_policy.py:_open_node): the password and
+   one passkey open their leaf seals and XOR the two shares. */
+rule Open_Via_Passkey1:
+  [ !PwSeed(~pw), !Pk1Seed(~pk1)
+  , !Armor( aenc(sh_pw, pk(recipientkey(~pw)))
+          , aenc(sh_or, pk(recipientkey(~pk1)))
+          , c_rest )
+  ]
+  --[ OpenedVia1(sh_pw XOR sh_or) ]->
+  [ ]
+
+rule Open_Via_Passkey2:
+  [ !PwSeed(~pw), !Pk2Seed(~pk2)
+  , !Armor( aenc(sh_pw, pk(recipientkey(~pw)))
+          , c_mid
+          , aenc(sh_or, pk(recipientkey(~pk2))) )
+  ]
+  --[ OpenedVia2(sh_pw XOR sh_or) ]->
+  [ ]
+
+/* The unlock-only factor signs in to the dashboard; it never touches
+   the share tree. */
+rule Unlock_Session:
+  [ !UnlockSeed(~ul) ]
+  --[ SessionGranted(pk(accesskey(~ul))) ]->
+  [ Out('session_cookie') ]
+
+/* Per-factor compromise: the adversary may obtain any factor seed.
+   The lemmas below pin the named subsets. */
+rule Reveal_Password:
+  [ !PwSeed(~pw) ]    --[ RevealedPw() ]->     [ Out(~pw) ]
+
+rule Reveal_Passkey1:
+  [ !Pk1Seed(~pk1) ]  --[ RevealedPk1() ]->    [ Out(~pk1) ]
+
+rule Reveal_Passkey2:
+  [ !Pk2Seed(~pk2) ]  --[ RevealedPk2() ]->    [ Out(~pk2) ]
+
+rule Reveal_Unlock:
+  [ !UnlockSeed(~ul) ] --[ RevealedUnlock() ]-> [ Out(~ul) ]
+
+/* ═══ Lemmas — verbatim from VaultFactorPolicy.spthy ═══ */
+
+lemma executable:
+  exists-trace
+  "Ex s ap #e #o1 #o2 #sg.
+      Enrolled(s)@e & OpenedVia1(s)@o1 & OpenedVia2(s)@o2
+    & SessionGranted(ap)@sg"
+
+lemma password_and_passkey1_release_root:
+  exists-trace
+  "Ex s #e #r1 #r2 #k.
+      Enrolled(s)@e & RevealedPw()@r1 & RevealedPk1()@r2 & K(s)@k
+    & not(Ex #q. RevealedPk2()@q)"
+
+lemma password_and_passkey2_release_root:
+  exists-trace
+  "Ex s #e #r1 #r2 #k.
+      Enrolled(s)@e & RevealedPw()@r1 & RevealedPk2()@r2 & K(s)@k
+    & not(Ex #q. RevealedPk1()@q)"
+
+lemma password_alone_no_root:
+  "not(Ex s #e #r #k.
+        Enrolled(s)@e & RevealedPw()@r & K(s)@k
+      & not(Ex #q1. RevealedPk1()@q1)
+      & not(Ex #q2. RevealedPk2()@q2))"
+
+lemma passkey1_alone_no_root:
+  "not(Ex s #e #r #k.
+        Enrolled(s)@e & RevealedPk1()@r & K(s)@k
+      & not(Ex #q1. RevealedPw()@q1)
+      & not(Ex #q2. RevealedPk2()@q2))"
+
+lemma passkey2_alone_no_root:
+  "not(Ex s #e #r #k.
+        Enrolled(s)@e & RevealedPk2()@r & K(s)@k
+      & not(Ex #q1. RevealedPw()@q1)
+      & not(Ex #q2. RevealedPk1()@q2))"
+
+lemma passkeys_both_no_root:
+  "not(Ex s #e #r1 #r2 #k.
+        Enrolled(s)@e & RevealedPk1()@r1 & RevealedPk2()@r2 & K(s)@k
+      & not(Ex #q. RevealedPw()@q))"
+
+lemma unlock_only_no_root:
+  "not(Ex s #e #u #k.
+        Enrolled(s)@e & RevealedUnlock()@u & K(s)@k
+      & not(Ex #q1. RevealedPw()@q1)
+      & not(Ex #q2. RevealedPk1()@q2)
+      & not(Ex #q3. RevealedPk2()@q3))"
+
+end
