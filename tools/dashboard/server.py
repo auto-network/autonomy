@@ -17986,27 +17986,79 @@ def _resolved_dispatch_limits() -> dict:
 _agentic_prep_semaphore = asyncio.Semaphore(3)
 
 
-def _agentic_running_count_recent() -> int:
-    """RUNNING agentic rows started within the cap window.
+# Launch context for QUEUED rows, held in-process (run_id -> kwargs for
+# _agentic_launch_task). Deliberately NOT persisted: a dashboard restart
+# loses it, and the startup sweep fails the matching QUEUED/PREPARING
+# rows as orphaned-prelaunch — consistent by construction.
+_pending_agentic_launches: dict = {}
+_agentic_queue_event: asyncio.Event = asyncio.Event()
+_agentic_queue_task: asyncio.Task | None = None
+_AGENTIC_QUEUE_CEILING = 200
 
-    Rows with missing/unparsable start times are excluded on purpose:
-    wedged rows (a killed container with --rm never reaches "exited", so
-    its row stays RUNNING forever — handoff item 3) must not starve new
-    dispatches once they age out of the window.
-    """
+
+def _agentic_queue_depth() -> int:
+    """QUEUED agentic rows (safety ceiling only, never a launch gate)."""
     from agents.dispatch_db import get_active_agentic_runs
-    now = datetime.now(timezone.utc)
-    count = 0
-    for row in get_active_agentic_runs():
-        raw = row.get("started_at")
-        try:
-            started = datetime.strptime(
-                str(raw), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-        except (TypeError, ValueError):
+    return sum(1 for r in get_active_agentic_runs()
+               if r.get("status") == "QUEUED")
+
+
+async def _drain_agentic_queue_once() -> int:
+    """Launch queued dispatches into free slots; returns launches started.
+
+    Cap semantics (operator ruling, 2026-08-29): the agentic limit
+    governs CONCURRENT runs — occupancy is RUNNING plus PREPARING (a
+    claimed launch about to become RUNNING; counting it prevents
+    overshoot) — and excess dispatches WAIT as QUEUED rows, visible in
+    the dispatch page's approved-waiting section, draining oldest-first
+    as slots free. Nothing is ever rejected for being over the cap.
+    """
+    from agents.dispatch_db import claim_queued_run, get_active_agentic_runs
+    limits = await asyncio.to_thread(_resolved_dispatch_limits)
+    cap = limits["agentic_max_concurrent"]
+    rows = await asyncio.to_thread(get_active_agentic_runs)
+    occupied = sum(1 for r in rows
+                   if r.get("status") in ("PREPARING", "RUNNING"))
+    queued = sorted(
+        (r for r in rows if r.get("status") == "QUEUED"),
+        key=lambda r: str(r.get("started_at") or ""),
+    )
+    started = 0
+    for row in queued:
+        if occupied >= cap:
+            break
+        run_id = row.get("id") or ""
+        ctx = _pending_agentic_launches.get(run_id)
+        if ctx is None:
+            # Context lost (restart) — the startup sweep owns these rows.
             continue
-        if (now - started).total_seconds() <= _AGENTIC_CAP_WINDOW_S:
-            count += 1
-    return count
+        if not await asyncio.to_thread(claim_queued_run, run_id):
+            continue
+        occupied += 1
+        started += 1
+        asyncio.create_task(
+            _agentic_launch_task(run_id=run_id, **ctx),
+            name=f"agentic-launch-{run_id}",
+        )
+    return started
+
+
+async def _agentic_queue_drainer() -> None:
+    """Background drainer: wakes on enqueue/slot events and every 5s.
+
+    The 5s fallback is what observes slots freed by the DISPATCHER
+    process finalizing completed runs (a cross-process event nothing
+    in-process signals)."""
+    while True:
+        try:
+            await asyncio.wait_for(_agentic_queue_event.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            pass
+        _agentic_queue_event.clear()
+        try:
+            await _drain_agentic_queue_once()
+        except Exception:
+            logger.exception("agentic queue drain failed")
 
 
 def _prepare_agent_action_workspace(
@@ -18077,16 +18129,18 @@ async def _agentic_launch_task(
 ) -> None:
     """Background half of an agentic dispatch: prep, launch, register.
 
-    Owns every status transition after QUEUED. Independent of the HTTP
-    request that accepted the dispatch — a client disconnect can no
-    longer orphan a half-created run. A dashboard restart mid-flight is
-    swept by fail_stale_prelaunch_runs() at the next startup.
+    Entered already claimed at PREPARING by the queue drainer (the cap's
+    slot accounting counts this task from claim to completion).
+    Independent of the HTTP request that accepted the dispatch — a
+    client disconnect can no longer orphan a half-created run. A
+    dashboard restart mid-flight is swept by fail_stale_prelaunch_runs()
+    at the next startup; the drainer nudge on every exit path frees the
+    slot for the next queued dispatch without waiting for the 5s poll.
     """
     from agents.dispatch_db import record_dispatch_failure, update_run_status
     try:
         if explicit_workspace:
             async with _agentic_prep_semaphore:
-                await asyncio.to_thread(update_run_status, run_id, "PREPARING")
                 # DO NOT move this back onto the event loop. Beyond git
                 # cost, _resolve_org_mount's path probes inside
                 # prepare_session_mounts will sit on a hard-mounted NFS
@@ -18120,8 +18174,6 @@ async def _agentic_launch_task(
                 )
                 return
             launch_kwargs.update(prep_update)
-        else:
-            await asyncio.to_thread(update_run_status, run_id, "PREPARING")
 
         try:
             from agents.session_launcher import launch_session
@@ -18157,6 +18209,11 @@ async def _agentic_launch_task(
             )
         except Exception:
             pass
+    finally:
+        _pending_agentic_launches.pop(run_id, None)
+        # Any exit — RUNNING, failed prep, crashed launch — changes slot
+        # occupancy or queue state; wake the drainer immediately.
+        _agentic_queue_event.set()
 
 
 async def api_agent_action_dispatch(request):
@@ -18555,28 +18612,24 @@ async def api_agent_action_dispatch(request):
             status_code=500,
         )
 
-    # ── Agentic launch cap (operator directive, host handoff 148ead24
-    # item 2): nothing else limits agentic spawns — the dispatcher's
-    # --max-concurrent gates only its own bead phase, and 59 launches in
-    # 30 minutes went out tonight. Enforced here because this endpoint is
-    # where agentic containers actually spawn. Only recently-started
-    # RUNNING rows count, so wedged rows (handoff item 3: kill/--rm races
-    # leave rows RUNNING forever) cannot starve dispatching.
-    running_agentic, agentic_cap = await asyncio.to_thread(
-        lambda: (_agentic_running_count_recent(),
-                 _resolved_dispatch_limits()["agentic_max_concurrent"]),
-    )
-    if running_agentic >= agentic_cap:
+    # ── Queue ceiling only (operator ruling, 2026-08-29): the agentic
+    # cap NEVER rejects a dispatch — excess dispatches enqueue as QUEUED
+    # rows (visible in the approved-waiting section) and the drainer
+    # launches them oldest-first as RUNNING slots free. The one refusal
+    # left is a generous absolute queue depth, purely as a runaway
+    # backstop.
+    queue_depth = await asyncio.to_thread(_agentic_queue_depth)
+    if queue_depth >= _AGENTIC_QUEUE_CEILING:
         return JSONResponse(
             {
                 "error": (
-                    f"agentic launch cap reached: {running_agentic} runs "
-                    f"started within the last hour are still RUNNING "
-                    f"(cap {agentic_cap}). Retry when one completes, or "
-                    f"raise the limit on the dispatch page."
+                    f"agentic dispatch queue is full ({queue_depth} "
+                    f"queued; ceiling {_AGENTIC_QUEUE_CEILING}) — this is "
+                    f"a runaway backstop, not the concurrency cap; "
+                    f"investigate before retrying"
                 ),
-                "running": running_agentic,
-                "cap": agentic_cap,
+                "queued": queue_depth,
+                "ceiling": _AGENTIC_QUEUE_CEILING,
             },
             status_code=429,
         )
@@ -18706,23 +18759,34 @@ async def api_agent_action_dispatch(request):
             "agent-actions: dispatch_runs insert failed run_id=%s", run_id,
         )
 
-    launch_task = asyncio.create_task(
-        _agentic_launch_task(
-            run_id=run_id,
-            workspace=workspace,
-            container_name=container_name,
-            output_dir_path=output_dir_path,
-            output_dir=output_dir,
-            launch_kwargs=launch_kwargs,
-            explicit_workspace=explicit_workspace,
-            model=model,
-        ),
-        name=f"agentic-launch-{run_id}",
-    )
+    _pending_agentic_launches[run_id] = {
+        "workspace": workspace,
+        "container_name": container_name,
+        "output_dir_path": output_dir_path,
+        "output_dir": output_dir,
+        "launch_kwargs": launch_kwargs,
+        "explicit_workspace": explicit_workspace,
+        "model": model,
+    }
+    _agentic_queue_event.set()
     if os.environ.get("AGENT_ACTIONS_SYNC_LAUNCH"):
-        # Deterministic mode for tests: the accepted contract is identical,
-        # the work just completes before the response is written.
-        await launch_task
+        # Deterministic mode for tests: drain inline until this row has
+        # left the queue (launched or failed); the accepted contract is
+        # identical, the work just completes before the response.
+        for _ in range(50):
+            started = await _drain_agentic_queue_once()
+            pending = [
+                t for t in asyncio.all_tasks()
+                if t.get_name() == f"agentic-launch-{run_id}"
+            ]
+            for t in pending:
+                await t
+            if run_id not in _pending_agentic_launches:
+                break
+            if started == 0 and not pending:
+                # No free slot for this row (cap saturated): it stays
+                # QUEUED, exactly as async mode would leave it.
+                break
 
     response = {
         "queued": True,
@@ -20599,6 +20663,9 @@ async def _on_startup():
     except Exception:
         logger.exception("stale prelaunch sweep failed")
     _dispatch_watcher_task = asyncio.create_task(_dispatch_watcher())
+    global _agentic_queue_task
+    _agentic_queue_task = asyncio.create_task(
+        _agentic_queue_drainer(), name="agentic-queue-drainer")
     _event_loop_watchdog_task = asyncio.create_task(_event_loop_watchdog())
     global _stall_sampler_started
     if not _stall_sampler_started:
@@ -20803,6 +20870,12 @@ async def _on_shutdown():
         await image_build_worker.stop_worker()
     except Exception:
         logger.exception("error stopping the workspace image build worker")
+    if _agentic_queue_task is not None and not _agentic_queue_task.done():
+        _agentic_queue_task.cancel()
+        try:
+            await _agentic_queue_task
+        except (asyncio.CancelledError, Exception):
+            pass
     try:
         await web_push.stop_worker()
     except Exception:

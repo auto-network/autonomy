@@ -71,7 +71,7 @@
              @change="saveLimits()">
     </span>
     <span class="inline-flex items-center gap-1.5 text-sm text-gray-400"
-          title="Concurrent agentic (agent-action) runs; dispatches 429 at the cap (0 pauses agentic launches). Applies immediately.">
+          title="Concurrent agentic (agent-action) runs; excess dispatches queue below and launch as slots free (0 pauses launching; everything queues). Applies immediately.">
       agentic &le;
       <input type="number" min="0" max="64"
              class="w-14 px-1.5 py-0.5 rounded bg-gray-800 border border-gray-600 text-gray-200 text-sm"

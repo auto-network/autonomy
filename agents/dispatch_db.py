@@ -851,6 +851,30 @@ def update_run_status(run_id: str, status: str) -> None:
         conn.close()
 
 
+def claim_queued_run(run_id: str) -> bool:
+    """Atomically claim one QUEUED row for launching (-> PREPARING).
+
+    The queue drainer's claim step: the UPDATE's status guard makes two
+    concurrent drain passes (or a drain racing the startup sweep) unable
+    to double-launch one row — exactly one claimer sees rowcount 1.
+    """
+    if not run_id:
+        return False
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            "UPDATE dispatch_runs SET status = 'PREPARING' "
+            "WHERE id = ? AND status = 'QUEUED'",
+            (run_id,),
+        )
+        conn.commit()
+        return (cur.rowcount or 0) == 1
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+
 def get_active_agentic_runs() -> list[dict]:
     """Agentic rows occupying launch capacity: QUEUED/PREPARING/RUNNING."""
     conn = _get_conn()
