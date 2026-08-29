@@ -131,6 +131,23 @@ def proof_refs_resolve(registry: dict) -> list[str]:
                     f"{theory_path.relative_to(REPO_ROOT)} does not exist"
                 )
                 continue
+            if proof["lemma"] == "Observational_equivalence":
+                # Diff-mode theories carry no named lemma: tamarin generates
+                # the equivalence obligation. The harness's DIFF_EXPECTATIONS
+                # table is the authority for which theories run in diff mode.
+                harness = (TAMARIN_DIR / "run_tamarin.py").read_text()
+                diff_block = re.search(
+                    r"DIFF_EXPECTATIONS = \{(.*?)\n\}", harness, re.S
+                )
+                if diff_block is None or (
+                    f'"{proof["theory"]}.spthy"' not in diff_block.group(1)
+                ):
+                    errors.append(
+                        f"{owner_id}: proof cites Observational_equivalence for "
+                        f"{proof['theory']}, which is not in run_tamarin.py's "
+                        "DIFF_EXPECTATIONS"
+                    )
+                continue
             if f"lemma {proof['lemma']}" not in theory_path.read_text():
                 errors.append(
                     f"{owner_id}: proof cites lemma {proof['lemma']}, not found in "
