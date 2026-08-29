@@ -1,0 +1,164 @@
+/*
+  VaultDelegateChainNoResolve — model 10 calibration: the acceptor
+  verifies the delegate certificate's signature and the write
+  signature, but does NOT resolve the chain to the roster — the
+  RosterRead action (and with it the roster_read_current contract) is
+  deleted from both acceptance rules. The liveness read stays.
+
+  Expected: write_resolves_to_current_member falsified (traces via
+  `tamarin-prover --prove VaultDelegateChainNoResolve.spthy`): with no
+  roster resolution, a chain terminating outside the roster is no
+  longer void — the adversary mints its own persona and delegate and
+  is accepted — and the bead's named scenario follows the same way: a
+  persona removed after delegating keeps writing through its delegate,
+  because nothing re-reads the roster at use. Every other lemma must
+  hold: scope confinement is structural, the liveness contract is
+  untouched, and the honest flow never needed the missing check.
+*/
+
+theory VaultDelegateChainNoResolve
+begin
+
+builtins: signing
+
+/* Enrollment: a member persona joins the roster. */
+rule Enroll_Persona:
+  [ Fr(~p) ]
+  --[ Enrolled(pk(~p)) ]->
+  [ !PersonaKey(~p), !PersonaPub(pk(~p)), Out(pk(~p)) ]
+
+/* Org contraction: the persona loses membership (trigger 3, §1d). */
+rule Remove_Persona:
+  [ !PersonaPub(ppub) ]
+  --[ Removed(ppub) ]->
+  [ ]
+
+/* A persona mints a delegate for a scope the network names — the
+   persona-signed certificate is public (_h_delegate admits it).
+   Minting deliberately does NOT check membership: resolution happens
+   at USE, which is the whole point under test. */
+rule Mint_Delegate:
+  [ !PersonaKey(~p), Fr(~d) ]
+  --[ Delegated(pk(~p), pk(~d), $scope) ]->
+  [ !DelegateKey(~d), !DelegateReg(pk(~d))
+  , Out(pk(~d))
+  , Out(< 'cert', pk(~p), pk(~d), $scope
+        , sign(<'cert', pk(~p), pk(~d), $scope>, ~p) >)
+  ]
+
+/* The delegate (an agent, possibly coopted) signs a write request for
+   any scope the network asks for. */
+rule Delegate_Sign_Write:
+  [ !DelegateKey(~d), Fr(~w) ]
+  -->
+  [ Out(< 'wr', $scope, ~w, sign(<'wr', $scope, ~w>, ~d) >) ]
+
+/* Liveness ends two ways: the TTL lapses, or a revocation is folded
+   (_h_revoke). */
+rule Expire_Delegate:
+  [ !DelegateReg(dpub) ]  --[ Expired(dpub) ]->           [ ]
+
+rule Revoke_Delegate:
+  [ !DelegateReg(dpub) ]  --[ RevocationFolded(dpub) ]->  [ ]
+
+/* Compromise: a delegate key is DISK-class (crib §9) — it can be
+   stolen outright. Theft does not revoke. */
+rule Reveal_Delegate:
+  [ !DelegateKey(~d) ] --[ DelegateRevealed(pk(~d)) ]-> [ Out(~d) ]
+
+/* The acceptor — one rule per storage scope, and NO rule for any
+   other scope: generic scope-holding is never consulted. It verifies
+   the certificate against the persona key the certificate names, the
+   write against the delegate key, and performs the two state reads
+   (roster, liveness) the restrictions below specify. */
+rule Accept_Advance:
+  [ In(<'cert', ppub, dpub, 'advance', csig>)
+  , In(<'wr', 'advance', w, wsig>)
+  ]
+  --[ Eq(verify(csig, <'cert', ppub, dpub, 'advance'>, ppub), true)
+    , Eq(verify(wsig, <'wr', 'advance', w>, dpub), true)
+    , LivenessRead(dpub)
+    , WriteAccepted(ppub, dpub, 'advance', w)
+    ]->
+  [ ]
+
+rule Accept_Grant:
+  [ In(<'cert', ppub, dpub, 'grant', csig>)
+  , In(<'wr', 'grant', w, wsig>)
+  ]
+  --[ Eq(verify(csig, <'cert', ppub, dpub, 'grant'>, ppub), true)
+    , Eq(verify(wsig, <'wr', 'grant', w>, dpub), true)
+    , LivenessRead(dpub)
+    , WriteAccepted(ppub, dpub, 'grant', w)
+    ]->
+  [ ]
+
+restriction equality:
+  "All x y #i. Eq(x, y)@i ==> x = y"
+
+/* The liveness read: the delegate's revocation is not folded and its
+   TTL has not lapsed at acceptance time. */
+restriction liveness_read:
+  "All d #i. LivenessRead(d)@i ==>
+      not(Ex #r. RevocationFolded(d)@r & #r < #i)
+    & not(Ex #x. Expired(d)@x & #x < #i)"
+
+/* ═══ Lemmas ═══ */
+
+/* The honest unattended flow: a member persona's delegates advance a
+   storage generation and issue a capability grant, both accepted. */
+lemma executable:
+  exists-trace
+  "Ex p da dg wa wg #i #j.
+      WriteAccepted(p, da, 'advance', wa)@i
+    & WriteAccepted(p, dg, 'grant', wg)@j"
+
+/* MAIN — chain resolution to a current member. Three conjuncts:
+   the Delegated one is DERIVED (persona-signature unforgeability: the
+   chain genuinely ends at the persona that minted the delegate, so a
+   fabricated chain resolves to no enrolled persona and is void); the
+   membership ones certify the roster-read contract, whose deletion is
+   the calibration. Covers the bead's scenario: a delegate minted
+   during membership yields nothing after its persona's removal. */
+lemma write_resolves_to_current_member:
+  "All p d s w #i. WriteAccepted(p, d, s, w)@i ==>
+      (Ex #j. Delegated(p, d, s)@j & #j < #i)
+    & (Ex #e. Enrolled(p)@e & #e < #i)
+    & not(Ex #r. Removed(p)@r & #r < #i)"
+
+/* Accepted writes carry exactly the two storage execution scopes;
+   intent-class scopes (role:grant, link:publish, ...) never ride a
+   delegate chain into acceptance — even though delegates FOR them are
+   mintable and writes UNDER them are signed in this model. */
+lemma delegate_scopes_only:
+  "All p d s w #i. WriteAccepted(p, d, s, w)@i ==>
+      ((s = 'advance') | (s = 'grant'))"
+
+/* A write is accepted only while its delegate is alive — no accepted
+   write after the delegate's revocation is folded or its TTL lapsed
+   (contract-consistency over the liveness read). With the MAIN lemma
+   this is the stolen-delegate bound: theft yields writes only inside
+   the persona's membership and only until revocation — then none. */
+lemma write_requires_live_delegate:
+  "All p d s w #i. WriteAccepted(p, d, s, w)@i ==>
+      not(Ex #r. RevocationFolded(d)@r & #r < #i)
+    & not(Ex #x. Expired(d)@x & #x < #i)"
+
+/* Vacuity guard for the stolen-delegate reading: a revealed delegate
+   key genuinely yields an ATTACKER-authored accepted write (the
+   payload is the adversary's public constant, which no honest signing
+   rule produces — honest payloads are fresh). Theft is not a no-op;
+   revocation is what ends it. */
+lemma stolen_delegate_write_witness:
+  exists-trace
+  "Ex p d #r #i.
+      DelegateRevealed(d)@r & WriteAccepted(p, d, 'advance', 'attack')@i
+    & #r < #i"
+
+/* Vacuity guard for write_requires_live_delegate: both liveness-
+   ending events genuinely fire. */
+lemma revocation_and_expiry_possible:
+  exists-trace
+  "Ex d1 d2 #i #j. RevocationFolded(d1)@i & Expired(d2)@j"
+
+end

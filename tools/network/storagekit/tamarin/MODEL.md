@@ -33,6 +33,8 @@ against.
 | `VaultPolicyClassNoAnchor.spthy` | model 8 calibration B: **anchor wrap deleted from the new generation** | `root_reaches_every_generation` falsified, rest verified |
 | `VaultRootRotation.spthy` | model 9 green: personal-root rotation dual authority (bead auto-lythl) | all lemmas verified |
 | `VaultRootRotationNoCosign.spthy` | model 9 calibration: **recovery co-signature check deleted** | `thief_cannot_rotate` falsified, rest verified |
+| `VaultDelegateChain.spthy` | model 10 green: delegate-chain resolution at use (bead auto-9ldpx) | all lemmas verified |
+| `VaultDelegateChainNoResolve.spthy` | model 10 calibration: **roster resolution deleted from acceptance** | `write_resolves_to_current_member` falsified, rest verified |
 | `run_tamarin.py` | harness enforcing every expectation above | exit 0 iff all hold |
 
 The pairing is the point: a green proof is only trusted because the
@@ -102,8 +104,8 @@ export PATH=/tmp/maude-dist:/tmp/tamarin:$PATH
 python3 tools/network/storagekit/tamarin/run_tamarin.py
 ```
 
-Verified 2026-08-29 with tamarin-prover 1.12.0 + Maude 3.5.1: all nine
-models (20 theories, 103 lemma expectations) green — each green theory
+Verified 2026-08-29 with tamarin-prover 1.12.0 + Maude 3.5.1: all ten
+models (22 theories, 115 lemma expectations) green — each green theory
 fully verifies and each calibration falsifies exactly its headline
 lemma. Whole suite runs in a few seconds. NOTE: the toolchain needs a
 UTF-8 locale (`LC_ALL=C.UTF-8`); `run_tamarin.py` sets it.
@@ -590,10 +592,95 @@ Abstraction register:
 5. **`rotated_at`, record-shape validation, version checks**: out of
    scope — parser hygiene, not authority.
 
+## Model 10 — delegate-chain resolution at use (bead auto-9ldpx)
+
+The PIN 6b acceptance rule (crib §7, §11; `storagekit/acceptance.py`,
+`ledger/fold.py:_h_delegate`/`_h_revoke`): a delegated key authorizes
+by resolving its chain to a member persona and checking that persona's
+CURRENT membership; a chain terminating outside the roster is void;
+generic scope-holding is never consulted for `storage:state:advance` /
+`storage:capability:grant`. Personas enroll and are removed; personas
+mint delegate certificates for arbitrary public scopes; delegates
+(agents, possibly coopted) sign write requests for arbitrary public
+scopes; a delegate key can be stolen outright (DISK-class, §9);
+revocation folding and TTL expiry end liveness.
+
+DERIVED vs ENCODED, explicitly: the acceptor's two STATE READS —
+roster currency and delegate liveness — are restrictions on the
+acceptance action (`roster_read_current`, `liveness_read`), the
+model-4/6 contract-consistency convention: they are reads of folded
+state, not cryptographic steps. The DERIVED Dolev-Yao content is the
+chain itself — the `Delegated` conjunct of the MAIN lemma (persona-
+signature unforgeability: an accepted write's certificate was
+genuinely minted by the enrolled persona it names, so a fabricated
+chain resolves onto no member and is void) — plus scope confinement,
+which is structural (acceptance rules exist for exactly the two
+storage scopes; the model-3 verify-at-use idiom). A first encoding
+carried the roster as consume-and-restore linear facts to make the
+membership conjunct derived too; the Accept→Accept token regression
+diverged for every search heuristic, and the restriction encoding is
+the suite's documented convention for folded-state reads.
+
+Proved (green, 1.0 s, 6/6):
+- **`write_resolves_to_current_member`** (MAIN) — every accepted
+  write's chain ends at the persona that minted the delegate
+  (derived), and that persona is enrolled and not removed at
+  acceptance (contract). Covers the bead's scenario: a delegate minted
+  during membership yields nothing after its persona's removal.
+- **`delegate_scopes_only`** — accepted writes carry exactly the two
+  storage execution scopes, in a model where delegates for intent
+  scopes ARE minted and writes under them ARE signed (mint and sign
+  take an arbitrary `$scope`).
+- **`write_requires_live_delegate`** — no accepted write after the
+  delegate's revocation folds or its TTL lapses (contract over the
+  liveness read). With the MAIN lemma this is the stolen-delegate
+  bound: theft yields writes only inside the persona's membership and
+  only until revocation — after it, none.
+- **`stolen_delegate_write_witness`** (exists-trace) — a revealed
+  delegate key yields an attacker-authored accepted write (payload is
+  the adversary's public constant; honest payloads are fresh). The
+  bead-required premise witness: theft is live, revocation ends it.
+- **`revocation_and_expiry_possible`** (exists-trace) — both
+  liveness-ending events fire; vacuity guard for the liveness lemma.
+- Executability: one persona's delegates advance a generation and
+  issue a capability grant, both accepted.
+
+Calibration (`VaultDelegateChainNoResolve.spthy`): the RosterRead
+action — and with it the roster contract — is deleted from both
+acceptance rules; the liveness read stays →
+`write_resolves_to_current_member` falsified in 8 steps (a chain
+terminating outside the roster is accepted; the removed-persona
+scenario follows identically, since nothing re-reads the roster at
+use). All five other lemmas hold.
+
+Abstraction register:
+
+1. **Ed25519 → `signing` builtin; Eq idiom** for both certificate and
+   write verification (the acceptor holds no secrets).
+2. **Chain depth 1.** The fold terminates storage chains at a persona
+   one hop up (the bounded self-delegation persona condition,
+   fold.py:_h_delegate — "a delegate is not a persona"). Multi-hop
+   `_upstream` resolution is not modeled.
+3. **One scope per certificate.** The real agent delegate carries the
+   two-scope set; splitting it into two single-scope certs changes
+   neither confinement nor resolution.
+4. **TTL is nondeterministic expiry.** `Expired` may fire at any time
+   after mint — every accepted write must therefore tolerate the
+   strictest timing; the literal clock is out of scope (model 6's
+   monotonic-clock note applies).
+5. **Delegate proof-of-possession, grant nonces, attenuation lattice**
+   (`_h_delegate`'s consent proof, `R_DELEGATE_NONCE_REUSED`,
+   `attenuates`): out of scope — they govern which delegate EVENTS
+   fold, not how a folded delegate authorizes a storage write. The
+   fold's admission is collapsed into the honest `Mint_Delegate` rule.
+6. **Roster and liveness as trace conditions**, not fact state — see
+   the encoding note above; the calibration certifies the roster read
+   is load-bearing.
+
 ## Roadmap (tracker note graph://8277c76c-ad1; beads filed)
 
-All nine Tamarin models DONE (auto-loxsf, -djh2m, -cpbkf, -veal7,
--loov7, -5wpjm, -ncokx, -lythl, plus the pilot). Remaining:
+All ten Tamarin models DONE (auto-loxsf, -djh2m, -cpbkf, -veal7,
+-loov7, -5wpjm, -ncokx, -lythl, -9ldpx, plus the pilot). Remaining:
 
 1. **TLA+ side-track (auto-xtt5v)**: c6z70 settings-resolution
    discriminator + fleet-roster OR-set convergence — attacker-free

@@ -171,6 +171,22 @@ EXPECTATIONS = {
         "both_secrets_suffice": "verified",
         "recovery_pk_is_declared": "verified",
     },
+    "VaultDelegateChain.spthy": {
+        "executable": "verified",
+        "write_resolves_to_current_member": "verified",
+        "delegate_scopes_only": "verified",
+        "write_requires_live_delegate": "verified",
+        "stolen_delegate_write_witness": "verified",
+        "revocation_and_expiry_possible": "verified",
+    },
+    "VaultDelegateChainNoResolve.spthy": {
+        "executable": "verified",
+        "write_resolves_to_current_member": "falsified",
+        "delegate_scopes_only": "verified",
+        "write_requires_live_delegate": "verified",
+        "stolen_delegate_write_witness": "verified",
+        "revocation_and_expiry_possible": "verified",
+    },
 }
 
 SUMMARY_RE = re.compile(
