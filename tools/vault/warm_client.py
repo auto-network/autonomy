@@ -37,7 +37,7 @@ import time
 import urllib.request
 
 from tools.network.idkit import KeyPair
-from tools.network.idkit.armor import decrypt_root_key
+from tools.network.idkit.root_factor_policy import open_armor_with_password
 from tools.network.idkit.canonical import canonical_json
 from tools.network.idkit.persona import derive_persona
 from tools.network.ledger import HLC, make_event, mint_grant_nonce, sign_delegate_proof
@@ -76,7 +76,7 @@ def call(path: str, body=None, org: str | None = None, method: str | None = None
 def unlock(pw: str) -> KeyPair:
     """Open the armor and prove the password unlock; returns the root."""
     personal = call("/api/identity/personal")
-    root = decrypt_root_key(personal["armored_private_key"], pw)
+    root = open_armor_with_password(personal["armored_private_key"], pw)
     options = call("/api/identity/unlock/password/options", {})
     call("/api/identity/unlock/password", {
         "challenge": options["challenge"],

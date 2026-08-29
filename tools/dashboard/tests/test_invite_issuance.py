@@ -20,7 +20,7 @@ from starlette.applications import Starlette
 from tools.dashboard import network_routes, org_authority
 from tools.graph.db import GraphDB
 from tools.network.idkit import KeyPair
-from tools.network.idkit.armor import encrypt_root_key
+from tools.network.idkit.root_factor_policy import mint_password_armor
 from tools.network.ledger import INVITE_LIVE, LedgerStore, org_ledger_db_path
 from tools.network.ledger.found import found_org_ledger
 
@@ -146,7 +146,7 @@ def test_node_issues_authorized_bearer_invite_and_refuses_other_persona(
     personal = KeyPair.from_private_hex(PERSONAL_SEED.hex())
     personal_armor = tmp_path / "personal.armor"
     personal_armor.write_text(
-        encrypt_root_key(
+        mint_password_armor(
             personal,
             PERSONAL_PASSPHRASE,
             iterations=10_000,
@@ -162,7 +162,7 @@ def test_node_issues_authorized_bearer_invite_and_refuses_other_persona(
     other = KeyPair.from_private_hex(OTHER_PERSONAL_SEED.hex())
     other_armor = tmp_path / "other-personal.armor"
     other_armor.write_text(
-        encrypt_root_key(
+        mint_password_armor(
             other,
             PERSONAL_PASSPHRASE,
             iterations=10_000,

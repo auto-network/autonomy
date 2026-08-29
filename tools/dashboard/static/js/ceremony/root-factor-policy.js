@@ -689,6 +689,43 @@ function policyWithFactorGranted(policy, factorId, typeOf) {
     : { op: 'or', children: [canonical, leaf] });
 }
 
+// One-password conveniences, mirroring tools/network/idkit/root_factor_policy.py.
+
+async function mintPasswordArmor({ rootSeed, rootPub, password, factorId = 'password-1', iterations = 600000 }) {
+  const { factor, seed } = await createPasswordFactor(rootPub, factorId, password, iterations);
+  try {
+    return await buildFactorPolicyArmor({
+      rootSeed, rootPub, generation: 1,
+      factors: [factor], access: [factorId],
+      policy: { op: 'factor', factor_id: factorId },
+    });
+  } finally {
+    seed.fill(0);
+  }
+}
+
+async function openArmorWithPassword(armorText, password) {
+  const envelope = await parseFactorPolicyArmor(armorText);
+  const seeds = {};
+  try {
+    for (const factor of envelope.factors) {
+      if (factor.type !== 'password') continue;
+      try {
+        seeds[factor.factor_id] = await openPasswordFactor(envelope.root_pub, factor, password);
+      } catch (e) { /* wrong password for this factor; others may open */ }
+    }
+    if (!Object.keys(seeds).length) {
+      throw new Error('armor does not open with that password');
+    }
+    if (!policySatisfied(envelope.policy, Object.keys(seeds))) {
+      throw new Error("this armor's policy is not satisfied by a password alone");
+    }
+    return await openFactorPolicyArmor(armorText, seeds);
+  } finally {
+    for (const seed of Object.values(seeds)) seed.fill(0);
+  }
+}
+
 export {
   FACTOR_RECIPIENT_PURPOSE,
   policyWithFactorGranted,
@@ -708,4 +745,6 @@ export {
   buildFactorPolicyArmor,
   openFactorPolicyArmor,
   signFactorPolicyTransition,
+  mintPasswordArmor,
+  openArmorWithPassword,
 };
