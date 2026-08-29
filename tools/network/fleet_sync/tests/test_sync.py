@@ -45,6 +45,10 @@ def _attachment(conn, identity: str, source_id: str) -> None:
 
 
 def _identity(path: Path, marker: str) -> None:
+    """Seed a joiner's pre-sync local state: its own personal-identity Setting
+    plus the local (never-synced) ``orgs`` row. On a checkpoint receiver the
+    Setting is replaced by the checkpoint's own identity row while the local
+    ``orgs`` row is preserved through ``_copy_local_state``."""
     graph = GraphDB(path)
     try:
         graph.conn.execute(
@@ -62,12 +66,30 @@ def _identity(path: Path, marker: str) -> None:
         graph.close()
 
 
+def _author_identity(origin, marker: str, timestamp_ns: int) -> None:
+    """Author a personal-identity Setting through the catalog on *origin*.
+
+    Personal identity is now an ordinary replicated Setting, so its checkpoint
+    carry goes through the authored path — exactly like any other synced row
+    (see ``test_checkpoint_carries_personal_vault_key_records``). A row merely
+    present before activation would be an untracked logical row and would fail
+    the checkpoint closed (see
+    ``test_preexisting_untracked_rows_fail_checkpoint_closed``)."""
+    with origin.author(timestamp_ns, f"identity-{marker}"):
+        origin.graph.conn.execute(
+            "INSERT INTO settings(id,set_id,schema_revision,key,payload,"
+            "publication_state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+            (marker, "autonomy.identity.personal", 1, "root", '{}', "raw",
+             "2026-08-19T00:00:00Z", "2026-08-19T00:00:00Z"),
+        )
+
+
 def test_alpha_checkpoint_installs_atomically_and_restarts(tmp_path: Path) -> None:
     origin_path = tmp_path / "origin.db"
     target_path = tmp_path / "target.db"
-    _identity(origin_path, "origin-secret")
     _identity(target_path, "target-secret")
     with FleetSyncAlpha(origin_path, "machine-a") as origin:
+        _author_identity(origin, "origin-secret", 90)
         with origin.author(100, "tx-1"):
             _source(origin.graph.conn, "live", "carried")
             _source(origin.graph.conn, "gone", "temporary")
@@ -80,8 +102,8 @@ def test_alpha_checkpoint_installs_atomically_and_restarts(tmp_path: Path) -> No
     assert checkpoint.alpha_version == ALPHA_VERSION
     assert checkpoint.watermark == 110
     # Full checkpoints carry one current winner/tombstone per address, not
-    # retired transaction history (live + gone tombstone here).
-    assert checkpoint.winner_records == 2
+    # retired transaction history (identity Setting + live + gone tombstone).
+    assert checkpoint.winner_records == 3
 
     installed = install_checkpoint(
         tmp_path / "checkpoint", target_path,
@@ -101,7 +123,10 @@ def test_alpha_checkpoint_installs_atomically_and_restarts(tmp_path: Path) -> No
         ).fetchall()] == [("personal", "personal")]
         forwarded = list(target.catalog.iter_mutations())
         assert {item.origin_incarnation for item in forwarded} == {"machine-a"}
-        assert {item.mutation.address for item in forwarded} == {("live",), ("gone",)}
+        assert {item.mutation.address for item in forwarded} == {
+            ("live",), ("gone",),
+            ("autonomy.identity.personal", 1, "root", "raw", "base"),
+        }
         with pytest.raises(WatermarkError, match="write refused"):
             with target.author(110, "too-old"):
                 pass
@@ -316,7 +341,8 @@ def test_checkpoint_install_skips_and_quarantines_foreign_key_orphans(
     and quarantines it for later repair."""
     origin_path = tmp_path / "origin.db"
     target_path = tmp_path / "target.db"
-    _identity(origin_path, "origin-secret")
+    # This test isolates the quarantine path, so the origin carries only the
+    # authored rows counted below — no identity Setting rides this checkpoint.
     _identity(target_path, "target-secret")
     with FleetSyncAlpha(origin_path, "machine-a") as origin:
         conn = origin.graph.conn
@@ -378,7 +404,8 @@ def test_checkpoint_install_quarantines_attachments_without_blob_bytes(
     consistent."""
     origin_path = tmp_path / "origin.db"
     target_path = tmp_path / "target.db"
-    _identity(origin_path, "origin-secret")
+    # This test isolates the quarantine path, so the origin carries only the
+    # authored rows counted below — no identity Setting rides this checkpoint.
     _identity(target_path, "target-secret")
     with FleetSyncAlpha(origin_path, "machine-a") as origin:
         conn = origin.graph.conn
