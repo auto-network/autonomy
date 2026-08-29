@@ -30,36 +30,73 @@ import keyreg  # noqa: E402
 
 CUSTODY_ORDER = ("cold", "memory", "disk", "public")
 
+# Validated against the dataviz skill's palette checks (light surface):
+# lightness band, chroma floor, CVD separation, and normal-vision floor all
+# pass; the contrast WARN is relieved by every node carrying a text label.
 CUSTODY_STYLE = {
-    "cold": "fill:#1e3a5f,color:#dbeafe,stroke:#3b82f6",
-    "memory": "fill:#4a2545,color:#fce7f3,stroke:#ec4899",
-    "disk": "fill:#3f3f1f,color:#fef9c3,stroke:#eab308",
-    "public": "fill:#1f3f2f,color:#dcfce7,stroke:#22c55e",
+    "cold": "fill:#2a78d6,color:#ffffff,stroke:#104281,stroke-width:1px",
+    "memory": "fill:#eb6834,color:#0b0b0b,stroke:#8a3315,stroke-width:1px",
+    "disk": "fill:#1baf7a,color:#0b0b0b,stroke:#0b5e41,stroke-width:1px",
+    "public": "fill:#eda100,color:#0b0b0b,stroke:#7a5300,stroke-width:1px",
 }
+
+# Cluster order is the reading order: the identity root feeds everything, so
+# it comes first; consumers follow; design-only stores last.
+GROUP_TITLES = {
+    "identity-armor": "Personal identity & armor",
+    "recovery": "Recovery",
+    "org-authority": "Org authority",
+    "domain-storage": "Domain storage",
+    "vault-classes": "Vault policy classes",
+    "sealed-stores": "Sealed stores (designed)",
+    "fleet": "Fleet",
+}
+
+
+def _label(key_id: str, entry: dict) -> str:
+    name = key_id.replace("_", " ")
+    if entry.get("status") == "designed":
+        name += " ⋄"
+    return name
 
 
 def gen_mermaid(registry: dict) -> str:
     lines = [
-        "%% Generated from registry.yaml by gen.py — do not edit by hand.",
-        "%% Solid arrows: derivation (parent to child). Dashed arrows: this",
-        "%% key's material is sealed to the recipient key. Node color is the",
-        "%% custody class. Seal edges whose recipient is prose rather than a",
-        "%% registered key id are omitted here and remain in the register.",
-        "graph TD",
+        '%%{init: {"theme": "base", "flowchart": {"nodeSpacing": 26, '
+        '"rankSpacing": 42, "curve": "basis", "useMaxWidth": false}, '
+        '"themeVariables": {"fontSize": "15px", "clusterBkg": "#f4f4f2", '
+        '"clusterBorder": "#c3c2b7"}}}%%',
+        "graph LR",
+        "    %% Generated from registry.yaml by gen.py — do not edit by hand.",
+        "    %% Clusters are the registry's group field (one subsystem each).",
+        "    %% Solid arrows: derivation (parent to child). Dashed arrows: the",
+        "    %% key's material is sealed to the recipient key. Node color is",
+        "    %% custody class: blue cold, orange memory, green disk. A diamond",
+        "    %% marks a design-only key. Prose seals remain in the register.",
     ]
     for custody in CUSTODY_ORDER:
         lines.append(f"    classDef {custody} {CUSTODY_STYLE[custody]}")
+    by_group: dict[str, list[str]] = {g: [] for g in GROUP_TITLES}
     for key_id, entry in sorted(registry["keys"].items()):
-        suffix = " (designed)" if entry.get("status") == "designed" else ""
-        lines.append(
-            f'    {key_id}["{key_id}{suffix}"]:::{entry["custody"]["class"]}'
-        )
+        by_group.setdefault(entry.get("group", "other"), []).append(key_id)
+    for group, ids in by_group.items():
+        if not ids:
+            continue
+        title = GROUP_TITLES.get(group, group)
+        lines.append(f'    subgraph {group.replace("-", "_")}["{title}"]')
+        lines.append("        direction TB")
+        for key_id in ids:
+            entry = registry["keys"][key_id]
+            lines.append(
+                f'        {key_id}["{_label(key_id, entry)}"]'
+                f':::{entry["custody"]["class"]}'
+            )
+        lines.append("    end")
     for child, parent, fn in keyreg.derivation_edges(registry):
         lines.append(f"    {parent} -->|{fn}| {child}")
     for key_id, recipient, purpose in keyreg.seal_edges(registry):
         if recipient in registry["keys"]:
-            label = purpose or "sealed"
-            lines.append(f"    {key_id} -.->|{label}| {recipient}")
+            lines.append(f"    {key_id} -.-> {recipient}")
     return "\n".join(lines) + "\n"
 
 

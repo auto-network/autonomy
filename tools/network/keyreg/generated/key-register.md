@@ -179,6 +179,17 @@ The layout mirrors the crib sheet's section 9 register (graph note
 - **code** `tools/network/idkit/certs.py`
 - **crib** §2, §9
 
+### vault_factor_recipient — kem, cold (Re-derivable only from the cold factor seed.)
+
+- **derived** from `factor_seed` via derive_encapsulation_keypair
+- **reaches** The vault class-key wraps sealed to it.
+- **snapshot** Those wraps; each class generation it belongs to opens.
+- **live?** No.
+- **revoke** Vault class-factor revocation reseals the next generation without it.
+- **bound** The classes it is enrolled in.
+- **code** `tools/vault/recipients.py`
+- **crib** §18
+
 ## MEMORY
 
 ### agent_delegate_signing_key — signing, memory (Passes the crib's Q2: scope-attenuated, TTL-bounded, fold-enforced at acceptance, revocable, and required for unattended operation.)

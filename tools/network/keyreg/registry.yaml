@@ -8,6 +8,7 @@ version: 1
 keys:
 
   personal_root_seed:
+    group: identity-armor
     kind: seed
     custody:
       class: cold
@@ -45,6 +46,7 @@ keys:
       - {framework: tamarin, theory: VaultFactorPolicy, lemma: password_and_passkey1_release_root}
 
   org_root_signing_key:
+    group: org-authority
     kind: signing
     custody:
       class: cold
@@ -64,6 +66,7 @@ keys:
     crib: ["§8", "§9"]
 
   recovery_code:
+    group: recovery
     kind: seed
     custody:
       class: cold
@@ -90,6 +93,7 @@ keys:
     crib: ["§9"]
 
   recovery_signing_key:
+    group: recovery
     kind: signing
     custody:
       class: cold
@@ -112,6 +116,7 @@ keys:
     crib: ["§9"]
 
   member_recovery_key:
+    group: recovery
     kind: signing
     custody:
       class: cold
@@ -141,6 +146,7 @@ keys:
       - {framework: tamarin, theory: VaultRecoveryRace, lemma: recovery_beats_thief}
 
   recovery_slot_recipient:
+    group: recovery
     kind: kem
     custody:
       class: cold
@@ -161,6 +167,7 @@ keys:
     crib: ["§2", "§9"]
 
   factor_seed:
+    group: identity-armor
     kind: seed
     custody:
       class: cold
@@ -188,6 +195,7 @@ keys:
       - {framework: tamarin, theory: VaultFactorPolicy, lemma: unlock_only_no_root}
 
   factor_recipient:
+    group: identity-armor
     kind: kem
     custody:
       class: cold
@@ -207,7 +215,28 @@ keys:
       - tools/network/idkit/root_factor_policy.py
     crib: ["§2"]
 
+  vault_factor_recipient:
+    group: vault-classes
+    kind: kem
+    custody:
+      class: cold
+      forced_by: Re-derivable only from the cold factor seed.
+    derivation:
+      parent: factor_seed
+      fn: derive_encapsulation_keypair
+      purpose: autonomy/vault-policy-recipient/v1
+    descriptor:
+      reaches: The vault class-key wraps sealed to it.
+      snapshot: Those wraps; each class generation it belongs to opens.
+      live: "No."
+      revoke: Vault class-factor revocation reseals the next generation without it.
+      bound: The classes it is enrolled in.
+    code:
+      - tools/vault/recipients.py
+    crib: ["§18"]
+
   master_kek:
+    group: identity-armor
     kind: symmetric
     custody:
       class: cold
@@ -224,6 +253,7 @@ keys:
     crib: ["§2"]
 
   per_credential_wrapping_key:
+    group: identity-armor
     kind: kem
     custody:
       class: cold
@@ -250,6 +280,7 @@ keys:
       - {framework: tamarin, theory: VaultOpenStore, lemma: no_key_to_forged_pk}
 
   tier2_session_key:
+    group: identity-armor
     kind: signing
     custody:
       class: cold
@@ -270,8 +301,12 @@ keys:
       - tools/network/idkit/certs.py
     crib: ["§2", "§9"]
     notes: The crib sheet's section 9 register calls this the browser session key.
+    seals_to:
+      - recipient: per_credential_wrapping_key
+        record: cross-device Tier-2 renewal seal
 
   persona_signing_key:
+    group: org-authority
     kind: signing
     custody:
       class: cold
@@ -294,6 +329,7 @@ keys:
     crib: ["§2"]
 
   persona_kem_private:
+    group: domain-storage
     kind: kem
     custody:
       class: memory
@@ -318,11 +354,15 @@ keys:
     code:
       - tools/network/storagekit/credentials.py:derive_kem_seed
     crib: ["§9", "§13", "§14"]
+    seals_to:
+      - recipient: per_machine_key
+        record: KEM-distribution record (designed; bead auto-pw9bs.6)
     proofs:
       - {framework: tamarin, theory: VaultFleetDist, lemma: persona_kem_snapshot_total}
       - {framework: tamarin, theory: VaultRekeyMarker, lemma: exclusion_forward}
 
   generation_secret:
+    group: domain-storage
     kind: symmetric
     custody:
       class: memory
@@ -337,11 +377,16 @@ keys:
     code:
       - tools/network/storagekit/state.py:generate
     crib: ["§6", "§9"]
+    seals_to:
+      - recipient: persona_kem_private
+        purpose: autonomy/capability-grant/v1
+        record: CapabilityGrant
     proofs:
       - {framework: tamarin, theory: VaultRekeyMarker, lemma: exclusion_forward}
       - {framework: tamarin, theory: VaultConcurrentRekey, lemma: concurrent_grant_secret}
 
   object_wrap_key:
+    group: domain-storage
     kind: derived-secret
     custody:
       class: memory
@@ -362,6 +407,7 @@ keys:
     crib: ["§6"]
 
   object_cek:
+    group: vault-classes
     kind: symmetric
     custody:
       class: memory
@@ -379,8 +425,13 @@ keys:
     code:
       - tools/vault/policy_class.py:_cek_public_seal_purpose
     crib: ["§4", "§18", "§23"]
+    seals_to:
+      - recipient: class_key
+        purpose: autonomy/vault-policy-class/cek/v1
+        record: sealed content key
 
   agent_delegate_signing_key:
+    group: org-authority
     kind: signing
     custody:
       class: memory
@@ -405,6 +456,7 @@ keys:
     crib: ["§7", "§9", "§11"]
 
   per_machine_key:
+    group: fleet
     kind: kem
     custody:
       class: disk
@@ -431,6 +483,7 @@ keys:
       - {framework: tamarin, theory: VaultFleetDist, lemma: kicked_machine_excluded}
 
   serving_delegate_key:
+    group: org-authority
     kind: signing
     custody:
       class: disk
@@ -447,6 +500,7 @@ keys:
     crib: ["§8", "§9"]
 
   root_anchor_seed:
+    group: vault-classes
     kind: seed
     custody:
       class: cold
@@ -469,6 +523,7 @@ keys:
     crib: ["§18"]
 
   class_key:
+    group: vault-classes
     kind: symmetric
     custody:
       class: cold
@@ -489,8 +544,16 @@ keys:
       - tools/vault/policy_class.py:Generation
       - tools/vault/store.py:put_class
     crib: ["§3", "§18"]
+    seals_to:
+      - recipient: vault_factor_recipient
+        purpose: autonomy/vault-policy-class/v1
+        record: PolicyClassRecord generation wrap
+      - recipient: root_anchor_seed
+        purpose: autonomy/vault-root-anchor-wrap/v1
+        record: mandatory anchor wrap
 
   sealed_index:
+    group: sealed-stores
     kind: seed
     status: designed
     custody:
@@ -507,6 +570,7 @@ keys:
     crib: ["§23"]
 
   k_index_k_meta:
+    group: sealed-stores
     kind: derived-secret
     status: designed
     custody:
@@ -527,6 +591,7 @@ keys:
     crib: ["§23"]
 
   pepper:
+    group: sealed-stores
     kind: symmetric
     status: designed
     custody:

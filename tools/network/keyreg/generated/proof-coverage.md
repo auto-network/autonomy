@@ -30,6 +30,7 @@ it, or GAP. Gap rows feed the formal-modeling queue on tracker note
 | sealed_index | key | **GAP** |
 | serving_delegate_key | key | **GAP** |
 | tier2_session_key | key | **GAP** |
+| vault_factor_recipient | key | **GAP** |
 | armor.enroll_factor | mutation | **GAP** |
 | armor.replace_recovery_slot | mutation | **GAP** |
 | armor.revoke_factor | mutation | **GAP** |
@@ -66,4 +67,4 @@ it, or GAP. Gap rows feed the formal-modeling queue on tracker note
 | vault.create_class | mutation | **GAP** |
 | vault.revoke_class_factor | mutation | **GAP** |
 
-15 of 59 entries carry at least one proof; 44 gaps.
+15 of 60 entries carry at least one proof; 45 gaps.
