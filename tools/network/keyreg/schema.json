@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "autonomy:keyreg:v1",
+  "title": "Key registry",
+  "description": "Machine-readable inventory of every key and mutation in the vault + storage system. Design: graph note 879ccc1e-b49. keyreg.py implements these constraints natively for environments without a jsonschema library; this file is the canonical contract.",
+  "type": "object",
+  "required": ["version", "keys", "mutations", "purposes"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {"const": 1},
+    "keys": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_]*$"},
+      "additionalProperties": {"$ref": "#/$defs/key"}
+    },
+    "mutations": {
+      "type": "object",
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_.:-]*$"},
+      "additionalProperties": {"$ref": "#/$defs/mutation"}
+    },
+    "purposes": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/purpose"}
+    }
+  },
+  "$defs": {
+    "codeAnchor": {
+      "type": "string",
+      "description": "Repo-relative file path, optionally followed by ':' and a symbol name defined in that file.",
+      "pattern": "^[A-Za-z0-9_./-]+\\.(py|js|mjs|go|sh|spthy)(:[A-Za-z_][A-Za-z0-9_.]*)?$"
+    },
+    "descriptor": {
+      "type": "object",
+      "description": "The six-field per-key descriptor of crib sheet section 9 (class and its forcing fact live under custody).",
+      "required": ["reaches", "snapshot", "live", "revoke", "bound"],
+      "additionalProperties": false,
+      "properties": {
+        "reaches": {"type": "string", "minLength": 1},
+        "snapshot": {"type": "string", "minLength": 1},
+        "live": {"type": "string", "minLength": 1},
+        "revoke": {"type": "string", "minLength": 1},
+        "bound": {"type": "string", "minLength": 1}
+      }
+    },
+    "key": {
+      "type": "object",
+      "required": ["kind", "custody", "derivation", "descriptor", "code", "crib"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"enum": ["seed", "signing", "kem", "symmetric", "derived-secret"]},
+        "status": {
+          "enum": ["built", "designed"],
+          "default": "built",
+          "description": "designed = the flow exists only in the design of record; code may then be empty."
+        },
+        "custody": {
+          "type": "object",
+          "required": ["class", "forced_by"],
+          "additionalProperties": false,
+          "properties": {
+            "class": {"enum": ["cold", "memory", "disk", "public"]},
+            "forced_by": {"type": "string", "minLength": 1}
+          }
+        },
+        "derivation": {
+          "oneOf": [
+            {"type": "null", "description": "Minted at random."},
+            {
+              "type": "object",
+              "required": ["parent", "fn"],
+              "additionalProperties": false,
+              "properties": {
+                "parent": {"type": "string", "description": "Key id of the derivation parent."},
+                "fn": {"type": "string"},
+                "inputs": {"type": "array", "items": {"type": "string"}},
+                "purpose": {"type": "string"}
+              }
+            }
+          ]
+        },
+        "descriptor": {"$ref": "#/$defs/descriptor"},
+        "seals_to": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["recipient"],
+            "additionalProperties": false,
+            "properties": {
+              "recipient": {"type": "string", "description": "Key id, or a prose recipient description."},
+              "purpose": {"type": "string"},
+              "record": {"type": "string"}
+            }
+          }
+        },
+        "signs": {"type": "array", "items": {"type": "string"}},
+        "code": {"type": "array", "items": {"$ref": "#/$defs/codeAnchor"}},
+        "crib": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "proofs": {"type": "array", "items": {"$ref": "#/$defs/proofRef"}},
+        "notes": {"type": "string"}
+      }
+    },
+    "mutation": {
+      "type": "object",
+      "required": ["source", "authority", "effects", "crib"],
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "type": "object",
+          "required": ["kind", "file"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {"enum": ["fold", "ceremony", "module-op", "route"]},
+            "file": {"type": "string"},
+            "symbol": {"type": "string"}
+          }
+        },
+        "authority": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "preconditions": {"type": "array", "items": {"type": "string"}},
+        "effects": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mints": {"type": "array", "items": {"type": "string"}},
+            "seals": {"type": "array", "items": {"type": "string"}},
+            "revokes": {"type": "array", "items": {"type": "string"}},
+            "writes": {"type": "array", "items": {"type": "string"}}
+          }
+        },
+        "refusals": {"type": "array", "items": {"type": "string"}},
+        "crib": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "proofs": {"type": "array", "items": {"$ref": "#/$defs/proofRef"}},
+        "notes": {"type": "string"}
+      }
+    },
+    "proofRef": {
+      "type": "object",
+      "required": ["framework", "theory", "lemma"],
+      "additionalProperties": false,
+      "properties": {
+        "framework": {"enum": ["tamarin", "tla"]},
+        "theory": {"type": "string"},
+        "lemma": {"type": "string"}
+      }
+    },
+    "purpose": {
+      "type": "object",
+      "required": ["description"],
+      "additionalProperties": false,
+      "properties": {
+        "description": {"type": "string", "minLength": 1},
+        "used_by": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  }
+}
