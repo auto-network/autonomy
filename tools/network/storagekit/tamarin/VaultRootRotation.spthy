@@ -1,0 +1,145 @@
+/*
+  VaultRootRotation — model 9: personal-root rotation needs the old
+  root AND the recovery key, so neither a thief nor a code finder can
+  rotate alone (idkit/root_rotation.py; crib graph://1e005d5c-c11 §9).
+  Bead auto-lythl. Tracker 8277c76c.
+
+  root_rotation.py's own security argument, machine-checked: a
+  rotation record carries three signatures over one binding — the OLD
+  root (rotation_input, proof the author opens the armor), the
+  enrolled RECOVERY key (rotation_recovery_input, proof of the printed
+  code), and the NEW root (rotation_continuity_input, proof the
+  successor is controlled). verify_rotation checks all three; the
+  three distinct domain strings are the 'rot'/'cont'/'rec' tags here.
+
+  The verifier holds none of the secrets, so signature checks use the
+  model-4 Eq idiom (Equal(verify(sig, m, pk), true) + the generic
+  equality restriction). The adversary may steal EITHER secret — a
+  reveal rule each for the old root (stolen armor + known password)
+  and the recovery key (a found printed code) — and the two MAIN
+  lemmas condition on which one stayed safe, so each direction of
+  "neither alone is enough" is a genuinely derived unforgeability
+  result. The both-secrets witness proves rotation authority is
+  exactly the pair, and guards both MAIN premises against vacuity.
+
+  DECLARED RECOVERY KEY: verify_rotation trusts the recovery_pub its
+  caller supplies; the registry that pins it is the unbuilt piece
+  (the crib still marks this whole flow unbuilt — the armor-layer code
+  now exists). Modeled as an honest binding: Accept_Rotation reads the
+  recovery pk from the setup-minted !DeclaredRecovery fact, never from
+  In(). recovery_pk_is_declared restates that assumption as a lemma;
+  a verifier that instead took the pk from the record would be
+  behaviourally the deleted check of the calibration.
+
+  Calibration (VaultRootRotationNoCosign.spthy): the recovery
+  co-signature check is dropped from Accept_Rotation ->
+  thief_cannot_rotate falsified, everything else holds.
+*/
+
+theory VaultRootRotation
+begin
+
+builtins: signing
+
+/* One lineage: the origin identity, its enrolled recovery key, and
+   the declared-recovery binding the unbuilt registry will own. */
+rule Setup:
+  [ Fr(~old), Fr(~rec) ]
+  --[ Enrolled(pk(~old)), DeclaredRecovery(pk(~rec)), OnceSetup() ]->
+  [ !OldRoot(~old), !RecoveryKey(~rec)
+  , !Origin(pk(~old)), !DeclaredRecoveryPk(pk(~rec))
+  , Out(pk(~old)), Out(pk(~rec))
+  ]
+
+restriction once_setup:
+  "All #i #j. OnceSetup()@i & OnceSetup()@j ==> #i = #j"
+
+/* The owner (armor + printed code) builds one succession record —
+   make_rotation's three signatures over the shared binding. */
+rule Owner_Rotate:
+  [ !OldRoot(~old), !RecoveryKey(~rec), Fr(~new) ]
+  --[ OwnerRotated(pk(~old), pk(~new)) ]->
+  [ Out(pk(~new))
+  , Out(< pk(~old), pk(~new)
+        , sign(<'rot',  pk(~old), pk(~new)>, ~old)
+        , sign(<'cont', pk(~old), pk(~new)>, ~new)
+        , sign(<'rec',  pk(~old), pk(~new)>, ~rec)
+        >)
+  ]
+
+/* The relying party: verify_rotation + resolve_current_root's
+   chain-start check, against the DECLARED recovery pk. The record
+   arrives over the open store/network (In). */
+rule Accept_Rotation:
+  [ !Origin(opk), !DeclaredRecoveryPk(rpk)
+  , In(<old_pub, new_pub, old_sig, new_sig, rec_sig>)
+  ]
+  --[ Eq(verify(old_sig, <'rot',  old_pub, new_pub>, old_pub), true)
+    , Eq(verify(new_sig, <'cont', old_pub, new_pub>, new_pub), true)
+    , Eq(verify(rec_sig, <'rec',  old_pub, new_pub>, rpk),     true)
+    , Eq(old_pub, opk)
+    , UsedRecoveryPk(rpk)
+    , RotationAccepted(old_pub, new_pub)
+    ]->
+  [ ]
+
+restriction equality:
+  "All x y #i. Eq(x, y)@i ==> x = y"
+
+/* Compromise: either secret may fall alone — or both. */
+rule Reveal_OldRoot:
+  [ !OldRoot(~old) ]    --[ RevealedOldRoot() ]->  [ Out(~old) ]
+
+rule Reveal_Recovery:
+  [ !RecoveryKey(~rec) ] --[ RevealedRecovery() ]-> [ Out(~rec) ]
+
+/* ═══ Lemmas ═══ */
+
+/* Reachability / executability: with the armor already stolen (old
+   root revealed) but the printed code safe, the owner completes a
+   rotation away from the stolen root and the verifier accepts it —
+   the elegant wipe actually runs under the compromise it exists for. */
+lemma owner_rotates_away_from_stolen_root:
+  exists-trace
+  "Ex o n #a #b #r.
+      OwnerRotated(o, n)@a & RotationAccepted(o, n)@b & RevealedOldRoot()@r
+    & not(Ex #q. RevealedRecovery()@q)"
+
+/* MAIN — the thief direction: while the recovery key is unrevealed,
+   every accepted rotation is one the owner authored — even though the
+   old root may be fully public. The thief cannot rotate the identity
+   to a key of their choosing. Derived Dolev-Yao result (recovery
+   co-signature unforgeability over the exact binding). */
+lemma thief_cannot_rotate:
+  "All o n #i.
+      RotationAccepted(o, n)@i & not(Ex #q. RevealedRecovery()@q)
+    ==> Ex #j. OwnerRotated(o, n)@j"
+
+/* MAIN — the code-finder direction: while the old root is unrevealed,
+   every accepted rotation is the owner's — the printed code alone
+   cannot produce the old root's authorising signature. */
+lemma code_finder_cannot_rotate:
+  "All o n #i.
+      RotationAccepted(o, n)@i & not(Ex #q. RevealedOldRoot()@q)
+    ==> Ex #j. OwnerRotated(o, n)@j"
+
+/* Authority is exactly the pair: with BOTH secrets revealed the
+   adversary forges an accepted rotation the owner never made. Guards
+   both MAIN premises against vacuity (acceptance and adversarial
+   signing are demonstrably live) and states honestly what full
+   compromise costs. */
+lemma both_secrets_suffice:
+  exists-trace
+  "Ex o n #i #r1 #r2.
+      RotationAccepted(o, n)@i
+    & RevealedOldRoot()@r1 & RevealedRecovery()@r2
+    & not(Ex o2 n2 #j. OwnerRotated(o2, n2)@j)"
+
+/* CONTRACT-CONSISTENCY — the verifier resolves the recovery pk from
+   the honest declaration, never from attacker-suppliable input. This
+   restates the honest-binding assumption standing in for the unbuilt
+   declaration registry (see MODEL.md). */
+lemma recovery_pk_is_declared:
+  "All rpk #i. UsedRecoveryPk(rpk)@i ==> Ex #j. DeclaredRecovery(rpk)@j"
+
+end

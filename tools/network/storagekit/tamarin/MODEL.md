@@ -31,6 +31,8 @@ against.
 | `VaultPolicyClass.spthy` | model 8 green: policy-class generation lifecycle (bead auto-ncokx) | all lemmas verified |
 | `VaultPolicyClassNoReseal.spthy` | model 8 calibration A: **revocation reuses the old class_key** | `revoked_factor_excluded_forward` falsified, rest verified |
 | `VaultPolicyClassNoAnchor.spthy` | model 8 calibration B: **anchor wrap deleted from the new generation** | `root_reaches_every_generation` falsified, rest verified |
+| `VaultRootRotation.spthy` | model 9 green: personal-root rotation dual authority (bead auto-lythl) | all lemmas verified |
+| `VaultRootRotationNoCosign.spthy` | model 9 calibration: **recovery co-signature check deleted** | `thief_cannot_rotate` falsified, rest verified |
 | `run_tamarin.py` | harness enforcing every expectation above | exit 0 iff all hold |
 
 The pairing is the point: a green proof is only trusted because the
@@ -100,8 +102,8 @@ export PATH=/tmp/maude-dist:/tmp/tamarin:$PATH
 python3 tools/network/storagekit/tamarin/run_tamarin.py
 ```
 
-Verified 2026-08-29 with tamarin-prover 1.12.0 + Maude 3.5.1: all eight
-models (18 theories, 93 lemma expectations) green — each green theory
+Verified 2026-08-29 with tamarin-prover 1.12.0 + Maude 3.5.1: all nine
+models (20 theories, 103 lemma expectations) green — each green theory
 fully verifies and each calibration falsifies exactly its headline
 lemma. Whole suite runs in a few seconds. NOTE: the toolchain needs a
 UTF-8 locale (`LC_ALL=C.UTF-8`); `run_tamarin.py` sets it.
@@ -508,10 +510,90 @@ Abstraction register:
    one write per generation (`Once*` on enroll/revoke; writes may
    repeat). Longer generation chains repeat the same mint shape.
 
+## Model 9 — personal-root rotation dual authority (bead auto-lythl)
+
+`idkit/root_rotation.py`'s own security argument, machine-checked: a
+personal-root succession record carries three signatures over one
+binding — the OLD root (`rotation_input`: the author opens the armor),
+the enrolled RECOVERY key (`rotation_recovery_input`: the author holds
+the printed code), and the NEW root (`rotation_continuity_input`: the
+successor is controlled). Neither the thief (armor + password, i.e.
+the old root seed) nor a code finder (recovery key alone) can rotate;
+the owner, holding both, rotates away from a stolen root. Signature
+checks use the model-4 Eq idiom (the verifier holds no secrets); the
+three distinct signing domains are structural tags.
+
+CRIB CORRECTION recorded here (bead auto-lythl): crib §9 still marks
+this flow 🪦 unbuilt, but the armor-layer code (`make_rotation`,
+`verify_rotation`, `resolve_current_root`) EXISTS. The unbuilt piece
+is the registry that DECLARES the recovery public key —
+`verify_rotation` trusts whatever `recovery_pub` its caller supplies.
+The model states that boundary honestly: the verifier reads the
+recovery pk from a setup-minted honest binding (`!DeclaredRecoveryPk`),
+never from `In()`, and `recovery_pk_is_declared` restates that
+assumption as a lemma. A caller that instead resolved the pk from
+attacker-writable rows would be behaviourally the calibration.
+
+Proved (green, 0.6 s, 5/5):
+- **`thief_cannot_rotate`** (MAIN, derived Dolev-Yao) — while the
+  recovery key is unrevealed, every accepted rotation is
+  owner-authored, even with the old root fully public: recovery
+  co-signature unforgeability over the exact `<old_pub, new_pub>`
+  binding (an owner co-signature for one successor cannot be replayed
+  for another).
+- **`code_finder_cannot_rotate`** (MAIN, derived) — the symmetric
+  direction: while the old root is unrevealed, the printed code alone
+  produces no accepted rotation the owner did not author.
+- **`owner_rotates_away_from_stolen_root`** (exists-trace; the model's
+  executability lemma) — with the old root already revealed and the
+  code safe, the owner completes an accepted rotation: the elegant
+  wipe runs under exactly the compromise it exists for.
+- **`both_secrets_suffice`** (exists-trace) — with BOTH secrets
+  revealed the adversary forges an accepted rotation the owner never
+  made. Rotation authority is exactly the pair; guards both MAIN
+  premises against vacuity.
+- **`recovery_pk_is_declared`** (contract-consistency, restriction-
+  level) — restates the honest declared-recovery binding; carries no
+  derived force and stands in for the unbuilt registry.
+
+Derived vs encoded, explicitly: the two `*_cannot_rotate` lemmas and
+both witnesses are derived from the modeled signature mechanism;
+`recovery_pk_is_declared` restates the honest-binding assumption.
+
+Calibration (`VaultRootRotationNoCosign.spthy`): the recovery
+co-signature check is deleted from `Accept_Rotation` →
+`thief_cannot_rotate` falsified in 8 steps (the adversary mints its
+own successor, signs 'rot' with the stolen old root and 'cont' with
+its key, and is accepted); the owner reachability, the code-finder
+direction (old_sig still checked), and the binding lemma all hold —
+the co-signature is load-bearing only against the thief.
+
+Abstraction register:
+
+1. **Ed25519 → `signing` builtin**; the three domain strings →
+   structural tags `'rot'`/`'cont'`/`'rec'` in the signed message,
+   preserving the no-cross-substitution property the domains exist
+   for.
+2. **Single lineage, single step.** `origin_pub` and `seq` bind a
+   co-signature to one step of one person's lineage;
+   `resolve_current_root`'s walk (order, no gaps, chain-start) is
+   collapsed to the one-step chain-start check `old_pub = origin`.
+   Multi-step succession and cross-lineage replay need the chain walk
+   modeled with induction — future work, and the reason `seq` exists
+   in the record.
+3. **The armor is the reveal.** "Thief holds armor + password" is
+   modeled as revealing the old root SEED directly — strictly
+   conservative (the armor's factor policy is model 7's subject).
+4. **`make_rotation`'s `new_pub != old_pub` refusal** is not modeled;
+   no lemma depends on it (a self-rotation would still need both
+   signatures).
+5. **`rotated_at`, record-shape validation, version checks**: out of
+   scope — parser hygiene, not authority.
+
 ## Roadmap (tracker note graph://8277c76c-ad1; beads filed)
 
-All eight Tamarin models DONE (auto-loxsf, -djh2m, -cpbkf, -veal7,
--loov7, -5wpjm, -ncokx, plus the pilot). Remaining:
+All nine Tamarin models DONE (auto-loxsf, -djh2m, -cpbkf, -veal7,
+-loov7, -5wpjm, -ncokx, -lythl, plus the pilot). Remaining:
 
 1. **TLA+ side-track (auto-xtt5v)**: c6z70 settings-resolution
    discriminator + fleet-roster OR-set convergence — attacker-free
