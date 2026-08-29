@@ -126,6 +126,26 @@ def _seed_actions(org_db: Path) -> None:
             },
         ),
         (
+            "note.analyze-inline",
+            {
+                "asset_type": "note",
+                "label": "Analyze (inline content)",
+                "icon": "≡",
+                "model": "claude-haiku-4-5-20251001",
+                # Content-carrying action: renders from {custom_input}
+                # only — dispatchable with no asset (operator ruling
+                # 2026-08-29; a template referencing {asset...} would
+                # fail loudly at render, which IS the target contract).
+                "prompt_template": (
+                    "Analyze the following item.\n"
+                    "Sender: {dispatched_by_session}\n\n"
+                    "{custom_input}\n"
+                ),
+                "estimated_seconds": 30,
+                "writes": [],
+            },
+        ),
+        (
             "note.update-summary",
             {
                 "asset_type": "note",
@@ -531,7 +551,8 @@ def test_dispatch_card_uses_monitored_agentic_activity_when_poller_lags(
         "last_snippet": None,
         "last_activity": None,
     }])
-    monkeypatch.setattr(server.dao_beads, "get_dispatch_beads", lambda: {
+    monkeypatch.setattr(
+        server.dao_beads, "get_dispatch_beads", lambda limit=None: {
         "approved_waiting": [], "approved_blocked": [],
     })
     monkeypatch.setattr(server.dao_beads, "get_bead_title_priority", lambda _ids: {})
@@ -1738,6 +1759,38 @@ def test_orphan_sweep_finalizes_dead_container_runs(isolated_dispatch_db):
     assert remaining == {"agent-alive", "agent-young"}
 
 
+def test_waiting_list_caps_at_top_five_with_exact_total(
+    client, per_org_universe, monkeypatch,
+):
+    """Operator directive: the queue LIST shows the top five; the badge
+    carries the exact total (SQL LIMIT on the bead side, combined re-cap
+    after queued agentic rows join)."""
+    from tools.dashboard import server as server_mod
+    from agents.dispatch_db import init_db, insert_launch_run
+
+    init_db()
+    for i in range(8):
+        insert_launch_run(
+            run_id=f"agent-q{i}", bead_id="", started_at=time.time() + i,
+            branch="", branch_base="", image="img",
+            container_name=f"agent-q{i}", output_dir=f"/tmp/rq{i}",
+            kind="agentic", agentic_source_id=f"s{i}", status="QUEUED",
+        )
+    monkeypatch.setattr(
+        server_mod, "_resolve_agentic_identity",
+        lambda sid: {"action_label": "a", "member_key": "a",
+                     "target_kind": "source", "target_source_id": "",
+                     "target_org": "autonomy", "dispatched_by_session": "",
+                     "harness": "claude", "model": None, "title": "t"},
+    )
+    data = asyncio.run(server_mod._collect_dispatch_data())
+    assert len(data["waiting"]) == server_mod._WAITING_LIST_LIMIT
+    assert data["waiting_total"] == 8
+    # oldest-first: the first five queued rows are the ones shown
+    shown = [w["id"] for w in data["waiting"] if w.get("kind") == "agentic"]
+    assert shown == [f"agent-q{i}" for i in range(5)]
+
+
 def test_queued_agentic_rows_render_in_waiting_section(
     client, per_org_universe, monkeypatch,
 ):
@@ -1765,6 +1818,7 @@ def test_queued_agentic_rows_render_in_waiting_section(
         },
     )
     data = asyncio.run(server_mod._collect_dispatch_data())
+    assert data["waiting_total"] >= 1
     queued = [w for w in data["waiting"] if w.get("kind") == "agentic"]
     assert len(queued) == 1
     entry = queued[0]
@@ -1775,3 +1829,64 @@ def test_queued_agentic_rows_render_in_waiting_section(
     assert entry["target_source_id"] == "tgt-1"
     # and it is NOT double-listed as active
     assert all(a.get("id") != "agent-wait-1" for a in data["active"])
+
+
+# ── Inline (asset-less) dispatch — operator ruling 2026-08-29 ────────
+
+def test_inline_dispatch_carries_content_without_an_asset(
+    client, per_org_universe, patch_launch_session, monkeypatch,
+):
+    """No asset, content in custom_input: 202, the content reaches the
+    agent's prompt, no graph note anywhere in the path."""
+    from tools.dashboard import server as server_mod
+    monkeypatch.setattr(
+        server_mod, "_resolved_dispatch_limits",
+        lambda: {"bead_max_concurrent": 2, "agentic_max_concurrent": 10},
+    )
+    r = client.post("/api/agent-actions/dispatch", json={
+        "member_key": "note.analyze-inline",
+        "custom_input": "PRIMER: analyze the attached corpus item 42",
+    })
+    assert r.status_code == 202, r.json()
+    assert len(patch_launch_session) == 1
+    prompt = patch_launch_session[-1]["kwargs"]["prompt"]
+    assert "PRIMER: analyze the attached corpus item 42" in prompt
+
+
+def test_inline_dispatch_requires_content(client, per_org_universe):
+    r = client.post("/api/agent-actions/dispatch", json={
+        "member_key": "note.analyze-inline",
+    })
+    assert r.status_code == 400
+    assert "custom_input" in r.json()["error"]
+
+
+def test_custom_input_size_cap(client, per_org_universe):
+    from tools.dashboard import server as server_mod
+    r = client.post("/api/agent-actions/dispatch", json={
+        "member_key": "note.analyze-inline",
+        "custom_input": "x" * (server_mod._AGENT_ACTION_INPUT_MAX_BYTES + 1),
+    })
+    assert r.status_code == 400
+    assert "exceeds" in r.json()["error"]
+
+
+def test_idempotency_distinguishes_content(
+    client, per_org_universe, patch_launch_session, monkeypatch,
+):
+    """Same member+session, different content, inside the replay window:
+    two distinct dispatches, never a cached-replay collapse."""
+    from tools.dashboard import server as server_mod
+    monkeypatch.setattr(
+        server_mod, "_resolved_dispatch_limits",
+        lambda: {"bead_max_concurrent": 2, "agentic_max_concurrent": 10},
+    )
+    r1 = client.post("/api/agent-actions/dispatch", json={
+        "member_key": "note.analyze-inline", "custom_input": "item 1",
+    })
+    r2 = client.post("/api/agent-actions/dispatch", json={
+        "member_key": "note.analyze-inline", "custom_input": "item 2",
+    })
+    assert r1.status_code == r2.status_code == 202
+    assert r1.json()["run_id"] != r2.json()["run_id"]
+    assert len(patch_launch_session) == 2

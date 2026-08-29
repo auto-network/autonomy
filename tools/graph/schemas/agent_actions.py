@@ -13,6 +13,15 @@ Revision history:
   a small input modal seeded with this label before dispatching, and
   the operator's input lands as ``custom_input`` on the dispatch payload
   (available as ``{custom_input}`` inside the action's ``prompt_template``).
+
+``custom_input`` is also the CONTENT CHANNEL for asset-less dispatch
+(operator ruling 2026-08-29): ``asset_id`` is optional on
+``POST /api/agent-actions/dispatch`` — a dispatch may instead carry its
+content inline (bounded at 512KB), rendered via ``{custom_input}``, with
+zero graph writes. Sessions must not mint a graph note per dispatch just
+to have an asset. A template referencing ``{asset...}``/``{source...}``
+fields still requires a real asset: strict placeholder rendering fails
+loudly without one, which is the target contract.
 """
 
 from __future__ import annotations

@@ -81,8 +81,8 @@
     <span class="text-gray-500 text-sm" x-show="active.length > 0">
       running: <span class="text-green-400" x-text="active.length"></span>
     </span>
-    <span class="text-gray-500 text-sm" x-show="waiting.length > 0">
-      queued: <span class="text-blue-400" x-text="waiting.length"></span>
+    <span class="text-gray-500 text-sm" x-show="waitingTotal > 0">
+      queued: <span class="text-blue-400" x-text="waitingTotal"></span>
     </span>
   </div>
 
@@ -106,6 +106,10 @@
     <template x-for="b in waiting" :key="b.id">
       {% include 'partials/bead-card.html' %}
     </template>
+    <div class="text-gray-500 text-xs mt-2" x-show="waitingTotal > waiting.length" x-cloak>
+      showing top <span x-text="waiting.length"></span> of
+      <span x-text="waitingTotal"></span> waiting
+    </div>
   </div>
 
   <!-- Approved — Blocked -->

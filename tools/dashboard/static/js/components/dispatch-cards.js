@@ -128,11 +128,15 @@
       return {
         active: [],
         waiting: [],
+        waitingTotal: 0,
         blocked: [],
         routeForRun,
         applyDispatch(data) {
           this.active = (data.active || []).map(active);
           this.waiting = (data.waiting || []).map(row => inactive(row, 'waiting'));
+          // The list is the top few; the badge carries the real count.
+          this.waitingTotal = (data.waiting_total != null)
+            ? data.waiting_total : this.waiting.length;
           this.blocked = (data.blocked || []).map(row => inactive(row, 'blocked'));
           if (data.paused != null) this.paused = { ...data.paused };
           if (data.pause_reasons != null) this.reasons = { ...data.pause_reasons };

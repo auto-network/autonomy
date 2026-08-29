@@ -274,14 +274,22 @@ _BEAD_COLS = """
 
 # ── Public API ─────────────────────────────────────────────────────────
 
-@_degrade_when_unreachable(lambda: {"approved_waiting": [], "approved_blocked": []})
-def get_dispatch_beads() -> dict[str, list[dict]]:
+@_degrade_when_unreachable(lambda: {
+    "approved_waiting": [], "approved_waiting_total": 0,
+    "approved_blocked": [],
+})
+def get_dispatch_beads(waiting_limit: int | None = None) -> dict:
     """Return beads grouped by dispatch role for the Dispatch page.
 
-    Returns a dict with two keys:
+    Returns a dict with:
     - "approved_waiting": readiness:approved, open, all blocking deps
       satisfied (closed).  Active dispatches are driven by SQLite
       dispatch_runs (status=RUNNING), not Dolt labels.
+    - "approved_waiting_total": full count of the above — with
+      ``waiting_limit`` set, the LIST is truncated by SQL LIMIT (the
+      dispatch page shows the top few plus the count; shipping a
+      thousand-row payload every watcher tick helped no one) while the
+      total stays exact via a COUNT query.
     - "approved_blocked": readiness:approved, open, at least one open
       non-parent-child dependency.
 
@@ -291,6 +299,9 @@ def get_dispatch_beads() -> dict[str, list[dict]]:
     with conn.cursor() as cur:
 
         # Approved waiting: open, readiness:approved, no open blocking deps
+        limit_sql = ""
+        if waiting_limit is not None:
+            limit_sql = f" LIMIT {int(waiting_limit)}"
         cur.execute(
             f"""
             SELECT {_BEAD_COLS}
@@ -306,11 +317,33 @@ def get_dispatch_beads() -> dict[str, list[dict]]:
                     AND di.status != %s
               )
             GROUP BY i.id
-            ORDER BY i.priority ASC, i.updated_at DESC
+            ORDER BY i.priority ASC, i.updated_at DESC{limit_sql}
             """,
             ("readiness:approved", "open", "parent-child", "closed"),
         )
         approved_waiting = [_coerce(r) for r in _rows(cur)]
+
+        if waiting_limit is None:
+            approved_waiting_total = len(approved_waiting)
+        else:
+            cur.execute(
+                """
+                SELECT COUNT(DISTINCT i.id)
+                FROM issues i
+                JOIN labels la ON la.issue_id = i.id AND la.label = %s
+                WHERE i.status = %s
+                  AND NOT EXISTS (
+                      SELECT 1 FROM dependencies d
+                      JOIN issues di ON di.id = d.depends_on_issue_id
+                      WHERE d.issue_id = i.id
+                        AND d.type != %s
+                        AND di.status != %s
+                  )
+                """,
+                ("readiness:approved", "open", "parent-child", "closed"),
+            )
+            row = cur.fetchone()
+            approved_waiting_total = int(list(row.values())[0] if isinstance(row, dict) else row[0])
 
         # Approved blocked: same as waiting but has at least one open dep.
         # Include the IDs of open blockers for the frontend to link to.
@@ -352,6 +385,7 @@ def get_dispatch_beads() -> dict[str, list[dict]]:
 
     return {
         "approved_waiting": approved_waiting,
+        "approved_waiting_total": approved_waiting_total,
         "approved_blocked": approved_blocked,
     }
 

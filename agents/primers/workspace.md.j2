@@ -340,8 +340,23 @@ To dispatch an agentic run on an existing action:
 
     POST /api/agent-actions/dispatch
 
-- `asset_id` — id of the bead, note or design to run against
 - `member_key` — action key
+- `asset_id` — id of the bead, note or design to run against — OPTIONAL
+- `custom_input` — inline content (up to 512KB) rendered into the
+  action's prompt via `{custom_input}`
+
+**Do NOT mint a graph note per dispatch just to carry content.** An
+asset-less dispatch with `custom_input` delivers the content straight
+to the agent's prompt with zero graph writes — use it for mass
+per-item runs. An action whose template references `{asset...}`
+fields still requires a real asset (render fails loudly otherwise).
+
+Dispatches always return `202 {"queued": true, "run_id": ...}` and
+NEVER reject at the concurrency cap: excess runs queue (visible on
+the dispatch page's waiting section) and launch oldest-first as slots
+free. Track status via `/api/dispatch/runs` (QUEUED → PREPARING →
+RUNNING → DONE/FAILED). Concurrency limits are operator-tunable at
+`/api/dispatch/limits`.
 
 To start a session you can send messages to:
 

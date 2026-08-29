@@ -14025,6 +14025,9 @@ _worktrees_last_signature: str | None = None
 _harness_usage_last_refresh_context: dict[str, tuple[tuple[str, ...], float]] = {}
 
 
+_WAITING_LIST_LIMIT = 5
+
+
 async def _collect_dispatch_data() -> dict:
     """Collect data for the 'dispatch' topic: active, waiting, blocked.
 
@@ -14036,7 +14039,7 @@ async def _collect_dispatch_data() -> dict:
     # Get bead data, running runs, and pre-launch agentic rows concurrently
     from agents.dispatch_db import get_active_agentic_runs
     bead_data, running_runs, active_agentic = await asyncio.gather(
-        asyncio.to_thread(dao_beads.get_dispatch_beads),
+        asyncio.to_thread(dao_beads.get_dispatch_beads, _WAITING_LIST_LIMIT),
         asyncio.to_thread(dao_dispatch.get_running_with_stats),
         asyncio.to_thread(get_active_agentic_runs),
     )
@@ -14198,10 +14201,15 @@ async def _collect_dispatch_data() -> dict:
     # in workspace prep behind the semaphore. This is where the 202
     # restructure's backpressure becomes VISIBLE — before it, a dispatch
     # in prep existed only as an open HTTP request.
-    for run in active_agentic:
+    pending_agentic = [
+        run for run in active_agentic
+        if run.get("status") in ("QUEUED", "PREPARING")
+    ]
+    pending_agentic.sort(key=lambda r: str(r.get("started_at") or ""))
+    waiting_total = bead_data.get(
+        "approved_waiting_total", len(waiting)) + len(pending_agentic)
+    for run in pending_agentic:
         run_status = run.get("status")
-        if run_status not in ("QUEUED", "PREPARING"):
-            continue
         ident = _resolve_agentic_identity(run.get("agentic_source_id"))
         waiting.append({
             "id": run.get("id", ""),
@@ -14218,6 +14226,11 @@ async def _collect_dispatch_data() -> dict:
             "target_kind": ident.get("target_kind"),
             "target_source_id": ident.get("target_source_id"),
         })
+    # Top-N display list; the totals badge carries the real count. A
+    # thousand-row waiting list in every 5s SSE frame helped no one
+    # (operator directive): beads arrive SQL-LIMITed, and the combined
+    # list re-caps after the queued agentic rows join.
+    waiting = waiting[:_WAITING_LIST_LIMIT]
 
     # Blocked: rename open_blockers → blockers, exclude currently-running beads
     blocked = [
@@ -14234,6 +14247,7 @@ async def _collect_dispatch_data() -> dict:
     return {
         "active": active,
         "waiting": waiting,
+        "waiting_total": waiting_total,
         "blocked": blocked,
         "paused": _get_pause_state(),
         "pause_reasons": _get_pause_reasons(),
@@ -15051,7 +15065,8 @@ async def _dispatch_watcher():
             nav_data = {
                 "open_beads": counts.get("open_count", 0),
                 "running_agents": len(dispatch_data["active"]),
-                "approved_waiting": len(dispatch_data["waiting"]),
+                "approved_waiting": dispatch_data.get(
+                    "waiting_total", len(dispatch_data["waiting"])),
                 "approved_blocked": len(dispatch_data["blocked"]),
                 "active_sessions": active_sessions,
                 "terminal_count": terminal_count,
@@ -17994,6 +18009,7 @@ _pending_agentic_launches: dict = {}
 _agentic_queue_event: asyncio.Event = asyncio.Event()
 _agentic_queue_task: asyncio.Task | None = None
 _AGENTIC_QUEUE_CEILING = 200
+_AGENT_ACTION_INPUT_MAX_BYTES = 512 * 1024
 
 
 def _agentic_queue_depth() -> int:
@@ -18295,8 +18311,28 @@ async def api_agent_action_dispatch(request):
         return JSONResponse(
             {"error": "member_key required"}, status_code=400,
         )
-    if not asset_id or not isinstance(asset_id, str):
-        return JSONResponse({"error": "asset_id required"}, status_code=400)
+    if not isinstance(asset_id, str):
+        return JSONResponse({"error": "asset_id must be a string"}, status_code=400)
+    # Content-carrying dispatch (operator ruling, 2026-08-29): the asset
+    # is OPTIONAL — sessions were minting a graph note per dispatch just
+    # to satisfy this guard, thousands of them. With no asset, the
+    # dispatch carries its content in custom_input and the template
+    # renders from {custom_input}; a template that references
+    # {asset...}/{source...} fields fails loudly at render time, which IS
+    # the target contract — no extra opt-in field needed.
+    inline_dispatch = not asset_id
+    if inline_dispatch and not custom_input.strip():
+        return JSONResponse(
+            {"error": "asset_id or custom_input required: an asset-less "
+                      "dispatch must carry its content"},
+            status_code=400,
+        )
+    if len(custom_input.encode("utf-8")) > _AGENT_ACTION_INPUT_MAX_BYTES:
+        return JSONResponse(
+            {"error": f"custom_input exceeds "
+                      f"{_AGENT_ACTION_INPUT_MAX_BYTES} bytes"},
+            status_code=400,
+        )
 
     if os.environ.get("DASHBOARD_MOCK"):
         from tools.dashboard.dao import mock as dao_mock
@@ -18393,23 +18429,28 @@ async def api_agent_action_dispatch(request):
     # exact SELECT under lock contention (host handoff 148ead24 item 1) —
     # the bead/design lookups beside it were already wrapped.
     source = (
-        None if requested_asset_kind == "design"
+        None if (inline_dispatch or requested_asset_kind == "design")
         else await asyncio.to_thread(graph_ops.get_source, asset_id)
     )
     bead = None
     design = None
     target_kind = "source"
     target_source_id = ""
-    if source is None:
+    if inline_dispatch:
+        target_kind = "inline"
+        target_org = str(body.get("target_org") or "") or "autonomy"
+    elif source is None:
         if requested_asset_kind == "design":
             design = await asyncio.to_thread(_resolve_design_action_asset, asset_id)
         else:
             bead = await asyncio.to_thread(dao_beads.get_bead, asset_id)
-    if source is None and bead is None and design is None:
+    if not inline_dispatch and source is None and bead is None and design is None:
         return JSONResponse(
             {"error": f"asset not found: {asset_id}"}, status_code=404,
         )
-    if source is not None:
+    if inline_dispatch:
+        pass    # target_org set above; nothing to canonicalise
+    elif source is not None:
         target_org = source.get("org") or ""
         if not target_org:
             return JSONResponse(
@@ -18466,8 +18507,14 @@ async def api_agent_action_dispatch(request):
             )
 
     # ── Step 3: idempotency window check ─────────────────────────
+    # The content hash is ALWAYS part of the key, not just for asset-less
+    # dispatches: two rapid dispatches against the same asset with
+    # different custom_input are different requests, and the replay cache
+    # must not hand the second caller the first one's response.
+    _content_hash = hashlib.sha256(custom_input.encode()).hexdigest()
     idem_key = _agent_action_idempotency_key(
-        asset_id, member_key, dispatched_by_session,
+        f"{asset_id}:{_content_hash}" if asset_id else _content_hash,
+        member_key, dispatched_by_session,
     )
     cached = _agent_action_idempotency_lookup(idem_key)
     if cached is not None:
