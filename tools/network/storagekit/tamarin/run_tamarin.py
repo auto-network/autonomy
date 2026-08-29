@@ -171,6 +171,13 @@ EXPECTATIONS = {
         "both_secrets_suffice": "verified",
         "recovery_pk_is_declared": "verified",
     },
+    "VaultRootRotationNoDeclaredPk.spthy": {
+        "owner_rotates_away_from_stolen_root": "verified",
+        "thief_cannot_rotate": "falsified",
+        "code_finder_cannot_rotate": "verified",
+        "both_secrets_suffice": "verified",
+        "recovery_pk_is_declared": "verified",
+    },
     "VaultDelegateChain.spthy": {
         "executable": "verified",
         "write_resolves_to_current_member": "verified",
