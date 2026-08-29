@@ -74,6 +74,7 @@ from . import org_member_profile  # noqa: F401 — autonomy.org.member-profile#1
 from . import workspace  # noqa: F401
 from . import workspace_artifact  # noqa: F401 — autonomy.workspace.artifact#1
 from . import dispatch_limits  # noqa: F401 — autonomy.dispatch.limits#1
+from . import note_similarity  # noqa: F401 — autonomy.graph.note-similarity#1
 from . import vault_release_lease  # noqa: F401 — autonomy.vault.release-lease#1
 from . import workspace_provision  # noqa: F401 — autonomy.workspace.provision#1
 from . import workspace_image_build  # noqa: F401 — autonomy.workspace.image-build#1

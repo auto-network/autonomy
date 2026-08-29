@@ -3739,6 +3739,29 @@ def cmd_note(args):
     if getattr(args, "html", None):
         _require_read("c62b0142", "Agents must read the Rich-Content Creation Guide before creating/updating rich-content notes.\n  See: graph://c62b0142-fb3")
     if getattr(args, 'content_stdin', None) == "-":
+        # Refuse, never discard: stdin used to silently WIN over positional
+        # text, so `graph note "update <id>" -c - < file` minted a perfect-
+        # looking NEW note (full piped body, correct title) while the author
+        # believed they revised <id> in place — invisible four times in the
+        # 2026-08-29 incident. Whatever the discarded text was (a subcommand,
+        # an intended title), dropping it silently turns a malformed command
+        # into a different operation.
+        if args.text:
+            print(
+                "✗ Both -c - (stdin) and positional text were given — the "
+                f"positional text {' '.join(args.text)!r} would be silently "
+                "discarded.",
+                file=sys.stderr,
+            )
+            print(
+                "  If you meant to revise a note:  graph note update <source_id> -c - < file",
+                file=sys.stderr,
+            )
+            print(
+                "  If you meant a title: put it in the body's first '# heading' line.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         text = sys.stdin.read().strip()
     elif args.text:
         text = " ".join(args.text)
@@ -3799,9 +3822,16 @@ def cmd_note(args):
                 short_description=getattr(args, "short_description", None),
                 keywords=getattr(args, "keywords", None),
                 org=getattr(args, "org", None),
+                force=getattr(args, "force", False),
             )
         except FileNotFoundError as e:
             print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        except ValueError as e:
+            # DuplicateNoteError host-direct; the HTTP path arrives as the
+            # translated 400 ValueError. Either way the message carries the
+            # full guidance (similar id, update invocation, --force).
+            print(f"✗ {e}", file=sys.stderr)
             sys.exit(1)
 
     for att in result.get("attachments") or []:
