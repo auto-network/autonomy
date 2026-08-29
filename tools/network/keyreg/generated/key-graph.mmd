@@ -56,7 +56,7 @@ graph LR
     end
     subgraph fleet["Fleet"]
         direction TB
-        per_machine_key["per machine key"]:::disk
+        per_machine_key["per machine key"]:::memory
     end
     factor_seed -->|derive_encapsulation_keypair| factor_recipient
     sealed_index -->|HKDF| k_index_k_meta

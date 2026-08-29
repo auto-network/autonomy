@@ -224,6 +224,17 @@ The layout mirrors the crib sheet's section 9 register (graph note
 - **bound** Location secrecy only; contents keep their own seals.
 - **crib** §24
 
+### per_machine_key — kem, memory (Derived from the personal root at unlock and never persisted — the machine stores only its public machine_id; the key exists for the warm period and a reboot always waits on a human unlock.)
+
+- **derived** from `personal_root_seed` via derive_machine_key(machine_id)
+- **reaches** Distributions sealed to it after the theft — future persona KEM keys.
+- **snapshot** Zero. It decrypts no existing record.
+- **live?** Yes — the thief must still be in the fleet and reachable.
+- **revoke** Remove the machine from the fleet. Root-signed, not a ceremony.
+- **bound** The removal.
+- **code** `tools/network/idkit/persona.py:derive_machine_key` · `tools/network/machine_boot.py:operating_key` · `tools/network/fleet_roster.py:RosterEntry`
+- **crib** §9, §10
+
 ### persona_kem_private — kem, memory (Snapshot is total: this key plus a copy of the replicated store is the whole domain history, offline. Not disk-eligible at any price.)
 
 - **derived** from `personal_root_seed` via derive_kem_seed(counter)
@@ -247,17 +258,6 @@ The layout mirrors the crib sheet's section 9 register (graph note
 - **bound** The certificate's validity window and scope list.
 - **code** `tools/dashboard/static/js/network-signon.mjs:signRegistryRequest` · `tools/dashboard/static/js/network-signon.mjs:_installSession` · `tools/network/registry/signing.py`
 - **crib** §2, §9
-
-### per_machine_key — kem, disk (Snapshot is zero — it decrypts no existing record; it only receives future distributions while the machine remains in the fleet. Placement is an operator setting.)
-
-- **derived** from `personal_root_seed` via derive_machine_key(machine_id)
-- **reaches** Distributions sealed to it after the theft — future persona KEM keys.
-- **snapshot** Zero. It decrypts no existing record.
-- **live?** Yes — the thief must still be in the fleet and reachable.
-- **revoke** Remove the machine from the fleet. Root-signed, not a ceremony.
-- **bound** The removal.
-- **code** `tools/network/idkit/persona.py:derive_machine_key` · `tools/network/fleet_roster.py:RosterEntry`
-- **crib** §9, §10
 
 ### serving_delegate_key — signing, disk (Snapshot is none — it reaches no plaintext and authorizes nothing.)
 
