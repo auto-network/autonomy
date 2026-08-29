@@ -12804,16 +12804,20 @@ async def api_dao_recent_sessions(request):
             return refused
         if requested_org:
             return JSONResponse({"error": "history snapshot cannot be organization-scoped"}, status_code=400)
-        # The Sessions page reads this bounded card projection once after a
-        # reload, behind the already-rendered Active list. It is a normal
-        # background-warmed cache value: the one-week global firehose plus an
-        # age-independent ten-session floor for every org. Local facets and
-        # lifecycle SSE supply everything after that first read.
-        sessions = dao_sessions.recent_sessions_cached(
-            "lastActivity", "1w", "all", None, include_org_floor=True,
+        # The Sessions page reads this bounded card projection ONCE after a
+        # reload, behind the already-rendered Active list: the one-week global
+        # list plus an age-independent ten-session floor for every org.
+        # Lifecycle SSE supplies everything after that first read, so this is
+        # computed directly per request in a worker thread — measured ~115ms
+        # on the full nine-org host data set (2026-08-29), and WAL +
+        # read-only pooled connections mean graph ingest cannot block it.
+        # The old background cache + 202-on-cold-key apparatus is gone: the
+        # 202's empty placeholder body was indistinguishable from a genuinely
+        # empty list and pinned a false "No recent sessions" on the page.
+        sessions = await asyncio.to_thread(
+            dao_sessions.get_recent_sessions,
+            None, "lastActivity", "1w", "all", None, True,
         )
-        if sessions is None:
-            return JSONResponse([], status_code=202)
         return JSONResponse(sessions)
     if requested_org:
         # A selected organization is a server-side scope, never a raw
@@ -12823,15 +12827,13 @@ async def api_dao_recent_sessions(request):
         org, refused = api_auth.resolve_scoped_org(requested_org, request=request)
         if refused is not None:
             return refused
-    # Served from the background-refreshed cache — the request path NEVER
-    # iterates the org DBs (that is what hung this endpoint to ~30s under graph
-    # ingest contention). A cold key returns [] and is warmed within one refresh
-    # cycle by _recent_sessions_refresher.
-    sessions = dao_sessions.recent_sessions_cached(sort, since, type_group, org)
-    if sessions is None:
-        # New scoped cache keys are warmed off the request path. Tell the UI
-        # to retry without presenting a false "No recent sessions" state.
-        return JSONResponse([], status_code=202)
+    # Computed directly per request, off the event loop. Scoped reads measure
+    # ~70-180ms on the full host data set (cost scales with the selected org's
+    # whole history — the scoped path deliberately has no since-window).
+    sessions = await asyncio.to_thread(
+        dao_sessions.get_recent_sessions,
+        None, sort, since, type_group, org,
+    )
     return JSONResponse(sessions)
 
 
@@ -20296,26 +20298,9 @@ _event_proxy_task: asyncio.Task | None = None
 _claude_credentials_refresh_task: asyncio.Task | None = None
 _codex_credentials_refresh_task: asyncio.Task | None = None
 _event_loop_watchdog_task: asyncio.Task | None = None
-_recent_sessions_refresher_task: asyncio.Task | None = None
 _vault_release_sweeper_task: asyncio.Task | None = None
 _settings_mediator_started: bool = False
 
-
-async def _recent_sessions_refresher():
-    """Warm the recent-sessions cache off the request path.
-
-    Every few seconds, recompute the registered param combos in a worker thread
-    so ``/api/dao/recent_sessions`` reads a precomputed dict instead of iterating
-    the per-org DBs on the request — the iteration is what hung that endpoint to
-    ~30s under graph-ingest contention. A slow refresh tick stays off the loop
-    and the handler keeps serving the last good cache meanwhile.
-    """
-    while True:
-        try:
-            await asyncio.to_thread(dao_sessions.refresh_recent_cache)
-        except Exception:
-            logger.exception("recent_sessions refresher tick failed")
-        await asyncio.sleep(5)
 
 
 # ── Event-loop stall SAMPLER (companion to the watchdog coroutine below) ──
@@ -20444,7 +20429,7 @@ async def _on_startup():
     global _dispatch_watcher_task, _mock_event_watcher_task, _harness_usage_poller_task
     global _claude_credentials_refresh_task, _codex_credentials_refresh_task
     global _event_loop_watchdog_task
-    global _recent_sessions_refresher_task, _serving_bootstrap_task
+    global _serving_bootstrap_task
     global _event_proxy_task
     # Startup phase timing (auto-network perf investigation, 2026-08-24):
     # boot has gotten intermittently slow (12-66s stalls observed in prod
@@ -20739,7 +20724,6 @@ async def _on_startup():
         threading.Thread(
             target=_loop_stall_sampler, name="loop-stall-sampler", daemon=True,
         ).start()
-    _recent_sessions_refresher_task = asyncio.create_task(_recent_sessions_refresher())
     _mark("watcher_tasks_created (dispatch/stall/recent_sessions)")
     # Vault release reconciliation + sweeper (auto-pw9bs.5). Reconcile FIRST,
     # before the sweeper loop and before traffic: a delivered secret whose
@@ -21011,7 +20995,6 @@ async def _on_shutdown():
             _claude_credentials_refresh_task,
             _codex_credentials_refresh_task,
             _event_loop_watchdog_task,
-            _recent_sessions_refresher_task,
             _vault_release_sweeper_task,
         )
         if t and not t.done()

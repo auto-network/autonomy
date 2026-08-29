@@ -5,7 +5,6 @@ from __future__ import annotations
 import json as _json
 import logging
 import sqlite3
-import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -62,13 +61,29 @@ _DEFAULT_TYPE_QUOTAS: dict[str, dict[str, int]] = {
 }
 
 
+_unknown_session_types_warned: set[str] = set()
+
+
 def _group_for_session_type(session_type: str | None) -> str:
     """Map a DAO session_type to one of the three quota groups.
 
     Unknown / missing values default to 'interactive' — the safest bucket,
     since human-attended sessions are the ones we most need to preserve.
+    An unknown value is logged once per process: the silent default is how
+    a new session_type lands in the wrong bucket (or, when the client's
+    grouping disagreed, in no bucket at all — 2026-08-29 regression).
     """
-    return _SESSION_TYPE_GROUPS.get((session_type or "").strip(), "interactive")
+    key = (session_type or "").strip()
+    group = _SESSION_TYPE_GROUPS.get(key)
+    if group is None:
+        if key and key not in _unknown_session_types_warned:
+            _unknown_session_types_warned.add(key)
+            logger.warning(
+                "recent-sessions: unknown session_type %r defaulted to the "
+                "'interactive' group — add it to _SESSION_TYPE_GROUPS", key,
+            )
+        return "interactive"
+    return group
 
 
 # Public-spec alias used by tests and the bead description.
@@ -803,69 +818,17 @@ def get_recent_sessions(
     # meaningful title ('{type} · {target}') instead of the raw process name.
     _annotate_librarian_rows(out)
 
-    # Strip internal fields used only during row construction
+    # Strip internal fields used only during row construction, and stamp the
+    # resolved quota group on every emitted row. The client must consume
+    # session_group rather than re-deriving it from session_type: the two
+    # mappings drifting apart is how agentic rows rendered in no chip at all
+    # (2026-08-29 regression — a row only renders where both sides agree).
     for r in out:
         r.pop("_source", None)
         r.pop("_org_floor", None)
         r.pop("_job_id", None)
         r.pop("_job_type", None)
+        r["session_group"] = _group_for_session_type(r.get("session_type"))
     return out
 
 
-# ── Recent-sessions cache ──────────────────────────────────────────────────
-# get_recent_sessions iterates every per-org DB and parses ~thousands of rows;
-# on the request path that's 200-500ms idle and tens of seconds when those DBs
-# are being written (graph ingest) or the disk is busy (clone). So the request
-# path NEVER computes it: a background refresher (server _on_startup) precomputes
-# the hot param combos off-loop and the handler reads this cache. Unknown combos
-# are registered on first request and warmed within one refresh cycle.
-_RECENT_CACHE: dict[tuple[str, str, str, str | None, bool], list] = {}
-_RECENT_KEYS: set[tuple[str, str, str, str | None, bool]] = {
-    ("lastActivity", "1d", "all", None, False),
-    ("lastActivity", "1w", "interactive", None, False),
-    # The Sessions page's only history request. A bounded global recent list
-    # plus ten old rows per org is enough for local facets without shipping
-    # the entire graph history on every PWA reload.
-    ("lastActivity", "1w", "all", None, True),
-}
-_RECENT_LOCK = threading.Lock()
-
-
-def recent_sessions_cached(
-    sort: str, since: str, type_group: str, org: str | None = None,
-    include_org_floor: bool = False,
-) -> list | None:
-    """Cached recent-sessions list for these params, or None if not yet warmed.
-
-    Registers the key so the background refresher computes it. NEVER computes on
-    the caller's thread — the handler serves ``[]`` on a cold ``None`` and the
-    refresher fills it within one cycle, so a request can never block on org-DB
-    iteration.
-    """
-    key = (sort, since, type_group, org, include_org_floor)
-    with _RECENT_LOCK:
-        _RECENT_KEYS.add(key)
-        return _RECENT_CACHE.get(key)
-
-
-def refresh_recent_cache() -> int:
-    """Recompute every registered key (off the request path). Keeps the last
-    good value on error. Returns how many keys were refreshed."""
-    with _RECENT_LOCK:
-        keys = list(_RECENT_KEYS)
-    n = 0
-    for sort, since, type_group, org, include_org_floor in keys:
-        try:
-            res = get_recent_sessions(
-                None, sort, since, type_group, org, include_org_floor,
-            )
-        except Exception:
-            logger.exception(
-                "recent_sessions cache refresh failed for %s/%s/%s org=%s floor=%s",
-                sort, since, type_group, org, include_org_floor,
-            )
-            continue
-        with _RECENT_LOCK:
-            _RECENT_CACHE[(sort, since, type_group, org, include_org_floor)] = res
-        n += 1
-    return n
