@@ -6,6 +6,16 @@ Artifact Layering pattern (graph://bc0dda40-f56) but targets *directories*
 at arbitrary container paths (not single files at
 ``/etc/autonomy/artifacts/<name>``).
 
+**An org mount is presumed to be a remote share: no exclusive locking and
+no SQLite, at any scope.** This is global, not a per-mount flag — scope
+says who may SEE a mount, not where its bytes live, so a machine-scoped
+folder can still sit on the NAS with several writers. SQLite's WAL mode
+cannot work on a network share at all (WAL coordinates through a
+shared-memory file network filesystems do not provide), and the pool is
+exported ``vers=3, nolock, local_lock=all``, so the server performs no
+lock coordination whatsoever. Operator decision, 2026-08-29
+(graph://89535205-2b6).
+
 The Setting is the declaration contract. The directory content lives on
 the operator's host at ``host_path`` and never enters the graph. Mounts
 typically live in the owning workspace's org DB at ``state=raw`` for
@@ -224,6 +234,22 @@ class WorkspaceMountV2(BaseModel):
     The consumer dual-dispatches: host_path rows keep the old HOST-origin behavior,
     subpath rows get the guarded resolver. Migration host_path -> subpath is
     voluntary and per-row.
+
+    `visibility` (machine|personal|organization) was ADDED to this revision
+    rather than minting a rev-3, deliberately. The registry does not
+    downconvert — ``upconvert_chain`` returns None when from_rev > to_rev — so
+    a rev-3 row would DROP for every consumer pinned at rev 2, and
+    ``workspace_settings.load_mounts`` is pinned at rev 2. anchore.db already
+    carries rev-1 and rev-2 rows for the SAME keys plus deprecated canonical
+    rows; a third revision lands on that mixed set for no gain, since an
+    optional field with a default is a compatible addition in both directions:
+    an old payload validates (default applies), and a new payload only reaches
+    code that already knows the field.
+
+    NOTE for anyone adding the NEXT field here: that reasoning holds for an
+    OPTIONAL field with a safe default. A required field, a narrowed type, or
+    a changed meaning is a real revision and must bump — the compatibility
+    above comes from the default, not from the practice of editing in place.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -251,6 +277,28 @@ class WorkspaceMountV2(BaseModel):
                     "present-but-wrong-type target.",
     )
     mode: Literal["ro", "rw"] = "ro"
+    # ACCESS SCOPE — who may see this mount — and deliberately NOT a path
+    # convention: the system has to act on this value, and a path segment
+    # cannot be queried, validated or enforced. Distinct from the Setting
+    # row's publication_state, which is the visibility of the DECLARATION,
+    # not of the data (publishing a row does not serve a directory), and
+    # which this set caps at `curated` anyway.
+    #
+    # DEFAULT IS THE NARROWEST SCOPE, and it is what every pre-existing row
+    # means: a mount declared before this field existed is presumed visible
+    # only on the machine holding it, until someone widens it deliberately.
+    # Because read_set(model=WorkspaceMountV2) returns the VALIDATED model,
+    # this default materializes on legacy rows automatically — consumers
+    # reading through the model never need a fallback. Consumers reading raw
+    # dicts (no model=) must use .get("visibility", "machine").
+    #
+    # There is no cross-org value: a mount visible to two organizations is a
+    # contradiction in terms, not a scope (operator ruling, 2026-08-29).
+    visibility: Literal["machine", "personal", "organization"] = Field(
+        default="machine",
+        description="Access scope: who may see this mount. Not a path "
+                    "convention. Absent on legacy rows means 'machine'.",
+    )
     # A SHORT title for a readiness tile — not a sentence. Capped so it can't
     # drift into being used as `description` is today (100-char sentences). The
     # UI puts `name` on top and `description` under it.
@@ -392,6 +440,18 @@ class _WorkspaceMountV2SchemaAdapter(SettingSchema):
             "description": "Mount mode — 'ro' for read-only, 'rw' for writable",
             "enum": ["ro", "rw"],
             "default": "ro",
+        },
+        "visibility": {
+            "type": "string",
+            "enum": ["machine", "personal", "organization"],
+            "default": "machine",
+            "description": (
+                "Access scope: who may see this mount. Records intent only — "
+                "serving a mount across the fleet or an org is separate, later "
+                "work. Legacy rows carry no value and mean 'machine' (the "
+                "narrowest scope). Not a path convention: a path segment "
+                "cannot be queried, validated or enforced."
+            ),
         },
         "name": {
             "type": "string",
