@@ -110,6 +110,17 @@ _cache_lock = threading.RLock()
 _cache_context: tuple[str, str] | None = None
 _workspaces_cache_value: "dict[str, WorkspaceV1] | None" = None
 _overrides_cache_value: "dict[str, OrgOverride] | None" = None
+#: Bumped on every invalidation of ``_overrides_cache_value``. Downstream
+#: caches derived from the overrides (org_identity's per-slug identity cache)
+#: key on this instead of registering their own invalidation callback, so a
+#: new invalidation site cannot forget to notify them — the generation moves
+#: and their key changes with it.
+_overrides_generation: int = 0
+
+
+def overrides_generation() -> int:
+    """Monotonic counter identifying the current org-override snapshot."""
+    return _overrides_generation
 
 _WORKSPACE_COMPOSITION_SET_IDS = frozenset({
     WORKSPACE_SET_ID,
@@ -129,15 +140,17 @@ def invalidate_caches() -> None:
     Useful for tests and lifecycle boundaries. Production mutations call
     :func:`invalidate_for_setting` from the post-commit event hook.
     """
-    global _workspaces_cache_value, _overrides_cache_value
+    global _workspaces_cache_value, _overrides_cache_value, _overrides_generation
     with _cache_lock:
         _workspaces_cache_value = None
         _overrides_cache_value = None
+        _overrides_generation += 1
 
 
 def _ensure_cache_context() -> None:
     """Clear snapshots when the process is explicitly repointed at another DB."""
     global _cache_context, _workspaces_cache_value, _overrides_cache_value
+    global _overrides_generation
     from tools.graph.cross_org import _orgs_root
 
     context = (str(_orgs_root()), os.environ.get("GRAPH_DB", ""))
@@ -145,16 +158,18 @@ def _ensure_cache_context() -> None:
         _cache_context = context
         _workspaces_cache_value = None
         _overrides_cache_value = None
+        _overrides_generation += 1
 
 
 def invalidate_for_setting(set_id: str) -> None:
     """Invalidate only caches whose composition depends on *set_id*."""
-    global _workspaces_cache_value, _overrides_cache_value
+    global _workspaces_cache_value, _overrides_cache_value, _overrides_generation
     with _cache_lock:
         if set_id in _WORKSPACE_COMPOSITION_SET_IDS:
             _workspaces_cache_value = None
         if set_id == ORG_SET_ID:
             _overrides_cache_value = None
+            _overrides_generation += 1
 
 
 class WorkspaceSettingsError(ValueError):

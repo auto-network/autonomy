@@ -20,6 +20,7 @@ that is either a workspace id (``enterprise-ng``) or an org slug
 from __future__ import annotations
 
 import hashlib
+from functools import lru_cache
 from typing import Any
 
 from agents import workspace_settings
@@ -114,7 +115,29 @@ def resolve_org_identity(slug: str | None) -> dict[str, Any]:
     use null/omit to be explicit.
     """
     slug = (slug or "").strip() or UNKNOWN_SLUG
+    # Cached per (slug, override-generation). This is called once per rendered
+    # session row and there are only ever a handful of orgs — a recent-sessions
+    # build was observed making 3,043 calls with ONE distinct slug, each redoing
+    # the full cascade below (load_org_overrides -> _ensure_cache_context ->
+    # _orgs_root -> resolve_orgs_root, ~5 os.environ lookups apiece).
+    # The generation is part of the key rather than a registered invalidation
+    # callback so that a NEW override-invalidation site cannot forget to notify
+    # this cache: the counter moves and the key moves with it.
+    # A copy is returned so a caller that mutates the dict (rows stash it under
+    # row["org"]) cannot poison the shared entry.
+    return dict(_identity_cached(slug, workspace_settings.overrides_generation()))
 
+
+@lru_cache(maxsize=256)
+def _identity_cached(slug: str, _generation: int) -> dict[str, Any]:
+    """Build one org's identity. ``_generation`` participates in the cache key
+    only — see :func:`agents.workspace_settings.overrides_generation`.
+
+    NOTE: when ``_canonical_identity`` stops being a stub (auto-hoi4, federated
+    identity fetched from the subscribed org's own graph.db), it becomes a
+    SECOND mutable input to this cascade and will need its own contribution to
+    the cache key — the override generation alone will no longer be sufficient.
+    """
     if slug == UNKNOWN_SLUG:
         return {
             "slug": slug,

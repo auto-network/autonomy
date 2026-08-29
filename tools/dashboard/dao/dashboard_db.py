@@ -1480,9 +1480,43 @@ def get_live_sessions(*, include_agentic: bool = False) -> list[dict]:
 
 
 def get_all_sessions() -> list[dict]:
-    """Return all sessions (live and dead)."""
+    """Return all sessions (live and dead), every column.
+
+    Prefer :func:`get_sessions_overlay` for the recent/active merge — this
+    ``SELECT *`` carries the wide text columns (todos, last_message, topics,
+    lifecycle_detail, session_uuids) for every row, which is ~53% of the
+    payload and is discarded by every current caller.
+    """
     conn = get_conn()
     rows = conn.execute("SELECT * FROM tmux_sessions ORDER BY created_at DESC").fetchall()
+    return [dict(r) for r in rows]
+
+
+#: Columns the session-overlay merge actually reads. Narrower than ``SELECT *``
+#: on purpose: tmux_sessions is 41 columns wide and ~2.8 MB in total, and over
+#: half of that sits in text blobs the overlay never touches. Measured on the
+#: live table (2,757 rows): SELECT * ~40ms, this list ~15ms.
+_OVERLAY_COLUMNS = (
+    "tmux_name", "session_uuid", "jsonl_path", "state", "startup_state",
+    "label", "role", "entry_count", "context_tokens", "bead_id",
+    "harness", "model", "harness_token", "disk_bytes", "disk_detail",
+    "last_activity", "ended_at", "created_at", "type", "project",
+)
+
+
+def get_sessions_overlay() -> list[dict]:
+    """Sessions with only the columns the recent/active overlay merge reads.
+
+    Same rows and order as :func:`get_all_sessions`, minus the wide unused
+    text columns. Callers needing a column not in ``_OVERLAY_COLUMNS`` must
+    add it here rather than reaching for ``get_all_sessions`` — a missing key
+    reads as ``None`` through ``row.get()`` and would fail silently.
+    """
+    conn = get_conn()
+    cols = ", ".join(_OVERLAY_COLUMNS)
+    rows = conn.execute(
+        f"SELECT {cols} FROM tmux_sessions ORDER BY created_at DESC"
+    ).fetchall()
     return [dict(r) for r in rows]
 
 

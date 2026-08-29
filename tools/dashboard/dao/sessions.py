@@ -14,7 +14,7 @@ from tools.data_paths import resolve_store
 from tools.dashboard.session_lifecycle_worker import derive_lifecycle_state
 from tools.dashboard.dao.dashboard_db import get_live_sessions as _db_live_sessions
 from tools.dashboard.dao.dashboard_db import find_live_session as _db_find_live
-from tools.dashboard.dao.dashboard_db import get_all_sessions as _db_all_sessions
+from tools.dashboard.dao.dashboard_db import get_sessions_overlay as _db_all_sessions
 from tools.dashboard.dao.dashboard_db import get_session_status_rows as _db_session_status_rows
 from tools.dashboard.org_identity import resolve_session_org
 from tools.graph.duration import parse_duration
