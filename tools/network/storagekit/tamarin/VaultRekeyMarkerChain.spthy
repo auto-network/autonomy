@@ -1,0 +1,147 @@
+/*
+  VaultRekeyMarkerChain — machine exclusion survives CHAINS of
+  frontier markers, not just one step (crib graph://1e005d5c-c11 §1d,
+  §3, §14; credentials.py:302-311 strictly_descends). Bead auto-szsw1.
+  Tracker 8277c76c. Lifts the one-marker-edge abstraction models 1-2
+  share (their register's named future work).
+
+  UNBOUNDED SCENARIO: disenrollment re-keys repeat. Re-key n consumes
+  the current frontier head f_{n-1}, writes marker f_n with parent
+  f_{n-1} (each new marker's parents contain the previous marker),
+  mints C_n citing f_n with kem key kemsk(root, s^n(z)), and removes
+  one machine — whose snapshot hands the adversary the PRE-re-key key.
+  Because every re-key here is a disenrollment, the per-step reveals
+  accumulate to the full multi-key snapshot: after n re-keys the
+  adversary holds EVERY retired key sk_0..sk_{n-1} and every public
+  record — the deep-chain adversary the single-step models never
+  faced.
+
+  THE SELECTOR, generalized: strictly_descends consults the ancestry
+  CLOSURE, and on this linear marker chain "fr is inside the current
+  closure" is exactly "some marker was ever written over fr" — the
+  selector_drops_descended restriction quantifies over the WHOLE
+  marker history. The calibration compares only against the LATEST
+  marker (the immediate parent), which is precisely the one-hop
+  descent check that fails to carry exclusion forward.
+
+  MAIN LEMMA SHAPE: exclusion is relative to grant time. A generation
+  granted to credential C_n leaks ONLY through a removal AFTER the
+  grant (a machine that was still fleet when the grant was made and
+  read it legitimately before its own later removal — §3's non-claim,
+  witnessed by later_removal_reads_earlier_grant). A machine removed
+  BEFORE the grant — excluded by a marker any number of steps back —
+  never reaches it.
+
+  Calibration (VaultRekeyMarkerChainOneHop.spthy): the drop check
+  compares only against the immediate parent ->
+  exclusion_through_chain falsified at depth 2.
+*/
+
+theory VaultRekeyMarkerChain
+begin
+
+builtins: asymmetric-encryption
+
+functions: kemsk/2
+
+/* Genesis: frontier head f0; C_0 cites f0; every fleet machine
+   derives sk_0 (§14). The credential key is derived from the CITED
+   FRONTIER — the re-key counter and the frontier advance in lockstep,
+   so identifying them is a relabeling, and it puts the key<->frontier
+   correlation into the term structure where induction can use it. */
+rule Setup:
+  let sk0 = kemsk(~root, ~f0)
+  in
+  [ Fr(~root), Fr(~f0) ]
+  --[ Genesis(~root), OnceSetup() ]->
+  [ !Root(~root)
+  , FrontierHead(~f0)
+  , !Cred(sk0, ~f0)
+  , !HonestSk(sk0)
+  , Out(pk(sk0))
+  ]
+
+restriction once_setup:
+  "All #i #j. OnceSetup()@i & OnceSetup()@j ==> #i = #j"
+
+/* One disenrollment re-key: marker over the current head, successor
+   credential at the next counter, and the removed machine's snapshot
+   (the pre-re-key key) goes to the adversary. Repeats without bound —
+   the linear FrontierHead token IS the marker chain. */
+rule Rekey_Disenrollment:
+  let sk_old = kemsk(~root, f_old)
+      sk_new = kemsk(~root, ~f1)
+  in
+  [ !Root(~root), FrontierHead(f_old), Fr(~f1) ]
+  --[ MarkerWritten(~f1, f_old)
+    , Removed(sk_old)
+    , RekeyDone() ]->
+  [ !Marker(~f1, f_old)
+  , !Cred(sk_new, ~f1)
+  , !HonestSk(sk_new)
+  , FrontierHead(~f1)
+  , Out(pk(sk_new))
+  , Out(sk_old)
+  ]
+
+/* The writer mints and grants a generation to a credential the
+   selector keeps. */
+rule Advance_And_Grant:
+  [ !Cred(skC, frC), Fr(~g) ]
+  --[ Granted(~g, skC, frC), GrantTo(frC) ]->
+  [ Out(aenc(~g, pk(skC))) ]
+
+/* strictly_descends over the closure: on the linear chain, "inside
+   the current closure" = "ANY marker was ever written over fr". The
+   whole marker history is consulted — this is the transitive check. */
+restriction selector_drops_descended:
+  "All fr #i. GrantTo(fr)@i ==>
+     not(Ex f2 #j. MarkerWritten(f2, fr)@j & #j < #i)"
+
+/* A remaining machine opens a grant addressed to a key it holds. */
+rule Honest_Open:
+  [ !HonestSk(sk), In(aenc(g, pk(sk))) ]
+  --[ HonestRead(g) ]->
+  [ ]
+
+/* ═══ Lemmas ═══ */
+
+/* Root secrecy — the inductive workhorse: no chain of re-keys ever
+   exposes derivation material. Marked reuse so the exclusion proof
+   may assume it at smaller trace positions. */
+lemma root_secret [use_induction, reuse]:
+  "not(Ex r #i #k. Genesis(r)@i & K(r)@k)"
+
+/* Retired-key containment — the second inductive helper: a derived
+   persona key reaches the adversary only through a removal. */
+lemma key_only_via_removal [use_induction, reuse]:
+  "All r f #i #k. Genesis(r)@i & K(kemsk(r, f))@k ==>
+     Ex #j. Removed(kemsk(r, f))@j & #j < #k"
+
+/* Depth >= 2 is genuinely exercised: two chained re-keys, then a
+   grant, then an honest read of it. */
+lemma executable_chain:
+  exists-trace
+  "Ex g sk fr #r1 #r2 #j #h.
+      RekeyDone()@r1 & RekeyDone()@r2 & #r1 < #r2
+    & Granted(g, sk, fr)@j & #r2 < #j
+    & HonestRead(g)@h"
+
+/* MAIN — exclusion through the chain: a granted generation reaches
+   the adversary ONLY via a removal AFTER the grant. Equivalently: a
+   machine removed before the grant — excluded by a marker any number
+   of steps back — never reads it, at any chain depth, even holding
+   every retired key and every public record. */
+lemma exclusion_through_chain:
+  "All g sk fr #j #k. Granted(g, sk, fr)@j & K(g)@k ==>
+     Ex #r. Removed(sk)@r & #j < #r"
+
+/* The §3 non-claim at chain scale, and the vacuity witness for the
+   MAIN conclusion: a machine removed AFTER a grant was fleet when the
+   grant was made, and reads it. */
+lemma later_removal_reads_earlier_grant:
+  exists-trace
+  "Ex g sk fr #j #r #k.
+      Granted(g, sk, fr)@j & Removed(sk)@r & #j < #r & K(g)@k"
+
+end

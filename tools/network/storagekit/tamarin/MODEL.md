@@ -39,6 +39,8 @@ against.
 | `VaultD006WindowNoHaltGate.spthy` | model 11 calibration: **HALT gate deleted from the window grant** | `halt_window_confidential` falsified, rest verified |
 | `VaultWitnessAccountability.spthy` | model 12 green: witness split-view accountability (bead auto-fogkg) | all lemmas verified |
 | `VaultWitnessAccountabilityNoChainBind.spthy` | model 12 calibration: **position binding deleted from served views** | `poll_yields_alert_or_fraud_proof` falsified, rest verified |
+| `VaultRekeyMarkerChain.spthy` | chain extension of model 1: exclusion through UNBOUNDED marker chains (bead auto-szsw1) | all lemmas verified |
+| `VaultRekeyMarkerChainOneHop.spthy` | chain calibration: **descent check compares only the immediate parent** | `exclusion_through_chain` falsified, rest verified |
 | `run_tamarin.py` | harness enforcing every expectation above | exit 0 iff all hold |
 
 The pairing is the point: a green proof is only trusted because the
@@ -73,12 +75,14 @@ result:
 1. **HPKE → `aenc`/`adec`** (builtin). Symbolic perfect encryption; the
    computational gap is covered by consuming the RFC 9180 CryptoVerif
    proof, not by this model (crib §5's shared primitive).
-2. **Frontier ancestry → one marker edge.** `strictly_descends`
-   (credentials.py:302-311) is modeled as: a grant may not target a
-   credential whose cited frontier some marker has advanced past
-   (`selector_drops_descended`). The pilot scenario needs exactly one
-   descent step; no transitive closure is modeled. Extending to chains
-   is future work (see below).
+2. **Frontier ancestry → one marker edge** (models 1-2 as written).
+   `strictly_descends` (credentials.py:302-311) is modeled as: a grant
+   may not target a credential whose cited frontier some marker has
+   advanced past (`selector_drops_descended`). LIFTED (auto-szsw1):
+   `VaultRekeyMarkerChain.spthy` proves the UNBOUNDED-chain result —
+   see its section below — so the one-edge limitation no longer bounds
+   the machine-checked exclusion claim; models 1-2 stay as the minimal
+   single-step exhibits.
 3. **`max(kem_key_id)` tie-break → adversarial choice.** The restriction
    models only the *drop* step. Any candidate surviving the drop may be
    chosen by the adversary — a strict superset of every fixed hash
@@ -108,8 +112,9 @@ export PATH=/tmp/maude-dist:/tmp/tamarin:$PATH
 python3 tools/network/storagekit/tamarin/run_tamarin.py
 ```
 
-Verified 2026-08-29 with tamarin-prover 1.12.0 + Maude 3.5.1: all
-twelve models (26 theories, 144 lemma expectations) green — each green theory
+Verified 2026-08-29 with tamarin-prover 1.12.0 + Maude 3.5.1: twelve
+models plus the chain extension (28 theories, 154 lemma expectations)
+green — each green theory
 fully verifies and each calibration falsifies exactly its headline
 lemma. Whole suite runs in a few seconds. NOTE: the toolchain needs a
 UTF-8 locale (`LC_ALL=C.UTF-8`); `run_tamarin.py` sets it.
@@ -850,6 +855,64 @@ Abstraction register:
 7. **One witness** (`OnceWitness`); multi-witness quorums and
    cross-witness gossip are future work.
 
+## Chain extension — exclusion through unbounded marker chains (bead auto-szsw1)
+
+Lifts the one-marker-edge abstraction of models 1-2: disenrollment
+re-keys now REPEAT without bound. Re-key n consumes the current
+frontier head, writes marker f_n with parent f_{n-1} (each new
+marker's parents contain the previous marker), mints C_n, and removes
+one machine — whose snapshot hands the adversary the pre-re-key key,
+so after n re-keys the adversary holds EVERY retired key and every
+public record: the deep-chain adversary the single-step models never
+faced.
+
+Proved UNBOUNDED, with genuine induction (green, 1.3 s, 5/5):
+- **`exclusion_through_chain`** (MAIN, derived) — a granted generation
+  reaches the adversary ONLY via a removal AFTER the grant.
+  Equivalently: a machine removed before the grant — excluded by a
+  marker ANY number of steps back — never reads it, at any chain
+  depth. NOT bounded: the result holds for arbitrarily long chains.
+- **`root_secret`** and **`key_only_via_removal`** (`[use_induction,
+  reuse]`) — the inductive helpers: no re-key chain exposes the root,
+  and a derived persona key reaches the adversary only through a
+  removal. Both diverge without the induction annotation (the
+  unbounded FrontierHead chain regression); with it, instant.
+- **`executable_chain`** — depth ≥ 2 genuinely exercised: two chained
+  re-keys, then a grant, then an honest read.
+- **`later_removal_reads_earlier_grant`** (exists-trace) — the §3
+  non-claim at chain scale and the MAIN conclusion's vacuity witness:
+  a machine removed AFTER a grant was fleet when it was made, and
+  reads it.
+
+Calibration (`VaultRekeyMarkerChainOneHop.spthy`): the drop check
+compares only against the immediate parent (the target is dropped only
+when the marker over its frontier is the LATEST marker) →
+`exclusion_through_chain` falsified at depth 2 in a 16-step trace: one
+further re-key silently expires the exclusion and the first-removed
+machine reads new content. All other lemmas hold.
+
+Abstraction register:
+
+1. **Key ← cited frontier.** The credential key is
+   `kemsk(root, f_cited)` instead of `kemsk(root, counter)` — the
+   counter and the frontier advance in lockstep, so this is a
+   relabeling, and it puts the key↔frontier correlation into term
+   structure where induction can use it (the counter encoding needs a
+   separate injectivity invariant that defeats the prover).
+2. **Linear chain.** The marker chain is a linear token
+   (`FrontierHead`); on it, "inside the current ancestry closure" is
+   exactly "some marker was ever written over fr", which is what
+   `selector_drops_descended` quantifies over. Branching frontiers
+   (concurrent markers) are model 5's territory.
+3. **Every re-key is a disenrollment**, so per-step reveals of the
+   pre-re-key key accumulate to the full multi-key snapshot; a
+   removed machine's older keys were revealed by the earlier removals.
+4. **No ParentBridge / old-generation walk** — the pilot owns those;
+   this theory isolates the selector-vs-chain-depth question.
+5. **Grant bookkeeping carries the credential secret** (`!Cred(skC,
+   frC)`, sealed to `pk(skC)`) — symbolic bookkeeping only; nothing
+   secret flows anywhere the pilot's encoding did not send it.
+
 ## Roadmap (tracker note graph://8277c76c-ad1; beads filed)
 
 All twelve Tamarin models DONE (auto-loxsf, -djh2m, -cpbkf, -veal7,
@@ -862,8 +925,8 @@ pilot). Remaining:
 2. ~~Model 6 increment: adversarial-witness split-view accountability~~
    — DONE as model 12 (auto-fogkg); cancel-suppression fraud and
    receipt-time clock-skew remain its open increments.
-3. **Transitive frontier descent** w/ induction (relaxes the one-edge
-   abstraction shared by models 1-2).
+3. ~~Transitive frontier descent w/ induction~~ — DONE, unbounded, as
+   the chain extension (auto-szsw1).
 4. ~~D-006 halt/continue window~~ — DONE as model 11 (auto-rjonx).
 5. **SAPIC+ port** for equivalence properties (unlinkability, §23/§24
    deniability) on ProVerif/DeepSec backends.
