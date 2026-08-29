@@ -701,22 +701,6 @@ def get_recent_sessions(
                 row["ended_at"] = row["last_activity_at"]
             row["_source"] = "merged"
 
-        # Resumable: JSONL exists AND the session is interactive. A bare
-        # file-existence check put resume buttons on dispatch/agentic rows
-        # (their JSONL always exists) — resuming a completed agent-action
-        # run is meaningless, and the affordance belongs to sessions a
-        # human drives (2026-08-29, host dump 148ead24 t346, defect 1).
-        row["resumable"] = bool(
-            row["file_path"]
-            and _group_for_session_type(row.get("session_type")) == "interactive"
-            and Path(row["file_path"]).exists()
-        )
-        # date for backwards compat
-        row["date"] = (row["last_activity_at"] or row["created_at"] or "")[:10]
-        # Resolve org identity from the full row (carries session_type) BEFORE bracket-wrap
-        row["org"] = resolve_session_org(row)
-        # Wrap project in brackets for backwards-compat with the existing UI
-        row["project"] = f"[{row['project']}]" if row["project"] else ""
         if row["id"] in org_floor_source_ids:
             row["_org_floor"] = True
 
@@ -818,17 +802,39 @@ def get_recent_sessions(
     # meaningful title ('{type} · {target}') instead of the raw process name.
     _annotate_librarian_rows(out)
 
-    # Strip internal fields used only during row construction, and stamp the
-    # resolved quota group on every emitted row. The client must consume
-    # session_group rather than re-deriving it from session_type: the two
-    # mappings drifting apart is how agentic rows rendered in no chip at all
-    # (2026-08-29 regression — a row only renders where both sides agree).
+    # ── Step 7: enrich ONLY the rows actually being returned ──────
+    # Per-row enrichment must stay after the quota trim. It used to run on
+    # the full candidate set in the merge loop, and the per-row org
+    # resolution dominated the entire request: host cProfile 2026-08-29
+    # measured 3,069 resolve_session_org calls (~15,771 os.environ lookups)
+    # plus 3,069 Path.exists() stats per call to keep ~40 rows — ~150ms of
+    # the autonomy-scoped read's 178ms, while SQL+JSON parse cost ~25ms.
+    # Also stamps session_group, the single source of truth the client
+    # must consume rather than re-deriving from session_type: the two
+    # mappings drifting apart is how agentic rows rendered in no chip at
+    # all (2026-08-29 regression — a row renders only where both agree).
     for r in out:
         r.pop("_source", None)
         r.pop("_org_floor", None)
         r.pop("_job_id", None)
         r.pop("_job_type", None)
         r["session_group"] = _group_for_session_type(r.get("session_type"))
+        # Resumable: JSONL exists AND the session is interactive. A bare
+        # file-existence check put resume buttons on dispatch/agentic rows
+        # (their JSONL always exists) — the affordance belongs to sessions
+        # a human drives (host dump 148ead24 t346, defect 1).
+        r["resumable"] = bool(
+            r.get("file_path")
+            and r["session_group"] == "interactive"
+            and Path(r["file_path"]).exists()
+        )
+        # date for backwards compat
+        r["date"] = (r.get("last_activity_at") or r.get("created_at") or "")[:10]
+        # Resolve org identity from the full row BEFORE the bracket-wrap
+        # (resolve_session_org reads the unwrapped project slug).
+        r["org"] = resolve_session_org(r)
+        # Wrap project in brackets for backwards-compat with the existing UI
+        r["project"] = f"[{r['project']}]" if r["project"] else ""
     return out
 
 
