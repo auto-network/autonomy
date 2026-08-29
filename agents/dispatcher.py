@@ -294,17 +294,110 @@ def run_cmd(cmd: list[str], timeout: int = 15) -> str:
         return ""
 
 
-def run_bd(args: list[str], timeout: int = 15, check: bool = False) -> str:
+_INFER_BEADS_DIR = object()
+_bead_prefix_cache: dict = {"at": 0.0, "map": {}}
+
+
+def _provisioned_bead_trackers() -> list:
+    """[(org_slug, beads_dir)] for every provisioned per-org tracker.
+
+    Per-org bead databases (autonomy@74585ba): an org dir under
+    DATA_ROOT/.beads/orgs/<slug>/ carrying metadata.json routes bd to
+    that org's database on the shared Dolt server. The shared tracker
+    (database "auto") is beads_dir None and is not listed here.
+    """
+    orgs_root = DATA_ROOT / ".beads" / "orgs"
+    out = []
+    try:
+        if orgs_root.is_dir():
+            for d in sorted(orgs_root.iterdir()):
+                if (d / "metadata.json").is_file():
+                    out.append((d.name, d))
+    except OSError:
+        pass
+    return out
+
+
+def _bead_prefix_map() -> dict:
+    """issue-prefix -> beads_dir, from each tracker's metadata.json.
+
+    Bead id prefixes are per-database (auto-, anc-, ...) and globally
+    unique, so the prefix of any bead id names its home tracker — which
+    is how the ~30 id-bearing bd call sites route without threading a
+    tracker handle through every one. Cached ~60s. A provisioned org
+    whose metadata carries no recognizable prefix is warned about once
+    per refresh: its ids would silently route to the shared tracker.
+    """
+    now = time.time()
+    if now - _bead_prefix_cache["at"] < 60.0:
+        return _bead_prefix_cache["map"]
+    mapping: dict = {}
+    for org, d in _provisioned_bead_trackers():
+        prefix = None
+        try:
+            meta = json.loads((d / "metadata.json").read_text())
+            raw = (meta.get("prefix") or meta.get("issue_prefix")
+                   or meta.get("issuePrefix"))
+            if isinstance(raw, str) and raw.strip():
+                prefix = raw.strip().rstrip("-")
+        except Exception:
+            pass
+        if prefix:
+            mapping[prefix] = d
+        else:
+            print(f"  WARNING: org tracker {org} declares no issue prefix "
+                  f"in metadata.json; its bead ids cannot route by prefix",
+                  file=sys.stderr)
+    _bead_prefix_cache["at"] = now
+    _bead_prefix_cache["map"] = mapping
+    return mapping
+
+
+def _beads_dir_for_args(args: list) -> "Path | None":
+    """Infer the home tracker from the first issue-id-shaped argument."""
+    mapping = _bead_prefix_map()
+    if not mapping:
+        return None
+    # args[0] is always the bd subcommand — never an issue id, and some
+    # subcommands are dash-shaped (set-state), so skip it.
+    for a in args[1:]:
+        m = re.match(r"^([a-z][a-z0-9]*)-[a-z0-9]", str(a))
+        if m:
+            return mapping.get(m.group(1))
+    return None
+
+
+def run_bd(
+    args: list[str],
+    timeout: int = 15,
+    check: bool = False,
+    beads_dir=_INFER_BEADS_DIR,
+) -> str:
     """Run a bd command and return stdout.
 
     Logs stderr on non-zero exit code. If check=True, raises
     BdCommandError on failure instead of returning empty string.
+
+    Credentials + routing (2026-08-28 handoff, defects A+B): bd was
+    invoked with the dispatcher's bare environment, fell back to user
+    'root', and was denied on every query for months — bead dispatch was
+    silently dead. Every invocation now carries the target tracker's
+    credentials.env via tools.data_paths.beads_client_env, and
+    ``beads_dir`` selects the tracker: the default infers it from the
+    first bead-id-shaped argument's prefix (auto- -> shared,
+    anc- -> anchore, ...); pass ``beads_dir=None`` explicitly for
+    shared-tracker queries or an org dir for that org's database.
     """
+    if beads_dir is _INFER_BEADS_DIR:
+        beads_dir = _beads_dir_for_args(args)
     try:
+        from tools.data_paths import beads_client_env
+        env = {**os.environ, **beads_client_env(beads_dir)}
         result = subprocess.run(
             ["bd"] + args,
             capture_output=True, text=True, timeout=timeout,
             cwd=str(REPO_ROOT),
+            env=env,
         )
         if result.returncode != 0:
             stderr = result.stderr.strip()
@@ -433,18 +526,28 @@ def get_ready_beads(label_filter: str | None = None) -> list[dict]:
     query = 'status=open AND label="readiness:approved"'
     if label_filter:
         query += f" AND label={label_filter}"
-    out = run_bd(["query", query, "--json"])
-
-    if not out:
-        return []
-    try:
-        beads = json.loads(out)
-    except json.JSONDecodeError:
-        return []
-
-    if not isinstance(beads, list):
-        return []
-
+    # Defect B (2026-08-28 handoff): the dispatcher only ever queried the
+    # shared tracker, so provisioned orgs' beads (anchore: 49 ready) were
+    # invisible to dispatch. Query the shared tracker plus every
+    # provisioned org tracker, each with its own credentials.
+    beads: list[dict] = []
+    seen_ids: set = set()
+    trackers = [None] + [d for _org, d in _provisioned_bead_trackers()]
+    for tracker_dir in trackers:
+        out = run_bd(["query", query, "--json"], beads_dir=tracker_dir)
+        if not out:
+            continue
+        try:
+            chunk = json.loads(out)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(chunk, list):
+            continue
+        for b in chunk:
+            bid = b.get("id")
+            if bid and bid not in seen_ids:
+                seen_ids.add(bid)
+                beads.append(b)
     return beads
 
 
@@ -3539,12 +3642,21 @@ def reconcile_state(running: list[RunningAgent]) -> None:
 
     # 2. Reset orphaned Dolt in_progress beads to open
     try:
-        out = run_bd(["query", "status=in_progress", "--json"])
-        if out:
+        in_progress_beads = []
+        for tracker_dir in (
+            [None] + [d for _org, d in _provisioned_bead_trackers()]
+        ):
+            out = run_bd(["query", "status=in_progress", "--json"],
+                         beads_dir=tracker_dir)
+            if not out:
+                continue
             try:
-                in_progress_beads = json.loads(out)
+                chunk = json.loads(out)
             except json.JSONDecodeError:
-                in_progress_beads = []
+                continue
+            if isinstance(chunk, list):
+                in_progress_beads.extend(chunk)
+        if in_progress_beads:
             if isinstance(in_progress_beads, list):
                 for bead in in_progress_beads:
                     bead_id = bead.get("id", "")
