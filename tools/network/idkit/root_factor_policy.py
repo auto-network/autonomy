@@ -1279,3 +1279,68 @@ def parse_armored_envelope(armor: object) -> dict:
 
 def canonicalize_armored_envelope(armor: object) -> str:
     return emit_armored_envelope(parse_armored_envelope(armor))
+
+
+def mint_password_armor(
+    root: KeyPair,
+    password: str,
+    *,
+    factor_id: str = "password-1",
+    iterations: int = PASSWORD_KDF_DEFAULT,
+) -> str:
+    """Armor *root* under a single-password policy; return the envelope text.
+
+    The convenience composition every headless birth path uses: one password
+    factor, full access, a one-leaf policy, generation 1. Browser flows build
+    richer policies through the same primitives.
+    """
+    factor, seed = create_password_factor(
+        root.public_hex, factor_id, password, iterations=iterations
+    )
+    try:
+        envelope = build_envelope(
+            root,
+            generation=1,
+            factors=[factor],
+            access=[factor_id],
+            policy=factor_leaf(factor_id),
+        )
+    finally:
+        seed[:] = b"\x00" * len(seed)
+    return emit_armored_envelope(envelope)
+
+
+def open_armor_with_password(armor: object, password: str) -> KeyPair:
+    """Open an armored envelope using its password factors alone.
+
+    Raises :class:`~tools.network.idkit.armor.ArmorPassphraseError` when no
+    password factor opens with *password*, and
+    :class:`RootFactorPolicyError` when the password opens factors but the
+    policy demands more than a password can satisfy (an MFA policy on a
+    headless path).
+    """
+    from .armor import ArmorPassphraseError  # lazy: armor.py imports us lazily too
+
+    parsed = parse_armored_envelope(armor)
+    root_pub = parsed["root_pub"]
+    seeds: dict[str, bytearray] = {}
+    try:
+        for factor in parsed["factors"]:
+            if factor.get("type") != "password":
+                continue
+            try:
+                seeds[factor["factor_id"]] = open_password_factor(
+                    root_pub, factor, password
+                )
+            except RootFactorPolicyError:
+                continue
+        if not seeds:
+            raise ArmorPassphraseError("armor does not open with that password")
+        if not policy_satisfied(parsed["policy"], seeds.keys()):
+            raise RootFactorPolicyError(
+                "this armor's policy is not satisfied by a password alone"
+            )
+        return open_envelope(parsed, seeds)
+    finally:
+        for seed in seeds.values():
+            seed[:] = b"\x00" * len(seed)

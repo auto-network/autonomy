@@ -610,7 +610,7 @@ def create_org_with_identity(
     registry identifier at creation.
     """
     from tools.network.idkit import KeyPair
-    from tools.network.idkit.armor import decrypt_root_key
+    from tools.network.idkit.root_factor_policy import open_armor_with_password
     from tools.network.ledger import LedgerStore, org_ledger_db_path
     from tools.network.ledger.found import found_org_ledger
     from tools.network.storagekit import credentials as _credentials
@@ -623,7 +623,7 @@ def create_org_with_identity(
         )
     # Step 1 — unlock first: a wrong password raises ArmorPassphraseError
     # here, before anything exists on disk.
-    personal_kp = decrypt_root_key(
+    personal_kp = open_armor_with_password(
         member.payload["armored_private_key"], personal_password
     )
     personal_seed = bytes.fromhex(personal_kp.private_hex)
@@ -1137,7 +1137,7 @@ def retrofit_found_ledgers(
     guarded resume (the only identity-preserving recovery). An org whose
     key will not open is recorded and left unfounded; the run continues.
     """
-    from tools.network.idkit.armor import decrypt_root_key
+    from tools.network.idkit.root_factor_policy import open_armor_with_password
     from tools.network.ledger import LedgerStore, org_ledger_db_path
     from tools.network.ledger.found import found_org_ledger, resume_org_founding
     from tools.network.storagekit import credentials as _credentials
@@ -1148,7 +1148,7 @@ def retrofit_found_ledgers(
             "no personal identity is enrolled; the retrofit founds ledgers "
             "under your personal key"
         )
-    personal_kp = decrypt_root_key(
+    personal_kp = open_armor_with_password(
         member.payload["armored_private_key"], personal_password
     )  # wrong password raises HERE, before any org is touched
     personal_seed = bytes.fromhex(personal_kp.private_hex)

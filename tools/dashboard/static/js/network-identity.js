@@ -106,9 +106,11 @@
     if (!/^[0-9a-f]{64}$/.test(rootPubHex)) {
       throw new Error('root_pub must be 64 lowercase hex chars');
     }
-    return _I().encryptArmor(
-      seed, rootPubHex, passphrase, iterations || _iterations,
-    );
+    var policy = await import('/static/js/ceremony/root-factor-policy.js');
+    return policy.mintPasswordArmor({
+      rootSeed: seed, rootPub: rootPubHex, password: passphrase,
+      iterations: iterations || _iterations,
+    });
   }
 
   async function importSigningKey(seed) {

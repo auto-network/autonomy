@@ -192,14 +192,14 @@ def _mint_personal_identity(password: str, *, display_name: str) -> bytes:
     from tools.graph import settings_ops
     from tools.graph.schemas.personal_identity import PERSONAL_IDENTITY_SET_ID
     from tools.network.idkit import KeyPair
-    from tools.network.idkit.armor import encrypt_root_key
+    from tools.network.idkit.root_factor_policy import mint_password_armor
 
     root = KeyPair.generate()
     with settings_ops.identity_write_context():
         settings_ops.upsert_by_key(
             PERSONAL_IDENTITY_SET_ID, 1, "default",
             {
-                "armored_private_key": encrypt_root_key(root, password),
+                "armored_private_key": mint_password_armor(root, password),
                 "root_pub": root.public_hex,
                 "display_name": display_name,
                 "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -226,7 +226,8 @@ def _open_personal_identity(password: str) -> bytes:
     """Decrypt the canonical local personal identity, never mint a new one."""
     from tools.graph import settings_ops
     from tools.graph.schemas.personal_identity import PERSONAL_IDENTITY_SET_ID
-    from tools.network.idkit.armor import ArmorError, decrypt_root_key
+    from tools.network.idkit.armor import ArmorError
+    from tools.network.idkit.root_factor_policy import open_armor_with_password
 
     members = [
         member
@@ -243,7 +244,7 @@ def _open_personal_identity(password: str) -> bytes:
     if member is None:
         raise JoinError("no personal identity is enrolled on this node")
     try:
-        root = decrypt_root_key(member.payload["armored_private_key"], password)
+        root = open_armor_with_password(member.payload["armored_private_key"], password)
     except ArmorError:
         raise JoinError("the supplied personal password did not unlock the identity") from None
     return bytes.fromhex(root.private_hex)

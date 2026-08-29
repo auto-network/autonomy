@@ -13,6 +13,7 @@ import {
 import { derivePersona } from './ceremony/ledger-event.js';
 import { createBrowserStorage } from './ceremony/storage.js';
 import { wakeVault } from './ceremony/vault-unlock.js';
+import { openArmorWithPassword } from './ceremony/root-factor-policy.js';
 import { enrollPasskey } from './ceremony/enrollment.js';
 
 var CryptoKeyConstructor = globalThis.CryptoKey;
@@ -312,7 +313,8 @@ var signRegistryRequestCore;
   // key opens the seal, and the personal seed dies before returning.
   async function _openOrgRoot(orgKey, passphrase) {
     if (orgKey.armored_private_key) {
-      return decryptArmor(orgKey.armored_private_key, passphrase);
+      throw new Error('this organization key is stored in a retired format — '
+        + 're-seal it to your personal identity before signing on');
     }
     if (orgKey.sealed_root_key) {
       var personal = await _fetchJson('/api/identity/personal');
@@ -321,7 +323,7 @@ var signRegistryRequestCore;
           'personal identity, but no personal identity is stored on this ' +
           'node — set one up from the getting-started flow first');
       }
-      var openedPersonal = await decryptArmor(
+      var openedPersonal = await openArmorWithPassword(
         personal.armored_private_key, passphrase);
       try {
         var seed = await openSealedArmor(orgKey, openedPersonal.seed);
@@ -377,7 +379,7 @@ var signRegistryRequestCore;
     }
     var openedPersonal = null;
     try {
-      openedPersonal = await decryptArmor(
+      openedPersonal = await openArmorWithPassword(
         personal.armored_private_key, passphrase);
     } catch (e) {
       // The entered passphrase opens the org armor but not the personal
@@ -720,7 +722,7 @@ var signRegistryRequestCore;
         'identity is stored on this node — set one up from the ' +
         'getting-started flow first');
     }
-    var opened = await decryptArmor(personal.armored_private_key, passphrase);
+    var opened = await openArmorWithPassword(personal.armored_private_key, passphrase);
     return {
       seed: opened.seed,
       rootPub: opened.rootPub || personal.root_pub || null,

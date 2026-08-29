@@ -4,9 +4,9 @@ import fs from 'node:fs';
 import { webcrypto } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
+import { openArmorWithPassword } from '../root-factor-policy.js';
 import {
   canonicalJson,
-  decryptArmor,
 } from '../primitives.js';
 import {
   buildEvent,
@@ -211,7 +211,7 @@ async function issueInvitation({
     throw new Error('authority-ledger heads response is malformed');
   }
 
-  const opened = await decryptArmor(personalArmor, personalPassphrase);
+  const opened = await openArmorWithPassword(personalArmor, personalPassphrase);
   let persona;
   try {
     persona = await derivePersona(opened.seed, heads.genesis_id);
