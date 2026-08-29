@@ -1,0 +1,46 @@
+%% Generated from registry.yaml by gen.py — do not edit by hand.
+%% Solid arrows: derivation (parent to child). Dashed arrows: this
+%% key's material is sealed to the recipient key. Node color is the
+%% custody class. Seal edges whose recipient is prose rather than a
+%% registered key id are omitted here and remain in the register.
+graph TD
+    classDef cold fill:#1e3a5f,color:#dbeafe,stroke:#3b82f6
+    classDef memory fill:#4a2545,color:#fce7f3,stroke:#ec4899
+    classDef disk fill:#3f3f1f,color:#fef9c3,stroke:#eab308
+    classDef public fill:#1f3f2f,color:#dcfce7,stroke:#22c55e
+    agent_delegate_signing_key["agent_delegate_signing_key"]:::memory
+    class_key["class_key"]:::cold
+    factor_recipient["factor_recipient"]:::cold
+    factor_seed["factor_seed"]:::cold
+    generation_secret["generation_secret"]:::memory
+    k_index_k_meta["k_index_k_meta (designed)"]:::cold
+    master_kek["master_kek"]:::cold
+    member_recovery_key["member_recovery_key"]:::cold
+    object_cek["object_cek"]:::memory
+    object_wrap_key["object_wrap_key"]:::memory
+    org_root_signing_key["org_root_signing_key"]:::cold
+    pepper["pepper (designed)"]:::memory
+    per_credential_wrapping_key["per_credential_wrapping_key"]:::cold
+    per_machine_key["per_machine_key"]:::disk
+    persona_kem_private["persona_kem_private"]:::memory
+    persona_signing_key["persona_signing_key"]:::cold
+    personal_root_seed["personal_root_seed"]:::cold
+    recovery_code["recovery_code"]:::cold
+    recovery_signing_key["recovery_signing_key"]:::cold
+    recovery_slot_recipient["recovery_slot_recipient"]:::cold
+    root_anchor_seed["root_anchor_seed"]:::cold
+    sealed_index["sealed_index (designed)"]:::cold
+    serving_delegate_key["serving_delegate_key"]:::disk
+    tier2_session_key["tier2_session_key"]:::cold
+    factor_seed -->|derive_encapsulation_keypair| factor_recipient
+    sealed_index -->|HKDF| k_index_k_meta
+    recovery_code -->|HKDF| member_recovery_key
+    generation_secret -->|HKDF| object_wrap_key
+    factor_seed -->|PRF-derived X25519| per_credential_wrapping_key
+    personal_root_seed -->|derive_machine_key| per_machine_key
+    personal_root_seed -->|derive_kem_seed| persona_kem_private
+    personal_root_seed -->|derive_persona| persona_signing_key
+    recovery_code -->|HKDF| recovery_signing_key
+    recovery_code -->|HKDF| recovery_slot_recipient
+    personal_root_seed -.->|autonomy/root-factor-recipient/v1| factor_recipient
+    personal_root_seed -.->|autonomy/recovery-armor/v1| recovery_slot_recipient

@@ -42,6 +42,7 @@ keys:
     proofs:
       - {framework: tamarin, theory: VaultOpenStore, lemma: root_secret_open_store}
       - {framework: tamarin, theory: VaultRekeyMarker, lemma: root_secret}
+      - {framework: tamarin, theory: VaultFactorPolicy, lemma: password_and_passkey1_release_root}
 
   org_root_signing_key:
     kind: signing
@@ -181,6 +182,10 @@ keys:
     code:
       - tools/network/idkit/root_factor_policy.py
     crib: ["§2"]
+    proofs:
+      - {framework: tamarin, theory: VaultFactorPolicy, lemma: password_alone_no_root}
+      - {framework: tamarin, theory: VaultFactorPolicy, lemma: passkeys_both_no_root}
+      - {framework: tamarin, theory: VaultFactorPolicy, lemma: unlock_only_no_root}
 
   factor_recipient:
     kind: kem
