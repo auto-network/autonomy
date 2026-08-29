@@ -334,19 +334,31 @@ def _bead_prefix_map() -> dict:
     mapping: dict = {}
     for org, d in _provisioned_bead_trackers():
         prefix = None
-        try:
-            meta = json.loads((d / "metadata.json").read_text())
-            raw = (meta.get("prefix") or meta.get("issue_prefix")
-                   or meta.get("issuePrefix"))
-            if isinstance(raw, str) and raw.strip():
-                prefix = raw.strip().rstrip("-")
-        except Exception:
-            pass
+        # The authoritative prefix lives in the DATABASE's config table —
+        # where bd itself reads it, and where the provisioning recipe
+        # (graph 74e2b864) writes it. metadata.json never carries it, so
+        # ask the tracker (routed with its own credentials); the file
+        # keys remain a fallback for hand-provisioned trackers.
+        out = run_bd(["config", "get", "issue_prefix"], beads_dir=d)
+        raw = out.splitlines()[0].strip() if out else ""
+        if raw:
+            prefix = raw.rstrip("-")
+        else:
+            try:
+                meta = json.loads((d / "metadata.json").read_text())
+                raw = (meta.get("prefix") or meta.get("issue_prefix")
+                       or meta.get("issuePrefix"))
+                if isinstance(raw, str) and raw.strip():
+                    prefix = raw.strip().rstrip("-")
+            except Exception:
+                pass
         if prefix:
             mapping[prefix] = d
         else:
-            print(f"  WARNING: org tracker {org} declares no issue prefix "
-                  f"in metadata.json; its bead ids cannot route by prefix",
+            print(f"  WARNING: org tracker {org} reports no issue_prefix "
+                  f"(bd config get issue_prefix / metadata.json); its bead "
+                  f"ids cannot route by prefix and id-bearing calls would "
+                  f"hit the shared tracker",
                   file=sys.stderr)
     _bead_prefix_cache["at"] = now
     _bead_prefix_cache["map"] = mapping
