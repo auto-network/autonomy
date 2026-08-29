@@ -1,0 +1,27 @@
+/*
+  VaultDeniabilityPlainAddr — privacy pair B calibration: the row
+  address is the deterministic PLAINTEXT store name instead of the
+  pepper-derived hash. Bead auto-u8pcx (spike: auto-pdvu6). Tracker
+  8277c76c.
+
+  Run with `tamarin-prover --diff --prove`: Observational_equivalence
+  MUST be falsified — the observer compares the dump row's address to
+  the known store name and learns whether the vault exists. This is
+  exactly the leak the §24 pepper-derived opaque addressing exists to
+  prevent, and the falsification calibrates the green theory's
+  verdict.
+*/
+
+theory VaultDeniabilityPlainAddr
+begin
+
+builtins: symmetric-encryption
+
+rule Dump_Row:
+  [ Fr(~data), Fr(~k), Fr(~r1), Fr(~r2) ]
+  -->
+  [ Out(diff( <'vault', senc(~data, ~k)>
+            , <~r1, ~r2> ))
+  ]
+
+end

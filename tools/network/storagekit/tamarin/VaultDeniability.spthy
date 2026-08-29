@@ -1,0 +1,38 @@
+/*
+  VaultDeniability — privacy pair B green: a cold database dump does
+  not reveal which stores are secret vaults (crib graph://1e005d5c-c11
+  §24). Bead auto-u8pcx (spike: auto-pdvu6). Tracker 8277c76c.
+
+  Sealed stores pool in one shared settings set with uniform opaque
+  row keys and payload shapes: a secret vault's dump row is
+  <h(<pepper, name>), senc(payload, key)> — the address derived from
+  the sealed pepper, the payload sealed. §24's claim: a dump
+  CONTAINING a secret vault is indistinguishable from one without, as
+  long as the pepper stays sealed (row COUNT is stated as revealed and
+  is out of scope — the bi-system compares same-shaped rows).
+
+  Run with `tamarin-prover --diff --prove`. LEFT of the diff: the row
+  is a real secret vault. RIGHT: the same-shaped row is pure noise (no
+  vault exists). Equivalence = deniability.
+
+  Calibration: VaultDeniabilityPlainAddr.spthy — deterministic
+  plaintext row addresses. Equivalence MUST be falsified there.
+
+  Abstraction: one row stands for the dump (multi-row dumps and
+  pepper-compromise variants are future increments); h and senc are
+  the builtin symbolic primitives.
+*/
+
+theory VaultDeniability
+begin
+
+builtins: symmetric-encryption, hashing
+
+rule Dump_Row:
+  [ Fr(~pepper), Fr(~data), Fr(~k), Fr(~r1), Fr(~r2) ]
+  -->
+  [ Out(diff( <h(<~pepper, 'vault'>), senc(~data, ~k)>
+            , <~r1, ~r2> ))
+  ]
+
+end
