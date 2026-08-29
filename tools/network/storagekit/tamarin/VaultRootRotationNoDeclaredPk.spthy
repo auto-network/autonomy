@@ -1,52 +1,58 @@
 /*
-  VaultRootRotationNoDeclaredPk — model 9 calibration B: the verifier
-  resolves the recovery public key from attacker-suppliable input
-  instead of a pinned declaration. Identical to VaultRootRotation.spthy
-  except Accept_Rotation reads rpk from In() — no !DeclaredRecoveryPk
-  premise — modeling a verify_rotation caller that takes recovery_pub
-  from an attacker-writable source (the B1 open-store threat model; the
-  "trust presence" defect class of jh59f / c6z70).
+  VaultRootRotationNoDeclaredPk — model 9 calibration B: a RELYING
+  PARTY that resolves the recovery public key from attacker-suppliable
+  input instead of the key it pinned is defeated. Identical to
+  VaultRootRotation.spthy except Accept_Rotation reads rpk from In() —
+  no !DeclaredRecoveryPk premise — modeling a verifier that takes
+  recovery_pub from the request rather than from its own pinned record.
 
-  WHAT THE PIN ACTUALLY IS (corrected 2026-08-29, operator): the
-  auto.network registry DOES pin recovery_pub — the `orgs` table
-  (registry/store.py) stores it per identity, personal and
-  organizational, and the rebind path ENFORCES it:
-  registry/app.py:823 rejects any rebind whose signer != the declared
-  recovery_pub ("the ONLY key that can sign a rebind is the
-  pre-declared cold recovery key"). So the earlier model-9 note's
-  "the declaration registry is the unbuilt piece" was WRONG: the pin
-  exists and one ceremony enforces it.
-
-  THE ACTUAL RESIDUAL, which this calibration pins down: the
-  armor-layer succession ceremony idkit/root_rotation.py
-  (make_rotation / verify_rotation / resolve_current_root) is a
-  DISTINCT path from the registry rebind, and has no non-test caller
-  wiring its recovery_pub argument to the registry's pinned value —
-  verify_rotation still trusts whatever key its caller passes. The gap
-  is UNWIRED, not unbuilt: the registry recovery_pub (app.py:823) is
-  the existing anchor to resolve it against, modulo the open design
-  question of whether armor-layer root succession should share the
-  registry rebind's pin or carry its own declaration (the two are
-  related but distinct ceremonies).
+  WHO THIS PROPERTY IS ABOUT (framing corrected 2026-08-29 after
+  operator review; earlier drafts of this header were wrong and are
+  superseded). A personal-root succession has no meaning until a party
+  OTHER than the machine that produced it accepts it, because a machine
+  checking a succession against a key it read from the same request is
+  checking nothing — an attacker who holds that machine controls both
+  sides. Under the governing threat model (crib graph://1e005d5c-c11
+  §0: host write access is out of scope; "the OWNER REWRITING THEIR OWN
+  STORE IS A FEATURE"), a local self-check is not a security boundary.
+  The two parties that actually decide whether a new root is you are:
+    - your FLEET machines, which accept another machine as you only
+      against root-signed roster material (RosterEntry is root-signed,
+      fleet_roster.py; producing that signature needs the root seed,
+      released only by your factors — VaultFactorPolicy, model 7); and
+    - the RELAY / auto.network registry, which rebinds your identity to
+      a new root only for a request signed by the recovery key it
+      pinned at enrollment (registry/app.py:823: "the ONLY key that can
+      sign a rebind is the pre-declared cold recovery key").
+  An attacker who steals your data but not your factors, and who edits
+  their own machine's code to accept a recovery key they minted,
+  convinces neither: the fabricated root is not root-signed into any
+  honest fleet machine's roster, and the registry keeps pointing at the
+  old root. idkit/root_rotation.py's verify_rotation is NOT one of
+  these relying parties — it is a local helper with no party on the
+  other side — so its caller-supplied recovery_pub is not a defect and
+  needs no change. This calibration models the requirement on the
+  parties that ARE relying: they must resolve recovery_pub from their
+  own pinned record, never from the request.
 
   Expected: thief_cannot_rotate falsified (trace via
   `tamarin-prover --prove VaultRootRotationNoDeclaredPk.spthy`): the
   thief reveals the old root, mints a recovery keypair IT controls,
   supplies its own public key as "the" recovery key, co-signs the
-  rotation itself, and is accepted — a correctly-performed check
-  against the wrong trust anchor. Every other lemma holds: the owner
-  still rotates (the network can supply the TRUE key, which is
+  rotation itself, and is accepted — a check correctly performed
+  against a key the relying party did not pin. Every other lemma holds:
+  the owner still rotates (the relying party's own pinned key is
   public), the code-finder direction still fails on the old-root
   signature, both_secrets is unchanged, recovery_pk_is_declared
-  verifies vacuously (the binding it speaks of is deleted here).
+  verifies vacuously (the pinned binding it speaks of is deleted here).
 
   Distinct from VaultRootRotationNoCosign.spthy: there the recovery
-  check is SKIPPED; here it is PERFORMED against an unpinned key. Both
-  collapse to the same thief win — "an approval-shaped check is only
-  as strong as where its trust anchor comes from." The wiring bead,
-  when cut, should cite this theory's attack trace as its acceptance
-  target: wiring verify_rotation to registry recovery_pub must make
-  this trace unreachable.
+  co-signature check is SKIPPED; here it is PERFORMED against an
+  unpinned key. Both collapse to the same thief win. registry/app.py:823
+  already implements the defended behaviour — it reads recovery_pub
+  from the stored binding and rejects a signer mismatch — so this
+  theory is a model of why that server-side resolution is load-bearing,
+  not a report of a missing check.
 */
 
 theory VaultRootRotationNoDeclaredPk

@@ -539,27 +539,43 @@ the owner, holding both, rotates away from a stolen root. Signature
 checks use the model-4 Eq idiom (the verifier holds no secrets); the
 three distinct signing domains are structural tags.
 
-CRIB / WIRING CORRECTION (bead auto-lythl; refined 2026-08-29 after
-operator review): crib §9 marks this flow 🪦 unbuilt, but the
+WHO THIS MODEL IS ABOUT (framing corrected 2026-08-29 after operator
+review; two earlier drafts of this paragraph were wrong and are
+superseded). This model verifies a personal-root succession, and a
+succession only has meaning once a party other than the machine that
+produced it accepts it. A machine that checks a succession against a
+key it read from the same request checks nothing, because an attacker
+who holds that machine controls both sides. Under the governing threat
+model (crib §0: host write access is out of scope; "the OWNER
+REWRITING THEIR OWN STORE IS A FEATURE") a local self-check is not a
+security boundary. The two parties that decide whether a new root is
+you are your FLEET machines and the RELAY (the auto.network registry).
+A fleet machine accepts another machine as you only against root-signed
+roster material — a `RosterEntry` is root-signed (`fleet_roster.py`),
+and producing that signature needs the root seed, released only by a
+satisfying set of your factors (`VaultFactorPolicy`, model 7). The
+registry rebinds your identity to a new root only for a request signed
+by the recovery key it pinned at enrollment (`registry/app.py:823`:
+"the ONLY key that can sign a rebind is the pre-declared cold recovery
+key"). An attacker who steals your data but not your factors, and who
+edits their own machine's code to accept a recovery key they minted,
+convinces neither: the fabricated root is root-signed into no honest
+fleet machine's roster, and the registry keeps pointing at the old
+root. So `idkit/root_rotation.py`'s `verify_rotation` is not a relying
+party — it is a local helper with no party on the other side — and its
+caller-supplied `recovery_pub` is not a defect and needs no change.
+The model represents the honest relying party as a verifier that reads
+the recovery pk from a pinned binding (`!DeclaredRecoveryPk`), never
+from `In()`; `recovery_pk_is_declared` states that the verifier uses
+its pinned key. crib §9 marks the 🪦 flow unbuilt, but both the
 armor-layer code (`make_rotation`, `verify_rotation`,
-`resolve_current_root`) EXISTS — AND so does the recovery-key pin the
-first draft of this note called unbuilt. The auto.network registry's
+`resolve_current_root`) and the recovery-key pin exist: the registry's
 `orgs` table (`registry/store.py`) stores `recovery_pub` per identity,
-personal and organizational, and the rebind ceremony enforces it
-(`registry/app.py:823` rejects a rebind not signed by the pinned
-recovery key). The genuine residual is narrower and is a WIRING gap:
-`idkit/root_rotation.py`'s succession ceremony is a DISTINCT path from
-the registry rebind and has no non-test caller resolving its
-`recovery_pub` argument against that pin, so `verify_rotation` still
-trusts whatever key its caller passes. The model states that boundary
-honestly: the verifier reads the recovery pk from a setup-minted
-binding (`!DeclaredRecoveryPk`), never from `In()`;
-`recovery_pk_is_declared` restates the assumption, and calibration B
-(`VaultRootRotationNoDeclaredPk.spthy`) shows what an unpinned read
-costs. Whether the fix is to wire `verify_rotation` to the registry's
-`recovery_pub` or to have root succession carry its own declaration is
-an open design question — the two ceremonies are related but not the
-same.
+personal and organizational, and the rebind path enforces it. There is
+no wiring gap in `verify_rotation` to close, because a personal local
+`verify_rotation` has no relying party; the enforced property lives in
+the fleet's roster acceptance and in the registry rebind, which
+already resolve the recovery key from their own records.
 
 Proved (green, 0.6 s, 5/5):
 - **`thief_cannot_rotate`** (MAIN, derived Dolev-Yao) — while the
@@ -580,8 +596,10 @@ Proved (green, 0.6 s, 5/5):
   made. Rotation authority is exactly the pair; guards both MAIN
   premises against vacuity.
 - **`recovery_pk_is_declared`** (contract-consistency, restriction-
-  level) — restates the honest declared-recovery binding; carries no
-  derived force and stands in for the unbuilt registry.
+  level) — states that the honest relying party resolves the recovery
+  key from its own pinned binding; carries no derived force and models
+  what the registry rebind (`registry/app.py:823`) and the fleet's
+  roster acceptance already do.
 
 Derived vs encoded, explicitly: the two `*_cannot_rotate` lemmas and
 both witnesses are derived from the modeled signature mechanism;
@@ -595,14 +613,17 @@ its key, and is accepted); the owner reachability, the code-finder
 direction (old_sig still checked), and the binding lemma all hold —
 the co-signature is load-bearing only against the thief.
 
-Calibration B (`VaultRootRotationNoDeclaredPk.spthy`): the verifier
-reads `recovery_pub` from `In()` instead of the pinned declaration →
+Calibration B (`VaultRootRotationNoDeclaredPk.spthy`): a relying party
+reads `recovery_pub` from `In()` instead of its own pinned binding →
 `thief_cannot_rotate` falsified in 9 steps (the thief supplies a
 recovery key it controls and co-signs with it — a check correctly
-performed against the wrong trust anchor). Distinct defect from
-NoCosign: there the check is skipped, here it runs against an unpinned
-key; both yield the thief win. This is the machine-checked acceptance
-target for wiring `verify_rotation` to the registry pin.
+performed against a key the relying party did not pin). Distinct defect
+from NoCosign: there the co-signature check is skipped, here it runs
+against an unpinned key; both yield the thief win. The registry rebind
+already implements the defended behaviour — `registry/app.py:823` reads
+`recovery_pub` from the stored binding and rejects a signer mismatch —
+so this calibration models why that server-side resolution matters,
+not a missing check.
 
 Abstraction register:
 
