@@ -284,32 +284,49 @@ keys:
     proofs:
       - {framework: tamarin, theory: VaultOpenStore, lemma: no_key_to_forged_pk}
 
-  tier2_session_key:
-    group: identity-armor
+  browser_session_key:
+    group: browser
     kind: signing
     custody:
-      class: cold
+      class: disk
       forced_by: >-
-        Browser-bound and non-extractable; every signature is one
-        user-verified assertion unwrapping it for one use (crib Q0 — it
-        carries the intent scopes).
+        Persisted in the browser's IndexedDB and usable with no further
+        human interaction until its certificate expires; theft through the
+        page is prevented by WebCrypto non-extractability, and the bound is
+        the certificate validity window plus revocation.
     derivation: null
     descriptor:
       reaches: >-
-        Every intent scope: role grants, invites, recovery vouches, link
-        publish and revoke, delegate minting, role definition.
-      snapshot: Nothing — it never leaves the browser.
-      live: "Yes."
-      revoke: Root-signed RevocationRecord, plus the seven-day TTL. Not a ceremony.
-      bound: The TTL, and one user-verified assertion per signature.
+        The scopes its persona-signed delegation certificate carries
+        (SESSION_SCOPES in network-signon.mjs): delegate:agent,
+        link:publish, link:revoke, tunnel:serve, turn:allocate, and
+        viewer:identify — one certificate per organization persona, all
+        over the single session key.
+      snapshot: >-
+        Nothing through the page: the key is created extractable:false and
+        _installSession refuses any key claiming otherwise, so no script
+        can export it; it appears in no replicated store.
+      live: "Yes — its signatures must reach the dashboard or registry."
+      revoke: >-
+        The certificate validity window (default twenty-four hours,
+        maximum thirty days), enforced at load and by an expiry watchdog
+        that signs the browser out; a root-signed revocation record is the
+        explicit path. Not a ceremony.
+      bound: The certificate's validity window and scope list.
     code:
-      - tools/network/idkit/certs.py
+      - tools/dashboard/static/js/network-signon.mjs:signRegistryRequest
+      - tools/dashboard/static/js/network-signon.mjs:_installSession
+      - tools/network/registry/signing.py
     crib: ["§2", "§9"]
-    notes: The crib sheet's section 9 register calls this the browser session key.
-    seals_to:
-      - recipient: per_credential_wrapping_key
-        record: cross-device Tier-2 renewal seal
-
+    notes: >-
+      Minted per browser during the sign-on ceremony, after the user proves
+      root authority by satisfying the armor's factor policy (password or
+      passkey, per the enrolled policy); routine operations then sign with
+      crypto.subtle.sign and never see a factor again during validity. The
+      crib sheet's section 2 Tier-2 prose (PRF-wrapped at rest, one
+      user-verified assertion per signature, seven-day TTL) and section 9's
+      scope list describe a design this implementation does not match;
+      recorded as a crib comment for the next synthesis.
   persona_signing_key:
     group: org-authority
     kind: signing
@@ -648,7 +665,7 @@ mutations:
 
   fold.delegate:
     source: {kind: fold, file: tools/network/ledger/fold.py, symbol: _h_delegate}
-    authority: [persona_signing_key, tier2_session_key]
+    authority: [persona_signing_key, browser_session_key]
     preconditions:
       - The delegated scope set never exceeds the delegator's (no scope escalation).
       - A non-redelegable certificate cannot mint children.
@@ -832,7 +849,7 @@ mutations:
     source: {kind: ceremony, file: tools/network/idkit/revocation.py, symbol: RevocationRecord}
     authority: [personal_root_seed]
     effects:
-      revokes: [per_credential_wrapping_key, tier2_session_key]
+      revokes: [per_credential_wrapping_key, browser_session_key]
       writes: [root-signed revocation record]
     crib: ["§2", "§8"]
 

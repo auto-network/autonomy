@@ -17,7 +17,10 @@ graph LR
         master_kek["master kek"]:::cold
         per_credential_wrapping_key["per credential wrapping key"]:::cold
         personal_root_seed["personal root seed"]:::cold
-        tier2_session_key["tier2 session key"]:::cold
+    end
+    subgraph browser["Browser session"]
+        direction TB
+        browser_session_key["browser session key"]:::disk
     end
     subgraph recovery["Recovery"]
         direction TB
@@ -74,4 +77,3 @@ graph LR
     persona_kem_private -.-> per_machine_key
     personal_root_seed -.-> factor_recipient
     personal_root_seed -.-> recovery_slot_recipient
-    tier2_session_key -.-> per_credential_wrapping_key

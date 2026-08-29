@@ -24,7 +24,7 @@ REQUIRED_KEYS = [
     "factor_recipient",
     "master_kek",
     "per_credential_wrapping_key",
-    "tier2_session_key",
+    "browser_session_key",
     "persona_signing_key",
     "persona_kem_private",
     "generation_secret",

@@ -44,6 +44,7 @@ CUSTODY_STYLE = {
 # it comes first; consumers follow; design-only stores last.
 GROUP_TITLES = {
     "identity-armor": "Personal identity & armor",
+    "browser": "Browser session",
     "recovery": "Recovery",
     "org-authority": "Org authority",
     "domain-storage": "Domain storage",

@@ -41,6 +41,32 @@
         }
       ]
     },
+    "browser_session_key": {
+      "code": [
+        "tools/dashboard/static/js/network-signon.mjs:signRegistryRequest",
+        "tools/dashboard/static/js/network-signon.mjs:_installSession",
+        "tools/network/registry/signing.py"
+      ],
+      "crib": [
+        "\u00a72",
+        "\u00a79"
+      ],
+      "custody": {
+        "class": "disk",
+        "forced_by": "Persisted in the browser's IndexedDB and usable with no further human interaction until its certificate expires; theft through the page is prevented by WebCrypto non-extractability, and the bound is the certificate validity window plus revocation."
+      },
+      "derivation": null,
+      "descriptor": {
+        "bound": "The certificate's validity window and scope list.",
+        "live": "Yes \u2014 its signatures must reach the dashboard or registry.",
+        "reaches": "The scopes its persona-signed delegation certificate carries (SESSION_SCOPES in network-signon.mjs): delegate:agent, link:publish, link:revoke, tunnel:serve, turn:allocate, and viewer:identify \u2014 one certificate per organization persona, all over the single session key.",
+        "revoke": "The certificate validity window (default twenty-four hours, maximum thirty days), enforced at load and by an expiry watchdog that signs the browser out; a root-signed revocation record is the explicit path. Not a ceremony.",
+        "snapshot": "Nothing through the page: the key is created extractable:false and _installSession refuses any key claiming otherwise, so no script can export it; it appears in no replicated store."
+      },
+      "group": "browser",
+      "kind": "signing",
+      "notes": "Minted per browser during the sign-on ceremony, after the user proves root authority by satisfying the armor's factor policy (password or passkey, per the enrolled policy); routine operations then sign with crypto.subtle.sign and never see a factor again during validity. The crib sheet's section 2 Tier-2 prose (PRF-wrapped at rest, one user-verified assertion per signature, seven-day TTL) and section 9's scope list describe a design this implementation does not match; recorded as a crib comment for the next synthesis."
+    },
     "class_key": {
       "code": [
         "tools/vault/policy_class.py:Generation",
@@ -795,36 +821,6 @@
       "group": "org-authority",
       "kind": "signing"
     },
-    "tier2_session_key": {
-      "code": [
-        "tools/network/idkit/certs.py"
-      ],
-      "crib": [
-        "\u00a72",
-        "\u00a79"
-      ],
-      "custody": {
-        "class": "cold",
-        "forced_by": "Browser-bound and non-extractable; every signature is one user-verified assertion unwrapping it for one use (crib Q0 \u2014 it carries the intent scopes)."
-      },
-      "derivation": null,
-      "descriptor": {
-        "bound": "The TTL, and one user-verified assertion per signature.",
-        "live": "Yes.",
-        "reaches": "Every intent scope: role grants, invites, recovery vouches, link publish and revoke, delegate minting, role definition.",
-        "revoke": "Root-signed RevocationRecord, plus the seven-day TTL. Not a ceremony.",
-        "snapshot": "Nothing \u2014 it never leaves the browser."
-      },
-      "group": "identity-armor",
-      "kind": "signing",
-      "notes": "The crib sheet's section 9 register calls this the browser session key.",
-      "seals_to": [
-        {
-          "recipient": "per_credential_wrapping_key",
-          "record": "cross-device Tier-2 renewal seal"
-        }
-      ]
-    },
     "vault_factor_recipient": {
       "code": [
         "tools/vault/recipients.py"
@@ -1129,7 +1125,7 @@
     "fold.delegate": {
       "authority": [
         "persona_signing_key",
-        "tier2_session_key"
+        "browser_session_key"
       ],
       "crib": [
         "\u00a78",
@@ -1501,7 +1497,7 @@
       "effects": {
         "revokes": [
           "per_credential_wrapping_key",
-          "tier2_session_key"
+          "browser_session_key"
         ],
         "writes": [
           "root-signed revocation record"

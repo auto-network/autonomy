@@ -168,17 +168,6 @@ The layout mirrors the crib sheet's section 9 register (graph note
 - **bound** The one store.
 - **crib** §23
 
-### tier2_session_key — signing, cold (Browser-bound and non-extractable; every signature is one user-verified assertion unwrapping it for one use (crib Q0 — it carries the intent scopes).)
-
-- **minted** at random
-- **reaches** Every intent scope: role grants, invites, recovery vouches, link publish and revoke, delegate minting, role definition.
-- **snapshot** Nothing — it never leaves the browser.
-- **live?** Yes.
-- **revoke** Root-signed RevocationRecord, plus the seven-day TTL. Not a ceremony.
-- **bound** The TTL, and one user-verified assertion per signature.
-- **code** `tools/network/idkit/certs.py`
-- **crib** §2, §9
-
 ### vault_factor_recipient — kem, cold (Re-derivable only from the cold factor seed.)
 
 - **derived** from `factor_seed` via derive_encapsulation_keypair
@@ -258,6 +247,17 @@ The layout mirrors the crib sheet's section 9 register (graph note
 - **crib** §9, §13, §14
 
 ## DISK
+
+### browser_session_key — signing, disk (Persisted in the browser's IndexedDB and usable with no further human interaction until its certificate expires; theft through the page is prevented by WebCrypto non-extractability, and the bound is the certificate validity window plus revocation.)
+
+- **minted** at random
+- **reaches** The scopes its persona-signed delegation certificate carries (SESSION_SCOPES in network-signon.mjs): delegate:agent, link:publish, link:revoke, tunnel:serve, turn:allocate, and viewer:identify — one certificate per organization persona, all over the single session key.
+- **snapshot** Nothing through the page: the key is created extractable:false and _installSession refuses any key claiming otherwise, so no script can export it; it appears in no replicated store.
+- **live?** Yes — its signatures must reach the dashboard or registry.
+- **revoke** The certificate validity window (default twenty-four hours, maximum thirty days), enforced at load and by an expiry watchdog that signs the browser out; a root-signed revocation record is the explicit path. Not a ceremony.
+- **bound** The certificate's validity window and scope list.
+- **code** `tools/dashboard/static/js/network-signon.mjs:signRegistryRequest` · `tools/dashboard/static/js/network-signon.mjs:_installSession` · `tools/network/registry/signing.py`
+- **crib** §2, §9
 
 ### per_machine_key — kem, disk (Snapshot is zero — it decrypts no existing record; it only receives future distributions while the machine remains in the fleet. Placement is an operator setting.)
 
