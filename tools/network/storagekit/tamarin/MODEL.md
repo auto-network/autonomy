@@ -26,6 +26,8 @@ against.
 | `VaultConcurrentRekeyNoConverge.spthy` | model 5 calibration: **winner→loser seal deleted** | `loser_converges` falsified, rest verified |
 | `VaultRecoverySuccession.spthy` | model 6 green: recovery-code succession witness window (bead auto-loov7) | all lemmas verified |
 | `VaultRecoverySuccessionNoCancel.spthy` | model 6 calibration: **no-cancellation precondition deleted** | `cancellation_blocks_completion` falsified, rest verified |
+| `VaultFactorPolicy.spthy` | model 7 green: root-factor-policy AND/OR share algebra (bead auto-5wpjm) | all lemmas verified |
+| `VaultFactorPolicyNoSplit.spthy` | model 7 calibration: **AND node's fresh blind deleted** | `password_alone_no_root` falsified, rest verified |
 | `run_tamarin.py` | harness enforcing every expectation above | exit 0 iff all hold |
 
 The pairing is the point: a green proof is only trusted because the
@@ -95,8 +97,8 @@ export PATH=/tmp/maude-dist:/tmp/tamarin:$PATH
 python3 tools/network/storagekit/tamarin/run_tamarin.py
 ```
 
-Verified 2026-08-28 with tamarin-prover 1.12.0 + Maude 3.5.1: all six
-models (13 theories, 65 lemma expectations) green — each green theory
+Verified 2026-08-29 with tamarin-prover 1.12.0 + Maude 3.5.1: all seven
+models (15 theories, 81 lemma expectations) green — each green theory
 fully verifies and each calibration falsifies exactly its headline
 lemma. Whole suite runs in a few seconds. NOTE: the toolchain needs a
 UTF-8 locale (`LC_ALL=C.UTF-8`); `run_tamarin.py` sets it.
@@ -187,6 +189,9 @@ Proved (green, 0.7 s, 5/5):
   (root survives unlock-reveal even when the full factor is separately
   compromised) needs a full-factor-compromise variant, where root
   secrecy itself intentionally falls. Kept as the named design claim.
+  RESOLVED BY MODEL 7: `unlock_only_no_root` in VaultFactorPolicy.spthy
+  is exactly that variant — full-factor reveal rules exist there and
+  root release is reachable, so the claim now has independent force.
 - Executability of all three honest ceremonies.
 
 Two calibrations, each a single deleted verify:
@@ -328,10 +333,101 @@ absorbs the recovery_pub-succession swap-resistance deferred from model
 4: a completed succession IS a recovery-key swap, and here it requires
 the window + no cancellation, so a thief cannot silently swap it.
 
+## Model 7 — root-factor-policy share algebra (bead auto-5wpjm)
+
+The AND/OR algebra of the root factor policy itself (crib §2, §18;
+`root_factor_policy.py`), which model 3 deliberately did not test: one
+concrete policy with both operators — password AND (passkey1 OR
+passkey2) — compiled the way `_compile_node` does. AND XOR-splits its
+node secret (here the root seed): the OR branch's share is a fresh
+blind, the password's share is the seed XORed with that blind; OR gives
+both passkey leaves the same share; each leaf seals its share to the
+factor's seed-derived recipient (`derive_encapsulation_keypair` under
+`autonomy/root-factor-recipient/v1`). A fourth, unlock-only factor
+derives only the dashboard access signer (`factor_access_keypair`) and
+holds no share.
+
+The adversary holds the full public armor and per-factor reveal rules;
+each secrecy lemma pins one NAMED non-satisfying subset, so a failure
+names the broken policy branch. There is deliberately NO blanket
+root-secrecy lemma: releasing the root to a satisfying set is the
+design, and the two release witnesses prove it happens.
+
+Proved (green, 1.9 s, 8/8):
+- `executable` — both satisfying opens (password+passkey1,
+  password+passkey2) reconstruct the true root seed via `_open_node`'s
+  XOR, and the unlock-only access path is live.
+- `password_and_passkey1_release_root` /
+  `password_and_passkey2_release_root` (exists-trace) — a satisfying
+  seed set yields the root seed to its holder, each OR branch alone
+  completing the AND. These are the vacuity guards for every secrecy
+  lemma below.
+- `password_alone_no_root`, `passkey1_alone_no_root`,
+  `passkey2_alone_no_root`, `passkeys_both_no_root` — every named
+  non-satisfying subset leaves the root seed secret. All four are
+  genuine Dolev-Yao derivations (the adversary has the ciphertexts,
+  the XOR theory, and the revealed seeds; nothing is
+  restriction-encoded).
+- `unlock_only_no_root` — the unlock-only factor never yields the
+  root, in a model where full-factor reveals exist and root release is
+  reachable. This supplies the independent force model 3's
+  `unlock_only_yields_no_root` lacked (see the RESOLVED note there).
+
+Calibration (`VaultFactorPolicyNoSplit.spthy`): the AND node's fresh
+blind is deleted (`zero` replaces it), so the password's sealed share
+normalizes to the node secret → `password_alone_no_root` falsified in
+5 steps (the password leaf alone opens the root; trace via
+`tamarin-prover --prove VaultFactorPolicyNoSplit.spthy`), all seven
+other lemmas unchanged. ENCODING NOTE: the naive "hand both children
+the node secret" variant would falsify five lemmas at once (either
+passkey leaf would open straight to the root, and the honest opener's
+XOR of two identical shares collapses to zero, killing `executable`) —
+a calibration that breaks everything demonstrates nothing about which
+element is load-bearing. Deleting only the blind's freshness
+(`os.urandom(32)` degrading to a zero buffer in `_compile_node`) is
+the minimal single-element deletion under which the AND stops
+splitting knowledge, and it isolates the failure to exactly the
+password branch.
+
+Abstraction register:
+
+1. **HPKE seal → `aenc`/`adec`** (builtin), as in every model; the
+   computational gap is covered by the RFC 9180 CryptoVerif proof
+   (crib §5's shared primitive).
+2. **XOR is the real operator, not an abstraction.** `builtins: xor`
+   gives the adversary the full equational theory (AC + cancellation +
+   unit), so share-recombination attacks are in scope — this is the
+   point of the model.
+3. **Envelope signature verification out of scope.** Model 3 owns
+   verify-at-use of the policy row; here every row is genuine, so no
+   signing is modeled. The two models compose: model 3 shows only a
+   root-signed envelope is consumed, model 7 shows what a genuine
+   envelope's share tree releases.
+4. **One recipient per factor.** A synced passkey's per-device PRF
+   slots (crib §2) are one recipient here: slots of one factor hold
+   identical shares, so collapsing them loses no adversary knowledge.
+5. **Factor seeds are atoms.** The password's PBKDF2 wrapping of its
+   seed is below this model (password guessing is computational);
+   revealing a factor means revealing its 32-byte seed, exactly what
+   `open_password_factor` / a PRF evaluation returns.
+6. **Wrap-purpose path labels omitted.** `_wrap_purpose` binds digest
+   and tree path to each seal against cross-generation share mixing;
+   with one bounded generation (`OnceEnroll`) there is nothing to mix.
+7. **The access signer is a free function.** `accesskey/1` and
+   `recipientkey/1` model `factor_access_keypair`'s HKDF independence
+   from the recipient derivation; holding the seed yields both, as in
+   code.
+8. **Bounded scenario:** one enrollment, three full factors in one
+   fixed two-operator policy, one unlock-only factor. Deeper
+   expressions repeat the same two compiled node shapes; the
+   independence rule (every factor id occurs once,
+   root_factor_policy.py:25) keeps the elementary XOR construction
+   sound at any depth.
+
 ## Roadmap (tracker note graph://8277c76c-ad1; beads filed)
 
-All six Tamarin models DONE (auto-loxsf, -djh2m, -cpbkf, -veal7, -loov7,
-plus the pilot). Remaining:
+All seven Tamarin models DONE (auto-loxsf, -djh2m, -cpbkf, -veal7,
+-loov7, -5wpjm, plus the pilot). Remaining:
 
 1. **TLA+ side-track (auto-xtt5v)**: c6z70 settings-resolution
    discriminator + fleet-roster OR-set convergence — attacker-free

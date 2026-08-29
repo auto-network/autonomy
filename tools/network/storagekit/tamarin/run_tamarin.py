@@ -119,6 +119,26 @@ EXPECTATIONS = {
         "veto_blocks_completion": "verified",
         "completion_implies_witnessed_declaration": "verified",
     },
+    "VaultFactorPolicy.spthy": {
+        "executable": "verified",
+        "password_and_passkey1_release_root": "verified",
+        "password_and_passkey2_release_root": "verified",
+        "password_alone_no_root": "verified",
+        "passkey1_alone_no_root": "verified",
+        "passkey2_alone_no_root": "verified",
+        "passkeys_both_no_root": "verified",
+        "unlock_only_no_root": "verified",
+    },
+    "VaultFactorPolicyNoSplit.spthy": {
+        "executable": "verified",
+        "password_and_passkey1_release_root": "verified",
+        "password_and_passkey2_release_root": "verified",
+        "password_alone_no_root": "falsified",
+        "passkey1_alone_no_root": "verified",
+        "passkey2_alone_no_root": "verified",
+        "passkeys_both_no_root": "verified",
+        "unlock_only_no_root": "verified",
+    },
 }
 
 SUMMARY_RE = re.compile(

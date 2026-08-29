@@ -1,0 +1,180 @@
+/*
+  VaultFactorPolicy — model 7: the root factor policy releases the root
+  seed to exactly the satisfying factor sets (crib graph://1e005d5c-c11
+  §2, §18). Bead auto-5wpjm. Tracker 8277c76c.
+
+  One concrete policy containing both operators, compiled the way
+  root_factor_policy.py:_compile_node does:
+
+      password AND (passkey1 OR passkey2)
+
+  AND XOR-splits its node secret (here the root seed itself): the OR
+  branch's share is a fresh 32-byte blind, the password's share is the
+  XOR of the root seed with that blind. OR gives BOTH passkey leaves
+  the same share. Each leaf HPKE-seals its share to the factor's
+  seed-derived X25519 recipient (derive_encapsulation_keypair under
+  autonomy/root-factor-recipient/v1 -> recipientkey/1 here). A fourth,
+  unlock-only factor derives only the dashboard access signer
+  (factor_access_keypair -> accesskey/1) and holds NO share — the
+  crib §2 UNLOCK-ONLY vs FULL AUTHORITY split.
+
+  Adversary model: per-factor reveal rules hand the attacker factor
+  seeds; which subsets it holds is not restricted. Each secrecy lemma
+  instead pins one NAMED non-satisfying subset (only these full-factor
+  reveals fired), so a failing lemma names the exact broken policy
+  branch. Root release to a satisfying set is the DESIGN, so there is
+  deliberately no blanket root-secrecy lemma here; the two
+  exists-trace witnesses prove release genuinely happens, which is
+  what gives every secrecy lemma a reachable premise and gives
+  unlock_only_no_root the independent force model 3's
+  unlock_only_yields_no_root lacked (MODEL.md re-audit 2026-08-28).
+
+  Model 3 (VaultOpenStore) owns the envelope-signature question — the
+  policy row is verified before use. This model owns the share algebra
+  INSIDE a genuine envelope, so no signing is modeled.
+
+  Calibration (VaultFactorPolicyNoSplit.spthy): the AND node's fresh
+  blind is deleted (the XOR identity replaces it), so the password's
+  sealed "share" IS the node secret — password_alone_no_root must
+  fail and every other lemma must hold. That file's header records
+  why this is the single-lemma encoding of "the AND stops splitting".
+*/
+
+theory VaultFactorPolicy
+begin
+
+builtins: asymmetric-encryption, xor
+
+functions: recipientkey/1, accesskey/1
+
+/* Compile the policy once: root seed ~s, AND blind ~x, full-authority
+   factor seeds ~pw ~pk1 ~pk2, unlock-only seed ~ul. The armor is
+   public: the adversary holds every ciphertext and public key. */
+rule Enroll_Policy:
+  let share_or = ~x
+      share_pw = ~s XOR ~x
+      c_pw  = aenc(share_pw, pk(recipientkey(~pw)))
+      c_pk1 = aenc(share_or, pk(recipientkey(~pk1)))
+      c_pk2 = aenc(share_or, pk(recipientkey(~pk2)))
+  in
+  [ Fr(~s), Fr(~x), Fr(~pw), Fr(~pk1), Fr(~pk2), Fr(~ul) ]
+  --[ Enrolled(~s), OnceEnroll() ]->
+  [ !RootSeed(~s)
+  , !PwSeed(~pw), !Pk1Seed(~pk1), !Pk2Seed(~pk2), !UnlockSeed(~ul)
+  , !Armor(c_pw, c_pk1, c_pk2)
+  , Out(<c_pw, c_pk1, c_pk2>)
+  , Out(<pk(recipientkey(~pw)), pk(recipientkey(~pk1)), pk(recipientkey(~pk2))>)
+  , Out(<pk(accesskey(~pw)), pk(accesskey(~ul))>)
+  ]
+
+restriction once_enroll:
+  "All #i #j. OnceEnroll()@i & OnceEnroll()@j ==> #i = #j"
+
+/* Honest opens (root_factor_policy.py:_open_node): the password and
+   one passkey open their leaf seals and XOR the two shares. */
+rule Open_Via_Passkey1:
+  [ !PwSeed(~pw), !Pk1Seed(~pk1)
+  , !Armor( aenc(sh_pw, pk(recipientkey(~pw)))
+          , aenc(sh_or, pk(recipientkey(~pk1)))
+          , c_rest )
+  ]
+  --[ OpenedVia1(sh_pw XOR sh_or) ]->
+  [ ]
+
+rule Open_Via_Passkey2:
+  [ !PwSeed(~pw), !Pk2Seed(~pk2)
+  , !Armor( aenc(sh_pw, pk(recipientkey(~pw)))
+          , c_mid
+          , aenc(sh_or, pk(recipientkey(~pk2))) )
+  ]
+  --[ OpenedVia2(sh_pw XOR sh_or) ]->
+  [ ]
+
+/* The unlock-only factor signs in to the dashboard; it never touches
+   the share tree. */
+rule Unlock_Session:
+  [ !UnlockSeed(~ul) ]
+  --[ SessionGranted(pk(accesskey(~ul))) ]->
+  [ Out('session_cookie') ]
+
+/* Per-factor compromise: the adversary may obtain any factor seed.
+   The lemmas below pin the named subsets. */
+rule Reveal_Password:
+  [ !PwSeed(~pw) ]    --[ RevealedPw() ]->     [ Out(~pw) ]
+
+rule Reveal_Passkey1:
+  [ !Pk1Seed(~pk1) ]  --[ RevealedPk1() ]->    [ Out(~pk1) ]
+
+rule Reveal_Passkey2:
+  [ !Pk2Seed(~pk2) ]  --[ RevealedPk2() ]->    [ Out(~pk2) ]
+
+rule Reveal_Unlock:
+  [ !UnlockSeed(~ul) ] --[ RevealedUnlock() ]-> [ Out(~ul) ]
+
+/* ═══ Lemmas ═══ */
+
+/* Both honest satisfying opens reconstruct the true root seed, and the
+   unlock-only factor's access path is live. Guards the model against
+   an unopenable armor (over-restriction would dead-end every lemma). */
+lemma executable:
+  exists-trace
+  "Ex s ap #e #o1 #o2 #sg.
+      Enrolled(s)@e & OpenedVia1(s)@o1 & OpenedVia2(s)@o2
+    & SessionGranted(ap)@sg"
+
+/* Release witnesses — the vacuity guards for every secrecy lemma
+   below: a satisfying seed set genuinely yields the root seed itself
+   (adversary-side derivation through the seals and the XOR), and each
+   OR branch alone completes the AND. */
+lemma password_and_passkey1_release_root:
+  exists-trace
+  "Ex s #e #r1 #r2 #k.
+      Enrolled(s)@e & RevealedPw()@r1 & RevealedPk1()@r2 & K(s)@k
+    & not(Ex #q. RevealedPk2()@q)"
+
+lemma password_and_passkey2_release_root:
+  exists-trace
+  "Ex s #e #r1 #r2 #k.
+      Enrolled(s)@e & RevealedPw()@r1 & RevealedPk2()@r2 & K(s)@k
+    & not(Ex #q. RevealedPk1()@q)"
+
+/* MAIN — one lemma per named non-satisfying subset. Each pins the
+   full-factor reveals to exactly that subset (the unlock-only reveal
+   stays unconstrained: it must never matter). */
+lemma password_alone_no_root:
+  "not(Ex s #e #r #k.
+        Enrolled(s)@e & RevealedPw()@r & K(s)@k
+      & not(Ex #q1. RevealedPk1()@q1)
+      & not(Ex #q2. RevealedPk2()@q2))"
+
+lemma passkey1_alone_no_root:
+  "not(Ex s #e #r #k.
+        Enrolled(s)@e & RevealedPk1()@r & K(s)@k
+      & not(Ex #q1. RevealedPw()@q1)
+      & not(Ex #q2. RevealedPk2()@q2))"
+
+lemma passkey2_alone_no_root:
+  "not(Ex s #e #r #k.
+        Enrolled(s)@e & RevealedPk2()@r & K(s)@k
+      & not(Ex #q1. RevealedPw()@q1)
+      & not(Ex #q2. RevealedPk1()@q2))"
+
+lemma passkeys_both_no_root:
+  "not(Ex s #e #r1 #r2 #k.
+        Enrolled(s)@e & RevealedPk1()@r1 & RevealedPk2()@r2 & K(s)@k
+      & not(Ex #q. RevealedPw()@q))"
+
+/* MAIN — unlock-only stays unlock-only, now with independent force:
+   full-factor reveal rules exist in this model and root release is
+   reachable (the witnesses above), so this cannot be a corollary of
+   blanket secrecy — none holds here. Repairs the gap MODEL.md's
+   2026-08-28 re-audit recorded against model 3's
+   unlock_only_yields_no_root. */
+lemma unlock_only_no_root:
+  "not(Ex s #e #u #k.
+        Enrolled(s)@e & RevealedUnlock()@u & K(s)@k
+      & not(Ex #q1. RevealedPw()@q1)
+      & not(Ex #q2. RevealedPk1()@q2)
+      & not(Ex #q3. RevealedPk2()@q3))"
+
+end
