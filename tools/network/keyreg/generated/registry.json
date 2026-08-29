@@ -1614,6 +1614,7 @@
           "succession record"
         ]
       },
+      "notes": "The auto.network registry pins recovery_pub for personal and org identities (registry/store.py orgs table; the rebind path enforces it in tools/network/registry/app.py). The residual gap is wiring: the armor-layer succession in root_rotation.py does not yet verify against that pin. VaultRootRotationNoDeclaredPk.spthy is the machine-checked acceptance target for closing it.",
       "preconditions": [
         "Three signatures \u2014 old root, declared recovery key, and new root \u2014 verified against the declaration, never against armor contents."
       ],
