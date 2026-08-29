@@ -142,6 +142,20 @@
     pendingEnded: [],
   };
 
+  // The server stamps session_group (dao/sessions.py) — the single source
+  // of truth for chip/quota bucketing. The fallback below exists ONLY for
+  // payloads that predate the stamp (e.g. session:ended SSE rows); it must
+  // mirror the server's _SESSION_TYPE_GROUPS and is the one client-side
+  // copy. Never bucket off session_type anywhere else — two hand-synced
+  // mappings is how agentic rows rendered in no chip at all (2026-08-29).
+  function _rowGroup(s) {
+    if (s && s.session_group) return s.session_group;
+    var t = (s && s.session_type) || '';
+    if (t === 'dispatch' || t === 'agentic' || t === 'agent-run') return 'dispatch';
+    if (t === 'librarian') return 'librarian';
+    return 'interactive';
+  }
+
   function _mapRecentRow(r) {
     var sessionId = r.tmux_session;
     if (!sessionId) return null;
@@ -156,6 +170,7 @@
       session_id: sessionId,
       label: label,
       session_type: r.session_type || 'interactive',
+      session_group: r.session_group || null,
       type: r.type || 'container',
       is_live: !!r.is_live,
       project: r.project || '',
@@ -937,14 +952,7 @@
         var quotas = { interactive: 20, dispatch: 10, librarian: 10 };
         var counts = { interactive: 0, dispatch: 0, librarian: 0 };
         return sorted.filter(function(row) {
-          // MUST mirror the server's _SESSION_TYPE_GROUPS: 'agentic'
-          // belongs to the dispatch group. When this disagreed with the
-          // server, agentic rows were excluded from the Interactive chip
-          // server-side AND hidden in the Dispatch view client-side —
-          // visible nowhere (operator-caught regression, 2026-08-29).
-          var group = (row.session_type === 'dispatch' || row.session_type === 'agentic')
-            ? 'dispatch'
-            : (row.session_type === 'librarian' ? 'librarian' : 'interactive');
+          var group = _rowGroup(row);
           if (counts[group] >= quotas[group]) return false;
           counts[group] += 1;
           return true;
@@ -952,10 +960,8 @@
       },
 
       _matchesFilter(s, f) {
-        var t = s.session_type || 'interactive';
-        if (f === 'dispatch') return t === 'dispatch';
-        if (f === 'librarian') return t === 'librarian';
-        return t === 'terminal' || t === 'host' || t === 'chatwith' || t === 'session' || t === 'interactive';
+        if (f === 'dispatch' || f === 'librarian') return _rowGroup(s) === f;
+        return _rowGroup(s) === 'interactive';
       },
 
       async resumeSession(s, $event) {

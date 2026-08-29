@@ -661,27 +661,6 @@ def get_recent_sessions(
     return _attach_org(out)
 
 
-def recent_sessions_cached(
-    sort: str, since: str, type_group: str, org: str | None = None,
-    include_org_floor: bool = False,
-) -> list[dict] | None:
-    """Mock-mode companion to ``dao.sessions.recent_sessions_cached``.
-
-    Production serves a background-refreshed cache so request handlers never
-    iterate org DBs. Mock mode is fixture-file backed, so compute immediately
-    from the fixture to keep tests deterministic.
-    """
-    return get_recent_sessions(
-        None, sort, since, type_group, org, include_org_floor,
-    )
-
-
-def refresh_recent_cache() -> int:
-    """Mock-mode no-op cache refresher for the dashboard startup task."""
-    recent_sessions_cached("lastActivity", "1d", "all")
-    return 1
-
-
 def get_session_status_rows(since: str | None = None) -> list[dict]:
     """Mirror of dashboard session-status rows for CLI/API tests."""
     import time as _time

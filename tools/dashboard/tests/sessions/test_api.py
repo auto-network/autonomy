@@ -133,15 +133,6 @@ class TestRecentSessionsAPI:
         for field in ("id", "type", "date", "title"):
             assert field in session, f"missing field: {field}"
 
-    def test_legacy_cache_miss_has_no_client_retry_contract(self, test_client, monkeypatch):
-        """Regression: Retry-After turned a cache miss into client-side polling."""
-        from tools.dashboard import server
-
-        monkeypatch.setattr(server.dao_sessions, "recent_sessions_cached", lambda *args: None)
-        response = test_client.get("/api/dao/recent_sessions")
-        assert response.status_code == 202
-        assert "retry-after" not in response.headers
-
     def test_limit_param_is_deprecated(self, test_client):
         """`limit` is retired in favour of server-side per-type quotas (auto-wyo79).
 
@@ -168,18 +159,18 @@ class TestRecentSessionsAPI:
         response = test_client.get("/api/dao/recent_sessions?org=anchore")
         assert response.status_code == 403
 
-    def test_selected_org_is_forwarded_to_the_scoped_cache(self, test_client, monkeypatch):
-        """Legacy callers retain their server-scoped cache behavior."""
+    def test_selected_org_is_forwarded_to_the_scoped_read(self, test_client, monkeypatch):
+        """The ``?org=`` selection scopes the direct per-request read."""
         from tools.dashboard import server
 
         captured = {}
 
-        def fake_cached(sort, since, type_group, org):
+        def fake_read(limit, sort, since, type_group, org):
             captured.update(sort=sort, since=since, type_group=type_group, org=org)
             return []
 
         monkeypatch.setattr(server, "_token_org_or_none", lambda request: None)
-        monkeypatch.setattr(server.dao_sessions, "recent_sessions_cached", fake_cached)
+        monkeypatch.setattr(server.dao_sessions, "get_recent_sessions", fake_read)
         response = test_client.get(
             "/api/dao/recent_sessions?org=dynbench&type=interactive&since=1d"
         )
@@ -192,29 +183,23 @@ class TestRecentSessionsAPI:
             "org": "dynbench",
         }
 
-    def test_history_snapshot_reads_the_warmed_bounded_projection(self, test_client, monkeypatch):
-        """Regression: history must not compute thousands of rows on its request path."""
+    def test_history_snapshot_computes_the_bounded_projection_directly(self, test_client, monkeypatch):
+        """The page-load list is computed per request: one week of history
+        across all orgs plus the ten-row-per-org floor. The background cache
+        and its 202-on-cold-key placeholder are gone (operator ruling,
+        2026-08-29): an empty 200 body now always means genuinely empty."""
         from tools.dashboard import server
 
         captured = {}
 
-        def fake_cached(sort, since, type_group, org, include_org_floor=False):
+        def fake_read(limit, sort, since, type_group, org, include_org_floor=False):
             captured.update(
                 sort=sort, since=since, type_group=type_group,
                 org=org, include_org_floor=include_org_floor,
             )
             return [{"id": "history-row"}]
 
-        monkeypatch.setattr(
-            server.dao_sessions,
-            "recent_sessions_cached",
-            fake_cached,
-        )
-        monkeypatch.setattr(
-            server.dao_sessions,
-            "get_recent_sessions",
-            lambda *args, **kwargs: pytest.fail("the snapshot must not compute on the request path"),
-        )
+        monkeypatch.setattr(server.dao_sessions, "get_recent_sessions", fake_read)
         response = test_client.get("/api/dao/recent_sessions?snapshot=1")
         assert response.status_code == 200
         assert response.json() == [{"id": "history-row"}]

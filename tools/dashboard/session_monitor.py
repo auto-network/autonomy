@@ -1874,12 +1874,18 @@ class SessionMonitor:
                 "%Y-%m-%dT%H:%M:%SZ"
             )
 
-        if row.get("bead_id"):
+        from tools.dashboard.dao.sessions import _group_for_session_type
+
+        row_type = (row.get("type") or "").strip()
+        if row_type in ("agentic", "agent-run"):
+            session_type = "agentic"
+        elif row.get("bead_id"):
             session_type = "dispatch"
-        elif row.get("role") == "librarian" or row.get("type") == "librarian":
+        elif row.get("role") == "librarian" or row_type == "librarian":
             session_type = "librarian"
         else:
             session_type = "interactive"
+        session_group = _group_for_session_type(session_type)
 
         created_at = iso_timestamp(row.get("created_at"))
         last_activity_at = iso_timestamp(
@@ -1891,6 +1897,7 @@ class SessionMonitor:
             "tmux_session": tmux_name,
             "title": row.get("label") or tmux_name,
             "session_type": session_type,
+            "session_group": session_group,
             "type": row.get("type") or "container",
             "is_live": False,
             "project": f"[{project}]" if project else "",
@@ -1900,8 +1907,12 @@ class SessionMonitor:
             "entry_count": int(row.get("entry_count") or 0),
             "context_tokens": int(row.get("context_tokens") or 0),
             "role": row.get("role") or "",
+            # Resume is an interactive-session affordance only — dispatch and
+            # agentic runs must never grow a resume button, even when their
+            # transcript file exists (same gate as the DAO's recent list).
             "resumable": bool(
-                row.get("graph_source_id")
+                session_group == "interactive"
+                and row.get("graph_source_id")
                 and row.get("jsonl_path")
                 and Path(str(row["jsonl_path"])).exists()
             ),
