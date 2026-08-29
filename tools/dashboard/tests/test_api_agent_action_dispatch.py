@@ -1519,73 +1519,70 @@ def _list_agentic_sources() -> list[dict]:
     return out
 
 
-# ── Agentic launch cap (2026-08-28 incident, handoff item 2) ─────────
+# ── Agentic queue semantics (operator ruling 2026-08-29) ────────────
 
-def test_agentic_running_count_ignores_stale_and_foreign_rows(monkeypatch):
-    """Only recent RUNNING agentic rows count toward the launch cap.
-
-    Wedged rows (killed/--rm'd containers stuck RUNNING forever) age out
-    of the window instead of starving dispatching; bead rows and rows
-    with unparsable start times never count.
-    """
-    from datetime import datetime, timedelta, timezone
+def test_drainer_counts_preparing_and_running_as_occupancy(monkeypatch):
+    """Slot occupancy = PREPARING + RUNNING (claimed launches count, so
+    the cap can never overshoot); QUEUED rows wait."""
     from tools.dashboard import server as server_mod
-
-    now = datetime.now(timezone.utc)
-    fmt = "%Y-%m-%d %H:%M:%S"
-    # Shapes as get_active_agentic_runs returns them: agentic-only (the
-    # SQL prefilters kind), across QUEUED/PREPARING/RUNNING.
-    rows = [
-        {"status": "RUNNING", "started_at": (now - timedelta(minutes=5)).strftime(fmt)},
-        {"status": "QUEUED", "started_at": (now - timedelta(minutes=59)).strftime(fmt)},
-        {"status": "RUNNING", "started_at": (now - timedelta(hours=26)).strftime(fmt)},  # wedged
-        {"status": "PREPARING", "started_at": None},                                     # wedged
-    ]
     import agents.dispatch_db as dispatch_db_mod
+
+    rows = [
+        {"id": "r1", "status": "RUNNING", "started_at": "2026-08-29 00:00:01"},
+        {"id": "r2", "status": "PREPARING", "started_at": "2026-08-29 00:00:02"},
+        {"id": "r3", "status": "QUEUED", "started_at": "2026-08-29 00:00:03"},
+    ]
     monkeypatch.setattr(dispatch_db_mod, "get_active_agentic_runs", lambda: rows)
-    assert server_mod._agentic_running_count_recent() == 2
-
-
-def test_dispatch_rejects_at_agentic_cap(
-    client, per_org_universe, patch_launch_session, monkeypatch,
-):
-    """At the cap the endpoint 429s BEFORE creating the agentic source
-    row and before any container spawn."""
-    from tools.dashboard import server as server_mod
-
-    monkeypatch.setattr(
-        server_mod, "_agentic_running_count_recent", lambda: 10,
-    )
     monkeypatch.setattr(
         server_mod, "_resolved_dispatch_limits",
-        lambda: {"bead_max_concurrent": 2, "agentic_max_concurrent": 10},
+        lambda: {"bead_max_concurrent": 2, "agentic_max_concurrent": 2},
+    )
+    claims = []
+    monkeypatch.setattr(dispatch_db_mod, "claim_queued_run",
+                        lambda rid: claims.append(rid) or True)
+    started = asyncio.run(server_mod._drain_agentic_queue_once())
+    assert started == 0 and claims == [], "cap full: nothing claimed"
+
+
+def test_dispatch_over_cap_queues_never_rejects(
+    client, per_org_universe, patch_launch_session, monkeypatch,
+):
+    """Operator ruling (2026-08-29): the cap governs concurrent RUNNING;
+    excess dispatches enqueue as QUEUED rows and are NEVER 429'd. With
+    the cap at 0 nothing can drain, so the dispatch accepts and stays
+    QUEUED with no container spawn."""
+    from tools.dashboard import server as server_mod
+    from agents.dispatch_db import get_active_agentic_runs
+
+    monkeypatch.setattr(
+        server_mod, "_resolved_dispatch_limits",
+        lambda: {"bead_max_concurrent": 2, "agentic_max_concurrent": 0},
     )
     asset_id = "44444444-4444-4444-4444-444444444444"
     _insert_note_source(org="autonomy", source_id=asset_id, title="capped")
-    pre_sources = _list_agentic_sources()
 
     r = client.post("/api/agent-actions/dispatch", json={
         "member_key": "note.update-summary",
         "asset_id": asset_id,
     })
-    assert r.status_code == 429, r.json()
-    body = r.json()
-    assert body["cap"] == 10
-    assert body["running"] == 10
-    assert _list_agentic_sources() == pre_sources, (
-        "no agentic source row may be created for a rejected dispatch")
-    assert patch_launch_session == [], "no container spawn at the cap"
+    assert r.status_code == 202, r.json()
+    run_id = r.json()["run_id"]
+    rows = {row["id"]: row["status"] for row in get_active_agentic_runs()}
+    assert rows.get(run_id) == "QUEUED"
+    assert patch_launch_session == [], "no container spawn while capped"
+    # and the queued row renders in the waiting section
+    data = asyncio.run(server_mod._collect_dispatch_data())
+    assert any(w.get("id") == run_id and w.get("status") == "queued"
+               for w in data["waiting"])
 
 
 def test_dispatch_under_cap_proceeds(
     client, per_org_universe, patch_launch_session, monkeypatch,
 ):
-    """One below the cap, the dispatch flows normally end to end."""
+    """With a free slot, the queued dispatch drains straight to RUNNING."""
     from tools.dashboard import server as server_mod
+    from agents.dispatch_db import get_active_agentic_runs
 
-    monkeypatch.setattr(
-        server_mod, "_agentic_running_count_recent", lambda: 9,
-    )
     monkeypatch.setattr(
         server_mod, "_resolved_dispatch_limits",
         lambda: {"bead_max_concurrent": 2, "agentic_max_concurrent": 10},
@@ -1598,6 +1595,55 @@ def test_dispatch_under_cap_proceeds(
     })
     assert r.status_code == 202, r.json()
     assert len(patch_launch_session) == 1
+    rows = {row["id"]: row["status"] for row in get_active_agentic_runs()}
+    assert rows.get(r.json()["run_id"]) == "RUNNING"
+
+
+def test_dispatch_burst_holds_cap_and_queues_excess(
+    client, per_org_universe, patch_launch_session, monkeypatch,
+):
+    """The reported repro: cap 2, burst 5 -> all five 202, two RUNNING,
+    three QUEUED oldest-first, zero rejections."""
+    from tools.dashboard import server as server_mod
+    from agents.dispatch_db import get_active_agentic_runs
+
+    monkeypatch.setattr(
+        server_mod, "_resolved_dispatch_limits",
+        lambda: {"bead_max_concurrent": 2, "agentic_max_concurrent": 2},
+    )
+    run_ids = []
+    for i in range(5):
+        asset_id = f"66666666-6666-6666-6666-66666666666{i}"
+        _insert_note_source(org="autonomy", source_id=asset_id, title=f"b{i}")
+        r = client.post("/api/agent-actions/dispatch", json={
+            "member_key": "note.update-summary",
+            "asset_id": asset_id,
+        })
+        assert r.status_code == 202, r.json()
+        run_ids.append(r.json()["run_id"])
+    statuses = {row["id"]: row["status"] for row in get_active_agentic_runs()}
+    got = [statuses.get(rid) for rid in run_ids]
+    assert got.count("RUNNING") == 2, got
+    assert got.count("QUEUED") == 3, got
+    assert len(patch_launch_session) == 2
+
+
+def test_dispatch_queue_ceiling_is_the_only_rejection(
+    client, per_org_universe, monkeypatch,
+):
+    from tools.dashboard import server as server_mod
+    monkeypatch.setattr(
+        server_mod, "_agentic_queue_depth",
+        lambda: server_mod._AGENTIC_QUEUE_CEILING,
+    )
+    asset_id = "77777777-7777-7777-7777-777777777777"
+    _insert_note_source(org="autonomy", source_id=asset_id, title="full")
+    r = client.post("/api/agent-actions/dispatch", json={
+        "member_key": "note.update-summary",
+        "asset_id": asset_id,
+    })
+    assert r.status_code == 429
+    assert "queue is full" in r.json()["error"]
 
 
 def test_dispatch_limits_settings_round_trip(client, per_org_universe):

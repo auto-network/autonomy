@@ -68,11 +68,11 @@ class DispatchLimitsV1(SettingSchema):
         "agentic_max_concurrent": {
             "type": "integer",
             "description": (
-                "Concurrent agentic (agent-action) runs; enforced at "
-                "POST /api/agent-actions/dispatch with a 429 at the cap. "
-                "Only RUNNING rows started within the last hour count, so "
-                "wedged rows cannot starve dispatching. 0 pauses agentic "
-                "launches."
+                "Concurrent agentic (agent-action) runs. Excess dispatches "
+                "are never rejected: they queue as QUEUED rows (visible in "
+                "the dispatch page's approved-waiting section) and launch "
+                "oldest-first as running slots free. 0 pauses agentic "
+                "launching entirely (everything queues)."
             ),
             "default": DEFAULT_AGENTIC_MAX_CONCURRENT,
         },
