@@ -1291,3 +1291,55 @@ def test_blank_org_overlay_emits_no_heading(_turn_correction_org_env):
     )
     out = render_workspace_primer(_cfg(id="sample"))
     assert "## Org Conventions" not in out
+
+
+class TestOrganizationalMounts:
+    """The primer's mounts section (operator requirement, 2026-08-29).
+
+    A session is handed these directories at container-create time and has
+    no other way to discover them: before this section, a workspace's mount
+    appeared nowhere in a 58k-character primer.
+    """
+
+    def _mount(self, **over):
+        from types import SimpleNamespace
+        payload = dict(
+            container_path="/opt/sample", kind="dir", mode="rw",
+            name="Workspace storage",
+            description="Shared network storage for this workspace. "
+                        "Files only, no databases.",
+            required=True, visibility="machine", subpath="sample",
+        )
+        payload.update(over)
+        return SimpleNamespace(payload=SimpleNamespace(**payload))
+
+    def test_a_row_states_path_type_mode_and_description(self):
+        """The four things the requirement asks for, as whole rows — which
+        also pins the formatting: the env sets trim_blocks, so a row ending
+        in a block tag rather than an expression puts the entire list on one
+        line."""
+        out = render_workspace_primer(_cfg(mounts={
+            "sample:nfs": self._mount(container_path="/opt/zeta"),
+            "sample:lic": self._mount(
+                container_path="/etc/a/license.yaml", kind="file", mode="ro",
+                description="Enterprise license."),
+        }))
+        # Bound the slice at the next heading: splitting on the heading
+        # alone leaves the whole rest of a 58k primer, whose repo and
+        # capability lists also start with "- `".
+        section = out.split("## Organizational Mounts")[1].split("\n## ")[0]
+        rows = [ln for ln in section.splitlines() if ln.startswith("- `")]
+
+        assert rows == [
+            "- `/etc/a/license.yaml` — file, read-only — Enterprise license.",
+            "- `/opt/zeta` — dir, **read/write** — Shared network storage "
+            "for this workspace. Files only, no databases.",
+        ], section
+
+    def test_a_workspace_with_no_mounts_renders_no_section(self):
+        """StrictUndefined makes an omitted context key RAISE rather than
+        skip, and this renders on the launch path — so the renderer must
+        always pass the collection, empty included."""
+        out = render_workspace_primer(_cfg())
+
+        assert "## Organizational Mounts" not in out

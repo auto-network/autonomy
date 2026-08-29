@@ -160,6 +160,49 @@ def _workspace_queries_block(cap, workspace_id: str) -> str:
     )
 
 
+def _org_mount_rows(config: WorkspaceV1) -> list[dict]:
+    """Rows for the primer's organizational-mounts section.
+
+    A session is given these directories at container-create time and has
+    no other way to learn they exist — a workspace's mount appears nowhere
+    else in the primer, so an undeclared mount is invisible to the agent
+    standing in it.
+
+    Reads ``config.mounts``, which ``load_workspaces`` already resolved
+    (``_mounts_by_workspace``), rather than re-reading the Set: the
+    renderer runs on the launch path and a second read would buy nothing.
+    Payloads arrive as ``WorkspaceMountV2`` through that loader's
+    ``model=``; the ``dict`` branch is for any caller that composed a
+    :class:`WorkspaceV1` by hand.
+
+    ``description`` carries the operating rule for the directory — the
+    live rows say "Files only, no databases" — so it renders as the
+    mount's own words, never a phrase composed here.
+    """
+    rows: list[dict] = []
+    for resolved in config.mounts.values():
+        payload = getattr(resolved, "payload", resolved)
+
+        def _get(name: str, default=""):
+            if isinstance(payload, dict):
+                value = payload.get(name, default)
+            else:
+                value = getattr(payload, name, default)
+            return default if value is None else value
+
+        rows.append({
+            # Required by WorkspaceMountV2, so a validated payload always
+            # has it; no guard here for a row that cannot exist.
+            "path": str(_get("container_path")),
+            "description": str(_get("description")),
+            "kind": str(_get("kind")),
+            "mode": str(_get("mode", "ro")),
+            "writable": str(_get("mode", "ro")) == "rw",
+        })
+    rows.sort(key=lambda r: r["path"])
+    return rows
+
+
 def _capability_primer_blocks(config: WorkspaceV1) -> list[dict]:
     """Build the per-capability primer projection rows for the template.
 
@@ -467,6 +510,10 @@ def render_workspace_primer(config: WorkspaceV1) -> str:
     template = _env.get_template("workspace.md.j2")
     writable_repos = [r for r in config.repos if r.writable]
     readonly_repos = [r for r in config.repos if not r.writable]
+    # Always in the context, empty list included: the Jinja env uses
+    # StrictUndefined, so a mountless workspace must get an empty
+    # collection to skip the section rather than an omitted key to raise on.
+    org_mounts = _org_mount_rows(config)
     workspace_primer = _overlay_markdown(
         config,
         WORKSPACE_PRIMER_SET_ID,
@@ -496,6 +543,7 @@ def render_workspace_primer(config: WorkspaceV1) -> str:
         has_startup=has_startup,
         writable_repos=writable_repos,
         readonly_repos=readonly_repos,
+        org_mounts=org_mounts,
         workspace_primer=workspace_primer,
         org_primer=org_primer,
         org=config.graph_project,

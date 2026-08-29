@@ -18,6 +18,21 @@ There is no bead, no task directive, and no `decision.json` to write.
 {% else %}
 - `/workspace/repo` — Autonomy Network source, **read-only** (dispatch a bead to change it)
 {% endif %}
+{% if org_mounts %}
+
+## Organizational Mounts
+{# The env sets trim_blocks, which eats the newline after every {% %} tag.
+   So each row ends in an INLINE expression, never a block tag, or the rows
+   concatenate onto one line; and a blank line that must survive after a
+   tag is written twice. #}
+{% for m in org_mounts %}
+- `{{ m.path }}` — {{ m.kind }}, {{ '**read/write**' if m.writable else 'read-only' }}{{ ' — ' ~ m.description if m.description else '' }}
+{% endfor %}
+
+These are shared network storage, not local disk. **No SQLite and no exclusive
+locking on them, at any scope** — the export provides no lock coordination and
+WAL cannot work on a network share at all. Keep databases on local disk.
+{% endif %}
 
 {% if not writable_repos %}
 ## Limits
