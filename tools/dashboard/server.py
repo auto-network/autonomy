@@ -18282,7 +18282,7 @@ async def api_agent_action_dispatch(request):
 
     set_id = "dashboard.agent-actions"
     member_key = body.get("member_key") or ""
-    asset_id = body.get("asset_id") or ""
+    asset_id = str(body.get("asset_id") or "").strip()
     requested_asset_kind = str(body.get("asset_kind") or "").strip()
     target_session_name = body.get("target_session_name") or ""
     # Optional operator-typed note for Send-To primers. This is genuine
