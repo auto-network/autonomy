@@ -937,7 +937,14 @@
         var quotas = { interactive: 20, dispatch: 10, librarian: 10 };
         var counts = { interactive: 0, dispatch: 0, librarian: 0 };
         return sorted.filter(function(row) {
-          var group = row.session_type === 'dispatch' ? 'dispatch' : (row.session_type === 'librarian' ? 'librarian' : 'interactive');
+          // MUST mirror the server's _SESSION_TYPE_GROUPS: 'agentic'
+          // belongs to the dispatch group. When this disagreed with the
+          // server, agentic rows were excluded from the Interactive chip
+          // server-side AND hidden in the Dispatch view client-side —
+          // visible nowhere (operator-caught regression, 2026-08-29).
+          var group = (row.session_type === 'dispatch' || row.session_type === 'agentic')
+            ? 'dispatch'
+            : (row.session_type === 'librarian' ? 'librarian' : 'interactive');
           if (counts[group] >= quotas[group]) return false;
           counts[group] += 1;
           return true;
