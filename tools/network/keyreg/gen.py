@@ -62,7 +62,7 @@ def _label(key_id: str, entry: dict) -> str:
 
 def gen_mermaid(registry: dict) -> str:
     lines = [
-        '%%{init: {"theme": "base", "flowchart": {"nodeSpacing": 26, '
+        '%%{init: {"theme": "base", "flowchart": {"defaultRenderer": "elk", "nodeSpacing": 26, '
         '"rankSpacing": 42, "curve": "basis", "useMaxWidth": false}, '
         '"themeVariables": {"fontSize": "15px", "clusterBkg": "#f4f4f2", '
         '"clusterBorder": "#c3c2b7"}}}%%',
