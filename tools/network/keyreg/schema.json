@@ -105,6 +105,11 @@
       "required": ["source", "authority", "effects", "crib"],
       "additionalProperties": false,
       "properties": {
+        "status": {
+          "enum": ["built", "designed"],
+          "default": "built",
+          "description": "designed = the flow exists only in the design of record; the source anchor then points at its formal spec."
+        },
         "source": {
           "type": "object",
           "required": ["kind", "file"],

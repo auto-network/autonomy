@@ -125,6 +125,8 @@ def _validate_mutation(errors, mut_id, entry):
     if not isinstance(entry, dict):
         errors.append(f"{where}: must be a mapping")
         return
+    if entry.get("status", "built") not in KEY_STATUSES:
+        errors.append(f"{where}.status: must be one of {sorted(KEY_STATUSES)}")
     source = entry.get("source")
     if not isinstance(source, dict):
         errors.append(f"{where}: missing field 'source'")

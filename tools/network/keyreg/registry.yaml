@@ -538,22 +538,446 @@ keys:
     code: []
     crib: ["§24"]
 
-# The mutations map is filled by bead auto-q9up6. The schema defines its
-# shape now so the validator and consumers are stable.
-mutations: {}
+# A mutation is any operation that mints, seals, revokes, or rewraps a key,
+# or changes who future material is sealed to. Entries with
+# status: designed describe flows that exist only in the design of record;
+# their source anchors point at the Tamarin theory that serves as the spec.
+mutations:
+
+  fold.genesis:
+    source: {kind: fold, file: tools/network/ledger/fold.py, symbol: _h_genesis}
+    authority: [org_root_signing_key]
+    effects:
+      writes: [genesis record, org recovery_pub declaration]
+    refusals: [recovery-equals-root]
+    crib: ["§7", "§8"]
+
+  fold.delegate:
+    source: {kind: fold, file: tools/network/ledger/fold.py, symbol: _h_delegate}
+    authority: [persona_signing_key, tier2_session_key]
+    preconditions:
+      - The delegated scope set never exceeds the delegator's (no scope escalation).
+      - A non-redelegable certificate cannot mint children.
+    effects:
+      mints: [agent_delegate_signing_key]
+      writes: [delegation certificate]
+    refusals: [scope-escalation, not-redelegable, delegate-unproven, delegate-nonce-reused]
+    crib: ["§8", "§11"]
+
+  fold.revoke:
+    source: {kind: fold, file: tools/network/ledger/fold.py, symbol: _h_revoke}
+    authority: [persona_signing_key, org_root_signing_key]
+    effects:
+      revokes: [agent_delegate_signing_key, persona_signing_key]
+      writes: [revocation record]
+    refusals: [revoke-unauthorized, revoke-bad-target, revoke-target-not-in-ancestry]
+    crib: ["§8"]
+
+  fold.role_define:
+    source: {kind: fold, file: tools/network/ledger/fold.py, symbol: _h_role_define}
+    authority: ["holders of role:define"]
+    effects:
+      writes: [role definition]
+    refusals: [role-define-unauthorized, role-define-overreach]
+    crib: ["§8"]
+
+  fold.role_grant:
+    source: {kind: fold, file: tools/network/ledger/fold.py, symbol: _h_role_grant}
+    authority: ["holders of role:grant:<role>"]
+    effects:
+      writes: [role grant]
+    refusals: [role-grant-unauthorized, role-undefined, approval-missing, bad-approval]
+    crib: ["§8"]
+
+  fold.role_revoke:
+    source: {kind: fold, file: tools/network/ledger/fold.py, symbol: _h_role_revoke}
+    authority: ["holders of role:grant:<role>"]
+    effects:
+      writes: [role revocation]
+    refusals: [role-revoke-unauthorized]
+    crib: ["§8"]
+
+  fold.invite:
+    source: {kind: fold, file: tools/network/ledger/fold.py, symbol: _h_invite}
+    authority: ["holders of invite:<role>"]
+    effects:
+      writes: [invite record]
+    refusals: [invite-overreach, invite-sponsor-mismatch, invite-not-in-ancestry, invite-expired, invite-dead]
+    crib: ["§8"]
+
+  fold.member_claim:
+    source: {kind: fold, file: tools/network/ledger/fold.py, symbol: _h_member_claim}
+    authority: [invited persona key]
+    preconditions:
+      - The claim's recovery enrollment is validated here; recovery_pub equal to the org root is refused.
+    effects:
+      writes: [member claim, member recovery_pub enrollment]
+    refusals: [claim-wrong-key, claim-bad-token, claim-bad-credential, invite-already-claimed, persona-exists]
+    crib: ["§8", "§9"]
+
+  fold.member_rekey:
+    source: {kind: fold, file: tools/network/ledger/fold.py, symbol: _h_member_rekey}
+    authority: [persona_signing_key, org_root_signing_key, member_recovery_key]
+    preconditions:
+      - The cited old key must be the persona's current key.
+      - A revoked key cannot self-authorize its own rekey.
+      - The new key proves control through the continuity signature.
+      - Under recovery policy none, a recovery-authorized rekey is refused, never ignored.
+    effects:
+      mints: [persona_signing_key]
+      revokes: [persona_signing_key]
+      writes: [rekey record, implicit revoke of the departed key on the recovery door]
+    refusals: [rekey-wrong-key, rekey-unauthorized, rekey-revoked-key, recovery-not-enrolled, recovery-sig-bad, bad-continuity, persona-exists, unknown-persona, bad-approval]
+    crib: ["§8", "§9"]
+    proofs:
+      - {framework: tamarin, theory: VaultRecoveryRace, lemma: recovery_beats_thief}
+      - {framework: tamarin, theory: VaultRecoveryRace, lemma: recovery_key_secret}
+
+  fold.key_rotate:
+    source: {kind: fold, file: tools/network/ledger/fold.py, symbol: _h_key_rotate}
+    authority: [org_root_signing_key, recovery_signing_key]
+    preconditions:
+      - Under recovery policy recovery-key, the declared recovery key co-signs the exact transition.
+      - The new key proves control through the continuity signature.
+    effects:
+      mints: [org_root_signing_key]
+      revokes: [org_root_signing_key]
+      writes: [rotation record]
+    refusals: [not-root, rotate-wrong-old, bad-continuity, recovery-not-enrolled, recovery-sig-bad, recovery-continuity-missing, bad-recovery-continuity, recovery-continuity-not-declared]
+    crib: ["§8", "§9"]
+
+  fold.key_epoch:
+    source: {kind: fold, file: tools/network/ledger/fold.py, symbol: _h_key_epoch}
+    authority: [org_root_signing_key]
+    effects:
+      writes: [key epoch marker]
+    refusals: [key-epoch-unauthorized]
+    crib: ["§8"]
+
+  fold.checkpoint:
+    source: {kind: fold, file: tools/network/ledger/fold.py, symbol: _h_checkpoint}
+    authority: ["holders of checkpoint"]
+    effects:
+      writes: [checkpoint record]
+    refusals: [checkpoint-unauthorized]
+    crib: ["§8"]
+    notes: >-
+      Checkpoint is decided-removed from the design vocabulary; the handler
+      remains in code, so it remains in this inventory.
+
+  armor.enroll_factor:
+    source: {kind: module-op, file: tools/network/idkit/root_factor_policy.py}
+    authority: [personal_root_seed]
+    effects:
+      mints: [factor_recipient]
+      seals: [personal_root_seed shares to factor_recipient]
+      writes: [next armor generation, root-signed]
+    crib: ["§2"]
+
+  armor.revoke_factor:
+    source: {kind: module-op, file: tools/network/idkit/root_factor_policy.py}
+    authority: [personal_root_seed]
+    effects:
+      writes: [next armor generation without the revoked factor, root-signed]
+    crib: ["§2"]
+
+  armor.set_recovery:
+    source: {kind: module-op, file: tools/network/idkit/root_factor_policy.py, symbol: set_recovery}
+    authority: [personal_root_seed]
+    preconditions:
+      - Enroll-only; it refuses to overwrite or clear an existing recovery slot.
+    effects:
+      seals: [personal_root_seed to recovery_slot_recipient]
+      writes: [armor recovery slot]
+    crib: ["§9"]
+
+  armor.replace_recovery_slot:
+    source: {kind: module-op, file: tools/network/idkit/root_factor_policy.py, symbol: replace_recovery_slot}
+    authority: [recovery_code, personal_root_seed]
+    effects:
+      seals: [personal_root_seed to the successor code's recovery_slot_recipient]
+      writes: [replaced armor recovery slot, root re-signed]
+    crib: ["§9"]
+    notes: Built at the armor layer; exposed by no route or UI yet.
+
+  root.rotation:
+    source: {kind: module-op, file: tools/network/idkit/root_rotation.py, symbol: make_rotation}
+    authority: [personal_root_seed, recovery_signing_key]
+    preconditions:
+      - Three signatures — old root, declared recovery key, and new root — verified against the declaration, never against armor contents.
+    effects:
+      mints: [personal_root_seed]
+      revokes: [personal_root_seed]
+      writes: [succession record]
+    crib: ["§9"]
+
+  passkey.enroll:
+    source: {kind: ceremony, file: tools/network/idkit/enrollment.py, symbol: mint}
+    authority: [personal_root_seed]
+    effects:
+      writes: [root-signed enrollment statement binding the per_credential_wrapping_key public half]
+    crib: ["§2", "§8"]
+    proofs:
+      - {framework: tamarin, theory: VaultOpenStore, lemma: no_key_to_forged_pk}
+
+  passkey.revoke:
+    source: {kind: ceremony, file: tools/network/idkit/revocation.py, symbol: RevocationRecord}
+    authority: [personal_root_seed]
+    effects:
+      revokes: [per_credential_wrapping_key, tier2_session_key]
+      writes: [root-signed revocation record]
+    crib: ["§2", "§8"]
+
+  ceremony.serve_cert_mint:
+    source: {kind: ceremony, file: tools/network/idkit/certs.py}
+    authority: [org_root_signing_key]
+    effects:
+      mints: [serving_delegate_key]
+      writes: [registry certificate and identity-neutral viewer certificate over the same child]
+    crib: ["§8"]
+
+  ceremony.registration:
+    source: {kind: route, file: tools/network/registry/app.py}
+    authority: [personal_root_seed]
+    effects:
+      writes: [registry binding, including the recovery policy declaration when pinned]
+    crib: ["§8", "§9"]
+
+  ceremony.vault_master_read:
+    source: {kind: ceremony, file: tools/vault/unlock.py, symbol: open_generation_keys}
+    authority: [factor_seed]
+    effects:
+      writes: [audited release log entry]
+    crib: ["§8", "§18"]
+
+  ceremony.recovery_policy_change:
+    status: designed
+    source: {kind: ceremony, file: tools/network/registry/app.py}
+    authority: [personal_root_seed, recovery_signing_key]
+    effects:
+      writes: [recovery policy transition]
+    crib: ["§8", "§9"]
+
+  vault.create_class:
+    source: {kind: module-op, file: tools/vault/policy_class.py, symbol: create_class}
+    authority: [personal_root_seed]
+    preconditions:
+      - A member class without the root-anchor wrap is refused at creation and again at the store (put_class, put_root_class_once).
+    effects:
+      mints: [class_key]
+      seals: [class_key to factor recipients and to root_anchor_seed]
+      writes: [PolicyClassRecord generation]
+    crib: ["§18"]
+
+  vault.revoke_class_factor:
+    source: {kind: module-op, file: tools/vault/policy_class.py, symbol: revoke_factor}
+    authority: [personal_root_seed]
+    preconditions:
+      - The root-anchor wrap cannot be dropped.
+    effects:
+      mints: [class_key]
+      seals: [class_key to surviving factors and to root_anchor_seed]
+      writes: [next PolicyClassRecord generation; applies at next write, existing sealed material untouched]
+    crib: ["§3", "§18"]
+
+  storage.advance_state:
+    source: {kind: module-op, file: tools/network/storagekit/lifecycle.py, symbol: advance_state}
+    authority: [agent_delegate_signing_key, persona_signing_key]
+    effects:
+      mints: [generation_secret]
+      writes: [StorageStateDescriptor, ParentBridge]
+    refusals: [StateAdvanceRequired on a stale write]
+    crib: ["§1d", "§6", "§7"]
+
+  storage.issue_grant:
+    source: {kind: module-op, file: tools/network/storagekit/capability.py, symbol: issue}
+    authority: [agent_delegate_signing_key, persona_signing_key]
+    effects:
+      seals: [generation_secret to persona_kem_private]
+      writes: [CapabilityGrant]
+    crib: ["§6", "§7"]
+    proofs:
+      - {framework: tamarin, theory: VaultRekeyMarker, lemma: exclusion_forward}
+
+  storage.issue_receipt:
+    source: {kind: module-op, file: tools/network/storagekit/capability.py, symbol: issue_receipt}
+    authority: [persona_kem_private]
+    effects:
+      writes: [CapabilityReceipt — proof of knowledge, not an assertion]
+    crib: ["§6", "§16"]
+
+  storage.mint_credential:
+    source: {kind: module-op, file: tools/network/storagekit/credentials.py, symbol: build}
+    authority: [persona_signing_key]
+    effects:
+      mints: [persona_kem_private]
+      writes: [PersonaKemCredential citing the current authority frontier]
+    crib: ["§1d", "§6", "§13"]
+    proofs:
+      - {framework: tamarin, theory: VaultConcurrentRekey, lemma: concurrent_grant_secret}
+
+  storage.provision_missing:
+    source: {kind: module-op, file: tools/network/storagekit/distribution.py, symbol: provision_missing}
+    authority: [persona_kem_private]
+    effects:
+      seals: [generation_secret to an unprovisioned member's current PersonaKemCredential]
+      writes: [repair CapabilityGrant]
+    crib: ["§15"]
+
+  fleet.enroll:
+    source: {kind: module-op, file: tools/network/fleet_roster.py, symbol: enroll}
+    authority: [personal_root_seed]
+    effects:
+      writes: [root-signed RosterEntry addressing one machine]
+    crib: ["§1b", "§10"]
+    notes: Renewal is a new entry with a higher sequence number superseding the old.
+
+  fleet.kick:
+    source: {kind: module-op, file: tools/network/fleet_roster.py, symbol: kick}
+    authority: [personal_root_seed]
+    effects:
+      revokes: [per_machine_key]
+      writes: [root-signed kick tombstone; stops future distribution to that machine]
+    crib: ["§1b", "§1d", "§10"]
+    proofs:
+      - {framework: tamarin, theory: VaultFleetDist, lemma: kicked_machine_excluded}
+
+  fleet.distribute_kem:
+    status: designed
+    source: {kind: module-op, file: tools/network/storagekit/tamarin/VaultFleetDist.spthy}
+    authority: [personal_root_seed]
+    effects:
+      seals: [persona_kem_private to per_machine_key, one seal per fleet machine not removed]
+    crib: ["§1d", "§1e"]
+    proofs:
+      - {framework: tamarin, theory: VaultFleetDist, lemma: machine_key_yields_nothing_undistributed}
+    notes: >-
+      The KEM-distribution record is the unbuilt half of the fleet layer
+      (bead auto-pw9bs.6); the cited theory is its formal spec.
+
+  rekey.frontier_marker:
+    status: designed
+    source: {kind: module-op, file: tools/network/storagekit/tamarin/VaultRekeyMarker.spthy}
+    authority: [persona_signing_key]
+    effects:
+      writes: [fold-inert frontier marker citing all locally current authority heads]
+    crib: ["§1d"]
+    proofs:
+      - {framework: tamarin, theory: VaultRekeyMarker, lemma: exclusion_forward}
+    notes: >-
+      Without the marker the re-key achieves nothing (the F-001 defect);
+      the calibration theory VaultRekeyF001 demonstrates exactly that.
+
+  recovery.succession:
+    status: designed
+    source: {kind: module-op, file: tools/network/storagekit/tamarin/VaultRecoverySuccession.spthy}
+    authority: [personal_root_seed, recovery_signing_key]
+    preconditions:
+      - Completion requires the elapsed witness window over a chain containing the declaration and no cancellation and no veto.
+    effects:
+      mints: [recovery_signing_key]
+      revokes: [recovery_signing_key]
+      writes: [witnessed declaration, then completion attestation]
+    crib: ["§9"]
+    proofs:
+      - {framework: tamarin, theory: VaultRecoverySuccession, lemma: window_cannot_be_fast_forwarded}
+      - {framework: tamarin, theory: VaultRecoverySuccession, lemma: cancellation_blocks_completion}
+      - {framework: tamarin, theory: VaultRecoverySuccession, lemma: veto_blocks_completion}
 
 purposes:
   autonomy/capability-grant/v1:
     description: Seals a generation secret to a PersonaKemCredential in a CapabilityGrant.
+    used_by: [tools/network/storagekit/capability.py]
+  autonomy/receipt-pok/v1:
+    description: Derives a CapabilityReceipt's proof-of-knowledge value from the state secret.
+    used_by: [tools/network/storagekit/capability.py]
+  autonomy/object-wrap/v1:
+    description: Derives an object revision's wrap key from its generation secret.
+    used_by: [tools/network/storagekit/object_header.py]
+  autonomy/storage-parent-edge/v1:
+    description: Keys a ParentBridge's child-to-parent generation recovery.
+    used_by: [tools/network/storagekit/bridge.py]
+  autonomy/storage-state-secret/v1:
+    description: Domain label for generation-secret material in a StorageStateDescriptor.
+    used_by: [tools/network/storagekit/state.py]
+  autonomy/storage-domain/v1:
+    description: Domain label for storage-domain identifiers in ledger projections.
+    used_by: [tools/network/ledger/projections.py]
   autonomy/root-policy-wrap/v1:
     description: Wraps root-factor-policy node secrets inside the armor envelope.
+    used_by: [tools/network/idkit/root_factor_policy.py]
   autonomy/root-factor-recipient/v1:
     description: Derives a factor's armor recipient from its factor seed.
+    used_by: [tools/network/idkit/root_factor_policy.py]
   autonomy/vault-factor/v1:
-    description: Derives a factor's vault policy-class recipient (distinct from the armor purpose).
+    description: Derives a factor's vault recipient inside the armor (distinct from the root-factor purpose).
+    used_by: [tools/network/idkit/armor.py]
   autonomy/recovery-armor/v1:
     description: Derives the recovery code's armor-slot recipient.
+    used_by: [tools/network/idkit/root_factor_policy.py]
   autonomy.recovery.signing.v1:
     description: Derives the recovery signing key from the recovery code.
+    used_by: [tools/network/idkit/recovery.py]
   autonomy.recovery.member-sign.v1:
     description: Derives a per-organization member recovery key from the recovery code and genesis_id.
+    used_by: [tools/network/idkit/recovery.py]
+  autonomy.recovery.kek.v1:
+    description: Derives the recovery share of the master key-encryption key from the recovery code.
+    used_by: [tools/network/idkit/recovery.py]
+  autonomy.identity.persona.v1:
+    description: Derives a persona keypair from the personal root seed and genesis_id.
+    used_by: [tools/network/idkit/persona.py]
+  autonomy.identity.machine.v1:
+    description: Derives the per-machine operating key from the personal root seed and machine_id.
+    used_by: [tools/network/idkit/persona.py]
+  autonomy.network.ledger.sync-key.v1:
+    description: Derives the ledger bundle sync key.
+    used_by: [tools/network/ledger/bundles.py]
+  autonomy.network.channel.keys.v1:
+    description: Derives relay channel keys.
+    used_by: [tools/network/relaykit/channel.py]
+  autonomy.network.channel.stream.v1:
+    description: Derives relay channel stream nonces.
+    used_by: [tools/network/relaykit/channel.py]
+  autonomy.attachment.cursor.v1:
+    description: Derives attachment download cursor authentication.
+    used_by: [tools/network/relaykit/attachment_download.py]
+  autonomy/vault-policy-class/v1:
+    description: Domain label for a vault policy class record.
+    used_by: [tools/vault/policy_class.py]
+  autonomy/vault-policy-class/sealing-key/v1:
+    description: Derives a class generation's public sealing keypair from its class key.
+    used_by: [tools/vault/policy_class.py]
+  autonomy/vault-policy-class/cek/v1:
+    description: Wraps an object content key under a class generation.
+    used_by: [tools/vault/policy_class.py]
+  autonomy/vault-policy-class/cek-hpke/v1:
+    description: Seals an object content key to a class generation's public sealing key.
+    used_by: [tools/vault/policy_class.py]
+  autonomy/vault-policy-recipient/v1:
+    description: Derives a factor's vault policy-class recipient from its factor seed.
+    used_by: [tools/vault/recipients.py]
+  autonomy/vault-root-anchor-wrap/v1:
+    description: Wraps a class key to the root anchor's derived recipient.
+    used_by: [tools/vault/root_anchor.py]
+  autonomy/vault/object-id/v1:
+    description: Derives a vault storage object's identifier.
+    used_by: [tools/vault/storage_object.py]
+  autonomy/vault/revision-id/v1:
+    description: Derives a vault storage object's revision identifier.
+    used_by: [tools/vault/storage_object.py]
+  autonomy/personal-vault-content/v1:
+    description: Encrypts personal vault object content.
+    used_by: [tools/vault/personal_object.py]
+  autonomy/personal-owner-at-rest/v1:
+    description: Seals the personal owner key at rest.
+    used_by: [tools/vault/personal_object.py]
+  autonomy/personal-vault/no-storage-generation/v1:
+    description: Domain label for personal vault objects outside any storage generation.
+    used_by: [tools/vault/personal_object.py]
+  autonomy/personal-vault/object-id/v1:
+    description: Derives a personal vault object's identifier.
+    used_by: [tools/vault/personal_object.py]
+  autonomy/personal-vault/revision-id/v1:
+    description: Derives a personal vault object's revision identifier.
+    used_by: [tools/vault/personal_object.py]
