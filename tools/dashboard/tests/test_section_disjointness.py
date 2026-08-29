@@ -127,7 +127,9 @@ def _recent_feed(names, monkeypatch):
     fake_db = _FakeGraphDb(graph_rows)
 
     from tools.graph import cross_org
-    monkeypatch.setattr(cross_org, "list_org_slugs", lambda: ["autonomy"])
+    # all_store_slugs passes root= through; a bare lambda broke this
+    # tripwire silently until 2026-08-29 — accept any signature.
+    monkeypatch.setattr(cross_org, "list_org_slugs", lambda *a, **kw: ["autonomy"])
     monkeypatch.setattr(cross_org, "open_peer_db", lambda slug: fake_db)
     monkeypatch.setattr(
         dao_sessions, "_claude_credentials_alias_map", lambda: {},
