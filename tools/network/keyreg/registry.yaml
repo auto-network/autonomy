@@ -471,11 +471,11 @@ keys:
     group: fleet
     kind: kem
     custody:
-      class: disk
+      class: memory
       forced_by: >-
-        Snapshot is zero — it decrypts no existing record; it only receives
-        future distributions while the machine remains in the fleet.
-        Placement is an operator setting.
+        Derived from the personal root at unlock and never persisted — the
+        machine stores only its public machine_id; the key exists for the
+        warm period and a reboot always waits on a human unlock.
     derivation:
       parent: personal_root_seed
       fn: derive_machine_key
@@ -488,6 +488,7 @@ keys:
       bound: The removal.
     code:
       - tools/network/idkit/persona.py:derive_machine_key
+      - tools/network/machine_boot.py:operating_key
       - tools/network/fleet_roster.py:RosterEntry
     crib: ["§9", "§10"]
     proofs:

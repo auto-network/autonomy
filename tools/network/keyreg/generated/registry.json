@@ -448,6 +448,7 @@
     "per_machine_key": {
       "code": [
         "tools/network/idkit/persona.py:derive_machine_key",
+        "tools/network/machine_boot.py:operating_key",
         "tools/network/fleet_roster.py:RosterEntry"
       ],
       "crib": [
@@ -455,8 +456,8 @@
         "\u00a710"
       ],
       "custody": {
-        "class": "disk",
-        "forced_by": "Snapshot is zero \u2014 it decrypts no existing record; it only receives future distributions while the machine remains in the fleet. Placement is an operator setting."
+        "class": "memory",
+        "forced_by": "Derived from the personal root at unlock and never persisted \u2014 the machine stores only its public machine_id; the key exists for the warm period and a reboot always waits on a human unlock."
       },
       "derivation": {
         "fn": "derive_machine_key",
