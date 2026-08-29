@@ -1,0 +1,1807 @@
+{
+  "keys": {
+    "agent_delegate_signing_key": {
+      "code": [
+        "tools/network/storagekit/acceptance.py"
+      ],
+      "crib": [
+        "\u00a77",
+        "\u00a79",
+        "\u00a711"
+      ],
+      "custody": {
+        "class": "memory",
+        "forced_by": "Passes the crib's Q2: scope-attenuated, TTL-bounded, fold-enforced at acceptance, revocable, and required for unattended operation."
+      },
+      "derivation": null,
+      "descriptor": {
+        "bound": "The delegating persona's own membership; the fold rejects any overreach.",
+        "live": "Yes \u2014 records must reach honest nodes, which verify them against the fold.",
+        "reaches": "Exactly two execution scopes, storage:state:advance and storage:capability:grant, and nothing else. It signs; it opens nothing.",
+        "revoke": "RevocationRecord plus TTL. Not a ceremony.",
+        "snapshot": "Nothing."
+      },
+      "kind": "signing"
+    },
+    "class_key": {
+      "code": [
+        "tools/vault/policy_class.py:Generation",
+        "tools/vault/store.py:put_class"
+      ],
+      "crib": [
+        "\u00a73",
+        "\u00a718"
+      ],
+      "custody": {
+        "class": "cold",
+        "forced_by": "Released only inside a factor ceremony and never across the release boundary \u2014 exporting it would release the whole class."
+      },
+      "derivation": null,
+      "descriptor": {
+        "bound": "The class's membership at each generation.",
+        "live": "No.",
+        "reaches": "Every content key sealed under that class generation.",
+        "revoke": "Factor revocation appends the next generation sealed to the survivors and the anchor; it applies at the next write and touches no existing sealed material.",
+        "snapshot": "The class's secrets for generations this key belongs to."
+      },
+      "kind": "symmetric"
+    },
+    "factor_recipient": {
+      "code": [
+        "tools/network/idkit/sealing.py:derive_encapsulation_keypair",
+        "tools/network/idkit/root_factor_policy.py"
+      ],
+      "crib": [
+        "\u00a72"
+      ],
+      "custody": {
+        "class": "cold",
+        "forced_by": "Re-derivable only from the cold factor seed."
+      },
+      "derivation": {
+        "fn": "derive_encapsulation_keypair",
+        "parent": "factor_seed",
+        "purpose": "autonomy/root-factor-recipient/v1"
+      },
+      "descriptor": {
+        "bound": "The policy expression.",
+        "live": "No.",
+        "reaches": "The policy shares sealed to it inside the armor envelope.",
+        "revoke": "Factor revocation; the envelope is re-signed without the share.",
+        "snapshot": "Those shares; the policy expression decides what they combine to."
+      },
+      "kind": "kem"
+    },
+    "factor_seed": {
+      "code": [
+        "tools/network/idkit/root_factor_policy.py"
+      ],
+      "crib": [
+        "\u00a72"
+      ],
+      "custody": {
+        "class": "cold",
+        "forced_by": "Producing it requires the human gesture \u2014 typing the password or a passkey PRF assertion (crib Q0)."
+      },
+      "derivation": null,
+      "descriptor": {
+        "bound": "The policy expression.",
+        "live": "No.",
+        "reaches": "The factor's derived recipient (its share of the root factor policy) and its derived dashboard access key. Only a factor set satisfying the policy expression reaches the root; unlock-only factors never do.",
+        "revoke": "Factor revocation re-signs the armor envelope without it.",
+        "snapshot": "That factor's policy shares. Whether the root follows depends on the policy expression, not on this key alone."
+      },
+      "kind": "seed",
+      "proofs": [
+        {
+          "framework": "tamarin",
+          "lemma": "password_alone_no_root",
+          "theory": "VaultFactorPolicy"
+        },
+        {
+          "framework": "tamarin",
+          "lemma": "passkeys_both_no_root",
+          "theory": "VaultFactorPolicy"
+        },
+        {
+          "framework": "tamarin",
+          "lemma": "unlock_only_no_root",
+          "theory": "VaultFactorPolicy"
+        }
+      ]
+    },
+    "generation_secret": {
+      "code": [
+        "tools/network/storagekit/state.py:generate"
+      ],
+      "crib": [
+        "\u00a76",
+        "\u00a79"
+      ],
+      "custody": {
+        "class": "memory",
+        "forced_by": "Snapshot is total for its branch, offline."
+      },
+      "derivation": null,
+      "descriptor": {
+        "bound": "None.",
+        "live": "No.",
+        "reaches": "Every object under the generation and every ancestor via bridges.",
+        "revoke": "None \u2014 a generation secret is never retired.",
+        "snapshot": "Total for that branch, offline."
+      },
+      "kind": "symmetric",
+      "proofs": [
+        {
+          "framework": "tamarin",
+          "lemma": "exclusion_forward",
+          "theory": "VaultRekeyMarker"
+        },
+        {
+          "framework": "tamarin",
+          "lemma": "concurrent_grant_secret",
+          "theory": "VaultConcurrentRekey"
+        }
+      ]
+    },
+    "k_index_k_meta": {
+      "code": [],
+      "crib": [
+        "\u00a723"
+      ],
+      "custody": {
+        "class": "cold",
+        "forced_by": "Subkeys of the sealed index; neither exists outside a release."
+      },
+      "derivation": {
+        "fn": "HKDF",
+        "parent": "sealed_index"
+      },
+      "descriptor": {
+        "bound": "The one store.",
+        "live": "No.",
+        "reaches": "K_index computes blind row addresses; K_meta seals row values. The blind index is the item-to-row mapping; nothing stores it.",
+        "revoke": "Follows the sealed index.",
+        "snapshot": "Nothing \u2014 they are never at rest."
+      },
+      "kind": "derived-secret",
+      "status": "designed"
+    },
+    "master_kek": {
+      "code": [
+        "tools/network/idkit/armor.py"
+      ],
+      "crib": [
+        "\u00a72"
+      ],
+      "custody": {
+        "class": "cold",
+        "forced_by": "Opened only inside a root ceremony gated on the factor policy."
+      },
+      "derivation": null,
+      "descriptor": {
+        "bound": "The factor policy.",
+        "live": "No.",
+        "reaches": "The root armor it seals.",
+        "revoke": "Re-sealed on every factor change (a new armor generation).",
+        "snapshot": "The armored root, opened only through a satisfying factor set."
+      },
+      "kind": "symmetric"
+    },
+    "member_recovery_key": {
+      "code": [
+        "tools/network/idkit/recovery.py:member_recovery_key",
+        "tools/network/ledger/fold.py:_h_member_rekey"
+      ],
+      "crib": [
+        "\u00a79"
+      ],
+      "custody": {
+        "class": "cold",
+        "forced_by": "Derived only from the cold recovery code."
+      },
+      "derivation": {
+        "fn": "HKDF",
+        "inputs": [
+          "genesis_id"
+        ],
+        "parent": "recovery_code",
+        "purpose": "autonomy.recovery.member-sign.v1"
+      },
+      "descriptor": {
+        "bound": "The one act; the fold rejects everything else.",
+        "live": "Yes \u2014 the rekey event must reach the ledger fold.",
+        "reaches": "Exactly one act: the recovery-authorized door of member.rekey. The genesis_id in the derivation keeps an identical printed code from linking personas across organizations.",
+        "revoke": "Enrolled at member.claim; changing it requires the current member recovery key or the org root. No event adds one after member.claim.",
+        "snapshot": "Nothing \u2014 no plaintext, no content, no authority beyond the one door."
+      },
+      "kind": "signing",
+      "proofs": [
+        {
+          "framework": "tamarin",
+          "lemma": "recovery_key_secret",
+          "theory": "VaultRecoveryRace"
+        },
+        {
+          "framework": "tamarin",
+          "lemma": "recovery_beats_thief",
+          "theory": "VaultRecoveryRace"
+        }
+      ]
+    },
+    "object_cek": {
+      "code": [
+        "tools/vault/policy_class.py:_cek_public_seal_purpose"
+      ],
+      "crib": [
+        "\u00a74",
+        "\u00a718",
+        "\u00a723"
+      ],
+      "custody": {
+        "class": "memory",
+        "forced_by": "Unique per immutable revision and encrypts nothing else, so releasing it equals releasing that one plaintext \u2014 it is the unit allowed across the release boundary."
+      },
+      "derivation": null,
+      "descriptor": {
+        "bound": "The one revision.",
+        "live": "No.",
+        "reaches": "One object revision's plaintext.",
+        "revoke": "Never \u2014 the revision is immutable; withdrawal is a new key for new writes.",
+        "snapshot": "That one revision."
+      },
+      "kind": "symmetric"
+    },
+    "object_wrap_key": {
+      "code": [
+        "tools/network/storagekit/objects.py"
+      ],
+      "crib": [
+        "\u00a76"
+      ],
+      "custody": {
+        "class": "memory",
+        "forced_by": "Re-derivable from the generation secret during the warm period."
+      },
+      "derivation": {
+        "fn": "HKDF",
+        "inputs": [
+          "genesis_id",
+          "domain_id",
+          "state_id",
+          "object_id",
+          "revision",
+          "content_hash"
+        ],
+        "parent": "generation_secret",
+        "purpose": "object-wrap"
+      },
+      "descriptor": {
+        "bound": "The one revision.",
+        "live": "No.",
+        "reaches": "One object revision's wrapped content key.",
+        "revoke": "Follows the generation secret; never individually retired.",
+        "snapshot": "That revision, given the ciphertext."
+      },
+      "kind": "derived-secret"
+    },
+    "org_root_signing_key": {
+      "code": [
+        "tools/network/ledger/fold.py:_h_key_rotate"
+      ],
+      "crib": [
+        "\u00a78",
+        "\u00a79"
+      ],
+      "custody": {
+        "class": "cold",
+        "forced_by": "Constitutional acts are intent acts (crib Q0)."
+      },
+      "derivation": null,
+      "descriptor": {
+        "bound": "The ceremony.",
+        "live": "Yes \u2014 it must reach the ledger or registry to be used.",
+        "reaches": "Genesis, key rotation, serve-certificate minting, registration, and rebind. It is not a domain principal: it holds no KEM credential and receives no capability grants.",
+        "revoke": "Org-vouch or dual-signed org-root rotation; both are ceremonies.",
+        "snapshot": "No content."
+      },
+      "kind": "signing"
+    },
+    "pepper": {
+      "code": [],
+      "crib": [
+        "\u00a724"
+      ],
+      "custody": {
+        "class": "memory",
+        "forced_by": "An audited vault setting: released unattended once the vault is open; encrypted at rest so a cold dump cannot run the offline location oracle."
+      },
+      "derivation": null,
+      "descriptor": {
+        "bound": "Location secrecy only; contents keep their own seals.",
+        "live": "No.",
+        "reaches": "The row addresses of every secret vault (location, not content).",
+        "revoke": "Re-mint and re-address every secret vault.",
+        "snapshot": "Encrypted at rest, nothing. Held warm, the ability to test password guesses against vault locations offline."
+      },
+      "kind": "symmetric",
+      "status": "designed"
+    },
+    "per_credential_wrapping_key": {
+      "code": [
+        "tools/network/idkit/enrollment.py:PasskeyEnrollmentStatement"
+      ],
+      "crib": [
+        "\u00a72"
+      ],
+      "custody": {
+        "class": "cold",
+        "forced_by": "The private half derives from the credential's PRF output on-device; using it requires a user-verified assertion at that machine."
+      },
+      "derivation": {
+        "fn": "PRF-derived X25519",
+        "parent": "factor_seed"
+      },
+      "descriptor": {
+        "bound": "The credential.",
+        "live": "Yes \u2014 opening a seal needs the assertion at that machine.",
+        "reaches": "Payloads sealed to the credential's device: cross-device Tier-2 renewals and master-KEK re-wraps. The public key is valid only when carried in a root-signed enrollment statement, verified before any seal is addressed to it.",
+        "revoke": "Passkey revocation (root-signed RevocationRecord).",
+        "snapshot": "Nothing without the device's PRF assertion."
+      },
+      "kind": "kem",
+      "proofs": [
+        {
+          "framework": "tamarin",
+          "lemma": "no_key_to_forged_pk",
+          "theory": "VaultOpenStore"
+        }
+      ]
+    },
+    "per_machine_key": {
+      "code": [
+        "tools/network/idkit/persona.py:derive_machine_key",
+        "tools/network/fleet_roster.py:RosterEntry"
+      ],
+      "crib": [
+        "\u00a79",
+        "\u00a710"
+      ],
+      "custody": {
+        "class": "disk",
+        "forced_by": "Snapshot is zero \u2014 it decrypts no existing record; it only receives future distributions while the machine remains in the fleet. Placement is an operator setting."
+      },
+      "derivation": {
+        "fn": "derive_machine_key",
+        "inputs": [
+          "machine_id"
+        ],
+        "parent": "personal_root_seed"
+      },
+      "descriptor": {
+        "bound": "The removal.",
+        "live": "Yes \u2014 the thief must still be in the fleet and reachable.",
+        "reaches": "Distributions sealed to it after the theft \u2014 future persona KEM keys.",
+        "revoke": "Remove the machine from the fleet. Root-signed, not a ceremony.",
+        "snapshot": "Zero. It decrypts no existing record."
+      },
+      "kind": "kem",
+      "proofs": [
+        {
+          "framework": "tamarin",
+          "lemma": "machine_key_yields_nothing_undistributed",
+          "theory": "VaultFleetDist"
+        },
+        {
+          "framework": "tamarin",
+          "lemma": "kicked_machine_excluded",
+          "theory": "VaultFleetDist"
+        }
+      ]
+    },
+    "persona_kem_private": {
+      "code": [
+        "tools/network/storagekit/credentials.py:derive_kem_seed"
+      ],
+      "crib": [
+        "\u00a79",
+        "\u00a713",
+        "\u00a714"
+      ],
+      "custody": {
+        "class": "memory",
+        "forced_by": "Snapshot is total: this key plus a copy of the replicated store is the whole domain history, offline. Not disk-eligible at any price."
+      },
+      "derivation": {
+        "fn": "derive_kem_seed",
+        "inputs": [
+          "counter"
+        ],
+        "parent": "personal_root_seed"
+      },
+      "descriptor": {
+        "bound": "None \u2014 damage is complete at the instant of theft.",
+        "live": "No.",
+        "reaches": "Every capability grant addressed to this persona, hence any head secret, hence all domain content including full history through the bridges.",
+        "revoke": "Publish a superseding PersonaKemCredential. Stops future grants only; undoes nothing already opened.",
+        "snapshot": "Total for the domain \u2014 key plus store copy is the whole history."
+      },
+      "kind": "kem",
+      "proofs": [
+        {
+          "framework": "tamarin",
+          "lemma": "persona_kem_snapshot_total",
+          "theory": "VaultFleetDist"
+        },
+        {
+          "framework": "tamarin",
+          "lemma": "exclusion_forward",
+          "theory": "VaultRekeyMarker"
+        }
+      ]
+    },
+    "persona_signing_key": {
+      "code": [
+        "tools/network/idkit/persona.py:derive_persona"
+      ],
+      "crib": [
+        "\u00a72"
+      ],
+      "custody": {
+        "class": "cold",
+        "forced_by": "Deriving it requires the personal root seed."
+      },
+      "derivation": {
+        "fn": "derive_persona",
+        "inputs": [
+          "genesis_id"
+        ],
+        "parent": "personal_root_seed"
+      },
+      "descriptor": {
+        "bound": "The persona's membership.",
+        "live": "Yes \u2014 records must reach honest nodes.",
+        "reaches": "Authorship of the persona's ledger events and key-control records in one organization. The genesis_id input keeps personas unlinkable across organizations.",
+        "revoke": "member.rekey moves the persona to a new key.",
+        "snapshot": "Authority to sign as the persona until rekeyed away."
+      },
+      "kind": "signing"
+    },
+    "personal_root_seed": {
+      "code": [
+        "tools/network/idkit/armor.py",
+        "tools/network/idkit/root_factor_policy.py",
+        "tools/network/idkit/root_rotation.py:make_rotation"
+      ],
+      "crib": [
+        "\u00a72",
+        "\u00a79"
+      ],
+      "custody": {
+        "class": "cold",
+        "forced_by": "Every act needing it expresses human intent (crib Q0), and its snapshot is total; no execution-class question is reached."
+      },
+      "derivation": null,
+      "descriptor": {
+        "bound": "None.",
+        "live": "No.",
+        "reaches": "Every purpose key ever derivable from it, and every vault policy class through each class's root-anchor wrap. Root authority reconstitutes the whole identity.",
+        "revoke": "None. The remedy is personal-root rotation, which requires the old root, the new root, and the enrolled recovery key (make_rotation in tools/network/idkit/root_rotation.py).",
+        "snapshot": "Total and unbounded, across every organization."
+      },
+      "kind": "seed",
+      "proofs": [
+        {
+          "framework": "tamarin",
+          "lemma": "root_secret_open_store",
+          "theory": "VaultOpenStore"
+        },
+        {
+          "framework": "tamarin",
+          "lemma": "root_secret",
+          "theory": "VaultRekeyMarker"
+        },
+        {
+          "framework": "tamarin",
+          "lemma": "password_and_passkey1_release_root",
+          "theory": "VaultFactorPolicy"
+        }
+      ],
+      "seals_to": [
+        {
+          "purpose": "autonomy/root-factor-recipient/v1",
+          "recipient": "factor_recipient",
+          "record": "root factor policy envelope share"
+        },
+        {
+          "purpose": "autonomy/recovery-armor/v1",
+          "recipient": "recovery_slot_recipient",
+          "record": "armor recovery slot"
+        }
+      ]
+    },
+    "recovery_code": {
+      "code": [
+        "tools/network/idkit/recovery.py"
+      ],
+      "crib": [
+        "\u00a79"
+      ],
+      "custody": {
+        "class": "cold",
+        "forced_by": "Its whole security property is being disjoint from the hot path; it is printed once and never touches a machine except in a recovery ceremony."
+      },
+      "derivation": null,
+      "descriptor": {
+        "bound": "None.",
+        "live": "No.",
+        "reaches": "Three domain-separated derivations, none reaching another: the armor recovery slot recipient, the recovery signing key, and the per-organization member recovery keys.",
+        "revoke": "Replacement with the code in hand runs replace_recovery_slot (tools/network/idkit/root_factor_policy.py). Regeneration with the code lost is the witnessed succession window: declaration, blocking alert, cancellation or veto, completion after the window.",
+        "snapshot": "The sealed root seed, opened only by the code. No org content."
+      },
+      "kind": "seed"
+    },
+    "recovery_signing_key": {
+      "code": [
+        "tools/network/idkit/recovery.py:recovery_signing_key",
+        "tools/network/idkit/root_rotation.py:rotation_recovery_input"
+      ],
+      "crib": [
+        "\u00a79"
+      ],
+      "custody": {
+        "class": "cold",
+        "forced_by": "Derived only from the cold recovery code."
+      },
+      "derivation": {
+        "fn": "HKDF",
+        "parent": "recovery_code",
+        "purpose": "autonomy.recovery.signing.v1"
+      },
+      "descriptor": {
+        "bound": "The acts it co-signs.",
+        "live": "Yes \u2014 its signatures must reach a verifier.",
+        "reaches": "The recovery co-signature on personal-root rotation and on recovery-code succession declarations.",
+        "revoke": "Recovery-code succession (the witnessed window).",
+        "snapshot": "Nothing; it signs and never decrypts."
+      },
+      "kind": "signing"
+    },
+    "recovery_slot_recipient": {
+      "code": [
+        "tools/network/idkit/recovery.py",
+        "tools/network/idkit/root_factor_policy.py:replace_recovery_slot"
+      ],
+      "crib": [
+        "\u00a72",
+        "\u00a79"
+      ],
+      "custody": {
+        "class": "cold",
+        "forced_by": "Derived only from the cold recovery code."
+      },
+      "derivation": {
+        "fn": "HKDF",
+        "parent": "recovery_code",
+        "purpose": "autonomy/recovery-armor/v1"
+      },
+      "descriptor": {
+        "bound": "None \u2014 it opens the root.",
+        "live": "No.",
+        "reaches": "The root seed sealed into the armor's recovery slot.",
+        "revoke": "replace_recovery_slot re-seals the slot to a new code's recipient.",
+        "snapshot": "The sealed root seed, and nothing else."
+      },
+      "kind": "kem"
+    },
+    "root_anchor_seed": {
+      "code": [
+        "tools/vault/root_anchor.py",
+        "tools/vault/store.py:put_root_class_once"
+      ],
+      "crib": [
+        "\u00a718"
+      ],
+      "custody": {
+        "class": "cold",
+        "forced_by": "Sealed to a root-derived recipient; opening it requires root authority."
+      },
+      "derivation": null,
+      "descriptor": {
+        "bound": "None \u2014 it is the root's guaranteed floor under every class.",
+        "live": "No.",
+        "reaches": "Every vault policy class, through each class generation's mandatory anchor wrap \u2014 the indirection that lets root-factor churn touch only the armor.",
+        "revoke": "Irrevocable by design: revoke_factor refuses to drop it and the store refuses to persist a class generation without it.",
+        "snapshot": "Nothing while sealed; every class once the root is open."
+      },
+      "kind": "seed"
+    },
+    "sealed_index": {
+      "code": [],
+      "crib": [
+        "\u00a723"
+      ],
+      "custody": {
+        "class": "cold",
+        "forced_by": "Exists only in sealed form; released by a factor ceremony."
+      },
+      "derivation": null,
+      "descriptor": {
+        "bound": "The one store.",
+        "live": "No.",
+        "reaches": "A sealed store's entire index \u2014 its address key and value key derive from it.",
+        "revoke": "Re-mint the store under a new index.",
+        "snapshot": "Nothing while sealed; the store's item map once released."
+      },
+      "kind": "seed",
+      "status": "designed"
+    },
+    "serving_delegate_key": {
+      "code": [
+        "tools/network/idkit/certs.py"
+      ],
+      "crib": [
+        "\u00a78",
+        "\u00a79"
+      ],
+      "custody": {
+        "class": "disk",
+        "forced_by": "Snapshot is none \u2014 it reaches no plaintext and authorizes nothing."
+      },
+      "derivation": null,
+      "descriptor": {
+        "bound": "The TTL.",
+        "live": "Yes.",
+        "reaches": "Authentication of one outbound serving tunnel (tunnel:serve only).",
+        "revoke": "Re-mint; thirty-day TTL, renewal below twenty days remaining.",
+        "snapshot": "None."
+      },
+      "kind": "signing"
+    },
+    "tier2_session_key": {
+      "code": [
+        "tools/network/idkit/certs.py"
+      ],
+      "crib": [
+        "\u00a72",
+        "\u00a79"
+      ],
+      "custody": {
+        "class": "cold",
+        "forced_by": "Browser-bound and non-extractable; every signature is one user-verified assertion unwrapping it for one use (crib Q0 \u2014 it carries the intent scopes)."
+      },
+      "derivation": null,
+      "descriptor": {
+        "bound": "The TTL, and one user-verified assertion per signature.",
+        "live": "Yes.",
+        "reaches": "Every intent scope: role grants, invites, recovery vouches, link publish and revoke, delegate minting, role definition.",
+        "revoke": "Root-signed RevocationRecord, plus the seven-day TTL. Not a ceremony.",
+        "snapshot": "Nothing \u2014 it never leaves the browser."
+      },
+      "kind": "signing"
+    }
+  },
+  "mutations": {
+    "armor.enroll_factor": {
+      "authority": [
+        "personal_root_seed"
+      ],
+      "crib": [
+        "\u00a72"
+      ],
+      "effects": {
+        "mints": [
+          "factor_recipient"
+        ],
+        "seals": [
+          "personal_root_seed shares to factor_recipient"
+        ],
+        "writes": [
+          "next armor generation",
+          "root-signed"
+        ]
+      },
+      "source": {
+        "file": "tools/network/idkit/root_factor_policy.py",
+        "kind": "module-op"
+      }
+    },
+    "armor.replace_recovery_slot": {
+      "authority": [
+        "recovery_code",
+        "personal_root_seed"
+      ],
+      "crib": [
+        "\u00a79"
+      ],
+      "effects": {
+        "seals": [
+          "personal_root_seed to the successor code's recovery_slot_recipient"
+        ],
+        "writes": [
+          "replaced armor recovery slot",
+          "root re-signed"
+        ]
+      },
+      "notes": "Built at the armor layer; exposed by no route or UI yet.",
+      "source": {
+        "file": "tools/network/idkit/root_factor_policy.py",
+        "kind": "module-op",
+        "symbol": "replace_recovery_slot"
+      }
+    },
+    "armor.revoke_factor": {
+      "authority": [
+        "personal_root_seed"
+      ],
+      "crib": [
+        "\u00a72"
+      ],
+      "effects": {
+        "writes": [
+          "next armor generation without the revoked factor",
+          "root-signed"
+        ]
+      },
+      "source": {
+        "file": "tools/network/idkit/root_factor_policy.py",
+        "kind": "module-op"
+      }
+    },
+    "armor.set_recovery": {
+      "authority": [
+        "personal_root_seed"
+      ],
+      "crib": [
+        "\u00a79"
+      ],
+      "effects": {
+        "seals": [
+          "personal_root_seed to recovery_slot_recipient"
+        ],
+        "writes": [
+          "armor recovery slot"
+        ]
+      },
+      "preconditions": [
+        "Enroll-only; it refuses to overwrite or clear an existing recovery slot."
+      ],
+      "source": {
+        "file": "tools/network/idkit/root_factor_policy.py",
+        "kind": "module-op",
+        "symbol": "set_recovery"
+      }
+    },
+    "ceremony.recovery_policy_change": {
+      "authority": [
+        "personal_root_seed",
+        "recovery_signing_key"
+      ],
+      "crib": [
+        "\u00a78",
+        "\u00a79"
+      ],
+      "effects": {
+        "writes": [
+          "recovery policy transition"
+        ]
+      },
+      "source": {
+        "file": "tools/network/registry/app.py",
+        "kind": "ceremony"
+      },
+      "status": "designed"
+    },
+    "ceremony.registration": {
+      "authority": [
+        "personal_root_seed"
+      ],
+      "crib": [
+        "\u00a78",
+        "\u00a79"
+      ],
+      "effects": {
+        "writes": [
+          "registry binding",
+          "including the recovery policy declaration when pinned"
+        ]
+      },
+      "source": {
+        "file": "tools/network/registry/app.py",
+        "kind": "route"
+      }
+    },
+    "ceremony.serve_cert_mint": {
+      "authority": [
+        "org_root_signing_key"
+      ],
+      "crib": [
+        "\u00a78"
+      ],
+      "effects": {
+        "mints": [
+          "serving_delegate_key"
+        ],
+        "writes": [
+          "registry certificate and identity-neutral viewer certificate over the same child"
+        ]
+      },
+      "source": {
+        "file": "tools/network/idkit/certs.py",
+        "kind": "ceremony"
+      }
+    },
+    "ceremony.vault_master_read": {
+      "authority": [
+        "factor_seed"
+      ],
+      "crib": [
+        "\u00a78",
+        "\u00a718"
+      ],
+      "effects": {
+        "writes": [
+          "audited release log entry"
+        ]
+      },
+      "source": {
+        "file": "tools/vault/unlock.py",
+        "kind": "ceremony",
+        "symbol": "open_generation_keys"
+      }
+    },
+    "fleet.distribute_kem": {
+      "authority": [
+        "personal_root_seed"
+      ],
+      "crib": [
+        "\u00a71d",
+        "\u00a71e"
+      ],
+      "effects": {
+        "seals": [
+          "persona_kem_private to per_machine_key",
+          "one seal per fleet machine not removed"
+        ]
+      },
+      "notes": "The KEM-distribution record is the unbuilt half of the fleet layer (bead auto-pw9bs.6); the cited theory is its formal spec.",
+      "proofs": [
+        {
+          "framework": "tamarin",
+          "lemma": "machine_key_yields_nothing_undistributed",
+          "theory": "VaultFleetDist"
+        }
+      ],
+      "source": {
+        "file": "tools/network/storagekit/tamarin/VaultFleetDist.spthy",
+        "kind": "module-op"
+      },
+      "status": "designed"
+    },
+    "fleet.enroll": {
+      "authority": [
+        "personal_root_seed"
+      ],
+      "crib": [
+        "\u00a71b",
+        "\u00a710"
+      ],
+      "effects": {
+        "writes": [
+          "root-signed RosterEntry addressing one machine"
+        ]
+      },
+      "notes": "Renewal is a new entry with a higher sequence number superseding the old.",
+      "source": {
+        "file": "tools/network/fleet_roster.py",
+        "kind": "module-op",
+        "symbol": "enroll"
+      }
+    },
+    "fleet.kick": {
+      "authority": [
+        "personal_root_seed"
+      ],
+      "crib": [
+        "\u00a71b",
+        "\u00a71d",
+        "\u00a710"
+      ],
+      "effects": {
+        "revokes": [
+          "per_machine_key"
+        ],
+        "writes": [
+          "root-signed kick tombstone; stops future distribution to that machine"
+        ]
+      },
+      "proofs": [
+        {
+          "framework": "tamarin",
+          "lemma": "kicked_machine_excluded",
+          "theory": "VaultFleetDist"
+        }
+      ],
+      "source": {
+        "file": "tools/network/fleet_roster.py",
+        "kind": "module-op",
+        "symbol": "kick"
+      }
+    },
+    "fold.checkpoint": {
+      "authority": [
+        "holders of checkpoint"
+      ],
+      "crib": [
+        "\u00a78"
+      ],
+      "effects": {
+        "writes": [
+          "checkpoint record"
+        ]
+      },
+      "notes": "Checkpoint is decided-removed from the design vocabulary; the handler remains in code, so it remains in this inventory.",
+      "refusals": [
+        "checkpoint-unauthorized"
+      ],
+      "source": {
+        "file": "tools/network/ledger/fold.py",
+        "kind": "fold",
+        "symbol": "_h_checkpoint"
+      }
+    },
+    "fold.delegate": {
+      "authority": [
+        "persona_signing_key",
+        "tier2_session_key"
+      ],
+      "crib": [
+        "\u00a78",
+        "\u00a711"
+      ],
+      "effects": {
+        "mints": [
+          "agent_delegate_signing_key"
+        ],
+        "writes": [
+          "delegation certificate"
+        ]
+      },
+      "preconditions": [
+        "The delegated scope set never exceeds the delegator's (no scope escalation).",
+        "A non-redelegable certificate cannot mint children."
+      ],
+      "refusals": [
+        "scope-escalation",
+        "not-redelegable",
+        "delegate-unproven",
+        "delegate-nonce-reused"
+      ],
+      "source": {
+        "file": "tools/network/ledger/fold.py",
+        "kind": "fold",
+        "symbol": "_h_delegate"
+      }
+    },
+    "fold.genesis": {
+      "authority": [
+        "org_root_signing_key"
+      ],
+      "crib": [
+        "\u00a77",
+        "\u00a78"
+      ],
+      "effects": {
+        "writes": [
+          "genesis record",
+          "org recovery_pub declaration"
+        ]
+      },
+      "refusals": [
+        "recovery-equals-root"
+      ],
+      "source": {
+        "file": "tools/network/ledger/fold.py",
+        "kind": "fold",
+        "symbol": "_h_genesis"
+      }
+    },
+    "fold.invite": {
+      "authority": [
+        "holders of invite:<role>"
+      ],
+      "crib": [
+        "\u00a78"
+      ],
+      "effects": {
+        "writes": [
+          "invite record"
+        ]
+      },
+      "refusals": [
+        "invite-overreach",
+        "invite-sponsor-mismatch",
+        "invite-not-in-ancestry",
+        "invite-expired",
+        "invite-dead"
+      ],
+      "source": {
+        "file": "tools/network/ledger/fold.py",
+        "kind": "fold",
+        "symbol": "_h_invite"
+      }
+    },
+    "fold.key_epoch": {
+      "authority": [
+        "org_root_signing_key"
+      ],
+      "crib": [
+        "\u00a78"
+      ],
+      "effects": {
+        "writes": [
+          "key epoch marker"
+        ]
+      },
+      "refusals": [
+        "key-epoch-unauthorized"
+      ],
+      "source": {
+        "file": "tools/network/ledger/fold.py",
+        "kind": "fold",
+        "symbol": "_h_key_epoch"
+      }
+    },
+    "fold.key_rotate": {
+      "authority": [
+        "org_root_signing_key",
+        "recovery_signing_key"
+      ],
+      "crib": [
+        "\u00a78",
+        "\u00a79"
+      ],
+      "effects": {
+        "mints": [
+          "org_root_signing_key"
+        ],
+        "revokes": [
+          "org_root_signing_key"
+        ],
+        "writes": [
+          "rotation record"
+        ]
+      },
+      "preconditions": [
+        "Under recovery policy recovery-key, the declared recovery key co-signs the exact transition.",
+        "The new key proves control through the continuity signature."
+      ],
+      "refusals": [
+        "not-root",
+        "rotate-wrong-old",
+        "bad-continuity",
+        "recovery-not-enrolled",
+        "recovery-sig-bad",
+        "recovery-continuity-missing",
+        "bad-recovery-continuity",
+        "recovery-continuity-not-declared"
+      ],
+      "source": {
+        "file": "tools/network/ledger/fold.py",
+        "kind": "fold",
+        "symbol": "_h_key_rotate"
+      }
+    },
+    "fold.member_claim": {
+      "authority": [
+        "invited persona key"
+      ],
+      "crib": [
+        "\u00a78",
+        "\u00a79"
+      ],
+      "effects": {
+        "writes": [
+          "member claim",
+          "member recovery_pub enrollment"
+        ]
+      },
+      "preconditions": [
+        "The claim's recovery enrollment is validated here; recovery_pub equal to the org root is refused."
+      ],
+      "refusals": [
+        "claim-wrong-key",
+        "claim-bad-token",
+        "claim-bad-credential",
+        "invite-already-claimed",
+        "persona-exists"
+      ],
+      "source": {
+        "file": "tools/network/ledger/fold.py",
+        "kind": "fold",
+        "symbol": "_h_member_claim"
+      }
+    },
+    "fold.member_rekey": {
+      "authority": [
+        "persona_signing_key",
+        "org_root_signing_key",
+        "member_recovery_key"
+      ],
+      "crib": [
+        "\u00a78",
+        "\u00a79"
+      ],
+      "effects": {
+        "mints": [
+          "persona_signing_key"
+        ],
+        "revokes": [
+          "persona_signing_key"
+        ],
+        "writes": [
+          "rekey record",
+          "implicit revoke of the departed key on the recovery door"
+        ]
+      },
+      "preconditions": [
+        "The cited old key must be the persona's current key.",
+        "A revoked key cannot self-authorize its own rekey.",
+        "The new key proves control through the continuity signature.",
+        "Under recovery policy none, a recovery-authorized rekey is refused, never ignored."
+      ],
+      "proofs": [
+        {
+          "framework": "tamarin",
+          "lemma": "recovery_beats_thief",
+          "theory": "VaultRecoveryRace"
+        },
+        {
+          "framework": "tamarin",
+          "lemma": "recovery_key_secret",
+          "theory": "VaultRecoveryRace"
+        }
+      ],
+      "refusals": [
+        "rekey-wrong-key",
+        "rekey-unauthorized",
+        "rekey-revoked-key",
+        "recovery-not-enrolled",
+        "recovery-sig-bad",
+        "bad-continuity",
+        "persona-exists",
+        "unknown-persona",
+        "bad-approval"
+      ],
+      "source": {
+        "file": "tools/network/ledger/fold.py",
+        "kind": "fold",
+        "symbol": "_h_member_rekey"
+      }
+    },
+    "fold.revoke": {
+      "authority": [
+        "persona_signing_key",
+        "org_root_signing_key"
+      ],
+      "crib": [
+        "\u00a78"
+      ],
+      "effects": {
+        "revokes": [
+          "agent_delegate_signing_key",
+          "persona_signing_key"
+        ],
+        "writes": [
+          "revocation record"
+        ]
+      },
+      "refusals": [
+        "revoke-unauthorized",
+        "revoke-bad-target",
+        "revoke-target-not-in-ancestry"
+      ],
+      "source": {
+        "file": "tools/network/ledger/fold.py",
+        "kind": "fold",
+        "symbol": "_h_revoke"
+      }
+    },
+    "fold.role_define": {
+      "authority": [
+        "holders of role:define"
+      ],
+      "crib": [
+        "\u00a78"
+      ],
+      "effects": {
+        "writes": [
+          "role definition"
+        ]
+      },
+      "refusals": [
+        "role-define-unauthorized",
+        "role-define-overreach"
+      ],
+      "source": {
+        "file": "tools/network/ledger/fold.py",
+        "kind": "fold",
+        "symbol": "_h_role_define"
+      }
+    },
+    "fold.role_grant": {
+      "authority": [
+        "holders of role:grant:<role>"
+      ],
+      "crib": [
+        "\u00a78"
+      ],
+      "effects": {
+        "writes": [
+          "role grant"
+        ]
+      },
+      "refusals": [
+        "role-grant-unauthorized",
+        "role-undefined",
+        "approval-missing",
+        "bad-approval"
+      ],
+      "source": {
+        "file": "tools/network/ledger/fold.py",
+        "kind": "fold",
+        "symbol": "_h_role_grant"
+      }
+    },
+    "fold.role_revoke": {
+      "authority": [
+        "holders of role:grant:<role>"
+      ],
+      "crib": [
+        "\u00a78"
+      ],
+      "effects": {
+        "writes": [
+          "role revocation"
+        ]
+      },
+      "refusals": [
+        "role-revoke-unauthorized"
+      ],
+      "source": {
+        "file": "tools/network/ledger/fold.py",
+        "kind": "fold",
+        "symbol": "_h_role_revoke"
+      }
+    },
+    "passkey.enroll": {
+      "authority": [
+        "personal_root_seed"
+      ],
+      "crib": [
+        "\u00a72",
+        "\u00a78"
+      ],
+      "effects": {
+        "writes": [
+          "root-signed enrollment statement binding the per_credential_wrapping_key public half"
+        ]
+      },
+      "proofs": [
+        {
+          "framework": "tamarin",
+          "lemma": "no_key_to_forged_pk",
+          "theory": "VaultOpenStore"
+        }
+      ],
+      "source": {
+        "file": "tools/network/idkit/enrollment.py",
+        "kind": "ceremony",
+        "symbol": "mint"
+      }
+    },
+    "passkey.revoke": {
+      "authority": [
+        "personal_root_seed"
+      ],
+      "crib": [
+        "\u00a72",
+        "\u00a78"
+      ],
+      "effects": {
+        "revokes": [
+          "per_credential_wrapping_key",
+          "tier2_session_key"
+        ],
+        "writes": [
+          "root-signed revocation record"
+        ]
+      },
+      "source": {
+        "file": "tools/network/idkit/revocation.py",
+        "kind": "ceremony",
+        "symbol": "RevocationRecord"
+      }
+    },
+    "recovery.succession": {
+      "authority": [
+        "personal_root_seed",
+        "recovery_signing_key"
+      ],
+      "crib": [
+        "\u00a79"
+      ],
+      "effects": {
+        "mints": [
+          "recovery_signing_key"
+        ],
+        "revokes": [
+          "recovery_signing_key"
+        ],
+        "writes": [
+          "witnessed declaration",
+          "then completion attestation"
+        ]
+      },
+      "preconditions": [
+        "Completion requires the elapsed witness window over a chain containing the declaration and no cancellation and no veto."
+      ],
+      "proofs": [
+        {
+          "framework": "tamarin",
+          "lemma": "window_cannot_be_fast_forwarded",
+          "theory": "VaultRecoverySuccession"
+        },
+        {
+          "framework": "tamarin",
+          "lemma": "cancellation_blocks_completion",
+          "theory": "VaultRecoverySuccession"
+        },
+        {
+          "framework": "tamarin",
+          "lemma": "veto_blocks_completion",
+          "theory": "VaultRecoverySuccession"
+        }
+      ],
+      "source": {
+        "file": "tools/network/storagekit/tamarin/VaultRecoverySuccession.spthy",
+        "kind": "module-op"
+      },
+      "status": "designed"
+    },
+    "rekey.frontier_marker": {
+      "authority": [
+        "persona_signing_key"
+      ],
+      "crib": [
+        "\u00a71d"
+      ],
+      "effects": {
+        "writes": [
+          "fold-inert frontier marker citing all locally current authority heads"
+        ]
+      },
+      "notes": "Without the marker the re-key achieves nothing (the F-001 defect); the calibration theory VaultRekeyF001 demonstrates exactly that.",
+      "proofs": [
+        {
+          "framework": "tamarin",
+          "lemma": "exclusion_forward",
+          "theory": "VaultRekeyMarker"
+        }
+      ],
+      "source": {
+        "file": "tools/network/storagekit/tamarin/VaultRekeyMarker.spthy",
+        "kind": "module-op"
+      },
+      "status": "designed"
+    },
+    "root.rotation": {
+      "authority": [
+        "personal_root_seed",
+        "recovery_signing_key"
+      ],
+      "crib": [
+        "\u00a79"
+      ],
+      "effects": {
+        "mints": [
+          "personal_root_seed"
+        ],
+        "revokes": [
+          "personal_root_seed"
+        ],
+        "writes": [
+          "succession record"
+        ]
+      },
+      "preconditions": [
+        "Three signatures \u2014 old root, declared recovery key, and new root \u2014 verified against the declaration, never against armor contents."
+      ],
+      "source": {
+        "file": "tools/network/idkit/root_rotation.py",
+        "kind": "module-op",
+        "symbol": "make_rotation"
+      }
+    },
+    "storage.advance_state": {
+      "authority": [
+        "agent_delegate_signing_key",
+        "persona_signing_key"
+      ],
+      "crib": [
+        "\u00a71d",
+        "\u00a76",
+        "\u00a77"
+      ],
+      "effects": {
+        "mints": [
+          "generation_secret"
+        ],
+        "writes": [
+          "StorageStateDescriptor",
+          "ParentBridge"
+        ]
+      },
+      "refusals": [
+        "StateAdvanceRequired on a stale write"
+      ],
+      "source": {
+        "file": "tools/network/storagekit/lifecycle.py",
+        "kind": "module-op",
+        "symbol": "advance_state"
+      }
+    },
+    "storage.issue_grant": {
+      "authority": [
+        "agent_delegate_signing_key",
+        "persona_signing_key"
+      ],
+      "crib": [
+        "\u00a76",
+        "\u00a77"
+      ],
+      "effects": {
+        "seals": [
+          "generation_secret to persona_kem_private"
+        ],
+        "writes": [
+          "CapabilityGrant"
+        ]
+      },
+      "proofs": [
+        {
+          "framework": "tamarin",
+          "lemma": "exclusion_forward",
+          "theory": "VaultRekeyMarker"
+        }
+      ],
+      "source": {
+        "file": "tools/network/storagekit/capability.py",
+        "kind": "module-op",
+        "symbol": "issue"
+      }
+    },
+    "storage.issue_receipt": {
+      "authority": [
+        "persona_kem_private"
+      ],
+      "crib": [
+        "\u00a76",
+        "\u00a716"
+      ],
+      "effects": {
+        "writes": [
+          "CapabilityReceipt \u2014 proof of knowledge",
+          "not an assertion"
+        ]
+      },
+      "source": {
+        "file": "tools/network/storagekit/capability.py",
+        "kind": "module-op",
+        "symbol": "issue_receipt"
+      }
+    },
+    "storage.mint_credential": {
+      "authority": [
+        "persona_signing_key"
+      ],
+      "crib": [
+        "\u00a71d",
+        "\u00a76",
+        "\u00a713"
+      ],
+      "effects": {
+        "mints": [
+          "persona_kem_private"
+        ],
+        "writes": [
+          "PersonaKemCredential citing the current authority frontier"
+        ]
+      },
+      "proofs": [
+        {
+          "framework": "tamarin",
+          "lemma": "concurrent_grant_secret",
+          "theory": "VaultConcurrentRekey"
+        }
+      ],
+      "source": {
+        "file": "tools/network/storagekit/credentials.py",
+        "kind": "module-op",
+        "symbol": "build"
+      }
+    },
+    "storage.provision_missing": {
+      "authority": [
+        "persona_kem_private"
+      ],
+      "crib": [
+        "\u00a715"
+      ],
+      "effects": {
+        "seals": [
+          "generation_secret to an unprovisioned member's current PersonaKemCredential"
+        ],
+        "writes": [
+          "repair CapabilityGrant"
+        ]
+      },
+      "source": {
+        "file": "tools/network/storagekit/distribution.py",
+        "kind": "module-op",
+        "symbol": "provision_missing"
+      }
+    },
+    "vault.create_class": {
+      "authority": [
+        "personal_root_seed"
+      ],
+      "crib": [
+        "\u00a718"
+      ],
+      "effects": {
+        "mints": [
+          "class_key"
+        ],
+        "seals": [
+          "class_key to factor recipients and to root_anchor_seed"
+        ],
+        "writes": [
+          "PolicyClassRecord generation"
+        ]
+      },
+      "preconditions": [
+        "A member class without the root-anchor wrap is refused at creation and again at the store (put_class, put_root_class_once)."
+      ],
+      "source": {
+        "file": "tools/vault/policy_class.py",
+        "kind": "module-op",
+        "symbol": "create_class"
+      }
+    },
+    "vault.revoke_class_factor": {
+      "authority": [
+        "personal_root_seed"
+      ],
+      "crib": [
+        "\u00a73",
+        "\u00a718"
+      ],
+      "effects": {
+        "mints": [
+          "class_key"
+        ],
+        "seals": [
+          "class_key to surviving factors and to root_anchor_seed"
+        ],
+        "writes": [
+          "next PolicyClassRecord generation; applies at next write",
+          "existing sealed material untouched"
+        ]
+      },
+      "preconditions": [
+        "The root-anchor wrap cannot be dropped."
+      ],
+      "source": {
+        "file": "tools/vault/policy_class.py",
+        "kind": "module-op",
+        "symbol": "revoke_factor"
+      }
+    }
+  },
+  "purposes": {
+    "autonomy.attachment.cursor.v1": {
+      "description": "Derives attachment download cursor authentication.",
+      "used_by": [
+        "tools/network/relaykit/attachment_download.py"
+      ]
+    },
+    "autonomy.identity.machine.v1": {
+      "description": "Derives the per-machine operating key from the personal root seed and machine_id.",
+      "used_by": [
+        "tools/network/idkit/persona.py"
+      ]
+    },
+    "autonomy.identity.persona.v1": {
+      "description": "Derives a persona keypair from the personal root seed and genesis_id.",
+      "used_by": [
+        "tools/network/idkit/persona.py"
+      ]
+    },
+    "autonomy.network.channel.keys.v1": {
+      "description": "Derives relay channel keys.",
+      "used_by": [
+        "tools/network/relaykit/channel.py"
+      ]
+    },
+    "autonomy.network.channel.stream.v1": {
+      "description": "Derives relay channel stream nonces.",
+      "used_by": [
+        "tools/network/relaykit/channel.py"
+      ]
+    },
+    "autonomy.network.ledger.sync-key.v1": {
+      "description": "Derives the ledger bundle sync key.",
+      "used_by": [
+        "tools/network/ledger/bundles.py"
+      ]
+    },
+    "autonomy.recovery.kek.v1": {
+      "description": "Derives the recovery share of the master key-encryption key from the recovery code.",
+      "used_by": [
+        "tools/network/idkit/recovery.py"
+      ]
+    },
+    "autonomy.recovery.member-sign.v1": {
+      "description": "Derives a per-organization member recovery key from the recovery code and genesis_id.",
+      "used_by": [
+        "tools/network/idkit/recovery.py"
+      ]
+    },
+    "autonomy.recovery.signing.v1": {
+      "description": "Derives the recovery signing key from the recovery code.",
+      "used_by": [
+        "tools/network/idkit/recovery.py"
+      ]
+    },
+    "autonomy/capability-grant/v1": {
+      "description": "Seals a generation secret to a PersonaKemCredential in a CapabilityGrant.",
+      "used_by": [
+        "tools/network/storagekit/capability.py"
+      ]
+    },
+    "autonomy/object-wrap/v1": {
+      "description": "Derives an object revision's wrap key from its generation secret.",
+      "used_by": [
+        "tools/network/storagekit/object_header.py"
+      ]
+    },
+    "autonomy/personal-owner-at-rest/v1": {
+      "description": "Seals the personal owner key at rest.",
+      "used_by": [
+        "tools/vault/personal_object.py"
+      ]
+    },
+    "autonomy/personal-vault-content/v1": {
+      "description": "Encrypts personal vault object content.",
+      "used_by": [
+        "tools/vault/personal_object.py"
+      ]
+    },
+    "autonomy/personal-vault/no-storage-generation/v1": {
+      "description": "Domain label for personal vault objects outside any storage generation.",
+      "used_by": [
+        "tools/vault/personal_object.py"
+      ]
+    },
+    "autonomy/personal-vault/object-id/v1": {
+      "description": "Derives a personal vault object's identifier.",
+      "used_by": [
+        "tools/vault/personal_object.py"
+      ]
+    },
+    "autonomy/personal-vault/revision-id/v1": {
+      "description": "Derives a personal vault object's revision identifier.",
+      "used_by": [
+        "tools/vault/personal_object.py"
+      ]
+    },
+    "autonomy/receipt-pok/v1": {
+      "description": "Derives a CapabilityReceipt's proof-of-knowledge value from the state secret.",
+      "used_by": [
+        "tools/network/storagekit/capability.py"
+      ]
+    },
+    "autonomy/recovery-armor/v1": {
+      "description": "Derives the recovery code's armor-slot recipient.",
+      "used_by": [
+        "tools/network/idkit/root_factor_policy.py"
+      ]
+    },
+    "autonomy/root-factor-recipient/v1": {
+      "description": "Derives a factor's armor recipient from its factor seed.",
+      "used_by": [
+        "tools/network/idkit/root_factor_policy.py"
+      ]
+    },
+    "autonomy/root-policy-wrap/v1": {
+      "description": "Wraps root-factor-policy node secrets inside the armor envelope.",
+      "used_by": [
+        "tools/network/idkit/root_factor_policy.py"
+      ]
+    },
+    "autonomy/storage-domain/v1": {
+      "description": "Domain label for storage-domain identifiers in ledger projections.",
+      "used_by": [
+        "tools/network/ledger/projections.py"
+      ]
+    },
+    "autonomy/storage-parent-edge/v1": {
+      "description": "Keys a ParentBridge's child-to-parent generation recovery.",
+      "used_by": [
+        "tools/network/storagekit/bridge.py"
+      ]
+    },
+    "autonomy/storage-state-secret/v1": {
+      "description": "Domain label for generation-secret material in a StorageStateDescriptor.",
+      "used_by": [
+        "tools/network/storagekit/state.py"
+      ]
+    },
+    "autonomy/vault-factor/v1": {
+      "description": "Derives a factor's vault recipient inside the armor (distinct from the root-factor purpose).",
+      "used_by": [
+        "tools/network/idkit/armor.py"
+      ]
+    },
+    "autonomy/vault-policy-class/cek-hpke/v1": {
+      "description": "Seals an object content key to a class generation's public sealing key.",
+      "used_by": [
+        "tools/vault/policy_class.py"
+      ]
+    },
+    "autonomy/vault-policy-class/cek/v1": {
+      "description": "Wraps an object content key under a class generation.",
+      "used_by": [
+        "tools/vault/policy_class.py"
+      ]
+    },
+    "autonomy/vault-policy-class/sealing-key/v1": {
+      "description": "Derives a class generation's public sealing keypair from its class key.",
+      "used_by": [
+        "tools/vault/policy_class.py"
+      ]
+    },
+    "autonomy/vault-policy-class/v1": {
+      "description": "Domain label for a vault policy class record.",
+      "used_by": [
+        "tools/vault/policy_class.py"
+      ]
+    },
+    "autonomy/vault-policy-recipient/v1": {
+      "description": "Derives a factor's vault policy-class recipient from its factor seed.",
+      "used_by": [
+        "tools/vault/recipients.py"
+      ]
+    },
+    "autonomy/vault-root-anchor-wrap/v1": {
+      "description": "Wraps a class key to the root anchor's derived recipient.",
+      "used_by": [
+        "tools/vault/root_anchor.py"
+      ]
+    },
+    "autonomy/vault/object-id/v1": {
+      "description": "Derives a vault storage object's identifier.",
+      "used_by": [
+        "tools/vault/storage_object.py"
+      ]
+    },
+    "autonomy/vault/revision-id/v1": {
+      "description": "Derives a vault storage object's revision identifier.",
+      "used_by": [
+        "tools/vault/storage_object.py"
+      ]
+    }
+  },
+  "version": 1
+}
