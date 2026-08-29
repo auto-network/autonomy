@@ -358,6 +358,13 @@ free. Track status via `/api/dispatch/runs` (QUEUED → PREPARING →
 RUNNING → DONE/FAILED). Concurrency limits are operator-tunable at
 `/api/dispatch/limits`.
 
+**Full results contract**: the run row's `decision` columns are a
+summary (status/reason/category). The agent's complete `decision.json`
+lives in the run directory — fetch it via
+`GET /api/session/<run_id>/output/decision.json`. That output API is
+the sanctioned full-results channel; do not parse truncated row
+fields when you need the real payload.
+
 To start a session you can send messages to:
 
     POST /api/session/create → {"tmux_name"}
