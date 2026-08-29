@@ -157,6 +157,20 @@ EXPECTATIONS = {
         "revoked_factor_keeps_old": "verified",
         "root_reaches_every_generation": "falsified",
     },
+    "VaultRootRotation.spthy": {
+        "owner_rotates_away_from_stolen_root": "verified",
+        "thief_cannot_rotate": "verified",
+        "code_finder_cannot_rotate": "verified",
+        "both_secrets_suffice": "verified",
+        "recovery_pk_is_declared": "verified",
+    },
+    "VaultRootRotationNoCosign.spthy": {
+        "owner_rotates_away_from_stolen_root": "verified",
+        "thief_cannot_rotate": "falsified",
+        "code_finder_cannot_rotate": "verified",
+        "both_secrets_suffice": "verified",
+        "recovery_pk_is_declared": "verified",
+    },
 }
 
 SUMMARY_RE = re.compile(
