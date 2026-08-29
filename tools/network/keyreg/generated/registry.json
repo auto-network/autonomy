@@ -65,7 +65,7 @@
       },
       "group": "browser",
       "kind": "signing",
-      "notes": "Minted per browser during the sign-on ceremony, after the user proves root authority by satisfying the armor's factor policy (password or passkey, per the enrolled policy); routine operations then sign with crypto.subtle.sign and never see a factor again during validity. The crib sheet's section 2 Tier-2 prose conflates this key with a second, different mechanism \u2014 the per-operation authorize ceremony, where opening a vault policy class costs one user-verified assertion that derives ephemeral opener seeds (vault_routes.py _openers; factor-management.js _authPasskey) \u2014 recorded as crib comments 5ca511cf and its correction for the next synthesis.",
+      "notes": "Minted per browser during the sign-on ceremony, after the user proves root authority by satisfying the armor's factor policy; routine operations then sign with crypto.subtle.sign and never see a factor again during the certificate's validity. Distinct from the per-operation vault authorize ceremony, which costs one user-verified assertion per class open and involves no session key.",
       "signs": [
         "registry request envelopes only (REQUEST_DOMAIN + canonical JSON of v, method, path, ts, signer, payload) \u2014 the single crypto.subtle.sign call site for this key in network-signon.mjs"
       ]
@@ -250,28 +250,6 @@
       "kind": "derived-secret",
       "status": "designed"
     },
-    "master_kek": {
-      "code": [
-        "tools/network/idkit/armor.py"
-      ],
-      "crib": [
-        "\u00a72"
-      ],
-      "custody": {
-        "class": "cold",
-        "forced_by": "Opened only inside a root ceremony gated on the factor policy."
-      },
-      "derivation": null,
-      "descriptor": {
-        "bound": "The factor policy.",
-        "live": "No.",
-        "reaches": "The root armor it seals.",
-        "revoke": "Re-sealed on every factor change (a new armor generation).",
-        "snapshot": "The armored root, opened only through a satisfying factor set."
-      },
-      "group": "identity-armor",
-      "kind": "symmetric"
-    },
     "member_recovery_key": {
       "code": [
         "tools/network/idkit/recovery.py:member_recovery_key",
@@ -453,7 +431,7 @@
       "descriptor": {
         "bound": "The credential.",
         "live": "Yes \u2014 opening a seal needs the assertion at that machine.",
-        "reaches": "Payloads sealed to the credential's device: cross-device Tier-2 renewals and master-KEK re-wraps. The public key is valid only when carried in a root-signed enrollment statement, verified before any seal is addressed to it.",
+        "reaches": "Payloads sealed to the credential's device. The public key is valid only when carried in a root-signed enrollment statement, verified before any seal is addressed to it.",
         "revoke": "Passkey revocation (root-signed RevocationRecord).",
         "snapshot": "Nothing without the device's PRF assertion."
       },
@@ -1613,9 +1591,9 @@
           "succession record"
         ]
       },
-      "notes": "The auto.network registry pins recovery_pub for personal and org identities (registry/store.py orgs table; the rebind path enforces it in tools/network/registry/app.py). The residual gap is wiring: the armor-layer succession in root_rotation.py does not yet verify against that pin. VaultRootRotationNoDeclaredPk.spthy is the machine-checked acceptance target for closing it.",
+      "notes": "A local verification has no relying party (crib section 0: the owner rewriting their own store is a feature); the load-bearing checks are the registry rebind gate (tools/network/registry/app.py, which resolves the pinned recovery key server-side) and the fleet's root-signed RosterEntry acceptance (tools/network/fleet_roster.py).",
       "preconditions": [
-        "Three signatures \u2014 old root, declared recovery key, and new root \u2014 verified against the declaration, never against armor contents."
+        "Three signatures \u2014 old root, enrolled recovery key, and new root. The succession convinces its relying parties, not the local machine - the fleet accepts a successor only against root-signed RosterEntry material, and the auto.network registry rebinds only for a request signed by the recovery key it pinned at enrollment."
       ],
       "proofs": [
         {

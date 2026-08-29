@@ -48,17 +48,6 @@ The layout mirrors the crib sheet's section 9 register (graph note
 - **bound** The one store.
 - **crib** §23
 
-### master_kek — symmetric, cold (Opened only inside a root ceremony gated on the factor policy.)
-
-- **minted** at random
-- **reaches** The root armor it seals.
-- **snapshot** The armored root, opened only through a satisfying factor set.
-- **live?** No.
-- **revoke** Re-sealed on every factor change (a new armor generation).
-- **bound** The factor policy.
-- **code** `tools/network/idkit/armor.py`
-- **crib** §2
-
 ### member_recovery_key — signing, cold (Derived only from the cold recovery code.)
 
 - **derived** from `recovery_code` via HKDF(genesis_id)
@@ -84,7 +73,7 @@ The layout mirrors the crib sheet's section 9 register (graph note
 ### per_credential_wrapping_key — kem, cold (The private half derives from the credential's PRF output on-device; using it requires a user-verified assertion at that machine.)
 
 - **derived** from `factor_seed` via PRF-derived X25519
-- **reaches** Payloads sealed to the credential's device: cross-device Tier-2 renewals and master-KEK re-wraps. The public key is valid only when carried in a root-signed enrollment statement, verified before any seal is addressed to it.
+- **reaches** Payloads sealed to the credential's device. The public key is valid only when carried in a root-signed enrollment statement, verified before any seal is addressed to it.
 - **snapshot** Nothing without the device's PRF assertion.
 - **live?** Yes — opening a seal needs the assertion at that machine.
 - **revoke** Passkey revocation (root-signed RevocationRecord).

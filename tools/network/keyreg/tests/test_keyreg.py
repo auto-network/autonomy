@@ -22,7 +22,6 @@ REQUIRED_KEYS = [
     "recovery_slot_recipient",
     "factor_seed",
     "factor_recipient",
-    "master_kek",
     "per_credential_wrapping_key",
     "browser_session_key",
     "persona_signing_key",
