@@ -15,7 +15,7 @@
  * mint, zeroize, no-leak — can be tested without a full ceremony vector; the
  * primitives themselves are covered by ceremony/claim.js's own tests.
  */
-import { decryptArmor as realDecryptArmor } from '../ceremony/primitives.js';
+import { openArmorWithPassword as realOpenArmor } from '../ceremony/root-factor-policy.js';
 import { mintMemberClaim as realMint } from '../ceremony/claim.js';
 
 async function defaultFetchPersonal() {
@@ -34,7 +34,7 @@ function defaultRandomSeed() {
 
 export function makeCeremony({
   fetchPersonal = defaultFetchPersonal,
-  decryptArmor = realDecryptArmor,
+  decryptArmor = realOpenArmor,
   mintMemberClaim = realMint,
   randomSeed = defaultRandomSeed,
 } = {}) {

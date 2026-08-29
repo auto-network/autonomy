@@ -44,7 +44,8 @@ def derive_persona(personal_root_seed: bytes, genesis_id: str) -> KeyPair:
     """Derive the persona :class:`KeyPair` for one organization.
 
     *personal_root_seed* is the raw 32-byte Ed25519 seed (what
-    ``armor.decrypt_root_key`` yields: ``bytes.fromhex(kp.private_hex)``);
+    ``root_factor_policy.open_armor_with_password`` yields:
+    ``bytes.fromhex(kp.private_hex)``);
     *genesis_id* is the organization's 64-lowercase-hex genesis event id.
     Raises :class:`MalformedError` on anything else.
     """

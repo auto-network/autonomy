@@ -1557,57 +1557,6 @@ def test_garbage_cookie_does_not_pass(env, root):
 
 # ── combined (MFA) unlock: BOTH factors, one session ──────────────────────
 #
-# An MFA identity carries only the combined factor, so neither the password
-# nor the passkey path can open it. The browser gathers both, decrypts locally
-# with decryptArmorWithCombined, and signs the challenge minted by the shared
-# password/options endpoint; the server verifies the root signature identically
-# and mints a 'combined' session. Without this an MFA user could never sign in.
-
-
-def _store_combined_identity(client, root: KeyPair, *, prf=b"\x21" * 32,
-                             name="Alex"):
-    from tools.network.idkit.armor import (
-        PASSKEY_ARMOR_PURPOSE, encrypt_root_key_combined,
-    )
-    from tools.network.idkit.sealing import derive_encapsulation_keypair
-    _, kem = derive_encapsulation_keypair(prf, PASSKEY_ARMOR_PURPOSE)
-    armor = encrypt_root_key_combined(root, PASSWORD, "cred-mfa", kem,
-                                      iterations=10_000)
-    r = client.post("/api/identity/personal",
-                    json={"display_name": name, "armored_private_key": armor})
-    assert r.status_code == 200, r.text
-    return r
-
-
-def test_combined_unlock_mints_a_session(env, root):
-    _store_combined_identity(env, root)
-    minted = env.post("/api/identity/unlock/password/options", json={},
-                      headers={"host": HOST})
-    assert minted.status_code == 200, minted.text
-    body = minted.json()
-    r = env.post("/api/identity/unlock/combined",
-                 json={"challenge": body["challenge"],
-                       "signature": _pw_sign(root, body["challenge"],
-                                             body["origin"])},
-                 headers={"host": HOST})
-    assert r.status_code == 200, r.text
-    assert r.json()["method"] == "combined"
-    assert unlock_routes.SESSION_COOKIE in r.headers.get("set-cookie", "")
-
-
-def test_combined_unlock_rejects_a_foreign_root(env, root):
-    _store_combined_identity(env, root)
-    other = KeyPair.generate()
-    minted = env.post("/api/identity/unlock/password/options", json={},
-                      headers={"host": HOST}).json()
-    r = env.post("/api/identity/unlock/combined",
-                 json={"challenge": minted["challenge"],
-                       "signature": _pw_sign(other, minted["challenge"],
-                                             minted["origin"])},
-                 headers={"host": HOST})
-    assert r.status_code == 403
-
-
 def test_root_releasing_unlock_routes_are_public_exceptions():
     """Every pre-session unlock route must be servable without a session —
     otherwise an operator at the locked screen gets 401. The combined (MFA)

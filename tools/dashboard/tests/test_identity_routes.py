@@ -740,93 +740,16 @@ def test_register_unknown_transports_are_dropped(env, root):
     assert r.json()["transports"] == ["internal"]
 
 
-def test_second_device_excluded_from_reenrollment(env, root):
-    """Options after an enrollment carry excludeCredentials for the same
-    RP ID, so the same authenticator isn't double-enrolled."""
-    _store_identity(env, root)
-    first = _enroll(env, root)
-    assert first.status_code == 200
-    opts = env.post("/api/identity/passkey/register-options", json={}).json()
-    excluded = [c["id"] for c in opts["options"].get("excludeCredentials", [])]
-    assert first.json()["credential_id"] in excluded
-    # A different RP ID excludes nothing — that domain has no rows.
-    opts_ts = env.post("/api/identity/passkey/register-options", json={},
-                       headers={"host": TSNET_HOST}).json()
-    assert not opts_ts["options"].get("excludeCredentials")
 
 
-# ── re-arming: promote / demote / set-password / require-pair ─────────────
-#
-# The browser re-wraps the SAME root under a new factor set and signs the new
-# armor with the root; the route verifies that proof against the stored root and
-# refuses a set with no daily opener. removeKey deletes a passkey, refusing
-# while it is still a root factor.
 
 
-def _rearmor_body(signer, armor_text, require_pair=None):
-    from tools.dashboard.identity_routes import REARMOR_DOMAIN
-    from tools.network.idkit.armor import canonicalize_armor
-    canonical = canonicalize_armor(armor_text)
-    sig = signer.sign_hex(REARMOR_DOMAIN + canonical.encode("utf-8"))
-    body = {"armored_private_key": canonical, "signature": sig}
-    if require_pair is not None:
-        body["require_pair"] = require_pair
-    return body
 
 
-def _passkey_armor(kp, cred="cred-a", prf=b"\x21" * 32, password=PASSWORD):
-    from tools.network.idkit.armor import (
-        PASSKEY_ARMOR_PURPOSE, add_passkey_factor, encrypt_root_key,
-    )
-    from tools.network.idkit.sealing import derive_encapsulation_keypair
-    _, kem = derive_encapsulation_keypair(prf, PASSKEY_ARMOR_PURPOSE)
-    base = mint_password_armor(kp, password, iterations=10_000)
-    return add_passkey_factor(base, password, cred, kem)
 
 
-def test_rearmor_promotes_a_passkey(env, root):
-    from tools.network.idkit.armor import armor_factor_types
-    _store_identity(env, root)
-    r = env.post("/api/identity/personal/armor",
-                 json=_rearmor_body(root, _passkey_armor(root)))
-    assert r.status_code == 200, r.text
-    assert "passkey" in r.json()["factors"]
-    served = env.get("/api/identity/personal").json()
-    assert "passkey" in armor_factor_types(served["armored_private_key"])
 
 
-def test_rearmor_rejects_a_bad_signature(env, root):
-    _store_identity(env, root)
-    body = _rearmor_body(root, _passkey_armor(root))
-    body["signature"] = "0" * 128
-    assert env.post("/api/identity/personal/armor", json=body).status_code == 403
-
-
-def test_rearmor_rejects_a_foreign_root(env, root):
-    _store_identity(env, root)
-    other = KeyPair.generate()
-    r = env.post("/api/identity/personal/armor",
-                 json=_rearmor_body(other, _passkey_armor(other)))
-    assert r.status_code == 409
-
-
-def test_rearmor_require_pair_needs_both(env, root):
-    _store_identity(env, root)
-    pw_only = mint_password_armor(root, PASSWORD, iterations=10_000)
-    r = env.post("/api/identity/personal/armor",
-                 json=_rearmor_body(root, pw_only, require_pair=True))
-    assert r.status_code == 400
-
-
-def test_rearmor_passkey_only_is_a_valid_opener(env, root):
-    from tools.network.idkit.armor import remove_factor
-    _store_identity(env, root)
-    passkey_only = remove_factor(_passkey_armor(root, cred="cred-x"),
-                                 PASSWORD, "password")
-    r = env.post("/api/identity/personal/armor",
-                 json=_rearmor_body(root, passkey_only))
-    assert r.status_code == 200, r.text
-    assert r.json()["factors"] == ["passkey"]
 
 
 def test_delete_passkey(env, root):
@@ -864,135 +787,18 @@ def _kem_for(prf: bytes) -> str:
     return derive_encapsulation_keypair(prf, PASSKEY_ARMOR_PURPOSE)[1]
 
 
-def test_rearmor_demotes_a_passkey(env, root):
-    from tools.network.idkit.armor import armor_factor_types, remove_passkey_factor
-    _store_identity(env, root)
-    demoted = remove_passkey_factor(_passkey_armor(root), PASSWORD, "cred-a")
-    r = env.post("/api/identity/personal/armor", json=_rearmor_body(root, demoted))
-    assert r.status_code == 200, r.text
-    served = env.get("/api/identity/personal").json()
-    assert armor_factor_types(served["armored_private_key"]) == ["password"]
 
 
-def test_rearmor_changes_the_password(env, root):
-    from tools.network.idkit.armor import set_password_factor
-    _store_identity(env, root)
-    changed = set_password_factor(_armor(root), PASSWORD, "brand-new-pass",
-                                  iterations=10_000)
-    r = env.post("/api/identity/personal/armor", json=_rearmor_body(root, changed))
-    assert r.status_code == 200, r.text
-    served = env.get("/api/identity/personal").json()
-    assert open_armor_with_password(
-        served["armored_private_key"], "brand-new-pass").private_hex == root.private_hex
 
 
-def test_rearmor_enables_mfa(env, root):
-    from tools.network.idkit.armor import armor_factor_types, enable_mfa
-    _store_identity(env, root)
-    prf = b"\x21" * 32
-    mfa = enable_mfa(_passkey_armor(root), PASSWORD, "cred-a", _kem_for(prf),
-                     iterations=10_000)
-    r = env.post("/api/identity/personal/armor",
-                 json=_rearmor_body(root, mfa, require_pair=True))
-    assert r.status_code == 200, r.text
-    served = env.get("/api/identity/personal").json()
-    assert armor_factor_types(served["armored_private_key"]) == ["combined"]
-    assert served["require_pair"] is True
 
 
-def test_rearmor_enable_mfa_satisfies_require_pair(env, root):
-    # the combined factor alone must satisfy require_pair (it IS the pair)
-    from tools.network.idkit.armor import enable_mfa
-    _store_identity(env, root)
-    prf = b"\x21" * 32
-    mfa = enable_mfa(_passkey_armor(root), PASSWORD, "cred-a", _kem_for(prf),
-                     iterations=10_000)
-    assert env.post("/api/identity/personal/armor",
-                    json=_rearmor_body(root, mfa, require_pair=True)).status_code == 200
 
 
-def test_onboarding_stores_a_combined_armor(env, root):
-    from tools.network.idkit.armor import (
-        armor_factor_types, encrypt_root_key_combined,
-    )
-    prf = b"\x21" * 32
-    mfa = encrypt_root_key_combined(root, PASSWORD, "cred-a", _kem_for(prf),
-                                    iterations=10_000)
-    r = env.post("/api/identity/personal",
-                 json={"display_name": "Alex", "armored_private_key": mfa})
-    assert r.status_code == 200, r.text
-    served = env.get("/api/identity/personal").json()
-    assert armor_factor_types(served["armored_private_key"]) == ["combined"]
 
 
-def test_delete_refused_while_combined_member(env, root):
-    """Enabling MFA folds the passkey into the combined factor; the credential
-    is still needed to unlock, so removing its device row must refuse — deleting
-    it strands the unlock path (the real lockout that shipped)."""
-    from tools.network.idkit.armor import PASSKEY_ARMOR_PURPOSE, enable_mfa
-    from tools.network.idkit.sealing import derive_encapsulation_keypair
-    _store_identity(env, root)
-    assert _enroll(env, root).status_code == 200
-    cred = env.get("/api/identity/status").json()["passkeys"][0]["credential_id"]
-    prf = b"\x55" * 32
-    _, kem = derive_encapsulation_keypair(prf, PASSKEY_ARMOR_PURPOSE)
-    mfa = enable_mfa(_passkey_armor(root, cred=cred, prf=prf), PASSWORD, cred, kem,
-                     iterations=10_000)
-    assert env.post("/api/identity/personal/armor",
-                    json=_rearmor_body(root, mfa, require_pair=True)).status_code == 200
-    r = env.delete(f"/api/identity/passkey/{cred}")
-    assert r.status_code == 409
-    assert "Multi-Factor" in r.json()["error"]
 
 
-# ── generalized factor-policy generations ───────────────────────────
-
-
-def _password_descriptor(root, factor_id, password):
-    from tools.network.idkit.root_factor_policy import create_password_factor
-    factor, seed = create_password_factor(
-        root.public_hex, factor_id, password, iterations=10_000,
-    )
-    seed[:] = b"\x00" * len(seed)
-    return factor
-
-
-def _policy_armor(root, generation, factors, access, policy):
-    from tools.network.idkit.root_factor_policy import build_envelope, emit_armored_envelope
-    return emit_armored_envelope(build_envelope(
-        root, generation=generation, factors=factors, access=access, policy=policy,
-    ))
-
-
-def _store_policy_identity(env, root, factors, access, policy, generation=1):
-    armor = _policy_armor(root, generation, factors, access, policy)
-    r = env.post("/api/identity/personal", json={
-        "display_name": "Alex", "armored_private_key": armor,
-    })
-    assert r.status_code == 200, r.text
-    return armor
-
-
-def _policy_commit_body(root, base_generation, operations, candidate_armor):
-    return {
-        "base_generation": base_generation,
-        "operations": operations,
-        "candidate_armor": candidate_armor,
-        "root_signature": root.sign_hex(identity_routes._transition_message(
-            base_generation, operations, candidate_armor,
-        )),
-    }
-
-
-def test_factor_policy_legacy_view_requires_explicit_migration(env, root):
-    _store_identity(env, root)
-    r = env.get("/api/identity/factor-policy")
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["generation"] == 0
-    assert body["migration_required"] is True
-    assert body["allowed_operations"] == ["migrate_legacy"]
-    assert body["factors"][0]["root_role"] == "individual"
 
 
 def test_factor_policy_preview_projects_batch_once_and_derives_roles(env, root):

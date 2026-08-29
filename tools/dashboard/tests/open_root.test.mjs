@@ -11,13 +11,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 const { JSDOM } = createRequire(import.meta.url)('jsdom');
-import {
-  encryptArmor, encryptArmorCombined, addPasskeyFactor, removePasswordFactor, bytesToHex,
-  deriveEncapsulationKeypair,
-} from '../static/js/ceremony/primitives.js';
+import { bytesToHex, deriveEncapsulationKeypair } from '../static/js/ceremony/primitives.js';
 import { deriveProvisioningKey } from '../static/js/ceremony/enrollment.js';
 import {
   FACTOR_RECIPIENT_PURPOSE, buildFactorPolicyArmor, createPasswordFactor,
+  mintPasswordArmor,
 } from '../static/js/ceremony/root-factor-policy.js';
 
 const IT = 10000;
@@ -35,10 +33,12 @@ async function mintRoot() {
   const rawPub = new Uint8Array(await crypto.subtle.exportKey('raw', kp.publicKey));
   return { seed: pk8.slice(-32), rootPub: bytesToHex(rawPub) };
 }
-async function aPassword(r, pw) { return encryptArmor(r.seed, r.rootPub, pw, IT); }
-async function aBoth(r, pw, c) { return addPasskeyFactor(await encryptArmor(r.seed, r.rootPub, pw, IT), pw, enc(c), await provPub(c)); }
-async function aPasskeyOnly(r, pw, c) { return removePasswordFactor(await aBoth(r, pw, c), pw); }
-async function aMfa(r, pw, c) { return encryptArmorCombined(r.seed, r.rootPub, pw, enc(c), await provPub(c), IT); }
+async function aV3Password(r, pw) {
+  return mintPasswordArmor({ rootSeed: r.seed, rootPub: r.rootPub, password: pw, factorId: 'pw.primary', iterations: IT });
+}
+function v3PolicyView() {
+  return { armor_version: 3, factors: [{ factor_id: 'pw.primary', label: 'Main password' }] };
+}
 
 let SERVER = null;
 function J(o) { return { ok: true, status: 200, json: async () => o }; }
@@ -83,84 +83,37 @@ function qa(sel) { const o = document.querySelectorAll('.or-overlay'); const r =
 function btnByText(t) { return qa('.or-btn').find((b) => b.textContent.includes(t)); }
 function rowByText(t) { return qa('.or-row').find((b) => b.textContent.includes(t)); }
 
-test('password armor → password field opens it', async () => {
+test('v3 password policy → password field opens it', async () => {
   const root = await mintRoot();
-  SERVER = { armor: await aPassword(root, 'pw'), rootPub: root.rootPub, passkeys: [] };
+  SERVER = { armor: await aV3Password(root, 'pw'), rootPub: root.rootPub,
+    passkeys: [], factorPolicy: v3PolicyView() };
   const p = openRoot({ title: 'Approve X' });
   await until(() => q('.or-in'));
   assert.ok(q('.or-in'), 'password field shown');
-  assert.equal(qa('.or-row').length, 0, 'no chooser for a single opener');
   q('.or-in').value = 'pw'; q('.or-in').dispatchEvent(new window.Event('input'));
-  btnByText('Approve').click();
+  await until(() => btnByText('Use this password'));
+  btnByText('Use this password').click();
   const out = await p;
   assert.ok(out && out.rootPub === root.rootPub, 'resolved with the right root');
   assert.equal(bytesToHex(out.seed), bytesToHex(root.seed));
 });
 
-test('passkey-only armor → passkey button opens it (no password field)', async () => {
-  const root = await mintRoot(); const c = 'dev-a';
-  SERVER = { armor: await aPasskeyOnly(root, 'pw', c), rootPub: root.rootPub,
-    passkeys: [{ credential_id: enc(c), rp_id: 'localhost', provisioning_public_key: await provPub(c) }] };
-  const p = openRoot({ title: 'Approve X' });
-  await until(() => btnByText('passkey'));
-  assert.ok(!q('.or-in'), 'no password field for a passkey-only armor');
-  btnByText('passkey').click();
-  const out = await p;
-  assert.ok(out && out.rootPub === root.rootPub);
-  assert.equal(bytesToHex(out.seed), bytesToHex(root.seed));
-});
-
-test('password+passkey armor → chooser, pick passkey', async () => {
-  const root = await mintRoot(); const c = 'dev-b';
-  SERVER = { armor: await aBoth(root, 'pw', c), rootPub: root.rootPub,
-    passkeys: [{ credential_id: enc(c), rp_id: 'localhost', provisioning_public_key: await provPub(c) }] };
-  const p = openRoot({ title: 'Approve X' });
-  await until(() => qa('.or-row').length >= 2);
-  assert.equal(qa('.or-row').length, 2, 'both openers offered');
-  rowByText('Passkey').click();
-  await until(() => btnByText('passkey'));
-  btnByText('passkey').click();
-  const out = await p;
-  assert.equal(bytesToHex(out.seed), bytesToHex(root.seed));
-});
-
-test('password+passkey armor → chooser, pick password', async () => {
-  const root = await mintRoot(); const c = 'dev-c';
-  SERVER = { armor: await aBoth(root, 'pw', c), rootPub: root.rootPub,
-    passkeys: [{ credential_id: enc(c), rp_id: 'localhost', provisioning_public_key: await provPub(c) }] };
-  const p = openRoot({ title: 'Approve X' });
-  await until(() => qa('.or-row').length >= 2);
-  rowByText('Password').click();
-  await until(() => q('.or-in'));
-  q('.or-in').value = 'pw'; q('.or-in').dispatchEvent(new window.Event('input'));
-  btnByText('Approve').click();
-  const out = await p;
-  assert.equal(bytesToHex(out.seed), bytesToHex(root.seed));
-});
-
-test('MFA armor → requires BOTH password and passkey', async () => {
-  const root = await mintRoot(); const c = 'dev-d';
-  SERVER = { armor: await aMfa(root, 'pw', c), rootPub: root.rootPub,
-    passkeys: [{ credential_id: enc(c), rp_id: 'localhost', provisioning_public_key: await provPub(c) }] };
-  const p = openRoot({ title: 'Approve X' });
-  await until(() => q('.or-in') && btnByText('passkey'));
-  // Approve is disabled until both are provided
-  assert.equal(btnByText('Approve').getAttribute('aria-disabled'), 'true');
-  q('.or-in').value = 'pw'; q('.or-in').dispatchEvent(new window.Event('input'));
-  btnByText('passkey').click();
-  await until(() => { const b = btnByText('Approve'); return !!b && b.getAttribute('aria-disabled') === 'false'; });
-  btnByText('Approve').click();
-  const out = await p;
-  assert.equal(bytesToHex(out.seed), bytesToHex(root.seed));
-});
-
 test('cancel resolves null', async () => {
   const root = await mintRoot();
-  SERVER = { armor: await aPassword(root, 'pw'), rootPub: root.rootPub, passkeys: [] };
+  SERVER = { armor: await aV3Password(root, 'pw'), rootPub: root.rootPub,
+    passkeys: [], factorPolicy: v3PolicyView() };
   const p = openRoot({ title: 'Approve X' });
   await until(() => qa('.or-cancel').length);
   qa('.or-cancel').pop().click();
   assert.equal(await p, null);
+});
+
+test('a retired-format armor is refused outright', async () => {
+  const fake = ['-----BEGIN AUTONOMY NETWORK ROOT KEY-----',
+    btoa('{"v": 2}'), '-----END AUTONOMY NETWORK ROOT KEY-----'].join('\n');
+  SERVER = { armor: fake, rootPub: 'f'.repeat(64), passkeys: [],
+    factorPolicy: { error: 'legacy armor' } };
+  await assert.rejects(() => openRoot({ title: 'Approve X' }), /retired format/);
 });
 
 test('v3 grouped policy gathers one password AND one passkey', async () => {

@@ -1,25 +1,27 @@
-"""A personal identity may be armored in either format (I1 gate).
+"""A personal identity's armor must be a version-3 root factor policy (I1).
 
-The I1 gate refuses anything that is not a strictly-parsed, canonical armor.
-It was also pinned to ONE version, which would have refused the very format
-the ceremonies are moving to -- so a browser minting the newer armor could
-never have stored it. Both are accepted; neither is accepted loosely.
+The I1 gate refuses anything that is not a strictly-parsed, canonical
+version-3 armored envelope. The retired version-2 multi-lock armor is
+refused with the facade's retired-format error — no write path stores one.
 """
 
 from __future__ import annotations
+
+import base64
 
 import pytest
 
 from tools.graph.schemas.personal_identity import PersonalIdentityV1
 from tools.graph.schemas.registry import SchemaValidationError
 from tools.network.idkit import KeyPair
-from tools.network.idkit.armor import encrypt_root_key
 from tools.network.idkit.root_factor_policy import (
-    build_envelope,
-    create_password_factor,
+    add_recovery_slot,
     emit_armored_envelope,
-    factor_leaf,
+    mint_password_armor,
+    parse_armored_envelope,
+    recovery_recipient_public_key,
 )
+from tools.network.idkit import recovery
 
 PASSWORD = "the-personal-password"
 ITERS = 10_000
@@ -38,84 +40,54 @@ def validate(data):
     PersonalIdentityV1.validate(data)
 
 
-def test_a_legacy_armored_identity_is_accepted():
+def _minted():
     key = KeyPair.generate()
-    validate(payload(encrypt_root_key(key, PASSWORD, iterations=ITERS), key.public_hex))
+    return key, mint_password_armor(key, PASSWORD, iterations=ITERS)
 
 
-def v3_armor(key, password=PASSWORD, *, iterations=ITERS):
-    factor, seed = create_password_factor(
-        key.public_hex, "password-primary", password, iterations=iterations,
-    )
-    try:
-        return emit_armored_envelope(build_envelope(
-            key,
-            generation=1,
-            factors=[factor],
-            access=[factor["factor_id"]],
-            policy=factor_leaf(factor["factor_id"]),
-        ))
-    finally:
-        seed[:] = b"\x00" * len(seed)
+def test_a_factor_policy_identity_is_accepted():
+    key, armor = _minted()
+    validate(payload(armor, key.public_hex))
 
 
-def test_a_root_signed_factor_policy_identity_is_accepted():
-    """The grouped-factor generation format must be storable."""
-    key = KeyPair.generate()
-    validate(payload(v3_armor(key), key.public_hex))
-
-
-def test_a_multi_lock_identity_carrying_a_recovery_lock_is_accepted():
-    from tools.network.idkit import recovery
-    from tools.network.idkit.armor import RECOVERY_ARMOR_PURPOSE, add_recovery_factor
-    from tools.network.idkit.sealing import derive_encapsulation_keypair
-
-    key = KeyPair.generate()
-    armor = encrypt_root_key(key, PASSWORD, iterations=ITERS)
+def test_a_policy_identity_carrying_a_recovery_slot_is_accepted():
+    key, armor = _minted()
     code = recovery.generate_recovery_code()
-    seed = recovery.derive_recovery_factors(code)["kek_recovery_seed"]
-    _, kem_pub = derive_encapsulation_keypair(seed, RECOVERY_ARMOR_PURPOSE)
-    validate(payload(add_recovery_factor(armor, PASSWORD, kem_pub), key.public_hex))
+    with_recovery = emit_armored_envelope(add_recovery_slot(
+        parse_armored_envelope(armor),
+        root_seed=bytes.fromhex(key.private_hex),
+        recovery_recipient_pub=recovery_recipient_public_key(code),
+        recovery_pub=recovery.recovery_signing_key(code).public_hex,
+        created_at="2026-08-15T00:00:00Z",
+    ))
+    validate(payload(with_recovery, key.public_hex))
 
 
-@pytest.mark.parametrize("mint", [encrypt_root_key, v3_armor])
-def test_a_mismatched_root_pub_is_refused_in_both_formats(mint):
-    key = KeyPair.generate()
+def test_the_retired_multi_lock_format_is_refused():
+    key, _ = _minted()
+    fake_v2 = (
+        "-----BEGIN AUTONOMY NETWORK ROOT KEY-----\n"
+        + base64.b64encode(b'{"v": 2}').decode()
+        + "\n-----END AUTONOMY NETWORK ROOT KEY-----"
+    )
+    with pytest.raises(SchemaValidationError):
+        validate(payload(fake_v2, key.public_hex))
+
+
+def test_a_mismatched_root_pub_is_refused():
+    key, armor = _minted()
     other = KeyPair.generate()
     with pytest.raises(SchemaValidationError):
-        validate(payload(mint(key, PASSWORD, iterations=ITERS), other.public_hex))
-
-
-@pytest.mark.parametrize("mint", [encrypt_root_key, v3_armor])
-def test_a_non_canonical_armor_is_refused_in_both_formats(mint):
-    """Accepting two versions must not mean accepting them loosely."""
-    key = KeyPair.generate()
-    armor = mint(key, PASSWORD, iterations=ITERS)
-    # Same bytes, different layout: the canonical-form check must still bite.
-    reflowed = armor.replace("\n", "\n\n")
-    with pytest.raises(SchemaValidationError):
-        validate(payload(reflowed, key.public_hex))
+        validate(payload(armor, other.public_hex))
 
 
 def test_plaintext_key_material_is_still_refused():
-    """The whole point of the gate: a bare seed must never be storable."""
     key = KeyPair.generate()
     with pytest.raises(SchemaValidationError):
         validate(payload(key.private_hex, key.public_hex))
 
 
-def test_an_armor_with_a_smuggled_field_is_refused():
-    import base64
-    import json
-
+def test_garbage_is_refused():
     key = KeyPair.generate()
-    armor = encrypt_root_key(key, PASSWORD, iterations=ITERS)
-    lines = [ln for ln in armor.split("\n") if ln]
-    body = json.loads(base64.b64decode("".join(lines[1:-1])))
-    body["smuggled"] = "AAAA"
-    blob = base64.b64encode(json.dumps(body).encode()).decode()
-    tampered = "\n".join(
-        [lines[0], *[blob[i:i + 64] for i in range(0, len(blob), 64)], lines[-1]]
-    )
     with pytest.raises(SchemaValidationError):
-        validate(payload(tampered, key.public_hex))
+        validate(payload("not an armor", key.public_hex))

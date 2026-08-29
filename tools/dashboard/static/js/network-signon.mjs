@@ -3,8 +3,6 @@ import {
   hexToBytes,
   bytesToHex,
   domainBytes,
-  decryptArmor,
-  encryptArmor,
   importEd25519RootSigningKey,
   openSealedArmor,
   deriveEncapsulationKeypair,
@@ -1390,10 +1388,8 @@ var signRegistryRequestCore;
     // enforcement they exercise lives in the real paths above.
     _internals: {
       canonicalJson: canonicalJson,
-      decryptArmor: decryptArmor,
       wakeVault: wakeVault,
       enrollPasskey: enrollPasskey,
-      encryptArmor: encryptArmor,
       openPersonalRoot: _openPersonalRoot,
       deriveEncapsulationKeypair: deriveEncapsulationKeypair,
       sealToEncapsulationKey: sealToEncapsulationKey,
