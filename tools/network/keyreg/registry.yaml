@@ -313,6 +313,10 @@ keys:
         that signs the browser out; a root-signed revocation record is the
         explicit path. Not a ceremony.
       bound: The certificate's validity window and scope list.
+    signs:
+      - registry request envelopes only (REQUEST_DOMAIN + canonical JSON of
+        v, method, path, ts, signer, payload) — the single crypto.subtle.sign
+        call site for this key in network-signon.mjs
     code:
       - tools/dashboard/static/js/network-signon.mjs:signRegistryRequest
       - tools/dashboard/static/js/network-signon.mjs:_installSession
