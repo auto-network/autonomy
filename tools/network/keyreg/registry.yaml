@@ -269,6 +269,7 @@ keys:
     code:
       - tools/network/idkit/certs.py
     crib: ["§2", "§9"]
+    notes: The crib sheet's section 9 register calls this the browser session key.
 
   persona_signing_key:
     kind: signing
@@ -391,7 +392,10 @@ keys:
       reaches: >-
         Exactly two execution scopes, storage:state:advance and
         storage:capability:grant, and nothing else. It signs; it opens
-        nothing.
+        nothing. It authorizes only by resolving its delegation chain to a
+        member persona: a chain terminating outside the member roster is
+        void, and generic scope-holding is never consulted for these two
+        scopes.
       snapshot: Nothing.
       live: "Yes — records must reach honest nodes, which verify them against the fold."
       revoke: RevocationRecord plus TTL. Not a ceremony.
