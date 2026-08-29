@@ -3005,6 +3005,112 @@ def _resolve_note_provenance(
     return source_id, db.get_latest_turn(source_id)
 
 
+class DuplicateNoteError(ValueError):
+    """A note create refused because its body is near-identical to a
+    recently created note — the author almost certainly meant
+    ``graph note update``. Carries the existing note's id and the
+    measured similarity so HTTP handlers can surface both."""
+
+    def __init__(self, message: str, *, similar_id: str, similarity: float):
+        super().__init__(message)
+        self.similar_id = similar_id
+        self.similarity = similarity
+
+
+def _note_similarity_config() -> dict:
+    """Guard tuning from ``autonomy.graph.note-similarity#1`` (machine
+    store), falling back to the schema defaults on any read failure —
+    the guard must never be the thing that breaks note creation."""
+    from .schemas import note_similarity as _ns
+    cfg = {
+        "enabled": True,
+        "threshold": _ns.DEFAULT_THRESHOLD,
+        "window_hours": _ns.DEFAULT_WINDOW_HOURS,
+        "min_chars": _ns.DEFAULT_MIN_CHARS,
+    }
+    try:
+        row = read_set_key(_ns.SET_ID, "default", org="machine", peers=[])
+        payload = ((row or {}).get("payload") or {})
+        if isinstance(payload.get("enabled"), bool):
+            cfg["enabled"] = payload["enabled"]
+        t = payload.get("threshold")
+        if isinstance(t, (int, float)) and not isinstance(t, bool) and 0.5 <= float(t) <= 0.95:
+            cfg["threshold"] = float(t)
+        for name in ("window_hours", "min_chars"):
+            v = payload.get(name)
+            if isinstance(v, int) and not isinstance(v, bool) and v >= 1:
+                cfg[name] = v
+    except Exception:
+        pass
+    return cfg
+
+
+def _check_duplicate_note(db, content: str) -> None:
+    """Refuse a create whose body is near-identical to a recent note.
+
+    Backstop behind the CLI's deterministic quoted-subcommand guard: it
+    catches the author who never reached for ``update`` at all (the
+    2026-08-29 four-id incident's invisible variant — a piped body plus
+    a discarded argv token produced perfect-looking duplicates).
+    Threshold measured, not guessed: revisions of one document scored
+    0.74-0.93 normalized-difflib ratio, distinct notes peaked at 0.073
+    (auto-0828-134703). Compares against each note's ORIGINAL body
+    (turn 1); withdrawn notes never block a create.
+    """
+    import difflib
+    from datetime import datetime, timedelta, timezone
+
+    cfg = _note_similarity_config()
+    if not cfg["enabled"]:
+        return
+    normalized = " ".join(content.split())
+    if len(normalized) < cfg["min_chars"]:
+        return
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(hours=cfg["window_hours"])
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    rows = db.conn.execute(
+        "SELECT s.id, s.title, s.created_at, t.content FROM sources s"
+        " JOIN thoughts t ON t.source_id = s.id AND t.turn_number = 1"
+        " WHERE s.type = 'note' AND s.created_at >= ?"
+        " AND COALESCE(s.deprecated, 0) = 0"
+        " ORDER BY s.created_at DESC LIMIT 100",
+        (cutoff,),
+    ).fetchall()
+    matcher = difflib.SequenceMatcher(autojunk=False)
+    matcher.set_seq2(normalized)
+    for r in rows:
+        cand = " ".join((r["content"] or "").split())
+        if len(cand) < cfg["min_chars"]:
+            continue
+        matcher.set_seq1(cand)
+        # Cheap upper bounds first; .ratio() only when they can't rule it out.
+        if matcher.real_quick_ratio() < cfg["threshold"]:
+            continue
+        if matcher.quick_ratio() < cfg["threshold"]:
+            continue
+        ratio = matcher.ratio()
+        if ratio < cfg["threshold"]:
+            continue
+        short_id = r["id"][:12]
+        age_s = (
+            datetime.now(timezone.utc)
+            - datetime.strptime(r["created_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        ).total_seconds()
+        age = (
+            f"{int(age_s // 60)} minutes ago" if age_s < 7200
+            else f"{age_s / 3600:.0f} hours ago"
+        )
+        raise DuplicateNoteError(
+            f"This note is {ratio:.0%} similar to {short_id}"
+            f" (\"{(r['title'] or '')[:60]}\"), created {age}.\n"
+            f"If this is a revision, use:  graph note update {short_id} -c - < file.md\n"
+            f"If it is genuinely a new note, re-run with --force.",
+            similar_id=r["id"],
+            similarity=ratio,
+        )
+
+
 def create_note(
     content: str,
     *,
@@ -3021,8 +3127,14 @@ def create_note(
     persona_id: str | None = None,
     session_id: str | None = None,
     org: str | None = None,
+    force: bool = False,
 ) -> dict:
     """Create a note source + turn-1 thought in ``org``'s DB.
+
+    ``force=False`` runs the duplicate-note guard
+    (:func:`_check_duplicate_note`) and raises :class:`DuplicateNoteError`
+    when the body is near-identical to a recent note; ``force=True``
+    bypasses it (the CLI's ``--force``).
 
     ``session_hint`` (a tmux session name) resolves the ``conceived_at``
     provenance edge server-side when ``auto_provenance_source_id``/
@@ -3078,6 +3190,8 @@ def create_note(
     )
 
     db = _open(org)
+    if not force:
+        _check_duplicate_note(db, content)
     try:
         db.insert_source(source)
 

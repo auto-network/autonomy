@@ -15396,6 +15396,7 @@ async def api_graph_note(request):
         html_path = html_paths[0] if html_paths else None
         for extra in html_paths[1:]:
             _safe_unlink(extra)
+        force = str(form.get("force") or "").lower() in ("1", "true")
     else:
         body = await request.json()
         e = _graph_validate_content(body)
@@ -15413,6 +15414,7 @@ async def api_graph_note(request):
         keywords = body.get("keywords")
         tmp_paths = []
         html_path = None
+        force = bool(body.get("force"))
 
     tags = str(tags_raw).split(",") if tags_raw else []
 
@@ -15432,7 +15434,17 @@ async def api_graph_note(request):
             persona_id=persona_id,
             session_id=session_id,
             org=org,
+            force=force,
         )
+    except graph_ops.DuplicateNoteError as e:
+        # 400 (not 409) deliberately: the client's _translate_http_error
+        # turns a 400 into ValueError(message), which the CLI already
+        # renders — the guidance text reaches the caller verbatim.
+        return JSONResponse({
+            "error": str(e),
+            "duplicate_of": e.similar_id,
+            "similarity": round(e.similarity, 3),
+        }, status_code=400)
     except FileNotFoundError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     except graph_ops.CrossOrgWriteError as e:

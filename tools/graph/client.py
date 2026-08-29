@@ -514,6 +514,7 @@ class HttpClient:
         short_description=None,
         keywords=None,
         org=None,
+        force=False,
     ):
         if attachments or html_path:
             return self._create_note_multipart(
@@ -525,8 +526,11 @@ class HttpClient:
                 short_description=short_description,
                 keywords=keywords,
                 org=org,
+                force=force,
             )
         body: dict[str, Any] = {"content": content}
+        if force:
+            body["force"] = True
         if tags:
             body["tags"] = ",".join(tags)
         if author:
@@ -549,8 +553,11 @@ class HttpClient:
         attachments, html_path,
         auto_provenance_source_id, auto_provenance_turn,
         short_description, keywords, org,
+        force=False,
     ):
         fields: dict[str, str] = {"content": content}
+        if force:
+            fields["force"] = "1"
         if tags:
             fields["tags"] = ",".join(tags)
         if author:
