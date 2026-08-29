@@ -35,6 +35,8 @@ against.
 | `VaultRootRotationNoCosign.spthy` | model 9 calibration: **recovery co-signature check deleted** | `thief_cannot_rotate` falsified, rest verified |
 | `VaultDelegateChain.spthy` | model 10 green: delegate-chain resolution at use (bead auto-9ldpx) | all lemmas verified |
 | `VaultDelegateChainNoResolve.spthy` | model 10 calibration: **roster resolution deleted from acceptance** | `write_resolves_to_current_member` falsified, rest verified |
+| `VaultD006Window.spthy` | model 11 green: D-006 halt/continue window (bead auto-rjonx) | all lemmas verified |
+| `VaultD006WindowNoHaltGate.spthy` | model 11 calibration: **HALT gate deleted from the window grant** | `halt_window_confidential` falsified, rest verified |
 | `run_tamarin.py` | harness enforcing every expectation above | exit 0 iff all hold |
 
 The pairing is the point: a green proof is only trusted because the
@@ -104,8 +106,8 @@ export PATH=/tmp/maude-dist:/tmp/tamarin:$PATH
 python3 tools/network/storagekit/tamarin/run_tamarin.py
 ```
 
-Verified 2026-08-29 with tamarin-prover 1.12.0 + Maude 3.5.1: all ten
-models (22 theories, 115 lemma expectations) green — each green theory
+Verified 2026-08-29 with tamarin-prover 1.12.0 + Maude 3.5.1: all
+eleven models (24 theories, 127 lemma expectations) green — each green theory
 fully verifies and each calibration falsifies exactly its headline
 lemma. Whole suite runs in a few seconds. NOTE: the toolchain needs a
 UTF-8 locale (`LC_ALL=C.UTF-8`); `run_tamarin.py` sets it.
@@ -677,10 +679,93 @@ Abstraction register:
    the encoding note above; the calibration certifies the roster read
    is load-bearing.
 
+## Model 11 — D-006 halt/continue window (bead auto-rjonx)
+
+The settled D-006 consequence (crib §1d), bounded: every machine of
+one person derives the byte-identical persona KEM keypair (§14), so
+excluding one machine needs a new PersonaKemCredential, which needs
+the root — absent unattended. Between an unattended removal fact and
+the next root-present login the writer chooses HALT (no new grants;
+confidentiality) or CONTINUE (grant to the still-shared credential;
+the removed machine reads along). Models 1-2 prove the post-re-key
+exclusion; this model bounds the leak in the window BEFORE it.
+
+WINDOW BOUNDARY ENCODING, explicitly: the timeline is a linear
+three-phase machine (StPre → removal → StWindow → re-key → StPost,
+each transition once), and the policy is fixed by WHICH removal rule
+consumed StPre — HALT and CONTINUE traces are mutually exclusive by
+fact flow. The removal hands the adversary the removed machine's
+snapshot (the shared KEM secret; ciphertexts were always public — the
+§9 discipline). Write timing is RESTRICTION-ENCODED (model-6
+convention): `granted_old_is_pre_removal` pins pre-grants,
+`window_content_in_window` pins window content, and
+`window_grant_gate` pins window grants to CONTINUE-and-before-re-key —
+its PolicyContinue conjunct IS the HALT gate under test.
+
+Derived vs encoded, per lemma: given that timing contract, every
+lemma's content is a derived Dolev-Yao (non-)derivability result —
+`halt_window_confidential`, `post_rekey_excluded`, and the three
+reachability witnesses all reason from the adversary's snapshot;
+none is itself a restriction restatement. The contract's load-bearing
+conjunct is certified by the calibration instead.
+
+Proved (green, 0.3 s, 6/6):
+- **`halt_window_confidential`** (MAIN) — in a HALT trace, no
+  generation minted during the window reaches the removed machine,
+  though it holds the shared KEM secret and every public record.
+  Content exists in the window (a write REQUEST is not a grant), so
+  the secret is a real term the adversary provably cannot derive.
+- **`continue_window_reaches_removed`** (exists-trace) — the accepted
+  CONTINUE leak, stated honestly: a window grant to the still-shared
+  credential opens on the removed machine.
+- **`post_rekey_excluded`** — under EITHER policy, nothing granted
+  after the re-key reaches the removed machine: the leak is exactly
+  the window's grants, no more. Composes with model 1
+  (`exclusion_forward`: the selector drops C_old) and model 2
+  (`kicked_machine_excluded`: distribution skips the removed machine).
+- **`removed_machine_keeps_prior`** (exists-trace, deliberately) — the
+  §3 renounced non-claim: even under HALT, pre-removal grants stay
+  readable to the removed machine. Stays a theorem so it stays
+  renounced.
+- `executable_halt` / `executable_continue` — both policy branches run
+  end to end: pre-grant → removal+policy → window activity → re-key →
+  post-grant, in order.
+
+Calibration (`VaultD006WindowNoHaltGate.spthy`): the PolicyContinue
+conjunct is deleted from `window_grant_gate` (the before-re-key bound
+stays) → `halt_window_confidential` falsified in 10 steps: the writer
+grants straight through a HALT window and the removed machine opens
+it. All five other lemmas hold — the policy check is the ENTIRE
+difference between HALT and CONTINUE, which is the D-006 point.
+
+Abstraction register:
+
+1. **HPKE grant seal → `aenc`** to the persona KEM public key — the
+   suite's standard §5 abstraction.
+2. **One shared credential, one removed machine.** §14's
+   byte-identical derivation makes per-machine distinction
+   meaningless pre-re-key; the removed machine IS the adversary
+   (snapshot reveal at removal).
+3. **The re-key is collapsed to minting the new credential.** The
+   frontier marker, selector discipline, and fleet distribution are
+   models 1-2; here only the new key's existence and its
+   non-distribution to the removed machine matter (structural:
+   `~kem2` is never output).
+4. **Write timing as restrictions**, phases as linear tokens — see
+   the encoding note above. The gate's policy conjunct is certified
+   load-bearing by the calibration.
+5. **HALT models "no new grants"**: window content is minted and held
+   (`!PendingContent`), never sealed — matching D-006's "HALT new
+   content and grants"; the request/grant split is what keeps the
+   MAIN lemma non-vacuous.
+6. **Bounded scenario**: one setup, one removal, one policy choice,
+   one re-key; writes repeat freely within each phase.
+
 ## Roadmap (tracker note graph://8277c76c-ad1; beads filed)
 
-All ten Tamarin models DONE (auto-loxsf, -djh2m, -cpbkf, -veal7,
--loov7, -5wpjm, -ncokx, -lythl, -9ldpx, plus the pilot). Remaining:
+All eleven Tamarin models DONE (auto-loxsf, -djh2m, -cpbkf, -veal7,
+-loov7, -5wpjm, -ncokx, -lythl, -9ldpx, -rjonx, plus the pilot).
+Remaining:
 
 1. **TLA+ side-track (auto-xtt5v)**: c6z70 settings-resolution
    discriminator + fleet-roster OR-set convergence — attacker-free
@@ -689,6 +774,6 @@ All ten Tamarin models DONE (auto-loxsf, -djh2m, -cpbkf, -veal7,
    (Künnemann et al.) over the honest-log base here.
 3. **Transitive frontier descent** w/ induction (relaxes the one-edge
    abstraction shared by models 1-2).
-4. **D-006 halt/continue window** (unattended disenrollment-fact window).
+4. ~~D-006 halt/continue window~~ — DONE as model 11 (auto-rjonx).
 5. **SAPIC+ port** for equivalence properties (unlinkability, §23/§24
    deniability) on ProVerif/DeepSec backends.
