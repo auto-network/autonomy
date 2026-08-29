@@ -1,0 +1,164 @@
+/*
+  VaultD006Window — model 11: between an unattended machine removal
+  and the next login, HALT leaks nothing new and CONTINUE leaks
+  exactly the window's grants (crib graph://1e005d5c-c11 §1d D-006,
+  §14, §3). Bead auto-rjonx. Tracker 8277c76c.
+
+  Every machine of one person derives the byte-identical persona KEM
+  keypair (§14), so grants are persona-addressed: a removed machine
+  and a retained machine hold the SAME private key. Excluding one
+  machine needs a new PersonaKemCredential, which needs the personal
+  root — absent unattended. D-006 accepts the consequence: between an
+  unattended removal fact and the next root-present login the writer
+  chooses HALT (no new grants; confidentiality) or CONTINUE (grant to
+  the still-shared credential; the removed machine reads along).
+  Models 1-2 prove the post-re-key exclusion; this model bounds the
+  leak in the window BEFORE it.
+
+  Mechanics: a linear three-phase machine — StPre -> (removal, which
+  also hands the adversary the removed machine's snapshot: the shared
+  KEM secret; every ciphertext is already public) -> StWindow ->
+  (login re-key) -> StPost. The policy is fixed at removal time by
+  which removal rule consumed StPre, so HALT and CONTINUE traces are
+  mutually exclusive. WINDOW TIMING IS RESTRICTION-ENCODED (the
+  model-6 convention): granted_old_is_pre_removal,
+  window_content_in_window, and window_grant_gate pin each write kind
+  to its phase; the CONTINUE conjunct of window_grant_gate IS the
+  HALT gate under test. Given that contract, every confidentiality
+  and reachability lemma is a derived Dolev-Yao result.
+
+  Calibration (VaultD006WindowNoHaltGate.spthy): the PolicyContinue
+  conjunct is deleted from window_grant_gate — the writer grants
+  during a HALT window -> halt_window_confidential falsified.
+*/
+
+theory VaultD006Window
+begin
+
+builtins: asymmetric-encryption
+
+/* One persona credential shared by all machines (§14). */
+rule Setup:
+  [ Fr(~kem) ]
+  --[ Setup(), OnceSetup() ]->
+  [ !OldCred(~kem), Out(pk(~kem)), StPre() ]
+
+restriction once_setup:
+  "All #i #j. OnceSetup()@i & OnceSetup()@j ==> #i = #j"
+
+/* Pre-removal writes: generation secrets granted to the shared
+   credential. Pinned to the pre phase by restriction. */
+rule Grant_Pre:
+  [ !OldCred(~kem), Fr(~g) ]
+  --[ GrantedOld(~g) ]->
+  [ Out(aenc(~g, pk(~kem))) ]
+
+restriction granted_old_is_pre_removal:
+  "All g #i. GrantedOld(g)@i ==> not(Ex #r. RemovalAccepted()@r & #r < #i)"
+
+/* The removal fact arrives unattended; the unattended writer commits
+   to one policy. Either way the removed machine walks away with its
+   snapshot: the shared KEM secret (it always had it — §3). */
+rule Accept_Removal_Halt:
+  [ StPre(), !OldCred(~kem) ]
+  --[ RemovalAccepted(), PolicyHalt() ]->
+  [ StWindow(), Out(~kem) ]
+
+rule Accept_Removal_Continue:
+  [ StPre(), !OldCred(~kem) ]
+  --[ RemovalAccepted(), PolicyContinue() ]->
+  [ StWindow(), Out(~kem) ]
+
+/* Content arrives during the window regardless of policy — a write
+   REQUEST is not a grant. */
+rule Window_Content:
+  [ Fr(~g) ]
+  --[ WindowContent(~g) ]->
+  [ !PendingContent(~g) ]
+
+restriction window_content_in_window:
+  "All g #i. WindowContent(g)@i ==>
+      (Ex #r. RemovalAccepted()@r & #r < #i)
+    & not(Ex #k. RekeyDone()@k & #k < #i)"
+
+/* The window grant — sealed to the STILL-SHARED old credential. The
+   PolicyContinue conjunct of its restriction is the HALT gate: under
+   HALT this rule must never fire. */
+rule Grant_Window:
+  [ !PendingContent(~g), !OldCred(~kem) ]
+  --[ WindowGranted(~g) ]->
+  [ Out(aenc(~g, pk(~kem))) ]
+
+restriction window_grant_gate:
+  "All g #i. WindowGranted(g)@i ==>
+      (Ex #p. PolicyContinue()@p & #p < #i)
+    & not(Ex #k. RekeyDone()@k & #k < #i)"
+
+/* The next login: the root is present, the re-key mints the new
+   credential (models 1-2 own the marker and the fleet distribution;
+   here only the new key's existence matters). */
+rule Login_Rekey:
+  [ StWindow(), Fr(~kem2) ]
+  --[ RekeyDone() ]->
+  [ !NewCred(~kem2), Out(pk(~kem2)), StPost() ]
+
+/* Post-re-key writes grant to the NEW credential only (model 1's
+   selector discipline). Structurally post-phase: !NewCred exists only
+   after Login_Rekey. */
+rule Grant_Post:
+  [ !NewCred(~kem2), Fr(~g) ]
+  --[ GrantedNew(~g) ]->
+  [ Out(aenc(~g, pk(~kem2))) ]
+
+/* ═══ Lemmas ═══ */
+
+/* Both policy branches run end to end. */
+lemma executable_halt:
+  exists-trace
+  "Ex g1 g2 g3 #a #b #c #d #e.
+      GrantedOld(g1)@a & PolicyHalt()@b & WindowContent(g2)@c
+    & RekeyDone()@d & GrantedNew(g3)@e
+    & #a < #b & #b < #c & #c < #d & #d < #e"
+
+lemma executable_continue:
+  exists-trace
+  "Ex g1 g2 g3 #a #b #c #d #e.
+      GrantedOld(g1)@a & PolicyContinue()@b & WindowGranted(g2)@c
+    & RekeyDone()@d & GrantedNew(g3)@e
+    & #a < #b & #b < #c & #c < #d & #d < #e"
+
+/* MAIN — HALT confidentiality: in a HALT trace, no generation minted
+   during the window reaches the removed machine, though the removed
+   machine holds the shared KEM secret and every public record.
+   Derived, given the window_grant_gate contract — whose CONTINUE
+   conjunct is exactly what the calibration deletes. */
+lemma halt_window_confidential:
+  "not(Ex g #m #p #k.
+        WindowContent(g)@m & PolicyHalt()@p & K(g)@k)"
+
+/* CONTINUE availability, stated honestly: the removed machine reads a
+   generation granted during the window — the accepted D-006 leak. */
+lemma continue_window_reaches_removed:
+  exists-trace
+  "Ex g #w #p #k.
+      WindowGranted(g)@w & PolicyContinue()@p & K(g)@k"
+
+/* CONTINUE's bound — and HALT's: nothing granted AFTER the re-key
+   reaches the removed machine, under either policy. Composes with
+   model 1's exclusion_forward (the selector drops C_old) and model
+   2's kicked_machine_excluded (distribution skips the removed
+   machine). Derived: the new KEM secret never reaches the adversary. */
+lemma post_rekey_excluded:
+  "not(Ex g #w #k. GrantedNew(g)@w & K(g)@k)"
+
+/* The §3 renounced non-claim as a theorem, so it stays renounced:
+   even under HALT the removed machine still reads everything granted
+   before the removal — revocation is exclusion from FUTURE seals,
+   never loss of synced data. */
+lemma removed_machine_keeps_prior:
+  exists-trace
+  "Ex g #w #r #p #k.
+      GrantedOld(g)@w & RemovalAccepted()@r & PolicyHalt()@p & K(g)@k
+    & #w < #r"
+
+end

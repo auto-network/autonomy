@@ -187,6 +187,22 @@ EXPECTATIONS = {
         "stolen_delegate_write_witness": "verified",
         "revocation_and_expiry_possible": "verified",
     },
+    "VaultD006Window.spthy": {
+        "executable_halt": "verified",
+        "executable_continue": "verified",
+        "halt_window_confidential": "verified",
+        "continue_window_reaches_removed": "verified",
+        "post_rekey_excluded": "verified",
+        "removed_machine_keeps_prior": "verified",
+    },
+    "VaultD006WindowNoHaltGate.spthy": {
+        "executable_halt": "verified",
+        "executable_continue": "verified",
+        "halt_window_confidential": "falsified",
+        "continue_window_reaches_removed": "verified",
+        "post_rekey_excluded": "verified",
+        "removed_machine_keeps_prior": "verified",
+    },
 }
 
 SUMMARY_RE = re.compile(
