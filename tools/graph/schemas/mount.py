@@ -111,7 +111,7 @@ from .registry import SettingSchema, SchemaValidationError, keyed_per_entity, pu
 from .registry import home, readiness_gated_by
 
 
-@publication_band(min="raw", max="curated")
+@publication_band(min="raw", max="raw")
 @keyed_per_entity(
     key_strategy="workspace_id:mount_name",
     # The first segment identifies the workspace this mount belongs to.
@@ -282,7 +282,8 @@ class WorkspaceMountV2(BaseModel):
     # cannot be queried, validated or enforced. Distinct from the Setting
     # row's publication_state, which is the visibility of the DECLARATION,
     # not of the data (publishing a row does not serve a directory), and
-    # which this set caps at `curated` anyway.
+    # which this set pins to `raw` anyway — a mount declaration never
+    # leaves the database that owns it.
     #
     # DEFAULT IS THE NARROWEST SCOPE, and it is what every pre-existing row
     # means: a mount declared before this field existed is presumed visible
@@ -388,7 +389,7 @@ class WorkspaceMountV2(BaseModel):
     key_strategy="workspace_id:mount_name",
     key_references={"workspace_id": "autonomy.workspace"},
 )
-@publication_band(min="raw", max="curated")
+@publication_band(min="raw", max="raw")
 @home("organization")
 @readiness_gated_by("required")
 class _WorkspaceMountV2SchemaAdapter(SettingSchema):

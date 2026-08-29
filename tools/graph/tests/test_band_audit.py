@@ -32,7 +32,7 @@ def _store_with(rows):
 
 def test_audit_flags_only_out_of_band_rows(monkeypatch):
     conn = _store_with([
-        # autonomy.workspace band is raw..curated -> canonical is ABOVE max (leak)
+        # autonomy.workspace band is raw..raw -> canonical is ABOVE max (leak)
         ("autonomy.workspace", "enterprise-ng", 1, "canonical"),
         # a within-band workspace row
         ("autonomy.workspace", "autonomy-dev", 1, "raw"),
@@ -55,7 +55,10 @@ def test_audit_flags_only_out_of_band_rows(monkeypatch):
     assert f["set_id"] == "autonomy.workspace"
     assert f["key"] == "enterprise-ng"
     assert f["state"] == "canonical"
-    assert f["band"] == "raw..curated"
+    # Spelled out rather than read from the registry: this literal is the
+    # canary that a band change was deliberate. autonomy.workspace narrowed
+    # raw..curated -> raw..raw on 2026-08-29.
+    assert f["band"] == "raw..raw"
     assert "above max" in f["reason"]
     assert f["store"] == "anchore"
 

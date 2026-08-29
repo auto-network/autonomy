@@ -195,3 +195,30 @@ class TestMountVisibility:
             "registry gained downconversion; the rev-2-in-place rationale "
             "in mount.py should be revisited"
         )
+
+
+def test_workspace_and_mount_are_pinned_to_raw():
+    """Both sets are ``max="raw"`` — rows never leave the database owning them.
+
+    Operator decision, 2026-08-29: a state is only worth allowing if some
+    workflow needs it. For these two sets ``curated`` could do exactly one
+    thing — outrank a ``raw`` row at the same key in the same database,
+    since both states sit below the public surface and neither is readable
+    from another org — and no key anywhere was using it. It bought nothing
+    and cost deletion: ``graph set remove`` accepts only ``raw``, which is
+    how 16 mount rows became undeletable.
+
+    Widening this again is a real change, not a tidy-up: at ``curated`` a
+    row becomes unremovable, and the band is what forecloses cross-database
+    override/exclude on these sets.
+    """
+    from tools.graph.schemas import workspace as workspace_schema
+    from tools.graph.schemas.mount import (
+        MOUNT_SCHEMA_REVISION_2, SET_ID as MOUNT_SET_ID,
+    )
+
+    for cls in (get_schema(MOUNT_SET_ID, SCHEMA_REVISION),
+                get_schema(MOUNT_SET_ID, MOUNT_SCHEMA_REVISION_2)):
+        assert cls._publication_band == ("raw", "raw"), cls.__name__
+
+    assert workspace_schema.WorkspaceV1._publication_band == ("raw", "raw")
