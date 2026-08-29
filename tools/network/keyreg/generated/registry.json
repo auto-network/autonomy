@@ -22,7 +22,24 @@
         "snapshot": "Nothing."
       },
       "group": "org-authority",
-      "kind": "signing"
+      "kind": "signing",
+      "proofs": [
+        {
+          "framework": "tamarin",
+          "lemma": "write_resolves_to_current_member",
+          "theory": "VaultDelegateChain"
+        },
+        {
+          "framework": "tamarin",
+          "lemma": "delegate_scopes_only",
+          "theory": "VaultDelegateChain"
+        },
+        {
+          "framework": "tamarin",
+          "lemma": "write_requires_live_delegate",
+          "theory": "VaultDelegateChain"
+        }
+      ]
     },
     "class_key": {
       "code": [
@@ -47,6 +64,18 @@
       },
       "group": "vault-classes",
       "kind": "symmetric",
+      "proofs": [
+        {
+          "framework": "tamarin",
+          "lemma": "revoked_factor_excluded_forward",
+          "theory": "VaultPolicyClass"
+        },
+        {
+          "framework": "tamarin",
+          "lemma": "revoked_factor_keeps_old",
+          "theory": "VaultPolicyClass"
+        }
+      ],
       "seals_to": [
         {
           "purpose": "autonomy/vault-policy-class/v1",
@@ -253,6 +282,11 @@
           "framework": "tamarin",
           "lemma": "recovery_beats_thief",
           "theory": "VaultRecoveryRace"
+        },
+        {
+          "framework": "tamarin",
+          "lemma": "Observational_equivalence",
+          "theory": "RecoveryUnlink"
         }
       ]
     },
@@ -363,6 +397,13 @@
       },
       "group": "sealed-stores",
       "kind": "symmetric",
+      "proofs": [
+        {
+          "framework": "tamarin",
+          "lemma": "Observational_equivalence",
+          "theory": "VaultDeniability"
+        }
+      ],
       "status": "designed"
     },
     "per_credential_wrapping_key": {
@@ -478,6 +519,16 @@
           "framework": "tamarin",
           "lemma": "exclusion_forward",
           "theory": "VaultRekeyMarker"
+        },
+        {
+          "framework": "tamarin",
+          "lemma": "exclusion_through_chain",
+          "theory": "VaultRekeyMarkerChain"
+        },
+        {
+          "framework": "tamarin",
+          "lemma": "post_rekey_excluded",
+          "theory": "VaultD006Window"
         }
       ],
       "seals_to": [
@@ -554,6 +605,11 @@
           "framework": "tamarin",
           "lemma": "password_and_passkey1_release_root",
           "theory": "VaultFactorPolicy"
+        },
+        {
+          "framework": "tamarin",
+          "lemma": "owner_rotates_away_from_stolen_root",
+          "theory": "VaultRootRotation"
         }
       ],
       "seals_to": [
@@ -616,7 +672,19 @@
         "snapshot": "Nothing; it signs and never decrypts."
       },
       "group": "recovery",
-      "kind": "signing"
+      "kind": "signing",
+      "proofs": [
+        {
+          "framework": "tamarin",
+          "lemma": "thief_cannot_rotate",
+          "theory": "VaultRootRotation"
+        },
+        {
+          "framework": "tamarin",
+          "lemma": "code_finder_cannot_rotate",
+          "theory": "VaultRootRotation"
+        }
+      ]
     },
     "recovery_slot_recipient": {
       "code": [
@@ -667,7 +735,14 @@
         "snapshot": "Nothing while sealed; every class once the root is open."
       },
       "group": "vault-classes",
-      "kind": "seed"
+      "kind": "seed",
+      "proofs": [
+        {
+          "framework": "tamarin",
+          "lemma": "root_reaches_every_generation",
+          "theory": "VaultPolicyClass"
+        }
+      ]
     },
     "sealed_index": {
       "code": [],
@@ -688,6 +763,13 @@
       },
       "group": "sealed-stores",
       "kind": "seed",
+      "proofs": [
+        {
+          "framework": "tamarin",
+          "lemma": "Observational_equivalence",
+          "theory": "VaultDeniability"
+        }
+      ],
       "status": "designed"
     },
     "serving_delegate_key": {
@@ -1009,6 +1091,11 @@
           "framework": "tamarin",
           "lemma": "kicked_machine_excluded",
           "theory": "VaultFleetDist"
+        },
+        {
+          "framework": "tamarin",
+          "lemma": "halt_window_confidential",
+          "theory": "VaultD006Window"
         }
       ],
       "source": {
@@ -1059,6 +1146,13 @@
       "preconditions": [
         "The delegated scope set never exceeds the delegator's (no scope escalation).",
         "A non-redelegable certificate cannot mint children."
+      ],
+      "proofs": [
+        {
+          "framework": "tamarin",
+          "lemma": "delegate_scopes_only",
+          "theory": "VaultDelegateChain"
+        }
       ],
       "refusals": [
         "scope-escalation",
@@ -1285,6 +1379,13 @@
           "revocation record"
         ]
       },
+      "proofs": [
+        {
+          "framework": "tamarin",
+          "lemma": "write_requires_live_delegate",
+          "theory": "VaultDelegateChain"
+        }
+      ],
       "refusals": [
         "revoke-unauthorized",
         "revoke-bad-target",
@@ -1450,6 +1551,11 @@
           "framework": "tamarin",
           "lemma": "veto_blocks_completion",
           "theory": "VaultRecoverySuccession"
+        },
+        {
+          "framework": "tamarin",
+          "lemma": "poll_yields_alert_or_fraud_proof",
+          "theory": "VaultWitnessAccountability"
         }
       ],
       "source": {
@@ -1476,6 +1582,11 @@
           "framework": "tamarin",
           "lemma": "exclusion_forward",
           "theory": "VaultRekeyMarker"
+        },
+        {
+          "framework": "tamarin",
+          "lemma": "exclusion_through_chain",
+          "theory": "VaultRekeyMarkerChain"
         }
       ],
       "source": {
@@ -1505,6 +1616,18 @@
       },
       "preconditions": [
         "Three signatures \u2014 old root, declared recovery key, and new root \u2014 verified against the declaration, never against armor contents."
+      ],
+      "proofs": [
+        {
+          "framework": "tamarin",
+          "lemma": "thief_cannot_rotate",
+          "theory": "VaultRootRotation"
+        },
+        {
+          "framework": "tamarin",
+          "lemma": "owner_rotates_away_from_stolen_root",
+          "theory": "VaultRootRotation"
+        }
       ],
       "source": {
         "file": "tools/network/idkit/root_rotation.py",
@@ -1662,6 +1785,13 @@
       "preconditions": [
         "A member class without the root-anchor wrap is refused at creation and again at the store (put_class, put_root_class_once)."
       ],
+      "proofs": [
+        {
+          "framework": "tamarin",
+          "lemma": "root_reaches_every_generation",
+          "theory": "VaultPolicyClass"
+        }
+      ],
       "source": {
         "file": "tools/vault/policy_class.py",
         "kind": "module-op",
@@ -1690,6 +1820,18 @@
       },
       "preconditions": [
         "The root-anchor wrap cannot be dropped."
+      ],
+      "proofs": [
+        {
+          "framework": "tamarin",
+          "lemma": "revoked_factor_excluded_forward",
+          "theory": "VaultPolicyClass"
+        },
+        {
+          "framework": "tamarin",
+          "lemma": "revoked_factor_keeps_old",
+          "theory": "VaultPolicyClass"
+        }
       ],
       "source": {
         "file": "tools/vault/policy_class.py",

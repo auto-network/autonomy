@@ -44,6 +44,7 @@ keys:
       - {framework: tamarin, theory: VaultOpenStore, lemma: root_secret_open_store}
       - {framework: tamarin, theory: VaultRekeyMarker, lemma: root_secret}
       - {framework: tamarin, theory: VaultFactorPolicy, lemma: password_and_passkey1_release_root}
+      - {framework: tamarin, theory: VaultRootRotation, lemma: owner_rotates_away_from_stolen_root}
 
   org_root_signing_key:
     group: org-authority
@@ -114,6 +115,9 @@ keys:
       - tools/network/idkit/recovery.py:recovery_signing_key
       - tools/network/idkit/root_rotation.py:rotation_recovery_input
     crib: ["§9"]
+    proofs:
+      - {framework: tamarin, theory: VaultRootRotation, lemma: thief_cannot_rotate}
+      - {framework: tamarin, theory: VaultRootRotation, lemma: code_finder_cannot_rotate}
 
   member_recovery_key:
     group: recovery
@@ -144,6 +148,7 @@ keys:
     proofs:
       - {framework: tamarin, theory: VaultRecoveryRace, lemma: recovery_key_secret}
       - {framework: tamarin, theory: VaultRecoveryRace, lemma: recovery_beats_thief}
+      - {framework: tamarin, theory: RecoveryUnlink, lemma: Observational_equivalence}
 
   recovery_slot_recipient:
     group: recovery
@@ -360,6 +365,8 @@ keys:
     proofs:
       - {framework: tamarin, theory: VaultFleetDist, lemma: persona_kem_snapshot_total}
       - {framework: tamarin, theory: VaultRekeyMarker, lemma: exclusion_forward}
+      - {framework: tamarin, theory: VaultRekeyMarkerChain, lemma: exclusion_through_chain}
+      - {framework: tamarin, theory: VaultD006Window, lemma: post_rekey_excluded}
 
   generation_secret:
     group: domain-storage
@@ -454,6 +461,10 @@ keys:
     code:
       - tools/network/storagekit/acceptance.py
     crib: ["§7", "§9", "§11"]
+    proofs:
+      - {framework: tamarin, theory: VaultDelegateChain, lemma: write_resolves_to_current_member}
+      - {framework: tamarin, theory: VaultDelegateChain, lemma: delegate_scopes_only}
+      - {framework: tamarin, theory: VaultDelegateChain, lemma: write_requires_live_delegate}
 
   per_machine_key:
     group: fleet
@@ -521,6 +532,8 @@ keys:
       - tools/vault/root_anchor.py
       - tools/vault/store.py:put_root_class_once
     crib: ["§18"]
+    proofs:
+      - {framework: tamarin, theory: VaultPolicyClass, lemma: root_reaches_every_generation}
 
   class_key:
     group: vault-classes
@@ -551,6 +564,9 @@ keys:
       - recipient: root_anchor_seed
         purpose: autonomy/vault-root-anchor-wrap/v1
         record: mandatory anchor wrap
+    proofs:
+      - {framework: tamarin, theory: VaultPolicyClass, lemma: revoked_factor_excluded_forward}
+      - {framework: tamarin, theory: VaultPolicyClass, lemma: revoked_factor_keeps_old}
 
   sealed_index:
     group: sealed-stores
@@ -568,6 +584,8 @@ keys:
       bound: The one store.
     code: []
     crib: ["§23"]
+    proofs:
+      - {framework: tamarin, theory: VaultDeniability, lemma: Observational_equivalence}
 
   k_index_k_meta:
     group: sealed-stores
@@ -611,6 +629,8 @@ keys:
       bound: Location secrecy only; contents keep their own seals.
     code: []
     crib: ["§24"]
+    proofs:
+      - {framework: tamarin, theory: VaultDeniability, lemma: Observational_equivalence}
 
 # A mutation is any operation that mints, seals, revokes, or rewraps a key,
 # or changes who future material is sealed to. Entries with
@@ -637,6 +657,8 @@ mutations:
       writes: [delegation certificate]
     refusals: [scope-escalation, not-redelegable, delegate-unproven, delegate-nonce-reused]
     crib: ["§8", "§11"]
+    proofs:
+      - {framework: tamarin, theory: VaultDelegateChain, lemma: delegate_scopes_only}
 
   fold.revoke:
     source: {kind: fold, file: tools/network/ledger/fold.py, symbol: _h_revoke}
@@ -646,6 +668,8 @@ mutations:
       writes: [revocation record]
     refusals: [revoke-unauthorized, revoke-bad-target, revoke-target-not-in-ancestry]
     crib: ["§8"]
+    proofs:
+      - {framework: tamarin, theory: VaultDelegateChain, lemma: write_requires_live_delegate}
 
   fold.role_define:
     source: {kind: fold, file: tools/network/ledger/fold.py, symbol: _h_role_define}
@@ -784,6 +808,9 @@ mutations:
       revokes: [personal_root_seed]
       writes: [succession record]
     crib: ["§9"]
+    proofs:
+      - {framework: tamarin, theory: VaultRootRotation, lemma: thief_cannot_rotate}
+      - {framework: tamarin, theory: VaultRootRotation, lemma: owner_rotates_away_from_stolen_root}
 
   passkey.enroll:
     source: {kind: ceremony, file: tools/network/idkit/enrollment.py, symbol: mint}
@@ -842,6 +869,8 @@ mutations:
       seals: [class_key to factor recipients and to root_anchor_seed]
       writes: [PolicyClassRecord generation]
     crib: ["§18"]
+    proofs:
+      - {framework: tamarin, theory: VaultPolicyClass, lemma: root_reaches_every_generation}
 
   vault.revoke_class_factor:
     source: {kind: module-op, file: tools/vault/policy_class.py, symbol: revoke_factor}
@@ -853,6 +882,9 @@ mutations:
       seals: [class_key to surviving factors and to root_anchor_seed]
       writes: [next PolicyClassRecord generation; applies at next write, existing sealed material untouched]
     crib: ["§3", "§18"]
+    proofs:
+      - {framework: tamarin, theory: VaultPolicyClass, lemma: revoked_factor_excluded_forward}
+      - {framework: tamarin, theory: VaultPolicyClass, lemma: revoked_factor_keeps_old}
 
   storage.advance_state:
     source: {kind: module-op, file: tools/network/storagekit/lifecycle.py, symbol: advance_state}
@@ -915,6 +947,7 @@ mutations:
     crib: ["§1b", "§1d", "§10"]
     proofs:
       - {framework: tamarin, theory: VaultFleetDist, lemma: kicked_machine_excluded}
+      - {framework: tamarin, theory: VaultD006Window, lemma: halt_window_confidential}
 
   fleet.distribute_kem:
     status: designed
@@ -938,6 +971,7 @@ mutations:
     crib: ["§1d"]
     proofs:
       - {framework: tamarin, theory: VaultRekeyMarker, lemma: exclusion_forward}
+      - {framework: tamarin, theory: VaultRekeyMarkerChain, lemma: exclusion_through_chain}
     notes: >-
       Without the marker the re-key achieves nothing (the F-001 defect);
       the calibration theory VaultRekeyF001 demonstrates exactly that.
@@ -957,6 +991,7 @@ mutations:
       - {framework: tamarin, theory: VaultRecoverySuccession, lemma: window_cannot_be_fast_forwarded}
       - {framework: tamarin, theory: VaultRecoverySuccession, lemma: cancellation_blocks_completion}
       - {framework: tamarin, theory: VaultRecoverySuccession, lemma: veto_blocks_completion}
+      - {framework: tamarin, theory: VaultWitnessAccountability, lemma: poll_yields_alert_or_fraud_proof}
 
 purposes:
   autonomy/capability-grant/v1:
