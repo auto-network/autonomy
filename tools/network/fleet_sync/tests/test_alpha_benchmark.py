@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from tools.network.fleet_sync.sync_benchmark import run
+from tools.network.fleet_sync.alpha_benchmark import run
 
 
 def test_alpha_benchmark_drives_complete_lifecycle(tmp_path: Path) -> None:
