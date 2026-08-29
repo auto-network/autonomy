@@ -173,10 +173,29 @@ def _armor(root: KeyPair) -> str:
     return mint_password_armor(root, PASSWORD, iterations=10_000)
 
 
-def _store_identity(client, root: KeyPair, name="Alex"):
+def _identity_armor(root: KeyPair, access_passkeys=()):
+    """A v3 identity armor: one password root factor, plus one access-only
+    passkey factor per credential id (recipient=None ⇒ dashboard access, not
+    root-opening). access_passkeys are raw credential-id bytes."""
+    from tools.network.idkit.root_factor_policy import factor_leaf
+    pw_factor, pw_seed = create_password_factor(
+        root.public_hex, "password.one", PASSWORD, iterations=10_000)
+    pw_seed[:] = b"\x00" * len(pw_seed)
+    factors = [pw_factor]
+    access = ["password.one"]
+    for i, cred in enumerate(access_passkeys):
+        fid = f"pk.access.{i}"
+        factors.append(passkey_factor(fid, _b64url(cred), None))
+        access.append(fid)
+    return emit_armored_envelope(build_envelope(
+        root, generation=1, factors=factors, access=access,
+        policy=factor_leaf("password.one")))
+
+
+def _store_identity(client, root: KeyPair, name="Alex", access_passkeys=()):
     r = client.post("/api/identity/personal",
                     json={"display_name": name,
-                          "armored_private_key": _armor(root)})
+                          "armored_private_key": _identity_armor(root, access_passkeys)})
     assert r.status_code == 200, r.text
     return r
 
@@ -1050,7 +1069,7 @@ def test_mock_mode_never_enforces(env, root, monkeypatch):
 
 
 def test_passkey_unlock_happy_path(env, root):
-    _store_identity(env, root)
+    _store_identity(env, root, access_passkeys=[b"test-credential-0001"])
     key = _enroll_passkey(env, root)
     env.cookies.clear()
     r = _unlock_with_passkey(env, key)
@@ -1096,7 +1115,7 @@ def test_assert_rejects_unknown_challenge(env, root):
 
 
 def test_assert_challenge_is_single_use(env, root):
-    _store_identity(env, root)
+    _store_identity(env, root, access_passkeys=[b"test-credential-0001"])
     key = _enroll_passkey(env, root)
     env.cookies.clear()
     minted = _assert_options(env)
@@ -1123,7 +1142,7 @@ def test_assert_rejects_expired_challenge(env, root, monkeypatch):
 
 
 def test_two_browsers_can_complete_concurrent_assert_options(env, root):
-    _store_identity(env, root)
+    _store_identity(env, root, access_passkeys=[b"test-credential-0001"])
     key = _enroll_passkey(env, root)
     env.cookies.clear()
     first = _assert_options(env)
@@ -1237,7 +1256,7 @@ def test_assert_rejects_sign_count_regression(env, root):
 
 
 def test_assert_advances_stored_sign_count(env, root):
-    _store_identity(env, root)
+    _store_identity(env, root, access_passkeys=[b"test-credential-0001"])
     key = _enroll_passkey(env, root, sign_count=5)
     env.cookies.clear()
     assert _unlock_with_passkey(env, key, sign_count=6).status_code == 200
