@@ -1,0 +1,110 @@
+/*
+  VaultPolicyClassNoReseal — model 8 calibration A: the revocation
+  reuses the old class_key. Identical to VaultPolicyClass.spthy except
+  Revoke_F2 does not mint a fresh key — generation 2's wraps and its
+  sealing public key carry generation 1's ~k1, the exact mutation
+  revoke_factor exists to forbid (policy_class.py: a new generation is
+  "a fresh class_key sealed to the SURVIVING factors only").
+
+  Expected: revoked_factor_excluded_forward falsified — the revoked
+  factor opens its OLD generation-1 wrap, recovers the still-current
+  class_key, derives the sealing private key, and reads every
+  post-revocation write (falsification trace via
+  `tamarin-prover --prove VaultPolicyClassNoReseal.spthy`). Every
+  other lemma must hold: the survivor and the anchor still read
+  everything, and the old-generation readability non-claim is
+  unchanged — the deleted element is load-bearing ONLY for forward
+  exclusion.
+*/
+
+theory VaultPolicyClassNoReseal
+begin
+
+builtins: asymmetric-encryption
+
+functions: recipientkey/1, sealkey/1
+
+rule Enroll_Class:
+  [ Fr(~k1), Fr(~f1), Fr(~f2), Fr(~anchor) ]
+  --[ ClassMinted(~k1), OnceEnroll() ]->
+  [ !F1Seed(~f1), !F2Seed(~f2), !AnchorSeed(~anchor)
+  , !Gen1Key(~k1)
+  , Out(aenc(~k1, pk(recipientkey(~f1))))
+  , Out(aenc(~k1, pk(recipientkey(~f2))))
+  , Out(aenc(~k1, pk(recipientkey(~anchor))))
+  , Out(pk(sealkey(~k1)))
+  ]
+
+restriction once_enroll:
+  "All #i #j. OnceEnroll()@i & OnceEnroll()@j ==> #i = #j"
+
+rule Write_Gen1:
+  [ !Gen1Key(~k1), Fr(~cek) ]
+  --[ WroteOld(~cek) ]->
+  [ Out(aenc(~cek, pk(sealkey(~k1)))) ]
+
+/* CALIBRATION: no Fr(~k2) — generation 2 reuses ~k1. */
+rule Revoke_F2:
+  [ !F1Seed(~f1), !AnchorSeed(~anchor), !Gen1Key(~k1) ]
+  --[ Revoked(), Gen2Minted(~k1), OnceRevoke() ]->
+  [ !Gen2Key(~k1)
+  , Out(aenc(~k1, pk(recipientkey(~f1))))
+  , Out(aenc(~k1, pk(recipientkey(~anchor))))
+  , Out(pk(sealkey(~k1)))
+  ]
+
+restriction once_revoke:
+  "All #i #j. OnceRevoke()@i & OnceRevoke()@j ==> #i = #j"
+
+rule Write_Gen2:
+  [ !Gen2Key(~k2), Fr(~cek) ]
+  --[ WroteNew(~cek) ]->
+  [ Out(aenc(~cek, pk(sealkey(~k2)))) ]
+
+rule Read_As_Survivor:
+  [ !F1Seed(~f1)
+  , In(aenc(k, pk(recipientkey(~f1))))
+  , In(aenc(cek, pk(sealkey(k))))
+  ]
+  --[ SurvivorRead(cek) ]->
+  [ ]
+
+rule Reveal_Survivor:
+  [ !F1Seed(~f1) ]         --[ RevealedSurvivor() ]-> [ Out(~f1) ]
+
+rule Reveal_Revoked:
+  [ !F2Seed(~f2) ]         --[ RevealedRevoked() ]->  [ Out(~f2) ]
+
+rule Reveal_Anchor:
+  [ !AnchorSeed(~anchor) ] --[ RevealedAnchor() ]->   [ Out(~anchor) ]
+
+/* ═══ Lemmas — verbatim from VaultPolicyClass.spthy ═══ */
+
+lemma executable:
+  exists-trace
+  "Ex kc c1 c2 #m #w1 #r #w2 #s1 #s2.
+      ClassMinted(kc)@m & WroteOld(c1)@w1 & Revoked()@r & WroteNew(c2)@w2
+    & SurvivorRead(c1)@s1 & SurvivorRead(c2)@s2"
+
+lemma revoked_factor_excluded_forward:
+  "not(Ex c #w #r #k.
+        WroteNew(c)@w & RevealedRevoked()@r & K(c)@k
+      & not(Ex #q1. RevealedSurvivor()@q1)
+      & not(Ex #q2. RevealedAnchor()@q2))"
+
+lemma revoked_factor_keeps_old:
+  exists-trace
+  "Ex c #w #r #k.
+      WroteOld(c)@w & RevealedRevoked()@r & K(c)@k
+    & not(Ex #q1. RevealedSurvivor()@q1)
+    & not(Ex #q2. RevealedAnchor()@q2)"
+
+lemma root_reaches_every_generation:
+  exists-trace
+  "Ex c1 c2 #w1 #w2 #r #k1 #k2.
+      WroteOld(c1)@w1 & WroteNew(c2)@w2 & RevealedAnchor()@r
+    & K(c1)@k1 & K(c2)@k2
+    & not(Ex #q1. RevealedSurvivor()@q1)
+    & not(Ex #q2. RevealedRevoked()@q2)"
+
+end
