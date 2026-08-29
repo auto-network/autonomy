@@ -1,0 +1,221 @@
+/*
+  VaultWitnessAccountabilityNoChainBind — model 12 calibration:
+  witness signatures no longer bind the chained history. Identical to
+  VaultWitnessAccountability.spthy except the two SERVE rules sign
+  <'at', v> instead of <'at', pos, v> — each signed head stands alone,
+  saying "the chain contains v" without committing to WHERE. A polling
+  device still asks about a (public) chain position, but the signed
+  answer it stores no longer mentions it.
+
+  Expected: poll_yields_alert_or_fraud_proof falsified (trace via
+  `tamarin-prover --prove VaultWitnessAccountabilityNoChainBind.spthy`):
+  the witness serves a positionless 'empty' head to the victim,
+  completes for the attacker, and the victim's two statements no
+  longer conflict — a positionless 'empty' view is perfectly
+  consistent with an honest chain that acquired the declaration later.
+  Equivocation without conflicting evidence. Every other lemma must
+  hold: the honesty-collapse lemmas never touch the serve statements,
+  and the honest end-to-end flow still runs.
+
+  DELIBERATE DEVIATION from the suite's identical-lemma-set pattern:
+  fraud_story_executable (the judge convicting on the conflicting
+  pair) is OMITTED here rather than listed as a second falsification —
+  its entire subject is the deleted binding, and keeping it would only
+  restate the headline failure. Recorded in MODEL.md.
+*/
+
+theory VaultWitnessAccountabilityNoChainBind
+begin
+
+builtins: signing
+
+/* Persona with old recovery key and root — model 6's Enroll. */
+rule Enroll:
+  [ Fr(~P), Fr(~oldrk), Fr(~root) ]
+  --[ Enrolled(~P) ]->
+  [ !Persona(~P)
+  , !OldRecovery(~P, ~oldrk)
+  , !RootKey(~P, ~root)
+  , Out(pk(~oldrk)), Out(pk(~root))
+  ]
+
+/* The witness principal. */
+rule Witness_Setup:
+  [ Fr(~wk) ]
+  --[ OnceWitness() ]->
+  [ !WitnessKey(~wk), !WitnessPub(pk(~wk)), Out(pk(~wk)) ]
+
+restriction once_witness:
+  "All #i #j. OnceWitness()@i & OnceWitness()@j ==> #i = #j"
+
+/* The chain advances; trace order is the never-decreasing entry time
+   (model 6's monotonic clock). */
+rule WitnessTick:
+  [ ] --[ Tick() ]-> [ ]
+
+/* DECLARE: the root-signed declaration enters the witnessed chain at
+   a fresh position. The position is public chain structure (lengths
+   are visible); the ENTRY is what a witness serves on request. */
+rule Declare_Succession:
+  [ !RootKey(P, ~root), In(new_rk_pub), Fr(~pos) ]
+  --[ Declared(P, new_rk_pub) ]->
+  [ !Declaration(P, new_rk_pub), !DeclPos(P, new_rk_pub, ~pos)
+  , Out(~pos)
+  ]
+
+/* CANCEL / VETO — model 6, unchanged. */
+rule Cancel_Succession:
+  [ !OldRecovery(P, ~oldrk), !Declaration(P, new_rk_pub) ]
+  --[ Cancelled(P, new_rk_pub) ]->
+  [ ]
+
+rule Root_Veto:
+  [ !RootKey(P, ~root), !Declaration(P, new_rk_pub) ]
+  --[ Vetoed(P, new_rk_pub) ]->
+  [ ]
+
+/* ── The witness's two faces ── */
+
+/* Honest serve: the true entry at the declaration's position. */
+rule Serve_Chain_Entry:
+  [ !DeclPos(P, nrk, pos), !WitnessKey(~wk) ]
+  --[ WSigned(<'at', <'decl', P, nrk>>) ]->
+  [ Out(< <'at', <'decl', P, nrk>>
+        , sign(<'at', <'decl', P, nrk>>, ~wk) >) ]
+
+/* Dishonest serve: 'empty' at a position that holds the declaration —
+   hiding the announcement from whoever asks. */
+rule Serve_Hidden:
+  [ !DeclPos(P, nrk, pos), !WitnessKey(~wk) ]
+  --[ WSigned(<'at', 'empty'>), WitnessCheated() ]->
+  [ Out(< <'at', 'empty'>, sign(<'at', 'empty'>, ~wk) >) ]
+
+/* Honest completion: the attestation IS the completion, and the three
+   model-6 completion guards hold at this instant (restrictions
+   below). */
+rule Witness_Attest_Honest:
+  [ !DeclPos(P, nrk, pos), !WitnessKey(~wk) ]
+  --[ Completed(P, nrk, pos), HonestAttest(P, nrk, pos)
+    , WSigned(<'ok', P, nrk, pos>) ]->
+  [ !EffectiveRecoveryPub(P, nrk)
+  , Out(< <'ok', P, nrk, pos>, sign(<'ok', P, nrk, pos>, ~wk) >)
+  ]
+
+/* Dishonest completion: attest regardless of window, cancellation, or
+   veto. */
+rule Witness_Attest_Fraud:
+  [ !DeclPos(P, nrk, pos), !WitnessKey(~wk) ]
+  --[ Completed(P, nrk, pos), WitnessCheated()
+    , WSigned(<'ok', P, nrk, pos>) ]->
+  [ !EffectiveRecoveryPub(P, nrk)
+  , Out(< <'ok', P, nrk, pos>, sign(<'ok', P, nrk, pos>, ~wk) >)
+  ]
+
+/* Model 6's completion contract, carried by the HONEST attestation. */
+restriction honest_attest_window:
+  "All P nrk pos #a. HonestAttest(P, nrk, pos)@a ==>
+     Ex #d #t1 #t2. Declared(P, nrk)@d
+       & Tick()@t1 & Tick()@t2
+       & #d < #t1 & #t1 < #t2 & #t2 < #a"
+
+restriction honest_attest_no_cancel:
+  "All P nrk pos #a. HonestAttest(P, nrk, pos)@a ==>
+     not(Ex #x. Cancelled(P, nrk)@x & #x < #a)"
+
+restriction honest_attest_no_veto:
+  "All P nrk pos #a. HonestAttest(P, nrk, pos)@a ==>
+     not(Ex #x. Vetoed(P, nrk)@x & #x < #a)"
+
+/* ── Devices and the judge ── */
+
+/* A device polls the chain at a position and keeps the witness-signed
+   answer. The position it asks about is public; the signed answer
+   binds that position — the binding under test. */
+/* CALIBRATION: the device still asks about a position, but the signed
+   answer is positionless — Polled records the ASKED position with an
+   answer that does not commit to it. */
+rule Device_Poll:
+  [ !WitnessPub(wpk), In(pos), In(< <'at', v>, stmt >) ]
+  --[ Eq(verify(stmt, <'at', v>, wpk), true)
+    , Polled(pos, v) ]->
+  [ !DeviceView(pos, v, stmt) ]
+
+/* Anyone can convict from the two signed statements alone: an 'empty'
+   view of pos and a completion attestation placing the declaration at
+   pos are inconsistent claims about the same chain position. */
+rule Judge_Conflict:
+  [ !WitnessPub(wpk)
+  , In(< <'at', pos, 'empty'>, s1 >)
+  , In(< <'ok', P, nrk, pos>, s2 >)
+  ]
+  --[ Eq(verify(s1, <'at', pos, 'empty'>, wpk), true)
+    , Eq(verify(s2, <'ok', P, nrk, pos>, wpk), true)
+    , FraudProven(pos) ]->
+  [ ]
+
+restriction equality:
+  "All x y #i. Eq(x, y)@i ==> x = y"
+
+/* ═══ Lemmas ═══ */
+
+/* Honest end to end: declare, window, truthful poll (the blocking
+   alert), honest completion — with the witness never cheating. Guards
+   the honest machinery against over-restriction. */
+lemma executable:
+  exists-trace
+  "Ex P nrk pos #d #q #c.
+      Declared(P, nrk)@d
+    & Polled(pos, <'decl', P, nrk>)@q
+    & Completed(P, nrk, pos)@c
+    & not(Ex #w. WitnessCheated()@w)"
+
+/* MAIN — the dichotomy, which contains the fraud-proof claim as its
+   v = 'empty' instance: for a completed succession, a device that
+   polled the declaration's chain position either saw the declaration
+   (and can cancel — Cancel_Succession is its rule), or two
+   witness-signed statements exist whose claims about that position
+   conflict — the self-contained fraud proof Judge_Conflict verifies.
+   No third outcome. Derived: the witness key never leaks, so both
+   conjuncts of the fraud pair are signature-unforgeability results. */
+lemma poll_yields_alert_or_fraud_proof:
+  "All P nrk pos v #c #q.
+      Completed(P, nrk, pos)@c & Polled(pos, v)@q
+    ==> (v = <'decl', P, nrk>)
+      | (Ex #s1 #s2. WSigned(<'at', pos, 'empty'>)@s1
+                   & WSigned(<'ok', P, nrk, pos>)@s2)"
+
+/* ── The honesty collapse: model 6's four MAIN lemmas, verified again
+   unchanged under the single honesty premise. ── */
+
+lemma honest_window_cannot_be_fast_forwarded:
+  "All P nrk pos #c.
+      Completed(P, nrk, pos)@c & not(Ex #w. WitnessCheated()@w)
+    ==> Ex #d #t1 #t2. Declared(P, nrk)@d
+          & Tick()@t1 & Tick()@t2
+          & #d < #t1 & #t1 < #t2 & #t2 < #c"
+
+lemma honest_cancellation_blocks_completion:
+  "not(Ex P nrk pos #x #c.
+        Cancelled(P, nrk)@x & Completed(P, nrk, pos)@c & #x < #c
+      & not(Ex #w. WitnessCheated()@w))"
+
+lemma honest_veto_blocks_completion:
+  "not(Ex P nrk pos #x #c.
+        Vetoed(P, nrk)@x & Completed(P, nrk, pos)@c & #x < #c
+      & not(Ex #w. WitnessCheated()@w))"
+
+lemma honest_completion_implies_witnessed_declaration:
+  "All P nrk pos #c.
+      Completed(P, nrk, pos)@c & not(Ex #w. WitnessCheated()@w)
+    ==> Ex #d. Declared(P, nrk)@d & #d < #c"
+
+/* Vacuity guards for the two blocking collapse lemmas. */
+lemma cancel_possible:
+  exists-trace
+  "Ex P nrk #x. Cancelled(P, nrk)@x"
+
+lemma veto_possible:
+  exists-trace
+  "Ex P nrk #x. Vetoed(P, nrk)@x"
+
+end

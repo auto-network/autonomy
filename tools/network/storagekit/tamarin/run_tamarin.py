@@ -203,6 +203,29 @@ EXPECTATIONS = {
         "post_rekey_excluded": "verified",
         "removed_machine_keeps_prior": "verified",
     },
+    "VaultWitnessAccountability.spthy": {
+        "executable": "verified",
+        "fraud_story_executable": "verified",
+        "poll_yields_alert_or_fraud_proof": "verified",
+        "honest_window_cannot_be_fast_forwarded": "verified",
+        "honest_cancellation_blocks_completion": "verified",
+        "honest_veto_blocks_completion": "verified",
+        "honest_completion_implies_witnessed_declaration": "verified",
+        "cancel_possible": "verified",
+        "veto_possible": "verified",
+    },
+    # fraud_story_executable is deliberately absent below: its subject IS the
+    # deleted position binding (see the theory header and MODEL.md model 12).
+    "VaultWitnessAccountabilityNoChainBind.spthy": {
+        "executable": "verified",
+        "poll_yields_alert_or_fraud_proof": "falsified",
+        "honest_window_cannot_be_fast_forwarded": "verified",
+        "honest_cancellation_blocks_completion": "verified",
+        "honest_veto_blocks_completion": "verified",
+        "honest_completion_implies_witnessed_declaration": "verified",
+        "cancel_possible": "verified",
+        "veto_possible": "verified",
+    },
 }
 
 SUMMARY_RE = re.compile(

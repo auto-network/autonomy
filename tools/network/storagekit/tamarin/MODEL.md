@@ -37,6 +37,8 @@ against.
 | `VaultDelegateChainNoResolve.spthy` | model 10 calibration: **roster resolution deleted from acceptance** | `write_resolves_to_current_member` falsified, rest verified |
 | `VaultD006Window.spthy` | model 11 green: D-006 halt/continue window (bead auto-rjonx) | all lemmas verified |
 | `VaultD006WindowNoHaltGate.spthy` | model 11 calibration: **HALT gate deleted from the window grant** | `halt_window_confidential` falsified, rest verified |
+| `VaultWitnessAccountability.spthy` | model 12 green: witness split-view accountability (bead auto-fogkg) | all lemmas verified |
+| `VaultWitnessAccountabilityNoChainBind.spthy` | model 12 calibration: **position binding deleted from served views** | `poll_yields_alert_or_fraud_proof` falsified, rest verified |
 | `run_tamarin.py` | harness enforcing every expectation above | exit 0 iff all hold |
 
 The pairing is the point: a green proof is only trusted because the
@@ -107,7 +109,7 @@ python3 tools/network/storagekit/tamarin/run_tamarin.py
 ```
 
 Verified 2026-08-29 with tamarin-prover 1.12.0 + Maude 3.5.1: all
-eleven models (24 theories, 127 lemma expectations) green — each green theory
+twelve models (26 theories, 144 lemma expectations) green — each green theory
 fully verifies and each calibration falsifies exactly its headline
 lemma. Whole suite runs in a few seconds. NOTE: the toolchain needs a
 UTF-8 locale (`LC_ALL=C.UTF-8`); `run_tamarin.py` sets it.
@@ -761,17 +763,105 @@ Abstraction register:
 6. **Bounded scenario**: one setup, one removal, one policy choice,
    one re-key; writes repeat freely within each phase.
 
+## Model 12 — witness split-view accountability (bead auto-fogkg)
+
+The model-6 increment its ACCOUNTABILITY SCOPE note promised
+(Künnemann/Esiyok/Backes framing): the witness may now EQUIVOCATE.
+The crib §9 claim under test: a witness that serves two conflicting
+chain views produces a SELF-CONTAINED fraud proof — hiding the
+declaration from the victim while completing for the attacker is
+detectable from the two signed statements alone.
+
+STRUCTURE: the witness is a principal with a signing key, and
+completion IS the witness attestation (the crib's own wording). Every
+witness behaviour has an honest and a dishonest rule; dishonest rules
+carry `WitnessCheated()`, so trace-honesty is the single premise
+`not(Ex #w. WitnessCheated()@w)`. Model 6's three completion
+restrictions move onto the HONEST attestation (`honest_attest_*`);
+the fraud attestation ignores window, cancellation, and veto. Served
+views sign the chain position they speak for — `<'at', pos, v>` — and
+the completion attestation `<'ok', P, nrk, pos>` places the
+declaration at its position. The `<message, signature>` wire pairs
+keep every rule variable premise-bound.
+
+Proved (green, 1.4 s, 9/9):
+- **`poll_yields_alert_or_fraud_proof`** (MAIN, derived) — the
+  dichotomy the bead asks for, containing its fraud-proof claim as
+  the `v = 'empty'` instance: for a completed succession, a device
+  that polled the declaration's chain position either saw the
+  declaration (the blocking alert — it can cancel; Cancel_Succession
+  is its rule) or two witness-signed statements exist whose claims
+  about that position conflict. No third outcome. Derived: the
+  witness key never leaks, so both statements are signature-
+  unforgeability results.
+- **`fraud_story_executable`** (exists-trace, green-only) — the full
+  fraud arc with the judge convicting: declaration hidden, completion
+  attested, `Judge_Conflict` verifies both signatures and needs
+  nothing else — the "self-contained, third-party-verifiable" half of
+  the claim, and the vacuity witness for the MAIN's fraud arm.
+- **`honest_window_cannot_be_fast_forwarded` /
+  `honest_cancellation_blocks_completion` /
+  `honest_veto_blocks_completion` /
+  `honest_completion_implies_witnessed_declaration`** — model 6's
+  four MAIN lemmas verify again unchanged under the honesty premise:
+  the extension strictly generalizes the base rather than replacing
+  it (the bead's collapse requirement).
+- `executable` (honest end-to-end with a truthful poll),
+  `cancel_possible`, `veto_possible` (vacuity guards).
+
+Calibration (`VaultWitnessAccountabilityNoChainBind.spthy`): the two
+SERVE rules sign `<'at', v>` — each signed head stands alone —
+→ `poll_yields_alert_or_fraud_proof` falsified in 8 steps: the
+victim's positionless 'empty' view is perfectly consistent with an
+honest chain that acquired the declaration later; equivocation
+without conflicting evidence. All other lemmas hold. DELIBERATE
+DEVIATION: `fraud_story_executable` is omitted from the calibration
+rather than listed as a second falsification — its entire subject is
+the deleted binding; a second falsified lemma would only restate the
+headline failure. The harness comment marks it.
+
+Abstraction register:
+
+1. **Chain-history binding → per-position claims.** A real head
+   signature commits to the whole hash chain; two conflicting FULL
+   histories always disagree at SOME position, so per-position signed
+   claims are the pointwise projection of prefix-consistency, and
+   same-position conflict is the projection of split-view. Hash-chain
+   extension proofs (prefix verification) are below this model.
+2. **Positions are fresh names, public as structure** (chain lengths
+   visible; entries served on demand). One declaration per position
+   by freshness.
+3. **Declaration authenticity is by possession** (model 6's
+   convention): only the root-key holder's rule declares. A witness
+   INVENTING a declaration would be forging a root-signed record —
+   out of scope, as in model 6.
+4. **The hiding fraud is modeled; cancel-suppression is not.** A
+   witness that hides a CANCELLATION from the completion check is the
+   analogous fraud one level up; modeling it needs cancellations as
+   chain entries with their own served views. Noted as future work.
+5. **UNMODELED (the bead's known-omission list): receipt-time
+   clock-skew checks** — a real device cross-checks the witness's
+   entry-time stamps against local time to bound how stale a served
+   view may be; here trace order is the only clock, so freshness of
+   served views is not modeled, only their consistency.
+6. **Honesty as rule choice** (`WitnessCheated` on dishonest rules) —
+   what "honest witness" means is exactly model 6's restrictions; the
+   collapse lemmas certify that correspondence.
+7. **One witness** (`OnceWitness`); multi-witness quorums and
+   cross-witness gossip are future work.
+
 ## Roadmap (tracker note graph://8277c76c-ad1; beads filed)
 
-All eleven Tamarin models DONE (auto-loxsf, -djh2m, -cpbkf, -veal7,
--loov7, -5wpjm, -ncokx, -lythl, -9ldpx, -rjonx, plus the pilot).
-Remaining:
+All twelve Tamarin models DONE (auto-loxsf, -djh2m, -cpbkf, -veal7,
+-loov7, -5wpjm, -ncokx, -lythl, -9ldpx, -rjonx, -fogkg, plus the
+pilot). Remaining:
 
 1. **TLA+ side-track (auto-xtt5v)**: c6z70 settings-resolution
    discriminator + fleet-roster OR-set convergence — attacker-free
    convergence, belongs in the existing TLA+ practice, parallelizable.
-2. **Model 6 increment**: adversarial-witness split-view accountability
-   (Künnemann et al.) over the honest-log base here.
+2. ~~Model 6 increment: adversarial-witness split-view accountability~~
+   — DONE as model 12 (auto-fogkg); cancel-suppression fraud and
+   receipt-time clock-skew remain its open increments.
 3. **Transitive frontier descent** w/ induction (relaxes the one-edge
    abstraction shared by models 1-2).
 4. ~~D-006 halt/continue window~~ — DONE as model 11 (auto-rjonx).
