@@ -1890,3 +1890,19 @@ def test_idempotency_distinguishes_content(
     assert r1.status_code == r2.status_code == 202
     assert r1.json()["run_id"] != r2.json()["run_id"]
     assert len(patch_launch_session) == 2
+
+
+def test_inline_dispatch_targets_the_callers_org():
+    """An org-bound session's inline dispatch homes to ITS org — the
+    autonomy default sent org-bound callers into the cross-org authz
+    mask ('asset not found: ' with an empty id)."""
+    from types import SimpleNamespace
+    from tools.dashboard.server import _inline_dispatch_target_org
+
+    anchore = SimpleNamespace(org_bound=True, org="anchore")
+    operator = SimpleNamespace(org_bound=False, org=None)
+    assert _inline_dispatch_target_org({}, anchore) == "anchore"
+    assert _inline_dispatch_target_org({}, operator) == "autonomy"
+    # explicit selection still wins (and is authz-checked downstream)
+    assert _inline_dispatch_target_org(
+        {"target_org": "autonomy"}, anchore) == "autonomy"

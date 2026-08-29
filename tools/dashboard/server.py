@@ -18232,6 +18232,25 @@ async def _agentic_launch_task(
         _agentic_queue_event.set()
 
 
+def _inline_dispatch_target_org(body: dict, principal) -> str:
+    """The org an asset-less dispatch targets.
+
+    An inline dispatch's natural home is the CALLER'S org — an org-bound
+    session dispatching content targets its own database (member lookup,
+    source row, workspace routing). Defaulting to "autonomy" here sent
+    org-bound callers into target_org_auth_error, whose deliberate
+    cross-org masking rendered the refusal as 'asset not found: ' with
+    an empty id — the exact ghost the first inline tester chased. An
+    explicit body target_org still wins and is still authz-checked.
+    """
+    explicit = str(body.get("target_org") or "")
+    if explicit:
+        return explicit
+    if getattr(principal, "org_bound", False) and getattr(principal, "org", ""):
+        return principal.org
+    return "autonomy"
+
+
 async def api_agent_action_dispatch(request):
     """POST /api/agent-actions/dispatch — spawn an agentic action.
 
@@ -18438,7 +18457,7 @@ async def api_agent_action_dispatch(request):
     target_source_id = ""
     if inline_dispatch:
         target_kind = "inline"
-        target_org = str(body.get("target_org") or "") or "autonomy"
+        target_org = _inline_dispatch_target_org(body, principal)
     elif source is None:
         if requested_asset_kind == "design":
             design = await asyncio.to_thread(_resolve_design_action_asset, asset_id)
