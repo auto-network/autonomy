@@ -32,7 +32,8 @@ against.
 | `VaultPolicyClassNoReseal.spthy` | model 8 calibration A: **revocation reuses the old class_key** | `revoked_factor_excluded_forward` falsified, rest verified |
 | `VaultPolicyClassNoAnchor.spthy` | model 8 calibration B: **anchor wrap deleted from the new generation** | `root_reaches_every_generation` falsified, rest verified |
 | `VaultRootRotation.spthy` | model 9 green: personal-root rotation dual authority (bead auto-lythl) | all lemmas verified |
-| `VaultRootRotationNoCosign.spthy` | model 9 calibration: **recovery co-signature check deleted** | `thief_cannot_rotate` falsified, rest verified |
+| `VaultRootRotationNoCosign.spthy` | model 9 calibration A: **recovery co-signature check deleted** | `thief_cannot_rotate` falsified, rest verified |
+| `VaultRootRotationNoDeclaredPk.spthy` | model 9 calibration B: **recovery pk read from In() not the pinned declaration** | `thief_cannot_rotate` falsified, rest verified |
 | `VaultDelegateChain.spthy` | model 10 green: delegate-chain resolution at use (bead auto-9ldpx) | all lemmas verified |
 | `VaultDelegateChainNoResolve.spthy` | model 10 calibration: **roster resolution deleted from acceptance** | `write_resolves_to_current_member` falsified, rest verified |
 | `VaultD006Window.spthy` | model 11 green: D-006 halt/continue window (bead auto-rjonx) | all lemmas verified |
@@ -118,7 +119,7 @@ python3 tools/network/storagekit/tamarin/run_tamarin.py
 
 Verified 2026-08-29 with tamarin-prover 1.12.0 + Maude 3.5.1: twelve
 models, the chain extension, and two observational-equivalence privacy
-pairs (32 theories, 158 expectations) green — each green theory
+pairs (33 theories, 163 expectations) green — each green theory
 fully verifies and each calibration falsifies exactly its headline
 lemma. Whole suite runs in a few seconds. NOTE: the toolchain needs a
 UTF-8 locale (`LC_ALL=C.UTF-8`); `run_tamarin.py` sets it.
@@ -538,16 +539,27 @@ the owner, holding both, rotates away from a stolen root. Signature
 checks use the model-4 Eq idiom (the verifier holds no secrets); the
 three distinct signing domains are structural tags.
 
-CRIB CORRECTION recorded here (bead auto-lythl): crib §9 still marks
-this flow 🪦 unbuilt, but the armor-layer code (`make_rotation`,
-`verify_rotation`, `resolve_current_root`) EXISTS. The unbuilt piece
-is the registry that DECLARES the recovery public key —
-`verify_rotation` trusts whatever `recovery_pub` its caller supplies.
-The model states that boundary honestly: the verifier reads the
-recovery pk from a setup-minted honest binding (`!DeclaredRecoveryPk`),
-never from `In()`, and `recovery_pk_is_declared` restates that
-assumption as a lemma. A caller that instead resolved the pk from
-attacker-writable rows would be behaviourally the calibration.
+CRIB / WIRING CORRECTION (bead auto-lythl; refined 2026-08-29 after
+operator review): crib §9 marks this flow 🪦 unbuilt, but the
+armor-layer code (`make_rotation`, `verify_rotation`,
+`resolve_current_root`) EXISTS — AND so does the recovery-key pin the
+first draft of this note called unbuilt. The auto.network registry's
+`orgs` table (`registry/store.py`) stores `recovery_pub` per identity,
+personal and organizational, and the rebind ceremony enforces it
+(`registry/app.py:823` rejects a rebind not signed by the pinned
+recovery key). The genuine residual is narrower and is a WIRING gap:
+`idkit/root_rotation.py`'s succession ceremony is a DISTINCT path from
+the registry rebind and has no non-test caller resolving its
+`recovery_pub` argument against that pin, so `verify_rotation` still
+trusts whatever key its caller passes. The model states that boundary
+honestly: the verifier reads the recovery pk from a setup-minted
+binding (`!DeclaredRecoveryPk`), never from `In()`;
+`recovery_pk_is_declared` restates the assumption, and calibration B
+(`VaultRootRotationNoDeclaredPk.spthy`) shows what an unpinned read
+costs. Whether the fix is to wire `verify_rotation` to the registry's
+`recovery_pub` or to have root succession carry its own declaration is
+an open design question — the two ceremonies are related but not the
+same.
 
 Proved (green, 0.6 s, 5/5):
 - **`thief_cannot_rotate`** (MAIN, derived Dolev-Yao) — while the
@@ -582,6 +594,15 @@ own successor, signs 'rot' with the stolen old root and 'cont' with
 its key, and is accepted); the owner reachability, the code-finder
 direction (old_sig still checked), and the binding lemma all hold —
 the co-signature is load-bearing only against the thief.
+
+Calibration B (`VaultRootRotationNoDeclaredPk.spthy`): the verifier
+reads `recovery_pub` from `In()` instead of the pinned declaration →
+`thief_cannot_rotate` falsified in 9 steps (the thief supplies a
+recovery key it controls and co-signs with it — a check correctly
+performed against the wrong trust anchor). Distinct defect from
+NoCosign: there the check is skipped, here it runs against an unpinned
+key; both yield the thief win. This is the machine-checked acceptance
+target for wiring `verify_rotation` to the registry pin.
 
 Abstraction register:
 
