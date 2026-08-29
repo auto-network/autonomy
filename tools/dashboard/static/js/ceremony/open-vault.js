@@ -6,6 +6,11 @@
  * there is no generic approval followed by a second decrypt dialog.
  */
 import * as primitives from './primitives.js';
+import { openPasswordWrap } from './password-wrap.js';
+
+async function openVaultPasswordWrap(envelope, password) {
+  return openPasswordWrap(envelope, password);
+}
 import { prfEvalExtension, prfOutputFromResults } from './enrollment.js';
 import { openRootAnchorEnvelope } from './root-anchor.js';
 
@@ -209,7 +214,7 @@ export async function gatherVaultOpeners(
   ceremony,
   password,
   {
-    decryptArmor = primitives.decryptArmor,
+    decryptArmor = openVaultPasswordWrap,
     openAnchor = openRootAnchorEnvelope,
     credentials = globalThis.navigator && globalThis.navigator.credentials,
     cryptoApi = globalThis.crypto,

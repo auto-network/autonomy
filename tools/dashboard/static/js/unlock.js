@@ -363,25 +363,8 @@
             throw new Error('this passkey grants access but does not open the root alone');
           }
         } else {
-          var prf = enroll.prfOutputFromResults(
-            (cred.getClientExtensionResults && cred.getClientExtensionResults()) || {});
-          if (!prf) throw new Error('this passkey supplied no PRF root material');
-          var migRecipient = null;
-          try {
-            var Pp = await import('./ceremony/primitives.js');
-            opened = await Pp.decryptArmorWithPasskey(U.armorText, prf);
-            // For the one-shot v2→v3 upgrade below: this device's v3
-            // root-recipient key, derived while the PRF is still live.
-            try {
-              var Rm = await import('./ceremony/root-factor-policy.js');
-              migRecipient = {
-                credentialId: bytesToB64u(cred.rawId),
-                publicKeyHex: (await Pp.deriveEncapsulationKeypair(
-                  prf, Rm.FACTOR_RECIPIENT_PURPOSE,
-                )).publicKeyHex,
-              };
-            } catch (e) { migRecipient = null; }
-          } finally { prf.fill(0); }
+          throw new Error('this identity\'s armor is in a retired format and '
+            + 'cannot be opened by this software');
         }
         var rootSeed = new Uint8Array(opened.seed);
         opened.seed.fill(0);
@@ -393,14 +376,6 @@
             if (window.console && console.warn) {
               console.warn('pending device slot not enrolled:', (e && e.message) || e);
             }
-          }
-        }
-        // ONE-SHOT v2→v3 armor upgrade (see _migrateArmorV2Once). Best-effort.
-        try {
-          await _migrateArmorV2Once({ rootSeed: rootSeed, passkeyRecipient: migRecipient });
-        } catch (e) {
-          if (window.console && console.warn) {
-            console.warn('one-shot armor upgrade failed (v2 stays):', (e && e.message) || e);
           }
         }
         try {
@@ -484,59 +459,6 @@
   // policy; they re-gain authority per device via "Enroll this device" in
   // Manage credentials. Knowingly not a general migration (operator ruling
   // 2026-08-27: sole pre-deployment identity, delete after use).
-  async function _migrateArmorV2Once(material) {
-    var fp = U.factorPolicy;
-    if (!fp || fp.armor_version === 3 || !fp.migration_required) return;
-    var R = await import('./ceremony/root-factor-policy.js');
-    var M = await import('./ceremony/armor-migration.js');
-    // Armor wraps whose credentials have no dashboard registration row are
-    // dead weight (cannot sign in) and the server's binding check refuses a
-    // v3 factor list naming them — the builder drops them.
-    var registered = [];
-    try {
-      var st = await _fetchJson('/api/identity/status');
-      registered = (st.passkeys || []).map(function (p) { return p.credential_id; })
-        .filter(function (c) { return typeof c === 'string'; });
-    } catch (e) { registered = null; }
-    var operations = await M.buildMigrationOperations(fp, {
-      password: material.password,
-      passkeyRecipient: material.passkeyRecipient,
-      registeredCredentialIds: registered,
-    });
-    if (!operations) return;   // nothing root-capable in hand — leave v2 intact
-    var pv = await _postJson('/api/identity/factor-policy/preview', {
-      base_generation: 0, operations: operations,
-    });
-    var armor = await R.buildFactorPolicyArmor({
-      rootSeed: material.rootSeed, rootPub: fp.root_pub, generation: pv.generation,
-      factors: pv.factors, access: pv.access, policy: pv.root_policy,
-    });
-    var seedCopy = new Uint8Array(material.rootSeed);
-    var signingKey;
-    try { signingKey = await _identityI().importSigningKey(seedCopy); }
-    finally { seedCopy.fill(0); }
-    var signature = await R.signFactorPolicyTransition({
-      signingKey: signingKey, baseGeneration: 0,
-      operations: operations, candidateArmor: armor,
-    });
-    await _postJson('/api/identity/factor-policy/commit', {
-      base_generation: 0, operations: operations,
-      candidate_armor: armor, root_signature: signature,
-    });
-    U.factorPolicy = null;
-    try { U.factorPolicy = await _fetchJson('/api/identity/factor-policy'); }
-    catch (e) { U.factorPolicy = null; }
-    if (window.console && console.info) {
-      console.info('armor upgraded to v3 (one-shot migration): generation '
-        + pv.generation);
-    }
-  }
-
-  // A synced passkey signed in earlier from a device whose PRF slot is not
-  // enrolled (detected + stashed above, public data only). The armor's
-  // recipient set is root-sealed, so the slot can only be written under a root
-  // proof — do it silently the moment a login opens the root. The factor panel
-  // then greets the arrival with the name-this-device dialog.
   async function _completePendingSlot(rootSeed) {
     var raw = null;
     try { raw = sessionStorage.getItem('autonomy.factor.pending-slot'); } catch (e) { return; }
@@ -711,148 +633,9 @@
         Object.values(factorSeeds).forEach(function (seed) { seed.fill(0); });
       }
     }
-    // An MFA identity's armor carries a combined factor and opens only with
-    // BOTH the password AND a passkey PRF. Branch on the armor itself (the
-    // source of truth), not merely the require_pair hint.
-    var P = null;
-    var isCombined = false;
-    try {
-      P = await import('./ceremony/primitives.js');
-      isCombined = (P.parseArmor(stored.armored_private_key).factors || [])
-        .some(function (f) { return f.type === 'combined'; });
-    } catch (e) { /* fall through to the password path, which will error clearly */ }
-    var opened;
-    var unlockRoute = '/api/identity/unlock/password';
-    if (isCombined) {
-      var prfResult = await _prfAssert();
-      var prf = prfResult.prf;
-      unlockRoute = '/api/identity/unlock/combined';
-      try {
-        opened = await P.decryptArmorWithCombined(stored.armored_private_key, password, prf);
-      } catch (e) {
-        throw new Error('that password and passkey did not open your identity — check them and try again');
-      }
-    } else {
-      try {
-        opened = await S.decryptArmor(stored.armored_private_key, password);
-      } catch (e) {
-        throw new Error('that password does not open your identity — check it and try again');
-      }
-    }
-    // The vault wake (below, after the session exists) needs the raw seed to
-    // derive its KEM credential + delegate. Keep ONE copy past the I1 zero and
-    // wipe it the instant the wake is done, so the seed never outlives it.
-    var wakeSeed = new Uint8Array(opened.seed);
-    var key;
-    try {
-      key = await I.importSigningKey(opened.seed);
-    } finally {
-      opened.seed.fill(0);
-      opened.seed = null;
-    }
-    var minted = await _postJson('/api/identity/unlock/password/options', {});
-    var message = new TextEncoder().encode(
-      UNLOCK_DOMAIN + S.canonicalJson({
-        v: 1, challenge: minted.challenge, origin: minted.origin,
-      }));
-    var sig = S.bytesToHex(await crypto.subtle.sign('Ed25519', key, message));
-    await _postJson(unlockRoute, {
-      challenge: minted.challenge, signature: sig,
-    });
-
-    // ONE-SHOT v2→v3 armor upgrade (see _migrateArmorV2Once). Best-effort: a
-    // failed upgrade leaves the v2 armor intact and never turns a successful
-    // unlock into a lockout.
-    try {
-      await _migrateArmorV2Once({ rootSeed: wakeSeed, password: password });
-    } catch (e) {
-      if (window.console && console.warn) {
-        console.warn('one-shot armor upgrade failed (v2 stays):', (e && e.message) || e);
-      }
-    }
-
-    // Wake the vault now that the session exists: publish the KEM credential
-    // and hand its private half so this sign-in warms the vault durably — the
-    // same ceremony warm_client runs. Best-effort: a wake that fails must never
-    // turn a successful unlock into a lockout.
-    try {
-      var wake = await S.wakeVault({ personalRootSeed: wakeSeed });
-      if (window.console && console.info) {
-        console.info('vault wake:', JSON.stringify(wake));
-      }
-    } catch (e) {
-      if (window.console && console.warn) {
-        console.warn('vault wake failed after unlock:', (e && e.message) || e);
-      }
-    }
-
-    // Complete a pending Fleet join, else mint the Fleet runtime + reachability
-    // credential — the SAME block the passkey-root path runs, shared via
-    // _fleetCompleteOrMint so the two root-releasing paths can never diverge.
-    try {
-      await _fleetCompleteOrMint(wakeSeed);
-      wakeSeed = null;  // the ceremony zeroed the shared Uint8Array
-    } catch (e) {
-      if (window.console && console.warn) {
-        console.warn('fleet enrollment completion failed after unlock:',
-                     (e && e.message) || e);
-      }
-      // A Fleet-linked unlock is the enrollment boundary, not a best-effort
-      // side effect.  Do not navigate to the synchronization screen unless
-      // this machine has verified and acknowledged its delivered evidence.
-      if (U.fleetRootRequired) throw e;
-    } finally {
-      if (wakeSeed) wakeSeed.fill(0);
-      wakeSeed = null;
-    }
-
-    // Access authentication has succeeded.  Reuse this password-backed root
-    // ceremony to maintain the unattended serving credential if necessary.
-    // The normal case is a cheap local status read; repair failures never
-    // turn successful dashboard access into a lockout.  The access-only
-    // passkey path does not run this because it releases no signing material.
-    var networkSession = window.AutonomyNetworkSession;
-    if (networkSession &&
-        typeof networkSession.repairServeCredential === 'function') {
-      try {
-        if (typeof networkSession.ready === 'function') {
-          await networkSession.ready();
-        }
-        // EVERY organization, not just the default one: the personal seed
-        // opens all of their sealed roots, and repairing only the default is
-        // how the others drift to expiry unnoticed.
-        if (typeof networkSession.repairAllServeCredentials === 'function') {
-          var serve = await networkSession.repairAllServeCredentials(
-            password, {});
-          window.__autonomyServeRepair = serve;
-          if (window.console && console.info &&
-              (serve.repaired.length || serve.failed.length)) {
-            console.info('serving credentials:', JSON.stringify(serve));
-          }
-        } else {
-          await networkSession.repairServeCredential(password, {});
-        }
-        // Report what happened to the SERVER. This ran only in a console
-        // before, which an operator on a phone cannot open -- and a repair
-        // whose failures nobody can read is how three organizations drifted
-        // to the edge of expiry unnoticed. Diagnostic only: statuses and
-        // error strings, never key material.
-        try {
-          await fetch('/api/network/unlock-report', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              serve: window.__autonomyServeRepair || null,
-            }),
-          });
-        } catch (e) { /* diagnostics must never break an unlock */ }
-      } catch (e) {
-        if (window.console && console.warn) {
-          console.warn('serving credential maintenance failed after unlock:',
-                       (e && e.message) || e);
-        }
-      }
-    }
+    // Every openable armor is a version-3 factor policy, handled above.
+    throw new Error('this identity\'s armor is in a retired format and '
+      + 'cannot be opened by this software');
   }
 
   // Recover access with the printed code: it opens the root ALONE (the
@@ -1219,13 +1002,8 @@
           U.mfa = !passwordHasAccess && passwordRows.some(function (f) {
             return f.root_role === 'mfa-member';
           });
-        } else {
-          var Pm = await import('./ceremony/primitives.js');
-          var Pol = await import('./ceremony/factor-policy.js');
-          var m = Pol.buildModel(status, Pm.parseArmor(U.armorText));
-          U.mfa = m.mfa;
-          U.pwOpensRoot = Pol.level(m, 'pass') === 'b';
-          U.passkeyOpensRoot = Pol.level(m, 'face') === 'b';   // a full-authority passkey
+        } else if (window.console && console.warn) {
+          console.warn('armor is not version 3; root-opening reach is unavailable');
         }
       } catch (e) { /* reach unknown; the ceremonies still work */ }
     }

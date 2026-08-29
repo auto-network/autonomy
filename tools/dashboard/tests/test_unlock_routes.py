@@ -24,6 +24,7 @@ server half and the gate itself:
 """
 
 from __future__ import annotations
+from tools.network.idkit.root_factor_policy import mint_password_armor
 
 import base64
 import hashlib
@@ -45,7 +46,6 @@ from tools.dashboard import identity_routes, unlock_routes
 from tools.dashboard.dao import identity_sessions
 from tools.graph import settings_ops
 from tools.network.idkit import KeyPair
-from tools.network.idkit.armor import encrypt_root_key
 from tools.network.idkit.canonical import canonical_json
 from tools.network.idkit.root_factor_policy import (
     build_envelope,
@@ -170,7 +170,7 @@ def _b64url_decode(value: str) -> bytes:
 
 
 def _armor(root: KeyPair) -> str:
-    return encrypt_root_key(root, PASSWORD, iterations=10_000)
+    return mint_password_armor(root, PASSWORD, iterations=10_000)
 
 
 def _store_identity(client, root: KeyPair, name="Alex"):

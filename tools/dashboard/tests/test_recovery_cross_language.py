@@ -9,6 +9,7 @@ assumed from the two implementations looking alike.
 """
 
 from __future__ import annotations
+from tools.network.idkit.root_factor_policy import mint_password_armor
 
 import json
 import shutil
@@ -76,7 +77,7 @@ def test_a_code_printed_by_the_browser_opens_an_armor_locked_here():
 
     # The command line locks an identity, knowing only the code's public half.
     key = KeyPair.generate()
-    armor = encrypt_root_key(key, "a-password", iterations=10_000)
+    armor = mint_password_armor(key, "a-password", iterations=10_000)
     kek_seed = recovery.derive_recovery_factors(code)["kek_recovery_seed"]
     _, kem_pub = derive_encapsulation_keypair(kek_seed, RECOVERY_ARMOR_PURPOSE)
     armor = add_recovery_factor(armor, "a-password", kem_pub)

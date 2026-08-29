@@ -1,6 +1,7 @@
 """Temporary roster-designated tunnel serving (auto-gx2mt.1)."""
 
 from __future__ import annotations
+from tools.network.idkit.root_factor_policy import mint_password_armor
 
 import pytest
 
@@ -21,7 +22,6 @@ from tools.graph.schemas.personal_identity import (
 )
 from tools.network import fleet_roster, fleet_tunnel_server
 from tools.network.idkit import KeyPair
-from tools.network.idkit.armor import encrypt_root_key
 
 
 @pytest.fixture
@@ -42,7 +42,7 @@ def fleet(tmp_path, monkeypatch):
 
 def _initialize_root() -> KeyPair:
     root = KeyPair.generate()
-    armor = encrypt_root_key(root, "test-passphrase", iterations=10_000)
+    armor = mint_password_armor(root, "test-passphrase", iterations=10_000)
     with settings_ops.identity_write_context():
         settings_ops.add_setting(
             PERSONAL_IDENTITY_SET_ID,

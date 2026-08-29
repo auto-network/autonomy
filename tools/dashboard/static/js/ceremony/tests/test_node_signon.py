@@ -7,6 +7,7 @@ organizations — no browser, no second passphrase, no organization root key.
 """
 
 from __future__ import annotations
+from tools.network.idkit.root_factor_policy import mint_password_armor
 
 import json
 import os
@@ -28,7 +29,6 @@ from starlette.routing import Route
 
 from tools.graph.schemas.network_identity import ORG_ROOT_ARMOR_PURPOSE
 from tools.network.idkit import KeyPair
-from tools.network.idkit.armor import encrypt_root_key
 from tools.network.idkit.persona import derive_persona
 from tools.network.idkit.sealing import derive_encapsulation_keypair, seal
 
@@ -163,7 +163,7 @@ def _identity_source(*, personal_armor: str, personal_root_pub: str,
         if org.legacy_key:
             return JSONResponse({
                 "label": "default",
-                "armored_private_key": encrypt_root_key(
+                "armored_private_key": mint_password_armor(
                     org.root, org.org_passphrase, iterations=10_000),
                 "root_pub": org.root.public_hex,
             })
@@ -174,7 +174,7 @@ def _identity_source(*, personal_armor: str, personal_root_pub: str,
             )
         return JSONResponse({
             "label": "default",
-            "armored_private_key": encrypt_root_key(
+            "armored_private_key": mint_password_armor(
                 org.root, "the org armor nobody should open", iterations=10_000,
             ),
             "root_pub": org.root.public_hex,
@@ -300,7 +300,7 @@ def _sign_on(orgs: list[OrgFixture], *, passphrase: str,
     requests: list[str] = []
     rekeyed: list[dict] = []
     identity = _identity_source(
-        personal_armor=encrypt_root_key(
+        personal_armor=mint_password_armor(
             personal_root, passphrase, iterations=10_000,
         ),
         personal_root_pub=personal_root.public_hex,
@@ -505,7 +505,7 @@ def test_wrong_passphrase_fails_closed():
     requests: list[str] = []
     rekeyed: list[dict] = []
     identity = _identity_source(
-        personal_armor=encrypt_root_key(
+        personal_armor=mint_password_armor(
             personal_root, "the real personal password", iterations=10_000,
         ),
         personal_root_pub=personal_root.public_hex,
@@ -526,7 +526,7 @@ def test_missing_passphrase_touches_nothing():
     personal_root = KeyPair.generate()
     requests: list[str] = []
     identity = _identity_source(
-        personal_armor=encrypt_root_key(
+        personal_armor=mint_password_armor(
             personal_root, "unused", iterations=10_000,
         ),
         personal_root_pub=personal_root.public_hex,

@@ -1,6 +1,7 @@
 """Headless dashboard access through a signed, one-time approval grant."""
 
 from __future__ import annotations
+from tools.network.idkit.root_factor_policy import mint_password_armor
 
 import asyncio
 import concurrent.futures
@@ -14,7 +15,6 @@ from tools.dashboard import approvals_routes, identity_routes, unlock_routes
 from tools.dashboard.dao import approval_requests as ar
 from tools.dashboard.dao import identity_sessions
 from tools.network.idkit import KeyPair
-from tools.network.idkit.armor import encrypt_root_key
 from tools.network.idkit.canonical import canonical_json
 
 
@@ -53,7 +53,7 @@ def grant_env(tmp_path, monkeypatch):
     client = TestClient(_app(), base_url="https://localhost:8080")
     stored = client.post("/api/identity/personal", json={
         "display_name": "Alex Operator",
-        "armored_private_key": encrypt_root_key(
+        "armored_private_key": mint_password_armor(
             personal, PASSWORD, iterations=10_000),
     })
     assert stored.status_code == 200, stored.text

@@ -10,6 +10,7 @@ containing the revoked session key stops verifying (spec §4.5, I7).
 """
 
 from __future__ import annotations
+from tools.network.idkit.root_factor_policy import mint_password_armor
 
 import time
 
@@ -27,7 +28,6 @@ from tools.graph.schemas.network_identity import (
     NETWORK_ORG_KEY_REVISION,
 )
 from tools.network.idkit import KeyPair, Subject, issue_cert, issue_revocation
-from tools.network.idkit.armor import encrypt_root_key
 from tools.network.registry.app import create_app as create_registry_app
 from tools.network.registry.signing import sign_request
 
@@ -321,7 +321,7 @@ def _registration_envelope(root, org_uuid):
 def test_register_persists_registry_uuid_not_caller_echo(env, root, monkeypatch):
     """The persisted binding's org_uuid comes from the registry's 201, not the
     caller's signed request (registry owns the namespace / authoritative claim)."""
-    _store_org_key(root, encrypt_root_key(root, PASSPHRASE, iterations=10_000))
+    _store_org_key(root, mint_password_armor(root, PASSPHRASE, iterations=10_000))
     caller_uuid = "11111111-1111-4111-8111-111111111111"
     registry_uuid = "99999999-9999-4999-8999-999999999999"
     monkeypatch.setattr(network_routes, "_registry_client",
@@ -338,7 +338,7 @@ def test_register_persists_registry_uuid_not_caller_echo(env, root, monkeypatch)
 def test_register_refuses_registry_binding_a_foreign_root(env, root, monkeypatch):
     """If the registry's 201 binds a DIFFERENT root than the one signed, refuse
     — never persist a binding for a key we did not prove control of."""
-    _store_org_key(root, encrypt_root_key(root, PASSPHRASE, iterations=10_000))
+    _store_org_key(root, mint_password_armor(root, PASSPHRASE, iterations=10_000))
     foreign = KeyPair.generate()
     monkeypatch.setattr(network_routes, "_registry_client",
                         lambda _base: _CannedRegistry(ORG_UUID, foreign.public_hex))

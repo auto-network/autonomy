@@ -1,6 +1,7 @@
 """End-to-end acceptance for portable node-volume snapshot and restore."""
 
 from __future__ import annotations
+from tools.network.idkit.root_factor_policy import mint_password_armor, open_armor_with_password
 
 import io
 import json
@@ -22,7 +23,6 @@ from tools.network.idkit import (
     issue_cert,
     verify_signature,
 )
-from tools.network.idkit.armor import decrypt_root_key, encrypt_root_key
 from tools.network.ledger.found import found_org_ledger
 from tools.network.ledger.store import LedgerStore
 from tools.portability import (
@@ -73,7 +73,7 @@ def _seed_node(volume: Path) -> dict:
     personal_root = KeyPair.from_private_hex(personal_seed.hex())
     identity_payload = json.dumps({
         "root_pub": personal_root.public_hex,
-        "armored_private_key": encrypt_root_key(
+        "armored_private_key": mint_password_armor(
             personal_root,
             PERSONAL_PASSPHRASE,
             iterations=10_000,
@@ -113,7 +113,7 @@ def _seed_node(volume: Path) -> dict:
     GraphDB(org_db).close()
     org_key_payload = json.dumps({
         "root_pub": org_root.public_hex,
-        "armored_private_key": encrypt_root_key(
+        "armored_private_key": mint_password_armor(
             org_root,
             ORG_PASSPHRASE,
             iterations=10_000,
@@ -242,7 +242,7 @@ def _assert_same_node(volume: Path, expected: dict) -> None:
         ).fetchone()
     assert row == (expected["identity_payload"],)
     identity = json.loads(row[0])
-    personal_root = decrypt_root_key(
+    personal_root = open_armor_with_password(
         identity["armored_private_key"],
         PERSONAL_PASSPHRASE,
     )
@@ -267,7 +267,7 @@ def _assert_same_node(volume: Path, expected: dict) -> None:
         ).fetchone()
     assert row == (expected["org_key_payload"],)
     org_identity = json.loads(row[0])
-    org_root = decrypt_root_key(
+    org_root = open_armor_with_password(
         org_identity["armored_private_key"],
         ORG_PASSPHRASE,
     )

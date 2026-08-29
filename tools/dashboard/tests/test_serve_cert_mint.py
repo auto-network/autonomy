@@ -14,6 +14,7 @@ root only, and never an organization's key.
 """
 
 from __future__ import annotations
+from tools.network.idkit.root_factor_policy import mint_password_armor
 
 import json
 import os
@@ -25,7 +26,6 @@ from pathlib import Path
 import pytest
 
 from tools.network.idkit import DelegationCert, KeyPair, derive_persona, verify_chain
-from tools.network.idkit.armor import encrypt_root_key
 
 HARNESS = Path(__file__).resolve().parent / "serve_cert_mint_harness.js"
 
@@ -38,8 +38,8 @@ def test_browser_serve_cert_mint_is_idkit_compatible(mode):
     genesis_id = "a1" * 32
     org_uuid = str(uuid.uuid4())
     pw = "correct horse battery staple"
-    armor = encrypt_root_key(root, pw, iterations=10_000)  # low iters: fast test
-    personal_armor = encrypt_root_key(
+    armor = mint_password_armor(root, pw, iterations=10_000)  # low iters: fast test
+    personal_armor = mint_password_armor(
         personal, pw, iterations=10_000)  # low iters: fast test
 
     result = subprocess.run(
@@ -165,8 +165,8 @@ def test_sign_on_checks_serving_but_cannot_mint_from_a_legacy_org_armor():
         ["node", str(HARNESS)],
         env={
             **os.environ,
-            "AUTONOMY_ARMOR": encrypt_root_key(root, pw, iterations=10_000),
-            "AUTONOMY_PERSONAL_ARMOR": encrypt_root_key(
+            "AUTONOMY_ARMOR": mint_password_armor(root, pw, iterations=10_000),
+            "AUTONOMY_PERSONAL_ARMOR": mint_password_armor(
                 personal, pw, iterations=10_000),
             "AUTONOMY_GENESIS_ID": "a1" * 32,
             "AUTONOMY_PW": pw,
@@ -193,9 +193,9 @@ def test_dashboard_unlock_repair_check_does_not_mint_when_credential_is_ready():
         ["node", str(HARNESS)],
         env={
             **os.environ,
-            "AUTONOMY_ARMOR": encrypt_root_key(
+            "AUTONOMY_ARMOR": mint_password_armor(
                 root, pw, iterations=10_000),
-            "AUTONOMY_PERSONAL_ARMOR": encrypt_root_key(
+            "AUTONOMY_PERSONAL_ARMOR": mint_password_armor(
                 personal, pw, iterations=10_000),
             "AUTONOMY_GENESIS_ID": "a1" * 32,
             "AUTONOMY_PW": pw,

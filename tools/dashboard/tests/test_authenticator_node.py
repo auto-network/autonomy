@@ -1,6 +1,7 @@
 """Node virtual-authenticator acceptance against the real dashboard routes."""
 
 from __future__ import annotations
+from tools.network.idkit.root_factor_policy import mint_password_armor
 
 import base64
 import json
@@ -17,7 +18,6 @@ from tools.dashboard.dao import identity_sessions
 from tools.graph import settings_ops
 from tools.graph.schemas.personal_identity import PASSKEY_SET_ID
 from tools.network.idkit import KeyPair
-from tools.network.idkit.armor import encrypt_root_key
 
 ORG = "nodeauthenticator"
 HOST = "localhost:8080"
@@ -131,7 +131,7 @@ def test_virtual_authenticator_registers_unlocks_and_signals_clone(
     route_client,
 ):
     root = KeyPair.generate()
-    armor = encrypt_root_key(
+    armor = mint_password_armor(
         root,
         "node virtual authenticator password",
         iterations=10_000,

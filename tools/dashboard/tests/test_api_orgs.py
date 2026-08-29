@@ -9,6 +9,7 @@ touch the operator's real ``data/orgs/``.
 """
 
 from __future__ import annotations
+from tools.network.idkit.root_factor_policy import mint_password_armor
 
 import json
 import sqlite3
@@ -82,14 +83,13 @@ def orgs_root(tmp_path, monkeypatch):
     from tools.graph import settings_ops
     from tools.graph.schemas.personal_identity import PERSONAL_IDENTITY_SET_ID
     from tools.network.idkit import KeyPair
-    from tools.network.idkit.armor import encrypt_root_key
 
     owner = KeyPair.generate()
     with settings_ops.identity_write_context():
         settings_ops.upsert_by_key(
             PERSONAL_IDENTITY_SET_ID, 1, "default",
             {
-                "armored_private_key": encrypt_root_key(
+                "armored_private_key": mint_password_armor(
                     owner, PERSONAL_PASSWORD, iterations=10_000
                 ),
                 "root_pub": owner.public_hex,

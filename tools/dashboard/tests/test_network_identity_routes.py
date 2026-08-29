@@ -15,6 +15,7 @@ pin the server half against the REAL B1 registry (httpx.ASGITransport):
 """
 
 from __future__ import annotations
+from tools.network.idkit.root_factor_policy import mint_password_armor
 
 import time
 from types import SimpleNamespace
@@ -34,7 +35,6 @@ from tools.graph.schemas.network_identity import (
     NETWORK_SERVE_CERT_SET_ID,
 )
 from tools.network.idkit import KeyPair, Subject, issue_cert
-from tools.network.idkit.armor import decrypt_root_key, encrypt_root_key
 from tools.network.registry.app import create_app as create_registry_app
 from tools.network.registry.signing import sign_request
 
@@ -723,9 +723,8 @@ def _store_personal_identity(personal: KeyPair) -> None:
         PERSONAL_IDENTITY_REVISION,
         PERSONAL_IDENTITY_SET_ID,
     )
-    from tools.network.idkit.armor import encrypt_root_key
 
-    armor = encrypt_root_key(personal, "correct horse battery staple",
+    armor = mint_password_armor(personal, "correct horse battery staple",
                              iterations=10_000)  # low iters: fast test
     with settings_ops.identity_write_context():
         settings_ops.upsert_by_key(
