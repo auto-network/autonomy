@@ -327,10 +327,12 @@ keys:
       root authority by satisfying the armor's factor policy (password or
       passkey, per the enrolled policy); routine operations then sign with
       crypto.subtle.sign and never see a factor again during validity. The
-      crib sheet's section 2 Tier-2 prose (PRF-wrapped at rest, one
-      user-verified assertion per signature, seven-day TTL) and section 9's
-      scope list describe a design this implementation does not match;
-      recorded as a crib comment for the next synthesis.
+      crib sheet's section 2 Tier-2 prose conflates this key with a second,
+      different mechanism — the per-operation authorize ceremony, where
+      opening a vault policy class costs one user-verified assertion that
+      derives ephemeral opener seeds (vault_routes.py _openers;
+      factor-management.js _authPasskey) — recorded as crib comments
+      5ca511cf and its correction for the next synthesis.
   persona_signing_key:
     group: org-authority
     kind: signing
