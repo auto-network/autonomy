@@ -21,6 +21,7 @@ The DASHBOARD_MOCK server reads fixture JSON on every request; the sessions
 page seeds its Alpine store from /api/dao/active_sessions (HTTP fallback).
 """
 from __future__ import annotations
+from tools.network.idkit.root_factor_policy import mint_password_armor, open_armor_with_password
 
 import functools
 import json
@@ -56,7 +57,6 @@ from tools.network.idkit import (
     issue_cert,
     verify_chain,
 )
-from tools.network.idkit.armor import decrypt_root_key, encrypt_root_key
 from tools.network.idkit.canonical import canonical_json
 from tools.network.idkit.keys import verify_signature
 from tools.network.idkit.persona import derive_persona
@@ -14443,12 +14443,12 @@ NETWORK_ROOT = KeyPair.generate()
 NETWORK_PASSPHRASE = "sweep horse battery staple"
 # Floor-of-range PBKDF2 iterations keep the sweep fast; real ceremonies
 # use armor.DEFAULT_ITERATIONS.
-NETWORK_ARMOR = encrypt_root_key(NETWORK_ROOT, NETWORK_PASSPHRASE, iterations=10_000)
+NETWORK_ARMOR = mint_password_armor(NETWORK_ROOT, NETWORK_PASSPHRASE, iterations=10_000)
 # The PERSONAL identity sign-on actually unlocks. Its armor opens with the
 # same one passphrase; the org armor above now only serves the root step-up
 # that revocation still is.
 NETWORK_PERSONAL_ROOT = KeyPair.generate()
-NETWORK_PERSONAL_ARMOR = encrypt_root_key(
+NETWORK_PERSONAL_ARMOR = mint_password_armor(
     NETWORK_PERSONAL_ROOT, NETWORK_PASSPHRASE, iterations=10_000,
 )
 NETWORK_ORG_SLUG = "sweep-org"
@@ -15006,7 +15006,7 @@ def _c1_smuggled_armor() -> tuple[str, str]:
     import base64 as _b64
 
     smuggle_root = KeyPair.generate()
-    armor = encrypt_root_key(smuggle_root, C1_PASSPHRASE, iterations=10_000)
+    armor = mint_password_armor(smuggle_root, C1_PASSPHRASE, iterations=10_000)
     lines = armor.strip().splitlines()
     body = json.loads(_b64.b64decode("".join(lines[1:-1])))
     body["private_hex"] = smuggle_root.private_hex
@@ -15048,7 +15048,7 @@ def _c1_noncanonical_b64_armor() -> str:
     import string as _string
 
     root = KeyPair.generate()
-    armor = encrypt_root_key(root, C1_PASSPHRASE, iterations=10_000)
+    armor = mint_password_armor(root, C1_PASSPHRASE, iterations=10_000)
     lines = armor.strip().splitlines()
     body = json.loads(_b64.b64decode("".join(lines[1:-1])))
     kdf = _c1_password_kdf(body)
@@ -15349,7 +15349,7 @@ class TestNetworkIdentityCeremony:
         post = c["captured"]["orgKeyPosts"][0]
         # Nothing beyond the armor and its public half ever leaves the page.
         assert set(post) == {"org", "armored_private_key", "root_pub"}
-        opened = decrypt_root_key(post["armored_private_key"], C1_PASSPHRASE)
+        opened = open_armor_with_password(post["armored_private_key"], C1_PASSPHRASE)
         assert opened.public_hex == post["root_pub"]
 
     def test_c1_armor_opens_c2_root_ceremony_seam(self):

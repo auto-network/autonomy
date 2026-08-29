@@ -1,6 +1,7 @@
 """Fail-loud isolation guards for repository-local operator data paths."""
 
 from __future__ import annotations
+from tools.network.idkit.root_factor_policy import mint_password_armor
 
 import sqlite3
 
@@ -16,7 +17,6 @@ from tools.graph.db import GraphDB, resolve_caller_db_path
 from tools.graph.migrations import migrate_operator_local
 from tools.graph.schemas.personal_identity import PERSONAL_IDENTITY_SET_ID
 from tools.network.idkit import KeyPair
-from tools.network.idkit.armor import encrypt_root_key
 from tools.network.ledger import org_ledger_db_path
 
 
@@ -86,7 +86,7 @@ def test_fresh_personal_identity_write_never_uses_legacy_db(
             1,
             "default",
             {
-                "armored_private_key": encrypt_root_key(
+                "armored_private_key": mint_password_armor(
                     owner, "personal-password", iterations=10_000,
                 ),
                 "root_pub": owner.public_hex,

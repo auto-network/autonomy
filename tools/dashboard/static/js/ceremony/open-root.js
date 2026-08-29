@@ -5,7 +5,7 @@
  * — a password field when a password opens it, a passkey button when a passkey
  * opens it, BOTH (and requires both) under Multi-Factor, and a chooser when
  * either one works so the operator picks. Callers never touch a password field
- * or decryptArmor again: they call `openRoot({title, detail})`, get back a
+ * again: they call `openRoot({title, detail})`, get back a
  * ready-to-use root signing key (and the raw seed for ceremonies that need it),
  * sign their specific request, and zero the seed. No per-dialog factor logic.
  *
@@ -83,22 +83,8 @@ async function loadModel() {
       factorViews: fp.factors || [],
     };
   }
-  const data = primitives.parseArmor(pj.armored_private_key);
-  const factors = data.factors || [];
-  const mfa = factors.some((f) => f.type === 'combined');
-  const hasPassword = factors.some((f) => f.type === 'password');
-  const hasPasskey = factors.some((f) => f.type === 'passkey');
-  const openers = mfa
-    ? ['both']
-    : [...(hasPassword ? ['password'] : []), ...(hasPasskey ? ['passkey'] : [])];
-  return {
-    armor: pj.armored_private_key,
-    rootPub: pj.root_pub || data.root_pub,
-    rpId: st.rp_id || undefined,
-    passkeys: st.passkeys || [],
-    mfa,
-    openers,
-  };
+  throw new Error("this identity's armor is in a retired format and "
+    + 'cannot be opened by this software');
 }
 
 function b64u(s) {
@@ -141,15 +127,7 @@ async function getPrf(model, credentialIds = null) {
   return { prf, credentialId };
 }
 
-// Open the armor with the gathered factor(s) and return the seed + signing key.
-async function openWith(model, { password, prf }) {
-  let opened;
-  if (model.mfa) opened = await primitives.decryptArmorWithCombined(model.armor, password, prf);
-  else if (prf != null) opened = await primitives.decryptArmorWithPasskey(model.armor, prf);
-  else opened = await primitives.decryptArmor(model.armor, password);
-  const signingKey = await primitives.importEd25519RootSigningKey(opened.seed);
-  return { seed: opened.seed, signingKey, rootPub: opened.rootPub };
-}
+
 
 async function openRootPolicy(model, { title, detail }) {
   const policy = model.policyModule;
@@ -322,118 +300,9 @@ export async function openRoot({ title = 'Approve', detail = '' } = {}) {
   injectStyles();
   const model = await loadModel();
   if (model.v3) return openRootPolicy(model, { title, detail });
-  if (!model.openers.length) throw new Error('your identity has no factor that can open the root');
-
-  return new Promise((resolve) => {
-    const host = document.createElement('div');
-    host.className = 'or-overlay';
-    host.setAttribute('data-testid', 'open-root');
-    const card = document.createElement('div'); card.className = 'or-card';
-    host.appendChild(card);
-    document.body.appendChild(host);
-
-    // S.method: which single opener is chosen (password|passkey) when either
-    // works; null until chosen. Under MFA both are always required.
-    const S = { method: model.mfa ? null : (model.openers.length === 1 ? model.openers[0] : null),
-      password: null, prf: null, warn: null, busy: false };
-
-    function close(result) {
-      if (host.parentNode) host.parentNode.removeChild(host);
-      resolve(result);
-    }
-
-    async function finish() {
-      if (S.busy) return;
-      S.busy = true; S.warn = null; render();
-      try {
-        const out = await openWith(model, { password: S.password, prf: S.prf });
-        close(out);
-      } catch (e) {
-        S.busy = false;
-        S.warn = (e && e.message) || 'that proof did not open your identity — try again';
-        S.prf = null; render();
-      }
-    }
-
-    function el(tag, cls, html) {
-      const n = document.createElement(tag);
-      if (cls) n.className = cls; if (html != null) n.innerHTML = html; return n;
-    }
-
-    function passwordField(labelText) {
-      const lab = el('label', 'or-lab', labelText); card.appendChild(lab);
-      const i = el('input', 'or-in'); i.type = 'password'; i.autocomplete = 'current-password';
-      if (S.password) i.value = S.password;
-      i.oninput = () => { S.password = i.value; };
-      card.appendChild(i);
-      setTimeout(() => i.focus(), 0);
-      return i;
-    }
-    function passkeyButton(labelText, cb) {
-      const b = el('div', 'or-btn' + (S.prf ? ' alt' : ''),
-        S.prf ? '&#10003; Passkey ready' : labelText);
-      if (!S.prf) b.onclick = cb; card.appendChild(b);
-      return b;
-    }
-    async function provePasskey() {
-      S.warn = null; S.busy = true; render();
-      try { S.prf = (await getPrf(model)).prf; S.busy = false; render(); }
-      catch (e) { S.busy = false; S.warn = (e && e.message) || String(e); render(); }
-    }
-
-    function render() {
-      card.innerHTML = '';
-      card.appendChild(el('div', 'or-ttl', title));
-      if (detail) card.appendChild(el('div', 'or-sub', detail));
-
-      if (model.mfa) {
-        card.appendChild(el('div', 'or-sub',
-          'Multi-Factor: your password AND your passkey are both required.'));
-        passwordField('Your password');
-        passkeyButton('Use your passkey', provePasskey);
-        const ready = !!S.password && !!S.prf && !S.busy;
-        const go = el('div', 'or-btn', S.busy ? 'Working…' : 'Approve');
-        go.setAttribute('aria-disabled', String(!ready));
-        if (ready) go.onclick = finish;
-        card.appendChild(go);
-      } else if (!S.method) {
-        // Either factor works — let the operator choose which.
-        card.appendChild(el('div', 'or-sub', 'Choose a factor to unlock your root.'));
-        model.openers.forEach((m) => {
-          const row = el('div', 'or-row',
-            '<div class="or-ic">' + (m === 'passkey' ? FACE : '') + '</div><div>' + NAME[m] + '</div>');
-          row.onclick = () => { S.method = m; S.warn = null; render(); };
-          card.appendChild(row);
-        });
-      } else if (S.method === 'passkey') {
-        card.appendChild(el('div', 'or-sub', 'Use your passkey to unlock your root.'));
-        if (!S.prf) {
-          const b = el('div', 'or-btn', S.busy ? 'Waiting for passkey…' : 'Use your passkey');
-          if (!S.busy) b.onclick = () => { provePasskey().then(() => { if (S.prf) finish(); }); };
-          card.appendChild(b);
-        } else {
-          const go = el('div', 'or-btn', S.busy ? 'Working…' : 'Approve');
-          go.onclick = finish; card.appendChild(go);
-        }
-      } else {
-        passwordField('Your password');
-        const go = el('div', 'or-btn', S.busy ? 'Working…' : 'Approve');
-        go.onclick = finish; card.appendChild(go);
-      }
-
-      if (model.openers.length > 1 && S.method && !model.mfa) {
-        const back = el('div', 'or-cancel', '‹ Use a different factor');
-        back.onclick = () => { S.method = null; S.prf = null; S.password = null; S.warn = null; render(); };
-        card.appendChild(back);
-      }
-      if (S.warn) card.appendChild(el('div', 'or-warn', S.warn));
-      const cancel = el('div', 'or-cancel', 'Cancel');
-      cancel.onclick = () => close(null);
-      card.appendChild(cancel);
-    }
-
-    render();
-  });
+  // loadModel refuses every non-v3 armor, so this line is unreachable; it
+  // exists so a future model shape fails loudly instead of silently.
+  throw new Error('unsupported root model');
 }
 
 export default openRoot;

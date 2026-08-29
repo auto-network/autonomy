@@ -1,6 +1,7 @@
 """Real module-load regression for browser sign-on adapter configuration."""
 
 from __future__ import annotations
+from tools.network.idkit.root_factor_policy import mint_password_armor
 
 import json
 import os
@@ -17,7 +18,6 @@ from tools.network.idkit import (
     derive_persona,
     verify_chain,
 )
-from tools.network.idkit.armor import encrypt_root_key
 from tools.network.idkit.keys import verify_signature
 from tools.network.registry.signing import request_signing_input
 
@@ -37,7 +37,7 @@ def test_browser_module_load_configures_real_signon_path():
         ["node", str(HARNESS), "browser"],
         env={
             **os.environ,
-            "AUTONOMY_PERSONAL_ARMOR": encrypt_root_key(
+            "AUTONOMY_PERSONAL_ARMOR": mint_password_armor(
                 personal, passphrase, iterations=10_000),
             "AUTONOMY_PERSONAL_ROOT_PUB": personal.public_hex,
             "AUTONOMY_GENESIS_ID": genesis_id,

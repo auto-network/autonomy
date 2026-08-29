@@ -14,6 +14,7 @@ Acceptance (model notes 53f65f2f-d73, 80ef5131-9f0; invariant I1):
 """
 
 from __future__ import annotations
+from tools.network.idkit.root_factor_policy import mint_password_armor
 
 import copy
 
@@ -27,10 +28,9 @@ from tools.graph.schemas.registry import (
     validate_payload,
 )
 from tools.network.idkit import KeyPair
-from tools.network.idkit.armor import encrypt_root_key
 
 _ROOT = KeyPair.generate()
-_ARMOR = encrypt_root_key(_ROOT, "week-glacier-thirty-nine", iterations=10_000)
+_ARMOR = mint_password_armor(_ROOT, "week-glacier-thirty-nine", iterations=10_000)
 
 
 def _personal_payload() -> dict:

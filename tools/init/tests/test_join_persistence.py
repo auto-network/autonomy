@@ -1,6 +1,7 @@
 """B4b: a Docker-path invite join survives a real process restart."""
 
 from __future__ import annotations
+from tools.network.idkit.root_factor_policy import mint_password_armor
 
 import hashlib
 import json
@@ -383,7 +384,6 @@ def test_restart_refuses_when_the_seed_no_longer_derives_the_staged_persona(
 ):
     from tools.graph import settings_ops
     from tools.graph.schemas.personal_identity import PERSONAL_IDENTITY_SET_ID
-    from tools.network.idkit.armor import encrypt_root_key
 
     world = FoundedInvite(tmp_path / "remote-orgs", "inviting")
     volume = tmp_path / "node-volume"
@@ -403,7 +403,7 @@ def test_restart_refuses_when_the_seed_no_longer_derives_the_staged_persona(
                 1,
                 "default",
                 {
-                    "armored_private_key": encrypt_root_key(
+                    "armored_private_key": mint_password_armor(
                         replacement, PASSWORD
                     ),
                     "root_pub": replacement.public_hex,

@@ -496,7 +496,6 @@ async def post_personal(request: Request) -> JSONResponse:
 # The root signs the re-factored armor so the server knows the submitter opened
 # the CURRENT armor (held a valid factor) rather than crafting a substitute.
 # Distinct domain so the signature cannot be replayed as any other record.
-REARMOR_DOMAIN = b"autonomy.identity.rearmor.v1\n"
 
 
 def _root_reachable(factor_types: list, require_pair: bool) -> bool:
@@ -520,186 +519,6 @@ def _root_reachable(factor_types: list, require_pair: bool) -> bool:
     if require_pair:
         return has_combined or (has_password and has_passkey)
     return has_password or has_passkey or has_combined
-
-
-async def post_rearmor(request: Request) -> JSONResponse:
-    """Replace the personal root's armor with a re-factored one — promote or
-    demote a passkey, set or remove the password, require a pair.
-
-    Body: ``{armored_private_key, require_pair?, signature}``. The browser opens
-    the current armor (proving possession of a factor), re-wraps the SAME root
-    seed under the new factor set, and signs the new armor with the root. The
-    server verifies that signature against the STORED root — never the armor's
-    own root_pub field alone, which a substitute armor could forge — and refuses
-    any factor set that would leave the identity without a daily opener
-    (rootReachable). I1: only the armor is stored, never plaintext.
-    """
-    if _mock_mode():
-        return JSONResponse({"ok": False,
-                             "error": "mock dashboard stores no identities"},
-                            status_code=502)
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"ok": False, "error": "body must be JSON"},
-                            status_code=400)
-    if not isinstance(body, dict) or not isinstance(body.get("armored_private_key"), str) \
-            or not isinstance(body.get("signature"), str):
-        return JSONResponse({"ok": False, "error": (
-            "body must carry 'armored_private_key' and the root 'signature' over it"
-        )}, status_code=400)
-
-    from tools.network.idkit.armor import (
-        ArmorError,
-        armor_factor_types,
-        armor_root_pub,
-        armor_version,
-        canonicalize_armor,
-    )
-    from tools.network.idkit.keys import verify_signature
-    from tools.network.idkit.errors import IdkitError
-    try:
-        canonical_armor = canonicalize_armor(body["armored_private_key"])
-        if armor_version(canonical_armor) != 2:
-            return JSONResponse({"ok": False, "error": (
-                "version 3 factor policies must use the generation-aware "
-                "factor-policy preview and commit endpoints"
-            )}, status_code=409)
-        new_root_pub = armor_root_pub(canonical_armor)
-        factor_types = armor_factor_types(canonical_armor)
-    except ArmorError as e:
-        return JSONResponse({"ok": False, "error": (
-            f"not a canonical password-encrypted key armor (I1): {e}"
-        )}, status_code=400)
-
-    try:
-        existing = _personal_member()
-    except Exception as e:
-        return JSONResponse({"ok": False,
-                             "error": f"could not read the personal identity: {e}"},
-                            status_code=500)
-    if existing is None or not existing.payload.get("root_pub"):
-        return JSONResponse({"ok": False, "error": (
-            "no personal identity to re-armor — run Get started first"
-        )}, status_code=409)
-    stored_root_pub = existing.payload["root_pub"]
-    if new_root_pub != stored_root_pub:
-        return JSONResponse({"ok": False, "error": (
-            "the new armor is for a different root key — re-armoring never "
-            "changes which identity this is"
-        )}, status_code=409)
-
-    # Proof of possession: only someone who opened the CURRENT armor holds the
-    # root, so only they can sign the replacement. A substitute armor forged
-    # with a stolen root_pub cannot produce this signature.
-    try:
-        verify_signature(stored_root_pub, body["signature"],
-                         REARMOR_DOMAIN + canonical_armor.encode("utf-8"))
-    except IdkitError:
-        return JSONResponse({"ok": False, "error": (
-            "the re-armor signature does not verify against your root — only a "
-            "holder of the current key may replace its armor"
-        )}, status_code=403)
-
-    require_pair = bool(body.get("require_pair", existing.payload.get("require_pair", False)))
-    if not _root_reachable(factor_types, require_pair):
-        need = ("a password AND a passkey" if require_pair
-                else "a password or a passkey")
-        return JSONResponse({"ok": False, "error": (
-            f"this factor set would leave no daily way in — keep {need}"
-        )}, status_code=400)
-
-    payload = dict(existing.payload)
-    payload["armored_private_key"] = canonical_armor
-    payload["root_pub"] = stored_root_pub
-    payload["require_pair"] = require_pair
-    payload["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    try:
-        with settings_ops.identity_write_context():
-            settings_ops.upsert_by_key(
-                PERSONAL_IDENTITY_SET_ID, PERSONAL_IDENTITY_REVISION,
-                existing.key, payload, org=None,
-            )
-    except Exception as e:
-        return JSONResponse({"ok": False,
-                             "error": f"could not store the re-armored identity: {e}"},
-                            status_code=500)
-    return JSONResponse({"ok": True, "root_pub": stored_root_pub,
-                         "factors": factor_types, "require_pair": require_pair})
-
-
-# ── factor-policy generations ────────────────────────────────────────
-
-
-def _legacy_factor_policy(armor_text: str) -> tuple[list[dict], dict]:
-    """Describe a v2 armor without pretending its physical locks are v3.
-
-    These synthetic ids are display/migration handles only.  A v2 password
-    wrap is not yet a normalized public recipient, so the transition API
-    accepts only one explicit ``migrate_legacy`` operation at generation zero.
-    """
-    from tools.network.idkit.armor import parse_armor
-    from tools.network.idkit.root_factor_policy import canonical_expression
-
-    data = parse_armor(armor_text)
-    factors: list[dict] = []
-    branches: list[dict] = []
-    for index, factor in enumerate(data["factors"]):
-        kind = factor["type"]
-        if kind == "password":
-            factor_id = "legacy.password"
-            factors.append({"factor_id": factor_id, "type": "password"})
-            branches.append({"op": "factor", "factor_id": factor_id})
-        elif kind == "passkey":
-            suffix = hashlib.sha256(
-                f"{factor['credential_id']}:{factor['kem_pub']}".encode("utf-8")
-            ).hexdigest()[:20]
-            factor_id = f"legacy.passkey:{suffix}"
-            factors.append({
-                "factor_id": factor_id,
-                "type": "passkey",
-                "credential_id": factor["credential_id"],
-                "recipients": [{
-                    "recipient_public_key": factor["kem_pub"],
-                    "label": "Legacy device",
-                    "created_at": "1970-01-01T00:00:00Z",
-                }],
-            })
-            branches.append({"op": "factor", "factor_id": factor_id})
-        elif kind == "combined":
-            suffix = hashlib.sha256(
-                f"{index}:{factor['credential_id']}:{factor['kem_pub']}".encode("utf-8")
-            ).hexdigest()[:20]
-            password_id = f"legacy.combined-password:{suffix}"
-            passkey_id = f"legacy.combined-passkey:{suffix}"
-            factors.extend([
-                {"factor_id": password_id, "type": "password"},
-                {
-                    "factor_id": passkey_id,
-                    "type": "passkey",
-                    "credential_id": factor["credential_id"],
-                    "recipients": [{
-                        "recipient_public_key": factor["kem_pub"],
-                        "label": "Legacy device",
-                        "created_at": "1970-01-01T00:00:00Z",
-                    }],
-                },
-            ])
-            branches.append({
-                "op": "and",
-                "children": [
-                    {"op": "factor", "factor_id": password_id},
-                    {"op": "factor", "factor_id": passkey_id},
-                ],
-            })
-        # Recovery remains visible in the legacy personal endpoint but is not a
-        # day-to-day factor in the new policy editor.
-    if not branches:
-        raise ValueError("legacy armor has no day-to-day root opener")
-    policy = branches[0] if len(branches) == 1 else {
-        "op": "or", "children": branches,
-    }
-    return factors, canonical_expression(policy)
 
 
 def _factor_policy_state(member) -> dict:
@@ -727,30 +546,10 @@ def _factor_policy_state(member) -> dict:
             "envelope": envelope,
             "migration_required": False,
         }
-    factors, policy = _legacy_factor_policy(armor_text)
-    member_ids = {factor["factor_id"] for factor in factors}
-    roles = {}
-    from tools.network.idkit.root_factor_policy import policy_satisfied
-    for factor in factors:
-        factor_id = factor["factor_id"]
-        roles[factor_id] = {
-            "access": "enabled",
-            "root_role": (
-                "individual" if policy_satisfied(policy, {factor_id})
-                else "mfa-member"
-            ),
-        }
-    return {
-        "armor_version": version,
-        "generation": 0,
-        "root_pub": member.payload["root_pub"],
-        "factors": factors,
-        "access": sorted(member_ids),
-        "root_policy": policy,
-        "roles": roles,
-        "envelope": None,
-        "migration_required": True,
-    }
+    raise ValueError(
+        "this identity's armor is in a retired format and cannot be described "
+        "by the factor-policy editor"
+    )
 
 
 def _factor_policy_view(state: dict) -> dict:
@@ -837,13 +636,11 @@ def _factor_policy_view(state: dict) -> dict:
             "recovery_pub": recovery["recovery_pub"],
             "created_at": recovery.get("created_at"),
         },
-        "allowed_operations": (
-            ["migrate_legacy"] if state["migration_required"] else [
-                "enroll_password", "enroll_passkey", "change_password",
-                "add_passkey_recipient", "remove_passkey_recipient",
-                "remove_factor", "set_access", "set_root_policy", "set_recovery",
-            ]
-        ),
+        "allowed_operations": [
+            "enroll_password", "enroll_passkey", "change_password",
+            "add_passkey_recipient", "remove_passkey_recipient",
+            "remove_factor", "set_access", "set_root_policy", "set_recovery",
+        ],
     }
 
 
@@ -855,39 +652,14 @@ def _project_factor_policy(state: dict, operations: object) -> dict:
     )
     if not isinstance(operations, list) or not operations:
         raise ValueError("operations must be a non-empty array")
-    if not state["migration_required"]:
-        return project_operations({
-            "generation": state["generation"],
-            "root_pub": state["root_pub"],
-            "factors": state["factors"],
-            "access": state["access"],
-            "policy": state["root_policy"],
-            "recovery": state.get("recovery"),
-        }, operations)
-    if len(operations) != 1 or not isinstance(operations[0], dict) \
-            or set(operations[0]) != {"op", "factors", "access", "root_policy"} \
-            or operations[0].get("op") != "migrate_legacy":
-        raise ValueError(
-            "generation zero accepts exactly one migrate_legacy operation "
-            "carrying factors, access, and root_policy"
-        )
-    operation = operations[0]
-    validated = validate_state(
-        operation["factors"], operation["access"], operation["root_policy"],
-        root_pub=state["root_pub"],
-    )
-    return {
-        "version": POLICY_VERSION,
-        "base_generation": 0,
-        "generation": 1,
+    return project_operations({
+        "generation": state["generation"],
         "root_pub": state["root_pub"],
-        "factors": validated["factors"],
-        "access": validated["access"],
-        "root_policy": validated["policy"],
-        "roles": validated["roles"],
-        "operations": ["migrate_legacy"],
-        "change_count": 1,
-    }
+        "factors": state["factors"],
+        "access": state["access"],
+        "policy": state["root_policy"],
+        "recovery": state.get("recovery"),
+    }, operations)
 
 
 def _validate_passkey_bindings(projected: dict) -> None:
@@ -1893,7 +1665,6 @@ ROUTES = [
     Route("/api/identity/unlock-state", get_unlock_state, methods=["GET"]),
     Route("/api/identity/personal", get_personal, methods=["GET"]),
     Route("/api/identity/personal", post_personal, methods=["POST"]),
-    Route("/api/identity/personal/armor", post_rearmor, methods=["POST"]),
     Route("/api/identity/factor-policy", get_factor_policy, methods=["GET"]),
     Route("/api/identity/factor-policy/preview", post_factor_policy_preview,
           methods=["POST"]),

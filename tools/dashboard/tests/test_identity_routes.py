@@ -23,6 +23,7 @@ the server half:
 """
 
 from __future__ import annotations
+from tools.network.idkit.root_factor_policy import mint_password_armor, open_armor_with_password
 
 import base64
 import hashlib
@@ -43,7 +44,6 @@ from tools.graph.schemas.personal_identity import (
     PERSONAL_IDENTITY_SET_ID,
 )
 from tools.network.idkit import KeyPair
-from tools.network.idkit.armor import decrypt_root_key, encrypt_root_key
 
 ORG = "idorg"
 PASSWORD = "week-glacier-thirty-nine"
@@ -91,7 +91,7 @@ def env(tmp_path, monkeypatch):
 
 
 def _armor(root: KeyPair) -> str:
-    return encrypt_root_key(root, PASSWORD, iterations=10_000)
+    return mint_password_armor(root, PASSWORD, iterations=10_000)
 
 
 def _store_identity(client, root: KeyPair, name="Alex"):
@@ -361,7 +361,7 @@ def test_personal_roundtrip(env, root):
     assert body["root_pub"] == root.public_hex
     served = env.get("/api/identity/personal").json()
     assert served["display_name"] == "Alex"
-    opened = decrypt_root_key(served["armored_private_key"], PASSWORD)
+    opened = open_armor_with_password(served["armored_private_key"], PASSWORD)
     assert opened.public_hex == root.public_hex
 
 
@@ -780,7 +780,7 @@ def _passkey_armor(kp, cred="cred-a", prf=b"\x21" * 32, password=PASSWORD):
     )
     from tools.network.idkit.sealing import derive_encapsulation_keypair
     _, kem = derive_encapsulation_keypair(prf, PASSKEY_ARMOR_PURPOSE)
-    base = encrypt_root_key(kp, password, iterations=10_000)
+    base = mint_password_armor(kp, password, iterations=10_000)
     return add_passkey_factor(base, password, cred, kem)
 
 
@@ -811,9 +811,8 @@ def test_rearmor_rejects_a_foreign_root(env, root):
 
 
 def test_rearmor_require_pair_needs_both(env, root):
-    from tools.network.idkit.armor import encrypt_root_key
     _store_identity(env, root)
-    pw_only = encrypt_root_key(root, PASSWORD, iterations=10_000)
+    pw_only = mint_password_armor(root, PASSWORD, iterations=10_000)
     r = env.post("/api/identity/personal/armor",
                  json=_rearmor_body(root, pw_only, require_pair=True))
     assert r.status_code == 400
@@ -876,14 +875,14 @@ def test_rearmor_demotes_a_passkey(env, root):
 
 
 def test_rearmor_changes_the_password(env, root):
-    from tools.network.idkit.armor import decrypt_root_key, set_password_factor
+    from tools.network.idkit.armor import set_password_factor
     _store_identity(env, root)
     changed = set_password_factor(_armor(root), PASSWORD, "brand-new-pass",
                                   iterations=10_000)
     r = env.post("/api/identity/personal/armor", json=_rearmor_body(root, changed))
     assert r.status_code == 200, r.text
     served = env.get("/api/identity/personal").json()
-    assert decrypt_root_key(
+    assert open_armor_with_password(
         served["armored_private_key"], "brand-new-pass").private_hex == root.private_hex
 
 

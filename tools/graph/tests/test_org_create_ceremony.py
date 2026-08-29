@@ -1,6 +1,7 @@
 """create_org_with_identity: the atomic founding ceremony (auto-nixfv)."""
 
 from __future__ import annotations
+from tools.network.idkit.root_factor_policy import mint_password_armor
 
 import io
 import json
@@ -16,7 +17,7 @@ from tools.graph.schemas.network_identity import (
 )
 from tools.graph.schemas.personal_identity import PERSONAL_IDENTITY_SET_ID
 from tools.network.idkit import KeyPair, derive_persona
-from tools.network.idkit.armor import ArmorPassphraseError, encrypt_root_key
+from tools.network.idkit.armor import ArmorPassphraseError
 from tools.network.idkit.errors import SealingError
 from tools.network.idkit.sealing import derive_encapsulation_keypair
 from tools.network.idkit.sealing import open as seal_open
@@ -45,7 +46,7 @@ def env(tmp_path, monkeypatch):
         settings_ops.upsert_by_key(
             PERSONAL_IDENTITY_SET_ID, 1, "default",
             {
-                "armored_private_key": encrypt_root_key(
+                "armored_private_key": mint_password_armor(
                     personal_root, PASSWORD, iterations=10_000
                 ),
                 "root_pub": personal_root.public_hex,

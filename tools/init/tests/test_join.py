@@ -1,6 +1,7 @@
 """Join orchestration: anchor pinning, the password ruling, the claim."""
 
 from __future__ import annotations
+from tools.network.idkit.root_factor_policy import open_armor_with_password
 
 import os
 
@@ -204,13 +205,12 @@ def test_with_a_password_mints_locally_and_claims(volume):
     from tools.network.idkit import derive_persona
     from tools.graph import settings_ops
     from tools.graph.schemas.personal_identity import PERSONAL_IDENTITY_SET_ID
-    from tools.network.idkit.armor import decrypt_root_key
 
     member = [
         m for m in settings_ops.read_owned_set(PERSONAL_IDENTITY_SET_ID, org=None).members
         if isinstance(m.payload, dict)
     ][0]
-    seed = bytes.fromhex(decrypt_root_key(member.payload["armored_private_key"],
+    seed = bytes.fromhex(open_armor_with_password(member.payload["armored_private_key"],
                                           PASSWORD).private_hex)
     assert derive_persona(seed, GENESIS).public_hex == outcome.persona_pub
 
