@@ -21,6 +21,7 @@
         "revoke": "RevocationRecord plus TTL. Not a ceremony.",
         "snapshot": "Nothing."
       },
+      "group": "org-authority",
       "kind": "signing"
     },
     "class_key": {
@@ -44,7 +45,20 @@
         "revoke": "Factor revocation appends the next generation sealed to the survivors and the anchor; it applies at the next write and touches no existing sealed material.",
         "snapshot": "The class's secrets for generations this key belongs to."
       },
-      "kind": "symmetric"
+      "group": "vault-classes",
+      "kind": "symmetric",
+      "seals_to": [
+        {
+          "purpose": "autonomy/vault-policy-class/v1",
+          "recipient": "vault_factor_recipient",
+          "record": "PolicyClassRecord generation wrap"
+        },
+        {
+          "purpose": "autonomy/vault-root-anchor-wrap/v1",
+          "recipient": "root_anchor_seed",
+          "record": "mandatory anchor wrap"
+        }
+      ]
     },
     "factor_recipient": {
       "code": [
@@ -70,6 +84,7 @@
         "revoke": "Factor revocation; the envelope is re-signed without the share.",
         "snapshot": "Those shares; the policy expression decides what they combine to."
       },
+      "group": "identity-armor",
       "kind": "kem"
     },
     "factor_seed": {
@@ -91,6 +106,7 @@
         "revoke": "Factor revocation re-signs the armor envelope without it.",
         "snapshot": "That factor's policy shares. Whether the root follows depends on the policy expression, not on this key alone."
       },
+      "group": "identity-armor",
       "kind": "seed",
       "proofs": [
         {
@@ -130,6 +146,7 @@
         "revoke": "None \u2014 a generation secret is never retired.",
         "snapshot": "Total for that branch, offline."
       },
+      "group": "domain-storage",
       "kind": "symmetric",
       "proofs": [
         {
@@ -141,6 +158,13 @@
           "framework": "tamarin",
           "lemma": "concurrent_grant_secret",
           "theory": "VaultConcurrentRekey"
+        }
+      ],
+      "seals_to": [
+        {
+          "purpose": "autonomy/capability-grant/v1",
+          "recipient": "persona_kem_private",
+          "record": "CapabilityGrant"
         }
       ]
     },
@@ -164,6 +188,7 @@
         "revoke": "Follows the sealed index.",
         "snapshot": "Nothing \u2014 they are never at rest."
       },
+      "group": "sealed-stores",
       "kind": "derived-secret",
       "status": "designed"
     },
@@ -186,6 +211,7 @@
         "revoke": "Re-sealed on every factor change (a new armor generation).",
         "snapshot": "The armored root, opened only through a satisfying factor set."
       },
+      "group": "identity-armor",
       "kind": "symmetric"
     },
     "member_recovery_key": {
@@ -215,6 +241,7 @@
         "revoke": "Enrolled at member.claim; changing it requires the current member recovery key or the org root. No event adds one after member.claim.",
         "snapshot": "Nothing \u2014 no plaintext, no content, no authority beyond the one door."
       },
+      "group": "recovery",
       "kind": "signing",
       "proofs": [
         {
@@ -250,7 +277,15 @@
         "revoke": "Never \u2014 the revision is immutable; withdrawal is a new key for new writes.",
         "snapshot": "That one revision."
       },
-      "kind": "symmetric"
+      "group": "vault-classes",
+      "kind": "symmetric",
+      "seals_to": [
+        {
+          "purpose": "autonomy/vault-policy-class/cek/v1",
+          "recipient": "class_key",
+          "record": "sealed content key"
+        }
+      ]
     },
     "object_wrap_key": {
       "code": [
@@ -283,6 +318,7 @@
         "revoke": "Follows the generation secret; never individually retired.",
         "snapshot": "That revision, given the ciphertext."
       },
+      "group": "domain-storage",
       "kind": "derived-secret"
     },
     "org_root_signing_key": {
@@ -305,6 +341,7 @@
         "revoke": "Org-vouch or dual-signed org-root rotation; both are ceremonies.",
         "snapshot": "No content."
       },
+      "group": "org-authority",
       "kind": "signing"
     },
     "pepper": {
@@ -324,6 +361,7 @@
         "revoke": "Re-mint and re-address every secret vault.",
         "snapshot": "Encrypted at rest, nothing. Held warm, the ability to test password guesses against vault locations offline."
       },
+      "group": "sealed-stores",
       "kind": "symmetric",
       "status": "designed"
     },
@@ -349,6 +387,7 @@
         "revoke": "Passkey revocation (root-signed RevocationRecord).",
         "snapshot": "Nothing without the device's PRF assertion."
       },
+      "group": "identity-armor",
       "kind": "kem",
       "proofs": [
         {
@@ -385,6 +424,7 @@
         "revoke": "Remove the machine from the fleet. Root-signed, not a ceremony.",
         "snapshot": "Zero. It decrypts no existing record."
       },
+      "group": "fleet",
       "kind": "kem",
       "proofs": [
         {
@@ -426,6 +466,7 @@
         "revoke": "Publish a superseding PersonaKemCredential. Stops future grants only; undoes nothing already opened.",
         "snapshot": "Total for the domain \u2014 key plus store copy is the whole history."
       },
+      "group": "domain-storage",
       "kind": "kem",
       "proofs": [
         {
@@ -437,6 +478,12 @@
           "framework": "tamarin",
           "lemma": "exclusion_forward",
           "theory": "VaultRekeyMarker"
+        }
+      ],
+      "seals_to": [
+        {
+          "recipient": "per_machine_key",
+          "record": "KEM-distribution record (designed; bead auto-pw9bs.6)"
         }
       ]
     },
@@ -465,6 +512,7 @@
         "revoke": "member.rekey moves the persona to a new key.",
         "snapshot": "Authority to sign as the persona until rekeyed away."
       },
+      "group": "org-authority",
       "kind": "signing"
     },
     "personal_root_seed": {
@@ -489,6 +537,7 @@
         "revoke": "None. The remedy is personal-root rotation, which requires the old root, the new root, and the enrolled recovery key (make_rotation in tools/network/idkit/root_rotation.py).",
         "snapshot": "Total and unbounded, across every organization."
       },
+      "group": "identity-armor",
       "kind": "seed",
       "proofs": [
         {
@@ -539,6 +588,7 @@
         "revoke": "Replacement with the code in hand runs replace_recovery_slot (tools/network/idkit/root_factor_policy.py). Regeneration with the code lost is the witnessed succession window: declaration, blocking alert, cancellation or veto, completion after the window.",
         "snapshot": "The sealed root seed, opened only by the code. No org content."
       },
+      "group": "recovery",
       "kind": "seed"
     },
     "recovery_signing_key": {
@@ -565,6 +615,7 @@
         "revoke": "Recovery-code succession (the witnessed window).",
         "snapshot": "Nothing; it signs and never decrypts."
       },
+      "group": "recovery",
       "kind": "signing"
     },
     "recovery_slot_recipient": {
@@ -592,6 +643,7 @@
         "revoke": "replace_recovery_slot re-seals the slot to a new code's recipient.",
         "snapshot": "The sealed root seed, and nothing else."
       },
+      "group": "recovery",
       "kind": "kem"
     },
     "root_anchor_seed": {
@@ -614,6 +666,7 @@
         "revoke": "Irrevocable by design: revoke_factor refuses to drop it and the store refuses to persist a class generation without it.",
         "snapshot": "Nothing while sealed; every class once the root is open."
       },
+      "group": "vault-classes",
       "kind": "seed"
     },
     "sealed_index": {
@@ -633,6 +686,7 @@
         "revoke": "Re-mint the store under a new index.",
         "snapshot": "Nothing while sealed; the store's item map once released."
       },
+      "group": "sealed-stores",
       "kind": "seed",
       "status": "designed"
     },
@@ -656,6 +710,7 @@
         "revoke": "Re-mint; thirty-day TTL, renewal below twenty days remaining.",
         "snapshot": "None."
       },
+      "group": "org-authority",
       "kind": "signing"
     },
     "tier2_session_key": {
@@ -678,8 +733,41 @@
         "revoke": "Root-signed RevocationRecord, plus the seven-day TTL. Not a ceremony.",
         "snapshot": "Nothing \u2014 it never leaves the browser."
       },
+      "group": "identity-armor",
       "kind": "signing",
-      "notes": "The crib sheet's section 9 register calls this the browser session key."
+      "notes": "The crib sheet's section 9 register calls this the browser session key.",
+      "seals_to": [
+        {
+          "recipient": "per_credential_wrapping_key",
+          "record": "cross-device Tier-2 renewal seal"
+        }
+      ]
+    },
+    "vault_factor_recipient": {
+      "code": [
+        "tools/vault/recipients.py"
+      ],
+      "crib": [
+        "\u00a718"
+      ],
+      "custody": {
+        "class": "cold",
+        "forced_by": "Re-derivable only from the cold factor seed."
+      },
+      "derivation": {
+        "fn": "derive_encapsulation_keypair",
+        "parent": "factor_seed",
+        "purpose": "autonomy/vault-policy-recipient/v1"
+      },
+      "descriptor": {
+        "bound": "The classes it is enrolled in.",
+        "live": "No.",
+        "reaches": "The vault class-key wraps sealed to it.",
+        "revoke": "Vault class-factor revocation reseals the next generation without it.",
+        "snapshot": "Those wraps; each class generation it belongs to opens."
+      },
+      "group": "vault-classes",
+      "kind": "kem"
     }
   },
   "mutations": {

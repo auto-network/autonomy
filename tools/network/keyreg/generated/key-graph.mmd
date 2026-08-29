@@ -1,37 +1,61 @@
-%% Generated from registry.yaml by gen.py — do not edit by hand.
-%% Solid arrows: derivation (parent to child). Dashed arrows: this
-%% key's material is sealed to the recipient key. Node color is the
-%% custody class. Seal edges whose recipient is prose rather than a
-%% registered key id are omitted here and remain in the register.
-graph TD
-    classDef cold fill:#1e3a5f,color:#dbeafe,stroke:#3b82f6
-    classDef memory fill:#4a2545,color:#fce7f3,stroke:#ec4899
-    classDef disk fill:#3f3f1f,color:#fef9c3,stroke:#eab308
-    classDef public fill:#1f3f2f,color:#dcfce7,stroke:#22c55e
-    agent_delegate_signing_key["agent_delegate_signing_key"]:::memory
-    class_key["class_key"]:::cold
-    factor_recipient["factor_recipient"]:::cold
-    factor_seed["factor_seed"]:::cold
-    generation_secret["generation_secret"]:::memory
-    k_index_k_meta["k_index_k_meta (designed)"]:::cold
-    master_kek["master_kek"]:::cold
-    member_recovery_key["member_recovery_key"]:::cold
-    object_cek["object_cek"]:::memory
-    object_wrap_key["object_wrap_key"]:::memory
-    org_root_signing_key["org_root_signing_key"]:::cold
-    pepper["pepper (designed)"]:::memory
-    per_credential_wrapping_key["per_credential_wrapping_key"]:::cold
-    per_machine_key["per_machine_key"]:::disk
-    persona_kem_private["persona_kem_private"]:::memory
-    persona_signing_key["persona_signing_key"]:::cold
-    personal_root_seed["personal_root_seed"]:::cold
-    recovery_code["recovery_code"]:::cold
-    recovery_signing_key["recovery_signing_key"]:::cold
-    recovery_slot_recipient["recovery_slot_recipient"]:::cold
-    root_anchor_seed["root_anchor_seed"]:::cold
-    sealed_index["sealed_index (designed)"]:::cold
-    serving_delegate_key["serving_delegate_key"]:::disk
-    tier2_session_key["tier2_session_key"]:::cold
+%%{init: {"theme": "base", "flowchart": {"nodeSpacing": 26, "rankSpacing": 42, "curve": "basis", "useMaxWidth": false}, "themeVariables": {"fontSize": "15px", "clusterBkg": "#f4f4f2", "clusterBorder": "#c3c2b7"}}}%%
+graph LR
+    %% Generated from registry.yaml by gen.py — do not edit by hand.
+    %% Clusters are the registry's group field (one subsystem each).
+    %% Solid arrows: derivation (parent to child). Dashed arrows: the
+    %% key's material is sealed to the recipient key. Node color is
+    %% custody class: blue cold, orange memory, green disk. A diamond
+    %% marks a design-only key. Prose seals remain in the register.
+    classDef cold fill:#2a78d6,color:#ffffff,stroke:#104281,stroke-width:1px
+    classDef memory fill:#eb6834,color:#0b0b0b,stroke:#8a3315,stroke-width:1px
+    classDef disk fill:#1baf7a,color:#0b0b0b,stroke:#0b5e41,stroke-width:1px
+    classDef public fill:#eda100,color:#0b0b0b,stroke:#7a5300,stroke-width:1px
+    subgraph identity_armor["Personal identity & armor"]
+        direction TB
+        factor_recipient["factor recipient"]:::cold
+        factor_seed["factor seed"]:::cold
+        master_kek["master kek"]:::cold
+        per_credential_wrapping_key["per credential wrapping key"]:::cold
+        personal_root_seed["personal root seed"]:::cold
+        tier2_session_key["tier2 session key"]:::cold
+    end
+    subgraph recovery["Recovery"]
+        direction TB
+        member_recovery_key["member recovery key"]:::cold
+        recovery_code["recovery code"]:::cold
+        recovery_signing_key["recovery signing key"]:::cold
+        recovery_slot_recipient["recovery slot recipient"]:::cold
+    end
+    subgraph org_authority["Org authority"]
+        direction TB
+        agent_delegate_signing_key["agent delegate signing key"]:::memory
+        org_root_signing_key["org root signing key"]:::cold
+        persona_signing_key["persona signing key"]:::cold
+        serving_delegate_key["serving delegate key"]:::disk
+    end
+    subgraph domain_storage["Domain storage"]
+        direction TB
+        generation_secret["generation secret"]:::memory
+        object_wrap_key["object wrap key"]:::memory
+        persona_kem_private["persona kem private"]:::memory
+    end
+    subgraph vault_classes["Vault policy classes"]
+        direction TB
+        class_key["class key"]:::cold
+        object_cek["object cek"]:::memory
+        root_anchor_seed["root anchor seed"]:::cold
+        vault_factor_recipient["vault factor recipient"]:::cold
+    end
+    subgraph sealed_stores["Sealed stores (designed)"]
+        direction TB
+        k_index_k_meta["k index k meta ⋄"]:::cold
+        pepper["pepper ⋄"]:::memory
+        sealed_index["sealed index ⋄"]:::cold
+    end
+    subgraph fleet["Fleet"]
+        direction TB
+        per_machine_key["per machine key"]:::disk
+    end
     factor_seed -->|derive_encapsulation_keypair| factor_recipient
     sealed_index -->|HKDF| k_index_k_meta
     recovery_code -->|HKDF| member_recovery_key
@@ -42,5 +66,12 @@ graph TD
     personal_root_seed -->|derive_persona| persona_signing_key
     recovery_code -->|HKDF| recovery_signing_key
     recovery_code -->|HKDF| recovery_slot_recipient
-    personal_root_seed -.->|autonomy/root-factor-recipient/v1| factor_recipient
-    personal_root_seed -.->|autonomy/recovery-armor/v1| recovery_slot_recipient
+    factor_seed -->|derive_encapsulation_keypair| vault_factor_recipient
+    class_key -.-> vault_factor_recipient
+    class_key -.-> root_anchor_seed
+    generation_secret -.-> persona_kem_private
+    object_cek -.-> class_key
+    persona_kem_private -.-> per_machine_key
+    personal_root_seed -.-> factor_recipient
+    personal_root_seed -.-> recovery_slot_recipient
+    tier2_session_key -.-> per_credential_wrapping_key

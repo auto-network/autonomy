@@ -49,6 +49,10 @@
       "additionalProperties": false,
       "properties": {
         "kind": {"enum": ["seed", "signing", "kem", "symmetric", "derived-secret"]},
+        "group": {
+          "type": "string",
+          "description": "Subsystem cluster for generated views (e.g. identity-armor, recovery, vault-classes)."
+        },
         "status": {
           "enum": ["built", "designed"],
           "default": "built",
