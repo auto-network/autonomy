@@ -13,13 +13,17 @@
 
   function _borderCls(t) {
     if (t === 'host') return 'session-card-host';
-    if (t === 'dispatch') return 'session-card-dispatch';
+    if (t === 'dispatch' || t === 'agentic') return 'session-card-dispatch';
     if (t === 'librarian') return 'session-card-librarian';
     if (t === 'chatwith') return 'session-card-chatwith';
     return 'session-card-container';
   }
 
   function _typeBadge(t) {
+    // 'agentic' badges as its own kind but styles with dispatch — the
+    // recent list's dispatch bucket covers both (host dump defect 3:
+    // agentic rows rendered badge-less, reading as interactive).
+    if (t === 'agentic') return 'Agentic';
     if (t === 'dispatch') return 'Dispatch';
     if (t === 'librarian') return 'Librarian';
     if (t === 'host') return 'Host';
@@ -29,7 +33,7 @@
 
   function _typeCls(t) {
     if (t === 'host') return 'sc-type-host';
-    if (t === 'dispatch') return 'sc-type-dispatch';
+    if (t === 'dispatch' || t === 'agentic') return 'sc-type-dispatch';
     if (t === 'librarian') return 'sc-type-librarian';
     if (t === 'chatwith') return 'sc-type-chatwith';
     return '';

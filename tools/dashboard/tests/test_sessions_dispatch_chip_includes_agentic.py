@@ -169,3 +169,86 @@ def test_sessions_all_chip_unchanged(isolated_sessions_dao):
     assert by_id["src-agentic-run"].get("session_type") == "agentic"
     assert by_id["src-bead-run"].get("session_type") == "dispatch"
     assert by_id["src-interactive"].get("session_type") == "interactive"
+
+
+def test_agentic_run_pair_collapses_to_identity_row_with_stats(
+    isolated_sessions_dao, tmp_path,
+):
+    """An agent-action run's TWO source rows (agentic identity + ingested
+    run-JSONL 'session' row) serve as ONE row: the identity wins the list
+    (badge, title, no resume), grafted with the JSONL sibling's stats and
+    freshest activity (host dump 148ead24 t346, defect 2: 4 runs served
+    as 10 rows)."""
+    import sqlite3, os
+    graph_db_path = (
+        tmp_path / "orgs" / "autonomy.db"
+    )
+    conn = sqlite3.connect(graph_db_path)
+    jsonl = tmp_path / "run.jsonl"
+    jsonl.write_text("{}\n")
+    conn.execute(
+        """INSERT INTO sources
+           (id, type, platform, title, file_path, metadata, created_at,
+            ingested_at, last_activity_at)
+           VALUES (?, 'session', 'claude-code', ?, ?, ?, ?, ?, ?)""",
+        (
+            "src-agentic-jsonl",
+            "agentic-update-summary-7f3a",
+            "/data/agent-runs/agentic-update-summary-7f3a-20260429-110000"
+            "/sessions/x/uuid.jsonl",
+            json.dumps({
+                "session_uuid": "uuid-agentic-run",
+                "ended_at": "2026-04-27T11:05:00Z",
+                "total_turns": 9,
+                "total_input_tokens": 1000,
+                "total_output_tokens": 500,
+            }),
+            "2026-04-27T10:58:30Z",
+            "2026-04-27T10:59:30Z",
+            "2026-04-27T11:05:00Z",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    rows = isolated_sessions_dao.get_recent_sessions(since="all")
+    slugged = [r for r in rows
+               if "agentic-update-summary-7f3a" in (r.get("file_path") or "")
+               or (r.get("file_path") or "").endswith("uuid.jsonl")]
+    assert len(slugged) == 1, [
+        (r["id"], r["type"], r["file_path"]) for r in slugged]
+    row = slugged[0]
+    assert row["type"] == "agentic"          # identity row won
+    assert row["session_type"] == "agentic"
+    assert row["total_turns"] == 9           # stats grafted from the sibling
+    assert row["total_tokens"] == 1500
+    assert row["last_activity_at"] == "2026-04-27T11:05:00Z"
+    assert row["resumable"] is False
+
+
+def test_resumable_requires_interactive_group(isolated_sessions_dao, tmp_path):
+    """A dispatch/agentic row never offers resume even when its JSONL
+    exists on disk (host dump defect 1)."""
+    import sqlite3
+    jsonl = tmp_path / "bead-run.jsonl"
+    jsonl.write_text("{}\n")
+    conn = sqlite3.connect(tmp_path / "orgs" / "autonomy.db")
+    conn.execute(
+        "UPDATE sources SET file_path = ? WHERE id = 'src-bead-run'",
+        (str(jsonl),),
+    )
+    inter = tmp_path / "interactive.jsonl"
+    inter.write_text("{}\n")
+    conn.execute(
+        "UPDATE sources SET file_path = ? WHERE id = 'src-interactive'",
+        (str(inter),),
+    )
+    conn.commit()
+    conn.close()
+
+    rows = {r["id"]: r for r in
+            isolated_sessions_dao.get_recent_sessions(since="all")}
+    assert rows["src-bead-run"]["session_type"] == "dispatch"
+    assert rows["src-bead-run"]["resumable"] is False
+    assert rows["src-interactive"]["session_type"] == "interactive"
+    assert rows["src-interactive"]["resumable"] is True

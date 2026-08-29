@@ -686,8 +686,16 @@ def get_recent_sessions(
                 row["ended_at"] = row["last_activity_at"]
             row["_source"] = "merged"
 
-        # Resumable: JSONL still exists on disk
-        row["resumable"] = bool(row["file_path"] and Path(row["file_path"]).exists())
+        # Resumable: JSONL exists AND the session is interactive. A bare
+        # file-existence check put resume buttons on dispatch/agentic rows
+        # (their JSONL always exists) — resuming a completed agent-action
+        # run is meaningless, and the affordance belongs to sessions a
+        # human drives (2026-08-29, host dump 148ead24 t346, defect 1).
+        row["resumable"] = bool(
+            row["file_path"]
+            and _group_for_session_type(row.get("session_type")) == "interactive"
+            and Path(row["file_path"]).exists()
+        )
         # date for backwards compat
         row["date"] = (row["last_activity_at"] or row["created_at"] or "")[:10]
         # Resolve org identity from the full row (carries session_type) BEFORE bracket-wrap
@@ -698,6 +706,47 @@ def get_recent_sessions(
             row["_org_floor"] = True
 
         merged[row["id"]] = row
+
+    # ── Step 3b: collapse the two source rows an agent-action run has ──
+    # Each inline/agentic run exists as TWO graph sources: the agentic
+    # identity row (file_path "agentic:<slug>", action metadata) and the
+    # eager/ingested run-JSONL row (type='session', the one carrying turn
+    # and token stats). Serving both doubled every run in the recent list
+    # (host dump 148ead24 t346, defect 2: 4 runs -> 10 rows). Collapse on
+    # the run slug: the identity row wins (correct badge, action title, no
+    # resume), grafting the stats and freshest activity from its JSONL
+    # sibling before that sibling is dropped.
+    agentic_by_slug: dict[str, dict] = {}
+    for r in merged.values():
+        fp = r.get("file_path") or ""
+        if r.get("type") == "agentic" and fp.startswith("agentic:"):
+            agentic_by_slug[fp[len("agentic:"):]] = r
+    if agentic_by_slug:
+        drop_ids = []
+        for r in merged.values():
+            if r.get("type") != "session":
+                continue
+            fp = r.get("file_path") or ""
+            if "/agent-runs/" not in fp:
+                continue
+            run_dir = fp.split("/agent-runs/", 1)[1].split("/", 1)[0]
+            slug = run_dir.rsplit("-", 2)[0] if run_dir.count("-") >= 2 else run_dir
+            ident = agentic_by_slug.get(slug)
+            if ident is None:
+                continue
+            for stat in ("total_tokens", "total_turns",
+                         "entry_count", "context_tokens"):
+                # The JSONL sibling is what ingestion actually tracked —
+                # its counters win whenever they are ahead of whatever the
+                # identity row happens to carry.
+                if (r.get(stat) or 0) > (ident.get(stat) or 0):
+                    ident[stat] = r[stat]
+            if (r.get("last_activity_at") or "") > (ident.get("last_activity_at") or ""):
+                ident["last_activity_at"] = r["last_activity_at"]
+                ident["ended_at"] = r.get("ended_at") or r["last_activity_at"]
+            drop_ids.append(r["id"])
+        for rid in drop_ids:
+            merged.pop(rid, None)
 
     # ── Step 4: apply `since` window ──────────────────────────────
     org_floor_rows = [r for r in merged.values() if r.get("_org_floor")]
