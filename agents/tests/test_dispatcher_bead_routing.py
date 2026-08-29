@@ -19,23 +19,59 @@ from agents import dispatcher as disp
 
 @pytest.fixture
 def org_tree(tmp_path, monkeypatch):
-    """A DATA_ROOT with one provisioned org tracker (prefix anc)."""
+    """A DATA_ROOT with one provisioned org tracker (prefix anc).
+
+    metadata.json deliberately carries NO prefix key — matching the real
+    provisioning recipe (graph 74e2b864), which writes issue_prefix only
+    into the database's config table. The prefix map is pre-seeded for
+    tests that exercise routing rather than discovery.
+    """
+    import time as _time
     orgs = tmp_path / ".beads" / "orgs" / "anchore"
     orgs.mkdir(parents=True)
     (orgs / "metadata.json").write_text(json.dumps(
-        {"dolt_database": "anchore", "prefix": "anc-"}))
+        {"dolt_database": "anchore", "backend": "dolt"}))
     monkeypatch.setattr(disp, "DATA_ROOT", tmp_path)
-    disp._bead_prefix_cache.update({"at": 0.0, "map": {}})
+    disp._bead_prefix_cache.update(
+        {"at": _time.time() + 3600, "map": {"anc": orgs}})
     yield SimpleNamespace(root=tmp_path, anchore=orgs)
     disp._bead_prefix_cache.update({"at": 0.0, "map": {}})
 
 
-def test_prefix_map_and_inference(org_tree):
+def test_prefix_discovery_reads_the_config_table(org_tree, monkeypatch):
+    """The authoritative issue_prefix lives in the tracker DATABASE's
+    config table (bd config get), never metadata.json — anchore's real
+    metadata has no prefix key, and routing must still work."""
+    disp._bead_prefix_cache.update({"at": 0.0, "map": {}})
+    config_calls = []
+
+    def fake_run_bd(args, timeout=15, check=False, beads_dir=None):
+        assert args == ["config", "get", "issue_prefix"]
+        config_calls.append(beads_dir)
+        return "anc\n"
+
+    monkeypatch.setattr(disp, "run_bd", fake_run_bd)
     assert disp._bead_prefix_map() == {"anc": org_tree.anchore}
+    assert config_calls == [org_tree.anchore]
+
+
+def test_prefix_falls_back_to_metadata_when_config_empty(org_tree, monkeypatch):
+    disp._bead_prefix_cache.update({"at": 0.0, "map": {}})
+    (org_tree.anchore / "metadata.json").write_text(json.dumps(
+        {"dolt_database": "anchore", "prefix": "anc-"}))
+    monkeypatch.setattr(
+        disp, "run_bd",
+        lambda args, timeout=15, check=False, beads_dir=None: "")
+    assert disp._bead_prefix_map() == {"anc": org_tree.anchore}
+
+
+def test_prefix_map_and_inference(org_tree):
     assert disp._beads_dir_for_args(
         ["update", "anc-123", "--append-notes", "x"]) == org_tree.anchore
     assert disp._beads_dir_for_args(["update", "auto-99x", "-s", "open"]) is None
     assert disp._beads_dir_for_args(["query", "status=open", "--json"]) is None
+    assert disp._beads_dir_for_args(["set-state", "anc-9k", "readiness=blocked"]) \
+        == org_tree.anchore
 
 
 def test_run_bd_carries_tracker_credentials(org_tree, monkeypatch):
