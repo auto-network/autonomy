@@ -41,6 +41,10 @@ against.
 | `VaultWitnessAccountabilityNoChainBind.spthy` | model 12 calibration: **position binding deleted from served views** | `poll_yields_alert_or_fraud_proof` falsified, rest verified |
 | `VaultRekeyMarkerChain.spthy` | chain extension of model 1: exclusion through UNBOUNDED marker chains (bead auto-szsw1) | all lemmas verified |
 | `VaultRekeyMarkerChainOneHop.spthy` | chain calibration: **descent check compares only the immediate parent** | `exclusion_through_chain` falsified, rest verified |
+| `RecoveryUnlink.spthy` | privacy pair A green (diff mode): recovery-key unlinkability across orgs (bead auto-u8pcx) | equivalence verified |
+| `RecoveryUnlinkNoContext.spthy` | privacy pair A calibration: **genesis context deleted from the derivation** | equivalence falsified |
+| `VaultDeniability.spthy` | privacy pair B green (diff mode): sealed-store dump deniability (bead auto-u8pcx) | equivalence verified |
+| `VaultDeniabilityPlainAddr.spthy` | privacy pair B calibration: **deterministic plaintext row addresses** | equivalence falsified |
 | `run_tamarin.py` | harness enforcing every expectation above | exit 0 iff all hold |
 
 The pairing is the point: a green proof is only trusted because the
@@ -113,8 +117,8 @@ python3 tools/network/storagekit/tamarin/run_tamarin.py
 ```
 
 Verified 2026-08-29 with tamarin-prover 1.12.0 + Maude 3.5.1: twelve
-models plus the chain extension (28 theories, 154 lemma expectations)
-green — each green theory
+models, the chain extension, and two observational-equivalence privacy
+pairs (32 theories, 158 expectations) green — each green theory
 fully verifies and each calibration falsifies exactly its headline
 lemma. Whole suite runs in a few seconds. NOTE: the toolchain needs a
 UTF-8 locale (`LC_ALL=C.UTF-8`); `run_tamarin.py` sets it.
@@ -913,6 +917,51 @@ Abstraction register:
    frC)`, sealed to `pk(skC)`) — symbolic bookkeeping only; nothing
    secret flows anywhere the pilot's encoding did not send it.
 
+## Privacy pairs — observational equivalence (bead auto-u8pcx; spike auto-pdvu6)
+
+The suite's trace lemmas cannot state privacy claims — statements that
+two WORLDS are indistinguishable. tamarin-prover's native diff mode
+can (bi-systems via `diff(left, right)` terms, run with
+`tamarin-prover --diff --prove`; `run_tamarin.py`'s
+`DIFF_EXPECTATIONS` table drives it and parses the
+`DiffLemma: Observational_equivalence` summary line). No
+ProVerif/DeepSec backend is installed or needed; the `-m=proverif` /
+`-m=deepsec` export paths remain the escalation route if a future
+equivalence outgrows diff mode's mirror-based comparison.
+
+**Pair A — recovery-key unlinkability across organizations (crib §9,
+`idkit/recovery.py:member_recovery_key`).** The observer holds both
+organizations' ledgers (genesis ids, both recovery public keys). LEFT:
+one printed code produced both keys; RIGHT: two independent codes.
+Verified (87 steps, 0.3 s): the genesis-id derivation context makes
+the worlds indistinguishable. Calibration
+(`RecoveryUnlinkNoContext.spthy`): context deleted → falsified in 7
+steps — the repeated public key IS the cross-org link.
+
+**Pair B — sealed-store deniability (crib §24).** A dump row of a
+secret vault — `<h(<pepper, name>), senc(payload, key)>` — against a
+same-shaped pure-noise row. Verified (81 steps, 0.3 s): with the
+pepper sealed, a dump containing a secret vault is indistinguishable
+from one without. Calibration (`VaultDeniabilityPlainAddr.spthy`):
+deterministic plaintext addresses → falsified in 8 steps — the
+observer compares the address to the known store name.
+
+Abstraction register:
+
+1. **Derivations are free functions** (`mrk/2` for the HKDF-based
+   `member_recovery_key`; builtin `h`/`senc` for the row) — the
+   computational PRF/KDF gap is the suite's standard §5 consumption.
+2. **One row stands for the dump.** §24 states row COUNT is revealed;
+   the bi-system compares same-shaped rows, so count leakage is out of
+   scope by construction. Multi-row dumps and pepper-compromise
+   variants are future increments.
+3. **The twins are the calibrations** — a twin whose equivalence
+   verifies is a broken harness, exactly as for trace models.
+4. **Diff-mode caveats to watch as these grow**: strict mirror-based
+   bi-process comparison, no mid-trace corruption switching worlds.
+   Neither bit at this scale (spike finding, tracker comment
+   d75c8a17 on graph://8277c76c-ad1).
+
 ## Roadmap (tracker note graph://8277c76c-ad1; beads filed)
 
 All twelve Tamarin models DONE (auto-loxsf, -djh2m, -cpbkf, -veal7,
@@ -928,5 +977,7 @@ pilot). Remaining:
 3. ~~Transitive frontier descent w/ induction~~ — DONE, unbounded, as
    the chain extension (auto-szsw1).
 4. ~~D-006 halt/continue window~~ — DONE as model 11 (auto-rjonx).
-5. **SAPIC+ port** for equivalence properties (unlinkability, §23/§24
-   deniability) on ProVerif/DeepSec backends.
+5. ~~SAPIC+ port for equivalence properties~~ — DONE natively: the
+   spike (auto-pdvu6) found tamarin's built-in diff mode sufficient,
+   and the privacy pairs landed in-suite (auto-u8pcx); ProVerif/
+   DeepSec export remains the escalation route.

@@ -1,0 +1,43 @@
+/*
+  RecoveryUnlink — privacy pair A green: recovery keys are unlinkable
+  across organizations (crib graph://1e005d5c-c11 §9). Bead auto-u8pcx
+  (spike: auto-pdvu6). Tracker 8277c76c.
+
+  The per-organization recovery signing key is derived as
+  member_recovery_key(code, genesis_id) (idkit/recovery.py) with the
+  genesis identifier as derivation context, precisely so one printed
+  code never links personas across organizations.
+
+  This is an OBSERVATIONAL-EQUIVALENCE theory, not a trace theory: run
+  with `tamarin-prover --diff --prove`. The bi-system gives the
+  observer both organizations' ledgers — the genesis ids and both
+  recovery PUBLIC keys. LEFT of every diff: ONE printed code produced
+  both keys. RIGHT: two independent codes. Equivalence = an observer
+  cannot tell which world it is in = unlinkability.
+
+  Calibration: RecoveryUnlinkNoContext.spthy — the same publication
+  with the genesis context deleted from the derivation. Equivalence
+  MUST be falsified there (the repeated public key IS the cross-org
+  link); a twin that verifies is a broken harness, never good news.
+
+  Abstraction: mrk/2 is a free function standing for the
+  HKDF-based member_recovery_key; the computational PRF gap is not
+  this model's subject (suite convention, crib §5).
+*/
+
+theory RecoveryUnlink
+begin
+
+builtins: signing
+
+functions: mrk/2
+
+rule Publish_Two_Orgs:
+  [ Fr(~code), Fr(~code2), Fr(~g1), Fr(~g2) ]
+  -->
+  [ Out(~g1), Out(~g2)
+  , Out(pk(mrk(~code, ~g1)))
+  , Out(pk(mrk(diff(~code, ~code2), ~g2)))
+  ]
+
+end

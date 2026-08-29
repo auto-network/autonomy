@@ -246,8 +246,24 @@ SUMMARY_RE = re.compile(
     r"^\s{2}(\w+) \((?:all-traces|exists-trace)\): (verified|falsified)", re.M
 )
 
+# Observational-equivalence theories (privacy pairs, bead auto-u8pcx).
+# Run with --diff; the summary line has a different shape, parsed by
+# DIFF_SUMMARY_RE. The single pseudo-lemma is Observational_equivalence.
+DIFF_EXPECTATIONS = {
+    "RecoveryUnlink.spthy": {"Observational_equivalence": "verified"},
+    "RecoveryUnlinkNoContext.spthy": {"Observational_equivalence": "falsified"},
+    "VaultDeniability.spthy": {"Observational_equivalence": "verified"},
+    "VaultDeniabilityPlainAddr.spthy": {"Observational_equivalence": "falsified"},
+}
 
-def run_theory(path: Path, extra: list[str] | None = None) -> tuple[dict, str]:
+DIFF_SUMMARY_RE = re.compile(
+    r"^\s{2}DiffLemma:\s+(\w+) : (verified|falsified)", re.M
+)
+
+
+def run_theory(
+    path: Path, extra: list[str] | None = None, summary_re: re.Pattern = None
+) -> tuple[dict, str]:
     bin_ = os.environ.get("TAMARIN_BIN", "tamarin-prover")
     env = dict(os.environ)
     # tamarin's GHC runtime needs a UTF-8 locale to read the .spthy files
@@ -261,7 +277,8 @@ def run_theory(path: Path, extra: list[str] | None = None) -> tuple[dict, str]:
         timeout=600,
     )
     out = proc.stdout + proc.stderr
-    results = {m.group(1): m.group(2) for m in SUMMARY_RE.finditer(out)}
+    pattern = summary_re or SUMMARY_RE
+    results = {m.group(1): m.group(2) for m in pattern.finditer(out)}
     if not results:
         print(out[-4000:])
         raise SystemExit(f"{path.name}: no lemma summary parsed (see output above)")
@@ -271,8 +288,13 @@ def run_theory(path: Path, extra: list[str] | None = None) -> tuple[dict, str]:
 def main() -> int:
     show_trace = "--trace" in sys.argv
     failures = []
-    for fname, expected in EXPECTATIONS.items():
-        results, out = run_theory(HERE / fname)
+    tables = [
+        (EXPECTATIONS, [], SUMMARY_RE),
+        (DIFF_EXPECTATIONS, ["--diff"], DIFF_SUMMARY_RE),
+    ]
+    for table, extra, pattern in tables:
+      for fname, expected in table.items():
+        results, out = run_theory(HERE / fname, extra, pattern)
         for lemma, want in expected.items():
             got = results.get(lemma, "MISSING")
             ok = got == want
@@ -293,9 +315,12 @@ def main() -> int:
                 "trustworthy. Fix the model, do not celebrate."
             )
         return 1
-    n = sum(len(v) for v in EXPECTATIONS.values())
+    n = sum(len(v) for v in EXPECTATIONS.values()) + sum(
+        len(v) for v in DIFF_EXPECTATIONS.values()
+    )
+    n_theories = len(EXPECTATIONS) + len(DIFF_EXPECTATIONS)
     print(
-        f"\nAll {n} expectations hold across {len(EXPECTATIONS)} theories: "
+        f"\nAll {n} expectations hold across {n_theories} theories: "
         "every green theory proves, every calibration falsifies its headline lemma."
     )
     return 0

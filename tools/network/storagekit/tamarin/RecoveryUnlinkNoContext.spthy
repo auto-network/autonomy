@@ -1,0 +1,31 @@
+/*
+  RecoveryUnlinkNoContext — privacy pair A calibration: the genesis
+  context is deleted from the recovery-key derivation (mrk1(code)
+  instead of member_recovery_key(code, genesis_id)). Bead auto-u8pcx
+  (spike: auto-pdvu6). Tracker 8277c76c.
+
+  LEFT now publishes the SAME public key for both organizations;
+  RIGHT publishes two different ones. Run with
+  `tamarin-prover --diff --prove`: Observational_equivalence MUST be
+  falsified — the observer's equality test on the two published keys
+  is exactly the cross-organization link the genesis context exists
+  to kill. This falsification is what makes the green theory's
+  verified verdict evidence rather than vacuity.
+*/
+
+theory RecoveryUnlinkNoContext
+begin
+
+builtins: signing
+
+functions: mrk1/1
+
+rule Publish_Two_Orgs:
+  [ Fr(~code), Fr(~code2), Fr(~g1), Fr(~g2) ]
+  -->
+  [ Out(~g1), Out(~g2)
+  , Out(pk(mrk1(~code)))
+  , Out(pk(mrk1(diff(~code, ~code2))))
+  ]
+
+end
