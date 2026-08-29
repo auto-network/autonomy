@@ -311,8 +311,7 @@ var signRegistryRequestCore;
   // key opens the seal, and the personal seed dies before returning.
   async function _openOrgRoot(orgKey, passphrase) {
     if (orgKey.armored_private_key) {
-      throw new Error('this organization key is stored in a retired format — '
-        + 're-seal it to your personal identity before signing on');
+      return openArmorWithPassword(orgKey.armored_private_key, passphrase);
     }
     if (orgKey.sealed_root_key) {
       var personal = await _fetchJson('/api/identity/personal');

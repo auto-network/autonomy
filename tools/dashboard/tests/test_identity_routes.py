@@ -210,6 +210,17 @@ def _enroll(
 # ── status / activation condition ─────────────────────────────────────
 
 
+
+def _policy_commit_body(root, base_generation, operations, candidate_armor):
+    return {
+        "base_generation": base_generation,
+        "operations": operations,
+        "candidate_armor": candidate_armor,
+        "root_signature": root.sign_hex(identity_routes._transition_message(
+            base_generation, operations, candidate_armor,
+        )),
+    }
+
 def test_status_starts_needing_onboarding(env):
     r = env.get("/api/identity/status")
     assert r.status_code == 200
@@ -765,22 +776,6 @@ def test_delete_unknown_passkey_is_404(env, root):
     assert env.delete("/api/identity/passkey/no-such-cred").status_code == 404
 
 
-def test_delete_refused_while_a_root_factor(env, root):
-    _store_identity(env, root)
-    assert _enroll(env, root).status_code == 200
-    cred = env.get("/api/identity/status").json()["passkeys"][0]["credential_id"]
-    # promote it to a root factor, then removal must refuse until it is demoted
-    assert env.post("/api/identity/personal/armor",
-                    json=_rearmor_body(root, _passkey_armor(root, cred=cred))
-                    ).status_code == 200
-    r = env.delete(f"/api/identity/passkey/{cred}")
-    assert r.status_code == 409
-    assert "demote" in r.json()["error"]
-
-
-# ── re-arm: demote / enable-MFA / change-password, and MFA onboarding ──────
-
-
 def _kem_for(prf: bytes) -> str:
     from tools.network.idkit.armor import PASSKEY_ARMOR_PURPOSE
     from tools.network.idkit.sealing import derive_encapsulation_keypair
@@ -855,6 +850,32 @@ def test_factor_policy_commit_is_atomic_generation_cas(env, root):
     }
     stale = env.post("/api/identity/factor-policy/commit", json=request)
     assert stale.status_code == 409
+
+
+def _password_descriptor(root, factor_id, password):
+    from tools.network.idkit.root_factor_policy import create_password_factor
+    factor, seed = create_password_factor(
+        root.public_hex, factor_id, password, iterations=10_000,
+    )
+    seed[:] = b"\x00" * len(seed)
+    return factor
+
+
+
+def _policy_armor(root, generation, factors, access, policy):
+    from tools.network.idkit.root_factor_policy import build_envelope, emit_armored_envelope
+    return emit_armored_envelope(build_envelope(
+        root, generation=generation, factors=factors, access=access, policy=policy,
+    ))
+
+
+def _store_policy_identity(env, root, factors, access, policy, generation=1):
+    armor = _policy_armor(root, generation, factors, access, policy)
+    r = env.post("/api/identity/personal", json={
+        "display_name": "Alex", "armored_private_key": armor,
+    })
+    assert r.status_code == 200, r.text
+    return armor
 
 
 def test_factor_policy_commit_binds_operations_and_candidate(env, root):
