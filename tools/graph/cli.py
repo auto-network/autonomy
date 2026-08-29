@@ -5971,7 +5971,7 @@ def main():
     p_note.add_argument("-c", dest="content_stdin", nargs="?", const="-", default=None, help="Read content from stdin")
     p_note.add_argument("--tags", "-t", help="Comma-separated tags")
     p_note.add_argument("--author", help="Who wrote this (default: current session's tmux name, e.g. auto-0322-153000)")
-    p_note.add_argument("--force", action="store_true", help="Bypass single-line length check")
+    p_note.add_argument("--force", action="store_true", help="Bypass the single-line length check and the near-duplicate guard (create even when the body closely matches a recent note)")
     p_note.add_argument("--integrate", dest="integrate_ids", action="append", default=[], help="Comment ID to mark as integrated (repeatable)")
     p_note.add_argument("--attach", action="append", default=[], help="Attach file to note (repeatable). Use {1}, {2} in text for inline placement. For images use markdown syntax: ![alt]({1}). Body-only updates reuse the note's existing numbered slots. Unplaced attachments appear as downloads")
     p_note.add_argument("--html", help="HTML file for rich-content note (creates version-paired attachment)")
