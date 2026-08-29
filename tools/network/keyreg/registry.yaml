@@ -811,6 +811,13 @@ mutations:
     proofs:
       - {framework: tamarin, theory: VaultRootRotation, lemma: thief_cannot_rotate}
       - {framework: tamarin, theory: VaultRootRotation, lemma: owner_rotates_away_from_stolen_root}
+    notes: >-
+      The auto.network registry pins recovery_pub for personal and org
+      identities (registry/store.py orgs table; the rebind path enforces it
+      in tools/network/registry/app.py). The residual gap is wiring: the
+      armor-layer succession in root_rotation.py does not yet verify against
+      that pin. VaultRootRotationNoDeclaredPk.spthy is the machine-checked
+      acceptance target for closing it.
 
   passkey.enroll:
     source: {kind: ceremony, file: tools/network/idkit/enrollment.py, symbol: mint}
