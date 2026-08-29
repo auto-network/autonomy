@@ -86,6 +86,30 @@
           now >= (app.restartStatus.countdown_ends_at_ms || now)) {
         app.restartStatus.phase = 'restarting';
       }
+      // Auto-close once the reboot is DONE (operator directive): if the
+      // banner still says "restarting" but the event stream is alive
+      // again (events flowing after the restart began — e.g. the phone
+      // slept through the completion event), flip to recovered and let
+      // it clear itself shortly. Nobody should have to dismiss a banner
+      // for a restart that already finished.
+      if (app.restartStatus &&
+          (app.restartStatus.phase === 'restarting' ||
+           app.restartStatus.phase === 'countdown') &&
+          _lastSeenTs > (app.restartStatus.started_at_ms || 0) + 3000 &&
+          (now - _lastSeenTs) < 3000 &&
+          (now - (app.restartStatus.started_at_ms || now)) > 5000) {
+        var done = app.restartStatus;
+        done.phase = 'recovered';
+        setTimeout(function() {
+          try {
+            var current = Alpine.store('app').restartStatus;
+            if (current === done) {
+              Alpine.store('app').restartStatus = null;
+              Alpine.store('app').sseInterrupted = false;
+            }
+          } catch (e) { /* page may have navigated */ }
+        }, 4000);
+      }
       app.restartNowMs = now;
     } catch (e) { /* Alpine not initialised yet */ }
   }

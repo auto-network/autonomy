@@ -1234,6 +1234,35 @@
       flex: 0 0 auto;
       align-self: center;
     }
+    /* Mobile (operator directive): the message owns the full top row —
+       no ellipsis truncation; the progress bar sits a touch lower and
+       the buttons drop to their own row below, so nothing competes with
+       the text for width. Desktop keeps the single-row layout. */
+    @media (max-width: 767.98px) {
+      .sse-banner {
+        height: auto;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 0.3rem;
+        padding-bottom: 0.55rem;
+      }
+      .sse-banner-copy {
+        height: auto;
+        justify-content: flex-start;
+      }
+      .sse-banner-message {
+        white-space: normal;
+        overflow: visible;
+        text-overflow: clip;
+      }
+      .sse-banner-bar {
+        margin-top: 0.45rem;
+      }
+      .sse-banner-actions {
+        margin-left: 0;
+        align-self: flex-end;
+      }
+    }
     @media (min-width: 768px) {
       .sse-banner {
         top: 0;
@@ -2416,7 +2445,7 @@
         <span class="sse-banner-message" x-show="$store.app.restartStatus" x-text="$store.app.restartMessage()"></span>
         <span class="sse-banner-message" x-show="!$store.app.restartStatus" x-text="$store.app.sseInterrupted"></span>
         <template x-if="$store.app.restartStatus">
-          <div class="mt-1 h-1.5 w-full overflow-hidden rounded bg-amber-950/40">
+          <div class="sse-banner-bar mt-1 h-1.5 w-full overflow-hidden rounded bg-amber-950/40">
             <div class="h-full rounded bg-amber-100 transition-[width] duration-200"
                  :style="'width:' + ($store.app.restartStatus.phase === 'countdown' ? $store.app.restartCountdownProgress() : $store.app.restartProgress()) + '%'"></div>
           </div>
