@@ -1908,3 +1908,47 @@ def test_cmd_set_read_chain_routes_through_api(
     finally:
         SCHEMAS.clear(); SCHEMAS.update(snap_s)
         UPCONVERTERS.clear(); UPCONVERTERS.update(snap_u)
+
+
+class TestNoteRouterQuotedSubcommandGuard:
+    """A fully-quoted `graph note "update <id> ..."` must refuse, not create.
+
+    cmd_note_router dispatches on an exact match of the FIRST argv token, so
+    quoting the whole subcommand as one string used to fall through to create
+    and silently mint a new note (2026-08-29 incident: four ids for one
+    document). The guard is a malformed-command check, not a heuristic.
+    """
+
+    def _route(self, text_tokens):
+        args = argparse.Namespace(text=text_tokens)
+        with mock.patch.object(graph_cli, "cmd_note") as created, \
+             mock.patch.object(graph_cli, "cmd_note_update") as updated, \
+             mock.patch.object(graph_cli, "cmd_note_withdraw") as withdrawn:
+            try:
+                graph_cli.cmd_note_router(args)
+                code = 0
+            except SystemExit as e:
+                code = e.code
+        return code, created, updated, withdrawn
+
+    def test_quoted_update_refuses_instead_of_creating(self, capsys):
+        code, created, updated, _ = self._route(["update 32fdbbfd-95a fixed text"])
+        assert code == 1
+        assert not created.called and not updated.called
+        err = capsys.readouterr().err
+        assert "graph note update 32fdbbfd-95a" in err
+
+    def test_quoted_withdraw_refuses_instead_of_creating(self, capsys):
+        code, created, _, withdrawn = self._route(["withdraw d4b72d24-d6f"])
+        assert code == 1
+        assert not created.called and not withdrawn.called
+
+    def test_unquoted_update_still_dispatches(self):
+        code, created, updated, _ = self._route(["update", "32fdbbfd-95a", "new text"])
+        assert code == 0
+        assert updated.called and not created.called
+
+    def test_prose_starting_with_update_still_creates(self):
+        code, created, updated, _ = self._route(["update the deploy docs before Monday"])
+        assert code == 0
+        assert created.called and not updated.called

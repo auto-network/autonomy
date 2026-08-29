@@ -3661,8 +3661,43 @@ def _auto_save_note(source_id: str, content: str) -> str:
     return str(save_path)
 
 
+# A create whose body BEGINS with a subcommand verb plus an id-shaped token is
+# almost certainly a quoting error: `graph note "update <id> text"` arrives as
+# ONE argv token, misses the exact-match subcommand dispatch below, and would
+# silently create a new note titled "update <id> ..." while the caller believes
+# they revised in place. Verified incident 2026-08-29 (OSS Insights): four note
+# ids minted for one document by exactly this shape. Genuinely wanting such a
+# body has an escape hatch: pipe it via `-c -`, which bypasses argv entirely.
+_QUOTED_NOTE_SUBCOMMAND_RE = re.compile(
+    r"^(update|withdraw)\s+([0-9a-fA-F]{6,}(?:-[0-9a-fA-F]+)*)(?:\s|$)"
+)
+
+
 def cmd_note_router(args):
     """Route 'graph note ...' to create, update, or withdraw."""
+    if args.text and len(args.text) == 1:
+        m = _QUOTED_NOTE_SUBCOMMAND_RE.match(args.text[0])
+        if m:
+            verb, src_id = m.group(1), m.group(2)
+            rest = args.text[0][m.end():].strip()
+            print(
+                f"✗ Refusing to create a note whose body starts with "
+                f"'{verb} {src_id}' — this looks like a quoted subcommand, "
+                f"and creating it would silently mint a NEW note instead of "
+                f"revising {src_id}.",
+                file=sys.stderr,
+            )
+            print("  You probably meant (subcommand outside the quotes):", file=sys.stderr)
+            if verb == "update":
+                print(f'    graph note update {src_id} "{rest or "<new text>"}"', file=sys.stderr)
+            else:
+                print(f"    graph note withdraw {src_id}", file=sys.stderr)
+            print(
+                "  If you genuinely want a note with this body, pipe it: "
+                "graph note -c - <<< '...'",
+                file=sys.stderr,
+            )
+            sys.exit(1)
     if args.text and args.text[0] == "update":
         # graph note update <src_id> [text...]
         if len(args.text) < 2:
