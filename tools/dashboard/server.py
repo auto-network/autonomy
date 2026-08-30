@@ -10066,6 +10066,38 @@ def _tmux_session_exists(name: str) -> bool:
                           capture_output=True).returncode == 0
 
 
+def _live_session_names_or_none() -> "set[str] | None":
+    """Live tmux session names, or None when tmux could not ANSWER.
+
+    Destructive consumers — the vault-release sweeper's orphan and
+    directory-reclaim passes — require a definitive listing. A failed
+    probe is ambiguous, not authoritative (the 2026-04-20 rule), and a
+    bare per-name probe cannot express the difference: on 2026-08-30 it
+    answered "dead" for every live session and the sweeper rmtree'd every
+    session's /run/secrets on both machines, orphaning their binds until
+    relaunch. rc != 0 — INCLUDING "no server" — returns None, because a
+    machine with no reachable tmux cannot distinguish "no sessions" from
+    "cannot see sessions"; the cost of skipping orphan cleanup for a tick
+    is a lingering empty directory, never a destroyed live secret.
+    """
+    tmux = subprocess.run(["tmux", "list-sessions", "-F", "#{session_name}"],
+                          capture_output=True, text=True)
+    if tmux.returncode != 0:
+        return None
+    # Container sessions are docker containers named for their session; on a
+    # node where they are not tmux-wrapped, tmux alone under-reports the
+    # living. Both oracles must answer, and a session alive in EITHER is
+    # alive.
+    docker = subprocess.run(["docker", "ps", "--format", "{{.Names}}"],
+                            capture_output=True, text=True)
+    if docker.returncode != 0:
+        return None
+    return (
+        {s for s in tmux.stdout.strip().split("\n") if s}
+        | {s for s in docker.stdout.strip().split("\n") if s}
+    )
+
+
 _DASHBOARD_PREFIXES = ("auto-", "host-", "chat-", "chatwith-")
 
 
@@ -14937,15 +14969,23 @@ async def _vault_release_sweeper() -> None:
     """Destroy delivered secrets at their deadline or session end (auto-pw9bs.5).
 
     The durable record store survives a dashboard restart; this loop is the
-    live half that acts on it. Runs off-loop (the sweep unlinks host files
-    and probes tmux). One failing tick never kills the loop — the record
-    stays outstanding and the next tick retries."""
+    live half that acts on it. Pure bookkeeping since the private-ramfs
+    redesign (2026-08-30): it closes leases for gone sessions; delivered
+    files die with their container's own mount namespace, so a wrong
+    liveness answer can no longer destroy anything. One failing tick never
+    kills the loop — the record stays outstanding and the next tick
+    retries."""
     from tools.dashboard import vault_release_sweeper as _vault_sweeper
 
     while True:
         try:
+            live = await asyncio.to_thread(_live_session_names_or_none)
             await asyncio.to_thread(
-                _vault_sweeper.sweep, session_exists=_tmux_session_exists,
+                _vault_sweeper.sweep,
+                session_exists=(
+                    (lambda s, _live=live: s in _live)
+                    if live is not None else None
+                ),
             )
         except asyncio.CancelledError:
             raise
@@ -20789,9 +20829,13 @@ async def _on_startup():
     # subsystem exists to prevent.
     try:
         from tools.dashboard import vault_release_sweeper as _vault_sweeper
+        _live_at_start = await asyncio.to_thread(_live_session_names_or_none)
         await asyncio.to_thread(
             _vault_sweeper.reconcile_on_startup,
-            session_exists=_tmux_session_exists,
+            session_exists=(
+                (lambda s, _live=_live_at_start: s in _live)
+                if _live_at_start is not None else None
+            ),
         )
     except Exception:
         logger.exception(

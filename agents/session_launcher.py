@@ -1590,36 +1590,16 @@ def launch_session(
     # is refused once, over the FULL plan, inside mount_args() below.
     from agents.mount_plan import (
         mount_args, discover_topology, SocketMountRefused, MountUnresolvable,
-        VolumeSubpathUnsupported, BindRefuseMissing,
+        VolumeSubpathUnsupported,
     )
-    # f51kg: give this session its OWN memory-only secret directory, bound at
-    # /run/secrets. On a containerized node it is created 0700 + chowned to the
-    # session uid (1000, the agent user) via a privileged host-ns helper BEFORE
-    # the container starts, then bound refuse-missing so a race that removes it
-    # fails the launch rather than yielding a look-alike on-disk directory. In
-    # `delivered` mode the trusted dashboard vault-open chokepoint writes the
-    # exact approved plaintext here, on ramfs (never swappable), and returns
-    # only the path; the mount remains 0700-isolated from other sessions.
-    # Best-effort: a node without the delivery ramfs launches without
-    # it and secret delivery fails closed later — never a launch that needs no
-    # secret. Cleanup is the sweeper's (auto-pw9bs.5); an early session-end
-    # unlink is a memory-reclamation optimisation only. (An empty subdir left by
-    # a launch refused downstream is reclaimed by the sweeper — not an authority
-    # leak.)
+    # Secret delivery needs NOTHING at launch: a vault release provisions a
+    # PRIVATE ramfs inside this container's own mount namespace on first
+    # delivery (agents.secret_ramfs.deliver_secret_file) — no shared host
+    # directory, no pre-created bind, nothing another process can find or
+    # destroy, and the kernel frees it when the container exits. The old
+    # per-session host subdir under /run/autonomy-secrets is retired
+    # (2026-08-30, fourth shared-root incident).
     mounts = dict(mounts or {})
-    try:
-        from agents import secret_ramfs
-        _secret_host_dir = secret_ramfs.provision_session_dir(
-            name, secret_ramfs.SESSION_SECRET_UID,
-        )
-        mounts[_secret_host_dir] = BindRefuseMissing(
-            f"{secret_ramfs.SESSION_SECRET_DST}:rw"
-        )
-    except Exception:
-        logger.warning(
-            "session %s: per-session secret directory unavailable — secret "
-            "delivery will fail closed for this session", name, exc_info=True,
-        )
     plan, shim_env, codex_auth_target = build_mount_plan(
         run_dir=run_dir,
         sessions_dir=sessions_dir,

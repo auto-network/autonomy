@@ -1,38 +1,40 @@
-"""Receipt-only delivery of an opened Setting into one session's ramfs.
+"""Receipt-only delivery of an opened Setting into one session's PRIVATE ramfs.
 
 The vault-open executor necessarily holds plaintext briefly while it performs
 the settled server-side AES-GCM-SIV open.  This module is the only next hop:
-it refuses every destination except the launcher's per-session **ramfs**
-directory, records a value-free release ledger entry first, materialises one
-mode-0600 file, and returns only a receipt naming the container-visible path.
+it records a value-free release ledger entry first, then writes the value —
+in its final shape, raw bytes — into the requesting session container's OWN
+mount-namespace ramfs at ``/run/secrets/<credential-name>`` through one
+nsenter helper over stdin (:func:`agents.secret_ramfs.deliver_secret_file`).
 
-General session output, temporary directories, and tmpfs are deliberately not
-fallbacks.  A missing or incorrectly mounted ramfs turns delivery into a
-failure before plaintext bytes are encoded for writing.
+No shared host directory exists (the 2026-08-30 finding: a shared root gave
+every sibling dashboard's sweeper the power to destroy every session's
+delivery, four incidents running).  The private mount is invisible outside
+the container, heals an orphaned legacy bind by mounting over it, and dies
+with the container — so delivery to a long-running session needs no sweeper
+protection at all.  General session output, temporary directories, and
+swappable tmpfs are refused inside the helper, fail closed.
 """
 
 from __future__ import annotations
 
-import os
 import re
-import stat
 import time
-from pathlib import Path
 
 from agents.secret_ramfs import (
-    DELIVERY_MOUNT,
     SESSION_SECRET_DST,
     SESSION_SECRET_UID,
+    ProvisionError,
+    deliver_secret_file,
 )
 from tools.dashboard.dao import vault_releases
-from tools.network.storagekit.memory_cache import assert_memory_backed
 
 
 _SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 class VaultDeliveryError(RuntimeError):
-    """A plaintext release could not be confined to session ramfs."""
+    """A plaintext release could not be confined to the session's ramfs."""
 
 
 def _validated_component(label: str, value: object) -> str:
@@ -41,44 +43,27 @@ def _validated_component(label: str, value: object) -> str:
     return value
 
 
-def _delivery_root() -> Path:
-    return Path(DELIVERY_MOUNT)
-
-
-def _write_all(fd: int, encoded: bytearray) -> None:
-    """Write a mutable buffer fully (separate seam for failure testing)."""
-    view = memoryview(encoded)
-    written = 0
-    while written < len(view):
-        count = os.write(fd, view[written:])
-        if count <= 0:
-            raise OSError("short write while delivering vault payload")
-        written += count
-
-
 def deliver_payload(
     row: dict,
     payload: dict,
     *,
-    delivery_root: Path | None = None,
     now: float | None = None,
 ) -> dict:
-    """Write the released VALUE — in its final shape — to the requester's
-    ramfs and return a receipt.
+    """Write the released VALUE — in its final shape — into the requester's
+    private in-container ramfs and return a receipt.
 
     The consumer receives the raw credential bytes at a stable path named
-    after the credential itself (``/run/secrets/<credential-name>``), mode
-    0600 — a file ssh, a CLI, or the workspace's own code can use directly.
-    No envelope: wrapping belongs to the store, never to the consumer, and
-    a structured secret delivers its document AS the value. The file has
-    SESSION LIFETIME — it is destroyed at session end (or by the orphan
-    sweep), not on a short timer; the request TTL bounds only the
-    approval-to-delivery window.
+    after the credential itself (``/run/secrets/<credential-name>``, 0600) —
+    a file ssh, a CLI, or the workspace's own code uses directly. No
+    envelope: wrapping belongs to the store, never to the consumer, and a
+    structured secret delivers its document AS the value. The file has
+    SESSION LIFETIME — the kernel frees the private mount when the container
+    exits; the request TTL bounds only the approval-to-delivery window.
 
-    The durable ledger commits before the file is created.  A crash can thus
-    leave a value-free record with no file, which reconciliation can close;
-    it can never leave an untracked plaintext file.  Any post-record failure
-    removes a partial file and marks the receipt ``delivery_failed``.
+    The durable ledger commits before the helper runs.  A crash can thus
+    leave a value-free record with no file, which reconciliation closes as
+    bookkeeping; it can never leave an untracked plaintext file.  A helper
+    failure marks the record ``delivery_failed``.
     """
     if not isinstance(payload, dict):
         raise VaultDeliveryError("a vault Setting payload must be an object")
@@ -117,26 +102,13 @@ def deliver_payload(
     if stamp_s >= float(expires_at_s):
         raise VaultDeliveryError("vault release expired before ramfs delivery")
 
-    root = Path(delivery_root) if delivery_root is not None else _delivery_root()
-    session_dir = root / session
-    if not session_dir.is_dir() or session_dir.is_symlink():
-        raise VaultDeliveryError("the requesting session has no secret ramfs")
-    directory_stat = session_dir.stat()
-    if stat.S_IMODE(directory_stat.st_mode) != 0o700:
-        raise VaultDeliveryError("the requesting session secret ramfs is not mode 0700")
-    if directory_stat.st_uid != SESSION_SECRET_UID:
-        raise VaultDeliveryError("the requesting session secret ramfs has the wrong owner")
-    # Check the actual destination on every write.  This is the production
-    # gate that refuses both ordinary disk and swappable tmpfs.
-    assert_memory_backed(session_dir)
-
-    host_path = session_dir / credential_name
-    container_path = str(Path(SESSION_SECRET_DST) / credential_name)
+    container_path = f"{SESSION_SECRET_DST}/{credential_name}"
     delivered_at_ms = int(stamp_s * 1000)
 
-    # expires_at=None: session lifetime. The launcher's session-end hook and
-    # the sweeper's orphan pass destroy the file; no short timer applies to
-    # the artifact (the TTL above bounded only approval-to-delivery).
+    # expires_at=None: session lifetime — the container's private mount dies
+    # with the container; no timer, no sweeper destruction. host_path is an
+    # audit LOCATOR in the container-namespace frame: there is no host path,
+    # which is the point.
     vault_releases.record_release(
         id=release_id,
         session=session,
@@ -144,50 +116,24 @@ def deliver_payload(
         release_mode="delivered",
         expires_at=None,
         container_path=container_path,
-        host_path=str(host_path),
+        host_path=f"container-ns:{session}:{container_path}",
         delivered_at=delivered_at_ms,
     )
 
-    fd: int | None = None
     encoded: bytearray | None = None
     try:
-        # Encoding occurs only after the ramfs guard and durable receipt.  The
-        # mutable buffer is wiped immediately after the kernel accepts it.
-        # RAW value bytes — never an envelope the consumer would have to
-        # unwrap.
+        # Encoding occurs only after the durable record. The mutable buffer
+        # is wiped as soon as the helper returns; the plaintext transits the
+        # helper's stdin only — never argv, env, or any host file.
         encoded = bytearray(value.encode("utf-8"))
-        # A re-release of the same credential in the same session replaces
-        # the file (fresh O_EXCL create after unlink, so a symlink can never
-        # be followed). The superseded lease still points here; destruction
-        # tolerates an already-gone file, so both leases settle at session
-        # end.
-        try:
-            os.unlink(host_path)
-        except FileNotFoundError:
-            pass
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        flags |= getattr(os, "O_CLOEXEC", 0)
-        flags |= getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(host_path, flags, 0o600)
-        _write_all(fd, encoded)
-        os.close(fd)
-        fd = None
-    except Exception:
-        if fd is not None:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-        try:
-            host_path.unlink()
-        except FileNotFoundError:
-            pass
+        deliver_secret_file(session, credential_name, bytes(encoded))
+    except (ProvisionError, OSError) as exc:
         vault_releases.mark_shredded(
-            release_id,
-            reason="delivery_failed",
-                now=delivered_at_ms,
+            release_id, reason="delivery_failed", now=delivered_at_ms,
         )
-        raise
+        raise VaultDeliveryError(
+            f"delivery into session {session!r} failed: {exc}"
+        ) from exc
     finally:
         if encoded is not None:
             encoded[:] = b"\x00" * len(encoded)
