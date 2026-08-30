@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Exercise the Phase 1A reservation lifecycle against a real Dashboard.
 
-The selected organization must be disposable: release is terminal, and this
-proof deliberately releases its ``--port-label`` reservation.  The script
-does not create an organization, bypass authentication, or write Settings
-directly.  It uses the same HTTPS API and operator cookie as the Dashboard UI.
+The selected labels must be disposable: release is terminal, and this proof
+deliberately releases its ``--port-label`` and ``--direct-release-label``
+reservations.  The script does not create an organization, bypass
+authentication, or write Settings directly.  It uses the same HTTPS API and
+operator cookie as the Dashboard UI.
 """
 
 from __future__ import annotations
@@ -58,6 +59,16 @@ def _expect(response: httpx.Response, status: int | tuple[int, ...]) -> dict:
     return value
 
 
+def _expect_error(response: httpx.Response, status: int, code: str) -> None:
+    body = _expect(response, status)
+    expected = {"ok": False, "error": code}
+    if body != expected:
+        raise ProofFailure(
+            f"{response.request.method} {response.request.url.path}: "
+            f"expected exact error {expected}, got {body}"
+        )
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -107,12 +118,29 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             ),
             (200, 201),
         )["reservation"]
+        direct = _expect(
+            call(
+                "POST",
+                "/api/network/service-reservations",
+                json_body={"app_label": args.direct_release_label},
+            ),
+            (200, 201),
+        )["reservation"]
         if docs["reservation_id"] == port["reservation_id"]:
             raise ProofFailure("two app labels collapsed to one reservation")
-        if docs["origin"] == port["origin"]:
-            raise ProofFailure("two app labels collapsed to one origin")
-        if docs["state"] != "active" or port["state"] != "active":
+        if len({docs["origin"], port["origin"], direct["origin"]}) != 3:
+            raise ProofFailure("three app labels collapsed to fewer than three origins")
+        if any(row["state"] != "active" for row in (docs, port, direct)):
             raise ProofFailure("proof requires initially active disposable labels")
+
+        port_state_path = (
+            f"/api/network/service-reservations/{port['reservation_id']}/state"
+        )
+        same_active = _expect(
+            call("PUT", port_state_path, json_body={"state": "active"}), 200
+        )["reservation"]
+        if same_active != port:
+            raise ProofFailure("active same-state request changed the reservation")
 
         duplicate = _expect(
             call(
@@ -125,12 +153,26 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         if duplicate != port:
             raise ProofFailure("duplicate create changed the reservation")
 
-        state_path = f"/api/network/service-reservations/{port['reservation_id']}/state"
-        paused = _expect(call("PUT", state_path, json_body={"state": "paused"}), 200)[
-            "reservation"
-        ]
+        paused = _expect(
+            call("PUT", port_state_path, json_body={"state": "paused"}), 200
+        )["reservation"]
         if paused["state"] != "paused":
             raise ProofFailure("pause did not become observable")
+        same_paused = _expect(
+            call("PUT", port_state_path, json_body={"state": "paused"}), 200
+        )["reservation"]
+        if same_paused != paused:
+            raise ProofFailure("paused same-state request changed the reservation")
+        duplicate_paused = _expect(
+            call(
+                "POST",
+                "/api/network/service-reservations",
+                json_body={"app_label": args.port_label},
+            ),
+            200,
+        )["reservation"]
+        if duplicate_paused != paused:
+            raise ProofFailure("duplicate create while paused changed the reservation")
         while_paused = _expect(call("GET", "/api/network/service-reservations"), 200)
         docs_while_paused = next(
             row
@@ -140,30 +182,54 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         if docs_while_paused != docs:
             raise ProofFailure("pausing port label changed its docs sibling")
 
-        resumed = _expect(call("PUT", state_path, json_body={"state": "active"}), 200)[
-            "reservation"
-        ]
+        resumed = _expect(
+            call("PUT", port_state_path, json_body={"state": "active"}), 200
+        )["reservation"]
         if resumed["state"] != "active":
             raise ProofFailure("resume did not become observable")
         released = _expect(
-            call("PUT", state_path, json_body={"state": "released"}), 200
+            call("PUT", port_state_path, json_body={"state": "released"}), 200
         )["reservation"]
         if released["state"] != "released" or not released.get("released_at"):
             raise ProofFailure("terminal release is incomplete")
         same_release = _expect(
-            call("PUT", state_path, json_body={"state": "released"}), 200
+            call("PUT", port_state_path, json_body={"state": "released"}), 200
         )["reservation"]
         if same_release != released:
             raise ProofFailure("repeated release was not an idempotent no-op")
-        _expect(call("PUT", state_path, json_body={"state": "active"}), 409)
-        _expect(
+        _expect_error(
+            call("PUT", port_state_path, json_body={"state": "active"}),
+            409,
+            "reservation_released",
+        )
+        _expect_error(
+            call("PUT", port_state_path, json_body={"state": "paused"}),
+            409,
+            "reservation_released",
+        )
+        _expect_error(
             call(
                 "POST",
                 "/api/network/service-reservations",
                 json_body={"app_label": args.port_label},
             ),
             409,
+            "reservation_released",
         )
+
+        direct_state_path = (
+            f"/api/network/service-reservations/{direct['reservation_id']}/state"
+        )
+        direct_paused = _expect(
+            call("PUT", direct_state_path, json_body={"state": "paused"}), 200
+        )["reservation"]
+        if direct_paused["state"] != "paused":
+            raise ProofFailure("direct-release reservation did not pause")
+        direct_released = _expect(
+            call("PUT", direct_state_path, json_body={"state": "released"}), 200
+        )["reservation"]
+        if direct_released["state"] != "released":
+            raise ProofFailure("paused-to-released transition was not observable")
 
         final = _expect(call("GET", "/api/network/service-reservations"), 200)
         raw = _expect(
@@ -173,10 +239,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     raw_rows = [
         member
         for member in raw.get("members", [])
-        if member.get("key") in {docs["reservation_id"], port["reservation_id"]}
+        if member.get("key")
+        in {docs["reservation_id"], port["reservation_id"], direct["reservation_id"]}
     ]
-    if len(raw_rows) != 2:
-        raise ProofFailure("raw Settings read did not return both reservations")
+    if len(raw_rows) != 3:
+        raise ProofFailure("raw Settings read did not return all three reservations")
     for member in raw_rows:
         payload = member.get("payload") or {}
         forbidden = {"reservation_id", "org", "organization", "origin"} & set(payload)
@@ -189,6 +256,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "before": before,
         "docs": docs,
         "port_released": released,
+        "paused_directly_released": direct_released,
         "final": final,
         "raw_settings": raw_rows,
         "transcript": transcript,
@@ -205,10 +273,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="https://localhost:8080")
-    parser.add_argument("--org", required=True, help="Disposable founded organization slug")
+    parser.add_argument("--org", required=True, help="Founded organization slug")
     parser.add_argument("--cookie-jar", required=True, help="Netscape jar from graph session-auth")
     parser.add_argument("--docs-label", default="docs")
     parser.add_argument("--port-label", default="port-8000")
+    parser.add_argument("--direct-release-label", default="paused-release")
     parser.add_argument(
         "--output-dir",
         default="/workspace/output/service-reservation-api",

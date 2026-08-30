@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import re
 import uuid
+from datetime import datetime
 from typing import Any
 
 from .registry import (
@@ -36,6 +37,16 @@ _PERSONA_PUB_RE = re.compile(r"^[0-9a-f]{64}$")
 _RFC3339_MILLIS_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$"
 )
+
+
+def _is_rfc3339_millis(value: Any) -> bool:
+    if not isinstance(value, str) or not _RFC3339_MILLIS_RE.fullmatch(value):
+        return False
+    try:
+        datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ")
+    except ValueError:
+        return False
+    return True
 
 
 def validate_app_label_value(value: Any) -> str:
@@ -149,14 +160,14 @@ class NamespaceReservationV1(SettingSchema):
             )
         for name in ("created_at", "updated_at"):
             value = payload.get(name)
-            if not isinstance(value, str) or not _RFC3339_MILLIS_RE.fullmatch(value):
+            if not _is_rfc3339_millis(value):
                 raise SchemaValidationError(
                     f"{cls.__name__}: {name} must be UTC RFC 3339 with milliseconds"
                 )
         state = payload.get("state")
         released_at = payload.get("released_at")
         if state == "released":
-            if not isinstance(released_at, str) or not _RFC3339_MILLIS_RE.fullmatch(released_at):
+            if not _is_rfc3339_millis(released_at):
                 raise SchemaValidationError(
                     f"{cls.__name__}: released rows require released_at"
                 )

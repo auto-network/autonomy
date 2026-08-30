@@ -74,7 +74,7 @@ def _persona_for_org(org: str) -> tuple[str, str]:
     except ServicePublicationError:
         raise
     except Exception as exc:
-        raise ServicePublicationError("organization_not_founded", 409) from exc
+        raise ServicePublicationError("organization_ledger_unavailable", 503) from exc
     persona_pub = org_ops.persona_pub_for_org(genesis_id)
     if not persona_pub:
         raise ServicePublicationError("persona_not_configured", 409)
