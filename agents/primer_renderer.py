@@ -171,7 +171,7 @@ def _org_mount_rows(config: WorkspaceV1) -> list[dict]:
     Reads ``config.mounts``, which ``load_workspaces`` already resolved
     (``_mounts_by_workspace``), rather than re-reading the Set: the
     renderer runs on the launch path and a second read would buy nothing.
-    Payloads arrive as ``WorkspaceMountV2`` through that loader's
+    Payloads arrive as ``WorkspaceMountV3`` through that loader's
     ``model=``; the ``dict`` branch is for any caller that composed a
     :class:`WorkspaceV1` by hand.
 
@@ -191,7 +191,7 @@ def _org_mount_rows(config: WorkspaceV1) -> list[dict]:
             return default if value is None else value
 
         rows.append({
-            # Required by WorkspaceMountV2, so a validated payload always
+            # Required by WorkspaceMountV3, so a validated payload always
             # has it; no guard here for a row that cannot exist.
             "path": str(_get("container_path")),
             "description": str(_get("description")),

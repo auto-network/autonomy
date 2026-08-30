@@ -3360,7 +3360,7 @@ async def api_workspace_local_create(request):
                 payload["model"] = model
             setting_id = graph_ops.add_setting(
                 workspace_settings.WORKSPACE_SET_ID,
-                workspace_settings.WORKSPACE_REVISION,
+                workspace_settings.WORKSPACE_REVISION_2,
                 workspace_id,
                 payload,
                 state="raw",

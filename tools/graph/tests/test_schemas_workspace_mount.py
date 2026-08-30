@@ -181,20 +181,21 @@ class TestMountVisibility:
         assert carried is not None, "identity upconverter must be registered"
         assert WorkspaceMountV2.model_validate(carried).visibility == "machine"
 
-    def test_no_rev_3_exists_to_strand_rows(self):
-        """Guards the decision itself: if someone later mints rev 3 without
-        a rev-2 consumer migration, load_mounts (pinned at 2) silently drops
-        every rev-3 row. Downconversion is not available to save it."""
-        from tools.graph.schemas.registry import upconvert_chain
+    def test_rev_3_is_reachable_from_every_stored_revision(self):
+        """Rev 3 (host_path deleted) registers with identity upconverters
+        from both stored revisions, so no clean row is stranded; a
+        straggler host_path row fails rev-3 validation by name instead of
+        serving a machine path."""
+        from tools.graph import schemas
+        from tools.graph.schemas.mount import MOUNT_SCHEMA_REVISION_3
 
-        assert get_schema(SET_ID, 3) is None, (
-            "a rev-3 mount schema exists — verify workspace_settings."
-            "load_mounts was moved off target_revision=2 first"
-        )
-        assert upconvert_chain(SET_ID, 2, 1) is None, (
-            "registry gained downconversion; the rev-2-in-place rationale "
-            "in mount.py should be revisited"
-        )
+        assert schemas.get_schema(SET_ID, MOUNT_SCHEMA_REVISION_3) is not None
+        assert schemas.upconvert_chain(SET_ID, 1, MOUNT_SCHEMA_REVISION_3)
+        assert schemas.upconvert_chain(SET_ID, 2, MOUNT_SCHEMA_REVISION_3)
+        with pytest.raises(Exception, match="host_path was deleted"):
+            schemas.get_schema(SET_ID, MOUNT_SCHEMA_REVISION_3).validate({
+                "host_path": "/home/op/data", "container_path": "/opt/x",
+            })
 
 
 def test_workspace_and_mount_are_pinned_to_raw():

@@ -44,6 +44,7 @@ from tools.graph.schemas.workspace import (
     LOCAL_REPO_NAME_RE,
     WORKSPACE_SET_ID,
     WORKSPACE_REVISION,
+    WORKSPACE_REVISION_2,
 )
 from tools.graph.schemas.workspace_artifact import (
     SET_ID as ARTIFACT_SET_ID,
@@ -53,8 +54,8 @@ from tools.graph.schemas.workspace_artifact import (
 from tools.graph.schemas.org import ORG_SET_ID, ORG_REVISION
 from tools.graph.schemas.mount import (
     SET_ID as MOUNT_SET_ID,
-    MOUNT_SCHEMA_REVISION_2 as MOUNT_REVISION_2,
-    WorkspaceMountV2,
+    MOUNT_SCHEMA_REVISION_3 as MOUNT_REVISION_3,
+    WorkspaceMountV3,
 )
 from tools.graph.schemas.workspace_capability_enable import (
     SET_ID as WORKSPACE_CAPABILITY_ENABLE_SET_ID,
@@ -284,10 +285,6 @@ class RepoMount:
     reference be a plain value instead of something parsed back out of a
     URL at the moment it is needed.
 
-    ``base_source`` is an optional absolute host checkout path. When set,
-    fresh session worktrees derive from that checkout's integration branch
-    instead of the managed clone's ``origin``. ``None`` means default
-    ``origin`` behaviour.
     """
     host: str | None
     repo: str | None
@@ -295,7 +292,6 @@ class RepoMount:
     user: str | None = None
     local_path: str | None = None
     writable: bool = False
-    base_source: str | None = None
     #: True when the row declared ``local: true`` (the workspace's
     #: dashboard-managed local repository). ``local_path`` then carries
     #: the NODE-resolved absolute path
@@ -528,10 +524,18 @@ def _parse_repo(
             raise WorkspaceSettingsError(
                 f"workspace {workspace_id!r}: repos[{idx}] missing {key!r}"
             )
+    for dead in ("local_path", "base_source"):
+        if raw.get(dead):
+            # The field was deleted from the schema; resolving it would
+            # apply a machine path that is wrong everywhere but one
+            # computer. Refuse by name so the row gets rewritten.
+            raise WorkspaceSettingsError(
+                f"workspace {workspace_id!r}: repos[{idx}].{dead} was "
+                f"deleted — rewrite the row to 'local: true' or "
+                f"'host'+'repo'"
+            )
     local = raw.get("local") is True
-    local_path: str | None = (
-        str(raw["local_path"]) if raw.get("local_path") else None
-    )
+    local_path: str | None = None
     if local:
         # Portable form: the row names no location. Resolve on THIS node
         # from the owning org, the workspace id, and the node's own store
@@ -542,22 +546,6 @@ def _parse_repo(
                 f"'local: true' but has no owning org to resolve under"
             )
         local_path = str(resolve_local_repo_path(org, workspace_id))
-    base_source_raw = raw.get("base_source")
-    base_source: str | None
-    if base_source_raw is None:
-        base_source = None
-    else:
-        if not isinstance(base_source_raw, str) or not base_source_raw:
-            raise WorkspaceSettingsError(
-                f"workspace {workspace_id!r}: repos[{idx}].base_source must "
-                f"be a non-empty string"
-            )
-        if not base_source_raw.startswith("/"):
-            raise WorkspaceSettingsError(
-                f"workspace {workspace_id!r}: repos[{idx}].base_source must "
-                f"be an absolute path, got {base_source_raw!r}"
-            )
-        base_source = base_source_raw
     return RepoMount(
         host=str(raw["host"]) if raw.get("host") else None,
         repo=str(raw["repo"]) if raw.get("repo") else None,
@@ -565,7 +553,6 @@ def _parse_repo(
         local_path=local_path,
         mount=str(raw["mount"]),
         writable=bool(raw.get("writable", False)),
-        base_source=base_source,
         local=local,
     )
 
@@ -783,28 +770,29 @@ def _artifacts_by_workspace(
 def load_mounts(
     workspace_id: str, *, org: str | None = None,
 ) -> dict[str, ResolvedSetting]:
-    """Return the :class:`WorkspaceMountV2` Settings for *workspace_id*.
+    """Return the :class:`WorkspaceMountV3` Settings for *workspace_id*.
 
-    Reads ``autonomy.workspace.mount#2`` with composite-key prefix
+    Reads ``autonomy.workspace.mount#3`` with composite-key prefix
     ``<workspace-id>:`` and validates each payload through
-    :class:`WorkspaceMountV2`. The returned dict maps composite key
+    :class:`WorkspaceMountV3`. The returned dict maps composite key
     (``<workspace-id>:<mount-name>``) to the resolved Setting so
     consumers can inspect ``payload`` (typed), ``state``, and ``org``
     without re-querying. Missing schema registration returns an empty
     dict (mount declaration is optional per workspace).
     """
-    if get_schema(MOUNT_SET_ID, MOUNT_REVISION_2) is None:
+    if get_schema(MOUNT_SET_ID, MOUNT_REVISION_3) is None:
         return {}
-    # Rev 2: guarded subpath OR deprecated host_path. The identity 1->2
-    # upconverter keeps a rev-1 (host_path) row alive here as a legacy row; the
-    # consumer dual-dispatches by field. Nothing drops; migration is voluntary.
+    # Rev 3: guarded subpath, or machine-located (no source stored; the
+    # machine's own artifact-path row locates it). host_path is deleted; a
+    # straggler row fails rev-3 validation loudly instead of resolving a
+    # machine path.
     return ops.read_set(
         MOUNT_SET_ID,
         org=org,
         peers=[],
-        target_revision=MOUNT_REVISION_2,
+        target_revision=MOUNT_REVISION_3,
         prefix=workspace_id,
-        model=WorkspaceMountV2,
+        model=WorkspaceMountV3,
     ).to_dict()
 
 
@@ -815,11 +803,11 @@ def _mounts_by_workspace(
     grouped: dict[str, dict[str, ResolvedSetting]] = {
         wid: {} for wid in workspace_ids
     }
-    if get_schema(MOUNT_SET_ID, MOUNT_REVISION_2) is None:
+    if get_schema(MOUNT_SET_ID, MOUNT_REVISION_3) is None:
         return grouped
     members = ops.read_set(
         MOUNT_SET_ID, org=org, peers=[],
-        target_revision=MOUNT_REVISION_2, model=WorkspaceMountV2,
+        target_revision=MOUNT_REVISION_3, model=WorkspaceMountV3,
     ).members
     for member in members:
         workspace_id, separator, _ = member.key.partition(":")
@@ -1161,18 +1149,30 @@ def _compose_workspaces(
     capabilities, capability_issues = _capabilities_by_workspace(
         workspace_ids, org=org,
     )
-    return {
-        member.key: _workspace_from_setting(
-            member.payload,
-            workspace_id=member.key,
-            graph_project=(graph_project if graph_project is not None else member.org or ""),
-            artifacts=artifacts[member.key],
-            mounts=mounts[member.key],
-            capabilities=capabilities[member.key],
-            capability_issues=capability_issues[member.key],
-        )
-        for member in members
-    }
+    out: dict[str, WorkspaceV1] = {}
+    for member in members:
+        try:
+            out[member.key] = _workspace_from_setting(
+                member.payload,
+                workspace_id=member.key,
+                graph_project=(
+                    graph_project if graph_project is not None
+                    else member.org or ""
+                ),
+                artifacts=artifacts[member.key],
+                mounts=mounts[member.key],
+                capabilities=capabilities[member.key],
+                capability_issues=capability_issues[member.key],
+            )
+        except WorkspaceSettingsError as exc:
+            # One malformed row darkens ITS workspace, never the fleet: a
+            # straggler carrying a deleted machine-path field must fail its
+            # own launch loudly, not take down load_workspaces() — which the
+            # dashboard startup path and every session list depend on.
+            logger.error(
+                "workspace %s dropped from composition: %s", member.key, exc,
+            )
+    return out
 
 
 def _workspaces_in_org(slug: str) -> dict[str, WorkspaceV1]:
@@ -1191,6 +1191,7 @@ def _workspaces_in_org(slug: str) -> dict[str, WorkspaceV1]:
     """
     members = ops.read_set(
         WORKSPACE_SET_ID, org=slug, peers=["personal"],
+        target_revision=WORKSPACE_REVISION_2,
     ).members
     return _compose_workspaces(members, org=slug, graph_project=slug)
 
@@ -1219,7 +1220,9 @@ def _load_workspaces_uncached() -> dict[str, WorkspaceV1]:
         # Pre-migration / empty-orgs fallback: read scopelessly so a
         # workspace Setting authored in the default DB is still
         # discoverable. ``org=None`` is explicit per auto-cfb8u.
-        members = ops.read_set(WORKSPACE_SET_ID, org=None).members
+        members = ops.read_set(
+            WORKSPACE_SET_ID, org=None, target_revision=WORKSPACE_REVISION_2,
+        ).members
         return _compose_workspaces(members, org=None)
     out = {}
     for ref in refs:

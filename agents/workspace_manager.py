@@ -612,90 +612,6 @@ def _repo_identity(url: str) -> tuple[str, str] | str:
         return str(Path(url).resolve())
 
 
-def _sync_managed_clone_from_base_source(
-    repo: RepoMount,
-    clone: Path,
-    *,
-    git_timeout: int = 600,
-) -> None:
-    """Sync ``clone``'s integration branch from ``repo.base_source``.
-
-    Validates that the host path exists, is a git checkout, and its
-    ``origin`` URL identity matches ``repo.url``. Resolves the checkout's
-    default integration branch and advances the managed clone's local
-    branch ref to that tip via :func:`_sync_managed_clone_branch_ref`.
-
-    Raises :class:`WorkspaceError` (loudly, with no fallback to ``origin``)
-    when the path is missing, not a git checkout, has no matching
-    ``origin``, or has no resolvable default branch.
-    """
-    base_source = repo.base_source
-    if base_source is None:
-        return
-    if _is_local_url(repo.url) and _repo_identity(base_source) == _repo_identity(repo.url):
-        # ``url`` IS the host checkout — a local-first repo with no separate git
-        # remote (e.g. a git-svn mirror). ``ensure_managed_clone`` already cloned/
-        # fetched the managed clone directly from it, so it is already in sync, and
-        # there is no ``origin`` on the checkout to reconcile against. (This is
-        # distinct from the base_source feature proper, where ``url`` is a real
-        # remote and ``base_source`` is a *different* local checkout of it.)
-        logger.info(
-            "workspace: repo %r is its own local source — managed clone tracks it "
-            "directly; skipping base_source reconciliation",
-            repo.url,
-        )
-        return
-    if not base_source.startswith("/"):
-        raise WorkspaceError(
-            f"workspace: repo {repo.url!r} base_source must be an absolute "
-            f"path, got {base_source!r}"
-        )
-    host_path = Path(base_source)
-    if not host_path.exists():
-        # Advisory, as the schema declares it: base_source names a checkout on
-        # the machine that wrote the row. Elsewhere the remote in repo.url is
-        # the right source, and this row already names it.
-        logger.info(
-            "workspace: base_source %s is not present on this machine; "
-            "managed clone tracks the remote %s instead",
-            base_source, repo.url,
-        )
-        return
-    rc, _, err = _git_output(
-        ["rev-parse", "--git-dir"], host_path, timeout=15,
-    )
-    if rc != 0:
-        raise WorkspaceError(
-            f"workspace: base_source is not a git checkout for repo "
-            f"{repo.url!r}: {base_source} ({err.strip()})"
-        )
-    rc, origin_url, err = _git_output(
-        ["config", "--get", "remote.origin.url"], host_path, timeout=15,
-    )
-    if rc != 0 or not origin_url.strip():
-        raise WorkspaceError(
-            f"workspace: base_source has no origin remote for repo "
-            f"{repo.url!r}: {base_source}"
-        )
-    origin = origin_url.strip()
-    if _repo_identity(origin) != _repo_identity(repo.url):
-        raise WorkspaceError(
-            f"workspace: base_source {base_source} origin {origin!r} does "
-            f"not match repo URL {repo.url!r}"
-        )
-    branch = _repo_default_branch(host_path)
-    if branch is None:
-        raise WorkspaceError(
-            f"workspace: could not resolve default branch for base_source "
-            f"of repo {repo.url!r}: {base_source}"
-        )
-    logger.info(
-        "workspace: syncing managed clone %s from base_source %s (branch %s)",
-        clone, base_source, branch,
-    )
-    _sync_managed_clone_branch_ref(clone, host_path, branch, timeout=git_timeout)
-
-
 COMMIT_SIGN_SHIM = os.environ.get("COMMIT_SIGN_SHIM", "/usr/local/bin/commit-sign-shim")
 
 
@@ -862,7 +778,6 @@ def prepare_session_mounts(
             repos_dir=repos_dir,
             git_timeout=git_timeout,
         )
-        _sync_managed_clone_from_base_source(repo, clone, git_timeout=git_timeout)
         if repo.writable:
             worktree = _session_worktree_dir(
                 worktrees_dir, session_name, _worktree_basename(repo.url),
@@ -1268,13 +1183,11 @@ def check_org_mount_readiness(*, key: str, payload: dict, org: str):
     question instead of guessing from the wrong filesystem.
     """
     from types import SimpleNamespace
-    from tools.graph.schemas.mount import WorkspaceMountV2
+    from tools.graph.schemas.mount import WorkspaceMountV3
 
-    typed = WorkspaceMountV2.model_validate(payload)
-    if typed.subpath is None and typed.host_path is None:
-        return _check_machine_located_mount_readiness(key=key, typed=typed, org=org)
+    typed = WorkspaceMountV3.model_validate(payload)
     if typed.subpath is None:
-        return ()
+        return _check_machine_located_mount_readiness(key=key, typed=typed, org=org)
     subject = f"orgs/{org}/{typed.subpath}"
     rs = SimpleNamespace(payload=typed, org=org, state="")
     try:
@@ -1351,17 +1264,17 @@ def check_org_mount_readiness(*, key: str, payload: dict, org: str):
 def _apply_workspace_mount_settings(
     workspace: WorkspaceV1, mounts: dict[str, str],
 ) -> None:
-    """Extend *mounts* with ``autonomy.workspace.mount#2`` mounts, DUAL-DISPATCHED
-    by which source field the payload carries (exactly one is set, per schema):
+    """Extend *mounts* with ``autonomy.workspace.mount#3`` mounts, dispatched
+    by which source form the payload carries:
 
     * ``subpath`` -> the guarded resolver: resolved under ``orgs/<workspace-org>/``
       in autonomy-orgs, realpath-refused if it escapes, type-checked against
       ``kind``, translated to a host path and emitted strict-bind
       (:func:`_resolve_org_mount`).
-    * ``host_path`` -> the DEPRECATED rev-1 fallback: the pre-refactor HOST
-      behavior, kept so un-migrated rows keep working through the transition
-      (b20f2468-b12). Its wrong-frame ``host.exists()`` is the acceptable status
-      quo for a legacy row; migrating it to a subpath moves it to the guarded path.
+    * no source -> MACHINE-LOCATED: this machine's own
+      ``autonomy.artifact-path`` row (key ``<org>:<mount-name>``) supplies
+      the daemon-frame path; a machine without the row does not have the
+      mount.
 
     Required mounts whose target is absent raise
     :class:`WorkspaceMountMissingError`; optional absent ones are skipped.
@@ -1389,21 +1302,6 @@ def _apply_workspace_mount_settings(
                 continue
             host_path, container_spec, _node_path = spec
             mounts[host_path] = container_spec
-        elif payload.host_path is not None:
-            # Deprecated host_path fallback (pre-fteke HOST behavior).
-            host = Path(payload.host_path)
-            if not host.exists():
-                if payload.required:
-                    raise WorkspaceMountMissingError(
-                        mount_key=key, origin_org=rs.org, state=rs.state,
-                        host_path=payload.host_path, container_path=payload.container_path,
-                    )
-                logger.debug(
-                    "workspace: optional legacy mount %s host_path %s absent — skipping",
-                    key, payload.host_path,
-                )
-                continue
-            mounts[str(host)] = f"{payload.container_path}:{payload.mode}"
         else:
             # MACHINE-LOCATED: the org row carries no location; this
             # machine's own artifact-path row supplies it. No row means
