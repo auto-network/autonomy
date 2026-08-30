@@ -16,7 +16,7 @@ and only then enables delivery of the unchanged armor.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from tools.network import fleet_roster
 from tools.network.fleet_invite import FleetInvite
@@ -138,6 +138,15 @@ class EnrollmentDelivery:
     #: server that already knows it -- never a snapshot the joiner has to
     #: search. None until the bootstrap origin has been attached.
     origin_entry: fleet_roster.RosterEntry | None = None
+    #: Every active roster entry as the approving machine resolves it, so a
+    #: joiner learns the WHOLE fleet at enrollment rather than only the origin
+    #: pair. Without it a new machine knows only two peers and cannot fetch a
+    #: first checkpoint from anyone else (see fountain_fetch: every symbol any
+    #: peer emits is useful). Each entry is independently root-signed and
+    #: ``fleet_roster.resolve`` re-verifies and drops the unverifiable, so a
+    #: larger delivery adds no new trust requirement. Empty for legacy
+    #: deliveries built before this field existed.
+    active_roster: tuple[fleet_roster.RosterEntry, ...] = ()
 
 
 def build_request(
