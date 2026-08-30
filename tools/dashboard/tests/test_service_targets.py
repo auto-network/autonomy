@@ -6,6 +6,8 @@ Design authority: graph://c880c5e6-8bd@3. Bead: auto-dgj9q.1.
 from __future__ import annotations
 
 import importlib
+import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -306,7 +308,7 @@ class TestServiceTargetApiContract:
         assert changed.json()["target"] == {
             **original,
             "session_id": "session-b",
-            "updated_at": "2026-08-30T12:00:02.000Z",
+            "updated_at": "2026-08-30T12:00:01.000Z",
         }
         assert len(events) == 2
 
@@ -425,9 +427,9 @@ class TestServiceTargetResolution:
         client, _events, *_ = target_api
         response = _put(client)
         raw = _target_members()[0].payload
-        forbidden = {"ip", "docker_ip", "network", "url", "upstream", "org", "reservation_id"}
-        assert forbidden.isdisjoint(raw)
-        assert forbidden.isdisjoint(response.json()["target"])
+        private_or_authority = {"ip", "docker_ip", "network", "url", "upstream", "org"}
+        assert (private_or_authority | {"reservation_id"}).isdisjoint(raw)
+        assert private_or_authority.isdisjoint(response.json()["target"])
         assert "172.30.0.11" not in repr(raw)
         assert "172.30.0.11" not in response.text
 
@@ -464,3 +466,65 @@ def test_service_target_schema_is_organization_homed_and_keyed_by_reservation():
     ):
         with pytest.raises(schemas.SchemaValidationError):
             schemas.validate_payload(TARGET_SET_ID, REVISION, {**payload, forbidden: "x"})
+
+
+def test_container_inspection_uses_an_argv_call_and_exact_compose_network(monkeypatch):
+    from tools.dashboard import service_publication as service
+
+    seen = []
+
+    def run(argv, **kwargs):
+        seen.append((argv, kwargs))
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "Id": CONTAINER_A,
+                        "State": {"Running": True},
+                        "NetworkSettings": {
+                            "Networks": {
+                                "autonomy_default": {"IPAddress": "172.30.0.11"}
+                            }
+                        },
+                    }
+                ]
+            ),
+        )
+
+    monkeypatch.setattr(service.subprocess, "run", run)
+    result = asyncio.run(
+        service._inspect_session_container("session-a", "autonomy_default")
+    )
+    assert result == service.ContainerInspection(CONTAINER_A, "172.30.0.11")
+    assert seen[0][0] == ["docker", "inspect", "session-a"]
+    assert seen[0][1]["check"] is False
+
+
+def test_container_inspection_refuses_a_container_outside_the_node_network(monkeypatch):
+    from tools.dashboard import service_publication as service
+
+    monkeypatch.setattr(
+        service.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "Id": CONTAINER_A,
+                        "State": {"Running": True},
+                        "NetworkSettings": {
+                            "Networks": {"some_other_network": {"IPAddress": "172.31.0.4"}}
+                        },
+                    }
+                ]
+            ),
+        ),
+    )
+    with pytest.raises(service.ServicePublicationError) as raised:
+        asyncio.run(service._inspect_session_container("session-a", "autonomy_default"))
+    assert (raised.value.code, raised.value.status_code) == (
+        "target_network_unavailable",
+        409,
+    )

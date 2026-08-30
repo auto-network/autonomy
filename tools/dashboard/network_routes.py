@@ -53,7 +53,7 @@ from pathlib import Path
 
 import httpx
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from tools.data_paths import resolve_store
@@ -2200,6 +2200,86 @@ async def put_service_reservation_state(request: Request) -> JSONResponse:
     return JSONResponse({"reservation": projection})
 
 
+async def get_service_targets(request: Request) -> JSONResponse:
+    org, refused = _service_publication_org(request)
+    if refused is not None:
+        return refused
+    from tools.dashboard import service_publication
+
+    return JSONResponse({"targets": service_publication.list_service_targets(org)})
+
+
+async def put_service_target(request: Request) -> JSONResponse:
+    org, refused = _service_publication_org(request)
+    if refused is not None:
+        return refused
+    try:
+        body = await request.json()
+    except Exception:
+        return _service_publication_error("invalid_json")
+    if not isinstance(body, dict):
+        return _service_publication_error("invalid_json")
+    if set(body) != {"session_id", "port"}:
+        return _service_publication_error("unknown_fields")
+    from tools.dashboard import service_publication
+
+    try:
+        projection, created = await service_publication.bind_service_target(
+            org,
+            request.path_params.get("reservation_id", ""),
+            body.get("session_id"),
+            body.get("port"),
+        )
+    except service_publication.ServicePublicationError as exc:
+        return _service_publication_error(exc.code, exc.status_code)
+    return JSONResponse(
+        {"target": projection}, status_code=201 if created else 200
+    )
+
+
+async def delete_service_target(request: Request) -> Response:
+    org, refused = _service_publication_org(request)
+    if refused is not None:
+        return refused
+    if await request.body():
+        return _service_publication_error("unknown_fields")
+    from tools.dashboard import service_publication
+
+    try:
+        service_publication.unbind_service_target(
+            org, request.path_params.get("reservation_id", "")
+        )
+    except service_publication.ServicePublicationError as exc:
+        return _service_publication_error(exc.code, exc.status_code)
+    return Response(status_code=204)
+
+
+async def check_service_target(request: Request) -> JSONResponse:
+    org, refused = _service_publication_org(request)
+    if refused is not None:
+        return refused
+    from tools.dashboard import service_publication
+
+    try:
+        descriptor = await service_publication.resolve_service_target(
+            org, request.path_params.get("reservation_id", "")
+        )
+    except service_publication.ServicePublicationError as exc:
+        return _service_publication_error(exc.code, exc.status_code)
+    return JSONResponse(
+        {
+            "ok": True,
+            "target": {
+                "reservation_id": request.path_params["reservation_id"],
+                "session_id": descriptor.session_id,
+                "port": descriptor.port,
+                "checked_at": descriptor.checked_at,
+                "expires_at": descriptor.expires_at,
+            },
+        }
+    )
+
+
 ROUTES = [
     Route("/api/network/service-reservations", get_service_reservations, methods=["GET"]),
     Route("/api/network/service-reservations", post_service_reservation, methods=["POST"]),
@@ -2207,6 +2287,22 @@ ROUTES = [
         "/api/network/service-reservations/{reservation_id}/state",
         put_service_reservation_state,
         methods=["PUT"],
+    ),
+    Route("/api/network/service-targets", get_service_targets, methods=["GET"]),
+    Route(
+        "/api/network/service-targets/{reservation_id}",
+        put_service_target,
+        methods=["PUT"],
+    ),
+    Route(
+        "/api/network/service-targets/{reservation_id}",
+        delete_service_target,
+        methods=["DELETE"],
+    ),
+    Route(
+        "/api/network/service-targets/{reservation_id}/check",
+        check_service_target,
+        methods=["POST"],
     ),
     Route("/api/network/org-key", get_org_key, methods=["GET"]),
     Route("/api/network/org-key/sealed", post_sealed_org_key, methods=["POST"]),
