@@ -65,6 +65,22 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # v9: first-class persona_id/session_id on authored graph content.
 # v10 (auto-52j7e): optional durable selected-text anchors on note comments.
 _SCHEMA_USER_VERSION = 10
+
+#: Captured data-phase migrations: ``(schema_user_version, rewrite)`` pairs,
+#: run in order for every version above the database's previous stamp.  The
+#: rewrite receives the open GraphDB AFTER fleet-sync attach, so on an
+#: activated database its replicated-row writes journal, timestamp, and
+#: synchronize like ordinary authored content — which is what makes fleet
+#: upgrade order irrelevant (each machine applies the same deterministic
+#: rewrite; identical values converge under last-writer-wins regardless of
+#: whose timestamp wins).  Requirements on every entry: deterministic on row
+#: content, and idempotent — a peer's copy of the same rewrite may arrive
+#: through sync before this machine runs its own, and a crash between the
+#: data phase and the version stamp re-runs it on the next open.  Structural
+#: DDL stays in the pre-attach phase in ``_init_schema``; a replicated-row
+#: rewrite placed there fails closed on an activated database.
+_DATA_PHASE_MIGRATIONS: tuple = ()
+
 DEFAULT_ORGS_DIR = DATA_ROOT / "orgs"
 
 # Lock wait, explicit so contention tests can shorten it. KEEP THIS SHORT.
@@ -94,19 +110,43 @@ def _fleet_sha256_text(value: object) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _register_fleet_sync_sql_functions(conn: sqlite3.Connection) -> None:
+def _register_fleet_sync_sql_functions(
+    conn: sqlite3.Connection, *, capture_fail_closed: bool = False,
+) -> None:
     conn.create_function(
         "fleet_sha256_text", 1, _fleet_sha256_text, deterministic=True
     )
     # A prepared fleet-sync database already has capture triggers when it is
-    # opened.  Schema migration may update a replicated table before the live
-    # catalog hook is attached, so every function referenced by those triggers
-    # must exist while SQLite prepares the migration statement.  Capture is
-    # deliberately disabled there; the other placeholders fail closed if they
-    # are somehow invoked.  Attaching MutationCatalog replaces the complete
-    # function set with its transaction-aware implementation immediately after
-    # the schema reaches the current version.
-    conn.create_function("fleet_sync_capture_enabled", 0, lambda: 0)
+    # opened.  Schema migration may run before the live catalog hook is
+    # attached, so every function referenced by those triggers must exist
+    # while SQLite prepares the migration statement.  Attaching
+    # MutationCatalog replaces the complete function set with its
+    # transaction-aware implementation immediately after the schema reaches
+    # the current version.
+    #
+    # On a database whose capture triggers are ACTIVE, the pre-attach window
+    # fails closed instead of silently disabling capture: an uncaptured
+    # rewrite of a replicated row never journals, so peers never hear it and
+    # the retained pre-migration frames replay the old values back — silent,
+    # permanent fleet divergence.  Structural DDL fires no row trigger and
+    # passes untouched; a row rewrite belongs in the captured data phase
+    # (``_DATA_PHASE_MIGRATIONS``), which runs after attach on the ordinary
+    # authored connection.  A never-activated database keeps the inert stub:
+    # with no journal and no peers, activation's bootstrap pass stamps
+    # whatever state exists.
+    if capture_fail_closed:
+        def _refuse_uncaptured_migration_write():
+            raise sqlite3.IntegrityError(
+                "uncaptured write to a replicated table during schema "
+                "migration on a fleet-activated database; move this rewrite "
+                "into the captured data phase (_DATA_PHASE_MIGRATIONS)"
+            )
+        conn.create_function(
+            "fleet_sync_capture_enabled", 0,
+            _refuse_uncaptured_migration_write,
+        )
+    else:
+        conn.create_function("fleet_sync_capture_enabled", 0, lambda: 0)
 
     def _capture_is_inactive(*_args):
         raise sqlite3.IntegrityError(
@@ -428,7 +468,15 @@ class GraphDB:
             factory=FleetSyncConnection,
         )
         self.conn.row_factory = sqlite3.Row
-        _register_fleet_sync_sql_functions(self.conn)
+        # Active capture triggers make the pre-attach window fail closed for
+        # replicated-row writes; see _register_fleet_sync_sql_functions.
+        fleet_activated = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='trigger' "
+            "AND name LIKE 'fleet_sync_%' LIMIT 1"
+        ).fetchone() is not None
+        _register_fleet_sync_sql_functions(
+            self.conn, capture_fail_closed=fleet_activated,
+        )
         self.conn.execute("PRAGMA journal_mode = WAL")
         self.conn.execute("PRAGMA foreign_keys = ON")
         self._fleet_catalog = None
@@ -438,12 +486,31 @@ class GraphDB:
         # because sqlite3_exec can commit outside the authored transaction
         # hook.  Attaching first therefore made every legitimate schema bump
         # brick the next writable open of a synced personal database.
-        self._init_schema()
+        try:
+            self._init_schema()
+        except sqlite3.OperationalError as exc:
+            # SQLite reports a raising user-defined function only as this
+            # opaque OperationalError; during the pre-attach window on an
+            # activated database the raising functions are exactly the
+            # fail-closed capture guards, so translate to a legible error
+            # that also skips the lock-contention retry ladder above.
+            if (
+                fleet_activated
+                and "user-defined function raised exception" in str(exc)
+            ):
+                raise sqlite3.IntegrityError(
+                    "schema migration attempted an uncaptured write to a "
+                    "replicated table on a fleet-activated database; move "
+                    "the rewrite into the captured data phase "
+                    "(_DATA_PHASE_MIGRATIONS)"
+                ) from exc
+            raise
         if self._attach_fleet_sync:
             from tools.network.fleet_sync.catalog import (
                 attach_active_production_catalog,
             )
             self._fleet_catalog = attach_active_production_catalog(self.conn)
+        self._run_data_phase_migrations()
 
     def _discard_failed_connection(self) -> None:
         conn = getattr(self, "conn", None)
@@ -522,8 +589,16 @@ class GraphDB:
         # Perf guard: skip the whole re-init (all writes) when this DB is already
         # at the expected schema version. See _SCHEMA_USER_VERSION above — bump
         # that constant whenever you change the schema/migrations/seed below.
-        if self.conn.execute("PRAGMA user_version").fetchone()[0] == _SCHEMA_USER_VERSION:
+        self._pending_data_migrations: list = []
+        previous_version = int(
+            self.conn.execute("PRAGMA user_version").fetchone()[0]
+        )
+        if previous_version == _SCHEMA_USER_VERSION:
             return
+        self._pending_data_migrations = [
+            rewrite for version, rewrite in _DATA_PHASE_MIGRATIONS
+            if version > previous_version
+        ]
         schema = SCHEMA_PATH.read_text()
         self.conn.executescript(schema)
         self._migrate_attachments_alt_text()
@@ -550,8 +625,31 @@ class GraphDB:
         # runs once at dashboard startup via
         # ``schemas.registry.flush_schema_meta_machine_store``. See the constant's
         # comment above.
-        # Stamp the version so subsequent opens hit the fast-path guard above.
+        # Stamp the version so subsequent opens hit the fast-path guard above
+        # — but only once the migration is COMPLETE.  With data-phase work
+        # pending, the stamp waits until _run_data_phase_migrations finishes
+        # after fleet-sync attach; a crash in between re-runs the (idempotent)
+        # phases on the next open instead of silently losing the rewrite.
+        if not self._pending_data_migrations:
+            self.conn.execute(f"PRAGMA user_version = {_SCHEMA_USER_VERSION}")
+
+    def _run_data_phase_migrations(self) -> None:
+        """Run captured data-phase migrations after fleet-sync attach.
+
+        On an activated database the connection's authored hook is installed
+        by now, so every replicated-row write these rewrites make is
+        journaled with ordinary provenance and synchronizes to the fleet.
+        On a never-activated database they run as plain writes, which is
+        equivalent: activation's bootstrap covers whatever state exists.
+        """
+        pending = getattr(self, "_pending_data_migrations", None)
+        if not pending:
+            return
+        self._pending_data_migrations = []
+        for rewrite in pending:
+            rewrite(self)
         self.conn.execute(f"PRAGMA user_version = {_SCHEMA_USER_VERSION}")
+        self.conn.commit()
 
     def _migrate_keycontrol_credential_wire(self):
         """Allow the credential body to be pruned while its audit row remains."""

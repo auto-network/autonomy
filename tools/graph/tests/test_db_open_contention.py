@@ -116,9 +116,19 @@ def test_schema_upgrade_precedes_fleet_sync_activation(tmp_path, monkeypatch):
     assert observed_versions == [db_module._SCHEMA_USER_VERSION]
 
 
-def test_schema_upgrade_disables_existing_capture_triggers_until_activation(
+def test_schema_upgrade_over_capture_triggers_fails_closed_not_disabled(
         tmp_path, monkeypatch):
-    """Migration DML can prepare a complete trigger left by a synced open."""
+    """Migration completes over a leftover capture trigger — fail-closed.
+
+    The old contract silently DISABLED capture for the whole migration
+    window, which let a migration rewrite replicated rows without
+    journaling them: peers never hear the rewrite, and the retained
+    pre-migration frames replay the old values back — silent fleet
+    divergence. The two-phase rule inverts this: structural DDL (which
+    fires no row trigger) still completes, but the pre-attach capture
+    state on an activated database is fail-closed — invoking the capture
+    guard raises instead of reporting "disabled". Replicated-row rewrites
+    belong in the captured data phase (_DATA_PHASE_MIGRATIONS)."""
     path = tmp_path / "personal.db"
     with GraphDB(path, attach_fleet_sync=False) as setup:
         setup.conn.executescript(
@@ -141,6 +151,7 @@ def test_schema_upgrade_disables_existing_capture_triggers_until_activation(
         setup.conn.commit()
 
     observed_capture_states = []
+    observed_guard = []
 
     class Hook:
         def before_statement(self, _sql):
@@ -153,11 +164,14 @@ def test_schema_upgrade_disables_existing_capture_triggers_until_activation(
             return None
 
     def attach(connection):
-        observed_capture_states.append(
-            connection.execute(
-                "SELECT fleet_sync_capture_enabled()"
-            ).fetchone()[0]
-        )
+        try:
+            observed_capture_states.append(
+                connection.execute(
+                    "SELECT fleet_sync_capture_enabled()"
+                ).fetchone()[0]
+            )
+        except sqlite3.OperationalError:
+            observed_guard.append("fail-closed")
         connection.install_fleet_sync_hook(Hook())
         return object()
 
@@ -171,7 +185,10 @@ def test_schema_upgrade_disables_existing_capture_triggers_until_activation(
             db_module._SCHEMA_USER_VERSION
         )
 
-    assert observed_capture_states == [0]
+    # No capture-disabled window exists anymore: the guard is in force
+    # for the entire pre-attach span, and only activation replaces it.
+    assert observed_capture_states == []
+    assert observed_guard == ["fail-closed"]
 
 
 def test_writable_lock_exhaustion_does_not_silently_fallback(
