@@ -71,16 +71,27 @@ def _read_settings(db_path):
     return [dict(r) for r in rows]
 
 
-def test_ensure_bootstrap_creates_both_dbs(orgs_root, stub_org_schema):
+def test_ensure_bootstrap_unnamed_creates_no_shared_org(orgs_root, stub_org_schema):
     refs = org_ops.ensure_bootstrap_orgs()
-    slugs = sorted(r.slug for r in refs)
-    assert slugs == ["autonomy", "personal"]
-    assert (orgs_root / "autonomy.db").exists()
+    assert sorted(r.slug for r in refs) == ["personal"]
+    assert not (orgs_root / "autonomy.db").exists()
     assert (orgs_root.parent / "personal.db").exists()
 
 
+def test_ensure_bootstrap_named_creates_that_org(orgs_root, stub_org_schema):
+    refs = org_ops.ensure_bootstrap_orgs(first_org="acme")
+    assert sorted(r.slug for r in refs) == ["acme", "personal"]
+    assert (orgs_root / "acme.db").exists()
+
+
+def test_ensure_bootstrap_reports_existing_shared(orgs_root, stub_org_schema):
+    org_ops.ensure_bootstrap_orgs(first_org="acme")
+    refs = org_ops.ensure_bootstrap_orgs()
+    assert sorted(r.slug for r in refs) == ["acme", "personal"]
+
+
 def test_ensure_bootstrap_seeds_identity(orgs_root, stub_org_schema):
-    org_ops.ensure_bootstrap_orgs()
+    org_ops.ensure_bootstrap_orgs(first_org="autonomy")
     aut_settings = _read_settings(orgs_root / "autonomy.db")
     assert len(aut_settings) == 1
     payload = json.loads(aut_settings[0]["payload"])
@@ -103,17 +114,17 @@ def test_bootstrap_skips_seed_when_schema_unregistered(orgs_root):
     # The autouse _isolate_schema_registry fixture restores it after.
     from tools.graph.schemas.registry import unregister_schema
     unregister_schema("autonomy.org", 1)
-    refs = org_ops.ensure_bootstrap_orgs()
-    assert sorted(r.slug for r in refs) == ["autonomy", "personal"]
+    refs = org_ops.ensure_bootstrap_orgs(first_org="acme")
+    assert sorted(r.slug for r in refs) == ["acme", "personal"]
     # DB exists, but no autonomy.org#1 Setting was seeded.
-    assert _read_settings(orgs_root / "autonomy.db") == []
+    assert _read_settings(orgs_root / "acme.db") == []
     assert _read_settings(orgs_root.parent / "personal.db") == []
 
 
 def test_bootstrap_is_idempotent(orgs_root, stub_org_schema):
-    refs1 = org_ops.ensure_bootstrap_orgs()
-    refs2 = org_ops.ensure_bootstrap_orgs()
-    refs3 = org_ops.ensure_bootstrap_orgs()
+    refs1 = org_ops.ensure_bootstrap_orgs(first_org="autonomy")
+    refs2 = org_ops.ensure_bootstrap_orgs(first_org="autonomy")
+    refs3 = org_ops.ensure_bootstrap_orgs(first_org="autonomy")
     # UUIDs stable across re-runs.
     by_slug1 = {r.slug: r.id for r in refs1}
     by_slug3 = {r.slug: r.id for r in refs3}
@@ -140,7 +151,7 @@ def test_bootstrap_uses_uuid7(orgs_root, stub_org_schema):
 
 
 def test_bootstrap_orgs_have_correct_types(orgs_root, stub_org_schema):
-    refs = org_ops.ensure_bootstrap_orgs()
+    refs = org_ops.ensure_bootstrap_orgs(first_org="autonomy")
     by_slug = {r.slug: r for r in refs}
     assert by_slug["autonomy"].type == "shared"
     assert by_slug["personal"].type == "personal"
