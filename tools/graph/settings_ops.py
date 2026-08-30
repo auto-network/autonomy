@@ -1346,12 +1346,11 @@ def _db_path(org: str | None) -> str | None:
         machine_path = _org_db_path("machine")
         with _personal_db_init_lock:
             if not machine_path.exists():
-                try:
-                    GraphDB.create_org_db(
-                        "machine", type_="personal", path=machine_path,
-                    ).close()
-                except FileExistsError:
-                    pass
+                # Schema only. ``create_org_db`` would also insert the
+                # identifying ``orgs`` row, and ``list_orgs`` lists every store
+                # that has one — which is how this store reached the org
+                # selector on nodes built after it started being created here.
+                GraphDB(machine_path).close()
         return str(machine_path)
     if org is None:
         personal_path = _org_db_path("personal")
