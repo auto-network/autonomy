@@ -447,15 +447,29 @@ def check_serving_readiness(report: dict) -> None:
                 try:
                     status = sup.control(org, "connector-status", {})
                     configured = status.get("fleet_runtime_configured")
+                    if configured is False and org not in personal_aliases:
+                        # Only the PERSONAL tunnel is ever armed for Fleet
+                        # sync. activate_local_runtime publishes the runtime
+                        # credential with org=None on purpose -- the fleet is
+                        # anchored on the personal root, so a shared org's
+                        # connector is never configured and never should be.
+                        # Reporting that as a failure printed three red FAIL
+                        # lines next to the one green line that matters, and
+                        # sent the operator hunting a fault that cannot exist.
+                        _line(
+                            f"{label}: serving readiness",
+                            "connector is up and eligible; fleet_runtime_configured"
+                            "=False is expected for an org scope, which does not "
+                            "serve Fleet sync",
+                        )
+                        continue
                     if configured is False:
                         _line(
                             f"{label}: serving readiness",
                             "connector is up and eligible, but "
                             "fleet_runtime_configured=False -- every sync pull will "
                             "refuse with 'serving machine is locked for Fleet sync' "
-                            "until a genuine unlock configures it (and that "
-                            "configuration will not survive this connector's next "
-                            "restart)",
+                            "until an unlock configures it",
                             fail=True,
                         )
                         continue
