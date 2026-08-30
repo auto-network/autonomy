@@ -44,11 +44,14 @@ not share this lock and must carry their own mock or node identity boundary.
 from __future__ import annotations
 
 import contextlib
+import ctypes
+import ctypes.util
 import fcntl
 import json
 import logging
 import os
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -82,6 +85,31 @@ CONNECTOR_STARTUP_TIMEOUT_S = 60.0
 #: so the single failure that leaves a process alive and permanently
 #: unable to serve was the single failure nothing reaped.
 CONNECTOR_RECONNECT_TIMEOUT_S = 600.0
+
+_log = logging.getLogger(__name__)
+
+#: ``prctl`` option number (``linux/prctl.h``): send a signal when the parent
+#: DIES, however it dies. This is the lifeline ``stop_all()`` cannot be — that
+#: only runs on a graceful shutdown, and a crash/SIGKILL/reload-without-cleanup
+#: is exactly the case that orphaned five generations of connectors onto
+#: systemd. Set in the child at spawn so the kernel reaps it with its dashboard.
+_PR_SET_PDEATHSIG = 1
+
+#: The libc handle is opened ONCE at import, never inside the post-fork
+#: ``preexec_fn``: ``dlopen`` after ``fork()`` in a threaded process can deadlock
+#: on the loader's own locks. Only the two syscalls below run in the child.
+try:
+    _LIBC = ctypes.CDLL(
+        ctypes.util.find_library("c") or "libc.so.6", use_errno=True
+    )
+except OSError:  # pragma: no cover - libc is always present on Linux
+    _LIBC = None
+
+#: The connector's module invocation, matched in ``/proc/<pid>/cmdline`` when
+#: reaping strays. A leaked connector is ``python -m tools.dashboard.link_serving
+#: --org <uuid> ...`` reparented to systemd — the supervisor cannot see it in
+#: ``self._procs`` (it is not its child), so it finds it by this signature.
+_CONNECTOR_MODULE = "tools.dashboard.link_serving"
 
 
 # ── provisioning state (also the enrich precondition) ─────────
@@ -445,6 +473,9 @@ class _Proc:
         self._p = popen
         self._ctl_path = ctl_path
 
+    def pid(self) -> int | None:
+        return getattr(self._p, "pid", None)
+
     def alive(self) -> bool:
         return self._p.poll() is None
 
@@ -493,6 +524,33 @@ class _Proc:
                     os.remove(self._ctl_path)
 
 
+def _make_pdeathsig_preexec(expected_ppid: int):
+    """Build the child's ``preexec_fn`` that ties its life to the dashboard.
+
+    Runs in the forked child *before* exec, so ``PR_SET_PDEATHSIG`` survives
+    into the connector image (the disposition is cleared on ``fork`` but
+    preserved across ``execve``). Two things it must get right:
+
+    * **The kernel watches the forking THREAD, not the process.** If a
+      short-lived thread spawns the connector, its exit would fire the death
+      signal prematurely. The supervisor only ever spawns from long-lived
+      threads (the watchdog, or the asyncio default executor's persistent
+      workers), which keeps that disposition tied to the dashboard's lifetime.
+    * **The parent can die between ``fork`` and this call.** Then the death
+      signal is armed against an already-dead thread and never arrives, leaving
+      the very orphan this exists to prevent. Re-check ``getppid()`` against the
+      pid we forked from and exit immediately if we were already reparented.
+    """
+
+    def _preexec() -> None:  # pragma: no cover - runs only in the forked child
+        if _LIBC is not None:
+            _LIBC.prctl(_PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0)
+        if os.getppid() != expected_ppid:
+            os._exit(0)
+
+    return _preexec
+
+
 def _default_spawn(argv: list, env: dict, *, log_path: str | None = None,
                    ctl_path: str | None = None):
     out = open(log_path, "ab") if log_path else subprocess.DEVNULL
@@ -502,12 +560,85 @@ def _default_spawn(argv: list, env: dict, *, log_path: str | None = None,
     child_env["PYTHONUNBUFFERED"] = "1"
     try:
         popen = subprocess.Popen(
-            argv, env=child_env, stdout=out, stderr=out
+            argv, env=child_env, stdout=out, stderr=out,
+            # Tie the connector's life to this dashboard's: the kernel signals
+            # it whenever the parent dies, so a crash/SIGKILL/reload can no
+            # longer leave it orphaned and fighting for the relay slot.
+            preexec_fn=_make_pdeathsig_preexec(os.getpid()),
         )
     finally:
         if out is not subprocess.DEVNULL:
             out.close()  # the child retains its duplicated descriptor
     return _Proc(popen, ctl_path=ctl_path)
+
+
+def _iter_connector_pids(org_uuid: str):
+    """Yield pids of running serving connectors for *org_uuid* — ours or not.
+
+    Scans ``/proc`` for ``python -m tools.dashboard.link_serving --org
+    <org_uuid>``. This is how the supervisor finds the leaked generations it
+    did not spawn (reparented to systemd, invisible in ``self._procs``); the
+    caller filters out the pids it owns before terminating the rest.
+    """
+    proc_root = "/proc"
+    try:
+        entries = os.listdir(proc_root)
+    except OSError:
+        return
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"{proc_root}/{entry}/cmdline", "rb") as fh:
+                parts = fh.read().split(b"\0")
+        except OSError:
+            continue  # the process exited mid-scan, or is not ours to read
+        args = [p.decode("utf-8", "replace") for p in parts if p]
+        if _CONNECTOR_MODULE not in args:
+            continue
+        try:
+            org_at = args.index("--org")
+            if args[org_at + 1] != org_uuid:
+                continue
+        except (ValueError, IndexError):
+            continue
+        try:
+            yield int(entry)
+        except ValueError:
+            continue
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, just not signalable by us
+    return True
+
+
+def _terminate_pid(pid: int) -> None:
+    """SIGTERM a stray connector, escalating to SIGKILL if it lingers.
+
+    Bounded so a wedged orphan cannot stall reconciliation: a short poll after
+    the term, then a kill. A stray that already exited is a no-op.
+    """
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        _log.warning("cannot terminate stray serving connector pid=%s "
+                     "(not permitted)", pid)
+        return
+    deadline = time.time() + 3.0
+    while time.time() < deadline:
+        if not _pid_alive(pid):
+            return
+        time.sleep(0.05)
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.kill(pid, signal.SIGKILL)
 
 
 class ServingSupervisor:
@@ -613,6 +744,13 @@ class ServingSupervisor:
                 proc.stop()
                 self._procs.pop(org, None)
                 self._credentials.pop(org, None)
+            # While we still hold the ownership lock, sweep any orphan for this
+            # org: a connector left serving on a revoked/expired org keeps
+            # displacing everyone else's relay slot exactly like the leaked
+            # generations. Only when we own the lock — otherwise a live sibling
+            # dashboard's connector is not ours to kill.
+            if org in self._locks:
+                self._reap_strays(org)
             self._started_at.pop(org, None)
             self._last_served.pop(org, None)
             self._release_lock(org)
@@ -722,6 +860,11 @@ class ServingSupervisor:
         # cross-container isolation; mock dashboards never bootstrap serving.
         if not self._acquire_lock(org, state["key_path"]):
             return {"running": True, "reason": "owned-by-other-dashboard"}
+        # We hold the per-org ownership lock, so every OTHER connector for this
+        # org is a stray — an orphan a dead dashboard left behind (a live sibling
+        # would still hold this lock). Reap them before spawning ours, so the new
+        # connector does not just join the crowd fighting for the relay slot.
+        self._reap_strays(org)
         try:
             cert_path = _materialize_cert(state["key_path"], state["cert"])
             viewer_cert_path = _viewer_cert_path_for(state["key_path"])
@@ -750,6 +893,51 @@ class ServingSupervisor:
         self._started_at[org] = self._now()
         self._last_served.pop(org, None)
         return {"running": True, "reason": "launched"}
+
+    def _owned_pids(self) -> set[int]:
+        """The pids of connectors THIS supervisor spawned — the reap exclusion
+        set. Includes our own pid so a same-node command line never matches."""
+        owned = {os.getpid()}
+        for handle in self._procs.values():
+            pid = None
+            with contextlib.suppress(Exception):
+                pid = handle.pid()
+            if isinstance(pid, int):
+                owned.add(pid)
+        return owned
+
+    def _reap_strays(self, org: str | None) -> None:
+        """Terminate serving connectors for *org* that this supervisor does not
+        own — the leaked generations reparented to systemd when a previous
+        dashboard died.
+
+        ``PR_SET_PDEATHSIG`` (see :func:`_default_spawn`) covers future spawns
+        but cannot touch a process that already leaked, nor the race where the
+        parent died before the child armed the signal. This is that backstop:
+        it also self-heals a node that inherited orphans from an earlier crash,
+        with no operator involved. Callers hold the lock; best-effort — a scan
+        or signal failure must never block reconciliation.
+        """
+        try:
+            binding, binding_error = _load_binding(org)
+            if binding_error or not binding:
+                return
+            org_uuid = binding.get("org_uuid")
+            if not org_uuid:
+                return
+            owned = self._owned_pids()
+            for pid in _iter_connector_pids(org_uuid):
+                if pid in owned:
+                    continue
+                _log.warning(
+                    "reaping stray serving connector pid=%s for org=%s "
+                    "(not owned by this dashboard — a leaked generation)",
+                    pid, org_uuid,
+                )
+                _terminate_pid(pid)
+        except Exception:
+            _log.warning("stray-connector reap failed for org=%s",
+                         org, exc_info=True)
 
     def _acquire_lock(self, org: str | None, key_path: str) -> bool:
         if org in self._locks:

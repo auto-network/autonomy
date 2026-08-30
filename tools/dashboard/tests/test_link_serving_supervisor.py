@@ -18,14 +18,20 @@ grant):
 
 from __future__ import annotations
 
+import contextlib
 import os
+import signal
+import subprocess
 import sys
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from tools.dashboard import link_serving_supervisor as sup
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 from tools.graph import settings_ops
 from tools.graph.schemas.network_identity import (
     NETWORK_BINDING_REVISION,
@@ -45,6 +51,9 @@ class FakeProc:
     def __init__(self):
         self._alive = True
         self._serving = True
+
+    def pid(self):
+        return None  # not a real /proc process; never a reap target
 
     def alive(self):
         return self._alive
@@ -116,6 +125,56 @@ def test_default_spawn_forces_unbuffered_connector_output(tmp_path):
         assert log_path.read_bytes() == b"ready"
     finally:
         proc.stop()
+
+
+def test_connector_dies_with_its_parent_via_pdeathsig(tmp_path):
+    """A spawned connector is signalled when its dashboard dies, however it
+    dies — the leak this bead exists to fix.
+
+    A stand-in "dashboard" process spawns a long-lived child through the real
+    ``_default_spawn`` (which arms ``PR_SET_PDEATHSIG``), reports the child pid,
+    then is SIGKILLed — the crash path ``stop_all()`` never covers. The kernel
+    must reap the orphan; without the death signal it would survive, reparented
+    to init, exactly as the five leaked generations did.
+    """
+    parent_src = (
+        "import os, sys, time\n"
+        "from tools.dashboard import link_serving_supervisor as sup\n"
+        "proc = sup._default_spawn(\n"
+        "    [sys.executable, '-c', 'import time; time.sleep(120)'],\n"
+        "    dict(os.environ))\n"
+        "print(proc.pid(), flush=True)\n"
+        "time.sleep(120)\n"
+    )
+    parent = subprocess.Popen(
+        [sys.executable, "-c", parent_src],
+        stdout=subprocess.PIPE, cwd=_REPO_ROOT, env=dict(os.environ),
+    )
+    try:
+        child_pid = int(parent.stdout.readline().decode().strip())
+        assert _alive(child_pid)
+        parent.kill()  # SIGKILL: the shutdown hook never runs
+        parent.wait(timeout=10)
+        deadline = time.time() + 10
+        while time.time() < deadline and _alive(child_pid):
+            time.sleep(0.05)
+        assert not _alive(child_pid), (
+            "orphaned connector survived its parent's death — PDEATHSIG did "
+            "not fire"
+        )
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            parent.kill()
+        with contextlib.suppress(Exception):
+            os.kill(child_pid, signal.SIGKILL)
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
 
 
 @pytest.fixture
@@ -307,6 +366,88 @@ def test_stops_when_last_grant_revoked(env):
     clock[0] += 60  # past the fresh-tunnel grace, so the watchdog reaps it
     assert s.ensure(ORG) == {"running": False, "reason": "no-live-grants"}
     assert proc.alive() is False  # the connector was stopped
+
+
+# ── reaping leaked / orphaned connectors ──────────────────────
+
+
+def _spawn_fake_connector(org_uuid: str):
+    """A harmless stand-in for a leaked serving connector: a sleeper whose
+    /proc cmdline carries the exact tokens the reaper matches on."""
+    return subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(120)",
+         sup._CONNECTOR_MODULE, "--org", org_uuid],
+    )
+
+
+def _await_visible(pid: int, org_uuid: str) -> None:
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if pid in set(sup._iter_connector_pids(org_uuid)):
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"connector pid={pid} never appeared in /proc scan")
+
+
+def test_iter_connector_pids_matches_by_org(env):
+    proc = _spawn_fake_connector(ORG_UUID)
+    try:
+        _await_visible(proc.pid, ORG_UUID)
+        assert proc.pid in set(sup._iter_connector_pids(ORG_UUID))
+        # a connector for a different org is not this org's stray
+        assert proc.pid not in set(sup._iter_connector_pids("99" * 16))
+    finally:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+def test_reap_strays_terminates_an_unowned_connector(env):
+    _provision_serve_cert(env)  # provisions the binding → org_uuid
+    proc = _spawn_fake_connector(ORG_UUID)
+    s = sup.ServingSupervisor(spawn=FakeSpawn())
+    try:
+        _await_visible(proc.pid, ORG_UUID)
+        s._reap_strays(ORG)
+        proc.wait(timeout=8)
+        assert proc.poll() is not None  # the orphan was terminated
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+
+
+def test_reap_strays_spares_a_connector_this_supervisor_owns(env):
+    _provision_serve_cert(env)
+    proc = _spawn_fake_connector(ORG_UUID)
+    s = sup.ServingSupervisor(spawn=FakeSpawn())
+    # Model this pid as the supervisor's own child: the reap must exclude it.
+    s._procs[ORG] = SimpleNamespace(pid=lambda: proc.pid, alive=lambda: True)
+    try:
+        _await_visible(proc.pid, ORG_UUID)
+        s._reap_strays(ORG)
+        time.sleep(0.4)
+        assert proc.poll() is None  # spared
+    finally:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+def test_launch_reaps_strays_before_spawning(env):
+    """Startup with an inherited orphan: the new connector clears the leaked
+    generation before it joins the crowd fighting for the relay slot."""
+    _provision_serve_cert(env)
+    _put_grant()
+    stray = _spawn_fake_connector(ORG_UUID)
+    spawn = FakeSpawn()
+    s = sup.ServingSupervisor(spawn=spawn)
+    try:
+        _await_visible(stray.pid, ORG_UUID)
+        assert s.ensure(ORG)["running"] is True
+        assert len(spawn.calls) == 1        # our clean connector launched
+        stray.wait(timeout=8)
+        assert stray.poll() is not None     # the orphan was reaped first
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            stray.kill()
 
 
 def test_roster_assignment_stops_a_connector_owned_by_another_machine(
