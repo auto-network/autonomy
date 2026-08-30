@@ -238,3 +238,24 @@ volumes:
   autonomy-orgs:
     name: autonomy-orgs
   dolt-data:
+
+# Pin the project network — never let the daemon choose. Left undeclared, the
+# daemon allocates from its built-in pools (172.17.0.0/12 in /16s, then
+# 192.168.0.0/16 in /20s) and, on a host where the first pool is used up, takes
+# the second pool's first /20 — 192.168.0.0/20, which swallows 192.168.1.0/24,
+# the most common home LAN there is, and blackholes the operator's own network.
+# It happened on this machine 2026-08-30 and cost hours.
+#
+# AUTONOMY_SUBNET has NO default on purpose. The `:?` makes `docker compose
+# config`/`up` FAIL immediately when it is unset, rather than fall back to the
+# daemon's silent allocation. Run the read-only preflight to choose a subnet
+# that overlaps nothing the host already routes, and record it in .env:
+#
+#     python3 -m tools.network.network_preflight --env >> .env
+#
+# There are no existing installations, so failing closed costs nothing.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${AUTONOMY_SUBNET:?run `python3 -m tools.network.network_preflight --env >> .env` to choose a free subnet first (bead auto-oj3bc)}

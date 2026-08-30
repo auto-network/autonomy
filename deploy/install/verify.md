@@ -58,6 +58,26 @@ fresh C, C serves A's identity and content — is exercised by the project's
 multi-node acceptance ladder (`python3 -m deploy.harness`, needs Docker
 and ~10 minutes; offer, don't force).
 
+## The project network sits clear of the operator's own LAN
+
+**Claim:** the Compose stack pinned its network to `AUTONOMY_SUBNET` and that
+subnet overlaps nothing the host routes — the daemon did not silently allocate
+a block on top of the operator's home network.
+
+```bash
+# After `docker compose up`, re-read live state and compare the CREATED network
+# against the host routes. Read-only; creates nothing.
+python3 -m tools.network.network_preflight
+docker network inspect "$(docker network ls --format '{{.Name}}' | grep _default | head -1)" \
+  --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}'
+```
+
+The preflight report's "Pool / host-route overlap" line should read clear and
+"Existing network COLLISIONS with the operator's LAN" should list nothing; the
+inspected subnet should equal the `AUTONOMY_SUBNET` you recorded in §2. A
+non-empty collisions section means a network is sitting on a real network the
+host uses — recreate it on a pinned subnet before proceeding.
+
 ## No mandated registry or distribution channel
 
 **Claim:** you can obtain, build, and run Autonomy without permission from

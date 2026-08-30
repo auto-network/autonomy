@@ -95,6 +95,32 @@ the platform's standard channel, or stop and report. Platform notes:
 [/install/platform/mac.md](/install/platform/mac.md) ·
 [/install/platform/linux.md](/install/platform/linux.md).
 
+**Pick the project subnet — do this before §4 creates the network.** Left to
+itself, the Docker daemon allocates the Compose network from its built-in
+pools, and on a busy host it reaches `192.168.0.0/16` and can take a block
+containing `192.168.1.0/24` — the most common home LAN there is — blackholing
+the operator's own network until a host route is added by hand. The stack now
+**refuses to start** without a pinned `AUTONOMY_SUBNET` (there is no default),
+so this step is mandatory. Run the read-only preflight; it reads the host's
+routes and Docker's networks (mutating nothing) and prints a subnet that
+overlaps nothing currently routed. Record it in the project `.env`.
+
+The preflight ships in the checkout, so obtain the source first (a `git clone`
+writes files into a new directory but starts nothing and touches no network —
+the system-changing `docker compose up` in §4 stays gated behind §3 consent):
+
+```bash
+git clone <source you chose> autonomy && cd autonomy
+python3 -m tools.network.network_preflight            # read-only report
+python3 -m tools.network.network_preflight --env >> .env   # record AUTONOMY_SUBNET
+```
+
+Do not judge the subnet yourself — run the command and record the value it
+prints. If the report shows a pool overlapping a host network, or an existing
+network colliding with the LAN, include that in your §3 briefing. §4 then runs
+`docker compose up` from this same directory, where the `.env` you just wrote
+supplies `AUTONOMY_SUBNET`.
+
 ## 3. The consent briefing
 
 Deliver a briefing in your own words with the observed specifics filled in.
@@ -122,7 +148,9 @@ behavior, different storage backing.
 **Path A — build from source you chose (the default sovereign path):**
 
 ```bash
-git clone <source you chose> autonomy && cd autonomy
+# You cloned in §2 to run the preflight; reuse that checkout. (git clone
+# <source you chose> autonomy && cd autonomy — if you have not yet.)
+# .env already carries the AUTONOMY_SUBNET the preflight chose.
 AUTONOMY_FIRST_ORG=myorg docker compose up -d
 # → https://localhost:8080  (self-signed cert; accept once)
 ```
@@ -172,6 +200,8 @@ invitation from their Dashboard): start the fresh node with that value. The
 same Docker volume survives the asynchronous approval and completion:
 
 ```bash
+# Same pinned-subnet requirement as Path A: run the §2 preflight and record
+# AUTONOMY_SUBNET in .env first, or this compose up refuses to start.
 AUTONOMY_FLEET_INVITE="$FLEET_INVITATION" docker compose up -d
 # → first render shows the machine comparison code and “Waiting for approval”
 ```
