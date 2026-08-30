@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import hashlib
+import json
 import sqlite3
 from typing import Final
 
@@ -256,6 +258,74 @@ def classify_table(name: str) -> PolicyKind | None:
     if name in LEDGER_TABLES:
         return PolicyKind.LOCAL
     return None
+
+
+_COMPAT_DIGEST_DOMAIN = b"autonomy.network.fleet-sync.compat-digest.v1\n"
+
+#: Per-database shape-digest memo, keyed by resolved file path and validated
+#: against SQLite's own ``PRAGMA schema_version`` counter — the engine
+#: increments it on every DDL statement against the file, so a cached digest
+#: is exact, not heuristic: one header-page read per validation, and
+#: recomputation happens only when a migration actually ran.
+_compat_digest_cache: dict[str, tuple[int, str]] = {}
+
+
+def _replication_surface() -> dict:
+    """The process-constant half of the digest: policy inventory + codec."""
+    from .codec import MAGIC
+
+    return {
+        "codec": MAGIC.hex(),
+        "policies": {
+            table: {
+                "kind": policy.kind.value,
+                "key": list(policy.key),
+                "json": sorted(policy.json_columns),
+                "excluded": sorted(policy.excluded_columns),
+                "timestamps": list(policy.timestamp_columns),
+            }
+            for table, policy in TABLE_POLICIES.items()
+        },
+    }
+
+
+def compatibility_digest(conn: sqlite3.Connection) -> str:
+    """Digest of everything that decides whether two machines' delta frames
+    are mutually intelligible: the synchronization policy inventory, the
+    codec domain identity, and the live logical shape (column name and
+    declared type, excluded columns removed) of every replicated table.
+
+    Deliberately absent: the graph ``user_version`` (a proxy for the shape —
+    it over-pauses on migrations that never touch replication and
+    under-protects against physical drift at equal numbers), the sync
+    protocol version (enforced earlier with its own typed error), catalog
+    schema versions (local bookkeeping, never wire-visible), and data-phase
+    migration progress (captured authored writes propagate through ordinary
+    synchronization and need no pause).
+    """
+    schema_version = int(conn.execute("PRAGMA schema_version").fetchone()[0])
+    path = str(conn.execute("PRAGMA database_list").fetchone()[2])
+    cached = _compat_digest_cache.get(path) if path else None
+    if cached is not None and cached[0] == schema_version:
+        return cached[1]
+    shape: dict[str, list] = {}
+    for table, policy in TABLE_POLICIES.items():
+        if policy.kind in {PolicyKind.LOCAL, PolicyKind.DERIVED}:
+            continue
+        shape[table] = sorted(
+            [str(row[1]), str(row[2])]
+            for row in conn.execute(f'PRAGMA table_info("{table}")')
+            if str(row[1]) not in policy.excluded_columns
+        )
+    payload = json.dumps(
+        {"surface": _replication_surface(), "shape": shape},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    digest = hashlib.sha256(_COMPAT_DIGEST_DOMAIN + payload).hexdigest()
+    if path:
+        _compat_digest_cache[path] = (schema_version, digest)
+    return digest
 
 
 def audit_schema(conn: sqlite3.Connection) -> dict[str, PolicyKind]:

@@ -66,7 +66,7 @@ FILE_MAGIC = b"FSB1"
 MAX_CHECKPOINT_FILES = 4096
 MAX_CHECKPOINT_BYTES = 4 * 1024 * 1024 * 1024
 _REQUEST_FIELDS = {
-    "v", "op", "roster_epoch", "checkpoint", "resume", "hello",
+    "v", "op", "roster_epoch", "checkpoint", "compat", "resume", "hello",
 }
 
 
@@ -345,6 +345,21 @@ class ConnectorFleetRuntime:
             )
         except FleetSyncProtocolError as exc:
             raise FleetRelaySyncError(str(exc)) from exc
+        peer_digest = message.get("compat")
+        if (
+            not isinstance(peer_digest, str)
+            or len(peer_digest) != 64
+            or any(ch not in "0123456789abcdef" for ch in peer_digest)
+        ):
+            raise FleetRelaySyncError("fleet sync pull compat digest is malformed")
+        local_digest = await asyncio.to_thread(
+            scheduler.store.compatibility_digest
+        )
+        if peer_digest != local_digest:
+            # Mixed-schema fleet: the puller has not applied this machine's
+            # migration yet (or vice versa). Refusing before the checkpoint
+            # is built pauses BOTH transports until the schemas reconverge.
+            raise FleetRelaySyncError("fleet sync schema mismatch")
         hello = canonical_json(message.get("hello"))
         peer_pub, _private, server_hello, _transcript = (
             scheduler.authenticator.accept_client(hello, session=token)
@@ -433,6 +448,7 @@ class ConnectorFleetRuntime:
                     token,
                     encode_pull_request(
                         requested_epoch,
+                        compat=peer_digest,
                         resume=resume_trail,
                     ),
                     peer_pub,
@@ -568,11 +584,15 @@ async def pull_checkpoint_once(
             fleet_sync_telemetry.read_resume_breadcrumbs,
             route.origin_machine_pub,
         )
+        local_digest = await asyncio.to_thread(
+            SQLiteFleetSyncStore(_org_db_path("personal")).compatibility_digest
+        )
         request = canonical_json({
             "v": PROTOCOL_VERSION,
             "op": PULL_OP,
             "roster_epoch": epoch,
             "checkpoint": include_checkpoint,
+            "compat": local_digest,
             "resume": [
                 encode_breadcrumb(breadcrumb) for breadcrumb in resume_trail
             ],
@@ -770,6 +790,8 @@ def _classify_pull_failure(exc: BaseException) -> str:
             return "attachment_bytes_unavailable"
         return "alpha_error"
     if isinstance(exc, FleetRelaySyncError):
+        if "schema mismatch" in text:
+            return "schema_mismatch"
         if "locked" in text:
             return "locked"
         if "malformed" in text:

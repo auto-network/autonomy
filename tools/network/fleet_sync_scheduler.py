@@ -51,8 +51,9 @@ logger = logging.getLogger(__name__)
 
 FLEET_SYNC_PROTOCOL_VERSION = 3
 _REQUEST_FIELDS = frozenset({
-    "v", "op", "roster_epoch", "resume",
+    "v", "op", "roster_epoch", "resume", "compat",
 })
+_REFUSAL_FIELDS = frozenset({"v", "kind", "digest"})
 _DONE_FIELDS = frozenset(
     {
         "v", "kind", "roster_epoch", "message_count", "digest",
@@ -61,6 +62,7 @@ _DONE_FIELDS = frozenset(
 )
 _MUTATION_MAGIC = b"FST1"
 _DONE_MAGIC = b"FSD1"
+_REFUSAL_MAGIC = b"FSR1"
 _HEADER_LIMIT = 4096
 _SETTINGS_HINT_LIMIT = 256
 #: A resume trail carries the last few verified stream positions plus an
@@ -134,6 +136,16 @@ def _emit_settings_materialized(
 
 class FleetSyncProtocolError(ValueError):
     """A peer sent malformed, inconsistent, or unsupported sync data."""
+
+
+class FleetSyncSchemaMismatch(FleetSyncProtocolError):
+    """The peer's replicated schema differs; synchronization is paused.
+
+    Not a fault: one fleet machine upgraded before the other.  The refusal
+    is typed so status surfaces show a pause, and the ordinary poll/backoff
+    loop resumes automatically once the lagging machine's own software
+    applies the same migration locally.
+    """
 
 
 @dataclass(frozen=True)
@@ -217,8 +229,42 @@ def decode_breadcrumb(value: object, what: str) -> tuple[str, str, int]:
     return origin, transaction, timestamp
 
 
+def _require_hex64(value: object, what: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(ch not in "0123456789abcdef" for ch in value)
+    ):
+        raise FleetSyncProtocolError(f"{what} is malformed")
+    return value
+
+
+def encode_schema_refusal(*, digest: str) -> bytes:
+    return _REFUSAL_MAGIC + canonical_json(
+        {
+            "v": FLEET_SYNC_PROTOCOL_VERSION,
+            "kind": "schema-refused",
+            "digest": _require_hex64(digest, "schema refusal digest"),
+        }
+    )
+
+
+def decode_schema_refusal(raw: bytes) -> str:
+    if not raw.startswith(_REFUSAL_MAGIC):
+        raise FleetSyncProtocolError("fleet sync refusal has wrong magic")
+    value = _json_object(
+        raw[len(_REFUSAL_MAGIC):], _REFUSAL_FIELDS, "fleet sync refusal"
+    )
+    if value["kind"] != "schema-refused":
+        raise FleetSyncProtocolError("fleet sync refusal has wrong kind")
+    return _require_hex64(value["digest"], "fleet sync refusal digest")
+
+
 def encode_pull_request(
-    epoch: str, *, resume: Sequence[tuple[str, str, int]] = (),
+    epoch: str,
+    *,
+    compat: str,
+    resume: Sequence[tuple[str, str, int]] = (),
 ) -> bytes:
     """Ask for every journal transaction after a content-addressed position.
 
@@ -235,6 +281,7 @@ def encode_pull_request(
             "v": FLEET_SYNC_PROTOCOL_VERSION,
             "op": "pull",
             "roster_epoch": epoch,
+            "compat": _require_hex64(compat, "fleet sync compat digest"),
             "resume": [
                 encode_breadcrumb(breadcrumb) for breadcrumb in resume
             ],
@@ -242,24 +289,21 @@ def encode_pull_request(
     )
 
 
-def decode_pull_request(raw: bytes) -> tuple[str, tuple[tuple[str, str, int], ...]]:
+def decode_pull_request(
+    raw: bytes,
+) -> tuple[str, tuple[tuple[str, str, int], ...], str]:
     value = _json_object(raw, _REQUEST_FIELDS, "fleet sync request")
     if value["op"] != "pull":
         raise FleetSyncProtocolError("unsupported fleet sync operation")
-    epoch = value["roster_epoch"]
-    if (
-        not isinstance(epoch, str)
-        or len(epoch) != 64
-        or any(ch not in "0123456789abcdef" for ch in epoch)
-    ):
-        raise FleetSyncProtocolError("fleet sync roster_epoch is malformed")
+    epoch = _require_hex64(value["roster_epoch"], "fleet sync roster_epoch")
+    compat = _require_hex64(value["compat"], "fleet sync compat digest")
     resume = value["resume"]
     if not isinstance(resume, list) or len(resume) > MAX_RESUME_BREADCRUMBS:
         raise FleetSyncProtocolError("fleet sync resume trail is malformed")
     return epoch, tuple(
         decode_breadcrumb(entry, "fleet sync resume breadcrumb")
         for entry in resume
-    )
+    ), compat
 
 
 def encode_authored(item: AuthoredMutation, *, transaction_operations: int) -> bytes:
@@ -434,6 +478,21 @@ class SQLiteFleetSyncStore:
         conn, catalog = self._open()
         try:
             return catalog.journal_breadcrumb(transaction_ref)
+        finally:
+            conn.close()
+
+    def compatibility_digest(self) -> str:
+        """The replicated-surface digest for this database.
+
+        Uses a plain connection: the digest is meaningful (and needed, for
+        the first checkpoint pull) before fleet writers are activated.
+        """
+        import sqlite3
+        from tools.network.fleet_sync.policies import compatibility_digest
+
+        conn = sqlite3.connect(self.path)
+        try:
+            return compatibility_digest(conn)
         finally:
             conn.close()
 
@@ -614,7 +673,7 @@ class FleetSyncScheduler:
         telemetry_started_at_ns: int | None = None,
         telemetry_started_monotonic_ns: int | None = None,
     ):
-        _requested_epoch, resume_trail = decode_pull_request(message)
+        _requested_epoch, resume_trail, peer_digest = decode_pull_request(message)
         epoch = self._current_epoch()
         record_here = telemetry_stats is None
         stats = telemetry_stats if telemetry_stats is not None else {}
@@ -631,14 +690,30 @@ class FleetSyncScheduler:
         async def response():
             digest = hashlib.sha256()
             count = 0
-            # The presented trail names transactions, never local row ids; the
-            # position is recomputed here so a database restored from backup
-            # re-serves its divergence window instead of honouring a cursor
-            # into journal rows that no longer exist.
-            cursor = await asyncio.to_thread(self.store.resume_ref, resume_trail)
             outcome = "failed"
             error_code = "stream_incomplete"
             try:
+                # Frames are only intelligible between machines that agree on
+                # the replicated surface. Refuse a mixed-schema pull with a
+                # typed frame the puller records as a pause, and let the
+                # ordinary poll loop resume once the lagging machine's own
+                # software applies the same migration locally.
+                local_digest = await asyncio.to_thread(
+                    self.store.compatibility_digest
+                )
+                if peer_digest != local_digest:
+                    refusal = encode_schema_refusal(digest=local_digest)
+                    stats["bytes_sent"] += len(refusal)
+                    error_code = "schema_mismatch"
+                    yield refusal
+                    return
+                # The presented trail names transactions, never local row
+                # ids; the position is recomputed here so a database restored
+                # from backup re-serves its divergence window instead of
+                # honouring a cursor into journal rows that no longer exist.
+                cursor = await asyncio.to_thread(
+                    self.store.resume_ref, resume_trail
+                )
                 while True:
                     self.authenticator.authorize(peer_pub)
                     page = await asyncio.to_thread(
@@ -808,7 +883,12 @@ class FleetSyncScheduler:
                 resume_trail = tuple(await asyncio.to_thread(
                     self.config.resume_cursor, machine_pub
                 ))
-            request = encode_pull_request(epoch, resume=resume_trail)
+            local_digest = await asyncio.to_thread(
+                self.store.compatibility_digest
+            )
+            request = encode_pull_request(
+                epoch, compat=local_digest, resume=resume_trail
+            )
             sent += len(request)
             await channel.send_message(request)
 
@@ -861,6 +941,12 @@ class FleetSyncScheduler:
                 # before another application message is accepted.
                 self.authenticator.authorize(machine_pub)
                 received += len(message)
+                if message.startswith(_REFUSAL_MAGIC):
+                    decode_schema_refusal(message)
+                    raise FleetSyncSchemaMismatch(
+                        "peer replicated schema differs; synchronization "
+                        "pauses until this machine applies the same migration"
+                    )
                 if message.startswith(_DONE_MAGIC):
                     (
                         remote_epoch,
