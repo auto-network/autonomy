@@ -59,7 +59,11 @@ from starlette.routing import Route
 from tools.data_paths import resolve_store
 # Safe at module scope: api_auth imports only starlette, and defers its one
 # unlock_routes import into the call. The reverse edge is what is circular.
-from tools.dashboard.api_auth import require_global_api_authority, resolve_scoped_org
+from tools.dashboard.api_auth import (
+    organization_scope_from_request,
+    require_global_api_authority,
+    resolve_scoped_org,
+)
 from tools.graph import schemas, settings_ops
 # Importing registers the autonomy.network.* Setting schemas (they
 # self-register on import).
@@ -2120,7 +2124,90 @@ async def get_unlock_maintenance_report(request: Request) -> JSONResponse:
     return JSONResponse(dict(_LAST_UNLOCK_MAINTENANCE))
 
 
+def _service_publication_error(code: str, status_code: int = 400) -> JSONResponse:
+    return JSONResponse({"ok": False, "error": code}, status_code=status_code)
+
+
+def _service_publication_org(request: Request) -> tuple[str | None, JSONResponse | None]:
+    refused = require_global_api_authority(request)
+    if refused is not None:
+        return None, refused
+    org = organization_scope_from_request(request)
+    if not isinstance(org, str) or not org:
+        return None, _service_publication_error("organization_required")
+    return org, None
+
+
+async def get_service_reservations(request: Request) -> JSONResponse:
+    org, refused = _service_publication_org(request)
+    if refused is not None:
+        return refused
+    from tools.dashboard import service_publication
+
+    return JSONResponse({"reservations": service_publication.list_reservations(org)})
+
+
+async def post_service_reservation(request: Request) -> JSONResponse:
+    org, refused = _service_publication_org(request)
+    if refused is not None:
+        return refused
+    try:
+        body = await request.json()
+    except Exception:
+        return _service_publication_error("invalid_json")
+    if not isinstance(body, dict):
+        return _service_publication_error("invalid_json")
+    if set(body) != {"app_label"}:
+        return _service_publication_error("unknown_fields")
+    from tools.dashboard import service_publication
+
+    try:
+        projection, created = service_publication.reserve_origin(
+            org, body.get("app_label")
+        )
+    except ValueError:
+        return _service_publication_error("invalid_app_label")
+    except service_publication.ServicePublicationError as exc:
+        return _service_publication_error(exc.code, exc.status_code)
+    return JSONResponse(
+        {"reservation": projection}, status_code=201 if created else 200
+    )
+
+
+async def put_service_reservation_state(request: Request) -> JSONResponse:
+    org, refused = _service_publication_org(request)
+    if refused is not None:
+        return refused
+    try:
+        body = await request.json()
+    except Exception:
+        return _service_publication_error("invalid_json")
+    if not isinstance(body, dict):
+        return _service_publication_error("invalid_json")
+    if set(body) != {"state"}:
+        return _service_publication_error("unknown_fields")
+    state = body.get("state")
+    if state not in {"active", "paused", "released"}:
+        return _service_publication_error("invalid_state")
+    from tools.dashboard import service_publication
+
+    try:
+        projection, _changed = service_publication.transition_reservation(
+            org, request.path_params.get("reservation_id", ""), state
+        )
+    except service_publication.ServicePublicationError as exc:
+        return _service_publication_error(exc.code, exc.status_code)
+    return JSONResponse({"reservation": projection})
+
+
 ROUTES = [
+    Route("/api/network/service-reservations", get_service_reservations, methods=["GET"]),
+    Route("/api/network/service-reservations", post_service_reservation, methods=["POST"]),
+    Route(
+        "/api/network/service-reservations/{reservation_id}/state",
+        put_service_reservation_state,
+        methods=["PUT"],
+    ),
     Route("/api/network/org-key", get_org_key, methods=["GET"]),
     Route("/api/network/org-key/sealed", post_sealed_org_key, methods=["POST"]),
     Route("/api/network/binding", get_binding, methods=["GET"]),
