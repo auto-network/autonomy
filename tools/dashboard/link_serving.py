@@ -1635,6 +1635,22 @@ def main() -> None:
     with open(args.channel_cert_file) as fh:
         channel_cert = DelegationCert.from_json(fh.read().strip())
 
+    # Re-arm the Fleet runtime from the warm ramfs cache BEFORE serving: a
+    # connector that restarts (a crash, or the watchdog respawning it after its
+    # dashboard died) held its sync credential only in memory and came back
+    # locked, refusing every pull until a human unlocked. The warm cache — the
+    # same ramfs treatment the delegate key gets — lets it re-arm itself with
+    # nobody present. Keyed by --org, so only the connector that was armed
+    # re-arms; the personal fleet connector is the one that ever holds it.
+    from tools.network.fleet_relay_sync import (
+        FleetRuntimeWarmCache,
+        connector_runtime,
+    )
+
+    with contextlib.suppress(Exception):
+        connector_runtime.attach_warm_cache(FleetRuntimeWarmCache(args.org))
+        connector_runtime.rearm_from_cache()
+
     from tools.network.relaykit.connector import Publisher
 
     # One Publisher shared by both halves of live push: the connector

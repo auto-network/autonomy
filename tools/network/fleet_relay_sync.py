@@ -113,11 +113,91 @@ def _decode_file(raw: bytes) -> tuple[str, bytes]:
     return path.as_posix(), body
 
 
+def _keycache_dir() -> Path:
+    """The ramfs mount that holds warm, memory-only node secrets.
+
+    Same mount the vault hot-reload and the delegate key use. The
+    ``AUTONOMY_KEYCACHE_MOUNT`` override keeps the guard testable headlessly,
+    exactly as ``unlock_routes`` resolves it.
+    """
+    override = os.environ.get("AUTONOMY_KEYCACHE_MOUNT")
+    if override:
+        return Path(override)
+    from agents.secret_ramfs import KEYCACHE_MOUNT
+
+    return Path(KEYCACHE_MOUNT)
+
+
+class FleetRuntimeWarmCache:
+    """A ramfs home for the connector's Fleet runtime credential (auto-ixwr3).
+
+    The credential is minted in the browser from the personal root at unlock,
+    pushed once, and held only in this process's memory. So a connector that
+    restarts — a crash, or the watchdog respawning it after its dashboard died —
+    came back with ``scheduler is None`` and refused every pull ("serving
+    machine is locked for Fleet sync") until a human unlocked again.
+
+    The agent delegate signing key already solved this exact problem (auto-a1pub):
+    the warm secret is handed to the next process through a ramfs cache so it
+    comes back armed with nobody present. This is the same treatment for the
+    same class of secret. ``store`` re-checks the mount is ramfs on every write
+    (memory, never swappable) and writes 0600, matching the delegate cache; a
+    reboot clears ramfs, so a reboot still fails closed to a human unlock.
+
+    Keyed by the connector's registry ``org_uuid`` so only the connector that
+    was armed re-arms itself: every other org's connector reads an absent file
+    and stays exactly as it was.
+    """
+
+    def __init__(self, org_uuid: str, *, directory: "Path | None" = None):
+        self._dir = Path(directory) if directory is not None else _keycache_dir()
+        self._path = self._dir / f"fleet-connector-runtime.{org_uuid}.json"
+
+    def store(self, payload: object) -> None:
+        from tools.network.storagekit.memory_cache import assert_memory_backed
+
+        assert_memory_backed(self._dir)  # ramfs only — refuses tmpfs/disk
+        data = json.dumps(payload).encode("utf-8")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(self._path, flags, 0o600)
+        try:
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+        finally:
+            os.close(fd)
+
+    def load(self) -> "dict | None":
+        from tools.network.storagekit.memory_cache import assert_memory_backed
+
+        try:
+            raw = self._path.read_bytes()
+        except FileNotFoundError:
+            return None
+        assert_memory_backed(self._dir)
+        try:
+            payload = json.loads(raw)
+        except ValueError:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def clear(self) -> None:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(self._path)
+
+
 class ConnectorFleetRuntime:
     """Short-lived Fleet server credential held only by the connector."""
 
     def __init__(self) -> None:
         self.scheduler: FleetSyncScheduler | None = None
+        #: Set at connector startup (main) so a fresh process re-arms itself
+        #: from the warm ramfs cache and a successful configure() re-warms it.
+        #: None on any node without a ramfs keycache — arming still works, it
+        #: just does not survive a restart there.
+        self._warm_cache: "FleetRuntimeWarmCache | None" = None
         #: How many sync pulls this process has turned away because it holds no
         #: credential (scheduler is None), and when the first one arrived. This
         #: is the "764 requests refused since 8pm" the profile sync flag reports:
@@ -171,7 +251,56 @@ class ConnectorFleetRuntime:
         # cleared hours ago.
         self.locked_refusals = 0
         self.first_locked_refusal_at = None
+        # Hand the warm credential to the NEXT connector process through ramfs,
+        # so a crash or watchdog respawn comes back armed with nobody present.
+        # A cache write failure (e.g. no ramfs on this node) must not fail the
+        # arm — the process is armed in memory regardless; it just will not
+        # survive a restart here.
+        if self._warm_cache is not None:
+            try:
+                self._warm_cache.store(payload)
+            except Exception:
+                logger.warning(
+                    "fleet runtime warm-cache write failed; connector is armed "
+                    "but will not survive a restart", exc_info=True)
         return {"ok": True, "machine_id": credential.machine_id}
+
+    def attach_warm_cache(self, cache: "FleetRuntimeWarmCache | None") -> None:
+        """Bind a ramfs warm cache so configure() persists the credential and
+        the connector can re-arm from it at startup."""
+        self._warm_cache = cache
+
+    def rearm_from_cache(self) -> bool:
+        """Re-arm this connector from the warm ramfs cache at startup.
+
+        Returns True iff a live cached credential re-armed it. An expired or
+        de-rostered payload no longer verifies in configure(); it will never
+        become valid, so drop it (a fresh unlock re-mints) rather than retry it
+        every restart. Staying locked is the correct fail-closed posture.
+        """
+        cache = self._warm_cache
+        if cache is None:
+            return False
+        try:
+            payload = cache.load()
+        except Exception:
+            logger.warning("fleet runtime warm-cache read failed", exc_info=True)
+            return False
+        if payload is None:
+            return False
+        try:
+            self.configure(payload)
+        except Exception:
+            logger.warning(
+                "fleet runtime warm-cache re-arm failed; clearing the stale "
+                "credential (a fresh unlock will re-mint)", exc_info=True)
+            with contextlib.suppress(Exception):
+                cache.clear()
+            return False
+        logger.warning(
+            "fleet runtime re-armed from the warm cache — serving without a "
+            "human unlock after a connector restart")
+        return True
 
     async def handle(self, token: str, message: dict):
         scheduler = self.scheduler
