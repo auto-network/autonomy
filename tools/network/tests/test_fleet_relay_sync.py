@@ -119,6 +119,7 @@ async def test_connector_stream_requires_fleet_machine_hello_and_chunks_checkpoi
         "op": "fleet.sync.pull",
         "roster_epoch": "cd" * 32,
         "checkpoint": True,
+        "compat": server.scheduler.store.compatibility_digest(),
         "resume": [],
         "hello": json.loads(hello),
     })
