@@ -2538,17 +2538,25 @@ def shadowed_write(
     # behind a flag somebody turns off during the bulk write that needs it.
     from .cross_org import PEER_VISIBLE_STATES, open_peer_db, resolve_peers
 
+    # Full rows, because the winner must be picked by _rank_candidates — the
+    # resolver's OWN six-step ordering (rung, store, SCHEMA REVISION, ...).
+    # Ranking here by publication_state alone made this check a different
+    # opinion from the thing it checks: during a revision migration, a key
+    # legitimately holds a rev-N and a rev-N+1 base at the same rung, the
+    # rung-only sort tied, insertion order won, and the warning declared the
+    # OLD row the winner — telling the operator their freshly migrated row
+    # was dead when the very next read served it (host finding, 2026-08-30).
     sql = (
-        "SELECT id, publication_state FROM settings "
+        "SELECT rowid AS _rowid, * FROM settings "
         "WHERE set_id = ? AND key = ? AND deprecated = 0 "
         "  AND supersedes IS NULL AND excludes IS NULL"
     )
-    candidates: list[tuple[str, str, str | None]] = []
+    candidates: list = []
     try:
         db = _open_read(org, set_id)
         try:
             for row in db.conn.execute(sql, (set_id, key)).fetchall():
-                candidates.append((row["id"], row["publication_state"], org))
+                candidates.append((org, row))
         finally:
             db.close()
 
@@ -2565,15 +2573,24 @@ def shadowed_write(
             except sqlite3.OperationalError:
                 continue
             for row in rows:
-                candidates.append((row["id"], row["publication_state"], peer))
+                candidates.append((peer, row))
     except Exception:
         return None
 
     if len(candidates) >= 2:
-        candidates.sort(key=lambda c: PRECEDENCE.get(c[1], 99))
-        if candidates[0][0] != written_id:
+        try:
+            ranked = _rank_candidates(
+                candidates,
+                reading_org=_resolve_settings_caller(org),
+                now=None,
+            )
+        except Exception:
+            return None
+        if ranked and ranked[0][1]["id"] != written_id:
+            top_org, top = ranked[0]
             return _shadowed_by_base(
-                key, written_id, org, state, *candidates[0])
+                key, written_id, org, state,
+                top["id"], top["publication_state"], top_org)
     # Winning the base contest is not the same as being read. An override on
     # this row is merged over it, so a write can win and still change nothing
     # -- which is the commonest way a write is silently neutralised, and was
@@ -2992,6 +3009,14 @@ def layers_for(set_id: str, key: str, *, org: str | None) -> dict:
 
     bases.sort(key=lambda r: PRECEDENCE.get(r["publication_state"], 99))
     base = bases[0]
+    # Competing live bases under the same key (the normal transient state of
+    # a revision migration). Surfaced so callers that are about to act on
+    # "the" row for a key can see the key is ambiguous and name an id.
+    out["shadowed_bases"] = [
+        {"id": r["id"], "state": r["publication_state"],
+         "schema_revision": r["schema_revision"]}
+        for r in bases[1:]
+    ]
     try:
         merged = json.loads(base["payload"]) or {}
     except Exception:
