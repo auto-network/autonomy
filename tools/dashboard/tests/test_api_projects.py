@@ -123,8 +123,10 @@ def test_local_workspace_api_attaches_repo_to_existing_personal_workspace(
         if m.key == "idea-board"
     )
     assert member.payload["working_dir"] == "/workspace/idea-board"
+    # The route writes the portable managed-repo form — never this
+    # machine's absolute path — into the replicating org row.
     assert member.payload["repos"] == [{
-        "local_path": str(repo),
+        "local": True,
         "mount": "/workspace/idea-board",
         "writable": True,
     }]
@@ -177,4 +179,8 @@ def test_local_workspace_api_creates_new_workspace_in_one_call(
     assert member.payload["name"] == "Field Notes"
     assert member.payload["model"] == "gpt-5.6-sol"
     assert member.payload["working_dir"] == "/workspace/field-notes"
-    assert member.payload["repos"][0]["local_path"] == str(repo)
+    assert member.payload["repos"][0] == {
+        "local": True,
+        "mount": "/workspace/field-notes",
+        "writable": True,
+    }

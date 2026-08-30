@@ -40,7 +40,11 @@ from typing import Any
 
 from tools.graph import ops, org_ops
 from tools.graph.schemas.registry import get_schema
-from tools.graph.schemas.workspace import WORKSPACE_SET_ID, WORKSPACE_REVISION
+from tools.graph.schemas.workspace import (
+    LOCAL_REPO_NAME_RE,
+    WORKSPACE_SET_ID,
+    WORKSPACE_REVISION,
+)
 from tools.graph.schemas.workspace_artifact import (
     SET_ID as ARTIFACT_SET_ID,
     SCHEMA_REVISION as ARTIFACT_REVISION,
@@ -83,6 +87,10 @@ from tools.data_paths import DATA_ROOT
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ARTIFACTS_ROOT = DATA_ROOT / "artifacts"
+#: Root of the dashboard-managed local repositories (``<root>/<org>/<id>``).
+#: Same value as ``workspace_manager.LOCAL_WORKSPACE_REPOS_DIR`` (a test
+#: asserts they cannot drift).
+LOCAL_WORKSPACE_REPOS_ROOT = DATA_ROOT / "workspace-repos"
 ARTIFACTS_MOUNT_DIR = "/etc/autonomy/artifacts"
 CAPABILITIES_MOUNT_DIR = "/opt/autonomy/capabilities"
 
@@ -288,6 +296,13 @@ class RepoMount:
     local_path: str | None = None
     writable: bool = False
     base_source: str | None = None
+    #: True when the row declared ``local: true`` (the workspace's
+    #: dashboard-managed local repository). ``local_path`` then carries
+    #: the NODE-resolved absolute path
+    #: (``LOCAL_WORKSPACE_REPOS_ROOT/<org>/<workspace-id>``) so every
+    #: downstream consumer of ``url`` / ``local_path`` works unchanged;
+    #: this flag records the portable declaration for provenance.
+    local: bool = False
 
     @property
     def url(self) -> str:
@@ -486,7 +501,24 @@ class WorkspaceV1:
 # ── Setting payload → typed model helpers ──────────────────
 
 
-def _parse_repo(raw: Any, workspace_id: str, idx: int) -> RepoMount:
+def resolve_local_repo_path(org: str, workspace_id: str) -> Path:
+    """Node-frame home of a ``local: true`` repo: ``<root>/<org>/<id>``.
+
+    Both components are held to the managed store's strict slug (``org``
+    comes from DB routing, ``workspace_id`` is the Setting key) so a
+    malformed value can never compose a path outside the store.
+    """
+    for label, value in (("org", org), ("workspace_id", workspace_id)):
+        if not isinstance(value, str) or not LOCAL_REPO_NAME_RE.fullmatch(value):
+            raise WorkspaceSettingsError(
+                f"invalid local workspace repository {label}: {value!r}"
+            )
+    return LOCAL_WORKSPACE_REPOS_ROOT / org / workspace_id
+
+
+def _parse_repo(
+    raw: Any, workspace_id: str, idx: int, org: str | None = None,
+) -> RepoMount:
     if not isinstance(raw, dict):
         raise WorkspaceSettingsError(
             f"workspace {workspace_id!r}: repos[{idx}] must be a mapping"
@@ -496,6 +528,20 @@ def _parse_repo(raw: Any, workspace_id: str, idx: int) -> RepoMount:
             raise WorkspaceSettingsError(
                 f"workspace {workspace_id!r}: repos[{idx}] missing {key!r}"
             )
+    local = raw.get("local") is True
+    local_path: str | None = (
+        str(raw["local_path"]) if raw.get("local_path") else None
+    )
+    if local:
+        # Portable form: the row names no location. Resolve on THIS node
+        # from the owning org, the workspace id, and the node's own store
+        # root; the launcher creates the bare repo at first launch.
+        if not org:
+            raise WorkspaceSettingsError(
+                f"workspace {workspace_id!r}: repos[{idx}] declares "
+                f"'local: true' but has no owning org to resolve under"
+            )
+        local_path = str(resolve_local_repo_path(org, workspace_id))
     base_source_raw = raw.get("base_source")
     base_source: str | None
     if base_source_raw is None:
@@ -516,10 +562,11 @@ def _parse_repo(raw: Any, workspace_id: str, idx: int) -> RepoMount:
         host=str(raw["host"]) if raw.get("host") else None,
         repo=str(raw["repo"]) if raw.get("repo") else None,
         user=str(raw["user"]) if raw.get("user") else None,
-        local_path=str(raw["local_path"]) if raw.get("local_path") else None,
+        local_path=local_path,
         mount=str(raw["mount"]),
         writable=bool(raw.get("writable", False)),
         base_source=base_source,
+        local=local,
     )
 
 
@@ -545,7 +592,8 @@ def _workspace_from_setting(
         )
     repos_raw = setting_payload.get("repos") or []
     repos = tuple(
-        _parse_repo(r, workspace_id, i) for i, r in enumerate(repos_raw)
+        _parse_repo(r, workspace_id, i, graph_project)
+        for i, r in enumerate(repos_raw)
     )
     env_raw = setting_payload.get("env") or {}
     env = {str(k): str(v) for k, v in env_raw.items()}

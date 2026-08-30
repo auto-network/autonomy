@@ -190,6 +190,68 @@ def test_missing_optional_mount_skipped(orgs_root, tmp_path):
     assert not any("/opt/harness" in v for v in result.values())
 
 
+# ── node-provided storage: a missing rw dir is created, not refused ─────────
+def test_missing_required_rw_dir_is_created_and_bound(orgs_root, tmp_path):
+    ws = _workspace({"enterprise-ng:storage": _mount_rs(
+        key="enterprise-ng:storage", subpath="workspace-storage",
+        container_path="/opt/storage", kind="dir", mode="rw", required=True)})
+    result = _prepare(ws, tmp_path)
+    created = orgs_root / "workspace-storage"
+    assert created.is_dir()
+    assert result[os.path.realpath(created)] == "/opt/storage:rw"
+
+
+def test_missing_optional_rw_dir_is_created_too(orgs_root, tmp_path):
+    # The storage rule keys on kind+mode, not required: an empty writable
+    # directory is its own correct provisioning either way.
+    ws = _workspace({"enterprise-ng:cache": _mount_rs(
+        key="enterprise-ng:cache", subpath="cache", container_path="/opt/cache",
+        kind="dir", mode="rw", required=False)})
+    result = _prepare(ws, tmp_path)
+    assert (orgs_root / "cache").is_dir()
+    assert result[os.path.realpath(orgs_root / "cache")] == "/opt/cache:rw"
+
+
+def test_missing_rw_file_still_refused(orgs_root, tmp_path):
+    # Only directories are node-provided storage; an empty stand-in FILE
+    # (a key, a license) would launch successfully and fail wrongly later.
+    ws = _workspace({"w:key": _mount_rs(
+        key="w:key", subpath="bridge.key", container_path="/etc/bridge.key",
+        kind="file", mode="rw", required=True)})
+    with pytest.raises(WorkspaceMountMissingError):
+        _prepare(ws, tmp_path)
+    assert not (orgs_root / "bridge.key").exists()
+
+
+def test_missing_ro_dir_still_refused(orgs_root, tmp_path):
+    # Read-only means operator-supplied content; creating it empty would
+    # hide the provisioning gap instead of reporting it.
+    ws = _workspace({"w:data": _mount_rs(
+        key="w:data", subpath="dataset", container_path="/opt/dataset",
+        kind="dir", mode="ro", required=True)})
+    with pytest.raises(WorkspaceMountMissingError):
+        _prepare(ws, tmp_path)
+    assert not (orgs_root / "dataset").exists()
+
+
+def test_readiness_reports_missing_rw_dir_advisory_without_creating(
+    orgs_root, tmp_path,
+):
+    findings = wm.check_org_mount_readiness(
+        key="enterprise-ng:storage",
+        payload={"subpath": "workspace-storage", "container_path": "/opt/storage",
+                 "kind": "dir", "mode": "rw", "required": True},
+        org=ORG,
+    )
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding.kind == "missing_path"
+    assert finding.severity == "advisory"
+    assert "created at first launch" in finding.detail
+    # Readiness is a pure read — the launch path does the creating.
+    assert not (orgs_root / "workspace-storage").exists()
+
+
 # ── kind: present-but-wrong-type refused (the anti-fabrication guard) ────────
 def test_kind_file_but_dir_present_refused(orgs_root, tmp_path):
     (orgs_root / "license.yaml").mkdir()  # a DIR where a file is declared

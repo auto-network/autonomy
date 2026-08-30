@@ -1004,7 +1004,24 @@ def _orgs_mount_context(topo) -> "tuple[str, str | None, bool] | None":
     return None
 
 
-def _resolve_org_mount(key, rs, orgs_ctx, org):
+def _mount_is_node_storage(payload) -> bool:
+    """A writable directory mount is STORAGE the node provides.
+
+    A ``kind: dir, mode: rw`` mount cannot mean operator-supplied content:
+    content the workspace only reads is declared ``ro``, and a writable
+    directory needs no content to be correct — an empty directory IS its
+    correct provisioning. So the declaration is the authority (the same
+    rule :func:`_ensure_declared_local_repo` applies to repositories): a
+    missing target means "not created yet", not "refuse the launch".
+    ``ro`` and ``kind: file`` mounts stay refuse-on-missing — creating an
+    empty stand-in for expected content (a license file, a dataset) would
+    make the launch succeed and the workspace fail later, wrongly and
+    quietly.
+    """
+    return payload.kind == "dir" and payload.mode == "rw"
+
+
+def _resolve_org_mount(key, rs, orgs_ctx, org, *, create_missing=False):
     """Resolve one rev-2 mount to ``(host_path, container_spec, node_path)``.
 
     The hybrid resolver (graph b20f2468-b12): build
@@ -1014,6 +1031,11 @@ def _resolve_org_mount(key, rs, orgs_ctx, org):
     type), then TRANSLATE the node-frame path to a host path for the bind. The
     org comes from session identity, never the payload. Returns ``None`` for an
     optional mount whose target is absent.
+
+    ``create_missing`` (launch path only — readiness stays a pure read):
+    an absent target that :func:`_mount_is_node_storage` classifies as
+    node-provided storage is created inside the already-guarded org tree
+    instead of refused.
     """
     payload = rs.payload
     subdesc = f"orgs/{org}/{payload.subpath}"
@@ -1079,13 +1101,25 @@ def _resolve_org_mount(key, rs, orgs_ctx, org):
     # content class kind exists to catch. os.path.isfile/isdir are exactly those
     # stat checks (and follow the already-resolved, symlink-free path).
     if not os.path.exists(resolved):
-        if payload.required:
+        if create_missing and _mount_is_node_storage(payload):
+            # The containment guard above already proved `resolved` sits
+            # inside this org's tree, so every intermediate directory this
+            # creates does too.
+            os.makedirs(resolved, exist_ok=True)
+            logger.info(
+                "workspace: created node-storage mount %s (%s) at first use",
+                key, subdesc,
+            )
+        elif payload.required:
             raise WorkspaceMountMissingError(
                 mount_key=key, origin_org=rs.org, state=rs.state,
                 host_path=subdesc, container_path=payload.container_path,
             )
-        logger.debug("workspace: optional mount %s absent (%s) — skipping", key, subdesc)
-        return None
+        else:
+            logger.debug(
+                "workspace: optional mount %s absent (%s) — skipping", key, subdesc,
+            )
+            return None
     if payload.kind == "dir" and not os.path.isdir(resolved):
         raise WorkspaceMountInvalidError(
             mount_key=key, reason=f"declares kind=dir but {subdesc} is not a directory")
@@ -1166,6 +1200,19 @@ def check_org_mount_readiness(*, key: str, payload: dict, org: str):
             frame="container-fs",
         ),)
     except WorkspaceMountMissingError:
+        if _mount_is_node_storage(typed):
+            # Readiness is a pure read; the launch path creates this
+            # node-provided storage directory itself, so its absence is
+            # provisioning-not-done, never launch-blocking.
+            return (VolumeMountReadinessIssue(
+                "missing_path",
+                f"subpath resolves to {subject!r}, which is not present — "
+                f"node storage, created at first launch",
+                "subpath",
+                subject,
+                "the node's autonomy-orgs volume",
+                "advisory",
+            ),)
         return (VolumeMountReadinessIssue(
             "missing_path",
             f"subpath resolves to {subject!r}, which is not present",
@@ -1246,7 +1293,7 @@ def _apply_workspace_mount_settings(
             if not orgs_ctx_ready:
                 orgs_ctx = _orgs_mount_context(mount_plan.discover_topology())
                 orgs_ctx_ready = True
-            spec = _resolve_org_mount(key, rs, orgs_ctx, org)
+            spec = _resolve_org_mount(key, rs, orgs_ctx, org, create_missing=True)
             if spec is None:
                 continue
             host_path, container_spec, _node_path = spec

@@ -3296,25 +3296,33 @@ async def api_workspace_local_create(request):
         peers=[],
     ).members
     existing = next((m for m in members if m.key == workspace_id), None)
-    # A local-first repository names itself with ``local_path``. It used to be
-    # ``url``, which the schema no longer has, so writing that shape here made
-    # every call to this route fail validation — the one path that creates a
-    # local workspace, rejecting its own payload.
+    # The managed local repository is declared with the portable
+    # ``local: true`` — the consuming node derives
+    # data/workspace-repos/<org>/<id> itself. Never an absolute
+    # ``local_path``: that is true on one machine and false on the next,
+    # and must not enter a replicating org row.
     repo_spec = {
-        "local_path": str(expected_repo_path),
+        "local": True,
         "mount": mount,
         "writable": True,
     }
-    if existing is not None:
-        existing_repos = existing.payload.get("repos") or []
-        # Tolerant on the way in: a row written before the shape changed still
-        # carries ``url``, and reading only the current field would see None,
+
+    def _same_local_repo(r: dict) -> bool:
+        # Tolerant on the way in: rows written before the shape changed carry
+        # the same repository as ``local_path`` (this machine's resolution of
+        # it) or the even older ``url``. Reading only the current field would
         # decide the existing configuration disagreed, and refuse with a 409
         # that named no difference.
-        existing_paths = [
-            r.get("local_path") or r.get("url") for r in existing_repos
-        ]
-        if existing_repos and existing_paths != [str(expected_repo_path)]:
+        return (
+            r.get("local") is True
+            or (r.get("local_path") or r.get("url")) == str(expected_repo_path)
+        )
+
+    if existing is not None:
+        existing_repos = existing.payload.get("repos") or []
+        if existing_repos and not (
+            len(existing_repos) == 1 and _same_local_repo(existing_repos[0])
+        ):
             return JSONResponse(
                 {
                     "error": (
@@ -3361,8 +3369,12 @@ async def api_workspace_local_create(request):
             setting_created = True
         else:
             existing_repos = existing.payload.get("repos") or []
+            # A legacy row pointing at this machine's resolution of the same
+            # repository is already configured — rewriting it to the portable
+            # shape is the voluntary per-row migration, not this route's job.
             already_configured = (
-                existing_repos == [repo_spec]
+                len(existing_repos) == 1
+                and _same_local_repo(existing_repos[0])
                 and existing.payload.get("working_dir") == mount
             )
             if already_configured:

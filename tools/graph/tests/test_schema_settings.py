@@ -154,6 +154,58 @@ def test_workspace_repo_rejects_non_string_base_source():
         WorkspaceV1.validate(_ws_payload(base_source=123))
 
 
+# ── Workspace repo 'local: true' — the portable managed-repo form ────
+
+
+def _ws_local_payload(**repo_overrides):
+    """Payload with a single ``local: true`` repo entry."""
+    repo = {"local": True, "mount": "/workspace/board", "writable": True}
+    repo.update(repo_overrides)
+    return {
+        "name": "board",
+        "image": "autonomy-session-platform",
+        "repos": [repo],
+    }
+
+
+def test_workspace_repo_accepts_local_true():
+    from tools.graph.schemas.workspace import WorkspaceV1
+    WorkspaceV1.validate(_ws_local_payload())
+
+
+def test_workspace_repo_rejects_local_mixed_with_local_path():
+    from tools.graph.schemas.registry import SchemaValidationError
+    from tools.graph.schemas.workspace import WorkspaceV1
+    with pytest.raises(SchemaValidationError, match="mixes repository forms"):
+        WorkspaceV1.validate(_ws_local_payload(local_path="/abs/somewhere"))
+
+
+def test_workspace_repo_rejects_local_mixed_with_remote():
+    from tools.graph.schemas.registry import SchemaValidationError
+    from tools.graph.schemas.workspace import WorkspaceV1
+    with pytest.raises(SchemaValidationError, match="mixes repository forms"):
+        WorkspaceV1.validate(
+            _ws_local_payload(host="github.com", repo="a/board")
+        )
+
+
+def test_workspace_repo_local_false_names_no_repository():
+    from tools.graph.schemas.registry import SchemaValidationError
+    from tools.graph.schemas.workspace import WorkspaceV1
+    with pytest.raises(SchemaValidationError, match="names no repository"):
+        WorkspaceV1.validate(_ws_local_payload(local=False))
+
+
+def test_workspace_repo_deprecated_local_path_still_validates():
+    # Un-rewritten rows must keep working until their deliberate migration.
+    from tools.graph.schemas.workspace import WorkspaceV1
+    WorkspaceV1.validate({
+        "name": "board",
+        "image": "autonomy-session-platform",
+        "repos": [{"local_path": "/abs/board", "mount": "/workspace/board"}],
+    })
+
+
 def test_workspace_accepts_independent_nested_docker_runtime():
     from tools.graph.schemas.workspace import WorkspaceV1
     payload = _ws_payload()
