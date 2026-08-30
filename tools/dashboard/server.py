@@ -14038,18 +14038,21 @@ async def _collect_dispatch_data() -> dict:
     Waiting/blocked come from Dolt (readiness:approved beads), with
     currently-running beads excluded to avoid double-counting.
     """
-    # Get bead data, running runs, and pre-launch agentic rows concurrently
+    # Two waves, not one: the bead queries must EXCLUDE the running beads,
+    # so which ones are running has to be known before they run. Same
+    # parallel width as before — the metadata lookup was already serial
+    # behind the first wave, and now shares the second with the bead read.
     from agents.dispatch_db import get_active_agentic_runs
-    bead_data, running_runs, active_agentic = await asyncio.gather(
-        asyncio.to_thread(dao_beads.get_dispatch_beads, _WAITING_LIST_LIMIT),
+    running_runs, active_agentic = await asyncio.gather(
         asyncio.to_thread(dao_dispatch.get_running_with_stats),
         asyncio.to_thread(get_active_agentic_runs),
     )
-
-    # Look up Dolt metadata for all running beads in a single query
     running_bead_ids = [r["bead_id"] for r in running_runs if r.get("bead_id")]
-    bead_meta = await asyncio.to_thread(
-        dao_beads.get_bead_title_priority, running_bead_ids
+    bead_data, bead_meta = await asyncio.gather(
+        asyncio.to_thread(
+            dao_beads.get_dispatch_beads, _WAITING_LIST_LIMIT, running_bead_ids,
+        ),
+        asyncio.to_thread(dao_beads.get_bead_title_priority, running_bead_ids),
     )
 
     # CPU and resident memory are sampled by ResourceMonitor for the Sessions
@@ -14184,10 +14187,11 @@ async def _collect_dispatch_data() -> dict:
             )
         active.append(active_row)
 
-    # Exclude running beads from waiting/blocked to avoid double-counting
-    running_ids = set(running_bead_ids)
-
-    # Waiting: strip to minimal fields, exclude currently-running beads
+    # Running beads are excluded in SQL (get_dispatch_beads(exclude_ids=...)),
+    # which is what keeps the list and the total agreeing. Filtering here
+    # instead is the bug this replaced: the count came from SQL and the list
+    # was trimmed in Python, so a running bead was counted and not shown —
+    # "showing top 0 of 1 waiting" over an empty section.
     waiting = [
         {
             "id": b["id"], "title": b["title"],
@@ -14195,7 +14199,6 @@ async def _collect_dispatch_data() -> dict:
             "status": b.get("status"),
         }
         for b in bead_data["approved_waiting"]
-        if b["id"] not in running_ids
     ]
 
     # Accepted-but-not-launched agentic dispatches belong in the same
@@ -14243,7 +14246,6 @@ async def _collect_dispatch_data() -> dict:
             "blockers": b.get("open_blockers", []),
         }
         for b in bead_data["approved_blocked"]
-        if b["id"] not in running_ids
     ]
 
     return {
