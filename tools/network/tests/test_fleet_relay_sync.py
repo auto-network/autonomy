@@ -119,7 +119,7 @@ async def test_connector_stream_requires_fleet_machine_hello_and_chunks_checkpoi
         "op": "fleet.sync.pull",
         "roster_epoch": "cd" * 32,
         "checkpoint": True,
-        "after_transaction_ref": 0,
+        "resume": [],
         "hello": json.loads(hello),
     })
     frames = [frame async for frame in stream]
@@ -142,7 +142,7 @@ async def test_connector_stream_requires_fleet_machine_hello_and_chunks_checkpoi
         "total_bytes": 17,
     }
     assert decode_done(frames[-1])[1:] == (
-        0, __import__("hashlib").sha256().hexdigest(), 0,
+        0, __import__("hashlib").sha256().hexdigest(), 0, None,
     )
 
 

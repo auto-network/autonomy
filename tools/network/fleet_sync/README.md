@@ -311,9 +311,17 @@ reads and releases one complete authored transaction at a time, streams it
 through RelayKit's existing encrypted record layer, applies one transaction
 atomically, and stores bytes, retries,
 watermarks, completed pulls, and applied-transaction counts in local peer
-state. A reconnect currently replays the retained journal; deterministic merge
-makes already committed transactions inert. This deliberately avoids claiming
-an unsafe scalar cursor before exact peer ACK floors land. The stream carries
+state. The resume position is content-addressed, never a served row number:
+the puller presents a breadcrumb trail of verified stream positions —
+each names one transaction from a past verified summary, the recent few kept contiguously plus
+an exponentially thinned history reaching back to its first pull — and the
+serving journal recomputes the position from its own rows on every request,
+resuming after the newest breadcrumb it still knows. A serving database
+restored from a backup therefore re-serves exactly its divergence window
+(deterministic merge makes the replayed prefix inert), instead of silently
+honouring a cursor into journal rows that no longer exist; its own rolled-back
+authoring floor recovers automatically when peers hand its post-backup history
+back through the ordinary apply path. The stream carries
 a bounded message count and digest, and refuses malformed framing, incomplete
 transaction groups, an unauthorized machine, or an individual mutation that
 cannot fit the channel's message bound.

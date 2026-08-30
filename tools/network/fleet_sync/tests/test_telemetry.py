@@ -93,3 +93,51 @@ def test_recording_sync_telemetry_never_authors_personal_fleet_work(local_stores
             (FLEET_SYNC_TELEMETRY_SET_ID,),
         ).fetchone()
     assert row == (1,)
+
+
+def test_breadcrumb_trail_replaces_position_and_thins_exponentially(local_stores):
+    """A verified stream identity REPLACES the acknowledged position (a
+    restored source legitimately reports a smaller one), and the stored
+    trail keeps the recent positions contiguously plus an exponentially
+    thinned history, bounded regardless of how many pulls ever happened."""
+    _personal, _machine = local_stores
+    peer = "cc" * 32
+
+    def ack(sequence: int, ref: int):
+        return fleet_sync_telemetry.record_iteration(
+            peer,
+            channel="direct",
+            direction="pull",
+            mode="delta",
+            outcome="success",
+            started_at_ns=sequence,
+            duration_ms=1,
+            acknowledged_transaction_ref=ref,
+            acknowledged_breadcrumb={
+                "origin": "aa" * 32,
+                "transaction": f"local:{sequence:08d}",
+                "timestamp": sequence,
+            },
+        )
+
+    payload = None
+    for sequence in range(1, 101):
+        payload = ack(sequence, ref=sequence * 10)
+    assert payload["acknowledged_transaction_ref"] == 1000
+
+    trail = fleet_sync_telemetry.read_resume_breadcrumbs(peer)
+    assert trail[0] == ("aa" * 32, "local:00000100", 100)
+    # Newest eight contiguous; older survivors one per power-of-two age
+    # bucket; the very first acknowledged position persists forever.
+    recent = [identity[2] for identity in trail[:8]]
+    assert recent == [100, 99, 98, 97, 96, 95, 94, 93]
+    older_ages = [100 - identity[2] for identity in trail[8:]]
+    assert all(age >= 8 for age in older_ages)
+    assert len({age.bit_length() for age in older_ages}) == len(older_ages)
+    assert ("aa" * 32, "local:00000001", 1) in trail
+    assert len(trail) <= fleet_sync_telemetry.MAX_RESUME_BREADCRUMBS
+
+    # A post-restore acknowledgement moves the position BACKWARDS honestly.
+    smaller = ack(101, ref=40)
+    assert smaller["acknowledged_transaction_ref"] == 40
+    assert fleet_sync_telemetry.read_resume_breadcrumbs(peer)[0][2] == 101
