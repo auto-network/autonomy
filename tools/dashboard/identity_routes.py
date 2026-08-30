@@ -1635,15 +1635,45 @@ async def get_ceremony_errors(request: Request) -> JSONResponse:
     return JSONResponse({"errors": [m.payload for m in members[:limit]]})
 
 
+def _oxford(items: list) -> str:
+    """"a", "a and b", "a, b, and c" — the affected-scope lists the flag
+    balloons and the restart prompt read."""
+    items = [str(x) for x in items]
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return f"{items[0]} and {items[1]}"
+    return ", ".join(items[:-1]) + f", and {items[-1]}"
+
+
+def _refused_since(since: object) -> str:
+    """" since 8pm" — a short local-clock stamp for the first refusal, or ''
+    when it isn't known. The count matters; when it started makes it legible."""
+    if not isinstance(since, (int, float)):
+        return ""
+    try:
+        stamp = time.strftime("%-I%p", time.localtime(since)).lower()
+        return f" since {stamp}"
+    except Exception:
+        return ""
+
+
 async def get_unlock_state(request: Request) -> JSONResponse:
     """Pre-auth status for the profile/locked-screen flag tray.
 
-    Six live indicators the tray (static/js/identity-indicator.js) renders, each
-    ``{needs: bool, detail: str}``. ``needs`` lights the tile amber; ``detail`` is
-    the balloon text. The three cold-vault signals (identity, delegate, session)
-    are read directly; the infra signals (certificate, tunnel, approvals) are
-    best-effort and degrade to a non-alarming "unavailable" rather than fabricate
-    a state — a false green here would be worse than a dim tile.
+    Seven live indicators the tray (static/js/identity-indicator.js) renders,
+    each ``{needs: bool, detail: str, value?: str, ...}``. ``needs`` lights the
+    tile amber; ``detail`` is the balloon text (what the flag IS when dim, what
+    is broken when lit); ``value`` is the corner readout. The three cold-vault
+    signals (identity, delegate, session) are read directly; the infra signals
+    (certificate, tunnel, sync, approvals) are best-effort and degrade to a
+    non-alarming "unavailable" rather than fabricate a state — a false green
+    here would be worse than a dim tile. The ``sync`` flag asks each serving
+    connector, over the control channel the CLI already uses, whether it is
+    armed (holds its memory-only credential) and current (running the installed
+    code); a scope never set up to serve is a quiet note, never a lit tile.
     """
     from tools.dashboard.unlock_routes import _agent_delegate, session_from_request
 
@@ -1693,21 +1723,102 @@ async def get_unlock_state(request: Request) -> JSONResponse:
                        if not low else "Running low — unlock again to extend it."),
         }
 
-    # certificates — this org's serving certificate (best-effort).
+    # agent (continued) — a lit delegate now says what stopped working, not
+    # only which button to press (the balloon-remedy-alone gap, bead auto-sdrsa).
+    if flags["agent"]["needs"]:
+        flags["agent"]["detail"] = (
+            "Your delegate key isn't loaded, so background work that needs "
+            "your secrets can't run. Unlock with your root to start it."
+        )
+    flags["agent"]["value"] = "Locked" if flags["agent"]["needs"] else "Running"
+
+    # certificates + sync are two questions about the SAME set of serving
+    # connectors, so one pass over the serving scopes computes both. A scope
+    # that was never set up to serve (no cert row at all — e.g. blindhash) is a
+    # quiet fact, not a fault: it must never light the tray, or the tray stays
+    # permanently amber for something that isn't broken (bead auto-sdrsa).
+    cert_broken: list = []      # set-up scopes whose cert has lapsed
+    cert_never: list = []       # scopes never provisioned to serve (quiet note)
+    serving_setup: list = []    # scopes provisioned to serve (any cert row)
+    sync_unarmed: list = []     # serving scopes holding no credential
+    sync_stale: list = []       # serving scopes running older code than on disk
+    sync_refusals = 0
+    sync_since = None
     try:
-        from tools.dashboard.api_auth import resolve_scoped_org
-        from tools.dashboard.link_serving_supervisor import serve_cert_state
-        org, _refused = resolve_scoped_org(request.query_params.get("org"))
-        status = serve_cert_state(org).get("status", "missing")
-        ok = status == "ok"
-        flags["certificates"] = {
-            "needs": not ok,
-            "detail": ("All current; the next renewal is months away." if ok
-                       else "Needs renewing — that needs your root key."),
-        }
+        from tools.dashboard import link_serving_supervisor as _sup
+        from tools.network import build_version as _bv
+
+        try:
+            disk_commit = _bv.disk_head()
+        except Exception:
+            disk_commit = None
+        try:
+            serving_scopes = _sup._discover_startup_orgs()
+        except Exception:
+            serving_scopes = []
+
+        for scope in serving_scopes:
+            try:
+                cert_status = _sup.serve_cert_state(scope).get("status", "missing")
+            except Exception:
+                continue
+            label = scope or "personal"
+            if cert_status == "missing":
+                cert_never.append(label)
+                continue
+            serving_setup.append(label)
+            if cert_status != "ok":
+                cert_broken.append(label)
+            # A scope meant to serve — ask its connector the two sync questions
+            # the CLI's control channel already answers: is it armed, and is it
+            # running current code?
+            try:
+                reply = _sup.control(scope, "connector-status", {})
+            except Exception:
+                # A serving scope whose connector won't answer is, from the
+                # fleet's side, refusing everything — count it as unarmed.
+                sync_unarmed.append(label)
+                continue
+            if not reply.get("fleet_runtime_configured"):
+                sync_unarmed.append(label)
+            process_commit = reply.get("process_commit")
+            if disk_commit and process_commit and process_commit != disk_commit:
+                sync_stale.append(label)
+            try:
+                sync_refusals += int(reply.get("locked_refusals") or 0)
+            except (TypeError, ValueError):
+                pass
+            since = reply.get("locked_refusal_since")
+            if isinstance(since, (int, float)) and (
+                sync_since is None or since < sync_since
+            ):
+                sync_since = since
+        cert_available = True
     except Exception:
-        flags["certificates"] = {"needs": False,
+        cert_available = False
+
+    if not cert_available:
+        flags["certificates"] = {"needs": False, "value": "",
                                  "detail": "Certificate state is unavailable."}
+    else:
+        cert_needs = bool(cert_broken)
+        cert = {"needs": cert_needs, "scopes": sorted(cert_broken),
+                "value": "Expired" if cert_needs else "Current"}
+        if cert_needs:
+            cert["detail"] = (
+                "The serving certificate for " + _oxford(sorted(cert_broken))
+                + " has lapsed, so devices can't verify this dashboard until "
+                "it's renewed — that needs your root key."
+            )
+        else:
+            cert["detail"] = "Your dashboard's certificate. All current."
+        if cert_never:
+            cert["note"] = (
+                _oxford(sorted(cert_never))
+                + (" isn't" if len(cert_never) == 1 else " aren't")
+                + " set up to serve — that's expected, not a problem."
+            )
+        flags["certificates"] = cert
 
     # tunnel — is the dashboard reachable from outside (best-effort live probe).
     try:
@@ -1715,11 +1826,60 @@ async def get_unlock_state(request: Request) -> JSONResponse:
         serving = bool(get_supervisor().serving())
         flags["tunnel"] = {
             "needs": not serving,
-            "detail": ("Reachable from outside." if serving
-                       else "Not reachable from outside — bringing it back needs your root key."),
+            "value": "Up" if serving else "Down",
+            "scopes": [] if serving else ["personal"],
+            "detail": ("The connection your other devices use to reach this "
+                       "dashboard." if serving
+                       else "Your other devices can't reach this dashboard from "
+                       "outside. Bringing the tunnel back needs your root key."),
         }
     except Exception:
-        flags["tunnel"] = {"needs": False, "detail": "Tunnel state is unavailable."}
+        flags["tunnel"] = {"needs": False, "value": "",
+                           "detail": "Tunnel state is unavailable."}
+
+    # sync — can the fleet's other machines sync WITH this one. Lit when any
+    # serving connector is unarmed (holds no credential — the memory-only one
+    # that dies on restart) or stale (older code than what's installed). Both
+    # need the root ceremony; a stale one needs restarting first, which the
+    # tray's restart button does in the right order (bead auto-sdrsa).
+    sync_needs = bool(sync_unarmed or sync_stale)
+    if sync_needs:
+        parts = ["Your other machines can't sync with this one."]
+        if sync_refusals:
+            plural = "s" if sync_refusals != 1 else ""
+            parts.append(
+                f"{sync_refusals} request{plural} have been refused"
+                + _refused_since(sync_since) + "."
+            )
+        if sync_unarmed:
+            parts.append(
+                _oxford(sorted(sync_unarmed))
+                + (" holds" if len(sync_unarmed) == 1 else " hold")
+                + " no serving credential — unlock with your root to give "
+                + ("it" if len(sync_unarmed) == 1 else "them") + " a new one."
+            )
+        if sync_stale:
+            parts.append(
+                _oxford(sorted(sync_stale))
+                + (" is" if len(sync_stale) == 1 else " are")
+                + " running older code than what's installed and must be "
+                "restarted."
+            )
+        sync_detail = " ".join(parts)
+        sync_value = "Locked" if sync_unarmed else "Stale"
+    else:
+        sync_detail = "Whether your other machines can sync with this one."
+        sync_value = "Serving" if serving_setup else ""
+    flags["sync"] = {
+        "needs": sync_needs,
+        "value": sync_value,
+        "detail": sync_detail,
+        "unarmed": sorted(sync_unarmed),
+        "stale": sorted(sync_stale),
+        "scopes": sorted(set(sync_unarmed) | set(sync_stale)),
+        "count": sync_refusals,
+        "since": sync_since,
+    }
 
     # approvals — requests waiting on you. Not yet wired to a live pending count
     # (there is no clean count accessor); honest no-alert default until it is.

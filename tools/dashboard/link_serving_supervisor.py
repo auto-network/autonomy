@@ -817,6 +817,26 @@ class ServingSupervisor:
         with self._lock:
             return [org for org, p in self._procs.items() if p.alive()]
 
+    def restart(self, org: str | None) -> dict:
+        """Stop *org*'s connector (if any) and reconcile it back up.
+
+        A running connector holds its Fleet serving credential ONLY in memory
+        and it dies with the process; it also keeps running whatever code it
+        imported at launch. Restarting is therefore how the tray's "sync" flag
+        clears a stale-code process — a fresh subprocess re-imports the code on
+        disk — and the precondition for re-arming it, since the credential must
+        be re-installed AFTER the new process is up. Idempotent; returns
+        ``{running, reason}`` from the relaunch."""
+        with self._lock:
+            proc = self._procs.pop(org, None)
+            if proc is not None:
+                proc.stop()
+            self._credentials.pop(org, None)
+            self._last_served.pop(org, None)
+            self._started_at.pop(org, None)
+            self._managed.add(org)
+            return self._reconcile(org)
+
 
 # ── process-wide singleton ────────────────────────────────────
 #

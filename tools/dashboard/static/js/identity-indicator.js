@@ -36,6 +36,9 @@
   var unlockState = null;
   var unlockStateError = false;
   var openFlagId = null;
+  // The restart button's in-flight guard: true from the moment the root
+  // ceremony succeeds until the restore finishes and the flags are re-read.
+  var restartBusy = false;
   var FLAG_NS = 'http://www.w3.org/2000/svg';
   // id -> {key on the unlock-state payload, title, plain-language detail, icon shapes}.
   // Order = tray order. Icons are the design's outline glyphs (placeholders to refine).
@@ -61,6 +64,10 @@
       body: 'Requests waiting for your approval.',
       shapes: [['path', { d: 'M4.5 5.5h15a1.5 1.5 0 0 1 1.5 1.5v8a1.5 1.5 0 0 1-1.5 1.5H12l-4.5 3.5v-3.5H4.5A1.5 1.5 0 0 1 3 15V7a1.5 1.5 0 0 1 1.5-1.5z' }],
         ['path', { d: 'M8.8 11l2.1 2.1 4.3-4.3' }]] },
+    { id: 'sync', key: 'sync', title: 'Sync',
+      body: 'Whether your other machines can sync with this one.',
+      shapes: [['path', { d: 'M17 3.5l3 3-3 3' }], ['path', { d: 'M20 6.5H9a5 5 0 0 0-5 5' }],
+        ['path', { d: 'M7 20.5l-3-3 3-3' }], ['path', { d: 'M4 17.5h11a5 5 0 0 0 5-5' }]] },
   ];
 
   function deriveIdentityState(value) {
@@ -399,9 +406,25 @@
     var s = unlockState[f.key];
     return !!(s && s.needs);
   }
+  function anyFlagNeeds() {
+    return FLAGS.some(function (f) { return flagNeeds(f); });
+  }
+  // Dim: the balloon says what the flag IS (the static description). Lit: it
+  // says what is BROKEN and what stopped working — the server's live detail.
+  // The remedy alone ("unlock with your root") never told the operator what
+  // they'd lost; a lit balloon now leads with the loss (bead auto-sdrsa).
   function flagDetail(f) {
-    if (unlockState) { var s = unlockState[f.key]; if (s && s.detail) return String(s.detail); }
+    if (flagNeeds(f) && unlockState) {
+      var s = unlockState[f.key];
+      if (s && s.detail) return String(s.detail);
+    }
     return f.body;
+  }
+  // An optional muted trailing line — e.g. a scope that was never set up to
+  // serve, a quiet fact that must not light the tile.
+  function flagNote(f) {
+    if (unlockState) { var s = unlockState[f.key]; if (s && s.note) return String(s.note); }
+    return '';
   }
   // The liveliness readout shown green in the balloon corner: a boolean flag
   // reports "Up"; a timed one reports its remaining range ("Valid for 71 days",
@@ -425,6 +448,37 @@
   }
   function flagTray() {
     var band = el('div', 'identity-band');
+    // Restart button: a refresh glyph shown whenever ANY flag is lit, gone when
+    // none is. One tap runs the whole restore start-to-finish (auth, restart,
+    // re-read) with no questions in between (bead auto-sdrsa).
+    if (anyFlagNeeds()) {
+      var restart = el('button', 'identity-flag-restart'
+        + (restartBusy ? ' busy' : ''));
+      restart.type = 'button';
+      restart.setAttribute('data-testid', 'identity-flag-restart');
+      restart.setAttribute('aria-label', 'Restore fleet services');
+      restart.title = 'Restore fleet services';
+      restart.disabled = restartBusy;
+      var rsvg = root.document.createElementNS(FLAG_NS, 'svg');
+      rsvg.setAttribute('viewBox', '0 0 24 24');
+      // A circle drawn as two arrows — the refresh/restart glyph.
+      [['path', { d: 'M3.5 12a8.5 8.5 0 0 1 14.4-6.2' }],
+        ['path', { d: 'M18.5 3.2v3.3h-3.3' }],
+        ['path', { d: 'M20.5 12a8.5 8.5 0 0 1-14.4 6.2' }],
+        ['path', { d: 'M5.5 20.8v-3.3h3.3' }]].forEach(function (sh) {
+        var e = root.document.createElementNS(FLAG_NS, sh[0]);
+        for (var k in sh[1]) {
+          if (Object.prototype.hasOwnProperty.call(sh[1], k)) e.setAttribute(k, sh[1][k]);
+        }
+        rsvg.appendChild(e);
+      });
+      restart.appendChild(rsvg);
+      restart.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        runRestart();
+      });
+      band.appendChild(restart);
+    }
     var tray = el('div', 'identity-flagtray');
     tray.setAttribute('data-testid', 'identity-flagtray');
     FLAGS.forEach(function (f) {
@@ -457,16 +511,178 @@
         }
         pop.appendChild(head);
         pop.appendChild(el('div', 'identity-flagpop-body', flagDetail(f)));
+        var note = flagNote(f);
+        if (note) pop.appendChild(el('div', 'identity-flagpop-note', note));
+        // A caret that points the floated balloon back at its tile; placed
+        // horizontally after layout in positionFlagpop().
+        pop.appendChild(el('div', 'identity-flagpop-caret'));
         band.appendChild(pop);
       }
     }
     return band;
+  }
+
+  // Float the open balloon under its tile and keep it on screen. Measured after
+  // the panel is in the DOM; in a layout-less environment (jsdom) the reads are
+  // 0 and this degrades to a fixed offset — the balloon still renders.
+  function positionFlagpop() {
+    if (!root || !root.document) return;
+    var host = root.document.getElementById('identity-indicator');
+    if (!host) return;
+    var pop = host.querySelector('.identity-flagpop');
+    var tile = host.querySelector('.identity-fl.on');
+    if (!pop || !tile) return;
+    // position: fixed — everything is in viewport coordinates, so the balloon
+    // floats over the page and is never clipped by the drawer's overflow.
+    var tileRect = tile.getBoundingClientRect();
+    var margin = 8;
+    var vw = root.innerWidth || 0;
+    var vh = root.innerHeight || 0;
+    var popW = pop.offsetWidth || 0;
+    var popH = pop.offsetHeight || 0;
+    var tileCenter = tileRect.left + tileRect.width / 2;
+    var left = tileCenter - popW / 2;
+    var maxLeft = vw - popW - margin;
+    if (maxLeft < margin) maxLeft = margin;
+    if (left > maxLeft) left = maxLeft;
+    if (left < margin) left = margin;
+    // Below the tile, or flipped above it when there is no room below.
+    var below = true;
+    var top = tileRect.bottom + 6;
+    if (vh && popH && top + popH > vh - margin && tileRect.top - popH - 6 >= margin) {
+      top = tileRect.top - popH - 6;
+      below = false;
+    }
+    if (top < margin) top = margin;
+    pop.style.left = left + 'px';
+    pop.style.top = top + 'px';
+    var caret = pop.querySelector('.identity-flagpop-caret');
+    if (caret) {
+      var caretLeft = tileCenter - left;
+      if (popW) caretLeft = Math.max(12, Math.min(popW - 12, caretLeft));
+      caret.style.left = caretLeft + 'px';
+      // The caret points at the tile: up-pointing when the balloon is below,
+      // down-pointing when it flipped above.
+      caret.classList.toggle('is-below', !below);
+    }
   }
   function loadUnlockState() {
     fetch('/api/identity/unlock-state', { headers: { 'Accept': 'application/json' } })
       .then(function (res) { if (!res.ok) throw new Error('HTTP ' + res.status); return res.json(); })
       .then(function (body) { unlockState = body || {}; unlockStateError = false; if (panelOpen) render(); })
       .catch(function () { unlockState = null; unlockStateError = true; if (panelOpen) render(); });
+  }
+
+  function _escHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;',
+        '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function _joinAnd(items) {
+    if (!items.length) return '';
+    if (items.length === 1) return items[0];
+    if (items.length === 2) return items[0] + ' and ' + items[1];
+    return items.slice(0, -1).join(', ') + ', and ' + items[items.length - 1];
+  }
+  // The structured request's reason: ONE sentence saying what is about to
+  // happen, then a short list naming what it applies to (scopes per flag). The
+  // list names; the balloons explain — the operator reads them before pressing
+  // the button (bead auto-sdrsa).
+  function restartReasonHtml() {
+    function lit(key) { var s = unlockState && unlockState[key]; return !!(s && s.needs); }
+    var actions = [];
+    if (lit('certificates')) actions.push('renew your serving certificate');
+    if (lit('tunnel')) actions.push('bring the tunnel back');
+    if (lit('sync')) actions.push('give the sync processes a new credential');
+    var sentence = actions.length
+      ? 'This will ' + _joinAnd(actions) + ', then restart them.'
+      : 'This will restart your fleet services.';
+    var labels = { certificates: 'Certificate', tunnel: 'Tunnel', sync: 'Sync',
+      agent: 'Delegate key', session: 'Session' };
+    var rows = [];
+    ['certificates', 'tunnel', 'sync', 'agent', 'session'].forEach(function (key) {
+      if (!lit(key)) return;
+      var s = unlockState[key] || {};
+      var scopes = Array.isArray(s.scopes) ? s.scopes : [];
+      rows.push('<li>' + _escHtml(labels[key])
+        + (scopes.length ? ' — ' + _escHtml(scopes.join(', ')) : '') + '</li>');
+    });
+    return '<div class="or-restore-sentence">' + _escHtml(sentence) + '</div>'
+      + (rows.length ? '<ul class="or-restore-list">' + rows.join('') + '</ul>' : '');
+  }
+
+  // The tray's restart button: one action, start to finish, no questions in
+  // between. Authenticate (the structured root ceremony, with a stated reason),
+  // restart everything, re-read the flags — the tray re-renders into the new
+  // state. Every step after the ceremony is best-effort: a hiccup in one must
+  // not strand the others, and the re-read shows whatever actually cleared.
+  async function runRestart() {
+    if (restartBusy) return;
+    var openRootMod;
+    try {
+      openRootMod = await import('./ceremony/open-root.js');
+    } catch (e) {
+      loadError = 'Could not start the restore: ' + ((e && e.message) || e);
+      render();
+      return;
+    }
+    var opened;
+    try {
+      opened = await openRootMod.openRoot({
+        title: 'Restore fleet services',
+        detail: restartReasonHtml(),
+      });
+    } catch (e) {
+      loadError = (e && e.message) || String(e);
+      render();
+      return;
+    }
+    if (!opened) return;   // operator cancelled — leave the tray untouched
+    restartBusy = true;
+    openFlagId = null;
+    render();
+    var seed = opened.seed;
+    opened.seed = null;
+    try {
+      // 1. Restart the serving processes: a fresh subprocess drops the stale
+      //    code and the dead in-memory credential, and comes back ready to be
+      //    re-armed.
+      try {
+        await root.fetch('/api/fleet/restore', {
+          method: 'POST', credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' }, body: '{}',
+        });
+      } catch (e) { /* best-effort — the arm below still runs */ }
+      // 2. Re-warm the vault (mints a fresh delegate) with the open root.
+      try {
+        var signon = root.AutonomyNetworkSession;
+        if (signon && signon._internals
+            && typeof signon._internals.wakeVault === 'function') {
+          await signon._internals.wakeVault({
+            personalRootSeed: new Uint8Array(seed),
+          });
+        }
+      } catch (e) { /* best-effort */ }
+      // 3. Give the now-fresh sync processes a new credential (the shared,
+      //    non-diverging restore used by the unlock path too).
+      try {
+        var fr = await import('./ceremony/fleet-restore.js');
+        await fr.restoreFleetRuntime(new Uint8Array(seed), {
+          fetchImpl: function (u, o) { return root.fetch(u, o); },
+          signon: root.AutonomyNetworkSession,
+        });
+      } catch (e) { /* best-effort */ }
+    } finally {
+      if (seed && seed.fill) seed.fill(0);
+      restartBusy = false;
+      // 4. Re-read the flags: by the time the tray renders again, they show
+      //    the new state — dim, or about to be.
+      unlockState = null;
+      unlockStateError = false;
+      render();
+      loadUnlockState();
+    }
   }
 
   function panelForState(state) {
@@ -595,6 +811,8 @@
             });
         }
       }
+      // Float the open flag balloon under its tile now the panel is in the DOM.
+      if (openFlagId) positionFlagpop();
     }
   }
 
@@ -693,6 +911,23 @@
       var host = root.document.getElementById('identity-indicator');
       if (host && !host.contains(event.target)) closePanel();
     });
+    // A flag balloon closes when you tap anywhere but its own tile or itself.
+    // Capture phase, because the indicator host stops click propagation on the
+    // bubble to guard the panel's outside-click closer — so a bubble listener
+    // here would never see in-panel taps (bead auto-sdrsa). A tap on a tray tile
+    // is left to the tile's own handler (which toggles/switches balloons).
+    root.document.addEventListener('click', function (event) {
+      if (!openFlagId) return;
+      var host = root.document.getElementById('identity-indicator');
+      if (!host) return;
+      var pop = host.querySelector('.identity-flagpop');
+      var tray = host.querySelector('.identity-flagtray');
+      var target = event.target;
+      if (pop && pop.contains(target)) return;    // inside the balloon: keep open
+      if (tray && tray.contains(target)) return;  // a tile: its handler decides
+      openFlagId = null;
+      render();
+    }, true);
     root.document.addEventListener('visibilitychange', function () {
       if (root.document.visibilityState === 'visible') refresh();
     });
