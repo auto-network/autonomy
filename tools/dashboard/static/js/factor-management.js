@@ -1343,12 +1343,6 @@ export function credentialsPanel() {
       const r = this.signedInRecipient();
       return !!r && k.recipientPub === r;
     },
-    enrolledHere(k) { return this.passkeys.some((x) => x.credId === k.credId && x.device === this.thisDevice()); },
-    // Offer enrollment on a SYNCED credential with no slot on this device. We
-    // can't know it's usable here without a ceremony — the offer is
-    // honest-optimistic, and tapping it runs the ceremony that resolves it.
-    offerEnroll(k) { return (k.synced || k.unpaired) && k.device !== this.thisDevice() && !this.enrolledHere(k); },
-    sib(k) { return this.passkeys.some((x) => x.id !== k.id && x.credId === k.credId); },
     // The physical half of a slot enrollment: one get()+PRF on the factor's
     // credential, staging its _addRecipient row. Returns the row, 'already',
     // or null (cancelled); throws on real errors. Used by the row action, the
@@ -1410,11 +1404,6 @@ export function credentialsPanel() {
     },
 
     startAddPasskey() { this.push({ s: 'addpk' }); },
-    // The recovery the whole thread is about: if a synced credential exists but
-    // has no slot on this device, create() throws InvalidStateError — we catch
-    // that and pivot to get()+PRF, adding THIS device's slot. The user only
-    // ever sees success + a new row.
-    get pendingEnroll() { return this.passkeys.find((k) => this.offerEnroll(k)) || null; },
     async usePasskey() {
       // Add ALWAYS creates a new passkey. Enrolling THIS device into an existing
       // synced credential is a separate operation with its own screen
