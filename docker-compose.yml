@@ -150,6 +150,15 @@ services:
     image: ${AUTONOMY_IMAGE:-autonomy-node:local}
     restart: unless-stopped
     command: sh /app/deploy/dispatch.sh
+    # The shared image's HEALTHCHECK curls https://127.0.0.1:8080/api/ping, which
+    # is the DASHBOARD's liveness probe. The dispatcher serves no HTTP at all, so
+    # it inherits a check it can never pass and reports `unhealthy` forever while
+    # working correctly. Disable it here rather than weaken the dashboard's.
+    # (A real dispatcher probe — last poll time, say — would be better than none,
+    # but a permanently-red light is worse than no light: it trains the operator
+    # to ignore the column.)
+    healthcheck:
+      disable: true
     environment:
       DISPATCH_INTERVAL: ${DISPATCH_INTERVAL:-5}
       DISPATCH_MAX_CONCURRENT: ${DISPATCH_MAX_CONCURRENT:-2}

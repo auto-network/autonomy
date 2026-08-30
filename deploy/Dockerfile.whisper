@@ -20,14 +20,28 @@ ARG BASE_IMAGE=nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 FROM ${BASE_IMAGE}
 
 # CTranslate2 needs cuDNN at runtime; the cudnn-runtime base supplies it.
-# python3 + pip only — no build toolchain, the wheels are prebuilt.
+#
+# The toolchain and portaudio headers are here for ONE dependency: whisper-live
+# requires PyAudio, which ships no wheel for this platform and fails to build
+# without them. PyAudio is client-side microphone capture and this server never
+# uses it — the dashboard streams PCM over a websocket — but it is a hard
+# requirement of the package, so it has to build.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3 python3-pip \
+    && apt-get install -y --no-install-recommends \
+        python3 python3-pip python3-dev gcc portaudio19-dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY deploy/requirements.whisper.txt /app/deploy/requirements.whisper.txt
-RUN pip3 install --no-cache-dir --break-system-packages \
-        -r /app/deploy/requirements.whisper.txt
+# Upgrade pip FIRST. The distro pip on this base is 22.x, and it fails two ways
+# on this dependency set: it has no --break-system-packages (not needed here —
+# no PEP 668 marker — but worth knowing), and it cannot read the PEP 517
+# metadata of openai-whisper's sdist, which whisper-live requires. It reports
+# "metadata has 'unknown'" and then "no matching distribution".
+#
+# No --break-system-packages below for the same reason: this base has no
+# externally-managed marker, and passing it fails the build outright.
+RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel \
+    && pip3 install --no-cache-dir -r /app/deploy/requirements.whisper.txt
 
 # Same uid as the node and the sessions (deploy/Dockerfile's single-uid model),
 # so anything read from or written to the shared data volume has consistent

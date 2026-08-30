@@ -14,3 +14,11 @@ whisper-live==0.8.0
 faster-whisper==1.2.0
 ctranslate2==4.7.1
 numpy==1.26.4
+
+# whisper_live.server imports fastapi at module scope but does not declare it as
+# a dependency — the container starts, crashes with ModuleNotFoundError, and
+# restart:unless-stopped turns that into a loop. uvicorn comes with it because a
+# FastAPI app is unusable without an ASGI server. Pinned to the same versions as
+# the node image (deploy/requirements.txt) so the two stay in step.
+fastapi==0.139.2
+uvicorn==0.44.0
