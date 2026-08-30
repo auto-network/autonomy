@@ -132,6 +132,11 @@
   // local views, and registry SSE applies the only lifecycle deltas. Keeping
   // the projection here also means desktop SPA remounts do not fetch history
   // again merely because the operator left and returned to /sessions.
+  // Mirrors the server's per-org history floor (dao/sessions.py
+  // include_org_floor): a selected org always shows at least this many of
+  // its newest sessions, however old they are.
+  var RECENT_ORG_FLOOR = 10;
+
   var _recentHistory = {
     rows: [],
     loaded: false,
@@ -919,10 +924,28 @@
         var base = this.recentFilter === 'all'
           ? this.recent
           : this.recent.filter(function(s) { return self._matchesFilter(s, self.recentFilter); });
-        base = base.filter(function(s) {
-          return self._matchesOrg(s) && self._matchesRecentSince(s);
-        });
-        return this._capAndSortRecent(base);
+        base = base.filter(function(s) { return self._matchesOrg(s); });
+        var windowed = base.filter(function(s) { return self._matchesRecentSince(s); });
+        // A selected organization is guaranteed its 10 most-recent sessions
+        // regardless of the Since window. The server ships an age-independent
+        // ten-row floor per org for exactly this (dao/sessions.py
+        // include_org_floor); letting the Since projection hide those rows is
+        // how a quiet org rendered an empty Recent list (2026-08-30).
+        if (this.selectedOrg && windowed.length < RECENT_ORG_FLOOR && base.length > windowed.length) {
+          var haveIds = {};
+          windowed.forEach(function(s) { haveIds[s.id] = true; });
+          var backfill = base
+            .filter(function(s) { return !haveIds[s.id]; })
+            .sort(function(a, b) {
+              // Most-recent first, mirroring the server floor's contract —
+              // the floor is "the org's newest N", not "top N by view sort".
+              return self._recentEpoch(b.last_activity_at || b.created_at || b.last_activity)
+                - self._recentEpoch(a.last_activity_at || a.created_at || a.last_activity);
+            })
+            .slice(0, RECENT_ORG_FLOOR - windowed.length);
+          windowed = windowed.concat(backfill);
+        }
+        return this._capAndSortRecent(windowed);
       },
 
       _recentEpoch(value) {
@@ -962,6 +985,24 @@
       _matchesFilter(s, f) {
         if (f === 'dispatch' || f === 'librarian') return _rowGroup(s) === f;
         return _rowGroup(s) === 'interactive';
+      },
+
+      // Empty-state sentence naming the filters that actually hid the rows.
+      // Never interpolate the raw chip key: recentFilter === 'all' rendered
+      // the literal text "No all sessions" (2026-08-30).
+      recentEmptyMessage() {
+        var chip = this.recentFilter !== 'all' ? this.recentFilter + ' ' : '';
+        var org = '';
+        if (this.selectedOrg) {
+          var picked = this.orgFilterPicked;
+          org = ' for ' + ((picked && picked.name) || this.selectedOrg);
+        }
+        var since = {
+          '6h': ' in the last 6 hours',
+          '1d': ' in the last day',
+          '1w': ' in the last week',
+        }[this.recentSince] || '';
+        return 'No ' + chip + 'sessions' + org + since;
       },
 
       async resumeSession(s, $event) {
