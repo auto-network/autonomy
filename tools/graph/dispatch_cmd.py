@@ -31,6 +31,31 @@ def _api_call(base_url: str, path: str, ctx):
     return json.loads(resp.read())
 
 
+def _exit_unreachable(base_url: str, exc: Exception) -> None:
+    """Report why a dashboard call failed, then exit 1.
+
+    ``HTTPError`` subclasses ``URLError``, so a dashboard that answered and
+    REFUSED is otherwise reported as one that never answered. That is the
+    worst possible confusion here: it points the operator at restarting a
+    healthy dashboard, which now also kills every serving connector with it
+    (PR_SET_PDEATHSIG, 5ae84ee71). Observed 2026-08-30, when an
+    unauthenticated shell got 401 on /api/dispatch/status and was told the
+    dashboard was down.
+    """
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code in (401, 403):
+            print(
+                f"Dashboard refused the request: HTTP {exc.code} — this shell is "
+                f"not authenticated to {base_url}. The dashboard is running; "
+                "mint a session with `graph session-auth`."
+            )
+        else:
+            print(f"Dashboard returned HTTP {exc.code} ({exc.reason}) at {base_url}")
+    else:
+        print(f"Dashboard not reachable at {base_url} — is it running?")
+    sys.exit(1)
+
+
 def _api_post(base_url: str, path: str, ctx, body: dict | None = None):
     data = None if body is None else json.dumps(body).encode()
     headers = {"Accept": "application/json"}
@@ -82,9 +107,8 @@ def cmd_dispatch_default(args):
     try:
         status_data = _api_call(base, "/api/dispatch/status", ctx)
         approved_data = _api_call(base, "/api/dispatch/approved", ctx)
-    except (urllib.error.URLError, OSError):
-        print(f"Dashboard not reachable at {base} \u2014 is it running?")
-        sys.exit(1)
+    except (urllib.error.URLError, OSError) as exc:
+        _exit_unreachable(base, exc)
 
     running_runs = status_data.get("running_runs", [])
     waiting = approved_data.get("waiting", [])
@@ -137,9 +161,8 @@ def cmd_dispatch_runs(args):
 
     try:
         runs = _api_call(base, "/api/dispatch/runs", ctx)
-    except (urllib.error.URLError, OSError):
-        print(f"Dashboard not reachable at {base} \u2014 is it running?")
-        sys.exit(1)
+    except (urllib.error.URLError, OSError) as exc:
+        _exit_unreachable(base, exc)
 
     if args.running:
         runs = [r for r in runs if r.get("status") == "RUNNING"]
@@ -430,9 +453,8 @@ def cmd_dispatch_reset(args):
                 f"/api/dispatch/reset/{urllib.parse.quote(bead_id)}",
                 ctx,
             )
-        except (urllib.error.URLError, OSError):
-            print(f"Dashboard not reachable at {base} — is it running?")
-            sys.exit(1)
+        except (urllib.error.URLError, OSError) as exc:
+            _exit_unreachable(base, exc)
 
         if not data.get("reset"):
             print(f"  {bead_id}: no consecutive failures — circuit breaker not tripped")
@@ -546,9 +568,8 @@ def _fetch_runs_for_stats() -> list[dict]:
     ctx = _make_ssl_ctx()
     try:
         return _api_call(base, "/api/dispatch/runs", ctx)
-    except (urllib.error.URLError, OSError):
-        print(f"Dashboard not reachable at {base} — is it running?")
-        sys.exit(1)
+    except (urllib.error.URLError, OSError) as exc:
+        _exit_unreachable(base, exc)
 
 
 def _extract_run_fields(run: dict) -> dict:
@@ -872,9 +893,8 @@ def cmd_dispatch_status(args):
         status_data = _api_call(base, "/api/dispatch/status", ctx)
         approved_data = _api_call(base, "/api/dispatch/approved", ctx)
         runs = _api_call(base, "/api/dispatch/runs", ctx)
-    except (urllib.error.URLError, OSError):
-        print(f"Dashboard not reachable at {base} \u2014 is it running?")
-        sys.exit(1)
+    except (urllib.error.URLError, OSError) as exc:
+        _exit_unreachable(base, exc)
 
     n_running = len(status_data.get("running_runs", []))
     n_queued = len(approved_data.get("waiting", []))
@@ -912,9 +932,8 @@ def _cmd_dispatch_status_detail(args, bead_id: str):
 
     try:
         runs = _api_call(base, "/api/dispatch/runs", ctx)
-    except (urllib.error.URLError, OSError):
-        print(f"Dashboard not reachable at {base} \u2014 is it running?")
-        sys.exit(1)
+    except (urllib.error.URLError, OSError) as exc:
+        _exit_unreachable(base, exc)
 
     # Find runs for this bead, sorted by timestamp descending (latest first)
     bead_runs = [r for r in runs if r.get("bead_id") == bead_id]
