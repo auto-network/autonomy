@@ -49,6 +49,12 @@ function fleetPage() {
     },
 
     get machines() { return (this.view && this.view.machines) || []; },
+
+    // Count of machines whose sync outcomes read as failing (see syncTrouble),
+    // so the fleet-level summary can warn without the operator opening a card.
+    get failingMachines() {
+      return this.machines.filter((machine) => this.syncTrouble(machine)).length;
+    },
     get invitation() {
       return (this.view && this.view.invitation) || {
         status: 'none', url: null, bootstrapCode: null, publishedAt: null, expiresAt: null,
@@ -100,21 +106,39 @@ function fleetPage() {
       window.location.assign('/activity?focus=approval&id=' + encodeURIComponent(id));
     },
 
+    // A machine that is failing to sync is not healthy, however good its
+    // standing. "Trying and failing" must show; "not yet started" must stay
+    // quiet, so a machine mid-first-sync is never marked failed. With only
+    // cumulative counters the honest signal is: failures observed with no pull
+    // ever completed. A machine with a recent success reads healthy even with
+    // old failures behind it; a machine with no attempts at all is not failed.
+    syncTrouble(machine) {
+      if (!machine || machine.isLocalMachine) return false;
+      if (machine.rowKind === 'pending_admission') return false;
+      const failed = Number(machine.failedIterations || 0);
+      if (failed <= 0) return false;
+      const succeeded = Number(machine.successfulIterations || 0);
+      return succeeded <= 0 || !machine.lastSuccessfulSyncAt;
+    },
+
     machineClass(machine) {
       if (machine.standing === 'revoked' || machine.standing === 'admission_failed') return 'failed';
       if (machine.rowKind === 'pending_admission') return 'pending';
+      if (this.syncTrouble(machine)) return 'warn';
       return '';
     },
 
     dotClass(machine) {
       if (machine.standing === 'revoked' || machine.standing === 'admission_failed') return 'failed';
       if (machine.rowKind === 'pending_admission') return 'pending';
+      if (this.syncTrouble(machine)) return 'warn';
       return machine.presence === 'connected' ? 'connected' : '';
     },
 
     statusTone(machine) {
       if (machine.standing === 'revoked' || machine.standing === 'admission_failed') return 'failed';
       if (machine.rowKind === 'pending_admission') return 'pending';
+      if (this.syncTrouble(machine)) return 'warn';
       return '';
     },
 
