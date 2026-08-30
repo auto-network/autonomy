@@ -15932,9 +15932,19 @@ async def api_graph_bead(request):
     if body.get("type"):
         bd_cmd += ["-t", body["type"]]
 
-    from tools.data_paths import org_beads_dir
-    stdout, stderr, rc = await run_cli(
-        bd_cmd, timeout=60, beads_dir=org_beads_dir(caller_org))
+    # A WRITE resolves the org's own tracker, provisioning it on first sight.
+    # Filing into the shared tracker because this org has never been seen is
+    # the silent mis-attribution the per-org split exists to prevent, so a
+    # node that cannot provision returns 503 rather than writing somewhere else.
+    from tools.beads_provision import BeadsProvisionError, beads_dir_for_write
+    try:
+        bd_dir = await asyncio.to_thread(beads_dir_for_write, caller_org)
+    except BeadsProvisionError as exc:
+        return JSONResponse(
+            {"error": f"no bead tracker for org {caller_org!r}: {exc}"},
+            status_code=503,
+        )
+    stdout, stderr, rc = await run_cli(bd_cmd, timeout=60, beads_dir=bd_dir)
     if rc != 0:
         return JSONResponse({"error": stderr, "rc": rc}, status_code=500)
 
