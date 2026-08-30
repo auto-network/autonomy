@@ -355,7 +355,7 @@ def _activate_runtime(
             personal_db_path=_org_db_path("personal"),
             telemetry_recorder=fleet_sync_telemetry.record_iteration,
             resume_cursor=(
-                fleet_sync_telemetry.read_acknowledged_transaction_ref
+                fleet_sync_telemetry.read_resume_breadcrumbs
             ),
         )
     )

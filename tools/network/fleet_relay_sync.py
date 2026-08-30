@@ -41,9 +41,13 @@ from tools.network.fleet_sync_scheduler import (
     _MUTATION_MAGIC,
     decode_authored,
     decode_done,
+    decode_breadcrumb,
     encode_pull_request,
+    encode_breadcrumb,
+    FleetSyncProtocolError,
     FleetSyncRuntimeConfig,
     FleetSyncScheduler,
+    MAX_RESUME_BREADCRUMBS,
     SQLiteFleetSyncStore,
     dashboard_fleet_sync_service,
     roster_epoch,
@@ -62,7 +66,7 @@ FILE_MAGIC = b"FSB1"
 MAX_CHECKPOINT_FILES = 4096
 MAX_CHECKPOINT_BYTES = 4 * 1024 * 1024 * 1024
 _REQUEST_FIELDS = {
-    "v", "op", "roster_epoch", "checkpoint", "after_transaction_ref", "hello",
+    "v", "op", "roster_epoch", "checkpoint", "resume", "hello",
 }
 
 
@@ -331,13 +335,16 @@ class ConnectorFleetRuntime:
         include_checkpoint = message.get("checkpoint")
         if not isinstance(include_checkpoint, bool):
             raise FleetRelaySyncError("fleet sync pull checkpoint flag must be bool")
-        after_transaction_ref = message.get("after_transaction_ref")
-        if (
-            isinstance(after_transaction_ref, bool)
-            or not isinstance(after_transaction_ref, int)
-            or after_transaction_ref < 0
-        ):
-            raise FleetRelaySyncError("fleet sync pull position is malformed")
+        raw_resume = message.get("resume")
+        if not isinstance(raw_resume, list) or len(raw_resume) > MAX_RESUME_BREADCRUMBS:
+            raise FleetRelaySyncError("fleet sync pull resume trail is malformed")
+        try:
+            resume_trail = tuple(
+                decode_breadcrumb(entry, "fleet sync resume breadcrumb")
+                for entry in raw_resume
+            )
+        except FleetSyncProtocolError as exc:
+            raise FleetRelaySyncError(str(exc)) from exc
         hello = canonical_json(message.get("hello"))
         peer_pub, _private, server_hello, _transcript = (
             scheduler.authenticator.accept_client(hello, session=token)
@@ -426,7 +433,7 @@ class ConnectorFleetRuntime:
                     token,
                     encode_pull_request(
                         requested_epoch,
-                        after_transaction_ref=after_transaction_ref,
+                        resume=resume_trail,
                     ),
                     peer_pub,
                     telemetry_channel="relay",
@@ -557,8 +564,8 @@ async def pull_checkpoint_once(
     try:
         private, hello = auth.build_client_hello(token)
         client_eph = _json(hello, "fleet client hello")["eph_pub"]
-        after_transaction_ref = await asyncio.to_thread(
-            fleet_sync_telemetry.read_acknowledged_transaction_ref,
+        resume_trail = await asyncio.to_thread(
+            fleet_sync_telemetry.read_resume_breadcrumbs,
             route.origin_machine_pub,
         )
         request = canonical_json({
@@ -566,7 +573,9 @@ async def pull_checkpoint_once(
             "op": PULL_OP,
             "roster_epoch": epoch,
             "checkpoint": include_checkpoint,
-            "after_transaction_ref": after_transaction_ref,
+            "resume": [
+                encode_breadcrumb(breadcrumb) for breadcrumb in resume_trail
+            ],
             "hello": _json(hello, "fleet client hello"),
         })
         metrics["bytes_sent"] += len(request)
@@ -644,6 +653,7 @@ async def pull_checkpoint_once(
                     expected_count,
                     expected_digest,
                     through_transaction_ref,
+                    through_breadcrumb,
                 ) = decode_done(raw)
                 if delta_count != expected_count \
                         or delta_digest.hexdigest() != expected_digest:
@@ -652,6 +662,10 @@ async def pull_checkpoint_once(
                 metrics["acknowledged_transaction_ref"] = (
                     through_transaction_ref
                 )
+                if through_breadcrumb is not None:
+                    metrics["acknowledged_breadcrumb"] = (
+                        encode_breadcrumb(through_breadcrumb)
+                    )
                 saw_done = True
                 break
             if raw.startswith(FILE_MAGIC):

@@ -1431,6 +1431,60 @@ class MutationCatalog:
         ]
         return transaction_ref, items
 
+    def journal_breadcrumb(
+        self, transaction_ref: int
+    ) -> tuple[str, str, int] | None:
+        """The breadcrumb naming one locally learned transaction, or None."""
+        if (
+            isinstance(transaction_ref, bool)
+            or not isinstance(transaction_ref, int)
+            or transaction_ref <= 0
+        ):
+            return None
+        row = self.conn.execute(
+            "SELECT o.incarnation,t.transaction_id,t.timestamp_ns "
+            "FROM fleet_sync_transactions t "
+            "JOIN fleet_sync_origins o ON o.id=t.origin_id WHERE t.id=?",
+            (transaction_ref,),
+        ).fetchone()
+        if row is None:
+            return None
+        return str(row[0]), str(row[1]), int(row[2])
+
+    def journal_resume_ref(
+        self, breadcrumbs: Iterable[tuple[str, str, int]]
+    ) -> int:
+        """Resolve a peer's content-addressed resume trail to a local position.
+
+        Journal row ids are never authority a peer may present: restoring
+        this database from a backup renumbers them, and a stale numeric
+        cursor silently skips everything authored afterwards.  The peer
+        instead presents breadcrumbs naming transactions it has already
+        verified — each one a durable promise that it consumed this
+        journal's complete prefix through that transaction — and the resume
+        position is recomputed here, from this journal's current rows, on
+        every pull.
+
+        The result is the newest presented transaction this journal still
+        knows.  Pre-restore rows keep their ids (they came back with the
+        backup), so a trail that reaches behind the backup point bounds the
+        replay to the divergence window; an empty or entirely unknown trail
+        replays the retained journal, which deterministic merge makes inert
+        on the peer.
+        """
+        best = 0
+        for origin, transaction_id, timestamp_ns in breadcrumbs:
+            row = self.conn.execute(
+                "SELECT t.id,t.timestamp_ns FROM fleet_sync_transactions t "
+                "JOIN fleet_sync_origins o ON o.id=t.origin_id "
+                "WHERE o.incarnation=? AND t.transaction_id=?",
+                (origin, transaction_id),
+            ).fetchone()
+            if row is None or int(row[1]) != timestamp_ns:
+                continue
+            best = max(best, int(row[0]))
+        return best
+
     def prune_journal(self, through_watermark: int) -> int:
         """Retire transaction frames only after an exact base ACK covers them."""
         if self._context is not None or self.conn.in_transaction:

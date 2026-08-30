@@ -106,8 +106,13 @@ def test_two_schedulers_transfer_once_and_resume_after_reconnect(tmp_path: Path)
 
         def record(peer, **values):
             telemetry.append({"peer": peer, **values})
-            if "acknowledged_transaction_ref" in values:
-                acknowledged[peer] = values["acknowledged_transaction_ref"]
+            breadcrumb = values.get("acknowledged_breadcrumb")
+            if breadcrumb is not None:
+                acknowledged[peer] = [(
+                    breadcrumb["origin"],
+                    breadcrumb["transaction"],
+                    breadcrumb["timestamp"],
+                )]
         root = KeyPair.generate()
         left_key = KeyPair.generate()
         right_key = KeyPair.generate()
@@ -141,7 +146,7 @@ def test_two_schedulers_transfer_once_and_resume_after_reconnect(tmp_path: Path)
             min_backoff=0.01,
             max_backoff=0.05,
             telemetry_recorder=record,
-            resume_cursor=lambda peer: acknowledged.get(peer, 0),
+            resume_cursor=lambda peer: acknowledged.get(peer, []),
         )
         _insert(right_path, "first-crossing", "first")
         left = FleetSyncScheduler(left_config)
@@ -176,9 +181,10 @@ def test_two_schedulers_transfer_once_and_resume_after_reconnect(tmp_path: Path)
             await _eventually(lambda: _title(left_path, "after-reconnect") == "second")
             await _eventually(lambda: _applied_transactions(left_path) >= 2)
             await _eventually(lambda: _acknowledgements(left_path) >= 2)
-            await _eventually(
-                lambda: acknowledged.get(right_key.public_hex, 0) >= 2
-            )
+            await _eventually(lambda: any(
+                row.get("acknowledged_transaction_ref", 0) >= 2
+                for row in telemetry
+            ))
         finally:
             await left.stop()
             await right.stop()

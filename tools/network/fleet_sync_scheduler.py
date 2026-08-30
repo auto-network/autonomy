@@ -49,20 +49,23 @@ from tools.network.relaykit.direct import new_session_id
 
 logger = logging.getLogger(__name__)
 
-FLEET_SYNC_PROTOCOL_VERSION = 2
+FLEET_SYNC_PROTOCOL_VERSION = 3
 _REQUEST_FIELDS = frozenset({
-    "v", "op", "roster_epoch", "after_transaction_ref",
+    "v", "op", "roster_epoch", "resume",
 })
 _DONE_FIELDS = frozenset(
     {
         "v", "kind", "roster_epoch", "message_count", "digest",
-        "through_transaction_ref",
+        "through_transaction_ref", "through_breadcrumb",
     }
 )
 _MUTATION_MAGIC = b"FST1"
 _DONE_MAGIC = b"FSD1"
 _HEADER_LIMIT = 4096
 _SETTINGS_HINT_LIMIT = 256
+#: A resume trail carries the last few verified stream positions plus an
+#: exponentially thinned history, so its length is logarithmic in stream age.
+MAX_RESUME_BREADCRUMBS = 64
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,7 +159,12 @@ class FleetSyncRuntimeConfig:
     min_backoff: float = 0.25
     max_backoff: float = 5.0
     telemetry_recorder: Callable[..., object] | None = None
-    resume_cursor: Callable[[str], int] | None = None
+    #: Returns the locally stored resume breadcrumb trail for one peer —
+    #: each breadcrumb names one verified transaction (origin, transaction
+    #: id, timestamp), newest first — never row numbers.
+    resume_cursor: Callable[
+        [str], Sequence[tuple[str, str, int]]
+    ] | None = None
 
 
 def roster_epoch(entries: Iterable[RosterEntry], root_pub: str) -> str:
@@ -183,24 +191,58 @@ def _json_object(raw: bytes, fields: frozenset[str], what: str) -> dict:
     return value
 
 
-def encode_pull_request(epoch: str, *, after_transaction_ref: int = 0) -> bytes:
+def encode_breadcrumb(breadcrumb: tuple[str, str, int]) -> dict:
+    origin, transaction, timestamp = breadcrumb
+    return {"origin": origin, "transaction": transaction, "timestamp": timestamp}
+
+
+def decode_breadcrumb(value: object, what: str) -> tuple[str, str, int]:
+    if not isinstance(value, dict) or set(value) != {
+        "origin", "transaction", "timestamp"
+    }:
+        raise FleetSyncProtocolError(f"{what} has wrong fields")
+    origin = value["origin"]
+    transaction = value["transaction"]
+    timestamp = value["timestamp"]
     if (
-        isinstance(after_transaction_ref, bool)
-        or not isinstance(after_transaction_ref, int)
-        or after_transaction_ref < 0
+        not isinstance(origin, str)
+        or len(origin) != 64
+        or any(ch not in "0123456789abcdef" for ch in origin)
     ):
-        raise FleetSyncProtocolError("after_transaction_ref is malformed")
+        raise FleetSyncProtocolError(f"{what} origin is malformed")
+    if not isinstance(transaction, str) or not transaction:
+        raise FleetSyncProtocolError(f"{what} transaction is malformed")
+    if isinstance(timestamp, bool) or not isinstance(timestamp, int) or timestamp < 0:
+        raise FleetSyncProtocolError(f"{what} timestamp is malformed")
+    return origin, transaction, timestamp
+
+
+def encode_pull_request(
+    epoch: str, *, resume: Sequence[tuple[str, str, int]] = (),
+) -> bytes:
+    """Ask for every journal transaction after a content-addressed position.
+
+    ``resume`` is the puller's verified breadcrumb trail, newest first.  It
+    names transactions, never the serving database's private row numbers,
+    so the server recomputes the position from its own journal on every
+    pull and a server restored from backup is re-served from the newest
+    breadcrumb it still holds.
+    """
+    if len(resume) > MAX_RESUME_BREADCRUMBS:
+        raise FleetSyncProtocolError("fleet sync resume trail exceeds bound")
     return canonical_json(
         {
             "v": FLEET_SYNC_PROTOCOL_VERSION,
             "op": "pull",
             "roster_epoch": epoch,
-            "after_transaction_ref": after_transaction_ref,
+            "resume": [
+                encode_breadcrumb(breadcrumb) for breadcrumb in resume
+            ],
         }
     )
 
 
-def decode_pull_request(raw: bytes) -> tuple[str, int]:
+def decode_pull_request(raw: bytes) -> tuple[str, tuple[tuple[str, str, int], ...]]:
     value = _json_object(raw, _REQUEST_FIELDS, "fleet sync request")
     if value["op"] != "pull":
         raise FleetSyncProtocolError("unsupported fleet sync operation")
@@ -211,10 +253,13 @@ def decode_pull_request(raw: bytes) -> tuple[str, int]:
         or any(ch not in "0123456789abcdef" for ch in epoch)
     ):
         raise FleetSyncProtocolError("fleet sync roster_epoch is malformed")
-    after = value["after_transaction_ref"]
-    if isinstance(after, bool) or not isinstance(after, int) or after < 0:
-        raise FleetSyncProtocolError("after_transaction_ref is malformed")
-    return epoch, after
+    resume = value["resume"]
+    if not isinstance(resume, list) or len(resume) > MAX_RESUME_BREADCRUMBS:
+        raise FleetSyncProtocolError("fleet sync resume trail is malformed")
+    return epoch, tuple(
+        decode_breadcrumb(entry, "fleet sync resume breadcrumb")
+        for entry in resume
+    )
 
 
 def encode_authored(item: AuthoredMutation, *, transaction_operations: int) -> bytes:
@@ -279,7 +324,12 @@ def decode_authored(raw: bytes) -> tuple[AuthoredMutation, int]:
 
 
 def encode_done(
-    *, epoch: str, count: int, digest: str, through_transaction_ref: int = 0,
+    *,
+    epoch: str,
+    count: int,
+    digest: str,
+    through_transaction_ref: int = 0,
+    through_breadcrumb: tuple[str, str, int] | None = None,
 ) -> bytes:
     if (
         isinstance(through_transaction_ref, bool)
@@ -295,11 +345,16 @@ def encode_done(
             "message_count": count,
             "digest": digest,
             "through_transaction_ref": through_transaction_ref,
+            "through_breadcrumb": (
+                None
+                if through_breadcrumb is None
+                else encode_breadcrumb(through_breadcrumb)
+            ),
         }
     )
 
 
-def decode_done(raw: bytes) -> tuple[str, int, str, int]:
+def decode_done(raw: bytes) -> tuple[str, int, str, int, tuple[str, str, int] | None]:
     if not raw.startswith(_DONE_MAGIC):
         raise FleetSyncProtocolError("fleet sync summary has wrong magic")
     value = _json_object(raw[len(_DONE_MAGIC):], _DONE_FIELDS, "fleet sync summary")
@@ -322,7 +377,15 @@ def decode_done(raw: bytes) -> tuple[str, int, str, int]:
         raise FleetSyncProtocolError(
             "fleet sync summary through_transaction_ref is malformed"
         )
-    return epoch, count, digest, through
+    raw_breadcrumb = value["through_breadcrumb"]
+    breadcrumb = (
+        None
+        if raw_breadcrumb is None
+        else decode_breadcrumb(
+            raw_breadcrumb, "fleet sync summary through breadcrumb"
+        )
+    )
+    return epoch, count, digest, through, breadcrumb
 
 
 def _digest_add(digest, message: bytes) -> None:
@@ -355,6 +418,22 @@ class SQLiteFleetSyncStore:
         conn, catalog = self._open()
         try:
             return catalog.next_journal_transaction_ref(after_transaction_ref)
+        finally:
+            conn.close()
+
+    def resume_ref(self, breadcrumbs: Sequence[tuple[str, str, int]]) -> int:
+        conn, catalog = self._open()
+        try:
+            return catalog.journal_resume_ref(breadcrumbs)
+        finally:
+            conn.close()
+
+    def breadcrumb(
+        self, transaction_ref: int
+    ) -> tuple[str, str, int] | None:
+        conn, catalog = self._open()
+        try:
+            return catalog.journal_breadcrumb(transaction_ref)
         finally:
             conn.close()
 
@@ -535,7 +614,7 @@ class FleetSyncScheduler:
         telemetry_started_at_ns: int | None = None,
         telemetry_started_monotonic_ns: int | None = None,
     ):
-        _requested_epoch, requested_after = decode_pull_request(message)
+        _requested_epoch, resume_trail = decode_pull_request(message)
         epoch = self._current_epoch()
         record_here = telemetry_stats is None
         stats = telemetry_stats if telemetry_stats is not None else {}
@@ -552,7 +631,11 @@ class FleetSyncScheduler:
         async def response():
             digest = hashlib.sha256()
             count = 0
-            cursor = requested_after
+            # The presented trail names transactions, never local row ids; the
+            # position is recomputed here so a database restored from backup
+            # re-serves its divergence window instead of honouring a cursor
+            # into journal rows that no longer exist.
+            cursor = await asyncio.to_thread(self.store.resume_ref, resume_trail)
             outcome = "failed"
             error_code = "stream_incomplete"
             try:
@@ -577,11 +660,17 @@ class FleetSyncScheduler:
                         stats["bytes_sent"] += len(encoded)
                         yield encoded
                 self.authenticator.authorize(peer_pub)
+                through_breadcrumb = None
+                if cursor:
+                    through_breadcrumb = await asyncio.to_thread(
+                        self.store.breadcrumb, cursor
+                    )
                 done = encode_done(
                     epoch=epoch,
                     count=count,
                     digest=digest.hexdigest(),
                     through_transaction_ref=cursor,
+                    through_breadcrumb=through_breadcrumb,
                 )
                 stats["bytes_sent"] += len(done)
                 yield done
@@ -658,6 +747,7 @@ class FleetSyncScheduler:
             outcome: str,
             error_code: str = "",
             acknowledged_transaction_ref: int | None = None,
+            acknowledged_breadcrumb: tuple[str, str, int] | None = None,
         ) -> None:
             recorder = self.config.telemetry_recorder
             if recorder is None:
@@ -681,6 +771,10 @@ class FleetSyncScheduler:
             if acknowledged_transaction_ref is not None:
                 values["acknowledged_transaction_ref"] = (
                     acknowledged_transaction_ref
+                )
+            if acknowledged_breadcrumb is not None:
+                values["acknowledged_breadcrumb"] = (
+                    encode_breadcrumb(acknowledged_breadcrumb)
                 )
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(
@@ -709,14 +803,12 @@ class FleetSyncScheduler:
             await asyncio.to_thread(
                 self.store.record_peer, machine_pub, epoch, online=True
             )
-            after_transaction_ref = 0
+            resume_trail: Sequence[tuple[str, str, int]] = ()
             if self.config.resume_cursor is not None:
-                after_transaction_ref = await asyncio.to_thread(
+                resume_trail = tuple(await asyncio.to_thread(
                     self.config.resume_cursor, machine_pub
-                )
-            request = encode_pull_request(
-                epoch, after_transaction_ref=after_transaction_ref
-            )
+                ))
+            request = encode_pull_request(epoch, resume=resume_trail)
             sent += len(request)
             await channel.send_message(request)
 
@@ -726,7 +818,8 @@ class FleetSyncScheduler:
             pending_identity = None
             pending_count: int | None = None
             saw_done = False
-            through_transaction_ref = after_transaction_ref
+            through_transaction_ref = 0
+            through_breadcrumb: tuple[str, str, int] | None = None
 
             async def apply_pending(items: list[AuthoredMutation]) -> None:
                 nonlocal peer_watermark, transactions
@@ -774,6 +867,7 @@ class FleetSyncScheduler:
                         expected_count,
                         expected_digest,
                         through_transaction_ref,
+                        through_breadcrumb,
                     ) = decode_done(message)
                     if not stream_final:
                         raise FleetSyncProtocolError("fleet summary is not final")
@@ -828,6 +922,7 @@ class FleetSyncScheduler:
             await record(
                 "success",
                 acknowledged_transaction_ref=through_transaction_ref,
+                acknowledged_breadcrumb=through_breadcrumb,
             )
         except asyncio.CancelledError:
             with contextlib.suppress(Exception):

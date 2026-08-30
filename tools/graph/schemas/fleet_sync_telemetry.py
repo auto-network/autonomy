@@ -72,6 +72,8 @@ class FleetSyncTelemetryV1(SettingSchema):
     total_checkpoint_bytes: int = field(required=True, description="Cumulative checkpoint file payload bytes transferred.")
     last_checkpoint_bytes: int = field(required=True, description="Checkpoint file payload bytes in the newest attempt.")
     acknowledged_transaction_ref: int = field(required=True, description="Newest fully verified source-journal transaction position.")
+    resume_breadcrumbs: list = field(required=False, description="Resume breadcrumbs, each naming one verified transaction (origin, transaction id, timestamp), newest first: the recent few contiguously plus an exponentially thinned history. Presented on pull so a restored source recomputes the resume position from content, never from its renumbered row ids.")
+    resume_breadcrumb_seq: int = field(required=False, description="Monotonic acknowledgement counter that ages the breadcrumb trail.")
     last_mode: str = field(required=True, description="Newest attempt mode: delta or checkpoint.")
     last_outcome: str = field(required=True, description="Newest terminal outcome.")
     last_error_code: str = field(required=True, description="Bounded failure classification, empty after success.")
@@ -95,6 +97,37 @@ class FleetSyncTelemetryV1(SettingSchema):
             "last_started_at_ns", "last_finished_at_ns", "last_success_at_ns",
         ):
             _counter(payload, name)
+        breadcrumbs = payload.get("resume_breadcrumbs")
+        if breadcrumbs is not None:
+            if not isinstance(breadcrumbs, list) or len(breadcrumbs) > 64:
+                raise SchemaValidationError(
+                    "resume_breadcrumbs must be a list of at most 64 entries"
+                )
+            for entry in breadcrumbs:
+                if (
+                    not isinstance(entry, dict)
+                    or not isinstance(entry.get("origin"), str)
+                    or len(entry["origin"]) != 64
+                    or not isinstance(entry.get("transaction"), str)
+                    or not entry["transaction"]
+                    or isinstance(entry.get("timestamp"), bool)
+                    or not isinstance(entry.get("timestamp"), int)
+                    or entry["timestamp"] < 0
+                    or isinstance(entry.get("seq"), bool)
+                    or not isinstance(entry.get("seq"), int)
+                    or entry["seq"] < 0
+                ):
+                    raise SchemaValidationError(
+                        "resume_breadcrumbs entries must carry origin, "
+                        "transaction, timestamp, and seq"
+                    )
+        seq = payload.get("resume_breadcrumb_seq")
+        if seq is not None and (
+            isinstance(seq, bool) or not isinstance(seq, int) or seq < 0
+        ):
+            raise SchemaValidationError(
+                "resume_breadcrumb_seq must be a non-negative integer"
+            )
         if payload.get("last_mode") not in _MODES:
             raise SchemaValidationError("last_mode must be delta or checkpoint")
         if payload.get("last_outcome") not in _OUTCOMES:
