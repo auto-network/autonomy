@@ -17,15 +17,24 @@ def client():
         yield c
 
 
-def _stub_serving(monkeypatch, *, scopes, cert_status, replies, disk="c0ffee"):
+def _stub_serving(monkeypatch, *, scopes, cert_status, replies, disk="c0ffee",
+                  designated=True):
     """Stub the serving-scope reads get_unlock_state makes.
 
     scopes: list of org scopes (None == personal); cert_status: {scope: status};
     replies: {scope: connector-status dict} — a scope absent from replies has no
-    reachable connector."""
+    reachable connector. designated: whether this machine is the fleet's
+    designated tunnel server (a managed fleet with allowed=False means it is
+    NOT, so holding no serving credential is expected, not a fault)."""
+    import types
     from tools.dashboard import link_serving_supervisor as sup
     from tools.network import build_version
+    from tools.network import fleet_tunnel_server
 
+    monkeypatch.setattr(
+        fleet_tunnel_server, "state",
+        lambda: types.SimpleNamespace(managed=True, allowed=bool(designated)),
+    )
     monkeypatch.setattr(sup, "_discover_startup_orgs", lambda: list(scopes))
     monkeypatch.setattr(
         sup, "serve_cert_state",
@@ -128,6 +137,46 @@ def test_never_set_up_scope_is_a_quiet_note_not_a_lit_flag(client, monkeypatch):
     assert "blindhash" not in flags["sync"]["scopes"]
     # ...but it is surfaced as a quiet note on the certificate balloon
     assert "blindhash" in flags["certificates"].get("note", "")
+
+
+def test_non_designated_tunnel_server_does_not_light_sync(client, monkeypatch):
+    # A machine that is not the fleet's designated tunnel server holds no serving
+    # credential by design. Its unarmed connector must NOT be reported as a fault,
+    # and no root-unlock remedy is offered — unlocking cannot arm a non-server.
+    _stub_serving(
+        monkeypatch,
+        scopes=[None],
+        cert_status={None: "ok"},
+        replies={None: {"fleet_runtime_configured": False, "process_commit": "c0ffee"}},
+        designated=False,
+    )
+    sync = client.get("/api/identity/unlock-state").json()["sync"]
+    assert sync["needs"] is False
+    assert sync["unarmed"] == []
+    assert sync["scopes"] == []
+    assert "serving credential" not in sync["detail"] or "expected" in sync["detail"]
+    assert "unlock with your root" not in sync["detail"].lower()
+    assert "expected" in sync["detail"]
+
+
+def test_scopeless_and_personal_scope_reported_once(client, monkeypatch):
+    # The scopeless (org=None) and "personal" scopes resolve to the SAME database,
+    # so an unarmed credential must not read "personal and personal ...".
+    _stub_serving(
+        monkeypatch,
+        scopes=[None, "personal"],
+        cert_status={None: "ok", "personal": "ok"},
+        replies={
+            None: {"fleet_runtime_configured": False, "process_commit": "c0ffee"},
+            "personal": {"fleet_runtime_configured": False, "process_commit": "c0ffee"},
+        },
+    )
+    sync = client.get("/api/identity/unlock-state").json()["sync"]
+    assert sync["needs"] is True
+    assert sync["unarmed"] == ["personal"]
+    assert sync["scopes"] == ["personal"]
+    assert "personal and personal" not in sync["detail"]
+    assert "personal holds no serving credential" in sync["detail"]
 
 
 def test_certificate_lights_for_a_lapsed_serving_scope(client, monkeypatch):

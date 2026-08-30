@@ -15,6 +15,7 @@
 .fleet-summary-card strong.connected { color: #6ee7b7; }
 .fleet-summary-card strong.attention { color: #fcd34d; }
 .fleet-summary-card small { display: block; margin-top: .15rem; color: #6b7280; font-size: .56rem; }
+.fleet-summary-card small.attention { color: #fcd34d; }
 .fleet-content-grid { display: grid; gap: 1rem; margin-top: 1rem; }
 .fleet-section-heading { display: flex; align-items: center; justify-content: space-between; margin: 0 .1rem .5rem; }
 .fleet-section-heading h2 { color: #6b7280; font-size: .68rem; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; }
@@ -22,6 +23,7 @@
 .fleet-machine-list { display: grid; gap: .4rem; }
 .fleet-machine { overflow: hidden; border: 1px solid #374151; border-radius: .55rem; background: rgba(17,24,39,.62); }
 .fleet-machine.pending { border-color: rgba(146,64,14,.7); }
+.fleet-machine.warn { border-color: rgba(180,83,9,.7); }
 .fleet-machine.failed { border-color: rgba(127,29,29,.65); }
 .fleet-machine-toggle { width: 100%; min-height: 3.7rem; display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: .75rem; padding: 0 .75rem; border: 0; color: inherit; background: transparent; text-align: left; }
 .fleet-machine-toggle:hover { background: rgba(55,65,81,.42); }
@@ -29,6 +31,7 @@
 .fleet-dot { width: .48rem; height: .48rem; border-radius: 999px; background: #4b5563; }
 .fleet-dot.connected { background: #34d399; }
 .fleet-dot.pending { background: #fbbf24; }
+.fleet-dot.warn { background: #f59e0b; }
 .fleet-dot.failed { background: #f87171; }
 .fleet-machine-title { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; }
 .fleet-machine-title strong { overflow: hidden; color: #f3f4f6; font-size: .78rem; font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
@@ -40,6 +43,7 @@
 .fleet-machine-status small { display: block; color: #6b7280; font-size: .52rem; letter-spacing: .04em; text-transform: uppercase; }
 .fleet-machine-status strong { display: block; margin-top: .18rem; color: #d1d5db; font-size: .62rem; font-weight: 500; }
 .fleet-machine-status strong.pending { color: #fcd34d; }
+.fleet-machine-status strong.warn { color: #fcd34d; }
 .fleet-machine-status strong.failed { color: #fca5a5; }
 .fleet-machine-detail { padding: .75rem; border-top: 1px solid #374151; }
 .fleet-machine-detail dl { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: .6rem 1rem; }

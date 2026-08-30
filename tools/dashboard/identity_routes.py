@@ -1609,49 +1609,89 @@ async def get_unlock_state(request: Request) -> JSONResponse:
         flags["tunnel"] = {"needs": False, "value": "",
                            "detail": "Tunnel state is unavailable."}
 
+    # Only the fleet's DESIGNATED tunnel server ever holds a serving credential:
+    # the relay does not yet support multi-homed tunnels, so exactly one machine
+    # runs the tunnel and every other machine syncs THROUGH it, not with it. A
+    # machine that is not designated holds no serving credential by design and
+    # never will until it is designated — reporting that as a fault raises an
+    # alarm on a machine behaving exactly as intended, and its "unlock with your
+    # root" remedy does nothing because unlocking cannot arm a non-server. So we
+    # consult tunnel-server designation before treating a missing credential as a
+    # problem, exactly as fleet_doctor was corrected to do for org scopes
+    # (644c88d74). Only a MANAGED fleet has a designated leader; an unmanaged
+    # (legacy single-node) install keeps the original serve-everywhere behavior.
+    tunnel_designated = True
+    try:
+        from tools.network import fleet_tunnel_server
+        _ts = fleet_tunnel_server.state()
+        if _ts.managed and not _ts.allowed:
+            tunnel_designated = False
+    except Exception:
+        pass
+
     # sync — can the fleet's other machines sync WITH this one. Lit when any
     # serving connector is unarmed (holds no credential — the memory-only one
     # that dies on restart) or stale (older code than what's installed). Both
     # need the root ceremony; a stale one needs restarting first, which the
-    # tray's restart button does in the right order (bead auto-sdrsa).
-    sync_needs = bool(sync_unarmed or sync_stale)
-    if sync_needs:
-        parts = ["Your other machines can't sync with this one."]
-        if sync_refusals:
-            plural = "s" if sync_refusals != 1 else ""
-            parts.append(
-                f"{sync_refusals} request{plural} have been refused"
-                + _refused_since(sync_since) + "."
-            )
-        if sync_unarmed:
-            parts.append(
-                _oxford(sorted(sync_unarmed))
-                + (" holds" if len(sync_unarmed) == 1 else " hold")
-                + " no serving credential — unlock with your root to give "
-                + ("it" if len(sync_unarmed) == 1 else "them") + " a new one."
-            )
-        if sync_stale:
-            parts.append(
-                _oxford(sorted(sync_stale))
-                + (" is" if len(sync_stale) == 1 else " are")
-                + " running older code than what's installed and must be "
-                "restarted."
-            )
-        sync_detail = " ".join(parts)
-        sync_value = "Locked" if sync_unarmed else "Stale"
+    # tray's restart button does in the right order (bead auto-sdrsa). The
+    # scopeless (org=None) and "personal" scopes resolve to the SAME database,
+    # so a label appearing under both names is reported once (bead auto-9yp8r).
+    unarmed_scopes = sorted(set(sync_unarmed))
+    stale_scopes = sorted(set(sync_stale))
+    if not tunnel_designated:
+        # This machine is not the designated tunnel server, so holding no serving
+        # credential is expected, not a fault. Report it quietly and never light.
+        flags["sync"] = {
+            "needs": False,
+            "value": "",
+            "detail": ("Your other machines sync through the fleet's designated "
+                       "tunnel server, not directly with this one, so it holds "
+                       "no serving credential — that's expected, not a problem."),
+            "unarmed": [],
+            "stale": [],
+            "scopes": [],
+            "count": 0,
+            "since": None,
+        }
     else:
-        sync_detail = "Whether your other machines can sync with this one."
-        sync_value = "Serving" if serving_setup else ""
-    flags["sync"] = {
-        "needs": sync_needs,
-        "value": sync_value,
-        "detail": sync_detail,
-        "unarmed": sorted(sync_unarmed),
-        "stale": sorted(sync_stale),
-        "scopes": sorted(set(sync_unarmed) | set(sync_stale)),
-        "count": sync_refusals,
-        "since": sync_since,
-    }
+        sync_needs = bool(unarmed_scopes or stale_scopes)
+        if sync_needs:
+            parts = ["Your other machines can't sync with this one."]
+            if sync_refusals:
+                plural = "s" if sync_refusals != 1 else ""
+                parts.append(
+                    f"{sync_refusals} request{plural} have been refused"
+                    + _refused_since(sync_since) + "."
+                )
+            if unarmed_scopes:
+                parts.append(
+                    _oxford(unarmed_scopes)
+                    + (" holds" if len(unarmed_scopes) == 1 else " hold")
+                    + " no serving credential — unlock with your root to give "
+                    + ("it" if len(unarmed_scopes) == 1 else "them") + " a new one."
+                )
+            if stale_scopes:
+                parts.append(
+                    _oxford(stale_scopes)
+                    + (" is" if len(stale_scopes) == 1 else " are")
+                    + " running older code than what's installed and must be "
+                    "restarted."
+                )
+            sync_detail = " ".join(parts)
+            sync_value = "Locked" if unarmed_scopes else "Stale"
+        else:
+            sync_detail = "Whether your other machines can sync with this one."
+            sync_value = "Serving" if serving_setup else ""
+        flags["sync"] = {
+            "needs": sync_needs,
+            "value": sync_value,
+            "detail": sync_detail,
+            "unarmed": unarmed_scopes,
+            "stale": stale_scopes,
+            "scopes": sorted(set(unarmed_scopes) | set(stale_scopes)),
+            "count": sync_refusals,
+            "since": sync_since,
+        }
 
     # approvals — requests waiting on you. Not yet wired to a live pending count
     # (there is no clean count accessor); honest no-alert default until it is.

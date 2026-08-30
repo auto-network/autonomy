@@ -31,8 +31,10 @@
         </div>
         <div class="fleet-summary-card">
           <span>Last sync</span>
-          <strong class="compact" x-text="timeLabel(summary.lastSuccessfulSyncAt, 'Never')"></strong>
-          <small>Observed here</small>
+          <strong class="compact" :class="failingMachines ? 'attention' : ''"
+                  x-text="timeLabel(summary.lastSuccessfulSyncAt, 'Never')"></strong>
+          <small :class="failingMachines ? 'attention' : ''"
+                 x-text="failingMachines ? (failingMachines + (failingMachines === 1 ? ' machine failing sync' : ' machines failing sync')) : 'Observed here'"></small>
         </div>
         <div class="fleet-summary-card">
           <span>Requests</span>
