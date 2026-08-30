@@ -52,13 +52,59 @@ async function openPanel(dom, ind) {
 describe('identity flag tray', () => {
   afterEach(() => { delete global.window; delete global.document; delete global.fetch; });
 
-  it('renders the six-tile tray in the panel', async () => {
+  it('renders the seven-tile tray in the panel', async () => {
     const { dom, ind } = boot();
     await openPanel(dom, ind);
     const d = dom.window.document;
     const tray = d.querySelector('[data-testid="identity-flagtray"]');
     assert.ok(tray, 'the flag tray renders');
-    assert.equal(tray.querySelectorAll('.identity-fl').length, 6);
+    assert.equal(tray.querySelectorAll('.identity-fl').length, 7);
+    assert.ok(d.querySelector('[data-testid="identity-fl-sync"]'),
+      'the seventh flag is Sync');
+  });
+
+  it('the sync flag lights and its balloon says what is broken + the count', async () => {
+    const { dom, ind } = boot({ sync: { needs: true, value: 'Locked',
+      detail: "Your other machines can't sync with this one. 764 requests have been refused since 8pm.",
+      scopes: ['anchore', 'autonomy', 'dynbench'] } });
+    await openPanel(dom, ind);
+    const d = dom.window.document;
+    assert.ok(d.querySelector('[data-testid="identity-fl-sync"]').classList.contains('needs'),
+      'sync goes amber when unarmed/stale');
+    d.querySelector('[data-testid="identity-fl-sync"]').click();
+    await tick();
+    const pop = d.querySelector('[data-testid="identity-flagpop"]');
+    assert.match(pop.textContent, /can't sync/, 'says what stopped working');
+    assert.match(pop.textContent, /764 requests/, 'the count makes it legible');
+  });
+
+  it('a lit flag shows the broken detail; a dim one shows the plain description', async () => {
+    const { dom, ind } = boot({ tunnel: { needs: true,
+      detail: "Your other devices can't reach this dashboard from outside." } });
+    await openPanel(dom, ind);
+    const d = dom.window.document;
+    d.querySelector('[data-testid="identity-fl-tunnel"]').click();
+    await tick();
+    assert.match(d.querySelector('[data-testid="identity-flagpop"]').textContent,
+      /can't reach this dashboard/, 'lit: the server broken detail');
+    // a dim flag with no server detail falls back to its static description
+    d.querySelector('[data-testid="identity-fl-cert"]').click();
+    await tick();
+    assert.match(d.querySelector('[data-testid="identity-flagpop"]').textContent,
+      /certificate/i, 'dim: the plain what-it-is description');
+  });
+
+  it("renders a quiet note without lighting the tile", async () => {
+    const { dom, ind } = boot({ certificates: { needs: false,
+      note: "blindhash isn't set up to serve — that's expected, not a problem." } });
+    await openPanel(dom, ind);
+    const d = dom.window.document;
+    assert.ok(!d.querySelector('[data-testid="identity-fl-cert"]').classList.contains('needs'),
+      'a never-set-up scope does not light the flag');
+    d.querySelector('[data-testid="identity-fl-cert"]').click();
+    await tick();
+    assert.match(d.querySelector('[data-testid="identity-flagpop"]').textContent,
+      /blindhash isn't set up/, 'the quiet note shows in the balloon');
   });
 
   it('lights only the flags the unlock-state marks, dim otherwise', async () => {
@@ -118,6 +164,32 @@ describe('identity flag tray', () => {
     await tick();
     assert.equal(d.querySelector('[data-testid="identity-flagpop-value"]'), null,
       'unknown liveliness renders no value, not a fake "Up"');
+  });
+
+  it('the restart button appears only when a flag is lit', async () => {
+    const dim = boot();   // no lit flags
+    await openPanel(dim.dom, dim.ind);
+    assert.equal(dim.dom.window.document.querySelector('[data-testid="identity-flag-restart"]'), null,
+      'no restart button when nothing is broken');
+
+    const lit = boot({ sync: { needs: true } });
+    await openPanel(lit.dom, lit.ind);
+    assert.ok(lit.dom.window.document.querySelector('[data-testid="identity-flag-restart"]'),
+      'the restart button appears when a flag is lit');
+  });
+
+  it('a flag balloon closes when you tap elsewhere in the panel', async () => {
+    const { dom, ind } = boot({ sync: { needs: true } });
+    await openPanel(dom, ind);
+    const d = dom.window.document;
+    d.querySelector('[data-testid="identity-fl-sync"]').click();
+    await tick();
+    assert.ok(d.querySelector('[data-testid="identity-flagpop"]'), 'balloon opens');
+    // tap the panel header (not the tile, not the balloon)
+    d.querySelector('[data-testid="identity-panel"]').click();
+    await tick();
+    assert.equal(d.querySelector('[data-testid="identity-flagpop"]'), null,
+      'tapping anywhere else closes the balloon');
   });
 
   it('a loaded org favicon drops its tile background and hides the initial', async () => {

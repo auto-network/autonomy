@@ -1515,6 +1515,14 @@ async def _serve_control_listener(connector, ctl_path: str,
                         # a stale-code worker looks identical to a correctly
                         # -configured one on every check above this line.
                         "process_commit": build_version.PROCESS_COMMIT,
+                        # How many sync pulls this process has turned away while
+                        # unarmed, and when the first was -- the profile sync
+                        # flag's "764 requests refused since 8pm". Zero on a
+                        # freshly armed process (configure() resets it).
+                        "locked_refusals": connector_runtime.locked_refusals,
+                        "locked_refusal_since": (
+                            connector_runtime.first_locked_refusal_at
+                        ),
                     }
                 elif request.get("op") == "fleet-runtime":
                     from tools.network.fleet_relay_sync import connector_runtime

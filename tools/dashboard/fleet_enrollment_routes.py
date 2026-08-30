@@ -603,6 +603,43 @@ async def complete_local_enrollment(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "machine_id": body["machine_id"]})
 
 
+async def restore_fleet_serving(request: Request) -> JSONResponse:
+    """Restart every serving connector — the server half of the tray's restart
+    button (bead auto-sdrsa).
+
+    A connector holds its Fleet serving credential ONLY in memory and keeps
+    running whatever code it imported at launch, so a restart is what clears a
+    stale-code process and is the precondition for re-arming an unarmed one: the
+    browser re-mints the credential and POSTs it to /api/fleet/runtime once the
+    fresh processes are back up, in that order (arming before the restart would
+    just be thrown away). Operator-gated because it restarts real background
+    processes. Never raises for one scope's failure — the others still restart."""
+    denied = _operator_required(request)
+    if denied is not None:
+        return denied
+    try:
+        supervisor = link_serving_supervisor.get_supervisor()
+        scopes = link_serving_supervisor._discover_startup_orgs()
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+    restarted: list = []
+    failed: list = []
+    for scope in scopes:
+        label = scope or "personal"
+        try:
+            # Only restart scopes actually set up to serve — a scope with no
+            # cert row was never a serving process to begin with.
+            if link_serving_supervisor.serve_cert_state(scope).get(
+                "status"
+            ) == "missing":
+                continue
+            supervisor.restart(scope)
+            restarted.append(label)
+        except Exception as exc:  # noqa: BLE001 - one scope must not stall the rest
+            failed.append({"scope": label, "error": str(exc)})
+    return JSONResponse({"ok": True, "restarted": restarted, "failed": failed})
+
+
 ROUTES = [
     Route("/api/fleet/invitations/register", register_invite, methods=["POST"]),
     Route("/api/fleet/enrollment/requests", pending_requests, methods=["GET"]),
@@ -637,4 +674,5 @@ ROUTES = [
         methods=["POST"],
     ),
     Route("/api/fleet/status", fleet_status, methods=["GET"]),
+    Route("/api/fleet/restore", restore_fleet_serving, methods=["POST"]),
 ]
