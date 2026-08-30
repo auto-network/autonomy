@@ -1244,11 +1244,29 @@ def build_mount_plan(
     # own issue prefix. Every other org — autonomy included — keeps the
     # shared tracker (database "auto") via the fallback, so nothing
     # changes for existing sessions until an org dir is provisioned.
+    # Launching a session for an org is a write: the session will file beads.
+    # Resolve its tracker, provisioning on first sight. A provisioning failure
+    # is not fatal here — the launch proceeds on the shared tracker with a loud
+    # log, because a session that cannot start is worse than one whose beads
+    # need re-homing, and the dashboard's own write path already refuses.
     beads_src = DATA_ROOT / ".beads"
     if org:
         org_beads = DATA_ROOT / ".beads" / "orgs" / str(org)
         if (org_beads / "metadata.json").is_file():
             beads_src = org_beads
+        else:
+            # First sight of this org. Provisioning is not fatal to a launch: a
+            # session that cannot start is worse than one whose beads need
+            # re-homing, and the dashboard's own write path already refuses.
+            try:
+                from tools.beads_provision import ensure_org_beads_dir
+                beads_src = ensure_org_beads_dir(
+                    str(org), orgs_root=DATA_ROOT / ".beads" / "orgs")
+            except Exception as exc:
+                logger.warning(
+                    "beads: no tracker for org %r and could not provision one "
+                    "(%s) — session launches on the shared tracker", org, exc,
+                )
     plan.set(mount_spec(beads_src, "/data/.beads"), replace=False)
     # ``.beads`` is rw for bd, but its dolt-remote credential is host-only
     # material no session reads; mask it with an empty ro device bind (auto-j3oj3).

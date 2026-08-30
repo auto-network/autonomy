@@ -15,15 +15,22 @@ already says to back up.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import secrets
 import shutil
 import subprocess
 
-from tools.data_paths import DATA_ROOT
+from tools import data_paths
 
-ORGS = DATA_ROOT / ".beads" / "orgs"
+logger = logging.getLogger(__name__)
+
+
+def _orgs_root():
+    """Read DATA_ROOT at call time, not import time: a caller may reroot it
+    (tests do, and a differently-rooted deployment would)."""
+    return data_paths.DATA_ROOT / ".beads" / "orgs"
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 
 
@@ -80,9 +87,15 @@ def dolt_sql(*statements: str) -> None:
         _docker("exec", container, "dolt", "sql", "-q", statement, timeout=300)
 
 
-def ensure_org_beads_dir(slug: str):
-    """The org's bead tracker dir, provisioning it on first sight."""
-    final = ORGS / slug
+def ensure_org_beads_dir(slug: str, orgs_root=None):
+    """The org's bead tracker dir, provisioning it on first sight.
+
+    ``orgs_root`` lets a caller that owns its own DATA_ROOT pass it, so the
+    directory this writes and the directory that caller reads are never two
+    different places.
+    """
+    root = orgs_root if orgs_root is not None else _orgs_root()
+    final = root / slug
     if (final / "metadata.json").is_file():
         return final
     if not SLUG_RE.match(slug):
@@ -102,7 +115,7 @@ def ensure_org_beads_dir(slug: str):
     # Staged, then published by one rename. A crash anywhere before it leaves a
     # .tmp dir that nothing reads and no tracker dir, so the next call simply
     # redoes the whole thing. That is why there is no lock and no recovery path.
-    tmp = ORGS / f".tmp-{slug}"
+    tmp = root / f".tmp-{slug}"
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir(parents=True, exist_ok=True)
     (tmp / "metadata.json").write_text(json.dumps({
@@ -138,3 +151,29 @@ def ensure_org_beads_dir(slug: str):
 
     os.rename(tmp, final)
     return final
+
+
+def beads_dir_for_write(org: str | None):
+    """The tracker dir a WRITE for *org* must go to, provisioning on first sight.
+
+    Returns None for an unscoped write, which belongs in the shared tracker.
+
+    On a host process there is no compose project and no socket path to a Dolt
+    container, so an unprovisioned org falls back to the shared tracker with a
+    warning. That branch exists only for the legacy host install and goes away
+    with it; on a node, an org that cannot be provisioned raises rather than
+    filing a bead into another org's database.
+    """
+    if not org:
+        return None
+    final = _orgs_root() / str(org)
+    if (final / "metadata.json").is_file():
+        return final
+    from agents.mount_plan import _own_container_id
+    if not _own_container_id():
+        logger.warning(
+            "beads: org %r has no tracker and this is a host process — writing to "
+            "the shared tracker. A node provisions instead.", org,
+        )
+        return None
+    return ensure_org_beads_dir(str(org))
