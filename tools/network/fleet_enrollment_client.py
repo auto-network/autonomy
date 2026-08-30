@@ -10,6 +10,7 @@ public machine id and retry state in ``machine.db`` -- never a machine key.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 import time
@@ -25,6 +26,8 @@ from tools.graph.db import _org_db_path
 from tools.network import fleet_enroll, fleet_invite, fleet_roster
 from tools.network.idkit import canonical_json
 from tools.network.relaykit.viewer import ViewerChannel
+
+log = logging.getLogger(__name__)
 
 
 _HEX32 = re.compile(r"^[0-9a-f]{32}$")
@@ -257,9 +260,26 @@ class FleetJoinStateStore:
         if not isinstance(payload, dict) or set(payload) != {
             "approval", "roster_entry", "origin_entry"
         }:
-            raise FleetEnrollmentClientError(
-                "saved fleet delivery has unknown or missing fields"
+            # A shape this version does not understand is treated as ABSENT, not
+            # as an error. Join state is spent once enrollment completes — the
+            # machine is already on the roster — so discarding a stale record
+            # loses nothing, while raising here is unrecoverable for the
+            # operator: this is read during the index page render, so a node
+            # that enrolled under an older field set answers 500 on `/` after an
+            # upgrade with no way back except hand-editing machine.db.
+            #
+            # Observed live on 2026-08-30: a node enrolled under 0e4e81bf had
+            # {approval, roster_entry, roster_entries}; `roster_entries` was
+            # later renamed `origin_entry`, and the strict comparison turned a
+            # dead row into a bricked front page.
+            log.warning(
+                "discarding saved fleet delivery for %s: field set %s is not "
+                "understood by this version (expected approval, roster_entry, "
+                "origin_entry) — enrollment is already complete, so this state "
+                "is spent",
+                rid[:12], sorted(payload) if isinstance(payload, dict) else type(payload).__name__,
             )
+            return None
         origin_payload = payload["origin_entry"]
         return fleet_enroll.EnrollmentDelivery(
             fleet_enroll.EnrollmentApproval.from_dict(payload["approval"]),
