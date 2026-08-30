@@ -155,7 +155,19 @@ COPY --chown=autonomy:autonomy --from=appsrc /app /app
 RUN printf '#!/bin/sh\nexec python3 -m tools.graph "$@"\n' > /usr/local/bin/graph \
     && chmod +x /usr/local/bin/graph \
     && chmod +x /app/deploy/entrypoint.sh \
-    && chown autonomy:autonomy /app
+    && chown autonomy:autonomy /app \
+    # /app/data is NOT copied in: .dockerignore excludes data/ from the build
+    # context, so COPY --chown never creates it and the VOLUME below would
+    # create it as ROOT. That root-owned directory becomes part of the code
+    # volume's seed, where the entrypoint's runtime chown can never reach it —
+    # by then the data volume is mounted over it. The visible symptom is that
+    # `git pull` on a node fails with "cannot create directory at
+    # 'data/uploads': Permission denied", because the repo tracks
+    # data/uploads/.gitkeep (see .gitignore: it materializes the bind's mount
+    # point inside the read-only session checkout, auto-j3oj3). Create it owned
+    # by autonomy here, before VOLUME, and the whole chain resolves.
+    && mkdir -p /app/data \
+    && chown autonomy:autonomy /app/data
 
 # Persistent state: per-org DBs (identity + credential Settings — the
 # secret store), graph.db, auth.db, TLS keypair. Its own volume, mounted at
