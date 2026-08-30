@@ -1,5 +1,11 @@
 #!/bin/bash
-# Shared entrypoint for autonomy-session-dind and its descendants.
+# The ONE session entrypoint, baked into every session image (base, platform,
+# dind, and their descendants). Nothing here is image-family-specific: it
+# wires the ssh agent if a key artifact is present, runs /startup.sh in the
+# background when the launcher mounted one (recording its exit in
+# /workspace/output/.setup-exit — the marker the dashboard's setup wait
+# reads), and execs the harness command. Whether a workspace's startup
+# script runs must never depend on which image family it uses.
 #
 # Order of operations:
 #   1. Start an SSH agent and load the shared artifact key (if present)

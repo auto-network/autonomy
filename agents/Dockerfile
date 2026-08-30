@@ -157,7 +157,11 @@ RUN mkdir -p /home/agent/.agent-browser \
 RUN codex --version > /dev/null 2>&1 || echo "WARN: codex not functional" \
     && agent-browser --version > /dev/null 2>&1 || echo "WARN: agent-browser not functional"
 
+COPY session-entrypoint.sh /usr/local/bin/autonomy-entrypoint.sh
+RUN chmod +x /usr/local/bin/autonomy-entrypoint.sh
+
 USER agent
 
-# Default entrypoint: claude with skip-permissions (dispatcher controls the prompt)
-ENTRYPOINT ["claude", "--dangerously-skip-permissions"]
+# The one session entrypoint (same as every session image): runs a mounted
+# /startup.sh, writes the setup markers, then execs the launcher's command.
+ENTRYPOINT ["/usr/local/bin/autonomy-entrypoint.sh"]

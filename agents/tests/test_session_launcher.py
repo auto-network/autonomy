@@ -136,7 +136,7 @@ def test_nested_docker_defaults_to_privileged_runtime(
     cmd = captured_run[0]
     assert "--privileged" in cmd
     assert not any(arg.startswith("--runtime=") for arg in cmd)
-    # DinD keeps its wrapper entrypoint and receives the full harness argv.
+    # Every image's shared entrypoint receives the full harness argv.
     image_index = cmd.index("session-enterprise")
     assert cmd[image_index + 1] == "claude"
     assert "--entrypoint" not in cmd
@@ -144,6 +144,21 @@ def test_nested_docker_defaults_to_privileged_runtime(
     meta = json.loads((run_dir / "sessions" / ".session_meta.json").read_text())
     assert meta["needs_nested_docker"] is True
     assert meta["session_runtime"] == "privileged"
+
+
+def test_command_shape_is_identical_for_both_image_families(
+    tmp_path, fake_creds, fake_crosstalk, captured_run,
+):
+    """The regression pin for the silent setup hang: whether a startup
+    script runs must never depend on needs_nested_docker, so the docker
+    command after the image name is byte-identical for both values — one
+    shared entrypoint receives the same full harness argv either way."""
+    _run(needs_nested_docker=True, output_dir=str(tmp_path / "a"))
+    _run(needs_nested_docker=False, output_dir=str(tmp_path / "b"))
+    dind, plain = captured_run
+    i, j = dind.index("session-enterprise"), plain.index("session-enterprise")
+    assert dind[i:] == plain[j:]
+    assert "--entrypoint" not in dind and "--entrypoint" not in plain
 
 
 def test_standard_session_is_not_privileged(
@@ -195,9 +210,10 @@ def test_runtime_is_independent_of_nested_docker_entrypoint(
     )
     cmd = captured_run[0]
     assert "--privileged" in cmd
-    # Isolation alone must not make a base image behave like DinD.
-    assert "--entrypoint" in cmd
-    assert cmd[cmd.index("--entrypoint") + 1] == "sh"
+    # Isolation is orthogonal to the command: one entrypoint, one shape.
+    assert "--entrypoint" not in cmd
+    image_index = cmd.index("session-enterprise")
+    assert cmd[image_index + 1] == "sh"
 
 
 @pytest.mark.parametrize(
@@ -305,8 +321,10 @@ def test_codex_interactive_uses_codex_entrypoint(
         image="autonomy-session-platform",
     )
     cmd = captured_run[0]
-    assert "--entrypoint" in cmd
-    assert "codex" in cmd
+    # One shared image entrypoint receives the full harness argv.
+    assert "--entrypoint" not in cmd
+    image_index = cmd.index("autonomy-session-platform")
+    assert cmd[image_index + 1] == "codex"
     assert "--no-alt-screen" in cmd
     assert "--dangerously-bypass-approvals-and-sandbox" in cmd
     assert "--dangerously-skip-permissions" not in cmd
@@ -435,8 +453,9 @@ def test_codex_noninteractive_uses_exec(
         model=None,
     )
     cmd = captured_run[0]
-    assert "--entrypoint" in cmd
-    assert "sh" in cmd
+    assert "--entrypoint" not in cmd
+    image_index = cmd.index("autonomy-session-platform")
+    assert cmd[image_index + 1] == "sh"
     shell_cmd = cmd[-1]
     assert "cat /workspace/output/.prompt.md | codex exec" in shell_cmd
     assert "--dangerously-bypass-approvals-and-sandbox" in shell_cmd
@@ -1999,7 +2018,7 @@ def test_golden_mount_argv_is_byte_identical(
         "-v", "{TMP}/startup.sh:/startup.sh:ro",
         "-e", "AUTONOMY_CAPABILITY_BIN=/etc/autonomy/cap-bin",
         "-w", "/workspace/repo",
-        "session-enterprise", "--dangerously-skip-permissions",
+        "session-enterprise", "claude", "--dangerously-skip-permissions",
         "--model", "claude-opus-4-8[1m]",
     ]
     assert got == expected

@@ -45,4 +45,4 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 USER agent
-ENTRYPOINT ["claude", "--dangerously-skip-permissions"]
+# Entrypoint inherited from the base image: the one session entrypoint.
