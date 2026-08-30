@@ -74,9 +74,9 @@ cp bin/bd context/bin/
 cp bin/dolt context/bin/
 cp bin/claude context/bin/
 
-# Copy Dockerfiles and any sibling files they COPY (e.g. dind-entrypoint.sh).
+# Copy Dockerfiles and any sibling files they COPY (e.g. session-entrypoint.sh).
 cp "$SCRIPT_DIR/Dockerfile" context/
-cp "$SCRIPT_DIR/dind-entrypoint.sh" context/
+cp "$SCRIPT_DIR/session-entrypoint.sh" context/
 cp "$SCRIPT_DIR/commit_sign_shim.sh" context/
 
 CLAUDE_VERSION=$(bin/claude --version 2>/dev/null | awk '{print $1}')

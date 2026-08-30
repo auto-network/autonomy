@@ -45,16 +45,8 @@ RUN pip install --break-system-packages --no-cache-dir poetry
 # Override DOCKER_HOST so the client finds the nested daemon by default.
 ENV DOCKER_HOST=unix:///var/run/docker.sock
 
-# ── Shared entrypoint wrapper ─────────────────────────────────────────────────
-# If /startup.sh is mounted, kick it off in the background, capture its pid,
-# and record its exit status. Then exec the caller's command (claude / sh -c).
-# launch_session() passes the full argv via exec "$@" — no hardcoded model.
-COPY dind-entrypoint.sh /usr/local/bin/autonomy-entrypoint.sh
-RUN chmod +x /usr/local/bin/autonomy-entrypoint.sh
-
 USER agent
 
-# Entrypoint does NOT hardcode claude or any model string — launch_session()
-# passes the full command (claude + flags + model) via docker CMD, which
-# lands on the wrapper as "$@".
-ENTRYPOINT ["/usr/local/bin/autonomy-entrypoint.sh"]
+# Entrypoint inherited from the base image: the one session entrypoint.
+# launch_session() passes the full command (harness + flags + model) via
+# docker CMD, which lands on the entrypoint as "$@".

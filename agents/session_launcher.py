@@ -1397,9 +1397,10 @@ def launch_session(
                     be provided (reuses existing session directory), session
                     meta creation is skipped, and --resume is appended to the
                     entrypoint command.
-        needs_nested_docker: Preserve the image's nested-daemon entrypoint
-                    (Dockerfile.dind and descendants). This controls image
-                    behavior only; it does not select container isolation.
+        needs_nested_docker: The workspace runs a nested docker daemon
+                    (started by its own startup script). Selects the
+                    default ``privileged`` runtime; it no longer affects
+                    the command shape — every image shares one entrypoint.
         runtime: Isolation selector. ``privileged`` adds ``--privileged``;
                     ``sysbox`` adds ``--runtime=sysbox-runc``; ``standard``
                     adds neither. When omitted, nested-Docker sessions default
@@ -1880,28 +1881,21 @@ def launch_session(
             if resolved_model:
                 codex_cmd[3:3] = ["--model", resolved_model]
             shell_cmd = prompt_pipe + shlex.join(codex_cmd)
-        if needs_nested_docker:
-            # Keep the dind wrapper entrypoint so /startup.sh still runs.
-            cmd += [image, "sh", "-c", shell_cmd]
-        else:
-            cmd += ["--entrypoint", "sh", image, "-c", shell_cmd]
+        # Every session image shares one entrypoint (session-entrypoint.sh):
+        # it runs a mounted /startup.sh, writes the setup markers the
+        # dashboard waits on, and execs this full argv. Whether setup runs
+        # must never depend on image family, so there is exactly one
+        # command shape per harness.
+        cmd += [image, "sh", "-c", shell_cmd]
     else:
         if harness == "claude":
-            if needs_nested_docker:
-                cmd += [
-                    image,
-                    "claude",
-                    "--dangerously-skip-permissions",
-                    "--model",
-                    resolved_model or DEFAULT_OPUS_MODEL,
-                ]
-            else:
-                cmd += [
-                    image,
-                    "--dangerously-skip-permissions",
-                    "--model",
-                    resolved_model or DEFAULT_OPUS_MODEL,
-                ]
+            cmd += [
+                image,
+                "claude",
+                "--dangerously-skip-permissions",
+                "--model",
+                resolved_model or DEFAULT_OPUS_MODEL,
+            ]
             if resume_uuid:
                 cmd += ["--resume", resume_uuid]
         else:
@@ -1921,10 +1915,7 @@ def launch_session(
                     resume_uuid,
                 )
                 codex_args += ["resume", m.group(1) if m else resume_uuid]
-            if needs_nested_docker:
-                cmd += [image, *codex_args]
-            else:
-                cmd += ["--entrypoint", "codex", image, *codex_args[1:]]
+            cmd += [image, *codex_args]
 
     _lap("docker_cmd_assembled")
 

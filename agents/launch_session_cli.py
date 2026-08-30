@@ -358,10 +358,8 @@ def main() -> int:
                     f"claude --dangerously-skip-permissions --model "
                     f"{shlex.quote(resolved_model)} -p"
                 )
-                if needs_nested_docker:
-                    cmd += [args.image, "sh", "-c", shell_cmd]
-                else:
-                    cmd += ["--entrypoint", "sh", args.image, "-c", shell_cmd]
+                # One shared image entrypoint everywhere; it execs this argv.
+                cmd += [args.image, "sh", "-c", shell_cmd]
             else:
                 codex_cmd = [
                     "codex",
@@ -372,43 +370,23 @@ def main() -> int:
                     codex_cmd += ["--model", resolved_model]
                 codex_cmd += ["-"]
                 shell_cmd = "cat /workspace/output/.prompt.md | " + shlex.join(codex_cmd)
-                if needs_nested_docker:
-                    cmd += [args.image, "sh", "-c", shell_cmd]
-                else:
-                    cmd += ["--entrypoint", "sh", args.image, "-c", shell_cmd]
+                cmd += [args.image, "sh", "-c", shell_cmd]
         else:
             if args.harness == "claude":
-                if needs_nested_docker:
-                    cmd += [
-                        args.image,
-                        "claude",
-                        "--dangerously-skip-permissions",
-                        "--model",
-                        resolved_model,
-                    ]
-                else:
-                    cmd += [
-                        args.image,
-                        "--dangerously-skip-permissions",
-                        "--model",
-                        resolved_model,
-                    ]
+                cmd += [
+                    args.image,
+                    "claude",
+                    "--dangerously-skip-permissions",
+                    "--model",
+                    resolved_model,
+                ]
             else:
-                if needs_nested_docker:
-                    cmd += [
-                        args.image,
-                        "codex",
-                        "--no-alt-screen",
-                        "--dangerously-bypass-approvals-and-sandbox",
-                    ]
-                else:
-                    cmd += [
-                        "--entrypoint",
-                        "codex",
-                        args.image,
-                        "--no-alt-screen",
-                        "--dangerously-bypass-approvals-and-sandbox",
-                    ]
+                cmd += [
+                    args.image,
+                    "codex",
+                    "--no-alt-screen",
+                    "--dangerously-bypass-approvals-and-sandbox",
+                ]
                 if resolved_model:
                     cmd += ["--model", resolved_model]
 
