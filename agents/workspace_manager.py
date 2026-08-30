@@ -652,10 +652,15 @@ def _sync_managed_clone_from_base_source(
         )
     host_path = Path(base_source)
     if not host_path.exists():
-        raise WorkspaceError(
-            f"workspace: base_source path does not exist for repo "
-            f"{repo.url!r}: {base_source}"
+        # Advisory, as the schema declares it: base_source names a checkout on
+        # the machine that wrote the row. Elsewhere the remote in repo.url is
+        # the right source, and this row already names it.
+        logger.info(
+            "workspace: base_source %s is not present on this machine; "
+            "managed clone tracks the remote %s instead",
+            base_source, repo.url,
         )
+        return
     rc, _, err = _git_output(
         ["rev-parse", "--git-dir"], host_path, timeout=15,
     )

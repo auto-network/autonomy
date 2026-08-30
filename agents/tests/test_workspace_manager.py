@@ -851,7 +851,14 @@ def test_prepare_session_mounts_readonly_advances_clone_main_from_base_source(
     )
 
 
-def test_prepare_session_mounts_rejects_missing_base_source_path(tmp_path, monkeypatch):
+def test_prepare_session_mounts_falls_back_when_base_source_absent(tmp_path, monkeypatch):
+    """A base_source that this machine does not have is not an error.
+
+    The field names a checkout on the machine that declared the workspace, and
+    the schema marks it advisory. Every repo carrying one also names a real
+    remote in ``url``, which is the correct source anywhere else — so a machine
+    without the checkout tracks the remote rather than failing the launch.
+    """
     upstream = _make_upstream(tmp_path)
     url = str(upstream)
     repos_dir = tmp_path / "repos"
@@ -870,11 +877,13 @@ def test_prepare_session_mounts_rejects_missing_base_source_path(tmp_path, monke
             base_source="/nonexistent/path/that/should/not/exist",
         ),),
     )
-    with pytest.raises(wm.WorkspaceError, match="base_source"):
-        wm.prepare_session_mounts(
-            proj, "sess-bad-path",
-            repos_dir=repos_dir, worktrees_dir=tmp_path / "worktrees",
-        )
+    mounts = wm.prepare_session_mounts(
+        proj, "sess-absent-base-source",
+        repos_dir=repos_dir, worktrees_dir=tmp_path / "worktrees",
+    )
+    assert any(
+        spec.startswith("/workspace/upstream") for spec in mounts.values()
+    ), mounts
 
 
 def test_prepare_session_mounts_rejects_non_git_base_source(tmp_path, monkeypatch):
