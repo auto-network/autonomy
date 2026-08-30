@@ -43,6 +43,7 @@ from tools.graph.schemas.claude_credentials import (
     CLAUDE_CREDENTIALS_REVISION,
     CLAUDE_CREDENTIALS_SET_ID,
 )
+from tools.network import fleet_tunnel_server
 
 
 logger = logging.getLogger(__name__)
@@ -402,8 +403,23 @@ async def credentials_refresh_poller() -> None:
     )
     while True:
         try:
-            counters = await asyncio.to_thread(refresh_all_credentials)
-            logger.info("claude credentials refresh tick: %s", counters)
+            # dashboard.claude.credentials is a synced personal Setting — every
+            # Fleet machine (native, trial, SJC, ...) sees the same row. If each
+            # one also refreshes it independently, they race: Anthropic rotates
+            # the refresh_token on every exchange, so whichever machine loses
+            # the race immediately gets a real (not stale) invalid_grant on its
+            # now-already-consumed token. Reuse the same singular-ownership gate
+            # link_serving.py already uses for the serving tunnel so only one
+            # Fleet machine ever refreshes this credential.
+            eligibility = fleet_tunnel_server.state()
+            if not eligibility.allowed:
+                logger.info(
+                    "claude credentials refresh: skipping tick, not the Fleet "
+                    "tunnel-server machine (reason=%s)", eligibility.reason,
+                )
+            else:
+                counters = await asyncio.to_thread(refresh_all_credentials)
+                logger.info("claude credentials refresh tick: %s", counters)
         except asyncio.CancelledError:
             raise
         except Exception:
