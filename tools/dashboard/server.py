@@ -11594,7 +11594,16 @@ async def page_index(request):
     # A Fleet install already made its first network request. Show the exact
     # comparison state first, even when the generic harness/identity gates
     # would otherwise own a clean machine's initial page.
-    if _fleet_enrollment_first_render() is not None:
+    #
+    # Only while the enrollment is still IN FLIGHT. `approved` means the
+    # delivery landed and the machine is on the roster — the join is over, and
+    # continuing to render the comparison screen strands a working fleet member
+    # on a welcome page it can never leave. Nothing deleted the join-state row
+    # on success, so `_fleet_enrollment_first_render()` kept returning a value
+    # forever and every subsequent visit re-entered the welcome shell (observed
+    # live 2026-08-30 on a node that had joined days earlier).
+    _fleet_first = _fleet_enrollment_first_render()
+    if _fleet_first is not None and _fleet_first.get("status") != "approved":
         return _welcome_page()
     if _bootstrap_gate_open():
         return HTMLResponse(_load_template("bootstrap.html"))
