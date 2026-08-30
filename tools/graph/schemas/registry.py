@@ -1860,6 +1860,10 @@ def validate_key(set_id: str, revision: int, key: str) -> None:
     strategy = getattr(schema, "_key_strategy", None)
     if not strategy:
         return
+    custom_validator = getattr(schema, "validate_member_key", None)
+    if callable(custom_validator):
+        custom_validator(key)
+        return
     if strategy.startswith("fixed:"):
         expected = strategy.split(":", 1)[1]
         if key != expected:
