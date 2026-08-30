@@ -117,6 +117,7 @@ def complete_enrollment(
         anchor_root_pub=request.personal_root_pub,
     )
     _write_row({"machine_id": assigned_id}, org=org)
+    clear_joining(org=org)
     return key
 
 
@@ -181,6 +182,7 @@ def accept_browser_completion(
         org=org,
     )
     _write_row({"machine_id": machine_id_value}, org=org)
+    clear_joining(org=org)
 
 
 def accept_local_bootstrap(
@@ -291,6 +293,27 @@ def is_joining(*, org="machine") -> bool:
         _JOINING_SET_ID, org=org, target_revision=FLEET_JOINING_REVISION
     ).to_dict()
     return members.get(_JOINING_KEY) is not None
+
+
+def clear_joining(*, org="machine") -> None:
+    """Remove the fleet-joining marker once enrollment has completed.
+
+    The counterpart to ``mark_joining``: a joining machine is joining only
+    until it holds an identity, and nothing else clears the marker. Called at
+    completion, after the machine identity row is written. Idempotent — a no-op
+    when no marker exists, so calling it on an already-cleared or never-marked
+    machine is harmless. The marker is written at publication state ``raw``, so
+    ``remove_setting`` accepts it.
+    """
+    from tools.graph import settings_ops
+    from tools.graph.schemas.fleet_joining import FLEET_JOINING_REVISION
+
+    members = settings_ops.read_owned_set(
+        _JOINING_SET_ID, org=org, target_revision=FLEET_JOINING_REVISION
+    ).to_dict()
+    member = members.get(_JOINING_KEY)
+    if member is not None:
+        settings_ops.remove_setting(member.id, org=org)
 
 
 def mark_joining_from_env(*, org="machine") -> bool:
