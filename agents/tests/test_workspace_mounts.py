@@ -252,6 +252,159 @@ def test_readiness_reports_missing_rw_dir_advisory_without_creating(
     assert not (orgs_root / "workspace-storage").exists()
 
 
+# ── machine-located mounts: the org row declares, artifact-path locates ─────
+def _machine_mount_rs(*, key, container_path, kind, mode="rw",
+                      required=False, org="dynbench") -> ResolvedSetting:
+    """An org mount row with NO source at all — location comes from this
+    machine's own autonomy.artifact-path row."""
+    payload = WorkspaceMountV2(
+        container_path=container_path, kind=kind, mode=mode, required=required,
+    )
+    return ResolvedSetting(
+        id=f"mock-{key}", set_id=MOUNT_SET_ID, stored_revision=2, key=key,
+        payload=payload, state="raw", supersedes=None, excludes=None,
+        deprecated=False, successor_id=None,
+        created_at="2026-08-30T00:00:00Z", updated_at="2026-08-30T00:00:00Z",
+        target_revision=None, org=org, upconverted=False,
+    )
+
+
+def _dynbench_ws(mounts) -> WorkspaceV1:
+    return WorkspaceV1(
+        id="dynbench-backend", name="Backend", description="",
+        image="img", graph_project="dynbench", repos=(), mounts=mounts,
+    )
+
+
+def test_machine_located_mount_binds_the_machine_declared_path(
+    tmp_path, monkeypatch,
+):
+    content = tmp_path / "win-agent"
+    content.mkdir()
+    monkeypatch.setattr(
+        wm, "_machine_located_mount_source",
+        lambda key, org: str(content) if (key, org) ==
+        ("dynbench-backend:win-build-dir", "dynbench") else None,
+    )
+    ws = _dynbench_ws({"dynbench-backend:win-build-dir": _machine_mount_rs(
+        key="dynbench-backend:win-build-dir", container_path="/windows",
+        kind="dir", mode="rw")})
+    result = _prepare(ws, tmp_path)
+    assert str(result[str(content)]) == "/windows:rw"
+
+
+def test_machine_located_mount_absent_row_skips_when_optional(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(
+        wm, "_machine_located_mount_source", lambda key, org: None,
+    )
+    ws = _dynbench_ws({"dynbench-backend:win-build-dir": _machine_mount_rs(
+        key="dynbench-backend:win-build-dir", container_path="/windows",
+        kind="dir", required=False)})
+    result = _prepare(ws, tmp_path)
+    assert not any("/windows" in str(v) for v in result.values())
+
+
+def test_machine_located_mount_absent_row_refuses_when_required(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(
+        wm, "_machine_located_mount_source", lambda key, org: None,
+    )
+    ws = _dynbench_ws({"dynbench-backend:win-build-dir": _machine_mount_rs(
+        key="dynbench-backend:win-build-dir", container_path="/windows",
+        kind="dir", required=True)})
+    with pytest.raises(WorkspaceMountMissingError) as ei:
+        _prepare(ws, tmp_path)
+    # The refusal names the exact machine row to write.
+    assert "autonomy.artifact-path dynbench:win-build-dir" in str(ei.value)
+
+
+def test_machine_located_mount_wrong_type_refused(tmp_path, monkeypatch):
+    a_file = tmp_path / "not-a-dir"
+    a_file.write_text("x")
+    monkeypatch.setattr(
+        wm, "_machine_located_mount_source", lambda key, org: str(a_file),
+    )
+    ws = _dynbench_ws({"dynbench-backend:win-build-dir": _machine_mount_rs(
+        key="dynbench-backend:win-build-dir", container_path="/windows",
+        kind="dir")})
+    with pytest.raises(WorkspaceMountInvalidError, match="kind=dir"):
+        _prepare(ws, tmp_path)
+
+
+def test_machine_located_mount_on_containerized_node_binds_unverified(
+    tmp_path, monkeypatch,
+):
+    """Compose shape: the declared path lives in the DAEMON's frame, which a
+    containerized node cannot stat — so it emits the strict refuse-missing
+    bind without a wrong-frame exists() check, and the launch preflight (or
+    docker itself) is the existence guard."""
+    monkeypatch.setattr(
+        wm.mount_plan, "discover_topology",
+        lambda: _topo(is_host_process=False),
+    )
+    monkeypatch.setattr(
+        wm, "_machine_located_mount_source",
+        lambda key, org: "/mnt/c/Agent",  # absent in THIS filesystem
+    )
+    ws = _dynbench_ws({"dynbench-backend:win-build-dir": _machine_mount_rs(
+        key="dynbench-backend:win-build-dir", container_path="/windows",
+        kind="dir", mode="rw")})
+    result = _prepare(ws, tmp_path)
+    spec = result["/mnt/c/Agent"]
+    assert isinstance(spec, mount_plan.BindRefuseMissing)
+    assert str(spec) == "/windows:rw"
+
+
+def test_machine_located_readiness_unanswerable_on_containerized_node(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        wm.mount_plan, "discover_topology",
+        lambda: _topo(is_host_process=False),
+    )
+    monkeypatch.setattr(
+        wm, "_machine_located_mount_source", lambda key, org: "/mnt/c/Agent",
+    )
+    findings = wm.check_org_mount_readiness(
+        key="dynbench-backend:win-build-dir",
+        payload={"container_path": "/windows", "kind": "dir", "mode": "rw",
+                 "required": False},
+        org="dynbench",
+    )
+    assert len(findings) == 1
+    assert findings[0].kind == "unanswerable_here"
+
+
+def test_machine_located_source_absent_store_means_not_declared(monkeypatch):
+    from tools.graph.db import GraphDBMissing
+
+    def raise_missing(*_a, **_kw):
+        raise GraphDBMissing("no machine store here")
+
+    monkeypatch.setattr("tools.graph.ops.read_set_key", raise_missing)
+    assert wm._machine_located_mount_source(
+        "dynbench-backend:win-build-dir", "dynbench",
+    ) is None
+
+
+def test_machine_located_readiness_names_the_row_to_write(monkeypatch):
+    monkeypatch.setattr(
+        wm, "_machine_located_mount_source", lambda key, org: None,
+    )
+    findings = wm.check_org_mount_readiness(
+        key="dynbench-backend:win-build-dir",
+        payload={"container_path": "/windows", "kind": "dir", "mode": "rw",
+                 "required": False},
+        org="dynbench",
+    )
+    assert len(findings) == 1
+    assert findings[0].severity == "advisory"
+    assert "autonomy.artifact-path dynbench:win-build-dir" in findings[0].detail
+
+
 # ── kind: present-but-wrong-type refused (the anti-fabrication guard) ────────
 def test_kind_file_but_dir_present_refused(orgs_root, tmp_path):
     (orgs_root / "license.yaml").mkdir()  # a DIR where a file is declared

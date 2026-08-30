@@ -217,10 +217,14 @@ MOUNT_SCHEMA_REVISION_2 = 2
 
 
 class WorkspaceMountV2(BaseModel):
-    """A workspace mount: EITHER a `subpath` in the org-partitioned autonomy-orgs
+    """A workspace mount: a `subpath` in the org-partitioned autonomy-orgs
     volume (the guarded path), OR a deprecated absolute `host_path` (the rev-1
     fallback the design kept "so existing rows keep working through the
-    transition", b20f2468-b12). Exactly one is set.
+    transition", b20f2468-b12), OR NEITHER — a MACHINE-LOCATED mount whose
+    location each machine supplies via an ``autonomy.artifact-path`` row
+    keyed ``<org>:<mount-name>`` in its own machine store (the org row
+    declares the thing; the machine row says where it sits HERE, and a
+    machine without the row does not have the mount).
 
     `subpath` is relative and org-free (e.g. ``personal/scale-harness/license.yaml``
     or ``vuln-diff-validation``); the launcher resolves it under
@@ -272,8 +276,9 @@ class WorkspaceMountV2(BaseModel):
     # fabrication failure mode: succeeds by exit code, wrong by content).
     kind: Literal["file", "dir"] | None = Field(
         default=None,
-        description="Expected target type; REQUIRED with subpath, forbidden with "
-                    "host_path (legacy rows carry no kind). The resolver refuses a "
+        description="Expected target type; REQUIRED with subpath and on "
+                    "machine-located rows, forbidden with host_path (legacy "
+                    "rows carry no kind). The resolver refuses a "
                     "present-but-wrong-type target.",
     )
     mode: Literal["ro", "rw"] = "ro"
@@ -356,32 +361,46 @@ class WorkspaceMountV2(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def exactly_one_source_with_kind_rule(self):
+    def source_form_with_kind_rule(self):
+        """A mount names its source ONE of three ways.
+
+        ``subpath`` (org-volume), deprecated ``host_path`` (this-machine
+        absolute), or NEITHER — a MACHINE-LOCATED mount: the org row
+        declares that the mount exists (name, container path, kind, mode)
+        and carries no location at all; each machine that has the content
+        says where it sits via an ``autonomy.artifact-path`` row keyed
+        ``<org>:<mount-name>`` in its own machine store. A machine without
+        that row simply does not have the mount (skipped when optional,
+        refused by name when required).
+        """
         has_host = self.host_path is not None
         has_sub = self.subpath is not None
-        if has_host == has_sub:
+        if has_host and has_sub:
             raise ValueError(
-                "exactly one of host_path (deprecated) or subpath must be set")
-        if has_host:
-            # Deprecated legacy row: kind forbidden, and NO canonical-spelling check
-            # on container_path — rev-1 semantics preserved verbatim so a valid V1
-            # row (incl. a trailing-slash container_path) stays valid and its argv
-            # unchanged. This is what makes the 1->2 upconverter identity-COMPATIBLE
-            # in effect, not just in name.
-            if self.kind is not None:
-                raise ValueError("host_path (legacy) must not carry kind")
-        else:
-            # Guarded subpath row: kind required, and container_path must be
-            # CANONICAL (the point-4 destination guard) — new rows are held to the
-            # strict spelling that legacy rows are grandfathered out of.
+                "a mount names its source one way: subpath, the deprecated "
+                "host_path, or neither (machine-located)")
+        if not has_host:
+            # Guarded subpath row or machine-located row: kind required and
+            # container_path canonical — both are typed, refuse-wrong-type
+            # mounts; only the deprecated host_path form is grandfathered.
             if self.kind is None:
-                raise ValueError("subpath requires kind (file|dir)")
+                raise ValueError(
+                    "a subpath or machine-located mount requires kind "
+                    "(file|dir)")
             cp = self.container_path
             _reject_traversal_segments(cp, label="container_path")
             if posixpath.normpath(cp) != cp:
                 raise ValueError(
-                    f"container_path for a subpath mount must be already-normalized "
+                    f"container_path must be already-normalized "
                     f"(no '.', '..', trailing or doubled '/'): {cp!r}")
+            return self
+        # Deprecated legacy row: kind forbidden, and NO canonical-spelling
+        # check on container_path — rev-1 semantics preserved verbatim so a
+        # valid V1 row (incl. a trailing-slash container_path) stays valid
+        # and its argv unchanged. This is what makes the 1->2 upconverter
+        # identity-COMPATIBLE in effect, not just in name.
+        if self.kind is not None:
+            raise ValueError("host_path (legacy) must not carry kind")
         return self
 
 
