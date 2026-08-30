@@ -80,6 +80,40 @@ def test_a_duplicate_release_id_is_refused(store):
         )
 
 
+def test_session_lifetime_release_outlives_any_deadline_but_not_the_session(
+    store, tmp_path,
+):
+    """expires_at=None is a session-lifetime file: no sweep tick ever
+    deadline-shreds it while its session lives; session end (or the orphan
+    pass) is what destroys it."""
+    root = tmp_path / "ramfs-lifetime"
+    root.mkdir(parents=True)
+    session_dir = root / "s-live"
+    session_dir.mkdir()
+    host_path = session_dir / "fleet-ssh-key"
+    vault_releases.record_release(
+        id="lifetime", session="s-live", setting_name="blindhash:fleet-ssh-key",
+        release_mode="delivered", expires_at=None,
+        container_path="/run/secrets/fleet-ssh-key",
+        host_path=str(host_path), now=0,
+    )
+    host_path.write_bytes(b"raw key bytes")
+
+    far_future = 10**15
+    swept = sweeper.sweep(
+        session_exists=lambda s: s == "s-live",
+        delivery_root=root, now=far_future,
+    )
+    assert swept["shredded"] == 0
+    assert host_path.exists()
+
+    ended = sweeper.on_session_end("s-live", delivery_root=root, now=far_future)
+    assert ended["shredded"] == 1 and ended["reclaimed_dir"] is True
+    assert not host_path.exists()
+    rec = vault_releases.get("lifetime")
+    assert rec["shred_reason"] == "session_end"
+
+
 def test_shred_is_idempotent_and_keeps_the_first_reason(store):
     vault_releases.record_release(
         id="r", session="s", setting_name="n", release_mode="delivered",

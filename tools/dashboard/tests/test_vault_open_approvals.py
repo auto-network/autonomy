@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import secrets
+import time
 
 import pytest
 from starlette.applications import Starlette
@@ -138,10 +139,11 @@ def vault_open_env(tmp_path, monkeypatch):
         approvals_routes._decision_waiters.clear()
 
 
-def test_fake_ssh_key_is_sealed_approved_delivered_and_expired_without_leak(
+def test_fake_ssh_key_is_sealed_approved_delivered_and_reclaimed_without_leak(
     vault_open_env,
 ):
-    """The Mac-key rehearsal: full path, exact bytes, then deadline shred."""
+    """The Mac-key rehearsal: full path, exact RAW bytes at the credential's
+    own name, session-lifetime file, session-end shred."""
     graph_db, world, client = vault_open_env
     secret = (
         "-----BEGIN OPENSSH PRIVATE KEY-----\n"
@@ -267,17 +269,17 @@ def test_fake_ssh_key_is_sealed_approved_delivered_and_expired_without_leak(
     assert execution["ok"] is True
     receipt = execution["receipt"]
     assert receipt["delivery"] == "session-ramfs"
-    assert receipt["path"] == f"/run/secrets/vault-open-{rid}.json"
+    # The value in its FINAL SHAPE: raw bytes at the credential's bare name
+    # (org prefix server-derived, so the consumer path is stable).
+    assert receipt["path"] == "/run/secrets/test.disposable"
+    assert receipt["lifetime"] == "session"
     assert replay["result"] == delivered["result"]
     assert "value" not in execution
     assert secret not in json.dumps(delivered)
-    ramfs_payload = json.loads(
-        (graph_db.parent / "ramfs" / "auto-real" / f"vault-open-{rid}.json")
-        .read_text()
-    )
-    assert hashlib.sha256(
-        ramfs_payload["value"].encode()
-    ).hexdigest() == expected_digest
+    ramfs_raw = (
+        graph_db.parent / "ramfs" / "auto-real" / "test.disposable"
+    ).read_text()
+    assert hashlib.sha256(ramfs_raw.encode()).hexdigest() == expected_digest
     persisted = ar.get(rid)
     assert "openers" not in json.dumps(persisted)
     assert opener_hex not in json.dumps(persisted)
@@ -289,17 +291,24 @@ def test_fake_ssh_key_is_sealed_approved_delivered_and_expired_without_leak(
     assert secret not in json.dumps(release)
     assert "cek" not in json.dumps(delivered).lower()
 
-    host_path = graph_db.parent / "ramfs" / "auto-real" / f"vault-open-{rid}.json"
+    host_path = graph_db.parent / "ramfs" / "auto-real" / "test.disposable"
+    # Session lifetime: while the session lives, no deadline ever shreds it.
     swept = vault_release_sweeper.sweep(
         session_exists=lambda session: session == "auto-real",
         delivery_root=graph_db.parent / "ramfs",
-        now=int(float(receipt["expires_at"]) * 1000),
+        now=int(time.time() * 1000) + 10 * 24 * 3600 * 1000,
     )
-    assert swept["shredded"] == 1
+    assert swept["shredded"] == 0
+    assert host_path.exists()
+    # Session end is what destroys it.
+    ended = vault_release_sweeper.on_session_end(
+        "auto-real", delivery_root=graph_db.parent / "ramfs",
+    )
+    assert ended["shredded"] == 1
     assert not host_path.exists()
-    expired = vault_releases.get(rid)
-    assert expired["shred_reason"] == "expired"
-    assert secret not in json.dumps(expired)
+    reclaimed = vault_releases.get(rid)
+    assert reclaimed["shred_reason"] == "session_end"
+    assert secret not in json.dumps(reclaimed)
 
 
 def test_root_reachable_fake_ssh_key_uses_personal_root_anchor(vault_open_env):
@@ -398,15 +407,14 @@ def test_root_reachable_fake_ssh_key_uses_personal_root_anchor(vault_open_env):
         delivered = client.get(f"/api/approvals/{rid}?wait=10").json()
 
     receipt = delivered["result"]["execution"]["receipt"]
-    ramfs_payload = json.loads(
-        (graph_db.parent / "ramfs" / "auto-real" / f"vault-open-{rid}.json")
-        .read_text()
-    )
-    assert hashlib.sha256(ramfs_payload["value"].encode()).hexdigest() == expected_digest
+    ramfs_raw = (
+        graph_db.parent / "ramfs" / "auto-real" / "test.root-reachable-ssh"
+    ).read_text()
+    assert hashlib.sha256(ramfs_raw.encode()).hexdigest() == expected_digest
     assert secret not in json.dumps(delivered)
     assert secret not in json.dumps(ar.get(rid))
     assert anchor_seed.hex() not in json.dumps(ar.get(rid))
-    assert receipt["path"] == f"/run/secrets/vault-open-{rid}.json"
+    assert receipt["path"] == "/run/secrets/test.root-reachable-ssh"
 
 
 def test_vault_open_refuses_setting_drift(vault_open_env):

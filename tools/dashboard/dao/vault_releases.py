@@ -159,6 +159,7 @@ def _members() -> list[dict]:
         rec = dict(member.payload)
         rec.setdefault("shredded_at", None)
         rec.setdefault("shred_reason", None)
+        rec.setdefault("expires_at", None)  # absent = session lifetime
         rec["id"] = member.key
         rows.append(rec)
     return rows
@@ -170,7 +171,7 @@ def record_release(
     session: str,
     setting_name: str,
     release_mode: str,
-    expires_at: int,
+    expires_at: int | None,
     container_path: str,
     host_path: str,
     delivered_at: int | None = None,
@@ -207,8 +208,11 @@ def record_release(
     ):
         if not isinstance(value, str) or not value:
             raise ValueError(f"{name} must be a non-empty string")
-    if not isinstance(expires_at, int) or isinstance(expires_at, bool):
-        raise ValueError("expires_at must be an int (unix ms)")
+    if expires_at is not None and (
+        not isinstance(expires_at, int) or isinstance(expires_at, bool)
+    ):
+        raise ValueError("expires_at must be an int (unix ms) or None "
+                         "(session lifetime)")
     stamp = int(time.time() * 1000) if now is None else int(now)
     delivered = stamp if delivered_at is None else int(delivered_at)
     payload = {
@@ -216,10 +220,11 @@ def record_release(
         "setting_name": setting_name,
         "release_mode": release_mode,
         "delivered_at": delivered,
-        "expires_at": int(expires_at),
         "container_path": container_path,
         "host_path": host_path,
     }
+    if expires_at is not None:
+        payload["expires_at"] = int(expires_at)
     VaultReleaseLeaseV1.validate(payload)
     with _transition_lock:
         if get(id) is not None:
@@ -237,11 +242,14 @@ def get(release_id: str) -> dict | None:
 
 
 def outstanding() -> list[dict]:
-    """Every release not yet shredded, oldest deadline first — the sweeper's
-    and reconciliation's work-list."""
+    """Every release not yet shredded — the sweeper's and reconciliation's
+    work-list. Deadline rows first (oldest deadline leading); session-
+    lifetime rows (no deadline) after them."""
     _drain_legacy_file()
     rows = [rec for rec in _members() if rec["shredded_at"] is None]
-    rows.sort(key=lambda rec: (rec["expires_at"], rec["id"]))
+    rows.sort(key=lambda rec: (
+        rec["expires_at"] is None, rec["expires_at"] or 0, rec["id"],
+    ))
     return rows
 
 
@@ -273,6 +281,9 @@ def mark_shredded(
         payload = {
             k: v for k, v in rec.items()
             if k not in ("id", "shredded_at", "shred_reason")
+            # A session-lifetime release surfaces expires_at=None from
+            # _members(); the stored row simply omits the field.
+            and not (k == "expires_at" and rec[k] is None)
         }
         payload["shredded_at"] = stamp
         payload["shred_reason"] = reason

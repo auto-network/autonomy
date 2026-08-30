@@ -120,12 +120,15 @@ def sweep(
     shredded = 0
     for rec in vault_releases.outstanding():
         session = rec["session"]
+        deadline = rec.get("expires_at")
         gone = not session_exists(session)
         if gone:
             reason = "orphaned"
-        elif stamp >= rec["expires_at"]:
+        elif deadline is not None and stamp >= deadline:
             reason = overdue_reason
         else:
+            # Deadline in the future, or a session-lifetime release
+            # (no deadline): the live session is still entitled to it.
             continue
         _destroy_file(rec["host_path"])
         if vault_releases.mark_shredded(rec["id"], reason=reason, now=stamp):
