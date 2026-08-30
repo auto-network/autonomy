@@ -32,12 +32,19 @@ def _cookies_from_jar(path: Path) -> httpx.Cookies:
     jar.load(ignore_discard=True, ignore_expires=True)
     cookies = httpx.Cookies()
     for cookie in jar:
-        cookies.set(
-            cookie.name,
-            cookie.value,
-            domain=cookie.domain,
-            path=cookie.path,
-        )
+        if cookie.domain_specified:
+            cookies.set(
+                cookie.name,
+                cookie.value,
+                domain=cookie.domain,
+                path=cookie.path,
+            )
+        else:
+            # Netscape host-only cookies carry a display domain but must not
+            # become domain cookies when transferred to httpx. In particular,
+            # httpx will not return a domain-qualified ``localhost`` cookie to
+            # ``https://localhost``.
+            cookies.set(cookie.name, cookie.value, path=cookie.path)
     return cookies
 
 
