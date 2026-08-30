@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from starlette.applications import Starlette
@@ -240,6 +241,10 @@ def test_duplicate_and_complete_lifecycle_matrix_is_idempotent(reservation_api):
     assert duplicate.json() == created.json()
     assert len(events) == 1
 
+    same_active = _state(client, reservation_id, "active")
+    assert same_active.json() == created.json()
+    assert len(events) == 1
+
     paused = _state(client, reservation_id, "paused")
     assert paused.status_code == 200
     assert paused.json()["reservation"]["state"] == "paused"
@@ -270,6 +275,17 @@ def test_duplicate_and_complete_lifecycle_matrix_is_idempotent(reservation_api):
     _error(_state(client, reservation_id, "paused"), 409, "reservation_released")
     _error(_reserve(client, "port-8000"), 409, "reservation_released")
     assert len(events) == 4
+
+    direct = _reserve(client, "direct-release")
+    direct_id = direct.json()["reservation"]["reservation_id"]
+    direct_paused = _state(client, direct_id, "paused")
+    assert direct_paused.json()["reservation"]["state"] == "paused"
+    direct_released = _state(client, direct_id, "released")
+    assert direct_released.json()["reservation"]["state"] == "released"
+    assert direct_released.json()["reservation"]["released_at"] == (
+        direct_released.json()["reservation"]["updated_at"]
+    )
+    assert len(events) == 7
 
 
 def test_lifecycle_preserves_product_reference_and_sibling(reservation_api):
@@ -345,3 +361,167 @@ def test_state_route_distinguishes_bad_missing_and_invalid_state(reservation_api
     )
     _error(response, 400, "unknown_fields")
     assert events == []
+
+
+@pytest.fixture
+def real_persona_store(tmp_path, monkeypatch):
+    """Hermetic real ledger/persona/profile stores without discovery stubs."""
+    GraphDB.close_all_pooled()
+    orgs = tmp_path / "orgs"
+    orgs.mkdir()
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.delenv("GRAPH_API", raising=False)
+    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    GraphDB.create_org_db("personal", type_="personal", path=orgs / "personal.db").close()
+    for slug in ("acme", "corrupt"):
+        GraphDB.create_org_db(slug, type_="shared", path=orgs / f"{slug}.db").close()
+    GraphDB.close_all_pooled()
+    yield orgs
+    GraphDB.close_all_pooled()
+
+
+@pytest.fixture
+def real_persona_api(real_persona_store, monkeypatch):
+    """The real discovery service through the authenticated HTTP routes."""
+    monkeypatch.setattr(unlock_routes, "gate_enforced", lambda: True)
+    app = Starlette(
+        routes=[
+            Route(
+                "/api/network/service-reservations",
+                network_routes.get_service_reservations,
+                methods=["GET"],
+            ),
+            Route(
+                "/api/network/service-reservations",
+                network_routes.post_service_reservation,
+                methods=["POST"],
+            ),
+        ],
+        middleware=[
+            Middleware(
+                api_auth.ApiIdentityMiddleware,
+                authenticate_bearer=_authenticate_bearer,
+                verify_cookie=_verify_cookie,
+                cookie_name=COOKIE,
+            )
+        ],
+    )
+    with TestClient(app) as client:
+        yield client
+
+
+def test_real_persona_discovery_distinguishes_unfounded_and_unconfigured(
+    real_persona_api,
+):
+    from tools.network.idkit import KeyPair
+    from tools.network.ledger import LedgerStore, org_ledger_db_path
+    from tools.network.ledger.found import found_org_ledger
+
+    _error(
+        real_persona_api.post(
+            "/api/network/service-reservations",
+            json={"app_label": "docs"},
+            headers=_operator_headers(),
+        ),
+        409,
+        "organization_not_founded",
+    )
+
+    with LedgerStore(org_ledger_db_path("acme")) as store:
+        found_org_ledger(
+            store,
+            org_id="11111111-1111-4111-8111-111111111111",
+            org_root=KeyPair.generate(),
+            personal_root_seed=b"\x91" * 32,
+            now=1_787_979_338_123,
+        )
+    _error(
+        real_persona_api.post(
+            "/api/network/service-reservations",
+            json={"app_label": "docs"},
+            headers=_operator_headers(),
+        ),
+        409,
+        "persona_not_configured",
+    )
+
+
+def test_real_persona_discovery_uses_profile_and_blank_fallback(real_persona_store):
+    from tools.dashboard import service_publication
+    from tools.graph.schemas.network_identity import (
+        NETWORK_PERSONA_REVISION,
+        NETWORK_PERSONA_SET_ID,
+    )
+    from tools.graph.schemas.org_member_profile import (
+        MEMBER_PROFILE_REVISION,
+        MEMBER_PROFILE_SET_ID,
+    )
+    from tools.network.idkit import KeyPair
+    from tools.network.ledger import LedgerStore, org_ledger_db_path
+    from tools.network.ledger.found import found_org_ledger
+
+    with LedgerStore(org_ledger_db_path("acme")) as store:
+        founded = found_org_ledger(
+            store,
+            org_id="11111111-1111-4111-8111-111111111111",
+            org_root=KeyPair.generate(),
+            personal_root_seed=b"\x92" * 32,
+            now=1_787_979_338_123,
+        )
+    settings_ops.upsert_by_key(
+        NETWORK_PERSONA_SET_ID,
+        NETWORK_PERSONA_REVISION,
+        founded.genesis_id,
+        {
+            "persona_pub": founded.founder_persona_pub,
+            "derived_at": "2026-08-30T05:35:38Z",
+            "source": "found",
+        },
+        org=None,
+    )
+
+    persona_pub, display_name = service_publication._persona_for_org("acme")
+    assert persona_pub == founded.founder_persona_pub
+    assert display_name == ""
+    assert service_publication.normalize_persona_label(display_name, persona_pub).startswith(
+        "persona-"
+    )
+
+    settings_ops.upsert_by_key(
+        MEMBER_PROFILE_SET_ID,
+        MEMBER_PROFILE_REVISION,
+        persona_pub,
+        {"display_name": "", "avatar": "", "color": "", "byline": ""},
+        org="acme",
+    )
+    assert service_publication._persona_for_org("acme") == (persona_pub, "")
+
+    settings_ops.upsert_by_key(
+        MEMBER_PROFILE_SET_ID,
+        MEMBER_PROFILE_REVISION,
+        persona_pub,
+        {"display_name": "Jérëmy 未来", "avatar": "", "color": "", "byline": ""},
+        org="acme",
+    )
+    projection, created = service_publication.reserve_origin("acme", "docs")
+    assert created is True
+    assert projection["persona_label"].startswith("jeremy-")
+
+
+def test_corrupt_ledger_is_unavailable_not_unfounded(real_persona_api):
+    from tools.network.ledger import org_ledger_db_path
+
+    ledger_path = Path(org_ledger_db_path("corrupt"))
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    ledger_path.write_bytes(b"not a sqlite ledger")
+
+    _error(
+        real_persona_api.post(
+            "/api/network/service-reservations",
+            json={"app_label": "docs"},
+            headers={"X-Graph-Org": "corrupt", "Authorization": "Bearer local"},
+        ),
+        503,
+        "organization_ledger_unavailable",
+    )
