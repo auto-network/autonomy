@@ -268,6 +268,32 @@ def test_first_boot_marks_joining(machine):
     assert machine_boot.has_identity() is False  # no durable id yet
 
 
+def test_completing_enrollment_clears_the_joining_marker(machine):
+    """A machine that finishes enrolling is no longer joining.
+
+    Nothing else clears the marker, so without this an enrolled machine would
+    report ``is_joining()`` forever -- the stale flag that locked an operator
+    out of a fully-enrolled dashboard.
+    """
+    root, invite = _invite()
+    request, _ = machine_boot.first_boot(invite)
+    assert machine_boot.is_joining() is True
+    delivery = _approved(root, invite, request)
+    machine_boot.complete_enrollment(
+        delivery, request, bytes.fromhex(root.private_hex),
+        invite=invite, channel_binding=CHANNEL,
+    )
+    assert machine_boot.has_identity() is True
+    assert machine_boot.is_joining() is False
+
+
+def test_clear_joining_is_idempotent(machine):
+    """Clearing an absent marker is a harmless no-op."""
+    assert machine_boot.is_joining() is False
+    machine_boot.clear_joining()
+    assert machine_boot.is_joining() is False
+
+
 def test_mark_joining_from_env_present(machine, monkeypatch):
     """A node booted with AUTONOMY_FLEET_INVITE is marked joining at startup."""
     _root, invite = _invite()
