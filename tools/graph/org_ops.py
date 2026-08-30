@@ -1421,9 +1421,12 @@ FIRST_ORG_ENV = "AUTONOMY_FIRST_ORG"
 FIRST_ORG_NAME_ENV = "AUTONOMY_FIRST_ORG_NAME"
 
 
-def resolve_first_org_slug(slug: str | None = None) -> str:
-    """First-org slug resolution: explicit arg > env > ``autonomy``."""
-    return slug or os.environ.get(FIRST_ORG_ENV) or "autonomy"
+def resolve_first_org_slug(slug: str | None = None) -> str | None:
+    """First-org slug: explicit arg, else env, else None.
+
+    None means no shared org was named, and none is created.
+    """
+    return slug or os.environ.get(FIRST_ORG_ENV) or None
 
 
 def _first_org_seed(slug: str, display_name: str | None) -> dict[str, Any]:
@@ -1452,38 +1455,30 @@ def ensure_bootstrap_orgs(
     arrives from the INVITING org's ledger rather than from a local
     creation.
 
-    The first org defaults to ``autonomy`` (this host's historical
-    behavior) but a fresh deployment names its own: pass ``first_org``
-    explicitly, or set ``AUTONOMY_FIRST_ORG`` (display name via
-    ``AUTONOMY_FIRST_ORG_NAME``) before first launch.
+    A shared org is created only when one is named: pass ``first_org``, or
+    set ``AUTONOMY_FIRST_ORG`` (display name via ``AUTONOMY_FIRST_ORG_NAME``)
+    before first launch. Named none, none is created.
 
     Idempotent — runs at every dashboard startup; pre-existing DBs are
     left untouched. Identity Setting seed is best-effort (skipped when
     ``autonomy.org#1`` schema is unregistered; auto-S1 owns the schema).
 
-    When neither the arg nor the env names a first org, an existing
-    shared org satisfies the bootstrap — startup never manufactures a
-    default ``autonomy`` org next to one the operator already created
-    (e.g. via ``python -m tools.init --org acme``).
+    Existing shared orgs are still reported when none is named: the return
+    value is this node's org inventory, and creating nothing must not also
+    hide what is there.
 
     Returns the list of orgs after bootstrap.
     """
     if personal_only:
         return [_ensure_org("personal", "personal", _PERSONAL_SEED_PAYLOAD, root=root)]
-    # ``or None``: an env var set-but-empty must mean "not named", not "named
-    # the empty string". Compose writes ``AUTONOMY_FIRST_ORG: ${VAR:-}``, which
-    # delivers '' when unset; '' then slipped past the ``is None`` guard below,
-    # skipped both the existing-shared-org branch and the ``autonomy`` default,
-    # and reached _ensure_org as OrgError: invalid slug: ''. The trial node hit
-    # that on every startup ("ensure_bootstrap_orgs() failed; continuing").
+    # ``or None`` so a set-but-empty env var means "not named": compose writes
+    # ``AUTONOMY_FIRST_ORG: ${VAR:-}``, which delivers '' rather than nothing.
     slug = first_org or os.environ.get(FIRST_ORG_ENV) or None
     if slug is None:
         shared = [o for o in list_orgs(root=root) if o.type == "shared"]
-        if shared:
-            return shared + [
-                _ensure_org("personal", "personal", _PERSONAL_SEED_PAYLOAD, root=root),
-            ]
-        slug = "autonomy"
+        return shared + [
+            _ensure_org("personal", "personal", _PERSONAL_SEED_PAYLOAD, root=root),
+        ]
     _validate_slug(slug)
     return [
         _ensure_org(slug, "shared", _first_org_seed(slug, first_org_name), root=root),

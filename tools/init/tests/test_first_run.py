@@ -184,9 +184,10 @@ def test_startup_bootstrap_respects_operator_named_org(tmp_path):
     assert not (tmp_path / "data" / "orgs" / "autonomy.db").exists()
 
 
-def test_default_first_org_is_autonomy(tmp_path):
+def test_no_first_org_named_creates_no_shared_org(tmp_path):
     initialize(tmp_path, tls=False)
-    assert (tmp_path / "data" / "orgs" / "autonomy.db").exists()
+    assert not (tmp_path / "data" / "orgs" / "autonomy.db").exists()
+    assert (tmp_path / "data" / "personal.db").exists()
 
 
 def test_invalid_first_org_slug_rejected(tmp_path):

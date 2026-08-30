@@ -425,7 +425,7 @@ def _init_orgs(
 
     orgs_root = resolve_store("orgs", root=data)
     slug = org_ops.resolve_first_org_slug(first_org)
-    for org_slug in (slug, "personal"):
+    for org_slug in ((slug, "personal") if slug else ("personal",)):
         # Routed: "personal" is a local store living beside orgs/
         # (auto-35kmy); checking the legacy path would report it created
         # on every run and break second-run idempotence.
@@ -439,7 +439,8 @@ def _init_orgs(
         root=orgs_root, first_org=slug, first_org_name=first_org_name,
     )
 
-    _seed_shell_default_org(data, report, slug)
+    if slug:
+        _seed_shell_default_org(data, report, slug)
 
 
 def _init_join(data: Path, report: InitReport, *, invite: str) -> None:
