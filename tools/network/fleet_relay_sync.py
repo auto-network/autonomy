@@ -118,6 +118,15 @@ class ConnectorFleetRuntime:
 
     def __init__(self) -> None:
         self.scheduler: FleetSyncScheduler | None = None
+        #: How many sync pulls this process has turned away because it holds no
+        #: credential (scheduler is None), and when the first one arrived. This
+        #: is the "764 requests refused since 8pm" the profile sync flag reports:
+        #: an unarmed serving process looks identical to a healthy one on every
+        #: other check, and the count is the difference between "nothing is
+        #: happening" and "something is trying and failing". Reset by configure()
+        #: — a fresh arm starts a new "since".
+        self.locked_refusals: int = 0
+        self.first_locked_refusal_at: float | None = None
 
     def configure(self, payload: object) -> dict:
         from tools.dashboard.link_approvals import _load_binding
@@ -157,11 +166,19 @@ class ConnectorFleetRuntime:
         scheduler._roster_snapshot = entries
         scheduler.authenticator.authorize(credential.machine_pub)
         self.scheduler = scheduler
+        # A fresh credential means this process is no longer refusing — start a
+        # new refusal tally so the flag's "since" reflects THIS lock, not one
+        # cleared hours ago.
+        self.locked_refusals = 0
+        self.first_locked_refusal_at = None
         return {"ok": True, "machine_id": credential.machine_id}
 
     async def handle(self, token: str, message: dict):
         scheduler = self.scheduler
         if scheduler is None:
+            self.locked_refusals += 1
+            if self.first_locked_refusal_at is None:
+                self.first_locked_refusal_at = time.time()
             raise FleetRelaySyncError("serving machine is locked for Fleet sync")
         if set(message) != _REQUEST_FIELDS or message.get("v") != PROTOCOL_VERSION \
                 or message.get("op") != PULL_OP:

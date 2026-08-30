@@ -506,6 +506,7 @@ header[data-app-chrome] .identity-avatar {
 /* Status flag tray — verbatim values from Design Studio e31b7e22 rev 32
  * (root-required flags). Same strip on the locked screen and this drawer band. */
 .identity-band {
+  position: relative;   /* the floated flag balloon positions against this */
   padding: 0.6875rem 0.875rem;
   border-bottom: 1px solid var(--identity-line, #1c2431);
 }
@@ -513,6 +514,48 @@ header[data-app-chrome] .identity-avatar {
   display: flex;
   justify-content: center;
   gap: 7px;
+}
+/* Restart button — a refresh glyph above the tray, present only when a flag is
+ * lit. One tap runs the whole restore. */
+.identity-flag-restart {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  margin: 0 auto 0.5rem;
+  padding: 0;
+  border: 1px solid #4a3a13;
+  border-radius: 8px;
+  background: #221a08;
+  color: #f59e0b;
+  cursor: pointer;
+}
+.identity-flag-restart svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.identity-flag-restart:hover {
+  background: #2c2109;
+  border-color: #6b531c;
+}
+.identity-flag-restart:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+.identity-flag-restart.busy svg {
+  animation: identity-spin 0.9s linear infinite;
+}
+@keyframes identity-spin {
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .identity-flag-restart.busy svg { animation: none; }
 }
 .identity-fl {
   width: 31px;
@@ -545,13 +588,46 @@ header[data-app-chrome] .identity-avatar {
   border-color: #4a5573;
   box-shadow: 0 0 0 2px rgba(130, 140, 170, 0.28);
 }
+/* The balloon FLOATS over the page rather than taking layout space (it used to
+ * push everything below it down and stretch the full drawer width) — position:
+ * fixed so it escapes the drawer's overflow clip entirely. positionFlagpop() in
+ * JS places it under the tapped tile, sizes it to content, and clamps it inside
+ * the viewport (flipping above the tile when there is no room below). */
 .identity-flagpop {
-  margin: 0.6875rem 0 0.0625rem;
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 80;
+  box-sizing: border-box;   /* so max-width caps the whole box, padding included */
+  width: max-content;
+  max-width: min(19rem, calc(100vw - 1rem));
   background: #121826;
   border: 1px solid #2a3344;
   border-radius: 11px;
   padding: 0.75rem 0.875rem;
   box-shadow: 0 10px 26px rgba(0, 0, 0, 0.5);
+}
+/* The caret that points the balloon back at its tile; its left (and up/down
+ * direction) are set in JS. Up-pointing when the balloon sits below its tile. */
+.identity-flagpop-caret {
+  position: absolute;
+  top: -6px;
+  left: 16px;
+  width: 10px;
+  height: 10px;
+  background: #121826;
+  border-left: 1px solid #2a3344;
+  border-top: 1px solid #2a3344;
+  transform: translateX(-50%) rotate(45deg);
+}
+/* Down-pointing, for when the balloon flips above its tile. */
+.identity-flagpop-caret.is-below {
+  top: auto;
+  bottom: -6px;
+  border-left: 0;
+  border-top: 0;
+  border-right: 1px solid #2a3344;
+  border-bottom: 1px solid #2a3344;
 }
 .identity-flagpop-head {
   display: flex;
@@ -583,4 +659,34 @@ header[data-app-chrome] .identity-avatar {
   font-size: 0.78125rem;
   line-height: 1.55;
   color: #aeb6c8;
+}
+/* A quiet trailing note — e.g. a scope that was never set up to serve. Muted so
+ * it reads as a fact, not an alarm. */
+.identity-flagpop-note {
+  margin-top: 0.4375rem;
+  font-size: 0.71875rem;
+  line-height: 1.5;
+  color: #6b7280;
+}
+
+/* Restart ceremony's structured reason (rendered inside open-root's overlay,
+ * which lives on document.body, so these are styled here). */
+.or-restore-sentence {
+  margin-bottom: 0.5rem;
+}
+.or-restore-list {
+  margin: 0 auto;
+  padding: 0;
+  max-width: 20rem;
+  list-style: none;
+  text-align: left;
+  font-size: 12.5px;
+  color: #cbd2df;
+}
+.or-restore-list li {
+  padding: 0.1875rem 0;
+  border-top: 1px solid #1e2432;
+}
+.or-restore-list li:first-child {
+  border-top: 0;
 }
