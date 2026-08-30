@@ -552,9 +552,11 @@ def test_dispatch_card_uses_monitored_agentic_activity_when_poller_lags(
         "last_activity": None,
     }])
     monkeypatch.setattr(
-        server.dao_beads, "get_dispatch_beads", lambda limit=None: {
-        "approved_waiting": [], "approved_blocked": [],
-    })
+        server.dao_beads, "get_dispatch_beads",
+        lambda limit=None, exclude_ids=None: {
+            "approved_waiting": [], "approved_waiting_total": 0,
+            "approved_blocked": [],
+        })
     monkeypatch.setattr(server.dao_beads, "get_bead_title_priority", lambda _ids: {})
     monkeypatch.setattr(server.resource_monitor, "snapshot", lambda: {"sessions": {}})
     monkeypatch.setattr(server.dashboard_db, "get_session", lambda _id: {
@@ -1783,6 +1785,18 @@ def test_waiting_list_caps_at_top_five_with_exact_total(
                      "target_org": "autonomy", "dispatched_by_session": "",
                      "harness": "claude", "model": None, "title": "t"},
     )
+    # The bead side is stubbed to empty because per_org_universe is hermetic
+    # for the GRAPH org DBs only — get_dispatch_beads reads the real bead
+    # database, so this asserted 8 purely because no approved bead happened
+    # to exist when it was written. It began failing 9 != 8 the moment one
+    # did (auto-sdrsa, 2026-08-30), which is live data changing under a test,
+    # not a regression. The subject here is the agentic queue's capping.
+    monkeypatch.setattr(
+        server_mod.dao_beads, "get_dispatch_beads",
+        lambda limit=None, exclude_ids=None: {
+            "approved_waiting": [], "approved_waiting_total": 0,
+            "approved_blocked": [],
+        })
     data = asyncio.run(server_mod._collect_dispatch_data())
     assert len(data["waiting"]) == server_mod._WAITING_LIST_LIMIT
     assert data["waiting_total"] == 8
@@ -1906,3 +1920,57 @@ def test_inline_dispatch_targets_the_callers_org():
     # explicit selection still wins (and is authz-checked downstream)
     assert _inline_dispatch_target_org(
         {"target_org": "autonomy"}, anchore) == "autonomy"
+
+
+def test_a_running_bead_is_absent_from_both_the_waiting_list_and_its_total(
+    client, per_org_universe, monkeypatch,
+):
+    """The count and the list apply the SAME exclusion.
+
+    Operator screenshot 2026-08-30: the dispatch page and nav badge said
+    "1 queued" over a section reading "No unblocked beads or queued agent
+    actions waiting", footer "showing top 0 of 1 waiting". Cause: the total
+    came from a SQL COUNT while the list was filtered in Python to drop
+    already-running beads, so a running-but-still-approved bead was counted
+    and never shown. Excluding in SQL for both is what makes them unable to
+    disagree — this test fails if the exclusion moves back downstream.
+    """
+    from tools.dashboard import server as server_mod
+
+    seen: dict = {}
+
+    def fake_get_dispatch_beads(limit=None, exclude_ids=None):
+        seen["limit"] = limit
+        seen["exclude_ids"] = list(exclude_ids or [])
+        rows = [
+            {"id": "auto-idle", "title": "not running", "priority": 1,
+             "labels": [], "status": "open"},
+            {"id": "auto-running", "title": "already dispatched", "priority": 1,
+             "labels": [], "status": "open"},
+        ]
+        kept = [r for r in rows if r["id"] not in seen["exclude_ids"]]
+        return {
+            "approved_waiting": kept,
+            "approved_waiting_total": len(kept),
+            "approved_blocked": [],
+        }
+
+    monkeypatch.setattr(
+        server_mod.dao_beads, "get_dispatch_beads", fake_get_dispatch_beads)
+    monkeypatch.setattr(
+        server_mod.dao_dispatch, "get_running_with_stats",
+        lambda: [{"id": "run-1", "bead_id": "auto-running", "kind": "bead",
+                  "status": "RUNNING", "started_at": "2026-08-30T03:39:35Z"}],
+    )
+    monkeypatch.setattr(
+        server_mod.dao_beads, "get_bead_title_priority",
+        lambda ids: {"auto-running": {"title": "already dispatched",
+                                      "priority": 1, "labels": []}},
+    )
+
+    data = asyncio.run(server_mod._collect_dispatch_data())
+
+    assert seen["exclude_ids"] == ["auto-running"], \
+        "running beads must be excluded in the QUERY, not downstream"
+    assert [w["id"] for w in data["waiting"]] == ["auto-idle"]
+    assert data["waiting_total"] == len(data["waiting"]) == 1

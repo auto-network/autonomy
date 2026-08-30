@@ -278,7 +278,10 @@ _BEAD_COLS = """
     "approved_waiting": [], "approved_waiting_total": 0,
     "approved_blocked": [],
 })
-def get_dispatch_beads(waiting_limit: int | None = None) -> dict:
+def get_dispatch_beads(
+    waiting_limit: int | None = None,
+    exclude_ids: "list[str] | tuple[str, ...] | None" = None,
+) -> dict:
     """Return beads grouped by dispatch role for the Dispatch page.
 
     Returns a dict with:
@@ -293,8 +296,21 @@ def get_dispatch_beads(waiting_limit: int | None = None) -> dict:
     - "approved_blocked": readiness:approved, open, at least one open
       non-parent-child dependency.
 
+    ``exclude_ids`` drops beads from EVERY query here — list, count and
+    blocked alike. It exists because the caller must exclude beads that
+    are already running, and doing that downstream in Python while the
+    total came from SQL made the two disagree by construction: a running
+    bead stayed in the count and vanished from the list, so the dispatch
+    page and nav badge reported "1 waiting" above an empty section
+    (operator screenshot, 2026-08-30). An exclusion the count does not
+    share is the bug; keep them in one place.
+
     Deps are resolved server-side via SQL — no N+1 bd subprocess calls.
     """
+    excluded = tuple(dict.fromkeys(i for i in (exclude_ids or ()) if i))
+    exclude_sql = ""
+    if excluded:
+        exclude_sql = " AND i.id NOT IN (%s)" % ",".join(["%s"] * len(excluded))
     conn = _get_conn()
     with conn.cursor() as cur:
 
@@ -316,10 +332,11 @@ def get_dispatch_beads(waiting_limit: int | None = None) -> dict:
                     AND d.type != %s
                     AND di.status != %s
               )
+            {exclude_sql}
             GROUP BY i.id
             ORDER BY i.priority ASC, i.updated_at DESC{limit_sql}
             """,
-            ("readiness:approved", "open", "parent-child", "closed"),
+            ("readiness:approved", "open", "parent-child", "closed") + excluded,
         )
         approved_waiting = [_coerce(r) for r in _rows(cur)]
 
@@ -339,8 +356,8 @@ def get_dispatch_beads(waiting_limit: int | None = None) -> dict:
                         AND d.type != %s
                         AND di.status != %s
                   )
-                """,
-                ("readiness:approved", "open", "parent-child", "closed"),
+                """ + exclude_sql,
+                ("readiness:approved", "open", "parent-child", "closed") + excluded,
             )
             row = cur.fetchone()
             approved_waiting_total = int(list(row.values())[0] if isinstance(row, dict) else row[0])
@@ -362,10 +379,11 @@ def get_dispatch_beads(waiting_limit: int | None = None) -> dict:
             JOIN issues di ON di.id = d.depends_on_issue_id AND di.status != %s
             LEFT JOIN labels l ON l.issue_id = i.id
             WHERE i.status = %s
+            """ + exclude_sql + """
             GROUP BY i.id
             ORDER BY i.priority ASC, i.updated_at DESC
             """,
-            ("readiness:approved", "parent-child", "closed", "open"),
+            ("readiness:approved", "parent-child", "closed", "open") + excluded,
         )
         approved_blocked_raw = _rows(cur)
 
