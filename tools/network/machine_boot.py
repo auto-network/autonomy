@@ -33,6 +33,37 @@ def completion_input(*, request_id: str, roster_entry_id: str) -> bytes:
     })
 
 
+def _store_delivered_roster(
+    delivery: EnrollmentDelivery,
+    origin,
+    *,
+    anchor_root_pub: str,
+) -> None:
+    """Persist this joiner's own entry, the origin, and the whole active roster.
+
+    The origin pair (this joiner's assigned entry and the approving machine's
+    own) is already verified by the ceremony that produced ``delivery`` and is
+    always stored -- a crash can leave harmless authorization evidence, but
+    never an identity unable to authenticate the origin peer. The additional
+    ``delivery.active_roster`` entries carry the rest of the fleet so a new
+    machine can fetch a first checkpoint from any peer, not only the origin.
+    Each is independently personal-root-signed; verify each against the anchor
+    and skip any that does not, so one malformed extra entry can never abort an
+    otherwise-complete enrollment (``fleet_roster.resolve`` would drop it on
+    read regardless). ``store_entry`` is an idempotent upsert keyed by content
+    id, so overlaps between the origin pair and the active roster are harmless.
+    """
+    for entry in (origin, delivery.roster_entry):
+        if entry is not None:
+            fleet_roster.store_entry(entry, org=None)
+    for entry in delivery.active_roster:
+        try:
+            fleet_roster.verify(entry, anchor_root_pub=anchor_root_pub)
+        except fleet_roster.FleetRosterError:
+            continue
+        fleet_roster.store_entry(entry, org=None)
+
+
 def has_identity(*, org="machine") -> bool:
     """Whether this installation has completed fleet enrollment."""
     return machine_id(org=org) is not None
@@ -81,8 +112,10 @@ def complete_enrollment(
         )
     except (ValueError, TypeError, IdkitError) as exc:
         raise MachineBootError(f"could not accept fleet approval: {exc}") from exc
-    for entry in (delivery.origin_entry, delivery.roster_entry):
-        fleet_roster.store_entry(entry, org=None)
+    _store_delivered_roster(
+        delivery, delivery.origin_entry,
+        anchor_root_pub=request.personal_root_pub,
+    )
     _write_row({"machine_id": assigned_id}, org=org)
     return key
 
@@ -135,12 +168,14 @@ def accept_browser_completion(
         raise MachineBootError(
             f"could not accept browser fleet completion: {exc}"
         ) from exc
-    # Each public record self-verifies against the personal root. Store this
-    # minimum first-peer pair and its machine-local route before adopting
-    # the local identity; a crash can leave harmless authorization evidence
-    # but never an identity unable to authenticate the origin peer.
-    for entry in (origin, delivery.roster_entry):
-        fleet_roster.store_entry(entry, org=None)
+    # Each public record self-verifies against the personal root. Store the
+    # first-peer pair, the rest of the delivered active roster, and this
+    # machine's route before adopting the local identity; a crash can leave
+    # harmless authorization evidence but never an identity unable to
+    # authenticate the origin peer.
+    _store_delivered_roster(
+        delivery, origin, anchor_root_pub=invite.personal_root_pub,
+    )
     fleet_route.store(
         fleet_route.FleetRoute(invite.rendezvous, origin.machine_pub),
         org=org,
