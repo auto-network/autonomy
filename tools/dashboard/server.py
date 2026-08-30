@@ -21136,6 +21136,10 @@ class _FleetJoiningMiddleware(BaseHTTPMiddleware):
         except Exception:
             # Fail OPEN: an unreadable marker must never make the dashboard
             # unnavigable. A node that is not joining is the common case.
+            # LOUD, though — a silent fail-open here is indistinguishable from
+            # "not joining", which is exactly how this middleware appeared to
+            # do nothing while the marker was in fact set.
+            logger.exception("fleet-joining check failed; not redirecting")
             joining = False
         if joining:
             return RedirectResponse(url="/", status_code=307)
