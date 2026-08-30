@@ -1416,8 +1416,11 @@ export function credentialsPanel() {
     // ever sees success + a new row.
     get pendingEnroll() { return this.passkeys.find((k) => this.offerEnroll(k)) || null; },
     async usePasskey() {
-      const p = this.pendingEnroll;
-      if (p) { await this.enrollThisDevice(p); this.pop(); return; }
+      // Add ALWAYS creates a new passkey. Enrolling THIS device into an existing
+      // synced credential is a separate operation with its own screen
+      // (_greetNewDevice -> 'newdevice'), armed by unlock.js when you sign in with
+      // that credential — never the Add button. (The InvalidStateError branch below
+      // still recovers if create() finds the credential already present here.)
       try {
         await this._createPasskey();
         this.pop(); this.flash('Passkey enrolled');
@@ -1880,7 +1883,7 @@ const MARKUP = `
       <div class="ttl"><h1>Add a passkey</h1><div class="sub">On this device</div></div></div>
     <div class="deep">
       <p class="lead">Approve with this device’s screen lock — fingerprint, face, or PIN.</p>
-      <button class="pkbtn" @click="usePasskey()"><svg><use xlink:href="#i-passkey"/></svg> Use your passkey</button>
+      <button class="pkbtn" @click="usePasskey()"><svg><use xlink:href="#i-passkey"/></svg> Create a passkey</button>
       <div class="authrow"><button class="btn btn-ghost" @click="back()">Cancel</button></div>
     </div>
   </div></template>
