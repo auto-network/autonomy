@@ -95,6 +95,7 @@ from tools.graph.schemas.codex_credentials import (
     CODEX_CREDENTIALS_REVISION,
     CODEX_CREDENTIALS_SET_ID,
 )
+from tools.network import fleet_tunnel_server
 
 
 logger = logging.getLogger(__name__)
@@ -725,10 +726,23 @@ async def codex_credentials_refresh_poller() -> None:
     )
     while True:
         try:
-            # refresh_all_credentials logs the per-tick decision basis
-            # itself (rows found / refreshed / failure age), or WARNs on a
-            # zero-row surface — no bare-counter echo here.
-            await asyncio.to_thread(refresh_all_credentials)
+            # dashboard.codex.credentials is a synced personal Setting, same as
+            # Claude's — every Fleet machine sees the same row. Refreshing it
+            # independently on each machine races Anthropic's/OpenAI's
+            # single-use refresh_token rotation, so only the Fleet's singular
+            # tunnel-server machine may run this tick (same gate
+            # claude_credentials_refresh.py and link_serving.py use).
+            eligibility = fleet_tunnel_server.state()
+            if not eligibility.allowed:
+                logger.info(
+                    "codex credentials refresh: skipping tick, not the Fleet "
+                    "tunnel-server machine (reason=%s)", eligibility.reason,
+                )
+            else:
+                # refresh_all_credentials logs the per-tick decision basis
+                # itself (rows found / refreshed / failure age), or WARNs on a
+                # zero-row surface — no bare-counter echo here.
+                await asyncio.to_thread(refresh_all_credentials)
         except asyncio.CancelledError:
             raise
         except Exception:
