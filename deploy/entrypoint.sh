@@ -67,11 +67,11 @@ fi
 python3 -m agents.secret_ramfs || \
     echo "WARNING: secret ramfs provisioning failed — secret delivery and the key cache will fail closed until resolved" >&2
 
-# The key cache and delivery root are dashboard-owned memory-class stores. The
-# dashboard runs as autonomy, so hand the mounted roots to it after the ramfs
-# provisioner verifies them. Per-session delivery subdirectories retain their
-# launcher-assigned ownership and mode 0700.
-chown autonomy:autonomy /run/autonomy-keycache /run/autonomy-secrets 2>/dev/null || true
+# The key cache is a dashboard-owned memory-class store. The dashboard runs
+# as autonomy, so hand the mounted root to it after the ramfs provisioner
+# verifies it. Session secret delivery is per-container-private and needs no
+# host-side store at all.
+chown autonomy:autonomy /run/autonomy-keycache 2>/dev/null || true
 
 # Drop to autonomy and run whatever this container's command is (the
 # dashboard's deploy/serve.sh by default — see the Dockerfile CMD — or the

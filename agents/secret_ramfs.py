@@ -1,18 +1,22 @@
 """Automatic ramfs provisioning for the node's secret stores (auto-pw9bs.4).
 
-Two host ramfs mounts a node needs before it can hold secrets in memory:
+One host ramfs mount the node needs, plus a per-container primitive:
 
-  * DELIVERY  ``/run/autonomy-secrets``  — per-session secret delivery. The
-    trusted dashboard binds the root so the server-side vault-open chokepoint
-    can write an approved plaintext directly; each session sees ONLY its own
-    writable subdirectory at ``/run/secrets``. Unlinking the subdirectory at
-    session end returns the memory (ramfs pages belong to the file, not the
-    writer). The per-session subdir wiring is auto-f51kg.
   * KEY CACHE ``/run/autonomy-keycache`` — the dashboard's own memory-class
     home for opened key material (auto-a1pub). Bound into the dashboard with
     ``rslave`` propagation so this boot-time host mount reaches the running
     container; NEVER bound into a session — a different mount entirely, so a
     session cannot structurally reach it.
+  * SESSION DELIVERY — a PRIVATE ramfs inside each session container's own
+    mount namespace at ``/run/secrets``, created lazily at first delivery
+    and written through one nsenter helper over stdin
+    (:func:`deliver_secret_file`). Proven 2026-08-19 and adopted 2026-08-30
+    after the shared-host-directory design's fourth incident: with no shared
+    root there is no host-visible path for any other process to find or
+    destroy, no per-uid subdirectory scheme, no sudo helper for sessions,
+    and no sweeper reclaim — the kernel frees the private mount when the
+    container dies. The old shared root (``/run/autonomy-secrets``) is
+    retired; only legacy lease rows may still name paths under it.
 
 Both MUST be ramfs, never tmpfs: tmpfs pages swap, and a swap slot cannot be
 wiped from userspace, so a secret on tmpfs can reach disk. ``RAMFS_MAGIC`` /
@@ -27,12 +31,10 @@ Automatic, no operator step:
     mounts ramfs. No ``CAP_SYS_ADMIN`` on the dashboard container itself; the
     socket already is the privilege.
   * Host-native root — mounts directly.
-  * Host-native unprivileged — hands off to a narrow, root-owned sudo helper
-    (``/usr/local/sbin/provision_ramfs``, NOPASSWD-scoped to that exact path;
-    source in ``agents/provision_ramfs.sh``) instead of the containerized
-    path's docker-socket/nsenter dance, which needs a socket this node doesn't
-    have. The helper self-heals the base delivery mount too (mkdir/mount if
-    missing), so no separate systemd unit is needed on this path.
+  * Host-native unprivileged — refused with instructions for a one-time
+    systemd mount unit (or the operator can run the root-owned
+    ``agents/provision_ramfs.sh`` install by hand). This applies to the key
+    cache only; session delivery needs no host mount at all.
 
 Idempotent, every boot: an already-ramfs mount is left alone; ramfs is
 ephemeral across a host reboot, so re-checking every boot is what self-heals.
@@ -58,8 +60,9 @@ from tools.network.storagekit import (
     filesystem_magic,
 )
 
-#: Per-session secret delivery (dashboard binds root; sessions bind own subdir).
-DELIVERY_MOUNT = "/run/autonomy-secrets"
+#: RETIRED shared delivery root. Kept only so legacy lease rows and the
+#: transition sweeper can name it; nothing provisions or binds it anymore.
+LEGACY_DELIVERY_MOUNT = "/run/autonomy-secrets"
 #: The dashboard's own key cache (bound into the dashboard via rslave; never a session).
 KEYCACHE_MOUNT = "/run/autonomy-keycache"
 
@@ -143,117 +146,127 @@ def _mount_host_native(path: str) -> None:
     os.chmod(path, 0o700)
 
 
-# ── Per-session secret delivery subdir (auto-f51kg) ──────────────────────────
-# Each session gets its OWN subdirectory under the delivery ramfs, owned by the
-# session's uid and readable by nobody else, bound into the container at
-# ``SESSION_SECRET_DST``. In ``delivered`` mode the dashboard's single
-# vault-open chokepoint decrypts the exact approved object and writes the
-# plaintext into that host-side subdirectory; only the path enters the tool
-# result. The guard exists for three real reasons — state them right, because a
-# guard with a wrong stated purpose gets deleted by whoever notices it is not
-# real:
-#   1. The dashboard holds plaintext only at the settled decrypt chokepoint and
-#      writes no ordinary filesystem or response-body copy.
-#   2. Plaintext never reaches disk — the subdir is ramfs, never swappable tmpfs
-#      (a tmpfs page can reach a swap slot, and a swap slot cannot be wiped).
-#   3. Cross-session isolation — each container mounts only its own subdir;
-#      mode 0700 and the launcher-assigned owner guard that contract on-host.
-# Provisioning is host-side (the launcher creates the subdir before the container
-# starts; the container binds it with refuse-missing, so a failed mkdir fails the
-# launch rather than yielding a look-alike on-disk directory). Teardown is the
-# launcher's — the component that created it removes it. Per auto-f51kg.
+# ── Per-session secret delivery: a PRIVATE in-container ramfs ────────────────
+# Each session that receives a vault release gets a ramfs mounted INSIDE its
+# own mount namespace at ``SESSION_SECRET_DST`` — invisible in the host mount
+# table and in every other container. The dashboard provisions and writes it
+# in ONE nsenter helper run over the Docker socket it already holds (the
+# socket is the privilege, host-native or containerized alike), with the
+# plaintext transiting only the helper's stdin — never argv, env, or any
+# on-disk docker config. A container that never receives a secret never
+# mounts anything. When the container exits, the kernel frees the mount and
+# its pages; nothing sweeps, so nothing can sweep wrongly.
 
-#: Container-side mount point for a session's own delivery subdir (f51kg spec).
+#: Container-side mount point for a session's own private delivery ramfs.
 SESSION_SECRET_DST = "/run/secrets"
 #: All current session images run their unprivileged agent as uid 1000. Keep
-#: the launcher and delivery guard on one value until per-session host UIDs are
+#: the delivery helper and consumers on one value until per-session uids are
 #: introduced.
 SESSION_SECRET_UID = 1000
 
 _SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
-def _session_dir(session_name: str, base: str) -> str:
-    if not _SESSION_NAME_RE.match(session_name) or session_name in (".", ".."):
-        raise ProvisionError(f"unsafe session name for a secret subdir: {session_name!r}")
-    return f"{base.rstrip('/')}/{session_name}"
+def _validated_name(label: str, value: str) -> str:
+    if not isinstance(value, str) or not _SESSION_NAME_RE.match(value) \
+            or value in (".", ".."):
+        raise ProvisionError(f"unsafe {label} for secret delivery: {value!r}")
+    return value
 
 
-def _session_dir_script(path: str, uid: int) -> str:
+def _container_pid(container: str) -> int:
+    out = subprocess.run(
+        ["docker", "inspect", "--format", "{{.State.Pid}}", container],
+        capture_output=True, text=True, timeout=15,
+    )
+    pid = out.stdout.strip()
+    if out.returncode != 0 or not pid.isdigit() or int(pid) <= 0:
+        raise ProvisionError(
+            f"container {container!r} is not running (no pid): "
+            f"{out.stderr.strip() or pid!r}"
+        )
+    return int(pid)
+
+
+def _container_image(container: str) -> str:
+    out = subprocess.run(
+        ["docker", "inspect", "--format", "{{.Config.Image}}", container],
+        capture_output=True, text=True, timeout=15,
+    )
+    if out.returncode != 0 or not out.stdout.strip():
+        raise ProvisionError(
+            f"could not resolve {container!r}'s image for the delivery "
+            f"helper: {out.stderr.strip()}"
+        )
+    return out.stdout.strip()
+
+
+def _deliver_script(filename: str, uid: int) -> str:
+    """One shell script, run inside the TARGET container's mount namespace:
+    ensure the private ramfs (mounting fresh, INCLUDING over an orphaned
+    ``//deleted`` bind left by the retired shared-root design — the
+    writability probe is what detects that state), verify it is ramfs and
+    not swappable tmpfs, then write stdin to the named file atomically at
+    0600. Fails closed at every step."""
     ramfs = f"{RAMFS_MAGIC:x}"
     tmpfs = f"{TMPFS_MAGIC:x}"
+    p = SESSION_SECRET_DST
     return (
-        f'set -e; mkdir -p "{path}"; chown {int(uid)}:{int(uid)} "{path}"; chmod 0700 "{path}"; '
-        f'm=$(stat -f -c %t "{path}"); '
+        f'set -e; mkdir -p "{p}" 2>/dev/null || true; '
+        f'm=$(stat -f -c %t "{p}" 2>/dev/null || echo none); '
+        # A healthy private ramfs is writable; an orphaned deleted-root bind
+        # is ramfs by magic but every write fails — mount fresh over either
+        # a non-ramfs or an unwritable one.
+        f'if [ "$m" != "{ramfs}" ] || ! touch "{p}/.w" 2>/dev/null; '
+        f'then mount -t ramfs ramfs "{p}"; else rm -f "{p}/.w"; fi; '
+        f'm=$(stat -f -c %t "{p}"); '
         f'case "$m" in '
+        f'{tmpfs}) echo "REFUSE: {p} is tmpfs, swappable" >&2; exit 4 ;; '
         f'{ramfs}) : ;; '
-        f'{tmpfs}) echo "REFUSE: {path} is tmpfs (0x{tmpfs}), swappable — a secret here can reach disk" >&2; exit 4 ;; '
-        f'*) echo "REFUSE: {path} is not ramfs (magic 0x$m)" >&2; exit 3 ;; '
-        f'esac'
+        f'*) echo "REFUSE: {p} is not ramfs (magic 0x$m)" >&2; exit 3 ;; '
+        f'esac; '
+        f'chown {int(uid)}:{int(uid)} "{p}"; chmod 0700 "{p}"; '
+        f'umask 077; cat > "{p}/{filename}.tmp"; '
+        f'chown {int(uid)}:{int(uid)} "{p}/{filename}.tmp"; '
+        f'chmod 0600 "{p}/{filename}.tmp"; '
+        f'mv -f "{p}/{filename}.tmp" "{p}/{filename}"'
     )
 
 
-#: Root-owned, non-writable-by-us copy of agents/provision_ramfs.sh — sudo is
-#: only a real privilege boundary if the calling user can't also edit the
-#: script it grants root on (see NOPASSWD line in /etc/sudoers.d/provision-ramfs).
-_SUDO_HELPER = "/usr/local/sbin/provision_ramfs"
+def deliver_secret_file(
+    container: str,
+    filename: str,
+    data: bytes,
+    *,
+    uid: int = SESSION_SECRET_UID,
+    timeout: int = 60,
+) -> str:
+    """Write *data* into *container*'s private delivery ramfs as *filename*.
 
-
-def _provision_via_sudo_helper(path: str, uid: int) -> None:
-    """Host-native, unprivileged, no docker socket to borrow root from: hand off
-    to the narrow root helper instead of failing outright. Still fails closed —
-    a helper error still raises — but the caller (session_launcher) treats that
-    as best-effort and launches the session anyway, without the secret mount."""
+    Provisions (or heals) the in-container ramfs and writes the file in ONE
+    privileged helper run: ``nsenter`` into the target container's mount
+    namespace via the Docker socket, plaintext piped over stdin only. The
+    helper reuses the target's own image (every session image carries
+    nsenter). Returns the container-visible path. Raises
+    :class:`ProvisionError` on any failure — the caller decides policy.
+    """
+    _validated_name("container", container)
+    _validated_name("filename", filename)
+    pid = _container_pid(container)
+    image = _container_image(container)
     r = subprocess.run(
-        ["sudo", "-n", _SUDO_HELPER, path, str(int(uid))],
-        capture_output=True, text=True, timeout=15,
+        ["docker", "run", "--rm", "-i", "--privileged", "--pid=host",
+         "--entrypoint", "nsenter", image,
+         "-t", str(pid), "-m", "--", "sh", "-c",
+         _deliver_script(filename, uid)],
+        input=data, capture_output=True, timeout=timeout,
     )
     if r.returncode != 0:
         raise ProvisionError(
-            f"cannot create {path} via {_SUDO_HELPER}: {(r.stderr or r.stdout).strip()}"
+            f"secret delivery into {container!r} failed (rc={r.returncode}): "
+            f"{(r.stderr or r.stdout).decode(errors='replace').strip()}"
         )
-
-
-def provision_session_dir(session_name: str, uid: int, *, base: str = DELIVERY_MOUNT) -> str:
-    """Create *session_name*'s own writable ramfs subdir under the delivery mount,
-    owned by *uid* (mode 0700), and return its host path. Fails closed: the subdir
-    must be ramfs afterward. The caller binds this ``src`` with refuse-missing, so
-    a helper failure fails the launch rather than yielding a writable on-disk
-    directory that looks identical and is not memory-backed. Note this function
-    still raises on failure — it is the CALLER's job (session_launcher) to treat
-    that as best-effort and launch without secrets rather than fail the session;
-    this function has no business deciding that policy for every caller."""
-    path = _session_dir(session_name, base)
-    if _own_container_id() is not None and Path(_DOCKER_SOCKET).exists():
-        _run_in_host_mount_ns(
-            _session_dir_script(path, uid), what=f"provision session secret dir {path}"
-        )
-    elif os.geteuid() == 0:
-        Path(path).mkdir(parents=True, exist_ok=True)
-        os.chown(path, int(uid), int(uid))
-        os.chmod(path, 0o700)
-        assert_memory_backed(path)  # ramfs only; tmpfs refused by name
-    else:
-        _provision_via_sudo_helper(path, uid)
-    return path
-
-
-def teardown_session_dir(session_name: str, *, base: str = DELIVERY_MOUNT) -> None:
-    """Unlink a session's secret subdir to return its ramfs memory. The LAUNCHER's
-    job: the component that created it removes it (a sweeper is only a
-    died-launcher backstop, since ramfs pages belong to the file, not the writer).
-    Best-effort — teardown must never raise into session cleanup."""
-    try:
-        path = _session_dir(session_name, base)
-    except ProvisionError:
-        return
-    try:
-        if _own_container_id() is not None and Path(_DOCKER_SOCKET).exists():
-            _run_in_host_mount_ns(f'rm -rf "{path}"', what=f"teardown session secret dir {path}", timeout=30)
-        elif os.geteuid() == 0:
-            subprocess.run(["rm", "-rf", path], timeout=15)
-    except (ProvisionError, subprocess.SubprocessError, OSError):
-        pass
+    return f"{SESSION_SECRET_DST}/{filename}"
 
 
 def daemon_missing(paths: list) -> "list | None":
@@ -337,8 +350,9 @@ def provision(path: str, *, container_bound: bool) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    # Both trusted dashboard roots are bound into us via rslave.
-    targets = [(DELIVERY_MOUNT, True), (KEYCACHE_MOUNT, True)]
+    # The key cache is bound into the dashboard via rslave; session
+    # delivery is per-container and needs no boot-time provisioning.
+    targets = [(KEYCACHE_MOUNT, True)]
     for path, bound in targets:
         try:
             provision(path, container_bound=bound)

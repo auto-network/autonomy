@@ -111,17 +111,12 @@ services:
       # same one session-launching needs); without it the mount stays an empty
       # dir and the vault's per-write ramfs check fails closed.
       #
-      # The delivery root is also bound into the trusted dashboard because the
-      # settled vault-open chokepoint decrypts the exact approved Setting there
-      # and writes it directly into the requester's per-session ramfs. Sessions
-      # still mount only their own subdirectory at /run/secrets. Both binds use
-      # rslave so a ramfs provisioned after container start propagates in.
-      - type: bind
-        source: /run/autonomy-secrets
-        target: /run/autonomy-secrets
-        bind:
-          propagation: rslave
-          create_host_path: true
+      # There is deliberately NO shared secret-delivery bind here: session
+      # delivery is a PRIVATE ramfs inside each session container's own mount
+      # namespace, written via the Docker socket at release time
+      # (agents.secret_ramfs.deliver_secret_file). A shared delivery root gave
+      # every dashboard on the daemon the power to destroy every session's
+      # secrets — the 2026-08-30 four-incident class — and must not return.
       - type: bind
         source: /run/autonomy-keycache
         target: /run/autonomy-keycache
