@@ -244,11 +244,47 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     ]
     if len(raw_rows) != 3:
         raise ProofFailure("raw Settings read did not return all three reservations")
-    for member in raw_rows:
+    raw_by_key = {member["key"]: member for member in raw_rows}
+    expected_projections = (docs, released, direct_released)
+    for projection in expected_projections:
+        member = raw_by_key.get(projection["reservation_id"])
+        if member is None:
+            raise ProofFailure(
+                f"raw Settings omitted reservation {projection['reservation_id']}"
+            )
         payload = member.get("payload") or {}
         forbidden = {"reservation_id", "org", "organization", "origin"} & set(payload)
         if forbidden:
             raise ProofFailure(f"raw payload repeats authority/identity fields: {forbidden}")
+        expected_payload_fields = {
+            "persona_label": projection["persona_label"],
+            "app_label": projection["app_label"],
+            "state": projection["state"],
+            "created_at": projection["created_at"],
+            "updated_at": projection["updated_at"],
+        }
+        if "released_at" in projection:
+            expected_payload_fields["released_at"] = projection["released_at"]
+        for field, expected in expected_payload_fields.items():
+            if payload.get(field) != expected:
+                raise ProofFailure(
+                    f"raw Settings {projection['reservation_id']} has stale {field}: "
+                    f"expected {expected!r}, got {payload.get(field)!r}"
+                )
+        if "released_at" not in projection and "released_at" in payload:
+            raise ProofFailure(
+                f"active raw Settings row {projection['reservation_id']} carries released_at"
+            )
+
+    final_by_key = {
+        row["reservation_id"]: row for row in final.get("reservations", [])
+    }
+    for projection in expected_projections:
+        if final_by_key.get(projection["reservation_id"]) != projection:
+            raise ProofFailure(
+                f"final reservation list disagrees with transition projection "
+                f"{projection['reservation_id']}"
+            )
 
     evidence = {
         "ok": True,
