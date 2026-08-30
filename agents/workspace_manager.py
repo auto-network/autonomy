@@ -1004,6 +1004,30 @@ def _orgs_mount_context(topo) -> "tuple[str, str | None, bool] | None":
     return None
 
 
+def _machine_located_mount_source(key: str, org: str) -> str | None:
+    """Where THIS machine says a machine-located mount sits.
+
+    The org row declares that the mount exists; an ``autonomy.artifact-path``
+    row keyed ``<org>:<mount-name>`` in this machine's own store says where.
+    Returns None when this machine does not declare it — including when no
+    machine store exists here at all — which simply means this machine does
+    not have the mount.
+    """
+    from tools.graph import ops
+    from tools.graph.db import GraphDBMissing
+    from agents.workspace_settings import ARTIFACT_PATH_SET_ID
+
+    mount_name = key.split(":", 1)[1] if ":" in key else key
+    try:
+        row = ops.read_set_key(
+            ARTIFACT_PATH_SET_ID, f"{org}:{mount_name}", org="machine", peers=[],
+        )
+    except GraphDBMissing:
+        return None
+    path = ((row or {}).get("payload") or {}).get("path")
+    return str(path) if isinstance(path, str) and path else None
+
+
 def _mount_is_node_storage(payload) -> bool:
     """A writable directory mount is STORAGE the node provides.
 
@@ -1170,6 +1194,71 @@ class VolumeMountReadinessIssue:
     remediation_params: dict = field(default_factory=dict)
 
 
+def _check_machine_located_mount_readiness(*, key: str, typed, org: str):
+    """Findings for a machine-located mount, on THIS machine's terms.
+
+    The finding names the exact artifact-path row to write, so the step
+    that would have said "provision this" is never skipped: a machine
+    without the row does not have the mount (advisory when optional,
+    blocking when required), and a row whose path is absent or of the
+    wrong type is a provisioning error either way.
+    """
+    mount_name = key.split(":", 1)[1] if ":" in key else key
+    subject = f"autonomy.artifact-path {org}:{mount_name}"
+    source = _machine_located_mount_source(key, org)
+    if source is None:
+        return (VolumeMountReadinessIssue(
+            "missing_path",
+            f"this machine declares no location for the mount — write "
+            f"{subject} with the local path, or leave it absent if this "
+            f"machine does not have the content",
+            "path",
+            subject,
+            "this machine's own store",
+            "blocking" if typed.required else "advisory",
+            frame="platform-host",
+        ),)
+    if not mount_plan.discover_topology().is_host_process:
+        # The declared path is in the daemon's frame; a containerized node
+        # cannot stat it. Say so rather than answer from the wrong
+        # filesystem — the launch preflight verifies it in the right frame.
+        return (VolumeMountReadinessIssue(
+            "unanswerable_here",
+            f"cannot verify {source!r} from a containerized node; the "
+            f"launch preflight checks it in the daemon's frame",
+            "path",
+            source,
+            "the daemon host's filesystem",
+            frame="container-fs",
+        ),)
+    exists = os.path.exists(source)
+    if not exists:
+        return (VolumeMountReadinessIssue(
+            "missing_path",
+            f"{subject} points at {source!r}, which is not present",
+            "path",
+            source,
+            "this machine's filesystem",
+            "blocking" if typed.required else "advisory",
+            frame="platform-host",
+        ),)
+    if typed.kind == "dir" and not os.path.isdir(source):
+        return (VolumeMountReadinessIssue(
+            "invalid_mount",
+            f"declares kind=dir but {source} is not a directory",
+            "path", source, "this machine's filesystem",
+            frame="platform-host",
+        ),)
+    if typed.kind == "file" and not os.path.isfile(source):
+        return (VolumeMountReadinessIssue(
+            "invalid_mount",
+            f"declares kind=file but {source} is not a regular file",
+            "path", source, "this machine's filesystem",
+            frame="platform-host",
+        ),)
+    return ()
+
+
 def check_org_mount_readiness(*, key: str, payload: dict, org: str):
     """Check a VOLUME-origin mount through the exact launch resolver.
 
@@ -1182,6 +1271,8 @@ def check_org_mount_readiness(*, key: str, payload: dict, org: str):
     from tools.graph.schemas.mount import WorkspaceMountV2
 
     typed = WorkspaceMountV2.model_validate(payload)
+    if typed.subpath is None and typed.host_path is None:
+        return _check_machine_located_mount_readiness(key=key, typed=typed, org=org)
     if typed.subpath is None:
         return ()
     subject = f"orgs/{org}/{typed.subpath}"
@@ -1298,7 +1389,7 @@ def _apply_workspace_mount_settings(
                 continue
             host_path, container_spec, _node_path = spec
             mounts[host_path] = container_spec
-        else:
+        elif payload.host_path is not None:
             # Deprecated host_path fallback (pre-fteke HOST behavior).
             host = Path(payload.host_path)
             if not host.exists():
@@ -1313,6 +1404,79 @@ def _apply_workspace_mount_settings(
                 )
                 continue
             mounts[str(host)] = f"{payload.container_path}:{payload.mode}"
+        else:
+            # MACHINE-LOCATED: the org row carries no location; this
+            # machine's own artifact-path row supplies it. No row means
+            # this machine does not have the mount.
+            if not org:
+                raise WorkspaceMountInvalidError(
+                    mount_key=key,
+                    reason="workspace has no org (graph_project) to resolve "
+                           "a machine-located mount for",
+                )
+            source = _machine_located_mount_source(key, org)
+            descriptor = (
+                f"autonomy.artifact-path "
+                f"{org}:{key.split(':', 1)[1] if ':' in key else key} "
+                f"(this machine's store)"
+            )
+            if source is None:
+                if payload.required:
+                    raise WorkspaceMountMissingError(
+                        mount_key=key, origin_org=rs.org, state=rs.state,
+                        host_path=descriptor,
+                        container_path=payload.container_path,
+                    )
+                logger.debug(
+                    "workspace: machine-located mount %s not declared on "
+                    "this machine — skipping", key,
+                )
+                continue
+            # The declared path is in the DAEMON'S frame — where docker
+            # binds from. A host-process node can (and must) verify it; a
+            # containerized node cannot see that frame, so it emits the
+            # strict bind unverified and the launch preflight — which
+            # checks sources in the daemon frame — plus refuse-missing
+            # semantics are the guards. Never a node-frame exists() on a
+            # containerized node: that is the wrong-frame op this epic
+            # removed.
+            if not orgs_ctx_ready:
+                _topology = mount_plan.discover_topology()
+                orgs_ctx = _orgs_mount_context(_topology)
+                orgs_ctx_ready = True
+            else:
+                _topology = None
+            is_host_process = (
+                _topology.is_host_process if _topology is not None
+                else (orgs_ctx is not None and orgs_ctx[2])
+            )
+            if is_host_process:
+                host = Path(source)
+                if not host.exists():
+                    if payload.required:
+                        raise WorkspaceMountMissingError(
+                            mount_key=key, origin_org=rs.org, state=rs.state,
+                            host_path=source,
+                            container_path=payload.container_path,
+                        )
+                    logger.debug(
+                        "workspace: machine-located mount %s path %s absent "
+                        "— skipping", key, source,
+                    )
+                    continue
+                if payload.kind == "dir" and not host.is_dir():
+                    raise WorkspaceMountInvalidError(
+                        mount_key=key,
+                        reason=f"declares kind=dir but {source} is not a "
+                               f"directory")
+                if payload.kind == "file" and not host.is_file():
+                    raise WorkspaceMountInvalidError(
+                        mount_key=key,
+                        reason=f"declares kind=file but {source} is not a "
+                               f"regular file")
+            mounts[source] = mount_plan.BindRefuseMissing(
+                f"{payload.container_path}:{payload.mode}"
+            )
 
 
 # ── Session teardown ──────────────────────────────────────────────
