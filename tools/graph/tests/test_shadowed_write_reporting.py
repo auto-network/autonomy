@@ -46,6 +46,15 @@ def probe_schema():
         a: str = field(required=True, description="a")
         b: str = field(required=True, description="b")
 
+    @keyed_per_entity(key_strategy="probe_id")
+    class Probe2(Probe):
+        set_id = "probe.shadow.value"
+        schema_revision = 2
+
+        @classmethod
+        def upconvert_from_prev(cls, payload):
+            return dict(payload)
+
     return Probe, Wide
 
 
@@ -96,6 +105,54 @@ def test_the_report_is_taken_once(orgs):
 
     assert settings_ops.take_shadowed_write("probe.shadow.value", "once")
     assert settings_ops.take_shadowed_write("probe.shadow.value", "once") is None
+
+
+def test_a_revision_migration_write_is_not_reported_backwards(orgs):
+    """The normal transient state of a revision migration: one key holds a
+    rev-1 and a rev-2 base at the same rung. The resolver is revision-aware
+    (higher revision wins), so the freshly migrated rev-2 row is the row
+    everything reads — reporting it as shadowed by the rev-1 row it just
+    replaced is the check disagreeing with the thing it checks (host
+    finding, 2026-08-30), and its advice ('remove the row') then deletes
+    the migrated row."""
+    settings_ops.add_setting("probe.shadow.value", 1, "mig", {"v": "old"},
+                             org="acme", state="raw")
+    settings_ops.add_setting("probe.shadow.value", 2, "mig", {"v": "new"},
+                             org="acme", state="raw")
+
+    assert settings_ops.take_shadowed_write("probe.shadow.value", "mig") is None
+
+
+def test_writing_the_old_revision_under_a_newer_one_is_reported(orgs):
+    """The mirror case is a real shadow: a rev-1 write under an existing
+    rev-2 base loses to it, exactly as the resolver ranks."""
+    settings_ops.add_setting("probe.shadow.value", 2, "back", {"v": "new"},
+                             org="acme", state="raw")
+    settings_ops.add_setting("probe.shadow.value", 1, "back", {"v": "old"},
+                             org="acme", state="raw")
+
+    shadow = settings_ops.take_shadowed_write("probe.shadow.value", "back")
+    assert shadow is not None
+
+
+def test_remove_by_key_refuses_an_ambiguous_key(orgs, capsys):
+    """`set remove <set_id> <key>` with two live bases under the key must
+    refuse and name ids — resolution picks the migration's NEW row, so
+    'remove by key' during a migration silently deletes the row just
+    migrated to (host finding, 2026-08-30)."""
+    from types import SimpleNamespace
+
+    settings_ops.add_setting("probe.shadow.value", 1, "amb", {"v": "old"},
+                             org="acme", state="raw")
+    settings_ops.add_setting("probe.shadow.value", 2, "amb", {"v": "new"},
+                             org="acme", state="raw")
+
+    args = SimpleNamespace(id_parts=["probe.shadow.value", "amb"], org="acme")
+    with pytest.raises(SystemExit):
+        set_cmd.cmd_set_remove(args)
+    err = capsys.readouterr().err
+    assert "2 live base row(s)" in err
+    assert "rev=1" in err and "rev=2" in err
 
 
 # ── delivery ─────────────────────────────────────────────────

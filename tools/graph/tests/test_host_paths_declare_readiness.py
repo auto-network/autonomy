@@ -60,6 +60,12 @@ NOT_A_HOST_PATH = {
         "repo-local, so it resolves against a checkout rather than a machine",
     ("dashboard.session.upload", "rel_path"):
         "relative to the session run dir, and served through a route",
+    ("autonomy.vault.release-lease", "host_path"):
+        "an operational ledger locator: the platform creates the delivered "
+        "file and the sweeper destroys it; nothing is operator-provisioned "
+        "there and a shredded lease's absent file is the CORRECT state",
+    ("autonomy.vault.release-lease", "container_path"):
+        "inside the container, carried for the audit only",
 }
 
 

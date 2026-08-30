@@ -1137,6 +1137,36 @@ def _report_rows_left_for(set_id: str, key: str, org) -> None:
 
 
 def cmd_set_remove(args) -> None:
+    # Removing BY KEY is refused when the key is ambiguous. Resolution picks
+    # the winning row, and during a revision migration the winner is the row
+    # you just migrated TO — so "remove the old row by key" silently deleted
+    # the new one and left the legacy row resolving again (host finding,
+    # 2026-08-30). More than one live base under the key → name an id.
+    parts = list(getattr(args, "id_parts", []) or [])
+    if len(parts) == 2:
+        try:
+            from tools.graph import settings_ops
+            layers = settings_ops.layers_for(parts[0], parts[1], org=_org(args))
+        except Exception:
+            layers = None
+        shadowed = (layers or {}).get("shadowed_bases") or []
+        if shadowed:
+            base = (layers or {}).get("base") or {}
+            print(
+                f"Error: {parts[1]!r} holds {1 + len(shadowed)} live base "
+                f"row(s); removing 'whichever resolves' is never what a "
+                f"migration wants. Name the id:",
+                file=sys.stderr,
+            )
+            for entry in [base, *shadowed]:
+                if entry.get("id"):
+                    print(
+                        f"    {entry['id']}  rev={entry.get('schema_revision')} "
+                        f" [{entry.get('state')}]"
+                        + ("  <- currently resolves" if entry is base else ""),
+                        file=sys.stderr,
+                    )
+            sys.exit(1)
     sid = _resolve_address(args)
     # Captured BEFORE the removal: afterwards the row is gone and, if it was
     # the base, its key stops resolving -- so there would be nothing left to
