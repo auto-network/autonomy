@@ -62,13 +62,23 @@ SYNOPSIS = {
 _VALID_HARNESSES = {"claude", "codex"}
 
 
+#: Components of a derived local-repository path (org slug, workspace id).
+#: Must mirror ``_LOCAL_WORKSPACE_COMPONENT_RE`` in
+#: ``agents.workspace_manager`` — the launch-side store refuses anything
+#: else (this layer cannot import agents; a test asserts the two patterns
+#: stay identical).
+LOCAL_REPO_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
 class WorkspaceRepoV1(SettingSchema):
     """One repository mounted into a workspace.
 
-    A repository is identified one of two ways, and exactly one: by ``host``
-    and ``repo`` on a git host, or by ``local_path`` for a local-first
-    repository that has no remote at all. The clone URL is composed from
-    whichever form is present.
+    A repository is identified one of three ways, and exactly one: by
+    ``host`` and ``repo`` on a git host; by ``local: true`` for THE
+    workspace's dashboard-managed local repository (no remote — location
+    derived on the consuming node, never stored); or by the DEPRECATED
+    absolute ``local_path``. The clone URL is composed from whichever form
+    is present.
 
     The host is stored rather than parsed back out of a clone URL because it
     is part of the remote's address and may be an SSH config alias.  It is
@@ -103,19 +113,31 @@ class WorkspaceRepoV1(SettingSchema):
             "every hosted forge; a private server may use another"
         ),
     )
+    local: bool = field(
+        required=False,
+        description=(
+            "True marks this entry as the workspace's dashboard-managed "
+            "local repository (no remote). It stores no location: the "
+            "consuming node derives data/workspace-repos/<owning-org>/"
+            "<workspace-id> and creates the bare repository at first "
+            "launch when missing. The worktree/commit/merge machinery "
+            "applies exactly as to a remote repo. Exactly one of "
+            "host+repo, local, or the deprecated local_path names a "
+            "repository."
+        ),
+    )
     local_path: str = field(
         required=False,
         exists="dir",
         exists_frame="platform-host",
         remediation=RemediationRef("workspace.declared-path.v1"),
         description=(
-            "Absolute host path of a local-first repository that has no "
-            "remote. Mutually exclusive with host and repo. The "
-            "declaration is the authority: a missing path is created at "
-            "first launch (bare repository, main branch, initial commit) "
-            "— so a missing_path finding here means 'will be created', "
-            "not 'blocked'. Convention home: data/workspace-repos/"
-            "<org>/<workspace-id>."
+            "DEPRECATED absolute host path of a local-first repository — "
+            "an org row must not carry a machine path (true on one "
+            "computer, false on the next); declare 'local: true' instead. "
+            "Kept only until existing rows are rewritten, then deleted. "
+            "On the machine where the path is real, semantics are "
+            "unchanged: a missing path is created at first launch."
         ),
     )
     mount: str = field(
@@ -132,7 +154,11 @@ class WorkspaceRepoV1(SettingSchema):
         exists_frame="platform-host",
         severity="advisory",
         remediation=RemediationRef("workspace.declared-path.v1"),
-        description="Absolute host path to clone from instead of the remote",
+        description=(
+            "DEPRECATED absolute host path to clone from instead of the "
+            "remote. Advisory-only (absent means track the remote) and "
+            "machine-local by nature; slated for deletion once unused."
+        ),
     )
 
 
@@ -141,30 +167,37 @@ def _validate_repo(repo: Any, idx: int) -> None:
 
     Field names, types and unknown-field rejection are declared on
     :class:`WorkspaceRepoV1` and enforced from its metadata. What is left
-    is a cross-field rule -- a repository is on a git host or it is local,
-    never both and never neither -- and the requirement that host paths be
-    absolute.
+    is a cross-field rule -- a repository is on a git host, the managed
+    local one, or a deprecated pathful local one; exactly one form -- and
+    the requirement that host paths be absolute.
+
+    ``local: true`` is a compatible in-place addition (optional field,
+    safe default) per the rule documented on the mount schema's rev-2
+    ``visibility`` field: an old payload validates unchanged, and a new
+    payload only reaches code that knows the field. Deleting the
+    deprecated fields later is the real revision-worthy change.
     """
     if not isinstance(repo, dict):
         return
     remote = bool(repo.get("host")) or bool(repo.get("repo"))
-    local = bool(repo.get("local_path"))
-    if remote and local:
+    pathful = bool(repo.get("local_path"))
+    managed = repo.get("local") is True
+    if remote + pathful + managed > 1:
         raise SchemaValidationError(
-            f"repos[{idx}] sets both a git host and a local path; "
-            f"a repository is one or the other"
+            f"repos[{idx}] mixes repository forms; give 'host'+'repo', "
+            f"'local: true', or the deprecated 'local_path' — exactly one"
         )
     if remote and not (repo.get("host") and repo.get("repo")):
         raise SchemaValidationError(
             f"repos[{idx}] needs both 'host' and 'repo' to name a "
             f"repository on a git host"
         )
-    if not remote and not local:
+    if not (remote or pathful or managed):
         raise SchemaValidationError(
             f"repos[{idx}] names no repository: give 'host' and 'repo', "
-            f"or 'local_path'"
+            f"'local: true', or the deprecated 'local_path'"
         )
-    if local and not str(repo["local_path"]).startswith("/"):
+    if pathful and not str(repo["local_path"]).startswith("/"):
         raise SchemaValidationError(
             f"repos[{idx}].local_path must be an absolute path, "
             f"got {repo['local_path']!r}"

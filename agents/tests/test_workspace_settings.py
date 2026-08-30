@@ -269,6 +269,70 @@ def test_parse_repo_rejects_empty_base_source():
         )
 
 
+def test_parse_repo_local_true_resolves_under_node_store():
+    repo = _parse_repo(
+        {"local": True, "mount": "/workspace/board", "writable": True},
+        "my-board", 0, "personal",
+    )
+    assert repo.local is True
+    assert repo.local_path == str(
+        workspace_settings.LOCAL_WORKSPACE_REPOS_ROOT / "personal" / "my-board"
+    )
+    # Downstream consumers read the same surface as a pathful local repo.
+    assert repo.url == repo.local_path
+
+
+def test_parse_repo_local_true_requires_owning_org():
+    with pytest.raises(WorkspaceSettingsError, match="owning org"):
+        _parse_repo({"local": True, "mount": "/m"}, "my-board", 0, None)
+
+
+def test_parse_repo_local_true_refuses_non_slug_components():
+    for org, wid in (("personal", "Bad/Name"), ("..", "my-board")):
+        with pytest.raises(WorkspaceSettingsError, match="invalid local"):
+            _parse_repo({"local": True, "mount": "/m"}, wid, 0, org)
+
+
+def test_parse_repo_local_false_is_plain_absence():
+    repo = _parse_repo(
+        {"host": "github.com", "repo": "a/b", "mount": "/m"}, "w", 0, "personal",
+    )
+    assert repo.local is False and repo.local_path is None
+
+
+def test_local_repo_store_cannot_split_from_workspace_manager():
+    """One store root and one slug rule, resolver and manager alike."""
+    from tools.graph.schemas.workspace import LOCAL_REPO_NAME_RE
+
+    assert (
+        workspace_settings.LOCAL_WORKSPACE_REPOS_ROOT
+        == workspace_manager.LOCAL_WORKSPACE_REPOS_DIR
+    )
+    assert (
+        workspace_manager._LOCAL_WORKSPACE_COMPONENT_RE.pattern
+        == LOCAL_REPO_NAME_RE.pattern
+    )
+
+
+def test_workspace_from_setting_resolves_local_repo_via_owning_org():
+    ws = _workspace_from_setting(
+        {
+            "name": "Board",
+            "image": "img",
+            "repos": [{"local": True, "mount": "/workspace/board",
+                       "writable": True}],
+        },
+        workspace_id="my-board",
+        graph_project="personal",
+        artifacts=(),
+        mounts={},
+    )
+    assert ws.repos[0].local is True
+    assert ws.repos[0].local_path == str(
+        workspace_settings.LOCAL_WORKSPACE_REPOS_ROOT / "personal" / "my-board"
+    )
+
+
 def test_workspace_from_setting_propagates_repo_base_source():
     workspace = _workspace_from_setting(
         {
