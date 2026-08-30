@@ -347,12 +347,14 @@ _PRODUCTION_ROWS = (
      ApprovalExpiryPolicy(ExpiryMode.TRUSTED_SOURCE_DEADLINE)),
     ("external_service_access", None, RequesterPolicy.INTERNAL_PRODUCER,
      AuthorityRequirement.OPERATOR_SESSION, ApprovalExpiryPolicy(ExpiryMode.NEVER)),
+    # FIXED, not BOUNDED-on-ttl: the pending approval waits a generous fixed
+    # window for the OPERATOR (a human tapping a phone). The request's
+    # ``ttl_seconds`` is the delivered credential's ramfs LIFETIME, applied
+    # from delivery — not how long the human has to approve. Conflating the
+    # two rejected slow-but-valid approvals (2026-08-30).
     ("vault_open", "vault", RequesterPolicy.SESSION_PRINCIPAL,
      AuthorityRequirement.VAULT_POLICY,
-     ApprovalExpiryPolicy(
-         ExpiryMode.BOUNDED, minimum_seconds=1, maximum_seconds=300,
-         default_seconds=60,
-     )),
+     ApprovalExpiryPolicy(ExpiryMode.FIXED, fixed_seconds=300)),
 )
 
 

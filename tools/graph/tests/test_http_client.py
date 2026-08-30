@@ -66,8 +66,8 @@ def test_request_vault_open_derives_session_server_side_and_returns_receipt():
                     "receipt": {
                         "release_id": "open-1",
                         "delivery": "session-ramfs",
-                        "path": "/run/secrets/vault-open-open-1.json",
-                        "expires_at": 123,
+                        "path": "/run/secrets/mac.ssh",
+                        "ttl_seconds": 60,
                     },
                 },
             },
@@ -81,8 +81,8 @@ def test_request_vault_open_derives_session_server_side_and_returns_receipt():
     assert receipt == {
         "release_id": "open-1",
         "delivery": "session-ramfs",
-        "path": "/run/secrets/vault-open-open-1.json",
-        "expires_at": 123,
+        "path": "/run/secrets/mac.ssh",
+        "ttl_seconds": 60,
     }
     assert captured[0][2] == {
         "kind": "vault_open",

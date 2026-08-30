@@ -1,66 +1,74 @@
-"""Close the ledger on ended releases, and reconcile across restarts.
+"""Destroy delivered credentials at their TTL, and close the ledger.
 
-The application-state half of secret delivery (auto-pw9bs.5), reduced to
-BOOKKEEPING on 2026-08-30: a delivered secret now lives in the requesting
-container's own PRIVATE mount-namespace ramfs, which the kernel frees the
-instant the container exits. There is no shared host directory, so there is
-nothing on disk for this module to destroy — and therefore nothing it can
-destroy wrongly.
+A vault release delivers a credential into the requesting container's OWN
+private ramfs (``agents.secret_ramfs.deliver_secret_file``) with a lifetime
+the requester chose (``ttl_seconds``). This module enforces that lifetime:
+when a lease is past its deadline it removes THAT ONE file from THAT ONE
+container, addressed by the exact ``(session, container_path)`` the durable
+lease recorded — via ``destroy_secret_file``'s nsenter unlink.
 
-That reduction is the fix for a four-incident class (Aug 23/27/28/30): the
-old design kept every session's delivery directory in ONE shared host ramfs
-that every dashboard on the daemon could see and sweep, each trusting its
-own machine-local tmux for liveness — so any sibling dashboard (another
-node, a stray worker) reclaimed every live session's secrets at the first
-tick past the grace window, silently. The record of that lesson lives here
-so the shared-root design does not come back: destruction of another
-process's delivery must be STRUCTURALLY impossible, not carefully avoided.
+Why this cannot repeat the four-incident shared-root class (Aug 23–30): it
+never enumerates a directory and never infers what to delete from liveness.
+The old design kept every session's secret in ONE shared host ramfs that any
+dashboard could scan and reclaim on its own machine-local tmux guess, so a
+sibling dashboard destroyed every live session's secrets. Here, destruction
+is per-file, driven by this node's own ledger, and reaches only the exact
+path this node delivered. A file for a container that has already exited is
+gone with the kernel-freed mount — absence is success.
 
-What remains is the value-free lease ledger: rows must not stay
-``outstanding`` forever once their session is gone. The sweep marks them
-``orphaned`` (or ``session_end`` via the launcher's hook) — a pure record
-transition. Legacy rows written by the retired shared-root design may still
-name a real host path; those get a best-effort unlink on close, which
-touches only paths this node's own ledger recorded.
-
-``session_exists`` is injected rather than imported so the sweeper is a
-pure function of (store, clock, liveness). ``None`` means the caller could
-not answer liveness this tick; rows are then left outstanding — a stale
-ledger row is noise, but a wrong transition is a lie in the audit.
+``session_exists`` is injected for the orphan-close bookkeeping only (a lease
+whose session vanished before its deadline); it never drives destruction.
+``None`` means liveness was unanswerable this tick — those bookkeeping
+closes simply wait; deadline destruction is unaffected because it needs no
+liveness at all.
 """
 
 from __future__ import annotations
 
 import logging
+import posixpath
 import time
-from pathlib import Path
 from typing import Callable
 
 from tools.dashboard.dao import vault_releases
 
 logger = logging.getLogger(__name__)
 
-#: How often the live sweep runs.
+#: How often the live sweep runs. A credential is destroyed by its TTL
+#: deadline plus at most one interval.
 SWEEP_INTERVAL_S = 30
 
-#: Prefix of the RETIRED shared delivery root. A lease's ``host_path`` under
-#: it is a real on-disk location from the old design and gets a best-effort
-#: unlink when the lease closes; the ``container-ns:`` locators the current
-#: design records are not paths and are never touched.
+#: Prefix of the RETIRED shared delivery root. A legacy lease's ``host_path``
+#: under it is a real on-disk file and gets a best-effort unlink; the
+#: ``container-ns:`` locators the current design records are not host paths.
 _LEGACY_HOST_PREFIX = "/run/autonomy-secrets/"
 
 
-def _destroy_legacy_file(host_path: str) -> None:
-    """Unlink a legacy shared-root file, if the lease recorded one. Missing
-    is success; the container-ns locator of the current design is skipped."""
-    if not host_path.startswith(_LEGACY_HOST_PREFIX):
+def _destroy_delivered(rec: dict) -> None:
+    """Destroy the credential a lease delivered, by its exact address.
+
+    Current lease: nsenter-unlink the recorded file inside its container
+    (no-op if the container is gone). Legacy shared-root lease: unlink the
+    real host path it recorded. Best-effort — a destruction failure leaves
+    the lease outstanding for the next tick rather than lying that it closed.
+    """
+    from agents import secret_ramfs
+    from agents.secret_ramfs import ProvisionError
+
+    host_path = rec.get("host_path") or ""
+    if host_path.startswith(_LEGACY_HOST_PREFIX):
+        from pathlib import Path
+        try:
+            Path(host_path).unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logger.exception("vault sweep: could not unlink legacy %s", host_path)
         return
-    try:
-        Path(host_path).unlink()
-    except FileNotFoundError:
-        pass
-    except OSError:
-        logger.exception("vault sweep: could not unlink legacy %s", host_path)
+    filename = posixpath.basename(rec.get("container_path") or "")
+    if not filename:
+        return
+    secret_ramfs.destroy_secret_file(rec["session"], filename)
 
 
 def sweep(
@@ -69,57 +77,72 @@ def sweep(
     now: int | None = None,
     overdue_reason: str = "expired",
 ) -> dict:
-    """One bookkeeping pass over the outstanding leases.
+    """One pass over the outstanding leases.
 
-    * a release whose SESSION no longer exists closes as ``orphaned``;
-    * a legacy release past its deadline closes as *overdue_reason*
-      (current releases carry no deadline — session lifetime).
+    * a lease past its TTL deadline: destroy the exact delivered file, then
+      close it *overdue_reason*;
+    * a lease whose SESSION is gone (its private mount already freed by the
+      kernel): close it ``orphaned`` — pure bookkeeping, no file to touch.
 
-    ``session_exists=None`` means liveness could not be answered this tick
-    (the caller's probe failed). An ambiguous answer never drives a
-    transition — the 2026-04-20 rule — so those rows simply wait.
+    ``session_exists=None`` leaves the orphan-close bookkeeping for a later
+    tick (an ambiguous liveness answer never drives a transition); deadline
+    destruction still runs, since it needs no liveness.
 
-    Returns ``{closed}`` for logging.
+    Returns ``{destroyed, closed}``.
     """
     stamp = int(time.time() * 1000) if now is None else int(now)
 
+    destroyed = 0
     closed = 0
     for rec in vault_releases.outstanding():
         session = rec["session"]
         deadline = rec.get("expires_at")
+        past_deadline = deadline is not None and stamp >= deadline
         gone = session_exists is not None and not session_exists(session)
-        if gone:
-            reason = "orphaned"
-        elif deadline is not None and stamp >= deadline:
+        if past_deadline:
             reason = overdue_reason
+        elif gone:
+            reason = "orphaned"
         else:
             continue
-        _destroy_legacy_file(rec["host_path"])
+        try:
+            if past_deadline:
+                _destroy_delivered(rec)
+                destroyed += 1
+        except Exception:
+            logger.exception(
+                "vault sweep: could not destroy delivered credential for "
+                "release %s (session=%s) — left outstanding for retry",
+                rec["id"], session,
+            )
+            continue
         if vault_releases.mark_shredded(rec["id"], reason=reason, now=stamp):
             closed += 1
             logger.info(
                 "vault sweep: closed release %s (session=%s reason=%s)",
                 rec["id"], session, reason,
             )
-    return {"closed": closed}
+    return {"destroyed": destroyed, "closed": closed}
 
 
-def on_session_end(
-    session: str,
-    *,
-    now: int | None = None,
-) -> dict:
+def on_session_end(session: str, *, now: int | None = None) -> dict:
     """The launcher's timely session-end hook: close the session's
-    outstanding leases as ``session_end``. The delivered files themselves
-    died with the container's private mount; only legacy shared-root paths
-    (if any lease still names one) get a best-effort unlink. Idempotent and
-    safe to race with the sweep: ``mark_shredded`` keeps the first reason."""
+    outstanding leases as ``session_end``. The delivered files died with the
+    container's private mount, so there is nothing to destroy here — only the
+    ledger to close (plus a best-effort unlink of any legacy shared-root path
+    a lease still names). Idempotent and race-safe with the sweep."""
     stamp = int(time.time() * 1000) if now is None else int(now)
     closed = 0
     for rec in vault_releases.outstanding():
         if rec["session"] != session:
             continue
-        _destroy_legacy_file(rec["host_path"])
+        host_path = rec.get("host_path") or ""
+        if host_path.startswith(_LEGACY_HOST_PREFIX):
+            from pathlib import Path
+            try:
+                Path(host_path).unlink()
+            except (FileNotFoundError, OSError):
+                pass
         if vault_releases.mark_shredded(rec["id"], reason="session_end",
                                         now=stamp):
             closed += 1
@@ -131,15 +154,18 @@ def reconcile_on_startup(
     session_exists: "Callable[[str], bool] | None",
     now: int | None = None,
 ) -> dict:
-    """The first pass after a (re)start — same bookkeeping as :func:`sweep`,
-    with overdue legacy releases closed as ``reconciled`` so the audit
-    distinguishes a downtime catch-up from a live-tick close."""
+    """The first pass after a (re)start — same as :func:`sweep`, with overdue
+    leases closed as ``reconciled`` so the audit distinguishes a downtime
+    catch-up from a live-tick close. A lease whose container is gone had its
+    file freed with the mount; one still delivered but past its TTL is
+    destroyed now."""
     result = sweep(
         session_exists=session_exists,
         now=now,
         overdue_reason="reconciled",
     )
     logger.info(
-        "vault release reconciliation: %d release(s) closed", result["closed"],
+        "vault release reconciliation: %d destroyed, %d release(s) closed",
+        result["destroyed"], result["closed"],
     )
     return result

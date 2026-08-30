@@ -67,9 +67,10 @@ def test_production_catalog_is_exact_closed_and_disabled():
     assert all(item.runtime is None for item in registry.kinds.values())
     assert registry.kinds["dashboard_access"].application_scope_policy.fixed == "sessions"
     assert registry.kinds["mcp_peer_link"].application_scope_policy.fixed == "relay"
+    # The pending-approval window is a generous FIXED value: ttl_seconds is
+    # the delivered credential's ramfs lifetime, not the human's clock.
     assert registry.kinds["vault_open"].request_expiry_policy == ApprovalExpiryPolicy(
-        mode=ExpiryMode.BOUNDED, minimum_seconds=1, maximum_seconds=300,
-        default_seconds=60,
+        mode=ExpiryMode.FIXED, fixed_seconds=300,
     )
     external = registry.kinds["external_service_access"]
     assert external.application_scope_policy.by_producer == {
@@ -91,7 +92,7 @@ def test_production_catalog_field_map_is_exact():
         "mcp_crosstalk": ("relay", "registered_service", "operator_session", "never"),
         "fleet_machine_admission": ("fleet", "internal_producer", "personal_root", "trusted_source_deadline"),
         "external_service_access": ("dropbox", "internal_producer", "operator_session", "never"),
-        "vault_open": ("vault", "session_principal", "vault_policy", "bounded"),
+        "vault_open": ("vault", "session_principal", "vault_policy", "fixed"),
     }
     actual = {}
     for kind, item in registry.kinds.items():

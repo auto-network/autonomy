@@ -37,13 +37,13 @@ def helper(monkeypatch):
     return calls
 
 
-def _row(expires_at=200.0, key="mac.ssh"):
+def _row(ttl_seconds=90, key="mac.ssh"):
     return {
         "id": "release-1",
         "session": "auto-requester",
         "request": {
             "target": f"autonomy.vault.secured/{key}",
-            "expires_at": expires_at,
+            "ttl_seconds": ttl_seconds,
             "setting": {
                 "set_id": "autonomy.vault.secured",
                 "key": key,
@@ -60,7 +60,7 @@ def test_record_first_then_private_write_returns_only_receipt(helper):
         "release_id": "release-1",
         "delivery": "session-ramfs",
         "path": "/run/secrets/mac.ssh",
-        "lifetime": "session",
+        "ttl_seconds": 90,
     }
     (container, filename, data, record_at_write) = helper[0]
     assert container == "auto-requester"
@@ -73,8 +73,8 @@ def test_record_first_then_private_write_returns_only_receipt(helper):
     assert record["container_path"] == "/run/secrets/mac.ssh"
     # No host path exists — the locator names the container namespace.
     assert record["host_path"].startswith("container-ns:auto-requester:")
-    # Session lifetime: no deadline; the mount dies with the container.
-    assert record["expires_at"] is None
+    # TTL is the credential lifetime, applied from delivery.
+    assert record["expires_at"] == record["delivered_at"] + 90 * 1000
     assert secret not in json.dumps(record)
     assert secret not in json.dumps(receipt)
 
@@ -98,9 +98,11 @@ def test_structured_payload_without_single_value_is_refused(helper):
     assert vault_releases.get("release-1") is None
 
 
-def test_expired_release_never_reaches_the_helper(helper):
-    with pytest.raises(delivery.VaultDeliveryError, match="expired"):
-        delivery.deliver_payload(_row(expires_at=50.0), {"value": "v"}, now=100.0)
+def test_missing_ttl_is_refused(helper):
+    bad = _row()
+    del bad["request"]["ttl_seconds"]
+    with pytest.raises(delivery.VaultDeliveryError, match="ttl_seconds"):
+        delivery.deliver_payload(bad, {"value": "v"}, now=100.0)
     assert helper == []
     assert vault_releases.get("release-1") is None
 
