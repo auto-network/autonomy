@@ -527,3 +527,141 @@ from .registry import register_upconverter as _register_upconverter
 _register_upconverter(
     SET_ID, SCHEMA_REVISION, MOUNT_SCHEMA_REVISION_2, lambda payload: dict(payload)
 )
+
+
+# ── Revision 3 — host_path is GONE ─────────────────────────────────────────
+#
+# The deprecated rev-1 fallback is deleted. A mount is a guarded `subpath`
+# in the org volume, or MACHINE-LOCATED (no source stored; each machine's
+# own autonomy.artifact-path row keyed <org>:<mount-name> says where it
+# sits, and a machine without the row does not have the mount). `kind` is
+# always required and `container_path` always canonical — the grandfather
+# clause died with the field it existed for. Every live row was rewritten
+# before this revision shipped, so the 2->3 upconverter is the IDENTITY;
+# a straggler host_path row fails rev-3 validation loudly (extra fields
+# are refused by name) instead of binding a path that is wrong on every
+# machine but one.
+
+MOUNT_SCHEMA_REVISION_3 = 3
+
+
+class WorkspaceMountV3(BaseModel):
+    """A workspace mount: a `subpath` in the org-partitioned autonomy-orgs
+    volume, or NEITHER source field — machine-located, resolved through
+    ``autonomy.artifact-path`` ``<org>:<mount-name>`` in the consuming
+    machine's own store. No field of this shape can hold a machine path."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    subpath: str | None = Field(
+        default=None,
+        description="Relative, org-free path under orgs/<org>/ in "
+                    "autonomy-orgs. Absent = machine-located: each "
+                    "machine's artifact-path row supplies the location.",
+    )
+    container_path: str = Field(..., description="Absolute path inside container")
+    kind: Literal["file", "dir"] = Field(
+        ...,
+        description="Expected target type; the resolver refuses a "
+                    "present-but-wrong-type target.",
+    )
+    mode: Literal["ro", "rw"] = "ro"
+    visibility: Literal["machine", "personal", "organization"] = Field(
+        default="machine",
+        description="Access scope: who may see this mount. Not a path "
+                    "convention.",
+    )
+    name: str | None = Field(
+        default=None, max_length=60,
+        description="Short display label, e.g. 'Anchore Enterprise license'",
+    )
+    description: str | None = None
+    help: str | None = None
+    required: bool = True
+
+    # Reuse rev-2's validators verbatim — the rules did not change, only
+    # the grandfathered field is gone.
+    _subpath_rule = field_validator("subpath")(
+        WorkspaceMountV2.subpath_relative_and_contained.__func__
+    )
+
+    @field_validator("container_path")
+    @classmethod
+    def container_canonical(cls, v: str) -> str:
+        if not v.startswith("/"):
+            raise ValueError(f"container_path must be absolute: {v!r}")
+        _reject_traversal_segments(v, label="container_path")
+        if posixpath.normpath(v) != v:
+            raise ValueError(
+                f"container_path must be already-normalized (no '.', '..', "
+                f"trailing or doubled '/'): {v!r}")
+        return v
+
+
+@keyed_per_entity(
+    key_strategy="workspace_id:mount_name",
+    key_references={"workspace_id": "autonomy.workspace"},
+)
+@publication_band(min="raw", max="raw")
+@home("organization")
+@readiness_gated_by("required")
+class _WorkspaceMountV3SchemaAdapter(SettingSchema):
+    """Registers ``autonomy.workspace.mount#3``. The 2->3 upconverter is the
+    identity (rows were rewritten portable before this shipped); a straggler
+    host_path row fails validation by name rather than serving."""
+
+    set_id = SET_ID
+    schema_revision = MOUNT_SCHEMA_REVISION_3
+    model = WorkspaceMountV3
+
+    _field_metadata: dict[str, dict] = {
+        k: v for k, v in _WorkspaceMountV2SchemaAdapter._field_metadata.items()
+        if k != "host_path"
+    }
+    _field_metadata["kind"] = {
+        "type": "string",
+        "enum": ["file", "dir"],
+        "required": True,
+        "description": "Expected target type; the resolver refuses a "
+                       "present-but-wrong-type mismatch",
+    }
+    _field_metadata["subpath"] = {
+        **_WorkspaceMountV2SchemaAdapter._field_metadata["subpath"],
+        "description": (
+            "Relative, org-free path under orgs/<org>/ in autonomy-orgs. "
+            "Absent = machine-located (autonomy.artifact-path "
+            "<org>:<mount-name> in each machine's own store)."
+        ),
+    }
+
+    @classmethod
+    def readiness_findings(cls, *, key, payload, org, read):
+        from agents.workspace_manager import check_org_mount_readiness
+
+        return check_org_mount_readiness(key=key, payload=payload, org=org)
+
+    @classmethod
+    def validate(cls, payload) -> None:
+        if not isinstance(payload, dict):
+            raise SchemaValidationError(
+                f"{cls.__name__}: payload must be a dict, "
+                f"got {type(payload).__name__}"
+            )
+        if "host_path" in payload:
+            raise SchemaValidationError(
+                f"{cls.__name__}: host_path was deleted from this schema — "
+                "an org row replicates and must not carry a machine path. "
+                "Use subpath (org volume) or omit the source and write "
+                "autonomy.artifact-path <org>:<mount-name> on the machine "
+                "that has the content."
+            )
+        try:
+            cls.model.model_validate(payload)
+        except Exception as exc:
+            raise SchemaValidationError(f"{cls.__name__}: {exc}") from exc
+
+
+_register_upconverter(
+    SET_ID, MOUNT_SCHEMA_REVISION_2, MOUNT_SCHEMA_REVISION_3,
+    lambda payload: dict(payload),
+)

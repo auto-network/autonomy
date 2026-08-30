@@ -196,7 +196,7 @@ def test_prepare_session_mounts_local_repo_no_remote(tmp_path):
     """A local checkout with no git remote provisions cleanly (option C).
 
     No monkeypatching of managed_clone_path/_worktree_basename: the local-path
-    handling must work natively, and base_source reconciliation (which would
+    handling must work natively, and origin reconciliation (which would
     fail on a remote-less checkout) must be skipped.
     """
     checkout = _make_local_checkout(tmp_path)
@@ -206,7 +206,7 @@ def test_prepare_session_mounts_local_repo_no_remote(tmp_path):
 
     proj = ProjectConfig(
         id="db", name="db", description="", image="img", graph_project="gp",
-        repos=(RepoMount.from_url(url=url, base_source=url, mount="/workspace/db", writable=True),),
+        repos=(RepoMount.from_url(url=url, mount="/workspace/db", writable=True),),
     )
     mounts = wm.prepare_session_mounts(
         proj, "sess-db", repos_dir=repos_dir, worktrees_dir=worktrees_dir,
@@ -455,6 +455,17 @@ def test_prepare_session_mounts_empty_for_repoless_project(tmp_path):
         proj, "sess", repos_dir=tmp_path / "r", worktrees_dir=tmp_path / "w",
     )
     assert mounts == {}
+
+
+def _make_host_checkout(tmp_path: Path, upstream: Path, name: str) -> Path:
+    """Clone ``upstream`` into ``tmp_path/name`` and return the checkout path."""
+    dest = tmp_path / name
+    subprocess.run(
+        ["git", "clone", "-q", str(upstream), str(dest)], check=True,
+    )
+    subprocess.run(["git", "-C", str(dest), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(dest), "config", "user.name", "t"], check=True)
+    return dest
 
 
 def test_create_worktree_prefers_explicitly_synced_local_base_when_ahead_of_origin(tmp_path, monkeypatch):
@@ -730,328 +741,7 @@ def test_prepare_session_mounts_readonly_prefers_explicitly_synced_local_default
     assert mounts[str(clone)] == "/workspace/ro:ro"
 
 
-# ── base_source host-checkout sync (auto-4sfe9) ───────────────────
 
-
-def _make_host_checkout(tmp_path: Path, upstream: Path, name: str) -> Path:
-    """Clone ``upstream`` into ``tmp_path/name`` and return the checkout path."""
-    dest = tmp_path / name
-    subprocess.run(
-        ["git", "clone", "-q", str(upstream), str(dest)], check=True,
-    )
-    subprocess.run(["git", "-C", str(dest), "config", "user.email", "t@t"], check=True)
-    subprocess.run(["git", "-C", str(dest), "config", "user.name", "t"], check=True)
-    return dest
-
-
-def test_prepare_session_mounts_syncs_clone_main_from_base_source(tmp_path, monkeypatch):
-    upstream = _make_upstream(tmp_path)
-    url = str(upstream)
-    repos_dir = tmp_path / "repos"
-    worktrees_dir = tmp_path / "worktrees"
-
-    monkeypatch.setattr(
-        wm, "managed_clone_path",
-        lambda u, *, repos_dir=repos_dir: repos_dir / "local" / "upstream.git",
-    )
-    monkeypatch.setattr(wm, "_worktree_basename", lambda u: "upstream")
-
-    host = _make_host_checkout(tmp_path, upstream, "host-checkout")
-    (host / "host-only.txt").write_text("host only\n")
-    subprocess.run(["git", "-C", str(host), "add", "host-only.txt"], check=True)
-    subprocess.run(
-        [
-            "git", "-C", str(host), "-c", "commit.gpgsign=false",
-            "commit", "-q", "-m", "host-only commit",
-        ],
-        check=True,
-    )
-    host_head = subprocess.run(
-        ["git", "-C", str(host), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
-
-    proj = ProjectConfig(
-        id="w", name="w", description="", image="img", graph_project="gp",
-        repos=(RepoMount.from_url(
-            url=url,
-            mount="/workspace/upstream",
-            writable=True,
-            base_source=str(host),
-        ),),
-    )
-    wm.prepare_session_mounts(
-        proj, "sess-base-src",
-        repos_dir=repos_dir, worktrees_dir=worktrees_dir,
-    )
-
-    clone = repos_dir / "local" / "upstream.git"
-    clone_main = subprocess.run(
-        ["git", "-C", str(clone), "rev-parse", "main"],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
-    assert clone_main == host_head, (
-        "managed clone's main should track the base_source host checkout"
-    )
-
-    worktree = wm._session_worktree_dir(worktrees_dir, "sess-base-src", "upstream")
-    assert (worktree / "host-only.txt").exists(), (
-        "fresh worktree should derive from the base_source-advanced main"
-    )
-
-
-def test_prepare_session_mounts_readonly_advances_clone_main_from_base_source(
-    tmp_path, monkeypatch,
-):
-    upstream = _make_upstream(tmp_path)
-    url = str(upstream)
-    repos_dir = tmp_path / "repos"
-
-    monkeypatch.setattr(
-        wm, "managed_clone_path",
-        lambda u, *, repos_dir=repos_dir: repos_dir / "local" / "upstream.git",
-    )
-
-    host = _make_host_checkout(tmp_path, upstream, "host-checkout-ro")
-    (host / "ro-host-only.txt").write_text("ro host only\n")
-    subprocess.run(["git", "-C", str(host), "add", "ro-host-only.txt"], check=True)
-    subprocess.run(
-        [
-            "git", "-C", str(host), "-c", "commit.gpgsign=false",
-            "commit", "-q", "-m", "ro host commit",
-        ],
-        check=True,
-    )
-    host_head = subprocess.run(
-        ["git", "-C", str(host), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
-
-    proj = ProjectConfig(
-        id="ro", name="ro", description="", image="img", graph_project="gp",
-        repos=(RepoMount.from_url(
-            url=url,
-            mount="/workspace/ro",
-            writable=False,
-            base_source=str(host),
-        ),),
-    )
-    wm.prepare_session_mounts(
-        proj, "sess-ro-base-src",
-        repos_dir=repos_dir, worktrees_dir=tmp_path / "worktrees",
-    )
-
-    clone = repos_dir / "local" / "upstream.git"
-    clone_main = subprocess.run(
-        ["git", "-C", str(clone), "rev-parse", "refs/heads/main"],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
-    assert clone_main == host_head, (
-        "read-only managed clone's main ref should track the base_source host checkout"
-    )
-
-
-def test_prepare_session_mounts_falls_back_when_base_source_absent(tmp_path, monkeypatch):
-    """A base_source that this machine does not have is not an error.
-
-    The field names a checkout on the machine that declared the workspace, and
-    the schema marks it advisory. Every repo carrying one also names a real
-    remote in ``url``, which is the correct source anywhere else — so a machine
-    without the checkout tracks the remote rather than failing the launch.
-    """
-    upstream = _make_upstream(tmp_path)
-    url = str(upstream)
-    repos_dir = tmp_path / "repos"
-
-    monkeypatch.setattr(
-        wm, "managed_clone_path",
-        lambda u, *, repos_dir=repos_dir: repos_dir / "local" / "upstream.git",
-    )
-
-    proj = ProjectConfig(
-        id="w", name="w", description="", image="img", graph_project="gp",
-        repos=(RepoMount.from_url(
-            url=url,
-            mount="/workspace/upstream",
-            writable=True,
-            base_source="/nonexistent/path/that/should/not/exist",
-        ),),
-    )
-    mounts = wm.prepare_session_mounts(
-        proj, "sess-absent-base-source",
-        repos_dir=repos_dir, worktrees_dir=tmp_path / "worktrees",
-    )
-    assert any(
-        spec.startswith("/workspace/upstream") for spec in mounts.values()
-    ), mounts
-
-
-def test_prepare_session_mounts_rejects_non_git_base_source(tmp_path, monkeypatch):
-    upstream = _make_upstream(tmp_path)
-    url = str(upstream)
-    repos_dir = tmp_path / "repos"
-
-    monkeypatch.setattr(
-        wm, "managed_clone_path",
-        lambda u, *, repos_dir=repos_dir: repos_dir / "local" / "upstream.git",
-    )
-
-    not_a_git_dir = tmp_path / "not-a-git-checkout"
-    not_a_git_dir.mkdir()
-
-    proj = ProjectConfig(
-        id="w", name="w", description="", image="img", graph_project="gp",
-        repos=(RepoMount.from_url(
-            url=url,
-            mount="/workspace/upstream",
-            writable=True,
-            base_source=str(not_a_git_dir),
-        ),),
-    )
-    with pytest.raises(wm.WorkspaceError, match="not a git checkout"):
-        wm.prepare_session_mounts(
-            proj, "sess-not-git",
-            repos_dir=repos_dir, worktrees_dir=tmp_path / "worktrees",
-        )
-
-
-def test_prepare_session_mounts_rejects_base_source_identity_mismatch(tmp_path, monkeypatch):
-    upstream = _make_upstream(tmp_path)
-    url = str(upstream)
-    repos_dir = tmp_path / "repos"
-
-    monkeypatch.setattr(
-        wm, "managed_clone_path",
-        lambda u, *, repos_dir=repos_dir: repos_dir / "local" / "upstream.git",
-    )
-
-    # Build a second unrelated upstream so the host checkout's origin
-    # parses fine but does not match the workspace repo URL.
-    other_src = tmp_path / "other-src"
-    other_src.mkdir()
-    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=other_src, check=True)
-    subprocess.run(["git", "-C", str(other_src), "config", "user.email", "t@t"], check=True)
-    subprocess.run(["git", "-C", str(other_src), "config", "user.name", "t"], check=True)
-    (other_src / "README.md").write_text("hi\n")
-    subprocess.run(["git", "-C", str(other_src), "add", "README.md"], check=True)
-    subprocess.run([
-        "git", "-C", str(other_src), "-c", "commit.gpgsign=false",
-        "commit", "-q", "-m", "init",
-    ], check=True)
-    other_bare = tmp_path / "other.git"
-    subprocess.run(
-        ["git", "clone", "-q", "--bare", str(other_src), str(other_bare)],
-        check=True,
-    )
-    host = _make_host_checkout(tmp_path, other_bare, "host-mismatch")
-
-    proj = ProjectConfig(
-        id="w", name="w", description="", image="img", graph_project="gp",
-        repos=(RepoMount.from_url(
-            url=url,
-            mount="/workspace/upstream",
-            writable=True,
-            base_source=str(host),
-        ),),
-    )
-    with pytest.raises(wm.WorkspaceError, match="does not match repo URL"):
-        wm.prepare_session_mounts(
-            proj, "sess-mismatch",
-            repos_dir=repos_dir, worktrees_dir=tmp_path / "worktrees",
-        )
-
-
-def test_prepare_session_mounts_rejects_relative_base_source(tmp_path, monkeypatch):
-    upstream = _make_upstream(tmp_path)
-    url = str(upstream)
-    repos_dir = tmp_path / "repos"
-
-    monkeypatch.setattr(
-        wm, "managed_clone_path",
-        lambda u, *, repos_dir=repos_dir: repos_dir / "local" / "upstream.git",
-    )
-
-    proj = ProjectConfig(
-        id="w", name="w", description="", image="img", graph_project="gp",
-        repos=(RepoMount.from_url(
-            url=url,
-            mount="/workspace/upstream",
-            writable=True,
-            base_source="relative/path",
-        ),),
-    )
-    with pytest.raises(wm.WorkspaceError, match="absolute path"):
-        wm.prepare_session_mounts(
-            proj, "sess-rel",
-            repos_dir=repos_dir, worktrees_dir=tmp_path / "worktrees",
-        )
-
-
-def test_prepare_session_mounts_resume_preserves_session_worktree_with_base_source(
-    tmp_path, monkeypatch,
-):
-    """Resume must not reset/rebase a session worktree even when base_source advances the clone."""
-    session = "sess-resume-base-src"
-    worktrees_dir, clone, worktree = _make_writable_session_worktree(
-        tmp_path, session, monkeypatch,
-    )
-    upstream = next(tmp_path.glob("upstream.git"))
-    url = str(upstream)
-
-    # Land local session work on the worktree.
-    subprocess.run(["git", "-C", str(worktree), "config", "user.email", "t@t"], check=True)
-    subprocess.run(["git", "-C", str(worktree), "config", "user.name", "t"], check=True)
-    (worktree / "session-work.txt").write_text("keep me\n")
-    subprocess.run(["git", "-C", str(worktree), "add", "session-work.txt"], check=True)
-    subprocess.run(
-        [
-            "git", "-C", str(worktree), "-c", "commit.gpgsign=false",
-            "commit", "-q", "-m", "session work",
-        ],
-        check=True,
-    )
-    head_before = subprocess.run(
-        ["git", "-C", str(worktree), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
-
-    # Build a host checkout that has advanced beyond the bare upstream.
-    host = _make_host_checkout(tmp_path, upstream, "host-resume")
-    (host / "host-advance.txt").write_text("host advance\n")
-    subprocess.run(["git", "-C", str(host), "add", "host-advance.txt"], check=True)
-    subprocess.run(
-        [
-            "git", "-C", str(host), "-c", "commit.gpgsign=false",
-            "commit", "-q", "-m", "host advance",
-        ],
-        check=True,
-    )
-
-    proj = ProjectConfig(
-        id="w", name="w", description="", image="img", graph_project="gp",
-        repos=(RepoMount.from_url(
-            url=url,
-            mount="/workspace/upstream",
-            writable=True,
-            base_source=str(host),
-        ),),
-    )
-    # Resume path: refresh_existing_worktree=False.
-    wm.prepare_session_mounts(
-        proj, session,
-        repos_dir=tmp_path / "repos",
-        worktrees_dir=worktrees_dir,
-        refresh_existing_worktree=False,
-    )
-
-    head_after = subprocess.run(
-        ["git", "-C", str(worktree), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
-    assert head_after == head_before, (
-        "resume must preserve the session worktree's HEAD even when base_source moves the clone"
-    )
-    assert (worktree / "session-work.txt").exists()
 
 
 # ── Session cleanup ───────────────────────────────────────────────
@@ -2810,7 +2500,7 @@ def test_host_root_opt_in_conflicts_with_repo_at_platform_path(tmp_path, monkeyp
     project = ProjectConfig(
         id="ops", name="ops", description="", image="img",
         graph_project="autonomy",
-        repos=(RepoMount.from_url(url=str(checkout), base_source=str(checkout),
+        repos=(RepoMount.from_url(url=str(checkout),
                          mount="/workspace/repo", writable=False),),
         host_root_mount_reason="contradiction",
     )

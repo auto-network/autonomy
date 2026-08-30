@@ -224,49 +224,18 @@ def test_direct_nested_docker_model_defaults_to_privileged():
 # ── RepoMount parsing (auto-4sfe9) ───────────────────────────────
 
 
-def test_parse_repo_defaults_base_source_to_none():
-    repo = _parse_repo(
-        {"url": "git@github.com:foo/bar.git", "mount": "/workspace/bar"},
-        workspace_id="ws", idx=0,
-    )
-    assert isinstance(repo, RepoMount)
-    assert repo.base_source is None
 
 
-def test_parse_repo_accepts_absolute_base_source():
-    repo = _parse_repo(
-        {
-            "url": "git@github.com:foo/bar.git",
-            "mount": "/workspace/bar",
-            "base_source": "/home/user/bar",
-        },
-        workspace_id="ws", idx=0,
-    )
-    assert repo.base_source == "/home/user/bar"
 
 
-def test_parse_repo_rejects_relative_base_source():
-    with pytest.raises(WorkspaceSettingsError, match="base_source"):
-        _parse_repo(
-            {
-                "url": "git@github.com:foo/bar.git",
-                "mount": "/workspace/bar",
-                "base_source": "relative/path",
-            },
-            workspace_id="ws", idx=0,
-        )
-
-
-def test_parse_repo_rejects_empty_base_source():
-    with pytest.raises(WorkspaceSettingsError, match="base_source"):
-        _parse_repo(
-            {
-                "url": "git@github.com:foo/bar.git",
-                "mount": "/workspace/bar",
-                "base_source": "",
-            },
-            workspace_id="ws", idx=0,
-        )
+def test_parse_repo_refuses_deleted_machine_path_fields():
+    for dead, entry in (
+        ("local_path", {"local_path": "/home/op/repo", "mount": "/m"}),
+        ("base_source", {"host": "gh", "repo": "a/b", "mount": "/m",
+                         "base_source": "/home/op/checkout"}),
+    ):
+        with pytest.raises(WorkspaceSettingsError, match=dead):
+            _parse_repo(entry, "w", 0, "personal")
 
 
 def test_parse_repo_local_true_resolves_under_node_store():
@@ -332,26 +301,6 @@ def test_workspace_from_setting_resolves_local_repo_via_owning_org():
         workspace_settings.LOCAL_WORKSPACE_REPOS_ROOT / "personal" / "my-board"
     )
 
-
-def test_workspace_from_setting_propagates_repo_base_source():
-    workspace = _workspace_from_setting(
-        {
-            "name": "Autonomy",
-            "image": "autonomy-session",
-            "repos": [
-                {
-                    "url": "git@github.com:foo/bar.git",
-                    "mount": "/workspace/bar",
-                    "base_source": "/home/user/bar",
-                },
-            ],
-        },
-        workspace_id="autonomy",
-        graph_project="autonomy",
-        artifacts=(),
-        mounts={},
-    )
-    assert workspace.repos[0].base_source == "/home/user/bar"
 
 
 def test_workspace_from_setting_rejects_invalid_harness():

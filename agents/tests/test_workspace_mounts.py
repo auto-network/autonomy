@@ -3,7 +3,7 @@
 Covers (auto-fteke):
 
 * :func:`workspace_settings.load_mounts` reads rev 2 and returns
-  :class:`WorkspaceMountV2` payloads keyed by composite key.
+  :class:`WorkspaceMountV3` payloads keyed by composite key.
 * :func:`workspace_manager.prepare_session_mounts` resolves each ``subpath``
   under ``orgs/<workspace-org>/`` in the autonomy-orgs pool, realpath-refuses
   an escape to a sibling org, type-checks against ``kind``, and translates to a
@@ -34,7 +34,8 @@ from tools.graph import ops
 from tools.graph.schemas.mount import (
     SET_ID as MOUNT_SET_ID,
     MOUNT_SCHEMA_REVISION_2,
-    WorkspaceMountV2,
+    MOUNT_SCHEMA_REVISION_3,
+    WorkspaceMountV3,
 )
 from tools.graph.settings_ops import ResolvedSetting
 
@@ -74,7 +75,7 @@ def graph_db_env(tmp_path, monkeypatch):
 
 def _mount_rs(*, key, subpath, container_path, kind, mode="ro",
               required=True, state="raw", org="autonomy") -> ResolvedSetting:
-    payload = WorkspaceMountV2(
+    payload = WorkspaceMountV3(
         subpath=subpath, container_path=container_path, kind=kind,
         mode=mode, required=required,
     )
@@ -86,20 +87,6 @@ def _mount_rs(*, key, subpath, container_path, kind, mode="ro",
         target_revision=None, org=org, upconverted=False,
     )
 
-
-def _legacy_mount_rs(*, key, host_path, container_path, mode="ro",
-                     required=True, state="raw", org="autonomy") -> ResolvedSetting:
-    """A rev-1-shaped (deprecated host_path) mount, valid as rev 2 by identity."""
-    payload = WorkspaceMountV2(
-        host_path=host_path, container_path=container_path, mode=mode, required=required,
-    )
-    return ResolvedSetting(
-        id=f"mock-{key}", set_id=MOUNT_SET_ID, stored_revision=1, key=key,
-        payload=payload, state=state, supersedes=None, excludes=None,
-        deprecated=False, successor_id=None,
-        created_at="2026-08-19T00:00:00Z", updated_at="2026-08-19T00:00:00Z",
-        target_revision=None, org=org, upconverted=True,
-    )
 
 
 def _workspace(mounts) -> WorkspaceV1:
@@ -131,7 +118,7 @@ def test_load_mounts_reads_rev2_and_filters_by_prefix(graph_db_env):
     mounts = load_mounts("enterprise-ng")
     assert set(mounts.keys()) == {"enterprise-ng:vuln-diff"}
     vd = mounts["enterprise-ng:vuln-diff"]
-    assert isinstance(vd.payload, WorkspaceMountV2)
+    assert isinstance(vd.payload, WorkspaceMountV3)
     assert vd.payload.subpath == "vuln-diff-validation" and vd.payload.kind == "dir"
 
 
@@ -257,7 +244,7 @@ def _machine_mount_rs(*, key, container_path, kind, mode="rw",
                       required=False, org="dynbench") -> ResolvedSetting:
     """An org mount row with NO source at all — location comes from this
     machine's own autonomy.artifact-path row."""
-    payload = WorkspaceMountV2(
+    payload = WorkspaceMountV3(
         container_path=container_path, kind=kind, mode=mode, required=required,
     )
     return ResolvedSetting(
@@ -552,84 +539,9 @@ def test_symlink_escape_outside_volume_refused(orgs_root, tmp_path):
         _prepare(ws, tmp_path)
 
 
-# ── deprecated fallback: rev-1 rows SURVIVE a rev-2 read via identity upconvert ─
-def test_load_mounts_keeps_rev1_rows_via_identity_upconverter(graph_db_env):
-    # The regression the first merge caused, inverted: with host_path kept in rev 2
-    # and the identity 1->2 upconverter, a rev-1 row is READ (not dropped) at rev 2
-    # as a host_path payload, alongside a native rev-2 subpath row. Nothing drops.
-    ops.add_setting(
-        MOUNT_SET_ID, 1, key="w:old",
-        payload={"host_path": "/abs/x", "container_path": "/opt/x", "required": True},
-        state="raw", org="personal")
-    ops.add_setting(
-        MOUNT_SET_ID, MOUNT_SCHEMA_REVISION_2, key="w:new",
-        payload={"subpath": "x", "container_path": "/opt/y", "kind": "dir", "required": True},
-        state="raw", org="personal")
-    mounts = load_mounts("w")
-    assert set(mounts) == {"w:old", "w:new"}
-    assert mounts["w:old"].payload.host_path == "/abs/x"
-    assert mounts["w:old"].payload.subpath is None
-    assert mounts["w:new"].payload.subpath == "x"
 
 
-# ── dual-dispatch: a legacy host_path row applies via the old HOST behavior ────
-def test_legacy_host_path_row_applied_via_old_host_behavior(tmp_path):
-    host_dir = tmp_path / "legacy-host-dir"
-    host_dir.mkdir()
-    ws = _workspace({"w:legacy": _legacy_mount_rs(
-        key="w:legacy", host_path=str(host_dir), container_path="/opt/legacy", mode="ro")})
-    result = _prepare(ws, tmp_path)
-    assert result[str(host_dir)] == "/opt/legacy:ro"
-    # NOT the guarded path's strict-bind marker — legacy rows keep the old -v shape.
-    assert getattr(result[str(host_dir)], "bind_refuse_missing", False) is False
 
-
-def test_rev1_trailing_slash_row_read_at_rev2_and_applied_across_the_seam(graph_db_env, tmp_path):
-    # Coordinator caveat 2 + the reviewer's exact-shape find, in ONE regression
-    # that crosses the converter/model SEAM where the defect lived: the EXACT live
-    # scale-harness:artifacts-dir shape (trailing-slash container_path, valid V1)
-    # stored at rev 1, READ at rev 2 (real ops.read_set identity upconvert — not
-    # upconvert_chain in isolation, not a directly-constructed model), and APPLIED
-    # through the old HOST path with its mount spec byte-identical (slash intact).
-    host_dir = tmp_path / "artifacts"
-    host_dir.mkdir()
-    ops.add_setting(
-        MOUNT_SET_ID, 1, key="scale-harness:artifacts-dir",
-        payload={"host_path": str(host_dir),
-                 "container_path": "/etc/autonomy/artifacts/scale-harness/",
-                 "required": True},
-        state="raw", org="personal")
-    mounts_rs = load_mounts("scale-harness")            # real rev1 -> rev2 read
-    assert set(mounts_rs) == {"scale-harness:artifacts-dir"}
-    payload = mounts_rs["scale-harness:artifacts-dir"].payload
-    assert payload.host_path == str(host_dir) and payload.subpath is None
-    result = _prepare(_workspace(mounts_rs), tmp_path)  # applied via old HOST path
-    assert result[str(host_dir)] == "/etc/autonomy/artifacts/scale-harness/:ro"
-
-
-def test_legacy_host_path_required_missing_raises(tmp_path):
-    ws = _workspace({"w:legacy": _legacy_mount_rs(
-        key="w:legacy", host_path=str(tmp_path / "absent"),
-        container_path="/opt/x", required=True)})
-    with pytest.raises(WorkspaceMountMissingError):
-        _prepare(ws, tmp_path)
-
-
-def test_legacy_and_subpath_rows_coexist_in_one_workspace(orgs_root, tmp_path):
-    # Dual-dispatch end to end: one workspace with both a legacy host_path row and
-    # a guarded subpath row — each takes its own path.
-    legacy_dir = tmp_path / "legacy"; legacy_dir.mkdir()
-    (orgs_root / "guarded").mkdir()
-    ws = _workspace({
-        "w:legacy": _legacy_mount_rs(key="w:legacy", host_path=str(legacy_dir),
-                                     container_path="/opt/legacy"),
-        "w:guarded": _mount_rs(key="w:guarded", subpath="guarded",
-                               container_path="/opt/guarded", kind="dir"),
-    })
-    result = _prepare(ws, tmp_path)
-    assert result[str(legacy_dir)] == "/opt/legacy:ro"                     # old path
-    guarded = os.path.realpath(orgs_root / "guarded")
-    assert getattr(result[guarded], "bind_refuse_missing", False) is True  # guarded path
 
 
 # ── blocker 4 (explicit provenance): real resolver -> emission, BOTH frames ────

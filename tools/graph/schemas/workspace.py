@@ -237,6 +237,11 @@ class WorkspaceV1(SettingSchema):
     set_id = WORKSPACE_SET_ID
     schema_revision = WORKSPACE_REVISION
 
+    # Revision-dispatch hook for the per-entry repo rules; ``validate``
+    # calls through the class so :class:`WorkspaceV2` swaps in the rev-2
+    # rules without re-stating the rest of the payload checks.
+    _validate_repo_entry = staticmethod(_validate_repo)
+
     _required = ("name", "image")
     _optional_types: dict[str, type | tuple[type, ...]] = {
         "description": str,
@@ -416,7 +421,7 @@ class WorkspaceV1(SettingSchema):
                     )
         if "repos" in payload:
             for i, repo in enumerate(payload["repos"]):
-                _validate_repo(repo, i)
+                cls._validate_repo_entry(repo, i)
         if "host_root_mount" in payload:
             hrm = payload["host_root_mount"]
             reason = hrm.get("reason")
@@ -450,3 +455,136 @@ class WorkspaceV1(SettingSchema):
                     f"{cls.__name__}: 'session_runtime' must be a non-empty "
                     "OCI runtime selector"
                 )
+
+
+# ── Revision 2 — the machine-path fields are GONE ──────────────────────────
+#
+# ``local_path`` and ``base_source`` are deleted. A repository is on a git
+# host ({host, repo}) or it is the workspace's managed local repository
+# ({local: true}); there is no third form, and a replicating org row can no
+# longer express a filesystem location at all — which is the point: not a
+# lint that flags the mistake, a shape that cannot hold it.
+#
+# Every live row was rewritten to a portable form before this revision
+# shipped, so the 1->2 upconverter is the IDENTITY: a clean rev-1 payload is
+# a valid rev-2 payload unchanged. A straggler row still carrying a deleted
+# field fails rev-2 validation LOUDLY when a consumer requests rev 2 —
+# deliberately, because silently serving it would resolve a machine path
+# that is wrong everywhere but one computer.
+
+WORKSPACE_REVISION_2 = 2
+
+
+class WorkspaceRepoV2(SettingSchema):
+    """One repository mounted into a workspace — revision 2 entry shape.
+
+    Exactly one of two forms names the repository: ``host`` + ``repo`` on a
+    git host, or ``local: true`` — the workspace's dashboard-managed local
+    bare repository (no remote; the consuming node derives
+    ``data/workspace-repos/<org>/<workspace-id>`` and creates it at first
+    launch when missing; the full worktree/commit/merge machinery applies).
+    No field of this shape can hold a filesystem path.
+    """
+
+    internal = True
+
+    host: str = field(
+        required=False,
+        description=(
+            "Git host this repository is on, e.g. github.com or an ssh "
+            "config alias. Credentials are per host, so this is what "
+            "selects one"
+        ),
+    )
+    repo: str = field(
+        required=False,
+        description="Owner and name on that host, e.g. anchore/anchorectl",
+    )
+    user: str = field(
+        required=False,
+        description=(
+            "Login user on that host. Defaults to git, which is right for "
+            "every hosted forge; a private server may use another"
+        ),
+    )
+    local: bool = field(
+        required=False,
+        description=(
+            "True marks this entry as the workspace's dashboard-managed "
+            "local repository (no remote). It stores no location: the "
+            "consuming node derives data/workspace-repos/<org>/"
+            "<workspace-id> and creates the bare repository at first "
+            "launch when missing. Exactly one of host+repo or local "
+            "names a repository."
+        ),
+    )
+    mount: str = field(
+        required=True,
+        description="Absolute path the repository is mounted at in the workspace",
+    )
+    writable: bool = field(
+        required=False,
+        description="Whether the agent may commit to it",
+    )
+
+
+def _validate_repo_v2(repo: Any, idx: int) -> None:
+    """Rev-2 cross-field rules: exactly one of two repository forms, and the
+    deleted machine-path fields are refused BY NAME so a straggler row gets
+    a message that says what to do, not a generic unknown-field error."""
+    if not isinstance(repo, dict):
+        return
+    for dead, fix in (
+        ("local_path", "declare 'local: true' (the node derives the store "
+                       "path) or give the repository a remote"),
+        ("base_source", "delete it — absent means the managed clone tracks "
+                        "the remote, which is always correct"),
+    ):
+        if dead in repo:
+            raise SchemaValidationError(
+                f"repos[{idx}].{dead} was deleted from this schema: an org "
+                f"row replicates and must not carry a machine path; {fix}"
+            )
+    remote = bool(repo.get("host")) or bool(repo.get("repo"))
+    managed = repo.get("local") is True
+    if remote and managed:
+        raise SchemaValidationError(
+            f"repos[{idx}] mixes repository forms; give 'host'+'repo' or "
+            f"'local: true' — exactly one"
+        )
+    if remote and not (repo.get("host") and repo.get("repo")):
+        raise SchemaValidationError(
+            f"repos[{idx}] needs both 'host' and 'repo' to name a "
+            f"repository on a git host"
+        )
+    if not (remote or managed):
+        raise SchemaValidationError(
+            f"repos[{idx}] names no repository: give 'host' and 'repo', "
+            f"or 'local: true'"
+        )
+
+
+class WorkspaceV2(WorkspaceV1):
+    """Revision 2 of ``autonomy.workspace``: ``repos`` entries can no longer
+    carry a filesystem path (``local_path`` and ``base_source`` deleted).
+    Everything outside ``repos`` is revision 1 unchanged."""
+
+    set_id = WORKSPACE_SET_ID
+    schema_revision = WORKSPACE_REVISION_2
+
+    _validate_repo_entry = staticmethod(_validate_repo_v2)
+
+    _field_metadata: dict[str, dict] = {
+        "repos": {
+            "type": "array",
+            "description": "Repos to mount as worktrees inside the container",
+            "element": WorkspaceRepoV2,
+        },
+    }
+
+    @classmethod
+    def upconvert_from_prev(cls, payload: dict) -> dict:
+        # Identity: every live row was rewritten portable before this
+        # revision shipped. A straggler carrying a deleted field fails
+        # rev-2 validation loudly rather than resolving a machine path.
+        return dict(payload)
