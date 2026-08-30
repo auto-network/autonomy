@@ -13,7 +13,6 @@ failure before plaintext bytes are encoded for writing.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import stat
@@ -64,7 +63,17 @@ def deliver_payload(
     delivery_root: Path | None = None,
     now: float | None = None,
 ) -> dict:
-    """Write *payload* to the exact requester's ramfs and return a receipt.
+    """Write the released VALUE — in its final shape — to the requester's
+    ramfs and return a receipt.
+
+    The consumer receives the raw credential bytes at a stable path named
+    after the credential itself (``/run/secrets/<credential-name>``), mode
+    0600 — a file ssh, a CLI, or the workspace's own code can use directly.
+    No envelope: wrapping belongs to the store, never to the consumer, and
+    a structured secret delivers its document AS the value. The file has
+    SESSION LIFETIME — it is destroyed at session end (or by the orphan
+    sweep), not on a short timer; the request TTL bounds only the
+    approval-to-delivery window.
 
     The durable ledger commits before the file is created.  A crash can thus
     leave a value-free record with no file, which reconciliation can close;
@@ -73,6 +82,12 @@ def deliver_payload(
     """
     if not isinstance(payload, dict):
         raise VaultDeliveryError("a vault Setting payload must be an object")
+    value = payload.get("value")
+    if not isinstance(value, str) or not value:
+        raise VaultDeliveryError(
+            "a vault release delivers the value in its final shape; this "
+            "Setting's payload does not carry a single non-empty 'value'"
+        )
 
     release_id = _validated_component("release id", row.get("id"))
     session = _validated_component("session", row.get("session"))
@@ -85,6 +100,15 @@ def deliver_payload(
         if not isinstance(set_id, str) or not isinstance(key, str):
             raise VaultDeliveryError("vault release has no frozen Setting target")
         setting_name = f"{set_id}/{key}"
+    # The delivered filename is the credential's own name — the suffix the
+    # requester asked for, without the server-derived org prefix — so the
+    # path is stable across sessions and machines and needs no lookup.
+    routed_key = setting.get("key")
+    if not isinstance(routed_key, str) or not routed_key:
+        routed_key = setting_name.rsplit("/", 1)[-1]
+    credential_name = _validated_component(
+        "credential name", routed_key.rsplit(":", 1)[-1],
+    )
 
     expires_at_s = request.get("expires_at")
     if isinstance(expires_at_s, bool) or not isinstance(expires_at_s, (int, float)):
@@ -106,18 +130,19 @@ def deliver_payload(
     # gate that refuses both ordinary disk and swappable tmpfs.
     assert_memory_backed(session_dir)
 
-    filename = f"vault-open-{release_id}.json"
-    host_path = session_dir / filename
-    container_path = str(Path(SESSION_SECRET_DST) / filename)
-    expires_at_ms = int(float(expires_at_s) * 1000)
+    host_path = session_dir / credential_name
+    container_path = str(Path(SESSION_SECRET_DST) / credential_name)
     delivered_at_ms = int(stamp_s * 1000)
 
+    # expires_at=None: session lifetime. The launcher's session-end hook and
+    # the sweeper's orphan pass destroy the file; no short timer applies to
+    # the artifact (the TTL above bounded only approval-to-delivery).
     vault_releases.record_release(
         id=release_id,
         session=session,
         setting_name=setting_name,
         release_mode="delivered",
-        expires_at=expires_at_ms,
+        expires_at=None,
         container_path=container_path,
         host_path=str(host_path),
         delivered_at=delivered_at_ms,
@@ -128,13 +153,18 @@ def deliver_payload(
     try:
         # Encoding occurs only after the ramfs guard and durable receipt.  The
         # mutable buffer is wiped immediately after the kernel accepts it.
-        encoded = bytearray(json.dumps(
-            payload,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-            allow_nan=False,
-        ).encode("utf-8"))
+        # RAW value bytes — never an envelope the consumer would have to
+        # unwrap.
+        encoded = bytearray(value.encode("utf-8"))
+        # A re-release of the same credential in the same session replaces
+        # the file (fresh O_EXCL create after unlink, so a symlink can never
+        # be followed). The superseded lease still points here; destruction
+        # tolerates an already-gone file, so both leases settle at session
+        # end.
+        try:
+            os.unlink(host_path)
+        except FileNotFoundError:
+            pass
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         flags |= getattr(os, "O_CLOEXEC", 0)
         flags |= getattr(os, "O_NOFOLLOW", 0)
@@ -166,5 +196,5 @@ def deliver_payload(
         "release_id": release_id,
         "delivery": "session-ramfs",
         "path": container_path,
-        "expires_at": expires_at_s,
+        "lifetime": "session",
     }

@@ -144,6 +144,10 @@ def test_project_start_handler_prepares_launches_registers_without_event_loop(mo
 
     monkeypatch.setattr(server, "_REPO_ROOT", tmp_path)
     monkeypatch.setattr(server.workspace_settings, "get_workspace", lambda _project_id: proj)
+    monkeypatch.setattr(
+        server.workspace_settings, "materialize_startup_script",
+        lambda _proj, _run_dir: None,
+    )
     monkeypatch.setattr(server.workspace_settings, "artifact_mounts", lambda _proj: {})
     monkeypatch.setattr(server, "render_workspace_primer", lambda _proj: "primer")
 
@@ -203,6 +207,10 @@ def test_project_start_handler_failure_writes_lifecycle_detail(monkeypatch, tmp_
     )
 
     monkeypatch.setattr(server.workspace_settings, "get_workspace", lambda _project_id: _project())
+    monkeypatch.setattr(
+        server.workspace_settings, "materialize_startup_script",
+        lambda _proj, _run_dir: None,
+    )
     monkeypatch.setattr(server, "prepare_session_mounts", lambda *_a, **_kw: {})
     monkeypatch.setattr(server.workspace_settings, "artifact_mounts", lambda _proj: {})
     monkeypatch.setattr(server, "render_workspace_primer", lambda _proj: "primer")
@@ -239,6 +247,10 @@ def test_project_start_handler_cleanup_error_preserves_failed_state(monkeypatch,
     )
 
     monkeypatch.setattr(server.workspace_settings, "get_workspace", lambda _project_id: _project())
+    monkeypatch.setattr(
+        server.workspace_settings, "materialize_startup_script",
+        lambda _proj, _run_dir: None,
+    )
     monkeypatch.setattr(server, "prepare_session_mounts", lambda *_a, **_kw: {})
     monkeypatch.setattr(server.workspace_settings, "artifact_mounts", lambda _proj: {})
     monkeypatch.setattr(server, "render_workspace_primer", lambda _proj: "primer")
@@ -455,6 +467,10 @@ def test_resume_start_handler_failure_preserves_worktrees(monkeypatch, tmp_path)
 
     monkeypatch.setattr(server, "_REPO_ROOT", tmp_path)
     monkeypatch.setattr(server.workspace_settings, "get_workspace", lambda _pid: proj)
+    monkeypatch.setattr(
+        server.workspace_settings, "materialize_startup_script",
+        lambda _proj, _run_dir: None,
+    )
     monkeypatch.setattr(server.workspace_settings, "artifact_mounts", lambda _proj: {})
     monkeypatch.setattr(server, "render_workspace_primer", lambda _proj: "primer")
     monkeypatch.setattr(

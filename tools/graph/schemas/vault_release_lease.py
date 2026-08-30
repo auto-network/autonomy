@@ -41,7 +41,8 @@ SHRED_REASONS = frozenset({
 
 _REQUIRED_STR = ("session", "setting_name", "release_mode",
                  "container_path", "host_path")
-_INT_FIELDS = ("delivered_at", "expires_at")
+_INT_FIELDS = ("delivered_at",)
+_OPTIONAL_INT_FIELDS = ("expires_at",)
 
 
 @home("machine")
@@ -55,7 +56,16 @@ class VaultReleaseLeaseV1(SettingSchema):
     setting_name: str = field(required=True, description="The released Setting's name; never its value.")
     release_mode: str = field(required=True, description="Always 'delivered' — the only mode that leaves a file.")
     delivered_at: int = field(required=True, description="Unix ms the record committed (before materialisation).")
-    expires_at: int = field(required=True, description="Unix ms deadline after which the sweeper destroys the file.")
+    expires_at: int = field(
+        required=False,
+        description=(
+            "Unix ms deadline after which the sweeper destroys the file. "
+            "Absent means SESSION LIFETIME: the artifact is destroyed at "
+            "session end (or by the orphan sweep), never by deadline — the "
+            "shape of a credential file the session uses for as long as it "
+            "runs."
+        ),
+    )
     container_path: str = field(required=True, description="The file as the session sees it (audit only).")
     host_path: str = field(required=True, description="The file on the host, where the sweeper unlinks.")
     shredded_at: int = field(required=False, description="Unix ms the file was destroyed; absent while outstanding.")
@@ -66,7 +76,10 @@ class VaultReleaseLeaseV1(SettingSchema):
         super().validate(payload)
         if not isinstance(payload, dict):
             return
-        known = set(_REQUIRED_STR) | set(_INT_FIELDS) | {"shredded_at", "shred_reason"}
+        known = (
+            set(_REQUIRED_STR) | set(_INT_FIELDS) | set(_OPTIONAL_INT_FIELDS)
+            | {"shredded_at", "shred_reason"}
+        )
         extra = set(payload) - known
         if extra:
             raise SchemaValidationError(
@@ -88,6 +101,15 @@ class VaultReleaseLeaseV1(SettingSchema):
             if isinstance(value, bool) or not isinstance(value, int):
                 raise SchemaValidationError(
                     f"{cls.__name__}: {name} must be an integer (unix ms)"
+                )
+        for name in _OPTIONAL_INT_FIELDS:
+            if name not in payload:
+                continue
+            value = payload.get(name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise SchemaValidationError(
+                    f"{cls.__name__}: {name} must be an integer (unix ms) "
+                    f"when present"
                 )
         shredded = payload.get("shredded_at")
         reason = payload.get("shred_reason")
