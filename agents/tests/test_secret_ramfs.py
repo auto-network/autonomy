@@ -112,3 +112,36 @@ def test_deliver_fails_closed_on_helper_error(monkeypatch):
     monkeypatch.setattr(secret_ramfs, "_container_image", lambda c: "img")
     with pytest.raises(secret_ramfs.ProvisionError, match="not ramfs"):
         secret_ramfs.deliver_secret_file("auto-x", "key", b"x")
+
+
+def test_destroy_removes_the_exact_file_via_nsenter(monkeypatch):
+    seen = {}
+
+    def fake_run(cmd, *, capture_output=None, timeout=None):
+        seen["cmd"] = cmd
+
+        class R:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+        return R()
+
+    monkeypatch.setattr(secret_ramfs.subprocess, "run", fake_run)
+    monkeypatch.setattr(secret_ramfs, "_container_pid", lambda c: 77)
+    monkeypatch.setattr(secret_ramfs, "_container_image", lambda c: "img")
+    secret_ramfs.destroy_secret_file("auto-x", "fleet-key")
+    joined = " ".join(str(t) for t in seen["cmd"])
+    assert "rm -f" in joined and "/run/secrets/fleet-key" in joined
+    assert "77" in seen["cmd"]  # the target container's pid, not PID 1
+
+
+def test_destroy_is_a_noop_when_container_is_gone(monkeypatch):
+    def gone(c):
+        raise secret_ramfs.ProvisionError("not running")
+
+    monkeypatch.setattr(secret_ramfs, "_container_pid", gone)
+    ran = []
+    monkeypatch.setattr(secret_ramfs.subprocess, "run",
+                        lambda *a, **k: ran.append(a))
+    secret_ramfs.destroy_secret_file("auto-x", "key")   # must not raise
+    assert ran == []   # container gone -> file already freed, no helper run

@@ -785,14 +785,21 @@ class HttpClient:
             dropped=DropAccounting(**(result.get("dropped") or {})),
         )
 
+    #: How long to wait for the OPERATOR to approve, independent of the
+    #: credential's ramfs lifetime. Approval is a human tapping a phone; it
+    #: must not be rushed by ``ttl_seconds`` (which governs how long the
+    #: delivered credential then lives, not how long the human has).
+    _APPROVAL_WAIT_S = 300
+
     def request_vault_open(self, set_id, key, *, org, ttl_seconds=60):
         """Request and await one operator-approved secured Setting release.
 
-        The session identity is intentionally absent from the body: the
-        dashboard derives it from this client's bearer.  Held GETs receive
-        only a value-free receipt naming the requesting session's ramfs path;
-        factor bootstrap is available solely on the browser's operator-cookie
-        GET.
+        ``ttl_seconds`` is the delivered credential's LIFETIME in the
+        session's ramfs (requester-chosen), NOT an approval deadline — the
+        wait for the operator is :data:`_APPROVAL_WAIT_S`. The session
+        identity is intentionally absent from the body: the dashboard
+        derives it from this client's bearer.  Held GETs receive only a
+        value-free receipt naming the requesting session's ramfs path.
         """
         org = _resolve_client_org_arg(org)
         created = self._request(
@@ -811,7 +818,7 @@ class HttpClient:
         request_id = (created or {}).get("id")
         if not isinstance(request_id, str) or not request_id:
             raise GraphHttpError("dashboard created no vault-open request", 500)
-        deadline = time.monotonic() + ttl_seconds + 5
+        deadline = time.monotonic() + self._APPROVAL_WAIT_S
         result = None
         while result is None and time.monotonic() < deadline:
             remaining = max(0, deadline - time.monotonic())

@@ -306,7 +306,6 @@ def prepare_create_from_request(
         raise ValueError("the secured Setting and policy class disagree")
     ceremony_bootstrap = _ceremony_bootstrap(class_snapshot, member.org)
 
-    now = time.time()
     safe_request = {
         "setting": {"set_id": set_id, "key": routed_key, "id": member.id},
         "operation": "read",
@@ -323,8 +322,10 @@ def prepare_create_from_request(
             (class_snapshot.get("governance") or {}).get("display_name")
             or class_snapshot.get("policy")
         ),
+        # ttl_seconds is the delivered credential's ramfs LIFETIME (delivery
+        # applies it from delivery time). The pending-approval window is the
+        # kind's FIXED policy, not this value — see approval_kind_registry.
         "ttl_seconds": ttl,
-        "expires_at": now + ttl,
     }
     staged = {
         "v": 1,
@@ -453,8 +454,12 @@ def _assert_frozen(row: dict) -> tuple[dict, dict]:
     staged = row.get("staged") or {}
     if staged.get("v") != 1 or not isinstance(req.get("setting"), dict):
         raise VaultError("this request has no frozen vault-open context")
-    if time.time() > float(req.get("expires_at") or 0):
-        raise VaultError("this vault-open request expired before delivery")
+    # No wall-clock expiry here: the operator's approval IS the
+    # authorization, and the frozen-context checks below (policy snapshot,
+    # factor digest, unchanged requesting session) catch anything that
+    # actually changed. A time budget that starts at REQUEST creation only
+    # rejected approvals the operator was slow to tap — punishing the human
+    # for the ceremony, never closing a real hole.
     launcher = dashboard_db.get_session(row.get("session"))
     requester = req.get("requester") or {}
     if launcher is None or str(launcher.get("project") or "").strip() != (

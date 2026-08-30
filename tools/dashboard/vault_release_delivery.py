@@ -95,26 +95,29 @@ def deliver_payload(
         "credential name", routed_key.rsplit(":", 1)[-1],
     )
 
-    expires_at_s = request.get("expires_at")
-    if isinstance(expires_at_s, bool) or not isinstance(expires_at_s, (int, float)):
-        raise VaultDeliveryError("vault release has no valid expiry")
+    # The request-provided TTL is the credential's LIFETIME in the session's
+    # ramfs, and it is enforced from DELIVERY, not from request creation: the
+    # approval takes as long as the human takes (no wall-clock rejection of a
+    # slow-approved release — see vault_open_approvals._assert_frozen), and
+    # the credential then lives exactly ttl_seconds before the sweeper
+    # destroys that one file in this container.
+    ttl_seconds = request.get("ttl_seconds")
+    if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, (int, float)) \
+            or ttl_seconds <= 0:
+        raise VaultDeliveryError("vault release has no positive ttl_seconds")
     stamp_s = time.time() if now is None else float(now)
-    if stamp_s >= float(expires_at_s):
-        raise VaultDeliveryError("vault release expired before ramfs delivery")
-
     container_path = f"{SESSION_SECRET_DST}/{credential_name}"
     delivered_at_ms = int(stamp_s * 1000)
+    expires_at_ms = delivered_at_ms + int(float(ttl_seconds) * 1000)
 
-    # expires_at=None: session lifetime — the container's private mount dies
-    # with the container; no timer, no sweeper destruction. host_path is an
-    # audit LOCATOR in the container-namespace frame: there is no host path,
-    # which is the point.
+    # host_path is an audit LOCATOR in the container-namespace frame: there is
+    # no host path — the file lives only inside the container's private mount.
     vault_releases.record_release(
         id=release_id,
         session=session,
         setting_name=setting_name,
         release_mode="delivered",
-        expires_at=None,
+        expires_at=expires_at_ms,
         container_path=container_path,
         host_path=f"container-ns:{session}:{container_path}",
         delivered_at=delivered_at_ms,
@@ -142,5 +145,5 @@ def deliver_payload(
         "release_id": release_id,
         "delivery": "session-ramfs",
         "path": container_path,
-        "lifetime": "session",
+        "ttl_seconds": int(ttl_seconds),
     }

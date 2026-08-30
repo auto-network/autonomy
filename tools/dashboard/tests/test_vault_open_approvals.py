@@ -76,6 +76,11 @@ def vault_open_env(tmp_path, monkeypatch):
         return f"/run/secrets/{filename}"
 
     monkeypatch.setattr(vault_release_delivery, "deliver_secret_file", fake_deliver)
+    destroyed_files: list = []
+    monkeypatch.setattr(
+        "agents.secret_ramfs.destroy_secret_file",
+        lambda container, filename, **kw: destroyed_files.append((container, filename)),
+    )
     monkeypatch.setattr(
         vault_open_approvals.dashboard_db,
         "get_session",
@@ -131,7 +136,9 @@ def vault_open_env(tmp_path, monkeypatch):
             world.identity.armor,
         )
     try:
-        yield graph_db, world, TestClient(Starlette(routes=approvals_routes.ROUTES)), delivered_files
+        yield (graph_db, world,
+               TestClient(Starlette(routes=approvals_routes.ROUTES)),
+               delivered_files, destroyed_files)
     finally:
         world.close()
         clear_seams()
@@ -144,7 +151,7 @@ def test_fake_ssh_key_is_sealed_approved_delivered_and_reclaimed_without_leak(
 ):
     """The Mac-key rehearsal: full path, exact RAW bytes at the credential's
     own name, session-lifetime file, session-end shred."""
-    graph_db, world, client, delivered_files = vault_open_env
+    graph_db, world, client, delivered_files, destroyed_files = vault_open_env
     secret = (
         "-----BEGIN OPENSSH PRIVATE KEY-----\n"
         + base64.b64encode(secrets.token_bytes(96)).decode("ascii")
@@ -272,7 +279,7 @@ def test_fake_ssh_key_is_sealed_approved_delivered_and_reclaimed_without_leak(
     # The value in its FINAL SHAPE: raw bytes at the credential's bare name
     # (org prefix server-derived, so the consumer path is stable).
     assert receipt["path"] == "/run/secrets/test.disposable"
-    assert receipt["lifetime"] == "session"
+    assert receipt["ttl_seconds"] == 60
     assert replay["result"] == delivered["result"]
     assert "value" not in execution
     assert secret not in json.dumps(delivered)
@@ -289,26 +296,31 @@ def test_fake_ssh_key_is_sealed_approved_delivered_and_reclaimed_without_leak(
     assert secret not in json.dumps(release)
     assert "cek" not in json.dumps(delivered).lower()
 
-    # Session lifetime: while the session lives, the lease stays outstanding
-    # (the delivered file lives in the container's own mount namespace and
-    # dies with it — nothing on a host path to sweep).
+    # Before the TTL deadline the lease is outstanding; the delivered file
+    # lives in the container's own private mount.
+    delivered_at = release["delivered_at"]
     swept = vault_release_sweeper.sweep(
         session_exists=lambda session: session == "auto-real",
-        now=int(time.time() * 1000) + 10 * 24 * 3600 * 1000,
+        now=delivered_at + 1,
     )
-    assert swept["closed"] == 0
+    assert swept == {"destroyed": 0, "closed": 0}
     assert vault_releases.get(rid)["shredded_at"] is None
-    # Session end closes the ledger row.
-    ended = vault_release_sweeper.on_session_end("auto-real")
-    assert ended["closed"] == 1
+    # Past the TTL, the sweeper destroys THAT exact file in THAT container
+    # and closes the lease as expired.
+    swept = vault_release_sweeper.sweep(
+        session_exists=lambda session: session == "auto-real",
+        now=release["expires_at"] + 1,
+    )
+    assert swept == {"destroyed": 1, "closed": 1}
+    assert ("auto-real", "test.disposable") in destroyed_files
     reclaimed = vault_releases.get(rid)
-    assert reclaimed["shred_reason"] == "session_end"
+    assert reclaimed["shred_reason"] == "expired"
     assert secret not in json.dumps(reclaimed)
 
 
 def test_root_reachable_fake_ssh_key_uses_personal_root_anchor(vault_open_env):
     """One stable anchor, opened by the root ceremony, releases exact bytes."""
-    graph_db, world, client, delivered_files = vault_open_env
+    graph_db, world, client, delivered_files, destroyed_files = vault_open_env
     root = KeyPair.generate()
     root_password = "disposable-root-password"
     pw_factor, pw_seed = create_password_factor(
@@ -411,7 +423,7 @@ def test_root_reachable_fake_ssh_key_uses_personal_root_anchor(vault_open_env):
 
 
 def test_vault_open_refuses_setting_drift(vault_open_env):
-    graph_db, world, client, delivered_files = vault_open_env
+    graph_db, world, client, delivered_files, destroyed_files = vault_open_env
     setting_id = ops.add_setting(
         VAULT_SECURED_SET_ID,
         VAULT_CREDENTIAL_REVISION,
@@ -460,7 +472,7 @@ def test_vault_open_refuses_setting_drift(vault_open_env):
 
 def test_vault_open_uses_the_generation_named_by_an_older_setting(vault_open_env):
     """A later revocation must not substitute today's wraps for old ciphertext."""
-    graph_db, world, client, delivered_files = vault_open_env
+    graph_db, world, client, delivered_files, destroyed_files = vault_open_env
     ops.add_setting(
         VAULT_SECURED_SET_ID,
         VAULT_CREDENTIAL_REVISION,

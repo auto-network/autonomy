@@ -269,6 +269,39 @@ def deliver_secret_file(
     return f"{SESSION_SECRET_DST}/{filename}"
 
 
+def destroy_secret_file(
+    container: str, filename: str, *, timeout: int = 30,
+) -> None:
+    """Remove ONE delivered file from *container*'s private ramfs.
+
+    Addressed by exact (container, filename) from the durable lease — this
+    never enumerates a directory, so it cannot reach any other session's
+    secret (the shared-root failure it replaces). If the container is not
+    running, the kernel already freed its private mount, so absence is
+    success. Raises :class:`ProvisionError` only when the container IS
+    running and the unlink itself fails.
+    """
+    _validated_name("container", container)
+    _validated_name("filename", filename)
+    try:
+        pid = _container_pid(container)
+    except ProvisionError:
+        return  # container gone -> file gone with its mount
+    image = _container_image(container)
+    r = subprocess.run(
+        ["docker", "run", "--rm", "--privileged", "--pid=host",
+         "--entrypoint", "nsenter", image,
+         "-t", str(pid), "-m", "--", "sh", "-c",
+         f'rm -f "{SESSION_SECRET_DST}/{filename}"'],
+        capture_output=True, timeout=timeout,
+    )
+    if r.returncode != 0:
+        raise ProvisionError(
+            f"secret destruction in {container!r} failed (rc={r.returncode}): "
+            f"{(r.stderr or r.stdout).decode(errors='replace').strip()}"
+        )
+
+
 def daemon_missing(paths: list) -> "list | None":
     """The subset of *paths* that do NOT exist in the frame the Docker daemon
     binds a ``--mount`` source from — or ``None`` if the check could not be run,
