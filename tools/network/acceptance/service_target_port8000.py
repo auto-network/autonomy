@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import http.cookiejar
 import json
+import os
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -65,11 +66,23 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     transcript: list[dict[str, Any]] = []
-    cookies = _cookies_from_jar(Path(args.cookie_jar))
+    cookies = (
+        _cookies_from_jar(Path(args.cookie_jar))
+        if args.cookie_jar
+        else httpx.Cookies()
+    )
+    headers = {"X-Graph-Org": args.org}
+    if args.bearer_env:
+        bearer = os.environ.get(args.bearer_env)
+        if not bearer:
+            raise ProofFailure(
+                f"bearer environment variable {args.bearer_env!r} is unset"
+            )
+        headers["Authorization"] = f"Bearer {bearer}"
 
     with httpx.Client(
         base_url=args.base_url.rstrip("/"),
-        headers={"X-Graph-Org": args.org},
+        headers=headers,
         cookies=cookies,
         verify=args.verify_tls,
         timeout=15.0,
@@ -248,7 +261,15 @@ def main() -> None:
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--org", required=True)
     parser.add_argument("--session", required=True)
-    parser.add_argument("--cookie-jar", required=True)
+    auth = parser.add_mutually_exclusive_group(required=True)
+    auth.add_argument("--cookie-jar")
+    auth.add_argument(
+        "--bearer-env",
+        help=(
+            "Name of an environment variable containing the bearer token; "
+            "the token is never accepted as an argument or written to evidence"
+        ),
+    )
     parser.add_argument("--app-label", required=True)
     parser.add_argument("--closed-port", type=int, default=8001)
     parser.add_argument(
