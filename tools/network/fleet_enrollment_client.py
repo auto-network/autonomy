@@ -223,6 +223,10 @@ class FleetJoinStateStore:
                 fleet_roster.RosterEntry.from_dict(delivery.origin_entry.to_dict())
                 if delivery.origin_entry is not None else None
             ),
+            tuple(
+                fleet_roster.RosterEntry.from_dict(entry.to_dict())
+                for entry in delivery.active_roster
+            ),
         )
         wire = json.dumps({
             "approval": frozen.approval.to_dict(),
@@ -231,6 +235,9 @@ class FleetJoinStateStore:
                 frozen.origin_entry.to_dict()
                 if frozen.origin_entry is not None else None
             ),
+            "active_roster": [
+                entry.to_dict() for entry in frozen.active_roster
+            ],
         }, sort_keys=True, separators=(",", ":"))
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -257,9 +264,12 @@ class FleetJoinStateStore:
         if row is None or row["delivery_json"] is None:
             return None
         payload = json.loads(row["delivery_json"])
-        if not isinstance(payload, dict) or set(payload) != {
-            "approval", "roster_entry", "origin_entry"
-        }:
+        base_fields = {"approval", "roster_entry", "origin_entry"}
+        if (
+            not isinstance(payload, dict)
+            or not base_fields <= set(payload)
+            or set(payload) - base_fields - {"active_roster"}
+        ):
             # A shape this version does not understand is treated as ABSENT, not
             # as an error. Join state is spent once enrollment completes — the
             # machine is already on the roster — so discarding a stale record
@@ -281,12 +291,17 @@ class FleetJoinStateStore:
             )
             return None
         origin_payload = payload["origin_entry"]
+        active_payload = payload.get("active_roster") or []
         return fleet_enroll.EnrollmentDelivery(
             fleet_enroll.EnrollmentApproval.from_dict(payload["approval"]),
             fleet_roster.RosterEntry.from_dict(payload["roster_entry"]),
             (
                 fleet_roster.RosterEntry.from_dict(origin_payload)
                 if origin_payload is not None else None
+            ),
+            tuple(
+                fleet_roster.RosterEntry.from_dict(entry)
+                for entry in active_payload
             ),
         )
 
@@ -403,7 +418,15 @@ class FleetEnrollmentClient:
             "personal_root_armor", "personal_root_created_at",
             "personal_root_updated_at",
         }
-        if status != "approved" or set(reply) != approved_fields:
+        # ``active_roster`` (the whole fleet, for peer bootstrap) is optional so
+        # a joiner still verifies against an origin that predates the field.
+        optional_fields = {"active_roster"}
+        extra = set(reply) - approved_fields
+        if (
+            status != "approved"
+            or not approved_fields <= set(reply)
+            or extra - optional_fields
+        ):
             raise FleetEnrollmentClientError(
                 "fleet resume returned an invalid status envelope"
             )
@@ -440,6 +463,10 @@ class FleetEnrollmentClient:
                 "fleet delivery names no origin roster entry"
             )
         origin_entry = fleet_roster.RosterEntry.from_dict(origin_payload)
+        active_roster = _parse_active_roster(
+            reply.get("active_roster"),
+            anchor_root_pub=frozen.invite.personal_root_pub,
+        )
         fleet_enroll.verify_approval(
             approval,
             frozen.request,
@@ -449,7 +476,7 @@ class FleetEnrollmentClient:
             anchor_root_pub=frozen.invite.personal_root_pub,
         )
         delivery = fleet_enroll.EnrollmentDelivery(
-            approval, roster_entry, origin_entry
+            approval, roster_entry, origin_entry, active_roster
         )
         fleet_enroll.verify_bootstrap_roster(
             delivery,
@@ -559,6 +586,34 @@ def _verify_envelope(value: dict) -> None:
         raise FleetEnrollmentClientError(
             "fleet grant envelope has no invitation target"
         ) from None
+
+
+def _parse_active_roster(
+    payload, *, anchor_root_pub: str
+) -> tuple[fleet_roster.RosterEntry, ...]:
+    """Decode a delivered active roster, keeping only entries that verify.
+
+    ``None`` or an empty list (an origin that predates the whole-roster
+    delivery) yields an empty tuple; a joiner then falls back to the origin
+    pair. A malformed or foreign entry is dropped rather than failing the whole
+    approved delivery, matching ``fleet_roster.resolve`` which drops the
+    unverifiable on read.
+    """
+    if payload is None:
+        return ()
+    if not isinstance(payload, list):
+        raise FleetEnrollmentClientError(
+            "fleet delivery active_roster must be a list"
+        )
+    entries: list[fleet_roster.RosterEntry] = []
+    for item in payload:
+        try:
+            entry = fleet_roster.RosterEntry.from_dict(item)
+            fleet_roster.verify(entry, anchor_root_pub=anchor_root_pub)
+        except (fleet_roster.FleetRosterError, TypeError, ValueError):
+            continue
+        entries.append(entry)
+    return tuple(entries)
 
 
 def _require_hex64(value, name: str) -> str:

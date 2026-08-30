@@ -5,6 +5,7 @@ import time
 
 import pytest
 
+from tools.network.clock import FLEET_RUNTIME_DELEGATION_TTL_SECONDS
 from tools.network.fleet_roster import enroll, kick
 from tools.network.fleet_sync_channel import (
     FleetAuthenticator,
@@ -213,7 +214,10 @@ def test_fleet_channel_refuses_overlong_process_delegation() -> None:
         org=f"personal:{root.public_hex}",
         subject=Subject(kind="machine", id=entry.machine_id),
         not_before=now - 30,
-        not_after=now + (13 * 60 * 60),
+        # Exceed the delegation TTL bound by a day. Pinned to the live constant
+        # (raised to 30 days in d0d6983af, matched to the serve-cert) so this
+        # test tracks the bound instead of a stale hard-coded hour count.
+        not_after=now + FLEET_RUNTIME_DELEGATION_TTL_SECONDS + (24 * 60 * 60),
     )
     auth = FleetAuthenticator(
         process,

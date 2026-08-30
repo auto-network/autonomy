@@ -1,10 +1,14 @@
 from pathlib import Path
 import json
+import sqlite3
 
 import pytest
 import tools.network.fleet_sync.sync as sync_module
 
 from tools.graph.db import GraphDB
+from tools.network import fleet_roster
+from tools.network.idkit import KeyPair, derive_machine_key
+from tools.graph.schemas.fleet_roster import FLEET_ROSTER_REVISION
 from tools.network.fleet_sync.sync import (
     ALPHA_VERSION,
     AlphaError,
@@ -14,6 +18,48 @@ from tools.network.fleet_sync.sync import (
 )
 from tools.network.fleet_sync.compaction import WatermarkError
 from tools.network.fleet_sync.streaming import StreamingCodecError
+
+
+def _author_roster_entry(alpha, entry, *, timestamp_ns: int, tx: str) -> None:
+    """Author a fleet-roster entry as an ordinary replicated Setting row.
+
+    The roster is stored as ``raw`` Setting members keyed by each entry's
+    content id, so it rides the mutation catalog exactly like any other synced
+    row -- which is what lets a kick authored on one machine be preserved
+    through another machine's checkpoint merge."""
+    with alpha.author(timestamp_ns, tx):
+        payload = json.dumps(
+            fleet_roster._entry_payload(entry),
+            sort_keys=True, separators=(",", ":"),
+        )
+        alpha.graph.conn.execute(
+            "INSERT INTO settings(id,set_id,schema_revision,key,payload,"
+            "publication_state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+            (
+                entry.entry_id, fleet_roster.FLEET_ROSTER_SET_ID,
+                FLEET_ROSTER_REVISION, entry.entry_id, payload, "raw",
+                "2026-08-19T00:00:00Z", "2026-08-19T00:00:00Z",
+            ),
+        )
+
+
+def _resolved_roster(path: Path, anchor_root_pub: str) -> dict:
+    """Read the roster Setting rows straight out of a published DB and resolve.
+
+    Bypasses the org-scoped settings reader so a bare checkpoint-target DB can
+    be inspected directly."""
+    conn = sqlite3.connect(path)
+    try:
+        rows = conn.execute(
+            "SELECT payload FROM settings WHERE set_id=?",
+            (fleet_roster.FLEET_ROSTER_SET_ID,),
+        ).fetchall()
+    finally:
+        conn.close()
+    entries = [
+        fleet_roster._entry_from_payload(json.loads(row[0])) for row in rows
+    ]
+    return fleet_roster.resolve(entries, anchor_root_pub=anchor_root_pub)
 
 
 def _source(conn, identity: str, title: str) -> None:
@@ -238,26 +284,150 @@ def test_checkpoint_carries_personal_vault_key_records(tmp_path: Path) -> None:
         ).fetchone()[0] == '{"secret":1}'
 
 
-def test_alpha_refuses_wrong_roster_epoch_without_touching_target(
-    tmp_path: Path,
-) -> None:
+def test_alpha_installs_when_roster_epoch_differs(tmp_path: Path) -> None:
+    """A checkpoint whose roster epoch differs from the receiver's installs.
+
+    Roster-epoch equality is a canonical-base-round property, not a checkpoint
+    admission rule (auto graph 1155b8f4-8cf): pinning one exact epoch belongs on
+    the exact-base barrier, not here. Enforcing it on ordinary checkpoint
+    install was the defect that left a fresh joiner -- which holds a smaller
+    roster and therefore a different epoch -- unable to ever complete a first
+    sync, because the roster that would fix its epoch lives inside the very
+    checkpoint being refused.
+    """
     origin_path = tmp_path / "origin.db"
     target_path = tmp_path / "target.db"
     with FleetSyncAlpha(origin_path, "machine-a") as origin:
         with origin.author(1, "tx"):
             _source(origin.graph.conn, "s1", "one")
-        origin.checkpoint(
+        checkpoint = origin.checkpoint(
             tmp_path / "checkpoint", roster_epoch=3,
             active_roster=("machine-a", "machine-b"),
         )
-    before = target_path.exists()
-    with pytest.raises(AlphaError, match="roster epoch"):
-        install_checkpoint(
-            tmp_path / "checkpoint", target_path,
-            target_origin_incarnation="machine-b", expected_roster_epoch=4,
-            expected_active_roster=("machine-a", "machine-b"),
+    installed = install_checkpoint(
+        tmp_path / "checkpoint", target_path,
+        target_origin_incarnation="machine-b", expected_roster_epoch=4,
+        expected_active_roster=("machine-a", "machine-b"),
+    )
+    assert installed.manifest_sha256 == checkpoint.manifest_sha256
+    # The install reports the checkpoint's OWN roster epoch, not the receiver's
+    # expected 4 -- the two now legitimately differ.
+    assert installed.roster_epoch == 3
+    with FleetSyncAlpha(target_path, "machine-b") as target:
+        assert target.graph.conn.execute(
+            "SELECT title FROM sources WHERE id='s1'"
+        ).fetchone()[0] == "one"
+
+
+def test_two_entry_receiver_installs_four_entry_checkpoint(
+    tmp_path: Path,
+) -> None:
+    """A receiver holding two roster entries installs a checkpoint built with
+    four, and the published DB is readable and carries the checkpoint's rows."""
+    origin_path = tmp_path / "origin.db"
+    target_path = tmp_path / "target.db"
+    with FleetSyncAlpha(origin_path, "machine-a") as origin:
+        with origin.author(5, "tx"):
+            _source(origin.graph.conn, "wide", "built with four")
+        origin.checkpoint(
+            tmp_path / "checkpoint", roster_epoch=9,
+            active_roster=(
+                "machine-a", "machine-b", "machine-c", "machine-d",
+            ),
         )
-    assert target_path.exists() is before
+    install_checkpoint(
+        tmp_path / "checkpoint", target_path,
+        target_origin_incarnation="machine-b", expected_roster_epoch=1,
+        expected_active_roster=("machine-a", "machine-b"),
+    )
+    conn = sqlite3.connect(target_path)
+    try:
+        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert conn.execute(
+            "SELECT title FROM sources WHERE id='wide'"
+        ).fetchone()[0] == "built with four"
+    finally:
+        conn.close()
+
+
+def test_older_checkpoint_does_not_resurrect_third_machine_kick(
+    tmp_path: Path,
+) -> None:
+    """A kick a receiver already holds survives an older checkpoint's merge.
+
+    This pins the property the deleted roster-equality checks were wrongly
+    believed to protect. A kick is an immutable tombstone at its own entry_id
+    address; an older checkpoint built before the kick cannot carry a competing
+    newer row at that address, and the merge (``merge_existing=True``) re-applies
+    the receiver's whole held catalog by last-writer-wins, so a kick authored by
+    a THIRD machine is preserved regardless of the checkpoint's origin or epoch.
+    """
+    root = KeyPair.generate()
+    kicked_id = "aa" * 32
+    kicked_key = derive_machine_key(bytes.fromhex(root.private_hex), kicked_id)
+    enroll = fleet_roster.enroll(
+        root, machine_id=kicked_id, machine_pub=kicked_key.public_hex, seq=0
+    )
+    kick = fleet_roster.kick(
+        root, machine_id=kicked_id, machine_pub=kicked_key.public_hex, seq=1
+    )
+    # Sanity: the enroll alone resolves the machine as active, so only the kick
+    # keeps it out of the roster.
+    assert kicked_key.public_hex in fleet_roster.resolve(
+        [enroll], anchor_root_pub=root.public_hex
+    )
+
+    # A THIRD machine (machine-c, not the receiver) authors both the enroll and
+    # the later kick and ships them in a checkpoint the receiver installs.
+    kick_checkpoint = tmp_path / "kick-checkpoint"
+    with FleetSyncAlpha(tmp_path / "machine-c.db", "machine-c") as mc:
+        _author_roster_entry(mc, enroll, timestamp_ns=100, tx="c-enroll")
+        _author_roster_entry(mc, kick, timestamp_ns=200, tx="c-kick")
+        mc.checkpoint(
+            kick_checkpoint, roster_epoch=2,
+            active_roster=("machine-c", "machine-b"),
+        )
+    target_path = tmp_path / "target.db"
+    install_checkpoint(
+        kick_checkpoint, target_path,
+        target_origin_incarnation="machine-b", expected_roster_epoch=2,
+        expected_active_roster=("machine-c", "machine-b"),
+    )
+    assert kicked_key.public_hex not in _resolved_roster(
+        target_path, root.public_hex
+    )
+
+    # machine-a built an OLDER checkpoint before the kick existed: it carries
+    # the enroll but not the kick.
+    old_checkpoint = tmp_path / "old-checkpoint"
+    with FleetSyncAlpha(tmp_path / "machine-a.db", "machine-a") as ma:
+        _author_roster_entry(ma, enroll, timestamp_ns=100, tx="a-enroll")
+        ma.checkpoint(
+            old_checkpoint, roster_epoch=1,
+            active_roster=("machine-a", "machine-b"),
+        )
+    # Installing the older checkpoint MERGES; the receiver's held kick is not
+    # erased, so the machine still resolves as kicked.
+    install_checkpoint(
+        old_checkpoint, target_path,
+        target_origin_incarnation="machine-b", expected_roster_epoch=1,
+        expected_active_roster=("machine-a", "machine-b"),
+        merge_existing=True,
+    )
+    assert kicked_key.public_hex not in _resolved_roster(
+        target_path, root.public_hex
+    )
+    conn = sqlite3.connect(target_path)
+    try:
+        keys = {
+            row[0] for row in conn.execute(
+                "SELECT key FROM settings WHERE set_id=?",
+                (fleet_roster.FLEET_ROSTER_SET_ID,),
+            )
+        }
+    finally:
+        conn.close()
+    assert {enroll.entry_id, kick.entry_id} <= keys
 
 
 def test_full_checkpoint_survives_retired_transaction_journal(
@@ -288,7 +458,13 @@ def test_full_checkpoint_survives_retired_transaction_journal(
         assert relayed[0].mutation.timestamp_ns == 10
 
 
-def test_checkpoint_refuses_active_roster_mismatch(tmp_path: Path) -> None:
+def test_checkpoint_installs_despite_active_roster_difference(
+    tmp_path: Path,
+) -> None:
+    """A checkpoint built under a different active set installs. The active-set
+    equality gate was a base-round rule mis-applied to checkpoint install; a
+    receiver whose roster differs from the checkpoint's is not an admission
+    fault, only a base-acknowledgment one (auto graph 1155b8f4-8cf)."""
     origin_path = tmp_path / "origin.db"
     target_path = tmp_path / "target.db"
     with FleetSyncAlpha(origin_path, "machine-a") as origin:
@@ -298,12 +474,15 @@ def test_checkpoint_refuses_active_roster_mismatch(tmp_path: Path) -> None:
             tmp_path / "checkpoint", roster_epoch=3,
             active_roster=("machine-a", "machine-b"),
         )
-    with pytest.raises(AlphaError, match="active roster"):
-        install_checkpoint(
-            tmp_path / "checkpoint", target_path,
-            target_origin_incarnation="machine-c", expected_roster_epoch=3,
-            expected_active_roster=("machine-a", "machine-c"),
-        )
+    install_checkpoint(
+        tmp_path / "checkpoint", target_path,
+        target_origin_incarnation="machine-c", expected_roster_epoch=3,
+        expected_active_roster=("machine-a", "machine-c"),
+    )
+    with FleetSyncAlpha(target_path, "machine-c") as target:
+        assert target.graph.conn.execute(
+            "SELECT title FROM sources WHERE id='s1'"
+        ).fetchone()[0] == "one"
 
 
 def test_failed_install_preserves_target_and_removes_staging(
