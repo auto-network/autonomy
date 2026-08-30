@@ -238,14 +238,3 @@ volumes:
   autonomy-orgs:
     name: autonomy-orgs
   dolt-data:
-
-# Pin the project network. Left undeclared, the daemon picks from its built-in
-# pools: 172.17.0.0/12 in /16s, then 192.168.0.0/16 in /20s. With 172.17-172.23
-# taken by other bridges and 172.24 held by WSL's own eth0, it fell through to
-# the second pool and took 192.168.0.0/20 — swallowing 192.168.1.0/24, the most
-# common home LAN there is, and blackholing the operator's own network.
-networks:
-  default:
-    ipam:
-      config:
-        - subnet: ${AUTONOMY_SUBNET:-172.30.0.0/24}
