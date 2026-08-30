@@ -44,6 +44,7 @@ import array
 import asyncio
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
@@ -57,7 +58,15 @@ log = logging.getLogger(__name__)
 # monkeypatch (or replace ``WhisperLiveClient`` outright with a
 # stub class) — keeps the route's client construction site
 # unchanged for both production and test paths.
-WHISPERLIVE_URL = "ws://127.0.0.1:9090"
+#
+# The URL is environment-overridable because the dashboard and the
+# transcription server are not always co-located. Running natively they share
+# a host, so loopback is right and stays the default. Under Compose the
+# dashboard is a container on the project network and WhisperLive is the
+# optional ``voice`` profile service, reachable as ``ws://whisper:9090``:
+# loopback there would resolve to the dashboard's own container and dictation
+# would fail with nothing obviously wrong. Set WHISPERLIVE_URL to move it.
+WHISPERLIVE_URL = os.environ.get("WHISPERLIVE_URL", "ws://127.0.0.1:9090")
 WHISPERLIVE_MODEL = "large-v3"
 WHISPERLIVE_LANGUAGE = "en"
 WHISPERLIVE_USE_VAD = True

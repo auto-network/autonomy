@@ -1,0 +1,58 @@
+# The optional `whisper` service — streaming transcription for dashboard
+# dictation (/ws/voice). Built only when the `voice` profile is used:
+#
+#   docker compose --profile voice up -d
+#
+# SEPARATE from deploy/Dockerfile on purpose. The node image is ~57 packages;
+# this one carries CTranslate2 and the CUDA runtime. Co-residence would put
+# that weight — and a GPU device claim — into every install, including the ones
+# that never dictate.
+#
+# GPU: uses it when the host provides one (see the compose service's device
+# reservation). faster-whisper falls back to CPU when there is none, so this
+# image runs either way; it is only slower.
+#
+# The MODEL IS NOT BAKED IN. It is read from the shared data volume at
+# /app/data/models/<name>, so the image stays small and the operator's model
+# choice is data, not a rebuild.
+
+ARG BASE_IMAGE=nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+FROM ${BASE_IMAGE}
+
+# CTranslate2 needs cuDNN at runtime; the cudnn-runtime base supplies it.
+# python3 + pip only — no build toolchain, the wheels are prebuilt.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY deploy/requirements.whisper.txt /app/deploy/requirements.whisper.txt
+RUN pip3 install --no-cache-dir --break-system-packages \
+        -r /app/deploy/requirements.whisper.txt
+
+# Same uid as the node and the sessions (deploy/Dockerfile's single-uid model),
+# so anything read from or written to the shared data volume has consistent
+# ownership.
+RUN useradd -u 1000 -m -s /bin/bash autonomy
+USER autonomy
+WORKDIR /app
+
+# Bind 0.0.0.0 INSIDE the container: only the Compose project network can reach
+# it, which is stricter than the host loopback binding it replaces, not looser.
+# Nothing is published to the host.
+#
+# single_model=True builds the model once at startup rather than per connection
+# — the dictation-latency defect fixed on 2026-08-02 (graph://b39129ef-80b).
+ENV WHISPER_HOST=0.0.0.0 \
+    WHISPER_PORT=9090 \
+    WHISPER_BACKEND=faster_whisper \
+    WHISPER_MODEL_PATH=/app/data/models/distil-large-v3
+
+CMD ["sh", "-c", "python3 -c \"\
+from whisper_live.server import TranscriptionServer; \
+import os; \
+TranscriptionServer().run( \
+    os.environ['WHISPER_HOST'], \
+    port=int(os.environ['WHISPER_PORT']), \
+    backend=os.environ['WHISPER_BACKEND'], \
+    single_model=True, \
+    faster_whisper_custom_model_path=os.environ['WHISPER_MODEL_PATH'])\""]

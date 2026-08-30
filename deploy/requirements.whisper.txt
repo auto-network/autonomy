@@ -1,0 +1,16 @@
+# Dependencies of the optional `whisper` Compose service (deploy/Dockerfile.whisper).
+#
+# Deliberately SEPARATE from deploy/requirements.txt. The node image is ~57
+# packages; this stack pulls in CTranslate2 and the CUDA runtime, which is a
+# large multiple of that. Keeping it here means an operator who never dictates
+# never carries it — the whole reason `whisper` is a profile service and not
+# co-resident in the dashboard.
+#
+# Pinned to the versions proven on the primary host, 2026-08-30.
+
+# Direct pins, matching the primary host's working environment. Transitive deps
+# are left to pip so security patches flow, same policy as requirements.txt.
+whisper-live==0.8.0
+faster-whisper==1.2.0
+ctranslate2==4.7.1
+numpy==1.26.4
