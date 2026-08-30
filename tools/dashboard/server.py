@@ -21145,7 +21145,14 @@ class _FleetJoiningMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         try:
             from tools.network import machine_boot
-            joining = machine_boot.is_joining()
+            # A machine that already holds an identity has finished enrolling,
+            # regardless of the marker. Checking the identity here stops a stale
+            # marker — one nothing cleared — from redirecting every page and
+            # locking the operator out of a fully-enrolled machine's dashboard.
+            joining = (
+                machine_boot.machine_id(org="machine") is None
+                and machine_boot.is_joining()
+            )
         except Exception:
             # Fail OPEN: an unreadable marker must never make the dashboard
             # unnavigable. A node that is not joining is the common case.
