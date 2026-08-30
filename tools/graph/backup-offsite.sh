@@ -60,12 +60,14 @@ echo "offsite: snapshot start ${STAMP} tier=${TIER} provider=${BACKUP_PROVIDER}"
 
 # ── DB dumps ──────────────────────────────────────────────────────────
 restic backup \
+    --quiet \
     --tag "tier=${TIER}" --tag "kind=db" \
     --host "${HOST}" \
     "${LATEST_TIER_DIR%/}"
 
 # ── Loose-file repo data ──────────────────────────────────────────────
 restic backup \
+    --quiet \
     --tag "tier=${TIER}" --tag "kind=data" \
     --host "${HOST}" \
     --exclude "*.log" --exclude "*.pid" --exclude "*-wal" --exclude "*-shm" \
@@ -81,6 +83,7 @@ restic backup \
 
 # ── Host Claude Code state ────────────────────────────────────────────
 restic backup \
+    --quiet \
     --tag "tier=${TIER}" --tag "kind=claude" \
     --host "${HOST}" \
     --exclude "*.log" --exclude "statsig" --exclude "cache" \
@@ -99,6 +102,7 @@ restic backup \
 BUNDLE_TMP="$(mktemp -t autonomy-XXXXXX.bundle)"
 if git -C "$REPO_ROOT" bundle create "$BUNDLE_TMP" --all 2>/dev/null; then
     restic backup \
+        --quiet \
         --tag "tier=${TIER}" --tag "kind=git" \
         --host "${HOST}" \
         --stdin --stdin-filename "autonomy.bundle" < "$BUNDLE_TMP"
@@ -107,6 +111,7 @@ rm -f "$BUNDLE_TMP"
 
 # ── Crontab ───────────────────────────────────────────────────────────
 crontab -l 2>/dev/null | restic backup \
+    --quiet \
     --tag "tier=${TIER}" --tag "kind=crontab" \
     --host "${HOST}" \
     --stdin --stdin-filename "crontab.txt" || true
@@ -118,6 +123,7 @@ crontab -l 2>/dev/null | restic backup \
 # them. Grouping by host+tags (tier=,kind=) lets all db snapshots share a
 # group so retention actually applies. See graph backup-retention pitfall.
 restic forget --prune \
+    --quiet \
     --group-by host,tags \
     --keep-hourly  "${RESTIC_KEEP_HOURLY:-24}" \
     --keep-daily   "${RESTIC_KEEP_DAILY:-30}" \
