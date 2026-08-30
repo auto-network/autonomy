@@ -103,6 +103,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     "response": response_body,
                 }
             )
+            (output_dir / "transcript.json").write_text(
+                json.dumps(transcript, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
             return response
 
         reservation = _expect(
