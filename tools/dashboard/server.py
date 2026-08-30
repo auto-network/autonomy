@@ -11481,22 +11481,6 @@ async def api_version(request):
 async def page_web_push_proof(request):
     return HTMLResponse(_load_template("web-push-proof.html"))
 
-def _bootstrap_gate_open() -> bool:
-    """True when Layer-0 harness bootstrap is still required.
-
-    Server-side gate (bead auto-n130b): while no harness row carries
-    ``auth == "ok"`` in ``autonomy.harness.bootstrap#1``, the first-launch
-    walkthrough renders instead of the session UI. Once a harness is verified
-    it never intercepts again. Any read error fails OPEN (gate closed) so a
-    substrate hiccup never bricks the dashboard behind bootstrap.
-    """
-    try:
-        return not _harness_bootstrap.has_verified_harness()
-    except Exception:
-        logger.exception("bootstrap gate check failed; not gating")
-        return False
-
-
 def _welcome_gate_open() -> bool:
     """True when the onboarding empty-state still holds (bead auto-inpkd).
 
@@ -11605,8 +11589,18 @@ async def page_index(request):
     _fleet_first = _fleet_enrollment_first_render()
     if _fleet_first is not None and _fleet_first.get("status") != "approved":
         return _welcome_page()
-    if _bootstrap_gate_open():
-        return HTMLResponse(_load_template("bootstrap.html"))
+    # NO harness gate here. It used to render the Layer-0 walkthrough whenever
+    # no harness CLI resolved on PATH *of the process serving this page*, which
+    # asks the wrong machine: the node never runs a harness. Sessions do, and
+    # the session image carries claude and codex (agents/Dockerfile). A
+    # containerized node therefore always failed the probe and served first-run
+    # setup forever, on a machine that was already enrolled, credentialed and
+    # able to launch sessions.
+    #
+    # The walkthrough still exists and is still reachable at /bootstrap for an
+    # operator who wants it; it just no longer intercepts the front page on a
+    # detection that cannot be true here.
+    #
     # Empty-state gate (bead auto-inpkd): once the harness is set up but the
     # machine still lacks an identity or an organization, the Welcome shell
     # renders — same server-side-decision pattern, one layer up.
