@@ -221,6 +221,30 @@ Read these graph notes to orient — use `graph read <id>` to load any of them.
 | Dispatch Lifecycle | `c706c9f3-5a8` | State machine, failure classification, recovery, merge flow |
 | Testing Architecture | `527150ad-743` | L1/L2 test tiers, validation patterns |
 | Design Studio Guide | `225a4af7-ee5` | Fixture states, responsive patterns, design-to-production workflow |
+| Compose node code update | `6b998890-3ce` | Updating code on the trial: the exact commands, and why `docker exec` without `-u autonomy` corrupts ownership |
+
+### Updating code on a Compose node (the trial)
+
+The node's code is the `autonomy-code` volume at `/app`, and the dashboard
+hot-reloads from it, so updating the checkout **is** the update — no restart.
+Full runbook and recovery steps in `graph://6b998890-3ce`. Two rules that have
+now been rediscovered twice:
+
+- **Always `docker exec -u autonomy`.** Without `-u` the exec runs as root, and
+  a `git reset --hard` rewrites `.git/objects`, the refs, and every restored
+  file as `root:root` in a tree owned by `autonomy`. Nothing fails loudly; the
+  next git run as the app user does.
+- **`data/uploads/.gitkeep` is tracked on purpose** (`auto-j3oj3`). A checkout
+  without it gives runc no mount point inside the read-only `/workspace/repo`
+  snapshot and kills every session launch. A reset that restores it is correct
+  — never delete it as stray.
+
+```bash
+git bundle create /tmp/master.bundle master   # the node has no git remote
+docker cp /tmp/master.bundle autonomy-trial-dashboard-1:/tmp/master.bundle
+docker exec -u autonomy autonomy-trial-dashboard-1 sh -c \
+  'cd /app && git fetch /tmp/master.bundle master && git reset --hard FETCH_HEAD'
+```
 
 ### Before working on a bead — get the full primer
 ```bash
