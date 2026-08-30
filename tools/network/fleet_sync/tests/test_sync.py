@@ -136,6 +136,60 @@ def test_alpha_checkpoint_installs_atomically_and_restarts(tmp_path: Path) -> No
             )
 
 
+def test_checkpoint_survives_deprecated_settings_base(tmp_path: Path) -> None:
+    """A base Setting leaving the live set must checkpoint as a tombstone.
+
+    The journal-replay test in ``test_catalog`` proves that a tombstone can be
+    applied remotely.  The production failure in auto-mnm2a was one boundary
+    later: checkpoint construction resolves every non-tombstoned catalog
+    winner through ``_live_row``.  If deprecation updates the physical row but
+    leaves a live catalog winner behind, this call fails with ``catalog points
+    to missing live row: settings`` before any checkpoint can be published.
+    """
+    origin_path = tmp_path / "origin.db"
+    target_path = tmp_path / "target.db"
+    with FleetSyncAlpha(origin_path, "machine-a") as origin:
+        with origin.author(100, "create-setting"):
+            origin.graph.conn.execute(
+                "INSERT INTO settings(id,set_id,schema_revision,key,payload,"
+                "publication_state,deprecated,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    "setting-a", "dashboard.example", 1, "default",
+                    '{"enabled":true}', "raw", 0,
+                    "2026-08-19T00:00:00Z", "2026-08-19T00:00:00Z",
+                ),
+            )
+        with origin.author(110, "deprecate-setting"):
+            origin.graph.conn.execute(
+                "UPDATE settings SET deprecated=1 WHERE id='setting-a'"
+            )
+
+        checkpoint = origin.checkpoint(
+            tmp_path / "checkpoint", roster_epoch=1,
+            active_roster=("machine-a", "machine-b"),
+            target_chunk_bytes=4096,
+        )
+
+    assert checkpoint.winner_records == 1
+    install_checkpoint(
+        tmp_path / "checkpoint", target_path,
+        target_origin_incarnation="machine-b", expected_roster_epoch=1,
+        expected_active_roster=("machine-a", "machine-b"),
+    )
+    with FleetSyncAlpha(target_path, "machine-b") as target:
+        assert target.graph.conn.execute(
+            "SELECT COUNT(*) FROM settings "
+            "WHERE set_id='dashboard.example' AND deprecated=0"
+        ).fetchone()[0] == 0
+        winners = list(target.catalog.iter_mutations())
+        assert len(winners) == 1
+        assert winners[0].mutation.address == (
+            "dashboard.example", 1, "default", "raw", "base",
+        )
+        assert winners[0].mutation.tombstone
+
+
 def test_checkpoint_carries_personal_vault_key_records(tmp_path: Path) -> None:
     origin_path = tmp_path / "origin.db"
     target_path = tmp_path / "target.db"
