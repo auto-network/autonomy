@@ -9,6 +9,7 @@ authenticate an API caller but cannot exercise personal-root authority.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -256,6 +257,46 @@ def _reachability_peer_addresses(credential, root_pub):
     return peers
 
 
+def _dashboard_runtime_cache() -> fleet_relay_sync.FleetRuntimeWarmCache:
+    """The Dashboard's own copy of the Fleet runtime credential (auto-5er0n).
+
+    Stored in the same ramfs warm cache the serving connector uses (auto-ixwr3)
+    but under a DISTINCT file name, keyed by the same registry ``org_uuid`` the
+    connector serves under. The connector's own entry is written ONLY on the
+    machine selected to serve the tunnel — on any other machine no connector
+    process runs, ``link_serving.py`` never executes, and that file never
+    exists — so the Dashboard must read its own entry, never the connector's.
+    """
+    binding = _reachability_binding()
+    org_uuid = binding.get("org_uuid") if binding else None
+    return fleet_relay_sync.FleetRuntimeWarmCache(
+        org_uuid, name_prefix="fleet-dashboard-runtime"
+    )
+
+
+def rearm_local_runtime_from_cache() -> bool:
+    """Replay the Dashboard's cached Fleet runtime credential at startup.
+
+    Returns ``False`` when no payload is cached (a machine that was never
+    unlocked, or whose ramfs was cleared by a reboot — both correctly stay
+    locked until a human unlocks). Otherwise replays the RAW browser payload
+    through :func:`_activate_runtime` and returns ``True``.
+
+    Replaying the raw payload rather than a reconstructed credential is
+    deliberate: ``_activate_runtime`` re-runs ``from_browser_payload``, which
+    verifies the payload against the current ``personal_root_pub`` and the live
+    roster entries, so a stale or de-rostered payload fails to activate instead
+    of arming the machine with a credential the fleet no longer accepts. Going
+    through ``_activate_runtime`` also re-arms all three runtime consumers, so
+    no consumer needs re-arming code of its own.
+    """
+    payload = _dashboard_runtime_cache().load()
+    if payload is None:
+        return False
+    _activate_runtime(payload)
+    return True
+
+
 def _activate_runtime(
     payload: object,
     *,
@@ -286,6 +327,15 @@ def _activate_runtime(
         raise fleet_runtime.FleetRuntimeError(
             "fleet runtime credential names a different local machine"
         )
+    # Carry the Dashboard's OWN copy of this credential across a restart
+    # (auto-5er0n). It is held only in process memory otherwise, so every
+    # Dashboard restart left the machine unable to pull Fleet sync until a human
+    # unlocked again. The raw browser payload is stored in the same ramfs warm
+    # cache the serving connector uses (auto-ixwr3) but under a DISTINCT file
+    # name, and replayed at startup by rearm_local_runtime_from_cache(). A cache
+    # write failure must never fail an activation that otherwise succeeded.
+    with contextlib.suppress(Exception):
+        _dashboard_runtime_cache().store(payload)
     _ensure_fleet_catalog(credential.machine_pub)
     fleet_sync_scheduler.configure_dashboard_fleet_sync(
         fleet_sync_scheduler.FleetSyncRuntimeConfig(

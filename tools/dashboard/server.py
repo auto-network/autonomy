@@ -5,6 +5,7 @@ Every view the dashboard shows, an agent can also produce via CLI.
 """
 
 import asyncio
+import contextlib
 import fcntl
 import functools
 import hashlib
@@ -20567,6 +20568,18 @@ async def _on_startup():
     set_settings_materialization_hook(attention_routes.emit_personal_sync_change)
     await dashboard_fleet_sync_service.start()
     _mark("fleet_sync_scheduler.start")
+
+    # Replay the Dashboard's OWN Fleet runtime credential from the warm ramfs
+    # cache so a restarted machine re-arms Fleet sync with nobody present
+    # (auto-5er0n). The credential is delivered by the browser at unlock and
+    # held only in process memory, so every restart lost it until a human
+    # unlocked again. Best-effort: a replay failure must not down startup, and a
+    # machine with no cached payload simply stays locked. The scheduler above is
+    # already started, so the replayed credential's consumers configure onto a
+    # live service.
+    with contextlib.suppress(Exception):
+        fleet_enrollment_routes.rearm_local_runtime_from_cache()
+    _mark("fleet_enrollment_routes.rearm_local_runtime_from_cache")
 
     # Restore EventBus sequence/buffer state from the prior process. restore()
     # advances the persisted epoch so clients show the existing reload banner
