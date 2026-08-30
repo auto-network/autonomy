@@ -1470,7 +1470,13 @@ def ensure_bootstrap_orgs(
     """
     if personal_only:
         return [_ensure_org("personal", "personal", _PERSONAL_SEED_PAYLOAD, root=root)]
-    slug = first_org or os.environ.get(FIRST_ORG_ENV)
+    # ``or None``: an env var set-but-empty must mean "not named", not "named
+    # the empty string". Compose writes ``AUTONOMY_FIRST_ORG: ${VAR:-}``, which
+    # delivers '' when unset; '' then slipped past the ``is None`` guard below,
+    # skipped both the existing-shared-org branch and the ``autonomy`` default,
+    # and reached _ensure_org as OrgError: invalid slug: ''. The trial node hit
+    # that on every startup ("ensure_bootstrap_orgs() failed; continuing").
+    slug = first_org or os.environ.get(FIRST_ORG_ENV) or None
     if slug is None:
         shared = [o for o in list_orgs(root=root) if o.type == "shared"]
         if shared:
