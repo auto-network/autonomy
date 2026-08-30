@@ -87,6 +87,37 @@ def test_cache_roundtrips_the_payload(tmp_path):
     assert cache.load() is None
 
 
+def test_dashboard_cache_uses_a_distinct_file_name(tmp_path):
+    # The Dashboard keeps its OWN copy of the same credential under a different
+    # file name (auto-5er0n), so it never reads the connector's entry.
+    cache = fleet_relay_sync.FleetRuntimeWarmCache(
+        "org-a", name_prefix="fleet-dashboard-runtime"
+    )
+    cache.store({"machine_id": "ab"})
+    assert (tmp_path / "fleet-dashboard-runtime.org-a.json").exists()
+    assert not (tmp_path / "fleet-connector-runtime.org-a.json").exists()
+    assert cache.load() == {"machine_id": "ab"}
+
+
+def test_connector_and_dashboard_entries_coexist_for_one_org(tmp_path):
+    # Same org_uuid, two credentials: the distinct file names mean neither
+    # write overwrites the other. On a serving machine BOTH files exist.
+    connector = fleet_relay_sync.FleetRuntimeWarmCache("org-a")
+    dashboard = fleet_relay_sync.FleetRuntimeWarmCache(
+        "org-a", name_prefix="fleet-dashboard-runtime"
+    )
+    connector.store({"which": "connector"})
+    dashboard.store({"which": "dashboard"})
+    assert connector.load() == {"which": "connector"}
+    assert dashboard.load() == {"which": "dashboard"}
+    # And the Dashboard cache stays empty of the connector's entry when only the
+    # connector wrote (a serving machine's connector entry must not re-arm a
+    # non-serving Dashboard's read path).
+    connector.clear()
+    assert connector.load() is None
+    assert dashboard.load() == {"which": "dashboard"}
+
+
 def test_configure_warms_the_cache_and_a_fresh_process_rearms(
     tmp_path, monkeypatch
 ):

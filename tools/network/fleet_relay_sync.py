@@ -149,9 +149,22 @@ class FleetRuntimeWarmCache:
     and stays exactly as it was.
     """
 
-    def __init__(self, org_uuid: str, *, directory: "Path | None" = None):
+    def __init__(
+        self,
+        org_uuid: str,
+        *,
+        directory: "Path | None" = None,
+        name_prefix: str = "fleet-connector-runtime",
+    ):
+        # ``name_prefix`` selects which credential this cache holds. It defaults
+        # to the serving connector's file so that caller is unchanged; the
+        # Dashboard passes ``fleet-dashboard-runtime`` for its OWN copy
+        # (auto-5er0n). The two files coexist for one ``org_uuid`` and neither
+        # reads the other: a non-serving machine runs no connector, so the
+        # connector file never exists there and the Dashboard must not depend on
+        # it.
         self._dir = Path(directory) if directory is not None else _keycache_dir()
-        self._path = self._dir / f"fleet-connector-runtime.{org_uuid}.json"
+        self._path = self._dir / f"{name_prefix}.{org_uuid}.json"
 
     def store(self, payload: object) -> None:
         from tools.network.storagekit.memory_cache import assert_memory_backed
