@@ -21106,6 +21106,42 @@ class _RequestDurationMiddleware(BaseHTTPMiddleware):
         return response
 
 
+class _FleetJoiningMiddleware(BaseHTTPMiddleware):
+    """While this machine is mid-join, every page is the home page.
+
+    A node booted with ``AUTONOMY_FLEET_INVITE`` has exactly one thing the
+    operator needs — the comparison code — and it renders on ``/``. Every other
+    page is not merely unhelpful but actively misleading: the Machines page
+    calls an API that requires global authority the node cannot have yet and so
+    reports "Fleet is unavailable", and the onboarding entry offers to create a
+    NEW identity, which is the opposite of joining an existing fleet.
+
+    So while ``machine_boot.is_joining()`` holds, redirect page navigations to
+    ``/``. ``/api`` is untouched (the join itself runs over it), as are static
+    assets and websockets.
+    """
+
+    async def dispatch(self, request, call_next):
+        path = request.url.path
+        if (
+            path == "/"
+            or path.startswith("/api/")
+            or path.startswith("/static/")
+            or path.startswith("/ws/")
+        ):
+            return await call_next(request)
+        try:
+            from tools.network import machine_boot
+            joining = machine_boot.is_joining()
+        except Exception:
+            # Fail OPEN: an unreadable marker must never make the dashboard
+            # unnavigable. A node that is not joining is the common case.
+            joining = False
+        if joining:
+            return RedirectResponse(url="/", status_code=307)
+        return await call_next(request)
+
+
 class _CSPMiddleware(BaseHTTPMiddleware):
     """Phase 1 CSP: blocks dangerous injections while permitting existing inline scripts."""
 
@@ -21199,6 +21235,10 @@ app = Starlette(
             authenticate_service=authenticate_service,
         ),
         Middleware(_CSPMiddleware),
+        # Mid-join, every page is the home page — see the class docstring.
+        # Outside the unlock gate: a joining node has no identity to unlock
+        # with, so the gate must not get a chance to send it somewhere else.
+        Middleware(_FleetJoiningMiddleware),
         # Innermost: the human unlock gate (fail-open-then-enforce).
         # Covers page loads, fragments, and browser websockets; the
         # agent/container ``/api`` surface passes through untouched.
