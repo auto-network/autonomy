@@ -62,6 +62,13 @@ services:
       # Points at the optional `beads` profile service; unreachable is a
       # supported state (beads surfaces degrade to empty, one warning).
       DOLT_SQL_HOST: dolt
+      # Reach the optional `voice` profile service on the project network.
+      # Unset would default to loopback, which inside this container is the
+      # container itself — dictation would fail with nothing obviously wrong.
+      WHISPERLIVE_URL: ${WHISPERLIVE_URL:-ws://whisper:9090}
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
     volumes:
       # The three-volume node model (graph b20f2468-b12 "FINAL ARCHITECTURE").
       #
@@ -147,11 +154,53 @@ services:
       DISPATCH_INTERVAL: ${DISPATCH_INTERVAL:-5}
       DISPATCH_MAX_CONCURRENT: ${DISPATCH_MAX_CONCURRENT:-2}
       DOLT_SQL_HOST: dolt
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
     volumes:
       - autonomy-code:/app
       - autonomy-data:/app/data
       - autonomy-orgs:/app/orgs
       - /var/run/docker.sock:/var/run/docker.sock
+
+  # Optional: streaming transcription for dashboard dictation (/ws/voice).
+  #   docker compose --profile voice up -d
+  #
+  # Its own image and its own dependency set (deploy/Dockerfile.whisper): the
+  # node image is ~57 packages, this one carries CTranslate2 and the CUDA
+  # runtime. Co-residence would put that weight, and a GPU device claim, into
+  # every install including the ones that never dictate.
+  #
+  # Reachable only on the project network as ws://whisper:9090 — nothing is
+  # published to the host. The dashboard finds it via WHISPERLIVE_URL; left
+  # unset it defaults to loopback, which is correct when both run natively.
+  whisper:
+    profiles: ["voice"]
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.whisper
+      args:
+        BASE_IMAGE: ${AUTONOMY_WHISPER_BASE_IMAGE:-nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04}
+    image: ${AUTONOMY_WHISPER_IMAGE:-autonomy-whisper:local}
+    restart: unless-stopped
+    environment:
+      WHISPER_MODEL_PATH: ${WHISPER_MODEL_PATH:-/app/data/models/distil-large-v3}
+    volumes:
+      # Read-only: the model is operator data, this service only consumes it.
+      - autonomy-data:/app/data:ro
+    # Uses the GPU when the host has one. Without the nvidia container runtime
+    # this reservation is unsatisfiable and the service will not start — drop
+    # the block to run on CPU, which faster-whisper supports (slower).
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
 
   # Optional: dolt SQL server backing the beads issue tracker. Image
   # source is operator-chosen via DOLT_IMAGE; the beads schema itself is
@@ -161,6 +210,9 @@ services:
     profiles: ["beads"]
     image: ${DOLT_IMAGE:-docker.io/dolthub/dolt-sql-server:latest}
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
     volumes:
       - dolt-data:/var/lib/dolt
 
