@@ -649,17 +649,33 @@ def install_checkpoint(
     merge_existing: bool = False,
     checkpoint_source_machine: str | None = None,
 ) -> AlphaCheckpoint:
-    """Validate and realize a checkpoint, then atomically publish its DB file."""
+    """Validate and realize a checkpoint, then atomically publish its DB file.
+
+    ``expected_active_roster`` is retained on the signature for caller symmetry
+    (every caller resolves and passes its own active roster), but it no longer
+    gates admission: checkpoint installation is a merge, not a base round, so it
+    does not require the receiver's exact active set. ``expected_roster_epoch``
+    is still recorded on the peer-state receipt, whose primary key includes it.
+    """
     body, manifest_digest = _read_manifest(checkpoint_directory)
     if body.get("alpha_version") != ALPHA_VERSION:
         raise AlphaError("unsupported alpha checkpoint version")
-    if _strict_roster_epoch(body.get("roster_epoch")) != expected_roster_epoch:
-        raise AlphaError("checkpoint roster epoch mismatch")
-    expected_roster_hash = _roster_hash(
-        expected_roster_epoch, expected_active_roster
-    )
-    if body.get("roster_hash") != expected_roster_hash:
-        raise AlphaError("checkpoint active roster mismatch")
+    # No roster-epoch or roster-hash equality gate here. Pinning one exact
+    # roster epoch is a property of a canonical BASE round (auto graph
+    # 1155b8f4-8cf): a base means one exact active set agreed one exact result,
+    # so every active peer must install and acknowledge it under that same set.
+    # An ordinary checkpoint is not a base round -- the same design states
+    # checkpoints "need not be current" and several branches may coexist -- and
+    # its install is a merge, not a replacement (`merge_existing=True` re-applies
+    # the receiver's entire held catalog by last-writer-wins), so an epoch or
+    # active-set difference is not an admission fault. Enforcing base-round
+    # equality here was the defect that left a joiner unable to ever complete a
+    # first sync: enrollment gives it two roster entries, its epoch never matches
+    # a larger fleet, and the roster that would fix it lives inside the very
+    # checkpoint being refused. The equality test belongs on the exact-base
+    # barrier that gates base acknowledgment, not on checkpoint installation.
+    # The shape of `roster_epoch` is still validated below when it is recorded.
+    _strict_roster_epoch(body.get("roster_epoch"))
     base = _base_catalog(body.get("base"))
     winners = _winner_catalog(body.get("winners"))
     _verify_catalog_file(
@@ -786,8 +802,13 @@ def install_checkpoint(
             raise
     finally:
         shutil.rmtree(temporary_root, ignore_errors=True)
+    # Describe the checkpoint that was actually installed, carrying its own
+    # roster identity rather than the receiver's expected epoch -- the two may
+    # now legitimately differ, since the equality gate above is gone.
     return AlphaCheckpoint(
-        ALPHA_VERSION, expected_roster_epoch, expected_roster_hash,
+        ALPHA_VERSION,
+        _strict_roster_epoch(body.get("roster_epoch")),
+        _strict_text(body.get("roster_hash"), "roster hash"),
         _strict_text(body["origin_incarnation"], "origin incarnation"),
         _strict_int(body["watermark"], "watermark"),
         base.root_sha256, winners.root_sha256, base.total_records,

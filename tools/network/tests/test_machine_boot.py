@@ -130,6 +130,48 @@ def test_roster_commit_then_completion_stores_only_assigned_machine_id(machine):
     assert machine_boot._read_row(org="machine") == {"machine_id": expected_id}
 
 
+def test_enrollment_stores_full_active_roster(machine):
+    """A joiner completing enrollment against a four-machine fleet holds four
+    roster entries -- the whole active roster is delivered and stored, not just
+    the origin pair, so the new machine can fetch from any peer."""
+    root, invite = _invite()
+    request, _ = machine_boot.first_boot(invite)
+    delivery = _approved(root, invite, request)
+    root_seed = bytes.fromhex(root.private_hex)
+    # Two further active peers, each independently personal-root-signed, so the
+    # active roster carried by the delivery is four machines: the joiner, the
+    # origin, and these two.
+    peers = []
+    for marker in ("02", "03"):
+        peer_id = marker * 32
+        peer_key = derive_machine_key(root_seed, peer_id)
+        peers.append(
+            fleet_roster.enroll(
+                root, machine_id=peer_id, machine_pub=peer_key.public_hex,
+                issued_at=2,
+            )
+        )
+    full = fleet_enroll.EnrollmentDelivery(
+        delivery.approval,
+        delivery.roster_entry,
+        delivery.origin_entry,
+        (delivery.roster_entry, delivery.origin_entry, *peers),
+    )
+
+    machine_boot.complete_enrollment(
+        full, request, root_seed, invite=invite, channel_binding=CHANNEL,
+    )
+
+    resolved = fleet_roster.resolve(
+        fleet_roster.load_entries(org=None), anchor_root_pub=root.public_hex
+    )
+    assert len(resolved) == 4
+    assert delivery.roster_entry.machine_pub in resolved
+    assert delivery.origin_entry.machine_pub in resolved
+    for peer in peers:
+        assert peer.machine_pub in resolved
+
+
 def test_tampered_delivery_writes_no_identity(machine):
     root, invite = _invite()
     request, _ = machine_boot.first_boot(invite)
