@@ -262,7 +262,7 @@
     </template>
     <template x-if="!recentLoading && filtered.length === 0 && recent.length > 0">
       <div class="text-gray-500 text-sm py-2"
-           x-text="'No ' + recentFilter + ' sessions'"
+           x-text="recentEmptyMessage()"
            data-testid="empty-filter-msg"></div>
     </template>
     <template x-if="!recentLoading && !recentError && recent.length === 0">
