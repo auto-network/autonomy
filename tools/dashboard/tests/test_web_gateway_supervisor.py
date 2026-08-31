@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import subprocess
 from types import SimpleNamespace
@@ -534,6 +535,51 @@ async def test_worker_reconciles_startup_and_relevant_events_only():
 
     assert len(observed) == 2
     assert bus.unsubscribed is True
+
+
+@pytest.mark.asyncio
+async def test_worker_watchdog_is_not_starved_by_unrelated_events(monkeypatch):
+    """A busy EventBus must not turn the watchdog into an idle timer."""
+    monkeypatch.setattr(sup, "RECONCILE_INTERVAL_SECONDS", 0.01)
+    observed = []
+
+    class Supervisor:
+        async def reconcile(self, plan):
+            observed.append(plan)
+            return {"state": "stopped"}
+
+    async def planner():
+        return desired()
+
+    class EventBus:
+        def __init__(self):
+            self.queue = asyncio.Queue()
+
+        def subscribe(self, **_kwargs):
+            return self.queue
+
+        def unsubscribe(self, _queue):
+            pass
+
+    bus = EventBus()
+    worker = sup.GatewayReconcileWorker(supervisor=Supervisor(), planner=planner)
+
+    async def flood_unrelated_events():
+        while True:
+            await bus.queue.put(("nav", {}, 1))
+            await asyncio.sleep(0.001)
+
+    await worker.start(bus)
+    flood = asyncio.create_task(flood_unrelated_events())
+    try:
+        await asyncio.sleep(0.04)
+    finally:
+        flood.cancel()
+        await worker.stop()
+        with contextlib.suppress(asyncio.CancelledError):
+            await flood
+
+    assert len(observed) >= 2
 
 
 @pytest.mark.asyncio

@@ -376,16 +376,21 @@ class GatewayReconcileWorker:
         queue = event_bus.subscribe(client_id="web-gateway-supervisor")
         try:
             await self._reconcile_safely()
+            loop = asyncio.get_running_loop()
+            watchdog_at = loop.time() + RECONCILE_INTERVAL_SECONDS
             while True:
                 try:
                     topic, data, _sequence = await asyncio.wait_for(
-                        queue.get(), timeout=RECONCILE_INTERVAL_SECONDS
+                        queue.get(),
+                        timeout=max(0.0, watchdog_at - loop.time()),
                     )
                 except asyncio.TimeoutError:
                     await self._reconcile_safely()
+                    watchdog_at = loop.time() + RECONCILE_INTERVAL_SECONDS
                     continue
                 if self.event_relevant(topic, data):
                     await self._reconcile_safely()
+                    watchdog_at = loop.time() + RECONCILE_INTERVAL_SECONDS
         finally:
             event_bus.unsubscribe(queue)
 
