@@ -648,3 +648,33 @@ def test_org_key_namespaced_set_isolates_reads_to_the_callers_namespace(orgs_roo
     assert settings_ops._set_is_org_key_namespaced("autonomy.credential-file")
     assert not settings_ops._set_is_org_key_namespaced("autonomy.workspace")
     assert not settings_ops._set_is_org_key_namespaced("autonomy.workspace.mount")
+    # A BARE org-slug key (autonomy.org — the org's own identity row, keyed
+    # by the slug with no <org>:<suffix>) is read across orgs BY DESIGN and
+    # must NOT be filtered; filtering it hid every org's name/icon but the
+    # caller's (the 2026-08-31 dropdown regression).
+    assert not settings_ops._set_is_org_key_namespaced("autonomy.org")
+
+
+def test_org_identity_rows_enumerate_across_orgs(orgs_root):
+    """load_org_overrides reads autonomy.org (a bare-org-slug key) across every
+    org DB so the dashboard can render each org's name/colour/icon. The
+    org-namespace read filter must not touch it."""
+    from tools.graph.schemas.org import ORG_SET_ID
+    for slug in ("personal", "anchore", "blindhash"):
+        db = _seed_org(slug)
+        db.conn.execute(
+            "INSERT INTO settings(id,set_id,schema_revision,key,payload,"
+            "publication_state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+            (f"orgid-{slug}", ORG_SET_ID, 1, slug,
+             '{"name":"' + slug.title() + '","color":"#123456"}',
+             "raw", "2026-08-31T00:00:00Z", "2026-08-31T00:00:00Z"),
+        )
+        db.conn.commit()
+
+    # Each org's own identity resolves from its own DB — reading as that org
+    # returns its row (not filtered away).
+    for slug in ("anchore", "blindhash"):
+        got = [m.payload.get("name")
+               for m in settings_ops.read_set(ORG_SET_ID, org=slug, peers=[]).members
+               if m.key == slug]
+        assert got == [slug.title()], f"{slug} identity was filtered away"

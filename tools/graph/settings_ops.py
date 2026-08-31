@@ -4350,15 +4350,23 @@ def get_setting(
 
 
 def _set_is_org_key_namespaced(set_id: str) -> bool:
-    """Whether a set's KEY carries an org in its first segment.
+    """Whether a set's KEY places an org PREFIX on a compound ``<org>:<...>``
+    key.
 
     True when the set declares an @org_writeback_namespace (org sessions
-    write into ``org_slug:<suffix>``) OR its primary key strategy's first
-    ``:``-segment is ``org`` / ``org_slug`` (e.g. ``org:workspace_id``,
-    ``org_slug:host``). These are the sets that live in one shared store yet
-    hold many orgs' rows, so a read by an org session must be scoped to its
-    own namespace. An org-homed set (keyed by ``workspace_id`` etc.) returns
-    False: its own database already isolates it.
+    write into ``org_slug:<suffix>``) OR its primary key strategy is COMPOUND
+    with ``org`` / ``org_slug`` as the first of several segments
+    (``org:workspace_id``, ``org_slug:host``). Those keys are per-org rows in
+    one shared store, so an org caller's read is scoped to its ``<org>:``
+    prefix.
+
+    A single-segment ``org_slug`` key (``autonomy.org`` — the org's OWN
+    identity row, keyed by the bare slug) is NOT namespaced this way and
+    returns False: it carries no ``<org>:`` prefix to filter on, and it is
+    read across orgs BY DESIGN (that is how the dashboard renders every org's
+    name/colour/icon). Filtering it hid every org but the caller's — the
+    2026-08-31 dropdown regression. Org-HOMED sets also return False; their
+    own database isolates them.
     """
     if schemas.declared_org_writeback_key_strategy(set_id):
         return True
@@ -4367,6 +4375,11 @@ def _set_is_org_key_namespaced(set_id: str) -> bool:
         if cls is None:
             continue
         strategy = getattr(cls, "_key_strategy", "") or ""
+        # Compound only: the org must be a PREFIX of a larger key, not the
+        # whole key. A bare 'org_slug' (the org's own identity) has no
+        # <org>:<suffix> shape to isolate on.
+        if ":" not in strategy:
+            return False
         first = strategy.split(":", 1)[0].strip("[]")
         return first in ("org", "org_slug")
     return False
