@@ -118,7 +118,7 @@ def _run_in_host_mount_ns(script: str, *, what: str, timeout: int = 90) -> None:
         raise ProvisionError(f"{what}: own container id is unknown")
     image = _own_image(cid)
     r = subprocess.run(
-        ["docker", "run", "--rm", "--privileged", "--pid=host",
+        ["docker", "run", "--rm", "--user", "0", "--privileged", "--pid=host",
          "--entrypoint", "nsenter", image,
          "-t", "1", "-m", "--", "sh", "-c", script],
         capture_output=True, text=True, timeout=timeout,
@@ -255,7 +255,7 @@ def deliver_secret_file(
     pid = _container_pid(container)
     image = _container_image(container)
     r = subprocess.run(
-        ["docker", "run", "--rm", "-i", "--privileged", "--pid=host",
+        ["docker", "run", "--rm", "-i", "--user", "0", "--privileged", "--pid=host",
          "--entrypoint", "nsenter", image,
          "-t", str(pid), "-m", "--", "sh", "-c",
          _deliver_script(filename, uid)],
@@ -289,7 +289,7 @@ def destroy_secret_file(
         return  # container gone -> file gone with its mount
     image = _container_image(container)
     r = subprocess.run(
-        ["docker", "run", "--rm", "--privileged", "--pid=host",
+        ["docker", "run", "--rm", "--user", "0", "--privileged", "--pid=host",
          "--entrypoint", "nsenter", image,
          "-t", str(pid), "-m", "--", "sh", "-c",
          f'rm -f "{SESSION_SECRET_DST}/{filename}"'],
@@ -339,7 +339,7 @@ def daemon_missing(paths: list) -> "list | None":
     )
     try:
         r = subprocess.run(
-            ["docker", "run", "--rm", "--privileged", "--pid=host",
+            ["docker", "run", "--rm", "--user", "0", "--privileged", "--pid=host",
              "--entrypoint", "nsenter", image,
              "-t", "1", "-m", "--", "sh", "-c", script],
             capture_output=True, text=True, timeout=60,
