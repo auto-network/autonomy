@@ -12,7 +12,17 @@ from datetime import datetime, timezone
 
 
 def _get_dashboard_url() -> str:
-    return os.environ.get("DASHBOARD_URL", "https://localhost:8080").rstrip("/")
+    # Fall through to GRAPH_API: the rest of the CLI addresses the dashboard
+    # with it (client.py), and sessions get it stamped at launch. Reading
+    # only DASHBOARD_URL made the dispatch family (status/runs/stats/primer)
+    # silently hit the 8080 default while every other command honored the
+    # stamped URL — found in-vivo by a trial-launched host session
+    # (2026-08-31, host-0831-042827).
+    return (
+        os.environ.get("DASHBOARD_URL")
+        or os.environ.get("GRAPH_API")
+        or "https://localhost:8080"
+    ).rstrip("/")
 
 
 def _make_ssl_ctx():
