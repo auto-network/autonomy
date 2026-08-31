@@ -9142,6 +9142,7 @@ async def api_session_create(request):
         )
         host_cmd = (
             _mint_host_session_token(tmux_name)
+            + f"GRAPH_API={_own_dashboard_url()} "
             + f"CLAUDE_CODE_OAUTH_TOKEN={shlex.quote(host_creds['token'])} "
             f"BD_ACTOR=terminal:{tmux_name} AUTONOMY_SESSION={tmux_name} "
             f"claude --dangerously-skip-permissions --model {model}"
@@ -9277,6 +9278,45 @@ async def api_session_create(request):
         return JSONResponse(resp, status_code=202)
 
 
+_OWN_DASHBOARD_URL: str | None = None
+
+
+def _own_dashboard_url() -> str:
+    """The URL a HOST-side process reaches THIS dashboard at.
+
+    Derived, never configured: containerized, one self-inspect of our own
+    port bindings yields the published host port — whatever the operator
+    mapped, 8081 or anything else; natively the serving default holds.
+    Stamped into host sessions' env (GRAPH_API) so their CLI talks to the
+    dashboard that minted their token: with two dashboards up (the
+    native→Compose interregnum) the CLI's bare-localhost fallback sent a
+    trial-launched session to the NATIVE store and every call 401'd
+    (proven 2026-08-31, session host-0831-042827).
+    """
+    global _OWN_DASHBOARD_URL
+    if _OWN_DASHBOARD_URL is None:
+        url = "https://localhost:8080"
+        try:
+            from agents import mount_plan
+            cid = mount_plan._own_container_id()
+            if cid:
+                out = subprocess.run(
+                    ["docker", "inspect", "--format",
+                     "{{json .HostConfig.PortBindings}}", cid],
+                    capture_output=True, text=True, timeout=15,
+                )
+                if out.returncode == 0 and out.stdout.strip():
+                    bindings = json.loads(out.stdout) or {}
+                    entries = bindings.get("8080/tcp") or []
+                    host_port = (entries[0] or {}).get("HostPort") if entries else None
+                    if host_port:
+                        url = f"https://localhost:{host_port}"
+        except Exception:
+            logger.exception("_own_dashboard_url: self-inspect failed; using default")
+        _OWN_DASHBOARD_URL = url
+    return _OWN_DASHBOARD_URL
+
+
 def _mint_host_session_token(tmux_name: str) -> str:
     """Mint an org-less local-operator session token for a host session and
     return the ``CROSSTALK_TOKEN=...`` shell prefix that delivers it.
@@ -9307,6 +9347,7 @@ def _build_host_resume_cmd(
     """Shell command that relaunches a host session's own harness CLI."""
     env_prefix = (
         _mint_host_session_token(tmux_name)
+        + f"GRAPH_API={_own_dashboard_url()} "
         + f"BD_ACTOR=terminal:{tmux_name} AUTONOMY_SESSION={tmux_name} "
     )
     if harness == "codex":
