@@ -2,12 +2,17 @@
  *
  * ONE common code path for every approval that needs the personal root. It reads
  * the armor's own factor set and presents exactly the openers that armor accepts
- * — a password field when a password opens it, a passkey button when a passkey
- * opens it, BOTH (and requires both) under Multi-Factor, and a chooser when
- * either one works so the operator picks. Callers never touch a password field
+ * — a password grouping when a password opens it, a passkey button when a passkey
+ * opens it, BOTH (and requires both) under Multi-Factor, and either when either
+ * one works so the operator picks. Callers never touch a password field
  * again: they call `openRoot({title, detail})`, get back a
  * ready-to-use root signing key (and the raw seed for ceremonies that need it),
  * sign their specific request, and zero the seed. No per-dialog factor logic.
+ *
+ * Every factor renders as one grouping in a fixed position: the password
+ * grouping is an icon-integrated input with an inline OK, the passkey grouping
+ * is one button. Completing a factor turns its grouping green with a check in
+ * place; when the policy's required set is green the dialog closes itself.
  *
  * This is deliberately NOT the centralized approval inbox (a separate, larger
  * effort) — it is the reusable unlock element that inbox and every current
@@ -22,33 +27,49 @@ const STYLE = `
   padding:max(24px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right))
     max(24px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left));
   color:#e5e7eb;font:15px/1.55 ui-sans-serif,-apple-system,"Segoe UI",Roboto,sans-serif}
-.or-card{width:100%;max-width:360px;background:#11141c;border:1px solid #1e2432;border-radius:14px;
+.or-card{width:100%;max-width:380px;background:#11141c;border:1px solid #1e2432;border-radius:14px;
   padding:22px 20px 18px;box-shadow:0 20px 50px -12px #000}
 .or-ttl{font-size:16px;font-weight:600;text-align:center;margin:0 0 4px}
-.or-sub{font-size:12.5px;color:#9aa3b2;text-align:center;margin:0 0 16px;line-height:1.45}
-.or-lab{display:block;font-size:13px;color:#9ca3af;margin:6px 0 6px}
-.or-in{width:100%;background:#1f2937;border:1px solid #374151;border-radius:8px;padding:12px;
-  font-size:16px;color:#e5e7eb;outline:none;font-family:inherit;margin-bottom:10px}
-.or-btn{background:#5b57e8;color:#fff;text-align:center;padding:12px;border-radius:9px;
-  font-size:14px;font-weight:600;cursor:pointer;margin-top:6px}
-.or-btn.alt{background:#161b26;border:1px solid #232a39;color:#e5e7eb}
-.or-btn[aria-disabled=true]{opacity:.5;cursor:default}
-.or-row{display:flex;align-items:center;gap:10px;padding:12px;margin-bottom:8px;background:#161b26;
-  border:1px solid #232a39;border-radius:10px;cursor:pointer}
-.or-row.on{border-color:#5b57e8;background:#191a2e}
-.or-ic{width:26px;height:26px;flex:0 0 26px;color:#38bdf8}
-.or-ic svg{width:100%;height:100%;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linejoin:round}
-.or-done{color:#34d399}
+.or-sub{font-size:12.5px;color:#9aa3b2;text-align:center;margin:0 0 6px;line-height:1.45}
+.or-req{font-size:12.5px;color:#c7d2fe;text-align:center;margin:0 0 16px;line-height:1.45;font-weight:500}
+.or-factor{position:relative;border:1px solid #232a39;background:#161b26;border-radius:12px;
+  padding:9px 12px;transition:border-color .25s ease,background .25s ease}
+.or-factor.done{border-color:#14532d;background:#0c1a12}
+.or-factor-row{display:flex;align-items:center;gap:10px;min-height:40px}
+.or-factor-ic{width:30px;height:30px;flex:0 0 30px;display:grid;place-items:center;border-radius:8px;
+  background:#1f2937;color:#38bdf8}
+.or-factor.done .or-factor-ic{background:#052e16;color:#34d399}
+.or-factor-ic svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.or-factor-name{font-size:13.5px;font-weight:600;color:#e5e7eb}
+.or-in-bare{flex:1;min-width:0;background:transparent;border:0;outline:none;padding:8px 0;
+  font-size:16px;color:#e5e7eb;font-family:inherit}
+.or-ok{flex:0 0 auto;background:#5b57e8;color:#fff;padding:9px 16px;border-radius:7px;
+  font-size:13.5px;font-weight:600;cursor:pointer}
+.or-ok[aria-disabled=true]{opacity:.5;cursor:default}
+.or-factor-btn{width:100%;text-align:left;cursor:pointer;color:#e5e7eb;font-family:inherit;
+  display:flex;align-items:center;gap:10px;min-height:58px}
+.or-factor-btn:hover{border-color:#5b57e8}
+.or-factor-btn[aria-disabled=true]{opacity:.6;cursor:default}
+.or-factor-slot{margin-bottom:10px}
+.or-factor-err{font-size:11.5px;color:#fca5a5;line-height:1.5;margin:6px 0 2px 40px}
 .or-warn{font-size:11.5px;color:#fca5a5;background:#2b1616;border:1px solid #4b2222;border-radius:9px;
   padding:10px 12px;line-height:1.5;margin-top:10px}
 .or-cancel{font-size:13px;color:#8b93a3;text-align:center;padding:10px;cursor:pointer;margin-top:4px}
 .or-cancel:hover{color:#e5e7eb}
 `;
-const FACE = '<svg viewBox="0 0 24 24"><path d="M4 8.6V6.2A2.2 2.2 0 0 1 6.2 4h2.4M15.4 4h2.4A2.2 2.2 0 0 1 20 6.2v2.4M20 15.4v2.4a2.2 2.2 0 0 1-2.2 2.2h-2.4M8.6 20H6.2A2.2 2.2 0 0 1 4 17.8v-2.4" stroke-linecap="round"/><path d="M9.2 10.2v1.6M14.8 10.2v1.6M12 10.2v3.2M10 15.4a3.6 3.6 0 0 0 4 0" stroke-linecap="round"/></svg>';
-const NAME = { password: 'Password', passkey: 'Passkey' };
+
+const ICONS = {
+  password: '<svg viewBox="0 0 24 24"><rect x="4.5" y="10" width="15" height="9.5" rx="2"/><path d="M8 10V7.5a4 4 0 0 1 8 0V10"/><path d="M12 14v2.2"/></svg>',
+  passkey: '<svg viewBox="0 0 24 24"><circle cx="10" cy="8.5" r="3.2"/><path d="M4.5 19c.6-3.2 2.9-5 5.5-5s4.9 1.8 5.5 5"/><path d="M17.5 9.5v4M15.6 11.5h3.8"/></svg>',
+  check: '<svg viewBox="0 0 24 24"><path d="M5 12.5 10 17.5 19 7"/></svg>',
+};
+
+const NO_ROOT_AUTHORITY =
+  'The factor you provided can unlock your dashboard but has no root authority.';
 
 function injectStyles() {
-  if (document.getElementById('open-root-styles')) return;
+  const existing = document.getElementById('open-root-styles');
+  if (existing) { existing.textContent = STYLE; return; }
   const el = document.createElement('style');
   el.id = 'open-root-styles'; el.textContent = STYLE;
   document.head.appendChild(el);
@@ -128,14 +149,15 @@ async function getPrf(model, credentialIds = null) {
 }
 
 
-
 async function openRootPolicy(model, { title, detail }) {
   const policy = model.policyModule;
   const memberIds = new Set(policy.policyFactorIds(model.envelope.policy));
   const factors = model.envelope.factors.filter((factor) => memberIds.has(factor.factor_id));
   const views = Object.fromEntries((model.factorViews || []).map((row) => [row.factor_id, row]));
+  const passwordCount = factors.filter((factor) => factor.type === 'password').length;
+  const passkeyCount = factors.filter((factor) => factor.type === 'passkey').length;
   const seeds = {};
-  const S = { selectedPassword: null, password: '', warn: null, busy: false };
+  const S = { passwords: {}, errors: {}, busy: null, warn: null };
 
   return new Promise((resolve) => {
     const host = document.createElement('div');
@@ -158,75 +180,97 @@ async function openRootPolicy(model, { title, detail }) {
       if (html != null) node.innerHTML = html;
       return node;
     }
-    function factorRow(cls, icon, text) {
-      const row = el('div', cls);
-      const iconNode = el('div'); iconNode.textContent = icon;
-      const textNode = el('div'); textNode.textContent = text;
-      row.append(iconNode, textNode);
-      return row;
-    }
     function label(factor) {
       return views[factor.factor_id]?.label
         || (factor.type === 'password' ? 'Password' : 'Passkey');
     }
-    async function finishIfSatisfied() {
-      if (!policy.policySatisfied(model.envelope.policy, Object.keys(seeds))) {
-        S.busy = false; render(); return;
+    // What the armor actually requires, stated up front. The policy is an
+    // and/or expression; the two flat shapes cover every real armor today
+    // and anything nested falls back to neutral wording.
+    function requirementLine() {
+      if (factors.length === 1) {
+        return `Your root requires your ${factors[0].type === 'password' ? 'password' : 'passkey'}.`;
       }
-      try {
-        const opened = await policy.openFactorPolicyArmor(model.armor, seeds);
-        close(opened);
-      } catch (error) {
-        cleanFactorSeeds(); S.busy = false;
-        S.warn = error?.message || 'Those factors did not open your root.';
-        render();
+      const expression = model.envelope.policy;
+      const flat = expression && ['and', 'or'].includes(expression.op)
+        && (expression.children || []).every((child) => child.op === 'factor');
+      if (flat && expression.op === 'or') {
+        return factors.length === 2
+          ? 'Your root opens with either factor — complete one.'
+          : 'Your root opens with any one factor — complete one.';
+      }
+      if (flat && expression.op === 'and') {
+        return factors.length === 2
+          ? 'Your root requires both factors — complete each one.'
+          : `Your root requires all ${factors.length} factors — complete each one.`;
+      }
+      return 'Complete the factor combination required by your current root policy.';
+    }
+    // The required set is green: leave it visible for a beat, then open the
+    // armor and resolve. Opening can still fail (corrupt slot); that surfaces
+    // as the global warning with all seeds discarded.
+    function finishCollected() {
+      S.busy = 'closing'; render();
+      setTimeout(async () => {
+        try {
+          const opened = await policy.openFactorPolicyArmor(model.armor, seeds);
+          close(opened);
+        } catch (error) {
+          cleanFactorSeeds(); S.busy = null;
+          S.warn = error?.message || 'Those factors did not open your root.';
+          render();
+        }
+      }, 650);
+    }
+    function noteCollected() {
+      if (policy.policySatisfied(model.envelope.policy, Object.keys(seeds))) {
+        finishCollected();
+      } else {
+        S.busy = null; render();
       }
     }
-    async function addPassword() {
-      if (S.busy || !S.selectedPassword || !S.password) return;
-      S.busy = true; S.warn = null; render();
+    async function addPassword(factor) {
+      const value = S.passwords[factor.factor_id] || '';
+      if (S.busy || !value) return;
+      S.busy = factor.factor_id; S.errors = {}; S.warn = null; render();
       try {
-        const factor = factors.find((row) => row.factor_id === S.selectedPassword);
         seeds[factor.factor_id] = await policy.openPasswordFactor(
-          model.rootPub, factor, S.password,
+          model.rootPub, factor, value,
         );
-        S.password = ''; S.selectedPassword = null;
-        await finishIfSatisfied();
+        S.passwords[factor.factor_id] = '';
+        noteCollected();
       } catch (error) {
-        S.busy = false; S.password = '';
-        S.warn = error?.message || 'That password did not open the selected factor.';
+        S.busy = null; S.passwords[factor.factor_id] = '';
+        S.errors = {
+          [factor.factor_id]: error?.message || 'That password did not open this factor.',
+        };
         render();
       }
     }
-    async function addPasskey() {
+    async function addPasskey(factor) {
       if (S.busy) return;
-      const remaining = factors.filter(
-        (factor) => factor.type === 'passkey' && !seeds[factor.factor_id],
-      );
-      S.busy = true; S.warn = null; render();
+      S.busy = factor.factor_id; S.errors = {}; S.warn = null; render();
       let result;
       try {
-        result = await getPrf(model, remaining.map((factor) => factor.credential_id));
+        result = await getPrf(model, [factor.credential_id]);
         const recipient = await primitives.deriveEncapsulationKeypair(
           result.prf, policy.FACTOR_RECIPIENT_PURPOSE,
         );
-        const match = remaining.find(
-          (factor) => factor.credential_id === result.credentialId
-            && factor.recipients.some(
-              (slot) => slot.recipient_public_key === recipient.publicKeyHex,
-            ),
-        );
-        if (!match) {
-          result.prf.fill(0);
-          throw new Error(
-            'This passkey works for dashboard access, but this device is not enrolled to authorize your root.',
+        const enrolled = result.credentialId === factor.credential_id
+          && factor.recipients.some(
+            (slot) => slot.recipient_public_key === recipient.publicKeyHex,
           );
+        if (!enrolled) {
+          result.prf.fill(0);
+          throw new Error(NO_ROOT_AUTHORITY);
         }
-        seeds[match.factor_id] = result.prf;
-        await finishIfSatisfied();
+        seeds[factor.factor_id] = result.prf;
+        noteCollected();
       } catch (error) {
-        result?.prf?.fill?.(0); S.busy = false;
-        S.warn = error?.message || 'That passkey did not open a policy factor.';
+        result?.prf?.fill?.(0); S.busy = null;
+        S.errors = {
+          [factor.factor_id]: error?.message || 'That passkey did not open a policy factor.',
+        };
         render();
       }
     }
@@ -235,54 +279,66 @@ async function openRootPolicy(model, { title, detail }) {
       card.innerHTML = '';
       card.appendChild(el('div', 'or-ttl', title));
       if (detail) card.appendChild(el('div', 'or-sub', detail));
-      card.appendChild(el('div', 'or-sub',
-        'Choose the factor or factor combination required by your current root policy.'));
+      card.appendChild(el('div', 'or-req', requirementLine()));
 
-      const collected = factors.filter((factor) => seeds[factor.factor_id]);
-      collected.forEach((factor) => card.appendChild(
-        factorRow('or-row on', '✓', label(factor)),
-      ));
-
-      const passwords = factors.filter(
-        (factor) => factor.type === 'password' && !seeds[factor.factor_id],
+      const satisfied = policy.policySatisfied(
+        model.envelope.policy, Object.keys(seeds),
       );
-      if (passwords.length) {
-        if (passwords.length === 1 && !S.selectedPassword) {
-          S.selectedPassword = passwords[0].factor_id;
+      let focusTarget = null;
+      factors.forEach((factor) => {
+        const slot = el('div', 'or-factor-slot');
+        if (seeds[factor.factor_id]) {
+          const done = el('div', 'or-factor done');
+          const row = el('div', 'or-factor-row');
+          row.appendChild(el('span', 'or-factor-ic', ICONS.check));
+          row.appendChild(el('span', 'or-factor-name',
+            factor.type === 'password' ? 'Password validated' : 'Passkey verified'));
+          done.appendChild(row);
+          slot.appendChild(done);
+        } else if (satisfied) {
+          // Required set already green; a moot factor disappears while the
+          // dialog closes itself.
+          return;
+        } else if (factor.type === 'password') {
+          const grouping = el('div', 'or-factor');
+          const row = el('div', 'or-factor-row');
+          row.appendChild(el('span', 'or-factor-ic', ICONS.password));
+          const input = el('input', 'or-in-bare');
+          input.type = 'password'; input.autocomplete = 'current-password';
+          input.placeholder = passwordCount > 1 ? label(factor) : 'Enter your password';
+          input.value = S.passwords[factor.factor_id] || '';
+          input.oninput = () => { S.passwords[factor.factor_id] = input.value; };
+          input.onkeydown = (event) => { if (event.key === 'Enter') addPassword(factor); };
+          row.appendChild(input);
+          const ok = el('div', 'or-ok', S.busy === factor.factor_id ? '…' : 'OK');
+          if (S.busy) ok.setAttribute('aria-disabled', 'true');
+          else ok.onclick = () => addPassword(factor);
+          row.appendChild(ok);
+          grouping.appendChild(row);
+          slot.appendChild(grouping);
+          if (!focusTarget) focusTarget = input;
+        } else {
+          const button = el('button', 'or-factor or-factor-btn');
+          button.type = 'button';
+          button.appendChild(el('span', 'or-factor-ic', ICONS.passkey));
+          button.appendChild(el('span', 'or-factor-name',
+            S.busy === factor.factor_id ? 'Waiting for your passkey…'
+              : passkeyCount > 1 ? label(factor) : 'Select your passkey'));
+          if (S.busy) button.setAttribute('aria-disabled', 'true');
+          else button.onclick = () => addPasskey(factor);
+          slot.appendChild(button);
         }
-        if (!S.selectedPassword && passwords.length > 1) {
-          card.appendChild(el('div', 'or-lab', 'Password factor'));
-          passwords.forEach((factor) => {
-            const row = factorRow('or-row', '', label(factor));
-            row.onclick = () => { S.selectedPassword = factor.factor_id; render(); };
-            card.appendChild(row);
-          });
-        } else if (S.selectedPassword) {
-          const selected = passwords.find((factor) => factor.factor_id === S.selectedPassword);
-          if (selected) {
-            card.appendChild(el('label', 'or-lab', label(selected)));
-            const input = el('input', 'or-in'); input.type = 'password';
-            input.autocomplete = 'current-password'; input.value = S.password;
-            input.oninput = () => { S.password = input.value; };
-            input.onkeydown = (event) => { if (event.key === 'Enter') addPassword(); };
-            card.appendChild(input);
-            const add = el('div', 'or-btn', S.busy ? 'Checking…' : 'Use this password');
-            if (!S.busy) add.onclick = addPassword; card.appendChild(add);
-            setTimeout(() => input.focus(), 0);
-          }
+        if (S.errors[factor.factor_id]) {
+          slot.appendChild(el('div', 'or-factor-err', S.errors[factor.factor_id]));
         }
-      }
+        card.appendChild(slot);
+      });
 
-      const passkeys = factors.filter(
-        (factor) => factor.type === 'passkey' && !seeds[factor.factor_id],
-      );
-      if (passkeys.length) {
-        const button = el('div', 'or-btn alt', S.busy ? 'Waiting…' : 'Use a passkey');
-        if (!S.busy) button.onclick = addPasskey; card.appendChild(button);
-      }
       if (S.warn) card.appendChild(el('div', 'or-warn', S.warn));
-      const cancel = el('div', 'or-cancel', 'Cancel'); cancel.onclick = () => close(null);
+      const cancel = el('div', 'or-cancel', 'Cancel');
+      cancel.onclick = () => close(null);
       card.appendChild(cancel);
+      if (focusTarget) setTimeout(() => focusTarget.focus(), 0);
     }
     render();
   });
