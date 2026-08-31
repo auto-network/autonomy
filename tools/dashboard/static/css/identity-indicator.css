@@ -348,15 +348,8 @@ header[data-app-chrome] .identity-avatar {
   }
 
   .identity-panel {
-    /* FULL SCREEN on mobile — not a bottom sheet. top:0 + bottom:0 fills the
-     * viewport top to bottom, edge to edge, exactly like the --credentials
-     * sub-view below (which already did this, which is why credentials went
-     * full screen but the main menu stayed a short sheet). The menu is a flex
-     * column that scrolls as one when its content (orgs + actions) is taller
-     * than the screen; safe-area padding is applied INSIDE so the header clears
-     * the notch and the last row clears the home bar. */
     position: fixed;
-    top: 0;
+    top: auto;
     right: 0;
     bottom: 0;
     left: 0;
@@ -364,11 +357,26 @@ header[data-app-chrome] .identity-avatar {
     display: flex;
     flex-direction: column;
     width: auto;
-    overflow-y: auto;
-    padding: max(env(safe-area-inset-top, 0px), 0.75rem) 1rem
-             calc(1rem + env(safe-area-inset-bottom, 0px));
-    border: 0;
-    border-radius: 0;
+    /* Bound the sheet at the viewport so tall content SCROLLS in the panels'
+     * own scroll surfaces (.body/.deep) instead of pushing the sheet's top off
+     * the screen. dvh tracks the iOS dynamic toolbars; vh is the fallback. */
+    max-height: calc(100vh - env(safe-area-inset-top, 0px));
+    max-height: calc(100dvh - env(safe-area-inset-top, 0px));
+    padding: 0.5rem 1rem calc(1rem + env(safe-area-inset-bottom));
+    border-right: 0;
+    border-bottom: 0;
+    border-left: 0;
+    border-radius: 0.75rem 0.75rem 0 0;
+  }
+
+  .identity-panel::before {
+    display: block;
+    width: 2.75rem;
+    height: 0.25rem;
+    margin: 0 auto 0.75rem;
+    border-radius: 9999px;
+    background: #4b5563;
+    content: '';
   }
 
   .identity-panel-header {
