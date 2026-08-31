@@ -239,6 +239,47 @@ def test_readiness_reports_missing_rw_dir_advisory_without_creating(
     assert not (orgs_root / "workspace-storage").exists()
 
 
+def test_readiness_empty_dir_is_ready_not_a_finding(orgs_root):
+    # A present but EMPTY directory is a valid mount target — it binds and
+    # works. The doctor must not complain merely because an org mount dir is
+    # empty (operator, screenshot 49d1ef4e: seven empty org dirs each listed
+    # as "present but empty · still runs without it").
+    (orgs_root / "anchorectl").mkdir()
+    findings = wm.check_org_mount_readiness(
+        key="anchore:anchorectl",
+        payload={"subpath": "anchorectl", "container_path": "/opt/anchorectl",
+                 "kind": "dir"},
+        org=ORG,
+    )
+    assert findings == ()
+
+
+def test_readiness_empty_file_is_advisory(orgs_root):
+    # A present but empty FILE is still worth an advisory — a zero-byte file is
+    # an unprovisioned stub, not real content.
+    (orgs_root / "license.yaml").write_bytes(b"")
+    findings = wm.check_org_mount_readiness(
+        key="anchore:license",
+        payload={"subpath": "license.yaml", "container_path": "/etc/x",
+                 "kind": "file"},
+        org=ORG,
+    )
+    assert len(findings) == 1
+    assert findings[0].kind == "unpopulated_path"
+    assert findings[0].severity == "advisory"
+
+
+def test_readiness_populated_file_is_ready(orgs_root):
+    (orgs_root / "license.yaml").write_bytes(b"key: value\n")
+    findings = wm.check_org_mount_readiness(
+        key="anchore:license",
+        payload={"subpath": "license.yaml", "container_path": "/etc/x",
+                 "kind": "file"},
+        org=ORG,
+    )
+    assert findings == ()
+
+
 # ── machine-located mounts: the org row declares, artifact-path locates ─────
 def _machine_mount_rs(*, key, container_path, kind, mode="rw",
                       required=False, org="dynbench") -> ResolvedSetting:

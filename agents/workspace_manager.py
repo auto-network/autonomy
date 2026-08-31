@@ -1177,10 +1177,11 @@ def _check_machine_located_mount_readiness(*, key: str, typed, org: str):
 def check_org_mount_readiness(*, key: str, payload: dict, org: str):
     """Check a VOLUME-origin mount through the exact launch resolver.
 
-    Presence and containment are blocking.  A present but empty target is
-    advisory: launch remains valid, but provisioning may not be complete.
-    A node that cannot see/translate ``autonomy-orgs`` reports an unanswered
-    question instead of guessing from the wrong filesystem.
+    Presence and containment are blocking.  A present but empty FILE is
+    advisory (a zero-byte stub is likely unprovisioned); an empty DIRECTORY is
+    ready — it is a valid mount target and binds fine, so emptiness there is
+    not a finding.  A node that cannot see/translate ``autonomy-orgs`` reports
+    an unanswered question instead of guessing from the wrong filesystem.
     """
     from types import SimpleNamespace
     from tools.graph.schemas.mount import WorkspaceMountV3
@@ -1244,12 +1245,12 @@ def check_org_mount_readiness(*, key: str, payload: dict, org: str):
         ),)
 
     _host_path, _container_spec, node_path = resolved_mount
-    if typed.kind == "file":
-        populated = os.path.getsize(node_path) > 0
-    else:
-        with os.scandir(node_path) as entries:
-            populated = next(entries, None) is not None
-    if not populated:
+    # A present DIRECTORY is ready whether or not it holds anything: an empty
+    # directory is a valid mount target that binds and works, so its emptiness
+    # is not a finding. Only an empty FILE is worth an advisory — a zero-byte
+    # file is an unprovisioned stub, not real content. (Operator: the doctor
+    # must not complain merely because an org mount directory is empty.)
+    if typed.kind == "file" and os.path.getsize(node_path) == 0:
         return (VolumeMountReadinessIssue(
             "unpopulated_path",
             f"{subject!r} is present but empty",
