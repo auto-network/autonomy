@@ -10,12 +10,27 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE = REPO_ROOT / "docker-compose.yml"
+NODE_DOCKERFILE = REPO_ROOT / "deploy/Dockerfile"
 ACCEPTANCE_OVERRIDE = (
     REPO_ROOT / "tools/network/acceptance/compose.service-gateway.yml"
 )
 BOOTSTRAP = REPO_ROOT / "deploy/service-gateway/bootstrap.json"
 GATEWAY_DOCKERFILE = REPO_ROOT / "deploy/Dockerfile.service-gateway"
 INSTALL = REPO_ROOT / "deploy/install/INSTALL.md"
+
+
+def test_node_image_bakes_the_compose_plugin_used_by_gateway_supervision():
+    dockerfile = NODE_DOCKERFILE.read_text(encoding="utf-8")
+
+    assert "ARG DOCKER_COMPOSE_VERSION=5.5.0" in dockerfile
+    assert (
+        "ARG DOCKER_COMPOSE_SHA256="
+        "c57ab918abd5b05ca7e7d0f275875dd1330a695074f309dc9eab1b49efafcd4b"
+        in dockerfile
+    )
+    assert "docker-compose-linux-x86_64" in dockerfile
+    assert "/usr/local/lib/docker/cli-plugins/docker-compose" in dockerfile
+    assert "docker compose version" in dockerfile
 
 
 def _compose() -> dict:
