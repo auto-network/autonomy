@@ -9110,7 +9110,13 @@ async def api_session_create(request):
                 status_code=503,
             )
 
-        host_project_folder = str(_REPO_ROOT).replace("/", "-")
+        # HOST form, not this process's view: the session runs on the host
+        # and Claude derives the transcript dir from the HOST cwd. A
+        # containerized dashboard's _REPO_ROOT is /app, which slugged to
+        # "-app" and made the JSONL watcher stare at a directory no host
+        # session ever writes (proven 2026-08-31: transcript landed in
+        # -opt-autonomy-code, auto-link never fired).
+        host_project_folder = _host_form(str(_REPO_ROOT)).replace("/", "-")
         await session_monitor.register_pending(
             tmux_name,
             session_type="host",
@@ -9166,7 +9172,13 @@ async def api_session_create(request):
                 {"error": reason, "tmux_name": tmux_name, "retryable": True},
                 status_code=503,
             )
-        projects_dir = Path.home() / ".claude" / "projects" / host_project_folder
+        # HOST home, not this process's: host transcripts live under the
+        # operator's ~/.claude/projects (mounted read-only at the identical
+        # path in a containerized dashboard — see docker-compose.yml).
+        projects_dir = (
+            Path(_host_form(str(Path.home())))
+            / ".claude" / "projects" / host_project_folder
+        )
         asyncio.create_task(
             _watch_for_host_session_jsonl(projects_dir, tmux_name, timeout=120.0),
         )
