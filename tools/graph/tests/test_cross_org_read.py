@@ -594,13 +594,13 @@ def test_resolve_source_strict_returns_none_on_peer_curated(orgs_root):
     ) is None
 
 
-def test_org_writeback_set_isolates_reads_to_the_callers_namespace(orgs_root):
-    """An @org_writeback_namespace @home('personal') set: an org session
-    enumerates ONLY its own <org>: keys (to know which credential to
-    request); it never sees another org's key names nor the operator's own
-    unprefixed rows. The personal owner sees the whole store. Generic —
-    driven by the decorators, not the set id (the 2026-08-31 cross-org
-    credential-name leak)."""
+def test_org_key_namespaced_set_isolates_reads_to_the_callers_namespace(orgs_root):
+    """ANY set whose key is org-namespaced (an @org_writeback_namespace, or a
+    key strategy whose first segment is org/org_slug) isolates an org
+    caller's reads to its own <org>: rows — it never sees another org's key
+    names. The store owner (personal/machine) sees all. Generic — driven by
+    the declared key shape, not the set id (the 2026-08-31 cross-org
+    key-name leak, seen on vault.secured, credential-file, and image-build)."""
     from tools.graph.schemas.registry import (
         SettingSchema, field, keyed_per_entity, home,
         org_writeback_namespace, publication_band,
@@ -640,3 +640,11 @@ def test_org_writeback_set_isolates_reads_to_the_callers_namespace(orgs_root):
         "anchore:scale-harness", "autonomy:mac.ssh",
         "blindhash:fleet-ssh-key", "blindhash:hcloud", "mac.ssh.disposable",
     ]
+
+    # And the predicate is generic — it flags an org-first key STRATEGY too
+    # (image-build: 'org:workspace_id'), not only @org_writeback_namespace,
+    # while leaving org-HOMED sets (keyed by workspace_id) alone.
+    assert settings_ops._set_is_org_key_namespaced("autonomy.workspace.image-build")
+    assert settings_ops._set_is_org_key_namespaced("autonomy.credential-file")
+    assert not settings_ops._set_is_org_key_namespaced("autonomy.workspace")
+    assert not settings_ops._set_is_org_key_namespaced("autonomy.workspace.mount")

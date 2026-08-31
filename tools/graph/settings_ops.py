@@ -4349,6 +4349,29 @@ def get_setting(
     return resolved
 
 
+def _set_is_org_key_namespaced(set_id: str) -> bool:
+    """Whether a set's KEY carries an org in its first segment.
+
+    True when the set declares an @org_writeback_namespace (org sessions
+    write into ``org_slug:<suffix>``) OR its primary key strategy's first
+    ``:``-segment is ``org`` / ``org_slug`` (e.g. ``org:workspace_id``,
+    ``org_slug:host``). These are the sets that live in one shared store yet
+    hold many orgs' rows, so a read by an org session must be scoped to its
+    own namespace. An org-homed set (keyed by ``workspace_id`` etc.) returns
+    False: its own database already isolates it.
+    """
+    if schemas.declared_org_writeback_key_strategy(set_id):
+        return True
+    for revision in range(1, 12):
+        cls = schemas.get_schema(set_id, revision)
+        if cls is None:
+            continue
+        strategy = getattr(cls, "_key_strategy", "") or ""
+        first = strategy.split(":", 1)[0].strip("[]")
+        return first in ("org", "org_slug")
+    return False
+
+
 def _prefix_like_pattern(prefix: str) -> str:
     r"""Build the SQL ``LIKE`` pattern for a composite-key prefix match.
 
@@ -4881,24 +4904,27 @@ def read_set(
         prefix_clause = " AND key LIKE ? ESCAPE '\\'"
         prefix_params = (_prefix_like_pattern(prefix),)
 
-    # ORG-NAMESPACE ISOLATION (the security domain a schema declares with
-    # @org_writeback_namespace on a @home("personal") set): the set lives in
-    # the operator's own store, and an organization session is granted WRITE
-    # into its derived <org>:<suffix> namespace but NO read-through to the
-    # rest. So an org-scoped caller enumerating such a set may see ONLY its
-    # own <org>: keys — enough to know which credential to request, never
-    # another org's key names nor the operator's own unprefixed rows. Values
-    # stay sealed regardless (a read of a @vaulted set returns ciphertext /
-    # a sealed locator, never plaintext — release is a separate ceremony).
-    # This is generic: it triggers on the declaration, not on any set id.
-    _iso_prefix = None
+    # ORG-NAMESPACE ISOLATION. A set whose KEY is organizationally namespaced
+    # — its key strategy's first segment is the org (``org:...`` /
+    # ``org_slug:...``), or it declares an @org_writeback_namespace — lives in
+    # a SHARED store (the machine store or the operator's personal store), one
+    # database holding every org's rows. An organization-scoped caller reading
+    # such a set may see ONLY rows in its own ``<org>:`` namespace: another
+    # org's key names and existence are not its business. This is the read
+    # side of the boundary the write side already enforces
+    # (derive_org_writeback_key / the org-prefixed key strategy). Generic by
+    # construction — it triggers on the declared key SHAPE, not on any set id
+    # (today: vault.secured, credential-file, workspace.image-build). An
+    # org-HOMED set needs no filter: its own per-org database already isolates
+    # it, and its key is not org-prefixed. Values stay sealed regardless — a
+    # @vaulted read returns ciphertext / a sealed locator, never plaintext.
+    #
     # resolved_org is an authenticated org slug (org_ops._validate_slug forbids
     # ':' and empties), so the LIKE '<org>:%' prefix cannot be widened or
-    # escaped; the truthiness check is belt-and-braces against a slug that
-    # somehow reached here empty.
+    # escaped; the truthiness check is belt-and-braces against an empty slug.
+    _iso_prefix = None
     if (
-        schemas.declared_org_writeback_key_strategy(set_id)
-        and schemas.declared_home(set_id) == "personal"
+        _set_is_org_key_namespaced(set_id)
         and isinstance(resolved_org, str)
         and resolved_org
         and resolved_org not in ("personal", "machine")
