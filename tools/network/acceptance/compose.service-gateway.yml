@@ -1,0 +1,7 @@
+# Test-only exposure for auto-dbex5's real Compose proof. Production Compose
+# publishes no Service-gateway port; this loopback mapping exists only while an
+# operator explicitly includes this override.
+services:
+  service-gateway:
+    ports:
+      - "127.0.0.1:${SERVICE_GATEWAY_TEST_PORT:-8443}:9443"

@@ -18,12 +18,16 @@ cd /app
 
 # Org-mount root (the autonomy-orgs volume mounts here).
 mkdir -p /app/orgs
+# The dashboard and local Caddy share only this permissioned Unix-socket
+# directory. The dispatcher also runs this entrypoint but has no named volume
+# here; creating an empty private directory in that container is harmless.
+mkdir -p /run/autonomy-service-gateway
 
 # First mount of a fresh, root-owned volume: hand it to autonomy once so the
 # server (running as autonomy) can read/write it. After that autonomy already
 # owns everything it writes, so the ownership check short-circuits and this is a
 # fast no-op on every reboot — no recursive chown of a large data volume.
-for d in /app/data /app/orgs; do
+for d in /app/data /app/orgs /run/autonomy-service-gateway; do
     if [ "$(stat -c '%u' "$d" 2>/dev/null)" != "1000" ]; then
         chown -R autonomy:autonomy "$d" 2>/dev/null || true
     fi
@@ -89,6 +93,13 @@ python3 -m agents.secret_ramfs || \
 # verifies it. Session secret delivery is per-container-private and needs no
 # host-side store at all.
 chown autonomy:autonomy /run/autonomy-keycache 2>/dev/null || true
+
+# Certificate material for the Service gateway is a child of the verified
+# ramfs key cache. Caddy receives only this child, read-only, and Compose is
+# told to refuse rather than create the bind source if this preparation failed.
+mkdir -p /run/autonomy-keycache/service-gateway 2>/dev/null || true
+chown autonomy:autonomy /run/autonomy-keycache/service-gateway 2>/dev/null || true
+chmod 0700 /run/autonomy-keycache/service-gateway 2>/dev/null || true
 
 # Host terminals: when the host's /tmp is mounted (docker-compose.yml,
 # dashboard service), every tmux invocation from this container must reach

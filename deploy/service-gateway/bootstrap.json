@@ -1,0 +1,8 @@
+{
+  "admin": {
+    "listen": "unix//run/autonomy-service-gateway/admin.sock|0660",
+    "config": {
+      "persist": false
+    }
+  }
+}
