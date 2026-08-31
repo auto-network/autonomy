@@ -54,6 +54,13 @@ services:
     # zombies 2026-08-31, only in-container: natively they reparented to
     # the host init which reaps). init: true runs tini as PID 1 to reap.
     init: true
+    # Per-session CPU/RAM telemetry (resource_monitor) reads sibling session
+    # containers' cgroup files directly. In its own PRIVATE cgroup namespace the
+    # dashboard sees only itself, so every session card lost CPU/RAM after the
+    # node was containerized. Join the HOST cgroup namespace and mount the host
+    # cgroup tree read-only (below) so the systemd-scope path
+    # /sys/fs/cgroup/system.slice/docker-<cid>.scope is readable.
+    cgroup: host
     command: sh /app/deploy/serve.sh
     # Every session the node launches joins THIS network (the launcher discovers
     # it via `docker inspect` self — agents/mount_plan.discover_topology) and
@@ -138,6 +145,10 @@ services:
       # effective host-root: a node that deliberately will not launch sessions
       # or hold secrets may drop it, but then it is a viewer, not a working node.
       - /var/run/docker.sock:/var/run/docker.sock
+      # Host cgroup tree, read-only: lets resource_monitor read each sibling
+      # session container's cpu.stat/memory.current for the CPU/RAM telemetry
+      # on the session cards (paired with `cgroup: host` above).
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
       # The dashboard's memory-class key cache (auto-a1pub): opened key material
       # lives on ramfs, never disk, never swap. This is only the mountpoint +
       # rslave propagation; the entrypoint mounts the ramfs on the host at boot
