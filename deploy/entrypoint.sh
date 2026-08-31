@@ -73,6 +73,24 @@ python3 -m agents.secret_ramfs || \
 # host-side store at all.
 chown autonomy:autonomy /run/autonomy-keycache 2>/dev/null || true
 
+# Host terminals: when the host's /tmp is mounted (docker-compose.yml,
+# dashboard service), every tmux invocation from this container must reach
+# the HOST tmux server — its socket dir lives under the host's /tmp and
+# tmux derives the tmux-<uid> subdir from the calling uid by itself.
+# Detection, not configuration: the mount's presence IS the signal.
+if [ -d /host-tmp ]; then
+    export TMUX_TMPDIR=/host-tmp
+fi
+
+# Path identity for session records: this container's repo is always /app;
+# the host-side form of the same tree derives from the relocated data root
+# when the operator set one. Derived here as startup OUTPUTS — nobody
+# passes these as inputs (see tools/graph/ingest.py:_session_path_rewrites).
+export AUTONOMY_CONTAINER_ROOT="${AUTONOMY_CONTAINER_ROOT:-/app}"
+if [ -n "${AUTONOMY_HOST_DATA_ROOT:-}" ] && [ -z "${AUTONOMY_HOST_ROOT:-}" ]; then
+    export AUTONOMY_HOST_ROOT="${AUTONOMY_HOST_DATA_ROOT}/code"
+fi
+
 # Drop to autonomy and run whatever this container's command is (the
 # dashboard's deploy/serve.sh by default — see the Dockerfile CMD — or the
 # dispatcher's deploy/dispatch.sh, via the compose service's own command:

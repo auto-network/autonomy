@@ -163,3 +163,13 @@ tools/dashboard/plugins/mission_control/viewer/.build/
 
 # Capability host-install mutex (flock target, runtime only)
 agents/capabilities/*/.host_install.lock
+
+# Machine-local compose configuration: .env holds this install's facts
+# (data root, subnet, operator home); the override file holds its volume
+# devices and port bindings. Neither ships — the shipped compose file is
+# machine-agnostic by rule.
+.env
+docker-compose.override.yml
+
+# Stray pid file the native dolt unit drops in the checkout
+dolt-server.pid
