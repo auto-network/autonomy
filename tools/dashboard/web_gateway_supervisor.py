@@ -251,7 +251,6 @@ class ComposeGatewayRuntime:
         self,
         *,
         compose_dir: str = "/app",
-        host_project_dir: str | None = None,
         project: str = "autonomy",
         runner=None,
         sleep=None,
@@ -263,9 +262,10 @@ class ComposeGatewayRuntime:
             "--project-name",
             project,
             "--project-directory",
-            host_project_dir
-            or os.environ.get("AUTONOMY_HOST_ROOT")
-            or compose_dir,
+            # Compose runs inside the Dashboard container.  Host-root paths
+            # are valid only for bind sources resolved by the Docker daemon;
+            # using one here hides /app/.env and breaks interpolation.
+            compose_dir,
             "-f",
             os.path.join(compose_dir, "docker-compose.yml"),
             "--profile",

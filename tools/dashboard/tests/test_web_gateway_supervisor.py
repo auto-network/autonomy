@@ -423,7 +423,9 @@ async def test_planner_failure_refuses_to_preserve_unverified_authority(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_compose_runtime_starts_checks_health_and_stops_exact_service():
+async def test_compose_runtime_starts_checks_health_and_stops_exact_service(
+    monkeypatch,
+):
     calls = []
     container_id = "b" * 64
 
@@ -449,11 +451,10 @@ async def test_compose_runtime_starts_checks_health_and_stops_exact_service():
             )
         return subprocess.CompletedProcess(argv, 0, "", "")
 
-    runtime = sup.ComposeGatewayRuntime(
-        host_project_dir="/opt/autonomy/code",
-        runner=runner,
-        sleep=lambda _delay: None,
-    )
+    # This is a daemon-side host path. It must never become Compose's
+    # client-side project directory inside the Dashboard container.
+    monkeypatch.setenv("AUTONOMY_HOST_ROOT", "/opt/autonomy/code")
+    runtime = sup.ComposeGatewayRuntime(runner=runner, sleep=lambda _delay: None)
 
     await runtime.ensure_started()
     assert await runtime.is_healthy() is True
@@ -466,8 +467,9 @@ async def test_compose_runtime_starts_checks_health_and_stops_exact_service():
     )
     assert any(text.endswith("rm -f -s service-gateway") for text in command_text)
     compose_commands = [text for text in command_text if text.startswith("docker compose ")]
+    assert all("--project-directory /app" in text for text in compose_commands)
     assert all(
-        "--project-directory /opt/autonomy/code" in text
+        "--project-directory /opt/autonomy/code" not in text
         for text in compose_commands
     )
     assert all("-f /app/docker-compose.yml" in text for text in compose_commands)

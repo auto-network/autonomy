@@ -37,6 +37,22 @@ def _p95(values: list[float]) -> float:
     return ordered[math.ceil(len(ordered) * 0.95) - 1]
 
 
+def _observe_gateway_status(
+    read: Callable[[], dict[str, Any]],
+    observations: list[dict[str, Any]],
+    *,
+    now: Callable[[], float] = time.time,
+) -> dict[str, Any]:
+    """Read and journal gateway state so failure cleanup cannot erase it."""
+    try:
+        current = read()
+    except Exception as exc:
+        observations.append({"at": now(), "transport_error": str(exc)})
+        return {}
+    observations.append({"at": now(), "gateway": current})
+    return current
+
+
 def _wait(
     label: str,
     predicate: Callable[[], Any],
@@ -119,6 +135,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     transcript: list[dict[str, Any]] = []
+    status_observations: list[dict[str, Any]] = []
     timings: list[dict[str, Any]] = []
     created: dict[str, dict[str, str]] = {}
     started_epoch = int(time.time())
@@ -174,12 +191,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         return value if isinstance(value, dict) else {}
 
     def status() -> dict:
-        try:
-            return api(
+        return _observe_gateway_status(
+            lambda: api(
                 "GET", "/api/network/service-gateway", record=False
-            ).get("gateway", {})
-        except (httpx.HTTPError, ProofFailure):
-            return {}
+            ).get("gateway", {}),
+            status_observations,
+        )
 
     def wait_loaded(
         reservation_id: str, baseline_revision: int, label: str, timeout: float
@@ -480,6 +497,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     finally:
         (output_dir / "dashboard-transcript.json").write_text(
             json.dumps(transcript, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        (output_dir / "gateway-status.json").write_text(
+            json.dumps(status_observations, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
         for route in list(created.values()):
