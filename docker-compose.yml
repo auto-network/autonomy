@@ -13,6 +13,15 @@
 #   docker compose --profile beads up -d
 # Without it the dashboard runs fine — beads surfaces are simply empty.
 
+# Pin the project name so it never derives from the checkout directory's
+# basename. Compose otherwise names the project after the cwd — which flips
+# between "autonomy" and "code" depending on whether you stand in the
+# symlinked old path or the real /opt/autonomy/code, spawning a SECOND
+# project whose network collides with the running one's subnet (hit live
+# during the 2026-08-31 cutover). Same reason the volumes carry explicit
+# name: below — daemon identity must not depend on the directory name.
+name: autonomy
+
 services:
   dashboard:
     build:
