@@ -233,10 +233,21 @@ def parse_repo_url(url: str) -> tuple[str, str]:
 def managed_clone_path(url: str, *, repos_dir: Path = REPOS_DIR) -> Path:
     """Return the filesystem path where ``url`` is cloned under ``repos_dir``."""
     if _is_local_url(url):
-        # Local checkout (no host/path URL to parse). Store the managed clone
-        # under a deterministic ``local/`` subtree mirroring the host path so
-        # it is unique and self-describing.
-        return repos_dir / "local" / f"{url.strip('/')}.git"
+        # A dashboard-managed local workspace repo lives at
+        # .../workspace-repos/<org>/<workspace-id>. Key the managed clone by
+        # that stable logical suffix, NOT the absolute path: embedding the
+        # absolute path re-pointed every local repo when the data root moved
+        # (2026-08-31 native→Compose cutover) and buried a redundant data-root
+        # prefix inside repos/local/. The suffix is unique per (org, workspace)
+        # and independent of where the data volume is mounted.
+        p = url.rstrip("/")
+        marker = "/workspace-repos/"
+        idx = p.rfind(marker)
+        if idx != -1:
+            rel = p[idx + len(marker):]  # "<org>/<workspace-id>"
+            return repos_dir / "local" / f"{rel}.git"
+        # Non-workspace local origin: keep the legacy path-mirroring form.
+        return repos_dir / "local" / f"{p.strip('/')}.git"
     host, path = parse_repo_url(url)
     return repos_dir / host / f"{path}.git"
 
