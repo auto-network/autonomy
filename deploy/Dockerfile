@@ -110,6 +110,22 @@ RUN curl -fsSL "$DOCKER_CLI_URL" -o /tmp/docker.tgz \
     && rm -f /tmp/docker.tgz \
     && docker --version
 
+# Compose CLI plugin: the node-level gateway supervisor controls the one
+# profile-gated service through the host Docker socket.  The static Docker CLI
+# above does not bundle Compose, so bake the matching x86_64 plugin into the
+# system-wide discovery directory.  Version 5.5.0 is built against Docker CLI
+# 29.7.2 (the exact client pin above); the release asset is checksum-pinned so
+# image rebuilds never download mutable tooling.
+ARG DOCKER_COMPOSE_VERSION=5.5.0
+ARG DOCKER_COMPOSE_SHA256=c57ab918abd5b05ca7e7d0f275875dd1330a695074f309dc9eab1b49efafcd4b
+ARG DOCKER_COMPOSE_URL=https://github.com/docker/compose/releases/download/v${DOCKER_COMPOSE_VERSION}/docker-compose-linux-x86_64
+RUN install -d -m 0755 /usr/local/lib/docker/cli-plugins \
+    && curl -fsSL "$DOCKER_COMPOSE_URL" -o /tmp/docker-compose \
+    && echo "$DOCKER_COMPOSE_SHA256  /tmp/docker-compose" | sha256sum -c - \
+    && install -m 0755 /tmp/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose \
+    && rm -f /tmp/docker-compose \
+    && docker compose version | grep -F "v${DOCKER_COMPOSE_VERSION}"
+
 # bd (beads) CLI — the dashboard shells out to it for the graph bead API path,
 # so a node without bd fails server-side with `bd: command not found` the moment
 # that path runs (not a stale-version mismatch — an outright absence). Fetched +
