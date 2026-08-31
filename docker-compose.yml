@@ -65,6 +65,14 @@ services:
       # — outputs of startup, not operator inputs.
       AUTONOMY_HOST_DATA_ROOT: ${AUTONOMY_HOST_DATA_ROOT:-}
       AUTONOMY_HOST_HOME: ${AUTONOMY_HOST_HOME}
+      # A container has no timezone and defaults to UTC, so naive
+      # datetime.fromtimestamp() (the session table, crosstalk log, card
+      # times) would render UTC where the native dashboard rendered the
+      # operator's local zone — a silent regression on cutover. Inherit
+      # the host's zone; the .env sets it from `timedatectl`/​/etc/timezone.
+      # Unset falls back to UTC, which is the honest default for an install
+      # that never told us its zone.
+      TZ: ${TZ:-UTC}
       # Points at the optional `beads` profile service; unreachable is a
       # supported state (beads surfaces degrade to empty, one warning).
       DOLT_SQL_HOST: dolt
