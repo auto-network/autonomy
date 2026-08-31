@@ -47,6 +47,13 @@ services:
     # Explicit, matching the Dockerfile CMD default — spelled out here because
     # the entrypoint is now shared with the dispatcher service below (it execs
     # whatever command it's given), so this is no longer implicit.
+    # PID 1 in a container must reap adopted orphans. This process
+    # shells out (bd, git, docker, the MCP gateway) and those children
+    # can outlive their spawn, reparenting to PID 1 — plain python/sh
+    # doesn't wait() on them, so zombies accrue (dispatcher hit 22k bd
+    # zombies 2026-08-31, only in-container: natively they reparented to
+    # the host init which reaps). init: true runs tini as PID 1 to reap.
+    init: true
     command: sh /app/deploy/serve.sh
     # Every session the node launches joins THIS network (the launcher discovers
     # it via `docker inspect` self — agents/mount_plan.discover_topology) and
@@ -190,6 +197,13 @@ services:
         TAILWIND_URL: ${AUTONOMY_TAILWIND_URL:-}
     image: ${AUTONOMY_IMAGE:-autonomy-node:local}
     restart: unless-stopped
+    # PID 1 in a container must reap adopted orphans. This process
+    # shells out (bd, git, docker, the MCP gateway) and those children
+    # can outlive their spawn, reparenting to PID 1 — plain python/sh
+    # doesn't wait() on them, so zombies accrue (dispatcher hit 22k bd
+    # zombies 2026-08-31, only in-container: natively they reparented to
+    # the host init which reaps). init: true runs tini as PID 1 to reap.
+    init: true
     command: sh /app/deploy/dispatch.sh
     # The shared image's HEALTHCHECK curls https://127.0.0.1:8080/api/ping, which
     # is the DASHBOARD's liveness probe. The dispatcher serves no HTTP at all, so
@@ -272,6 +286,13 @@ services:
         TAILWIND_URL: ${AUTONOMY_TAILWIND_URL:-}
     image: ${AUTONOMY_IMAGE:-autonomy-node:local}
     restart: unless-stopped
+    # PID 1 in a container must reap adopted orphans. This process
+    # shells out (bd, git, docker, the MCP gateway) and those children
+    # can outlive their spawn, reparenting to PID 1 — plain python/sh
+    # doesn't wait() on them, so zombies accrue (dispatcher hit 22k bd
+    # zombies 2026-08-31, only in-container: natively they reparented to
+    # the host init which reaps). init: true runs tini as PID 1 to reap.
+    init: true
     command: sh /app/deploy/relay.sh
     # Shared image's HEALTHCHECK probes the dashboard's HTTP port; the relay
     # serves no HTTP. Same reasoning as the dispatcher's disable above.
