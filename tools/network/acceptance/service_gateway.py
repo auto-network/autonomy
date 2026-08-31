@@ -102,6 +102,13 @@ def _docker_exec(
     )
 
 
+def _dashboard_exec(
+    container: str, argv: list[str], *, timeout: float = 30.0
+) -> str:
+    """Exec as the named dashboard user, retaining supplementary groups."""
+    return _docker_exec(container, argv, timeout=timeout, user="autonomy")
+
+
 def _wait_healthy(container_id: str, timeout: float = 30.0) -> dict:
     deadline = time.monotonic() + timeout
     latest: dict[str, Any] = {}
@@ -331,10 +338,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
         api("POST", target_path + "/check", expected=(200,))
 
-        _docker_exec(
+        _dashboard_exec(
             args.dashboard_container,
             acceptance_certificate_command(hostname),
-            user="1000:1000",
         )
         # The operator applies the dashboard's new control-volume mount once.
         # This proof must not silently recreate that stateful service itself.
@@ -353,7 +359,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         inspect = _wait_healthy(gateway_id)
 
         loaded = json.loads(
-            _docker_exec(
+            _dashboard_exec(
                 args.dashboard_container,
                 [
                     "python3",
@@ -365,13 +371,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     "--reservation-id",
                     reservation_id,
                 ],
-                user="1000:1000",
             )
         )
         if loaded.get("hostname") != hostname:
             raise ProofFailure("loaded gateway hostname disagrees with reservation")
         active_config = json.loads(
-            _docker_exec(
+            _dashboard_exec(
                 args.dashboard_container,
                 [
                     "curl",
@@ -380,7 +385,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     "/run/autonomy-service-gateway/admin.sock",
                     "http://localhost/config/",
                 ],
-                user="1000:1000",
             )
         )
         active_config_text = json.dumps(active_config, sort_keys=True)
@@ -449,7 +453,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             raise ProofFailure("unknown hostname reached the session canary")
 
         unavailable = json.loads(
-            _docker_exec(
+            _dashboard_exec(
                 args.dashboard_container,
                 [
                     "python3",
@@ -461,7 +465,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     "--reservation-id",
                     reservation_id,
                 ],
-                user="1000:1000",
             )
         )
         removed = _curl(hostname, args.port, "/", output_dir, "removed-route")

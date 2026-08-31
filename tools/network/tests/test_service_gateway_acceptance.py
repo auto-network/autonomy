@@ -14,3 +14,23 @@ def test_acceptance_certificate_uses_full_hostname_only_in_san():
     assert subject == "/CN=Autonomy Service Gateway Acceptance"
     assert san == f"subjectAltName=DNS:{hostname}"
     assert hostname not in subject
+
+
+def test_dashboard_exec_preserves_the_named_users_supplementary_groups(monkeypatch):
+    seen = {}
+
+    def fake_exec(container, argv, *, timeout=30.0, user=None):
+        seen.update(container=container, argv=argv, timeout=timeout, user=user)
+        return "ok"
+
+    monkeypatch.setattr(service_gateway, "_docker_exec", fake_exec)
+
+    result = service_gateway._dashboard_exec("dashboard", ["docker", "inspect"])
+
+    assert result == "ok"
+    assert seen == {
+        "container": "dashboard",
+        "argv": ["docker", "inspect"],
+        "timeout": 30.0,
+        "user": "autonomy",
+    }
