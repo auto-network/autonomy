@@ -203,12 +203,15 @@ services:
   # start/stop. With the profile inactive it consumes zero CPU/RSS.
   service-gateway:
     profiles: ["service-gateway"]
-    image: docker.io/library/caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.service-gateway
+    image: ${AUTONOMY_SERVICE_GATEWAY_IMAGE:-autonomy-service-gateway:local}
     restart: unless-stopped
     user: "1000:1000"
-    # The official image already declares `caddy` as ENTRYPOINT; Compose
-    # replaces only its CMD here.
-    command: ["run", "--config", "/etc/caddy/bootstrap.json"]
+    # This pinned image has no ENTRYPOINT; replacing its default CMD must keep
+    # the binary as argv[0].
+    command: ["caddy", "run", "--config", "/etc/caddy/bootstrap.json"]
     networks: ["default"]
     # Internal listener only. The public raw-stream adapter will dial this on
     # the Compose network; the test-only acceptance override publishes 8443.
@@ -239,7 +242,7 @@ services:
       dashboard:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "--unix-socket", "/run/autonomy-service-gateway/admin.sock", "http://localhost/config/"]
+      test: ["CMD-SHELL", "test -S /run/autonomy-service-gateway/admin.sock && kill -0 1"]
       interval: 10s
       timeout: 3s
       retries: 3
