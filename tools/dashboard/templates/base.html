@@ -295,11 +295,25 @@
       border-radius: 0;
       background: #1f2937;
     }
-    header.global-search-open {
-      gap: 0;
+    /* Mobile: the expanding search takes the whole toolbar row and hides the
+       other icons — a phone has no room to keep them beside it. */
+    @media (max-width: 767px) {
+      header.global-search-open {
+        gap: 0;
+      }
+      header.global-search-open > :not(#global-search-control) {
+        display: none !important;
+      }
     }
-    header.global-search-open > :not(#global-search-control) {
-      display: none !important;
+    /* Desktop: the search grows to a comfortable width and stops, so the other
+       toolbar icons stay in place with room beside it instead of the field
+       stretching across the whole bar. */
+    @media (min-width: 768px) {
+      #global-search-control.is-open {
+        width: 24rem;
+        max-width: 24rem;
+        flex: 0 1 24rem;
+      }
     }
     @media (max-width: 767px) {
       body.mobile-nav-open header[data-app-chrome] [data-testid="central-attention-root"] {

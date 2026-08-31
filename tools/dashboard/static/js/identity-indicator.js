@@ -133,6 +133,16 @@
       lock: ['M6 10V7a6 6 0 0 1 12 0v3', 'M5 10h14v11H5z'],
       key: ['M15 7a5 5 0 1 1-4.4 7.4L3 22v-4h4v-4h3.6A5 5 0 0 1 15 7z',
             'M16.5 10.5h.01'],
+      // The exact key glyph the credentials manager uses (#i-key in
+      // factor-management.js), so "Manage credentials" carries the same mark —
+      // rendered with the panel's currentColor, i.e. not the manager's green.
+      // The credentials symbol's ring is a <circle>; drawn here as an arc path
+      // since this factory only appends <path> elements.
+      credkey: ['M10.7 12.3 21 2m-4 0 3 3m-6 0 3 3',
+                'M12 15.5a4.5 4.5 0 1 1-9 0 4.5 4.5 0 0 1 9 0z'],
+      // A chain-link (lucide "link-2"): "Accept invitation" pastes an
+      // invitation LINK, so a link mark reads truer than a padlock.
+      link: ['M9 17H7a5 5 0 0 1 0-10h2', 'M15 7h2a5 5 0 0 1 0 10h-2', 'M8 12h8'],
       retry: ['M20 11a8 8 0 1 0-2.3 5.7', 'M20 4v7h-7'],
       machines: ['M4 5h16v11H4z', 'M8 20h8', 'M12 16v4'],
     };
@@ -251,8 +261,11 @@
     var iconHost = el('span', 'identity-panel-action-icon');
     iconHost.appendChild(icon(
       kind === 'add-passkey' ? 'key'
-        : kind.indexOf('plugin-') === 0 ? 'machines'
-          : 'lock'
+        : kind === 'manage-factors' ? 'credkey'
+          : kind === 'accept-invite' ? 'link'
+            : kind === 'lock' ? 'lock'
+              : kind.indexOf('plugin-') === 0 ? 'machines'
+                : 'lock'
     ));
     button.appendChild(iconHost);
     var copy = el('span', 'identity-panel-action-copy');

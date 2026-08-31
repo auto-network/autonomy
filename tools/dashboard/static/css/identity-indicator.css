@@ -252,7 +252,13 @@ header[data-app-chrome] .identity-avatar {
 
 .identity-panel-action {
   display: grid;
-  grid-template-columns: 1.125rem minmax(0, 1fr);
+  /* An explicit column-gap so the label sits the SAME distance from its mark on
+     every row. Without it the icon leaned on the label, and worse, the org rows
+     (a solid filled tile, edge flush to the gap) read as tighter than the
+     non-org rows (a stroked glyph, visually inset inside its box). A fixed 1rem
+     mark column + a real gap makes both identical. */
+  grid-template-columns: 1rem minmax(0, 1fr);
+  column-gap: 0.625rem;
   align-items: center;
   width: 100%;
   min-height: 2.5rem;
