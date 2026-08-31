@@ -900,11 +900,6 @@ def _build_host_project_to_org() -> dict[str, str]:
         f"{home}/workspace/enterprise": "anchore",
         f"{home}/workspace/enterprise-dev-compose-files": "anchore",
         f"{home}/workspace/autonomy": "autonomy",
-        # The same repo at its relocated home (native → Compose cutover,
-        # 2026-08-31): host sessions launched by a containerized dashboard
-        # run in the HOST-form repo root, and after the cutover so does
-        # everything else. Without this row their org rendered as "?".
-        "/opt/autonomy/code": "autonomy",
         f"{home}/infra": "blindhash",
         f"{home}/blindhash": "blindhash",
         f"{home}/jira": "personal",
@@ -914,6 +909,14 @@ def _build_host_project_to_org() -> dict[str, str]:
         f"{home}/boatlore-passage": "personal",
         f"{home}/ai-pres-my-video": "personal",
     }
+    # The node's own repo, wherever this install keeps it, in HOST form
+    # (AUTONOMY_HOST_ROOT when the observer is containerized, the running
+    # checkout otherwise). A host terminal has no real organization — it
+    # files under personal, which every install has by construction
+    # (operator ruling 2026-08-31). setdefault: an explicit row above or
+    # the overlay below still wins.
+    repo_host = os.environ.get("AUTONOMY_HOST_ROOT") or str(_REPO_ROOT)
+    by_cwd.setdefault(repo_host, "personal")
     overlay = os.environ.get("AUTONOMY_HOST_PROJECT_ORGS")
     if overlay:
         try:
