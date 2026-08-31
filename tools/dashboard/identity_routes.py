@@ -1621,11 +1621,20 @@ async def get_unlock_state(request: Request) -> JSONResponse:
     # (644c88d74). Only a MANAGED fleet has a designated leader; an unmanaged
     # (legacy single-node) install keeps the original serve-everywhere behavior.
     tunnel_designated = True
+    # A fleet exists only once its roster is initialized (_ts.managed). An
+    # unmanaged, legacy single-node install has no roster and therefore no
+    # OTHER machines — "your other machines can't sync with this one" is
+    # meaningless there, and its "unlock with your root" remedy re-arms a
+    # serving credential nobody is waiting on. Default True so a state we
+    # cannot read keeps the existing alarm: a real fleet is never silenced by
+    # a read error.
+    fleet_managed = True
     try:
         from tools.network import fleet_tunnel_server
         _ts = fleet_tunnel_server.state()
         if _ts.managed and not _ts.allowed:
             tunnel_designated = False
+        fleet_managed = bool(_ts.managed)
     except Exception:
         pass
 
@@ -1638,7 +1647,23 @@ async def get_unlock_state(request: Request) -> JSONResponse:
     # so a label appearing under both names is reported once (bead auto-9yp8r).
     unarmed_scopes = sorted(set(sync_unarmed))
     stale_scopes = sorted(set(sync_stale))
-    if not tunnel_designated:
+    if not fleet_managed:
+        # No fleet roster: this is a single-node install with no other machines,
+        # so peer sync does not apply. Report quietly and never light — an
+        # unarmed serving credential here has no peer waiting to sync with it.
+        flags["sync"] = {
+            "needs": False,
+            "value": "",
+            "detail": ("This is the only machine in your fleet, so there is "
+                       "nothing to sync with it. Add another machine to sync "
+                       "your work between them."),
+            "unarmed": [],
+            "stale": [],
+            "scopes": [],
+            "count": 0,
+            "since": None,
+        }
+    elif not tunnel_designated:
         # This machine is not the designated tunnel server, so holding no serving
         # credential is expected, not a fault. Report it quietly and never light.
         flags["sync"] = {

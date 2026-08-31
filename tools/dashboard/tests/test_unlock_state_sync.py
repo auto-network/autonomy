@@ -18,14 +18,16 @@ def client():
 
 
 def _stub_serving(monkeypatch, *, scopes, cert_status, replies, disk="c0ffee",
-                  designated=True):
+                  designated=True, managed=True):
     """Stub the serving-scope reads get_unlock_state makes.
 
     scopes: list of org scopes (None == personal); cert_status: {scope: status};
     replies: {scope: connector-status dict} — a scope absent from replies has no
     reachable connector. designated: whether this machine is the fleet's
     designated tunnel server (a managed fleet with allowed=False means it is
-    NOT, so holding no serving credential is expected, not a fault)."""
+    NOT, so holding no serving credential is expected, not a fault). managed:
+    whether a fleet roster exists at all — False is a legacy single-node install
+    with no other machines, where peer sync does not apply."""
     import types
     from tools.dashboard import link_serving_supervisor as sup
     from tools.network import build_version
@@ -33,7 +35,8 @@ def _stub_serving(monkeypatch, *, scopes, cert_status, replies, disk="c0ffee",
 
     monkeypatch.setattr(
         fleet_tunnel_server, "state",
-        lambda: types.SimpleNamespace(managed=True, allowed=bool(designated)),
+        lambda: types.SimpleNamespace(managed=bool(managed),
+                                      allowed=bool(designated)),
     )
     monkeypatch.setattr(sup, "_discover_startup_orgs", lambda: list(scopes))
     monkeypatch.setattr(
@@ -157,6 +160,32 @@ def test_non_designated_tunnel_server_does_not_light_sync(client, monkeypatch):
     assert "serving credential" not in sync["detail"] or "expected" in sync["detail"]
     assert "unlock with your root" not in sync["detail"].lower()
     assert "expected" in sync["detail"]
+
+
+def test_single_node_install_does_not_light_sync(client, monkeypatch):
+    # A legacy single-node install has no fleet roster (managed=False) and thus
+    # no OTHER machines. Even with every serving connector unarmed, peer sync is
+    # moot: the flag must stay quiet and never offer the root-unlock remedy for a
+    # credential no peer is waiting on. This is the operator-reported case — three
+    # orgs read as "hold no serving credential" on a machine with no peers.
+    _stub_serving(
+        monkeypatch,
+        scopes=["anchore", "autonomy", "dynbench"],
+        cert_status={"anchore": "ok", "autonomy": "ok", "dynbench": "ok"},
+        replies={
+            "anchore": {"fleet_runtime_configured": False, "process_commit": "c0ffee"},
+            "autonomy": {"fleet_runtime_configured": False, "process_commit": "c0ffee"},
+            "dynbench": {"fleet_runtime_configured": False, "process_commit": "c0ffee"},
+        },
+        managed=False,
+    )
+    sync = client.get("/api/identity/unlock-state").json()["sync"]
+    assert sync["needs"] is False
+    assert sync["unarmed"] == []
+    assert sync["scopes"] == []
+    assert "hold no serving credential" not in sync["detail"]
+    assert "unlock with your root" not in sync["detail"].lower()
+    assert "only machine" in sync["detail"]
 
 
 def test_scopeless_and_personal_scope_reported_once(client, monkeypatch):
