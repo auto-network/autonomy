@@ -3566,16 +3566,38 @@ async def api_terminals(request):
             result.append({"id": name, "alive": True, **info})
     return JSONResponse(result)
 
+def _host_form(s: str) -> str:
+    """Render a string containing this process's paths in HOST paths.
+
+    A containerized node sees the repo at /app and its home at
+    /home/autonomy; the host tmux server that forks host sessions sees
+    neither. The entrypoint exports AUTONOMY_HOST_ROOT (=<data root>/code)
+    and AUTONOMY_HOST_HOME for exactly this translation — the launch-side
+    twin of tools/graph/ingest.py's ingest-side rewrites. Native runs have
+    neither var set and this is the identity function.
+    """
+    for env_key, src in (("AUTONOMY_HOST_ROOT", str(_REPO_ROOT)),
+                         ("AUTONOMY_HOST_HOME", str(Path.home()))):
+        dst = os.environ.get(env_key)
+        if dst and dst != src:
+            s = s.replace(src, dst)
+    return s
+
+
 async def api_terminal_kill(request):
     """Stop a terminal session via the lifecycle worker.
 
     Dashboard-tracked sessions go through the worker's STOP handler
     (stopping → cleaning → dead, bounded steps, chatwith ingest on
-    completion) and return 202 immediately. Unknown tmux sessions (not in
-    dashboard.db) fall back to a direct kill.
+    completion) and return 202 immediately — even when their tmux session
+    is already gone, because the workload can outlive tmux: proven
+    2026-08-31, a container session whose tmux died returned "not found"
+    here while its container kept running, making close a dead button.
+    Only a name that neither tmux nor dashboard.db knows is not_found.
+    Unknown-to-the-DB tmux sessions fall back to a direct kill.
     """
     name = request.path_params["id"]
-    if not _tmux_session_exists(name):
+    if not _tmux_session_exists(name) and not dashboard_db.session_exists(name):
         return JSONResponse({"status": "not_found", "id": name})
 
     if dashboard_db.session_exists(name):
@@ -3588,8 +3610,11 @@ async def api_terminal_kill(request):
             "api_terminal_kill: lifecycle queue full; stopping %s inline", name,
         )
 
-    # Non-dashboard tmux session, or queue-full fallback: direct kill.
+    # Non-dashboard tmux session, or queue-full fallback: direct kill of
+    # both halves — the tmux session and any same-named container (each a
+    # no-op when absent, including for host terminals).
     subprocess.run(["tmux", "kill-session", "-t", name], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", name], capture_output=True)
     await session_monitor.deregister(name)
     await asyncio.to_thread(auth_db.revoke_token, name)
     if name.startswith("chatwith-"):
@@ -8440,7 +8465,14 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
             "tmux", "new-session", "-d", "-s", tmux_name, "-x", "120", "-y", "40",
         ]
         if kind == "host":
-            tmux_cmd += ["-c", str(_REPO_ROOT)]
+            # Host sessions are forked by the HOST tmux server, so every
+            # path in the command must be a HOST path. A containerized
+            # dashboard builds them from its own view (/app…) — proven
+            # fatal 2026-08-31: the host has no /app, the command dies
+            # instantly and the launch times out. _host_form() is the
+            # identity when running natively.
+            tmux_cmd += ["-c", _host_form(str(_REPO_ROOT))]
+            cmd_str = _host_form(cmd_str)
         tmux_cmd.append(cmd_str)
         result = subprocess.run(
             tmux_cmd,
@@ -8576,7 +8608,14 @@ def _run_simple_session_start(job: LifecycleJob, writer: SessionLifecycleStateWr
             "tmux", "new-session", "-d", "-s", tmux_name, "-x", "120", "-y", "40",
         ]
         if kind == "host":
-            tmux_cmd += ["-c", str(_REPO_ROOT)]
+            # Host sessions are forked by the HOST tmux server, so every
+            # path in the command must be a HOST path. A containerized
+            # dashboard builds them from its own view (/app…) — proven
+            # fatal 2026-08-31: the host has no /app, the command dies
+            # instantly and the launch times out. _host_form() is the
+            # identity when running natively.
+            tmux_cmd += ["-c", _host_form(str(_REPO_ROOT))]
+            cmd_str = _host_form(cmd_str)
         tmux_cmd.append(cmd_str)
         result = subprocess.run(
             tmux_cmd,
