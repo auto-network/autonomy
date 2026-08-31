@@ -900,6 +900,11 @@ def _build_host_project_to_org() -> dict[str, str]:
         f"{home}/workspace/enterprise": "anchore",
         f"{home}/workspace/enterprise-dev-compose-files": "anchore",
         f"{home}/workspace/autonomy": "autonomy",
+        # The same repo at its relocated home (native → Compose cutover,
+        # 2026-08-31): host sessions launched by a containerized dashboard
+        # run in the HOST-form repo root, and after the cutover so does
+        # everything else. Without this row their org rendered as "?".
+        "/opt/autonomy/code": "autonomy",
         f"{home}/infra": "blindhash",
         f"{home}/blindhash": "blindhash",
         f"{home}/jira": "personal",
