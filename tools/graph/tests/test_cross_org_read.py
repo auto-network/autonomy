@@ -592,3 +592,51 @@ def test_resolve_source_strict_returns_none_on_peer_curated(orgs_root):
     assert ops.resolve_source_strict(
         ids["autonomy_curated"], org="anchore",
     ) is None
+
+
+def test_org_writeback_set_isolates_reads_to_the_callers_namespace(orgs_root):
+    """An @org_writeback_namespace @home('personal') set: an org session
+    enumerates ONLY its own <org>: keys (to know which credential to
+    request); it never sees another org's key names nor the operator's own
+    unprefixed rows. The personal owner sees the whole store. Generic —
+    driven by the decorators, not the set id (the 2026-08-31 cross-org
+    credential-name leak)."""
+    from tools.graph.schemas.registry import (
+        SettingSchema, field, keyed_per_entity, home,
+        org_writeback_namespace, publication_band,
+    )
+
+    @home("personal")
+    @publication_band(max="raw")
+    @keyed_per_entity(key_strategy="setting_name")
+    @org_writeback_namespace(suffix="cred")
+    class _IsoProbe(SettingSchema):
+        set_id = "autonomy.test.orgns.iso"
+        schema_revision = 1
+        v: str = field(required=True, description="v")
+
+    _seed_org("blindhash"); _seed_org("anchore")
+    pdb = _seed_org("personal")   # the operator's own store, where these live
+    now = "2026-08-31T00:00:00Z"
+    for key in ("blindhash:fleet-ssh-key", "blindhash:hcloud",
+                "anchore:scale-harness", "autonomy:mac.ssh",
+                "mac.ssh.disposable"):
+        pdb.conn.execute(
+            "INSERT INTO settings(id,set_id,schema_revision,key,payload,"
+            "publication_state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+            (key.replace(":", "_"), "autonomy.test.orgns.iso", 1, key,
+             '{"v":"x"}', "raw", now, now),
+        )
+    pdb.conn.commit()
+
+    def keys(org):
+        return sorted(m.key for m in settings_ops.read_set(
+            "autonomy.test.orgns.iso", org=org).members)
+
+    assert keys("blindhash") == ["blindhash:fleet-ssh-key", "blindhash:hcloud"]
+    assert keys("anchore") == ["anchore:scale-harness"]
+    # The operator's own store: everything, including unprefixed rows.
+    assert keys("personal") == [
+        "anchore:scale-harness", "autonomy:mac.ssh",
+        "blindhash:fleet-ssh-key", "blindhash:hcloud", "mac.ssh.disposable",
+    ]

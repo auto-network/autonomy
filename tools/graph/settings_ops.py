@@ -4880,6 +4880,32 @@ def read_set(
     if prefix is not None:
         prefix_clause = " AND key LIKE ? ESCAPE '\\'"
         prefix_params = (_prefix_like_pattern(prefix),)
+
+    # ORG-NAMESPACE ISOLATION (the security domain a schema declares with
+    # @org_writeback_namespace on a @home("personal") set): the set lives in
+    # the operator's own store, and an organization session is granted WRITE
+    # into its derived <org>:<suffix> namespace but NO read-through to the
+    # rest. So an org-scoped caller enumerating such a set may see ONLY its
+    # own <org>: keys — enough to know which credential to request, never
+    # another org's key names nor the operator's own unprefixed rows. Values
+    # stay sealed regardless (a read of a @vaulted set returns ciphertext /
+    # a sealed locator, never plaintext — release is a separate ceremony).
+    # This is generic: it triggers on the declaration, not on any set id.
+    _iso_prefix = None
+    # resolved_org is an authenticated org slug (org_ops._validate_slug forbids
+    # ':' and empties), so the LIKE '<org>:%' prefix cannot be widened or
+    # escaped; the truthiness check is belt-and-braces against a slug that
+    # somehow reached here empty.
+    if (
+        schemas.declared_org_writeback_key_strategy(set_id)
+        and schemas.declared_home(set_id) == "personal"
+        and isinstance(resolved_org, str)
+        and resolved_org
+        and resolved_org not in ("personal", "machine")
+    ):
+        _iso_prefix = resolved_org
+        prefix_clause += " AND key LIKE ? ESCAPE '\\'"
+        prefix_params = (*prefix_params, _prefix_like_pattern(resolved_org))
     db = _open_read(org, set_id)
     try:
         rows = db.conn.execute(

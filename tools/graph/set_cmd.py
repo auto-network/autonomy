@@ -487,6 +487,12 @@ def cmd_set_read(args) -> None:
 
     if len(parts) == 2:
         set_id, key = parts
+        # A read never needs a revision — read_set, the vault-open dispatch,
+        # and chain_setting all key on the bare set name. Tolerate a `#<rev>`
+        # suffix (the form the docs and `graph set add` use) instead of
+        # letting it silently miss declared_vault_tier and fall through to a
+        # failing plain read.
+        set_id = set_id.split("#", 1)[0]
     else:
         # Single positional — resolve to row, then derive (set_id, key).
         client = get_client()
