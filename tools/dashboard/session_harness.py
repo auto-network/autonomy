@@ -2998,6 +2998,14 @@ _CLAUDE_TRUST_CONFIRM_RE = re.compile(
     r"|(?:^|\n)\s*1\.\s*yes\b|no,?\s+quit",
     re.IGNORECASE,
 )
+# Which option the selector caret (❯) sits on. The dialog's DEFAULT is not
+# fixed: a folder whose .claude/settings.local.json pre-approves tool
+# permissions defaults to "No, exit" as a safety stance — proven live
+# 2026-08-31 on /opt/autonomy/code (101 pre-approvals): a bare Enter chose
+# "No", claude exited, and every launch died at the confirming_trust
+# timeout. When the caret is on a No option, step Down onto the trust
+# option before confirming.
+_CLAUDE_TRUST_DEFAULT_NO_RE = re.compile(r"❯\s*No\b", re.IGNORECASE)
 _CLAUDE_PLANNING_RE = re.compile(
     r"(?:^|\n)\s*(?:plan mode|planning|Planning)\b",
     re.IGNORECASE,
@@ -3049,11 +3057,13 @@ def _claude_read_screen_state(
     if trust_visible and not prev.get("confirming_trust_prompt"):
         # Newly-detected dialog. Send the confirm keystroke and flip
         # the flag so a re-poll while the keystroke is in flight does
-        # not re-send. The fallback default-selected option in Claude's
-        # TUI is "Yes, trust this directory" — Enter on that option
-        # accepts. Empirical verification required: a sandbox test
-        # spawning a real harness and asserting that this single
-        # Enter clears the dialog within one poll interval.
+        # not re-send. The default-selected option is NOT always the
+        # trust one (see _CLAUDE_TRUST_DEFAULT_NO_RE): when the caret
+        # sits on a "No" option, step Down onto the trust option first
+        # — verified live 2026-08-31: Down+Enter clears the
+        # pre-approved-permissions variant; bare Enter exits claude.
+        if _CLAUDE_TRUST_DEFAULT_NO_RE.search(text):
+            keystrokes.append({"kind": "key", "value": "Down"})
         keystrokes.append({"kind": "key", "value": "C-m"})
         new_state["confirming_trust_prompt"] = True
     elif not trust_visible and prev.get("confirming_trust_prompt"):
