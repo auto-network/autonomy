@@ -173,6 +173,17 @@ def _curl(
     }
 
 
+def _header_value(headers: str, name: str) -> str | None:
+    """Return the last matching response header without assuming HTTP version casing."""
+    wanted = name.casefold()
+    value = None
+    for line in headers.splitlines():
+        field, separator, candidate = line.partition(":")
+        if separator and field.strip().casefold() == wanted:
+            value = candidate.strip()
+    return value
+
+
 def _recv_exact(connection: ssl.SSLSocket, size: int) -> bytes:
     chunks = []
     remaining = size
@@ -432,7 +443,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             (calls[5], 200, "stream-three"),
         ):
             _expect_http(result, status, marker)
-        if "Location: /final" not in calls[4]["headers"]:
+        if _header_value(calls[4]["headers"], "Location") != "/final":
             raise ProofFailure("redirect did not preserve the relative Location")
         websocket = _websocket_echo(hostname, args.port, "sovereign-websocket")
 

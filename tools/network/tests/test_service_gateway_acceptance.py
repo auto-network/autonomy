@@ -34,3 +34,9 @@ def test_dashboard_exec_preserves_the_named_users_supplementary_groups(monkeypat
         "timeout": 30.0,
         "user": "autonomy",
     }
+
+
+def test_header_lookup_is_case_insensitive_for_http2_curl_output():
+    headers = "HTTP/2 302\r\nlocation: /final\r\nvia: 1.1 Caddy\r\n\r\n"
+
+    assert service_gateway._header_value(headers, "Location") == "/final"
