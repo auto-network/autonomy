@@ -42,9 +42,13 @@ from tools.vault.recipients import PERSONAL_ROOT_RECIPIENT
 
 
 KIND = "vault_open"
-MIN_TTL_SECONDS = 1
-MAX_TTL_SECONDS = 300
-DEFAULT_TTL_SECONDS = 60
+# ttl_seconds is the delivered credential's ramfs LIFETIME (not the approval
+# window — that is the kind's FIXED policy). 0 means the FULL CONTAINER
+# LIFESPAN: no timed destruction; the file dies with the container's private
+# mount. A positive value destroys the file that many seconds after delivery.
+MIN_TTL_SECONDS = 0
+MAX_TTL_SECONDS = 86400
+DEFAULT_TTL_SECONDS = 0
 _ALLOWED_REQUEST_FIELDS = {"set_id", "key", "ttl_seconds"}
 _HEX_SEED_LEN = 64
 

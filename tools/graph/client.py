@@ -791,15 +791,19 @@ class HttpClient:
     #: delivered credential then lives, not how long the human has).
     _APPROVAL_WAIT_S = 300
 
-    def request_vault_open(self, set_id, key, *, org, ttl_seconds=60):
+    def request_vault_open(self, set_id, key, *, org, ttl_seconds=0):
         """Request and await one operator-approved secured Setting release.
 
         ``ttl_seconds`` is the delivered credential's LIFETIME in the
         session's ramfs (requester-chosen), NOT an approval deadline — the
-        wait for the operator is :data:`_APPROVAL_WAIT_S`. The session
-        identity is intentionally absent from the body: the dashboard
-        derives it from this client's bearer.  Held GETs receive only a
-        value-free receipt naming the requesting session's ramfs path.
+        wait for the operator is :data:`_APPROVAL_WAIT_S`. ``0`` (the
+        default) means the FULL CONTAINER LIFESPAN: the file lives until the
+        container stops and the kernel frees its private mount, with no
+        timed destruction; a positive value destroys the file that many
+        seconds after delivery. The session identity is intentionally
+        absent from the body: the dashboard derives it from this client's
+        bearer.  Held GETs receive only a value-free receipt naming the
+        requesting session's ramfs path.
         """
         org = _resolve_client_org_arg(org)
         created = self._request(

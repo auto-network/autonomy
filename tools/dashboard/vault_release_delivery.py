@@ -96,19 +96,22 @@ def deliver_payload(
     )
 
     # The request-provided TTL is the credential's LIFETIME in the session's
-    # ramfs, and it is enforced from DELIVERY, not from request creation: the
-    # approval takes as long as the human takes (no wall-clock rejection of a
-    # slow-approved release — see vault_open_approvals._assert_frozen), and
-    # the credential then lives exactly ttl_seconds before the sweeper
-    # destroys that one file in this container.
-    ttl_seconds = request.get("ttl_seconds")
+    # ramfs, enforced from DELIVERY (the approval takes as long as the human
+    # takes — no wall-clock rejection of a slow-approved release). TTL 0 (the
+    # default) means the FULL CONTAINER LIFESPAN: no deadline, the file dies
+    # with the container's private mount when it stops. A positive value
+    # destroys that one file that many seconds after delivery.
+    ttl_seconds = request.get("ttl_seconds", 0)
     if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, (int, float)) \
-            or ttl_seconds <= 0:
-        raise VaultDeliveryError("vault release has no positive ttl_seconds")
+            or ttl_seconds < 0:
+        raise VaultDeliveryError("vault release ttl_seconds must be >= 0")
     stamp_s = time.time() if now is None else float(now)
     container_path = f"{SESSION_SECRET_DST}/{credential_name}"
     delivered_at_ms = int(stamp_s * 1000)
-    expires_at_ms = delivered_at_ms + int(float(ttl_seconds) * 1000)
+    expires_at_ms = (
+        None if ttl_seconds == 0
+        else delivered_at_ms + int(float(ttl_seconds) * 1000)
+    )
 
     # host_path is an audit LOCATOR in the container-namespace frame: there is
     # no host path — the file lives only inside the container's private mount.

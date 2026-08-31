@@ -37,7 +37,7 @@ def helper(monkeypatch):
     return calls
 
 
-def _row(ttl_seconds=90, key="mac.ssh"):
+def _row(ttl_seconds=0, key="mac.ssh"):
     return {
         "id": "release-1",
         "session": "auto-requester",
@@ -60,7 +60,7 @@ def test_record_first_then_private_write_returns_only_receipt(helper):
         "release_id": "release-1",
         "delivery": "session-ramfs",
         "path": "/run/secrets/mac.ssh",
-        "ttl_seconds": 90,
+        "ttl_seconds": 0,
     }
     (container, filename, data, record_at_write) = helper[0]
     assert container == "auto-requester"
@@ -73,8 +73,8 @@ def test_record_first_then_private_write_returns_only_receipt(helper):
     assert record["container_path"] == "/run/secrets/mac.ssh"
     # No host path exists — the locator names the container namespace.
     assert record["host_path"].startswith("container-ns:auto-requester:")
-    # TTL is the credential lifetime, applied from delivery.
-    assert record["expires_at"] == record["delivered_at"] + 90 * 1000
+    # Default TTL 0 = full container lifespan: no deadline.
+    assert record["expires_at"] is None
     assert secret not in json.dumps(record)
     assert secret not in json.dumps(receipt)
 
@@ -98,11 +98,24 @@ def test_structured_payload_without_single_value_is_refused(helper):
     assert vault_releases.get("release-1") is None
 
 
-def test_missing_ttl_is_refused(helper):
-    bad = _row()
-    del bad["request"]["ttl_seconds"]
+def test_absent_ttl_defaults_to_lifespan(helper):
+    row = _row()
+    del row["request"]["ttl_seconds"]
+    receipt = delivery.deliver_payload(row, {"value": "v"}, now=100.0)
+    assert receipt["ttl_seconds"] == 0
+    assert vault_releases.get("release-1")["expires_at"] is None
+
+
+def test_positive_ttl_sets_a_deadline_from_delivery(helper):
+    receipt = delivery.deliver_payload(_row(ttl_seconds=90), {"value": "v"}, now=100.0)
+    assert receipt["ttl_seconds"] == 90
+    record = vault_releases.get("release-1")
+    assert record["expires_at"] == record["delivered_at"] + 90 * 1000
+
+
+def test_negative_ttl_is_refused(helper):
     with pytest.raises(delivery.VaultDeliveryError, match="ttl_seconds"):
-        delivery.deliver_payload(bad, {"value": "v"}, now=100.0)
+        delivery.deliver_payload(_row(ttl_seconds=-1), {"value": "v"}, now=100.0)
     assert helper == []
     assert vault_releases.get("release-1") is None
 
