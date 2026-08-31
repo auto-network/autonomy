@@ -3485,7 +3485,13 @@ async def api_active_sessions(request):
     from pathlib import Path
 
     threshold = int(request.query_params.get("threshold", "300"))  # seconds
-    projects_dir = Path.home() / ".claude" / "projects"
+    # Operator's home, not this process's: containerized, the host's
+    # ~/.claude/projects is mounted at its host path and AUTONOMY_HOST_HOME
+    # names it; natively the two are the same.
+    projects_dir = (
+        Path(os.environ.get("AUTONOMY_HOST_HOME") or Path.home())
+        / ".claude" / "projects"
+    )
     now = time.time()
     sessions = []
 
@@ -5944,7 +5950,10 @@ async def api_session_tail(request):
 
     file_size = session_file.stat().st_size
     # Determine session type from resolved path
-    home_projects = Path.home() / ".claude" / "projects"
+    home_projects = (
+        Path(os.environ.get("AUTONOMY_HOST_HOME") or Path.home())
+        / ".claude" / "projects"
+    )
     session_type = "host" if session_file.is_relative_to(home_projects) else "container"
 
     # Liveness from DB — the one state column decides
@@ -6461,7 +6470,10 @@ async def api_session_confirm_link(request):
         return JSONResponse({"error": "tmux_session required"}, status_code=400)
 
     # Scan all project directories for newest JSONL containing handshake
-    claude_projects = Path.home() / ".claude" / "projects"
+    claude_projects = (
+        Path(os.environ.get("AUTONOMY_HOST_HOME") or Path.home())
+        / ".claude" / "projects"
+    )
     if not claude_projects.exists():
         return JSONResponse({"error": "no projects directory"}, status_code=404)
 
