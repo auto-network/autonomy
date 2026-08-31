@@ -16,13 +16,14 @@ import time
 
 from starlette.testclient import TestClient
 
-from tools.dashboard import link_serving_supervisor
+from tools.dashboard import link_serving_supervisor, web_gateway_supervisor
 
 
 def test_lifespan_startup_does_not_block_on_bootstrap(
     test_app, monkeypatch
 ):
     started = {"called": False, "finished": False}
+    gateway_worker = {"started": False, "stopped": False}
     # Gate the fake bootstrap on an event rather than a wall-clock sleep: the
     # proof that startup is fire-and-forget is that the lifespan returns while
     # bootstrap is still blocked, which holds regardless of scheduling latency.
@@ -37,6 +38,14 @@ def test_lifespan_startup_does_not_block_on_bootstrap(
         return None
 
     monkeypatch.setattr(link_serving_supervisor, "bootstrap", slow_bootstrap)
+    async def start_gateway_worker(_event_bus):
+        gateway_worker["started"] = True
+
+    async def stop_gateway_worker():
+        gateway_worker["stopped"] = True
+
+    monkeypatch.setattr(web_gateway_supervisor, "start_worker", start_gateway_worker)
+    monkeypatch.setattr(web_gateway_supervisor, "stop_worker", stop_gateway_worker)
     monkeypatch.delenv("DASHBOARD_MOCK", raising=False)
 
     try:
@@ -45,6 +54,7 @@ def test_lifespan_startup_does_not_block_on_bootstrap(
             # event — that is the fire-and-forget proof, with no timing margin.
             resp = client.get("/api/version")
             assert resp.status_code == 200
+            assert gateway_worker["started"] is True
             # The background task was kicked off (poll briefly; it runs on
             # another thread and may not have been scheduled yet).
             for _ in range(200):
@@ -60,3 +70,4 @@ def test_lifespan_startup_does_not_block_on_bootstrap(
             release.set()
     finally:
         release.set()  # safety if an assertion above raised first
+    assert gateway_worker["stopped"] is True

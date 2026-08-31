@@ -192,6 +192,11 @@ def target_api(tmp_path, monkeypatch):
                 network_routes.check_service_target,
                 methods=["POST"],
             ),
+            Route(
+                "/api/network/service-gateway",
+                network_routes.get_service_gateway,
+                methods=["GET"],
+            ),
         ],
         middleware=[
             Middleware(
@@ -225,6 +230,35 @@ def _check(client, reservation_id=ACTIVE_ID):
 
 def _target_members():
     return settings_ops.read_owned_set(TARGET_SET_ID, org="acme").members
+
+
+def test_service_gateway_status_requires_operator_and_reports_runtime(
+    target_api, monkeypatch
+):
+    client, *_ = target_api
+    from tools.dashboard import web_gateway_supervisor
+
+    monkeypatch.setattr(
+        web_gateway_supervisor,
+        "status",
+        lambda: {
+            "state": "healthy",
+            "reason": "ready",
+            "advertised_routes": [ACTIVE_ID],
+        },
+    )
+
+    refused = client.get("/api/network/service-gateway")
+    assert refused.status_code == 401
+    response = client.get("/api/network/service-gateway", headers=_headers())
+    assert response.status_code == 200
+    assert response.json() == {
+        "gateway": {
+            "state": "healthy",
+            "reason": "ready",
+            "advertised_routes": [ACTIVE_ID],
+        }
+    }
 
 
 class TestServiceTargetApiContract:
@@ -375,7 +409,9 @@ class TestServiceTargetResolution:
         [
             ("missing-session", "target_session_not_found"),
             ("other-session", "target_session_not_found"),
-            ("host-session", "host_session_unsupported"),
+            # Host sessions are personal-scoped after the Compose cutover, so
+            # an organization-scoped caller cannot discover their type.
+            ("host-session", "target_session_not_found"),
             ("dead-session", "target_session_unavailable"),
         ],
     )

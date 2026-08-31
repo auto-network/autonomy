@@ -2209,6 +2209,15 @@ async def get_service_targets(request: Request) -> JSONResponse:
     return JSONResponse({"targets": service_publication.list_service_targets(org)})
 
 
+async def get_service_gateway(request: Request) -> JSONResponse:
+    _org, refused = _service_publication_org(request)
+    if refused is not None:
+        return refused
+    from tools.dashboard import web_gateway_supervisor
+
+    return JSONResponse({"gateway": web_gateway_supervisor.status()})
+
+
 async def put_service_target(request: Request) -> JSONResponse:
     org, refused = _service_publication_org(request)
     if refused is not None:
@@ -2289,6 +2298,7 @@ ROUTES = [
         methods=["PUT"],
     ),
     Route("/api/network/service-targets", get_service_targets, methods=["GET"]),
+    Route("/api/network/service-gateway", get_service_gateway, methods=["GET"]),
     Route(
         "/api/network/service-targets/{reservation_id}",
         put_service_target,

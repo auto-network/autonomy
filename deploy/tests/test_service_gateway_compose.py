@@ -15,6 +15,7 @@ ACCEPTANCE_OVERRIDE = (
 )
 BOOTSTRAP = REPO_ROOT / "deploy/service-gateway/bootstrap.json"
 GATEWAY_DOCKERFILE = REPO_ROOT / "deploy/Dockerfile.service-gateway"
+INSTALL = REPO_ROOT / "deploy/install/INSTALL.md"
 
 
 def _compose() -> dict:
@@ -126,3 +127,9 @@ def test_acceptance_override_is_the_only_host_port_publication():
     gateway = override["services"]["service-gateway"]
 
     assert gateway["ports"] == ["127.0.0.1:${SERVICE_GATEWAY_TEST_PORT:-8443}:9443"]
+
+
+def test_install_prebuilds_the_profile_image_without_starting_the_gateway():
+    install = INSTALL.read_text()
+
+    assert "docker compose --profile service-gateway build service-gateway" in install
