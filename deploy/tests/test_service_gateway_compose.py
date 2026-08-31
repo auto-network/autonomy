@@ -113,7 +113,10 @@ def test_service_gateway_mounts_only_config_control_and_ramfs_certificate_input(
     assert "/var/run/docker.sock" not in sources
     assert "service-gateway-control" in sources
     assert "/run/autonomy-keycache/service-gateway" in sources
-    assert "./deploy/service-gateway/bootstrap.json" in sources
+    assert (
+        "${AUTONOMY_HOST_ROOT:-.}/deploy/service-gateway/bootstrap.json"
+        in sources
+    )
     assert any(
         isinstance(volume, dict)
         and volume.get("source") == "/run/autonomy-keycache/service-gateway"

@@ -44,3 +44,43 @@ def test_header_lookup_is_case_insensitive_for_http2_curl_output():
 
 def test_lifecycle_p95_uses_the_nearest_rank():
     assert service_gateway_lifecycle._p95([float(value) for value in range(1, 21)]) == 19
+
+
+def test_lifecycle_status_observation_retains_the_runtime_error():
+    observations = []
+
+    current = service_gateway_lifecycle._observe_gateway_status(
+        lambda: {
+            "state": "backoff",
+            "reason": "backoff",
+            "error": "start Service gateway failed (1): bind source missing",
+        },
+        observations,
+        now=lambda: 123.5,
+    )
+
+    assert current["state"] == "backoff"
+    assert observations == [
+        {
+            "at": 123.5,
+            "gateway": current,
+        }
+    ]
+
+
+def test_lifecycle_status_observation_retains_transport_failures():
+    observations = []
+
+    current = service_gateway_lifecycle._observe_gateway_status(
+        lambda: (_ for _ in ()).throw(RuntimeError("dashboard restarting")),
+        observations,
+        now=lambda: 456.0,
+    )
+
+    assert current == {}
+    assert observations == [
+        {
+            "at": 456.0,
+            "transport_error": "dashboard restarting",
+        }
+    ]

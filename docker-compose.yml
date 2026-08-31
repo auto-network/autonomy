@@ -227,7 +227,15 @@ services:
       - /data:rw,noexec,nosuid,nodev,size=16m,uid=1000,gid=1000,mode=0700
       - /config:rw,noexec,nosuid,nodev,size=4m,uid=1000,gid=1000,mode=0700
     volumes:
-      - ./deploy/service-gateway/bootstrap.json:/etc/caddy/bootstrap.json:ro
+      # Host Compose resolves `.` from the checkout. The in-Dashboard
+      # supervisor exports AUTONOMY_HOST_ROOT so the host Docker daemon sees
+      # the same file even though the Compose client itself runs from /app.
+      - type: bind
+        source: ${AUTONOMY_HOST_ROOT:-.}/deploy/service-gateway/bootstrap.json
+        target: /etc/caddy/bootstrap.json
+        read_only: true
+        bind:
+          create_host_path: false
       - service-gateway-control:/run/autonomy-service-gateway
       # The dashboard creates this exact child inside its verified ramfs mount
       # before Caddy can start. Refuse a missing source; never fabricate a
