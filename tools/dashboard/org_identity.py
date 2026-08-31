@@ -203,6 +203,12 @@ def session_org_slug(session: dict) -> str:
     session_type = session.get("session_type") or session.get("type")
     if session_type in ("dispatch", "librarian"):
         return "autonomy"
+    # Host terminals have no real organization; they file and render as
+    # personal (operator ruling 2026-08-31, superseding the earlier
+    # "only host sessions should lack an org" contract that painted "?").
+    # Matches the graph-side rule: the node's own repo maps to personal.
+    if session_type == "host":
+        return "personal"
     raw = session.get("project") or ""
     if isinstance(raw, str):
         raw = raw.strip().strip("[]").strip()
