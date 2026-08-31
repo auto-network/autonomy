@@ -48,6 +48,35 @@ def _run(argv: list[str], *, timeout: float = 30.0) -> subprocess.CompletedProce
     )
 
 
+def acceptance_certificate_command(hostname: str) -> list[str]:
+    """Build the ephemeral acceptance certificate command.
+
+    The public origin belongs in subjectAltName.  X.509 Common Name is a
+    legacy presentation field capped at 64 characters, while a valid Service
+    origin can be longer once its app and persona labels are combined.
+    """
+    return [
+        "openssl",
+        "req",
+        "-x509",
+        "-newkey",
+        "ec",
+        "-pkeyopt",
+        "ec_paramgen_curve:P-256",
+        "-nodes",
+        "-days",
+        "1",
+        "-subj",
+        "/CN=Autonomy Service Gateway Acceptance",
+        "-addext",
+        f"subjectAltName=DNS:{hostname}",
+        "-keyout",
+        "/run/autonomy-keycache/service-gateway/tls.key",
+        "-out",
+        "/run/autonomy-keycache/service-gateway/tls.crt",
+    ]
+
+
 def _require(result: subprocess.CompletedProcess[str], label: str) -> str:
     if result.returncode != 0:
         raise ProofFailure(
@@ -304,26 +333,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
         _docker_exec(
             args.dashboard_container,
-            [
-                "openssl",
-                "req",
-                "-x509",
-                "-newkey",
-                "ec",
-                "-pkeyopt",
-                "ec_paramgen_curve:P-256",
-                "-nodes",
-                "-days",
-                "1",
-                "-subj",
-                f"/CN={hostname}",
-                "-addext",
-                f"subjectAltName=DNS:{hostname}",
-                "-keyout",
-                "/run/autonomy-keycache/service-gateway/tls.key",
-                "-out",
-                "/run/autonomy-keycache/service-gateway/tls.crt",
-            ],
+            acceptance_certificate_command(hostname),
             user="1000:1000",
         )
         # The operator applies the dashboard's new control-volume mount once.
