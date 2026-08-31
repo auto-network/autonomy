@@ -81,6 +81,13 @@ services:
       # — outputs of startup, not operator inputs.
       AUTONOMY_HOST_DATA_ROOT: ${AUTONOMY_HOST_DATA_ROOT:-}
       AUTONOMY_HOST_HOME: ${AUTONOMY_HOST_HOME}
+      # The container's OWN data root, pinned. Without it the code defaults to
+      # the repo-relative <repo>/data; on this node /app/data is the real
+      # autonomy-data mount, so pinning it keeps every resolved data path as
+      # /app/data — which the node->host mount translator maps cleanly to the
+      # host. (A stray code/data symlink previously collapsed it to /data and
+      # broke session-mount translation; 2026-08-31.)
+      AUTONOMY_DATA_ROOT: /app/data
       # A container has no timezone and defaults to UTC, so naive
       # datetime.fromtimestamp() (the session table, crosstalk log, card
       # times) would render UTC where the native dashboard rendered the
@@ -218,6 +225,7 @@ services:
       DISPATCH_INTERVAL: ${DISPATCH_INTERVAL:-5}
       DISPATCH_MAX_CONCURRENT: ${DISPATCH_MAX_CONCURRENT:-2}
       DOLT_SQL_HOST: dolt
+      AUTONOMY_DATA_ROOT: /app/data   # real mount, never repo-relative (see dashboard note)
     logging:
       driver: json-file
       options: { max-size: "20m", max-file: "5" }
@@ -294,6 +302,8 @@ services:
     # the host init which reaps). init: true runs tini as PID 1 to reap.
     init: true
     command: sh /app/deploy/relay.sh
+    environment:
+      AUTONOMY_DATA_ROOT: /app/data   # real mount, never repo-relative (see dashboard note)
     # Shared image's HEALTHCHECK probes the dashboard's HTTP port; the relay
     # serves no HTTP. Same reasoning as the dispatcher's disable above.
     healthcheck:
