@@ -16,7 +16,7 @@ tools/                — utility tools, each with its own TOOL.md
   dashboard/          — web UI: bead board, session monitor, graph explorer (planned)
   analytics/          — session log analysis, tool use metrics (planned)
 data/                 — extracted/collected data
-  graph.db            — knowledge graph database (100K+ thoughts, gitignored)
+  orgs/               — per-org knowledge graph DBs (autonomy.db, anchore.db, …; gitignored). data/graph.db is a dead pre-org-split remnant
   chatgpt/            — scraped ChatGPT conversations (.json, .md)
   claude/             — scraped Claude.ai conversations (.json, .md)
 .beads/               — Beads issue tracker (Dolt-backed, local state gitignored)

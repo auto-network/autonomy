@@ -59,6 +59,12 @@ services:
       AUTONOMY_FLEET_INVITE: ${AUTONOMY_FLEET_INVITE:-}
       DASHBOARD_DOMAIN: ${DASHBOARD_DOMAIN:-}
       DASHBOARD_TLS: ${DASHBOARD_TLS:-}
+      # Path identity for session records (tools/graph/ingest.py rewrites).
+      # Only the raw facts are passed; the entrypoint DERIVES the working
+      # values (AUTONOMY_HOST_ROOT = <data root>/code, container root = /app)
+      # — outputs of startup, not operator inputs.
+      AUTONOMY_HOST_DATA_ROOT: ${AUTONOMY_HOST_DATA_ROOT:-}
+      AUTONOMY_HOST_HOME: ${AUTONOMY_HOST_HOME}
       # Points at the optional `beads` profile service; unreachable is a
       # supported state (beads surfaces degrade to empty, one warning).
       DOLT_SQL_HOST: dolt
@@ -122,6 +128,29 @@ services:
         target: /run/autonomy-keycache
         bind:
           propagation: rslave
+          create_host_path: true
+      # The host's /tmp, so tmux calls from this container reach the HOST
+      # tmux server (whose socket dir lives under /tmp, per tmux default).
+      # Host terminals are a required node capability: sessions the operator
+      # opens against the machine itself run as host processes, forked by the
+      # host tmux server — this mount is the entire transport. The entrypoint
+      # detects it and exports TMUX_TMPDIR; nothing is configured. /tmp always
+      # exists, so Docker never has to create the source (no boot race, no
+      # ownership repair). Proven live 2026-08-31: a containerized tmux client
+      # listed and captured every session of the host server through it.
+      - /tmp:/host-tmp
+      # Host-session transcripts. Host terminals write their JSONL under the
+      # OPERATOR's home (~/.claude/projects), not under the data volume, and
+      # the session viewer reads transcripts from the file named by the DB's
+      # jsonl_path. Mounted read-only at the IDENTICAL path so stored host
+      # paths resolve verbatim in here. AUTONOMY_HOST_HOME is required (see
+      # .env): a node without it cannot serve host terminals, which are not
+      # optional (operator ruling 2026-08-31).
+      - type: bind
+        source: ${AUTONOMY_HOST_HOME:?set AUTONOMY_HOST_HOME to the operator home dir (host terminals require it)}/.claude/projects
+        target: ${AUTONOMY_HOST_HOME}/.claude/projects
+        read_only: true
+        bind:
           create_host_path: true
 
   # Polls for approved beads and launches session containers for them
@@ -205,6 +234,41 @@ services:
     logging:
       driver: json-file
       options: { max-size: "20m", max-file: "5" }
+
+  # Optional: MCP relay — exposes this node's graph to an external AI peer
+  # (e.g. ChatGPT via OpenAI's Secure MCP Tunnel). Same pattern as `voice`
+  # and `beads`: the SERVICE ships here behind a profile, off by default,
+  # while the heavy foreign artifact lives in the operator's DATA — for
+  # voice that's the whisper model, for the relay it's the tunnel-client
+  # binary + credentials under data/services/mcp-relay/ (see DEPLOY.md).
+  # An install that never connected an external peer has neither and simply
+  # never enables `--profile relay`. Same node image: the gateway the
+  # tunnel-client spawns is stdlib-only Python from this repo
+  # (tools/mcp_relay/gateway.py) translating MCP calls into graph reads.
+  mcp-relay:
+    profiles: ["relay"]
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+      args:
+        BASE_IMAGE: ${AUTONOMY_BASE_IMAGE:-python:3.12-slim}
+        TAILWIND_URL: ${AUTONOMY_TAILWIND_URL:-}
+    image: ${AUTONOMY_IMAGE:-autonomy-node:local}
+    restart: unless-stopped
+    command: sh /app/deploy/relay.sh
+    # Shared image's HEALTHCHECK probes the dashboard's HTTP port; the relay
+    # serves no HTTP. Same reasoning as the dispatcher's disable above.
+    healthcheck:
+      disable: true
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
+    # Code (gateway + graph CLI) and data (binary, profiles, org DBs the
+    # graph reads). No docker socket, no keycache: the relay launches
+    # nothing and decrypts nothing.
+    volumes:
+      - autonomy-code:/app
+      - autonomy-data:/app/data
 
   # Optional: dolt SQL server backing the beads issue tracker. Image
   # source is operator-chosen via DOLT_IMAGE; the beads schema itself is
