@@ -18,16 +18,14 @@ def client():
 
 
 def _stub_serving(monkeypatch, *, scopes, cert_status, replies, disk="c0ffee",
-                  designated=True, managed=True):
+                  designated=True):
     """Stub the serving-scope reads get_unlock_state makes.
 
     scopes: list of org scopes (None == personal); cert_status: {scope: status};
     replies: {scope: connector-status dict} — a scope absent from replies has no
     reachable connector. designated: whether this machine is the fleet's
     designated tunnel server (a managed fleet with allowed=False means it is
-    NOT, so holding no serving credential is expected, not a fault). managed:
-    whether a fleet roster exists at all — False is a legacy single-node install
-    with no other machines, where peer sync does not apply."""
+    NOT, so holding no serving credential is expected, not a fault)."""
     import types
     from tools.dashboard import link_serving_supervisor as sup
     from tools.network import build_version
@@ -35,8 +33,7 @@ def _stub_serving(monkeypatch, *, scopes, cert_status, replies, disk="c0ffee",
 
     monkeypatch.setattr(
         fleet_tunnel_server, "state",
-        lambda: types.SimpleNamespace(managed=bool(managed),
-                                      allowed=bool(designated)),
+        lambda: types.SimpleNamespace(managed=True, allowed=bool(designated)),
     )
     monkeypatch.setattr(sup, "_discover_startup_orgs", lambda: list(scopes))
     monkeypatch.setattr(
@@ -72,56 +69,82 @@ def test_sync_dim_when_every_connector_armed_and_current(client, monkeypatch):
     assert sync["scopes"] == []
 
 
-def test_sync_lights_when_a_connector_is_unarmed(client, monkeypatch):
+def test_sync_lights_when_the_personal_connector_is_unarmed(client, monkeypatch):
+    # Only the PERSONAL tunnel serves Fleet sync. When ITS connector is unarmed
+    # (fleet_runtime_configured=False) sync pulls refuse, so the tray lights.
+    # Org connectors alongside it (armed or not) never contribute.
     _stub_serving(
         monkeypatch,
-        scopes=["anchore", "autonomy", "dynbench"],
-        cert_status={"anchore": "ok", "autonomy": "ok", "dynbench": "ok"},
+        scopes=[None, "anchore"],
+        cert_status={None: "ok", "anchore": "ok"},
         replies={
-            "anchore": {"fleet_runtime_configured": False, "process_commit": "c0ffee",
-                        "locked_refusals": 764, "locked_refusal_since": 1_700_000_000},
-            "autonomy": {"fleet_runtime_configured": False, "process_commit": "c0ffee",
-                         "locked_refusals": 382, "locked_refusal_since": 1_700_000_500},
-            "dynbench": {"fleet_runtime_configured": True, "process_commit": "c0ffee"},
+            None: {"fleet_runtime_configured": False, "process_commit": "c0ffee",
+                   "locked_refusals": 764, "locked_refusal_since": 1_700_000_000},
+            "anchore": {"fleet_runtime_configured": True, "process_commit": "c0ffee"},
         },
     )
     sync = client.get("/api/identity/unlock-state").json()["sync"]
     assert sync["needs"] is True
     assert sync["value"] == "Locked"
-    assert sync["unarmed"] == ["anchore", "autonomy"]
-    assert sync["count"] == 764 + 382
+    assert sync["unarmed"] == ["personal"]
+    assert sync["count"] == 764
     assert "can't sync" in sync["detail"]
-    assert "1146 requests" in sync["detail"]
+    assert "764 requests" in sync["detail"]
 
 
-def test_sync_lights_when_a_connector_is_stale(client, monkeypatch):
+def test_org_connectors_never_light_sync(client, monkeypatch):
+    # The operator-reported false alarm: anchore/autonomy/dynbench databases do
+    # not sync over the personal engine, so their connectors report
+    # fleet_runtime_configured=False BY DESIGN — they never serve Fleet sync and
+    # were never provisioned to. The tray must not read that as a fault ("hold
+    # no serving credential"). With the personal tunnel absent from the serving
+    # set, sync stays quiet no matter what the org connectors report.
     _stub_serving(
         monkeypatch,
-        scopes=["anchore"],
-        cert_status={"anchore": "ok"},
+        scopes=["anchore", "autonomy", "dynbench"],
+        cert_status={"anchore": "ok", "autonomy": "ok", "dynbench": "ok"},
+        replies={
+            "anchore": {"fleet_runtime_configured": False, "process_commit": "c0ffee"},
+            "autonomy": {"fleet_runtime_configured": False, "process_commit": "c0ffee"},
+            "dynbench": {"fleet_runtime_configured": False, "process_commit": "c0ffee"},
+        },
+    )
+    sync = client.get("/api/identity/unlock-state").json()["sync"]
+    assert sync["needs"] is False
+    assert sync["unarmed"] == []
+    assert sync["scopes"] == []
+    assert "hold no serving credential" not in sync["detail"]
+    assert "unlock with your root" not in sync["detail"].lower()
+
+
+def test_sync_lights_when_the_personal_connector_is_stale(client, monkeypatch):
+    _stub_serving(
+        monkeypatch,
+        scopes=[None],
+        cert_status={None: "ok"},
         replies={
             # armed, but running an older commit than what's on disk
-            "anchore": {"fleet_runtime_configured": True, "process_commit": "0ld"},
+            None: {"fleet_runtime_configured": True, "process_commit": "0ld"},
         },
         disk="c0ffee",
     )
     sync = client.get("/api/identity/unlock-state").json()["sync"]
     assert sync["needs"] is True
     assert sync["value"] == "Stale"
-    assert sync["stale"] == ["anchore"]
+    assert sync["stale"] == ["personal"]
     assert "older code" in sync["detail"]
 
 
-def test_unreachable_serving_connector_counts_as_unarmed(client, monkeypatch):
+def test_unreachable_personal_connector_counts_as_unarmed(client, monkeypatch):
     _stub_serving(
         monkeypatch,
-        scopes=["anchore"],
-        cert_status={"anchore": "ok"},
+        scopes=[None],
+        cert_status={None: "ok"},
         replies={},   # cert provisioned, but no connector answers
     )
     sync = client.get("/api/identity/unlock-state").json()["sync"]
     assert sync["needs"] is True
-    assert "anchore" in sync["unarmed"]
+    assert "personal" in sync["unarmed"]
 
 
 def test_never_set_up_scope_is_a_quiet_note_not_a_lit_flag(client, monkeypatch):
@@ -160,32 +183,6 @@ def test_non_designated_tunnel_server_does_not_light_sync(client, monkeypatch):
     assert "serving credential" not in sync["detail"] or "expected" in sync["detail"]
     assert "unlock with your root" not in sync["detail"].lower()
     assert "expected" in sync["detail"]
-
-
-def test_single_node_install_does_not_light_sync(client, monkeypatch):
-    # A legacy single-node install has no fleet roster (managed=False) and thus
-    # no OTHER machines. Even with every serving connector unarmed, peer sync is
-    # moot: the flag must stay quiet and never offer the root-unlock remedy for a
-    # credential no peer is waiting on. This is the operator-reported case — three
-    # orgs read as "hold no serving credential" on a machine with no peers.
-    _stub_serving(
-        monkeypatch,
-        scopes=["anchore", "autonomy", "dynbench"],
-        cert_status={"anchore": "ok", "autonomy": "ok", "dynbench": "ok"},
-        replies={
-            "anchore": {"fleet_runtime_configured": False, "process_commit": "c0ffee"},
-            "autonomy": {"fleet_runtime_configured": False, "process_commit": "c0ffee"},
-            "dynbench": {"fleet_runtime_configured": False, "process_commit": "c0ffee"},
-        },
-        managed=False,
-    )
-    sync = client.get("/api/identity/unlock-state").json()["sync"]
-    assert sync["needs"] is False
-    assert sync["unarmed"] == []
-    assert sync["scopes"] == []
-    assert "hold no serving credential" not in sync["detail"]
-    assert "unlock with your root" not in sync["detail"].lower()
-    assert "only machine" in sync["detail"]
 
 
 def test_scopeless_and_personal_scope_reported_once(client, monkeypatch):

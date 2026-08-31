@@ -1541,14 +1541,28 @@ async def get_unlock_state(request: Request) -> JSONResponse:
             serving_setup.append(label)
             if cert_status != "ok":
                 cert_broken.append(label)
-            # A scope meant to serve — ask its connector the two sync questions
-            # the CLI's control channel already answers: is it armed, and is it
-            # running current code?
+            # Fleet sync is anchored on the PERSONAL root: activate_local_runtime
+            # publishes the fleet-runtime credential with org=None, so ONLY the
+            # personal connector is ever armed for Fleet sync. A shared org's
+            # database does not sync over the personal engine, so its connector
+            # reports fleet_runtime_configured=False by design and holds no
+            # sync credential BECAUSE IT NEVER SHOULD. Asking the org scopes the
+            # fleet-sync question invented a fault that cannot exist — it lit the
+            # tray with "anchore, autonomy, and dynbench hold no serving
+            # credential" on connectors that are behaving exactly as intended.
+            # fleet_doctor already skips org scopes for this check (644c88d74);
+            # the tray must too. So the fleet-sync questions (armed? current
+            # code? refusing pulls?) are asked of the personal scope alone; org
+            # serve certs are still checked above, because an org connector does
+            # serve its own grant-gated targets — that is a different question.
+            is_personal = scope is None or scope == "personal"
+            if not is_personal:
+                continue
             try:
                 reply = _sup.control(scope, "connector-status", {})
             except Exception:
-                # A serving scope whose connector won't answer is, from the
-                # fleet's side, refusing everything — count it as unarmed.
+                # The personal connector won't answer — from the fleet's side it
+                # is refusing every sync pull; count it as unarmed.
                 sync_unarmed.append(label)
                 continue
             if not reply.get("fleet_runtime_configured"):
@@ -1621,20 +1635,11 @@ async def get_unlock_state(request: Request) -> JSONResponse:
     # (644c88d74). Only a MANAGED fleet has a designated leader; an unmanaged
     # (legacy single-node) install keeps the original serve-everywhere behavior.
     tunnel_designated = True
-    # A fleet exists only once its roster is initialized (_ts.managed). An
-    # unmanaged, legacy single-node install has no roster and therefore no
-    # OTHER machines — "your other machines can't sync with this one" is
-    # meaningless there, and its "unlock with your root" remedy re-arms a
-    # serving credential nobody is waiting on. Default True so a state we
-    # cannot read keeps the existing alarm: a real fleet is never silenced by
-    # a read error.
-    fleet_managed = True
     try:
         from tools.network import fleet_tunnel_server
         _ts = fleet_tunnel_server.state()
         if _ts.managed and not _ts.allowed:
             tunnel_designated = False
-        fleet_managed = bool(_ts.managed)
     except Exception:
         pass
 
@@ -1647,23 +1652,7 @@ async def get_unlock_state(request: Request) -> JSONResponse:
     # so a label appearing under both names is reported once (bead auto-9yp8r).
     unarmed_scopes = sorted(set(sync_unarmed))
     stale_scopes = sorted(set(sync_stale))
-    if not fleet_managed:
-        # No fleet roster: this is a single-node install with no other machines,
-        # so peer sync does not apply. Report quietly and never light — an
-        # unarmed serving credential here has no peer waiting to sync with it.
-        flags["sync"] = {
-            "needs": False,
-            "value": "",
-            "detail": ("This is the only machine in your fleet, so there is "
-                       "nothing to sync with it. Add another machine to sync "
-                       "your work between them."),
-            "unarmed": [],
-            "stale": [],
-            "scopes": [],
-            "count": 0,
-            "since": None,
-        }
-    elif not tunnel_designated:
+    if not tunnel_designated:
         # This machine is not the designated tunnel server, so holding no serving
         # credential is expected, not a fault. Report it quietly and never light.
         flags["sync"] = {
