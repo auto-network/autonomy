@@ -309,11 +309,25 @@
     header[data-app-chrome] > #identity-indicator {
       order: 5;
     }
-    header.app-topbar-active #global-search-control,
-    header.app-topbar-active #identity-indicator,
-    body.route-immersive header[data-app-chrome] #global-search-control,
-    body.route-immersive header[data-app-chrome] #identity-indicator {
-      display: none;
+    /* The immersive/session topbar hides the global search + profile only on
+       MOBILE, where the session's own app-topbar-slot needs the whole row.
+       At desktop the profile (and search) stay in the top-right corner on
+       every route, including the session viewer. */
+    @media (max-width: 767px) {
+      header.app-topbar-active #global-search-control,
+      header.app-topbar-active #identity-indicator,
+      body.route-immersive header[data-app-chrome] #global-search-control,
+      body.route-immersive header[data-app-chrome] #identity-indicator {
+        display: none;
+      }
+    }
+    /* The nav hamburger is a mobile-only affordance. `md:hidden` alone loses
+       to `.toolbar-icon-button { display: inline-flex }` (both class-
+       specificity, and the component rule loads later), so at desktop it
+       stayed visible next to the already-open sidebar. An id-specificity
+       desktop rule settles it. */
+    @media (min-width: 768px) {
+      #nav-toggle { display: none; }
     }
     header.app-topbar-active #app-topbar-slot {
       display: flex;
