@@ -145,3 +145,33 @@ def test_destroy_is_a_noop_when_container_is_gone(monkeypatch):
                         lambda *a, **k: ran.append(a))
     secret_ramfs.destroy_secret_file("auto-x", "key")   # must not raise
     assert ran == []   # container gone -> file already freed, no helper run
+
+
+def test_helper_runs_as_root_or_nsenter_has_no_capabilities(monkeypatch):
+    """The session/dashboard images end with USER agent (uid 1000); a
+    non-root process in a --privileged container holds no effective
+    capabilities, so nsenter setns fails EPERM (proven 2026-08-30). Every
+    privileged helper MUST pass --user 0."""
+    seen = {}
+
+    def fake_run(cmd, *, input=None, capture_output=None, timeout=None):
+        seen["cmd"] = cmd
+
+        class R:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+        return R()
+
+    monkeypatch.setattr(secret_ramfs.subprocess, "run", fake_run)
+    monkeypatch.setattr(secret_ramfs, "_container_pid", lambda c: 5)
+    monkeypatch.setattr(secret_ramfs, "_container_image", lambda c: "autonomy-session")
+
+    secret_ramfs.deliver_secret_file("auto-x", "key", b"v")
+    cmd = seen["cmd"]
+    assert "--user" in cmd and cmd[cmd.index("--user") + 1] == "0"
+    assert cmd.index("--user") < cmd.index("--privileged")
+
+    secret_ramfs.destroy_secret_file("auto-x", "key")
+    cmd = seen["cmd"]
+    assert "--user" in cmd and cmd[cmd.index("--user") + 1] == "0"
