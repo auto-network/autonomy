@@ -8473,6 +8473,14 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
             # identity when running natively.
             tmux_cmd += ["-c", _host_form(str(_REPO_ROOT))]
             cmd_str = _host_form(cmd_str)
+            # tmux seeds a new session's environment from the CLIENT. From
+            # a containerized dashboard that's the container's env, whose
+            # bare PATH has no claude — proven 2026-08-31 (trial probe:
+            # NO-CLAUDE, PATH=/usr/local/bin:…). A login shell rebuilds the
+            # operator's real environment from the HOST's own profile, so
+            # the host environment always comes from the host, never from
+            # whichever client asked for the session.
+            cmd_str = "bash -lc " + shlex.quote(cmd_str)
         tmux_cmd.append(cmd_str)
         result = subprocess.run(
             tmux_cmd,
@@ -8616,6 +8624,14 @@ def _run_simple_session_start(job: LifecycleJob, writer: SessionLifecycleStateWr
             # identity when running natively.
             tmux_cmd += ["-c", _host_form(str(_REPO_ROOT))]
             cmd_str = _host_form(cmd_str)
+            # tmux seeds a new session's environment from the CLIENT. From
+            # a containerized dashboard that's the container's env, whose
+            # bare PATH has no claude — proven 2026-08-31 (trial probe:
+            # NO-CLAUDE, PATH=/usr/local/bin:…). A login shell rebuilds the
+            # operator's real environment from the HOST's own profile, so
+            # the host environment always comes from the host, never from
+            # whichever client asked for the session.
+            cmd_str = "bash -lc " + shlex.quote(cmd_str)
         tmux_cmd.append(cmd_str)
         result = subprocess.run(
             tmux_cmd,
