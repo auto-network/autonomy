@@ -357,6 +357,14 @@ header[data-app-chrome] .identity-avatar {
     display: flex;
     flex-direction: column;
     width: auto;
+    /* Reset the desktop 18rem width AND its max-width cap so the sheet spans
+     * the FULL width — flush to left:0 and right:0 both. Without the max-width
+     * reset the base cap (100vw - 2rem) wins, the box is 2rem too narrow, and
+     * because left:0 + right:0 are then over-constrained the browser drops
+     * right:0 — leaving a strip of the page showing through on the right.
+     * (Same reset the --credentials sub-view already needed for the same
+     * reason.) */
+    max-width: none;
     /* Bound the sheet at the viewport so tall content SCROLLS in the panels'
      * own scroll surfaces (.body/.deep) instead of pushing the sheet's top off
      * the screen. dvh tracks the iOS dynamic toolbars; vh is the fallback. */
