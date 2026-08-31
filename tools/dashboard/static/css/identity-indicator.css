@@ -162,7 +162,12 @@ header[data-app-chrome] .identity-avatar {
   top: calc(100% + 0.5rem);
   right: 0;
   z-index: 60;
-  width: 12rem;
+  /* 12rem crammed the org list, sync status, and actions into a sliver at
+     desktop. Give the profile menu room; the cap keeps it on-screen on a
+     narrow viewport (the --credentials drawer and the mobile block below set
+     their own widths). */
+  width: 18rem;
+  max-width: calc(100vw - 2rem);
   overflow: hidden;
   border: 1px solid #4b5563;
   border-radius: 0.5rem;

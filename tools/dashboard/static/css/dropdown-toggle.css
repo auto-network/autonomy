@@ -177,3 +177,20 @@
     max-width: 100%;
   }
 }
+
+/* Desktop: the org-filter menu holds a long organization name on ONE line
+   (e.g. "Dynamic Benchmarking") instead of wrapping. It sizes to its content
+   past a comfortable floor, up to a cap, and each option stays a single row.
+   Scoped to the org filter so the sibling Sort/Since dropdowns are unchanged;
+   the mobile rules above (<=767px: width max-content, max-width 100vw-24px)
+   already own the narrow case. */
+@media (min-width: 768px) {
+  .sessions-org-filter .sort-menu {
+    min-width: 220px;
+    width: max-content;
+    max-width: 340px;
+  }
+  .sessions-org-filter .sort-option {
+    white-space: nowrap;
+  }
+}
