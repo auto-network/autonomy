@@ -91,6 +91,8 @@ def test_service_gateway_has_the_fixed_container_security_boundary():
         "CMD-SHELL",
         "test -S /run/autonomy-service-gateway/admin.sock && kill -0 1",
     ]
+    assert gateway["healthcheck"]["interval"] == "1s"
+    assert gateway["healthcheck"]["start_interval"] == "1s"
 
 
 def test_service_gateway_image_strips_the_unused_privileged_port_capability():
