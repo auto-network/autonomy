@@ -5322,8 +5322,12 @@ class SessionMonitor:
                 dashboard_tmux.discard(tmux_name)
                 seeded += 1
 
-        # Host sessions: ~/.claude/projects/**/*.meta.json
-        home_projects = Path.home() / ".claude" / "projects"
+        # Host sessions: ~/.claude/projects/**/*.meta.json — the OPERATOR's
+        # home (AUTONOMY_HOST_HOME when containerized), not this process's.
+        home_projects = (
+            Path(os.environ.get("AUTONOMY_HOST_HOME") or Path.home())
+            / ".claude" / "projects"
+        )
         if home_projects.exists():
             for meta_path in home_projects.rglob("*.meta.json"):
                 try:
