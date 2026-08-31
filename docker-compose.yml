@@ -194,6 +194,58 @@ services:
         read_only: true
         bind:
           create_host_path: true
+      # Permissioned control plane for the optional local Service gateway.
+      # Only dashboard + Caddy receive this volume; session containers never do.
+      - service-gateway-control:/run/autonomy-service-gateway
+
+  # Optional local TLS terminator for sovereign Service publications.
+  # It is deliberately profile-gated: Phase 1D's dashboard supervisor owns
+  # start/stop. With the profile inactive it consumes zero CPU/RSS.
+  service-gateway:
+    profiles: ["service-gateway"]
+    image: docker.io/library/caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    restart: unless-stopped
+    user: "1000:1000"
+    command: ["caddy", "run", "--config", "/etc/caddy/bootstrap.json"]
+    networks: ["default"]
+    # Internal listener only. The public raw-stream adapter will dial this on
+    # the Compose network; the test-only acceptance override publishes 8443.
+    expose: ["9443"]
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.5
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+      - /data:rw,noexec,nosuid,nodev,size=16m,uid=1000,gid=1000,mode=0700
+      - /config:rw,noexec,nosuid,nodev,size=4m,uid=1000,gid=1000,mode=0700
+    volumes:
+      - ./deploy/service-gateway/bootstrap.json:/etc/caddy/bootstrap.json:ro
+      - service-gateway-control:/run/autonomy-service-gateway
+      # The dashboard creates this exact child inside its verified ramfs mount
+      # before Caddy can start. Refuse a missing source; never fabricate a
+      # disk-backed directory for certificate/key material.
+      - type: bind
+        source: /run/autonomy-keycache/service-gateway
+        target: /run/autonomy-service-gateway-certs
+        read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      dashboard:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--unix-socket", "/run/autonomy-service-gateway/admin.sock", "http://localhost/config/"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    stop_grace_period: 10s
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
 
   # Polls for approved beads and launches session containers for them
   # (agents/dispatcher.py). Was host-only prior to this (agents/start-dispatcher.sh,
@@ -355,6 +407,8 @@ volumes:
     name: autonomy-data
   autonomy-orgs:
     name: autonomy-orgs
+  service-gateway-control:
+    name: autonomy-service-gateway-control
   dolt-data:
 
 # Pin the project network — never let the daemon choose. Left undeclared, the

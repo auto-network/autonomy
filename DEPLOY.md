@@ -84,6 +84,34 @@ working node — session launch (`docker run`), topology discovery
 (`docker inspect`), and the in-memory secret-store provisioning
 (`agents/secret_ramfs.py`) all reach the daemon through it.
 
+### Local Service gateway
+
+The optional `service-gateway` profile is the node-local TLS terminator for
+sovereign Service publications. It uses the digest-pinned ordinary Caddy image
+(no `caddy-l4` module), joins only the Compose default network, and publishes no
+host port in the production file. The profile is deliberately inactive until
+the dashboard's gateway supervisor needs it:
+
+```bash
+docker compose --profile service-gateway up -d service-gateway
+```
+
+Caddy receives no Docker socket. Its root filesystem is read-only, all Linux
+capabilities are dropped, resources are bounded, and its admin API exists only
+at `/run/autonomy-service-gateway/admin.sock` in a named volume shared with the
+dashboard. Session containers do not receive that volume. Certificate and key
+files are read-only under `/run/autonomy-service-gateway-certs`, sourced from
+the dashboard's verified `/run/autonomy-keycache/service-gateway` ramfs child;
+Compose refuses a missing source instead of fabricating a disk-backed one.
+
+The production file never maps Caddy to the host. The narrowly scoped
+`tools/network/acceptance/compose.service-gateway.yml` override maps loopback
+8443 only for the real-node compatibility proof. Its harness and dependency-free
+session canary are `python3 -m tools.network.acceptance.service_gateway` and
+`tools/network/acceptance/service_gateway_canary.py`. Dynamic start/stop and
+complete desired-state reconciliation belong to the next delivery slice; the
+base profile is the hardened control/data-plane boundary they consume.
+
 ### Choosing where the data lives on the host
 
 By default the three persistent volumes (`autonomy-code`, `autonomy-data`,
