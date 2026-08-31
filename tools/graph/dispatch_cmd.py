@@ -32,10 +32,24 @@ def _make_ssl_ctx():
     return ctx
 
 
+def _auth_headers() -> dict[str, str]:
+    """Bearer for the session's token, matching the shared client's
+    chokepoint (client.py). This module is a third hand-rolled HTTP path;
+    it shipped with no Authorization at all — invisible against the old
+    ungated native dashboard, a hard 401 against any gated one (found
+    in-vivo 2026-08-31, host-0831-042827). Same scar client.py already
+    documents: every request builder must carry the bearer."""
+    headers = {"Accept": "application/json"}
+    token = os.environ.get("CROSSTALK_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
 def _api_call(base_url: str, path: str, ctx):
     req = urllib.request.Request(
         f"{base_url}{path}",
-        headers={"Accept": "application/json"},
+        headers=_auth_headers(),
     )
     resp = urllib.request.urlopen(req, context=ctx, timeout=10)
     return json.loads(resp.read())
@@ -68,7 +82,7 @@ def _exit_unreachable(base_url: str, exc: Exception) -> None:
 
 def _api_post(base_url: str, path: str, ctx, body: dict | None = None):
     data = None if body is None else json.dumps(body).encode()
-    headers = {"Accept": "application/json"}
+    headers = _auth_headers()
     if body is not None:
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(
