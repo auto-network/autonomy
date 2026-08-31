@@ -38,6 +38,14 @@ def test_service_gateway_is_digest_pinned_dormant_and_not_host_published():
         "sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648"
     )
     assert gateway["profiles"] == ["service-gateway"]
+    # The official image already declares `caddy` as ENTRYPOINT. Compose
+    # replaces only its CMD, so repeating the binary would execute
+    # `caddy caddy run ...` and crash before bootstrap.
+    assert gateway["command"] == [
+        "run",
+        "--config",
+        "/etc/caddy/bootstrap.json",
+    ]
     assert "ports" not in gateway
     assert gateway["networks"] == ["default"]
     assert gateway["expose"] == ["9443"]
