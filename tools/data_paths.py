@@ -293,6 +293,26 @@ def resolve_data_root() -> Optional[Path]:
 DATA_ROOT = resolve_data_root() or DEFAULT_DATA_ROOT
 
 
+def local_session_path(stored: str) -> str:
+    """Re-root a stored session-transcript path into THIS process's data frame.
+
+    A container-session transcript always lives under ``<data>/agent-runs/…``.
+    Ingest has historically stored that path in whatever frame observed it —
+    ``/data/…`` (a container), ``/home/jeremy/…/data/…`` (the host cron),
+    ``/app/data/…`` — so a path stored in one frame does not resolve in
+    another. Re-rooting by the stable ``/agent-runs/`` anchor onto the local
+    :data:`DATA_ROOT` makes any of those forms resolve to the real file here,
+    with no dependence on which frame wrote it. Paths without the anchor
+    (host ``.claude`` transcripts, mounted at their own absolute path in every
+    frame) pass through unchanged.
+    """
+    anchor = "/agent-runs/"
+    i = stored.find(anchor)
+    if i == -1:
+        return stored
+    return str(DATA_ROOT).rstrip("/") + stored[i:]
+
+
 def refuse_real_data_fallback_enabled() -> bool:
     """Return whether repository-local fallback paths must be refused."""
     value = os.environ.get(REFUSE_REAL_DATA_FALLBACK_ENV, "")

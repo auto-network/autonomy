@@ -57,6 +57,23 @@ if [ -n "$AUT_HOME" ]; then
     done
     if [ -f "$AUT_HOME/.ssh/id_ed25519" ] || [ -f "$AUT_HOME/.ssh/id_rsa" ]; then
         ssh-keyscan -t ed25519,rsa github.com >> "$AUT_HOME/.ssh/known_hosts" 2>/dev/null || true
+        # Workspace repos declare their `host` as an ssh CONFIG ALIAS
+        # (github-autonomy, github-relay-cli, …). The operator's ~/.ssh/config
+        # defines those on the host, but the container has none, so a clone/
+        # fetch dies with "Could not resolve hostname github-autonomy" and every
+        # remote-repo workspace launch fails instantly (2026-08-31). Those
+        # aliases all resolve to github.com, so map github-* to it with the
+        # staged key. (Distinct per-alias keys are the longer-term refinement,
+        # same as the per-workspace key selection noted above.)
+        _key="$AUT_HOME/.ssh/id_ed25519"; [ -f "$_key" ] || _key="$AUT_HOME/.ssh/id_rsa"
+        cat > "$AUT_HOME/.ssh/config" <<SSHCFG
+Host github-*
+    HostName github.com
+    User git
+    IdentityFile $_key
+    IdentitiesOnly yes
+SSHCFG
+        chmod 600 "$AUT_HOME/.ssh/config"
     fi
     chown -R autonomy:autonomy "$AUT_HOME/.ssh"
 fi

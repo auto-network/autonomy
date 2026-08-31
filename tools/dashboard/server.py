@@ -9709,6 +9709,13 @@ async def api_session_resume(request):
         return JSONResponse({"error": "file_path is required (provide source_id or file_path)"}, status_code=400)
 
     # ── Verify JSONL file exists on disk ──
+    # The stored file_path may be in any historical frame (/data, the old
+    # host path, /app/data). Re-root it onto THIS process's data frame by the
+    # agent-runs anchor so the real file resolves regardless of who ingested
+    # it (tools.data_paths.local_session_path; identity for host .claude
+    # transcripts). 2026-08-31.
+    from tools.data_paths import local_session_path
+    file_path = local_session_path(file_path)
     jsonl_path = Path(file_path)
     if not jsonl_path.exists():
         return JSONResponse(
