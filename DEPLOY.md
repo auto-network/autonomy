@@ -87,10 +87,13 @@ working node — session launch (`docker run`), topology discovery
 ### Local Service gateway
 
 The optional `service-gateway` profile is the node-local TLS terminator for
-sovereign Service publications. It uses the digest-pinned ordinary Caddy image
-(no `caddy-l4` module), joins only the Compose default network, and publishes no
-host port in the production file. The profile is deliberately inactive until
-the dashboard's gateway supervisor needs it:
+sovereign Service publications. It builds from the digest-pinned ordinary Caddy
+image (no `caddy-l4` module). The one-line derivative removes upstream's
+privileged-port file capability because this gateway listens only on
+unprivileged 9443; the binary and modules remain the official distribution. It
+joins only the Compose default network and publishes no host port in the
+production file. The profile is deliberately inactive until the dashboard's
+gateway supervisor needs it:
 
 ```bash
 docker compose --profile service-gateway up -d service-gateway

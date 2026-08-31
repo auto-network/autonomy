@@ -1,0 +1,8 @@
+FROM docker.io/library/caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+
+# The upstream image grants its binary CAP_NET_BIND_SERVICE so it can listen
+# on 80/443 as a non-root user. This gateway listens only on unprivileged 9443;
+# retaining that file capability both exceeds its authority and prevents exec
+# under no-new-privileges. Keep the official binary, remove only that xattr.
+RUN setcap -r /usr/bin/caddy \
+    && test -z "$(getcap /usr/bin/caddy)"

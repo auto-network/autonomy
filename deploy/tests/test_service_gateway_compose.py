@@ -14,6 +14,7 @@ ACCEPTANCE_OVERRIDE = (
     REPO_ROOT / "tools/network/acceptance/compose.service-gateway.yml"
 )
 BOOTSTRAP = REPO_ROOT / "deploy/service-gateway/bootstrap.json"
+GATEWAY_DOCKERFILE = REPO_ROOT / "deploy/Dockerfile.service-gateway"
 
 
 def _compose() -> dict:
@@ -34,14 +35,17 @@ def test_service_gateway_is_digest_pinned_dormant_and_not_host_published():
     gateway = _compose()["services"]["service-gateway"]
 
     assert gateway["image"] == (
-        "docker.io/library/caddy:2.11.4-alpine@"
-        "sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648"
+        "${AUTONOMY_SERVICE_GATEWAY_IMAGE:-autonomy-service-gateway:local}"
     )
+    assert gateway["build"] == {
+        "context": ".",
+        "dockerfile": "deploy/Dockerfile.service-gateway",
+    }
     assert gateway["profiles"] == ["service-gateway"]
-    # The official image already declares `caddy` as ENTRYPOINT. Compose
-    # replaces only its CMD, so repeating the binary would execute
-    # `caddy caddy run ...` and crash before bootstrap.
+    # This pinned image has no ENTRYPOINT; its default CMD includes the binary.
+    # Replacing CMD must therefore retain `caddy` as argv[0].
     assert gateway["command"] == [
+        "caddy",
         "run",
         "--config",
         "/etc/caddy/bootstrap.json",
@@ -57,6 +61,7 @@ def test_service_gateway_has_the_fixed_container_security_boundary():
     assert gateway["user"] == "1000:1000"
     assert gateway["read_only"] is True
     assert gateway["cap_drop"] == ["ALL"]
+    assert "cap_add" not in gateway
     assert gateway["security_opt"] == ["no-new-privileges:true"]
     assert gateway["pids_limit"] == 64
     assert gateway["mem_limit"] == "128m"
@@ -67,13 +72,20 @@ def test_service_gateway_has_the_fixed_container_security_boundary():
         "/config:rw,noexec,nosuid,nodev,size=4m,uid=1000,gid=1000,mode=0700",
     }
     assert gateway["healthcheck"]["test"] == [
-        "CMD",
-        "curl",
-        "-fsS",
-        "--unix-socket",
-        "/run/autonomy-service-gateway/admin.sock",
-        "http://localhost/config/",
+        "CMD-SHELL",
+        "test -S /run/autonomy-service-gateway/admin.sock && kill -0 1",
     ]
+
+
+def test_service_gateway_image_strips_the_unused_privileged_port_capability():
+    dockerfile = GATEWAY_DOCKERFILE.read_text()
+
+    assert dockerfile.startswith(
+        "FROM docker.io/library/caddy:2.11.4-alpine@"
+        "sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648\n"
+    )
+    assert "setcap -r /usr/bin/caddy" in dockerfile
+    assert 'test -z "$(getcap /usr/bin/caddy)"' in dockerfile
 
 
 def test_service_gateway_mounts_only_config_control_and_ramfs_certificate_input():
