@@ -1,4 +1,4 @@
-from tools.network.acceptance import service_gateway
+from tools.network.acceptance import service_gateway, service_gateway_lifecycle
 
 
 def test_acceptance_certificate_uses_full_hostname_only_in_san():
@@ -40,3 +40,7 @@ def test_header_lookup_is_case_insensitive_for_http2_curl_output():
     headers = "HTTP/2 302\r\nlocation: /final\r\nvia: 1.1 Caddy\r\n\r\n"
 
     assert service_gateway._header_value(headers, "Location") == "/final"
+
+
+def test_lifecycle_p95_uses_the_nearest_rank():
+    assert service_gateway_lifecycle._p95([float(value) for value in range(1, 21)]) == 19

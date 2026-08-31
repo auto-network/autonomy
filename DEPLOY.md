@@ -93,11 +93,18 @@ privileged-port file capability because this gateway listens only on
 unprivileged 9443; the binary and modules remain the official distribution. It
 joins only the Compose default network and publishes no host port in the
 production file. The profile is deliberately inactive until the dashboard's
-gateway supervisor needs it:
+gateway supervisor needs it. Prepare its image during installation without
+starting a container:
 
 ```bash
-docker compose --profile service-gateway up -d service-gateway
+docker compose --profile service-gateway build service-gateway
 ```
+
+After that, publication state owns the container. The Dashboard starts the
+exact `autonomy` Compose service, atomically loads the complete desired config,
+recovers it after either process restarts, and removes it after the last
+active-or-paused Service disappears. Operators do not manually run this
+profile during ordinary use.
 
 Caddy receives no Docker socket. Its root filesystem is read-only, all Linux
 capabilities are dropped, resources are bounded, and its admin API exists only
@@ -107,13 +114,17 @@ files are read-only under `/run/autonomy-service-gateway-certs`, sourced from
 the dashboard's verified `/run/autonomy-keycache/service-gateway` ramfs child;
 Compose refuses a missing source instead of fabricating a disk-backed one.
 
-The production file never maps Caddy to the host. The narrowly scoped
+The production file never maps Caddy to the host. The authenticated
+`GET /api/network/service-gateway` projection reports observed lifecycle state
+and successfully loaded route IDs without exposing certificate material or
+upstream details. The narrowly scoped
 `tools/network/acceptance/compose.service-gateway.yml` override maps loopback
 8443 only for the real-node compatibility proof. Its harness and dependency-free
 session canary are `python3 -m tools.network.acceptance.service_gateway` and
-`tools/network/acceptance/service_gateway_canary.py`. Dynamic start/stop and
-complete desired-state reconciliation belong to the next delivery slice; the
-base profile is the hardened control/data-plane boundary they consume.
+`tools/network/acceptance/service_gateway_canary.py`. Automatic lifecycle,
+restart recovery, and timing are proved without a host port by
+`python3 -m tools.network.acceptance.service_gateway_lifecycle`, which reaches
+the internal gateway from the Dashboard container.
 
 ### Choosing where the data lives on the host
 

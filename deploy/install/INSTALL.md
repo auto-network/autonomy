@@ -151,6 +151,7 @@ behavior, different storage backing.
 # You cloned in §2 to run the preflight; reuse that checkout. (git clone
 # <source you chose> autonomy && cd autonomy — if you have not yet.)
 # .env already carries the AUTONOMY_SUBNET the preflight chose.
+docker compose --profile service-gateway build service-gateway
 AUTONOMY_FIRST_ORG=myorg docker compose up -d
 # → https://localhost:8080  (self-signed cert; accept once)
 ```
@@ -167,6 +168,7 @@ keypair. Re-running is safe; initialization is idempotent.
 # then run exactly what was verified.
 ./deploy/verify-image.sh "$AUTONOMY_IMAGE"     # image@sha256:... only
 AUTONOMY_IMAGE=<repo/image@sha256:...> docker compose pull
+docker compose --profile service-gateway build service-gateway
 AUTONOMY_IMAGE=<repo/image@sha256:...> AUTONOMY_FIRST_ORG=myorg \
   docker compose up -d --no-build
 ```
@@ -174,6 +176,11 @@ AUTONOMY_IMAGE=<repo/image@sha256:...> AUTONOMY_FIRST_ORG=myorg \
 `verify-image.sh` refuses mutable tags outright and verifies the cosign
 signature against the project public key in the checkout — the registry
 that hosts the image is a delivery channel, never an authority.
+
+The Service gateway build is a small derivative of a digest-pinned official
+Caddy image. Building it during installation does not start its profile or
+consume runtime resources. The Dashboard starts that container only while a
+ready published Service exists.
 
 **Joining an existing organization instead** (the user has an invitation
 code): don't found — join. The invitation rides install arguments, exactly
