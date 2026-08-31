@@ -550,7 +550,8 @@ def cmd_set_read(args) -> None:
                 file=sys.stderr,
             )
             sys.exit(1)
-        receipt = opener(set_id, key, org=org)
+        receipt = opener(set_id, key, org=org,
+                          ttl_seconds=int(getattr(args, "ttl", 0) or 0))
         print(receipt["path"])
         return
     members = client.read_set(set_id, org=org)
@@ -579,7 +580,8 @@ def cmd_set_read(args) -> None:
                         file=sys.stderr,
                     )
                     sys.exit(1)
-                receipt = opener(set_id, key, org=org)
+                receipt = opener(set_id, key, org=org,
+                                 ttl_seconds=int(getattr(args, "ttl", 0) or 0))
                 # The common tool result contains only a path.  Secret bytes
                 # remain in the session's non-swappable ramfs and therefore do
                 # not enter the transcript/model context.
@@ -1605,6 +1607,13 @@ def attach_set_subparser(sub) -> None:
     p_read.add_argument(
         "--chain", action="store_true", dest="chain",
         help="Show per-layer contributions through the supersedes chain",
+    )
+    p_read.add_argument(
+        "--ttl", type=int, default=0, dest="ttl", metavar="SECONDS",
+        help="For a secured-vault read: how long the delivered credential "
+             "lives in the session ramfs. 0 (default) = the full container "
+             "lifespan (destroyed only when the container stops); a positive "
+             "value destroys the file that many seconds after delivery.",
     )
     _add_org_arg(p_read)
     p_read.set_defaults(func=cmd_set_read)
