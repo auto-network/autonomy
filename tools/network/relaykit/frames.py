@@ -43,8 +43,15 @@ FRAME_OPEN = 0x01
 FRAME_DATA = 0x02
 FRAME_CLOSE = 0x03
 FRAME_CTRL = 0x04
+#: Per-stream control for negotiated raw streams (tls-stream/1,
+#: auto-9z1xh): open-ok / credit / eof / reset ride this type on the
+#: stream's channel id. Capability-gated — never sent to a peer that did
+#: not negotiate the cap, so pre-stream peers keep refusing it strictly.
+FRAME_STREAM_CTRL = 0x05
 
-_TYPES = frozenset({FRAME_OPEN, FRAME_DATA, FRAME_CLOSE, FRAME_CTRL})
+_TYPES = frozenset(
+    {FRAME_OPEN, FRAME_DATA, FRAME_CLOSE, FRAME_CTRL, FRAME_STREAM_CTRL}
+)
 
 CHANNEL_ID_LEN = 16
 HEADER_LEN = 1 + CHANNEL_ID_LEN

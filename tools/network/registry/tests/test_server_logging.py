@@ -16,7 +16,7 @@ def test_entrypoint_disables_http_and_websocket_route_logging(monkeypatch):
     app_calls: list[tuple[str, str, dict]] = []
     run_calls: list[tuple[object, dict[str, object]]] = []
 
-    def fake_create_app(db: str, *, base_url: str, build_info: dict, turn_issuer=None):
+    def fake_create_app(db: str, *, base_url: str, build_info: dict, turn_issuer=None, **_ingress):
         assert turn_issuer is None
         app_calls.append((db, base_url, build_info))
         return app

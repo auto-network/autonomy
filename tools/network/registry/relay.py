@@ -52,12 +52,17 @@ from tools.network.relaykit.frames import (
     FRAME_CTRL,
     FRAME_DATA,
     FRAME_OPEN,
+    FRAME_STREAM_CTRL,
     FrameError,
     decode_frame,
     encode_frame,
     new_channel_id,
     VIEWER_KIND_FEED,
     tag_viewer_message,
+)
+from tools.network.relaykit.stream_wire import (
+    CAP_TLS_STREAM,
+    RESET_ROUTE_RELEASED,
 )
 from tools.network.relaykit.hello import (
     HELLO_FIELDS_V2,
@@ -380,6 +385,10 @@ class Tunnel:
         #: channel ids are fenced on it and never survive a reconnect.
         self.connection_id = new_channel_id().hex()
         self.channels: Dict[bytes, _ViewerRelayChannel] = {}
+        #: tls-stream/1 raw streams (auto-9z1xh), channel_id-keyed.
+        #: Registered by the ingress, dispatched by the receive loop,
+        #: reset by lease removal, torn down with the tunnel.
+        self.raw_streams: Dict[bytes, object] = {}
         self.streams: Dict[str, Stream] = {}
         self._send_lock = asyncio.Lock()
         self._background_tasks: set[asyncio.Task] = set()
@@ -470,10 +479,23 @@ class Tunnel:
             del self.streams[token]
         return True
 
+    def reset_raw_streams(self, reservation: str | None, code: int) -> None:
+        """Signal a relay-side reset to raw streams (all, or one
+        reservation's) — used by lease removal (code 5). Synchronous:
+        each stream's own pump performs the teardown."""
+        for stream in list(self.raw_streams.values()):
+            if reservation is None or stream.reservation == reservation:
+                stream.signal_reset(code)
+
     async def close_all_viewers(self, code: int) -> None:
         channels = list(self.channels.values())
         self.channels.clear()
         self.streams.clear()
+        raw_streams = list(self.raw_streams.values())
+        self.raw_streams.clear()
+        for stream in raw_streams:
+            with contextlib.suppress(Exception):
+                await stream.teardown()
         if channels:
             await asyncio.gather(
                 *(channel.close(code) for channel in channels),
@@ -717,7 +739,7 @@ HOST_LEASE_TTL = 120
 CAP_HOST_LEASE = "host-lease/1"
 #: What this registry supports; the hello ack advertises the
 #: intersection with what the connector offered.
-REGISTRY_CAPS = frozenset({CAP_HOST_LEASE})
+REGISTRY_CAPS = frozenset({CAP_HOST_LEASE, CAP_TLS_STREAM})
 
 _APP_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 _RESERVED_APP_LABELS = frozenset(
@@ -819,6 +841,11 @@ class HostRoutes:
         lease = self._leases.pop(reservation, None)
         if lease is not None and self._by_host.get(lease.host) == reservation:
             del self._by_host[lease.host]
+        if lease is not None:
+            # Route removal resets any live raw streams on this
+            # reservation (seam §4.3 code 5) in the same act — never left
+            # to the lease TTL or endpoint teardown.
+            lease.tunnel.reset_raw_streams(reservation, RESET_ROUTE_RELEASED)
 
     def route(self, host: str) -> Optional["Tunnel"]:
         """Resolve a serving hostname to its leased live tunnel, or None.
@@ -1306,6 +1333,19 @@ async def tunnel_endpoint(websocket: WebSocket, org: str, hub: TunnelHub,
                 except FrameError:
                     break
                 continue
+            raw_stream = tunnel.raw_streams.get(frame.channel_id)
+            if raw_stream is not None:
+                # Raw-stream frames (auto-9z1xh): enqueue only — a stream's
+                # own pumps do the blocking work, never this receive loop.
+                if frame.type == FRAME_STREAM_CTRL:
+                    raw_stream.on_ctrl_raw(frame.payload)
+                elif frame.type == FRAME_DATA:
+                    raw_stream.on_data(frame.payload)
+                elif frame.type == FRAME_CLOSE:
+                    raw_stream.on_close()
+                continue
+            if frame.type == FRAME_STREAM_CTRL:
+                continue  # stale frame for a torn-down stream
             if frame.channel_id not in tunnel.channels:
                 if frame.type == FRAME_DATA:
                     # Not a live viewer channel -- try the same 16 bytes

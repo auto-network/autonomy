@@ -631,6 +631,9 @@ def create_app(
     build_info: Optional[dict] = None,
     abuse_limiter: Optional[RelayAbuseLimiter] = None,
     turn_issuer=None,
+    stream_ingress_port: Optional[int] = None,
+    stream_ingress_host: str = "127.0.0.1",
+    stream_idle_timeout: Optional[float] = None,
 ) -> FastAPI:
     """Build the registry app.
 
@@ -2445,6 +2448,33 @@ def create_app(
             websocket, host, host_routes, now_fn,
             abuse_limiter=abuse_limiter,
         )
+
+    if stream_ingress_port is not None:
+        # Raw-stream ingress (auto-9z1xh): loopback TCP, started on the
+        # app's own event loop. The public edge (Caddy L4) is auto-ot0t7.
+        from tools.network.relaykit.stream_wire import STREAM_IDLE_TIMEOUT
+        from .stream_ingress import start_stream_ingress
+
+        idle = (
+            stream_idle_timeout
+            if stream_idle_timeout is not None
+            else STREAM_IDLE_TIMEOUT
+        )
+
+        @app.on_event("startup")
+        async def _start_stream_ingress():
+            app.state.stream_ingress = await start_stream_ingress(
+                stream_ingress_host, stream_ingress_port,
+                host_routes=host_routes, abuse_limiter=abuse_limiter,
+                idle_timeout=idle,
+            )
+
+        @app.on_event("shutdown")
+        async def _stop_stream_ingress():
+            server = getattr(app.state, "stream_ingress", None)
+            if server is not None:
+                server.close()
+                await server.wait_closed()
 
     @app.get("/healthz")
     async def healthz():

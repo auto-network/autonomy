@@ -57,6 +57,7 @@ from .frames import (
     FRAME_CLOSE,
     FRAME_CTRL,
     FRAME_DATA,
+    FRAME_STREAM_CTRL,
     VIEWER_KIND_RECORD,
     FRAME_OPEN,
     FrameError,
@@ -64,6 +65,8 @@ from .frames import (
     tag_viewer_message,
     encode_frame,
 )
+from .stream_adapter import StreamAdapter
+from .stream_wire import CAP_TLS_STREAM
 from .hello import (
     HELLO_VERSION,
     HELLO_VERSION_2,
@@ -460,6 +463,7 @@ class TunnelConnector:
         publisher: "Publisher | None" = None,
         machine_key: KeyPair | None = None,
         caps: tuple = (),
+        stream_handler=None,
     ):
         self._url = f"{relay_url.rstrip('/')}/t/{org}"
         self._org = org
@@ -483,6 +487,9 @@ class TunnelConnector:
         self._caps = tuple(sorted({str(cap) for cap in caps}))
         if self._caps and machine_key is None:
             raise ValueError("capabilities require a machine key (hello v2)")
+        #: async (host, reservation) -> (reader, writer) | None — the
+        #: dashboard's dial-only raw-stream seam (stream_adapter.py).
+        self._stream_handler = stream_handler
         #: capability intersection the registry accepted on the live tunnel
         self.accepted_caps: tuple = ()
         #: reservation -> hostname this connector wants leased; re-registered
@@ -776,6 +783,19 @@ class TunnelConnector:
         # tunnel, so a publish addressed by token leaves exactly once.
         if self._publisher is not None:
             self._publisher.bind(send_frame)
+        # Raw-stream adapter (tls-stream/1): live only when the operator
+        # wired a handler AND this tunnel's ack negotiated the capability —
+        # a non-negotiated tunnel can never carry a stream frame.
+        adapter = None
+        if (
+            self._stream_handler is not None
+            and CAP_TLS_STREAM in self.accepted_caps
+        ):
+            adapter = StreamAdapter(
+                self._stream_handler, send_frame,
+                lease_lookup=self._desired_hosts.get,
+            )
+        open_tasks: set = set()
 
         def drop(channel_id: bytes) -> None:
             queue = channels.pop(channel_id, None)
@@ -793,9 +813,30 @@ class TunnelConnector:
                 if frame.type == FRAME_CTRL:
                     self._resolve_ctrl_reply(frame.payload)
                     continue
+                if frame.type == FRAME_STREAM_CTRL:
+                    if adapter is not None:
+                        adapter.dispatch_ctrl(frame.channel_id, frame.payload)
+                    continue  # never negotiated: stale/hostile frame, ignored
                 if frame.type == FRAME_OPEN:
                     try:
                         meta = json.loads(frame.payload)
+                        if (
+                            isinstance(meta, dict)
+                            and meta.get("kind") == "tls-stream"
+                        ):
+                            if adapter is None:
+                                await send_frame(
+                                    FRAME_CLOSE, frame.channel_id
+                                )
+                                continue
+                            # Own task: a slow local dial must not stall
+                            # the tunnel serve loop.
+                            task = asyncio.create_task(
+                                adapter.open(frame.channel_id, meta)
+                            )
+                            open_tasks.add(task)
+                            task.add_done_callback(open_tasks.discard)
+                            continue
                         if (
                             isinstance(meta, dict)
                             and meta.get("kind") == "host-probe"
@@ -832,12 +873,24 @@ class TunnelConnector:
                         self._serve_channel(frame.channel_id, token, queue, send_frame, drop)
                     )
                 elif frame.type == FRAME_DATA:
+                    if adapter is not None and adapter.dispatch_data(
+                        frame.channel_id, frame.payload
+                    ):
+                        continue
                     queue = channels.get(frame.channel_id)
                     if queue is not None:
                         queue.put_nowait(frame.payload)
                 elif frame.type == FRAME_CLOSE:
+                    if adapter is not None and adapter.dispatch_close(
+                        frame.channel_id
+                    ):
+                        continue
                     drop(frame.channel_id)
         finally:
+            if adapter is not None:
+                for task in list(open_tasks):
+                    task.cancel()
+                await adapter.shutdown()
             self._ctrl_send = None
             if self._publisher is not None:
                 self._publisher.unbind()

@@ -120,6 +120,47 @@ indistinguishable). The raw `tls-stream` transport that rides these
 routes is auto-9z1xh; the adapter seam contract is the r3 artifact
 agreed with the dashboard lane.
 
+## Raw streams — tls-stream/1 (auto-9z1xh)
+
+RelayKit carries arbitrary bounded bidirectional TCP bytes as a distinct
+negotiated stream kind. Raw payload bypasses the X25519 record layer —
+the browser↔local-Caddy TLS is the content encryption; RelayKit supplies
+the authenticated tunnel, routing, mux, credit, and lifecycle. Exact wire
+(golden vectors: `tests/fixtures/stream_v1.json`):
+
+- **OPEN (0x01), relay → connector**: `{"kind":"tls-stream","v":1,
+  "host":...,"reservation":...,"credit":262144}` — routing context only,
+  never a target or grant. **No DATA (including the ingress-buffered
+  ClientHello) flows until `open-ok`**; a pre-open-ok refusal discards
+  the buffer and closes the public socket.
+- **STREAM_CTRL (0x05)**, JSON on the stream's channel id:
+  `{"op":"open-ok","v":1,"credit":N}` (connector's first frame),
+  `{"op":"credit","add":N}`, `{"op":"eof"}` (half-close, ≤1 per
+  direction; TCP FIN semantics preserved), `{"op":"reset","code":1..7}`
+  (1 orderly, 2 timeout, 3 overflow tripwire, 4 byte-budget emergency,
+  5 route-released — the only Service revocation; no grant layer exists,
+  6 tunnel loss, 7 protocol error).
+- **DATA (0x02)**: raw opaque bytes ≤64 KiB, never inspected or logged.
+  **CLOSE (0x03)** after orderly (both eofs) or reset.
+- Bounds: 256 KiB initial credit each direction, ≤512 KiB buffered per
+  stream per side (credit IS the buffer bound; violation = reset 7),
+  128 streams/tunnel, fairness at ≤64 KiB frame granularity, 10 s
+  handshake and 600 s idle timeouts.
+- **Shaping, never reset, for byte budgets** (operator rule 2026-09-01):
+  a drained abuse-limiter byte bucket pauses the stream until refill —
+  at any duration. Reset 4 exists only behind an explicit emergency
+  starvation opt-in that production does not set.
+- Ingress: `--stream-ingress-port` starts the loopback TCP acceptor
+  (`registry/stream_ingress.py`) — bounded ClientHello/SNI peek, lease
+  routing, abuse admission; every refusal closes with zero bytes
+  written. The public edge (pinned Caddy L4) is auto-ot0t7.
+- Connector: `TunnelConnector(..., caps=(..., "tls-stream/1"),
+  stream_handler=...)` — the handler is dial-only
+  (`async (host, reservation) -> (reader, writer) | None`, e.g.
+  `stream_adapter.tcp_dial_handler`); all wire mechanics live in
+  `stream_adapter.py`. Tunnel loss closes every stream socket and task;
+  channel ids and generations never survive a reconnect.
+
 ## Dashboard integration seam
 
 `TunnelConnector(relay_url, org, key, registry_cert, handler,
