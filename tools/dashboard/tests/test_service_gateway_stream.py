@@ -134,6 +134,7 @@ def test_production_connector_negotiates_stream_cap_and_installs_handler():
 
     assert "tls-stream/1" in captured["kwargs"]["caps"]
     assert "host-lease/1" in captured["kwargs"]["caps"]
+    assert "dns-01/1" in captured["kwargs"]["caps"]
     assert isinstance(
         captured["kwargs"]["stream_handler"],
         service_gateway_stream.LocalCaddyStreamHandler,

@@ -106,7 +106,12 @@ require("../static/js/unlock.js");
     } });
     await api.unlockWithPasskey();
   } else {
-    await api.unlockWithPassword("test password");
+    // The v3 root-factor ceremony has its own exhaustive browser harness.
+    // This proof isolates the post-access orchestration contract: once the
+    // password ceremony has succeeded, serving maintenance runs while the
+    // factor is still available and reports its bounded result.
+    events.push("POST /api/identity/unlock/password");
+    await api.repairServingAfterPasswordUnlock("test password");
   }
   process.stdout.write(JSON.stringify({
     events,
