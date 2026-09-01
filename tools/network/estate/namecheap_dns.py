@@ -296,6 +296,86 @@ def assert_clean_add(before: list[Record], after: list[Record], new: Record) -> 
     return d
 
 
+# ── serve.auto.network delegation (auto-g1jxw) ───────────────────────────
+
+#: The exact four-record parent mutation delegating serve.auto.network to
+#: the estate authoritative pair. Rendered and operator-approved before
+#: any write; NS TTL matches the zone's own NS TTL.
+SERVE_NS_TTL = "3600"
+
+
+def serve_delegation(primary_ip: str, secondary_ip: str) -> list[Record]:
+    """NS pair + glue A pair — the whole delegation, nothing else."""
+    return [
+        Record("serve", "NS", "ns1.serve.auto.network.", SERVE_NS_TTL),
+        Record("serve", "NS", "ns2.serve.auto.network.", SERVE_NS_TTL),
+        Record("ns1.serve", "A", primary_ip, SERVE_NS_TTL),
+        Record("ns2.serve", "A", secondary_ip, SERVE_NS_TTL),
+    ]
+
+
+def add_delegation_records(
+    records: list[Record], delegation: list[Record]
+) -> tuple[list[Record], list[Record]]:
+    """Return (records_with_delegation, actually_added).
+
+    Idempotent, append-only, NS-aware: two same-name NS records with
+    different targets ARE the delegation and coexist, but an existing NS
+    for the same name pointing anywhere outside *delegation* means a
+    foreign delegation already exists — refused, resolve by hand. Glue A
+    conflicts keep :func:`add_record`'s single-value refusal.
+    """
+    delegation_keys = {r.key() for r in delegation}
+    merged = list(records)
+    added: list[Record] = []
+    for new in delegation:
+        existing_keys = {r.key() for r in merged}
+        if new.key() in existing_keys:
+            continue
+        for r in merged:
+            if r.name != new.name or r.type != new.type:
+                continue
+            if new.type == "NS":
+                if r.key() not in delegation_keys:
+                    raise DnsError(
+                        f"refusing: {new.name!r} already delegates to "
+                        f"{r.address!r}, outside this delegation set. "
+                        "Resolve by hand — this tool only appends."
+                    )
+                continue  # sibling NS from our own set: legitimate
+            if r.address != new.address:
+                raise DnsError(
+                    f"refusing: a {new.type} record for {new.name!r} "
+                    f"already exists with a different address "
+                    f"({r.address!r} vs {new.address!r}). Resolve by hand "
+                    "— this tool only appends."
+                )
+        merged.append(new)
+        added.append(new)
+    return merged, added
+
+
+def assert_clean_multi_add(
+    before: list[Record], after: list[Record], news: list[Record]
+) -> Diff:
+    """Fail unless after == before + exactly *news* (order-independent):
+    no removal, no extra addition, no landed-wrong value."""
+    d = diff_records(before, after)
+    if d.removed:
+        raise DnsError(
+            f"DESTRUCTIVE WRITE DETECTED: {len(d.removed)} record(s) removed: "
+            + "; ".join(r.key() for r in d.removed)
+        )
+    expected = {r.key() for r in news}
+    landed = {r.key() for r in d.added}
+    if landed != expected:
+        raise DnsError(
+            "the added records do not match the intended delegation.\n"
+            f"  intended: {sorted(expected)}\n  landed:   {sorted(landed)}"
+        )
+    return d
+
+
 # ── credentials + live I/O (thin) ────────────────────────────────────────
 
 @dataclass
@@ -443,6 +523,60 @@ def cmd_add_record(ns: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_add_delegation(ns: argparse.Namespace) -> int:
+    """Append the exact four serve.auto.network delegation records
+    (auto-g1jxw): NS pair + glue A pair — same read→gate→modify→write→
+    verify discipline as add-record, +4/−0 required."""
+    creds = load_credentials(ns.env)
+    sld, tld = ns.sld, ns.tld
+    delegation = serve_delegation(ns.primary_ip, ns.secondary_ip)
+
+    # 1. READ — capture live state, save it verbatim as the rollback source.
+    before_xml = live_gethosts(creds, sld, tld)
+    save_dir = Path(ns.save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    before_path = save_dir / f"{sld}.{tld}.before.xml"
+    before_path.write_text(before_xml)
+    before = parse_hosts(before_xml)
+    print(f"read {len(before)} live records → saved verbatim to {before_path}")
+
+    # 2. GATE — never write if the mail records did not survive the read.
+    assert_critical_present(before)
+    print("critical mail records present: mail A, MX, SPF, DMARC, DKIM ✓")
+
+    # 3. MODIFY — append the delegation, idempotently, NS-aware.
+    after_intended, added = add_delegation_records(before, delegation)
+    if not added:
+        print("delegation already present, nothing to do:")
+        print(_fmt(delegation))
+        return 0
+
+    print(f"delegation diff — {len(added)} record(s) to add, 0 to remove:")
+    for r in added:
+        print(f"  + {r.key()}")
+
+    if ns.dry_run:
+        params = build_sethosts_params(sld, tld, after_intended, creds)
+        body = encode_body(params)
+        assert_dkim_safe(after_intended, body)
+        print("DRY RUN — encoding check passed (DKIM '+' → %2B). "
+              "No write performed.")
+        return 0
+
+    # 4. WRITE the complete set + the delegation records.
+    live_sethosts(creds, sld, tld, after_intended)
+    print("setHosts OK")
+
+    # 5. VERIFY — re-read and prove exactly the delegation, zero removals.
+    after_xml = live_gethosts(creds, sld, tld)
+    (save_dir / f"{sld}.{tld}.after.xml").write_text(after_xml)
+    after = parse_hosts(after_xml)
+    d = assert_clean_multi_add(before, after, added)
+    assert_critical_present(after)
+    print(f"verified: +{len(d.added)} record(s), -0 records.")
+    return 0
+
+
 def cmd_gethosts(ns: argparse.Namespace) -> int:
     creds = load_credentials(ns.env)
     xml = live_gethosts(creds, ns.sld, ns.tld)
@@ -483,6 +617,22 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--dry-run", action="store_true",
                    help="read + gate + encode-check only; never writes")
     a.set_defaults(func=cmd_add_record)
+
+    d = sub.add_parser(
+        "add-delegation",
+        help="append the exact four serve.auto.network NS+glue records",
+    )
+    d.add_argument("--sld", default="auto")
+    d.add_argument("--tld", default="network")
+    d.add_argument("--primary-ip", required=True,
+                   help="ns1.serve glue target (dns-ash-1 IPv4)")
+    d.add_argument("--secondary-ip", required=True,
+                   help="ns2.serve glue target (dns-hel-1 IPv4)")
+    d.add_argument("--save-dir", default="/var/backups/namecheap",
+                   help="where the verbatim before/after XML is saved")
+    d.add_argument("--dry-run", action="store_true",
+                   help="render the exact diff and encoding check, no write")
+    d.set_defaults(func=cmd_add_delegation)
 
     ns = p.parse_args(argv)
     try:
