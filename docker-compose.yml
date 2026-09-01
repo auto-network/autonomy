@@ -264,6 +264,37 @@ services:
       driver: json-file
       options: { max-size: "20m", max-file: "5" }
 
+  # On-demand ACME client for the persona apex + wildcard certificate. The
+  # Dashboard starts this job only while issuing/renewing. Its entire Certbot
+  # state and private key live below the node's verified ramfs; the only hook
+  # surface is an order-bound Unix socket in that same mount.
+  service-certbot:
+    profiles: ["service-certbot"]
+    image: docker.io/certbot/certbot:v5.7.0@sha256:34ee91d2f43008eb78a007d22f23ed4b2eaa9a454cb27ca2c042b49527a695b4
+    restart: "no"
+    user: "1000:1000"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 1.0
+    networks: ["default"]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,uid=1000,gid=1000,mode=0700
+    volumes:
+      - type: bind
+        source: /run/autonomy-keycache/service-acme
+        target: /run/autonomy-acme
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${AUTONOMY_HOST_ROOT:-.}/deploy/service-certbot/dns01-hook.py
+        target: /usr/local/bin/autonomy-dns01-hook
+        read_only: true
+        bind:
+          create_host_path: false
+
   # Polls for approved beads and launches session containers for them
   # (agents/dispatcher.py). Was host-only prior to this (agents/start-dispatcher.sh,
   # a bare `nohup ... &` with no supervisor) — a disk-full crash on 2026-08-25 killed

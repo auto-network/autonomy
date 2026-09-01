@@ -153,3 +153,28 @@ def test_install_prebuilds_the_profile_image_without_starting_the_gateway():
     install = INSTALL.read_text()
 
     assert "docker compose --profile service-gateway build service-gateway" in install
+
+
+def test_certbot_job_is_digest_pinned_ephemeral_and_receives_only_acme_ramfs():
+    compose = _compose()
+    certbot = compose["services"]["service-certbot"]
+
+    assert certbot["profiles"] == ["service-certbot"]
+    assert certbot["image"] == (
+        "docker.io/certbot/certbot:v5.7.0@"
+        "sha256:34ee91d2f43008eb78a007d22f23ed4b2eaa9a454cb27ca2c042b49527a695b4"
+    )
+    assert certbot["restart"] == "no"
+    assert certbot["read_only"] is True
+    assert certbot["cap_drop"] == ["ALL"]
+    assert certbot["security_opt"] == ["no-new-privileges:true"]
+    assert certbot["user"] == "1000:1000"
+    assert "ports" not in certbot
+    assert "/var/run/docker.sock" not in _volume_sources(certbot)
+    assert _volume_sources(certbot) == [
+        "/run/autonomy-keycache/service-acme",
+        "${AUTONOMY_HOST_ROOT:-.}/deploy/service-certbot/dns01-hook.py",
+    ]
+    assert set(certbot["tmpfs"]) == {
+        "/tmp:rw,noexec,nosuid,nodev,size=16m,uid=1000,gid=1000,mode=0700",
+    }
