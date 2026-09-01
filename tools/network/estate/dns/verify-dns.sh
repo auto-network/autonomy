@@ -1,23 +1,28 @@
 #!/usr/bin/env bash
-# Prove the delegated serve.auto.network zone (auto-g1jxw).
+# Prove the serve.auto.network authoritative service (auto-g1jxw).
 #
-#   verify-dns.sh <primary-ip> <secondary-ip>            # staging rungs
-#   verify-dns.sh <primary-ip> <secondary-ip> --public   # + post-cutover rungs
+#   verify-dns.sh <host-ip> [--public]
+#   verify-dns.sh <host-ip> <second-ip> [--public]   # multi-relay future
 #
-# Staging rungs (no parent change needed): TCP and UDP authoritative
-# answers from BOTH endpoints, wildcard → relay IP, SOA serial
-# convergence primary→secondary, multi-value TXT atomicity through the
-# challenge broker (over SSH to the primary).
-# Public rungs (after the operator-approved delegation): ≥2 independent
-# recursive resolvers resolve probe.<zone> to the relay IP — never trust
-# one resolver (the estate lesson).
+# Single-host rungs: TCP and UDP authoritative answers, apex + wildcard
+# → relay IP, NS set, multi-value TXT atomicity through the challenge
+# broker (over SSH). With a second endpoint (when a second relay machine
+# carries ns2), adds serial-convergence and both-endpoint checks.
+# --public (after the operator-approved delegation): ≥2 independent
+# recursive resolvers resolve probe.<zone> — never trust one resolver.
 
 set -euo pipefail
 ZONE="serve.auto.network"
 RELAY_IP="5.161.219.195"
-PRIMARY=${1:?usage: verify-dns.sh <primary-ip> <secondary-ip> [--public]}
-SECONDARY=${2:?usage: verify-dns.sh <primary-ip> <secondary-ip> [--public]}
-PUBLIC=${3:-}
+PRIMARY=${1:?usage: verify-dns.sh <host-ip> [second-ip] [--public]}
+shift
+SECONDARY="" PUBLIC=""
+for arg in "$@"; do
+    case "$arg" in
+    --public) PUBLIC=1 ;;
+    *) SECONDARY=$arg ;;
+    esac
+done
 FAIL=0
 
 check() { # <desc> <cmd...>
@@ -28,8 +33,11 @@ check() { # <desc> <cmd...>
 
 q() { dig +short +time=3 +tries=1 "$@"; }
 
-echo "== authoritative answers (UDP + TCP, both endpoints)"
-for ip in "$PRIMARY" "$SECONDARY"; do
+ENDPOINTS=$PRIMARY
+[ -n "$SECONDARY" ] && ENDPOINTS="$PRIMARY $SECONDARY"
+
+echo "== authoritative answers (UDP + TCP)"
+for ip in $ENDPOINTS; do
     check "@$ip UDP probe.$ZONE → $RELAY_IP" \
         bash -c "q @$ip probe.$ZONE A | grep -qx '$RELAY_IP'"
     check "@$ip TCP probe.$ZONE → $RELAY_IP" \
@@ -37,34 +45,36 @@ for ip in "$PRIMARY" "$SECONDARY"; do
     check "@$ip apex A → $RELAY_IP" \
         bash -c "q @$ip $ZONE A | grep -qx '$RELAY_IP'"
     check "@$ip authoritative NS set" \
-        bash -c "q @$ip $ZONE NS | sort | tr '\n' ' ' | grep -q 'ns1.$ZONE. ns2.$ZONE.'"
+        bash -c "q @$ip $ZONE NS | sort | tr '\n' ' ' | grep -q 'ns1.auto.network. ns2.auto.network.'"
 done
 
-echo "== serial convergence (primary → secondary within refresh bound)"
-serial_p=$(q "@$PRIMARY" "$ZONE" SOA | awk '{print $3}')
-for _ in $(seq 60); do
-    serial_s=$(q "@$SECONDARY" "$ZONE" SOA | awk '{print $3}')
-    [ "$serial_s" = "$serial_p" ] && break
-    sleep 5
-done
-check "secondary serial $serial_s == primary serial $serial_p" \
-    test "${serial_s:-}" = "$serial_p"
+if [ -n "$SECONDARY" ]; then
+    echo "== serial convergence (primary → secondary within refresh bound)"
+    serial_p=$(q "@$PRIMARY" "$ZONE" SOA | awk '{print $3}')
+    for _ in $(seq 60); do
+        serial_s=$(q "@$SECONDARY" "$ZONE" SOA | awk '{print $3}')
+        [ "$serial_s" = "$serial_p" ] && break
+        sleep 5
+    done
+    check "secondary serial $serial_s == primary serial $serial_p" \
+        test "${serial_s:-}" = "$serial_p"
+fi
 
-echo "== challenge broker: multi-value atomicity (over SSH to primary)"
+echo "== challenge write path: multi-value atomicity (over SSH)"
 LABEL="verify-$(date +%s | tail -c 7)-aaaaaaaaaaaaaaaaaaaa"
 NAME="_acme-challenge.$LABEL.$ZONE"
-BROKER="python3 /usr/local/bin/challenge_broker.py"
-ssh -o IdentitiesOnly=yes "root@$PRIMARY" "$BROKER present $NAME apex-token && $BROKER present $NAME wildcard-token"
+BROKER="cd /opt/autonomy-registry && PYTHONPATH=. venv/bin/python -m tools.network.registry.dns_challenges --db /var/lib/autonomy-registry/registry.db"
+ssh -o IdentitiesOnly=yes "root@$PRIMARY" "$BROKER present $NAME apex-token && $BROKER present $NAME wildcard-token && sleep 2"
 check "both TXT values live at one name" \
     bash -c "q @$PRIMARY $NAME TXT | sort | tr -d '\"' | tr '\n' ' ' | grep -q 'apex-token wildcard-token'"
-ssh -o IdentitiesOnly=yes "root@$PRIMARY" "$BROKER cleanup $NAME apex-token"
+ssh -o IdentitiesOnly=yes "root@$PRIMARY" "$BROKER cleanup $NAME apex-token && sleep 2"
 check "one value removed, sibling preserved" \
     bash -c "q @$PRIMARY $NAME TXT | tr -d '\"' | grep -qx wildcard-token"
-ssh -o IdentitiesOnly=yes "root@$PRIMARY" "$BROKER cleanup $NAME wildcard-token"
+ssh -o IdentitiesOnly=yes "root@$PRIMARY" "$BROKER cleanup $NAME wildcard-token && sleep 2"
 check "empty RRset removed" \
     bash -c "test -z \"\$(q @$PRIMARY $NAME TXT)\""
 
-if [ "$PUBLIC" = "--public" ]; then
+if [ -n "$PUBLIC" ]; then
     echo "== public resolution (post-cutover; majority of independent resolvers)"
     ok=0
     for resolver in 1.1.1.1 8.8.8.8 9.9.9.9 208.67.222.222; do

@@ -36,10 +36,10 @@ def _live_set() -> list[Record]:
 def test_delegation_is_exactly_four_pinned_records():
     records = serve_delegation(PRIMARY_IP, SECONDARY_IP)
     assert [(r.name, r.type, r.address) for r in records] == [
-        ("serve", "NS", "ns1.serve.auto.network."),
-        ("serve", "NS", "ns2.serve.auto.network."),
-        ("ns1.serve", "A", PRIMARY_IP),
-        ("ns2.serve", "A", SECONDARY_IP),
+        ("serve", "NS", "ns1.auto.network."),
+        ("serve", "NS", "ns2.auto.network."),
+        ("ns1", "A", PRIMARY_IP),
+        ("ns2", "A", SECONDARY_IP),
     ]
     assert all(r.ttl == "3600" for r in records)
 
@@ -71,8 +71,8 @@ def test_same_name_ns_pair_is_legitimate_but_glue_conflict_refused():
     # Two NS records for "serve" with different targets must coexist —
     # that IS a delegation. A glue A record pointing somewhere else is
     # the destructive case and fails closed.
-    conflicted = _live_set() + [Record("ns1.serve", "A", "192.0.2.99", "3600")]
-    with pytest.raises(DnsError, match="ns1.serve"):
+    conflicted = _live_set() + [Record("ns1", "A", "192.0.2.99", "3600")]
+    with pytest.raises(DnsError, match="ns1"):
         add_delegation_records(
             conflicted, serve_delegation(PRIMARY_IP, SECONDARY_IP)
         )
@@ -90,6 +90,6 @@ def test_clean_multi_add_catches_removal_extra_and_mismatch():
         assert_clean_multi_add(
             before, good + [Record("x", "A", "192.0.2.1", "60")], news
         )  # an unexpected extra
-    wrong = before + news[:3] + [Record("ns2.serve", "A", "192.0.2.7", "3600")]
+    wrong = before + news[:3] + [Record("ns2", "A", "192.0.2.7", "3600")]
     with pytest.raises(DnsError):
         assert_clean_multi_add(before, wrong, news)  # landed wrong value

@@ -2476,6 +2476,12 @@ def create_app(
                 server.close()
                 await server.wait_closed()
 
+    @app.get("/v1/dns/zone-state")
+    async def dns_zone_state():
+        # Read path for the co-located DNS process (auto-g1jxw). Contents
+        # are public by nature — every value here is published in DNS.
+        return {"challenges": store.live_serve_challenges(now=now())}
+
     @app.get("/healthz")
     async def healthz():
         return {"ok": True}

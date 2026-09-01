@@ -299,18 +299,23 @@ def assert_clean_add(before: list[Record], after: list[Record], new: Record) -> 
 # ── serve.auto.network delegation (auto-g1jxw) ───────────────────────────
 
 #: The exact four-record parent mutation delegating serve.auto.network to
-#: the estate authoritative pair. Rendered and operator-approved before
-#: any write; NS TTL matches the zone's own NS TTL.
+#: the registry-embedded authoritative (auto-g1jxw). The NS names are
+#: OUT of the delegated zone (ns1/ns2.auto.network — ordinary records of
+#: the parent Namecheap already serves), so no glue is required and the
+#: future anycast cutover re-points ONLY the two A records, touching
+#: neither the delegation nor the zone. Both A records target the relay
+#: host today; ns2 relocates when a second responder machine exists
+#: (until then NS-set diversity is cosmetic, not redundancy).
 SERVE_NS_TTL = "3600"
 
 
 def serve_delegation(primary_ip: str, secondary_ip: str) -> list[Record]:
-    """NS pair + glue A pair — the whole delegation, nothing else."""
+    """NS pair + the two re-pointable nameserver A records."""
     return [
-        Record("serve", "NS", "ns1.serve.auto.network.", SERVE_NS_TTL),
-        Record("serve", "NS", "ns2.serve.auto.network.", SERVE_NS_TTL),
-        Record("ns1.serve", "A", primary_ip, SERVE_NS_TTL),
-        Record("ns2.serve", "A", secondary_ip, SERVE_NS_TTL),
+        Record("serve", "NS", "ns1.auto.network.", SERVE_NS_TTL),
+        Record("serve", "NS", "ns2.auto.network.", SERVE_NS_TTL),
+        Record("ns1", "A", primary_ip, SERVE_NS_TTL),
+        Record("ns2", "A", secondary_ip, SERVE_NS_TTL),
     ]
 
 
