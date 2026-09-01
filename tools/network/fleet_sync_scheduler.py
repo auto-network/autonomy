@@ -503,6 +503,26 @@ class SQLiteFleetSyncStore:
         finally:
             conn.close()
 
+    def record_served_ack(
+        self, machine_pub: str, epoch: str, acked_transaction_ref: int
+    ) -> None:
+        conn, catalog = self._open()
+        try:
+            catalog.record_served_ack(
+                machine_pub, epoch, acked_transaction_ref
+            )
+        finally:
+            conn.close()
+
+    def prune_acknowledged(
+        self, machine_pubs: Sequence[str], epoch: str
+    ) -> tuple[int, int]:
+        conn, catalog = self._open()
+        try:
+            return catalog.prune_acknowledged(machine_pubs, epoch)
+        finally:
+            conn.close()
+
     def record_peer(
         self,
         machine_pub: str,
@@ -714,6 +734,21 @@ class FleetSyncScheduler:
                 cursor = await asyncio.to_thread(
                     self.store.resume_ref, resume_trail
                 )
+                # A resolvable trail is the peer's durable acknowledgement of
+                # this journal's prefix through that transaction. Record it
+                # before serving; the fleet-wide floor of these
+                # acknowledgements is what authorizes journal pruning.
+                if cursor > 0:
+                    try:
+                        await asyncio.to_thread(
+                            self.store.record_served_ack,
+                            peer_pub, epoch, cursor,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "fleet sync served-ack record failed",
+                            exc_info=True,
+                        )
                 while True:
                     self.authenticator.authorize(peer_pub)
                     page = await asyncio.to_thread(
@@ -751,6 +786,34 @@ class FleetSyncScheduler:
                 yield done
                 outcome = "success"
                 error_code = ""
+                # Retire journal frames every active peer has acknowledged.
+                # Best-effort maintenance: a prune failure never fails the
+                # serve, but it is logged rather than swallowed. A solo
+                # roster prunes nothing (acknowledged_journal_floor returns
+                # None for an empty peer list), so a concurrently enrolling
+                # machine can never race a full retirement.
+                try:
+                    active = resolve(
+                        self._roster_snapshot,
+                        anchor_root_pub=self.config.personal_root_pub,
+                    )
+                    others = [
+                        pub for pub in active
+                        if pub != self.authenticator.machine_pub
+                    ]
+                    journal_rows, transaction_rows = await asyncio.to_thread(
+                        self.store.prune_acknowledged, others, epoch
+                    )
+                    if journal_rows or transaction_rows:
+                        logger.info(
+                            "fleet sync journal pruned: %d frames, "
+                            "%d transactions",
+                            journal_rows, transaction_rows,
+                        )
+                except Exception:
+                    logger.warning(
+                        "fleet sync journal prune failed", exc_info=True
+                    )
             except asyncio.CancelledError:
                 outcome = "cancelled"
                 error_code = ""

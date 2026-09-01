@@ -17,7 +17,7 @@ from pathlib import Path
 import re
 import sqlite3
 import time
-from typing import Iterable, Iterator
+from typing import Iterable, Iterator, Sequence
 from uuid import uuid4
 import zlib
 
@@ -34,7 +34,8 @@ from .streaming import ensure_streaming_indexes, iter_indexed_snapshot_mutations
 
 
 CATALOG_SCHEMA_VERSION = 3
-JOURNAL_STORAGE_VERSION = 1
+JOURNAL_STORAGE_VERSION = 2
+_JOURNAL_STORAGE_ZLIB = 1
 MAX_TRANSACTION_OPERATIONS = 16_384
 MAX_TRANSACTION_FRAME_BYTES = 128 * 1024 * 1024
 _table_columns: dict[str, tuple[str, ...]] = {}
@@ -46,19 +47,30 @@ _MUTATING_TABLE = re.compile(
 
 
 def _pack_journal(frame: bytes) -> bytes:
-    return bytes([JOURNAL_STORAGE_VERSION]) + zlib.compress(frame, level=1)
+    # Raw storage: the journal is transient once served acknowledgements
+    # retire it, and per-row zlib through a Python callback was the single
+    # largest write-path cost (measured 4.9x on ingestion). Version 1
+    # (zlib) rows remain readable below.
+    return bytes([JOURNAL_STORAGE_VERSION]) + frame
 
 
 def _unpack_journal(stored: bytes) -> bytes:
-    if not stored or stored[0] != JOURNAL_STORAGE_VERSION:
+    if not stored:
         raise WatermarkError("unsupported journal storage frame")
-    decompressor = zlib.decompressobj()
-    frame = decompressor.decompress(stored[1:], MAX_FRAME_BYTES + 1)
-    if len(frame) > MAX_FRAME_BYTES or not decompressor.eof:
-        raise WatermarkError("journal storage frame violates size bounds")
-    if decompressor.unused_data or decompressor.unconsumed_tail:
-        raise WatermarkError("journal storage frame has trailing data")
-    return frame
+    if stored[0] == JOURNAL_STORAGE_VERSION:
+        frame = bytes(stored[1:])
+        if len(frame) > MAX_FRAME_BYTES:
+            raise WatermarkError("journal storage frame violates size bounds")
+        return frame
+    if stored[0] == _JOURNAL_STORAGE_ZLIB:
+        decompressor = zlib.decompressobj()
+        frame = decompressor.decompress(stored[1:], MAX_FRAME_BYTES + 1)
+        if len(frame) > MAX_FRAME_BYTES or not decompressor.eof:
+            raise WatermarkError("journal storage frame violates size bounds")
+        if decompressor.unused_data or decompressor.unconsumed_tail:
+            raise WatermarkError("journal storage frame has trailing data")
+        return frame
+    raise WatermarkError("unsupported journal storage frame")
 
 
 def _quote(name: str) -> str:
@@ -392,6 +404,21 @@ class MutationCatalog:
 
     @staticmethod
     def _key_function(table: object, *values: object) -> bytes:
+        # One captured row invokes this deterministic UDF several times from
+        # one trigger body (journal insert, catalog upsert, frame). A
+        # single-entry memo collapses those consecutive identical calls
+        # without unbounded retention.
+        memo = MutationCatalog._key_memo
+        if memo is not None and memo[0] == table and memo[1] == values:
+            return memo[2]
+        encoded = MutationCatalog._encode_key(table, *values)
+        MutationCatalog._key_memo = (table, values, encoded)
+        return encoded
+
+    _key_memo: tuple[object, tuple[object, ...], bytes] | None = None
+
+    @staticmethod
+    def _encode_key(table: object, *values: object) -> bytes:
         if not isinstance(table, str) or table not in TABLE_POLICIES:
             raise ValueError("unknown fleet-sync table")
         if table == "note_versions":
@@ -532,10 +559,13 @@ class MutationCatalog:
                 updated_at_ns INTEGER NOT NULL DEFAULT 0 CHECK(updated_at_ns>=0),
                 PRIMARY KEY(machine_public_key,roster_epoch)
             ) WITHOUT ROWID""",
-            """CREATE INDEX IF NOT EXISTS idx_fleet_sync_catalog_order
-                ON fleet_sync_catalog(
-                    timestamp_ns,transaction_ref,operation_index,address
-                )""",
+            # The former order index (timestamp_ns,transaction_ref,
+            # operation_index,address) is retired: every consumer's ORDER BY
+            # needs joined-table columns and sorts in a temp B-tree anyway,
+            # its range predicate spans the whole catalog at checkpoint
+            # time, and — this being a WITHOUT ROWID table — it duplicated
+            # the full address blob per row on every captured write.
+            """DROP INDEX IF EXISTS idx_fleet_sync_catalog_order""",
             """CREATE INDEX IF NOT EXISTS idx_fleet_sync_peer_state_online
                 ON fleet_sync_peer_state(roster_epoch,online,machine_public_key)""",
         )
@@ -1496,6 +1526,117 @@ class MutationCatalog:
                 (through_watermark,),
             )
         return int(cursor.rowcount)
+
+    def record_served_ack(
+        self, machine_public_key: str, roster_epoch: str,
+        acked_transaction_ref: int,
+    ) -> None:
+        """Record a peer's implicit acknowledgement of this journal's prefix.
+
+        The acknowledgement is the peer's own resume trail: presenting a
+        breadcrumb that resolves to local transaction row ``N`` is a durable
+        promise that the peer consumed this journal's complete prefix through
+        ``N`` (see ``journal_resume_ref``).  The ref is a *local row id*, not
+        a timestamp — serving order is id order, and remote-imported
+        transactions may carry timestamps far behind their ids, so a
+        timestamp floor could retire frames a slow peer never consumed.  Row
+        ids and this table restore together from the same backup, so the
+        stored refs rewind with the journal they describe.
+        """
+        if (
+            isinstance(acked_transaction_ref, bool)
+            or not isinstance(acked_transaction_ref, int)
+            or acked_transaction_ref <= 0
+        ):
+            raise WatermarkError("served acknowledgement ref is malformed")
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO fleet_sync_peer_state("
+                "machine_public_key,roster_epoch,online,local_watermark,"
+                "updated_at_ns) VALUES(?,?,1,?,?) "
+                "ON CONFLICT(machine_public_key,roster_epoch) DO UPDATE SET "
+                "local_watermark=CASE "
+                "WHEN fleet_sync_peer_state.local_watermark IS NULL OR "
+                "excluded.local_watermark>fleet_sync_peer_state.local_watermark "
+                "THEN excluded.local_watermark "
+                "ELSE fleet_sync_peer_state.local_watermark END,"
+                "updated_at_ns=excluded.updated_at_ns",
+                (
+                    machine_public_key, roster_epoch,
+                    acked_transaction_ref, time.time_ns(),
+                ),
+            )
+
+    def acknowledged_journal_floor(
+        self, machine_public_keys: Sequence[str], roster_epoch: str
+    ) -> int | None:
+        """The journal prefix every listed peer has acknowledged, or None.
+
+        None means the floor is unavailable — some listed machine has never
+        presented a resolvable resume trail this epoch — and nothing may be
+        retired.  An empty machine list is also None: a solo machine keeps
+        its journal, because a concurrently enrolling peer may already be
+        mid-pull against a roster snapshot this process has not seen yet.
+        """
+        keys = list(machine_public_keys)
+        if not keys:
+            return None
+        rows = dict(self.conn.execute(
+            "SELECT machine_public_key,local_watermark "
+            "FROM fleet_sync_peer_state WHERE roster_epoch=? "
+            "AND machine_public_key IN ("
+            + ",".join("?" for _ in keys) + ")",
+            (roster_epoch, *keys),
+        ).fetchall())
+        floors = [rows.get(key) for key in keys]
+        if any(floor is None for floor in floors):
+            return None
+        return min(int(floor) for floor in floors)
+
+    def prune_acknowledged(
+        self, machine_public_keys: Sequence[str], roster_epoch: str
+    ) -> tuple[int, int]:
+        """Retire journal frames every active peer has acknowledged.
+
+        Deletes journal rows with ``transaction_ref <= floor`` and
+        transaction rows strictly below the floor that no longer own journal
+        rows.  The floor transaction row itself is kept: it is the slowest
+        peer's newest breadcrumb, and ``journal_resume_ref`` must keep
+        resolving it.  Rows from other roster epochs in
+        ``fleet_sync_peer_state`` are dropped in the same pass — every
+        reader keys on the current epoch, so they are dead weight.
+        Returns ``(journal_rows_deleted, transaction_rows_deleted)``.
+        """
+        if self._context is not None or self.conn.in_transaction:
+            raise WatermarkError("cannot prune journal inside a transaction")
+        floor = self.acknowledged_journal_floor(
+            machine_public_keys, roster_epoch
+        )
+        if floor is None or floor <= 0:
+            return (0, 0)
+        with self.conn:
+            journal = self.conn.execute(
+                "DELETE FROM fleet_sync_journal WHERE transaction_ref<=?",
+                (floor,),
+            )
+            # Current winners keep a foreign key to their authoring
+            # transaction as provenance, so only superseded transactions
+            # (referenced by neither the journal nor any winner) retire.
+            # Retained rows are therefore bounded by live-address count,
+            # not by write history.
+            transactions = self.conn.execute(
+                "DELETE FROM fleet_sync_transactions WHERE id<? "
+                "AND NOT EXISTS(SELECT 1 FROM fleet_sync_journal j "
+                "WHERE j.transaction_ref=fleet_sync_transactions.id) "
+                "AND NOT EXISTS(SELECT 1 FROM fleet_sync_catalog c "
+                "WHERE c.transaction_ref=fleet_sync_transactions.id)",
+                (floor,),
+            )
+            self.conn.execute(
+                "DELETE FROM fleet_sync_peer_state WHERE roster_epoch<>?",
+                (roster_epoch,),
+            )
+        return (int(journal.rowcount), int(transactions.rowcount))
 
     def apply_remote(self, authored: AuthoredMutation) -> bool:
         """Merge one trusted remote mutation atomically; return winner status."""
