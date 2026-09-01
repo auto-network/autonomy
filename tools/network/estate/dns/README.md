@@ -48,18 +48,29 @@ cd tools/network/estate
 # 3. Staging proofs — no parent change yet. Retain the output.
 ./dns/verify-dns.sh 5.161.219.195
 
-# 4. OPERATOR APPROVAL GATE — render the exact 4-record parent diff:
+# 4. COMPATIBILITY GATE — Zonemaster's full RFC battery against the
+#    live server in UNDELEGATED mode (from any docker-equipped machine),
+#    BEFORE any public change. Gate: no ERROR/CRITICAL findings; hold
+#    and investigate WARNINGs.
+docker run --rm zonemaster/cli serve.auto.network \
+    --ns ns1.auto.network/5.161.219.195 \
+    --ns ns2.auto.network/5.161.219.195
+#    (Optional deeper rung: an unbound instance stub-zoned to the server,
+#    resolving through it — exercises a real validating resolver's
+#    QNAME-minimization/EDNS/0x20 behavior end to end.)
+
+# 5. OPERATOR APPROVAL GATE — render the exact 4-record parent diff:
 #    (on auto-ash-1, the Namecheap-whitelisted host; both IPs are the
 #    relay host today — ns2's A relocates with the second machine)
 python3 namecheap_dns.py add-delegation \
     --primary-ip 5.161.219.195 --secondary-ip 5.161.219.195 --dry-run
 
-# 5. Apply the approved delegation (same host):
+# 6. Apply the approved delegation (same host):
 python3 namecheap_dns.py add-delegation \
     --primary-ip 5.161.219.195 --secondary-ip 5.161.219.195
 #    pre-change set saved verbatim to /var/backups/namecheap/auto.network.before.xml
 
-# 6. Post-cutover proof + captured parent sets:
+# 7. Post-cutover proof + captured parent sets:
 ./dns/verify-dns.sh 5.161.219.195 --public
 python3 namecheap_dns.py gethosts \
     --save /var/backups/namecheap/auto.network.after-delegation.xml
@@ -112,6 +123,20 @@ size every PoP for 100% of load.
   registry snapshot/backup tooling — no DNS-private state anywhere,
   which is also what keeps the later multi-PoP story (fleet-sync
   TABLE_POLICIES over registry tables) a non-event for DNS.
+
+## Compatibility tiers (how we know it interoperates)
+
+1. **Primary matrix** (`test_dns_responder.py`) — behavior against an
+   independently written mini-codec.
+2. **Differential** (`test_dns_differential.py`) — the same matrix
+   re-driven through dnspython's strict codec (software we did not
+   write); skip-gated on dnspython availability.
+3. **Zonemaster undelegated** — runbook step 4: the registry-grade RFC
+   compliance battery against the live server, pre-delegation.
+4. **Public consumers** — runbook step 7's four independent recursive
+   resolvers, then a Let's Encrypt STAGING DNS-01 issuance (the
+   pickiest real consumer, multi-perspective validation) as the gate
+   before auto-rvq3j touches production ACME.
 
 ## Tests
 
