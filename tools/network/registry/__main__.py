@@ -72,12 +72,31 @@ def main() -> None:
         "--version-file",
         help="deploy-written JSON provenance stamp (diagnostic only)",
     )
+    parser.add_argument(
+        "--stream-ingress-port",
+        type=int,
+        help="enable the raw-stream (tls-stream/1) TCP ingress on this "
+             "loopback port (fronted publicly by the estate Caddy L4)",
+    )
+    parser.add_argument(
+        "--stream-ingress-host",
+        default="127.0.0.1",
+        help="bind address for the raw-stream ingress",
+    )
+    parser.add_argument(
+        "--stream-idle-timeout",
+        type=float,
+        help="idle seconds before a raw stream is reset (default 600)",
+    )
     args = parser.parse_args()
     app = create_app(
         args.db,
         base_url=args.base_url,
         build_info=_load_build_info(args.version_file),
         turn_issuer=_load_turn_issuer(),
+        stream_ingress_port=args.stream_ingress_port,
+        stream_ingress_host=args.stream_ingress_host,
+        stream_idle_timeout=args.stream_idle_timeout,
     )
     # Link tokens are bearer credentials and are part of the public route.
     # Uvicorn's HTTP access logger records the full path, while its WebSocket
