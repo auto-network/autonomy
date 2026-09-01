@@ -5,8 +5,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class Dns01HookServer:
@@ -75,6 +78,7 @@ class Dns01HookServer:
         except Exception:
             # The hook needs a useful success bit, not authority or relay
             # diagnostics. Full detail remains in the Dashboard log.
+            logger.exception("DNS-01 hook operation failed")
             reply = {"ok": False, "error": "operation failed"}
         try:
             writer.write((json.dumps(reply, separators=(",", ":")) + "\n").encode())
