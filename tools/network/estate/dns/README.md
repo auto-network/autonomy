@@ -38,7 +38,10 @@ cd tools/network/estate
 # 1. Ship the registry code that carries the responder (ordinary deploy):
 ../registry/deploy/deploy.sh root@5.161.219.195
 
-# 2. Open 53 and start the DNS process on the relay host:
+# 2. Open 53 and start the DNS process on the relay host.
+#    firewall-estate only allows TCP 22/80/443 + ICMP; this adds
+#    UDP/53 + TCP/53 for the relay host. Only the primary IP answers
+#    (the DNS unit binds it explicitly) — coturn's second IP untouched.
 ./dns/ensure-dns-firewall.sh                  # registry-ash-1 by default
 ./dns/deploy.sh --host root@5.161.219.195 --node-id registry-ash-1
 
@@ -65,11 +68,33 @@ python3 namecheap_dns.py gethosts \
 The four parent records: `serve NS ns1.auto.network.`,
 `serve NS ns2.auto.network.`, `ns1 A <relay-ip>`, `ns2 A <relay-ip>` —
 glue-less (the NS names are ordinary records of the parent zone
-Namecheap already serves). Honest dependency note: Namecheap remains in
-the resolution path for `serve.*` until the auto.network apex itself
-moves to our authoritative (a later phase, registrar NS change).
-NS-set diversity is cosmetic until a second responder machine exists —
-do not count it as redundancy yet.
+Namecheap already serves). **Honest dependency:** Namecheap remains in
+the `serve.*` resolution path (it serves the parent zone, including the
+delegation and the ns1/ns2 A records) until the auto.network apex
+itself moves to the registry authoritative — a later phase requiring a
+registrar NS change. `serve.*` is NOT Namecheap-free yet. NS-set
+diversity is cosmetic until a second responder machine exists — do not
+count it as redundancy yet.
+
+## Future: the anycast cutover (written now, executed later)
+
+When the anycast prefix/ASN exists, the entire DNS cutover is three
+parent-zone A-record edits — no delegation change, no zone change, no
+resolver-visible transition:
+
+1. **Before anything:** relocate ns2's A record to the first
+   non-anycast second machine (RFC 2182 — one NS permanently outside
+   the anycast cloud, so a routing/RPKI mistake can never darken the
+   zone).
+2. Lower the ns1/ns2 A-record TTLs 3600 → 300, at least one old TTL
+   (an hour) before the move.
+3. Re-point ns1's A record to the anycast prefix; restore TTLs.
+
+**Catchment verification before trusting any multi-PoP announcement:**
+CHAOS `id.server` already reports the per-PoP node id — run RIPE Atlas
+queries for `id.server` and map probe → PoP. Expect a roughly 80/20
+imbalance with two sites; that is normal BGP behavior, not a fault —
+size every PoP for 100% of load.
 
 ## Rollback / outage
 
