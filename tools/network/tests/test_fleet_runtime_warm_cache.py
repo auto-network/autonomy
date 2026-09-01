@@ -32,7 +32,7 @@ def _ramfs(tmp_path, monkeypatch):
     )
 
 
-def _valid_payload(tmp_path, monkeypatch, *, expired=False):
+def _valid_payload(tmp_path, monkeypatch, *, expired=False, reachability=False):
     """Build a real, roster-verified fleet runtime payload and wire the
     process-side reads configure() performs. ``expired`` mints a delegation
     whose lifetime is already in the past, so configure() refuses it."""
@@ -64,6 +64,21 @@ def _valid_payload(tmp_path, monkeypatch, *, expired=False):
         "process_private_seed": process.private_hex,
         "delegation_cert": cert.to_dict(),
     }
+    org_uuid = "2d4b90cb-0000-4000-8000-000000000000"
+    if reachability:
+        reachability_cert = issue_cert(
+            root,
+            machine.public_hex,
+            scope=("node:announce", "node:lookup"),
+            org=org_uuid,
+            subject=Subject(kind="machine", id=machine_id),
+            not_before=not_before,
+            not_after=not_after,
+        )
+        payload.update(
+            machine_private_seed=machine.private_hex,
+            reachability_cert=reachability_cert.to_dict(),
+        )
     personal = tmp_path / "personal.db"
     personal.touch()
     monkeypatch.setattr(
@@ -75,6 +90,10 @@ def _valid_payload(tmp_path, monkeypatch, *, expired=False):
         lambda *, org: list(entries),
     )
     monkeypatch.setattr(fleet_relay_sync, "_org_db_path", lambda _org: personal)
+    monkeypatch.setattr(
+        "tools.dashboard.link_approvals._load_binding",
+        lambda _org: ({"org_uuid": org_uuid}, None),
+    )
     return payload, machine_id
 
 
@@ -138,6 +157,19 @@ def test_configure_warms_the_cache_and_a_fresh_process_rearms(
     restarted.attach_warm_cache(fleet_relay_sync.FleetRuntimeWarmCache("org-a"))
     assert restarted.rearm_from_cache() is True
     assert restarted.scheduler is not None
+
+
+def test_verified_warm_credential_exposes_the_enrolled_machine_key(
+    tmp_path, monkeypatch
+):
+    payload, _ = _valid_payload(tmp_path, monkeypatch, reachability=True)
+    runtime = fleet_relay_sync.ConnectorFleetRuntime()
+    runtime.attach_warm_cache(fleet_relay_sync.FleetRuntimeWarmCache("org-a"))
+
+    runtime.configure(payload)
+
+    assert runtime.machine_key is not None
+    assert runtime.machine_key.public_hex == payload["machine_pub"]
 
 
 def test_only_the_matching_org_rearms(tmp_path, monkeypatch):
