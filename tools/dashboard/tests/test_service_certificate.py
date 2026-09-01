@@ -22,6 +22,12 @@ def test_certbot_command_is_exact_scope_ephemeral_job(monkeypatch, tmp_path):
     assert not any("private" in token.lower() for token in command)
 
 
+def test_compose_environment_derives_host_code_root_for_fresh_exec(monkeypatch):
+    monkeypatch.delenv("AUTONOMY_HOST_ROOT", raising=False)
+    monkeypatch.setenv("AUTONOMY_HOST_DATA_ROOT", "/opt/autonomy")
+    assert certs._compose_environment()["AUTONOMY_HOST_ROOT"] == "/opt/autonomy/code"
+
+
 def test_status_requires_pair_and_unexpired_metadata(monkeypatch, tmp_path):
     monkeypatch.setattr(certs, "GATEWAY_CERT", tmp_path / "tls.crt")
     monkeypatch.setattr(certs, "GATEWAY_KEY", tmp_path / "tls.key")

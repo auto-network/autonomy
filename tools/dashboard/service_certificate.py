@@ -66,6 +66,27 @@ def _compose_base() -> list[str]:
     ]
 
 
+def _compose_environment() -> dict[str, str]:
+    """Environment for Compose interpolation in a fresh ``docker exec``.
+
+    ``AUTONOMY_HOST_ROOT`` is derived by the dashboard entrypoint and therefore
+    exists in the long-lived server process, but Docker does not retroactively
+    add that export to later ``docker exec`` processes. Re-derive the same host
+    path from the compose-declared data root and refuse an ambiguous relative
+    bind source.
+    """
+    env = dict(os.environ)
+    host_root = env.get("AUTONOMY_HOST_ROOT")
+    if not host_root:
+        host_data_root = env.get("AUTONOMY_HOST_DATA_ROOT")
+        if host_data_root:
+            host_root = str(Path(host_data_root) / "code")
+    if not host_root or not Path(host_root).is_absolute():
+        raise ServiceCertificateError("AUTONOMY_HOST_ROOT is unavailable")
+    env["AUTONOMY_HOST_ROOT"] = host_root
+    return env
+
+
 def _certbot_command(apex: str, order: str, *, staging: bool) -> list[str]:
     command = [
         *_compose_base(), "run", "--rm", "--no-deps",
@@ -154,6 +175,7 @@ async def issue(org: str, persona_label: str, *, staging: bool = False) -> dict:
                 *_certbot_command(apex, order, staging=staging),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=_compose_environment(),
             )
             stdout, stderr = await proc.communicate()
         if proc.returncode != 0:
