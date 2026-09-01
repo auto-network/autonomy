@@ -98,7 +98,7 @@ into graph notes, never mount all of `~/.config/hcloud` into a container
   `setHosts` replaces all records). **Landed** as `namecheap_dns.py` +
   `add-apex-a-record.sh` (bead auto-9q7a5); generalise to a full DNS
   cutover script reusing the same safety gates.
-- Install `caddy/registry-ash-1.Caddyfile` from the golden-snapshot build.
+- Install `caddy/estate.Caddyfile` (one authored file, byte-identical to every box; the bind IP arrives as $AUTONOMY_BIND_IP via a systemd drop-in) from the golden-snapshot build.
   The complete config is now authored and reproducible; do not reintroduce a
   live-host capture as a deployment input.
 - Validation + full-site teardown, mirroring the BlindHash script set

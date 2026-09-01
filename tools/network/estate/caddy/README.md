@@ -16,8 +16,12 @@ All three front the **same** registry uvicorn process on `127.0.0.1:8477`
 (`tools/network/registry`, `autonomy-registry.service`). Splitting them is a
 naming/contract boundary, not three processes.
 
-Every listener is bound explicitly to `5.161.219.195`. The same machine also
-has a second public IPv4 for coturn; wildcard Caddy listeners would take that
+Every listener is bound to the box's own primary IP via `default_bind
+{$AUTONOMY_BIND_IP}` — the ONE per-host value, supplied to caddy by a systemd
+drop-in that `deploy-caddy.sh` installs (`--bind-ip`, defaulting to the
+target's address). The config file itself is byte-identical on every estate
+box. Explicit binding matters because the same machine also has a second
+public IPv4 for coturn; a wildcard `0.0.0.0` listener would take that
 address's TCP 80/443 and make TURN/TLS plus standalone certificate renewal
 impossible.
 
@@ -25,11 +29,11 @@ impossible.
 `https://relay.auto.network` via the service unit's `--base-url`. Adding the
 apex vhost does not, and must not, touch that: a link minted after the apex
 lands still points at `relay.auto.network`. Do not add a base-url override in
-`registry-ash-1.Caddyfile` or in the systemd unit.
+`estate.Caddyfile` or in the systemd unit.
 
 ## Files here
 
-- `registry-ash-1.Caddyfile` — the complete authored configuration for all
+- `estate.Caddyfile` — the one complete authored configuration for all
   four current address blocks. This is the source of truth; clean hosts never
   pull configuration back from an old host.
 - `../deploy-caddy.sh` — checksum, target-side validation, atomic install,

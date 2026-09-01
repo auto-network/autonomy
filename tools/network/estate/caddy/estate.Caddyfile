@@ -1,0 +1,34 @@
+# auto.network registry edge — fronted by Caddy.
+# ONE authored file for every estate box. The single per-host value is the
+# bind IP, supplied as $AUTONOMY_BIND_IP by the caddy unit's environment
+# (deploy-caddy.sh installs the drop-in). This complete file is the deploy
+# source of truth (auto-oyqlw); no live-host capture.
+
+# Pin every listener — including the auto-HTTP :80 ACME/redirect server — to
+# the box's primary IP via default_bind, so a floating/TURN IP stays free for
+# coturn. Without this the auto-HTTPS sites' :80 listener falls back to
+# 0.0.0.0 and Certbot's standalone HTTP-01 on the TURN IP is refused (see
+# turn/deploy/issue-certificate.sh).
+{
+	default_bind {$AUTONOMY_BIND_IP}
+}
+
+# registry.auto.network: automatic HTTPS (Let's Encrypt) -> loopback registry.
+registry.auto.network {
+	reverse_proxy 127.0.0.1:8477
+}
+
+# Raw-IP HTTP access for pre-DNS / off-tailnet reachability testing.
+{$AUTONOMY_BIND_IP}:80 {
+	reverse_proxy 127.0.0.1:8477
+}
+
+# relay.auto.network: public share hostname -> same loopback registry.
+relay.auto.network {
+	reverse_proxy 127.0.0.1:8477
+}
+
+# auto.network apex: TLS ingress to the same loopback registry (auto-9q7a5).
+auto.network {
+	reverse_proxy 127.0.0.1:8477
+}
