@@ -76,6 +76,17 @@ python3 namecheap_dns.py gethosts \
     --save /var/backups/namecheap/auto.network.after-delegation.xml
 ```
 
+**Registrar propagation gap (observed live 2026-09-01, don't panic):** there is
+a ~5-minute window between Namecheap's API confirming the write (`gethosts`
+shows all 4 records instantly) and Namecheap's *own* authoritative
+nameservers (`dns1/dns2.registrar-servers.com`) publishing the delegation.
+During that window they return **NXDOMAIN with the `aa` flag set** — an
+authoritative negative, not resolver caching — so a `--public` check run
+immediately after apply can legitimately fail. Confirm it's the window and
+not a real failure by watching the parent SOA serial bump between checks,
+then retry `--public` a few minutes later; it resolves cleanly once their
+NS publish.
+
 The four parent records: `serve NS ns1.auto.network.`,
 `serve NS ns2.auto.network.`, `ns1 A <relay-ip>`, `ns2 A <relay-ip>` —
 glue-less (the NS names are ordinary records of the parent zone

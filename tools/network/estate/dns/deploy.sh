@@ -56,10 +56,38 @@ systemctl enable -q autonomy-registry-dns
 systemctl restart autonomy-registry-dns
 EOF
 
+# Prove an authoritative answer WITHOUT depending on dig being on the
+# control host (it often isn't — a fresh box or a minimal container has no
+# dnsutils). Use dig when present, else a stdlib-Python UDP query. A
+# deploy's own success check must not hinge on an un-guaranteed tool.
+probe_answer() {  # -> prints the answered A record, or nothing
+    if command -v dig >/dev/null 2>&1; then
+        dig +short +time=2 +tries=1 @"$HOST_IP" probe.serve.auto.network A \
+            2>/dev/null | head -1
+    else
+        HOST_IP="$HOST_IP" python3 - <<'PY' 2>/dev/null
+import os, socket, struct
+ip = os.environ["HOST_IP"]
+q = struct.pack(">HHHHHH", 0x1234, 0x0100, 1, 0, 0, 0)
+for lbl in "probe.serve.auto.network".split("."):
+    q += bytes([len(lbl)]) + lbl.encode()
+q += b"\x00" + struct.pack(">HH", 1, 1)  # QTYPE A, IN
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(3)
+try:
+    s.sendto(q, (ip, 53)); raw, _ = s.recvfrom(2048)
+except Exception:
+    raise SystemExit(0)
+# Last 4 bytes of a single-A answer are the address; parse the answer RR.
+if raw[6:8] != b"\x00\x01":  # ANCOUNT >= 1
+    raise SystemExit(0)
+print(".".join(str(b) for b in raw[-4:]))
+PY
+    fi
+}
+
 echo "== proving authoritative answers"
 for _ in $(seq 15); do
-    if dig +short +time=2 +tries=1 @"$HOST_IP" probe.serve.auto.network A \
-            | grep -qx "$HOST_IP"; then
+    if [ "$(probe_answer)" = "$HOST_IP" ]; then
         echo "   @$HOST_IP answers probe.serve.auto.network → $HOST_IP ✓"
         echo "deploy complete. Next: verify-dns.sh $HOST_IP"
         exit 0

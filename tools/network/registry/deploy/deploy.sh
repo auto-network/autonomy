@@ -59,6 +59,15 @@ rsync -az --delete --exclude '__pycache__' --exclude 'tests' \
     "$REPO_ROOT/tools/network/relaykit" \
     "$REPO_ROOT/tools/network/registry" \
     "$TARGET:$APP_DIR/tools/network/"
+# Top-level tools/network/*.py modules the packages import at load time
+# (clock.py, and any future sibling) are FILES, not in the three package
+# dirs above, so the per-directory sync skips them. A long-lived host
+# accretes them from older deploys and boots; a fresh box crashes with
+# ModuleNotFoundError (proven on relay-hil-1: 'tools.network.clock'). Ship
+# every top-level sibling so a from-scratch deploy is complete — the cattle
+# fix. They are plain source, imported only on demand, harmless if unused.
+rsync -az "$REPO_ROOT"/tools/network/*.py \
+    "$TARGET:$APP_DIR/tools/network/"
 rsync -az --delete \
     "$REPO_ROOT/deploy/install" \
     "$TARGET:$APP_DIR/deploy/"
@@ -98,6 +107,11 @@ echo
 systemctl --no-pager --lines=5 status autonomy-registry
 EOF
 
+if [ -n "${SKIP_PUBLIC_SMOKE:-}" ]; then
+    echo "==> SKIP_PUBLIC_SMOKE set: the loopback /healthz check above is this" \
+         "box's per-box proof; skipping the public-URL smoke (a fresh box with" \
+         "no public TLS edge has nothing public to hit)."
+else
 SMOKE_URL="${SMOKE_URL:-https://relay.auto.network}"
 echo "==> smoke test against $SMOKE_URL"
 SMOKE_ARGS=("$SMOKE_URL")
@@ -145,5 +159,6 @@ fi
 # Deliberately NOT tolerated: a deploy that leaves links broken has failed,
 # even though systemd is happy and /healthz answers.
 "$SMOKE_PYTHON" "$REPO_ROOT/tools/network/registry/deploy/smoke.py" "${SMOKE_ARGS[@]}"
+fi
 
 echo "==> deployed: registry live on $TARGET (loopback :8477, fronted by Caddy)"
