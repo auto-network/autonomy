@@ -451,18 +451,26 @@ var signRegistryRequestCore;
     var viewerPayload = Object.assign({}, commonCert, {
       subject: { kind: 'operator', id: childPub },
     });
+    var dns01Payload = Object.assign({}, commonCert, {
+      scope: ['serve:dns-01'],
+      subject: { kind: 'persona', id: personaPub },
+    });
     var registrySig = bytesToHex(new Uint8Array(await crypto.subtle.sign(
       'Ed25519', rootKey,
       _domainBytes(CERT_DOMAIN, canonicalJson(registryPayload)))));
     var viewerSig = bytesToHex(new Uint8Array(await crypto.subtle.sign(
       'Ed25519', rootKey,
       _domainBytes(CERT_DOMAIN, canonicalJson(viewerPayload)))));
+    var dns01Sig = bytesToHex(new Uint8Array(await crypto.subtle.sign(
+      'Ed25519', rootKey,
+      _domainBytes(CERT_DOMAIN, canonicalJson(dns01Payload)))));
     return {
       childPub: childPub,
       notAfter: commonCert.not_after,
       body: {
         cert: canonicalJson(Object.assign({}, registryPayload, { sig: registrySig })),
         viewer_cert: canonicalJson(Object.assign({}, viewerPayload, { sig: viewerSig })),
+        dns01_cert: canonicalJson(Object.assign({}, dns01Payload, { sig: dns01Sig })),
         private_key: privateKeyHex,
       },
     };

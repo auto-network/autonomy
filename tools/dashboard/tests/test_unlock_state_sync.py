@@ -28,6 +28,7 @@ def _stub_serving(monkeypatch, *, scopes, cert_status, replies, disk="c0ffee",
     NOT, so holding no serving credential is expected, not a fault)."""
     import types
     from tools.dashboard import link_serving_supervisor as sup
+    from tools.dashboard import service_certificate
     from tools.network import build_version
     from tools.network import fleet_tunnel_server
 
@@ -48,6 +49,7 @@ def _stub_serving(monkeypatch, *, scopes, cert_status, replies, disk="c0ffee",
 
     monkeypatch.setattr(sup, "control", control)
     monkeypatch.setattr(build_version, "disk_head", lambda: disk)
+    monkeypatch.setattr(service_certificate, "status", lambda: {"status": "ok"})
     # Keep the tunnel probe from touching a real supervisor singleton.
     monkeypatch.setattr(sup, "get_supervisor",
                         lambda: type("S", (), {"serving": lambda self: True})())
@@ -218,3 +220,18 @@ def test_certificate_lights_for_a_lapsed_serving_scope(client, monkeypatch):
     assert cert["needs"] is True
     assert cert["scopes"] == ["anchore"]
     assert "lapsed" in cert["detail"]
+
+
+def test_existing_certificate_flag_includes_missing_service_tls(client, monkeypatch):
+    _stub_serving(
+        monkeypatch,
+        scopes=["autonomy"],
+        cert_status={"autonomy": "ok"},
+        replies={"autonomy": {"process_commit": "c0ffee"}},
+    )
+    from tools.dashboard import service_certificate
+    monkeypatch.setattr(service_certificate, "status", lambda: {"status": "missing"})
+    cert = client.get("/api/identity/unlock-state").json()["certificates"]
+    assert cert["needs"] is True
+    assert cert["scopes"] == ["Service TLS"]
+    assert "DNS-01" in cert["detail"]

@@ -1615,7 +1615,7 @@ async def get_serve_cert_status(request: Request) -> JSONResponse:
 
     No certificate bytes or identity are returned. The browser uses this only
     to decide whether the organization root it is about to unlock should also
-    sign the two context-specific serving certificates.
+    sign the context-specific serving certificates.
     """
     org, refused = resolve_scoped_org(request.query_params.get("org"), request=request)
     if refused is not None:
@@ -1640,6 +1640,11 @@ async def get_serve_cert_status(request: Request) -> JSONResponse:
     required = status != "ok"
     days_remaining = None
     row = state.get("row") or {}
+    if not isinstance(row.get("dns01_cert"), str):
+        # Existing tunnel credentials remain usable while the ordinary unlock
+        # ceremony upgrades them.  Do not take the live connector down merely
+        # because its new, narrower DNS authority has not been minted yet.
+        required = True
     not_after = row.get("not_after")
     if isinstance(not_after, int):
         days_remaining = (not_after - int(time.time())) / 86400.0
@@ -1659,8 +1664,9 @@ async def get_serve_cert_status(request: Request) -> JSONResponse:
 async def post_serve_cert(request: Request) -> JSONResponse:
     """Provision the org's tunnel serving delegate (§5.1).
 
-    Body: ``{org?, cert, viewer_cert, private_key}`` — two direct-root
-    ``tunnel:serve`` delegation certificates over one Ed25519 serving child,
+    Body: ``{org?, cert, viewer_cert, dns01_cert, private_key}`` — two
+    direct-root ``tunnel:serve`` certificates plus one exact-scope
+    ``serve:dns-01`` certificate over one Ed25519 serving child,
     minted in the operator's browser during ordinary organization sign-on when
     the cheap status check says repair is required. The persona certificate is
     for registry admission; the identity-neutral certificate is for viewer
@@ -1683,10 +1689,12 @@ async def post_serve_cert(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": "body must be JSON"}, status_code=400)
     if not isinstance(body, dict) or not isinstance(body.get("cert"), str) \
             or not isinstance(body.get("viewer_cert"), str) \
+            or not isinstance(body.get("dns01_cert"), str) \
             or not isinstance(body.get("private_key"), str):
         return JSONResponse({"ok": False, "error": (
             "body must carry 'cert' (registry admission cert), 'viewer_cert' "
-            "(identity-neutral viewer cert), and 'private_key' (their shared "
+            "(identity-neutral viewer cert), 'dns01_cert' (exact-scope DNS "
+            "delegate), and 'private_key' (their shared "
             "delegate key hex)"
         )}, status_code=400)
 
@@ -1725,6 +1733,7 @@ async def post_serve_cert(request: Request) -> JSONResponse:
     try:
         cert = DelegationCert.from_json(body["cert"])
         viewer_cert = DelegationCert.from_json(body["viewer_cert"])
+        dns01_cert = DelegationCert.from_json(body["dns01_cert"])
     except Exception as e:
         return JSONResponse({"ok": False, "error": f"serving cert does not parse: {e}"},
                             status_code=400)
@@ -1763,6 +1772,19 @@ async def post_serve_cert(request: Request) -> JSONResponse:
     if cert.not_after <= now:
         return JSONResponse({"ok": False, "error": "cert is already expired"},
                             status_code=400)
+    if (
+        dns01_cert.child_pub != cert.child_pub
+        or dns01_cert.org != cert.org
+        or tuple(dns01_cert.scope) != ("serve:dns-01",)
+        or dns01_cert.not_before != cert.not_before
+        or dns01_cert.not_after != cert.not_after
+        or dns01_cert.parent_cert is not None
+        or dns01_cert.subject != cert.subject
+    ):
+        return JSONResponse({"ok": False, "error": (
+            "dns01 cert must be a direct-root serve:dns-01 delegate over "
+            "the same child key, organization, persona, and validity window"
+        )}, status_code=400)
     if cert.org != org_uuid:
         return JSONResponse({"ok": False, "error": (
             "cert org does not match the org's binding"
@@ -1782,13 +1804,17 @@ async def post_serve_cert(request: Request) -> JSONResponse:
         )}, status_code=409)
     # Chain to the org's OWN root (not a caller-supplied one) with tunnel:serve.
     try:
-        for candidate in (cert, viewer_cert):
+        for candidate, required_scope in (
+            (cert, SERVE_CERT_SCOPE),
+            (viewer_cert, SERVE_CERT_SCOPE),
+            (dns01_cert, "serve:dns-01"),
+        ):
             verified = verify_chain(
                 candidate,
                 root_pub,
                 org=org_uuid,
                 now=now,
-                required_scope=SERVE_CERT_SCOPE,
+                required_scope=required_scope,
             )
             if verified.depth != 1:
                 raise IdkitError(
@@ -1820,6 +1846,7 @@ async def post_serve_cert(request: Request) -> JSONResponse:
             if (
                 previous_serve.payload.get("cert") == body["cert"]
                 and previous_serve.payload.get("viewer_cert") == body["viewer_cert"]
+                and previous_serve.payload.get("dns01_cert") == body["dns01_cert"]
             ):
                 from tools.dashboard.link_serving_supervisor import serve_cert_state
 
@@ -1855,6 +1882,7 @@ async def post_serve_cert(request: Request) -> JSONResponse:
         settings_ops.upsert_by_key(
             NETWORK_SERVE_CERT_SET_ID, NETWORK_SERVE_CERT_REVISION, "default",
             {"cert": body["cert"], "viewer_cert": body["viewer_cert"],
+             "dns01_cert": body["dns01_cert"],
              "key_path": key_file,
              "root_pub": root_pub, "not_after": cert.not_after},
             org=write_org,
