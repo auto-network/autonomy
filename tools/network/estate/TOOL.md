@@ -16,7 +16,7 @@ Every box must be reproducible from these scripts — nothing hand-configured.
 | `deploy-caddy.sh [ssh-target]` | Installs the complete repository-owned four-block Caddyfile on registry-ash-1: checksum, target-side `caddy validate`, atomic replace, rollback copy, reload. Never captures the live host as source. Default target `root@5.161.219.195` |
 | `verify-apex.sh` | End-to-end proof: apex DNS across 4 public resolvers, valid cert, `/healthz` 200, `/install` content contract, and that share links still issue on relay.auto.network |
 | `namecheap_dns.py add-delegation` | Appends EXACTLY the four serve.auto.network NS+glue records (auto-g1jxw): same read→gate→write→verify discipline, +4/−0 required, NS-aware append, `--dry-run` renders the operator-approval diff. Runs on auto-ash-1 |
-| `dns/` | The delegated serve.auto.network authoritative pair: pinned PowerDNS 4.9 deploy (primary dns-ash-1 / secondary dns-hel-1), TXT-only expiry-ledgered challenge broker, 53/tcp+udp firewall, verify/backup/restore, full runbook in `dns/README.md` |
+| `dns/` | The registry-served serve.auto.network authoritative zone (auto-g1jxw): its own systemd process on the relay host answering from registry state, 53/tcp+udp firewall, verify script, gated 4-record parent delegation, full runbook in `dns/README.md` |
 
 Consumers: `tools/network/registry/deploy/` (share-links registry), the
 H2 clean-VM deployment harness, H6 clean-machine acceptance.

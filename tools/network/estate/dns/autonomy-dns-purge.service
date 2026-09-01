@@ -1,6 +1,0 @@
-[Unit]
-Description=Purge expired serve.auto.network ACME challenge TXT values
-
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/python3 /usr/local/bin/challenge_broker.py purge-expired

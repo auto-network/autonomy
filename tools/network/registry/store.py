@@ -273,6 +273,18 @@ CREATE TABLE IF NOT EXISTS serve_hosts (
     created_at     INTEGER NOT NULL
 );
 
+-- DNS-01 challenge TXT values served by the registry's own authoritative
+-- responder (auto-g1jxw: the DNS server IS the registry). Every value
+-- carries an expiry; reads purge inline, so a crashed ACME client can
+-- never strand a challenge. Writes arrive only through the bounded
+-- dns_challenges module (later: the auto-bhs3c authenticated control op).
+CREATE TABLE IF NOT EXISTS serve_challenges (
+    name       TEXT NOT NULL,
+    value      TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    PRIMARY KEY (name, value)
+);
+
 -- One immutable serving label per persona (design §3.2: generated once,
 -- never renamed). UNIQUE(label) is the registry-side rejection of the
 -- astronomically-unlikely same-label/different-key collision — refused,
@@ -1217,6 +1229,54 @@ class RegistryStore:
             (host,),
         ).fetchone()
         return self._host_ownership_row(row)
+
+    @_locked
+    def upsert_serve_challenge(
+        self, name: str, value: str, *, expires_at: int, now: int,
+        max_values: int = 8,
+    ) -> None:
+        """Add/refresh one challenge value; purges expired rows first and
+        bounds live values per name (raises ValueError at the cap)."""
+        self._conn.execute(
+            "DELETE FROM serve_challenges WHERE expires_at < ?", (now,))
+        live = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM serve_challenges"
+            " WHERE name = ? AND value != ?",
+            (name, value),
+        ).fetchone()["n"]
+        if live >= max_values:
+            self._conn.rollback()
+            raise ValueError(f"{max_values} live values at {name}")
+        self._conn.execute(
+            "INSERT INTO serve_challenges (name, value, expires_at)"
+            " VALUES (?, ?, ?) ON CONFLICT (name, value)"
+            " DO UPDATE SET expires_at = excluded.expires_at",
+            (name, value, expires_at),
+        )
+        self._conn.commit()
+
+    @_locked
+    def delete_serve_challenge(self, name: str, value: str) -> None:
+        self._conn.execute(
+            "DELETE FROM serve_challenges WHERE name = ? AND value = ?",
+            (name, value),
+        )
+        self._conn.commit()
+
+    @_locked
+    def live_serve_challenges(self, *, now: int) -> dict:
+        """{fqdn: [values]} of unexpired challenges, purging inline."""
+        self._conn.execute(
+            "DELETE FROM serve_challenges WHERE expires_at < ?", (now,))
+        self._conn.commit()
+        rows = self._conn.execute(
+            "SELECT name, value FROM serve_challenges"
+            " ORDER BY name, value",
+        ).fetchall()
+        challenges: dict = {}
+        for row in rows:
+            challenges.setdefault(row["name"], []).append(row["value"])
+        return challenges
 
     @_locked
     def get_persona_label(self, persona_pub: str) -> Optional[str]:
