@@ -482,6 +482,12 @@ def _copy_peer_state(source: Path, target: sqlite3.Connection) -> None:
             return
         for raw in local.execute("SELECT * FROM fleet_sync_peer_state"):
             row = dict(raw)
+            # Served acknowledgements are local journal transaction row ids,
+            # and the staging database renumbers them; a stale ref could
+            # authorize pruning frames a peer never consumed. Peers
+            # re-establish their acknowledgement on their next pull.
+            if "local_watermark" in row:
+                row["local_watermark"] = None
             columns = sorted(row)
             target.execute(
                 "INSERT INTO fleet_sync_peer_state("
