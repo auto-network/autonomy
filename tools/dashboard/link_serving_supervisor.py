@@ -111,6 +111,21 @@ except OSError:  # pragma: no cover - libc is always present on Linux
 #: --org <uuid> ...`` reparented to systemd — the supervisor cannot see it in
 #: ``self._procs`` (it is not its child), so it finds it by this signature.
 _CONNECTOR_MODULE = "tools.dashboard.link_serving"
+_PROCESS_OWNERSHIP: dict[str, int] = {}
+
+
+def _try_ownership_lock(fd: int) -> None:
+    """Acquire the per-process connector election lock without blocking.
+
+    POSIX record locks are intentionally used instead of ``flock``: record
+    locks are not inherited across ``fork()``, so an unrelated worker cannot
+    prolong Dashboard ownership even if its launcher retains the descriptor.
+    """
+    fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _release_ownership_lock(fd: int) -> None:
+    fcntl.lockf(fd, fcntl.LOCK_UN)
 
 
 # ── provisioning state (also the enrich precondition) ─────────
@@ -944,6 +959,15 @@ class ServingSupervisor:
         if org in self._locks:
             return True
         lock_path = _lock_path_for(key_path)
+        pid = os.getpid()
+        owner_pid = _PROCESS_OWNERSHIP.get(lock_path)
+        if owner_pid == pid:
+            return False
+        if owner_pid is not None:
+            # A forked child may inherit this bookkeeping, but POSIX record
+            # lock ownership itself is not inherited.  Never let the parent's
+            # pid make the child believe it owns anything.
+            _PROCESS_OWNERSHIP.pop(lock_path, None)
         lock = open(lock_path, "a+")
         # Defense in depth for subprocess launch paths that exec: Python opens
         # descriptors non-inheritable by default, but make the ownership
@@ -951,20 +975,24 @@ class ServingSupervisor:
         os.set_inheritable(lock.fileno(), False)
         os.chmod(lock_path, 0o600)
         try:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _try_ownership_lock(lock.fileno())
         except BlockingIOError:
             lock.close()
             return False
         self._locks[org] = lock
+        _PROCESS_OWNERSHIP[lock_path] = pid
         return True
 
     def _release_lock(self, org: str | None) -> None:
         lock = self._locks.pop(org, None)
         if lock is None:
             return
+        lock_path = str(lock.name)
         with contextlib.suppress(OSError):
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            _release_ownership_lock(lock.fileno())
         lock.close()
+        if _PROCESS_OWNERSHIP.get(lock_path) == os.getpid():
+            _PROCESS_OWNERSHIP.pop(lock_path, None)
 
     def _drop_inherited_locks_after_fork(self) -> None:
         """Close this child's duplicate ownership descriptors after ``fork``.
