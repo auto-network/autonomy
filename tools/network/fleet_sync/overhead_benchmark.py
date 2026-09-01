@@ -106,7 +106,6 @@ def run(
     catalog_names = {
         "fleet_sync_catalog", "fleet_sync_origins", "fleet_sync_state",
         "fleet_sync_transactions",
-        "idx_fleet_sync_catalog_order",
     }
     catalog_bytes = sum(
         size for name, size in tracked["allocation"].items()
