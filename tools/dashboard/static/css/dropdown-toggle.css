@@ -85,6 +85,11 @@
 .sessions-launch-control {
   flex: 0 0 auto;
 }
+.sessions-launch-menu {
+  left: 0;
+  right: auto;
+  max-width: calc(100vw - 24px);
+}
 .sessions-org-filter .sort-toggle-icon {
   flex: 0 0 auto;
   font-size: 11px;
@@ -171,6 +176,10 @@
   }
   .sessions-launch-control {
     grid-column: 3;
+  }
+  .sessions-launch-menu {
+    left: auto;
+    right: 0;
   }
   .sessions-org-filter-toggle {
     width: auto;
