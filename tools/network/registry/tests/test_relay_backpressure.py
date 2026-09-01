@@ -150,6 +150,7 @@ def test_viewer_channel_cap_rejects_when_tunnel_full(monkeypatch):
 
     class _Link:
         org_uuid = "test-org"
+        target_type = "note"
 
     class _Hub:
         def get(self, org):
@@ -174,6 +175,7 @@ def test_viewer_channel_cap_admits_below_capacity(monkeypatch):
 
     class _Link:
         org_uuid = "test-org"
+        target_type = "note"
 
     class _Hub:
         def get(self, org):

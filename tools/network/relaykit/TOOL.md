@@ -70,6 +70,56 @@ timing, volume — asserted in tests by a TCP tap on the tunnel wire: the
 token appears in captured bytes (positive control), channel plaintext
 never does.
 
+## Hello v2 — machine identity + capability negotiation (auto-0zdky)
+
+The `/t/{org}` hello has two versions. v1 (`{v, org, signer, ts, cert,
+sig}`) is the deployed legacy shape and keeps working unchanged. v2 adds
+the enrolled machine identity and capability negotiation, enabling
+concurrent per-persona/per-machine tunnels and hostname routing:
+
+```json
+{"v": 2, "org": ..., "signer": ..., "machine": "<enrolled machine pub>",
+ "machine_sig": ..., "caps": ["host-lease/1"], "ts": ...,
+ "cert": ..., "sig": ...}
+```
+
+One canonical unsigned core — `canonical_json({v, org, signer, machine,
+caps, ts})`, excluding `cert` (chain-verified) and both signatures —
+carries two domain-separated Ed25519 signatures: the serving leaf under
+`autonomy.network.tunnel.hello.v2\n`, and the enrolled machine key under
+`autonomy.network.tunnel.hello.machine.v1\n` (a brand-new domain, so its
+first version is v1; the core itself carries the hello version). The
+machine co-signature proves live custody of the machine key — a
+persona-signed claim alone cannot bind a hostname lease to a machine.
+The registry ack names the accepted capability intersection:
+`{"ok": true, "v": 2, "caps": [...]}`; capability-gated frames are never
+sent to a tunnel that did not negotiate them, so old connectors cannot
+misparse.
+
+**Hub keying.** The relay hub keys live tunnels by
+`(org, persona_pub, machine)`; reconnect replaces only the same slot
+(close 4409) and drops that connection's leases synchronously — distinct
+machines and personas of one org coexist. v1 connectors occupy the
+empty-machine slot with legacy replacement semantics. Org-level viewer
+selection is least-loaded-with-capacity, pinned per connection (the
+TLA-verified pool rule, `tools/network/TLA/PoolGreen.cfg`).
+
+**Hostname leases (`host-lease/1`).** D19 control ops `host-register` /
+`host-renew` / `host-release` bind serving hostnames
+(`<app>.<persona-label>.serve.auto.network`) to the authenticated
+tunnel. Durable ownership (persona-bound, reservation-keyed UUIDv5 over
+`<persona_pub>\0<app>`, monotonic generation persisted in the registry
+store) is separate from the live lease (memory-only, TTL 120 s, dies
+with the connection). Identity is always derived from the tunnel — op
+bodies carrying identity fields fail closed. Conflicts are typed:
+`host-owned-elsewhere`, `lease-held`, `stale-generation`,
+`label-invalid`, `not-authorized`. Route teardown on disconnect,
+replacement, revocation, or release is synchronous, never TTL-bound.
+Route lookup misses are uniform (unknown, unleased, expired are
+indistinguishable). The raw `tls-stream` transport that rides these
+routes is auto-9z1xh; the adapter seam contract is the r3 artifact
+agreed with the dashboard lane.
+
 ## Dashboard integration seam
 
 `TunnelConnector(relay_url, org, key, registry_cert, handler,

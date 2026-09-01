@@ -1,0 +1,335 @@
+"""auto-0zdky: hostname ownership + live leases over tunnel control ops.
+
+``host-register`` is the authenticated desired-state advertisement, keyed
+by the NamespaceReservation UUID (UUIDv5 over ``<persona_pub>\\0<app>``,
+design c880c5e6 §3.2). Ownership is durable and persona-bound; the lease
+binds one live (machine, connection) with generation fencing. Identity is
+always derived from the authenticated tunnel — never from op bodies.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import hashlib
+import json
+import uuid
+
+import pytest
+
+from tools.network.idkit import KeyPair, Subject, issue_cert
+from tools.network.relaykit import hello as hello_mod
+from tools.network.relaykit.frames import (
+    CTRL_CHANNEL_ID,
+    FRAME_CTRL,
+    decode_frame,
+    encode_frame,
+)
+
+from .conftest import DAY, NOW, ORG, register
+
+PERSONA_A = "ab" * 32
+PERSONA_B = "cd" * 32
+RESERVATION_NS = uuid.UUID("6cf440db-c8b4-566c-99db-e7be17109bdc")
+
+
+def _label(persona_pub: str, slug: str = "worker") -> str:
+    suffix = hashlib.sha256(bytes.fromhex(persona_pub)).hexdigest()[:20]
+    return f"{slug}-{suffix}"
+
+
+def _host(app_label: str, persona_pub: str, slug: str = "worker") -> str:
+    return f"{app_label}.{_label(persona_pub, slug)}.serve.auto.network"
+
+
+def _reservation(persona_pub: str, app_label: str) -> str:
+    name = f"{persona_pub}\0{app_label}"
+    return str(uuid.uuid5(RESERVATION_NS, name))
+
+
+def _serve_cert(root, serve_key, persona=PERSONA_A):
+    return issue_cert(
+        root,
+        serve_key.public_hex,
+        scope=("tunnel:serve",),
+        org=ORG,
+        subject=Subject("persona", persona),
+        not_before=NOW - 100,
+        not_after=NOW + 30 * DAY,
+    )
+
+
+@contextlib.contextmanager
+def _tunnel(client, clock, root, *, persona=PERSONA_A, machine_key=None,
+            caps=("host-lease/1",)):
+    serve_key = KeyPair.generate()
+    machine_key = machine_key or KeyPair.generate()
+    cert = _serve_cert(root, serve_key, persona)
+    raw = hello_mod.build_tunnel_hello_v2(
+        serve_key, cert, machine_key=machine_key, org=ORG,
+        ts=clock.now, caps=caps,
+    )
+    with client.websocket_connect(f"/t/{ORG}") as ws:
+        ws.send_text(raw)
+        ack = ws.receive_json()
+        assert ack["ok"] is True, ack
+        yield ws, machine_key
+
+
+_SEQ = iter(range(10_000))
+
+
+def _ctrl(ws, op, args):
+    correlation = format(next(_SEQ), "032x")
+    ws.send_bytes(encode_frame(
+        FRAME_CTRL, CTRL_CHANNEL_ID,
+        json.dumps({"id": correlation, "op": op, "args": args}).encode(),
+    ))
+    frame = decode_frame(ws.receive_bytes())
+    assert frame.type == FRAME_CTRL
+    reply = json.loads(frame.payload.decode())
+    assert reply["id"] == correlation
+    return reply
+
+
+def test_register_returns_lease_and_persists_ownership(
+    app, client, clock, root,
+):
+    register(client, clock, root, org_uuid=ORG)
+    host = _host("docs", PERSONA_A)
+    res = _reservation(PERSONA_A, "docs")
+    with _tunnel(client, clock, root) as (ws, _):
+        reply = _ctrl(ws, "host-register", {"reservation": res, "host": host})
+        assert reply["ok"] is True, reply
+        lease = reply["lease"]
+        assert lease["generation"] >= 1
+        assert lease["expires_at"] == clock.now + 120
+        # Live route resolves while leased …
+        assert app.state.host_routes.route(host) is not None
+    # … and is gone immediately after tunnel loss (fail closed, ≤2 s bound
+    # satisfied synchronously in the disconnect path).
+    assert app.state.host_routes.route(host) is None
+
+
+def test_reservation_uuid_must_match_persona_app_derivation(
+    app, client, clock, root,
+):
+    register(client, clock, root, org_uuid=ORG)
+    host = _host("docs", PERSONA_A)
+    with _tunnel(client, clock, root) as (ws, _):
+        reply = _ctrl(ws, "host-register", {
+            "reservation": str(uuid.uuid4()), "host": host,
+        })
+        assert reply["ok"] is False
+        assert reply["error"] == "label-invalid"
+
+
+def test_cross_persona_claim_fails_closed(app, client, clock, root):
+    register(client, clock, root, org_uuid=ORG)
+    host = _host("docs", PERSONA_A)
+    res = _reservation(PERSONA_A, "docs")
+    with _tunnel(client, clock, root, persona=PERSONA_A) as (ws_a, _):
+        assert _ctrl(ws_a, "host-register", {
+            "reservation": res, "host": host,
+        })["ok"] is True
+        with _tunnel(client, clock, root, persona=PERSONA_B) as (ws_b, _):
+            reply = _ctrl(ws_b, "host-register", {
+                "reservation": res, "host": host,
+            })
+            assert reply["ok"] is False
+            assert reply["error"] in (
+                "label-invalid", "host-owned-elsewhere", "not-authorized",
+            )
+
+
+def test_second_connection_register_gets_lease_held(client, clock, root):
+    register(client, clock, root, org_uuid=ORG)
+    host = _host("docs", PERSONA_A)
+    res = _reservation(PERSONA_A, "docs")
+    with _tunnel(client, clock, root) as (ws_a, _):
+        assert _ctrl(ws_a, "host-register", {
+            "reservation": res, "host": host,
+        })["ok"] is True
+        with _tunnel(client, clock, root) as (ws_b, _):
+            reply = _ctrl(ws_b, "host-register", {
+                "reservation": res, "host": host,
+            })
+            assert reply["ok"] is False
+            assert reply["error"] == "lease-held"
+
+
+def test_renew_with_stale_generation_is_fenced(app, client, clock, root):
+    register(client, clock, root, org_uuid=ORG)
+    host = _host("docs", PERSONA_A)
+    res = _reservation(PERSONA_A, "docs")
+    with _tunnel(client, clock, root) as (ws, _):
+        gen1 = _ctrl(ws, "host-register", {
+            "reservation": res, "host": host,
+        })["lease"]["generation"]
+    # Lease dropped on disconnect; a new connection re-registers → gen+1.
+    with _tunnel(client, clock, root) as (ws2, _):
+        gen2 = _ctrl(ws2, "host-register", {
+            "reservation": res, "host": host,
+        })["lease"]["generation"]
+        assert gen2 == gen1 + 1
+        stale = _ctrl(ws2, "host-renew", {
+            "reservation": res, "generation": gen1,
+        })
+        assert stale["ok"] is False
+        assert stale["error"] == "stale-generation"
+        fresh = _ctrl(ws2, "host-renew", {
+            "reservation": res, "generation": gen2,
+        })
+        assert fresh["ok"] is True
+        assert fresh["lease"]["generation"] == gen2
+
+
+def test_release_and_sibling_independence(app, client, clock, root):
+    register(client, clock, root, org_uuid=ORG)
+    host_docs = _host("docs", PERSONA_A)
+    host_api = _host("app2", PERSONA_A)
+    res_docs = _reservation(PERSONA_A, "docs")
+    res_api = _reservation(PERSONA_A, "app2")
+    with _tunnel(client, clock, root) as (ws, _):
+        assert _ctrl(ws, "host-register", {
+            "reservation": res_docs, "host": host_docs,
+        })["ok"] is True
+        assert _ctrl(ws, "host-register", {
+            "reservation": res_api, "host": host_api,
+        })["ok"] is True
+        assert _ctrl(ws, "host-release", {"reservation": res_docs})["ok"]
+        assert app.state.host_routes.route(host_docs) is None
+        assert app.state.host_routes.route(host_api) is not None
+
+
+@pytest.mark.parametrize("app_label", [
+    "www", "api", "relay", "registry", "auto", "serve", "_autonomy",
+    "-bad", "bad-", "UPPER", "a" * 64,
+])
+def test_reserved_or_malformed_app_labels_refused(
+    client, clock, root, app_label,
+):
+    register(client, clock, root, org_uuid=ORG)
+    host = _host(app_label, PERSONA_A)
+    res = _reservation(PERSONA_A, app_label)
+    with _tunnel(client, clock, root) as (ws, _):
+        reply = _ctrl(ws, "host-register", {
+            "reservation": res, "host": host,
+        })
+        assert reply["ok"] is False
+        assert reply["error"] == "label-invalid"
+
+
+def test_wrong_persona_suffix_in_host_is_refused(client, clock, root):
+    register(client, clock, root, org_uuid=ORG)
+    # Host whose label suffix binds to persona B, offered by persona A.
+    host = _host("docs", PERSONA_B)
+    res = _reservation(PERSONA_A, "docs")
+    with _tunnel(client, clock, root, persona=PERSONA_A) as (ws, _):
+        reply = _ctrl(ws, "host-register", {
+            "reservation": res, "host": host,
+        })
+        assert reply["ok"] is False
+        assert reply["error"] == "label-invalid"
+
+
+def test_identity_fields_in_op_body_are_refused(client, clock, root):
+    register(client, clock, root, org_uuid=ORG)
+    host = _host("docs", PERSONA_A)
+    res = _reservation(PERSONA_A, "docs")
+    with _tunnel(client, clock, root) as (ws, _):
+        for spoof in ({"persona": PERSONA_B}, {"machine": "ef" * 32}):
+            reply = _ctrl(ws, "host-register", {
+                "reservation": res, "host": host, **spoof,
+            })
+            assert reply["ok"] is False
+
+
+def test_ops_require_negotiated_capability(client, clock, root):
+    register(client, clock, root, org_uuid=ORG)
+    host = _host("docs", PERSONA_A)
+    res = _reservation(PERSONA_A, "docs")
+    with _tunnel(client, clock, root, caps=()) as (ws, _):
+        reply = _ctrl(ws, "host-register", {
+            "reservation": res, "host": host,
+        })
+        assert reply["ok"] is False
+        assert reply["error"] == "not-authorized"
+
+
+def test_clean_op_failure_keeps_tunnel_serving(client, clock, root):
+    register(client, clock, root, org_uuid=ORG)
+    with _tunnel(client, clock, root) as (ws, _):
+        bad = _ctrl(ws, "host-register", {"reservation": "nope", "host": "x"})
+        assert bad["ok"] is False
+        # The tunnel is still up and answers the next op.
+        host = _host("docs", PERSONA_A)
+        res = _reservation(PERSONA_A, "docs")
+        good = _ctrl(ws, "host-register", {
+            "reservation": res, "host": host,
+        })
+        assert good["ok"] is True
+
+
+def test_persona_serving_label_is_immutable(client, clock, root):
+    """First registration binds the persona's label; a second app under a
+    different slug (same valid suffix) fails closed as label-invalid."""
+    register(client, clock, root, org_uuid=ORG)
+    with _tunnel(client, clock, root) as (ws, _):
+        assert _ctrl(ws, "host-register", {
+            "reservation": _reservation(PERSONA_A, "docs"),
+            "host": _host("docs", PERSONA_A, slug="worker"),
+        })["ok"] is True
+        reply = _ctrl(ws, "host-register", {
+            "reservation": _reservation(PERSONA_A, "blog"),
+            "host": _host("blog", PERSONA_A, slug="other"),
+        })
+        assert reply["ok"] is False
+        assert reply["error"] == "label-invalid"
+        # Same slug is fine: many apps under one persona label.
+        assert _ctrl(ws, "host-register", {
+            "reservation": _reservation(PERSONA_A, "blog"),
+            "host": _host("blog", PERSONA_A, slug="worker"),
+        })["ok"] is True
+
+
+def test_revocation_drops_hostname_routes_before_socket_close(
+    app, client, clock, root,
+):
+    """Revoking the serving signer removes its hostname routes in the same
+    act that removes the tunnel from admission — never left to the
+    endpoint teardown or the lease TTL."""
+    from tools.network.idkit import issue_revocation
+
+    register(client, clock, root, org_uuid=ORG)
+    host = _host("docs", PERSONA_A)
+    res = _reservation(PERSONA_A, "docs")
+    serve_key = KeyPair.generate()
+    machine_key = KeyPair.generate()
+    cert = _serve_cert(root, serve_key)
+    raw = hello_mod.build_tunnel_hello_v2(
+        serve_key, cert, machine_key=machine_key, org=ORG,
+        ts=clock.now, caps=("host-lease/1",),
+    )
+    with client.websocket_connect(f"/t/{ORG}") as ws:
+        ws.send_text(raw)
+        assert ws.receive_json()["ok"] is True
+        assert _ctrl(ws, "host-register", {
+            "reservation": res, "host": host,
+        })["ok"] is True
+        assert app.state.host_routes.route(host) is not None
+
+        record = issue_revocation(
+            root,
+            serve_key.public_hex,
+            org=ORG,
+            revoked_at=clock.now,
+            expires_at=cert.not_after,
+            revoked_cert=cert,
+        )
+        response = client.post("/v1/revocations", json={
+            "org": ORG,
+            "record": record.to_json().decode("ascii"),
+            "revoked_cert": cert.to_json().decode("ascii"),
+        })
+        assert response.status_code == 201, response.text
+        assert app.state.host_routes.route(host) is None

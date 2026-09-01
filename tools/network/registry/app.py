@@ -57,7 +57,14 @@ from tools.network.idkit.keys import PUBLIC_KEY_HEX_LEN, _decode_hex
 from .abuse import RelayAbuseLimiter
 from .assertion import IDENTIFY_SCOPE, MAX_ASSERTION_TTL, parse_assertion
 from .listings import parse_attestation_record, parse_listing_claim
-from .relay import TunnelHub, _resolve_live_link, tunnel_endpoint, viewer_endpoint
+from .relay import (
+    HostRoutes,
+    TunnelHub,
+    _resolve_live_link,
+    host_probe_endpoint,
+    tunnel_endpoint,
+    viewer_endpoint,
+)
 from .signing import (
     ENVELOPE_VERSION,
     MAX_CLOCK_SKEW,
@@ -646,6 +653,7 @@ def create_app(
     now_fn = now_fn or (lambda: int(time.time()))
     now_ms_fn = now_ms_fn or (lambda: int(time.time() * 1000))
     hub = TunnelHub()
+    host_routes = HostRoutes(store, now_fn)
     if abuse_limiter is None:
         abuse_limiter = RelayAbuseLimiter()
     witness_key = witness_key or KeyPair.generate()
@@ -657,6 +665,7 @@ def create_app(
     app.state.now_fn = now_fn
     app.state.now_ms_fn = now_ms_fn
     app.state.tunnel_hub = hub
+    app.state.host_routes = host_routes
     app.state.witness_key = witness_key
     app.state.challenge_hub = challenge_hub
     app.state.abuse_limiter = abuse_limiter
@@ -1513,7 +1522,9 @@ def create_app(
         # Revocation is effective on the standing connection, not merely on
         # its next reconnect. The hub keeps only connection-memory signer
         # attribution; no persona/address history is created.
-        await hub.close_revoked(org_uuid, record.revoked_key_id)
+        await hub.close_revoked(
+            org_uuid, record.revoked_key_id, host_routes=host_routes
+        )
         return {"revoked_key_id": record.revoked_key_id, "expires_at": record.expires_at}
 
     # -- §4.6 grant envelope (bootloader) -------------------------------------
@@ -2419,12 +2430,20 @@ def create_app(
     async def relay_tunnel(websocket: WebSocket, org_uuid: str):
         await tunnel_endpoint(websocket, org_uuid, hub, store, now_fn,
                               base_url=base_url, turn_issuer=turn_issuer,
-                              witness_key=witness_key)
+                              witness_key=witness_key,
+                              host_routes=host_routes)
 
     @app.websocket("/v1/links/{token}/channel")
     async def relay_viewer(websocket: WebSocket, token: str):
         await viewer_endpoint(
             websocket, token, hub, store, now_fn, abuse_limiter=abuse_limiter
+        )
+
+    @app.websocket("/v1/hosts/{host}/probe")
+    async def relay_host_probe(websocket: WebSocket, host: str):
+        await host_probe_endpoint(
+            websocket, host, host_routes, now_fn,
+            abuse_limiter=abuse_limiter,
         )
 
     @app.get("/healthz")

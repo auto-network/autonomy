@@ -254,6 +254,35 @@ CREATE TABLE IF NOT EXISTS node_hints (
 );
 CREATE INDEX IF NOT EXISTS idx_node_hints_expiry ON node_hints (expires_at);
 
+-- auto-0zdky serving hostname ownership --------------------------------------
+
+-- Durable persona-bound hostname ownership: one row per
+-- NamespaceReservation (UUIDv5 over persona_pub + app label). The row is
+-- the *advertisement* accepted from an authenticated host-register — it
+-- carries no session, container, port, grant, or route. The live lease
+-- binding a reservation to one connection is deliberately memory-only
+-- (it must die with the connection); only the monotonic generation
+-- counter persists here so a registry restart can never resurrect a
+-- pre-restart generation and un-fence a stale renewal.
+CREATE TABLE IF NOT EXISTS serve_hosts (
+    reservation_id TEXT PRIMARY KEY,
+    org_uuid       TEXT NOT NULL,
+    persona_pub    TEXT NOT NULL,
+    host           TEXT NOT NULL UNIQUE,
+    generation     INTEGER NOT NULL,
+    created_at     INTEGER NOT NULL
+);
+
+-- One immutable serving label per persona (design §3.2: generated once,
+-- never renamed). UNIQUE(label) is the registry-side rejection of the
+-- astronomically-unlikely same-label/different-key collision — refused,
+-- never silently renamed.
+CREATE TABLE IF NOT EXISTS serve_labels (
+    persona_pub TEXT PRIMARY KEY,
+    label       TEXT NOT NULL UNIQUE,
+    created_at  INTEGER NOT NULL
+);
+
 -- E1 session linking (spec §4.7, §4.8, §6.8) --------------------------------
 
 -- First-party auto.network viewing sessions. A row is created ANONYMOUS
@@ -323,6 +352,16 @@ class OrgBinding:
     endpoint_hints: Optional[list]
     policy_epoch: int = 0
     binding_generation: str = ""
+
+
+@dataclass(frozen=True)
+class HostOwnership:
+    reservation_id: str
+    org: str
+    persona_pub: str
+    host: str
+    generation: int
+    created_at: int
 
 
 @dataclass(frozen=True)
@@ -1142,6 +1181,98 @@ class RegistryStore:
         cur = self._conn.execute("DELETE FROM node_hints WHERE expires_at < ?", (now,))
         self._conn.commit()
         return cur.rowcount
+
+    # -- serving hostname ownership (auto-0zdky) ---------------------------
+
+    def _host_ownership_row(self, row) -> Optional["HostOwnership"]:
+        if row is None:
+            return None
+        return HostOwnership(
+            reservation_id=row["reservation_id"],
+            org=row["org_uuid"],
+            persona_pub=row["persona_pub"],
+            host=row["host"],
+            generation=row["generation"],
+            created_at=row["created_at"],
+        )
+
+    @_locked
+    def get_host_ownership(
+        self, reservation_id: str
+    ) -> Optional["HostOwnership"]:
+        row = self._conn.execute(
+            "SELECT reservation_id, org_uuid, persona_pub, host, generation,"
+            " created_at FROM serve_hosts WHERE reservation_id = ?",
+            (reservation_id,),
+        ).fetchone()
+        return self._host_ownership_row(row)
+
+    @_locked
+    def get_host_ownership_by_host(
+        self, host: str
+    ) -> Optional["HostOwnership"]:
+        row = self._conn.execute(
+            "SELECT reservation_id, org_uuid, persona_pub, host, generation,"
+            " created_at FROM serve_hosts WHERE host = ?",
+            (host,),
+        ).fetchone()
+        return self._host_ownership_row(row)
+
+    @_locked
+    def get_persona_label(self, persona_pub: str) -> Optional[str]:
+        row = self._conn.execute(
+            "SELECT label FROM serve_labels WHERE persona_pub = ?",
+            (persona_pub,),
+        ).fetchone()
+        return row["label"] if row is not None else None
+
+    @_locked
+    def bind_persona_label(
+        self, persona_pub: str, label: str, *, now: int
+    ) -> bool:
+        """Bind a persona's immutable serving label on first registration.
+        Returns False when the label is already bound to a different
+        persona (refused, never renamed)."""
+        try:
+            self._conn.execute(
+                "INSERT INTO serve_labels (persona_pub, label, created_at)"
+                " VALUES (?, ?, ?)",
+                (persona_pub, label, now),
+            )
+            self._conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            self._conn.rollback()
+            return False
+
+    @_locked
+    def upsert_host_ownership(
+        self,
+        *,
+        reservation_id: str,
+        org: str,
+        persona_pub: str,
+        host: str,
+        now: int,
+    ) -> int:
+        """Record/refresh ownership and advance the lease generation.
+
+        Callers validate persona binding and conflicts BEFORE this write;
+        the method itself only enforces row identity. Returns the new
+        generation — monotonic across restarts by construction."""
+        self._conn.execute(
+            "INSERT INTO serve_hosts (reservation_id, org_uuid, persona_pub,"
+            " host, generation, created_at) VALUES (?, ?, ?, ?, 1, ?)"
+            " ON CONFLICT (reservation_id) DO UPDATE SET"
+            " generation = serve_hosts.generation + 1",
+            (reservation_id, org, persona_pub, host, now),
+        )
+        self._conn.commit()
+        row = self._conn.execute(
+            "SELECT generation FROM serve_hosts WHERE reservation_id = ?",
+            (reservation_id,),
+        ).fetchone()
+        return int(row["generation"])
 
     @_locked
     def deposit_bundle(

@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import hashlib
 import inspect
 import json
 import logging
@@ -63,7 +64,12 @@ from .frames import (
     tag_viewer_message,
     encode_frame,
 )
-from .hello import HELLO_VERSION, build_tunnel_hello
+from .hello import (
+    HELLO_VERSION,
+    HELLO_VERSION_2,
+    build_tunnel_hello,
+    build_tunnel_hello_v2,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -452,6 +458,8 @@ class TunnelConnector:
         min_backoff: float = 0.2,
         max_backoff: float = 5.0,
         publisher: "Publisher | None" = None,
+        machine_key: KeyPair | None = None,
+        caps: tuple = (),
     ):
         self._url = f"{relay_url.rstrip('/')}/t/{org}"
         self._org = org
@@ -469,6 +477,18 @@ class TunnelConnector:
         self._publisher = publisher
         self._min_backoff = min_backoff
         self._max_backoff = max_backoff
+        #: Enrolled machine identity: presence selects the v2 hello
+        #: (machine co-signature + capability negotiation, auto-0zdky).
+        self._machine_key = machine_key
+        self._caps = tuple(sorted({str(cap) for cap in caps}))
+        if self._caps and machine_key is None:
+            raise ValueError("capabilities require a machine key (hello v2)")
+        #: capability intersection the registry accepted on the live tunnel
+        self.accepted_caps: tuple = ()
+        #: reservation -> hostname this connector wants leased; re-registered
+        #: after every reconnect (leases are connection-scoped by design).
+        self._desired_hosts: dict = {}
+        self._host_leases: dict = {}
         self._stop = asyncio.Event()
         #: set while a tunnel is authenticated and serving (tests await it)
         self.connected = asyncio.Event()
@@ -525,6 +545,70 @@ class TunnelConnector:
         finally:
             self._pending.pop(correlation, None)
 
+    def _machine_digest(self) -> str:
+        """A short machine-key digest for probe echoes: distinguishes
+        connectors in a routing proof without disclosing the enrolled key
+        to an anonymous prober."""
+        if self._machine_key is None:
+            return ""
+        return hashlib.sha256(
+            bytes.fromhex(self._machine_key.public_hex)
+        ).hexdigest()[:16]
+
+    async def serve_host(self, reservation: str, host: str) -> dict:
+        """Advertise + lease one serving hostname (host-lease/1). The pair
+        persists as desired state: leases are connection-scoped by design,
+        so every reconnect re-registers them under a fresh generation."""
+        self._desired_hosts[reservation] = host
+        try:
+            return await self._register_host(reservation, host)
+        except ConnectionError:
+            # Desired state is recorded; the per-connection lease keeper
+            # registers it as soon as a tunnel is up.
+            return {"ok": False, "error": "no-live-tunnel"}
+
+    async def release_host(self, reservation: str) -> dict:
+        self._desired_hosts.pop(reservation, None)
+        self._host_leases.pop(reservation, None)
+        return await self.control("host-release", {"reservation": reservation})
+
+    async def _register_host(self, reservation: str, host: str) -> dict:
+        reply = await self.control(
+            "host-register", {"reservation": reservation, "host": host}
+        )
+        if isinstance(reply, dict) and reply.get("ok") is True:
+            self._host_leases[reservation] = dict(reply.get("lease") or {})
+        return reply
+
+    async def _maintain_host_leases(self) -> None:
+        """Per-connection lease keeper: re-register every desired host on
+        this fresh tunnel, then renew each at half-life. A stale-generation
+        refusal re-registers; any other failure retries next tick."""
+        self._host_leases = {}
+        for reservation, host in list(self._desired_hosts.items()):
+            with contextlib.suppress(Exception):
+                await self._register_host(reservation, host)
+        while True:
+            await asyncio.sleep(15)
+            now = time.time()
+            for reservation, lease in list(self._host_leases.items()):
+                host = self._desired_hosts.get(reservation)
+                if host is None:
+                    continue
+                if lease.get("expires_at", 0) - now > 60:
+                    continue
+                try:
+                    reply = await self.control("host-renew", {
+                        "reservation": reservation,
+                        "generation": lease.get("generation"),
+                    })
+                    if reply.get("ok") is True:
+                        self._host_leases[reservation] = dict(reply["lease"])
+                    elif reply.get("error") == "stale-generation":
+                        await self._register_host(reservation, host)
+                except Exception:
+                    continue  # tunnel churn: the next tick (or reconnect) retries
+
     def _resolve_ctrl_reply(self, payload: bytes) -> None:
         """Deliver a FRAME_CTRL reply to its waiting control() caller."""
         try:
@@ -555,10 +639,21 @@ class TunnelConnector:
                     await self._handshake(ws)
                     served_at = time.monotonic()
                     self.connected.set()
+                    lease_task = None
+                    if self._desired_hosts:
+                        lease_task = asyncio.create_task(
+                            self._maintain_host_leases()
+                        )
                     try:
                         await self._serve(ws)
                     finally:
                         self.connected.clear()
+                        if lease_task is not None:
+                            lease_task.cancel()
+                            with contextlib.suppress(
+                                asyncio.CancelledError, Exception
+                            ):
+                                await lease_task
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -636,16 +731,28 @@ class TunnelConnector:
         """Authenticate a fresh tunnel. The peer-relay park connector
         (``peer.PeerParkConnector``) overrides this to first demand the
         relay's own ``relay:serve`` proof before presenting a hello."""
-        await ws.send(build_tunnel_hello(
-            self._key, self._cert, org=self._org, ts=int(time.time())
-        ))
+        if self._machine_key is not None:
+            await ws.send(build_tunnel_hello_v2(
+                self._key, self._cert, machine_key=self._machine_key,
+                org=self._org, ts=int(time.time()), caps=self._caps,
+            ))
+            expected_version = HELLO_VERSION_2
+        else:
+            await ws.send(build_tunnel_hello(
+                self._key, self._cert, org=self._org, ts=int(time.time())
+            ))
+            expected_version = HELLO_VERSION
         reply = json.loads(await ws.recv())
         if not isinstance(reply, dict):
             raise ConnectionError(f"hello rejected: {reply!r}")
         if reply.get("ok") is True:
             remote_version = reply.get("v")
-            if type(remote_version) is not int or remote_version != HELLO_VERSION:
+            if type(remote_version) is not int or remote_version != expected_version:
                 raise TunnelProtocolVersionError(remote_version)
+            accepted = reply.get("caps", [])
+            self.accepted_caps = (
+                tuple(accepted) if isinstance(accepted, list) else ()
+            )
             return
         error = reply.get("error")
         if isinstance(error, dict) and error.get("code") == "protocol_version_mismatch":
@@ -688,7 +795,32 @@ class TunnelConnector:
                     continue
                 if frame.type == FRAME_OPEN:
                     try:
-                        token = json.loads(frame.payload)["token"]
+                        meta = json.loads(frame.payload)
+                        if (
+                            isinstance(meta, dict)
+                            and meta.get("kind") == "host-probe"
+                        ):
+                            # One-shot routing diagnostic (auto-0zdky): echo
+                            # which connector this hostname resolved to —
+                            # a machine-key digest, never the key itself.
+                            # The PROBER closes after reading; sending CLOSE
+                            # here would race the relay's bounded writer
+                            # into discarding the still-queued echo. No
+                            # channel state is created.
+                            await send_frame(
+                                FRAME_DATA,
+                                frame.channel_id,
+                                json.dumps({
+                                    "kind": "host-probe",
+                                    "host": meta.get("host", ""),
+                                    "reservation": meta.get(
+                                        "reservation", ""
+                                    ),
+                                    "machine_digest": self._machine_digest(),
+                                }).encode("utf-8"),
+                            )
+                            continue
+                        token = meta["token"]
                     except (ValueError, KeyError, TypeError):
                         await send_frame(FRAME_CLOSE, frame.channel_id)
                         continue

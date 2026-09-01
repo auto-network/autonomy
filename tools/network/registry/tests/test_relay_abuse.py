@@ -447,6 +447,7 @@ def test_inbound_byte_refusal_never_enters_dashboard_queue(monkeypatch):
 
         class _Link:
             org_uuid = "org"
+            target_type = "note"
 
         monkeypatch.setattr(
             relay, "_resolve_live_link", lambda store, token, now: _Link()
@@ -482,6 +483,7 @@ def test_listener_attachment_failure_releases_channel_lease(monkeypatch):
 
         class _Link:
             org_uuid = "org"
+            target_type = "note"
 
         monkeypatch.setattr(
             relay, "_resolve_live_link", lambda store, token, now: _Link()
