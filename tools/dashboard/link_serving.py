@@ -1298,6 +1298,7 @@ def _make_ice_serving_connector(
     *,
     min_backoff,
     max_backoff,
+    machine_key=None,
     connector_factory=None,
 ):
     """Construct the production connector with the existing ICE handler."""
@@ -1325,6 +1326,13 @@ def _make_ice_serving_connector(
         signaling_capacity=IceCapacity(64, per_token_limit=2),
         publisher=publisher,
     )
+    stream_kwargs = {}
+    if machine_key is not None:
+        stream_kwargs = {
+            "machine_key": machine_key,
+            "caps": ("host-lease/1", "tls-stream/1"),
+            "stream_handler": LocalCaddyStreamHandler(graph_org),
+        }
     connector = factory(
         relay,
         org,
@@ -1335,8 +1343,7 @@ def _make_ice_serving_connector(
         min_backoff=min_backoff,
         max_backoff=max_backoff,
         publisher=publisher,
-        caps=("host-lease/1", "tls-stream/1"),
-        stream_handler=LocalCaddyStreamHandler(graph_org),
+        **stream_kwargs,
     )
     return connector
 
@@ -1673,6 +1680,7 @@ def main() -> None:
         graph_org=args.graph_org,
         publisher=publisher,
         min_backoff=args.min_backoff, max_backoff=args.max_backoff,
+        machine_key=connector_runtime.machine_key,
     )
     # Live push is ON by default and needs no configuration: the dashboard
     # delivers each event over the control listener below, so there is no

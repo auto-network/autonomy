@@ -128,6 +128,7 @@ def test_production_connector_negotiates_stream_cap_and_installs_handler():
         publisher=object(),
         min_backoff=0.2,
         max_backoff=5.0,
+        machine_key=object(),
         connector_factory=factory,
     )
 
@@ -137,3 +138,28 @@ def test_production_connector_negotiates_stream_cap_and_installs_handler():
         captured["kwargs"]["stream_handler"],
         service_gateway_stream.LocalCaddyStreamHandler,
     )
+
+
+def test_production_connector_without_warm_machine_key_stays_legacy():
+    captured = {}
+
+    def factory(*args, **kwargs):
+        captured.update(kwargs)
+        return object()
+
+    link_serving._make_ice_serving_connector(
+        "wss://relay.auto.network",
+        "org-id",
+        key=object(),
+        cert=object(),
+        channel_cert=object(),
+        graph_org="autonomy",
+        publisher=object(),
+        min_backoff=0.2,
+        max_backoff=5.0,
+        machine_key=None,
+        connector_factory=factory,
+    )
+
+    assert "caps" not in captured
+    assert "stream_handler" not in captured
