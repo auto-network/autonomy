@@ -649,21 +649,22 @@ class TunnelConnector:
                     await self._handshake(ws)
                     served_at = time.monotonic()
                     self.connected.set()
-                    lease_task = None
-                    if self._desired_hosts:
-                        lease_task = asyncio.create_task(
-                            self._maintain_host_leases()
-                        )
+                    # Always run the keeper for a live tunnel. Production adds
+                    # publications after the connector is already connected;
+                    # gating task creation on desired_hosts-at-handshake left
+                    # those late leases registered once but never renewed.
+                    lease_task = asyncio.create_task(
+                        self._maintain_host_leases()
+                    )
                     try:
                         await self._serve(ws)
                     finally:
                         self.connected.clear()
-                        if lease_task is not None:
-                            lease_task.cancel()
-                            with contextlib.suppress(
-                                asyncio.CancelledError, Exception
-                            ):
-                                await lease_task
+                        lease_task.cancel()
+                        with contextlib.suppress(
+                            asyncio.CancelledError, Exception
+                        ):
+                            await lease_task
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

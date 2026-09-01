@@ -161,3 +161,24 @@ def test_disconnect_logging_time_does_not_count_as_useful_service(monkeypatch):
 
     assert attempts == 3
     assert clock.sleeps == [0.2, 0.4, 0.8]
+
+
+def test_connected_tunnel_starts_keeper_before_any_host_is_desired(monkeypatch):
+    connector = _connector()
+    clock = _Clock()
+    _install_common_fakes(monkeypatch, connector, clock)
+    keeper_started = asyncio.Event()
+
+    async def keeper():
+        keeper_started.set()
+        await asyncio.Event().wait()
+
+    async def serve(_ws):
+        await asyncio.wait_for(keeper_started.wait(), 1)
+        connector.stop()
+
+    connector._maintain_host_leases = keeper
+    connector._serve = serve
+
+    asyncio.run(connector.run())
+    assert keeper_started.is_set()
