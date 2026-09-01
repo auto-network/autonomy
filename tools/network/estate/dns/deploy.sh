@@ -18,21 +18,26 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-HOST="" NODE_ID=""
+HOST="" NODE_ID="" RELAY_IP=""
 while [ $# -gt 0 ]; do
     case $1 in
     --host) HOST=$2; shift 2 ;;
     --node-id) NODE_ID=$2; shift 2 ;;
+    --relay-ip) RELAY_IP=$2; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 1 ;;
     esac
 done
-[ -n "$HOST" ] || { echo "usage: deploy.sh --host root@<relay-ip>" >&2; exit 1; }
+[ -n "$HOST" ] || { echo "usage: deploy.sh --host root@<relay-ip> [--relay-ip IP]" >&2; exit 1; }
 case "$HOST" in
 *auto-ash-1*|*5.161.179.179*)
     echo "refusing: '$HOST' is the legacy pet host" >&2; exit 1 ;;
 esac
 HOST_IP=${HOST#*@}
 NODE_ID=${NODE_ID:-registry-ash-1}
+# The IP that serve.auto.network A answers resolve to. Defaults to the box's
+# own IP (single-box POC), but serve rides its own floating IP where a dumb
+# :443 forward reaches the raw-stream ingress — so it is set explicitly there.
+RELAY_IP=${RELAY_IP:-$HOST_IP}
 
 echo "== preflight: the registry code on the box must carry the responder"
 ssh -o IdentitiesOnly=yes "$HOST" \
@@ -49,6 +54,7 @@ install -d -m 0755 /etc/autonomy-dns
 cat > /etc/autonomy-dns/dns.env <<ENV
 DNS_BIND=$HOST_IP
 DNS_NODE_ID=$NODE_ID
+DNS_RELAY_IP=$RELAY_IP
 ENV
 install -m 0644 /tmp/autonomy-registry-dns.service /etc/systemd/system/
 systemctl daemon-reload

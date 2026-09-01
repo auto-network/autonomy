@@ -18,6 +18,7 @@ Environment=PYTHONPATH=/opt/autonomy-registry
 EnvironmentFile=/etc/autonomy-dns/dns.env
 ExecStart=/opt/autonomy-registry/venv/bin/python -m tools.network.registry.dns_server \
     --bind ${DNS_BIND} --node-id ${DNS_NODE_ID} \
+    --relay-ip ${DNS_RELAY_IP} \
     --registry-url http://127.0.0.1:8477
 Restart=on-failure
 RestartSec=2

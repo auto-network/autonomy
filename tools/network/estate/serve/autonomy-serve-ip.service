@@ -1,0 +1,14 @@
+[Unit]
+Description=Bind the serve.auto.network floating IPv4
+Before=autonomy-serve-forward.service
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/autonomy-serve/serve.env
+ExecStart=/opt/autonomy-serve/bind-serve-ip.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
