@@ -961,6 +961,21 @@ class ServingSupervisor:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
         lock.close()
 
+    def _drop_inherited_locks_after_fork(self) -> None:
+        """Close this child's duplicate ownership descriptors after ``fork``.
+
+        A raw-fork multiprocessing helper inherits the parent's entire file
+        table and may outlive the connector processes.  These descriptors
+        share open-file descriptions with the parent, so the child must only
+        close its copies: calling ``flock(..., LOCK_UN)`` here would release
+        the live parent's lock as well.
+        """
+        inherited = self._locks
+        self._locks = {}
+        for lock in inherited.values():
+            with contextlib.suppress(OSError):
+                lock.close()
+
     def start_watchdog(self, interval: float = 20.0) -> None:
         """Periodically re-reconcile every managed org — restart the dead,
         tear down the expired/revoked. No-op if already running."""
@@ -1033,14 +1048,24 @@ class ServingSupervisor:
 
 _SINGLETON: ServingSupervisor | None = None
 _SINGLETON_LOCK = threading.Lock()
+_AT_FORK_REGISTERED = False
+
+
+def _drop_singleton_locks_after_fork() -> None:
+    supervisor = _SINGLETON
+    if supervisor is not None:
+        supervisor._drop_inherited_locks_after_fork()
 
 
 def get_supervisor() -> ServingSupervisor:
-    global _SINGLETON
+    global _AT_FORK_REGISTERED, _SINGLETON
     if _SINGLETON is None:
         with _SINGLETON_LOCK:
             if _SINGLETON is None:
                 _SINGLETON = ServingSupervisor()
+                if not _AT_FORK_REGISTERED and hasattr(os, "register_at_fork"):
+                    os.register_at_fork(after_in_child=_drop_singleton_locks_after_fork)
+                    _AT_FORK_REGISTERED = True
     return _SINGLETON
 
 

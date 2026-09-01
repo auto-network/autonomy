@@ -686,6 +686,32 @@ def test_only_one_dashboard_process_owns_an_org_connector(env):
     second.stop_all()
 
 
+def test_fork_child_drops_inherited_ownership_descriptors_without_unlocking(monkeypatch):
+    """A multiprocessing child must not keep the Dashboard's flocks alive.
+
+    The child shares the parent's open-file descriptions after ``fork()``.
+    Closing its duplicate is safe; explicitly unlocking it would also unlock
+    the still-live parent's ownership.
+    """
+    class _InheritedLock:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    inherited = _InheritedLock()
+    supervisor = sup.ServingSupervisor(spawn=FakeSpawn())
+    supervisor._locks[ORG] = inherited
+    flock_calls = []
+    monkeypatch.setattr(sup.fcntl, "flock", lambda *args: flock_calls.append(args))
+
+    supervisor._drop_inherited_locks_after_fork()
+
+    assert inherited.closed is True
+    assert supervisor._locks == {}
+    assert flock_calls == []
+
+
 def test_pre_spawn_failure_releases_org_ownership(env, monkeypatch):
     """A failed owner must not prevent another dashboard from taking over."""
     _provision_serve_cert(env)

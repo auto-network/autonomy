@@ -683,7 +683,16 @@ async def restore_fleet_serving(request: Request) -> JSONResponse:
                 "status"
             ) == "missing":
                 continue
-            supervisor.restart(scope)
+            result = supervisor.restart(scope)
+            if (
+                result.get("running") is not True
+                or result.get("reason") == "owned-by-other-dashboard"
+            ):
+                failed.append({
+                    "scope": label,
+                    "error": str(result.get("reason") or "connector-not-running"),
+                })
+                continue
             restarted.append(label)
         except Exception as exc:  # noqa: BLE001 - one scope must not stall the rest
             failed.append({"scope": label, "error": str(exc)})
