@@ -8,6 +8,7 @@ connector, and accepts only the registry-derived challenge name.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import socket
 import time
 from typing import Callable
 
@@ -21,6 +22,7 @@ from tools.network.idkit import (
 
 CAPABILITY = "dns-01/1"
 SIGNING_DOMAIN = b"autonomy.network.serve.dns01.v1\n"
+AUTHORITATIVE_NAMESERVERS = ("ns1.auto.network", "ns2.auto.network")
 
 
 class Dns01Error(RuntimeError):
@@ -134,3 +136,52 @@ class Dns01Client:
             "value": value,
             "ts": int(self._now()),
         })
+
+
+def _query_authoritative_txt(server: str, name: str) -> set[str]:
+    """Query one named authority directly; never accept recursive cache state."""
+    import dns.resolver
+
+    addresses = {
+        item[4][0]
+        for item in socket.getaddrinfo(server, 53, type=socket.SOCK_DGRAM)
+    }
+    if not addresses:
+        return set()
+    resolver = dns.resolver.Resolver(configure=False)
+    resolver.nameservers = sorted(addresses)
+    resolver.timeout = 2.0
+    resolver.lifetime = 2.0
+    try:
+        answer = resolver.resolve(name, "TXT", search=False)
+    except Exception:
+        return set()
+    values = set()
+    for record in answer:
+        chunks = getattr(record, "strings", ())
+        values.add(b"".join(chunks).decode("utf-8"))
+    return values
+
+
+def wait_authoritative_txt(
+    name: str,
+    value: str,
+    *,
+    nameservers: tuple[str, ...] = AUTHORITATIVE_NAMESERVERS,
+    query: Callable[[str, str], set[str]] = _query_authoritative_txt,
+    now: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+    timeout: float = 60.0,
+    interval: float = 0.5,
+) -> float:
+    """Return elapsed seconds only after every authority serves *value*."""
+    started = now()
+    deadline = started + timeout
+    while True:
+        if all(value in query(server, name) for server in nameservers):
+            return now() - started
+        if now() >= deadline:
+            raise Dns01Unavailable(
+                "DNS-01 value did not reach every authoritative nameserver"
+            )
+        sleep(interval)
