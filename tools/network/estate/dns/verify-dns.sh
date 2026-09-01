@@ -32,6 +32,10 @@ check() { # <desc> <cmd...>
 }
 
 q() { dig +short +time=3 +tries=1 "$@"; }
+# check() invokes q inside `bash -c` subshells, which do not inherit
+# shell functions unless exported — without this every rung fails with
+# "q: command not found" (found the hard way in staging).
+export -f q
 
 ENDPOINTS=$PRIMARY
 [ -n "$SECONDARY" ] && ENDPOINTS="$PRIMARY $SECONDARY"

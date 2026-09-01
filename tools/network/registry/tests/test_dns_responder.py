@@ -293,3 +293,22 @@ def test_challenge_txt_honors_per_name_ttl():
     )
     r = ask(state, f"_acme-challenge.worker-aa.{ZONE}", "TXT")
     assert r["answers"][0][2] == 45
+
+
+def test_unknown_edns_version_answers_badvers(state):
+    """RFC 6891 (caught live by the Zonemaster gate): an EDNS version-1
+    query answers extended rcode BADVERS via the OPT TTL high byte, with
+    a version-0 OPT and no answer data."""
+    query = build_query(ZONE, "A", edns_payload=1232)
+    # Rewrite the OPT TTL to declare EDNS version 1.
+    opt_ttl_off = len(query) - 6
+    query = query[:opt_ttl_off] + struct.pack(">I", 1 << 16) \
+        + query[opt_ttl_off + 4:]
+    reply = handle_query(query, state)
+    parsed = parse_response(reply)
+    assert parsed["rcode"] == 0          # header low bits
+    assert parsed["answers"] == []
+    # The raw OPT TTL carries ext-rcode byte 1 (16 >> 4) and version 0.
+    opt_index = reply.rfind(b"\x00\x00\x29")
+    ext_rcode, version = reply[opt_index + 5], reply[opt_index + 6]
+    assert (ext_rcode, version) == (1, 0)
