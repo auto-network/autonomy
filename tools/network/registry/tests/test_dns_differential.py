@@ -172,3 +172,13 @@ def test_edns_echo_do_bit_and_truncation(state):
         over_tcp.answer, dns.name.from_text(CHALLENGE),
         dns.rdataclass.IN, dns.rdatatype.TXT)
     assert len(rrset) == 8
+
+
+def test_edns_version_1_gets_badvers(state):
+    """dnspython computes the extended rcode for us: version-1 EDNS must
+    answer BADVERS (the Zonemaster-caught RFC 6891 case)."""
+    query = dns.message.make_query(ZONE, "A", use_edns=1, payload=1232)
+    reply = dns.message.from_wire(handle_query(query.to_wire(), state))
+    assert reply.rcode() == dns.rcode.BADVERS
+    assert reply.edns == 0               # we answer with version 0
+    assert reply.answer == []

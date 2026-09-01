@@ -48,6 +48,7 @@ _TYPE_AAAA, _TYPE_OPT = 28, 41
 _TYPE_IXFR, _TYPE_AXFR, _TYPE_ANY = 251, 252, 255
 _CLASS_IN, _CLASS_CH = 1, 3
 _RCODE_FORMERR, _RCODE_NOTIMP, _RCODE_REFUSED = 1, 4, 5
+_RCODE_BADVERS = 16  # extended rcode, carried via the OPT TTL high byte
 
 _CHALLENGE_PREFIX = "_acme-challenge."
 
@@ -125,8 +126,9 @@ def _parse_question(raw: bytes) -> tuple[bytes, str, int, int, int] | None:
     return qname_wire, qname_lower, qtype, qclass, off + 4
 
 
-def _client_opt_payload(raw: bytes, off: int, counts) -> int | None:
-    """Scan the remaining records for a root-name OPT; returns payload."""
+def _client_opt_payload(raw: bytes, off: int, counts) -> tuple[int, int] | None:
+    """Scan the remaining records for a root-name OPT; returns
+    (payload, edns_version)."""
     qd_extra, an, ns, ar = counts
     # Skip any unexpected extra questions defensively.
     total = an + ns + ar
@@ -147,11 +149,12 @@ def _client_opt_payload(raw: bytes, off: int, counts) -> int | None:
             off += length
         if off + 10 > len(raw):
             return None
-        rtype, rclass, _ttl, rdlen = struct.unpack(
+        rtype, rclass, ttl, rdlen = struct.unpack(
             ">HHIH", raw[off:off + 10])
         off += 10 + rdlen
         if rtype == _TYPE_OPT:
-            return rclass
+            # OPT TTL packs [ext-rcode(8) | version(8) | flags(16)].
+            return rclass, (ttl >> 16) & 0xFF
     return None
 
 
@@ -170,8 +173,11 @@ def handle_query(raw: bytes, state: ZoneState, *, tcp: bool = False,
               question: bytes = b"", answers: list[bytes] = (),
               authority: list[bytes] = (), opt: bool = False) -> bytes:
         rflags = (1 << 15) | (opcode << 11) | (int(aa) << 10) \
-            | (int(tc) << 9) | (rd << 8) | rcode
-        additional = [_rr(b"\x00", _TYPE_OPT, UDP_PAYLOAD, 0, b"")] \
+            | (int(tc) << 9) | (rd << 8) | (rcode & 0xF)
+        # OPT TTL carries the extended-rcode high byte (BADVERS = 16 →
+        # header 0 + ext byte 1) and always version 0 (RFC 6891).
+        opt_ttl = ((rcode >> 4) & 0xFF) << 24
+        additional = [_rr(b"\x00", _TYPE_OPT, UDP_PAYLOAD, opt_ttl, b"")] \
             if opt else []
         msg = struct.pack(
             ">HHHHHH", qid, rflags, 1 if question else 0,
@@ -187,9 +193,10 @@ def handle_query(raw: bytes, state: ZoneState, *, tcp: bool = False,
         return reply(_RCODE_FORMERR)
     qname_wire, qname, qtype, qclass, off = parsed
     question = qname_wire + struct.pack(">HH", qtype, qclass)
-    client_payload = _client_opt_payload(
+    client_opt = _client_opt_payload(
         raw, off, (0, ancount, nscount, arcount))
-    opt = client_payload is not None
+    opt = client_opt is not None
+    client_payload, edns_version = client_opt if opt else (None, 0)
 
     def finish(rcode, *, aa=False, answers=(), authority=()):
         full = reply(rcode, aa=aa, question=question,
@@ -205,6 +212,11 @@ def handle_query(raw: bytes, state: ZoneState, *, tcp: bool = False,
 
     if opcode != 0:
         return finish(_RCODE_NOTIMP)
+    if edns_version > 0:
+        # RFC 6891: an unknown EDNS version answers BADVERS (extended
+        # rcode 16) with a version-0 OPT and no answer data — caught by
+        # the Zonemaster gate before the first public deploy.
+        return finish(_RCODE_BADVERS)
 
     # CHAOS id.server — the per-PoP identifier.
     if qclass == _CLASS_CH:
