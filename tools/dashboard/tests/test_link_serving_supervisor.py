@@ -714,25 +714,25 @@ def test_fork_child_drops_inherited_ownership_descriptors_without_unlocking(monk
     assert flock_calls == []
 
 
-def test_multiprocessing_child_cannot_prolong_parent_ownership(env):
-    """Exercise multiprocessing's own post-fork callback registry.
+def test_unregistered_fork_child_cannot_prolong_parent_ownership(env):
+    """Ownership itself must not be inherited, even when callbacks are bypassed.
 
     The parent releases its legitimate lock only after the child exists.  A
-    child that retained the duplicate would keep the flock busy; a cleaned
-    child can acquire it through a new file description.
+    child may retain the descriptor through an arbitrary process launcher, but
+    it must not retain the lock.  POSIX process locks provide that kernel-level
+    guarantee; open-file-description flocks do not.
     """
     supervisor = sup.ServingSupervisor(spawn=FakeSpawn())
     key_path = str(env / "fork-proof.key")
     assert supervisor._acquire_lock(ORG, key_path) is True
-    sup._register_multiprocessing_fork_cleanup(supervisor)
     parent, child = multiprocessing.get_context("fork").Pipe()
 
     def probe_after_parent_release(pipe, path):
         pipe.recv()
         candidate = open(path, "a+")
         try:
-            fcntl.flock(candidate.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+            sup._try_ownership_lock(candidate.fileno())
+        except (AttributeError, BlockingIOError):
             pipe.send(False)
         else:
             pipe.send(True)
