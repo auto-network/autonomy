@@ -17,10 +17,14 @@ class Dns01HookServer:
     this boundary.
     """
 
-    def __init__(self, client, order: str, path: str | Path):
+    def __init__(self, client, order: str, path: str | Path, *, wait_ready=None):
+        if wait_ready is None:
+            from tools.dashboard.acme_dns01 import wait_authoritative_txt
+            wait_ready = wait_authoritative_txt
         self._client = client
         self._order = order
         self._path = Path(path)
+        self._wait_ready = wait_ready
         self._server = None
 
     async def __aenter__(self):
@@ -56,6 +60,9 @@ class Dns01HookServer:
             if action == "present":
                 result = await asyncio.to_thread(
                     self._client.present, self._order, value,
+                )
+                await asyncio.to_thread(
+                    self._wait_ready, result["name"], value,
                 )
                 reply = {"ok": True, **result}
             else:

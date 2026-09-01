@@ -33,8 +33,12 @@ def _request(path, payload):
 def test_order_bound_socket_presents_and_cleans_only_its_value(tmp_path):
     async def scenario():
         client = _Client()
+        waits = []
         path = tmp_path / "dns01.sock"
-        async with Dns01HookServer(client, "certbot-run-7", path):
+        async with Dns01HookServer(
+            client, "certbot-run-7", path,
+            wait_ready=lambda name, value: waits.append((name, value)),
+        ):
             shown = await asyncio.to_thread(
                 _request, path, {"action": "present", "value": "txt-value"})
             cleaned = await asyncio.to_thread(
@@ -47,6 +51,9 @@ def test_order_bound_socket_presents_and_cleans_only_its_value(tmp_path):
             ("present", "certbot-run-7", "txt-value"),
             ("cleanup", "certbot-run-7", "txt-value"),
         ]
+        assert waits == [
+            ("_acme-challenge.p.serve.auto.network", "txt-value"),
+        ]
         assert not path.exists()
 
     asyncio.run(scenario())
@@ -56,7 +63,9 @@ def test_socket_refuses_extra_fields_and_unknown_actions(tmp_path):
     async def scenario():
         client = _Client()
         path = tmp_path / "dns01.sock"
-        async with Dns01HookServer(client, "certbot-run-7", path):
+        async with Dns01HookServer(
+            client, "certbot-run-7", path, wait_ready=lambda *_: None,
+        ):
             extra = await asyncio.to_thread(
                 _request, path,
                 {"action": "present", "value": "txt", "org": "other"})
