@@ -49,6 +49,7 @@ import ctypes.util
 import fcntl
 import json
 import logging
+import multiprocessing.util
 import os
 import re
 import signal
@@ -944,6 +945,10 @@ class ServingSupervisor:
             return True
         lock_path = _lock_path_for(key_path)
         lock = open(lock_path, "a+")
+        # Defense in depth for subprocess launch paths that exec: Python opens
+        # descriptors non-inheritable by default, but make the ownership
+        # contract explicit at the point where retaining this fd is harmful.
+        os.set_inheritable(lock.fileno(), False)
         os.chmod(lock_path, 0o600)
         try:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1057,6 +1062,22 @@ def _drop_singleton_locks_after_fork() -> None:
         supervisor._drop_inherited_locks_after_fork()
 
 
+def _drop_supervisor_locks_after_multiprocessing_fork(
+    supervisor: ServingSupervisor,
+) -> None:
+    supervisor._drop_inherited_locks_after_fork()
+
+
+def _register_multiprocessing_fork_cleanup(
+    supervisor: ServingSupervisor,
+) -> None:
+    """Cover multiprocessing's child-bootstrap callback path as well as os.fork."""
+    multiprocessing.util.register_after_fork(
+        supervisor,
+        _drop_supervisor_locks_after_multiprocessing_fork,
+    )
+
+
 def get_supervisor() -> ServingSupervisor:
     global _AT_FORK_REGISTERED, _SINGLETON
     if _SINGLETON is None:
@@ -1066,6 +1087,7 @@ def get_supervisor() -> ServingSupervisor:
                 if not _AT_FORK_REGISTERED and hasattr(os, "register_at_fork"):
                     os.register_at_fork(after_in_child=_drop_singleton_locks_after_fork)
                     _AT_FORK_REGISTERED = True
+                _register_multiprocessing_fork_cleanup(_SINGLETON)
     return _SINGLETON
 
 

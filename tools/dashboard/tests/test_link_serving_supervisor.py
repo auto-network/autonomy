@@ -19,6 +19,8 @@ grant):
 from __future__ import annotations
 
 import contextlib
+import fcntl
+import multiprocessing
 import os
 import signal
 import subprocess
@@ -710,6 +712,43 @@ def test_fork_child_drops_inherited_ownership_descriptors_without_unlocking(monk
     assert inherited.closed is True
     assert supervisor._locks == {}
     assert flock_calls == []
+
+
+def test_multiprocessing_child_cannot_prolong_parent_ownership(env):
+    """Exercise multiprocessing's own post-fork callback registry.
+
+    The parent releases its legitimate lock only after the child exists.  A
+    child that retained the duplicate would keep the flock busy; a cleaned
+    child can acquire it through a new file description.
+    """
+    supervisor = sup.ServingSupervisor(spawn=FakeSpawn())
+    key_path = str(env / "fork-proof.key")
+    assert supervisor._acquire_lock(ORG, key_path) is True
+    sup._register_multiprocessing_fork_cleanup(supervisor)
+    parent, child = multiprocessing.get_context("fork").Pipe()
+
+    def probe_after_parent_release(pipe, path):
+        pipe.recv()
+        candidate = open(path, "a+")
+        try:
+            fcntl.flock(candidate.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            pipe.send(False)
+        else:
+            pipe.send(True)
+        finally:
+            candidate.close()
+
+    process = multiprocessing.get_context("fork").Process(
+        target=probe_after_parent_release,
+        args=(child, sup._lock_path_for(key_path)),
+    )
+    process.start()
+    supervisor._release_lock(ORG)
+    parent.send(True)
+    assert parent.recv() is True
+    process.join(timeout=5)
+    assert process.exitcode == 0
 
 
 def test_pre_spawn_failure_releases_org_ownership(env, monkeypatch):
