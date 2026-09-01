@@ -91,3 +91,51 @@ def test_uniform_relay_refusal_is_not_reclassified():
         assert str(exc) == "DNS-01 operation refused"
     else:
         raise AssertionError("uniform refusal was accepted")
+
+
+def test_waits_for_challenge_on_every_authoritative_nameserver():
+    observations = {
+        "ns1.auto.network": [set(), {"challenge"}],
+        "ns2.auto.network": [{"challenge"}],
+    }
+    clock = [0.0]
+
+    def query(server, name):
+        values = observations[server]
+        return values.pop(0) if len(values) > 1 else values[0]
+
+    def sleep(seconds):
+        clock[0] += seconds
+
+    elapsed = acme_dns01.wait_authoritative_txt(
+        "_acme-challenge.p.serve.auto.network",
+        "challenge",
+        query=query,
+        now=lambda: clock[0],
+        sleep=sleep,
+        timeout=5,
+        interval=1,
+    )
+    assert elapsed == 1
+
+
+def test_authoritative_wait_times_out_if_only_one_ns_observes_value():
+    clock = [0.0]
+
+    def query(server, name):
+        return {"challenge"} if server == "ns1.auto.network" else set()
+
+    try:
+        acme_dns01.wait_authoritative_txt(
+            "_acme-challenge.p.serve.auto.network",
+            "challenge",
+            query=query,
+            now=lambda: clock[0],
+            sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+            timeout=2,
+            interval=1,
+        )
+    except acme_dns01.Dns01Unavailable as exc:
+        assert str(exc) == "DNS-01 value did not reach every authoritative nameserver"
+    else:
+        raise AssertionError("single-authoritative visibility was accepted")
