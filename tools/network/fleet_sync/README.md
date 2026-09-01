@@ -36,11 +36,14 @@ schema migration therefore cannot silently fall outside the checkpoint.
 
 ## Strict byte algorithm
 
-All integers use minimal base-128 unsigned magnitude plus a sign byte.  Text is
-UTF-8.  Bytes and containers are length framed.  Maps sort by their encoded key
-bytes.  Floats are finite IEEE-754 binary64 with negative zero normalized to
-positive zero.  JSON stored by SQLite is parsed into those typed values rather
-than serialized as presentation text.
+All integers are length-framed minimal decimal text — the shipped format,
+kept deliberately: candidate hashes are computed over these bytes, so a
+denser integer encoding is a fleet-wide compatibility break, and profiling
+shows integer encoding is not a measurable cost.  Text is UTF-8.  Bytes and
+containers are length framed.  Maps sort by their encoded key bytes.  Floats
+are finite IEEE-754 binary64 with negative zero normalized to positive zero.
+JSON stored by SQLite is parsed into those typed values rather than
+serialized as presentation text.
 
 A mutation frame contains, in order:
 

@@ -9,6 +9,7 @@ to ordinary dictionaries/lists before reaching this layer.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cached_property
 import hashlib
 import math
 import struct
@@ -32,10 +33,14 @@ class CodecError(ValueError):
     """Mutation bytes violate the canonical fleet-sync contract."""
 
 
+_pack_u32 = struct.Struct(">I").pack
+_pack_f64 = struct.Struct(">d").pack
+
+
 def _u32(value: int) -> bytes:
     if not 0 <= value < 1 << 32:
         raise CodecError("length exceeds u32")
-    return struct.pack(">I", value)
+    return _pack_u32(value)
 
 
 def _blob(tag: bytes, data: bytes) -> bytes:
@@ -45,40 +50,65 @@ def _blob(tag: bytes, data: bytes) -> bytes:
 def encode_value(value: CanonicalValue) -> bytes:
     """Encode a typed value into one unique byte representation."""
 
+    # Dispatch is ordered by measured frequency: replication frames are
+    # dominated by strings, then ints. The byte layout is frozen; only the
+    # construction path is tuned.
+    kind = type(value)
+    if kind is str:
+        data = value.encode("utf-8")
+        return b"s" + _pack_u32(len(data)) + data
+    if kind is bool:
+        return b"t" if value else b"f"
+    if kind is int:
+        data = str(value).encode("ascii")
+        return b"i" + _pack_u32(len(data)) + data
     if value is None:
         return b"n"
-    if value is False:
-        return b"f"
-    if value is True:
-        return b"t"
-    if isinstance(value, int):
-        return _blob(b"i", str(value).encode("ascii"))
-    if isinstance(value, float):
+    if kind is float:
         if not math.isfinite(value):
             raise CodecError("non-finite floats are not canonical")
         # SQLite compares both signed zeros as zero; preserve only one form.
         if value == 0.0:
             value = 0.0
-        return b"r" + struct.pack(">d", value)
-    if isinstance(value, str):
-        return _blob(b"s", value.encode("utf-8"))
-    if isinstance(value, bytes):
-        return _blob(b"b", value)
+        return b"r" + _pack_f64(value)
+    if kind is bytes:
+        return b"b" + _pack_u32(len(value)) + value
     if isinstance(value, list):
         if len(value) > MAX_CONTAINER_ITEMS:
             raise CodecError("list exceeds item bound")
         return b"l" + _u32(len(value)) + b"".join(
-            encode_value(item) for item in value
+            map(encode_value, value)
         )
     if isinstance(value, dict):
         if len(value) > MAX_CONTAINER_ITEMS:
             raise CodecError("object exceeds item bound")
-        if not all(isinstance(key, str) for key in value):
-            raise CodecError("object keys must be strings")
-        ordered = sorted(value.items(), key=lambda item: item[0].encode("utf-8"))
-        return b"d" + _u32(len(ordered)) + b"".join(
-            encode_value(key) + encode_value(item) for key, item in ordered
-        )
+        try:
+            ordered = sorted(
+                (key.encode("utf-8"), item) for key, item in value.items()
+            )
+        except AttributeError:
+            raise CodecError("object keys must be strings") from None
+        parts = [b"d", _u32(len(ordered))]
+        for key_bytes, item in ordered:
+            parts.append(b"s" + _pack_u32(len(key_bytes)) + key_bytes)
+            parts.append(encode_value(item))
+        return b"".join(parts)
+    # Fall through for int/str/bytes/float subclasses so the accepted value
+    # domain is unchanged; bool subclasses cannot exist.
+    if isinstance(value, bool):
+        return b"t" if value else b"f"
+    if isinstance(value, int):
+        return _blob(b"i", str(value).encode("ascii"))
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise CodecError("non-finite floats are not canonical")
+        if value == 0.0:
+            value = 0.0
+        return b"r" + _pack_f64(value)
+    if isinstance(value, str):
+        return _blob(b"s", value.encode("utf-8"))
+    if isinstance(value, bytes):
+        return _blob(b"b", value)
     raise CodecError(f"unsupported canonical value: {type(value).__name__}")
 
 
@@ -178,6 +208,11 @@ def _candidate_material(
     ])
 
 
+_FRAME_VERSION_BYTES = _blob(b"i", str(FRAME_VERSION).encode("ascii"))
+_MATERIAL_HEADER = b"l" + _pack_u32(4)
+_FRAME_HEADER = b"l" + _pack_u32(7)
+
+
 @dataclass(frozen=True)
 class Mutation:
     """One addressed graph mutation in the globally deterministic order."""
@@ -202,11 +237,33 @@ class Mutation:
             raise CodecError("tombstones do not carry row values")
         _validate_policy(self)
 
+    @cached_property
+    def _encoded(self) -> tuple[bytes, bytes]:
+        """One shared encode pass: ``(canonical frame, candidate hash)``.
+
+        The candidate material and the frame share every element except the
+        version, timestamp, and trailing hash, so the elements are encoded
+        once and assembled into both byte layouts. The layouts themselves
+        are frozen — this is construction sharing, not a format change.
+        """
+        table = encode_value(self.table)
+        address = encode_value(list(self.address))
+        tombstone = b"t" if self.tombstone else b"f"
+        values = encode_value({key: value for key, value in self.values})
+        shared = table + address
+        digest = hashlib.sha256(
+            _MATERIAL_HEADER + shared + tombstone + values
+        ).digest()
+        frame = (
+            _FRAME_HEADER + _FRAME_VERSION_BYTES + shared
+            + encode_value(self.timestamp_ns) + tombstone + values
+            + b"b" + _pack_u32(32) + digest
+        )
+        return frame, digest
+
     @property
     def candidate_hash(self) -> bytes:
-        return hashlib.sha256(_candidate_material(
-            self.table, self.address, self.tombstone, self.values
-        )).digest()
+        return self._encoded[1]
 
     @property
     def position(self) -> tuple[int, bytes]:
@@ -232,15 +289,7 @@ def _validate_policy(mutation: Mutation) -> None:
             f"machine-local columns in {mutation.table}: {', '.join(sorted(forbidden))}"
         )
 def _frame(mutation: Mutation) -> bytes:
-    return encode_value([
-        FRAME_VERSION,
-        mutation.table,
-        list(mutation.address),
-        mutation.timestamp_ns,
-        mutation.tombstone,
-        {key: value for key, value in mutation.values},
-        mutation.candidate_hash,
-    ])
+    return mutation._encoded[0]
 
 
 def encode_mutation_frame(mutation: Mutation) -> bytes:
