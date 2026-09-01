@@ -283,3 +283,13 @@ def test_oversize_udp_truncates_and_tcp_does_not():
 def test_malformed_and_non_queries_are_dropped(state):
     assert handle_query(b"\x00\x01\x02", state) is None
     assert handle_query(build_query(ZONE, "A", qr=1), state) is None
+
+
+def test_challenge_txt_honors_per_name_ttl():
+    state = ZoneState(
+        relay_ip=RELAY_IP, node_id="n",
+        txt_lookup=lambda name: ["tok"],
+        txt_ttl=lambda name: 45,
+    )
+    r = ask(state, f"_acme-challenge.worker-aa.{ZONE}", "TXT")
+    assert r["answers"][0][2] == 45

@@ -737,9 +737,13 @@ RESERVATION_NAMESPACE = _uuid.UUID("6cf440db-c8b4-566c-99db-e7be17109bdc")
 #: disconnect/release is immediate, never TTL-bound.
 HOST_LEASE_TTL = 120
 CAP_HOST_LEASE = "host-lease/1"
+CAP_DNS01 = "dns-01/1"
 #: What this registry supports; the hello ack advertises the
 #: intersection with what the connector offered.
-REGISTRY_CAPS = frozenset({CAP_HOST_LEASE, CAP_TLS_STREAM})
+REGISTRY_CAPS = frozenset({CAP_HOST_LEASE, CAP_TLS_STREAM, CAP_DNS01})
+
+#: serve:dns-01 op signature domain (auto-bhs3c).
+DNS01_DOMAIN = b"autonomy.network.serve.dns01.v1\n"
 
 _APP_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 _RESERVED_APP_LABELS = frozenset(
@@ -1187,6 +1191,122 @@ _HOST_OP_ARGS = {
     "host-release": frozenset({"reservation"}),
 }
 
+# -- auto-bhs3c: serve.dns01.* ops -----------------------------------------
+
+_DNS01_ORDER_RE = _re.compile(r"^[A-Za-z0-9._-]{1,64}\Z")
+_DNS01_ARGS = {
+    "serve.dns01.present": frozenset(
+        {"order", "value", "ttl", "expiry", "ts", "cert", "sig"}),
+    "serve.dns01.cleanup": frozenset(
+        {"order", "value", "ts", "cert", "sig"}),
+}
+DNS01_TTL_FLOOR, DNS01_TTL_CEILING = 30, 300
+#: expiry is an ABSOLUTE signed deadline: 60..900 s after the signed ts.
+#: A replayed request can only re-assert its own deadline — never extend
+#: it — so the 15-minute bound holds against the full skew window.
+DNS01_DEADLINE_MIN, DNS01_DEADLINE_MAX = 60, 900
+
+
+def _dns01_audit(op: str, persona: str, args: dict, result: str) -> None:
+    """One audit line per op: hashed order/value, never raw values, never
+    key material. The uniform wire error keeps detail server-side."""
+    def _h(field):
+        raw = args.get(field)
+        return hashlib.sha256(
+            raw.encode() if isinstance(raw, str) else b"?").hexdigest()[:16]
+    logger.info(
+        "dns01 op=%s persona=%s order=%s value=%s ttl=%s expiry=%s "
+        "result=%s",
+        op, (persona or "")[:8], _h("order"), _h("value"),
+        args.get("ttl"), args.get("expiry"), result,
+    )
+
+
+def _dns01_verify(tunnel: "Tunnel", op: str, args: dict,
+                  store: RegistryStore, now: int) -> None:
+    """Everything short of the store write; raises on ANY defect. The
+    caller collapses every failure to the uniform refusal."""
+    if CAP_DNS01 not in tunnel.caps:
+        raise _CtrlError("capability not negotiated")
+    if not isinstance(args, dict) or set(args) != _DNS01_ARGS[op]:
+        raise _CtrlError("bad arg set")
+    if not isinstance(args["order"], str) or \
+            _DNS01_ORDER_RE.match(args["order"]) is None:
+        raise _CtrlError("bad order")
+    from tools.network.registry.dns_challenges import validate_value
+
+    validate_value(args["value"])
+    if type(args["ts"]) is not int or abs(now - args["ts"]) > MAX_CLOCK_SKEW:
+        raise _CtrlError("ts outside skew")
+    for field in ("ttl", "expiry"):
+        if field in args and type(args[field]) is not int:
+            raise _CtrlError("bad numeric field")
+    if op == "serve.dns01.present":
+        deadline_in = args["expiry"] - args["ts"]
+        if not DNS01_DEADLINE_MIN <= deadline_in <= DNS01_DEADLINE_MAX:
+            raise _CtrlError("expiry deadline outside 60..900s of ts")
+    core_fields = {"op": op, "order": args["order"], "value": args["value"],
+                   "ts": args["ts"]}
+    if op == "serve.dns01.present":
+        core_fields["ttl"] = args["ttl"]
+        core_fields["expiry"] = args["expiry"]
+    binding = store.get_org(tunnel.org)
+    if binding is None or binding.expires_at < now:
+        raise _CtrlError("no live binding")
+    cert = DelegationCert.from_json(args["cert"])
+    store.purge_expired_revocations(now=now)
+    verified = verify_chain(
+        cert, binding.root_pub, org=tunnel.org, now=now,
+        revocations=store.revocation_set(tunnel.org),
+        required_scope="serve:dns-01",
+    )
+    if tuple(verified.scope) != ("serve:dns-01",):
+        raise _CtrlError("scope must be exactly serve:dns-01")
+    if verified.depth != 1:
+        raise _CtrlError("dns01 cert must be root-issued")
+    if verified.subject_kind != "persona" \
+            or verified.subject_id != tunnel.persona_pub:
+        raise _CtrlError("dns01 cert subject must be the tunnel persona")
+    verify_signature(
+        cert.child_pub, args["sig"],
+        DNS01_DOMAIN + canonical_json(core_fields),
+    )
+
+
+def _ctrl_dns01(tunnel: "Tunnel", op: str, args: dict,
+                store: RegistryStore, now: int) -> dict:
+    """serve.dns01.present / .cleanup — the record name is DERIVED from
+    the tunnel persona's serving-label binding, never body-supplied.
+    Every negative collapses to the uniform {"error": "refused"}."""
+    try:
+        _dns01_verify(tunnel, op, args, store, now)
+        label = store.get_persona_label(tunnel.persona_pub)
+        if label is None:
+            raise _CtrlError("no serving-label binding")
+        name = f"_acme-challenge.{label}.{SERVE_BASE_DOMAIN}"
+        if op == "serve.dns01.present":
+            ttl = max(DNS01_TTL_FLOOR,
+                      min(DNS01_TTL_CEILING, args["ttl"]))
+            # The SIGNED absolute deadline, verbatim: a replay re-asserts
+            # it; only a freshly signed request can move it.
+            expires_at = args["expiry"]
+            store.upsert_serve_challenge(
+                name + ".", args["value"], expires_at=expires_at,
+                now=now, ttl=ttl, order_ref=args["order"],
+            )
+            result = {"name": name, "expires_at": expires_at}
+        else:
+            store.delete_serve_challenge(
+                name + ".", args["value"], order_ref=args["order"])
+            result = {}
+    except Exception as exc:
+        _dns01_audit(op, tunnel.persona_pub or "", args
+                     if isinstance(args, dict) else {},
+                     f"refused:{type(exc).__name__}")
+        raise _CtrlError("refused") from exc
+    _dns01_audit(op, tunnel.persona_pub or "", args, "ok")
+    return result
+
 
 def _ctrl_host_op(tunnel: "Tunnel", op: str, args: dict,
                   host_routes: "HostRoutes | None") -> dict:
@@ -1237,6 +1357,8 @@ async def _handle_ctrl_frame(tunnel: "Tunnel", payload: bytes,
             result = _ctrl_issue_turn(tunnel, args, turn_issuer)
         elif op in _HOST_OP_ARGS:
             result = _ctrl_host_op(tunnel, op, args, host_routes)
+        elif op in _DNS01_ARGS:
+            result = _ctrl_dns01(tunnel, op, args, store, now)
         else:
             raise _CtrlError(f"unknown control op: {op!r}")
         reply = {"id": correlation, "ok": True, **result}

@@ -62,7 +62,7 @@ def test_apex_and_wildcard_values_coexist(store, tick):
     present(store, NAME, "apex-tok", now_fn=_now_fn(tick))
     present(store, NAME, "wild-tok", now_fn=_now_fn(tick))
     live = store.live_serve_challenges(now=tick["now"])
-    assert live == {NAME + ".": ["apex-tok", "wild-tok"]}
+    assert live == {NAME + ".": {"values": ["apex-tok", "wild-tok"], "ttl": 60}}
 
 
 def test_present_is_idempotent_and_refreshes_expiry(store, tick):
@@ -71,7 +71,7 @@ def test_present_is_idempotent_and_refreshes_expiry(store, tick):
     present(store, NAME, "tok", expiry=100, now_fn=_now_fn(tick))
     tick["now"] += 90  # past the first expiry, inside the refreshed one
     assert store.live_serve_challenges(now=tick["now"]) == {
-        NAME + ".": ["tok"]
+        NAME + ".": {"values": ["tok"], "ttl": 60}
     }
 
 
@@ -81,7 +81,7 @@ def test_expired_values_purge_on_read(store, tick):
     present(store, NAME, "young", expiry=900, now_fn=_now_fn(tick))
     tick["now"] += 100
     assert store.live_serve_challenges(now=tick["now"]) == {
-        NAME + ".": ["young"]
+        NAME + ".": {"values": ["young"], "ttl": 60}
     }
 
 
@@ -97,7 +97,7 @@ def test_cleanup_removes_one_value_keeps_sibling(store, tick):
     present(store, NAME, "b", now_fn=_now_fn(tick))
     cleanup(store, NAME, "a")
     assert store.live_serve_challenges(now=tick["now"]) == {
-        NAME + ".": ["b"]
+        NAME + ".": {"values": ["b"], "ttl": 60}
     }
     cleanup(store, NAME, "b")
     assert store.live_serve_challenges(now=tick["now"]) == {}
@@ -113,4 +113,4 @@ def test_zone_state_endpoint_serves_live_challenges(client, store):
     dc.present(app_store, NAME, "tok",
                now_fn=lambda: client.app.state.now_fn())
     body = client.get("/v1/dns/zone-state").json()
-    assert body == {"challenges": {NAME + ".": ["tok"]}}
+    assert body == {"challenges": {NAME + ".": {"values": ["tok"], "ttl": 60}}}

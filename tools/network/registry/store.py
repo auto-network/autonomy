@@ -282,6 +282,8 @@ CREATE TABLE IF NOT EXISTS serve_challenges (
     name       TEXT NOT NULL,
     value      TEXT NOT NULL,
     expires_at INTEGER NOT NULL,
+    ttl        INTEGER NOT NULL DEFAULT 60,
+    order_ref  TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (name, value)
 );
 
@@ -500,6 +502,18 @@ class RegistryStore:
                 "UPDATE orgs SET binding_generation = ? WHERE org_uuid = ?",
                 (secrets.token_hex(32), row["org_uuid"]),
             )
+        challenge_cols = {
+            r["name"] for r in self._conn.execute(
+                "PRAGMA table_info(serve_challenges)")
+        }
+        if challenge_cols and "ttl" not in challenge_cols:
+            self._conn.execute(
+                "ALTER TABLE serve_challenges ADD COLUMN"
+                " ttl INTEGER NOT NULL DEFAULT 60")
+        if challenge_cols and "order_ref" not in challenge_cols:
+            self._conn.execute(
+                "ALTER TABLE serve_challenges ADD COLUMN"
+                " order_ref TEXT NOT NULL DEFAULT ''")
         link_cols = {
             r["name"] for r in self._conn.execute("PRAGMA table_info(links)")
         }
@@ -1233,7 +1247,7 @@ class RegistryStore:
     @_locked
     def upsert_serve_challenge(
         self, name: str, value: str, *, expires_at: int, now: int,
-        max_values: int = 8,
+        ttl: int = 60, order_ref: str = "", max_values: int = 8,
     ) -> None:
         """Add/refresh one challenge value; purges expired rows first and
         bounds live values per name (raises ValueError at the cap)."""
@@ -1248,34 +1262,51 @@ class RegistryStore:
             self._conn.rollback()
             raise ValueError(f"{max_values} live values at {name}")
         self._conn.execute(
-            "INSERT INTO serve_challenges (name, value, expires_at)"
-            " VALUES (?, ?, ?) ON CONFLICT (name, value)"
-            " DO UPDATE SET expires_at = excluded.expires_at",
-            (name, value, expires_at),
+            "INSERT INTO serve_challenges"
+            " (name, value, expires_at, ttl, order_ref)"
+            " VALUES (?, ?, ?, ?, ?) ON CONFLICT (name, value)"
+            " DO UPDATE SET expires_at = excluded.expires_at,"
+            " ttl = excluded.ttl, order_ref = excluded.order_ref",
+            (name, value, expires_at, ttl, order_ref),
         )
         self._conn.commit()
 
     @_locked
-    def delete_serve_challenge(self, name: str, value: str) -> None:
-        self._conn.execute(
-            "DELETE FROM serve_challenges WHERE name = ? AND value = ?",
-            (name, value),
-        )
+    def delete_serve_challenge(
+        self, name: str, value: str, *, order_ref: str | None = None,
+    ) -> None:
+        """Remove one value; with *order_ref*, only the owning order's
+        row (a mismatched order removes nothing — bhs3c cleanup scope)."""
+        if order_ref is None:
+            self._conn.execute(
+                "DELETE FROM serve_challenges WHERE name = ? AND value = ?",
+                (name, value),
+            )
+        else:
+            self._conn.execute(
+                "DELETE FROM serve_challenges WHERE name = ? AND value = ?"
+                " AND order_ref = ?",
+                (name, value, order_ref),
+            )
         self._conn.commit()
 
     @_locked
     def live_serve_challenges(self, *, now: int) -> dict:
-        """{fqdn: [values]} of unexpired challenges, purging inline."""
+        """{fqdn: {"values": [...], "ttl": min}} of unexpired challenges,
+        purging inline. The per-name TTL is the minimum across values."""
         self._conn.execute(
             "DELETE FROM serve_challenges WHERE expires_at < ?", (now,))
         self._conn.commit()
         rows = self._conn.execute(
-            "SELECT name, value FROM serve_challenges"
+            "SELECT name, value, ttl FROM serve_challenges"
             " ORDER BY name, value",
         ).fetchall()
         challenges: dict = {}
         for row in rows:
-            challenges.setdefault(row["name"], []).append(row["value"])
+            entry = challenges.setdefault(
+                row["name"], {"values": [], "ttl": row["ttl"]})
+            entry["values"].append(row["value"])
+            entry["ttl"] = min(entry["ttl"], row["ttl"])
         return challenges
 
     @_locked

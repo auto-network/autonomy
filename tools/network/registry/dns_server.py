@@ -65,7 +65,7 @@ class _ChallengeCache:
 
     def __init__(self, registry_url: str):
         self._url = f"{registry_url.rstrip('/')}/v1/dns/zone-state"
-        self._challenges: dict[str, list[str]] = {}
+        self._challenges: dict[str, tuple[list[str], int]] = {}
         self._fetched_at = 0.0
         self._lock = asyncio.Lock()
 
@@ -75,10 +75,17 @@ class _ChallengeCache:
         ) as resp:
             data = json.loads(resp.read())
         challenges = data.get("challenges", {})
-        return {
-            str(name): [str(v) for v in values]
-            for name, values in challenges.items()
-        } if isinstance(challenges, dict) else {}
+        if not isinstance(challenges, dict):
+            return {}
+        parsed: dict[str, tuple[list[str], int]] = {}
+        for name, entry in challenges.items():
+            if isinstance(entry, dict):
+                values = [str(v) for v in entry.get("values", [])]
+                ttl = int(entry.get("ttl", 60))
+            else:  # v1 compatibility: a bare value list
+                values, ttl = [str(v) for v in entry], 60
+            parsed[str(name)] = (values, ttl)
+        return parsed
 
     async def refresh_if_stale(self) -> None:
         if time.monotonic() - self._fetched_at < STATE_CACHE_SECONDS:
@@ -94,7 +101,10 @@ class _ChallengeCache:
             self._fetched_at = time.monotonic()
 
     def lookup(self, name: str) -> list[str]:
-        return self._challenges.get(name, [])
+        return self._challenges.get(name, ([], 60))[0]
+
+    def lookup_ttl(self, name: str) -> int:
+        return self._challenges.get(name, ([], 60))[1]
 
 
 class DnsService:
@@ -104,6 +114,7 @@ class DnsService:
         self.state = ZoneState(
             relay_ip=relay_ip, node_id=node_id,
             txt_lookup=self._cache.lookup,
+            txt_ttl=self._cache.lookup_ttl,
         )
 
     async def answer(self, raw: bytes, source: str, *,
