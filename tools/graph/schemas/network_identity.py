@@ -767,6 +767,14 @@ class NetworkServeCertV2(SettingSchema):
             "{kind: operator, id: child_pub}."
         ),
     )
+    dns01_cert: str | None = field(
+        required=False,
+        description=(
+            "Optional direct-root serve:dns-01 certificate over the same "
+            "serving child key. It authorizes only persona-scoped ACME TXT "
+            "present/cleanup operations and is never exposed to Certbot."
+        ),
+    )
     key_path: str = field(
         required=True,
         description=(
@@ -829,6 +837,12 @@ class NetworkServeCertV2(SettingSchema):
             viewer_cert = DelegationCert.from_json(
                 _require_str(payload, "viewer_cert", cls.__name__, max_len=16384)
             )
+            dns01_wire = payload.get("dns01_cert")
+            dns01_cert = (
+                None if dns01_wire is None else DelegationCert.from_json(
+                    _require_str(payload, "dns01_cert", cls.__name__, max_len=16384)
+                )
+            )
         except Exception as e:
             raise SchemaValidationError(
                 f"{cls.__name__}: serving certificate does not parse as a delegation "
@@ -880,19 +894,37 @@ class NetworkServeCertV2(SettingSchema):
                 f"{cls.__name__}: viewer cert subject must be identity-neutral "
                 "{kind: operator, id: child_pub}"
             )
+        if dns01_cert is not None:
+            if (
+                dns01_cert.child_pub != cert.child_pub
+                or dns01_cert.org != cert.org
+                or tuple(dns01_cert.scope) != ("serve:dns-01",)
+                or dns01_cert.not_before != cert.not_before
+                or dns01_cert.not_after != cert.not_after
+                or dns01_cert.parent_cert is not None
+                or dns01_cert.subject != cert.subject
+            ):
+                raise SchemaValidationError(
+                    f"{cls.__name__}: dns01_cert must be a direct-root "
+                    "serve:dns-01 certificate over the same child, persona, "
+                    "organization, and validity window"
+                )
 
         # Settings validation has no injected clock, so verify both chains at
         # a point inside their common validity window. The HTTP route and
         # supervisor separately enforce current-time validity.
         mid = (cert.not_before + cert.not_after) // 2
         try:
-            for candidate in (cert, viewer_cert):
+            candidates = [(cert, SERVE_CERT_SCOPE), (viewer_cert, SERVE_CERT_SCOPE)]
+            if dns01_cert is not None:
+                candidates.append((dns01_cert, "serve:dns-01"))
+            for candidate, required_scope in candidates:
                 verified = verify_chain(
                     candidate,
                     root_pub,
                     org=cert.org,
                     now=mid,
-                    required_scope=SERVE_CERT_SCOPE,
+                    required_scope=required_scope,
                 )
                 if verified.depth != 1:
                     raise IdkitError(

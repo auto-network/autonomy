@@ -1579,6 +1579,15 @@ async def get_unlock_state(request: Request) -> JSONResponse:
                 sync_since is None or since < sync_since
             ):
                 sync_since = since
+        # The persona wildcard TLS pair is the second certificate lifecycle
+        # carried by this same operator-facing flag. It is relevant once this
+        # node is configured to serve at least one scope; it is not a new
+        # identity flag or a second key-unlock concept.
+        if serving_setup:
+            from tools.dashboard import service_certificate as _service_tls
+            tls_status = _service_tls.status().get("status", "missing")
+            if tls_status != "ok":
+                cert_broken.append("Service TLS")
         cert_available = True
     except Exception:
         cert_available = False
@@ -1592,9 +1601,11 @@ async def get_unlock_state(request: Request) -> JSONResponse:
                 "value": "Expired" if cert_needs else "Current"}
         if cert_needs:
             cert["detail"] = (
-                "The serving certificate for " + _oxford(sorted(cert_broken))
-                + " has lapsed, so devices can't verify this dashboard until "
-                "it's renewed — that needs your root key."
+                "Certificate attention is required for "
+                + _oxford(sorted(cert_broken))
+                + ": one is missing or has lapsed. Unlock with your root if "
+                "delegation renewal is needed; "
+                "Service TLS renews through DNS-01."
             )
         else:
             cert["detail"] = "Your dashboard's certificate. All current."

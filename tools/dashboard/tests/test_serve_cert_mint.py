@@ -57,6 +57,7 @@ def test_browser_serve_cert_mint_is_idkit_compatible(mode):
 
     cert = DelegationCert.from_json(posted["cert"])
     viewer_cert = DelegationCert.from_json(posted["viewer_cert"])
+    dns01_cert = DelegationCert.from_json(posted["dns01_cert"])
     # Exactly what the handshake / provision gate re-check: chains to the org
     # root, tunnel:serve scope, right org.
     now = (cert.not_before + cert.not_after) // 2
@@ -69,6 +70,8 @@ def test_browser_serve_cert_mint_is_idkit_compatible(mode):
         bytes.fromhex(personal.private_hex), genesis_id).public_hex
     verify_chain(viewer_cert, root.public_hex, org=org_uuid, now=now,
                  required_scope="tunnel:serve")
+    verify_chain(dns01_cert, root.public_hex, org=org_uuid, now=now,
+                 required_scope="serve:dns-01")
     assert viewer_cert.child_pub == cert.child_pub
     assert viewer_cert.org == cert.org
     assert viewer_cert.scope == cert.scope
@@ -77,6 +80,10 @@ def test_browser_serve_cert_mint_is_idkit_compatible(mode):
     assert viewer_cert.subject.kind == "operator"
     assert viewer_cert.subject.id == viewer_cert.child_pub
     assert cert.subject.id not in posted["viewer_cert"]
+    assert dns01_cert.child_pub == cert.child_pub
+    assert dns01_cert.subject == cert.subject
+    assert dns01_cert.not_before == cert.not_before
+    assert dns01_cert.not_after == cert.not_after
     # The exported private key is the one the cert delegates to.
     assert KeyPair.from_private_hex(posted["private_key"]).public_hex == cert.child_pub
     # A ~30-day delegate window (the operator's decision).
@@ -135,11 +142,14 @@ def test_browser_personal_tunnel_provision_is_idkit_compatible():
     assert out["serve"]["org"] is None
     cert = DelegationCert.from_json(out["serve"]["cert"])
     viewer_cert = DelegationCert.from_json(out["serve"]["viewer_cert"])
+    dns01_cert = DelegationCert.from_json(out["serve"]["dns01_cert"])
     now = (cert.not_before + cert.not_after) // 2
     verify_chain(cert, personal.public_hex, org=org_uuid, now=now,
                  required_scope="tunnel:serve")
     verify_chain(viewer_cert, personal.public_hex, org=org_uuid, now=now,
                  required_scope="tunnel:serve")
+    verify_chain(dns01_cert, personal.public_hex, org=org_uuid, now=now,
+                 required_scope="serve:dns-01")
     assert cert.subject.kind == "persona"
     assert cert.subject.id == personal.public_hex
     assert viewer_cert.subject.kind == "operator"

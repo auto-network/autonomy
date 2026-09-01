@@ -893,16 +893,22 @@ def _mint_serve(
 
 
 def _serve_body(root: KeyPair, delegate: KeyPair, cert, *, org=ORG, **changes):
-    """Canonical two-cert provisioning body over one child and time window."""
+    """Canonical scoped-cert provisioning body over one child/time window."""
     viewer_cert = issue_cert(
         root, delegate.public_hex, scope=tuple(cert.scope), org=cert.org,
         subject=Subject("operator", delegate.public_hex),
+        not_before=cert.not_before, not_after=cert.not_after,
+    )
+    dns01_cert = issue_cert(
+        root, delegate.public_hex, scope=("serve:dns-01",), org=cert.org,
+        subject=cert.subject,
         not_before=cert.not_before, not_after=cert.not_after,
     )
     body = {
         "org": org,
         "cert": cert.to_json().decode("ascii"),
         "viewer_cert": viewer_cert.to_json().decode("ascii"),
+        "dns01_cert": dns01_cert.to_json().decode("ascii"),
         "private_key": delegate.private_hex,
     }
     body.update(changes)
