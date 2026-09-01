@@ -47,6 +47,9 @@ IP=$(./provision-vm.sh "$NAME" --role service --type "$TYPE" --location "$LOCATI
 echo "   $NAME -> $IP"
 TARGET="root@$IP"
 
+echo "== 2a/4 open UDP+TCP 53 (base firewall is 22/80/443 only)"
+./dns/ensure-dns-firewall.sh "$NAME"
+
 echo "== 2/4 wait for SSH + cloud-init"
 for _ in $(seq 1 60); do
     if ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 \
@@ -60,7 +63,9 @@ for _ in $(seq 1 60); do
 done
 
 echo "== 3/4 registry code deploy (carries the DNS responder)"
-"$REPO_ROOT/tools/network/registry/deploy/deploy.sh" "$TARGET"
+# A fresh box has no public TLS edge, so the registry deploy's public-URL
+# smoke has nothing to hit; its loopback /healthz probe is the real proof.
+SKIP_PUBLIC_SMOKE=1 "$REPO_ROOT/tools/network/registry/deploy/deploy.sh" "$TARGET"
 
 echo "== 4/4 DNS process"
 ./dns/deploy.sh --host "$TARGET" --node-id "$NAME"
