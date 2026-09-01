@@ -1539,6 +1539,29 @@ async def _serve_control_listener(connector, ctl_path: str,
                             connector_runtime.first_locked_refusal_at
                         ),
                     }
+                elif request.get("op") == "serve-host":
+                    # Dashboard-local desired-state seam. Unlike forwarding a
+                    # one-shot host-register frame, serve_host records the
+                    # reservation in the connector and its half-life keeper
+                    # renews it across the full tunnel lifetime/reconnects.
+                    args = request.get("args") or {}
+                    if set(args) != {"reservation", "host"} or not all(
+                        isinstance(args.get(field), str) and args[field]
+                        for field in ("reservation", "host")
+                    ):
+                        reply = {"ok": False, "error": "invalid serve-host request"}
+                    else:
+                        reply = await connector.serve_host(
+                            args["reservation"], args["host"]
+                        )
+                elif request.get("op") == "release-host":
+                    args = request.get("args") or {}
+                    if set(args) != {"reservation"} or not isinstance(
+                        args.get("reservation"), str
+                    ):
+                        reply = {"ok": False, "error": "invalid release-host request"}
+                    else:
+                        reply = await connector.release_host(args["reservation"])
                 elif request.get("op") == "fleet-runtime":
                     from tools.network.fleet_relay_sync import connector_runtime
 

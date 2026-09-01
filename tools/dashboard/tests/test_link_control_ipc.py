@@ -32,6 +32,14 @@ class _StubConnector:
             raise ConnectionError("no live tunnel to carry a control frame")
         return {**self._reply, "op": op}
 
+    async def serve_host(self, reservation, host):
+        self.calls.append(("serve-host", {"reservation": reservation, "host": host}))
+        return {"ok": True, "lease": {"generation": 1}}
+
+    async def release_host(self, reservation):
+        self.calls.append(("release-host", {"reservation": reservation}))
+        return {"ok": True}
+
 
 async def _with_listener(connector, ctl_path, body):
     task = asyncio.create_task(
@@ -109,6 +117,25 @@ def test_listener_reports_local_serving_state_without_forwarding(tmp_path):
         assert up["serving"] is True
         assert up["accepted_caps"] == ["host-lease/1", "dns-01/1"]
         assert connector.calls == []
+
+    asyncio.run(_with_listener(connector, ctl, body))
+
+
+def test_listener_enrolls_host_in_connector_lease_keeper(tmp_path):
+    ctl = str(tmp_path / "serve.ctl")
+    connector = _StubConnector()
+
+    async def body():
+        descriptor = json.loads(open(ctl).read())
+        reply = await asyncio.to_thread(
+            _roundtrip, descriptor["port"], {
+                "auth": descriptor["auth"], "op": "serve-host",
+                "args": {"reservation": "reservation-id", "host": "app.example"},
+            })
+        assert reply["ok"] is True
+        assert connector.calls == [("serve-host", {
+            "reservation": "reservation-id", "host": "app.example",
+        })]
 
     asyncio.run(_with_listener(connector, ctl, body))
 

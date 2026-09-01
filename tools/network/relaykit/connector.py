@@ -86,7 +86,10 @@ _LOG_SECRET_RE = re.compile(
     r"\b[0-9a-fA-F]{16,}\b|"
     r"\b[A-Za-z0-9_-]{24,}\b"
 )
-_OP_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+# Control operation vocabulary includes the namespaced DNS-01 operations
+# (serve.dns01.present / cleanup). Keep logs bounded, but do not relabel valid
+# dotted operations as <invalid> and send diagnosis down the wrong path.
+_OP_RE = re.compile(r"^[a-z][a-z0-9.-]{0,63}$")
 
 
 def _safe_log_text(value) -> str:
