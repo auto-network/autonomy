@@ -75,6 +75,27 @@ def test_one_scope_failing_does_not_stall_the_others(client, monkeypatch):
     assert [f["scope"] for f in body["failed"]] == ["anchore"]
 
 
+def test_restore_does_not_claim_a_connector_owned_elsewhere_was_restarted(
+    client, monkeypatch
+):
+    class _Locked(_FakeSupervisor):
+        def restart(self, org):
+            self.restarted.append(org)
+            return {"running": True, "reason": "owned-by-other-dashboard"}
+
+    fake = _Locked()
+    monkeypatch.setattr(sup, "get_supervisor", lambda: fake)
+    monkeypatch.setattr(sup, "_discover_startup_orgs", lambda: ["autonomy"])
+    monkeypatch.setattr(sup, "serve_cert_state", lambda org, **k: {"status": "ok"})
+
+    body = client.post("/api/fleet/restore", json={}).json()
+
+    assert body["restarted"] == []
+    assert body["failed"] == [
+        {"scope": "autonomy", "error": "owned-by-other-dashboard"}
+    ]
+
+
 def test_connector_counts_refusals_while_unarmed():
     rt = fleet_relay_sync.ConnectorFleetRuntime()
     assert rt.scheduler is None
