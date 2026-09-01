@@ -1301,6 +1301,7 @@ def _make_ice_serving_connector(
     connector_factory=None,
 ):
     """Construct the production connector with the existing ICE handler."""
+    from tools.dashboard.service_gateway_stream import LocalCaddyStreamHandler
     from tools.network.relaykit.aiortc_responder import PeerRuntime
     from tools.network.relaykit.connector import TunnelConnector
     from tools.network.relaykit.ice_signaling import IceCapacity
@@ -1334,6 +1335,8 @@ def _make_ice_serving_connector(
         min_backoff=min_backoff,
         max_backoff=max_backoff,
         publisher=publisher,
+        caps=("host-lease/1", "tls-stream/1"),
+        stream_handler=LocalCaddyStreamHandler(graph_org),
     )
     return connector
 
