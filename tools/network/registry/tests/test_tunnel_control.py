@@ -24,6 +24,7 @@ from tools.network.relaykit.frames import (
 )
 from tools.network.relaykit.hello import (
     HELLO_VERSION,
+    HELLO_VERSION_2,
     build_tunnel_hello,
     hello_signing_input,
 )
@@ -100,7 +101,7 @@ def test_authenticated_old_connector_gets_typed_version_mismatch(
             "error": {
                 "code": "protocol_version_mismatch",
                 "connector_version": HELLO_VERSION - 1,
-                "registry_version": HELLO_VERSION,
+                "registry_version": HELLO_VERSION_2,
             },
         }
         with pytest.raises(WebSocketDisconnect) as closed:

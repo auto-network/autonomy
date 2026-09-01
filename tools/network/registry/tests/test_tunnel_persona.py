@@ -43,24 +43,24 @@ def test_two_devices_for_one_persona_retain_same_routing_identity(
     second = KeyPair.generate()
     assert first.public_hex != second.public_hex
 
-    persona_a, signer_a = _verify(app, first, _cert(root, first))
-    persona_b, signer_b = _verify(app, second, _cert(root, second))
+    verified_a = _verify(app, first, _cert(root, first))
+    verified_b = _verify(app, second, _cert(root, second))
 
-    assert persona_a == persona_b == "ab" * 32
-    assert signer_a == first.public_hex
-    assert signer_b == second.public_hex
+    assert verified_a.persona_pub == verified_b.persona_pub == "ab" * 32
+    assert verified_a.signer_pub == first.public_hex
+    assert verified_b.signer_pub == second.public_hex
 
 
 def test_different_personas_remain_distinguishable(app, bound_org, root):
     first = KeyPair.generate()
     second = KeyPair.generate()
-    persona_a, _ = _verify(app, first, _cert(root, first))
-    persona_b, _ = _verify(
+    verified_a = _verify(app, first, _cert(root, first))
+    verified_b = _verify(
         app,
         second,
         _cert(root, second, subject=Subject("persona", "cd" * 32)),
     )
-    assert persona_a != persona_b
+    assert verified_a.persona_pub != verified_b.persona_pub
 
 
 @pytest.mark.parametrize(

@@ -30,7 +30,9 @@ import hashlib
 import hmac
 import logging
 import re
+import uuid as _uuid
 from collections import deque
+from dataclasses import dataclass
 from typing import Callable, Coroutine, Dict, List, NamedTuple, Optional, Tuple
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
@@ -58,8 +60,13 @@ from tools.network.relaykit.frames import (
     tag_viewer_message,
 )
 from tools.network.relaykit.hello import (
+    HELLO_FIELDS_V2,
     HELLO_VERSION,
+    HELLO_VERSION_2,
+    MACHINE_HELLO_DOMAIN,
+    TUNNEL_HELLO_DOMAIN_V2,
     HelloError,
+    hello_core,
     hello_signing_input,
     parse_tunnel_hello,
 )
@@ -355,13 +362,23 @@ class Tunnel:
         *,
         persona_pub: str | None = None,
         signer_pub: str | None = None,
+        machine: str = "",
+        caps: tuple = (),
     ):
         self.ws = ws
         self.org = org
-        # Connection-memory routing facts only. Neither value is written to
-        # link_sessions, node_hints, logs, metrics, or a history table.
+        # Connection-memory routing facts only. None of these values is
+        # written to link_sessions, node_hints, logs, metrics, or a
+        # history table.
         self.persona_pub = persona_pub
         self.signer_pub = signer_pub
+        #: Enrolled machine pub for v2 hellos; "" is the legacy v1 slot.
+        self.machine = machine
+        #: Accepted capability intersection for this connection.
+        self.caps = caps
+        #: Relay-minted per-connection identity: lease generations and
+        #: channel ids are fenced on it and never survive a reconnect.
+        self.connection_id = new_channel_id().hex()
         self.channels: Dict[bytes, _ViewerRelayChannel] = {}
         self.streams: Dict[str, Stream] = {}
         self._send_lock = asyncio.Lock()
@@ -495,38 +512,80 @@ class Tunnel:
 
 
 class TunnelHub:
-    """org → live tunnel. All state is in-memory: tunnels are ephemeral
-    by nature and re-dialed by connectors after any restart."""
+    """org → (persona, machine) → live tunnel. All state is in-memory:
+    tunnels are ephemeral by nature and re-dialed by connectors after any
+    restart.
+
+    Reconnect replaces only the same (persona, machine) slot — distinct
+    machines and personas of one org coexist (auto-0zdky). v1 connectors
+    occupy the empty-machine slot, preserving legacy replacement
+    semantics among themselves. Org-level viewer selection is the
+    TLA-verified pool rule: least-loaded live tunnel, pinned by the
+    caller for the connection's lifetime.
+    """
 
     def __init__(self):
-        self._tunnels: Dict[str, Tunnel] = {}
+        self._tunnels: Dict[str, Dict[tuple, Tunnel]] = {}
+
+    @staticmethod
+    def _slot(tunnel: Tunnel) -> tuple:
+        return (tunnel.persona_pub, tunnel.machine)
 
     def get(self, org: str) -> Optional[Tunnel]:
-        return self._tunnels.get(org)
+        """Org compatibility selector: the least-loaded live tunnel.
+        Callers pin the returned tunnel for the connection lifetime."""
+        slots = self._tunnels.get(org)
+        if not slots:
+            return None
+        return min(slots.values(), key=lambda t: len(t.channels))
+
+    def get_slot(
+        self, org: str, persona_pub: str, machine: str
+    ) -> Optional[Tunnel]:
+        return self._tunnels.get(org, {}).get((persona_pub, machine))
+
+    def tunnels_for(self, org: str) -> List[Tunnel]:
+        return list(self._tunnels.get(org, {}).values())
 
     def register(self, tunnel: Tunnel) -> Optional[Tunnel]:
-        """Install *tunnel*; returns the tunnel it replaced, if any."""
-        previous = self._tunnels.get(tunnel.org)
-        self._tunnels[tunnel.org] = tunnel
+        """Install *tunnel*; returns the same-slot tunnel it replaced, if
+        any. Never touches a different persona/machine's slot."""
+        slots = self._tunnels.setdefault(tunnel.org, {})
+        previous = slots.get(self._slot(tunnel))
+        slots[self._slot(tunnel)] = tunnel
         return previous
 
     def unregister(self, tunnel: Tunnel) -> None:
-        if self._tunnels.get(tunnel.org) is tunnel:
+        slots = self._tunnels.get(tunnel.org)
+        if slots is None:
+            return
+        if slots.get(self._slot(tunnel)) is tunnel:
+            del slots[self._slot(tunnel)]
+        if not slots:
             del self._tunnels[tunnel.org]
 
-    async def close_revoked(self, org: str, signer_pub: str) -> bool:
-        """Close the live tunnel authenticated by a newly revoked signer.
+    async def close_revoked(
+        self, org: str, signer_pub: str,
+        host_routes: "HostRoutes | None" = None,
+    ) -> bool:
+        """Close every live tunnel authenticated by a newly revoked signer.
 
-        Removing it from admission first prevents a viewer racing the socket
-        close from opening a new channel on an already-revoked tunnel.
+        Removing each from admission — hub slot AND hostname leases —
+        before the socket close prevents a viewer or routed open racing
+        onto an already-revoked tunnel.
         """
-        tunnel = self._tunnels.get(org)
-        if tunnel is None or tunnel.signer_pub != signer_pub:
-            return False
-        self.unregister(tunnel)
-        await _close_quietly(tunnel.ws, CLOSE_UNAUTHENTICATED)
-        await tunnel.close_all_viewers(CLOSE_UNAUTHENTICATED)
-        return True
+        matches = [
+            tunnel
+            for tunnel in self._tunnels.get(org, {}).values()
+            if tunnel.signer_pub == signer_pub
+        ]
+        for tunnel in matches:
+            self.unregister(tunnel)
+            if host_routes is not None:
+                host_routes.drop_connection(tunnel)
+            await _close_quietly(tunnel.ws, CLOSE_UNAUTHENTICATED)
+            await tunnel.close_all_viewers(CLOSE_UNAUTHENTICATED)
+        return bool(matches)
 
 
 class _ProtocolVersionMismatch(HelloError):
@@ -534,13 +593,28 @@ class _ProtocolVersionMismatch(HelloError):
         self.connector_version = connector_version
         super().__init__(
             "tunnel protocol version mismatch: "
-            f"connector={connector_version} registry={HELLO_VERSION}"
+            f"connector={connector_version} registry={HELLO_VERSION_2}"
         )
+
+
+@dataclass(frozen=True)
+class VerifiedTunnelHello:
+    """The authenticated routing identity a hello establishes."""
+
+    persona_pub: str
+    signer_pub: str
+    #: Enrolled machine pub (64 hex) for v2 hellos; "" for v1 — the
+    #: legacy org-slot identity.
+    machine: str
+    #: Capabilities the connector offered (v2), before intersection with
+    #: what this registry supports.
+    caps: tuple
+    version: int
 
 
 def _verify_tunnel_hello(
     raw, org: str, store: RegistryStore, now: int
-) -> tuple[str, str]:
+) -> VerifiedTunnelHello:
     """The tunnel's I4 gate: hello signature + tunnel:serve chain to the
     org's bound root. Raises HelloError on any failure."""
     # Parse an integer version without accepting it yet.  We authenticate the
@@ -557,14 +631,39 @@ def _verify_tunnel_hello(
     if binding is None or binding.expires_at < now:
         raise HelloError("no live binding for org")
 
+    is_v2 = data["v"] == HELLO_VERSION_2 and set(data) == HELLO_FIELDS_V2
     try:
-        verify_signature(
-            data["signer"],
-            data["sig"],
-            hello_signing_input(
-                org, data["signer"], data["ts"], version=data["v"]
-            ),
-        )
+        if is_v2:
+            core = hello_core(
+                org=org,
+                signer=data["signer"],
+                machine=data["machine"],
+                caps=data["caps"],
+                ts=data["ts"],
+                version=data["v"],
+            )
+            verify_signature(
+                data["signer"], data["sig"], TUNNEL_HELLO_DOMAIN_V2 + core
+            )
+            try:
+                verify_signature(
+                    data["machine"],
+                    data["machine_sig"],
+                    MACHINE_HELLO_DOMAIN + core,
+                )
+            except Exception as exc:
+                raise HelloError(
+                    "machine co-signature does not verify against the "
+                    "claimed machine key"
+                ) from exc
+        else:
+            verify_signature(
+                data["signer"],
+                data["sig"],
+                hello_signing_input(
+                    org, data["signer"], data["ts"], version=data["v"]
+                ),
+            )
         cert = DelegationCert.from_json(data["cert"])
         if cert.child_pub != data["signer"]:
             raise HelloError("cert does not delegate to the hello signer")
@@ -590,14 +689,232 @@ def _verify_tunnel_hello(
             )
     except (ChainVerifyError, MalformedError) as exc:
         raise HelloError(f"{type(exc).__name__}: {exc}") from exc
-    if data["v"] != HELLO_VERSION:
+    if data["v"] not in (HELLO_VERSION, HELLO_VERSION_2):
         raise _ProtocolVersionMismatch(data["v"])
-    return verified.subject_id, data["signer"]
+    return VerifiedTunnelHello(
+        persona_pub=verified.subject_id,
+        signer_pub=data["signer"],
+        machine=data["machine"] if is_v2 else "",
+        caps=tuple(data["caps"]) if is_v2 else (),
+        version=data["v"],
+    )
 
 
 async def _close_quietly(ws: WebSocket, code: int) -> None:
     with contextlib.suppress(Exception):
         await ws.close(code=code)
+
+
+# -- auto-0zdky: serving hostname ownership + live leases ------------------
+
+#: The delegated serving zone every registered hostname must live under.
+SERVE_BASE_DOMAIN = "serve.auto.network"
+#: NamespaceReservation UUIDv5 namespace (design c880c5e6 §3.2).
+RESERVATION_NAMESPACE = _uuid.UUID("6cf440db-c8b4-566c-99db-e7be17109bdc")
+#: Live lease lifetime; renewal is expected at half-life. Teardown on
+#: disconnect/release is immediate, never TTL-bound.
+HOST_LEASE_TTL = 120
+CAP_HOST_LEASE = "host-lease/1"
+#: What this registry supports; the hello ack advertises the
+#: intersection with what the connector offered.
+REGISTRY_CAPS = frozenset({CAP_HOST_LEASE})
+
+_APP_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
+_RESERVED_APP_LABELS = frozenset(
+    {"_autonomy", "www", "api", "relay", "registry", "auto", "serve"}
+)
+_PERSONA_LABEL_RE = re.compile(
+    r"^[a-z0-9](?:[a-z0-9-]{0,40}[a-z0-9])?-[0-9a-f]{20}\Z"
+)
+
+
+class HostValidationError(Exception):
+    """A hostname registration that fails closed as label-invalid."""
+
+
+def persona_label_suffix(persona_pub: str) -> str:
+    """The cryptographic binding between a serving label and its persona:
+    the first 20 lowercase hex characters of SHA-256(persona key bytes)."""
+    return hashlib.sha256(bytes.fromhex(persona_pub)).hexdigest()[:20]
+
+
+def validate_host_registration(
+    host: str, reservation: str, persona_pub: str
+) -> tuple[str, str]:
+    """Validate a host-register request against the authenticated persona.
+
+    Returns ``(app_label, persona_label)``. The reservation UUID must be
+    the deterministic UUIDv5 over ``<persona_pub>\\0<app_label>`` — a
+    mismatched id can never claim a host, and the label suffix must be
+    the persona's own key digest, so a host under another persona's
+    label fails closed here regardless of ownership state.
+    """
+    if not isinstance(host, str) or not isinstance(reservation, str):
+        raise HostValidationError("host and reservation must be strings")
+    if len(host) > 253 or host != host.strip("."):
+        raise HostValidationError("host is not a valid FQDN")
+    suffix = "." + SERVE_BASE_DOMAIN
+    if not host.endswith(suffix):
+        raise HostValidationError(f"host must end with {suffix}")
+    labels = host[: -len(suffix)].split(".")
+    if len(labels) != 2:
+        raise HostValidationError(
+            "host must be <app>.<persona-label>" + suffix
+        )
+    app_label, persona_label = labels
+    if (
+        _APP_LABEL_RE.match(app_label) is None
+        or app_label in _RESERVED_APP_LABELS
+    ):
+        raise HostValidationError("app label is reserved or malformed")
+    if _PERSONA_LABEL_RE.match(persona_label) is None:
+        raise HostValidationError("persona label is malformed")
+    if not persona_label.endswith("-" + persona_label_suffix(persona_pub)):
+        raise HostValidationError(
+            "persona label does not bind to the authenticated persona"
+        )
+    expected = str(
+        _uuid.uuid5(RESERVATION_NAMESPACE, f"{persona_pub}\0{app_label}")
+    )
+    if reservation != expected:
+        raise HostValidationError(
+            "reservation id does not derive from persona and app label"
+        )
+    return app_label, persona_label
+
+
+class _HostLease(NamedTuple):
+    tunnel: "Tunnel"
+    generation: int
+    expires_at: int
+    host: str
+
+
+class HostRoutes:
+    """Live hostname → tunnel routing state.
+
+    Durable *ownership* (persona-bound reservation rows, monotonic
+    generation counters) lives in the store; the *lease* binding a
+    reservation to one authenticated connection is memory-only and dies
+    with the connection — reconnects re-register under a fresh
+    generation, so stale routes can never survive a tunnel loss.
+    """
+
+    def __init__(self, store: RegistryStore, now_fn):
+        self._store = store
+        self._now_fn = now_fn
+        self._leases: Dict[str, _HostLease] = {}
+        self._by_host: Dict[str, str] = {}
+
+    def _live(self, reservation: str) -> Optional[_HostLease]:
+        lease = self._leases.get(reservation)
+        if lease is None:
+            return None
+        if lease.expires_at < int(self._now_fn()):
+            self._drop(reservation)
+            return None
+        return lease
+
+    def _drop(self, reservation: str) -> None:
+        lease = self._leases.pop(reservation, None)
+        if lease is not None and self._by_host.get(lease.host) == reservation:
+            del self._by_host[lease.host]
+
+    def route(self, host: str) -> Optional["Tunnel"]:
+        """Resolve a serving hostname to its leased live tunnel, or None.
+        Every miss (unknown, unleased, expired) is indistinguishable."""
+        reservation = self._by_host.get(host)
+        if reservation is None:
+            return None
+        lease = self._live(reservation)
+        return lease.tunnel if lease is not None else None
+
+    def reservation_for(self, host: str) -> str:
+        """The reservation id behind a live-routed host ("" when unrouted)."""
+        reservation = self._by_host.get(host)
+        if reservation is None or self._live(reservation) is None:
+            return ""
+        return reservation
+
+    def register(self, tunnel: "Tunnel", reservation: str, host: str) -> dict:
+        """host-register: the authenticated desired-state advertisement."""
+        try:
+            app_label, persona_label = validate_host_registration(
+                host, reservation, tunnel.persona_pub
+            )
+        except HostValidationError as exc:
+            raise _CtrlError("label-invalid") from exc
+        owner = self._store.get_host_ownership(reservation)
+        if owner is not None and owner.persona_pub != tunnel.persona_pub:
+            raise _CtrlError("host-owned-elsewhere")
+        if owner is not None and owner.host != host:
+            # One immutable serving label per persona: a different slug
+            # (or app spelling) for an existing reservation fails closed.
+            raise _CtrlError("label-invalid")
+        other = self._store.get_host_ownership_by_host(host)
+        if other is not None and other.reservation_id != reservation:
+            raise _CtrlError("host-owned-elsewhere")
+        # One immutable serving label per persona: the first registration
+        # binds it; a different slug for the same persona fails closed, and
+        # a label already bound to a different persona key is refused
+        # rather than silently renamed (design §3.2).
+        bound = self._store.get_persona_label(tunnel.persona_pub)
+        if bound is None:
+            if not self._store.bind_persona_label(
+                tunnel.persona_pub, persona_label,
+                now=int(self._now_fn()),
+            ):
+                raise _CtrlError("host-owned-elsewhere")
+        elif bound != persona_label:
+            raise _CtrlError("label-invalid")
+        current = self._live(reservation)
+        if current is not None and current.tunnel is not tunnel:
+            raise _CtrlError("lease-held")
+        generation = self._store.upsert_host_ownership(
+            reservation_id=reservation,
+            org=tunnel.org,
+            persona_pub=tunnel.persona_pub,
+            host=host,
+            now=int(self._now_fn()),
+        )
+        expires_at = int(self._now_fn()) + HOST_LEASE_TTL
+        self._leases[reservation] = _HostLease(
+            tunnel, generation, expires_at, host
+        )
+        self._by_host[host] = reservation
+        return {"lease": {"generation": generation, "expires_at": expires_at}}
+
+    def renew(self, tunnel: "Tunnel", reservation: str, generation) -> dict:
+        lease = self._live(reservation)
+        if (
+            lease is None
+            or lease.tunnel is not tunnel
+            or type(generation) is not int
+            or generation != lease.generation
+        ):
+            raise _CtrlError("stale-generation")
+        expires_at = int(self._now_fn()) + HOST_LEASE_TTL
+        self._leases[reservation] = lease._replace(expires_at=expires_at)
+        return {"lease": {"generation": lease.generation,
+                          "expires_at": expires_at}}
+
+    def release(self, tunnel: "Tunnel", reservation: str) -> dict:
+        owner = self._store.get_host_ownership(reservation)
+        if owner is None or owner.persona_pub != tunnel.persona_pub:
+            raise _CtrlError("not-authorized")
+        lease = self._live(reservation)
+        if lease is not None and lease.tunnel is not tunnel:
+            raise _CtrlError("lease-held")
+        self._drop(reservation)
+        return {}
+
+    def drop_connection(self, tunnel: "Tunnel") -> None:
+        """Immediate fail-closed teardown of every lease this exact
+        connection holds — called on disconnect and 4409 replacement."""
+        for reservation in [
+            r for r, lease in self._leases.items() if lease.tunnel is tunnel
+        ]:
+            self._drop(reservation)
 
 
 # -- §D19 tunnel control frames --------------------------------------------
@@ -837,9 +1154,39 @@ def _ctrl_issue_turn(tunnel: "Tunnel", args: dict, turn_issuer) -> dict:
     }
 
 
+_HOST_OP_ARGS = {
+    "host-register": frozenset({"reservation", "host"}),
+    "host-renew": frozenset({"reservation", "generation"}),
+    "host-release": frozenset({"reservation"}),
+}
+
+
+def _ctrl_host_op(tunnel: "Tunnel", op: str, args: dict,
+                  host_routes: "HostRoutes | None") -> dict:
+    """Dispatch one hostname-lease op. Identity is always the tunnel's —
+    any identity-shaped field in the body is an exact-arg-set violation
+    and fails closed before dispatch."""
+    if host_routes is None:
+        raise _CtrlError("not-authorized")
+    if CAP_HOST_LEASE not in tunnel.caps:
+        raise _CtrlError("not-authorized")
+    if not isinstance(args, dict) or set(args) != _HOST_OP_ARGS[op]:
+        raise _CtrlError("bad-request")
+    if op == "host-register":
+        return host_routes.register(
+            tunnel, args["reservation"], args["host"]
+        )
+    if op == "host-renew":
+        return host_routes.renew(
+            tunnel, args["reservation"], args["generation"]
+        )
+    return host_routes.release(tunnel, args["reservation"])
+
+
 async def _handle_ctrl_frame(tunnel: "Tunnel", payload: bytes,
                              store: RegistryStore, base_url: str,
-                             now: int, turn_issuer=None, witness_key=None) -> None:
+                             now: int, turn_issuer=None, witness_key=None,
+                             host_routes: "HostRoutes | None" = None) -> None:
     """Parse one control request and reply on the control channel. A
     malformed payload raises FrameError (drops the tunnel); a clean op
     failure replies {ok: false} and leaves the tunnel up."""
@@ -861,6 +1208,8 @@ async def _handle_ctrl_frame(tunnel: "Tunnel", payload: bytes,
             result = _ctrl_revoke_link(tunnel, args, store, now, witness_key)
         elif op == "issue-turn":
             result = _ctrl_issue_turn(tunnel, args, turn_issuer)
+        elif op in _HOST_OP_ARGS:
+            result = _ctrl_host_op(tunnel, op, args, host_routes)
         else:
             raise _CtrlError(f"unknown control op: {op!r}")
         reply = {"id": correlation, "ok": True, **result}
@@ -877,7 +1226,8 @@ async def _handle_ctrl_frame(tunnel: "Tunnel", payload: bytes,
 
 async def tunnel_endpoint(websocket: WebSocket, org: str, hub: TunnelHub,
                           store: RegistryStore, now_fn,
-                          base_url: str = "", turn_issuer=None, witness_key=None) -> None:
+                          base_url: str = "", turn_issuer=None, witness_key=None,
+                          host_routes: "HostRoutes | None" = None) -> None:
     """Handle one dashboard tunnel connection for its whole lifetime."""
     await websocket.accept()
     try:
@@ -885,7 +1235,7 @@ async def tunnel_endpoint(websocket: WebSocket, org: str, hub: TunnelHub,
     except (WebSocketDisconnect, KeyError, RuntimeError):
         return
     try:
-        persona_pub, signer_pub = _verify_tunnel_hello(
+        verified = _verify_tunnel_hello(
             raw_hello, org, store, int(now_fn())
         )
     except _ProtocolVersionMismatch as exc:
@@ -895,7 +1245,7 @@ async def tunnel_endpoint(websocket: WebSocket, org: str, hub: TunnelHub,
                 "error": {
                     "code": "protocol_version_mismatch",
                     "connector_version": exc.connector_version,
-                    "registry_version": HELLO_VERSION,
+                    "registry_version": HELLO_VERSION_2,
                 },
             })
         await _close_quietly(websocket, CLOSE_PROTOCOL_MISMATCH)
@@ -906,16 +1256,30 @@ async def tunnel_endpoint(websocket: WebSocket, org: str, hub: TunnelHub,
         await _close_quietly(websocket, CLOSE_UNAUTHENTICATED)
         return
 
+    accepted_caps = tuple(
+        cap for cap in verified.caps if cap in REGISTRY_CAPS
+    )
     tunnel = Tunnel(
         websocket,
         org,
-        persona_pub=persona_pub,
-        signer_pub=signer_pub,
+        persona_pub=verified.persona_pub,
+        signer_pub=verified.signer_pub,
+        machine=verified.machine,
+        caps=accepted_caps,
     )
     replaced = hub.register(tunnel)
     if replaced is not None:
+        # Same (persona, machine) reconnect: the replaced connection's
+        # leases fail closed immediately — never silently migrated.
+        if host_routes is not None:
+            host_routes.drop_connection(replaced)
         await _close_quietly(replaced.ws, CLOSE_REPLACED)
-    await websocket.send_json({"ok": True, "v": HELLO_VERSION})
+    if verified.version == HELLO_VERSION_2:
+        await websocket.send_json({
+            "ok": True, "v": HELLO_VERSION_2, "caps": list(accepted_caps),
+        })
+    else:
+        await websocket.send_json({"ok": True, "v": HELLO_VERSION})
 
     try:
         while True:
@@ -937,6 +1301,7 @@ async def tunnel_endpoint(websocket: WebSocket, org: str, hub: TunnelHub,
                     await _handle_ctrl_frame(
                         tunnel, frame.payload, store, base_url, int(now_fn()),
                         turn_issuer=turn_issuer, witness_key=witness_key,
+                        host_routes=host_routes,
                     )
                 except FrameError:
                     break
@@ -960,6 +1325,11 @@ async def tunnel_endpoint(websocket: WebSocket, org: str, hub: TunnelHub,
             elif frame.type == FRAME_CLOSE:
                 tunnel.close_viewer(frame.channel_id, 1000)
     finally:
+        # Lease removal precedes viewer teardown — the same admission-first
+        # ordering close_revoked uses, so a routed open can never race onto
+        # a dying connection (route disappearance is synchronous here).
+        if host_routes is not None:
+            host_routes.drop_connection(tunnel)
         hub.unregister(tunnel)
         await tunnel.close_all_viewers(1001)
 
@@ -1104,6 +1474,91 @@ async def viewer_endpoint(
     finally:
         if tunnel.detach_viewer(channel_id, relay_channel):
             tunnel.detach_listener(token, channel_id)
+            await relay_channel.close(1001)
+            with contextlib.suppress(Exception):
+                await tunnel.send_frame(FRAME_CLOSE, channel_id)
+        else:
+            await relay_channel.wait_closed()
+
+
+async def host_probe_endpoint(
+    websocket: WebSocket,
+    host: str,
+    host_routes: HostRoutes,
+    now_fn,
+    *,
+    abuse_limiter: RelayAbuseLimiter | None = None,
+) -> None:
+    """One-shot hostname routing diagnostic (auto-0zdky).
+
+    Resolves *host* through the live lease table exactly the way the
+    tls-stream OPEN (auto-9z1xh) will, opens a probe channel on the leased
+    tunnel, relays the connector's single echo record to the prober, and
+    closes. Every miss — unknown host, no lease, expired lease, offline
+    tunnel — is the same uniform 4404; nothing distinguishes "reserved but
+    idle" from "never reserved".
+    """
+    await websocket.accept()
+    admission = None
+    if abuse_limiter is not None:
+        peer = getattr(websocket, "client", None)
+        admission = abuse_limiter.begin(
+            peer.host if peer is not None else "unknown"
+        )
+        if admission is None:
+            await _close_quietly(websocket, CLOSE_UNKNOWN_LINK)
+            return
+    tunnel = host_routes.route(host)
+    if tunnel is None:
+        await _close_quietly(websocket, CLOSE_UNKNOWN_LINK)
+        return
+    resolved = None
+    if abuse_limiter is not None:
+        resolved = abuse_limiter.resolve(admission, host, tunnel.org)
+        if resolved is None:
+            await _close_quietly(websocket, CLOSE_UNKNOWN_LINK)
+            return
+    if len(tunnel.channels) >= MAX_VIEWER_CHANNELS_PER_TUNNEL:
+        await _close_quietly(websocket, CLOSE_UNKNOWN_LINK)
+        return
+    abuse_lease = None
+    if abuse_limiter is not None:
+        abuse_lease = abuse_limiter.acquire(resolved)
+        if abuse_lease is None:
+            await _close_quietly(websocket, CLOSE_UNKNOWN_LINK)
+            return
+    channel_id = new_channel_id()
+    try:
+        relay_channel = tunnel.add_viewer(
+            channel_id, websocket, abuse_lease=abuse_lease
+        )
+    except Exception:
+        if abuse_lease is not None:
+            abuse_lease.release()
+        raise
+    reservation = host_routes.reservation_for(host)
+    try:
+        await tunnel.send_frame(
+            FRAME_OPEN,
+            channel_id,
+            canonical_json({
+                "kind": "host-probe", "host": host,
+                "reservation": reservation,
+            }),
+        )
+    except Exception:
+        tunnel.detach_viewer(channel_id, relay_channel)
+        await relay_channel.close(CLOSE_UNKNOWN_LINK)
+        return
+    try:
+        while True:
+            message = await websocket.receive()
+            if message["type"] == "websocket.disconnect":
+                break
+            if tunnel.channels.get(channel_id) is not relay_channel:
+                break  # echoed and closed from the connector side
+    finally:
+        if tunnel.detach_viewer(channel_id, relay_channel):
             await relay_channel.close(1001)
             with contextlib.suppress(Exception):
                 await tunnel.send_frame(FRAME_CLOSE, channel_id)

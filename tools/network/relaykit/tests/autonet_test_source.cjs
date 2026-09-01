@@ -25,7 +25,11 @@ function loadAutonetTestSource() {
   core = core
     .replace(/^export function /gm, "function ")
     .replace(/^export async function /gm, "async function ")
-    .replace(/^export class /gm, "class ");
+    .replace(/^export class /gm, "class ")
+    // Statement-form re-exports (e.g. `export { a as b };`) have no
+    // classic-script equivalent; the closure below returns its own fixed
+    // export object, so they are simply dropped from the test view.
+    .replace(/^export \{[^}]*\};?\s*$/gm, "");
   const coreClosure = [
     "const __relaykitCore = (() => {",
     core,
