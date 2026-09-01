@@ -214,6 +214,42 @@
     }
   }
 
+  // A successful PASSWORD ceremony has both granted access and proved the
+  // root-opening factor. Run the existing all-org serving maintenance while
+  // that factor is still available, then publish the bounded report the
+  // server/profile tooling already exposes. This call was previously missing:
+  // network-signon implemented the maintenance, but unlock never invoked it.
+  async function _repairServingAfterPasswordUnlock(password) {
+    var report;
+    try {
+      var session = window.AutonomyNetworkSession;
+      if (typeof session.repairAllServeCredentials === 'function') {
+        report = await session.repairAllServeCredentials(password, {});
+      } else {
+        // Compatibility for a partially-updated static client: repair the
+        // current scope rather than silently doing nothing. Production's
+        // current module always provides the all-org function.
+        var one = await session.repairServeCredential(password, {});
+        report = { repaired: one.repaired ? ['current'] : [], ready: [],
+                   failed: [], bindings: [] };
+      }
+    } catch (e) {
+      report = {
+        repaired: [], ready: [], bindings: [],
+        failed: [{ org: 'all', error: (e && e.message) || String(e) }],
+      };
+    }
+    window.__autonomyServeRepair = report;
+    try {
+      await _postJson('/api/network/unlock-report', report);
+    } catch (e) {
+      if (window.console && console.warn) {
+        console.warn('unlock maintenance report failed:', (e && e.message) || e);
+      }
+    }
+    return report;
+  }
+
   async function _unlockWithPasskey() {
     if (!window.PublicKeyCredential || !navigator.credentials) {
       throw new Error('this browser does not support passkeys — use your password instead');
@@ -627,6 +663,7 @@
           catch (e) { if (window.console && console.warn) console.warn('vault wake failed:', e); }
           await _fleetCompleteOrMint(rootSeed);
           rootSeed = null;
+          await _repairServingAfterPasswordUnlock(password);
         } finally { if (rootSeed) rootSeed.fill(0); }
         return;
       } finally {
@@ -1030,6 +1067,7 @@
       state: function () { return U; },
       unlockWithPasskey: _unlockWithPasskey,
       unlockWithPassword: _unlockWithPassword,
+      repairServingAfterPasswordUnlock: _repairServingAfterPasswordUnlock,
       nextPath: _nextPath,
       domain: UNLOCK_DOMAIN,
     },

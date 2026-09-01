@@ -1330,7 +1330,7 @@ def _make_ice_serving_connector(
     if machine_key is not None:
         stream_kwargs = {
             "machine_key": machine_key,
-            "caps": ("host-lease/1", "tls-stream/1"),
+            "caps": ("host-lease/1", "tls-stream/1", "dns-01/1"),
             "stream_handler": LocalCaddyStreamHandler(graph_org),
         }
     connector = factory(
@@ -1658,6 +1658,7 @@ def main() -> None:
     # nobody present. Keyed by --org, so only the connector that was armed
     # re-arms; the personal fleet connector is the one that ever holds it.
     from tools.network.fleet_relay_sync import (
+        ConnectorFleetRuntime,
         FleetRuntimeWarmCache,
         connector_runtime,
     )
@@ -1665,6 +1666,29 @@ def main() -> None:
     with contextlib.suppress(Exception):
         connector_runtime.attach_warm_cache(FleetRuntimeWarmCache(args.org))
         connector_runtime.rearm_from_cache()
+
+    # The enrolled machine signer is node-wide, while the Fleet runtime cache
+    # that carries it belongs to the PERSONAL tunnel. Organization connectors
+    # previously looked only at their own org-keyed cache, found nothing, and
+    # silently emitted hello v1 with zero capabilities. Reuse the already-
+    # verified personal warm credential solely to recover its machine signer;
+    # do not invent or persist another machine key.
+    machine_key = connector_runtime.machine_key
+    if machine_key is None:
+        with contextlib.suppress(Exception):
+            from tools.dashboard.link_approvals import _load_binding
+
+            personal_binding, _error = _load_binding(None)
+            personal_org_uuid = (
+                personal_binding.get("org_uuid") if personal_binding else None
+            )
+            if personal_org_uuid:
+                personal_runtime = ConnectorFleetRuntime()
+                personal_runtime.attach_warm_cache(
+                    FleetRuntimeWarmCache(personal_org_uuid)
+                )
+                personal_runtime.rearm_from_cache()
+                machine_key = personal_runtime.machine_key
 
     from tools.network.relaykit.connector import Publisher
 
@@ -1685,7 +1709,7 @@ def main() -> None:
         graph_org=args.graph_org,
         publisher=publisher,
         min_backoff=args.min_backoff, max_backoff=args.max_backoff,
-        machine_key=connector_runtime.machine_key,
+        machine_key=machine_key,
     )
     # Live push is ON by default and needs no configuration: the dashboard
     # delivers each event over the control listener below, so there is no
