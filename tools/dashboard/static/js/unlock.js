@@ -214,35 +214,21 @@
     }
   }
 
-  // A successful PASSWORD ceremony has both granted access and proved the
-  // root-opening factor. Run the existing all-org serving maintenance while
-  // that factor is still available, then publish the bounded report the
-  // server/profile tooling already exposes. This call was previously missing:
-  // network-signon implemented the maintenance, but unlock never invoked it.
-  async function _repairServingAfterPasswordUnlock(password) {
+  // Every successful ROOT unlock converges here. The factor that proved the
+  // policy is irrelevant: password, passkey, recovery, or a future factor all
+  // yield the same opened personal root and therefore the same maintenance.
+  async function _repairServingAfterRootUnlock(rootSeed) {
     var report;
     try {
-      var session = window.AutonomyNetworkSession;
-      if (typeof session.repairAllServeCredentials === 'function') {
-        report = await session.repairAllServeCredentials(password, {});
-      } else {
-        // Compatibility for a partially-updated static client: repair the
-        // current scope rather than silently doing nothing. Production's
-        // current module always provides the all-org function.
-        var one = await session.repairServeCredential(password, {});
-        report = { repaired: one.repaired ? ['current'] : [], ready: [],
-                   failed: [], bindings: [] };
-      }
+      report = await window.AutonomyNetworkSession
+        .repairAllServeCredentialsWithRootSeed(new Uint8Array(rootSeed), {});
     } catch (e) {
-      report = {
-        repaired: [], ready: [], bindings: [],
-        failed: [{ org: 'all', error: (e && e.message) || String(e) }],
-      };
+      report = { repaired: [], ready: [], bindings: [],
+                 failed: [{ org: 'all', error: (e && e.message) || String(e) }] };
     }
     window.__autonomyServeRepair = report;
-    try {
-      await _postJson('/api/network/unlock-report', report);
-    } catch (e) {
+    try { await _postJson('/api/network/unlock-report', report); }
+    catch (e) {
       if (window.console && console.warn) {
         console.warn('unlock maintenance report failed:', (e && e.message) || e);
       }
@@ -432,6 +418,7 @@
             }
             if (U.fleetRootRequired) throw e;
           }
+          await _repairServingAfterRootUnlock(rootSeed);
         } finally {
           rootSeed.fill(0);
         }
@@ -661,9 +648,9 @@
           catch (e) { if (window.console && console.warn) console.warn('pending device slot not enrolled:', (e && e.message) || e); }
           try { await _signonI().wakeVault({ personalRootSeed: new Uint8Array(rootSeed) }); }
           catch (e) { if (window.console && console.warn) console.warn('vault wake failed:', e); }
-          await _fleetCompleteOrMint(rootSeed);
+          await _fleetCompleteOrMint(new Uint8Array(rootSeed));
+          await _repairServingAfterRootUnlock(rootSeed);
           rootSeed = null;
-          await _repairServingAfterPasswordUnlock(password);
         } finally { if (rootSeed) rootSeed.fill(0); }
         return;
       } finally {
@@ -703,7 +690,11 @@
       try { sessionStorage.setItem('autonomy.factor.open-credentials', '1'); } catch (e) { /* best-effort */ }
       try { await _signonI().wakeVault({ personalRootSeed: new Uint8Array(rootSeed) }); }
       catch (e) { if (window.console && console.warn) console.warn('vault wake failed:', (e && e.message) || e); }
-      try { await _fleetCompleteOrMint(rootSeed); rootSeed = null; }
+      try {
+        await _fleetCompleteOrMint(new Uint8Array(rootSeed));
+        await _repairServingAfterRootUnlock(rootSeed);
+        rootSeed = null;
+      }
       catch (e) { if (window.console && console.warn) console.warn('fleet after recovery unlock failed:', (e && e.message) || e); }
     } finally { if (rootSeed) rootSeed.fill(0); }
   }
@@ -1067,7 +1058,7 @@
       state: function () { return U; },
       unlockWithPasskey: _unlockWithPasskey,
       unlockWithPassword: _unlockWithPassword,
-      repairServingAfterPasswordUnlock: _repairServingAfterPasswordUnlock,
+      repairServingAfterRootUnlock: _repairServingAfterRootUnlock,
       nextPath: _nextPath,
       domain: UNLOCK_DOMAIN,
     },
