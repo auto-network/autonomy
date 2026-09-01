@@ -19,11 +19,12 @@ from tools.dashboard import link_serving_supervisor as sup
 
 
 class _StubConnector:
-    def __init__(self, reply=None, raise_conn=False):
+    def __init__(self, reply=None, raise_conn=False, accepted_caps=()):
         self._reply = reply or {"ok": True, "token": "t" * 32}
         self._raise = raise_conn
         self.calls = []
         self.connected = asyncio.Event()
+        self.accepted_caps = tuple(accepted_caps)
 
     async def control(self, op, args, timeout=10.0):
         self.calls.append((op, args))
@@ -85,7 +86,7 @@ def test_listener_forwards_authorized_control(tmp_path):
 
 def test_listener_reports_local_serving_state_without_forwarding(tmp_path):
     ctl = str(tmp_path / "serve.ctl")
-    connector = _StubConnector()
+    connector = _StubConnector(accepted_caps=("host-lease/1", "dns-01/1"))
 
     async def body():
         descriptor = json.loads(open(ctl).read())
@@ -97,12 +98,16 @@ def test_listener_reports_local_serving_state_without_forwarding(tmp_path):
         down = await asyncio.to_thread(
             _roundtrip, descriptor["port"], request
         )
-        assert down == {"ok": True, "serving": False}
+        assert down["ok"] is True
+        assert down["serving"] is False
+        assert down["accepted_caps"] == ["host-lease/1", "dns-01/1"]
         connector.connected.set()
         up = await asyncio.to_thread(
             _roundtrip, descriptor["port"], request
         )
-        assert up == {"ok": True, "serving": True}
+        assert up["ok"] is True
+        assert up["serving"] is True
+        assert up["accepted_caps"] == ["host-lease/1", "dns-01/1"]
         assert connector.calls == []
 
     asyncio.run(_with_listener(connector, ctl, body))

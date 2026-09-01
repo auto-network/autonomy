@@ -1512,6 +1512,11 @@ async def _serve_control_listener(connector, ctl_path: str,
                     reply = {
                         "ok": True,
                         "serving": connector.connected.is_set(),
+                        # Capabilities accepted by the registry for this live
+                        # tunnel. Local consumers must gate optional control
+                        # operations on negotiation instead of interpreting a
+                        # uniform remote refusal as a capability signal.
+                        "accepted_caps": list(connector.accepted_caps),
                         # Added live 2026-08-23 while diagnosing "locked for
                         # Fleet sync" persisting across an unlock that
                         # logged no error -- lets a caller ask this exact
