@@ -56,11 +56,14 @@ class ZoneState:
     """Everything the responder answers from — injected, never global."""
 
     def __init__(self, *, relay_ip: str, node_id: str = "",
-                 txt_lookup=None, answer_a=None):
+                 txt_lookup=None, txt_ttl=None, answer_a=None):
         self.relay_ip = relay_ip
         self.node_id = node_id
         #: fqdn (lowercase, trailing dot) -> list of TXT strings
         self.txt_lookup = txt_lookup or (lambda name: [])
+        #: fqdn -> answer TTL for that name's TXT values (bhs3c honors
+        #: the requested, clamped TTL); default DATA_TTL.
+        self.txt_ttl = txt_ttl or (lambda name: DATA_TTL)
         #: qname (lowercase, no trailing dot) -> IPv4 str | None.
         #: None → the constant relay IP. The tunnel-aware seam.
         self.answer_a = answer_a
@@ -256,8 +259,9 @@ def handle_query(raw: bytes, state: ZoneState, *, tcp: bool = False,
         if qname.startswith(_CHALLENGE_PREFIX):
             values = state.txt_lookup(qname + ".")
             if values:
+                ttl = int(state.txt_ttl(qname + "."))
                 answers = [
-                    _rr(_QPTR, _TYPE_TXT, _CLASS_IN, DATA_TTL,
+                    _rr(_QPTR, _TYPE_TXT, _CLASS_IN, ttl,
                         _txt_rdata(value))
                     for value in values
                 ]

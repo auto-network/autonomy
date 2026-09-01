@@ -104,6 +104,19 @@ empty-machine slot with legacy replacement semantics. Org-level viewer
 selection is least-loaded-with-capacity, pinned per connection (the
 TLA-verified pool rule, `tools/network/TLA/PoolGreen.cfg`).
 
+**DNS-01 challenges (`dns-01/1`, auto-bhs3c).** D19 ops
+`serve.dns01.present` / `serve.dns01.cleanup`: the record name is DERIVED
+from the tunnel persona's serving-label binding (never body-supplied);
+authority is a second root-issued chain scoped exactly `serve:dns-01`
+with subject == the tunnel persona, verified per op alongside a
+leaf signature (domain `autonomy.network.serve.dns01.v1\n`) over
+`{op, order, value[, ttl, expiry], ts}`. `expiry` is an ABSOLUTE signed
+deadline (60..900 s after the signed ts) — replay re-asserts, never
+extends. TTL honored clamped [30,300]; ≤8 live values/name; cleanup is
+order-scoped; every negative replies the uniform
+`{"ok": false, "error": "refused"}`. Full contract:
+`graph://6195a923-cd4`.
+
 **Hostname leases (`host-lease/1`).** D19 control ops `host-register` /
 `host-renew` / `host-release` bind serving hostnames
 (`<app>.<persona-label>.serve.auto.network`) to the authenticated
