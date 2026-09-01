@@ -19,8 +19,6 @@ grant):
 from __future__ import annotations
 
 import contextlib
-import fcntl
-import multiprocessing
 import os
 import signal
 import subprocess
@@ -686,69 +684,6 @@ def test_only_one_dashboard_process_owns_an_org_connector(env):
     assert second.ensure(ORG)["reason"] == "launched"
     assert len(second_spawn.calls) == 1
     second.stop_all()
-
-
-def test_fork_child_drops_inherited_ownership_descriptors_without_unlocking(monkeypatch):
-    """A multiprocessing child must not keep the Dashboard's flocks alive.
-
-    The child shares the parent's open-file descriptions after ``fork()``.
-    Closing its duplicate is safe; explicitly unlocking it would also unlock
-    the still-live parent's ownership.
-    """
-    class _InheritedLock:
-        closed = False
-
-        def close(self):
-            self.closed = True
-
-    inherited = _InheritedLock()
-    supervisor = sup.ServingSupervisor(spawn=FakeSpawn())
-    supervisor._locks[ORG] = inherited
-    flock_calls = []
-    monkeypatch.setattr(sup.fcntl, "flock", lambda *args: flock_calls.append(args))
-
-    supervisor._drop_inherited_locks_after_fork()
-
-    assert inherited.closed is True
-    assert supervisor._locks == {}
-    assert flock_calls == []
-
-
-def test_unregistered_fork_child_cannot_prolong_parent_ownership(env):
-    """Ownership itself must not be inherited, even when callbacks are bypassed.
-
-    The parent releases its legitimate lock only after the child exists.  A
-    child may retain the descriptor through an arbitrary process launcher, but
-    it must not retain the lock.  POSIX process locks provide that kernel-level
-    guarantee; open-file-description flocks do not.
-    """
-    supervisor = sup.ServingSupervisor(spawn=FakeSpawn())
-    key_path = str(env / "fork-proof.key")
-    assert supervisor._acquire_lock(ORG, key_path) is True
-    parent, child = multiprocessing.get_context("fork").Pipe()
-
-    def probe_after_parent_release(pipe, path):
-        pipe.recv()
-        candidate = open(path, "a+")
-        try:
-            sup._try_ownership_lock(candidate.fileno())
-        except (AttributeError, BlockingIOError):
-            pipe.send(False)
-        else:
-            pipe.send(True)
-        finally:
-            candidate.close()
-
-    process = multiprocessing.get_context("fork").Process(
-        target=probe_after_parent_release,
-        args=(child, sup._lock_path_for(key_path)),
-    )
-    process.start()
-    supervisor._release_lock(ORG)
-    parent.send(True)
-    assert parent.recv() is True
-    process.join(timeout=5)
-    assert process.exitcode == 0
 
 
 def test_pre_spawn_failure_releases_org_ownership(env, monkeypatch):

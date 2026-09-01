@@ -49,7 +49,6 @@ import ctypes.util
 import fcntl
 import json
 import logging
-import multiprocessing.util
 import os
 import re
 import signal
@@ -111,21 +110,6 @@ except OSError:  # pragma: no cover - libc is always present on Linux
 #: --org <uuid> ...`` reparented to systemd — the supervisor cannot see it in
 #: ``self._procs`` (it is not its child), so it finds it by this signature.
 _CONNECTOR_MODULE = "tools.dashboard.link_serving"
-_PROCESS_OWNERSHIP: dict[str, int] = {}
-
-
-def _try_ownership_lock(fd: int) -> None:
-    """Acquire the per-process connector election lock without blocking.
-
-    POSIX record locks are intentionally used instead of ``flock``: record
-    locks are not inherited across ``fork()``, so an unrelated worker cannot
-    prolong Dashboard ownership even if its launcher retains the descriptor.
-    """
-    fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-
-
-def _release_ownership_lock(fd: int) -> None:
-    fcntl.lockf(fd, fcntl.LOCK_UN)
 
 
 # ── provisioning state (also the enrich precondition) ─────────
@@ -959,55 +943,23 @@ class ServingSupervisor:
         if org in self._locks:
             return True
         lock_path = _lock_path_for(key_path)
-        pid = os.getpid()
-        owner_pid = _PROCESS_OWNERSHIP.get(lock_path)
-        if owner_pid == pid:
-            return False
-        if owner_pid is not None:
-            # A forked child may inherit this bookkeeping, but POSIX record
-            # lock ownership itself is not inherited.  Never let the parent's
-            # pid make the child believe it owns anything.
-            _PROCESS_OWNERSHIP.pop(lock_path, None)
         lock = open(lock_path, "a+")
-        # Defense in depth for subprocess launch paths that exec: Python opens
-        # descriptors non-inheritable by default, but make the ownership
-        # contract explicit at the point where retaining this fd is harmful.
-        os.set_inheritable(lock.fileno(), False)
         os.chmod(lock_path, 0o600)
         try:
-            _try_ownership_lock(lock.fileno())
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             lock.close()
             return False
         self._locks[org] = lock
-        _PROCESS_OWNERSHIP[lock_path] = pid
         return True
 
     def _release_lock(self, org: str | None) -> None:
         lock = self._locks.pop(org, None)
         if lock is None:
             return
-        lock_path = str(lock.name)
         with contextlib.suppress(OSError):
-            _release_ownership_lock(lock.fileno())
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
         lock.close()
-        if _PROCESS_OWNERSHIP.get(lock_path) == os.getpid():
-            _PROCESS_OWNERSHIP.pop(lock_path, None)
-
-    def _drop_inherited_locks_after_fork(self) -> None:
-        """Close this child's duplicate ownership descriptors after ``fork``.
-
-        A raw-fork multiprocessing helper inherits the parent's entire file
-        table and may outlive the connector processes.  These descriptors
-        share open-file descriptions with the parent, so the child must only
-        close its copies: calling ``flock(..., LOCK_UN)`` here would release
-        the live parent's lock as well.
-        """
-        inherited = self._locks
-        self._locks = {}
-        for lock in inherited.values():
-            with contextlib.suppress(OSError):
-                lock.close()
 
     def start_watchdog(self, interval: float = 20.0) -> None:
         """Periodically re-reconcile every managed org — restart the dead,
@@ -1081,41 +1033,14 @@ class ServingSupervisor:
 
 _SINGLETON: ServingSupervisor | None = None
 _SINGLETON_LOCK = threading.Lock()
-_AT_FORK_REGISTERED = False
-
-
-def _drop_singleton_locks_after_fork() -> None:
-    supervisor = _SINGLETON
-    if supervisor is not None:
-        supervisor._drop_inherited_locks_after_fork()
-
-
-def _drop_supervisor_locks_after_multiprocessing_fork(
-    supervisor: ServingSupervisor,
-) -> None:
-    supervisor._drop_inherited_locks_after_fork()
-
-
-def _register_multiprocessing_fork_cleanup(
-    supervisor: ServingSupervisor,
-) -> None:
-    """Cover multiprocessing's child-bootstrap callback path as well as os.fork."""
-    multiprocessing.util.register_after_fork(
-        supervisor,
-        _drop_supervisor_locks_after_multiprocessing_fork,
-    )
 
 
 def get_supervisor() -> ServingSupervisor:
-    global _AT_FORK_REGISTERED, _SINGLETON
+    global _SINGLETON
     if _SINGLETON is None:
         with _SINGLETON_LOCK:
             if _SINGLETON is None:
                 _SINGLETON = ServingSupervisor()
-                if not _AT_FORK_REGISTERED and hasattr(os, "register_at_fork"):
-                    os.register_at_fork(after_in_child=_drop_singleton_locks_after_fork)
-                    _AT_FORK_REGISTERED = True
-                _register_multiprocessing_fork_cleanup(_SINGLETON)
     return _SINGLETON
 
 
