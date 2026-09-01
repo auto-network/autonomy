@@ -64,11 +64,13 @@ globalThis.fetch = async (requestUrl, options) => {
 window.fetch = globalThis.fetch;
 
 let repairCalledAfterAccess = false;
-window.AutonomyNetworkSession.repairServeCredential = async (password) => {
+window.AutonomyNetworkSession.repairAllServeCredentialsWithRootSeed = async (seed) => {
   repairCalls += 1;
   repairCalledAfterAccess = events.includes(
     "POST /api/identity/unlock/password");
-  if (password !== "test password") throw new Error("wrong password forwarded");
+  if (!(seed instanceof Uint8Array) || seed.length !== 32) {
+    throw new Error("opened root seed not forwarded");
+  }
   if (mode === "failure") throw new Error("simulated maintenance failure");
   return { checked: true, repaired: false, status: "ready" };
 };
@@ -76,9 +78,9 @@ window.AutonomyNetworkSession.repairServeCredential = async (password) => {
 let allRepairCalls = 0;
 let allRepairOrgs = null;
 if (process.env.AUTONOMY_ALL_ORG_REPAIR === "1") {
-  window.AutonomyNetworkSession.repairAllServeCredentials = async (password) => {
+  window.AutonomyNetworkSession.repairAllServeCredentialsWithRootSeed = async (seed) => {
     allRepairCalls += 1;
-    if (password !== "test password") throw new Error("wrong password forwarded");
+    if (!(seed instanceof Uint8Array) || seed.length !== 32) throw new Error("root missing");
     allRepairOrgs = ["autonomy", "dynbench", "anchore"];
     return { repaired: allRepairOrgs, ready: [], failed: [] };
   };
@@ -111,7 +113,7 @@ require("../static/js/unlock.js");
     // password ceremony has succeeded, serving maintenance runs while the
     // factor is still available and reports its bounded result.
     events.push("POST /api/identity/unlock/password");
-    await api.repairServingAfterPasswordUnlock("test password");
+    await api.repairServingAfterRootUnlock(new Uint8Array(32));
   }
   process.stdout.write(JSON.stringify({
     events,

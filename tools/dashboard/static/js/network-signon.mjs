@@ -1174,6 +1174,53 @@ var signRegistryRequestCore;
     return { repaired: repaired, ready: ready, failed: failed, bindings: bindings };
   }
 
+  // Passkey root unlock reaches the same maintenance without a password. The
+  // WebAuthn PRF has already opened the personal root, so consume a fresh seed
+  // copy directly and use the same sealed-org-root renewal primitives as
+  // ordinary sign-on. The caller's buffer is always zeroed here.
+  async function repairAllServeCredentialsWithRootSeed(personalRootSeed, opts) {
+    opts = opts || {};
+    if (!(personalRootSeed instanceof Uint8Array) || personalRootSeed.length !== 32) {
+      throw new Error('personalRootSeed must be a 32-byte Uint8Array');
+    }
+    var repaired = [], ready = [], failed = [], bindings = [];
+    try {
+      var slugs = await _signOnOrgSlugs(opts);
+      for (var i = 0; i < slugs.length; i++) {
+        var slug = slugs[i];
+        try {
+          var binding = await _fetchJsonOrNull(
+            '/api/network/binding?org=' + encodeURIComponent(slug), slug);
+          var heads = await _fetchJsonOrNull(
+            '/api/network/ledger/heads?org=' + encodeURIComponent(slug), slug);
+          if (!(binding && binding.org_uuid) ||
+              !(heads && typeof heads.genesis_id === 'string')) {
+            ready.push(slug + ' (unregistered)');
+            continue;
+          }
+          var persona = await derivePersona(personalRootSeed, heads.genesis_id);
+          var result = await _renewServeCredential(
+            slug, binding, persona.publicHex, personalRootSeed);
+          if (result.renewed) repaired.push(slug);
+          else ready.push(slug);
+          try {
+            var bm = await _maintainBinding(slug, binding, personalRootSeed);
+            bindings.push({ org: slug, action: bm.action });
+          } catch (e) {
+            bindings.push({ org: slug, action: 'failed',
+                            error: (e && e.message) || String(e) });
+          }
+        } catch (e) {
+          failed.push({ org: slug, error: (e && e.message) || String(e) });
+        }
+      }
+      return { repaired: repaired, ready: ready, failed: failed,
+               bindings: bindings };
+    } finally {
+      personalRootSeed.fill(0);
+    }
+  }
+
   // Sign-out destroys the key and cert locally (spec §6.3): the store is
   // CLEARED, not just the current row.
   async function signOut() {
@@ -1389,6 +1436,7 @@ var signRegistryRequestCore;
     provisionPersonalNetworkIdentity: provisionPersonalNetworkIdentity,
     repairServeCredential: repairServeCredential,
     repairAllServeCredentials: repairAllServeCredentials,
+    repairAllServeCredentialsWithRootSeed: repairAllServeCredentialsWithRootSeed,
     revokeCurrentKey: revokeCurrentKey,
     listKeys: listKeys,
     // Internals exposed for the L2.B sweep + cross-language vectors; the
