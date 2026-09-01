@@ -830,6 +830,33 @@ class TestDesktopToolbarLayout:
         assert layout["zoomHeight"] <= layout["orgHeight"]
         assert layout["toolbarWidth"] > 1000
 
+    def test_launch_menu_stays_inside_viewport_with_all_orgs(self, h):
+        ab_raw("set", "viewport", "768", "900")
+        try:
+            ab_eval("""
+                var root = document.querySelector('[x-data="sessionsPage()"]');
+                root._x_dataStack[0].pickOrgFilter('');
+                document.querySelector('[data-testid="session-launch-dropdown"] button').click();
+                return true;
+            """)
+            time.sleep(0.2)
+            menu = ab_eval("""
+                var root = document.querySelector('[data-testid="session-launch-dropdown"]');
+                var panel = root.querySelector('.sessions-launch-menu');
+                var r = panel.getBoundingClientRect();
+                return {left:r.left, right:r.right, width:r.width, viewport:window.innerWidth};
+            """)
+            assert menu["width"] > 0, "Create-workspace menu did not open"
+            assert menu["left"] >= 0 and menu["right"] <= menu["viewport"]
+        finally:
+            ab_eval("""
+                var button = document.querySelector('[data-testid="session-launch-dropdown"] button');
+                var root = button && button.parentElement;
+                if (root && root._x_dataStack && root._x_dataStack[0].open) button.click();
+                return true;
+            """)
+            ab_raw("set", "viewport", "1440", "900")
+
 
 class TestRecentSessions:
     """Recent sessions section shows historical sessions."""
