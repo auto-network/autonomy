@@ -57,6 +57,8 @@ def _setting_route(
     principal: api_auth.ApiPrincipal,
     set_id: str,
     key: str,
+    *,
+    op: str = KIND,
 ) -> tuple[str, str | None]:
     """Resolve a request suffix to its exact store key and database scope.
 
@@ -82,7 +84,7 @@ def _setting_route(
                 set_id, principal.org or "", key,
             ), None
         except ValueError as exc:
-            raise ValueError(f"vault_open {exc}") from exc
+            raise ValueError(f"{op} {exc}") from exc
     return key, principal.org
 
 def _digest(value: object) -> str:

@@ -964,6 +964,21 @@ class HttpClient:
             headers=_settings_headers(org),
         )
 
+    def remove_vault_credential(self, set_id, name, *, org):
+        """Remove one sealed credential by its bare name.
+
+        The server derives the caller's namespace from the bearer, exactly
+        as seal and vault_open do — the request never carries an org prefix.
+        """
+        org = _resolve_client_org_arg(org)
+        return self._request(
+            "DELETE",
+            f"/api/vault/credential/"
+            f"{urllib.parse.quote(set_id, safe='')}/"
+            f"{urllib.parse.quote(name, safe='')}",
+            headers=_settings_headers(org),
+        )
+
     def resolve_setting_strict(self, value, *, org):
         """Resolve a Setting by full id or id-prefix.
 

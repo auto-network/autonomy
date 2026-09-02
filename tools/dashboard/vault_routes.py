@@ -28,6 +28,7 @@ from tools.graph import settings_ops
 from tools.graph.schemas import registry as schema_registry
 from tools.graph.schemas.registry import SchemaValidationError
 from tools.graph.schemas.vault_credential import (
+    VAULT_AUDITED_SET_ID,
     VAULT_CREDENTIAL_REVISION,
     VAULT_SECURED_SET_ID,
 )
@@ -273,6 +274,72 @@ async def seal_personal_setting(request: Request):
         return JSONResponse({"error": str(exc)}, status_code=400)
 
 
+async def remove_vault_credential(request: Request):
+    """Remove one sealed credential from the caller's own namespace.
+
+    The caller names the bare credential name; the store key is derived
+    through the same routing seam ``vault_open`` and ``seal`` use, so remove
+    accepts exactly the address read accepts. An explicit organization
+    prefix is refused with the derives-the-namespace message rather than
+    half-matching another namespace's row.
+    """
+    if (denied := api_auth.require_authenticated_api_caller(request)) is not None:
+        return denied
+    set_id = request.path_params["set_id"]
+    name = request.path_params["name"]
+    if set_id not in (VAULT_SECURED_SET_ID, VAULT_AUDITED_SET_ID):
+        return JSONResponse(
+            {"error": f"{set_id!r} is not a vault credential set"},
+            status_code=400,
+        )
+    # Local import: vault_open_approvals pulls in the approval machinery,
+    # which this module must not load at import time.
+    from tools.dashboard.vault_open_approvals import _setting_route
+    principal = api_auth.principal_from_request(request)
+    try:
+        routed_key, scope = _setting_route(
+            principal, set_id, name, op="vault_remove",
+        )
+    except PermissionError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=403)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    layers = settings_ops.layers_for(set_id, routed_key, org=scope)
+    base = layers.get("base") or {}
+    if not base.get("id"):
+        return JSONResponse(
+            {"error": (
+                f"no sealed credential named {name!r} in your vault namespace"
+            )},
+            status_code=404,
+        )
+    if layers.get("shadowed_bases"):
+        return JSONResponse(
+            {"error": (
+                f"{name!r} resolves to more than one live row; removal by "
+                "name is ambiguous — name the setting id"
+            )},
+            status_code=409,
+        )
+    try:
+        settings_ops.remove_setting(base["id"], org=scope)
+    except LookupError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    logger.info(
+        "vault_credential_removed caller_kind=%s caller=%s caller_org=%s "
+        "set_id=%s key=%s setting_id=%s",
+        principal.kind.value,
+        principal.subject,
+        principal.org,
+        set_id,
+        routed_key,
+        base["id"],
+    )
+    return JSONResponse({"ok": True, "set_id": set_id, "key": routed_key})
+
+
 async def enroll_password(request: Request):
     if (denied := _guard(request)) is not None:
         return denied
@@ -406,6 +473,11 @@ ROUTES = [
         methods=["POST"],
     ),
     Route("/api/identity/vault-settings", seal_personal_setting, methods=["POST"]),
+    Route(
+        "/api/vault/credential/{set_id}/{name}",
+        remove_vault_credential,
+        methods=["DELETE"],
+    ),
     Route("/api/identity/factors/password", enroll_password, methods=["POST"]),
     Route("/api/identity/classes", create_class, methods=["POST"]),
     Route("/api/identity/classes/{class_id}", show_class, methods=["GET"]),

@@ -141,6 +141,21 @@ def _looks_like_set_id(value: str) -> bool:
     return "." in value
 
 
+def _scope_phrase(org) -> str:
+    """Human suffix naming the search scope of a failed lookup.
+
+    ``org`` may be the :data:`ops.CALLER_ORG` sentinel (no ``--org`` given);
+    rendering its repr into an error produced the baffling
+    ``in org <settings_ops.CALLER_ORG>`` — say what it means instead.
+    """
+    if not org:
+        return ""
+    from . import ops
+    if org is ops.CALLER_ORG:
+        return " in the caller's organization scope"
+    return f" in org {org!r}"
+
+
 def _resolve_address(args, *, accept_key: bool = True) -> str:
     """Resolve the ``id [key]`` positional pair to a single Setting id.
 
@@ -185,7 +200,7 @@ def _resolve_id_or_prefix(value: str, *, org: str | None) -> str:
     client = get_client()
     hit = client.resolve_setting_strict(value, org=org)
     if hit is None:
-        scope = f" in org {org!r}" if org else ""
+        scope = _scope_phrase(org)
         print(
             f"Error: no Setting with id starting with {value!r}{scope}",
             file=sys.stderr,
@@ -216,7 +231,7 @@ def _resolve_set_key(set_id: str, key: str, *, org: str | None) -> str:
     for m in members.members:
         if m.key == key:
             return m.id
-    scope = f" in org {org!r}" if org else ""
+    scope = _scope_phrase(org)
     print(
         f"Error: no Setting with set_id={set_id!r} key={key!r}{scope}",
         file=sys.stderr,
@@ -498,7 +513,7 @@ def cmd_set_read(args) -> None:
         client = get_client()
         hit = client.resolve_setting_strict(parts[0], org=org)
         if hit is None:
-            scope = f" in org {org!r}" if org else ""
+            scope = _scope_phrase(org)
             print(
                 f"Error: no Setting with id starting with {parts[0]!r}{scope}",
                 file=sys.stderr,
@@ -520,7 +535,7 @@ def cmd_set_read(args) -> None:
     if chain_mode:
         chain = get_client().chain_setting(set_id, key, org=org)
         if chain is None:
-            scope = f" in org {org!r}" if org else ""
+            scope = _scope_phrase(org)
             print(
                 f"Error: no member matches ({set_id!r}, {key!r}){scope}",
                 file=sys.stderr,
@@ -590,7 +605,7 @@ def cmd_set_read(args) -> None:
             print(json.dumps(m.payload, indent=2, default=str))
             _print_composition(set_id, key, org)
             return
-    scope = f" in org {org!r}" if org else ""
+    scope = _scope_phrase(org)
     print(
         f"Error: no member matches ({set_id!r}, {key!r}){scope}",
         file=sys.stderr,
@@ -1152,6 +1167,37 @@ def cmd_set_remove(args) -> None:
     # 2026-08-30). More than one live base under the key → name an id.
     parts = list(getattr(args, "id_parts", []) or [])
     if len(parts) == 2:
+        # A vault credential's stored key carries a server-derived org
+        # namespace the caller never types (and must not guess), so removal
+        # goes through the same routing seam seal and vault_open use: the
+        # bare name in, the server derives the rest.
+        from tools.graph import schemas
+        vault_set_id = parts[0].split("#", 1)[0]
+        if (
+            schemas.declared_vault_tier(vault_set_id) in ("secured", "audited")
+            and schemas.declared_home(vault_set_id) == "personal"
+        ):
+            remover = getattr(get_client(), "remove_vault_credential", None)
+            if remover is not None:
+                from .client import GraphHttpError
+                try:
+                    receipt = remover(vault_set_id, parts[1], org=_org(args))
+                except (LookupError, ValueError) as e:
+                    print(f"Error: {e}", file=sys.stderr)
+                    sys.exit(1)
+                except GraphHttpError as e:
+                    detail = (e.body or {}).get("error") or str(e)
+                    print(f"Error: {detail}", file=sys.stderr)
+                    sys.exit(1)
+                removed_key = (
+                    receipt.get("key") if isinstance(receipt, dict) else None
+                ) or parts[1]
+                print(f"  ✓ Removed vault credential: {removed_key}")
+                return
+            # Disaster-recovery direct mode has no vault routing seam; the
+            # caller explicitly owns local store selection, so fall through
+            # to the generic path.
+    if len(parts) == 2:
         try:
             from tools.graph import settings_ops
             layers = settings_ops.layers_for(parts[0], parts[1], org=_org(args))
@@ -1233,7 +1279,7 @@ def _resolve_schema_member(
         if m.key.startswith(f"{set_id}#")
     ]
     if not matches:
-        scope = f" in org {org!r}" if org else ""
+        scope = _scope_phrase(org)
         print(
             f"Error: no schema registered for {set_id!r}{scope}",
             file=sys.stderr,

@@ -17269,6 +17269,8 @@ async def api_graph_setting_delete(request):
         graph_ops.remove_setting(sid, org=org or graph_ops.CALLER_ORG)
     except LookupError as e:
         return JSONResponse({"error": str(e)}, status_code=404)
+    except graph_ops.CrossOrgWriteError as e:
+        return _cross_org_error_response(e)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     # setting.changed (operation=delete) fires from settings_ops via the
