@@ -183,3 +183,61 @@ def test_personal_org_uuid_is_deterministic_and_root_scoped():
 def test_personal_org_uuid_rejects_non_pubkey():
     with pytest.raises(fleet_runtime.FleetRuntimeError):
         fleet_runtime.personal_org_uuid("not-a-pubkey")
+
+
+# -- auto-e2ufw: optional per-org serving machine key in the payload --------
+
+def test_serving_machine_seed_absent_leaves_fleet_key_as_hello_identity():
+    root, _machine, _process, entry, payload = _fixture()
+    cred = fleet_runtime.FleetRuntimeCredential.from_browser_payload(
+        payload, personal_root_pub=root.public_hex,
+        roster_entries=[entry], now=NOW,
+    )
+    # No serving seed -> no serving key -> the transitional fleet-key path.
+    assert cred.serving_machine_key is None
+
+
+def test_serving_machine_seed_present_is_parsed_as_a_distinct_key():
+    from tools.network.idkit import derive_serving_machine_key
+    root, _machine, _process, entry, payload = _fixture()
+    genesis = "1a" * 32
+    serving = derive_serving_machine_key(
+        bytes.fromhex(root.private_hex), genesis, entry.machine_id)
+    payload = {**payload,
+               "serving_machine_private_seed": serving.private_hex}
+    cred = fleet_runtime.FleetRuntimeCredential.from_browser_payload(
+        payload, personal_root_pub=root.public_hex,
+        roster_entries=[entry], now=NOW,
+    )
+    assert cred.serving_machine_key is not None
+    assert cred.serving_machine_key.public_hex == serving.public_hex
+    # Distinct from the fleet machine key: this is the whole point.
+    assert cred.serving_machine_key.public_hex != cred.machine_pub
+
+
+def test_malformed_serving_machine_seed_is_refused():
+    root, _machine, _process, entry, payload = _fixture()
+    payload = {**payload, "serving_machine_private_seed": "not-hex"}
+    with pytest.raises(fleet_runtime.FleetRuntimeError):
+        fleet_runtime.FleetRuntimeCredential.from_browser_payload(
+            payload, personal_root_pub=root.public_hex,
+            roster_entries=[entry], now=NOW,
+        )
+
+
+def test_serving_seed_composes_with_the_reachability_path():
+    # The serving key is independent of the reachability machine_private_seed;
+    # a payload may carry both, and the serving key is separate from the
+    # fleet/reachability key.
+    from tools.network.idkit import derive_serving_machine_key
+    root, machine, _process, entry, payload = _fixture()
+    genesis = "2b" * 32
+    serving = derive_serving_machine_key(
+        bytes.fromhex(root.private_hex), genesis, entry.machine_id)
+    payload = {**payload,
+               "serving_machine_private_seed": serving.private_hex}
+    cred = fleet_runtime.FleetRuntimeCredential.from_browser_payload(
+        payload, personal_root_pub=root.public_hex,
+        roster_entries=[entry], now=NOW,
+    )
+    assert cred.serving_machine_key.public_hex == serving.public_hex
