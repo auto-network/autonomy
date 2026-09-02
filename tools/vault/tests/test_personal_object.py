@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import sqlite3
@@ -21,7 +22,7 @@ from tools.network.idkit.canonical import canonical_json
 from tools.vault import ClassOpenError, PASSWORD_POLICY, create_class
 from tools.vault.factors import create_password_factor, open_password_seed
 from tools.vault import key_holder
-from tools.vault.personal_object import is_personal_locator
+from tools.vault.personal_object import LOCATOR_PREFIX, is_personal_locator
 from tools.vault.store import VaultStore
 from tools.vault.testkit import enroll_test_anchor
 
@@ -100,6 +101,11 @@ def test_personal_secured_setting_seals_cold_and_opens_only_with_factor(
         ).fetchone()[0]
     locator = json.loads(stored)
     assert is_personal_locator(locator)
+    _wire = locator[len(LOCATOR_PREFIX):]
+    _envelope = json.loads(base64.urlsafe_b64decode(_wire + "=" * (-len(_wire) % 4)))
+    assert _envelope["body_suite_id"] == "chacha20-poly1305", (
+        "a secured body seals the browser-openable ChaCha20-Poly1305 suite (A-2)"
+    )
     assert SECRET not in stored
     assert outer_objects == 0, "personal secured writes must bypass the org outer layer"
 
