@@ -3021,6 +3021,15 @@ def layers_for(set_id: str, key: str, *, org: str | None) -> dict:
         merged = json.loads(base["payload"]) or {}
     except Exception:
         return out
+    if not isinstance(merged, dict):
+        # A vaulted row's payload column holds a locator STRING, not an
+        # object. Report the base opaquely — there is nothing to merge and
+        # an override on sealed content has no meaning.
+        out["base"] = {"id": base["id"], "state": base["publication_state"],
+                       "schema_revision": base["schema_revision"],
+                       "payload": merged}
+        out["resolved"] = merged
+        return out
     out["base"] = {"id": base["id"], "state": base["publication_state"],
                    "schema_revision": base["schema_revision"],
                    "payload": dict(merged)}
