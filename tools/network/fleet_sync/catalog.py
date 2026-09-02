@@ -1589,6 +1589,20 @@ class MutationCatalog:
             return None
         return str(row[0]), str(row[1]), int(row[2])
 
+    def newest_transaction_ref(self) -> int:
+        """The newest transaction row id, journal-backed or not.
+
+        A served checkpoint delivers content through the freeze cut, so its
+        done-summary may acknowledge through this row even when the journal
+        is empty (fully pruned, or a checkpoint receiver): resume trails
+        resolve against transaction rows, not journal frames, so the next
+        pull becomes a delta from here instead of another full checkpoint.
+        """
+        row = self.conn.execute(
+            "SELECT MAX(id) FROM fleet_sync_transactions"
+        ).fetchone()
+        return int(row[0] or 0)
+
     def journal_resume_ref(
         self, breadcrumbs: Iterable[tuple[str, str, int]]
     ) -> int:

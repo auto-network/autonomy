@@ -635,6 +635,13 @@ class SQLiteFleetSyncStore:
         finally:
             conn.close()
 
+    def newest_transaction_ref(self) -> int:
+        conn, catalog = self._open()
+        try:
+            return catalog.newest_transaction_ref()
+        finally:
+            conn.close()
+
     def compatibility_digest(self) -> str:
         """The replicated-surface digest for this database.
 
@@ -1069,9 +1076,11 @@ class FleetSyncScheduler:
                 # freshly prepared machines must meet through (empty) deltas,
                 # not by installing each other's blank databases.
                 server_has_content = await asyncio.to_thread(store.has_state)
+                served_checkpoint = False
                 if allow_checkpoint and server_has_content and (
                     serve_checkpoint_decision(cursor, bootstrap, journal_gap)
                 ):
+                    served_checkpoint = True
                     import shutil as _shutil
                     import tempfile as _tempfile
 
@@ -1169,6 +1178,11 @@ class FleetSyncScheduler:
                         stats["bytes_sent"] += len(encoded)
                         yield encoded
                 self.authenticator.authorize(peer_pub)
+                if served_checkpoint:
+                    newest = await asyncio.to_thread(
+                        store.newest_transaction_ref
+                    )
+                    cursor = max(cursor, newest)
                 through_breadcrumb = None
                 if cursor:
                     through_breadcrumb = await asyncio.to_thread(
@@ -1648,14 +1662,11 @@ class FleetSyncScheduler:
                         await self._install_direct_checkpoint(
                             checkpoint_stage, scope, machine_pub, epoch
                         )
+                        # No receipt recording here: install_checkpoint's
+                        # _record_checkpoint_receipt already records it
+                        # durably with source attribution — a second write
+                        # double-counted every direct-path install.
                         installed_checkpoint = True
-                        await asyncio.to_thread(
-                            store.record_peer,
-                            machine_pub,
-                            epoch,
-                            online=True,
-                            checkpoints_received=1,
-                        )
                         continue
                     raise FleetSyncProtocolError(
                         "unknown fleet stream control frame"

@@ -122,6 +122,10 @@ def test_partition_during_prune_retains_needed_frames(tmp_path: Path) -> None:
         fleet.start_all()
         fleet.write(0, "pre-part", "before partition")
         fleet.wait_converged(timeout=120.0)
+        # Retention-under-frozen-ack presumes an ESTABLISHED fleet: a pair
+        # that converged only indirectly gets a legitimate checkpoint on
+        # first direct contact, which resets a journal mid-scenario.
+        fleet.wait_pairwise_established()
 
         fleet.partition(2, 0)
         fleet.partition(2, 1)
@@ -133,15 +137,25 @@ def test_partition_during_prune_retains_needed_frames(tmp_path: Path) -> None:
         )
         # Give the live pair time to ack and prune each other.
         time.sleep(1.0)
-        # What is honestly assertable today: the partition opens, the
-        # live pair keeps converging, and healing brings the partitioned
-        # peer fully current with no divergence. The tighter live
-        # assertion — while-away frames still journaled on the live pair
-        # at heal time (floor purity) — is deferred into auto-jn8ca: its
-        # spurious trail-miss installs legitimately WIPE a healthy
-        # machine's journal (install is not prune), which contaminates any
-        # journal-retention probe. Floor purity itself is machine-checked
-        # by the AckFloor TLA model.
+        # THE invariant, asserted directly (restored after auto-jn8ca):
+        # the partitioned peer's acknowledgement is frozen below the
+        # while-away transactions, so the floor cannot retire them — every
+        # one of the six frames is still journaled on both live machines
+        # at heal time. Matches the AckFloor TLA model's safety property,
+        # here checked on the real engine.
+        for live in (0, 1):
+            with sqlite3.connect(
+                f"file:{fleet.machines[live].db_path}?mode=ro&immutable=1",
+                uri=True,
+            ) as conn:
+                retained = conn.execute(
+                    "SELECT COUNT(DISTINCT transaction_ref) "
+                    "FROM fleet_sync_journal"
+                ).fetchone()[0]
+            assert retained >= 6, (
+                f"machine {live} retained only {retained} journaled "
+                "transactions while a partitioned peer was unacknowledged"
+            )
         fleet.heal(2, 0)
         fleet.heal(2, 1)
         fleet.wait(
@@ -200,11 +214,11 @@ def test_joiner_never_refetches_checkpoints_in_a_loop(tmp_path: Path) -> None:
             fleet.write(0, f"j-{note}", f"joiner content {note}")
         fleet.start(1)
         fleet.wait_converged(timeout=120.0)
-        # Bounded, then STOPPED: today a join settles at up to two
-        # checkpoints (the second is tracked waste — auto-jn8ca, which will
-        # tighten this to exactly one). The field bug was an UNBOUNDED
-        # refetch loop, so the assertion here is stability: wait until the
-        # count holds still, then confirm it stays still.
+        # Exactly one, then STOPPED: the historical double was a receipt
+        # accounting bug (client and installer each recorded the same
+        # checkpoint — auto-jn8ca), and a journal-empty server used to
+        # re-checkpoint established peers on every pull. Stability plus
+        # exactly-one now guards both, and the unbounded field bug.
         def settled_count() -> int:
             return _checkpoints_received(fleet.machines[1].db_path)
 
@@ -219,7 +233,7 @@ def test_joiner_never_refetches_checkpoints_in_a_loop(tmp_path: Path) -> None:
             time.sleep(0.1)
         time.sleep(1.0)
         assert settled_count() == last
-        assert 1 <= last <= 3
+        assert last == 1
         fleet.evidence["settled_checkpoints"] = last
         fleet.write_evidence(tmp_path / "no-refetch-loop.json")
     finally:
