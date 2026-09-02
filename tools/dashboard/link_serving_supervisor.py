@@ -7,7 +7,8 @@ module owns its lifecycle so a publish's promise — "the link actually serves"
 — holds without the operator babysitting a process.
 
 The rule, from the operator's model: *if a valid serve-cert is provisioned AND
-any link is live, the connector should be running.* So :meth:`ServingSupervisor.ensure`
+any artifact grant or bound Service publication is live, the connector should
+be running.* So :meth:`ServingSupervisor.ensure`
 is an idempotent reconciler — given an org, it brings the world to match that
 rule (start if it should run and isn't; stop if it shouldn't and is) — driven
 from three triggers:
@@ -270,6 +271,36 @@ def _has_live_grant(org: str | None, now: float) -> bool:
         if link_serving._grant_valid(m.payload, m.key, now) is not None:
             return True
     return False
+
+
+def _has_live_service_publication(org: str | None) -> bool:
+    """True when *org* has an active/paused Service with a bound target.
+
+    Services deliberately have no visitor-grant layer: application HTTP auth
+    remains the application's responsibility.  Consequently their connector
+    lifecycle cannot be inferred from ``network.link-grant``.  The durable
+    reservation plus target Settings are the existing publication authority.
+    """
+    if org is None:
+        return False
+    try:
+        from tools.dashboard import service_publication
+
+        target_ids = {
+            row.get("reservation_id")
+            for row in service_publication.list_service_targets(org)
+            if isinstance(row, dict)
+        }
+        return any(
+            isinstance(row, dict)
+            and row.get("state") in {"active", "paused"}
+            and row.get("reservation_id") in target_ids
+            for row in service_publication.list_reservations(org)
+        )
+    except Exception:
+        # Settings read failures remain fail-closed: do not keep a public
+        # connector alive based on state we could not establish.
+        return False
 
 
 def _is_personal_fleet_scope(org: str | None) -> bool:
@@ -728,6 +759,7 @@ class ServingSupervisor:
         fleet_has_members = (eligibility.active_machine_count or 0) >= 2
         should_run = state["status"] == "ok" and (
             _has_live_grant(org, now)
+            or _has_live_service_publication(org)
             or (fleet_has_members and _is_personal_fleet_scope(org))
         )
 

@@ -19,6 +19,7 @@ grant):
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import signal
 import subprocess
@@ -40,6 +41,14 @@ from tools.graph.schemas.network_identity import (
     NETWORK_LINK_GRANT_SET_ID,
     NETWORK_SERVE_CERT_REVISION,
     NETWORK_SERVE_CERT_SET_ID,
+)
+from tools.graph.schemas.namespace_reservation import (
+    NAMESPACE_RESERVATION_REVISION,
+    NAMESPACE_RESERVATION_SET_ID,
+)
+from tools.graph.schemas.service_target import (
+    SERVICE_TARGET_REVISION,
+    SERVICE_TARGET_SET_ID,
 )
 
 ORG = "netorg"
@@ -214,6 +223,11 @@ def _provision_serve_cert(tmp_path, *, ttl=30 * 24 * 3600) -> dict:
         subject=Subject("operator", delegate.public_hex),
         not_before=cert.not_before, not_after=cert.not_after,
     )
+    dns01_cert = issue_cert(
+        root, delegate.public_hex, scope=("serve:dns-01",), org=ORG_UUID,
+        subject=cert.subject,
+        not_before=cert.not_before, not_after=cert.not_after,
+    )
     keydir = tmp_path / "network"
     keydir.mkdir(exist_ok=True)
     key_path = keydir / "serve.key"
@@ -225,6 +239,7 @@ def _provision_serve_cert(tmp_path, *, ttl=30 * 24 * 3600) -> dict:
         {
             "cert": cert.to_json().decode("ascii"),
             "viewer_cert": viewer_cert.to_json().decode("ascii"),
+            "dns01_cert": dns01_cert.to_json().decode("ascii"),
             "key_path": str(key_path),
             "root_pub": root.public_hex,
             "not_after": cert.not_after,
@@ -243,7 +258,8 @@ def _provision_serve_cert(tmp_path, *, ttl=30 * 24 * 3600) -> dict:
         org=ORG,
     )
     return {"root": root, "delegate": delegate, "cert": cert,
-            "viewer_cert": viewer_cert, "key_path": key_path}
+            "viewer_cert": viewer_cert, "dns01_cert": dns01_cert,
+            "key_path": key_path}
 
 
 def _put_grant(token="a" * 32, *, meta=None, issued_at=None):
@@ -284,6 +300,46 @@ def _drop_grant(token="a" * 32):
             settings_ops.remove_setting(m.id, org=ORG)
 
 
+def _put_service_publication(*, state="active"):
+    reservation_id = "11111111-1111-5111-8111-111111111111"
+    now = "2026-09-02T20:00:00.000Z"
+    persona_pub = "ab" * 32
+    reservation = {
+        "persona_pub": persona_pub,
+        "persona_label": "persona-" + hashlib.sha256(
+            bytes.fromhex(persona_pub)
+        ).hexdigest()[:20],
+        "app_label": "service",
+        "state": state,
+        "created_at": now,
+        "updated_at": now,
+    }
+    if state == "released":
+        reservation["released_at"] = now
+    settings_ops.add_setting(
+        NAMESPACE_RESERVATION_SET_ID,
+        NAMESPACE_RESERVATION_REVISION,
+        reservation_id,
+        reservation,
+        org=ORG,
+    )
+    settings_ops.add_setting(
+        SERVICE_TARGET_SET_ID,
+        SERVICE_TARGET_REVISION,
+        reservation_id,
+        {
+            "machine_id": "cd" * 32,
+            "session_id": "auto-test",
+            "container_id": "ef" * 32,
+            "port": 8000,
+            "created_at": now,
+            "updated_at": now,
+        },
+        org=ORG,
+    )
+    return reservation_id
+
+
 # ── the run condition ─────────────────────────────────────────
 
 
@@ -310,6 +366,32 @@ def test_no_launch_without_live_grant(env):
     spawn = FakeSpawn()
     s = sup.ServingSupervisor(spawn=spawn)
     assert s.ensure(ORG) == {"running": False, "reason": "no-live-grants"}
+    assert spawn.calls == []
+
+
+@pytest.mark.parametrize("state", ["active", "paused"])
+def test_launches_for_bound_service_without_artifact_grant(env, state):
+    _provision_serve_cert(env)
+    _put_service_publication(state=state)
+    spawn = FakeSpawn()
+
+    assert sup.ServingSupervisor(spawn=spawn).ensure(ORG) == {
+        "running": True,
+        "reason": "launched",
+    }
+    assert len(spawn.calls) == 1
+
+
+def test_unbound_or_released_service_does_not_keep_connector_alive(env):
+    _provision_serve_cert(env)
+    reservation_id = _put_service_publication(state="released")
+    spawn = FakeSpawn()
+    supervisor = sup.ServingSupervisor(spawn=spawn)
+
+    assert supervisor.ensure(ORG) == {
+        "running": False,
+        "reason": "no-live-grants",
+    }
     assert spawn.calls == []
 
 
