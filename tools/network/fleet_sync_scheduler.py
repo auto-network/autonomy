@@ -70,11 +70,6 @@ _SETTINGS_HINT_LIMIT = 256
 #: A resume trail carries the last few verified stream positions plus an
 #: exponentially thinned history, so its length is logarithmic in stream age.
 MAX_RESUME_BREADCRUMBS = 64
-#: A pull whose stream goes silent this long is failed and retried through
-#: ordinary backoff. Without it, one wedged serve freezes the puller's
-#: entire round loop forever (observed as a rare whole-fleet stall under
-#: heavy CPU contention).
-PULL_STREAM_SILENCE_LIMIT_S = 30.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -878,6 +873,7 @@ class FleetSyncScheduler:
     async def start(self) -> None:
         if self.running:
             return
+        await asyncio.to_thread(self._recover_interrupted_installs)
         self._roster_snapshot = await asyncio.to_thread(
             lambda: tuple(self.config.roster_entries())
         )
@@ -906,6 +902,46 @@ class FleetSyncScheduler:
         return roster_epoch(
             self._roster_snapshot, self.config.personal_root_pub
         )
+
+    def _recover_interrupted_installs(self) -> None:
+        """Consume any crashed install's marker and backup before syncing.
+
+        Recovery normally runs at the next install attempt, but a machine
+        that crashed mid-install and thereafter syncs by deltas may never
+        install again — leaving a stale marker and a full database backup
+        on disk indefinitely. Startup is the natural recovery moment: no
+        connections exist yet, and recover_checkpoint_handoff's own
+        contract (inode-checked publish/restore/clean) decides the rest.
+        """
+        from tools.network.fleet_checkpoint_handoff import (
+            _backup_path,
+            _marker_path,
+            recover_checkpoint_handoff,
+        )
+        from tools.network.fleet_sync_connection import (
+            acquire_database_quiescence,
+        )
+
+        for scope, path in self._scope_paths().items():
+            if not (_marker_path(path).exists() or _backup_path(path).exists()):
+                continue
+            try:
+                token = acquire_database_quiescence(path)
+                try:
+                    outcome = recover_checkpoint_handoff(
+                        path, quiescence=token
+                    )
+                finally:
+                    token.release()
+                logger.warning(
+                    "fleet sync scope %r recovered interrupted install: %s",
+                    scope, outcome,
+                )
+            except Exception:
+                logger.warning(
+                    "fleet sync scope %r startup install recovery failed",
+                    scope, exc_info=True,
+                )
 
     def _scope_paths(self) -> dict[str, Path]:
         """Synchronized databases by scope slug, personal always first."""
@@ -1317,20 +1353,11 @@ class FleetSyncScheduler:
                 assert last_error is not None
                 raise last_error
             await channel.send_message(encode_blob_request(digests))
-            stream = channel.recv_message_stream().__aiter__()
-            while not receiver.done:
-                try:
-                    frame, _final = await asyncio.wait_for(
-                        stream.__anext__(), PULL_STREAM_SILENCE_LIMIT_S
-                    )
-                except StopAsyncIteration:
-                    break
-                except asyncio.TimeoutError as exc:
-                    raise FleetSyncProtocolError(
-                        "fleet blob stream went silent"
-                    ) from exc
+            async for frame, _final in channel.recv_message_stream():
                 self.authenticator.authorize(machine_pub)
                 await asyncio.to_thread(receiver.feed, frame)
+                if receiver.done:
+                    break
             if not receiver.done:
                 raise FleetSyncProtocolError(
                     "blob stream ended without terminal frame"
@@ -1543,18 +1570,7 @@ class FleetSyncScheduler:
                         "fleet transaction is incomplete or out of order"
                     )
 
-            stream = channel.recv_message_stream().__aiter__()
-            while True:
-                try:
-                    message, stream_final = await asyncio.wait_for(
-                        stream.__anext__(), PULL_STREAM_SILENCE_LIMIT_S
-                    )
-                except StopAsyncIteration:
-                    break
-                except asyncio.TimeoutError as exc:
-                    raise FleetSyncProtocolError(
-                        "fleet pull stream went silent"
-                    ) from exc
+            async for message, stream_final in channel.recv_message_stream():
                 # A kick that lands after the hello revokes this live session
                 # before another application message is accepted.
                 self.authenticator.authorize(machine_pub)

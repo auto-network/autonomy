@@ -77,6 +77,7 @@ class HarnessFleet:
     # -- construction -----------------------------------------------------
 
     def build(self) -> "HarnessFleet":
+        self._acquire_fleet_slot()
         self.root_dir.mkdir(parents=True, exist_ok=True)
         self.hub.start()
         for index in range(self.size):
@@ -208,9 +209,55 @@ class HarnessFleet:
         self.start(index)
 
     def shutdown(self) -> None:
-        for machine in self.machines:
-            self.stop(machine.index, kill=True)
-        self.hub.stop()
+        try:
+            for machine in self.machines:
+                self.stop(machine.index, kill=True)
+            self.hub.stop()
+        finally:
+            self._release_fleet_slot()
+
+    # -- machine-wide fleet slots -----------------------------------------
+    #
+    # The engine's only observed hang class fires under multi-fleet CPU
+    # starvation (several three-process fleets across parallel xdist
+    # workers). Bounding CONCURRENT FLEETS — not tests — keeps the suite
+    # fully xdist-parallel while removing the trigger: excess fleets wait
+    # deterministically on a slot instead of stalling probabilistically
+    # mid-scenario. Slots are machine-wide flock files so they compose
+    # across worker processes; a crashed holder's lock dies with it.
+
+    def _slot_dir(self):
+        import tempfile
+
+        path = Path(tempfile.gettempdir()) / "fleet-harness-slots"
+        path.mkdir(exist_ok=True)
+        return path
+
+    def _acquire_fleet_slot(self, slots: int | None = None) -> None:
+        import fcntl
+
+        if slots is None:
+            slots = int(os.environ.get("AUTONOMY_HARNESS_FLEET_SLOTS", "2"))
+        deadline = time.monotonic() + 300.0
+        while True:
+            for index in range(slots):
+                handle = open(self._slot_dir() / f"slot-{index}", "w")
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    handle.close()
+                    continue
+                self._slot_handle = handle
+                return
+            if time.monotonic() > deadline:
+                raise TimeoutError("no harness fleet slot became free")
+            time.sleep(0.2)
+
+    def _release_fleet_slot(self) -> None:
+        handle = getattr(self, "_slot_handle", None)
+        if handle is not None:
+            self._slot_handle = None
+            handle.close()
 
     # -- faults -----------------------------------------------------------
 
@@ -320,9 +367,20 @@ class HarnessFleet:
         return len(digests) == 1
 
     def _progress_signal(self) -> tuple:
-        """Everything that observably advances while the fleet works."""
+        """Everything that observably advances while the fleet works.
+
+        Includes each database file's stat, which changes on every write
+        AND every checkpoint-install swap — during install churn the digest
+        observer legitimately fails constant and the counters are briefly
+        unreadable, which must never read as a stall.
+        """
         signal = []
         for machine in self.machines:
+            try:
+                stat = machine.db_path.stat()
+                signal.append((stat.st_mtime_ns, stat.st_size, stat.st_ino))
+            except OSError:
+                signal.append(None)
             signal.append(self.digest(machine.index))
             try:
                 with self._read_only(machine.db_path) as conn:
@@ -338,7 +396,7 @@ class HarnessFleet:
     def wait(
         self, predicate: Callable[[], bool], *, timeout: float,
         interval: float = 0.05, label: str = "condition",
-        stall_after: float = 30.0,
+        stall_after: float = 45.0,
     ) -> float:
         """Poll until the predicate holds; fail on STALL, not on schedule.
 
@@ -346,6 +404,8 @@ class HarnessFleet:
         digest, applied-transaction count, or received-byte counter changes
         for ``stall_after`` seconds while the predicate stays false, the
         fleet is wedged and the wait fails fast with that diagnosis. The
+        default sits ABOVE the engine's own 30s stream-silence recovery so
+        one silence-failed-and-retried pull is never mistaken for a wedge. The
         absolute ``timeout`` is a distant backstop for pathological
         progress-without-convergence, so a loaded-but-working fleet is
         never mistaken for a broken one.

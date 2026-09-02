@@ -113,8 +113,8 @@ def test_end_to_end_attachment_crosses_the_fleet(tmp_path: Path) -> None:
     digest = hashlib.sha256(content).hexdigest()
     payload = tmp_path / "photo.png"
     payload.write_bytes(content)
-    fleet.start_all()
     try:
+        fleet.start_all()
         graph = GraphDB(fleet.machines[0].db_path)
         try:
             _insert_attachment(

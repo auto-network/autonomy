@@ -34,8 +34,8 @@ def test_org_databases_sync_with_isolation(tmp_path: Path) -> None:
     fleet = HarnessFleet(
         tmp_path / "fleet", size=2, org_scopes=("alpha", "beta")
     ).build()
-    fleet.start_all()
     try:
+        fleet.start_all()
         fleet.write(0, "p-note", "personal crossing")
         fleet.write_org(0, "alpha", "a-note", "alpha crossing")
         fleet.write_org(1, "beta", "b-note", "beta crossing")
@@ -74,8 +74,8 @@ def test_schema_mismatch_pauses_only_that_org(tmp_path: Path) -> None:
         tmp_path / "fleet", size=2, org_scopes=("alpha", "beta"),
         org_customize=diverge,
     ).build()
-    fleet.start_all()
     try:
+        fleet.start_all()
         fleet.write(0, "p-1", "personal still flows")
         fleet.write_org(0, "alpha", "a-1", "must pause")
         fleet.write_org(0, "beta", "b-1", "must flow")

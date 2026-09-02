@@ -8,8 +8,8 @@ from tools.network.fleet_sync.harness import HarnessFleet, Step
 
 def test_three_way_convergence(tmp_path: Path) -> None:
     fleet = HarnessFleet(tmp_path / "fleet", size=3).build()
-    fleet.start_all()
     try:
+        fleet.start_all()
         for machine in range(3):
             for note in range(5):
                 fleet.write(
@@ -29,8 +29,8 @@ def test_three_way_convergence(tmp_path: Path) -> None:
 
 def test_flapping_peer_converges_after_stabilizing(tmp_path: Path) -> None:
     fleet = HarnessFleet(tmp_path / "fleet", size=3).build()
-    fleet.start_all()
     try:
+        fleet.start_all()
         fleet.run_timeline([
             Step(0.0, lambda f: f.write(0, "w-0", "before flapping"), "write"),
             Step(0.2, lambda f: f.restart(2, kill=True), "flap 1"),
@@ -51,8 +51,8 @@ def test_lossy_link_converges_without_divergence(tmp_path: Path) -> None:
     fleet = HarnessFleet(tmp_path / "fleet", size=2).build()
     # Both directions degraded before anything syncs: 30% retransmit-like
     # stalls, occasional mid-stream resets, and real added latency.
-    fleet.start_all()
     try:
+        fleet.start_all()
         fleet.set_pair_faults(
             0, 1,
             stall_rate=0.3, stall_s=0.15, reset_rate=0.02,
