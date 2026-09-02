@@ -1,0 +1,22 @@
+[Unit]
+Description=Private Prometheus for the auto.network relay estate (auto-k9jxd)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=true
+# Loopback bind ONLY: never publicly reachable. The dashboard Operations
+# plugin queries it over the operator-private path (O0, graph://41195143-344).
+ExecStart=/opt/autonomy-observability/prometheus \
+    --config.file=/etc/prometheus/prometheus.yml \
+    --storage.tsdb.path=/var/lib/prometheus \
+    --storage.tsdb.retention.time=60d \
+    --web.listen-address=127.0.0.1:9090 \
+    --web.enable-lifecycle
+Restart=on-failure
+RestartSec=3
+StateDirectory=prometheus
+
+[Install]
+WantedBy=multi-user.target
