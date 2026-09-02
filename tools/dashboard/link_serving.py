@@ -1702,7 +1702,15 @@ def main() -> None:
     # silently emitted hello v1 with zero capabilities. Reuse the already-
     # verified personal warm credential solely to recover its machine signer;
     # do not invent or persist another machine key.
-    machine_key = connector_runtime.machine_key
+    # auto-e2ufw: prefer the per-org SERVING key for the tunnel hello when the
+    # browser delivered one; fall back to the fleet machine key (transitional)
+    # otherwise. This changes only which machine identity the serving hello
+    # presents — reachability node:announce is unaffected (it never uses this
+    # key). The registry's serving-domain verify accepts either under the
+    # per-org allow-set (empty set -> transitional accept).
+    machine_key = (
+        connector_runtime.serving_machine_key or connector_runtime.machine_key
+    )
     if machine_key is None:
         with contextlib.suppress(Exception):
             from tools.dashboard.link_approvals import _load_binding
@@ -1717,7 +1725,10 @@ def main() -> None:
                     FleetRuntimeWarmCache(personal_org_uuid)
                 )
                 personal_runtime.rearm_from_cache()
-                machine_key = personal_runtime.machine_key
+                machine_key = (
+                    personal_runtime.serving_machine_key
+                    or personal_runtime.machine_key
+                )
 
     from tools.network.relaykit.connector import Publisher
 

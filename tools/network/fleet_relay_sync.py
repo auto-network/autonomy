@@ -214,6 +214,10 @@ class ConnectorFleetRuntime:
         #: credential.  It is memory-only and absent on a cold/legacy
         #: connector; RelayKit hello v2 must never be attempted without it.
         self.machine_key: KeyPair | None = None
+        #: Per-org serving key for the tunnel hello (auto-e2ufw); when present
+        #: the serving connector presents this unlinkable key instead of the
+        #: fleet machine_key. None keeps the transitional fleet-key behavior.
+        self.serving_machine_key: KeyPair | None = None
         #: Set at connector startup (main) so a fresh process re-arms itself
         #: from the warm ramfs cache and a successful configure() re-warms it.
         #: None on any node without a ramfs keycache — arming still works, it
@@ -268,6 +272,7 @@ class ConnectorFleetRuntime:
         scheduler.authenticator.authorize(credential.machine_pub)
         self.scheduler = scheduler
         self.machine_key = credential.machine_key
+        self.serving_machine_key = credential.serving_machine_key
         # A fresh credential means this process is no longer refusing — start a
         # new refusal tally so the flag's "since" reflects THIS lock, not one
         # cleared hours ago.

@@ -65,6 +65,16 @@ class FleetRuntimeCredential:
     # untouched on an unregistered org.
     machine_key: "KeyPair | None" = None
     reachability_cert: "DelegationCert | None" = None
+    #: Per-(org, machine) SERVING key (auto-e2ufw), derived by the browser as
+    #: derive_serving_machine_key(root, org_genesis, machine_id) and delivered
+    #: only for a serving org. Present only when the payload carries
+    #: serving_machine_private_seed; None keeps the fleet key as the hello
+    #: machine identity (the transitional path). This is a DISTINCT key from
+    #: the fleet machine_key and is used ONLY for the serving tunnel hello,
+    #: never for reachability node:announce. The registry's per-org allow-set
+    #: (serve_machine_keys) enforces that this pubkey is registered for the
+    #: org; from_browser_payload only validates it is a well-formed key.
+    serving_machine_key: "KeyPair | None" = None
 
     @classmethod
     def from_browser_payload(
@@ -82,7 +92,8 @@ class FleetRuntimeCredential:
             "process_private_seed",
             "delegation_cert",
         }
-        optional = {"machine_private_seed", "reachability_cert"}
+        optional = {"machine_private_seed", "reachability_cert",
+                    "serving_machine_private_seed"}
         keys = set(payload) if isinstance(payload, dict) else set()
         if not isinstance(payload, dict) or not required <= keys <= (required | optional):
             raise FleetRuntimeError(
@@ -189,9 +200,25 @@ class FleetRuntimeCredential:
                     f"reachability cert does not verify: {exc}"
                 ) from exc
 
+        serving_machine_key = None
+        if "serving_machine_private_seed" in keys:
+            # The browser derived this per-(org, machine) serving key from the
+            # opened root; we only need it well-formed here. The registry's
+            # serve_machine_keys allow-set is what binds it to the org
+            # (auto-e2ufw Option B), so no roster/genesis check belongs here.
+            try:
+                serving_machine_key = KeyPair.from_private_hex(
+                    _hex(payload["serving_machine_private_seed"],
+                         "serving_machine_private_seed")
+                )
+            except (IdkitError, ValueError, TypeError) as exc:
+                raise FleetRuntimeError(
+                    f"invalid serving machine key: {exc}"
+                ) from exc
+
         return cls(
             machine_id, machine_pub, process_key, cert,
-            machine_key, reachability_cert,
+            machine_key, reachability_cert, serving_machine_key,
         )
 
 
