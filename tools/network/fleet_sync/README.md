@@ -361,3 +361,32 @@ MiB of canonical mutation frames per authored transaction. Base memory is one
 record-aligned chunk plus one materialization batch; hot-delta memory is at
 most one bounded transaction. RaptorQ's current Python wrapper materializes
 one immutable segment at a time, never the complete personal database.
+
+## Opt-in performance suite
+
+Performance evidence lives in `tools/network/fleet_sync/perf` and runs only
+when explicitly invoked — never from default sweeps, directory runs of the
+engine tests, or agent-test's changed-line plan. The package contains no
+pytest-collectable files by design; `tests/test_perf_isolation.py` trips if
+one is added. The one documented command:
+
+```bash
+python3 -m tools.network.fleet_sync.perf run --scale quick   # smoke, ~15 s
+python3 -m tools.network.fleet_sync.perf run                 # full baselines
+```
+
+It runs five benchmarks — `kernel` (insert/update throughput with the
+served-ack floor active, journal plateau, steady tracking overhead),
+`storage` (tracked-vs-indexed on-disk cost), `checkpoint` (seed → freeze →
+RaptorQ transport → install lifecycle), `live` (concurrent
+writer/reader/delta lag), and the `crsqlite` yardstick (auto-skipped unless
+the loadable extension is present; set `FLEET_SYNC_CRSQLITE_EXT` or place it
+under `<baseline store>/crsqlite/`) — then prints a direction-aware
+comparison against the retained baseline for that scale and promotes the new
+result. Baselines persist in `/opt/autonomy-developer/fleet-sync-perf` (or
+`FLEET_SYNC_PERF_BASELINES`), one per scale, with full history under
+`runs/`. Regressions past 10% are flagged in the table but never gate;
+the exit status reflects benchmark errors only. `--only NAME` runs a
+subset without touching the baseline, `--output PATH` writes the raw
+result JSON, and the `compare A.json B.json` subcommand diffs any two
+retained results offline.
