@@ -3,31 +3,49 @@
 A consumer (a password manager, a notes app) calls ``get`` / ``put`` / ``list``
 / ``delete`` with logical names and plaintext. This layer transparently:
 
-- **hashes the key** into a blind index — ``<domain>:<HMAC(K_index, name)>`` —
-  so the substrate never sees the logical name;
-- **seals the value** under a metadata key derived from the store's root, so
-  the substrate stores only ciphertext;
-- **manages the root key** lazily: on first use it is minted (a cold,
-  approval-free seal) or released through the existing ``vault_open``
+- **hashes the key** into a blind index — ``<store-tag>:<HMAC(K_index, name)>``
+  — so the substrate never sees the logical name;
+- **seals the value** under a metadata key derived from the store's sealed
+  index, so the substrate stores only ciphertext;
+- **manages the sealed index** lazily: on first use it is minted (a
+  factor-free seal) or released through the existing ``vault_open``
   rendezvous, and cached for the session.
 
 The consumer never sees the hash, the ciphertext, the derived keys, or the
 unlock ceremony. Swapping a plain settings client for a ``SealedSettings`` of
 the same surface changes no call site.
 
+## Seal-all addressing — nothing on disk names a store
+
+Every address this layer writes is opaque (crib ``1e005d5c-c11`` §23/§24):
+
+- The **sealed index** — the store's one 32-byte secret, from which
+  ``K_index``/``K_meta`` derive — is an ordinary ``autonomy.vault.secured``
+  credential whose row key is ``base64url(HMAC-SHA-256(pepper, NFC(store
+  name)))``. All sealed indexes pool in the secured set with uniform opaque
+  keys; a cold reader learns how many stores exist, never which is which.
+- Item rows carry that same opaque address as their **store tag** in place of
+  a plaintext domain prefix, so a cold dump cannot attribute a row to a store
+  or app — required for secret-vault deniability, where an attributable tag
+  would defeat the vault's hidden existence.
+- The **pepper** is ONE shared ``autonomy.vault.audited`` row
+  (``sealed-settings.pepper``): encrypted at rest, released unattended when
+  the vault is warm, minted once at vault bring-up
+  (:func:`ensure_pepper_minted`). It is what makes store locations
+  incomputable from a cold dump. It is never re-minted — rotation would
+  orphan every store address.
+
 ## No new crypto
 
-Keys are derived from the 32-byte root with HKDF-SHA-256 and values sealed with
-ChaCha20-Poly1305 — both from ``cryptography``, the same primitives the vault
-already uses. The root itself is an ordinary ``autonomy.vault.secured``
-credential (``sealed-settings.<domain>.root``): minted cold on first use and
-released later, per session, into the requesting session's ramfs.
+Keys are derived from the 32-byte sealed index with HKDF-SHA-256 and values
+sealed with ChaCha20-Poly1305 — both from ``cryptography``, the same
+primitives the vault already uses.
 
 ## Where sealing lands, and the one audit event
 
 The metadata rows here are sealed by THIS layer under the factor-derived key,
-so listing a store is ONE factor release (opening the root), not one audited
-release per row. A secret whose every reveal must be audited does NOT belong in
+so listing a store is ONE factor release (opening the sealed index), not one
+audited release per row. A secret whose every reveal must be audited does NOT belong in
 a metadata row — it belongs in ``autonomy.vault.audited`` under the same blind
 index, where the substrate's release-is-audit fires per reveal. This module
 owns the index + metadata half; the audited-secret half is the existing vault
@@ -35,13 +53,14 @@ set, addressed by :func:`blind_index`.
 
 ## Runtime seam
 
-The substrate operations (release/mint the root, read/write/list rows) are a
-:class:`SealedBackend` so the two runtime contexts — a container session over
-the HTTP client, an in-process dashboard plugin — can each supply their own
-without the crypto core knowing which it is. :class:`ClientBackend` is the
-container/HTTP adapter; it is runtime-critical (its root release and existence
-probe only exercise against a live dashboard) and must be validated on a real
-run, not only unit-tested.
+The substrate operations (read the pepper, release/mint the sealed index,
+read/write/list rows) are a :class:`SealedBackend` so the two runtime contexts
+— a container session over the HTTP client, an in-process dashboard plugin —
+can each supply their own without the crypto core knowing which it is.
+:class:`ClientBackend` is the container/HTTP adapter; it is runtime-critical
+(its pepper read, sealed-index release, and existence probe only exercise
+against a live dashboard) and must be validated on a real run, not only
+unit-tested.
 """
 
 from __future__ import annotations
@@ -60,17 +79,28 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-from .schemas.vault_credential import VAULT_SECURED_SET_ID
+from .schemas.vault_credential import (
+    VAULT_AUDITED_SET_ID,
+    VAULT_CREDENTIAL_REVISION,
+    VAULT_SECURED_SET_ID,
+)
 from .schemas.sealed_row import SEALED_ROW_REVISION, SEALED_ROW_SET_ID
 
-# One fixed salt binds every derivation to this scheme + version, so a root
-# reused elsewhere never yields these subkeys and a future scheme revision is a
-# clean break rather than a silent key collision.
+# One fixed salt binds every derivation to this scheme + version, so a sealed
+# index reused elsewhere never yields these subkeys and a future scheme
+# revision is a clean break rather than a silent key collision.
 _HKDF_SALT = b"autonomy.sealed-settings.v1"
 _INFO_INDEX = b"index"          # -> K_index, the blind-index HMAC key
 _INFO_METADATA = b"metadata"    # -> K_meta, the metadata AEAD key
-_ROOT_LEN = 32
+_SEALED_INDEX_LEN = 32
 _NONCE_LEN = 12
+
+#: The one shared audited credential every hidden store address derives from.
+#: Its NAME is deliberately plaintext (anchor layer: the row's identity is the
+#: declared leakage, its value is sealed); what it protects is every OTHER
+#: address. Minted once at vault bring-up; never rotated in place.
+PEPPER_KEY = "sealed-settings.pepper"
+_PEPPER_LEN = 32
 
 
 # --------------------------------------------------------------------------- #
@@ -82,7 +112,7 @@ class SealedSettingsError(RuntimeError):
 
 
 class VaultLocked(SealedSettingsError):
-    """The root exists but could not be released now.
+    """The credential exists but could not be released now.
 
     ``state`` is one of ``PENDING`` (operator has not yet decided),
     ``DENIED`` (operator declined), or ``COLD`` (no key holder is warm — the
@@ -117,6 +147,20 @@ def _hkdf(root: bytes, info: bytes, length: int = 32) -> bytes:
     ).derive(root)
 
 
+def hidden_address(pepper: bytes, store_name: str) -> str:
+    """The opaque row address a store's sealed index lives at.
+
+    ``base64url(HMAC-SHA-256(pepper, NFC(store-name)))``, unpadded — the
+    seal-all form (crib §23). The same string doubles as the store tag
+    prefixing every item row, so nothing on disk attributes a row to a store.
+    A secret vault derives its address as ``HMAC(pepper, KDF(password))``
+    browser-side; colliding with it would take a store name whose NFC UTF-8
+    bytes equal a 32-byte KDF output, which is negligible.
+    """
+    digest = hmac.new(pepper, _canonical(store_name), sha256).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+
 def blind_index(k_index: bytes, name: str) -> str:
     """The base64url HMAC-SHA-256 of a logical name — the row's hidden key.
 
@@ -145,15 +189,24 @@ def _open(k_meta: bytes, ciphertext: str, aad: bytes) -> bytes:
 class SealedBackend(Protocol):
     """The substrate operations SealedSettings needs, per runtime context."""
 
-    def read_root(self, secured_key: str, *, block: bool) -> bytes | None:
-        """Return the 32-byte root, or ``None`` if no such credential exists.
+    def read_pepper(self) -> bytes:
+        """Return the 32-byte shared pepper.
+
+        Raise :class:`VaultLocked` (``COLD``) when the pepper row exists but
+        the vault cannot release it now, and :class:`SealedSettingsError`
+        when it was never minted (vault bring-up has not run).
+        """
+
+    def read_sealed_index(self, address: str, *, block: bool) -> bytes | None:
+        """Return the 32-byte sealed index at the hidden ``address``, or
+        ``None`` if no such credential exists.
 
         Raise :class:`VaultLocked` if the credential exists but cannot be
         released now (pending / denied / cold).
         """
 
-    def mint_root(self, secured_key: str, value_hex: str) -> None:
-        """Seal a fresh root (a cold, approval-free personal-secured write)."""
+    def mint_sealed_index(self, address: str, value_hex: str) -> None:
+        """Seal a fresh sealed index (a factor-free personal-secured write)."""
 
     def read_row(self, row_key: str) -> str | None:
         """Return a row's ``ciphertext`` string, or ``None`` if absent."""
@@ -187,18 +240,19 @@ class SealedItem:
 class SealedSettings:
     """A sealed key/value store over one logical ``domain``.
 
-    ``block`` chooses what a root release does when the operator has not yet
-    decided: ``False`` (default) raises ``VaultLocked("PENDING")`` immediately;
-    ``True`` holds until the decision (the backend's release call waits).
+    The domain is the store's name INSIDE this layer only; on disk it appears
+    solely as the pepper-derived opaque tag. ``block`` chooses what a
+    sealed-index release does when the operator has not yet decided: ``False``
+    (default) raises ``VaultLocked("PENDING")`` immediately; ``True`` holds
+    until the decision (the backend's release call waits).
     """
 
     def __init__(self, domain: str, backend: SealedBackend, *, block: bool = False):
-        if ":" in domain:
-            raise ValueError("domain must not contain ':' (it prefixes row keys)")
         self._domain = domain
         self._backend = backend
         self._block = block
-        self._root: bytes | None = None
+        self._sealed_index: bytes | None = None
+        self._tag: str | None = None
 
     # -- consumer-facing: identical shape to a plain settings client -------- #
     def get(self, name: str):
@@ -224,7 +278,7 @@ class SealedSettings:
     def list(self) -> list[SealedItem]:
         _, k_meta = self._keys()
         items: list[SealedItem] = []
-        for row_key, ciphertext in self._backend.list_rows(self._domain):
+        for row_key, ciphertext in self._backend.list_rows(self._store_tag()):
             try:
                 items.append(self._open_item(k_meta, row_key, ciphertext))
             except (InvalidTag, ValueError, KeyError):
@@ -240,7 +294,7 @@ class SealedSettings:
     # -- internals ---------------------------------------------------------- #
     def _row_key(self, name: str) -> str:
         k_index, _ = self._keys()
-        return f"{self._domain}:{blind_index(k_index, name)}"
+        return f"{self._store_tag()}:{blind_index(k_index, name)}"
 
     def _aad(self, row_key: str) -> bytes:
         # Bind each ciphertext to its own row so a blob cannot be lifted into
@@ -252,35 +306,50 @@ class SealedSettings:
         return SealedItem(payload["name"], payload["metadata"])
 
     def _keys(self) -> tuple[bytes, bytes]:
-        if self._root is None:
-            self._root = self._get_or_create_root()
-        return _hkdf(self._root, _INFO_INDEX), _hkdf(self._root, _INFO_METADATA)
+        if self._sealed_index is None:
+            self._sealed_index = self._get_or_create_sealed_index()
+        return (
+            _hkdf(self._sealed_index, _INFO_INDEX),
+            _hkdf(self._sealed_index, _INFO_METADATA),
+        )
 
-    def _secured_key(self) -> str:
-        return f"sealed-settings.{self._domain}.root"
+    def _store_tag(self) -> str:
+        """The store's one opaque on-disk name: its hidden address."""
+        if self._tag is None:
+            pepper = self._backend.read_pepper()
+            if len(pepper) != _PEPPER_LEN:
+                raise SealedSettingsError("pepper is not 32 bytes")
+            self._tag = hidden_address(pepper, self._domain)
+        return self._tag
 
-    def _get_or_create_root(self) -> bytes:
-        secured_key = self._secured_key()
-        root = self._backend.read_root(secured_key, block=self._block)
-        if root is None:
-            # First use: seed the credential (cold write, no approval), then
-            # bind to the AUTHORITATIVE root via the same release path. We never
-            # use the freshly generated bytes directly, so a concurrent
-            # first-mint resolves to one winner both sessions converge on.
-            self._backend.mint_root(secured_key, secrets.token_bytes(_ROOT_LEN).hex())
-            root = self._backend.read_root(secured_key, block=self._block)
-            if root is None:
-                raise SealedSettingsError("root key absent immediately after mint")
-        if len(root) != _ROOT_LEN:
-            raise SealedSettingsError("root key is not 32 bytes")
-        return root
+    def _get_or_create_sealed_index(self) -> bytes:
+        address = self._store_tag()
+        sealed_index = self._backend.read_sealed_index(address, block=self._block)
+        if sealed_index is None:
+            # First use: seed the credential (factor-free seal-only write),
+            # then bind to the AUTHORITATIVE bytes via the same release path.
+            # We never use the freshly generated bytes directly, so a
+            # concurrent first-mint resolves to one winner both sessions
+            # converge on.
+            self._backend.mint_sealed_index(
+                address, secrets.token_bytes(_SEALED_INDEX_LEN).hex()
+            )
+            sealed_index = self._backend.read_sealed_index(address, block=self._block)
+            if sealed_index is None:
+                raise SealedSettingsError(
+                    "sealed index absent immediately after mint"
+                )
+        if len(sealed_index) != _SEALED_INDEX_LEN:
+            raise SealedSettingsError("sealed index is not 32 bytes")
+        return sealed_index
 
 
 # --------------------------------------------------------------------------- #
-# Container / HTTP backend. RUNTIME-CRITICAL: the root release and the
-# existence probe only exercise against a live dashboard, so this adapter's
-# behavior must be confirmed on a real run, not solely by the unit tests
-# (which cover the crypto core through a fake backend).
+# Container / HTTP backend. RUNTIME-CRITICAL: the pepper read, the
+# sealed-index release, and the existence probe only exercise against a live
+# dashboard, so this adapter's behavior must be confirmed on a real run, not
+# solely by the unit tests (which cover the crypto core through a fake
+# backend).
 # --------------------------------------------------------------------------- #
 class ClientBackend:
     """A :class:`SealedBackend` over ``tools.graph.client`` (a container session)."""
@@ -291,16 +360,40 @@ class ClientBackend:
         self._client = client
         self._ttl = ttl_seconds
 
-    def read_root(self, secured_key: str, *, block: bool) -> bytes | None:
+    def read_pepper(self) -> bytes:
+        # Audited tier: the warm dashboard opens the row unattended and the
+        # member arrives with its plaintext payload; a vault that cannot open
+        # it arrives with ``vault_error`` instead. Absence is a provisioning
+        # failure (bring-up mints the pepper), not a lock state.
+        members = self._client.read_set(VAULT_AUDITED_SET_ID, org=self._PERSONAL)
+        member = next((m for m in members.members if m.key == PEPPER_KEY), None)
+        if member is None:
+            raise SealedSettingsError(
+                "the sealed-settings pepper was never minted — vault bring-up "
+                "has not run on this dashboard"
+            )
+        failure = getattr(member, "vault_error", None)
+        if failure is not None:
+            if getattr(failure, "reason", "") == "no_key_holder":
+                raise VaultLocked(VaultLocked.COLD)
+            raise SealedSettingsError(
+                f"the pepper could not be released: {getattr(failure, 'reason', '?')}"
+            )
+        value = (member.payload or {}).get("value")
+        if not isinstance(value, str):
+            raise SealedSettingsError("the pepper row carries no value")
+        return bytes.fromhex(value)
+
+    def read_sealed_index(self, address: str, *, block: bool) -> bytes | None:
         # Existence probe first: opening a nonexistent secured key cannot be
         # told apart from a denial, so decide absent-vs-locked WITHOUT the
         # ceremony. The row is present even while sealed.
         members = self._client.read_set(VAULT_SECURED_SET_ID, org=self._PERSONAL)
-        if secured_key not in {m.key for m in members.members}:
+        if address not in {m.key for m in members.members}:
             return None
         try:
             receipt = self._client.request_vault_open(
-                VAULT_SECURED_SET_ID, secured_key,
+                VAULT_SECURED_SET_ID, address,
                 org=self._PERSONAL, ttl_seconds=self._ttl,
             )
         except PermissionError:
@@ -315,9 +408,9 @@ class ClientBackend:
         with open(receipt["path"], "rb") as handle:
             return bytes.fromhex(handle.read().decode("ascii").strip())
 
-    def mint_root(self, secured_key: str, value_hex: str) -> None:
+    def mint_sealed_index(self, address: str, value_hex: str) -> None:
         self._client.seal_personal_setting(
-            secured_key, value_hex, policy_class_id="personal-root",
+            address, value_hex, policy_class_id="personal-root",
         )
 
     def read_row(self, row_key: str) -> str | None:
@@ -352,3 +445,33 @@ class ClientBackend:
 def _looks_cold(exc: Exception) -> bool:
     text = str(exc).lower()
     return "no_key_holder" in text or "vault is locked" in text or "no key" in text
+
+
+# --------------------------------------------------------------------------- #
+# Vault bring-up hook (in-process, dashboard side).
+# --------------------------------------------------------------------------- #
+def ensure_pepper_minted() -> bool:
+    """Mint the shared pepper if it has never existed. Returns True on mint.
+
+    Called once per unlock, AFTER the personal audited delegate recipient is
+    published (``unlock_routes._install_personal_audited_delegate``) — the
+    audited write is a cold delegate seal and fails before that. Presence in
+    ANY state short-circuits without writing: re-minting would rotate the
+    pepper and silently orphan every sealed store's address, so there is
+    deliberately no rotate path here.
+    """
+    from tools.graph import settings_ops
+
+    members = settings_ops.read_set(
+        VAULT_AUDITED_SET_ID, org=ClientBackend._PERSONAL, peers=[]
+    )
+    if any(m.key == PEPPER_KEY for m in members.members):
+        return False
+    settings_ops.upsert_by_key(
+        VAULT_AUDITED_SET_ID,
+        VAULT_CREDENTIAL_REVISION,
+        PEPPER_KEY,
+        {"value": secrets.token_bytes(_PEPPER_LEN).hex()},
+        org=ClientBackend._PERSONAL,
+    )
+    return True
