@@ -63,9 +63,9 @@ class RelayRawStream:
         self.channel_id = channel_id
         self.reservation = reservation
         self.host = host
-        #: real client address (PROXY v2 when the edge supplies it, else the
-        #: socket peer) — the accounting/logging key, never paired with the
-        #: link token or payload (auto-p20eb).
+        #: real client address — the ingress binds the public serve IP itself,
+        #: so this is the native socket peer; the accounting/logging key, never
+        #: paired with the link token or payload.
         self.source = source
         self._metrics = metrics
         self._org = getattr(tunnel, "org", "other")
@@ -304,55 +304,9 @@ class _Refused(Exception):
         self.code = code
 
 
-# -- PROXY protocol v2 (auto-p20eb) ----------------------------------------
-#
-# The serve edge is a dumb :443→ingress TCP forward, so without this the
-# ingress attributes every public stream to the forward's own address and
-# source-aware accounting is impossible. The forward prefixes each upstream
-# connection with a PROXY v2 header carrying the real client address; the
-# ingress consumes it BEFORE the ClientHello peek — but only from peers
-# named in *proxy_sources* (the trust boundary: anyone else writing a
-# header is just handing the SNI parser garbage and gets the byte-identical
-# silent close). The 12-byte signature can never open a valid TLS record,
-# so a trusted peer that sends no header (an un-upgraded forward during
-# rollout) is still parsed as TLS — deployment is order-free.
-
-PROXY_V2_SIGNATURE = b"\r\n\r\n\x00\r\nQUIT\n"
-_PROXY_V2_MAX_LEN = 512
-
-
-async def _read_proxy_v2(first16: bytes, reader) -> str | None:
-    """Parse one PROXY v2 header whose first 16 bytes are *first16*.
-    Returns the source address string, or None when the header carries no
-    client (LOCAL command — a health check). Raises StreamProtocolError
-    on any malformation; the caller closes silently."""
-    import ipaddress
-
-    ver_cmd, fam_proto = first16[12], first16[13]
-    if ver_cmd >> 4 != 0x2:
-        raise StreamProtocolError("unsupported PROXY version")
-    length = int.from_bytes(first16[14:16], "big")
-    if length > _PROXY_V2_MAX_LEN:
-        raise StreamProtocolError("oversized PROXY header")
-    try:
-        payload = await reader.readexactly(length)
-    except (asyncio.IncompleteReadError, OSError) as exc:
-        raise StreamProtocolError("truncated PROXY header") from exc
-    command = ver_cmd & 0x0F
-    if command == 0x0:
-        return None  # LOCAL: use the socket's own peer address
-    if command != 0x1:
-        raise StreamProtocolError("unknown PROXY command")
-    if fam_proto == 0x11 and length >= 12:  # TCP over IPv4
-        return str(ipaddress.IPv4Address(payload[0:4]))
-    if fam_proto == 0x21 and length >= 36:  # TCP over IPv6
-        return str(ipaddress.IPv6Address(payload[0:16]))
-    raise StreamProtocolError("unsupported PROXY family")
-
-
-async def _peek_client_hello(reader, initial: bytes = b"") -> tuple[str, bytes]:
+async def _peek_client_hello(reader) -> tuple[str, bytes]:
     """Read just enough to extract the SNI. Returns (sni, buffered)."""
-    buffered = initial
+    buffered = b""
     while len(buffered) < SNI_PEEK_MAX_BYTES:
         if buffered:
             try:
@@ -372,8 +326,7 @@ async def _peek_client_hello(reader, initial: bytes = b"") -> tuple[str, bytes]:
 
 async def handle_stream_connection(
     reader, writer, *, host_routes, abuse_limiter=None,
-    idle_timeout: float = STREAM_IDLE_TIMEOUT,
-    proxy_sources: frozenset = frozenset(), metrics=None,
+    idle_timeout: float = STREAM_IDLE_TIMEOUT, metrics=None,
 ) -> None:
     """One ingress connection, accept to teardown."""
     from tools.network.relaykit.frames import new_channel_id
@@ -383,33 +336,14 @@ async def handle_stream_connection(
             metrics.stream_refused(reason)
 
     abuse_lease = None
+    # The ingress binds the public serve IP directly, so the socket peer IS
+    # the real client — no PROXY header, source is native.
     peer = writer.get_extra_info("peername") or ("unknown",)
     source = str(peer[0])
     try:
-        initial = b""
-        if proxy_sources and source in proxy_sources:
-            try:
-                first16 = await asyncio.wait_for(
-                    reader.readexactly(16), STREAM_HANDSHAKE_TIMEOUT
-                )
-            except (asyncio.IncompleteReadError, asyncio.TimeoutError,
-                    OSError):
-                return
-            if first16[:12] == PROXY_V2_SIGNATURE:
-                try:
-                    real = await asyncio.wait_for(
-                        _read_proxy_v2(first16, reader),
-                        STREAM_HANDSHAKE_TIMEOUT,
-                    )
-                except (StreamProtocolError, asyncio.TimeoutError, OSError):
-                    return
-                if real is not None:
-                    source = real
-            else:
-                initial = first16  # un-upgraded forward: this is TLS
         try:
             sni, buffered = await asyncio.wait_for(
-                _peek_client_hello(reader, initial), STREAM_HANDSHAKE_TIMEOUT
+                _peek_client_hello(reader), STREAM_HANDSHAKE_TIMEOUT
             )
         except (StreamProtocolError, asyncio.TimeoutError, OSError) as exc:
             _refuse("no_sni" if isinstance(exc, StreamProtocolError)
@@ -475,14 +409,13 @@ async def handle_stream_connection(
 
 async def start_stream_ingress(
     host: str, port: int, *, host_routes, abuse_limiter=None,
-    idle_timeout: float = STREAM_IDLE_TIMEOUT,
-    proxy_sources: frozenset = frozenset(), metrics=None,
+    idle_timeout: float = STREAM_IDLE_TIMEOUT, metrics=None,
 ):
     async def handle(reader, writer):
         await handle_stream_connection(
             reader, writer, host_routes=host_routes,
             abuse_limiter=abuse_limiter, idle_timeout=idle_timeout,
-            proxy_sources=proxy_sources, metrics=metrics,
+            metrics=metrics,
         )
 
     server = await asyncio.start_server(handle, host, port)

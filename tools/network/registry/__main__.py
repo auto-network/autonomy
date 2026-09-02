@@ -75,27 +75,20 @@ def main() -> None:
     parser.add_argument(
         "--stream-ingress-port",
         type=int,
-        help="enable the raw-stream (tls-stream/1) TCP ingress on this "
-             "loopback port (fronted publicly by the estate Caddy L4)",
+        help="enable the raw-stream (tls-stream/1) TCP ingress on this port. "
+             "In production this is the serve floating IP's :443 — the ingress "
+             "is the public serve edge and sees the client's native source IP.",
     )
     parser.add_argument(
         "--stream-ingress-host",
         default="127.0.0.1",
-        help="bind address for the raw-stream ingress",
+        help="bind address for the raw-stream ingress (the serve floating IP "
+             "in production; loopback for tests)",
     )
     parser.add_argument(
         "--stream-idle-timeout",
         type=float,
         help="idle seconds before a raw stream is reset (default 600)",
-    )
-    parser.add_argument(
-        "--stream-proxy-source",
-        action="append",
-        default=[],
-        metavar="IP",
-        help="trust a PROXY v2 header only from this ingress peer address "
-             "(the serve edge forward); repeatable. Any other peer's header "
-             "is treated as protocol garbage and the connection is dropped.",
     )
     parser.add_argument(
         "--metrics-port",
@@ -127,7 +120,6 @@ def main() -> None:
         stream_ingress_port=args.stream_ingress_port,
         stream_ingress_host=args.stream_ingress_host,
         stream_idle_timeout=args.stream_idle_timeout,
-        stream_proxy_sources=frozenset(args.stream_proxy_source),
         metrics_port=args.metrics_port,
         metrics_host=args.metrics_host,
         abuse_exempt_sources=frozenset(args.abuse_exempt_source),

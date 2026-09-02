@@ -1,6 +1,6 @@
 [Unit]
 Description=Bind the serve.auto.network floating IPv4
-Before=autonomy-serve-forward.service
+Before=autonomy-registry.service
 Wants=network-online.target
 After=network-online.target
 
