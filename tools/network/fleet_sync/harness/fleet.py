@@ -288,12 +288,7 @@ class HarnessFleet:
     def write_org(
         self, index: int, slug: str, source_id: str, title: str
     ) -> None:
-        graph = GraphDB(self.org_db_path(index, slug))
-        try:
-            graph.insert_source(Source(id=source_id, type="note", title=title))
-        finally:
-            graph.close()
-        self.evidence["writes"] += 1
+        self._write_row(self.org_db_path(index, slug), source_id, title)
 
     def has_org(self, index: int, slug: str, source_id: str) -> bool:
         try:
@@ -305,12 +300,64 @@ class HarnessFleet:
             return False
 
     def write(self, index: int, source_id: str, title: str) -> None:
-        graph = GraphDB(self.machines[index].db_path)
-        try:
-            graph.insert_source(Source(id=source_id, type="note", title=title))
-        finally:
-            graph.close()
-        self.evidence["writes"] += 1
+        self._write_row(self.machines[index].db_path, source_id, title)
+
+    def _write_row(self, db_path: Path, source_id: str, title: str) -> None:
+        # The parent writes cross-process while the machine's worker may be
+        # atomically replacing the database (checkpoint install) — a race
+        # production does not have (its writer shares the installer's
+        # process and quiescence gate). A connection landing in the swap
+        # window fails once and succeeds on a fresh connection.
+        import sqlite3 as _sqlite3
+
+        last: Exception | None = None
+        for _ in range(5):
+            try:
+                graph = GraphDB(db_path)
+                try:
+                    graph.insert_source(
+                        Source(id=source_id, type="note", title=title)
+                    )
+                finally:
+                    graph.close()
+                self.evidence["writes"] += 1
+                return
+            except _sqlite3.Error as exc:
+                last = exc
+                time.sleep(0.2)
+        raise last
+
+    def wait_pairwise_established(self, *, timeout: float = 120.0) -> None:
+        """Every ordered pair has completed at least one direct pull.
+
+        Content convergence can arrive indirectly through a third machine,
+        leaving a pair that never pulled each other directly; that pair's
+        first contact is trail-less and is legitimately served a
+        checkpoint. Scenarios asserting delta-only behavior (for example
+        journal retention under a frozen acknowledgement) must start from
+        an established fleet, which this waits for.
+        """
+        def established() -> bool:
+            for machine in self.machines:
+                try:
+                    with self._read_only(machine.db_path) as conn:
+                        rows = dict(conn.execute(
+                            "SELECT machine_public_key,"
+                            "COALESCE(SUM(deltas_received),0)"
+                            "+COALESCE(SUM(checkpoints_received),0) "
+                            "FROM fleet_sync_peer_state "
+                            "GROUP BY machine_public_key"
+                        ).fetchall())
+                except sqlite3.Error:
+                    return False
+                for other in self.machines:
+                    if other.index == machine.index:
+                        continue
+                    if rows.get(other.key.public_hex, 0) < 1:
+                        return False
+            return True
+
+        self.wait(established, timeout=timeout, label="pairwise contact")
 
     def _read_only(self, path: Path) -> sqlite3.Connection:
         # immutable=1 takes no locks and maps no WAL shared memory: a plain
