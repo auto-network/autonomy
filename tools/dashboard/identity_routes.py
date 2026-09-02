@@ -1509,7 +1509,7 @@ async def get_unlock_state(request: Request) -> JSONResponse:
     # that was never set up to serve (no cert row at all — e.g. blindhash) is a
     # quiet fact, not a fault: it must never light the tray, or the tray stays
     # permanently amber for something that isn't broken (bead auto-sdrsa).
-    cert_broken: list = []      # set-up scopes whose cert has lapsed
+    cert_states: list[dict] = []  # actual state of every relevant certificate
     cert_never: list = []       # scopes never provisioned to serve (quiet note)
     serving_setup: list = []    # scopes provisioned to serve (any cert row)
     sync_unarmed: list = []     # serving scopes holding no credential
@@ -1539,8 +1539,15 @@ async def get_unlock_state(request: Request) -> JSONResponse:
                 cert_never.append(label)
                 continue
             serving_setup.append(label)
-            if cert_status != "ok":
-                cert_broken.append(label)
+            if cert_status == "ok":
+                cert_states.append({"scope": label, "state": "current",
+                                    "reason": "The serving delegation certificate is current."})
+            elif cert_status == "expired":
+                cert_states.append({"scope": label, "state": "expired",
+                                    "reason": "The serving delegation certificate has expired."})
+            else:
+                cert_states.append({"scope": label, "state": "issuance_failed",
+                                    "reason": "The serving delegation certificate is invalid or unavailable."})
             # Fleet sync is anchored on the PERSONAL root: activate_local_runtime
             # publishes the fleet-runtime credential with org=None, so ONLY the
             # personal connector is ever armed for Fleet sync. A shared org's
@@ -1583,11 +1590,13 @@ async def get_unlock_state(request: Request) -> JSONResponse:
         # carried by this same operator-facing flag. It is relevant once this
         # node is configured to serve at least one scope; it is not a new
         # identity flag or a second key-unlock concept.
-        if serving_setup:
-            from tools.dashboard import service_certificate as _service_tls
-            tls_status = _service_tls.status().get("status", "missing")
-            if tls_status != "ok":
-                cert_broken.append("Service TLS")
+        from tools.dashboard import service_certificate_manager as _service_tls
+        for item in _service_tls.certificate_states():
+            cert_states.append({
+                "scope": f"{item['org']} / {item['persona_label']}",
+                "state": item["state"],
+                "reason": item["reason"],
+            })
         cert_available = True
     except Exception:
         cert_available = False
@@ -1596,19 +1605,45 @@ async def get_unlock_state(request: Request) -> JSONResponse:
         flags["certificates"] = {"needs": False, "value": "",
                                  "detail": "Certificate state is unavailable."}
     else:
-        cert_needs = bool(cert_broken)
-        cert = {"needs": cert_needs, "scopes": sorted(cert_broken),
-                "value": "Expired" if cert_needs else "Current"}
-        if cert_needs:
-            cert["detail"] = (
-                "Certificate attention is required for "
-                + _oxford(sorted(cert_broken))
-                + ": one is missing or has lapsed. Unlock with your root if "
-                "delegation renewal is needed; "
-                "Service TLS renews through DNS-01."
+        labels = {
+            "missing": "Missing",
+            "issuing": "Issuing",
+            "current": "Current",
+            "renewal_due": "Renewal due",
+            "expired": "Expired",
+            "issuance_failed": "Issuance failed",
+        }
+        priority = {
+            "issuance_failed": 5,
+            "expired": 4,
+            "missing": 3,
+            "issuing": 2,
+            "renewal_due": 1,
+            "current": 0,
+        }
+        headline = max(
+            cert_states,
+            key=lambda item: priority.get(item["state"], 5),
+            default={"state": "current"},
+        )["state"]
+        problems = [item for item in cert_states if item["state"] != "current"]
+        cert = {
+            "needs": bool(problems),
+            "scopes": sorted(item["scope"] for item in problems),
+            "value": labels[headline],
+            "state": headline,
+        }
+        if problems:
+            cert["detail"] = " ".join(
+                f"{item['scope']}: {item['reason']}" for item in problems
             )
         else:
-            cert["detail"] = "Your dashboard's certificate. All current."
+            cert["detail"] = (
+                " ".join(
+                    f"{item['scope']}: {item['reason']}" for item in cert_states
+                )
+                or "Your dashboard's certificates are current."
+            )
         if cert_never:
             cert["note"] = (
                 _oxford(sorted(cert_never))

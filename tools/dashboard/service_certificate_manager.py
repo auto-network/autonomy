@@ -86,12 +86,14 @@ class ServiceCertificateManager:
         self._lock = asyncio.Lock()
         self._materialized: dict[tuple[str, str], str] = {}
         self.errors: dict[tuple[str, str], str] = {}
+        self.in_progress: set[tuple[str, str]] = set()
 
     async def reconcile_once(self) -> bool:
         async with self._lock:
             desired = sorted(self._desired())
             for org, persona in desired:
                 identity = (org, persona)
+                self.in_progress.add(identity)
                 try:
                     metadata = service_certificate.certificate_metadata(org, persona)
                     if metadata is None:
@@ -136,7 +138,48 @@ class ServiceCertificateManager:
                         persona,
                         exc_info=True,
                     )
+                finally:
+                    self.in_progress.discard(identity)
             return not any(identity in self.errors for identity in desired)
+
+    def certificate_states(self) -> list[dict]:
+        """Return the operator-facing state of every desired persona pair."""
+        now = int(self._now())
+        states = []
+        for org, persona in sorted(self._desired()):
+            identity = (org, persona)
+            metadata = service_certificate.certificate_metadata(org, persona)
+            error = self.errors.get(identity)
+            if error:
+                state = "issuance_failed"
+                summary = error.splitlines()[0].strip()[:300]
+                reason = f"Certificate issuance failed: {summary}"
+            elif identity in self.in_progress:
+                state = "issuing"
+                reason = "Certificate issuance or renewal is in progress."
+            elif metadata is None:
+                state = "missing"
+                reason = "No persona Service TLS certificate has been issued yet."
+            else:
+                remaining = int(metadata.get("not_after") or 0) - now
+                if remaining <= 0:
+                    state = "expired"
+                    reason = "The persona Service TLS certificate has expired."
+                elif remaining <= service_certificate.RENEWAL_WINDOW_SECONDS:
+                    state = "renewal_due"
+                    reason = "The persona Service TLS certificate is inside its renewal window."
+                else:
+                    state = "current"
+                    reason = "The persona Service TLS certificate is current."
+            states.append(
+                {
+                    "org": org,
+                    "persona_label": persona,
+                    "state": state,
+                    "reason": reason,
+                }
+            )
+        return states
 
 
 class ServiceCertificateWorker:
@@ -203,6 +246,15 @@ class ServiceCertificateWorker:
 
 
 _worker: ServiceCertificateWorker | None = None
+
+
+def certificate_states() -> list[dict]:
+    """Snapshot the live manager state without starting another manager."""
+    if _worker is None:
+        manager = ServiceCertificateManager()
+    else:
+        manager = _worker._manager
+    return manager.certificate_states()
 
 
 async def start_worker(event_bus) -> None:

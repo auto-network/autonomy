@@ -129,3 +129,36 @@ def test_worker_reconcile_requests_coalesce():
     worker.request_reconcile()
 
     assert worker._wake.is_set()
+
+
+@pytest.mark.parametrize(
+    ("metadata_value", "progress", "error", "expected"),
+    [
+        (None, False, None, "missing"),
+        (None, True, None, "issuing"),
+        (metadata(not_after=10_000_000), False, None, "current"),
+        (metadata(not_after=200), False, None, "renewal_due"),
+        (metadata(not_after=99), False, None, "expired"),
+        (None, False, "ServiceCertificateError: refused", "issuance_failed"),
+    ],
+)
+def test_manager_reports_each_certificate_state(
+    monkeypatch, metadata_value, progress, error, expected
+):
+    identity = ("anchore", "persona-abc")
+    monkeypatch.setattr(
+        certs, "certificate_metadata", lambda *_args: metadata_value
+    )
+    lifecycle = manager.ServiceCertificateManager(
+        now=lambda: 100,
+        desired_fn=lambda: {identity},
+    )
+    if progress:
+        lifecycle.in_progress.add(identity)
+    if error:
+        lifecycle.errors[identity] = error
+
+    state = lifecycle.certificate_states()[0]
+
+    assert state["state"] == expected
+    assert state["reason"]
