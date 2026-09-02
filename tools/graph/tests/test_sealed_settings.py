@@ -237,10 +237,11 @@ def test_unicode_names_normalized():
 
 
 def test_client_backend_resolves_org_prefixed_sealed_index():
-    """The vault-settings seam prefixes session-minted rows with the bearer's
-    org; ClientBackend must resolve the prefixed row from the bare hidden
-    address, open THAT exact key, and prefer the earliest mint when several
-    principals minted the same address."""
+    """The vault-settings seam stores session mints org-prefixed, and the
+    vault_open rendezvous takes the BARE suffix (the server derives the org
+    prefix). ClientBackend must detect the prefixed row, open with the bare
+    address, refuse an operator-only (unprefixed) store loudly, and stay
+    silent for a store never minted."""
     from types import SimpleNamespace
 
     from tools.graph.sealed_settings import ClientBackend
@@ -248,11 +249,10 @@ def test_client_backend_resolves_org_prefixed_sealed_index():
     address = "gpZ0yFl8HO0uX63yAtFOtyMxp3HEgXrO1onEcTRUhCk"
 
     class StubClient:
-        def __init__(self, keys_with_created):
+        def __init__(self, keys):
             self._members = [
-                SimpleNamespace(key=k, created_at=c, payload=None,
-                                vault_error=None)
-                for k, c in keys_with_created
+                SimpleNamespace(key=k, payload=None, vault_error=None)
+                for k in keys
             ]
             self.opened_with = None
 
@@ -268,20 +268,20 @@ def test_client_backend_resolves_org_prefixed_sealed_index():
             os.close(fd)
             return {"path": path}
 
-    stub = StubClient([("autonomy:" + address, "2026-09-02T20:00:00Z"),
-                       ("autonomy:mac.ssh", "2026-01-01T00:00:00Z")])
+    # Session-minted (prefixed) store: open with the BARE address.
+    stub = StubClient(["autonomy:" + address, "autonomy:mac.ssh"])
     got = ClientBackend(stub).read_sealed_index(address, block=False)
-    assert stub.opened_with == "autonomy:" + address
+    assert stub.opened_with == address
     assert got == bytes.fromhex("ab" * 32)
 
-    # Unprefixed (operator-minted) rows resolve too, and the earliest mint
-    # wins when both exist.
-    stub = StubClient([("autonomy:" + address, "2026-09-02T20:00:00Z"),
-                       (address, "2026-09-01T00:00:00Z")])
-    ClientBackend(stub).read_sealed_index(address, block=False)
-    assert stub.opened_with == address
+    # Operator-minted (unprefixed) store: unreachable from a session — fail
+    # loud rather than mint a shadow index beside it.
+    stub = StubClient([address])
+    with pytest.raises(SealedSettingsError, match="operator"):
+        ClientBackend(stub).read_sealed_index(address, block=False)
+    assert stub.opened_with is None
 
     # Absent stays absent — no ceremony for a store never minted.
-    stub = StubClient([("autonomy:mac.ssh", "2026-01-01T00:00:00Z")])
+    stub = StubClient(["autonomy:mac.ssh"])
     assert ClientBackend(stub).read_sealed_index(address, block=False) is None
     assert stub.opened_with is None
