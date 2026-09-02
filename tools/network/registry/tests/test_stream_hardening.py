@@ -160,3 +160,30 @@ def test_ingress_never_logs_payload_or_source_with_token(caplog):
     assert sentinel not in joined
     # And the metrics exposition never carries payload/source either.
     assert sentinel not in metrics.render()
+
+
+class _RecordingLimiter:
+    """Captures the source string admission is attempted with, then denies
+    (so the connection short-circuits after we've observed the source)."""
+
+    def __init__(self):
+        self.seen: list[str] = []
+
+    def begin(self, source):
+        self.seen.append(source)
+        return None  # deny — we only care that `source` is the native peer
+
+
+def test_source_is_native_socket_peer_no_proxy_header():
+    """The ingress binds the public serve IP directly, so admission keys on
+    the real socket peer address — there is no PROXY header to parse and no
+    trusted forward hop. A ClientHello with a benign SNI must present the
+    connecting peer's IP (not a loopback forward address) to the limiter."""
+    limiter = _RecordingLimiter()
+    writer = _MockWriter(peer=("198.51.100.7", 44321))
+    reader = _MockReader(_client_hello("app.p.serve.auto.network"))
+    asyncio.run(si.handle_stream_connection(
+        reader, writer, host_routes=_NoRoute(),
+        abuse_limiter=limiter, metrics=RegistryMetrics(),
+    ))
+    assert limiter.seen == ["198.51.100.7"]

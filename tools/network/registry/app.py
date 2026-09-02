@@ -634,7 +634,6 @@ def create_app(
     stream_ingress_port: Optional[int] = None,
     stream_ingress_host: str = "127.0.0.1",
     stream_idle_timeout: Optional[float] = None,
-    stream_proxy_sources: frozenset = frozenset(),
     metrics_port: Optional[int] = None,
     metrics_host: str = "127.0.0.1",
     abuse_exempt_sources: frozenset = frozenset(),
@@ -2460,8 +2459,10 @@ def create_app(
         )
 
     if stream_ingress_port is not None:
-        # Raw-stream ingress (auto-9z1xh): loopback TCP, started on the
-        # app's own event loop. The public edge (Caddy L4) is auto-ot0t7.
+        # Raw-stream ingress (auto-9z1xh): started on the app's own event
+        # loop. In production it binds the serve floating IP's :443 directly
+        # and is itself the public serve edge — the socket peer is the native
+        # client, no forward and no PROXY header.
         from tools.network.relaykit.stream_wire import STREAM_IDLE_TIMEOUT
         from .stream_ingress import start_stream_ingress
 
@@ -2476,8 +2477,7 @@ def create_app(
             app.state.stream_ingress = await start_stream_ingress(
                 stream_ingress_host, stream_ingress_port,
                 host_routes=host_routes, abuse_limiter=abuse_limiter,
-                idle_timeout=idle, proxy_sources=stream_proxy_sources,
-                metrics=metrics,
+                idle_timeout=idle, metrics=metrics,
             )
 
         @app.on_event("shutdown")

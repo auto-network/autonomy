@@ -8,30 +8,35 @@
 
 [Unit]
 Description=auto.network registry v1 (org bindings, share-link grants, revocations)
-After=network-online.target
+After=network-online.target autonomy-serve-ip.service
 Wants=network-online.target
+Requires=autonomy-serve-ip.service
 
 [Service]
 Type=simple
 DynamicUser=true
 StateDirectory=autonomy-registry
 WorkingDirectory=/opt/autonomy-registry
+# The serve floating IP (SERVE_BIND_IP, bound by autonomy-serve-ip.service) is
+# read from the shared serve env so the raw tls-stream ingress can be the public
+# serve edge directly on :443 — no loopback forward, no PROXY header.
+EnvironmentFile=/etc/autonomy-serve/serve.env
 # --base-url controls only the public URL returned for a minted grant. The
 # registry API remains on registry.auto.network; public viewers use the relay
 # hostname. Tokens themselves are hostname-independent.
-# --stream-ingress-port: the raw tls-stream ingress (auto-9z1xh). The serve
-# edge forward (serve_forward.py) reaches it over loopback, so
-# --stream-proxy-source 127.0.0.1 trusts a PROXY v2 header (real client
-# address, auto-p20eb) only from that hop; a header from any other peer is
-# dropped. A forward that predates PROXY v2 sends none and is still parsed
-# as TLS, so rollout ordering is free.
+# --stream-ingress-*: the raw tls-stream ingress (auto-9z1xh) binds the serve
+# floating IP's :443 itself, so the socket peer IS the real client and the
+# source IP is native — no serve_forward hop, no PROXY v2 trust seam.
+# Binding a privileged port under DynamicUser needs CAP_NET_BIND_SERVICE.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 ExecStart=/opt/autonomy-registry/venv/bin/python -m tools.network.registry \
     --db /var/lib/autonomy-registry/registry.db \
     --version-file /opt/autonomy-registry/REVISION.json \
     --host 127.0.0.1 --port 8477 \
     --base-url https://relay.auto.network \
-    --stream-ingress-port 8479 \
-    --stream-proxy-source 127.0.0.1 \
+    --stream-ingress-host ${SERVE_BIND_IP} \
+    --stream-ingress-port 443 \
     --metrics-port 9479
 Restart=on-failure
 RestartSec=2
