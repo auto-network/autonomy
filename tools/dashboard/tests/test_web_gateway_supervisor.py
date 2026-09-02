@@ -625,6 +625,71 @@ async def test_planner_replaces_stale_active_target_with_unavailable_route(monke
 
 
 @pytest.mark.asyncio
+async def test_planner_keeps_healthy_sibling_when_another_target_is_unavailable(monkeypatch):
+    healthy_host = "healthy.persona-77827e972ba4c37d4215.serve.auto.network"
+    unavailable_host = "down.persona-77827e972ba4c37d4215.serve.auto.network"
+    down_id = "7629c755-5c91-5a64-9dd8-5f171920291f"
+    healthy_id = "efde8d86-e51c-558e-a560-3f118b65081c"
+    monkeypatch.setattr(sup, "_discover_orgs", lambda: ["autonomy"])
+    monkeypatch.setattr(
+        sup.service_publication,
+        "list_reservations",
+        lambda _org: [
+            {
+                "reservation_id": healthy_id,
+                "state": "active",
+                "persona_label": "persona-test",
+            },
+            {
+                "reservation_id": down_id,
+                "state": "active",
+                "persona_label": "persona-test",
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        sup.service_publication,
+        "list_service_targets",
+        lambda _org: [{"reservation_id": healthy_id}, {"reservation_id": down_id}],
+    )
+
+    async def connector_ready(_org):
+        return True
+
+    async def resolve(_org, reservation_id):
+        if reservation_id == down_id:
+            raise RuntimeError("session exited")
+        return ServiceGatewayRoute(
+            reservation_id=healthy_id,
+            hostname=healthy_host,
+            session_id="auto-0831-171125",
+            container_id="a" * 64,
+            network="autonomy_default",
+            upstream_ip="172.16.0.42",
+            port=8000,
+            expires_at="2026-09-02T22:00:00.000Z",
+        )
+
+    monkeypatch.setattr(sup, "_connector_ready", connector_ready)
+    monkeypatch.setattr(sup.service_gateway, "resolve_gateway_route", resolve)
+    monkeypatch.setattr(
+        sup.service_gateway,
+        "reservation_hostname",
+        lambda _org, reservation_id: (
+            unavailable_host if reservation_id == down_id else healthy_host
+        ),
+    )
+
+    plan = await sup.build_desired_state()
+
+    assert plan.ready is True
+    assert [route.route_id for route in plan.routes] == [down_id, healthy_id]
+    assert f"reverse_proxy 172.16.0.42:8000" in plan.caddyfile
+    assert f"https://{unavailable_host}:9443" in plan.caddyfile
+    assert "This service is not running" in plan.caddyfile
+
+
+@pytest.mark.asyncio
 async def test_planner_failure_refuses_to_preserve_unverified_authority(monkeypatch):
     monkeypatch.setattr(sup, "_discover_orgs", lambda: ["autonomy"])
 
