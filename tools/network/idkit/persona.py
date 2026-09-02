@@ -34,6 +34,18 @@ PERSONA_SALT = b"autonomy.identity.persona.v1"
 #: INDEPENDENT by construction, never by an assumption that a machine id and a
 #: genesis id can't collide. Changing it re-keys every machine.
 MACHINE_KEY_SALT = b"autonomy.identity.machine.v1"
+#: DISTINCT salt for the per-(organization, machine) SERVING key (auto-e2ufw).
+#: derive_machine_key above is the personal FLEET key: one identity per machine
+#: with NO organization axis, so the same machine presents the same public key
+#: to every org — correct for mutually-trusted fleet channels, WRONG as the
+#: identity a machine shows an untrusted relay, which could then correlate that
+#: machine across organizations. The serving key derives over BOTH the org
+#: genesis and the machine id (the same unlinkability shape derive_persona uses
+#: over the org axis, extended to also bind the machine), so each org gets a
+#: serving-machine identity that is unlinkable across orgs. Its own salt keeps
+#: it cryptographically independent of both the persona and the fleet key.
+#: Changing it re-keys every serving machine.
+SERVING_MACHINE_KEY_SALT = b"autonomy.identity.serving-machine.v1"
 PERSONA_SEED_LEN = 32
 
 _GENESIS_ID_HEX_LEN = 64  # SHA-256 hexdigest
@@ -95,6 +107,51 @@ def derive_machine_key(personal_root_seed: bytes, machine_id: str) -> KeyPair:
         length=PERSONA_SEED_LEN,
         salt=MACHINE_KEY_SALT,
         info=machine_id.encode("ascii"),
+    ).derive(personal_root_seed)
+    return KeyPair.from_private_hex(derived.hex())
+
+
+def derive_serving_machine_key(
+    personal_root_seed: bytes, genesis_id: str, machine_id: str
+) -> KeyPair:
+    """Derive a machine's per-organization SERVING :class:`KeyPair` (auto-e2ufw).
+
+    This is the identity a machine presents to the (untrusted) relay when it
+    serves under one organization. Unlike :func:`derive_machine_key` — the
+    personal fleet key with no organization axis — this binds BOTH the org's
+    ``genesis_id`` and the machine's ``machine_id``, so the same physical
+    machine shows a DIFFERENT, unrelated public key to each organization's
+    relay and cannot be correlated across organizations. It is the exact
+    unlinkability construction :func:`derive_persona` uses over the org axis,
+    extended to also carry the machine::
+
+        HKDF-SHA256(personal_root_seed,
+                    salt=SERVING_MACHINE_KEY_SALT,
+                    info=genesis_id + "\\0" + machine_id) -> Ed25519 seed
+
+    Both ids are 64-lowercase-hex and fixed-length, and the NUL separator
+    cannot occur in either, so the info encoding is unambiguous by
+    construction (the string-anchoring discipline this module keeps). The
+    distinct salt makes this key cryptographically independent of both the
+    persona and the fleet machine key even for the same root and colliding
+    ids. Nothing is stored: the machine re-derives it when the root unlocks.
+
+    *genesis_id* is the organization's 64-lowercase-hex genesis event id;
+    *machine_id* is the machine's 64-lowercase-hex durable identifier. Raises
+    :class:`MalformedError` on anything else.
+    """
+    if not isinstance(personal_root_seed, bytes) or len(personal_root_seed) != PERSONA_SEED_LEN:
+        raise MalformedError(
+            f"personal_root_seed must be exactly {PERSONA_SEED_LEN} raw bytes"
+        )
+    _decode_hex(genesis_id, _GENESIS_ID_HEX_LEN, "genesis_id")
+    _decode_hex(machine_id, _MACHINE_ID_HEX_LEN, "machine_id")
+    info = (genesis_id + "\0" + machine_id).encode("ascii")
+    derived = HKDF(
+        algorithm=hashes.SHA256(),
+        length=PERSONA_SEED_LEN,
+        salt=SERVING_MACHINE_KEY_SALT,
+        info=info,
     ).derive(personal_root_seed)
     return KeyPair.from_private_hex(derived.hex())
 
