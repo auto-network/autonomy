@@ -30,6 +30,7 @@ from starlette.routing import Route
 
 from tools.dashboard import api_auth
 from tools.dashboard import attention_routes
+from tools.dashboard import session_notify
 from tools.dashboard import web_push
 from tools.dashboard.approval_http_bridge import (
     CENTRAL_APPROVAL_ID_PREFIX,
@@ -257,6 +258,13 @@ RESULT_BUILDERS: dict = {
 WAIT_RESULT_BUILDERS: dict = {
     **_vault_open.WAIT_RESULT_BUILDERS,
 }
+# Per-kind wake: (row-with-committed-result) -> notification spec | None. A kind
+# registered here wakes its requesting session by task-notification when the
+# decision is committed, so a requester that posted and returned (no held GET)
+# learns the outcome without polling.
+SESSION_NOTIFIERS: dict = {
+    **_vault_open.SESSION_NOTIFIERS,
+}
 
 
 def push_eligible_kind(kind: str) -> bool:
@@ -300,6 +308,25 @@ def _finalize_decision(rid: str, kind: str, session: str) -> None:
         ev.set()
     event_bus.broadcast_sync("approval:decided",
                              {"id": rid, "kind": kind, "session": session})
+    notifier = SESSION_NOTIFIERS.get(kind)
+    if notifier and session:
+        # Wake the requesting session by task-notification. Best-effort and
+        # deduped: a wake failure must never roll back the committed decision,
+        # and a held ?wait= GET that already delivered is harmless to duplicate.
+        try:
+            row = ar.get(rid)
+            spec = notifier(row) if row else None
+            if spec:
+                session_notify.deliver_task_notification_sync(
+                    session,
+                    spec["notification_id"],
+                    kind=spec.get("kind", "system"),
+                    status=spec.get("status", "complete"),
+                    summary=spec["summary"],
+                    body=spec.get("body", ""),
+                )
+        except Exception:
+            pass
 
 # Cap on ?wait= so a stuck client can't hold a connection open indefinitely;
 # requesters (e.g. the signing shim) loop on the held GET instead.

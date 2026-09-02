@@ -114,6 +114,28 @@ def test_remove_locates_the_tier_and_removes(monkeypatch):
     assert c.removed == [(vault_cmd.VAULT_AUDITED_SET_ID, "k", "personal")]
 
 
+def test_secured_read_returns_a_pending_receipt_without_hanging(monkeypatch, capsys):
+    c = FakeClient({vault_cmd.VAULT_SECURED_SET_ID: [FakeMember("gh.token", sealed={"x": 1})]})
+    seen = {}
+
+    def request_vault_open(set_id, name, *, org, wait_seconds):
+        seen.update(set_id=set_id, name=name, org=org, wait_seconds=wait_seconds)
+        return {"pending": True, "approval_id": "open-7", "name": name,
+                "path": f"/run/secrets/{name}"}
+
+    c.request_vault_open = request_vault_open
+    monkeypatch.setattr(vault_cmd, "get_client", lambda: c)
+    vault_cmd.cmd_vault_read(_args(name="gh.token", tier="secured", wait=0))
+    out = capsys.readouterr().out
+    # Default read is non-blocking: wait_seconds 0 → pending, and it announces
+    # the approval id + the eventual path, never the value.
+    assert seen["wait_seconds"] == 0
+    assert seen["set_id"] == vault_cmd.VAULT_SECURED_SET_ID
+    assert "pending" in out.lower()
+    assert "open-7" in out
+    assert "/run/secrets/gh.token" in out
+
+
 def test_list_shows_names_and_tiers_never_values(monkeypatch, capsys):
     c = FakeClient({
         vault_cmd.VAULT_SECURED_SET_ID: [FakeMember("a")],

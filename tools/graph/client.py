@@ -791,21 +791,47 @@ class HttpClient:
     #: delivered credential then lives, not how long the human has).
     _APPROVAL_WAIT_S = 300
 
-    def request_vault_open(self, set_id, key, *, org, ttl_seconds=0):
-        """Request and await one operator-approved secured Setting release.
+    def request_vault_open(self, set_id, key, *, org, ttl_seconds=0, wait_seconds=None):
+        """Request an operator-approved secured Setting release.
 
-        ``ttl_seconds`` is the delivered credential's LIFETIME in the
-        session's ramfs (requester-chosen), NOT an approval deadline — the
-        wait for the operator is :data:`_APPROVAL_WAIT_S`. ``0`` (the
-        default) means the FULL CONTAINER LIFESPAN: the file lives until the
-        container stops and the kernel frees its private mount, with no
-        timed destruction; a positive value destroys the file that many
-        seconds after delivery. The session identity is intentionally
-        absent from the body: the dashboard derives it from this client's
-        bearer.  Held GETs receive only a value-free receipt naming the
-        requesting session's ramfs path.
+        ``ttl_seconds`` is the delivered credential's LIFETIME in the session's
+        ramfs (requester-chosen), NOT an approval deadline. ``0`` (the default)
+        means the FULL CONTAINER LIFESPAN: the file lives until the container
+        stops and the kernel frees its private mount; a positive value destroys
+        the file that many seconds after delivery. The session identity is
+        intentionally absent from the body: the dashboard derives it from this
+        client's bearer.
+
+        ``wait_seconds`` selects the completion model:
+
+        - ``None`` (default): request AND block up to :data:`_APPROVAL_WAIT_S`
+          for the operator, raising 408 on timeout — the synchronous contract
+          the ``graph set read`` path relies on.
+        - ``0``: post the approval and return a PENDING receipt immediately —
+          no polling. The operator's decision wakes the session by
+          task-notification and the material lands at ``/run/secrets/<name>``
+          at decision time (its TTL starts then).
+        - ``> 0``: post, then hold up to ``wait_seconds`` for a synchronous
+          receipt, degrading to the pending receipt on timeout so an absent
+          operator never hangs the caller.
+
+        A delivered receipt is ``{"delivery": "session-ramfs", "path": ...}``;
+        a pending receipt is ``{"pending": True, "approval_id": ..., "name":
+        ..., "path": ...}``.
         """
         org = _resolve_client_org_arg(org)
+        request_id = self._post_vault_open(set_id, key, org, ttl_seconds)
+        if wait_seconds is not None and wait_seconds <= 0:
+            return self._pending_vault_receipt(request_id, key)
+        budget = self._APPROVAL_WAIT_S if wait_seconds is None else float(wait_seconds)
+        receipt = self._await_vault_open(request_id, org, budget)
+        if receipt is not None:
+            return receipt
+        if wait_seconds is None:
+            raise GraphHttpError("vault-open approval expired", 408)
+        return self._pending_vault_receipt(request_id, key)
+
+    def _post_vault_open(self, set_id, key, org, ttl_seconds):
         created = self._request(
             "POST",
             "/api/approvals",
@@ -822,7 +848,24 @@ class HttpClient:
         request_id = (created or {}).get("id")
         if not isinstance(request_id, str) or not request_id:
             raise GraphHttpError("dashboard created no vault-open request", 500)
-        deadline = time.monotonic() + self._APPROVAL_WAIT_S
+        return request_id
+
+    @staticmethod
+    def _pending_vault_receipt(request_id, key):
+        # The delivered filename is the credential's own name — the suffix asked
+        # for, without any server-derived org prefix — so the path is knowable
+        # before delivery. The material is not there until the wake arrives.
+        name = key.rsplit(":", 1)[-1]
+        return {
+            "pending": True,
+            "approval_id": request_id,
+            "name": name,
+            "path": f"/run/secrets/{name}",
+        }
+
+    def _await_vault_open(self, request_id, org, budget):
+        """Hold for the decision up to ``budget`` seconds; None on timeout."""
+        deadline = time.monotonic() + budget
         result = None
         while result is None and time.monotonic() < deadline:
             remaining = max(0, deadline - time.monotonic())
@@ -835,7 +878,7 @@ class HttpClient:
             )
             result = (response or {}).get("result")
         if result is None:
-            raise GraphHttpError("vault-open approval expired", 408)
+            return None
         if result.get("approved") is not True:
             raise PermissionError("secured Setting release was declined")
         execution = result.get("execution") or {}

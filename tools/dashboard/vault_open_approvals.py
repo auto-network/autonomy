@@ -525,6 +525,44 @@ def result(_row: dict, decision: dict, outcome: dict) -> dict:
     return {"approved": bool(decision.get("approved")), "execution": outcome}
 
 
+def notify_session(row: dict) -> dict | None:
+    """The wake a decided secured read sends to its requesting session.
+
+    A secured read returns immediately with a pending receipt and does not
+    poll; the operator's decision is what wakes the agent. The material is
+    already at ``/run/secrets/<name>`` (materialized at decision time, TTL
+    started), so the wake only has to say the release is ready — or that it was
+    declined. Never carries the value. ``None`` means "nothing to wake".
+    """
+    request = row.get("request") or {}
+    result_payload = row.get("result") or {}
+    setting = request.get("setting") or {}
+    name = setting.get("key") or request.get("target") or "secret"
+    approval_id = row.get("id")
+    if not isinstance(approval_id, str) or not approval_id:
+        return None
+    execution = result_payload.get("execution") or {}
+    receipt = execution.get("receipt") or {}
+    spec = {"notification_id": f"vault-open:{approval_id}", "kind": "vault-open"}
+    if result_payload.get("approved") is True and execution.get("ok") is True:
+        path = receipt.get("path") or f"/run/secrets/{name}"
+        spec.update(
+            status="released",
+            summary=f"Vault secret released: {name}",
+            body=(
+                f"The approved secret is at {path}. It was materialized at "
+                "decision time, so its TTL clock has started."
+            ),
+        )
+        return spec
+    spec.update(
+        status="declined",
+        summary=f"Vault secret release declined: {name}",
+        body="The operator declined the release. Re-run the read to ask again.",
+    )
+    return spec
+
+
 PREPARE_CREATE_FROM_REQUEST = {KIND: prepare_create_from_request}
 ENRICH_FROM_REQUEST = {KIND: enrich_from_request}
 AUTHORIZE_DECISION = {KIND: authorize_decision}
@@ -532,3 +570,4 @@ AUTHORIZE_GET = {KIND: authorize_get}
 EXECUTORS = {KIND: execute}
 RESULT_BUILDERS = {KIND: result}
 WAIT_RESULT_BUILDERS = {}
+SESSION_NOTIFIERS = {KIND: notify_session}

@@ -162,7 +162,11 @@ def cmd_vault_read(args) -> None:
         _emit_release(client, _TIER_SET[tier], args.name, org, member)
         return
 
-    # Secured: the human-factor release rendezvous.
+    # Secured: the human-factor release rendezvous. Default is async-notify —
+    # post the approval and return a pending receipt without polling; the
+    # operator's decision wakes this session by task-notification and the
+    # material lands at /run/secrets/<name> at decision time. --wait N is an
+    # opt-in bounded synchronous mode; its absence must never hang the agent.
     opener = getattr(client, "request_vault_open", None)
     if opener is None:
         print(
@@ -173,8 +177,17 @@ def cmd_vault_read(args) -> None:
         sys.exit(1)
     receipt = opener(
         _TIER_SET[tier], args.name, org=org,
-        ttl_seconds=getattr(args, "wait", 0) or 0,
+        wait_seconds=getattr(args, "wait", 0) or 0,
     )
+    if receipt.get("pending"):
+        print(
+            f"⧖ Vault release pending — approval {receipt['approval_id']} "
+            f"for {receipt['name']!r}.\n"
+            "  You will be notified when the operator decides; on approval the "
+            f"secret is placed at {receipt['path']}\n"
+            "  (do not read it until the notification arrives)."
+        )
+        return
     print(receipt["path"])
 
 

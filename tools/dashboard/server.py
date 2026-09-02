@@ -6256,8 +6256,6 @@ async def api_session_notify(request):
     activity. Callers provide a stable notification id so retries cannot wake
     the agent twice during one dashboard process lifetime.
     """
-    import html as _html
-
     body = await request.json()
     tmux_session = str(body.get("tmux_session") or "").strip()
     notification_id = str(body.get("notification_id") or "").strip()
@@ -6285,21 +6283,9 @@ async def api_session_notify(request):
     key = (tmux_session, notification_id)
     if key in _SESSION_NOTIFICATION_IDS:
         return JSONResponse({"ok": True, "status": "duplicate", "notification_id": notification_id})
-    escaped = {
-        "id": _html.escape(notification_id),
-        "kind": _html.escape(kind),
-        "status": _html.escape(status[:100]),
-        "summary": _html.escape(summary),
-        "body": _html.escape(detail),
-    }
-    envelope = (
-        "<task-notification>\n"
-        f"<id>{escaped['id']}</id>\n"
-        f"<kind>{escaped['kind']}</kind>\n"
-        f"<summary>{escaped['summary']}</summary>\n"
-        f"<status>{escaped['status']}</status>\n"
-        + (f"<body>{escaped['body']}</body>\n" if detail else "")
-        + "</task-notification>"
+    from tools.dashboard.session_notify import build_task_notification_envelope
+    envelope = build_task_notification_envelope(
+        notification_id, kind=kind, status=status, summary=summary, body=detail,
     )
     await tmux_send(tmux_session, envelope)
     _SESSION_NOTIFICATION_IDS[key] = time.time()
