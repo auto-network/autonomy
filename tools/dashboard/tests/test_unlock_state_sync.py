@@ -28,7 +28,7 @@ def _stub_serving(monkeypatch, *, scopes, cert_status, replies, disk="c0ffee",
     NOT, so holding no serving credential is expected, not a fault)."""
     import types
     from tools.dashboard import link_serving_supervisor as sup
-    from tools.dashboard import service_certificate
+    from tools.dashboard import service_certificate_manager
     from tools.network import build_version
     from tools.network import fleet_tunnel_server
 
@@ -49,7 +49,7 @@ def _stub_serving(monkeypatch, *, scopes, cert_status, replies, disk="c0ffee",
 
     monkeypatch.setattr(sup, "control", control)
     monkeypatch.setattr(build_version, "disk_head", lambda: disk)
-    monkeypatch.setattr(service_certificate, "status", lambda: {"status": "ok"})
+    monkeypatch.setattr(service_certificate_manager, "certificate_states", lambda: [])
     # Keep the tunnel probe from touching a real supervisor singleton.
     monkeypatch.setattr(sup, "get_supervisor",
                         lambda: type("S", (), {"serving": lambda self: True})())
@@ -219,7 +219,7 @@ def test_certificate_lights_for_a_lapsed_serving_scope(client, monkeypatch):
     cert = client.get("/api/identity/unlock-state").json()["certificates"]
     assert cert["needs"] is True
     assert cert["scopes"] == ["anchore"]
-    assert "lapsed" in cert["detail"]
+    assert "expired" in cert["detail"]
 
 
 def test_existing_certificate_flag_includes_missing_service_tls(client, monkeypatch):
@@ -229,9 +229,53 @@ def test_existing_certificate_flag_includes_missing_service_tls(client, monkeypa
         cert_status={"autonomy": "ok"},
         replies={"autonomy": {"process_commit": "c0ffee"}},
     )
-    from tools.dashboard import service_certificate
-    monkeypatch.setattr(service_certificate, "status", lambda: {"status": "missing"})
+    from tools.dashboard import service_certificate_manager
+    monkeypatch.setattr(
+        service_certificate_manager,
+        "certificate_states",
+        lambda: [{
+            "org": "autonomy",
+            "persona_label": "persona-missing",
+            "state": "missing",
+            "reason": "No persona Service TLS certificate has been issued yet.",
+        }],
+    )
     cert = client.get("/api/identity/unlock-state").json()["certificates"]
     assert cert["needs"] is True
-    assert cert["scopes"] == ["Service TLS"]
-    assert "DNS-01" in cert["detail"]
+    assert cert["value"] == "Missing"
+    assert cert["scopes"] == ["autonomy / persona-missing"]
+    assert "has been issued" in cert["detail"]
+
+
+@pytest.mark.parametrize(
+    ("state", "value", "reason"),
+    [
+        ("issuing", "Issuing", "Certificate issuance or renewal is in progress."),
+        ("current", "Current", "The persona Service TLS certificate is current."),
+        ("renewal_due", "Renewal due", "The certificate is inside its renewal window."),
+        ("expired", "Expired", "The persona Service TLS certificate has expired."),
+        ("issuance_failed", "Issuance failed", "ACME authorization was refused."),
+    ],
+)
+def test_certificate_flag_projects_each_manager_state(
+    client, monkeypatch, state, value, reason
+):
+    _stub_serving(monkeypatch, scopes=[], cert_status={}, replies={})
+    from tools.dashboard import service_certificate_manager
+    monkeypatch.setattr(
+        service_certificate_manager,
+        "certificate_states",
+        lambda: [{
+            "org": "anchore",
+            "persona_label": "persona-state",
+            "state": state,
+            "reason": reason,
+        }],
+    )
+
+    cert = client.get("/api/identity/unlock-state").json()["certificates"]
+
+    assert cert["value"] == value
+    assert cert["state"] == state
+    assert reason in cert["detail"]
+    assert cert["needs"] is (state != "current")
