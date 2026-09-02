@@ -36,9 +36,11 @@ from .errors import (
 from .keys import KeyPair, load_public_key, verify_signature
 from .persona import (
     MACHINE_KEY_SALT,
+    SERVING_MACHINE_KEY_SALT,
     PERSONA_SALT,
     PERSONA_SEED_LEN,
     derive_machine_key,
+    derive_serving_machine_key,
     derive_persona,
     mint_machine_id,
 )
@@ -80,8 +82,10 @@ __all__ = [
     # persona
     "derive_persona",
     "derive_machine_key",
+    "derive_serving_machine_key",
     "mint_machine_id",
     "MACHINE_KEY_SALT",
+    "SERVING_MACHINE_KEY_SALT",
     "PERSONA_SALT",
     "PERSONA_SEED_LEN",
     # sealing
