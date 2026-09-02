@@ -89,11 +89,56 @@ def test_request_vault_open_derives_session_server_side_and_returns_receipt():
         "request": {
             "set_id": "autonomy.vault.secured",
             "key": "mac.ssh",
-            "ttl_seconds": 60,
+            # The POST carries the client's default ttl (0 = full container
+            # lifespan); the delivered receipt's own ttl_seconds is separate.
+            "ttl_seconds": 0,
         },
     }
     assert "session" not in captured[0][2]
     assert "/api/approvals/open-1?wait=" in captured[1][1]
+
+
+def test_request_vault_open_pending_posts_once_and_never_polls():
+    """wait_seconds=0 → post the approval, return a pending receipt, no GET."""
+    client = _make_client()
+    captured = []
+
+    def fake_urlopen(req, timeout=None, context=None):
+        captured.append((req.get_method(), req.full_url))
+        assert req.get_method() == "POST", "a pending read must never poll"
+        return _FakeResponse({"id": "open-2"})
+
+    with patch("urllib.request.urlopen", fake_urlopen):
+        receipt = client.request_vault_open(
+            "autonomy.vault.secured", "mac.ssh", org="autonomy", wait_seconds=0,
+        )
+
+    assert receipt == {
+        "pending": True,
+        "approval_id": "open-2",
+        "name": "mac.ssh",
+        "path": "/run/secrets/mac.ssh",
+    }
+    assert [m for m, _ in captured] == ["POST"]
+
+
+def test_request_vault_open_bounded_wait_degrades_to_pending_on_timeout():
+    """wait_seconds>0 that never resolves returns a pending receipt, not a hang."""
+    client = _make_client()
+
+    def fake_urlopen(req, timeout=None, context=None):
+        if req.get_method() == "POST":
+            return _FakeResponse({"id": "open-3"})
+        return _FakeResponse({"result": None})  # never decided
+
+    with patch("urllib.request.urlopen", fake_urlopen):
+        receipt = client.request_vault_open(
+            "autonomy.vault.secured", "mac.ssh", org="autonomy", wait_seconds=0.05,
+        )
+
+    assert receipt["pending"] is True
+    assert receipt["approval_id"] == "open-3"
+    assert receipt["path"] == "/run/secrets/mac.ssh"
 
 
 def test_personal_seal_uses_narrow_endpoint_with_policy_but_no_opener_material():
