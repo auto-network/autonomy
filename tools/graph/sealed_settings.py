@@ -198,15 +198,22 @@ class SealedBackend(Protocol):
         """
 
     def read_sealed_index(self, address: str, *, block: bool) -> bytes | None:
-        """Return the 32-byte sealed index at the hidden ``address``, or
+        """Return the 32-byte sealed index for the hidden ``address``, or
         ``None`` if no such credential exists.
 
+        ``address`` is the logical hidden address; a backend may store the
+        row under a principal-derived prefix and must resolve either form.
         Raise :class:`VaultLocked` if the credential exists but cannot be
         released now (pending / denied / cold).
         """
 
     def mint_sealed_index(self, address: str, value_hex: str) -> None:
-        """Seal a fresh sealed index (a factor-free personal-secured write)."""
+        """Seal a fresh sealed index (a factor-free personal-secured write).
+
+        The substrate may store it under a principal-derived prefix; the
+        layer re-reads through :meth:`read_sealed_index` and never assumes
+        the stored key equals ``address``.
+        """
 
     def read_row(self, row_key: str) -> str | None:
         """Return a row's ``ciphertext`` string, or ``None`` if absent."""
@@ -393,12 +400,27 @@ class ClientBackend:
         # Existence probe first: opening a nonexistent secured key cannot be
         # told apart from a denial, so decide absent-vs-locked WITHOUT the
         # ceremony. The row is present even while sealed.
+        #
+        # Resolution is by SUFFIX: the vault-settings seam prefixes a
+        # session-minted row with the bearer's org (`autonomy:<address>`)
+        # while operator/browser mints are unprefixed — an operator-ruled,
+        # declared leakage (which principal class minted the store), and the
+        # boundary that keeps org sessions out of the unprefixed space where
+        # secret vaults live. Both forms must resolve to the same store.
         members = self._client.read_set(VAULT_SECURED_SET_ID, org=None)
-        if address not in {m.key for m in members.members}:
+        candidates = [
+            m for m in members.members
+            if m.key == address or m.key.endswith(f":{address}")
+        ]
+        if not candidates:
             return None
+        # More than one principal minted this address: first mint wins,
+        # deterministically — the same converge-on-authoritative rule the
+        # layer applies to its own re-read after minting.
+        row_key = min(candidates, key=lambda m: (m.created_at, m.key)).key
         try:
             receipt = self._client.request_vault_open(
-                VAULT_SECURED_SET_ID, address,
+                VAULT_SECURED_SET_ID, row_key,
                 org=None, ttl_seconds=self._ttl,
             )
         except PermissionError:
