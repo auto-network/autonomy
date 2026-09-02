@@ -23,6 +23,69 @@ def test_certbot_command_is_exact_scope_ephemeral_job(monkeypatch, tmp_path):
     assert not any("private" in token.lower() for token in command)
 
 
+def test_production_lineage_name_is_stable_and_renew_uses_certbot_renew(
+    monkeypatch, tmp_path
+):
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text("services: {}\n")
+    monkeypatch.setenv("AUTONOMY_CONTAINER_ROOT", str(tmp_path))
+    first = certs.certificate_name("anchore", "persona-abc")
+    second = certs.certificate_name("anchore", "persona-abc")
+    assert first == second
+    command = certs._certbot_command(
+        "persona-abc.serve.auto.network", first, staging=False, renew=True
+    )
+    service_index = max(i for i, token in enumerate(command) if token == "service-certbot")
+    assert command[service_index + 1] == "renew"
+    assert command[command.index("--cert-name") + 1] == first
+    assert "--no-random-sleep-on-renew" in command
+    assert "-d" not in command
+
+
+def test_acme_bundle_round_trip_and_prunes_old_lineage_generations(
+    monkeypatch, tmp_path
+):
+    root = tmp_path / "acme"
+    archive = root / "config" / "archive" / "service-lineage"
+    live = root / "config" / "live" / "service-lineage"
+    account = root / "config" / "accounts" / "account-id"
+    for directory in (archive, live, account):
+        directory.mkdir(parents=True)
+    (account / "private_key.json").write_text("account-secret")
+    for generation in (1, 2, 3):
+        for kind in ("cert", "chain", "fullchain", "privkey"):
+            (archive / f"{kind}{generation}.pem").write_text(
+                f"{kind}-{generation}"
+            )
+    (live / "cert.pem").symlink_to("../../archive/service-lineage/cert3.pem")
+    monkeypatch.setattr(certs, "ACME_ROOT", root)
+    stored = {}
+    monkeypatch.setattr(
+        certs.settings_ops,
+        "write_by_key",
+        lambda _set, _rev, key, payload, **_kwargs: stored.update(
+            {"key": key, "payload": payload}
+        ),
+    )
+
+    certs._write_acme_bundle()
+
+    assert stored["key"] == certs.ACME_VAULT_KEY
+    assert not list(archive.glob("*1.pem"))
+    assert len(list(archive.glob("*.pem"))) == 8
+    monkeypatch.setattr(
+        certs.settings_ops,
+        "read_set_key",
+        lambda *_args, **_kwargs: {"payload": stored["payload"]},
+    )
+    import shutil
+    shutil.rmtree(root / "config")
+
+    assert certs._restore_acme_bundle() is True
+    assert (account / "private_key.json").read_text() == "account-secret"
+    assert (live / "cert.pem").is_symlink()
+
+
 def test_compose_environment_derives_host_code_root_for_fresh_exec(monkeypatch):
     monkeypatch.delenv("AUTONOMY_HOST_ROOT", raising=False)
     monkeypatch.setenv("AUTONOMY_HOST_DATA_ROOT", "/opt/autonomy")

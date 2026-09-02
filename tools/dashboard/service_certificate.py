@@ -10,12 +10,16 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
+import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import tarfile
 import time
 import uuid
 
@@ -40,6 +44,8 @@ GATEWAY_CERT = Path("/run/autonomy-keycache/service-gateway/tls.crt")
 GATEWAY_KEY = Path("/run/autonomy-keycache/service-gateway/tls.key")
 STATUS_PATH = Path("/run/autonomy-keycache/service-gateway/tls-status.json")
 PERSONA_CERT_ROOT = Path("/run/autonomy-keycache/service-gateway/personas")
+ACME_VAULT_KEY = "service.acme.production"
+ACME_BUNDLE_VERSION = 1
 CERTIFICATE_CHECK_INTERVAL_SECONDS = 6 * 3600
 RENEWAL_WINDOW_SECONDS = 30 * 24 * 3600
 _LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
@@ -100,24 +106,103 @@ def _compose_environment() -> dict[str, str]:
     return env
 
 
-def _certbot_command(apex: str, order: str, *, staging: bool) -> list[str]:
+def certificate_name(org: str, domain_identity: str) -> str:
+    """A stable Certbot lineage name; v2 passes its domain reservation id."""
+    digest = hashlib.sha256(f"{org}\0{domain_identity}".encode()).hexdigest()[:24]
+    return f"service-{digest}"
+
+
+def _certbot_command(
+    apex: str, cert_name: str, *, staging: bool, renew: bool = False
+) -> list[str]:
     command = [
         *_compose_base(), "run", "--rm", "--no-deps",
         "-e", "AUTONOMY_ACME_SOCKET=/run/autonomy-acme/dns01.sock",
-        "service-certbot", "certonly", "--manual",
+        "service-certbot", "renew" if renew else "certonly", "--manual",
         "--preferred-challenges", "dns",
         "--manual-auth-hook", "/usr/local/bin/autonomy-dns01-hook present",
         "--manual-cleanup-hook", "/usr/local/bin/autonomy-dns01-hook cleanup",
-        "--agree-tos", "--register-unsafely-without-email", "--non-interactive",
-        "--key-type", "ecdsa", "--elliptic-curve", "secp256r1",
+        "--non-interactive",
         "--config-dir", "/run/autonomy-acme/config",
         "--work-dir", "/run/autonomy-acme/work",
         "--logs-dir", "/run/autonomy-acme/logs",
-        "--cert-name", order, "-d", apex, "-d", f"*.{apex}",
+        "--cert-name", cert_name,
     ]
+    if renew:
+        command.append("--no-random-sleep-on-renew")
+    else:
+        command.extend([
+            "--agree-tos", "--register-unsafely-without-email",
+            "--key-type", "ecdsa", "--elliptic-curve", "secp256r1",
+            "-d", apex, "-d", f"*.{apex}",
+        ])
     if staging:
         command.append("--staging")
     return command
+
+
+def _acme_bundle_payload() -> dict:
+    """Serialize the bounded production Certbot config as one credential."""
+    _prune_acme_lineages()
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        if (ACME_ROOT / "config").is_dir():
+            archive.add(ACME_ROOT / "config", arcname="config", recursive=True)
+    value = json.dumps({
+        "version": ACME_BUNDLE_VERSION,
+        "archive": base64.b64encode(buffer.getvalue()).decode("ascii"),
+    }, separators=(",", ":"), sort_keys=True)
+    return {"value": value}
+
+
+def _write_acme_bundle() -> None:
+    settings_ops.write_by_key(
+        VAULT_AUDITED_SET_ID,
+        VAULT_CREDENTIAL_REVISION,
+        ACME_VAULT_KEY,
+        _acme_bundle_payload(),
+        org=None,
+        state="raw",
+    )
+
+
+def _restore_acme_bundle() -> bool:
+    row = settings_ops.read_set_key(
+        VAULT_AUDITED_SET_ID, ACME_VAULT_KEY, org=None, peers=[]
+    )
+    if row is None:
+        return False
+    try:
+        payload = json.loads(row["payload"]["value"])
+        if payload != {"version": ACME_BUNDLE_VERSION, "archive": payload["archive"]}:
+            raise ValueError("unexpected fields")
+        raw = base64.b64decode(payload["archive"], validate=True)
+        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as archive:
+            archive.extractall(ACME_ROOT, filter="data")
+    except Exception as exc:
+        raise ServiceCertificateError("ACME account bundle is invalid") from exc
+    return True
+
+
+def _prune_acme_lineages() -> None:
+    """Keep current + previous Certbot archive generations per lineage."""
+    archive_root = ACME_ROOT / "config" / "archive"
+    if not archive_root.is_dir():
+        return
+    pattern = re.compile(r"^(cert|chain|fullchain|privkey)(\d+)\.pem$")
+    for lineage in archive_root.iterdir():
+        if not lineage.is_dir():
+            continue
+        generations: dict[int, list[Path]] = {}
+        for path in lineage.iterdir():
+            match = pattern.fullmatch(path.name)
+            if match:
+                generations.setdefault(int(match.group(2)), []).append(path)
+        keep = set(sorted(generations)[-2:])
+        for generation, paths in generations.items():
+            if generation not in keep:
+                for path in paths:
+                    path.unlink()
 
 
 def _verify_pair(cert_path: Path, key_path: Path, apex: str) -> dict:
@@ -407,12 +492,26 @@ async def obtain(
     client = load_dns01_client(org)
     order = f"service-{uuid.uuid4().hex}"
     apex = f"{persona_label}.serve.auto.network"
+    cert_name = order if staging else certificate_name(org, persona_label)
     socket_path = ACME_ROOT / "dns01.sock"
     ACME_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
+        # A killed prior job may not have reached its finally block. Never
+        # merge ambiguous working state into the authoritative vaulted copy,
+        # and never let a staging run observe production account material.
+        for child in ("config", "work", "logs"):
+            shutil.rmtree(ACME_ROOT / child, ignore_errors=True)
+        if not staging:
+            _restore_acme_bundle()
+        renew = (
+            not staging
+            and (ACME_ROOT / "config" / "renewal" / f"{cert_name}.conf").is_file()
+        )
         async with Dns01HookServer(client, order, socket_path):
             proc = await asyncio.create_subprocess_exec(
-                *_certbot_command(apex, order, staging=staging),
+                *_certbot_command(
+                    apex, cert_name, staging=staging, renew=renew
+                ),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=_compose_environment(),
@@ -423,11 +522,13 @@ async def obtain(
             raise ServiceCertificateError(
                 f"Certbot failed ({proc.returncode}): {detail}"
             )
-        lineage = ACME_ROOT / "config" / "live" / order
+        lineage = ACME_ROOT / "config" / "live" / cert_name
         cert_path = lineage / "fullchain.pem"
         key_path = lineage / "privkey.pem"
         metadata = _verify_pair(cert_path, key_path, apex)
         metadata.update({"org": org, "staging": staging, "activated_at": int(time.time())})
+        if not staging:
+            _write_acme_bundle()
         return metadata, cert_path.read_bytes(), key_path.read_bytes()
     finally:
         # Certbot's account, work, logs, and generated key are deliberately
