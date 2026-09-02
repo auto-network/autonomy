@@ -92,7 +92,16 @@ CREATE TABLE IF NOT EXISTS vault_secrets (
     setting_name TEXT PRIMARY KEY,
     wire         TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS delegate_recipients (
+    recipient_id TEXT PRIMARY KEY,
+    public_hex   TEXT NOT NULL
+);
 """
+
+#: The single audited-tier delegate recipient in a personal scope. Its 64-hex
+#: X25519 public half is published so a personal audited write seals COLD; the
+#: matching private half is re-derived at unlock and never stored.
+DELEGATE_AUDITED_RECIPIENT_ID = "audited"
 
 
 @dataclass(frozen=True)
@@ -370,3 +379,43 @@ class VaultStore:
                 "SELECT setting_name FROM vault_secrets ORDER BY setting_name"
             ).fetchall()
         ]
+
+    # -- delegate recipients -------------------------------------------------
+
+    def put_delegate_audited_recipient(self, public_hex: str) -> None:
+        """Publish the audited delegate's X25519 public half (insert-only).
+
+        This public half is what a personal audited write seals to COLD. It is
+        deterministic from the operator's root seed, so re-publishing the same
+        value is a no-op, but a DIFFERENT value would silently orphan every
+        secret sealed to the old one and is refused.
+        """
+        with self.db:
+            row = self.db.execute(
+                "SELECT public_hex FROM delegate_recipients WHERE recipient_id = ?",
+                (DELEGATE_AUDITED_RECIPIENT_ID,),
+            ).fetchone()
+            if row is not None:
+                if row[0] == public_hex:
+                    return
+                raise VaultError(
+                    "the audited delegate recipient is already published and "
+                    "cannot be replaced with a different key"
+                )
+            self.db.execute(
+                "INSERT INTO delegate_recipients(recipient_id, public_hex) VALUES (?, ?)",
+                (DELEGATE_AUDITED_RECIPIENT_ID, public_hex),
+            )
+
+    def get_delegate_audited_recipient(self) -> str:
+        """The published audited delegate X25519 public half (64 hex), or raise."""
+        row = self.db.execute(
+            "SELECT public_hex FROM delegate_recipients WHERE recipient_id = ?",
+            (DELEGATE_AUDITED_RECIPIENT_ID,),
+        ).fetchone()
+        if row is None:
+            raise VaultError(
+                "no audited delegate recipient is published; the operator must "
+                "unlock the vault once to provision it"
+            )
+        return row[0]

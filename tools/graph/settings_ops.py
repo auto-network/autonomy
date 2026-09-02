@@ -633,6 +633,28 @@ def _seal_vault_payload(
             policy_class=policy_class,
         )
 
+    # A personal AUDITED Setting is cold-writable owner-at-rest data: its CEK
+    # seals to the published delegate public key with no factor, no policy class,
+    # and no consultation of the process key cache or a delegate — so it remains
+    # writable when the vault is cold. The delegate's private half, warm at
+    # unlock, opens it unattended on read.
+    if schemas.declared_home(set_id) == "personal" and tier == "audited":
+        from tools.graph.schemas.vault_policy_class import (
+            VAULT_POLICY_CLASS_SET_ID,
+        )
+        from tools.vault.key_holder import _scoped_db
+        from tools.vault.store import VaultStore
+
+        with VaultStore(_scoped_db(VAULT_POLICY_CLASS_SET_ID, org)) as store:
+            delegate_public_hex = store.get_delegate_audited_recipient()
+        return personal_object.seal_audited_revision(
+            set_id=set_id,
+            key=key,
+            setting_id=setting_id,
+            payload=payload,
+            delegate_public_hex=delegate_public_hex,
+        )
+
     sealer = _vault_sealer
     if sealer is None:
         raise VaultSealerMissing(

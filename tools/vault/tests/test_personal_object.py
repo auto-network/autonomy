@@ -203,3 +203,56 @@ def test_personal_audited_seals_cold_to_delegate_and_opens_with_delegate_private
             setting_id="setting-abc",
             delegate_private_hex=other_priv,
         )
+
+
+def test_personal_audited_setting_seals_cold_with_published_delegate(
+    tmp_path, monkeypatch
+):
+    """A-1 Stage 2 (write): with the delegate public key published, a personal
+    audited Setting seals through the normal write path with NO vault key holder
+    registered (cold write) and no policy class named."""
+    from tools.vault import personal_object as pobj
+    from tools.vault.store import VaultStore
+
+    db_path = tmp_path / "personal.db"
+    monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.delenv("GRAPH_API", raising=False)
+    monkeypatch.setattr(key_holder, "_scoped_db", lambda _set_id, _org: db_path)
+
+    AUD_SET = "autonomy.test.personal-audited"
+
+    @home("personal")
+    @vaulted("audited")
+    class PersonalAuditedV1(SettingSchema):
+        set_id = AUD_SET
+        schema_revision = 1
+
+    schemas.register_schema(AUD_SET, 1, PersonalAuditedV1)
+    GraphDB(db_path).close()
+
+    # The operator publishes the delegate recipient (done at unlock in production).
+    root_seed = bytes(range(32))
+    _priv_hex, pub_hex = pobj.derive_delegate_audited_recipient(root_seed)
+    with VaultStore(db_path) as store:
+        store.put_delegate_audited_recipient(pub_hex)
+
+    # COLD: the autouse fixture cleared the sealer AND the key holder.
+    assert settings_ops._vault_sealer is None
+    assert settings_ops._vault_key_holder is None
+
+    setting_id = settings_ops.add_setting(
+        AUD_SET, 1, "anchore:scale-harness.ssh", {"value": SECRET}, org=None,
+    )
+
+    with sqlite3.connect(db_path) as connection:
+        stored = connection.execute(
+            "SELECT payload FROM settings WHERE id = ?", (setting_id,)
+        ).fetchone()[0]
+    locator = json.loads(stored)
+    assert pobj.is_personal_locator(locator)
+    assert SECRET not in stored
+    wire = locator[len(pobj.LOCATOR_PREFIX):]
+    env = json.loads(base64.urlsafe_b64decode(wire + "=" * (-len(wire) % 4)))
+    assert env["tier"] == "audited"
+    assert "delegate_sealed_cek" in env and "sealed_cek" not in env
