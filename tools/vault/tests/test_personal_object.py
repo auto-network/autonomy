@@ -155,3 +155,51 @@ def test_personal_locator_cannot_be_moved_to_another_setting(personal_world):
     assert moved.payload is None
     assert moved.sealed_content_key is None
     assert moved.vault_error.reason == settings_ops.VAULT_DECRYPTION_FAILED
+
+
+def test_personal_audited_seals_cold_to_delegate_and_opens_with_delegate_private():
+    """A-1: a personal audited revision seals COLD to the delegate's public key
+    (no key holder, no factor) and opens only with the delegate private half."""
+    from tools.vault import personal_object as pobj
+    from tools.vault.errors import VaultError
+
+    root_seed = bytes(range(32))
+    priv_hex, pub_hex = pobj.derive_delegate_audited_recipient(root_seed)
+    assert len(priv_hex) == 64 and len(pub_hex) == 64 and priv_hex != pub_hex
+
+    # COLD write: only the published public key is needed — no VaultKeyCache, no factor.
+    locator = pobj.seal_audited_revision(
+        set_id="autonomy.vault.audited",
+        key="anchore:scale-harness.ssh",
+        setting_id="setting-abc",
+        payload={"value": SECRET},
+        delegate_public_hex=pub_hex,
+    )
+    assert pobj.is_personal_locator(locator)
+    wire = locator[len(pobj.LOCATOR_PREFIX):]
+    env = json.loads(base64.urlsafe_b64decode(wire + "=" * (-len(wire) % 4)))
+    assert env["tier"] == "audited"
+    assert env["body_suite_id"] == "aes-256-gcm-siv", "audited keeps the nonce-misuse-resistant body"
+    assert "delegate_sealed_cek" in env and "sealed_cek" not in env
+    assert SECRET not in locator
+
+    # WARM read: the delegate private half opens it.
+    opened = pobj.open_audited_revision(
+        locator,
+        set_id="autonomy.vault.audited",
+        key="anchore:scale-harness.ssh",
+        setting_id="setting-abc",
+        delegate_private_hex=priv_hex,
+    )
+    assert opened == {"value": SECRET}
+
+    # A different delegate key fails closed — never plaintext.
+    other_priv, _ = pobj.derive_delegate_audited_recipient(bytes(range(1, 33)))
+    with pytest.raises(VaultError):
+        pobj.open_audited_revision(
+            locator,
+            set_id="autonomy.vault.audited",
+            key="anchore:scale-harness.ssh",
+            setting_id="setting-abc",
+            delegate_private_hex=other_priv,
+        )
