@@ -93,6 +93,16 @@ venv/bin/pip install --quiet --upgrade pip
 venv/bin/pip install --quiet 'fastapi>=0.110' 'uvicorn>=0.29' 'cryptography>=42' 'websockets>=13'
 EOF
 
+# auto-493mx: prove the SHIPPED tree can load its entry points BEFORE the
+# restart — a top-level import of an in-repo module that wasn't shipped
+# (the clock.py class) otherwise crashes the service only after systemd has
+# already restarted it, turning a bad deploy into an outage. This imports the
+# entry points in a throwaway process (main() is guarded, so nothing starts)
+# and fails the deploy here if any module in the load closure is missing.
+echo "==> import-closure preflight (fails before restart on a missing module)"
+ssh "$TARGET" "cd $APP_DIR && venv/bin/python \
+    tools/network/registry/deploy/check_import_closure.py $APP_DIR"
+
 echo "==> systemd unit"
 scp -q "$REPO_ROOT/tools/network/registry/deploy/autonomy-registry.service" \
     "$TARGET:/etc/systemd/system/autonomy-registry.service"
