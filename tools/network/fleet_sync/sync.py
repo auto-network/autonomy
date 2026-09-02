@@ -26,8 +26,9 @@ from tools.graph.db import GraphDB
 from raptorq import Decoder
 from tools.network.swarmkit.fountain import FountainStore, source_symbols
 
-from .catalog import MutationCatalog
+from .catalog import MutationCatalog, ensure_quarantine_table, quarantine_unrealized
 from .codec import encode_value
+from .compaction import WatermarkError
 from .delta import DeltaCatalog, read_delta_catalog, stream_delta_to_chunks
 from .materialize import ContentAddressedBlobStore
 from .policies import PolicyKind, TABLE_POLICIES
@@ -502,6 +503,65 @@ def _copy_peer_state(source: Path, target: sqlite3.Connection) -> None:
         local.close()
 
 
+def _copy_quarantine(source: Path, catalog: MutationCatalog) -> int:
+    """Carry the unrealized-row backlog across database publication.
+
+    The staging database only records what THIS install could not realize; the
+    outgoing database's backlog — delta-deferred attachments awaiting bytes,
+    prior orphans — would otherwise vanish with the swapped-out file. Each
+    prior entry is carried unless this install already resolved it: a fresh
+    same-address entry supersedes it, and an address whose row now exists
+    realized in staging is satisfied and dropped. Returns the carried count.
+    """
+    if not source.exists():
+        return 0
+    local = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
+    local.row_factory = sqlite3.Row
+    try:
+        exists = local.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='fleet_sync_quarantine'"
+        ).fetchone()
+        if exists is None:
+            return 0
+        ensure_quarantine_table(catalog.conn)
+        carried = 0
+        for raw in local.execute("SELECT * FROM fleet_sync_quarantine"):
+            row = dict(raw)
+            fresh = catalog.conn.execute(
+                "SELECT 1 FROM fleet_sync_quarantine WHERE address=?",
+                (row["address"],),
+            ).fetchone()
+            if fresh is not None:
+                continue
+            table = str(row["table_name"])
+            address = tuple(json.loads(str(row["logical_address"])))
+            live = catalog.conn.execute(
+                "SELECT 1 FROM fleet_sync_catalog WHERE address=? "
+                "AND tombstone=0",
+                (row["address"],),
+            ).fetchone()
+            if live is not None:
+                try:
+                    catalog._live_row(catalog.conn, table, address)
+                    continue  # realized by this install: satisfied.
+                except WatermarkError:
+                    pass
+            catalog.conn.execute(
+                "INSERT INTO fleet_sync_quarantine VALUES(?,?,?,?,?,?,?)",
+                (
+                    row["address"], table, row["logical_address"],
+                    row["reason"], row["watermark"],
+                    row["quarantined_at_ns"], row.get("frame"),
+                ),
+            )
+            carried += 1
+        catalog.conn.commit()
+        return carried
+    finally:
+        local.close()
+
+
 def _existing_replicated_rows(conn: sqlite3.Connection) -> int:
     tables = {
         str(row[0]) for row in conn.execute(
@@ -601,49 +661,6 @@ def _record_checkpoint_receipt(
     conn.commit()
 
 
-def _quarantine_unrealized(
-    conn: sqlite3.Connection,
-    rows: list[tuple[str, tuple, str]],
-    *,
-    watermark: int,
-) -> None:
-    """Retain rows the receiver could not realize, for observability and repair.
-
-    Each entry is ``(table, address, reason)``. ``reason`` is ``fk_orphan`` (a
-    NOT-NULL parent absent from the checkpoint — the origin keeps its own copy;
-    repair re-materializes it once the parent is recovered) or
-    ``attachment_bytes_unavailable`` (external content-addressed bytes not yet
-    fetched — the row lands once blob transfer backfills it). Recording them
-    keeps a durable, decodable backlog so a later repair or fetch can drain it,
-    and so the retained skip delta is ``COUNT(*)`` over this table rather than a
-    fresh foreign-key scan across every child table. Rewritable per address: a
-    later checkpoint that finally carries the row installs it and its entry
-    becomes stale, so the drain clears it."""
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS fleet_sync_quarantine("
-        "address BLOB PRIMARY KEY,"
-        "table_name TEXT NOT NULL,"
-        "logical_address TEXT NOT NULL,"
-        "reason TEXT NOT NULL,"
-        "watermark INTEGER NOT NULL,"
-        "quarantined_at_ns INTEGER NOT NULL)"
-    )
-    now = time.time_ns()
-    for table, address, reason in rows:
-        conn.execute(
-            "INSERT OR REPLACE INTO fleet_sync_quarantine VALUES(?,?,?,?,?,?)",
-            (
-                encode_value([table, list(address)]),
-                table,
-                json.dumps(list(address)),
-                reason,
-                int(watermark),
-                now,
-            ),
-        )
-    conn.commit()
-
-
 def install_checkpoint(
     checkpoint_directory: Path,
     target_path: Path,
@@ -737,6 +754,10 @@ def install_checkpoint(
             )
             catalog = MutationCatalog(stage.conn, target_origin_incarnation)
             catalog.install()
+            # The winner merge below replays the receiver's held attachment
+            # rows through apply_remote_batch; without the store they would
+            # all defer to quarantine on every install.
+            catalog.blob_store = blob_store
             installed_winners = install_winner_catalog(
                 catalog, checkpoint_directory / "winners", winners,
                 skip_addresses=skip_blobs,
@@ -749,7 +770,7 @@ def install_checkpoint(
             if installed_live != base.total_records - skip_count:
                 raise AlphaError("winner metadata does not cover the exact base")
             if unrealized:
-                _quarantine_unrealized(
+                quarantine_unrealized(
                     stage.conn, unrealized,
                     watermark=winners.through_watermark,
                 )
@@ -768,6 +789,7 @@ def install_checkpoint(
                     catalog,
                     expected_origin=target_origin_incarnation,
                 )
+            _copy_quarantine(target_path, catalog)
             if checkpoint_source_machine is not None:
                 _record_checkpoint_receipt(
                     stage.conn,

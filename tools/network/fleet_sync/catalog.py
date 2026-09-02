@@ -13,6 +13,7 @@ from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
+import json
 from pathlib import Path
 import re
 import sqlite3
@@ -26,7 +27,7 @@ from .codec import (
     encode_value,
 )
 from .compaction import AuthoredMutation, WatermarkError
-from .materialize import materialize
+from .materialize import ContentAddressedBlobStore, materialize
 from .merge import mutation_wins
 from .policies import PolicyKind, TABLE_POLICIES, audit_schema
 from .snapshot import _logical_address, _logical_values, _row_timestamp
@@ -71,6 +72,74 @@ def _unpack_journal(stored: bytes) -> bytes:
             raise WatermarkError("journal storage frame has trailing data")
         return frame
     raise WatermarkError("unsupported journal storage frame")
+
+
+def ensure_quarantine_table(conn: sqlite3.Connection) -> None:
+    """The unrealized-row backlog, upgraded in place when the frame column
+    is missing (the table predates it and is created lazily)."""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS fleet_sync_quarantine("
+        "address BLOB PRIMARY KEY,"
+        "table_name TEXT NOT NULL,"
+        "logical_address TEXT NOT NULL,"
+        "reason TEXT NOT NULL,"
+        "watermark INTEGER NOT NULL,"
+        "quarantined_at_ns INTEGER NOT NULL,"
+        "frame BLOB)"
+    )
+    columns = {
+        row[1] for row in conn.execute(
+            "PRAGMA table_info(fleet_sync_quarantine)"
+        )
+    }
+    if "frame" not in columns:
+        conn.execute(
+            "ALTER TABLE fleet_sync_quarantine ADD COLUMN frame BLOB"
+        )
+
+
+def quarantine_unrealized(
+    conn: sqlite3.Connection,
+    rows: list[tuple[str, tuple, str]],
+    *,
+    watermark: int,
+    frames: dict[bytes, bytes] | None = None,
+    commit: bool = True,
+) -> None:
+    """Retain rows the receiver could not realize, for observability and repair.
+
+    Each entry is ``(table, address, reason)``. ``reason`` is ``fk_orphan`` (a
+    NOT-NULL parent absent from the checkpoint — the origin keeps its own copy;
+    repair re-materializes it once the parent is recovered) or
+    ``attachment_bytes_unavailable`` (external content-addressed bytes not yet
+    fetched — the row lands once blob transfer backfills it). Recording them
+    keeps a durable, decodable backlog so a later repair or fetch can drain it.
+    ``frames`` optionally maps address blobs to the deferred canonical mutation
+    frame: a delta-deferred row is never re-served (the peer's trail advances
+    past it), so the drain re-materializes from the stored frame; checkpoint
+    entries leave it NULL because the next checkpoint carries the row again.
+    Rewritable per address: a later install that finally realizes the row makes
+    the entry stale, and the drain clears it.
+    """
+    ensure_quarantine_table(conn)
+    now = time.time_ns()
+    for table, address, reason in rows:
+        address_blob = encode_value([table, list(address)])
+        conn.execute(
+            "INSERT OR REPLACE INTO fleet_sync_quarantine "
+            "VALUES(?,?,?,?,?,?,?)",
+            (
+                address_blob,
+                table,
+                json.dumps(list(address)),
+                reason,
+                int(watermark),
+                now,
+                (frames or {}).get(address_blob),
+            ),
+        )
+    if commit:
+        conn.commit()
 
 
 def _quote(name: str) -> str:
@@ -299,6 +368,10 @@ class MutationCatalog:
         self.conn = conn
         self.origin_incarnation = origin_incarnation
         self._context: _WriteContext | None = None
+        # Optional attachment store consulted when applying remote batches;
+        # set by the owning store/scheduler after attach. Absent, attachment
+        # rows defer to quarantine instead of realizing.
+        self.blob_store: ContentAddressedBlobStore | None = None
         global _table_columns
         _table_columns = {
             table: tuple(str(row[1]) for row in self.conn.execute(
@@ -1745,16 +1818,33 @@ class MutationCatalog:
                 timestamp, identity[0], identity[1], transaction_ref,
                 capture=False,
             )
-            materialize(
+            report = materialize(
                 self.conn, [item.mutation for item, _ in winners],
                 manage_transaction=False,
+                blob_store=self.blob_store,
+            )
+            # Rows materialize could not realize — attachments whose bytes no
+            # local file satisfies, and foreign-key orphans — are deferred:
+            # journaled (a downstream peer may realize them) but excluded
+            # from the winner catalog and the hash verification, and
+            # quarantined with their canonical frame so the attachment
+            # transport can drain them without a re-pull. Raising here would
+            # poison the batch on every retry, since the peer's resume trail
+            # advances past this transaction regardless.
+            deferred = {
+                encode_value(["attachments", [attachment_id]])
+                for attachment_id in report.pending_attachments
+            }
+            deferred.update(
+                encode_value([table, list(address)])
+                for table, address in report.skipped_orphans
             )
             final_winners = {
                 address_blob: authored for authored, address_blob in winners
             }
             for address_blob, authored in final_winners.items():
                 mutation = authored.mutation
-                if mutation.tombstone:
+                if mutation.tombstone or address_blob in deferred:
                     continue
                 installed = Mutation(
                     mutation.table, mutation.address, mutation.timestamp_ns, False,
@@ -1770,21 +1860,25 @@ class MutationCatalog:
                         f"expected={mutation.candidate_hash.hex()[:16]} "
                         f"installed={installed.candidate_hash.hex()[:16]}"
                     )
+            deferred_count = 0
             for authored, address_blob in winners:
                 mutation = authored.mutation
-                self.conn.execute(
-                    "INSERT INTO fleet_sync_catalog VALUES(?,?,?,?,?) "
-                    "ON CONFLICT(address) DO UPDATE SET "
-                    "timestamp_ns=excluded.timestamp_ns,"
-                    "tombstone=excluded.tombstone,"
-                    "transaction_ref=excluded.transaction_ref,"
-                    "operation_index=excluded.operation_index",
-                    (
-                        address_blob, mutation.timestamp_ns,
-                        int(mutation.tombstone), transaction_ref,
-                        authored.operation_index,
-                    ),
-                )
+                if address_blob in deferred:
+                    deferred_count += 1
+                else:
+                    self.conn.execute(
+                        "INSERT INTO fleet_sync_catalog VALUES(?,?,?,?,?) "
+                        "ON CONFLICT(address) DO UPDATE SET "
+                        "timestamp_ns=excluded.timestamp_ns,"
+                        "tombstone=excluded.tombstone,"
+                        "transaction_ref=excluded.transaction_ref,"
+                        "operation_index=excluded.operation_index",
+                        (
+                            address_blob, mutation.timestamp_ns,
+                            int(mutation.tombstone), transaction_ref,
+                            authored.operation_index,
+                        ),
+                    )
                 self.conn.execute(
                     "INSERT OR IGNORE INTO fleet_sync_journal VALUES(?,?,?)",
                     (
@@ -1792,13 +1886,32 @@ class MutationCatalog:
                         _pack_journal(encode_mutation_frame(mutation)),
                     ),
                 )
+            if deferred:
+                deferred_rows = []
+                frames: dict[bytes, bytes] = {}
+                for authored, address_blob in winners:
+                    if address_blob not in deferred:
+                        continue
+                    mutation = authored.mutation
+                    reason = (
+                        "attachment_bytes_unavailable"
+                        if mutation.table == "attachments" else "fk_orphan"
+                    )
+                    deferred_rows.append(
+                        (mutation.table, tuple(mutation.address), reason)
+                    )
+                    frames[address_blob] = encode_mutation_frame(mutation)
+                quarantine_unrealized(
+                    self.conn, deferred_rows,
+                    watermark=timestamp, frames=frames, commit=False,
+                )
             self.conn.execute(
                 "UPDATE fleet_sync_state SET last_timestamp="
                 "MAX(last_timestamp,?) WHERE singleton=1",
                 (mutation.timestamp_ns,),
             )
             self.conn.commit()
-            return len(winners), ignored
+            return len(winners) - deferred_count, ignored
         except Exception:
             self.conn.rollback()
             raise

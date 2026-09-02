@@ -88,6 +88,65 @@ class ContentAddressedBlobStore:
         return hashlib.sha256(path.read_bytes()).hexdigest() == digest
 
 
+def local_attachment_bytes(
+    conn: sqlite3.Connection, digest: str
+) -> bytes | None:
+    """Bytes for a content digest already present on this machine, or None.
+
+    Resolves through the local ``attachments`` table (``hash`` →
+    ``file_path``). The store re-verifies size and digest before installing,
+    so this only locates candidates and never vouches for them.
+    """
+    rows = conn.execute(
+        "SELECT file_path FROM attachments WHERE hash=?", (digest,)
+    ).fetchall()
+    for (file_path,) in rows:
+        if not file_path:
+            continue
+        path = Path(str(file_path))
+        try:
+            if path.is_file():
+                return path.read_bytes()
+        except OSError:
+            continue
+    return None
+
+
+def production_blob_store(
+    db_path: Path, *, extra_source: Path | None = None
+) -> ContentAddressedBlobStore:
+    """The machine's attachment store for sync realization.
+
+    Installs verified bytes content-addressed under
+    ``<db dir>/uploads/fleet``, and fetches from bytes this machine already
+    holds: the databases' own ``attachments`` rows whose files exist locally.
+    Network fetch is deliberately absent here — a digest no local file
+    satisfies stays pending and quarantines, and the attachment transport
+    drains that backlog separately.
+    """
+    db_path = Path(db_path)
+    root = db_path.parent / "uploads" / "fleet"
+
+    def fetch(digest: str) -> bytes | None:
+        for candidate in (extra_source, db_path):
+            if candidate is None or not Path(candidate).exists():
+                continue
+            source = sqlite3.connect(
+                f"file:{Path(candidate)}?mode=ro", uri=True
+            )
+            try:
+                payload = local_attachment_bytes(source, digest)
+            except sqlite3.Error:
+                continue
+            finally:
+                source.close()
+            if payload is not None:
+                return payload
+        return None
+
+    return ContentAddressedBlobStore(root, fetch)
+
+
 # Parents precede children. Tables without declared foreign keys are still
 # placed after the content they describe so failures are understandable.
 _TABLE_ORDER = (

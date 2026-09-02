@@ -18,7 +18,10 @@ from tools.network.fleet_sync.sync import (
     _read_manifest,
     install_checkpoint,
 )
-from tools.network.fleet_sync.materialize import ContentAddressedBlobStore
+from tools.network.fleet_sync.materialize import (
+    ContentAddressedBlobStore,
+    production_blob_store,
+)
 
 
 HANDOFF_MARKER_VERSION = 1
@@ -146,6 +149,12 @@ def install_quiesced_checkpoint(
     if _marker_path(target).exists() or _backup_path(target).exists():
         recover_checkpoint_handoff(target, quiescence=quiescence)
     manifest, digest = _read_manifest(Path(checkpoint_directory))
+    if blob_store is None:
+        # The machine's own attachment store: realizes rows whose bytes a
+        # local file already satisfies (the pre-swap database is the
+        # candidate index); everything else defers to quarantine for the
+        # attachment transport to drain.
+        blob_store = production_blob_store(target, extra_source=target)
     target.parent.mkdir(parents=True, exist_ok=True)
     before = _inode(target)
     _write_marker(target, {
