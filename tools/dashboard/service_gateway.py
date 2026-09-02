@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import http.client
+import ipaddress
 import json
 import re
 import socket
@@ -46,6 +47,7 @@ class ServiceGatewayRoute:
     session_id: str
     container_id: str
     network: str
+    upstream_ip: str
     port: int
     expires_at: str
 
@@ -65,6 +67,13 @@ class ServiceGatewayRoute:
             or self.network in {"bridge", "host", "none"}
         ):
             raise ValueError("invalid Compose network")
+        try:
+            upstream = ipaddress.ip_address(self.upstream_ip)
+        except ValueError as exc:
+            raise ValueError("invalid upstream IP") from exc
+        if upstream.version != 4 or upstream.is_unspecified \
+                or upstream.is_loopback or upstream.is_multicast:
+            raise ValueError("invalid upstream IP")
         if type(self.port) is not int or not 1 <= self.port <= 65535:
             raise ValueError("invalid target port")
 
@@ -91,6 +100,7 @@ async def resolve_gateway_route(org: str, reservation_id: str) -> ServiceGateway
         session_id=descriptor.session_id,
         container_id=descriptor.container_id,
         network=descriptor.network,
+        upstream_ip=descriptor.network_ip,
         port=descriptor.port,
         expires_at=descriptor.expires_at,
     )
@@ -183,7 +193,7 @@ def render_caddyfile(
             [
                 f"https://{route.hostname}:{LISTEN_PORT} {{",
                 f"\ttls {cert_path} {key_path}",
-                f"\treverse_proxy {route.session_id}:{route.port} {{",
+                f"\treverse_proxy {route.upstream_ip}:{route.port} {{",
                 "\t\tflush_interval -1",
                 "\t}",
                 "}",

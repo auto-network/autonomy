@@ -23,6 +23,7 @@ def _route(**changes):
         "session_id": "auto-0831-011653",
         "container_id": CONTAINER_ID,
         "network": "autonomy_default",
+        "upstream_ip": "172.16.0.42",
         "port": 8000,
         "expires_at": "2026-08-31T05:20:43.000Z",
     }
@@ -39,7 +40,7 @@ def test_rendered_caddyfile_has_one_exact_route_and_no_http3_or_tcp_admin():
     assert "protocols h1 h2" in rendered
     assert "strict_sni_host on" in rendered
     assert f"https://{HOSTNAME}:9443" in rendered
-    assert "reverse_proxy auto-0831-011653:8000" in rendered
+    assert "reverse_proxy 172.16.0.42:8000" in rendered
     assert "tls /run/autonomy-service-gateway-certs/tls.crt /run/autonomy-service-gateway-certs/tls.key" in rendered
     assert "*.serve.auto.network" not in rendered
     assert "h3" not in rendered
@@ -98,6 +99,8 @@ def test_each_persona_hostname_uses_its_own_certificate_pair():
         ("session_id", "session name"),
         ("container_id", "not-hex"),
         ("network", "bridge"),
+        ("upstream_ip", "session-name"),
+        ("upstream_ip", "127.0.0.1"),
         ("port", 0),
         ("port", True),
     ],
@@ -118,6 +121,7 @@ def test_route_is_derived_from_the_existing_live_target_descriptor(monkeypatch):
         session_id="auto-0831-011653",
         container_id=CONTAINER_ID,
         network="autonomy_default",
+        network_ip="172.16.0.42",
         port=8000,
         checked_at="2026-08-31T05:20:38.000Z",
         expires_at="2026-08-31T05:20:43.000Z",

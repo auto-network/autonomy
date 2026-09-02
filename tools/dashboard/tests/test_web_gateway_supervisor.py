@@ -506,6 +506,7 @@ async def test_planner_builds_complete_active_and_paused_config(monkeypatch):
             session_id="auto-0831-171125",
             container_id="a" * 64,
             network="autonomy_default",
+            upstream_ip="172.16.0.42",
             port=8000,
             expires_at="2026-08-31T21:12:00.000Z",
         )
@@ -521,7 +522,7 @@ async def test_planner_builds_complete_active_and_paused_config(monkeypatch):
 
     assert plan.ready is True
     assert [route.route_id for route in plan.routes] == [active_id, paused_id]
-    assert f"reverse_proxy auto-0831-171125:8000" in plan.caddyfile
+    assert f"reverse_proxy 172.16.0.42:8000" in plan.caddyfile
     assert f"https://{paused_host}:9443" in plan.caddyfile
     assert (
         'respond "This service is temporarily paused by its operator." 503'
