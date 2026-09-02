@@ -35,21 +35,28 @@ from tools.network import (
     fleet_runtime,
     fleet_sync_telemetry,
 )
+from tools.network.fleet_sync.catalog import AuthoredMutation
 from tools.network.fleet_sync_channel import FleetAuthenticator
 from tools.network.fleet_sync_scheduler import (
     _DONE_MAGIC,
     _MUTATION_MAGIC,
+    _OPERATION_MAGIC,
+    _TRANSACTION_MAGIC,
     decode_authored,
     decode_done,
     decode_breadcrumb,
+    decode_operation_frame,
+    decode_transaction_header,
     discover_org_sync_scopes,
     encode_pull_request,
     encode_breadcrumb,
+    FLEET_SYNC_PROTOCOL_VERSION,
     FleetSyncProtocolError,
     FleetSyncRuntimeConfig,
     FleetSyncScheduler,
     MAX_RESUME_BREADCRUMBS,
     SQLiteFleetSyncStore,
+    SUPPORTED_PROTOCOL_VERSIONS,
     dashboard_fleet_sync_service,
     roster_epoch,
 )
@@ -343,18 +350,21 @@ class ConnectorFleetRuntime:
             raise FleetRelaySyncError("serving machine is locked for Fleet sync")
         if message.get("op") == BLOB_OP:
             return await self._handle_blob(token, message)
-        # "scope" is the one optional field, mirroring the direct protocol:
-        # absent means personal, so a mixed-version fleet keeps syncing the
-        # personal scope while only organization pulls carry the field an
-        # older server refuses.
+        # "scope" and "sync_v" are the optional fields, mirroring the direct
+        # protocol: absent they mean the personal scope at sync protocol v3,
+        # so a mixed-version fleet keeps syncing the personal scope while
+        # only newer pullers carry the fields an older server refuses.
         if not (_REQUEST_FIELDS <= set(message)
-                <= _REQUEST_FIELDS | {"scope"}) \
+                <= _REQUEST_FIELDS | {"scope", "sync_v"}) \
                 or message.get("v") != PROTOCOL_VERSION \
                 or message.get("op") != PULL_OP:
             raise FleetRelaySyncError("fleet sync pull has unknown fields")
         scope = message.get("scope", "personal")
         if not isinstance(scope, str) or not scope or ":" in scope:
             raise FleetRelaySyncError("fleet sync pull scope is malformed")
+        sync_version = message.get("sync_v", 3)
+        if sync_version not in SUPPORTED_PROTOCOL_VERSIONS:
+            raise FleetRelaySyncError("fleet sync pull version is unsupported")
         requested_epoch = message.get("roster_epoch")
         if not isinstance(requested_epoch, str) or len(requested_epoch) != 64:
             raise FleetRelaySyncError("fleet sync pull has no roster epoch")
@@ -507,6 +517,7 @@ class ConnectorFleetRuntime:
                         compat=peer_digest,
                         resume=resume_trail,
                         scope=scope,
+                        version=sync_version,
                     ),
                     peer_pub,
                     telemetry_channel="relay",
@@ -664,6 +675,12 @@ def _scope_db_path(scope: str) -> Path:
 
 _activated_scope_paths: set[Path] = set()
 
+#: Per-peer declared sync protocol version for relay pulls. A server that
+#: refused a v4 declaration before its hello is retried at v3 for the rest
+#: of this process; a restart re-probes v4. Only wire efficiency rides on
+#: this, never correctness.
+_relay_sync_versions: dict[str, int] = {}
+
 
 def _scoped_store(scope: str, machine_pub: str) -> SQLiteFleetSyncStore:
     """The scope's client store, with fleet writers activated once per path.
@@ -784,6 +801,9 @@ async def pull_checkpoint_once(
                 scope, credential.machine_pub
             ).compatibility_digest()
         )
+        sync_version = _relay_sync_versions.get(
+            route.origin_machine_pub, FLEET_SYNC_PROTOCOL_VERSION
+        )
         body = {
             "v": PROTOCOL_VERSION,
             "op": PULL_OP,
@@ -796,9 +816,12 @@ async def pull_checkpoint_once(
             "hello": _json(hello, "fleet client hello"),
         }
         # The personal scope keeps the historical request shape; only
-        # organization pulls carry the field an older server refuses.
+        # organization pulls and v4 declarations carry the fields an older
+        # server refuses.
         if scope != "personal":
             body["scope"] = scope
+        if sync_version != 3:
+            body["sync_v"] = sync_version
         request = canonical_json(body)
         metrics["bytes_sent"] += len(request)
         await channel.send_message(request)
@@ -809,6 +832,7 @@ async def pull_checkpoint_once(
         pending = []
         pending_identity = None
         pending_count = None
+        transaction_group = None
         delta_digest = hashlib.sha256()
         delta_count = 0
         saw_done = False
@@ -832,6 +856,12 @@ async def pull_checkpoint_once(
             if not saw_hello:
                 first = _json(raw, "fleet server hello envelope")
                 if first.get("kind") == "fleet.server-error":
+                    if sync_version >= 4:
+                        # Refused before the hello — the signature of pre-v4
+                        # software rejecting the declared version. Retry
+                        # this peer at v3 from the next poll round; only
+                        # wire efficiency rides on the declaration.
+                        _relay_sync_versions[route.origin_machine_pub] = 3
                     raise FleetRelaySyncError(
                         f"fleet server refused: {first.get('error', 'unknown reason')}"
                     )
@@ -846,6 +876,36 @@ async def pull_checkpoint_once(
                     expected_machine_pub=route.origin_machine_pub,
                 )
                 saw_hello = True
+                continue
+            if raw.startswith(_TRANSACTION_MAGIC):
+                # v4: the header opens a group; a previous group must be
+                # complete before it applies, exactly like the v3
+                # identity-change boundary.
+                origin, transaction_id, operations = (
+                    decode_transaction_header(raw)
+                )
+                await apply_pending()
+                pending_identity = None
+                transaction_group = (origin, transaction_id)
+                pending_count = operations
+                delta_digest.update(struct.pack(">Q", len(raw)))
+                delta_digest.update(raw)
+                continue
+            if raw.startswith(_OPERATION_MAGIC):
+                if transaction_group is None:
+                    raise FleetRelaySyncError(
+                        "fleet operation frame arrived before its "
+                        "transaction header"
+                    )
+                operation, mutation = decode_operation_frame(raw)
+                pending.append(AuthoredMutation(
+                    transaction_group[0], transaction_group[1],
+                    operation, mutation,
+                ))
+                delta_digest.update(struct.pack(">Q", len(raw)))
+                delta_digest.update(raw)
+                delta_count += 1
+                metrics["mutation_frames"] += 1
                 continue
             if raw.startswith(_MUTATION_MAGIC):
                 item, operation_count = decode_authored(raw)

@@ -172,19 +172,28 @@ def test_partition_during_prune_retains_needed_frames(tmp_path: Path) -> None:
 
 def test_restored_backup_server_reconverges(tmp_path: Path) -> None:
     """Scenario (e): a machine restored from an old snapshot rejoins and
-    reconverges without divergence."""
+    reconverges without divergence.
+
+    This is the heaviest scenario in the suite — two full checkpoint
+    installs plus a restore cycle — and under a loaded xdist sweep it has
+    legitimately exceeded a 120s ceiling while making continuous forward
+    progress (retained history: passes solo in 12-38s, both historical
+    failures hit the ceiling exactly). The stall detector remains the real
+    failure signal; the absolute timeout is only the backstop against
+    progress-without-convergence, so it gets the headroom the docstring on
+    ``wait`` promises."""
     fleet = HarnessFleet(tmp_path / "fleet", size=2).build()
     try:
         fleet.start_all()
         fleet.write(0, "epoch-1", "before the snapshot")
-        fleet.wait_converged(timeout=120.0)
+        fleet.wait_converged(timeout=300.0)
         fleet.stop(0, kill=True)
         snapshot = tmp_path / "snapshot.db"
         shutil.copy(fleet.machines[0].db_path, snapshot)
 
         fleet.start(0)
         fleet.write(0, "epoch-2", "after the snapshot")
-        fleet.wait_converged(timeout=120.0)
+        fleet.wait_converged(timeout=300.0)
 
         # Restore machine 0 from the old snapshot and rejoin.
         fleet.stop(0, kill=True)
@@ -195,9 +204,9 @@ def test_restored_backup_server_reconverges(tmp_path: Path) -> None:
         fleet.start(0)
         fleet.wait(
             lambda: fleet.has(0, "epoch-2"),
-            timeout=120.0, label="restored machine recovers",
+            timeout=300.0, label="restored machine recovers",
         )
-        fleet.wait_converged(timeout=120.0)
+        fleet.wait_converged(timeout=300.0)
         fleet.write_evidence(tmp_path / "restore.json")
     finally:
         fleet.shutdown()

@@ -18,16 +18,26 @@ def test_scope_field_roundtrip_and_personal_bytes_unchanged() -> None:
     epoch = "ab" * 32
     compat = "cd" * 32
     personal = encode_pull_request(epoch, compat=compat)
-    assert b"scope" not in personal  # v3 bytes for mixed-version fleets
+    assert b"scope" not in personal  # request shape shared with v3 fleets
     assert decode_pull_request(personal) == (
-        epoch, (), compat, "personal", False
+        epoch, (), compat, "personal", False, 4
     )
     scoped = encode_pull_request(epoch, compat=compat, scope="alpha")
-    assert decode_pull_request(scoped) == (epoch, (), compat, "alpha", False)
+    assert decode_pull_request(scoped) == (
+        epoch, (), compat, "alpha", False, 4
+    )
     boot = encode_pull_request(epoch, compat=compat, bootstrap=True)
-    assert decode_pull_request(boot) == (epoch, (), compat, "personal", True)
+    assert decode_pull_request(boot) == (
+        epoch, (), compat, "personal", True, 4
+    )
+    legacy = encode_pull_request(epoch, compat=compat, version=3)
+    assert decode_pull_request(legacy) == (
+        epoch, (), compat, "personal", False, 3
+    )
     with pytest.raises(FleetSyncProtocolError):
         encode_pull_request(epoch, compat=compat, scope="bad:scope")
+    with pytest.raises(FleetSyncProtocolError):
+        encode_pull_request(epoch, compat=compat, version=2)
 
 
 def test_org_databases_sync_with_isolation(tmp_path: Path) -> None:
