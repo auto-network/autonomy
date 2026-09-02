@@ -22,7 +22,6 @@ from tools.vault.store import VaultStore
 from tools.vault.key_holder import _scoped_db
 from tools.vault.policy_class import extend_class
 from tools.vault.root_anchor import RootAnchorRecord
-from tools.network.idkit.armor import ArmorError
 from tools.dashboard.identity_routes import _personal_member
 from tools.graph import settings_ops
 from tools.graph.schemas import registry as schema_registry
@@ -353,7 +352,7 @@ async def enroll_password(request: Request):
                 store, body["factor_id"], body["public_key"], body["armor"]
             )
         return JSONResponse({"factor_id": f.factor_id, "public_key": f.public_key}, status_code=201)
-    except (KeyError, TypeError, ValueError, VaultError, ArmorError) as exc:
+    except (KeyError, TypeError, ValueError, VaultError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
 

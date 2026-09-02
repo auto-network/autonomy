@@ -12,7 +12,6 @@ import secrets
 from datetime import datetime, timezone
 
 from tools.network.idkit.enrollment import verified_provisioning_key
-from tools.network.idkit.armor import canonicalize_armor
 
 from .errors import VaultError
 from .factors import (
@@ -22,6 +21,7 @@ from .factors import (
     create_password_factor,
     open_password_seed,
 )
+from .password_wrap import PasswordWrapError, canonicalize_password_wrap
 from .policy_class import (
     create_class,
     create_root_reachable_class,
@@ -55,7 +55,10 @@ def enroll_password_factor_material(
     The browser derives the factor public key and creates the PBKDF2/AES armor;
     the server only validates and canonicalizes the armor envelope.
     """
-    canonical = canonicalize_armor(armor)
+    try:
+        canonical = canonicalize_password_wrap(armor)
+    except PasswordWrapError as exc:
+        raise VaultError(f"armor is malformed: {exc}") from exc
     if not isinstance(public_key, str) or len(public_key) != 64:
         raise VaultError("factor public_key must be 64 hex characters")
     try:
