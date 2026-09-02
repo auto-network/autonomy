@@ -197,7 +197,47 @@ class RegistryMetrics:
         return "\n".join(lines) + "\n"
 
 
-async def start_metrics_listener(host: str, port: int, metrics: RegistryMetrics):
+_RCODE_NAMES = {
+    0: "noerror", 1: "formerr", 2: "servfail", 3: "nxdomain",
+    4: "notimp", 5: "refused", 16: "badvers",
+}
+
+
+class DnsMetrics:
+    """The DNS process's own metrics (auto-albp6.9) — a SEPARATE scrape
+    target from the registry, since the DNS server is its own process and
+    crash domain. Query counts by rcode plus a challenge-store size gauge.
+    No source addresses, ever."""
+
+    def __init__(self) -> None:
+        self._queries: Counter = Counter()      # (rcode,)
+        self._challenge_count: Callable[[], int] = lambda: 0
+
+    def bind_challenge_count(self, fn: Callable[[], int]) -> None:
+        self._challenge_count = fn
+
+    def query(self, rcode_num: int) -> None:
+        self._queries[(_RCODE_NAMES.get(rcode_num, "other"),)] += 1
+
+    def dropped(self) -> None:
+        # A rate-limited/dropped query produces no answer and no rcode.
+        self._queries[("dropped",)] += 1
+
+    def render(self) -> str:
+        lines = [
+            "# HELP dns_queries_total Authoritative DNS answers, by rcode.",
+            "# TYPE dns_queries_total counter",
+        ]
+        for (rcode,), value in sorted(self._queries.items()):
+            lines.append(f'dns_queries_total{{rcode="{rcode}"}} {value}')
+        lines.append("# HELP dns_challenge_records Live DNS-01 challenge "
+                     "records served.")
+        lines.append("# TYPE dns_challenge_records gauge")
+        lines.append(f"dns_challenge_records {int(self._challenge_count())}")
+        return "\n".join(lines) + "\n"
+
+
+async def start_metrics_listener(host: str, port: int, metrics):
     """A minimal loopback HTTP/1.1 responder serving GET /metrics only —
     its own listener, never the public app. Stdlib asyncio, no framework, so
     it shares no route table, middleware, or auth surface with the public

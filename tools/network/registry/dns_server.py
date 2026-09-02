@@ -108,9 +108,15 @@ class _ChallengeCache:
 
 
 class DnsService:
-    def __init__(self, *, relay_ip: str, node_id: str, registry_url: str):
+    def __init__(self, *, relay_ip: str, node_id: str, registry_url: str,
+                 metrics=None):
         self._cache = _ChallengeCache(registry_url)
         self._buckets = _Buckets()
+        self._metrics = metrics
+        if metrics is not None:
+            metrics.bind_challenge_count(
+                lambda: len(self._cache._challenges)
+            )
         self.state = ZoneState(
             relay_ip=relay_ip, node_id=node_id,
             txt_lookup=self._cache.lookup,
@@ -120,9 +126,15 @@ class DnsService:
     async def answer(self, raw: bytes, source: str, *,
                      tcp: bool) -> bytes | None:
         if not self._buckets.allow(source):
+            if self._metrics is not None:
+                self._metrics.dropped()
             return None  # dropped, never an error a flood can amplify
         await self._cache.refresh_if_stale()
-        return handle_query(raw, self.state, tcp=tcp)
+        reply = handle_query(raw, self.state, tcp=tcp)
+        if self._metrics is not None and reply is not None and len(reply) >= 4:
+            # rcode is the low 4 bits of the header's second flags byte.
+            self._metrics.query(reply[3] & 0x0F)
+        return reply
 
 
 class _UdpProtocol(asyncio.DatagramProtocol):
@@ -173,14 +185,26 @@ async def _serve_tcp(reader, writer, service: DnsService):
 
 
 async def run_server(*, bind: str, port: int, relay_ip: str,
-                     node_id: str, registry_url: str) -> None:
+                     node_id: str, registry_url: str,
+                     metrics_host: str = "127.0.0.1",
+                     metrics_port: int | None = None) -> None:
+    metrics = None
+    if metrics_port is not None:
+        from .metrics import DnsMetrics, start_metrics_listener
+        metrics = DnsMetrics()
     service = DnsService(relay_ip=relay_ip, node_id=node_id,
-                         registry_url=registry_url)
+                         registry_url=registry_url, metrics=metrics)
     loop = asyncio.get_event_loop()
     transport, _ = await loop.create_datagram_endpoint(
         lambda: _UdpProtocol(service), local_addr=(bind, port))
     tcp_server = await asyncio.start_server(
         lambda r, w: _serve_tcp(r, w, service), bind, port)
+    metrics_server = None
+    if metrics is not None:
+        # Private, loopback-only — a SEPARATE scrape target from the
+        # registry, matching the DNS process's own crash domain.
+        metrics_server = await start_metrics_listener(
+            metrics_host, metrics_port, metrics)
     logger.warning("serve.auto.network DNS answering on %s:%d (udp+tcp)",
                    bind, port)
     try:
@@ -188,6 +212,8 @@ async def run_server(*, bind: str, port: int, relay_ip: str,
     finally:
         transport.close()
         tcp_server.close()
+        if metrics_server is not None:
+            metrics_server.close()
 
 
 def main() -> None:
@@ -202,12 +228,17 @@ def main() -> None:
                         help="CHAOS id.server identity (per-PoP)")
     parser.add_argument("--registry-url",
                         default="http://127.0.0.1:8477")
+    parser.add_argument("--metrics-port", type=int,
+                        help="enable the PRIVATE DNS metrics exposition on "
+                             "this loopback port (own scrape target)")
+    parser.add_argument("--metrics-host", default="127.0.0.1")
     args = parser.parse_args()
     logging.basicConfig(level=logging.WARNING)
     asyncio.run(run_server(
         bind=args.bind, port=args.port,
         relay_ip=args.relay_ip or args.bind,
         node_id=args.node_id, registry_url=args.registry_url,
+        metrics_host=args.metrics_host, metrics_port=args.metrics_port,
     ))
 
 
