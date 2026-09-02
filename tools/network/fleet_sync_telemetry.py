@@ -262,12 +262,13 @@ def read_peer_totals(*, org: str = "machine") -> dict[str, dict]:
         target_revision=FLEET_SYNC_TELEMETRY_REVISION,
     ).members
     for member in members:
-        parts = member.key.split(":", 2)
-        if len(parts) != 3:
+        parts = member.key.split(":")
+        if len(parts) not in (3, 4):
             continue
-        channel, direction, peer = parts
+        channel, direction, peer = parts[:3]
+        scope = parts[3] if len(parts) == 4 else "personal"
         try:
-            telemetry_key(peer, channel, direction)
+            telemetry_key(peer, channel, direction, scope)
         except ValueError:
             continue
         payload: Mapping = member.payload
@@ -314,6 +315,59 @@ def read_peer_totals(*, org: str = "machine") -> dict[str, dict]:
                 "last_error_code": payload.get("last_error_code") or None,
             })
     return result
+
+
+def read_channel_rows(*, org: str = "machine") -> list[dict]:
+    """Every local telemetry aggregate as flat rows for status surfaces."""
+    rows: list[dict] = []
+    members = settings_ops.read_owned_set(
+        FLEET_SYNC_TELEMETRY_SET_ID,
+        org=org,
+        target_revision=FLEET_SYNC_TELEMETRY_REVISION,
+    ).members
+    for member in members:
+        parts = member.key.split(":")
+        if len(parts) not in (3, 4):
+            continue
+        channel, direction, peer = parts[:3]
+        scope = parts[3] if len(parts) == 4 else "personal"
+        try:
+            telemetry_key(peer, channel, direction, scope)
+        except ValueError:
+            continue
+        rows.append({
+            "peer": peer, "channel": channel, "direction": direction,
+            "scope": scope, "payload": dict(member.payload),
+        })
+    return rows
+
+
+def direct_pull_fresh(
+    peer_machine_public_key: str,
+    *,
+    window_s: float,
+    org: str = "machine",
+    scope: str = "personal",
+) -> bool:
+    """Whether a direct pull from this peer succeeded within the window.
+
+    The relay loop consults this to defer to the direct path: when direct
+    is carrying the scope's traffic, relay pulls for it are redundant
+    bandwidth through the public relay. Absence of telemetry, a failed
+    last outcome, or a stale success all answer False — the relay then
+    proceeds, which is the safe direction.
+    """
+    key = telemetry_key(peer_machine_public_key, "direct", "pull", scope)
+    row = settings_ops.read_set_key(
+        FLEET_SYNC_TELEMETRY_SET_ID, key, org=org, peers=[]
+    )
+    if row is None:
+        return False
+    payload = row["payload"]
+    if payload.get("last_outcome") != "success":
+        return False
+    last_success = payload.get("last_success_at_ns") or 0
+    return (time.time_ns() - int(last_success)) <= window_s * 1_000_000_000
 
 
 def read_acknowledged_transaction_ref(
