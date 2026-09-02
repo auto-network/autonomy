@@ -234,3 +234,54 @@ def test_unicode_names_normalized():
     # The other normalization form addresses the SAME row.
     assert store.get(decomposed) == {"v": 1}
     assert len(list(store.list())) == 1
+
+
+def test_client_backend_resolves_org_prefixed_sealed_index():
+    """The vault-settings seam prefixes session-minted rows with the bearer's
+    org; ClientBackend must resolve the prefixed row from the bare hidden
+    address, open THAT exact key, and prefer the earliest mint when several
+    principals minted the same address."""
+    from types import SimpleNamespace
+
+    from tools.graph.sealed_settings import ClientBackend
+
+    address = "gpZ0yFl8HO0uX63yAtFOtyMxp3HEgXrO1onEcTRUhCk"
+
+    class StubClient:
+        def __init__(self, keys_with_created):
+            self._members = [
+                SimpleNamespace(key=k, created_at=c, payload=None,
+                                vault_error=None)
+                for k, c in keys_with_created
+            ]
+            self.opened_with = None
+
+        def read_set(self, set_id, *, org):
+            assert org is None  # bearer-derived scope, never "personal"
+            return SimpleNamespace(members=self._members)
+
+        def request_vault_open(self, set_id, key, *, org, ttl_seconds):
+            self.opened_with = key
+            import tempfile, os
+            fd, path = tempfile.mkstemp()
+            os.write(fd, (b"ab" * 32))
+            os.close(fd)
+            return {"path": path}
+
+    stub = StubClient([("autonomy:" + address, "2026-09-02T20:00:00Z"),
+                       ("autonomy:mac.ssh", "2026-01-01T00:00:00Z")])
+    got = ClientBackend(stub).read_sealed_index(address, block=False)
+    assert stub.opened_with == "autonomy:" + address
+    assert got == bytes.fromhex("ab" * 32)
+
+    # Unprefixed (operator-minted) rows resolve too, and the earliest mint
+    # wins when both exist.
+    stub = StubClient([("autonomy:" + address, "2026-09-02T20:00:00Z"),
+                       (address, "2026-09-01T00:00:00Z")])
+    ClientBackend(stub).read_sealed_index(address, block=False)
+    assert stub.opened_with == address
+
+    # Absent stays absent — no ceremony for a store never minted.
+    stub = StubClient([("autonomy:mac.ssh", "2026-01-01T00:00:00Z")])
+    assert ClientBackend(stub).read_sealed_index(address, block=False) is None
+    assert stub.opened_with is None
