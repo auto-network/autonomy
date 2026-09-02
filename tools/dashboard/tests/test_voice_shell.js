@@ -132,6 +132,7 @@ function loadVoiceShell(opts) {
   const visualViewport = {
     width,
     height,
+    offsetTop: 0,
     addEventListener(name, cb) {
       (winListeners['visual:' + name] ||= []).push(cb);
     },
@@ -747,10 +748,13 @@ describe('voice shell helpers', () => {
     const h = loadVoiceShell({ voiceStore: { sheetOpen: true, sheetMode: 'partial' } });
     h.document.activeElement = h.component.$refs.sheetInput;
     h.window.visualViewport.height = 390;
+    h.window.visualViewport.offsetTop = 217;
     h.component.refreshKeyboardLayout();
     assert.equal(h.component.keyboardVisible, true);
     assert.equal(h.component.effectiveSheetMode, 'full');
-    assert.equal(Object.keys(h.component.sheetStyle).length, 0);
+    assert.equal(h.component.sheetStyle.top, '217px');
+    assert.equal(h.component.sheetStyle.height, '390px');
+    assert.equal(h.component.sheetStyle.bottom, 'auto');
     assert.equal(h.component.$refs.sheetInput.scrollTop, 0);
 
     h.document.activeElement = null;

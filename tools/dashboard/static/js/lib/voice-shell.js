@@ -245,6 +245,11 @@
     return (viewport && viewport.height) || (typeof window !== 'undefined' && window.innerHeight) || 0;
   }
 
+  function _viewportOffsetTop() {
+    var viewport = (typeof window !== 'undefined' && window.visualViewport) || null;
+    return (viewport && viewport.offsetTop) || 0;
+  }
+
   function _sessionsStore() {
     try {
       if (typeof Alpine === 'undefined' || typeof Alpine.store !== 'function') return null;
@@ -328,6 +333,7 @@
       return {
         viewportWidth: _viewportWidth(),
         viewportHeight: _viewportHeight(),
+        viewportOffsetTop: _viewportOffsetTop(),
         capsulePosition: null,
         capsulePressedAction: '',
         capsulePttActive: false,
@@ -359,6 +365,7 @@
           window.addEventListener('resize', this._resizeHandler);
           if (window.visualViewport && typeof window.visualViewport.addEventListener === 'function') {
             window.visualViewport.addEventListener('resize', this._resizeHandler);
+            window.visualViewport.addEventListener('scroll', this._resizeHandler);
           }
           // Reflect caption visibility as a <body> class so scrollable page
           // content (.sv-entries) can reserve the bottom gutter the fixed
@@ -432,6 +439,7 @@
             window.removeEventListener('resize', this._resizeHandler);
             if (window.visualViewport && typeof window.visualViewport.removeEventListener === 'function') {
               window.visualViewport.removeEventListener('resize', this._resizeHandler);
+              window.visualViewport.removeEventListener('scroll', this._resizeHandler);
             }
           }
           this._teardownCapsuleGesture();
@@ -544,7 +552,15 @@
         },
 
         get sheetStyle() {
-          if (this.keyboardVisible || this.sheetHeightPx == null) return {};
+          if (this.keyboardVisible) {
+            return {
+              top: Math.round(this.viewportOffsetTop) + 'px',
+              bottom: 'auto',
+              height: Math.round(this.viewportHeight) + 'px',
+              transition: 'none',
+            };
+          }
+          if (this.sheetHeightPx == null) return {};
           return {
             height: Math.round(this.sheetHeightPx) + 'px',
             top: 'auto',
@@ -686,8 +702,11 @@
         },
 
         refreshViewport() {
+          var previousViewportHeight = this.viewportHeight;
+          var previousViewportOffsetTop = this.viewportOffsetTop;
           this.viewportWidth = _viewportWidth();
           this.viewportHeight = _viewportHeight();
+          this.viewportOffsetTop = _viewportOffsetTop();
           var keyboardWasVisible = this.keyboardVisible;
           var inputFocused = !!(
             typeof document !== 'undefined' &&
@@ -702,7 +721,11 @@
             inputFocused &&
             this._restingViewportHeight - this.viewportHeight >= 100
           );
-          if (this.keyboardVisible && !keyboardWasVisible) this._scrollSheetToTop();
+          if (this.keyboardVisible && (
+            !keyboardWasVisible ||
+            previousViewportHeight !== this.viewportHeight ||
+            previousViewportOffsetTop !== this.viewportOffsetTop
+          )) this._scrollSheetToTop();
           if (!this.capsulePosition || !this.$refs || !this.$refs.capsule) return;
           var clamped = this._clampCapsulePosition(this.capsulePosition, this.$refs.capsule);
           if (clamped.x === this.capsulePosition.x && clamped.y === this.capsulePosition.y) return;
