@@ -179,10 +179,17 @@ class ServiceCertificateManager:
 
 
 class ServiceCertificateWorker:
-    def __init__(self, manager=None) -> None:
+    def __init__(self, manager=None, *, retry_interval=None,
+                 check_interval=None) -> None:
         self._manager = manager or ServiceCertificateManager()
         self._task: asyncio.Task | None = None
         self._wake = asyncio.Event()
+        self._retry_interval = (
+            RETRY_INTERVAL_SECONDS if retry_interval is None else retry_interval
+        )
+        self._check_interval = (
+            CHECK_INTERVAL_SECONDS if check_interval is None else check_interval
+        )
 
     def request_reconcile(self) -> None:
         """Wake the single worker; concurrent requests coalesce."""
@@ -192,8 +199,15 @@ class ServiceCertificateWorker:
         queue = event_bus.subscribe(client_id="service-certificate-manager")
         try:
             healthy = await self._manager.reconcile_once()
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + (
+                self._check_interval if healthy else self._retry_interval
+            )
             while True:
-                timeout = CHECK_INTERVAL_SECONDS if healthy else RETRY_INTERVAL_SECONDS
+                # Unrelated EventBus traffic must not restart this deadline.
+                # A busy Dashboard otherwise starves a failed certificate
+                # forever even though RETRY_INTERVAL_SECONDS says one minute.
+                timeout = max(0.0, deadline - loop.time())
                 event_task = asyncio.create_task(queue.get())
                 wake_task = asyncio.create_task(self._wake.wait())
                 try:
@@ -204,9 +218,10 @@ class ServiceCertificateWorker:
                     )
                     for task in pending:
                         task.cancel()
+                    reconcile = False
                     if wake_task in done:
                         self._wake.clear()
-                        healthy = await self._manager.reconcile_once()
+                        reconcile = True
                     elif event_task in done:
                         topic, data, _sequence = event_task.result()
                         if topic == "network:serving" or (
@@ -215,9 +230,15 @@ class ServiceCertificateWorker:
                             and data.get("set_id")
                             in {NAMESPACE_RESERVATION_SET_ID, SERVICE_TARGET_SET_ID}
                         ):
-                            healthy = await self._manager.reconcile_once()
+                            reconcile = True
                     else:
+                        reconcile = True
+                    if reconcile:
                         healthy = await self._manager.reconcile_once()
+                        deadline = loop.time() + (
+                            self._check_interval if healthy
+                            else self._retry_interval
+                        )
                 finally:
                     for task in (event_task, wake_task):
                         if not task.done():

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from tools.dashboard import service_certificate as certs
 from tools.dashboard import service_certificate_manager as manager
+from tools.dashboard.event_bus import EventBus
 
 
 def metadata(**changes):
@@ -117,6 +120,34 @@ def test_worker_reconcile_requests_coalesce():
     worker.request_reconcile()
 
     assert worker._wake.is_set()
+
+
+@pytest.mark.asyncio
+async def test_failed_worker_retry_is_not_starved_by_unrelated_events():
+    class FailingManager:
+        def __init__(self):
+            self.calls = 0
+
+        async def reconcile_once(self):
+            self.calls += 1
+            return False
+
+    lifecycle = FailingManager()
+    worker = manager.ServiceCertificateWorker(
+        lifecycle, retry_interval=0.03, check_interval=60,
+    )
+    bus = EventBus()
+    await worker.start(bus)
+    try:
+        # Keep irrelevant traffic arriving faster than the retry interval. The
+        # old loop reset its timeout on every event and never called again.
+        for sequence in range(12):
+            await asyncio.sleep(0.006)
+            await bus.broadcast("unrelated", {"sequence": sequence})
+        await asyncio.sleep(0.02)
+        assert lifecycle.calls >= 3
+    finally:
+        await worker.stop()
 
 
 @pytest.mark.parametrize(
