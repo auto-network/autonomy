@@ -104,9 +104,22 @@ async def _worker(config_path: Path) -> int:
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(signum, stopped.set)
+
+    async def parent_watch(initial_parent: int = os.getppid()) -> None:
+        # A worker must never outlive its parent: an orphan keeps the test
+        # runner's process group open and wedges its supervisor (observed
+        # live 2026-09-02). Reparenting to init/reaper means the parent died.
+        while not stopped.is_set():
+            if os.getppid() != initial_parent:
+                stopped.set()
+                return
+            await asyncio.sleep(0.5)
+
+    watcher = asyncio.ensure_future(parent_watch())
     await scheduler.start()
     print(json.dumps({"kind": "ready", "port": scheduler.port}), flush=True)
     await stopped.wait()
+    watcher.cancel()
     await scheduler.stop()
     print(json.dumps({
         "kind": "stopped",

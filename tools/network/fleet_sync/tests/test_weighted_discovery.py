@@ -26,9 +26,9 @@ def test_bounded_rounds_converge_and_cap_pull_volume(tmp_path: Path) -> None:
     fleet = HarnessFleet(
         tmp_path / "fleet", size=4, max_concurrent_pulls=2
     ).build()
-    fleet.start_all()
-    started = time.monotonic()
     try:
+        fleet.start_all()
+        started = time.monotonic()
         for machine in range(4):
             fleet.write(machine, f"m{machine}", f"from {machine}")
         fleet.wait_converged(timeout=120.0)
@@ -52,8 +52,8 @@ def test_returning_peer_is_prioritized(tmp_path: Path) -> None:
     fleet = HarnessFleet(
         tmp_path / "fleet", size=3, max_concurrent_pulls=1
     ).build()
-    fleet.start_all()
     try:
+        fleet.start_all()
         fleet.write(0, "before", "before the absence")
         fleet.wait_converged(timeout=120.0)
 

@@ -25,15 +25,14 @@ def test_bootstrap_chain_without_relay(tmp_path: Path) -> None:
     installed journal cannot replay retired history, serves a checkpoint it
     builds from its own live state. Deltas then flow to C normally."""
     fleet = HarnessFleet(tmp_path / "fleet", size=3).build()
-
-    # A starts alone and authors state before anyone else exists online.
-    fleet.start(0)
-    for note in range(5):
-        fleet.write(0, f"seed-{note}", f"pre-fleet note {note}")
-
-    # B starts empty: its pull declares bootstrap and installs a checkpoint.
-    fleet.start(1)
     try:
+        # A starts alone and authors state before anyone else exists online.
+        fleet.start(0)
+        for note in range(5):
+            fleet.write(0, f"seed-{note}", f"pre-fleet note {note}")
+
+        # B starts empty: its pull declares bootstrap, installs a checkpoint.
+        fleet.start(1)
         fleet.wait(
             lambda: all(fleet.has(1, f"seed-{n}") for n in range(5)),
             timeout=120.0, label="B bootstrap",
