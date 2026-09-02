@@ -634,6 +634,7 @@ def create_app(
     stream_ingress_port: Optional[int] = None,
     stream_ingress_host: str = "127.0.0.1",
     stream_idle_timeout: Optional[float] = None,
+    stream_proxy_sources: frozenset = frozenset(),
 ) -> FastAPI:
     """Build the registry app.
 
@@ -2466,7 +2467,7 @@ def create_app(
             app.state.stream_ingress = await start_stream_ingress(
                 stream_ingress_host, stream_ingress_port,
                 host_routes=host_routes, abuse_limiter=abuse_limiter,
-                idle_timeout=idle,
+                idle_timeout=idle, proxy_sources=stream_proxy_sources,
             )
 
         @app.on_event("shutdown")

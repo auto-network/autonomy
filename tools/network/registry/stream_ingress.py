@@ -57,11 +57,16 @@ class RelayRawStream:
     def __init__(self, tunnel, channel_id: bytes, reservation: str,
                  host: str, reader, writer, *, abuse_lease=None,
                  idle_timeout: float = STREAM_IDLE_TIMEOUT,
-                 charge_starvation: float | None = None):
+                 charge_starvation: float | None = None,
+                 source: str = "unknown"):
         self.tunnel = tunnel
         self.channel_id = channel_id
         self.reservation = reservation
         self.host = host
+        #: real client address (PROXY v2 when the edge supplies it, else the
+        #: socket peer) — the accounting/logging key, never paired with the
+        #: link token or payload (auto-p20eb).
+        self.source = source
         self.reader = reader
         self.writer = writer
         self.abuse_lease = abuse_lease
@@ -292,43 +297,114 @@ class _Refused(Exception):
         self.code = code
 
 
-async def _peek_client_hello(reader) -> tuple[str, bytes]:
+# -- PROXY protocol v2 (auto-p20eb) ----------------------------------------
+#
+# The serve edge is a dumb :443→ingress TCP forward, so without this the
+# ingress attributes every public stream to the forward's own address and
+# source-aware accounting is impossible. The forward prefixes each upstream
+# connection with a PROXY v2 header carrying the real client address; the
+# ingress consumes it BEFORE the ClientHello peek — but only from peers
+# named in *proxy_sources* (the trust boundary: anyone else writing a
+# header is just handing the SNI parser garbage and gets the byte-identical
+# silent close). The 12-byte signature can never open a valid TLS record,
+# so a trusted peer that sends no header (an un-upgraded forward during
+# rollout) is still parsed as TLS — deployment is order-free.
+
+PROXY_V2_SIGNATURE = b"\r\n\r\n\x00\r\nQUIT\n"
+_PROXY_V2_MAX_LEN = 512
+
+
+async def _read_proxy_v2(first16: bytes, reader) -> str | None:
+    """Parse one PROXY v2 header whose first 16 bytes are *first16*.
+    Returns the source address string, or None when the header carries no
+    client (LOCAL command — a health check). Raises StreamProtocolError
+    on any malformation; the caller closes silently."""
+    import ipaddress
+
+    ver_cmd, fam_proto = first16[12], first16[13]
+    if ver_cmd >> 4 != 0x2:
+        raise StreamProtocolError("unsupported PROXY version")
+    length = int.from_bytes(first16[14:16], "big")
+    if length > _PROXY_V2_MAX_LEN:
+        raise StreamProtocolError("oversized PROXY header")
+    try:
+        payload = await reader.readexactly(length)
+    except (asyncio.IncompleteReadError, OSError) as exc:
+        raise StreamProtocolError("truncated PROXY header") from exc
+    command = ver_cmd & 0x0F
+    if command == 0x0:
+        return None  # LOCAL: use the socket's own peer address
+    if command != 0x1:
+        raise StreamProtocolError("unknown PROXY command")
+    if fam_proto == 0x11 and length >= 12:  # TCP over IPv4
+        return str(ipaddress.IPv4Address(payload[0:4]))
+    if fam_proto == 0x21 and length >= 36:  # TCP over IPv6
+        return str(ipaddress.IPv6Address(payload[0:16]))
+    raise StreamProtocolError("unsupported PROXY family")
+
+
+async def _peek_client_hello(reader, initial: bytes = b"") -> tuple[str, bytes]:
     """Read just enough to extract the SNI. Returns (sni, buffered)."""
-    buffered = b""
+    buffered = initial
     while len(buffered) < SNI_PEEK_MAX_BYTES:
+        if buffered:
+            try:
+                sni = extract_sni(buffered)
+            except NeedMoreData:
+                pass
+            else:
+                if sni is None:
+                    raise StreamProtocolError("ClientHello carries no SNI")
+                return sni, buffered
         chunk = await reader.read(4096)
         if not chunk:
             raise StreamProtocolError("connection ended before ClientHello")
         buffered += chunk
-        try:
-            sni = extract_sni(buffered)
-        except NeedMoreData:
-            continue
-        if sni is None:
-            raise StreamProtocolError("ClientHello carries no SNI")
-        return sni, buffered
     raise StreamProtocolError("ClientHello exceeds peek bound")
 
 
 async def handle_stream_connection(
     reader, writer, *, host_routes, abuse_limiter=None,
     idle_timeout: float = STREAM_IDLE_TIMEOUT,
+    proxy_sources: frozenset = frozenset(),
 ) -> None:
     """One ingress connection, accept to teardown."""
     from tools.network.relaykit.frames import new_channel_id
 
     abuse_lease = None
+    peer = writer.get_extra_info("peername") or ("unknown",)
+    source = str(peer[0])
     try:
+        initial = b""
+        if proxy_sources and source in proxy_sources:
+            try:
+                first16 = await asyncio.wait_for(
+                    reader.readexactly(16), STREAM_HANDSHAKE_TIMEOUT
+                )
+            except (asyncio.IncompleteReadError, asyncio.TimeoutError,
+                    OSError):
+                return
+            if first16[:12] == PROXY_V2_SIGNATURE:
+                try:
+                    real = await asyncio.wait_for(
+                        _read_proxy_v2(first16, reader),
+                        STREAM_HANDSHAKE_TIMEOUT,
+                    )
+                except (StreamProtocolError, asyncio.TimeoutError, OSError):
+                    return
+                if real is not None:
+                    source = real
+            else:
+                initial = first16  # un-upgraded forward: this is TLS
         try:
             sni, buffered = await asyncio.wait_for(
-                _peek_client_hello(reader), STREAM_HANDSHAKE_TIMEOUT
+                _peek_client_hello(reader, initial), STREAM_HANDSHAKE_TIMEOUT
             )
         except (StreamProtocolError, asyncio.TimeoutError, OSError):
             return
         admission = None
         if abuse_limiter is not None:
-            peer = writer.get_extra_info("peername") or ("unknown",)
-            admission = abuse_limiter.begin(str(peer[0]))
+            admission = abuse_limiter.begin(source)
             if admission is None:
                 return
         tunnel = host_routes.route(sni)
@@ -347,7 +423,7 @@ async def handle_stream_connection(
         stream = RelayRawStream(
             tunnel, channel_id, host_routes.reservation_for(sni), sni,
             reader, writer, abuse_lease=abuse_lease,
-            idle_timeout=idle_timeout,
+            idle_timeout=idle_timeout, source=source,
         )
         abuse_lease = None  # owned by the stream now
         tunnel.raw_streams[channel_id] = stream
@@ -378,11 +454,13 @@ async def handle_stream_connection(
 async def start_stream_ingress(
     host: str, port: int, *, host_routes, abuse_limiter=None,
     idle_timeout: float = STREAM_IDLE_TIMEOUT,
+    proxy_sources: frozenset = frozenset(),
 ):
     async def handle(reader, writer):
         await handle_stream_connection(
             reader, writer, host_routes=host_routes,
             abuse_limiter=abuse_limiter, idle_timeout=idle_timeout,
+            proxy_sources=proxy_sources,
         )
 
     server = await asyncio.start_server(handle, host, port)

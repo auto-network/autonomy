@@ -88,6 +88,15 @@ def main() -> None:
         type=float,
         help="idle seconds before a raw stream is reset (default 600)",
     )
+    parser.add_argument(
+        "--stream-proxy-source",
+        action="append",
+        default=[],
+        metavar="IP",
+        help="trust a PROXY v2 header only from this ingress peer address "
+             "(the serve edge forward); repeatable. Any other peer's header "
+             "is treated as protocol garbage and the connection is dropped.",
+    )
     args = parser.parse_args()
     app = create_app(
         args.db,
@@ -97,6 +106,7 @@ def main() -> None:
         stream_ingress_port=args.stream_ingress_port,
         stream_ingress_host=args.stream_ingress_host,
         stream_idle_timeout=args.stream_idle_timeout,
+        stream_proxy_sources=frozenset(args.stream_proxy_source),
     )
     # Link tokens are bearer credentials and are part of the public route.
     # Uvicorn's HTTP access logger records the full path, while its WebSocket
