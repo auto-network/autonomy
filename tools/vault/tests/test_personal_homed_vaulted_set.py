@@ -1,19 +1,15 @@
-"""Can a PERSONAL-homed vaulted set actually be written?
+"""Can a PERSONAL-homed vaulted set actually be written — and read back?
 
 `autonomy.vault.audited` and `.secured` are declared `@home("personal")` and
-`@vaulted(...)`. Nothing had exercised that pair — the sealer's own tests all
-pass an org that happens to have a founded ledger behind it, so they prove the
-ORG path and say nothing about the personal one.
+`@vaulted(...)`. A personal secret takes the owner-at-rest path, never the org
+storage-domain path: a personal SECURED CEK seals to its policy class (the human
+factor opens it), and a personal AUDITED CEK seals COLD to the dedicated delegate
+recipient (the warm delegate opens it unattended). Neither consults the org
+sealer, which resolves a founded ledger and exists only for org-homed sets.
 
-The design distinguishes them sharply. An ORG secret's CEK is additionally
-wrapped under storage-state secrets so every member can reach it, which needs
-a genesis, a frontier and a generation. A PERSONAL secret's CEK is wrapped
-under the owner's vault master KEK and stops there — "Personal object => N=1,
-degenerate, no storage domain involved" (`graph://193fa89e-313` R4).
-
-`seal_revision` implements only the first. These tests pin what that means for
-a personal-homed set today, so the answer is a test result rather than an
-argument.
+These tests drive the real `settings_ops` write/read path against the shipped
+`autonomy.vault.audited` set, so the cold-audited behaviour is a test result
+rather than an argument.
 """
 
 from __future__ import annotations
@@ -21,27 +17,36 @@ from __future__ import annotations
 import pytest
 
 from tools.graph import settings_ops
+from tools.graph.db import GraphDB
 from tools.graph.schemas.vault_credential import (
     VAULT_AUDITED_SET_ID,
     VAULT_CREDENTIAL_REVISION,
 )
-from tools.vault.key_holder import VaultKeyCache
-from tools.vault.key_sealer import VaultSealerNotReady, register_vault_sealer
-from tools.vault.db_content_store import DbContentStore
-from tools.vault.storage_object import Holdings
-from tools.graph.tests.vault_read_harness import VaultWorld
-from tools.network.storagekit.keycontrol import KeyControlStore
+from tools.vault import key_holder
+from tools.vault.errors import VaultError
+from tools.vault.personal_object import derive_delegate_audited_recipient
+from tools.vault.store import VaultStore
 
 import tools.graph.schemas  # noqa: F401 — registers the sets
 
 
 @pytest.fixture(autouse=True)
-def _no_sealer():
+def cold_vault(tmp_path, monkeypatch):
+    """A cold vault over a fresh personal.db: no sealer, no key holder, no warm
+    delegate. The vault store and the settings rows share the one file."""
+    monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.delenv("GRAPH_API", raising=False)
+    db = tmp_path / "personal.db"
+    monkeypatch.setattr(key_holder, "_scoped_db", lambda _set_id, _org: db)
+    GraphDB(db).close()
     settings_ops.set_vault_sealer(None)
     settings_ops.set_vault_key_holder(None)
-    yield
+    settings_ops.set_personal_delegate_audited_key(None)
+    yield db
     settings_ops.set_vault_sealer(None)
     settings_ops.set_vault_key_holder(None)
+    settings_ops.set_personal_delegate_audited_key(None)
 
 
 def test_the_set_is_declared_personal_and_vaulted():
@@ -53,101 +58,58 @@ def test_the_set_is_declared_personal_and_vaulted():
     assert schemas.declared_vault_tier(VAULT_AUDITED_SET_ID) == "audited"
 
 
-def test_seal_revision_cannot_seal_without_an_organization():
-    """THE ONE THAT MATTERS.
-
-    The production sealer resolves an org's ledger to get a frontier, because
-    `seal_revision` derives its content domain from `frontier.genesis_id`. The
-    operator's own store is not an organization and has no genesis, so the
-    provider has nothing to return and the write refuses.
-
-    This is not a bug in the sealer — it is the sealer being honest that it
-    implements the ORG path. It is a gap in the SET: a personal-homed vaulted
-    row needs the owner-wrap path (CEK under the vault master KEK), and that
-    path is not wired into settings.
-    """
-    register_vault_sealer(
-        VaultKeyCache(),
-        lambda: object(),          # an author is available
-        lambda set_id, org: None,  # ...but the personal store has no ledger
-    )
-
-    with pytest.raises(VaultSealerNotReady, match="no folded ledger"):
+def test_audited_write_refuses_by_name_before_the_delegate_is_published(cold_vault):
+    """Without a published delegate recipient there is no cold recipient to seal
+    to. The write refuses naming the missing provisioning — it does NOT silently
+    fall to the org sealer, which is only for org-homed sets."""
+    with pytest.raises(VaultError, match="delegate recipient"):
         settings_ops.add_setting(
-            VAULT_AUDITED_SET_ID, VAULT_CREDENTIAL_REVISION,
-            "github.token", {"value": "ghp_" + "a" * 36}, org=None,
+            VAULT_AUDITED_SET_ID,
+            VAULT_CREDENTIAL_REVISION,
+            "github.token",
+            {"value": "ghp_" + "a" * 36},
+            org=None,
         )
 
 
-def test_the_refusal_names_the_organization_rather_than_the_mechanism():
-    """A caller hitting this must be able to tell it is a HOMING problem and
-    not a missing installation, or the next person re-registers the sealer and
-    gets the same refusal."""
-    register_vault_sealer(
-        VaultKeyCache(),
-        lambda: object(), lambda set_id, org: None,
-    )
+def test_ehyoh_can_store_the_operators_github_token(cold_vault):
+    """auto-ehyoh: the operator's GitHub token in their OWN store, written COLD and
+    released unattended — the corrected audited path (no org sealer, no factor)."""
+    db = cold_vault
 
-    with pytest.raises(VaultSealerNotReady) as excinfo:
-        settings_ops.add_setting(
-            VAULT_AUDITED_SET_ID, VAULT_CREDENTIAL_REVISION,
-            "github.token", {"value": "x" * 40}, org=None,
-        )
+    # The operator publishes the delegate recipient at unlock; here, directly.
+    private_hex, public_hex = derive_delegate_audited_recipient(bytes(range(32)))
+    with VaultStore(db) as store:
+        store.put_delegate_audited_recipient(public_hex)
 
-    message = str(excinfo.value)
-    assert "genesis" in message
-    assert "organization" in message
-
-
-def test_ehyoh_can_store_the_operators_github_token(tmp_path, monkeypatch):
-    """auto-ehyoh: the operator's GitHub token, stored in their OWN store and
-    released unattended.
-
-    The personal store is a degenerate single-member domain — the same storage
-    machinery an organization uses, run at N=1 — so the token seals by the org
-    code (``seal_revision``) and its ciphertext lands INSIDE ``personal.db``,
-    the file that follows the operator across the fleet. This drives the real
-    ``settings_ops`` write/read path against a founded single-member domain.
-    """
-    monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))  # personal.db under here
-    monkeypatch.delenv("GRAPH_DB", raising=False)
-    db = tmp_path / "personal.db"  # where the personal home resolves
-
-    world = VaultWorld(tmp_path / "scaffold", member_count=1)
-    world.content_store = DbContentStore(db)
-    world.store = world.content_store
-    world.key_control = KeyControlStore(db)
-    world.sync()
-
-    def holder(*, set_id, org):
-        with KeyControlStore(db) as kc:
-            holdings = Holdings(
-                secrets=world.world.held(world.author),
-                descriptors=kc.states,
-                bridges=list(kc.accepted_bridges()),
-            )
-        return settings_ops.VaultKeyControl(
-            holdings=holdings, content_store=DbContentStore(db)
-        )
-
-    settings_ops.set_vault_sealer(world.sealer)
-    settings_ops.set_vault_key_holder(holder)
-
+    # COLD write: the sealer and key holder are both None.
+    assert settings_ops._vault_sealer is None
+    assert settings_ops._vault_key_holder is None
     token = "ghp_" + "a" * 36
-    settings_ops.add_setting(
-        VAULT_AUDITED_SET_ID, VAULT_CREDENTIAL_REVISION,
-        "github.token", {"value": token}, org=None,
+    setting_id = settings_ops.add_setting(
+        VAULT_AUDITED_SET_ID,
+        VAULT_CREDENTIAL_REVISION,
+        "github.token",
+        {"value": token},
+        org=None,
     )
+    assert isinstance(setting_id, str) and setting_id
 
-    # It reads back decrypted, through the real read path.
-    resolved = settings_ops.read_set(VAULT_AUDITED_SET_ID, org=None)
-    values = {s.key: s for s in resolved}
-    assert values["github.token"].payload["value"] == token
+    # Cold read fails closed — no warm delegate, no plaintext.
+    member = _member(settings_ops.read_set(VAULT_AUDITED_SET_ID, org=None))
+    assert member.payload is None
+    assert member.vault_error is not None
+    assert member.vault_error.reason == settings_ops.VAULT_NO_KEY_HOLDER
 
-    # And the ciphertext is a row INSIDE personal.db — no sidecar.
-    import sqlite3
-    n = sqlite3.connect(db).execute(
-        "SELECT count(*) FROM vault_content_bodies"
-    ).fetchone()[0]
-    assert n >= 1
+    # Warm read: the delegate private half releases the token unattended.
+    settings_ops.set_personal_delegate_audited_key(private_hex)
+    member = _member(settings_ops.read_set(VAULT_AUDITED_SET_ID, org=None))
+    assert member.vault_error is None
+    assert member.payload["value"] == token
+
+    # The ciphertext lives inline in personal.db — no org content sidecar.
     assert not (db.parent / "content").exists()
+
+
+def _member(resolved):
+    return {s.key: s for s in resolved}["github.token"]

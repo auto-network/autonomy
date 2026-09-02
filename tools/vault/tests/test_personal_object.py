@@ -37,6 +37,7 @@ def isolated_registry_and_seams():
     upconverters_snapshot = dict(UPCONVERTERS)
     settings_ops.set_vault_sealer(None)
     settings_ops.set_vault_key_holder(None)
+    settings_ops.set_personal_delegate_audited_key(None)
     try:
         yield
     finally:
@@ -46,6 +47,7 @@ def isolated_registry_and_seams():
         UPCONVERTERS.update(upconverters_snapshot)
         settings_ops.set_vault_sealer(None)
         settings_ops.set_vault_key_holder(None)
+        settings_ops.set_personal_delegate_audited_key(None)
 
 
 @pytest.fixture
@@ -233,7 +235,7 @@ def test_personal_audited_setting_seals_cold_with_published_delegate(
 
     # The operator publishes the delegate recipient (done at unlock in production).
     root_seed = bytes(range(32))
-    _priv_hex, pub_hex = pobj.derive_delegate_audited_recipient(root_seed)
+    priv_hex, pub_hex = pobj.derive_delegate_audited_recipient(root_seed)
     with VaultStore(db_path) as store:
         store.put_delegate_audited_recipient(pub_hex)
 
@@ -256,3 +258,20 @@ def test_personal_audited_setting_seals_cold_with_published_delegate(
     env = json.loads(base64.urlsafe_b64decode(wire + "=" * (-len(wire) % 4)))
     assert env["tier"] == "audited"
     assert "delegate_sealed_cek" in env and "sealed_cek" not in env
+
+    # READ cold: no warm delegate private key -> fails closed, never plaintext.
+    member = settings_ops.read_set(AUD_SET, org=None, peers=[]).members[0]
+    assert member.payload is None
+    assert member.sealed_content_key is None
+    assert member.vault_error is not None
+    assert member.vault_error.reason == settings_ops.VAULT_NO_KEY_HOLDER
+
+    # READ warm: the delegate private half opens it unattended, inline.
+    settings_ops.set_personal_delegate_audited_key(priv_hex)
+    try:
+        member = settings_ops.read_set(AUD_SET, org=None, peers=[]).members[0]
+        assert member.vault_error is None
+        assert member.sealed_content_key is None
+        assert member.payload == {"value": SECRET}
+    finally:
+        settings_ops.set_personal_delegate_audited_key(None)
