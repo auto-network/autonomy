@@ -59,6 +59,7 @@ class HarnessFleet:
         self, root_dir: Path, size: int, *, seed: int = 7,
         org_scopes: tuple[str, ...] = (),
         org_customize: "Callable[[int, str, Path], None] | None" = None,
+        max_concurrent_pulls: int = 3,
     ) -> None:
         if size < 2:
             raise ValueError("a fleet needs at least two machines")
@@ -66,6 +67,7 @@ class HarnessFleet:
         self.size = size
         self.org_scopes = org_scopes
         self.org_customize = org_customize
+        self.max_concurrent_pulls = max_concurrent_pulls
         self.hub = ProxyHub(seed=seed)
         self.machines: list[Machine] = []
         self.evidence: dict = {"faults": [], "restarts": [], "writes": 0}
@@ -126,6 +128,7 @@ class HarnessFleet:
             ]
         machine.config_path.write_text(json.dumps({
             "poll_interval": 0.06,
+            "max_concurrent_pulls": self.max_concurrent_pulls,
             "personal_root_pub": self._root_key.public_hex,
             "roster_entries": [entry.to_dict() for entry in self._entries],
             "machine_private": machine.key.private_hex,
@@ -179,6 +182,12 @@ class HarnessFleet:
         if process is None:
             return
         machine.process = None
+        # Dials toward a stopped machine refuse instantly instead of
+        # depending on dead-port timing — under load a slow dial from a
+        # single-slot puller can otherwise burn whole rounds.
+        for other in self.machines:
+            if other.index != index:
+                self.hub.clear_target(self._link_name(other.index, index))
         if kill:
             process.kill()
             process.communicate()
@@ -278,6 +287,20 @@ class HarnessFleet:
                 ).fetchone() is not None
         except sqlite3.Error:
             return False
+
+    def total_successful_pulls(self) -> int:
+        total = 0
+        for machine in self.machines:
+            try:
+                with self._read_only(machine.db_path) as conn:
+                    total += int(conn.execute(
+                        "SELECT COALESCE(SUM(deltas_received),0)"
+                        "+COALESCE(SUM(checkpoints_received),0) "
+                        "FROM fleet_sync_peer_state"
+                    ).fetchone()[0])
+            except sqlite3.Error:
+                continue
+        return total
 
     def digest(self, index: int) -> str:
         try:

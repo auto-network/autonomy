@@ -172,6 +172,15 @@ class ProxyHub:
             self._links[name].target = (host, port)
         self._call(apply())
 
+    def clear_target(self, name: str) -> None:
+        """Refuse new dials instantly and abort live ones — the shape of a
+        machine that is gone, without depending on dead-port dial timing."""
+        async def apply() -> None:
+            link = self._links[name]
+            link.target = None
+            link.abort_connections()
+        self._call(apply())
+
     def set_faults(self, name: str, **changes: object) -> None:
         async def apply() -> None:
             link = self._links[name]

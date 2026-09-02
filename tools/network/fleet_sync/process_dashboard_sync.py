@@ -267,6 +267,9 @@ def run_process_acceptance(root_dir: Path) -> dict:
         live_processes.append(first_process)
         _wait(lambda: _has(left_db, "process-first"))
         _wait(lambda: _peer_report(left_db)["transactions_applied"] >= 1)
+        # The success record (acknowledgements) lands after the stream and
+        # drain complete; stopping on data-arrival alone races it.
+        _wait(lambda: _peer_report(left_db)["acknowledgements"] >= 1)
         reports.append(_stop_worker(first_process))
         live_processes.remove(first_process)
 
@@ -275,6 +278,7 @@ def run_process_acceptance(root_dir: Path) -> dict:
         live_processes.append(second_process)
         _wait(lambda: _has(left_db, "process-reconnect"))
         _wait(lambda: _peer_report(left_db)["transactions_applied"] >= 2)
+        _wait(lambda: _peer_report(left_db)["acknowledgements"] >= 2)
         reports.append(_stop_worker(second_process))
         live_processes.remove(second_process)
     finally:

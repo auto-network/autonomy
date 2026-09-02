@@ -70,6 +70,11 @@ _SETTINGS_HINT_LIMIT = 256
 #: A resume trail carries the last few verified stream positions plus an
 #: exponentially thinned history, so its length is logarithmic in stream age.
 MAX_RESUME_BREADCRUMBS = 64
+#: A pull whose stream goes silent this long is failed and retried through
+#: ordinary backoff. Without it, one wedged serve freezes the puller's
+#: entire round loop forever (observed as a rare whole-fleet stall under
+#: heavy CPU contention).
+PULL_STREAM_SILENCE_LIMIT_S = 30.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,6 +190,9 @@ class FleetSyncRuntimeConfig:
     #: always first. Databases share the graph schema; each keeps its own
     #: catalog, journal, peer state, and breadcrumb trails.
     sync_scopes: Callable[[], Mapping[str, Path]] | None = None
+    #: Bounded pulls per round; the stalest-first ranking below decides
+    #: which peers fill the slots. Zero or negative means unbounded.
+    max_concurrent_pulls: int = 3
 
 
 def discover_org_sync_scopes() -> dict[str, Path]:
@@ -205,6 +213,30 @@ def discover_org_sync_scopes() -> dict[str, Path]:
         if slug and slug != "personal" and ":" not in slug:
             scopes[slug] = candidate
     return scopes
+
+
+def rank_peers(
+    candidates: Sequence[str],
+    last_success_ns: Mapping[str, int],
+    *,
+    limit: int,
+) -> list[str]:
+    """Stalest-first bounded peer selection for one sync round.
+
+    A peer with no recorded success ever ranks ahead of every peer with
+    one, so a machine returning from a long absence — or never yet synced
+    — fills the first slot on its first eligible round. Among recorded
+    successes, oldest first. Ties break on the key itself so rounds are
+    deterministic. Starvation-free by construction: an unselected peer's
+    staleness only grows, monotonically raising its rank until selected.
+    """
+    ordered = sorted(
+        candidates,
+        key=lambda pub: (last_success_ns.get(pub) or 0, pub),
+    )
+    if limit <= 0:
+        return ordered
+    return ordered[:limit]
 
 
 def roster_epoch(entries: Iterable[RosterEntry], root_pub: str) -> str:
@@ -627,6 +659,27 @@ class SQLiteFleetSyncStore:
         conn, catalog = self._open()
         try:
             return catalog.apply_remote_batch(items)
+        finally:
+            conn.close()
+
+    def peer_last_success(self) -> dict[str, int]:
+        """Newest recorded pull success per peer, across epochs, for
+        stalest-first ranking. Absent machines simply have no entry."""
+        import sqlite3 as _sqlite3
+
+        if not Path(self.path).exists():
+            return {}
+        conn = _sqlite3.connect(f"file:{self.path}?mode=ro", uri=True)
+        try:
+            return {
+                str(row[0]): int(row[1] or 0)
+                for row in conn.execute(
+                    "SELECT machine_public_key,MAX(last_success_ns) "
+                    "FROM fleet_sync_peer_state GROUP BY machine_public_key"
+                )
+            }
+        except _sqlite3.Error:
+            return {}
         finally:
             conn.close()
 
@@ -1264,11 +1317,20 @@ class FleetSyncScheduler:
                 assert last_error is not None
                 raise last_error
             await channel.send_message(encode_blob_request(digests))
-            async for frame, _final in channel.recv_message_stream():
+            stream = channel.recv_message_stream().__aiter__()
+            while not receiver.done:
+                try:
+                    frame, _final = await asyncio.wait_for(
+                        stream.__anext__(), PULL_STREAM_SILENCE_LIMIT_S
+                    )
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError as exc:
+                    raise FleetSyncProtocolError(
+                        "fleet blob stream went silent"
+                    ) from exc
                 self.authenticator.authorize(machine_pub)
                 await asyncio.to_thread(receiver.feed, frame)
-                if receiver.done:
-                    break
             if not receiver.done:
                 raise FleetSyncProtocolError(
                     "blob stream ended without terminal frame"
@@ -1289,17 +1351,32 @@ class FleetSyncScheduler:
             active = resolve(entries, anchor_root_pub=self.config.personal_root_pub)
             addresses = self.config.peer_addresses()
             now = asyncio.get_running_loop().time()
-            peers = [
-                (machine_pub, tuple(addresses.get(machine_pub, ())))
+            eligible = [
+                machine_pub
                 for machine_pub in sorted(active)
                 if machine_pub != self.authenticator.machine_pub
                 and addresses.get(machine_pub)
                 and now >= self._next_attempt.get(machine_pub, 0.0)
             ]
-            if peers:
+            selected = eligible
+            if eligible:
+                try:
+                    weights = await asyncio.to_thread(
+                        self.store.peer_last_success
+                    )
+                except Exception:
+                    weights = {}
+                selected = rank_peers(
+                    eligible, weights,
+                    limit=self.config.max_concurrent_pulls,
+                )
+                self._last_round_selection = tuple(selected)
+            if selected:
                 await asyncio.gather(
-                    *(self._sync_peer(machine_pub, candidates)
-                      for machine_pub, candidates in peers),
+                    *(self._sync_peer(
+                        machine_pub,
+                        tuple(addresses.get(machine_pub, ())),
+                    ) for machine_pub in selected),
                     return_exceptions=True,
                 )
             try:
@@ -1466,7 +1543,18 @@ class FleetSyncScheduler:
                         "fleet transaction is incomplete or out of order"
                     )
 
-            async for message, stream_final in channel.recv_message_stream():
+            stream = channel.recv_message_stream().__aiter__()
+            while True:
+                try:
+                    message, stream_final = await asyncio.wait_for(
+                        stream.__anext__(), PULL_STREAM_SILENCE_LIMIT_S
+                    )
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError as exc:
+                    raise FleetSyncProtocolError(
+                        "fleet pull stream went silent"
+                    ) from exc
                 # A kick that lands after the hello revokes this live session
                 # before another application message is accepted.
                 self.authenticator.authorize(machine_pub)
