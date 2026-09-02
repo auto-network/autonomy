@@ -70,6 +70,15 @@ function loadVoiceShell(opts) {
       this.deliveryMode = mode;
       return true;
     },
+    bindSession(sessionId) {
+      this.boundSessionId = sessionId;
+      this.micMode = 'listening';
+      return true;
+    },
+    setMicMode(mode) {
+      this.micMode = mode;
+      return true;
+    },
     speakVoiceover() { return true; },
     confirmRebind() {
       this.boundSessionId = this.pendingRebindTarget;
@@ -99,6 +108,7 @@ function loadVoiceShell(opts) {
 
   const _bodyClasses = new Set();
   const document = {
+    activeElement: null,
     addEventListener(name, cb) {
       (docListeners[name] ||= []).push(cb);
     },
@@ -197,6 +207,11 @@ function loadVoiceShell(opts) {
       focusCalls: 0,
       focus() {
         this.focusCalls += 1;
+      },
+    },
+    sheet: {
+      getBoundingClientRect() {
+        return { left: 0, top: 484, width: 390, height: 360 };
       },
     },
   };
@@ -673,7 +688,7 @@ describe('voice shell helpers', () => {
     assert.equal(h.component.sheetCrossTargetTitle, 'auto-B');
   });
 
-  it('sheet handle drag expands a partial sheet to full mode', () => {
+  it('sheet handle follows the pointer and snaps only at the full-height endpoint', () => {
     const h = loadVoiceShell({
       voiceStore: {
         sheetOpen: true,
@@ -682,15 +697,92 @@ describe('voice shell helpers', () => {
     });
     const handleEvent = {
       clientY: 520,
+      pointerId: 7,
+      preventDefault() {},
       target: {
         closest(selector) {
-          return selector === '.voice-sheet__handle' ? { nodeType: 1 } : null;
+          return selector === '.voice-sheet__handle' ? {
+            nodeType: 1,
+            setPointerCapture() {},
+            releasePointerCapture() {},
+          } : null;
         },
       },
     };
     assert.equal(h.component.startSheetGesture(handleEvent), true);
-    h.winListeners.pointerup[0]({ clientY: 460 });
+    h.winListeners.pointermove[0]({ clientY: 0, pointerId: 7, preventDefault() {} });
+    assert.equal(h.component.sheetHeightPx, 828);
+    assert.equal(h.voiceStore.sheetMode, 'partial');
+    assert.equal(h.component.effectiveSheetMode, 'custom');
+    h.winListeners.pointerup[0]({ clientY: 0, pointerId: 7, preventDefault() {}, type: 'pointerup' });
     assert.equal(h.voiceStore.sheetMode, 'full');
+    assert.equal(h.component.sheetHeightPx, null);
+  });
+
+  it('sheet handle preserves an intermediate dragged height and never dismisses downward', () => {
+    const h = loadVoiceShell({ voiceStore: { sheetOpen: true, sheetMode: 'partial' } });
+    const handle = {
+      setPointerCapture() {},
+      releasePointerCapture() {},
+    };
+    const event = {
+      clientY: 520,
+      pointerId: 8,
+      preventDefault() {},
+      target: { closest: () => handle },
+    };
+    h.component.startSheetGesture(event);
+    h.winListeners.pointermove[0]({ clientY: 370, pointerId: 8, preventDefault() {} });
+    assert.equal(h.component.sheetHeightPx, 510);
+    h.winListeners.pointerup[0]({ clientY: 370, pointerId: 8, preventDefault() {}, type: 'pointerup' });
+    assert.equal(h.component.sheetHeightPx, 510);
+    assert.equal(h.voiceStore.sheetMode, 'partial');
+    assert.equal(h.component.effectiveSheetMode, 'custom');
+    assert.equal(h.voiceStore.sheetOpen, true);
+  });
+
+  it('uses full viewport keyboard layout while the focused editor shrinks the visual viewport', () => {
+    const h = loadVoiceShell({ voiceStore: { sheetOpen: true, sheetMode: 'partial' } });
+    h.document.activeElement = h.component.$refs.sheetInput;
+    h.window.visualViewport.height = 390;
+    h.component.refreshKeyboardLayout();
+    assert.equal(h.component.keyboardVisible, true);
+    assert.equal(h.component.effectiveSheetMode, 'full');
+    assert.equal(Object.keys(h.component.sheetStyle).length, 0);
+
+    h.document.activeElement = null;
+    h.window.visualViewport.height = 844;
+    h.component.refreshKeyboardLayout();
+    assert.equal(h.component.keyboardVisible, false);
+    assert.equal(h.component.effectiveSheetMode, 'partial');
+  });
+
+  it('resets the keyboard baseline after an unfocused orientation change', () => {
+    const h = loadVoiceShell({ voiceStore: { sheetOpen: true, sheetMode: 'partial' } });
+    h.window.visualViewport.height = 390;
+    h.component.refreshViewport();
+    assert.equal(h.component._restingViewportHeight, 390);
+    h.document.activeElement = h.component.$refs.sheetInput;
+    h.component.refreshKeyboardLayout();
+    assert.equal(h.component.keyboardVisible, false);
+
+    h.window.visualViewport.height = 190;
+    h.component.refreshKeyboardLayout();
+    assert.equal(h.component.keyboardVisible, true);
+  });
+
+  it('switches a keyboard draft to the viewed session without unmuting it', () => {
+    const h = loadVoiceShell({
+      voiceStore: {
+        boundSessionId: 'auto-B',
+        viewedSessionId: 'auto-A',
+        micMode: 'muted',
+      },
+    });
+    assert.equal(h.component.switchSheetToCurrent(), true);
+    assert.equal(h.voiceStore.boundSessionId, 'auto-A');
+    assert.equal(h.voiceStore.micMode, 'muted');
+    assert.equal(h.component.sheetCrossSession, false);
   });
 
   it('lifts the default capsule position above the reserved caption gutter', () => {

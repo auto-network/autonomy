@@ -2649,11 +2649,15 @@
 
     <div class="voice-sheet"
          data-testid="voice-compose-sheet"
+         x-ref="sheet"
          x-show="showSheet"
          x-cloak
+         :style="sheetStyle"
          :class="{
-           'voice-sheet--partial': sheetMode === 'partial',
-           'voice-sheet--full': sheetMode === 'full',
+           'voice-sheet--partial': effectiveSheetMode === 'partial',
+           'voice-sheet--full': effectiveSheetMode === 'full',
+           'voice-sheet--keyboard': keyboardVisible,
+           'voice-sheet--cross': sheetCrossSession && !voiceoverMode,
            'voice-sheet--voiceover': voiceoverMode
          }">
       <div class="voice-sheet__handle"
@@ -2669,8 +2673,10 @@
            session than the one being viewed. Violet, consistent with the dictation
            tile, so Send isn't a surprise. -->
       <div class="voice-sheet__cross" x-show="sheetCrossSession && !voiceoverMode" x-cloak>
-        <span class="voice-sheet__cross-arrow">→</span>
         <span class="voice-sheet__cross-label">Sending to</span>
+        <button type="button"
+                class="voice-sheet__switch"
+                @click="switchSheetToCurrent()">Switch</button>
         <span class="voice-sheet__cross-target" x-text="sheetCrossTargetTitle"></span>
       </div>
       <div class="voice-sheet__body">
@@ -2678,6 +2684,8 @@
                   x-ref="sheetInput"
                   x-model="$store.voice.bufferText"
                   @input="onSheetInput()"
+                  @focus="refreshKeyboardLayout()"
+                  @blur="onSheetInputBlur()"
                   :placeholder="voiceoverMode ? 'Ask what this session is doing…' : ''"
                   spellcheck="false"></textarea>
         <div class="voice-sheet__voiceover-reply"
@@ -2720,6 +2728,14 @@
         </div>
       </div>
       <div class="voice-sheet__actions">
+        <button type="button"
+                class="voice-sheet__mic"
+                :class="capsuleMicClass"
+                @click="runCapsuleAction('mic')"
+                :aria-label="$store.voice.micMode === 'muted' ? 'Unmute microphone' : 'Mute microphone'"
+                :title="$store.voice.micMode === 'muted' ? 'Unmute microphone' : 'Mute microphone'">
+          <span class="voice-capsule__icon-wrap" x-html="capsuleIcon('mic')"></span>
+        </button>
         <input type="file"
                multiple
                x-ref="voiceFileInput"
@@ -2740,6 +2756,7 @@
                 class="voice-sheet__send"
                 :class="{
                   'voice-sheet__send--disabled': !canSendVoice,
+                  'voice-sheet__send--cross': sheetCrossSession && !voiceoverMode,
                   'voice-sheet__send--voiceover': voiceoverMode
                 }"
                 :disabled="!canSendVoice"

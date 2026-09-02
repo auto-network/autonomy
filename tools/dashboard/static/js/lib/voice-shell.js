@@ -14,9 +14,6 @@
   var CAPTION_PREVIEW_WORDS = 12;
   var CAPTION_RESERVED_HEIGHT = 72;
   var SHEET_BACKDROP_GUARD_MS = 300;
-  var SHEET_EXPAND_THRESHOLD = -42;
-  var SHEET_COLLAPSE_THRESHOLD = 56;
-  var SHEET_DISMISS_THRESHOLD = 72;
 
   function _voiceStore() {
     try {
@@ -334,6 +331,10 @@
         capsulePosition: null,
         capsulePressedAction: '',
         capsulePttActive: false,
+        sheetHeightPx: null,
+        sheetDragging: false,
+        keyboardVisible: false,
+        _restingViewportHeight: 0,
         _capsuleHoldTimer: null,
         _capsuleGesture: null,
         _capsuleMoveHandler: null,
@@ -349,6 +350,10 @@
             x: voice.capsulePosition.x,
             y: voice.capsulePosition.y,
           } : null;
+          this._restingViewportHeight = Math.max(
+            (typeof window !== 'undefined' && window.innerHeight) || 0,
+            _viewportHeight()
+          );
           this._resizeHandler = this.refreshViewport.bind(this);
           window.addEventListener('resize', this._resizeHandler);
           if (window.visualViewport && typeof window.visualViewport.addEventListener === 'function') {
@@ -384,7 +389,13 @@
               if (typeof requestAnimationFrame !== 'function') return;
               requestAnimationFrame(function () {
                 var ta = self.$refs && self.$refs.sheetInput;
-                if (ta) ta.scrollTop = ta.scrollHeight;
+                // WebKit can paint the caret outside a fixed textarea when JS
+                // changes scrollTop while that textarea owns focus. Native
+                // typing already keeps its caret visible; only follow dictated
+                // text when the editor is not actively being edited.
+                if (ta && document.activeElement !== ta) {
+                  ta.scrollTop = ta.scrollHeight;
+                }
               });
             });
             // Feed live dictation into the durability outbox tile (auto-0530's
@@ -513,6 +524,22 @@
         get sheetMode() {
           var voice = this.voice;
           return (voice && voice.sheetMode) || 'partial';
+        },
+
+        get effectiveSheetMode() {
+          if (this.keyboardVisible) return 'full';
+          if (this.sheetHeightPx != null) return 'custom';
+          return this.sheetMode;
+        },
+
+        get sheetStyle() {
+          if (this.keyboardVisible || this.sheetHeightPx == null) return {};
+          return {
+            height: Math.round(this.sheetHeightPx) + 'px',
+            top: 'auto',
+            bottom: '0',
+            transition: this.sheetDragging ? 'none' : 'height 180ms ease',
+          };
         },
 
         get capsuleStyle() {
@@ -650,6 +677,19 @@
         refreshViewport() {
           this.viewportWidth = _viewportWidth();
           this.viewportHeight = _viewportHeight();
+          var inputFocused = !!(
+            typeof document !== 'undefined' &&
+            document.activeElement === (this.$refs && this.$refs.sheetInput)
+          );
+          // A resize without editor focus is browser chrome or orientation,
+          // not the software keyboard. Make that geometry the new baseline so
+          // opening the editor in landscape cannot be mistaken for a keyboard
+          // that was already present.
+          if (!inputFocused) this._restingViewportHeight = this.viewportHeight;
+          this.keyboardVisible = !!(
+            inputFocused &&
+            this._restingViewportHeight - this.viewportHeight >= 100
+          );
           if (!this.capsulePosition || !this.$refs || !this.$refs.capsule) return;
           var clamped = this._clampCapsulePosition(this.capsulePosition, this.$refs.capsule);
           if (clamped.x === this.capsulePosition.x && clamped.y === this.capsulePosition.y) return;
@@ -657,6 +697,15 @@
           if (this.voice && typeof this.voice.setCapsulePosition === 'function') {
             this.voice.setCapsulePosition(clamped);
           }
+        },
+
+        refreshKeyboardLayout() {
+          this.refreshViewport();
+        },
+
+        onSheetInputBlur() {
+          var self = this;
+          setTimeout(function () { self.refreshViewport(); }, 80);
         },
 
         openVoiceFilePicker() {
@@ -706,7 +755,13 @@
 
         dismissSheet() {
           if (!this.voice || typeof this.voice.dismissSheet !== 'function') return false;
-          return this.voice.dismissSheet();
+          var dismissed = this.voice.dismissSheet();
+          if (dismissed) {
+            this.sheetHeightPx = null;
+            this.sheetDragging = false;
+            this.keyboardVisible = false;
+          }
+          return dismissed;
         },
 
         onSheetBackdrop() {
@@ -769,6 +824,22 @@
           return true;
         },
 
+        switchSheetToCurrent() {
+          var voice = this.voice;
+          if (!voice || !voice.viewedSessionId ||
+              voice.viewedSessionId === voice.boundSessionId ||
+              typeof voice.bindSession !== 'function') return false;
+          var priorMode = voice.micMode;
+          voice.bindSession(voice.viewedSessionId);
+          // Opening the keyboard mutes capture. Preserve that state across the
+          // explicit target switch; if the operator used the sheet mic button
+          // to resume capture, bindSession's listening state is already right.
+          if (priorMode === 'muted' && typeof voice.setMicMode === 'function') {
+            voice.setMicMode('muted');
+          }
+          return true;
+        },
+
         onSheetInput() {
           if (!this.voice) return;
           this.voice.sheetError = '';
@@ -808,6 +879,8 @@
             return false;
           }
           if (action === 'type' && typeof this.voice.openSheet === 'function') {
+            this.sheetHeightPx = null;
+            this.sheetDragging = false;
             return this.voice.openSheet();
           }
           if (action === 'voiceover') return this.toggleVoiceover();
@@ -985,40 +1058,55 @@
           var handle = event && event.target && typeof event.target.closest === 'function'
             ? event.target.closest('.voice-sheet__handle')
             : null;
-          if (!handle || !this.voice) return false;
-          // preventDefault + pointer capture so the swipe-up reliably produces
-          // a pointerup with the right clientY even as the finger travels up
-          // the screen — without these iOS treats it as a scroll and the
-          // expand never fires (same fix as the capsule drag).
+          var sheet = this.$refs && this.$refs.sheet;
+          if (!handle || !sheet || !this.voice || this.keyboardVisible) return false;
+          this._teardownSheetGesture();
           if (event && typeof event.preventDefault === 'function') event.preventDefault();
           if (event && event.pointerId != null && typeof handle.setPointerCapture === 'function') {
             try { handle.setPointerCapture(event.pointerId); } catch (_e) {}
           }
-          var initialMode = this.sheetMode;
+          var viewportHeight = _viewportHeight();
+          var minHeight = Math.max(160, Math.min(360, viewportHeight - 8));
+          var maxHeight = Math.max(minHeight, viewportHeight - 16);
           this._sheetGesture = {
+            pointerId: event.pointerId,
+            handle: handle,
             startY: event.clientY,
-            initialMode: initialMode,
+            startHeight: sheet.getBoundingClientRect().height,
+            minHeight: minHeight,
+            maxHeight: maxHeight,
           };
+          this.sheetHeightPx = this._sheetGesture.startHeight;
+          this.sheetDragging = true;
           var self = this;
-          this._sheetMoveHandler = function () {};
+          this._sheetMoveHandler = function (moveEvent) {
+            var gesture = self._sheetGesture;
+            if (!gesture || (gesture.pointerId != null && moveEvent.pointerId !== gesture.pointerId)) return;
+            if (typeof moveEvent.preventDefault === 'function') moveEvent.preventDefault();
+            var next = gesture.startHeight + gesture.startY - moveEvent.clientY;
+            self.sheetHeightPx = Math.max(gesture.minHeight, Math.min(gesture.maxHeight, next));
+          };
           this._sheetUpHandler = function (upEvent) {
-            if (!self._sheetGesture) return;
-            var deltaY = upEvent.clientY - self._sheetGesture.startY;
-            var mode = self._sheetGesture.initialMode;
+            var gesture = self._sheetGesture;
+            if (!gesture || (gesture.pointerId != null && upEvent.pointerId !== gesture.pointerId)) return;
+            if (typeof upEvent.preventDefault === 'function') upEvent.preventDefault();
+            if (upEvent.type !== 'pointercancel') {
+              var finalHeight = gesture.startHeight + gesture.startY - upEvent.clientY;
+              self.sheetHeightPx = Math.max(gesture.minHeight, Math.min(gesture.maxHeight, finalHeight));
+            }
+            try { gesture.handle.releasePointerCapture(gesture.pointerId); } catch (_e) {}
+            var height = self.sheetHeightPx;
+            self.sheetDragging = false;
             self._teardownSheetGesture();
-            if (deltaY <= SHEET_EXPAND_THRESHOLD) {
+            if (height >= gesture.maxHeight - 24) {
+              self.sheetHeightPx = null;
               if (self.voice && typeof self.voice.expandSheet === 'function') self.voice.expandSheet();
-              return;
-            }
-            if (mode === 'full' && deltaY >= SHEET_COLLAPSE_THRESHOLD) {
+            } else if (height <= gesture.minHeight + 24) {
+              self.sheetHeightPx = null;
               if (self.voice && typeof self.voice.collapseSheet === 'function') self.voice.collapseSheet();
-              return;
-            }
-            if (mode === 'partial' && deltaY >= SHEET_DISMISS_THRESHOLD) {
-              if (self.voice && typeof self.voice.dismissSheet === 'function') self.voice.dismissSheet();
             }
           };
-          window.addEventListener('pointermove', this._sheetMoveHandler);
+          window.addEventListener('pointermove', this._sheetMoveHandler, { passive: false });
           window.addEventListener('pointerup', this._sheetUpHandler);
           window.addEventListener('pointercancel', this._sheetUpHandler);
           return true;

@@ -221,10 +221,13 @@ body.sv-viewer-composer-active .voice-caption {
   border: 1px solid rgba(71, 85, 105, 0.3);
   border-bottom: 0;
   box-shadow: 0 -24px 60px rgba(2, 6, 23, 0.58);
+  transition: height 180ms ease, top 180ms ease, left 180ms ease,
+              right 180ms ease, border-radius 180ms ease;
 }
 
 .voice-sheet--partial {
   height: min(42svh, 360px);
+  min-height: min(360px, calc(100dvh - 8px));
 }
 
 .voice-sheet--full {
@@ -250,12 +253,48 @@ body.sv-viewer-composer-active .voice-caption {
   }
 }
 
+/* Once iOS raises its software keyboard, this stops being a floating drawer:
+   the editor owns the complete visual viewport above the keyboard. The parent
+   page has already applied the device safe area, so applying it again here
+   creates a large dead strip at the top. */
+.voice-sheet--keyboard.voice-sheet--full {
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: auto;
+  border: 0;
+  border-radius: 0;
+}
+
+.voice-sheet--keyboard .voice-sheet__handle {
+  display: none;
+}
+
+.voice-sheet--keyboard .voice-sheet__body {
+  padding-bottom: 4px;
+}
+
+.voice-sheet--keyboard.voice-sheet--cross .voice-sheet__cross {
+  margin: 8px 16px 10px;
+}
+
+.voice-sheet--keyboard:not(.voice-sheet--cross) .voice-sheet__body {
+  padding-top: 6px;
+}
+
+.voice-sheet--keyboard .voice-sheet__actions {
+  padding-bottom: 4px;
+}
+
 .voice-sheet__handle {
   display: flex;
   justify-content: center;
   align-items: center;
-  padding: 10px 0 6px;
+  min-height: 44px;
+  padding: 0;
   touch-action: none;
+  cursor: ns-resize;
 }
 
 .voice-sheet__handle span {
@@ -297,22 +336,60 @@ body.sv-viewer-composer-active .voice-caption {
 /* Cross-session banner (#23) — same violet language as the dictation tile, so
    composing into a session other than the one being viewed is never a surprise. */
 .voice-sheet__cross {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 7px;
+  gap: 0 8px;
   margin: 2px 4px 8px;
   padding: 7px 12px;
   border-radius: 10px;
-  border-left: 3px solid #7c3aed;
   background: linear-gradient(90deg, rgba(124, 58, 237, 0.18), rgba(124, 58, 237, 0.03));
   font-size: 0.8125rem;
 }
-.voice-sheet__cross-arrow { color: #a78bfa; font-weight: 700; }
 .voice-sheet__cross-label {
   color: #c4b5fd; font-weight: 700; text-transform: uppercase;
   letter-spacing: .06em; font-size: 0.6875rem;
 }
-.voice-sheet__cross-target { color: #ede9fe; font-weight: 700; }
+.voice-sheet__cross-target {
+  grid-column: 1 / -1;
+  min-width: 0;
+  overflow: hidden;
+  color: #ede9fe;
+  font-size: 0.75rem;
+  font-weight: 700;
+  line-height: 1.25;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.voice-sheet__switch {
+  appearance: none;
+  position: relative;
+  min-height: 22px;
+  padding: 0 10px;
+  border: 1px solid rgba(196, 181, 253, 0.3);
+  border-radius: 999px;
+  background: rgba(109, 40, 217, 0.22);
+  color: #ddd6fe;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+  transition: transform 120ms ease, background-color 120ms ease;
+}
+
+.voice-sheet__switch::before {
+  content: '';
+  position: absolute;
+  inset: -11px -5px;
+}
+
+.voice-sheet__switch:active {
+  transform: scale(0.96);
+  background: rgba(109, 40, 217, 0.38);
+}
 
 .voice-sheet__body {
   flex: 1;
@@ -320,6 +397,7 @@ body.sv-viewer-composer-active .voice-caption {
   display: flex;
   flex-direction: column;
   padding: 0 16px 12px;
+  overflow: hidden;
 }
 
 .voice-sheet__buffer {
@@ -478,6 +556,31 @@ body.sv-viewer-composer-active .voice-caption {
   padding: 0 16px calc(env(safe-area-inset-bottom, 0px) + 14px);
 }
 
+.voice-sheet__mic {
+  appearance: none;
+  cursor: pointer;
+  flex-shrink: 0;
+  width: 46px;
+  min-height: 46px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 14px;
+  color: #eff6ff;
+  transition: transform 120ms ease, background-color 120ms ease, opacity 120ms ease;
+}
+
+.voice-sheet__mic .voice-capsule__icon-wrap {
+  width: 32px;
+  height: 32px;
+}
+
+.voice-sheet__mic:active {
+  transform: scale(0.96);
+  opacity: 0.86;
+}
+
 /* The native file input stays off-screen; the + button proxies the click so
    the picker matches the sheet's styling instead of the OS default control. */
 .voice-sheet__file {
@@ -529,6 +632,10 @@ body.sv-viewer-composer-active .voice-caption {
 .voice-sheet__send {
   background: #2563eb;
   color: #eff6ff;
+}
+
+.voice-sheet__send--cross {
+  background: #7c3aed;
 }
 
 .voice-sheet__send--voiceover {
