@@ -125,6 +125,20 @@ def _body(envelope: str) -> dict:
     return data
 
 
+def canonicalize_password_wrap(envelope: str) -> str:
+    """Validate a browser-produced envelope and re-emit it in the frozen form.
+
+    The wire format (canonical-JSON body, 64-column base64, BEGIN/END lines) is
+    exactly what :func:`wrap_password_factor` produces, so an already-canonical
+    envelope round-trips byte-for-byte. The seed is never opened —
+    canonicalization is a structural normalization, not a decryption, and needs
+    no password. Raises :class:`PasswordWrapError` if the envelope is malformed.
+    """
+    data = _body(envelope)
+    b64 = base64.b64encode(canonical_json(data)).decode("ascii")
+    return "\n".join([_BEGIN, *textwrap.wrap(b64, 64), _END])
+
+
 def wrap_password_factor(
     key: KeyPair, password: str, *, iterations: int = DEFAULT_ITERATIONS
 ) -> str:
