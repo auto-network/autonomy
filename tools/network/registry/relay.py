@@ -733,9 +733,11 @@ async def _close_quietly(ws: WebSocket, code: int) -> None:
 SERVE_BASE_DOMAIN = "serve.auto.network"
 #: NamespaceReservation UUIDv5 namespace (design c880c5e6 §3.2).
 RESERVATION_NAMESPACE = _uuid.UUID("6cf440db-c8b4-566c-99db-e7be17109bdc")
-#: Live lease lifetime; renewal is expected at half-life. Teardown on
+#: Live lease lifetime; one tunnel-wide ``host-renew-all`` keepalive at
+#: roughly half-life keeps every lease alive (auto-ja0rf). The TTL is a
+#: dead-man's switch for a wedged-but-connected tunnel only — teardown on
 #: disconnect/release is immediate, never TTL-bound.
-HOST_LEASE_TTL = 120
+HOST_LEASE_TTL = 600
 CAP_HOST_LEASE = "host-lease/1"
 CAP_DNS01 = "dns-01/1"
 #: What this registry supports; the hello ack advertises the
@@ -928,6 +930,24 @@ class HostRoutes:
         self._leases[reservation] = lease._replace(expires_at=expires_at)
         return {"lease": {"generation": lease.generation,
                           "expires_at": expires_at}}
+
+    def renew_all(self, tunnel: "Tunnel") -> dict:
+        """host-renew-all: one tunnel-wide keepalive extending every live
+        lease this exact connection holds (auto-ja0rf). Liveness is a
+        property of the connection, so renewal carries no reservation or
+        generation — the authenticated tunnel identity selects exactly
+        the leases that ``drop_connection`` would tear down."""
+        expires_at = int(self._now_fn()) + HOST_LEASE_TTL
+        renewed = 0
+        for reservation in [
+            r for r, lease in self._leases.items() if lease.tunnel is tunnel
+        ]:
+            lease = self._live(reservation)
+            if lease is None or lease.tunnel is not tunnel:
+                continue
+            self._leases[reservation] = lease._replace(expires_at=expires_at)
+            renewed += 1
+        return {"renewed": renewed, "expires_at": expires_at}
 
     def release(self, tunnel: "Tunnel", reservation: str) -> dict:
         owner = self._store.get_host_ownership(reservation)
@@ -1188,6 +1208,7 @@ def _ctrl_issue_turn(tunnel: "Tunnel", args: dict, turn_issuer) -> dict:
 _HOST_OP_ARGS = {
     "host-register": frozenset({"reservation", "host"}),
     "host-renew": frozenset({"reservation", "generation"}),
+    "host-renew-all": frozenset(),
     "host-release": frozenset({"reservation"}),
 }
 
@@ -1327,6 +1348,8 @@ def _ctrl_host_op(tunnel: "Tunnel", op: str, args: dict,
         return host_routes.renew(
             tunnel, args["reservation"], args["generation"]
         )
+    if op == "host-renew-all":
+        return host_routes.renew_all(tunnel)
     return host_routes.release(tunnel, args["reservation"])
 
 

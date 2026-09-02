@@ -17,6 +17,7 @@ import uuid
 import pytest
 
 from tools.network.idkit import KeyPair, Subject, issue_cert
+from tools.network.registry import relay as relay_mod
 from tools.network.relaykit import hello as hello_mod
 from tools.network.relaykit.frames import (
     CTRL_CHANNEL_ID,
@@ -102,7 +103,7 @@ def test_register_returns_lease_and_persists_ownership(
         assert reply["ok"] is True, reply
         lease = reply["lease"]
         assert lease["generation"] >= 1
-        assert lease["expires_at"] == clock.now + 120
+        assert lease["expires_at"] == clock.now + relay_mod.HOST_LEASE_TTL
         # Live route resolves while leased …
         assert app.state.host_routes.route(host) is not None
     # … and is gone immediately after tunnel loss (fail closed, ≤2 s bound
@@ -333,3 +334,89 @@ def test_revocation_drops_hostname_routes_before_socket_close(
         })
         assert response.status_code == 201, response.text
         assert app.state.host_routes.route(host) is None
+
+
+# -- auto-ja0rf: one tunnel-wide keepalive ----------------------------------
+
+
+def test_renew_all_extends_every_owned_lease_and_no_others(
+    app, client, clock, root,
+):
+    register(client, clock, root, org_uuid=ORG)
+    res_docs = _reservation(PERSONA_A, "docs")
+    res_app2 = _reservation(PERSONA_A, "app2")
+    res_b = _reservation(PERSONA_B, "docs")
+    with _tunnel(client, clock, root, persona=PERSONA_A) as (ws_a, _):
+        for res, app_label in ((res_docs, "docs"), (res_app2, "app2")):
+            assert _ctrl(ws_a, "host-register", {
+                "reservation": res, "host": _host(app_label, PERSONA_A),
+            })["ok"] is True
+        with _tunnel(client, clock, root, persona=PERSONA_B) as (ws_b, _):
+            assert _ctrl(ws_b, "host-register", {
+                "reservation": res_b, "host": _host("docs", PERSONA_B),
+            })["ok"] is True
+            before_b = app.state.host_routes._leases[res_b].expires_at
+            clock.advance(300)
+            reply = _ctrl(ws_a, "host-renew-all", {})
+            assert reply["ok"] is True, reply
+            assert reply["renewed"] == 2
+            assert reply["expires_at"] == clock.now + relay_mod.HOST_LEASE_TTL
+            leases = app.state.host_routes._leases
+            assert leases[res_docs].expires_at == reply["expires_at"]
+            assert leases[res_app2].expires_at == reply["expires_at"]
+            # The other connection's lease is untouched by A's keepalive.
+            assert leases[res_b].expires_at == before_b
+
+
+def test_renew_all_takes_no_args_and_reports_zero_without_leases(
+    client, clock, root,
+):
+    register(client, clock, root, org_uuid=ORG)
+    with _tunnel(client, clock, root) as (ws, _):
+        # Exact-arg-set discipline: any body field fails closed.
+        bad = _ctrl(ws, "host-renew-all", {"reservation": "x"})
+        assert bad["ok"] is False
+        assert bad["error"] == "bad-request"
+        # No leases: the keepalive succeeds and says so honestly.
+        reply = _ctrl(ws, "host-renew-all", {})
+        assert reply["ok"] is True
+        assert reply["renewed"] == 0
+
+
+def test_silent_connection_loses_all_routes_after_ttl(
+    app, client, clock, root,
+):
+    register(client, clock, root, org_uuid=ORG)
+    host_docs = _host("docs", PERSONA_A)
+    host_app2 = _host("app2", PERSONA_A)
+    with _tunnel(client, clock, root) as (ws, _):
+        for res, host in (
+            (_reservation(PERSONA_A, "docs"), host_docs),
+            (_reservation(PERSONA_A, "app2"), host_app2),
+        ):
+            assert _ctrl(ws, "host-register", {
+                "reservation": res, "host": host,
+            })["ok"] is True
+        clock.advance(relay_mod.HOST_LEASE_TTL - 1)
+        assert app.state.host_routes.route(host_docs) is not None
+        clock.advance(2)
+        # Dead-man's switch: a connection that never renews loses every
+        # route within one TTL, together.
+        assert app.state.host_routes.route(host_docs) is None
+        assert app.state.host_routes.route(host_app2) is None
+
+
+def test_renew_all_keepalive_spans_many_old_ttls(app, client, clock, root):
+    register(client, clock, root, org_uuid=ORG)
+    host = _host("docs", PERSONA_A)
+    res = _reservation(PERSONA_A, "docs")
+    with _tunnel(client, clock, root) as (ws, _):
+        assert _ctrl(ws, "host-register", {
+            "reservation": res, "host": host,
+        })["ok"] is True
+        # Six half-life keepalives keep the route alive for 30 minutes —
+        # far past the retired 120 s per-share TTL.
+        for _ in range(6):
+            clock.advance(relay_mod.HOST_LEASE_TTL // 2)
+            assert _ctrl(ws, "host-renew-all", {})["renewed"] == 1
+        assert app.state.host_routes.route(host) is not None
