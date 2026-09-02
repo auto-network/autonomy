@@ -63,20 +63,15 @@ def test_activation_writes_public_pointer_only_after_bundle_materializes(
 
 
 @pytest.mark.asyncio
-async def test_manager_exercises_staging_then_activates_production(monkeypatch):
+async def test_manager_first_issuance_uses_only_production(monkeypatch):
     calls = []
     monkeypatch.setattr(certs, "certificate_metadata", lambda *_args: None)
     monkeypatch.setattr(manager, "_import_legacy_pair", lambda *_args: None)
-
-    async def obtain(org, persona, *, staging):
-        calls.append(("obtain", org, persona, staging))
-        return metadata(staging=True), b"staging-cert", b"staging-key"
 
     async def issue(org, persona, *, staging):
         calls.append(("issue", org, persona, staging))
         return metadata(not_after=10_000)
 
-    monkeypatch.setattr(certs, "obtain", obtain)
     monkeypatch.setattr(certs, "issue", issue)
     lifecycle = manager.ServiceCertificateManager(
         now=lambda: 1000,
@@ -85,10 +80,7 @@ async def test_manager_exercises_staging_then_activates_production(monkeypatch):
 
     healthy = await lifecycle.reconcile_once()
 
-    assert calls == [
-        ("obtain", "anchore", "persona-abc", True),
-        ("issue", "anchore", "persona-abc", False),
-    ]
+    assert calls == [("issue", "anchore", "persona-abc", False)]
     assert healthy is True
 
 
@@ -97,15 +89,11 @@ async def test_manager_isolates_one_personas_failure(monkeypatch):
     monkeypatch.setattr(certs, "certificate_metadata", lambda *_args: None)
     monkeypatch.setattr(manager, "_import_legacy_pair", lambda *_args: None)
 
-    async def obtain(_org, persona, *, staging):
+    async def issue(org, persona, *, staging):
         if persona == "persona-bad":
             raise RuntimeError("CA unavailable")
-        return metadata(persona_label=persona), b"cert", b"key"
-
-    async def issue(org, persona, *, staging):
         return metadata(org=org, persona_label=persona, not_after=10_000)
 
-    monkeypatch.setattr(certs, "obtain", obtain)
     monkeypatch.setattr(certs, "issue", issue)
     lifecycle = manager.ServiceCertificateManager(
         now=lambda: 1000,

@@ -101,14 +101,10 @@ class ServiceCertificateManager:
                             _import_legacy_pair, org, persona
                         )
                     if metadata is None:
-                        # Exercise the complete DNS/CA path without ever
-                        # activating the untrusted staging certificate.
-                        _staging, staging_cert, staging_key = (
-                            await service_certificate.obtain(
-                                org, persona, staging=True
-                            )
-                        )
-                        del staging_cert, staging_key, _staging
+                        # Staging is an explicit acceptance operation, not a
+                        # prerequisite for every first production issuance.
+                        # Running it here would create disposable staging
+                        # accounts at production cardinality.
                         metadata = await service_certificate.issue(
                             org, persona, staging=False
                         )
